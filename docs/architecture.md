@@ -1,28 +1,26 @@
 # Architecture — proposed, not implemented
 
-```text
-Browser publisher (TS, WebCodecs)
-             |
-      MoQ / WebTransport
-             |
-         Rust relay
-        /          \
-Browser viewer    Rust CLI viewer
-(TS, WebCodecs)   (decoder, audio, Kitty Graphics)
+![XmoQ system architecture](assets/architecture.svg)
 
-Durable Objects (room state / chat)
-Integration with relay: TBD
-```
+The diagram shows **intended component boundaries**, not a tested deployment. Solid arrows are proposed media paths; the dashed connection to Durable Objects is **undecided**.
+
+## Broadcast flow
+
+![Proposed publish/subscribe sequence](assets/broadcast-flow.svg)
+
+This sequence is conceptual. Connection setup, session authentication, MoQ draft interoperability, codec and media timing details are **not yet validated**.
 
 ## Responsibilities
-- Browser: capture, encode, subscribe, decode, render.
-- Relay: subscriptions and media fan-out; bounded buffering and slow subscribers need design.
-- CLI: media subscription, decoding, terminal rendering and native audio; backends undecided.
-- Durable Objects: proposed room state and chat persistence; transport integration undecided.
 
-## Boundaries
-Each client connects independently to the relay. MoQ Track is a logical publish/subscribe series, **not** a QUIC stream. WebTransport multiplexes streams and datagrams within a session. MoQ sessions have defined message formats; do not mix arbitrary custom streams without an interoperability design.
+- **Browser:** capture, encode, subscribe, decode and render. TypeScript and WebCodecs.
+- **Rust Relay:** media subscription and fan-out. Library choice, buffering, slow subscriber policy and deployment remain open.
+- **Rust CLI:** media subscription, video decoding, Ghostty Kitty Graphics rendering, native audio and chat. Backends and compatibility require testing.
+- **Durable Objects:** proposed room/application state and chat persistence. Relay integration is not decided; direct WebTransport termination at DO is not assumed.
 
-WebCodecs is not a complete player: jitter buffering, A/V sync, late join and recovery need implementation. Direct WebTransport termination at Durable Objects is **not assumed**.
+## Boundaries and constraints
 
-Future multi-publisher support should not be structurally precluded, but is not an MVP feature.
+Each client uses its own connection to the relay. MoQ Track is a logical data series, not a QUIC stream. WebCodecs does not provide a complete jitter buffer or A/V synchronization pipeline.
+
+Future multiple publishers should not be structurally excluded, but bidirectional media is **not** an initial implementation requirement.
+
+See [protocol layers](protocols.md), [validation](validation.md) and [open decisions](open-questions.md).
