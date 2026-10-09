@@ -1,32 +1,29 @@
 # Protocols and layers
 
-```text
-Application: video / audio / chat
-Media processing: codec, jitter buffer, A/V synchronization
-MoQ: Track, Group, Object, publish / subscribe
-WebTransport: session, streams, datagrams
-HTTP/3
-QUIC: multiplexing, encryption, congestion control
-UDP/IP
-```
+![XmoQ protocol layers](assets/protocol-layers.svg)
 
-MoQ is a media object distribution protocol, not a replacement for the full WebRTC media stack. One WebTransport session can contain multiple streams; one MoQ Track does not necessarily correspond to one stream.
+This is the **proposed browser media path**, not a claim that all layers have been integrated.
+
+MoQ is a media Object distribution protocol, not a replacement for the entire WebRTC media stack. One WebTransport session can multiplex streams and datagrams. A MoQ Track is **not** the same thing as a QUIC stream.
 
 ## Discussed
+
 - MoQ over WebTransport for browser streaming.
 - WebCodecs for browser media processing.
-- Rust relay and CLI.
+- Rust relay and terminal client.
 
-## Not decided / to validate
-- Rust and browser MoQ implementations, draft versions and interoperability.
-- Codec/profile, media packaging and synchronization.
-- Native CLI transport and media backends.
-- Chat as MoQ Track vs separate transport; WebSocket is not required by decision.
-- Reactions delivery semantics and persistence.
+## Undecided or requiring validation
+
+- Rust/browser MoQ implementations, draft version and interoperability.
+- Codec, media packaging, keyframe handling and A/V synchronization.
+- Native CLI transport, decoder and audio output.
+- Chat as MoQ Track versus a different application transport.
+- Reactions semantics and persistence.
 - Relay ↔ Durable Objects protocol.
 
 ## Primary specifications
+
 - [IETF MoQ](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
-- [WebTransport](https://www.w3.org/TR/webtransport/)
-- [WebCodecs](https://www.w3.org/TR/webcodecs/)
-- [Durable Objects](https://developers.cloudflare.com/durable-objects/)
+- [W3C WebTransport](https://www.w3.org/TR/webtransport/)
+- [W3C WebCodecs](https://www.w3.org/TR/webcodecs/)
+- [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/)
