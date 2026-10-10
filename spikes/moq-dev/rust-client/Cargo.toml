@@ -1,0 +1,14 @@
+[package]
+name = "xmoq-spike-moq-dev"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+moq-net = "=0.3.10"
+moq-tokio = "=0.19.23"
+tokio = { version = "1", features = ["full"] }
+usage = { package = "usage-rs", version = "=6.12.1", features = ["config"] }

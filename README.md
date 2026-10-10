@@ -21,6 +21,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Requirements](docs/requirements.md)
 - [Architecture and broadcast flow](docs/architecture.md)
 - [Protocol layers](docs/protocols.md)
+- [MoQ library candidates](docs/moq-libraries.md)
 - [Roadmap](docs/roadmap.md)
 - [Validation](docs/validation.md)
 - [Open questions](docs/open-questions.md)

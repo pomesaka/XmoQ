@@ -14,7 +14,7 @@ MoQ is a media Object distribution protocol, not a replacement for the entire We
 
 ## Undecided or requiring validation
 
-- Rust/browser MoQ implementations, draft version and interoperability.
+- Rust/browser MoQ implementations, draft version and interoperability. Candidates are surveyed in [MoQ library candidates](moq-libraries.md).
 - Codec, media packaging, keyframe handling and A/V synchronization.
 - Native CLI transport, decoder and audio output.
 - Chat as MoQ Track versus a different application transport.

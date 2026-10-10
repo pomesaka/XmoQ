@@ -1,0 +1,12 @@
+{
+	"name": "xmoq-spike-moq-dev-web",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@moq/net": "0.4.2"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.2",
+		"playwright-core": "1.64.0"
+	}
+}

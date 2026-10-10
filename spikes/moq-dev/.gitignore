@@ -1,0 +1,5 @@
+bin/
+logs/
+target/
+node_modules/
+web/dist/
