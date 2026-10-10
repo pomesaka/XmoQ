@@ -106,7 +106,7 @@ What a client saw after its PUBLISH_DONE in one `mise run interop`, by relay. Th
 
 ## Limitations and blockers
 
-- **That the wait keeps an Object from being lost was not shown.** The loss needs a stream that arrived and was not accepted when the session closed, and no run produced it before the change either: the scenario in which the page closed right after its last Object did not fail for a lost Object in any round of [the disconnect record](2026-10-10-disconnects-through-own-relay.md). What is shown is the order: the page closes after the relay's FIN.
+- **That the wait keeps an Object from being lost was not shown.** The loss needs a stream that arrived and was not accepted when the session closed, and no run had produced it when this was written: the scenario in which the page closed right after its last Object did not fail for a lost Object in any round of [the disconnect record](2026-10-10-disconnects-through-own-relay.md). **On 2026-10-11 it did, without PUBLISH_DONE: once in CI and in 1 of 200 runs on a loaded machine** (that record, "The last Object of a publisher that sends no PUBLISH_DONE can be lost"). With PUBLISH_DONE and the wait, no run has lost an Object; that is still no proof that the wait prevents it. What is shown is the order: the page closes after the relay's FIN.
 - `reset` and `nothing-in-time` were seen with the played transport only, and so was the code of the STOP_SENDING at the end of a wait: in Chromium it was not observed.
 - When `writer.close()` of a stream resolves in Chromium, at the FIN going out or at its arrival, was not looked at; the start of the wait depends on it. No run made the relay give up on the counted streams.
 - Chromium only.
