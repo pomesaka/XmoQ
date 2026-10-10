@@ -2,7 +2,7 @@
 
 Do not infer answers.
 
-- Rust MoQ implementation, browser implementation, compatible draft revision: **to validate**
+- When to move the MoQ implementation from draft 18 to a newer draft: **undecided**
 - Codec/profile, Track/Object packaging, audio pipeline: **undecided**
 - Latency goal, room size, expected concurrent rooms: **undecided**
 - Supported browsers, operating systems, Ghostty versions: **undecided**
@@ -16,4 +16,4 @@ Do not infer answers.
 - Bidirectional requirements: **future possibility**
 - OSS license and contribution rules: **undecided**
 
-When decided, record context, alternatives, decision, consequences and evidence.
+When an item is decided, remove it from this list. Record context, alternatives, decision, consequences and evidence where the decision takes effect: as WHY / WHY NOT comments in the code, or in the document that covers the topic. Decisions are not collected in a separate place.

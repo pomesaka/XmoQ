@@ -1,6 +1,8 @@
 # MoQ library candidates
 
-Status: **survey, nothing selected.** The library pair and the wire protocol are still open decisions (see [Open questions](open-questions.md)). The survey itself is from documentation and source reading. The moq-dev pair was then run locally; see [the experiment record](experiments/2026-10-10-moq-dev-object-transfer.md). Statements changed by that run are marked "(run 2026-10-10)".
+Status: **survey closed; no library was selected.** After the Phase 0 runs the project owner decided to implement MoQ Transport draft 18 in this repository and to keep `moqtail` as an interop peer; see [Protocols and layers](protocols.md). The sections "Recommended pair" and "Decisions needed" below are kept as the input to that decision and are no longer open.
+
+The survey itself is from documentation and source reading. Two pairs were then run locally: [moq-dev](experiments/2026-10-10-moq-dev-object-transfer.md) and [moqtail](experiments/2026-10-10-moqtail-object-transfer.md). Statements changed by the moq-dev run are marked "(run 2026-10-10)". The moqtail run corrected three statements here that are not edited in place: no `mkcert` or browser flag is needed when `serverCertificateHashes` is used, the relay and moqtail-ts did interoperate on draft 18 with Chromium 156 and Chrome 155, and the `moqtail` crate has no client API.
 
 All facts below were checked on **2026-10-10** against the sources in [Sources](#sources). `[n]` refers to that list. "Last commit" is the default branch unless noted.
 

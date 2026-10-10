@@ -1,11 +1,22 @@
 # Roadmap (proposed, no committed dates)
 
 ## Phase 0 — Feasibility
-- [ ] Select candidate Rust and browser MoQ libraries; record supported draft revisions.
-- [ ] Establish browser ↔ Rust WebTransport/MoQ connectivity.
-- [ ] Transfer one MoQ Object and document reproducible commands.
+- [x] Select candidate Rust and browser MoQ libraries; record supported draft revisions. See [MoQ library candidates](moq-libraries.md).
+- [x] Establish browser ↔ Rust WebTransport/MoQ connectivity.
+- [x] Transfer one MoQ Object and document reproducible commands. See the [moqtail](experiments/2026-10-10-moqtail-object-transfer.md) and [moq-dev](experiments/2026-10-10-moq-dev-object-transfer.md) records.
 
-**Exit:** reproducible Object exchange or documented blocker.
+**Exit:** reproducible Object exchange or documented blocker. Reached on 2026-10-10 with both library pairs.
+
+## Phase 0b — Own MoQ Transport implementation (draft 18)
+
+Each step replaces one `moqtail` component with an own one, so that one side of every run is a known-good peer.
+
+- [ ] Rust wire codec and session for SETUP, PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE and subgroup streams, with byte fixtures captured from `moqtail`.
+- [ ] Own Rust client against the `moqtail` relay and the `moqtail` browser client.
+- [ ] Own Rust relay against the `moqtail` browser client and the own Rust client.
+- [ ] Own TypeScript browser client against the own relay and against the `moqtail` relay.
+
+**Exit:** one Object between browser and Rust through the own relay with own clients, and the same Object exchange against `moqtail` peers.
 
 ## Phase 1 — Video
 - [ ] Browser WebCodecs publisher.

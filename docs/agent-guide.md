@@ -13,4 +13,4 @@ Read README, requirements, architecture, protocols, roadmap, validation and open
 
 Each change should report objective, changed files, verification commands, actual results, blockers and open questions.
 
-First assignment: evaluate interoperable Rust/browser MoQ libraries and demonstrate a single Object transfer, or document the precise blocker. Do not build the full app before this gate.
+Current assignment: Phase 0b in the [roadmap](roadmap.md), the own MoQ Transport implementation pinned to draft 18. Implement from the draft text, cite the section for non-obvious behaviour, and run every own component against a `moqtail` peer before pairing it with another own component. Do not build media features before this gate.

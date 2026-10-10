@@ -13,7 +13,7 @@ This sequence is conceptual. Connection setup, session authentication, MoQ draft
 ## Responsibilities
 
 - **Browser:** capture, encode, subscribe, decode and render. TypeScript and WebCodecs.
-- **Rust Relay:** media subscription and fan-out. Library choice, buffering, slow subscriber policy and deployment remain open.
+- **Rust Relay:** media subscription and fan-out. The MoQ layer is implemented in this repository (see [protocol layers](protocols.md)). Buffering, slow subscriber policy and deployment remain open.
 - **Rust CLI:** media subscription, video decoding, Ghostty Kitty Graphics rendering, native audio and chat. Backends and compatibility require testing.
 - **Durable Objects:** proposed room/application state and chat persistence. Relay integration is not decided; direct WebTransport termination at DO is not assumed.
 
