@@ -1518,7 +1518,7 @@ impl Relay {
             session,
             SessionState {
                 moqt,
-                requests: Requests::default(),
+                requests: Requests::new(),
                 in_streams: HashMap::new(),
                 early: VecDeque::new(),
                 own: HashMap::new(),
@@ -2803,14 +2803,6 @@ impl Relay {
             self.take_slot(subscriber.session, subscriber.stream, actions);
             return;
         }
-        // The session keeps the request until the stream closes: what the
-        // subscriber sent before it saw the PUBLISH_DONE still arrives.
-        self.put_slot(
-            subscriber.session,
-            subscriber.stream,
-            RequestSlot::Finished(Some(subscriber.request)),
-            actions,
-        );
         self.respond(subscriber.session, subscriber.stream, done, actions);
         // §10.11: "SHOULD send FIN on the subscription's bidi stream
         // immediately after sending PUBLISH_DONE".
@@ -2825,6 +2817,16 @@ impl Relay {
             session: subscriber.session,
             stream: subscriber.stream,
         });
+        // The session keeps the request until the stream closes: what the
+        // subscriber sent before it saw the PUBLISH_DONE still arrives. Put
+        // last, as in the branch above: the Joining FETCHes of the
+        // subscription hear of its end after the PUBLISH_DONE went out.
+        self.put_slot(
+            subscriber.session,
+            subscriber.stream,
+            RequestSlot::Finished(Some(subscriber.request)),
+            actions,
+        );
     }
 
     /// Queues a message the session produced, or closes the session when the
