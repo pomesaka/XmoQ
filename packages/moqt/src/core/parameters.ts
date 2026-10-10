@@ -14,6 +14,16 @@ export interface Location {
 	object: bigint;
 }
 
+/**
+ * Whether a range that starts at `start` and has the End Location `end` ends
+ * before it starts. An End Location names the last Object plus 1, and with
+ * Object 0 the whole Group (§10.12.1).
+ */
+export function endsBefore(start: Location, end: Location): boolean {
+	if (end.group !== start.group) return end.group < start.group;
+	return end.object !== 0n && end.object < start.object;
+}
+
 /** Subscription Filter of §5.1.2. */
 export type SubscriptionFilter =
 	| { filterType: "NextGroupStart" }

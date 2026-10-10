@@ -2,6 +2,8 @@ import {
 	type ControlMessage,
 	drainControlMessages,
 	encodeControlMessage,
+	type FetchOk,
+	type FetchRange,
 	type PublishDone,
 	type RequestError,
 	type RequestOk,
@@ -31,6 +33,8 @@ import {
 	type SubgroupOptions,
 } from "./outgoing-subgroups.ts";
 import {
+	endsBefore,
+	type Location,
 	type MessageParameters,
 	parametersOutsideScope,
 } from "./parameters.ts";
@@ -56,6 +60,23 @@ export interface SubscribeRequest extends FullTrackName {
 	parameters?: MessageParameters;
 }
 
+export interface FetchRequest {
+	range: FetchRange;
+	parameters?: MessageParameters;
+}
+
+/** What a fetch stream that arrived belongs to. */
+export type FetchStreamOpened =
+	/** A FETCH that is open: the bytes of the stream are its response. */
+	| "fetch"
+	/**
+	 * A request of this endpoint that is over. For a FETCH that was cancelled
+	 * or rejected, the publisher opened the stream before it knew (§5.2:
+	 * "some Objects could be received even if the FETCH results in error").
+	 * The stream was stopped; nothing is wrong.
+	 */
+	| "ended";
+
 export interface RequestsOptions {
 	limits: SessionLimits;
 	/** Hands out the numbers of the streams this endpoint opens, which requests share with the control stream. */
@@ -80,6 +101,66 @@ export interface Requests {
 	publishNamespace(request: PublishNamespaceRequest): SessionResult<bigint>;
 	publish(request: PublishRequest): SessionResult<bigint>;
 	subscribe(request: SubscribeRequest): SessionResult<bigint>;
+	/**
+	 * Asks for a range of a track (§10.12).
+	 *
+	 * The request is over when it was rejected, when it was cancelled, or
+	 * when both its FETCH_OK came and its fetch stream ended. WHY both, where
+	 * §5.2 has the state kept "until ... the FETCH data stream receives a FIN
+	 * or is reset": the response "can come at any time relative to object
+	 * delivery" (§10.12.3), and a FETCH_OK that comes after the stream ended
+	 * would have no request to go to. A publisher that never answers leaves
+	 * the request open: there is no clock here, so the caller cancels it when
+	 * it has waited long enough.
+	 *
+	 * Throws a `RangeError` for a parameter that may not appear in FETCH, for
+	 * a Standalone FETCH that ends before it starts (§10.12.3), and for a
+	 * Joining FETCH that names a request that is not a SUBSCRIBE of this
+	 * endpoint that is Pending or Established (§10.12.2).
+	 */
+	fetch(request: FetchRequest): SessionResult<bigint>;
+	/**
+	 * What the Request ID of a FETCH_HEADER refers to (§11.4.4), on the
+	 * stream `peerStream`. The stream may come before the FETCH_OK (§10.13).
+	 *
+	 * WHY any request of this endpoint that is over counts as a FETCH that
+	 * ended, and no list of the requests that ended is kept: a list has an
+	 * end, and what falls off it reads as a FETCH that was never sent, which
+	 * closes the session. The Rust implementation has the same, and why a
+	 * relay needs it. The price: a second stream for a FETCH that is over,
+	 * and a fetch stream for a SUBSCRIBE that is over, are stopped and not
+	 * found out.
+	 *
+	 * Throws a PROTOCOL_VIOLATION for an ID this endpoint never gave a
+	 * request, for the ID of an open request that is no FETCH, and for a
+	 * second stream of an open FETCH (§10.12.3: "The Objects in the response
+	 * are delivered on a single unidirectional stream"). The draft names no
+	 * code for any of them.
+	 */
+	fetchStreamOpened(
+		requestId: bigint,
+		peerStream: number,
+		out: SessionOutput[],
+	): FetchStreamOpened;
+	/**
+	 * Bytes of the fetch stream `peerStream` after its FETCH_HEADER, and its
+	 * end with `fin`. Does nothing for a stream that is not the one of an
+	 * open FETCH: what the peer sent before it saw the stream stopped.
+	 */
+	fetchStreamData(
+		requestId: bigint,
+		peerStream: number,
+		data: Uint8Array,
+		fin: boolean,
+		out: SessionOutput[],
+	): void;
+	/** The peer reset the fetch stream `peerStream`. */
+	fetchStreamReset(
+		requestId: bigint,
+		peerStream: number,
+		code: number | undefined,
+		out: SessionOutput[],
+	): void;
 	cancelRequest(requestId: bigint): SessionOutput[];
 	publishDone(
 		requestId: bigint,
@@ -163,7 +244,25 @@ interface SubscribeEntry extends RequestCommon {
 	trackAlias: bigint | undefined;
 }
 
-type RequestEntry = NamespaceEntry | PublishEntry | SubscribeEntry;
+/**
+ * A FETCH. Its state is Pending until FETCH_OK and Established after; the
+ * draft names no states for it (§5.2).
+ */
+interface FetchEntry extends RequestCommon {
+	kind: "FETCH";
+	/**
+	 * The Start Location, where this endpoint knows it: not for a Relative
+	 * Joining FETCH, whose start the publisher counts from the subscription.
+	 */
+	start: Location | undefined;
+	/**
+	 * What this endpoint saw of the fetch stream: nothing, the stream with
+	 * this number, or its end.
+	 */
+	fetchStream: "none" | "ended" | { peerStream: number };
+}
+
+type RequestEntry = NamespaceEntry | PublishEntry | SubscribeEntry | FetchEntry;
 
 /** §10.2.12: FORWARD defaults to 1 wherever it is omitted, except in REQUEST_UPDATE. */
 const DEFAULT_FORWARD = true;
@@ -305,6 +404,15 @@ export function createRequests(options: RequestsOptions): Requests {
 		}
 		if (request.kind === "SUBSCRIBE" && request.trackAlias !== undefined) {
 			incoming.release(request.trackAlias, code, out);
+		}
+		// §5.2: "If the data stream is already open, the subscriber wishing to
+		// cancel the FETCH MAY send STOP_SENDING for the data stream as well".
+		// It is always done: nobody reads the stream from here on. A stream
+		// that comes later finds a request that is over and is stopped then.
+		if (request.kind === "FETCH" && typeof request.fetchStream === "object") {
+			const { peerStream } = request.fetchStream;
+			request.fetchStream = "ended";
+			out.push({ type: "stop-sending", peerStream, code });
 		}
 		announce();
 		if (wasPendingSubscribe) incoming.resolveHeld(out);
@@ -468,6 +576,87 @@ export function createRequests(options: RequestsOptions): Requests {
 		incoming.resolveHeld(out);
 	};
 
+	/** A FETCH whose FETCH_OK came and whose fetch stream ended has nothing more to come. */
+	const endFetchIfServed = (
+		request: FetchEntry,
+		out: SessionOutput[],
+	): void => {
+		if (request.state !== "Established" || request.fetchStream !== "ended") {
+			return;
+		}
+		endRequest(request, out, () => {
+			out.push(closedEvent(request, "fetch-served"));
+			finishSend(request, out);
+		});
+	};
+
+	const onFetchOk = (
+		request: FetchEntry,
+		message: FetchOk,
+		out: SessionOutput[],
+	): void => {
+		// §10.13: "If End Location is smaller than the Start Location in the
+		// corresponding FETCH the receiver MUST close the session with a
+		// PROTOCOL_VIOLATION."
+		if (
+			request.start !== undefined &&
+			endsBefore(request.start, message.endLocation)
+		) {
+			throw protocolViolation("FETCH_OK ends before the FETCH starts");
+		}
+		// §2.5.1, as for SUBSCRIBE_OK: no Mandatory Track Property is
+		// understood, so the track is not processed.
+		if (
+			message.trackProperties.some(({ type }) => isMandatoryTrackProperty(type))
+		) {
+			abandonRequest(request, "unsupported-track-property", out);
+			return;
+		}
+		request.state = "Established";
+		out.push({
+			type: "event",
+			event: {
+				type: "fetch-ok",
+				requestId: request.requestId,
+				endOfTrack: message.endOfTrack,
+				endLocation: message.endLocation,
+				parameters: message.parameters,
+				trackProperties: message.trackProperties,
+			},
+		});
+		endFetchIfServed(request, out);
+	};
+
+	/** The FETCH whose fetch stream is `peerStream`, while both are open. */
+	const fetchOfStream = (
+		requestId: bigint,
+		peerStream: number,
+	): FetchEntry | undefined => {
+		const request = requests.get(requestId);
+		if (request?.kind !== "FETCH") return undefined;
+		if (typeof request.fetchStream !== "object") return undefined;
+		return request.fetchStream.peerStream === peerStream ? request : undefined;
+	};
+
+	const fetchStreamEnded = (
+		request: FetchEntry,
+		how: "fin" | "reset",
+		resetCode: number | undefined,
+		out: SessionOutput[],
+	): void => {
+		request.fetchStream = "ended";
+		out.push({
+			type: "event",
+			event: {
+				type: "fetch-stream-ended",
+				requestId: request.requestId,
+				how,
+				resetCode,
+			},
+		});
+		endFetchIfServed(request, out);
+	};
+
 	const onPublishDone = (
 		request: SubscribeEntry,
 		trackAlias: bigint,
@@ -554,10 +743,20 @@ export function createRequests(options: RequestsOptions): Requests {
 				onRequestError(request, message, out);
 				return;
 			case "REQUEST_OK":
-				if (request.state !== "Pending" || request.kind === "SUBSCRIBE") {
+				if (
+					request.state !== "Pending" ||
+					request.kind === "SUBSCRIBE" ||
+					request.kind === "FETCH"
+				) {
 					throw unexpected;
 				}
 				onRequestOk(request, message, out);
+				return;
+			case "FETCH_OK":
+				if (request.state !== "Pending" || request.kind !== "FETCH") {
+					throw unexpected;
+				}
+				onFetchOk(request, message, out);
 				return;
 			case "SUBSCRIBE_OK":
 				if (request.state !== "Pending" || request.kind !== "SUBSCRIBE") {
@@ -685,6 +884,98 @@ export function createRequests(options: RequestsOptions): Requests {
 			}));
 		},
 
+		fetch(request) {
+			const { range } = request;
+			// §10.12.2: "a subscription in the same session in the Established or
+			// Pending (subscriber) states". FIXME: a subscription the peer made
+			// with PUBLISH can be joined as well (§5.1); this endpoint accepts no
+			// PUBLISH, so it has none (docs/moqt-implementation-notes.md, known
+			// gaps).
+			// A SUBSCRIBE that got its PUBLISH_DONE is over for this, though it
+			// is kept here for the streams still on their way (§10.11): the
+			// Rust session has dropped it by then, and refuses the same.
+			const refuseUnlessOpenSubscribe = (joiningRequestId: bigint): void => {
+				const joined = requests.get(joiningRequestId);
+				if (joined?.kind !== "SUBSCRIBE" || isDraining(joined)) {
+					throw new RangeError(
+						`Joining Request ID ${joiningRequestId} is not an open SUBSCRIBE of this session (§10.12.2)`,
+					);
+				}
+			};
+			let start: Location | undefined;
+			switch (range.fetchType) {
+				case "Standalone":
+					if (endsBefore(range.startLocation, range.endLocation)) {
+						throw new RangeError(
+							"the range of the FETCH ends before it starts (§10.12.3)",
+						);
+					}
+					start = range.startLocation;
+					break;
+				case "RelativeJoining":
+					refuseUnlessOpenSubscribe(range.joiningRequestId);
+					break;
+				case "AbsoluteJoining":
+					refuseUnlessOpenSubscribe(range.joiningRequestId);
+					// §10.12.2.1: "the publisher sets the Start Location to
+					// {Joining Start, 0}".
+					start = { group: range.joiningStart, object: 0n };
+					break;
+			}
+			return openRequest((common) => ({
+				entry: { ...common, kind: "FETCH", start, fetchStream: "none" },
+				message: {
+					type: "FETCH",
+					requestId: common.requestId,
+					range,
+					parameters: request.parameters ?? {},
+				},
+			}));
+		},
+
+		fetchStreamOpened(requestId, peerStream, out) {
+			const request = requests.get(requestId);
+			if (request?.kind === "FETCH") {
+				if (request.fetchStream !== "none") {
+					throw protocolViolation("a second fetch stream for one FETCH");
+				}
+				request.fetchStream = { peerStream };
+				return "fetch";
+			}
+			// §10.1: the client's Request IDs are the even ones, counted up by 2.
+			const issued = requestId % 2n === 0n && requestId < nextRequestId;
+			// A SUBSCRIBE that got its PUBLISH_DONE is a request that is over,
+			// as in the Rust session, which has dropped it by then; it is kept
+			// here only for the streams still on their way (§10.11).
+			const open = request !== undefined && !isDraining(request);
+			if (open || !issued) {
+				throw protocolViolation("fetch stream for no FETCH of this endpoint");
+			}
+			out.push({
+				type: "stop-sending",
+				peerStream,
+				code: StreamResetErrorCode.CANCELLED,
+			});
+			return "ended";
+		},
+
+		fetchStreamData(requestId, peerStream, data, fin, out) {
+			const request = fetchOfStream(requestId, peerStream);
+			if (request === undefined) return;
+			if (data.length > 0) {
+				out.push({
+					type: "event",
+					event: { type: "fetch-data", requestId, data },
+				});
+			}
+			if (fin) fetchStreamEnded(request, "fin", undefined, out);
+		},
+
+		fetchStreamReset(requestId, peerStream, code, out) {
+			const request = fetchOfStream(requestId, peerStream);
+			if (request !== undefined) fetchStreamEnded(request, "reset", code, out);
+		},
+
 		cancelRequest(requestId) {
 			const request = requests.get(requestId);
 			if (request === undefined) return [];
@@ -798,6 +1089,10 @@ export function createRequests(options: RequestsOptions): Requests {
 				return;
 			}
 			requestStreams.delete(stream);
+			// The publisher has answered and has nothing more to say on the
+			// request stream; the FETCH goes on until its fetch stream ends
+			// (§5.2).
+			if (request.kind === "FETCH" && request.state === "Established") return;
 			if (request.state === "Terminated") {
 				reportPeerEndAfterPublishDone(request, "fin", undefined, out);
 				return;

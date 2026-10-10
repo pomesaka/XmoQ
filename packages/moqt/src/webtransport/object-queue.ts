@@ -24,6 +24,8 @@ export interface ObjectQueue<T> {
 	end(error?: Error): void;
 	/** Closes the stream now and drops the items that were not read. */
 	discard(): void;
+	/** Fails the stream now with `error` and drops the items that were not read. */
+	abort(error: Error): void;
 }
 
 /**
@@ -121,6 +123,14 @@ export function createObjectQueue<T>(
 			settled = true;
 			items = [];
 			controller?.close();
+			wake();
+			releasePushes();
+		},
+		abort(error) {
+			if (settled) return;
+			settled = true;
+			items = [];
+			controller?.error(error);
 			wake();
 			releasePushes();
 		},

@@ -1,7 +1,7 @@
 import type { Bytes } from "./bytes.ts";
 import type { Redirect } from "./control-message.ts";
 import type { KeyValuePair } from "./key-value-pair.ts";
-import type { MessageParameters } from "./parameters.ts";
+import type { Location, MessageParameters } from "./parameters.ts";
 import type { SubgroupObject } from "./subgroup.ts";
 
 export type RequestClosedReason =
@@ -15,8 +15,13 @@ export type RequestClosedReason =
 	 * subscription ended with PUBLISH_DONE UPDATE_FAILED.
 	 */
 	| "update-failed"
-	/** §2.5.1: SUBSCRIBE_OK carried a Mandatory Track Property this endpoint does not understand. */
+	/**
+	 * §2.5.1: SUBSCRIBE_OK or FETCH_OK carried a Mandatory Track Property
+	 * this endpoint does not understand.
+	 */
 	| "unsupported-track-property"
+	/** A FETCH has nothing more to come: its FETCH_OK came and its fetch stream ended. */
+	| "fetch-served"
 	/** §2.4.2: the Track was malformed and its subscription was cancelled. */
 	| "malformed-track"
 	/**
@@ -87,14 +92,45 @@ export type SessionEvent =
 			publisherPriority: number | undefined;
 			object: SubgroupObject;
 	  }
+	| {
+			type: "fetch-ok";
+			requestId: bigint;
+			endOfTrack: boolean;
+			endLocation: Location;
+			parameters: MessageParameters;
+			trackProperties: KeyValuePair[];
+	  }
+	/**
+	 * Bytes of the fetch stream of a FETCH, after its FETCH_HEADER: Objects
+	 * and End of Range indicators as §11.4.4 has them, not decoded, cut
+	 * wherever a read ended. They can come before `fetch-ok` (§10.13).
+	 */
+	| { type: "fetch-data"; requestId: bigint; data: Uint8Array }
+	/**
+	 * The fetch stream of a FETCH ended: the peer finished it or reset it.
+	 * Not reported for a stream this endpoint stopped. The FETCH goes on
+	 * until `request-closed`.
+	 */
+	| {
+			type: "fetch-stream-ended";
+			requestId: bigint;
+			how: "fin" | "reset";
+			/** With "reset": the error code of the reset, when the transport reported one. */
+			resetCode?: number;
+	  }
 	/** An incoming subgroup stream was dropped; Objects on it are lost to the application. */
 	| {
 			type: "subgroup-abandoned";
 			trackAlias: bigint | undefined;
 			reason: string;
 	  }
-	/** A request the peer opened was answered with REQUEST_ERROR NOT_SUPPORTED. */
-	| { type: "peer-request-rejected"; messageType: bigint; requestId: bigint };
+	/** A request the peer opened was answered with REQUEST_ERROR, with this code. */
+	| {
+			type: "peer-request-rejected";
+			messageType: bigint;
+			requestId: bigint;
+			errorCode: bigint;
+	  };
 
 /**
  * What the I/O layer has to do, in order. `stream` numbers name streams this

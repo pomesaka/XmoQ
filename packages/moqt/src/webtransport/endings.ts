@@ -40,6 +40,27 @@ export type PublishEnd =
 	| { type: "session-closed"; close: SessionClose };
 
 /**
+ * How a FETCH ended. The Objects are in `Fetch.body`, which says by itself
+ * whether all of them came.
+ */
+export type FetchEnd =
+	/** FETCH_OK came, and the publisher finished the fetch stream: the response is whole. */
+	| { type: "served" }
+	/** FETCH_OK came, and the publisher reset the fetch stream. `code` is a Stream Reset Error Code (§3.3.3). */
+	| { type: "stream-reset"; code: number | undefined }
+	/** The publisher answered REQUEST_ERROR; `error` has what it said. */
+	| { type: "rejected"; error: RequestFailedError }
+	/** The publisher closed the request stream without an answer. */
+	| { type: "peer-closed" }
+	/** The publisher reset the request stream (§5.2). `code` is a Stream Reset Error Code (§3.3.3). */
+	| { type: "peer-reset"; code: number | undefined }
+	/** §2.5.1: the FETCH_OK had a Mandatory Track Property this endpoint does not understand, so it cancelled. */
+	| { type: "unsupported-track-property" }
+	/** This endpoint cancelled it: `cancel()`, the `signal` of the call, or a reader that cancelled `body`. */
+	| { type: "cancelled" }
+	| { type: "session-closed"; close: SessionClose };
+
+/**
  * How the subscriber ended its direction of the request stream after this
  * endpoint's PUBLISH_DONE. These say what was seen and no more: the draft
  * gives that direction no meaning after PUBLISH_DONE (§10.11, §5.1.1).
@@ -93,6 +114,8 @@ function describeClose(close: SessionClose): string {
  * | `SubscriptionEndedError` | The Objects of a subscription stopped before its publisher finished it | See `end` |
  * | `PublishEndedError` | The subscription made with PUBLISH is over | Stop publishing; see `end` |
  * | `SubgroupClosedError` | The subgroup stream is closed while its Track goes on | Open another subgroup |
+ * | `FetchEndedError` | The FETCH ended before its fetch stream did | See `end` |
+ * | `FetchStreamResetError` | The publisher reset the fetch stream | What was read before it is good; see `code` |
  */
 export class RequestFailedError extends Error {
 	override readonly name = "RequestFailedError";
@@ -125,8 +148,10 @@ export type RequestAbort =
 	| { type: "peer-closed" }
 	/** The peer reset the request stream. `code` is a Stream Reset Error Code (§3.3.3). */
 	| { type: "peer-reset"; code: number | undefined }
-	/** §2.5.1: the SUBSCRIBE_OK had a Mandatory Track Property this endpoint does not understand, so it cancelled. */
-	| { type: "unsupported-track-property" };
+	/** §2.5.1: the SUBSCRIBE_OK or FETCH_OK had a Mandatory Track Property this endpoint does not understand, so it cancelled. */
+	| { type: "unsupported-track-property" }
+	/** This endpoint cancelled the request before it was answered. Only a FETCH is handed out before its answer. */
+	| { type: "cancelled" };
 
 export class RequestAbortedError extends Error {
 	override readonly name = "RequestAbortedError";
@@ -179,4 +204,34 @@ export class PublishEndedError extends Error {
 
 export class SubgroupClosedError extends Error {
 	override readonly name = "SubgroupClosedError";
+}
+
+/**
+ * `Fetch.body` fails with this when the FETCH ended while its fetch stream
+ * had not; `end` is what `Fetch.ended` resolves with.
+ */
+export class FetchEndedError extends Error {
+	override readonly name = "FetchEndedError";
+	readonly end: FetchEnd;
+
+	constructor(end: FetchEnd) {
+		super(
+			end.type === "session-closed"
+				? describeClose(end.close)
+				: `the FETCH ended: ${end.type}`,
+		);
+		this.end = end;
+	}
+}
+
+/** `Fetch.body` fails with this when the publisher reset the fetch stream. */
+export class FetchStreamResetError extends Error {
+	override readonly name = "FetchStreamResetError";
+	/** A Stream Reset Error Code (§3.3.3), when the transport reported one. */
+	readonly code: number | undefined;
+
+	constructor(code: number | undefined) {
+		super(`the publisher reset the fetch stream: code=${code ?? "unknown"}`);
+		this.code = code;
+	}
 }

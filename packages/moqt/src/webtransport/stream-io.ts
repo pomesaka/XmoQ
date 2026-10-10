@@ -1,5 +1,6 @@
 import type { Session } from "../core/session.ts";
 import type { SessionOutput } from "../core/session-output.ts";
+import { createStreamSlots } from "./stream-slots.ts";
 import type { MoqtTransport } from "./transport.ts";
 
 /**
@@ -104,12 +105,9 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	let nextPeerStream = 0;
 	/** Set by `clear`: nothing more is taken from the transport. */
 	let cleared = false;
-	/** The loop that takes unidirectional streams, while it waits for one to end. */
-	let wakeUniAccept: (() => void) | undefined;
 
 	/**
-	 * Resolves once fewer unidirectional streams of the peer are being read
-	 * than the limit, or the streams were cleared.
+	 * The unidirectional streams of the peer that are read at once.
 	 *
 	 * WHY a limit on streams and none on Objects: the queue of a subscription
 	 * makes a stream wait only after it has handed over the Objects of the
@@ -150,26 +148,11 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * the client should end such a subscription itself is in
 	 * docs/open-questions.md.
 	 */
-	const uniStreamSlot = async (): Promise<void> => {
-		while (!cleared && peerUniReaders.size >= maxPeerUniStreams) {
-			await new Promise<void>((resolve) => {
-				wakeUniAccept = resolve;
-			});
-		}
-	};
-	const uniStreamEnded = (peerStream: number): void => {
-		peerUniReaders.delete(peerStream);
-		wakeUniAccept?.();
-		wakeUniAccept = undefined;
-	};
+	const uniSlots = createStreamSlots(maxPeerUniStreams);
 
-	/** Bidirectional streams of the peer whose receiving side is being read. */
-	let peerBidiStreamsRead = 0;
-	/** The loop that takes bidirectional streams, while it waits for one to end. */
-	let wakeBidiAccept: (() => void) | undefined;
 	/**
-	 * Resolves once fewer bidirectional streams of the peer are being read
-	 * than the limit, or the streams were cleared.
+	 * The bidirectional streams of the peer whose receiving side is read at
+	 * once.
 	 *
 	 * WHY a limit: a request of the peer is held until its first message is
 	 * whole, and a FETCH is decoded whole before it is refused, up to 64 KiB a
@@ -192,18 +175,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * is lost but the refusal. The Rust implementation stops such a stream
 	 * after 10 seconds (`first_bytes_timeout` in crates/moqt-io/src/streams.rs).
 	 */
-	const bidiStreamSlot = async (): Promise<void> => {
-		while (!cleared && peerBidiStreamsRead >= maxPeerBidiStreams) {
-			await new Promise<void>((resolve) => {
-				wakeBidiAccept = resolve;
-			});
-		}
-	};
-	const bidiStreamEnded = (): void => {
-		peerBidiStreamsRead -= 1;
-		wakeBidiAccept?.();
-		wakeBidiAccept = undefined;
-	};
+	const bidiSlots = createStreamSlots(maxPeerBidiStreams);
 
 	const write = (
 		stream: number,
@@ -441,23 +413,31 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 				(peerStream, stream) => {
 					const reader = stream.getReader();
 					peerUniReaders.set(peerStream, reader);
+					uniSlots.take();
 					void pump({
 						name: streamName("peer-uni", peerStream),
 						reader,
 						onData: (session, data, fin) =>
 							session.receivePeerUniStreamData(peerStream, data, fin),
-						onReset: (session) => session.peerUniStreamReset(peerStream),
-						onEnd: () => uniStreamEnded(peerStream),
+						onReset: (session, error) =>
+							session.peerUniStreamReset(
+								peerStream,
+								transport.streamErrorCode(error),
+							),
+						onEnd() {
+							peerUniReaders.delete(peerStream);
+							uniSlots.release();
+						},
 					});
 				},
-				uniStreamSlot,
+				uniSlots.free,
 			);
 			void accept(
 				transport.incomingBidirectionalStreams,
 				(peerStream, stream) => {
 					const writer = stream.writable.getWriter();
 					peerBidiWriters.set(peerStream, writer);
-					peerBidiStreamsRead += 1;
+					bidiSlots.take();
 					void pump({
 						name: streamName("peer-bidi", peerStream),
 						reader: stream.readable.getReader(),
@@ -465,7 +445,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 							session.receivePeerBidiStreamData(peerStream, data, fin),
 						onReset: (session) => session.peerBidiStreamReset(peerStream),
 						onEnd() {
-							bidiStreamEnded();
+							bidiSlots.release();
 							// The request ended without an answer from this endpoint,
 							// so the send side was never used. Closing it can only fail
 							// if the peer already stopped it.
@@ -475,7 +455,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 						},
 					});
 				},
-				bidiStreamSlot,
+				bidiSlots.free,
 			);
 		},
 
@@ -484,9 +464,8 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 			peerUniReaders.clear();
 			peerBidiWriters.clear();
 			cleared = true;
-			wakeUniAccept?.();
-			wakeBidiAccept?.();
-			wakeUniAccept = undefined;
+			uniSlots.close();
+			bidiSlots.close();
 		},
 	};
 }

@@ -152,6 +152,15 @@ pub enum Event {
         /// The header.
         header: SubgroupHeader,
     },
+    /// The `FETCH_HEADER` of a unidirectional stream of the peer arrived.
+    FetchStreamOpened {
+        /// The session.
+        session: SessionKey,
+        /// The stream.
+        stream: StreamKey,
+        /// The Request ID of the header.
+        request_id: u64,
+    },
     /// An Object arrived on a subgroup stream.
     Object {
         /// The session.

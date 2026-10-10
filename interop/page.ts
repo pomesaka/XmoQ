@@ -5,16 +5,21 @@
 
 import {
 	connect,
+	decodeFetchBody,
+	type FetchRange,
 	type KeyValuePair,
 	type MoqtConnection,
 	type PeerStreamEnd,
 	PublishEndedError,
 	type PublishedTrack,
+	RequestFailedError,
 	SubgroupClosedError,
 	type Subscription,
 } from "@xmoq/moqt";
 import type { Diagnostics } from "@xmoq/moqt/diagnostics";
 import type {
+	PageFetch,
+	PageFetchReport,
 	PageProperty,
 	PageReceivedObject,
 	SubscriptionReport,
@@ -295,6 +300,100 @@ async function sendInWhatMayBeStopped(
 	}
 }
 
+function fetchRangeOf(asked: PageFetch): FetchRange {
+	if (asked.type === "Standalone") {
+		return {
+			fetchType: "Standalone",
+			trackNamespace: namespaceFromPath(asked.namespace),
+			trackName: utf8.encode(asked.trackName),
+			startLocation: {
+				group: BigInt(asked.start[0]),
+				object: BigInt(asked.start[1]),
+			},
+			endLocation: {
+				group: BigInt(asked.end[0]),
+				object: BigInt(asked.end[1]),
+			},
+		};
+	}
+	return {
+		fetchType: asked.type,
+		joiningRequestId: currentSubscription().requestId,
+		joiningStart: BigInt(asked.joiningStart),
+	};
+}
+
+/** Sends a FETCH, decodes its fetch stream, and reports all of it once the FETCH is over. */
+async function fetchRange(
+	asked: PageFetch,
+	timeoutMs: number,
+): Promise<PageFetchReport> {
+	const session = connected();
+	const fetch = await session.fetch(
+		// The priority the page's SUBSCRIBE has.
+		{ range: fetchRangeOf(asked), parameters: { subscriberPriority: 128 } },
+		{ signal: AbortSignal.timeout(timeoutMs) },
+	);
+	console.log(`fetch sent: request_id=${fetch.requestId} type=${asked.type}`);
+	const response: Promise<PageFetchReport["response"]> = fetch.response.then(
+		(ok) => ({
+			endOfTrack: ok.endOfTrack,
+			endLocation: [
+				ok.endLocation.group.toString(),
+				ok.endLocation.object.toString(),
+			],
+		}),
+		(error: unknown) => ({
+			error: errorText(error),
+			...(error instanceof RequestFailedError
+				? { errorCode: error.errorCode.toString() }
+				: {}),
+		}),
+	);
+	const items: PageFetchReport["items"] = [];
+	let bodyEnd = "closed";
+	try {
+		const reader = decodeFetchBody(session, fetch).getReader();
+		for (;;) {
+			const next = await reader.read();
+			if (next.done) break;
+			const item = next.value;
+			items.push(
+				item.type === "object"
+					? {
+							type: "object",
+							group: item.object.groupId.toString(),
+							object: item.object.objectId.toString(),
+							payloadHex: toHex(item.object.payload, ""),
+						}
+					: {
+							type: "end-of-range",
+							kind: item.kind,
+							group: item.location.group.toString(),
+							object: item.location.object.toString(),
+						},
+			);
+		}
+	} catch (error) {
+		bodyEnd = errorText(error);
+	}
+	const end = await fetch.ended;
+	const report: PageFetchReport = {
+		response: await response,
+		items,
+		bodyEnd,
+		end: {
+			type: end.type,
+			...("code" in end && end.code !== undefined ? { code: end.code } : {}),
+			...(end.type === "rejected"
+				? { error: { errorCode: end.error.errorCode.toString() } }
+				: {}),
+		},
+	};
+	console.log(`fetch over: ${JSON.stringify(report)}`);
+	return report;
+}
+
 /**
  * WHY rethrow as a plain Error: with playwright-core 1.64.0, `page.evaluate`
  * resolved with `undefined` when the page promise rejected with an Error that
@@ -486,6 +585,10 @@ window.xmoqOwn = {
 		await currentSubscription().cancel();
 		console.log("subscription cancelled");
 	}),
+
+	fetchRange: withPlainErrors(async (asked: PageFetch, timeoutMs: number) =>
+		JSON.stringify(await fetchRange(asked, timeoutMs)),
+	),
 
 	subscriptionReport: withPlainErrors(async () => {
 		const end = await currentSubscription().ended;

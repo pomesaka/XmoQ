@@ -87,6 +87,12 @@ such event, when a bystander was treated differently, or when the sequences
 were not counted.
 Nothing outside `spikes/relay-core-diff/.work` is written.
 
+Exit code 2 and a line `NOT COMPARED` mean that nothing was compared: the two
+cores did not build together, or the random sequences were not counted. No
+counts are printed then. The old core is built against the `xmoq-moqt` of
+<after>, so a change to a type of that crate that the core matches on (a new
+variant of an enum of the session, say) is such a case.
+
 Both versions have to share `events.rs`: the `Event` and `Action` types are
 those of <after>. A <before> whose events differ does not compile here, with
 one exception: a <before> from the time when the timer of a drain had no
@@ -546,6 +552,26 @@ def cargo(*args):
     return run.returncode, run.stdout + run.stderr
 
 
+def compared(*args):
+    """Runs the tests of a crate in which both cores are, or ends the run.
+
+    WHY the run ends here when the crate does not build: then nothing was
+    compared, and every count below would be a 0 that reads as "no
+    difference". The old core is built against the `xmoq-moqt` of <after>, so
+    this is what happens when a type of that crate the core matches on has
+    changed between the two revisions.
+    """
+    code, output = cargo(*args)
+    if code != 0 and "could not compile" in output:
+        errors = [line for line in output.splitlines() if line.startswith("error")]
+        print("NOT COMPARED: the two cores do not build together.")
+        for line in errors[:12]:
+            print("    " + line[:300])
+        print("The old core is built against the xmoq-moqt of <after>; it does not fit it.")
+        sys.exit(2)
+    return output
+
+
 def order_cause(line):
     """Which of the places that iterate over a `HashMap` an order-only mismatch comes from."""
     event = re.search(r"event=(\w+)", line).group(1)
@@ -668,9 +694,9 @@ def main():
                              "&Refusal::code(request_error_code::DOES_NOT_EXIST),", "the TIMEOUT refusal"))
         print("MUTATED: the new core answers DOES_NOT_EXIST where it answered TIMEOUT")
     totals = collections.Counter()
-    _, output = cargo("test", "--locked", "-p", "xmoq-relay-core", "--", "--nocapture", "--test-threads", "1")
+    output = compared("test", "--locked", "-p", "xmoq-relay-core", "--", "--nocapture", "--test-threads", "1")
     report("tests of xmoq-relay-core and the random events", output, totals, random_events=True)
-    _, output = cargo("test", "--locked", "-p", "xmoq-relay", "--", "--nocapture", "--test-threads", "1")
+    output = compared("test", "--locked", "-p", "xmoq-relay", "--", "--nocapture", "--test-threads", "1")
     report("tests of xmoq-relay", output, totals)
     if "--spikes" in sys.argv:
         code, output = cargo("build", "--locked", "-p", "xmoq-relay")
@@ -686,6 +712,11 @@ def main():
             totals["failed"] += not matched
     print(f"TOTAL content={totals['content']} state={totals['state']} sequence={totals['sequence']} "
           f"order={totals['order']} failed={totals['failed']}")
+    if totals["not_counted"] and ("--touching" in sys.argv or "--random-only" in sys.argv):
+        # WHY no counts here: the sequences were not counted, and a line of
+        # zeros would be read as a result.
+        print("NOT COMPARED: the random sequences were not counted (see above).")
+        sys.exit(2)
     if "--touching" in sys.argv:
         # The tests of the new version hold the new behaviour, so tests that
         # differ are expected; a difference before the change is touched is not.

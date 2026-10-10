@@ -84,8 +84,6 @@ pub enum Error {
     UnsupportedMessageType(u64),
     /// A unidirectional stream type the draft does not define (§3.4).
     UnknownStreamType(u64),
-    /// A unidirectional stream type the draft defines and this crate does not implement.
-    UnsupportedStreamType(u64),
     /// A Message Parameter type the draft does not define (§10.2).
     UnknownParameter(u64),
     /// A Track Alias already in use for another track (§11.1).
@@ -153,7 +151,6 @@ impl Error {
             Self::InvalidPath => session(TerminationCode::InvalidPath),
             // The peer was within the draft; the limitation is ours.
             Self::UnsupportedMessageType(_)
-            | Self::UnsupportedStreamType(_)
             | Self::BufferLimitExceeded { .. }
             | Self::TooManyKeyValuePairs { .. }
             | Self::TooManyParameters { .. } => session(TerminationCode::InternalError),
@@ -189,7 +186,6 @@ impl fmt::Display for Error {
             Self::UnknownMessageType(ty) => write!(f, "unknown message type {ty:#x}"),
             Self::UnsupportedMessageType(ty) => write!(f, "unsupported message type {ty:#x}"),
             Self::UnknownStreamType(ty) => write!(f, "unknown stream type {ty:#x}"),
-            Self::UnsupportedStreamType(ty) => write!(f, "unsupported stream type {ty:#x}"),
             Self::UnknownParameter(ty) => write!(f, "unknown message parameter {ty:#x}"),
             Self::DuplicateTrackAlias(alias) => write!(f, "duplicate track alias {alias}"),
             Self::InvalidRequestId(id) => write!(f, "invalid request id {id}"),

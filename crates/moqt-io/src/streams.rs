@@ -14,6 +14,7 @@ use xmoq_moqt::data::{
     SubgroupEvent, SubgroupHeader, SubgroupObject, SubgroupStreamDecoder, SubgroupStreamEncoder,
     UniStreamType, uni_stream_type,
 };
+use xmoq_moqt::fetch::{FetchHeader, decode_fetch_header};
 use xmoq_moqt::message::{ControlMessage, MessageDecoder};
 use xmoq_moqt::{Error, ErrorScope, UsageError, stream_reset_code};
 
@@ -22,6 +23,16 @@ use crate::{Connection, ReadError, RecvStream, SendStream, WriteError};
 /// Bytes asked of a stream in one read. Each stream that is being read holds a
 /// buffer of this size.
 const READ_CHUNK: usize = 16 * 1024;
+
+/// Reads of a fetch stream that wait in the queue of its [`FetchBody`]. A
+/// fetch stream nobody reads holds one more read than this, the one that
+/// waits for room in the queue: five times [`READ_CHUNK`] at most, on top of
+/// what the transport holds in the stream's receive window. Its sender is
+/// held back by flow control.
+const FETCH_BODY_CHUNKS: usize = 4;
+
+/// The longest `FETCH_HEADER`: two variable-length integers of 9 bytes.
+const FETCH_HEADER_MAX: usize = 18;
 
 /// Which way the bytes of a trace line travelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +155,8 @@ pub async fn send_message<S: SendStream>(
 }
 
 /// Tells readers of this crate to stop reading a stream, by the number the
-/// reader announced the stream with.
+/// reader announced the stream with, and holds what a fetch stream carries
+/// until someone takes it.
 ///
 /// WHY a registry and not a list of unwanted Track Aliases: an entry lives
 /// exactly as long as its reader, so nothing accumulates over a session, and
@@ -159,6 +171,9 @@ pub struct StreamStops {
 struct StopsInner {
     next_stream: u64,
     signals: HashMap<u64, oneshot::Sender<u32>>,
+    /// The bodies of fetch streams that were announced and not taken yet,
+    /// each with what tells its reader that it left here.
+    fetch_bodies: HashMap<u64, (FetchBody, oneshot::Sender<()>)>,
 }
 
 /// One reader's entry in a [`StreamStops`], removed when the reader ends.
@@ -172,10 +187,29 @@ impl StreamStops {
     /// Sends `STOP_SENDING` with `code` on the stream, if it is still being
     /// read. Does nothing otherwise.
     pub fn stop(&self, stream: u64, code: u32) {
-        if let Some(signal) = self.lock().signals.remove(&stream) {
+        let mut inner = self.lock();
+        // Nobody is going to read it.
+        inner.fetch_bodies.remove(&stream);
+        if let Some(signal) = inner.signals.remove(&stream) {
             // The reader may have just ended; then nobody needs the signal.
             let _ = signal.send(code);
         }
+    }
+
+    /// What the fetch stream announced with [`UniEvent::FetchOpened`]
+    /// carries after its header. `None` when it was taken before or the
+    /// stream was stopped.
+    ///
+    /// Whoever gets a `FetchOpened` has to take the body or stop the stream:
+    /// until then the stream holds one of the session's stream slots
+    /// ([`StreamConfig::max_uni_streams`]), also after its last byte was
+    /// read.
+    #[must_use]
+    pub fn take_fetch_body(&self, stream: u64) -> Option<FetchBody> {
+        let (body, taken) = self.lock().fetch_bodies.remove(&stream)?;
+        // The reader may have ended with a stop; then nobody waits for this.
+        let _ = taken.send(());
+        Some(body)
     }
 
     /// Streams that are being read, for tests.
@@ -212,7 +246,50 @@ impl StreamStops {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.stops.lock().signals.remove(&self.stream);
+        let mut inner = self.stops.lock();
+        inner.signals.remove(&self.stream);
+        inner.fetch_bodies.remove(&self.stream);
+    }
+}
+
+/// One piece of what a fetch stream carries after its `FETCH_HEADER`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchChunk {
+    /// Bytes of the stream, in order, cut wherever a read ended: Objects and
+    /// End of Range indicators as §11.4.4 has them, not decoded.
+    Bytes(Vec<u8>),
+    /// The peer ended the stream, or the connection did.
+    End(StreamEnd),
+    /// This endpoint stopped reading the stream: with
+    /// [`StreamStops::stop`], or by dropping [`IncomingStreams`]. Told apart
+    /// from [`FetchChunk::End`] so that whoever passes the stream on can
+    /// give the peer's reset code on where there was one, and its own where
+    /// it stopped the stream itself.
+    Stopped,
+}
+
+/// What a fetch stream of the peer carries after its header, read at the
+/// pace of whoever holds this.
+///
+/// WHY bytes that are pulled, where a subgroup stream is decoded and its
+/// Objects are put in the session's queue: a relay passes a fetch stream on
+/// as it is, and may read it only as fast as the one it writes to takes it;
+/// and decoding needs the Group Order of the FETCH, which the one who sent
+/// the FETCH knows and this reader does not.
+#[derive(Debug)]
+pub struct FetchBody {
+    chunks: mpsc::Receiver<FetchChunk>,
+}
+
+impl FetchBody {
+    /// The next piece. After [`FetchChunk::End`] every call returns
+    /// [`FetchChunk::Stopped`].
+    ///
+    /// Dropping the body stops the stream with `CANCELLED` and frees its
+    /// stream slot. [`StreamStops::stop`] does the same with a code of the
+    /// caller's.
+    pub async fn next(&mut self) -> FetchChunk {
+        self.chunks.recv().await.unwrap_or(FetchChunk::Stopped)
     }
 }
 
@@ -481,6 +558,15 @@ pub enum UniEvent {
         header: SubgroupHeader,
         /// How it ended.
         end: StreamEnd,
+    },
+    /// A fetch stream, after its `FETCH_HEADER`. What follows the header is
+    /// not put in the queue: the consumer takes it with
+    /// [`StreamStops::take_fetch_body`], or stops the stream.
+    FetchOpened {
+        /// The stream.
+        stream: u64,
+        /// Its header.
+        header: FetchHeader,
     },
     /// A stream held something the session cannot go on after. The session has
     /// to be closed with [`Error::termination_code`].
@@ -816,6 +902,7 @@ async fn read_uni_stream<R: RecvStream, T>(
         UniStreamType::Subgroup => {
             read_subgroup_stream(reader, &head, config, budget, sink).await;
         }
+        UniStreamType::Fetch => read_fetch_stream(reader, head, sink).await,
         // §11.5.1: everything on a padding stream is discarded, so that it
         // does not use up flow control, and either side may cancel it without
         // consequence.
@@ -867,6 +954,127 @@ async fn read_control_stream<R: RecvStream, T>(
             // deadline.
             Step::Lost | Step::Stop(_) | Step::TimedOut => return,
         };
+    }
+}
+
+/// Reads the header of a fetch stream, announces the stream, and then moves
+/// its bytes to whoever takes the [`FetchBody`], waiting for them.
+async fn read_fetch_stream<R: RecvStream, T>(
+    mut reader: Reader<R>,
+    mut head: Vec<u8>,
+    sink: &Sink<UniEvent, T>,
+) {
+    let (header, used) = loop {
+        match decode_fetch_header(&head) {
+            Ok(Some(decoded)) => break decoded,
+            // Two variable-length integers; more bytes than they can take
+            // without a header is not reached, and bounds `head` if it were.
+            Ok(None) if head.len() < FETCH_HEADER_MAX => {}
+            Ok(None) => return,
+            Err(error) => {
+                sink.put(UniEvent::Failed(error)).await;
+                return;
+            }
+        }
+        match reader.step().await {
+            Step::Bytes(len) => head.extend_from_slice(reader.received(len)),
+            // §10.12.3: a fetch without Objects still has "the FETCH_HEADER"
+            // before its FIN.
+            Step::Fin => {
+                let error = Error::ProtocolViolation("stream ended before its FETCH_HEADER");
+                sink.put(UniEvent::Failed(error)).await;
+                return;
+            }
+            // As for a stream cancelled before it said what it is (§11.4.1).
+            Step::Reset(_) | Step::Lost => return,
+            Step::Stop(code) => {
+                reader.recv.stop(code);
+                return;
+            }
+            Step::TimedOut => {
+                reader.recv.stop(stream_reset_code::INTERNAL_ERROR);
+                return;
+            }
+        }
+    };
+    // The stream has said what it is; from here on, how long it stays open
+    // is the business of the two endpoints.
+    reader.deadline = None;
+    let stream = reader.stream();
+    let (chunks, body) = mpsc::channel(FETCH_BODY_CHUNKS);
+    let (taken, left_the_registry) = oneshot::channel();
+    reader
+        .registration
+        .stops
+        .lock()
+        .fetch_bodies
+        .insert(stream, (FetchBody { chunks: body }, taken));
+    if !sink.put(UniEvent::FetchOpened { stream, header }).await {
+        return;
+    }
+
+    let rest = head.get(used..).unwrap_or_default().to_vec();
+    let mut unsent = (!rest.is_empty()).then_some(rest);
+    // How the stream ended, or `None` when a stop ended it: the one who asked
+    // for the stop has given up the body with it.
+    let end = loop {
+        if let Some(bytes) = unsent.take() {
+            // Waits for room, which is what holds the sender of the stream
+            // back, and for a stop, which ends the wait.
+            let sent = tokio::select! {
+                biased;
+                code = &mut reader.registration.signal => Err(code.ok()),
+                sent = chunks.send(FetchChunk::Bytes(bytes)) => match sent {
+                    Ok(()) => Ok(()),
+                    // The body was dropped: nobody wants the rest (§5.2 lets
+                    // a subscriber stop the data stream of a FETCH it
+                    // cancels).
+                    Err(_) => Err(Some(stream_reset_code::CANCELLED)),
+                },
+            };
+            if let Err(code) = sent {
+                if let Some(code) = code {
+                    reader.recv.stop(code);
+                }
+                return;
+            }
+        }
+        // WHY the body is watched while the stream is: a body that is
+        // dropped while the peer sends nothing would otherwise keep the
+        // stream, and one of the session's stream slots, until the peer's
+        // next byte, which the peer need never send. WHY after the step in
+        // the order: a stop takes the body out of the registry and drops it
+        // too, and the stop's code is the one to use then. Dropping a read
+        // loses nothing (contract of `RecvStream`).
+        let step = tokio::select! {
+            biased;
+            step = reader.step() => step,
+            () = chunks.closed() => Step::Stop(stream_reset_code::CANCELLED),
+        };
+        match step {
+            Step::Bytes(len) => unsent = Some(reader.received(len).to_vec()),
+            Step::Fin => break StreamEnd::Fin,
+            Step::Reset(code) => break StreamEnd::Aborted(code),
+            Step::Lost => break StreamEnd::Lost,
+            Step::Stop(code) => {
+                reader.recv.stop(code);
+                return;
+            }
+            // The deadline was cleared above.
+            Step::TimedOut => return,
+        }
+    };
+    // WHY wait once the end is passed on: the body may not be taken yet, and
+    // it is in the registry only as long as this reader's registration is.
+    // A stop takes it out of the registry as well, which ends the wait.
+    tokio::select! {
+        biased;
+        _ = &mut reader.registration.signal => {}
+        () = async {
+            if chunks.send(FetchChunk::End(end)).await.is_ok() {
+                let _ = left_the_registry.await;
+            }
+        } => {}
     }
 }
 

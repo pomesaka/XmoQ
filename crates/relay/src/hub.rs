@@ -973,6 +973,11 @@ fn uni_envelope<C: Connection>(session: SessionKey, event: UniEvent) -> Envelope
                 StreamEnd::Lost => xmoq_relay_core::StreamEnd::Lost,
             },
         },
+        UniEvent::FetchOpened { stream, header } => Event::FetchStreamOpened {
+            session,
+            stream: StreamKey(stream),
+            request_id: header.request_id,
+        },
         UniEvent::Failed(error) => Event::SessionFailed { session, error },
         UniEvent::ReaderPanicked => return reader_panicked(session),
     })

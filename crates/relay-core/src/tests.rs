@@ -3,8 +3,8 @@ use std::sync::Arc;
 use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError, RequestOk,
-    RequestUpdate, Setup, Subscribe, SubscribeOk,
+    ControlMessage, Fetch, FetchRange, Publish, PublishDone, PublishNamespace, ReasonPhrase,
+    RequestError, RequestOk, RequestUpdate, Setup, Subscribe, SubscribeOk,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
@@ -576,16 +576,37 @@ fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
     }
     // (first message; REQUEST_ERROR code)
     let cases = [
-        // FETCH: NOT_SUPPORTED.
+        // TRACK_STATUS, which the session does not decode and refuses by
+        // itself: NOT_SUPPORTED.
         (
             ControlMessage::UnsupportedRequest {
-                message_type: 0x16,
+                message_type: 0x0d,
                 request_id: 0,
             },
             0x3,
         ),
         // A fifth publisher of the track: EXCESSIVE_LOAD.
         (publish(2, b"a"), 0x9),
+        // FETCH, which the session hands to the relay: NOT_SUPPORTED, and
+        // the same actions as for the request the session refused.
+        (
+            ControlMessage::Fetch(Fetch {
+                request_id: 6,
+                range: FetchRange::Standalone {
+                    full_track_name: track(b"a"),
+                    start: Location {
+                        group: 0,
+                        object: 0,
+                    },
+                    end: Location {
+                        group: 1,
+                        object: 0,
+                    },
+                },
+                parameters: vec![],
+            }),
+            0x3,
+        ),
     ];
     for (index, (first, error_code)) in cases.into_iter().enumerate() {
         let stream = StreamKey(u64::try_from(index).unwrap());
@@ -636,6 +657,73 @@ fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
         }]
     );
     assert_eq!(held(&relay), (5, 1, 0, 0, 0));
+}
+
+#[test]
+fn a_refused_fetch_leaves_nothing_in_the_session() {
+    let fetch = |request_id| {
+        ControlMessage::Fetch(Fetch {
+            request_id,
+            range: FetchRange::Standalone {
+                full_track_name: track(b"a"),
+                start: Location {
+                    group: 0,
+                    object: 0,
+                },
+                end: Location {
+                    group: 1,
+                    object: 0,
+                },
+            },
+            parameters: vec![],
+        })
+    };
+    let mut relay = relay_with_track();
+    // More rounds than a session may have requests open (256): were a
+    // refused FETCH kept after its stream closed, the SUBSCRIBE at the end
+    // would be refused with EXCESSIVE_LOAD.
+    for round in 0..300u64 {
+        let stream = StreamKey(round);
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream,
+            first: fetch(round * 4),
+        });
+        assert_eq!(actions.len(), 2, "round {round}: {actions:?}");
+        // A REQUEST_UPDATE that crossed the REQUEST_ERROR gets no answer.
+        assert_eq!(
+            relay.step(Event::RequestMessage {
+                session: ALICE,
+                stream,
+                message: ControlMessage::RequestUpdate(RequestUpdate {
+                    request_id: round * 4 + 2,
+                    parameters: vec![],
+                }),
+            }),
+            [],
+            "round {round}"
+        );
+        relay.step(Event::RequestClosed {
+            session: ALICE,
+            stream,
+            how: RequestEnd::Fin,
+        });
+    }
+    let actions = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(1000),
+        first: subscribe(1200, b"a"),
+    });
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [Action::SendRequest {
+                message: ControlMessage::SubscribeOk(_),
+                ..
+            }]
+        ),
+        "{actions:?}"
+    );
 }
 
 #[test]
@@ -1006,6 +1094,15 @@ fn a_protocol_error_closes_one_session_and_cleans_up_after_it() {
                 first: publish(2, b"b"),
             },
             0x5,
+        ),
+        // A fetch stream, where the relay sent no FETCH: PROTOCOL_VIOLATION.
+        (
+            Event::FetchStreamOpened {
+                session: PUBLISHER,
+                stream: StreamKey(5),
+                request_id: 1,
+            },
+            0x3,
         ),
         // Found by the I/O side: an unknown stream type, PROTOCOL_VIOLATION.
         (

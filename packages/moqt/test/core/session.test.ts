@@ -726,24 +726,71 @@ describe("Session", () => {
 		});
 		expect(event).toEqual({
 			type: "event",
-			event: { type: "peer-request-rejected", messageType: 3n, requestId: 1n },
+			event: {
+				type: "peer-request-rejected",
+				messageType: 3n,
+				requestId: 1n,
+				errorCode: 3n,
+			},
 		});
 	});
 
-	// A FETCH is not served yet, like any request of the peer, and is refused
-	// the same way. Unlike the others it is decoded whole first, so that one
-	// the draft has close the session does (§10.12, §10.2.1); the Rust
-	// implementation does the same with the same bytes.
-	test("decodes a FETCH of the peer whole and refuses it with NOT_SUPPORTED", () => {
-		const session = started();
-		// Relative Joining FETCH with Request ID 1. Its start alone asks for
-		// nothing yet.
+	// A FETCH is not served yet, like any request of the peer, and is refused.
+	// Unlike the others it is decoded whole first, so that one the draft has
+	// close the session does (§10.12, §10.2.1), and so that the two refusals
+	// the session of the Rust implementation makes by itself are made here
+	// with the same codes: INVALID_RANGE (0x11) and
+	// INVALID_JOINING_REQUEST_ID (0x32). Every SUBSCRIBE of the peer is
+	// refused here, so no Joining Request ID names a subscription.
+	// The Standalone ones are for the track ["a"] "b", with Request ID 1.
+	test.each([
+		{
+			name: "a Standalone FETCH from {1, 0} to {3, 0}: NOT_SUPPORTED",
+			bytes: "16 00 0c 01 01 01 01 61 01 62 01 00 03 00 00",
+			errorCode: 3n,
+		},
+		{
+			name: "one from {1, 5} to {1, 0}, the whole of Group 1: NOT_SUPPORTED",
+			bytes: "16 00 0c 01 01 01 01 61 01 62 01 05 01 00 00",
+			errorCode: 3n,
+		},
+		{
+			name: "one from {1, 5} to {1, 5}: NOT_SUPPORTED",
+			bytes: "16 00 0c 01 01 01 01 61 01 62 01 05 01 05 00",
+			errorCode: 3n,
+		},
+		{
+			name: "one from {1, 5} to {1, 4}: INVALID_RANGE",
+			bytes: "16 00 0c 01 01 01 01 61 01 62 01 05 01 04 00",
+			errorCode: 0x11n,
+		},
+		{
+			name: "one from {2, 0} to {1, 0}: INVALID_RANGE",
+			bytes: "16 00 0c 01 01 01 01 61 01 62 02 00 01 00 00",
+			errorCode: 0x11n,
+		},
+		{
+			name: "a Relative Joining FETCH for Request ID 0: INVALID_JOINING_REQUEST_ID",
+			bytes: "16 00 05 01 02 00 00 00",
+			errorCode: 0x32n,
+		},
+		{
+			name: "an Absolute Joining FETCH for Request ID 3: INVALID_JOINING_REQUEST_ID",
+			bytes: "16 00 05 01 03 03 00 00",
+			errorCode: 0x32n,
+		},
+	])("refuses $name", ({ bytes, errorCode }) => {
+		// The session has a SUBSCRIBE of its own with Request ID 0, which is
+		// not one of the peer's.
+		const session = withRequests();
+		const whole = hex(bytes);
+		// Its start alone asks for nothing yet.
 		expect(
-			session.receivePeerBidiStreamData(0, hex("16 00 05 01 02"), false),
+			session.receivePeerBidiStreamData(0, whole.subarray(0, 5), false),
 		).toEqual([]);
 		const [respond, event] = session.receivePeerBidiStreamData(
 			0,
-			hex("00 00 00"),
+			whole.subarray(5),
 			false,
 		);
 		if (respond?.type !== "respond") {
@@ -751,12 +798,18 @@ describe("Session", () => {
 		}
 		expect(decodeControlMessage(respond.data)).toMatchObject({
 			status: "ok",
-			value: { type: "REQUEST_ERROR", errorCode: 3n, retryInterval: 0n },
+			value: { type: "REQUEST_ERROR", errorCode, retryInterval: 0n },
 		});
 		expect(event).toEqual({
 			type: "event",
-			event: { type: "peer-request-rejected", messageType: 22n, requestId: 1n },
+			event: {
+				type: "peer-request-rejected",
+				messageType: 22n,
+				requestId: 1n,
+				errorCode,
+			},
 		});
+		expect(session.closed).toBe(false);
 		// The Request ID is used up.
 		expect(
 			session.receivePeerBidiStreamData(1, hex("0d 00 02 01 00"), false).at(-1),
@@ -1125,11 +1178,11 @@ describe("Session", () => {
 			code: 3,
 		},
 		{
-			name: "FETCH_HEADER, not implemented",
+			name: "a fetch stream for a request that is no FETCH",
 			on: "peer-uni",
 			bytes: "05 00",
 			fin: false,
-			code: 1,
+			code: 3,
 		},
 		{
 			name: "a second SETUP",

@@ -1293,6 +1293,11 @@ impl Relay {
                 stream,
                 header,
             } => self.on_data_stream_opened(session, stream, header, &mut actions),
+            Event::FetchStreamOpened {
+                session,
+                stream,
+                request_id,
+            } => self.on_fetch_stream_opened(session, stream, request_id, &mut actions),
             Event::Object {
                 session,
                 stream,
@@ -1527,6 +1532,19 @@ impl Relay {
             }
         };
         match peer_request {
+            // FIXME: serve a FETCH (§9.4, §10.12).
+            PeerRequest::Fetch(_) => {
+                let unserved = Refusal::code(request_error_code::NOT_SUPPORTED);
+                self.refuse(session, stream, request, &unserved, actions);
+                // The session keeps a rejected FETCH until its stream is
+                // gone, for the REQUEST_UPDATE that can still be on its way;
+                // the slot has to tell it when that is.
+                if let Some(state) = self.sessions.get_mut(&session) {
+                    state
+                        .requests
+                        .insert(stream, RequestSlot::Finished(Some(request)));
+                }
+            }
             PeerRequest::Subscribe(subscribe) => {
                 self.on_subscribe(session, stream, request, &subscribe, actions);
             }
@@ -1938,7 +1956,12 @@ impl Relay {
                     }
                 }
             }
-            PeerRequestEvent::UpdateAlreadyRefused | PeerRequestEvent::LateMessage => {}
+            // Only an accepted FETCH leads here, and the relay refuses every
+            // FETCH above.
+            PeerRequestEvent::UpdateAccepted { .. }
+            | PeerRequestEvent::UpdateHeld
+            | PeerRequestEvent::UpdateAlreadyRefused
+            | PeerRequestEvent::LateMessage => {}
         }
     }
 
@@ -2073,6 +2096,29 @@ impl Relay {
             .is_some_and(RequestSlot::note_peer_finished);
         if !goes_on {
             self.on_request_closed(session, stream, true, actions);
+        }
+    }
+
+    fn on_fetch_stream_opened(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        request_id: u64,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        match state.moqt.on_fetch_stream(request_id) {
+            // FIXME: pass the stream on to the one whose FETCH the relay sent
+            // upstream (§9.4). The relay sends no FETCH yet, so the session
+            // knows none and every fetch stream ends up in the last arm.
+            Ok(_) => actions.push(Action::StopDataStream {
+                session,
+                stream,
+                code: stream_reset_code::CANCELLED,
+            }),
+            Err(error) => self.fail_session(session, &error, actions),
         }
     }
 
