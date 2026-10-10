@@ -113,7 +113,7 @@ function describeClose(close: SessionClose): string {
  * | `SessionClosedError` | The session is over | Connect again |
  * | `SubscriptionEndedError` | The Objects of a subscription stopped before its publisher finished it | See `end` |
  * | `PublishEndedError` | The subscription made with PUBLISH is over | Stop publishing; see `end` |
- * | `SubgroupClosedError` | The subgroup stream is closed while its Track goes on | Open another subgroup |
+ * | `SubgroupClosedError` | The subgroup stream is closed while its Track goes on; `metStop` says whether this call met the subscriber's STOP_SENDING, and `code` has its code where the browser passed it on | Open another subgroup |
  * | `FetchEndedError` | The FETCH ended before its fetch stream did | See `end` |
  * | `FetchStreamResetError` | The publisher reset the fetch stream | What was read before it is good; see `code` |
  */
@@ -204,6 +204,26 @@ export class PublishEndedError extends Error {
 
 export class SubgroupClosedError extends Error {
 	override readonly name = "SubgroupClosedError";
+	/**
+	 * Whether this call is the one that met the subscriber's STOP_SENDING:
+	 * its write was under way, or was made, when the stop came. False for
+	 * every call after that one, and for a stream this endpoint closed or
+	 * reset itself. So it does not say whether the stream was ever stopped.
+	 */
+	readonly metStop: boolean;
+	/**
+	 * With `metStop`: the Stream Reset Error Code (§3.3.3) of the
+	 * STOP_SENDING. `undefined` there means that the subscriber stopped the
+	 * stream and the browser did not pass the code on, which Chromium does
+	 * when the stop arrives while a write is under way.
+	 */
+	readonly code: number | undefined;
+
+	constructor(message: string, stop?: { code: number | undefined }) {
+		super(message);
+		this.metStop = stop !== undefined;
+		this.code = stop?.code;
+	}
 }
 
 /**

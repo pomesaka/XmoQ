@@ -348,6 +348,21 @@ The correction: `RelayLog` in `interop/harness.ts`, the type of the relay a driv
 - Not run: the state before the correction under the same load, so how often the old count failed is known from CI alone, once in the runs of the pull requests since the scenario was added.
 - A fence is sound for what the scenario's author says of it, and nothing checks that: a line of the relay that can come before a line the check is about would let that line through. Each one has its reason next to it in `disconnect.ts`.
 
+### The stop without a code, taken in by `@xmoq/moqt`
+
+Added on 2026-10-11, on `main` at `cf2a367f` with the changes of two pull requests that were open then on top. The gap of the section "A page whose write lost against the relay's STOP_SENDING" is mended in the library: a writer that fails with Chromium's NetworkError is read as a stream the peer stopped, with a code that is not known ([the measurement](2026-10-11-write-abort-in-chromium.md) has why that reading holds, and for which stream it is not made). The session then resets the stream and counts it as ended, as for a stop with a code, and the write is rejected with `SubgroupClosedError`.
+
+**The page no longer resets a stream whose write failed**, which was the way round the gap; the library does it. The same run as before, "own-rust leaves the Publisher Priority out and own-browser writes 128", six at once on six ports:
+
+| State | Rounds | Failed | The page's write met the stop |
+|---|---|---|---|
+| The library as it was, the page without its reset (the middle row of the table above) | 300 | 4: "PUBLISH_DONE must not be sent while subgroup streams are open" | not counted |
+| The library takes the stop in, the page without its reset | 300 | 0 | 9 times, each as a stop without a code (`metStop`, called `stopped` then; `code` undefined); the other 291 writes went through before the stop |
+
+- **In the 9 rounds that met the stop, the track ended with the page's PUBLISH_DONE all the same**, which is what failed before.
+- A stop with its code was not met by a write in these rounds: where the write lost the race, the browser gave the NetworkError every time. The tests with the played transport have both forms.
+- `mise run check` and `mise run interop` passed after it: 74 of 74 pairings.
+
 ## Limitations and blockers
 
 - **The relay change was under review when the runs were made.** The last runs are on `a44c8854`; if it changes again, they have to be made again.

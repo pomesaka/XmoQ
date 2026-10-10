@@ -68,6 +68,8 @@ No blocker.
 - **"Never in 1080" is not "cannot".** The reading that a NetworkError is a stopped stream rests on these samples and on the one function in Chromium's source that makes it; the code paths of the browser for a session that ends were not read.
 - One browser, one version, one machine, loopback, one run. A loaded machine and a real network were not run.
 - A stream that the peer resets or stops while the session is closing was not run.
+- **A NetworkError is not only a stopped stream.** Chromium rejects `createUnidirectionalStream()` and `createBidirectionalStream()` with a `DOMException` of the same name when a stream cannot be made (`web_transport.cc`, read by a reviewer of the change that followed this record). That is a stream that was never there, not a writer that failed, and it was not run here. `@xmoq/moqt` ends the session for it and looks at that before it reads an error as a stop.
+- Added later the same day, 20 samples of each, `spikes/wt-write-abort/own-reset.ts`: when the page itself aborts the writer with a `WebTransportError` that has a code, as `@xmoq/moqt` does to reset a stream, `writer.closed` and a later write were rejected with that very error (`source` "stream", the page's own code) in 80 of 80, and so was the write of 8 MiB that was under way in the 40 that had one. **So a writer's error with a code is not always the peer's**: whoever reads it has to know whether it reset the stream itself.
 - The page was in the foreground.
 - The server's library sends STOP_SENDING and keeps its own side as it is; a peer that also resets its side of a bidirectional stream was not run here (the own relay does, in the interop runs).
 

@@ -53,6 +53,22 @@ export function fakeStreamError(
 }
 
 /**
+ * What a writer fails with in Chromium 156 when the peer stops its stream
+ * while a write is under way and the data pipe of the stream closes before
+ * the STOP_SENDING is reported: a `DOMException`, not a `WebTransportError`,
+ * with no code. `writer.closed` and every write of the stream are rejected
+ * with it from then on. Seen for 56 of 720 stopped streams, and for none of
+ * 1080 writers of a session that ended
+ * (docs/experiments/2026-10-11-write-abort-in-chromium.md).
+ */
+export function fakeStopWithoutCode(): DOMException {
+	return new DOMException(
+		"The stream was aborted by the remote server",
+		"NetworkError",
+	);
+}
+
+/**
  * `reason` as Chromium 156 sent it (fixtures/webtransport-close): the longest
  * run of whole characters from the start that is at most 1024 bytes of UTF-8,
  * with U+FFFD for half of a surrogate pair and a leading U+FEFF kept.
@@ -131,13 +147,65 @@ export interface FakePeer {
 }
 
 /**
+ * A writable that takes a write at once while `stalls` returns false and
+ * keeps it under way while it returns true, until the stream is aborted;
+ * the write is then rejected with what the stream was aborted with.
+ *
+ * WHY `abort` of the writer is wrapped: by the Streams standard an abort
+ * waits for the write that is under way, and bun 1.3.12 has no
+ * `controller.signal` for a sink to hear of the abort. Chromium's stream
+ * rejects the write at once.
+ */
+function stallingWritable(stalls: () => boolean): WritableStream<Uint8Array> {
+	let rejectStalled: ((reason: unknown) => void) | undefined;
+	const stream = new WritableStream<Uint8Array>({
+		write: () =>
+			stalls()
+				? new Promise<void>((_resolve, reject) => {
+						rejectStalled = reject;
+					})
+				: undefined,
+	});
+	const getWriter = stream.getWriter.bind(stream);
+	stream.getWriter = () => {
+		const writer = getWriter();
+		const abort = writer.abort.bind(writer);
+		writer.abort = (reason?: unknown) => {
+			rejectStalled?.(reason);
+			return abort(reason);
+		};
+		return writer;
+	};
+	return stream;
+}
+
+/**
  * `holdBidi`: `createBidirectionalStream` of the client does not resolve
  * before this has, as when the peer gives no credit for a stream. The
  * connection performs its outputs in order, so everything behind the
  * request that waits for the stream waits with it.
+ *
+ * `failUni`: `createUnidirectionalStream` of the client rejects with what
+ * this returns, when it returns something. In Chromium that is a `DOMException` named
+ * NetworkError as well ("Failed to create send stream", `web_transport.cc`),
+ * the name a stopped stream has, for a stream that was never there.
+ *
+ * `stallWrites`: the unidirectional streams of the client take a write at
+ * once while this returns false, and keep it under way while it returns
+ * true, until the stream is aborted; the write is then rejected with what
+ * the stream was aborted with. That is what Chromium 156 does to a write of
+ * 8 MiB that waits for the peer's window when the page aborts the writer
+ * (spikes/wt-write-abort/out/own-reset-20.txt). WHY not the pipe of the
+ * other streams with a reader that does not read: in bun 1.3.12 `abort()`
+ * of such a stream waits for the write that is under way and settles
+ * nothing. The peer's side of these streams reads nothing.
  */
 export function createFakePeer(
-	options: { holdBidi?: Promise<void> } = {},
+	options: {
+		holdBidi?: Promise<void>;
+		failUni?: () => unknown;
+		stallWrites?: () => boolean;
+	} = {},
 ): FakePeer {
 	const clientUnis = handover<ReadableStreamDefaultReader<Uint8Array>>();
 	const clientBidis = handover<PeerBidiStream>();
@@ -189,6 +257,12 @@ export function createFakePeer(
 			incomingUnidirectionalStreams: incomingUni.readable,
 			incomingBidirectionalStreams: incomingBidi.readable,
 			createUnidirectionalStream() {
+				const failure = options.failUni?.();
+				if (failure !== undefined) return Promise.reject(failure);
+				if (options.stallWrites !== undefined) {
+					clientUnis.put(new ReadableStream<Uint8Array>().getReader());
+					return Promise.resolve(stallingWritable(options.stallWrites));
+				}
 				const stream = pipe();
 				clientUnis.put(stream.readable.getReader());
 				return Promise.resolve(stream.writable);

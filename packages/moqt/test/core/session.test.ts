@@ -655,6 +655,56 @@ describe("Session", () => {
 		]);
 	});
 
+	// A stop whose code the transport did not pass on (`localStreamAborted`)
+	// is read as a stop, but for the control stream, stream 0: there the
+	// reading is not certain enough to make a violation of the peer.
+	// `withRequests()` has a PUBLISH on stream 2, here Established, and its
+	// subgroup stream is 3.
+	test.each<{ name: string; stream: number; expected: SessionOutput[] }>([
+		{ name: "the control stream: nothing", stream: 0, expected: [] },
+		{
+			name: "a subgroup stream: it is reset, and the PUBLISH goes on",
+			stream: 3,
+			expected: [{ type: "reset", stream: 3, code: 1 }],
+		},
+		{
+			name: "the request stream of the PUBLISH: the subscription ends, with no code",
+			stream: 2,
+			expected: [
+				{ type: "reset", stream: 3, code: 1 },
+				{
+					type: "event",
+					event: {
+						type: "request-closed",
+						requestId: 2n,
+						reason: "peer-reset",
+						resetCode: undefined,
+					},
+				},
+				{ type: "reset", stream: 2, code: 1 },
+			],
+		},
+	])("a stop without a code on $name", ({ stream, expected }) => {
+		const session = withRequests();
+		session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
+		session.openSubgroup(2n, SUBGROUP);
+		expect(session.localStreamAborted(stream)).toEqual(expected);
+		expect(session.closed).toBe(false);
+	});
+
+	test("a subgroup stream that was stopped without a code no longer keeps PUBLISH_DONE back, and is counted (§10.11)", () => {
+		const session = withRequests();
+		session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
+		session.openSubgroup(2n, SUBGROUP);
+		session.localStreamAborted(3);
+		// PUBLISH_DONE, Status Code 2, Stream Count 1, no reason.
+		expect(session.publishDone(2n, 0x2n, "").at(0)).toEqual({
+			type: "send",
+			stream: 2,
+			data: hex("0b 00 03 02 01 00"),
+		});
+	});
+
 	test("a FIN of the subscriber on the request stream of an Established PUBLISH does not end the subscription (§5.1)", () => {
 		const session = withRequests();
 		session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
