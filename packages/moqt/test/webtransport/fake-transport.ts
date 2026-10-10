@@ -96,6 +96,8 @@ export interface FakePeer {
 	fail(error: Error): void;
 	/** What the client closed the session with, once it did. */
 	closeInfo(): CloseInfo | undefined;
+	/** How many of the streams made by `openUni` the client has not taken from the transport. */
+	untakenUniStreams(): number;
 }
 
 export function createFakePeer(): FakePeer {
@@ -110,6 +112,7 @@ export function createFakePeer(): FakePeer {
 		MoqtBidirectionalStream
 	>({}, undefined, { highWaterMark: 1024 });
 	const incomingUniWriter = incomingUni.writable.getWriter();
+	const openedUnis: ReadableStream<Uint8Array>[] = [];
 	const incomingBidiWriter = incomingBidi.writable.getWriter();
 	/** Ends every stream made so far, as the end of the session does. */
 	const streamEnders: ((error: Error) => void)[] = [];
@@ -177,6 +180,7 @@ export function createFakePeer(): FakePeer {
 		clientBidi: clientBidis.take,
 		openUni() {
 			const stream = pipe();
+			openedUnis.push(stream.readable);
 			void incomingUniWriter.write(stream.readable);
 			return stream.writable.getWriter();
 		},
@@ -201,5 +205,8 @@ export function createFakePeer(): FakePeer {
 			setTimeout(() => rejectClosed(error), 0);
 		},
 		closeInfo: () => closeInfo,
+		// The client locks a stream when it starts to read it.
+		untakenUniStreams: () =>
+			openedUnis.filter((readable) => !readable.locked).length,
 	};
 }

@@ -39,6 +39,11 @@ import type { MoqtTransport } from "./transport.ts";
 /** Provisional defaults; the project has not chosen any of them. */
 const DEFAULT_SUBSCRIPTION_HIGH_WATER_MARK = 16;
 /**
+ * Provisional, and the value of the Rust implementation (`max_uni_streams` in
+ * crates/moqt-io): the draft sets no limit, and XmoQ has not decided one.
+ */
+const DEFAULT_MAX_PEER_UNI_STREAMS = 64;
+/**
  * The largest code an application may reset a stream with.
  *
  * WHY 255 and not the 2^32 - 1 of W3C WebTransport (`[Clamp] unsigned long?
@@ -67,6 +72,21 @@ export interface SessionConnectOptions {
 	 * subgroup streams that feed it.
 	 */
 	subscriptionHighWaterMark?: number;
+	/**
+	 * Unidirectional streams of the peer read at once, the peer's control
+	 * stream among them; a whole number from 2, or `connect` rejects with a
+	 * `RangeError`. Further streams wait in the transport, and a stream holds
+	 * its place until it has ended.
+	 *
+	 * This bounds the streams that feed a subscription nobody reads, not its
+	 * Objects: a stream waits once the queue is full, but only after it has
+	 * queued every Object of the chunk it read. So the queue holds up to
+	 * `subscriptionHighWaterMark` - 1 Objects plus one chunk's worth from
+	 * each of `maxPeerUniStreams` - 1 streams. That is one Object a stream
+	 * where a chunk carries one, and as many as fit into a chunk where
+	 * Objects are small; neither Objects nor bytes are counted.
+	 */
+	maxPeerUniStreams?: number;
 	/** How long to wait for the peer's SETUP before closing with CONTROL_MESSAGE_TIMEOUT. */
 	setupTimeoutMs?: number;
 	/**
@@ -265,6 +285,16 @@ export async function connectOver(
 	transport: MoqtTransport,
 	options: SessionConnectOptions = {},
 ): Promise<MoqtConnection> {
+	const maxPeerUniStreams =
+		options.maxPeerUniStreams ?? DEFAULT_MAX_PEER_UNI_STREAMS;
+	// WHY from 2: one place is the peer's control stream for as long as the
+	// session lasts, so with 1 no data stream would ever be read, and with 0
+	// not even SETUP. NaN and Infinity would switch the limit off.
+	if (!Number.isInteger(maxPeerUniStreams) || maxPeerUniStreams < 2) {
+		throw new RangeError(
+			`maxPeerUniStreams is a whole number from 2, not ${String(maxPeerUniStreams)}`,
+		);
+	}
 	const session: Session = createSession({
 		implementation: options.implementation,
 		limits: options.limits,
@@ -287,6 +317,7 @@ export async function connectOver(
 
 	const io = createStreamIo({
 		transport,
+		maxPeerUniStreams,
 		trace: (direction, name, data) =>
 			options.diagnostics?.onBytes?.(direction, name, data),
 		input: (action) => applyInput(action),

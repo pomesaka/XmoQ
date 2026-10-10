@@ -24,6 +24,11 @@ export type StreamOutput = Exclude<
 
 export interface StreamIoOptions {
 	transport: MoqtTransport;
+	/**
+	 * Unidirectional streams of the peer read at once. Further ones are not
+	 * taken from the transport until one of these has ended.
+	 */
+	maxPeerUniStreams: number;
 	/** Called with the bytes of every stream. */
 	trace(direction: "sent" | "received", stream: string, data: Uint8Array): void;
 	/**
@@ -74,7 +79,7 @@ function toError(value: unknown): Error {
 const EMPTY = new Uint8Array(0);
 
 export function createStreamIo(options: StreamIoOptions): StreamIo {
-	const { transport, trace, input, fatal } = options;
+	const { transport, maxPeerUniStreams, trace, input, fatal } = options;
 	const localStreams = new Map<number, LocalStream>();
 	const peerUniReaders = new Map<
 		number,
@@ -85,6 +90,66 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		WritableStreamDefaultWriter<Uint8Array>
 	>();
 	let nextPeerStream = 0;
+	/** Set by `clear`: nothing more is taken from the transport. */
+	let cleared = false;
+	/** The loop that takes unidirectional streams, while it waits for one to end. */
+	let wakeUniAccept: (() => void) | undefined;
+
+	/**
+	 * Resolves once fewer unidirectional streams of the peer are being read
+	 * than the limit, or the streams were cleared.
+	 *
+	 * WHY a limit on streams and none on Objects: the queue of a subscription
+	 * makes a stream wait only after it has handed over the Objects of the
+	 * chunk it read, so without this every new stream adds to the queue. With
+	 * it, what the streams hold is bounded by their number, as in the Rust
+	 * implementation (`max_uni_streams`), and the rest stays with the
+	 * transport, where flow control holds the peer back.
+	 *
+	 * A stream holds its place until it has ended: a subgroup that stays open
+	 * for a long time, and a stream of no subscription that the peer does not
+	 * close, each keep one.
+	 *
+	 * WHY the control stream counts: it is one of the peer's unidirectional
+	 * streams, and nothing tells it apart before its first bytes are read. A
+	 * peer that keeps to the draft cannot take every place before it: data
+	 * streams come for a subscription, and a subscription is made after
+	 * SETUP, which the control stream carries.
+	 *
+	 * FIXME: in one shape of traffic, a subscription nobody reads holds up
+	 * the other requests of its session. Seen in Chromium 156 with the own
+	 * relay (docs/experiments/2026-10-10-subscription-backlog-in-chromium.md):
+	 * with a subscription that was not read and one Object of 100,000 bytes a
+	 * stream, the relay's PUBLISH_DONE for it did not arrive, and after the
+	 * relay had ended that subscription its SUBSCRIBE_OK for another track of
+	 * the same session did not arrive either. With Objects of 57 bytes, and
+	 * with 30 Objects of 100,000 bytes a stream, both arrived; a second
+	 * request made while the first subscription was still served was not
+	 * tried. Without this limit the second request was answered in the same
+	 * shape of traffic, while the page held everything that was sent.
+	 * The likely cause, not verified with a capture: the streams that are not
+	 * taken stay in the browser and hold the flow-control credit of the
+	 * connection, so that the sender cannot send on a request stream either.
+	 * §11.4.2 names a deadlock of that kind for control messages and asks
+	 * endpoints to "allocate connection flow control to the control streams
+	 * before allocating it to any data streams"; a page has no say in how the
+	 * browser's credit is given out. The Rust implementation has a related
+	 * FIXME at `read_uni_streams` in crates/moqt-io/src/streams.rs. Whether
+	 * the client should end such a subscription itself is in
+	 * docs/open-questions.md.
+	 */
+	const uniStreamSlot = async (): Promise<void> => {
+		while (!cleared && peerUniReaders.size >= maxPeerUniStreams) {
+			await new Promise<void>((resolve) => {
+				wakeUniAccept = resolve;
+			});
+		}
+	};
+	const uniStreamEnded = (peerStream: number): void => {
+		peerUniReaders.delete(peerStream);
+		wakeUniAccept?.();
+		wakeUniAccept = undefined;
+	};
 
 	const write = (
 		stream: number,
@@ -180,10 +245,14 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	const accept = async <T>(
 		streams: ReadableStream<T>,
 		start: (peerStream: number, stream: T) => void,
+		/** Resolves when the next stream may be taken. */
+		room: () => Promise<void> = () => Promise.resolve(),
 	): Promise<void> => {
 		const reader = streams.getReader();
 		try {
 			for (;;) {
+				await room();
+				if (cleared) return;
 				// Only the read is guarded: it fails when the transport session
 				// ends, which `transport.closed` reports to the connection.
 				const next = await reader.read().catch(() => undefined);
@@ -311,9 +380,10 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 						onData: (session, data, fin) =>
 							session.receivePeerUniStreamData(peerStream, data, fin),
 						onReset: (session) => session.peerUniStreamReset(peerStream),
-						onEnd: () => peerUniReaders.delete(peerStream),
+						onEnd: () => uniStreamEnded(peerStream),
 					});
 				},
+				uniStreamSlot,
 			);
 			void accept(
 				transport.incomingBidirectionalStreams,
@@ -343,6 +413,9 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 			localStreams.clear();
 			peerUniReaders.clear();
 			peerBidiWriters.clear();
+			cleared = true;
+			wakeUniAccept?.();
+			wakeUniAccept = undefined;
 		},
 	};
 }
