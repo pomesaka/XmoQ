@@ -16,6 +16,8 @@
 //!   FIN only if its sender waited for them to arrive
 //!   ([`SendStream::finish_and_wait`]). On a real connection the rest is lost
 //!   or not depending on timing; here it is always lost.
+//! * A stream that was not accepted when the connection is closed is never
+//!   accepted afterwards, whether or not it had arrived.
 //!
 //! It models nothing else of QUIC: no packets, no loss, no timing. Its windows
 //! are far smaller than real ones ([`STREAM_WINDOW`] bytes a stream and
@@ -28,7 +30,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::{Notify, mpsc, watch};
 
-use crate::{Connection, ConnectionLost, ReadError, RecvStream, SendStream, WriteError};
+use crate::{
+    Connection, ConnectionEnd, ConnectionLost, ReadError, RecvStream, SendStream, WriteError,
+};
 
 /// Bytes a stream holds that its receiver has not read. A writer waits beyond
 /// that, as flow control makes it wait on a real connection.
@@ -254,12 +258,6 @@ impl RecvStream for MemoryRecv {
 }
 
 impl MemoryRecv {
-    /// Whether the stream outlives its connection; see the module
-    /// documentation.
-    fn arrived(&self) -> bool {
-        self.shared.lock().arrived
-    }
-
     fn halt(&self, code: Option<u32>) {
         let mut pipe = self.shared.lock();
         if pipe.stopped.is_none() {
@@ -295,6 +293,8 @@ pub struct Close {
     pub code: u32,
     /// The reason.
     pub reason: Vec<u8>,
+    /// Which end closed: the first of the pair or the second.
+    first: bool,
 }
 
 struct Incoming {
@@ -310,6 +310,8 @@ pub struct MemoryConnection {
     closed_sender: Arc<watch::Sender<bool>>,
     closed: watch::Receiver<bool>,
     close: Arc<Mutex<Option<Close>>>,
+    /// Whether this is the first end of its pair.
+    first: bool,
 }
 
 /// Two connected ends.
@@ -322,7 +324,8 @@ pub fn pair() -> (MemoryConnection, MemoryConnection) {
     let (closed_sender, closed) = watch::channel(false);
     let closed_sender = Arc::new(closed_sender);
     let close = Arc::new(Mutex::new(None));
-    let end = |to_peer_uni, to_peer_bi, uni, bi| MemoryConnection {
+    let end = |first, to_peer_uni, to_peer_bi, uni, bi| MemoryConnection {
+        first,
         to_peer_uni,
         to_peer_bi,
         incoming: Incoming {
@@ -334,8 +337,8 @@ pub fn pair() -> (MemoryConnection, MemoryConnection) {
         close: Arc::clone(&close),
     };
     (
-        end(a_uni, a_bi, a_incoming_uni, a_incoming_bi),
-        end(b_uni, b_bi, b_incoming_uni, b_incoming_bi),
+        end(true, a_uni, a_bi, a_incoming_uni, a_incoming_bi),
+        end(false, b_uni, b_bi, b_incoming_uni, b_incoming_bi),
     )
 }
 
@@ -389,15 +392,12 @@ impl Connection for MemoryConnection {
 
     async fn accept_uni(&self) -> Result<MemoryRecv, ConnectionLost> {
         let mut incoming = self.incoming.uni.lock().await;
-        accept(&mut incoming, self.until_closed(), MemoryRecv::arrived).await
+        accept(&mut incoming, self.until_closed()).await
     }
 
     async fn accept_bi(&self) -> Result<(MemorySend, MemoryRecv), ConnectionLost> {
         let mut incoming = self.incoming.bi.lock().await;
-        accept(&mut incoming, self.until_closed(), |(_, recv)| {
-            recv.arrived()
-        })
-        .await
+        accept(&mut incoming, self.until_closed()).await
     }
 
     fn close(&self, code: u32, reason: &[u8]) {
@@ -408,35 +408,38 @@ impl Connection for MemoryConnection {
         if close.is_none() {
             *close = Some(Close {
                 code,
-                reason: reason.to_vec(),
+                reason: crate::close_reason(reason).into_bytes(),
+                first: self.first,
             });
         }
         self.closed_sender.send_replace(true);
     }
 
-    async fn closed(&self) {
+    async fn closed(&self) -> ConnectionEnd {
         self.until_closed().await;
+        match self.close_info() {
+            Some(close) if close.first == self.first => ConnectionEnd::ClosedLocally,
+            Some(close) => ConnectionEnd::ClosedByPeer {
+                code: close.code,
+                reason: String::from_utf8_lossy(&close.reason).into_owned(),
+            },
+            None => ConnectionEnd::Lost("the peer went away".to_string()),
+        }
     }
 }
 
-/// The next stream of `incoming`. Once the connection is closed, only the
-/// streams that had arrived are left to accept; the others went with it.
+/// The next stream of `incoming`. Closed first: a stream that was not
+/// accepted when the connection went is gone with it, also one that had
+/// arrived. See the module documentation.
 async fn accept<S>(
     incoming: &mut mpsc::Receiver<S>,
     closed: impl Future<Output = ()>,
-    arrived: impl Fn(&S) -> bool,
 ) -> Result<S, ConnectionLost> {
     tokio::select! {
         biased;
-        () = closed => {}
-        stream = incoming.recv() => return stream.ok_or_else(MemoryConnection::lost),
+        () = closed => Err(MemoryConnection::lost()),
+        stream = incoming.recv() => stream.ok_or_else(MemoryConnection::lost),
     }
-    while let Ok(stream) = incoming.try_recv() {
-        if arrived(&stream) {
-            return Ok(stream);
-        }
-    }
-    Err(MemoryConnection::lost())
 }
 
 impl Drop for MemoryConnection {

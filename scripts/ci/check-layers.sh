@@ -7,7 +7,7 @@ cd "${REPO_ROOT}"
 # Crates that must stay free of I/O, as "package name:directory".
 SANS_IO_CRATES=("xmoq-moqt:crates/moqt" "xmoq-relay-core:crates/relay-core")
 
-# WHY the socket-layer crates and not only the transports: banning wtransport and quinn by name
+# WHY the socket-layer crates and not only the transports: banning web-transport-quinn and quinn by name
 # would miss the next transport crate. mio, socket2, polling, async-io and quinn-udp sit under
 # the async runtimes, so a dependency that does network I/O through tokio, smol or async-std
 # brings one of them in. tokio itself is judged the same way: with tokio 1.49.0 the "net"
@@ -15,7 +15,7 @@ SANS_IO_CRATES=("xmoq-moqt:crates/moqt" "xmoq-relay-core:crates/relay-core")
 # This cannot see a crate that calls std::net or libc directly.
 # WHY NOT an allowlist of permitted dependencies: it would have to be edited for every harmless
 # crate (bytes, thiserror), and the review of that edit is the same judgement this list encodes.
-IO_CRATES=(mio socket2 polling async-io quinn-udp wtransport quinn)
+IO_CRATES=(mio socket2 polling async-io quinn-udp web-transport-quinn quinn)
 
 errors=0
 report() {

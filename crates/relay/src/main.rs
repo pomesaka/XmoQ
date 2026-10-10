@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
         ..HubConfig::default()
     };
     let limits = quic_limits(&config.streams);
-    let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits).await?;
+    let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
     let (hub, hub_task) = hub::spawn(config);
     tokio::select! {
@@ -125,7 +125,9 @@ async fn accept_sessions(server: &WtServer, hub: &HubHandle<WtConnection>, log: 
         let Ok(permit) = Arc::clone(&handshakes).acquire_owned().await else {
             return;
         };
-        let incoming = server.incoming().await;
+        let Some(incoming) = server.incoming().await else {
+            return;
+        };
         let hub = hub.clone();
         let log = log.clone();
         // Each handshake runs on its own, so that a slow client does not hold

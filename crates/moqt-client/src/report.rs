@@ -9,7 +9,7 @@ use xmoq_moqt::Error as MoqtError;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
 use xmoq_moqt::message::{PublishDone, Setup};
 
-use xmoq_moqt_io::Direction;
+use xmoq_moqt_io::{Direction, RequestClose};
 
 use crate::hex;
 
@@ -70,6 +70,20 @@ pub fn published(track_alias: u64, forward: bool) {
 /// A `REQUEST_UPDATE` was answered with `REQUEST_ERROR` `NOT_SUPPORTED`.
 pub fn update_refused() {
     println!("UPDATE_REFUSED");
+}
+
+/// How the peer ended its direction of the request stream after this client's
+/// `PUBLISH_DONE`, or `None` when it did not in time.
+///
+/// WHY only what was seen, and no word like "confirmed": that a FIN means
+/// "every stream the Stream Count named has ended here" holds for `XmoQ`'s
+/// relay alone. A peer that follows only the draft may finish the stream for
+/// any reason, and this client cannot tell which peer it talks to.
+pub fn publish_done_peer_ended(how: Option<RequestClose>) {
+    match how {
+        Some(how) => println!("PUBLISH_DONE_PEER_ENDED how={how}"),
+        None => println!("PUBLISH_DONE_PEER_ENDED how=nothing in time"),
+    }
 }
 
 pub fn sent(group_id: u64, payload_len: usize) {

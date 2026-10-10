@@ -7,6 +7,7 @@
 //! without going through the session, which is where the IDs are checked.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
@@ -15,9 +16,9 @@ use xmoq_moqt::message::{ControlMessage, ReasonPhrase, RequestError, request_err
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, IncomingStreams, PeerRequestStreamEvent, RequestReader, RequestStreamEvent,
-    SendStream, StreamConfig, StreamStops, Trace, UniEvent, WriteError, read_request_streams,
-    read_uni_streams, send_message,
+    Connection, IncomingStreams, PeerRequestStreamEvent, RequestClose, RequestReader,
+    RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace, UniEvent, WriteError,
+    read_request_streams, read_uni_streams, send_message,
 };
 
 type Send = <WtConnection as Connection>::Send;
@@ -56,17 +57,32 @@ impl RequestStream {
         Ok(())
     }
 
-    /// Ends this endpoint's half of the stream with a FIN and lets go of the
-    /// other half: nothing more is expected on it. Waits until what was sent
-    /// has reached the peer, so that closing the session afterwards does not
-    /// take it back.
-    pub async fn finish_and_wait(self) -> Result<()> {
-        let delivered = self.send.finish_and_wait().await;
-        self.reader.stop(stream_reset_code::CANCELLED);
-        match delivered {
-            // The peer let go of the stream first; it has what it wanted.
-            Ok(()) | Err(WriteError::Stopped(_)) => Ok(()),
-            Err(WriteError::Lost(reason)) => Err(anyhow::anyhow!("connection lost: {reason}")),
+    /// Ends this endpoint's half of the stream with a FIN and waits for the
+    /// peer to end its own, for at most `wait`. Returns how the peer did, or
+    /// `None` when it did not in time.
+    ///
+    /// WHY wait for the peer and not only for the transport: after
+    /// `PUBLISH_DONE`, an `XmoQ` relay finishes its direction once it has
+    /// received as many subgroup streams as the Stream Count said, and resets
+    /// it when it gave up waiting. That tells a publisher whether it can
+    /// close the session without losing what it sent last. The transport
+    /// alone cannot: a stream that arrived and was not accepted yet can be
+    /// lost when the connection closes (`xmoq_moqt_io::Connection::accept_uni`).
+    pub async fn finish_and_await_close(mut self, wait: Duration) -> Result<Option<RequestClose>> {
+        self.send.finish();
+        let closed = async {
+            loop {
+                // Whatever the peer still says on the stream changes nothing.
+                if let RequestStreamEvent::Closed(how) = self.reader.next_event().await? {
+                    return Ok::<_, anyhow::Error>(how);
+                }
+            }
+        };
+        if let Ok(how) = tokio::time::timeout(wait, closed).await {
+            Ok(Some(how?))
+        } else {
+            self.reader.stop(stream_reset_code::CANCELLED);
+            Ok(None)
         }
     }
 
@@ -89,10 +105,9 @@ impl RequestStream {
         tokio::select! {
             event = self.reader.next_event() => Ok(event?),
             stopped = self.send.stopped() => match stopped {
-                WriteError::Stopped(code) => Ok(RequestStreamEvent::Closed(match code {
-                    Some(code) => format!("STOP_SENDING, code {code:#x}"),
-                    None => "STOP_SENDING, without an application code".to_string(),
-                })),
+                WriteError::Stopped(code) => {
+                    Ok(RequestStreamEvent::Closed(RequestClose::Stopped(code)))
+                }
                 // A lost connection is reported where the session is watched.
                 WriteError::Lost(_) => std::future::pending().await,
             },

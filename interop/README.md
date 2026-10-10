@@ -107,7 +107,7 @@ The relay runs on a self-signed certificate that `run.ts` creates under `.cert/`
 | ECDSA P-256, valid for under two weeks (13 days here) | Chromium accepts nothing else through `serverCertificateHashes`, which is how the browser clients pin the certificate's SHA-256 |
 | Key from `openssl ecparam -genkey`, certificate from `openssl req -x509 -new -key` | With LibreSSL 3.3.6, the relay could not load a key written by the one-step `openssl req -newkey ec` |
 
-The Rust clients pin the same SHA-256 through `wtransport`'s `with_server_certificate_hashes`.
+The Rust clients pin the same SHA-256: the own client through `web-transport-quinn`'s `with_server_certificate_hashes`, the moqtail client through `wtransport`'s.
 
 ## Generated files
 
