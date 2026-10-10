@@ -79,14 +79,13 @@ import {
 	type Client,
 	captureGroup,
 	DISCONNECT_TIMEOUT_MS,
+	type Fence,
 	isBrowserClient,
 	isOwnClient,
 	isRustClient,
 	log,
 	parseClient,
-	pollFor,
 	runCleanups,
-	STEP_TIMEOUT_MS,
 	startRun,
 	stopEverythingOnExit,
 	withTimeout,
@@ -153,6 +152,15 @@ const SUBSCRIBER_KILL_NOTICED_WITHIN_MS = 7_500;
 // a publisher that the relay stopped, and SEND … PUBLISH_DONE towards a
 // subscriber, which has to be absent while a source is left and is seen once
 // for every own subscriber when the track has ended.
+//
+// The relay's lines are counted, and found absent, only before a line of the
+// relay itself, the fence (`RelayLog.linesBefore` in harness.ts, which has
+// why). The type of the relay has no way to count the lines "so far". A
+// scenario names the fence by what makes the relay print it: a session that
+// ended (`leaveInOrder`), a stream it stopped (`expectStreamsStopped`), a
+// client that came, a Group it sent on, or, for what holds of the whole
+// scenario, the first session of the run that follows it
+// (`relayServesTheTrackAgain`).
 //
 // Which session a client has is taken from the order in which the clients of
 // a run connect, one after the other; the relay prints no address to tell
@@ -497,11 +505,18 @@ async function outcomes(
  *
  * It is also where the lines that the scenarios expect to be absent are seen
  * once: a stream opened towards a session, and a session dropped.
+ *
+ * Returns the fence for what a scenario counts in the relay's log when it is
+ * over: the line for the first session of this step. WHY that line: the
+ * step starts when every client of the scenario has reported its end, and a
+ * client reports what the relay sent it after the relay printed that it
+ * sent it. So every line of the scenario stands before this one, and none
+ * of this step does.
  */
 /** The Group of the Object that is moved after a scenario; the scenarios stay far below it. */
 const AFTER_GROUP = 1_000_000;
 
-async function relayServesTheTrackAgain(run: Run): Promise<void> {
+async function relayServesTheTrackAgain(run: Run): Promise<Fence> {
 	const relay = run.context.relay;
 	// WHY a label and a payload of its own: the log tells this publisher from
 	// the one of the scenario, and an Object of the scenario that came late
@@ -539,12 +554,20 @@ async function relayServesTheTrackAgain(run: Run): Promise<void> {
 	// §3.3: a control stream is not closed while the session lasts. The relay
 	// closes the session of a client that stops its control stream, which
 	// own-rust did before it closed its session, on `wtransport`.
-	const closedByRelay = relay.matches(SESSION_CLOSED_BY_RELAY);
+	// The subscriber that stays leaves when its subscription has ended, and
+	// the relay prints the end of a session when it has printed everything
+	// else that end made it do.
+	const closedByRelay = await relay.linesBefore(
+		{ line: sessionClosed(sessionOf(staying, run)) },
+		SESSION_CLOSED_BY_RELAY,
+		DISCONNECT_TIMEOUT_MS,
+	);
 	if (closedByRelay.length > 0) {
 		throw new Error(
 			`the relay closed a session itself: ${closedByRelay.map((match) => match.input).join("; ")}`,
 		);
 	}
+	return { line: sessionOpened(sessionOf(publisher, run)) };
 }
 
 /** An own-browser publisher has to see its subscription end by its own PUBLISH_DONE. */
@@ -743,8 +766,8 @@ async function closedWithoutPublishDone(
 			);
 		}
 	}
-	expectPublishDoneLines(ownOnly(subscribers), run);
-	await relayServesTheTrackAgain(run);
+	const over = await relayServesTheTrackAgain(run);
+	await expectPublishDoneLines(ownOnly(subscribers), run, over);
 
 	return {
 		summary: delivered
@@ -826,11 +849,23 @@ async function subscriberLeaves(run: Run): Promise<ScenarioResult> {
 	const afterLeaving = await publisher.send();
 	groups.push(afterLeaving);
 	await allReceive(stayers, afterLeaving, run);
+	// The relay's own order of the two lines: the stream of the Group towards
+	// a stayer, and the end of the killed session.
+	const [stayer] = stayers;
+	if (stayer === undefined) throw new Error("the scenario has no stayer");
+	const servedAfterLeaving: Fence = {
+		line: streamOpened(sessionOf(stayer, run), afterLeaving),
+	};
 	for (const { subscriber, way } of leavers) {
 		if (
 			way === "kill" &&
 			isRustClient(subscriber.kind) &&
-			relay.matches(sessionClosed(sessionOf(subscriber, run))).length > 0
+			(
+				await relay.linesBefore(
+					servedAfterLeaving,
+					sessionClosed(sessionOf(subscriber, run)),
+				)
+			).length > 0
 		) {
 			throw new Error(
 				`the relay had dropped the session of ${subscriber.label} before the stayers received Group ${afterLeaving}, so the run does not show that it did not wait for it`,
@@ -896,27 +931,30 @@ async function subscriberLeaves(run: Run): Promise<ScenarioResult> {
 		}
 		leaverEnds.push({ subscriber, outcome });
 	}
-	await relayServesTheTrackAgain(run);
+	const over = await relayServesTheTrackAgain(run);
 
 	// §11.4.1: ending the request stream ends the subscription, not the
 	// session. So the relay opened no stream towards the one that cancelled
 	// for what was sent after, and still serves its session.
-	// WHY only now: every line the relay printed during the scenario has been
-	// read by the time the run that follows it is over.
 	const sentAfterLeaving = groups.filter(
 		(group) => !beforeLeaving.includes(group),
 	);
 	for (const subscriber of cancelled) {
 		const session = sessionOf(subscriber, run);
-		const opened = sentAfterLeaving.filter(
-			(group) => relay.matches(streamOpened(session, group)).length > 0,
-		);
+		const opened: number[] = [];
+		for (const group of sentAfterLeaving) {
+			const streams = await relay.linesBefore(
+				over,
+				streamOpened(session, group),
+			);
+			if (streams.length > 0) opened.push(group);
+		}
 		if (opened.length > 0) {
 			throw new Error(
 				`the relay went on sending to ${subscriber.label} after it cancelled: Groups [${opened}]`,
 			);
 		}
-		if (relay.matches(sessionClosed(session)).length > 0) {
+		if ((await relay.linesBefore(over, sessionClosed(session))).length > 0) {
 			throw new Error(
 				`the relay dropped the session of ${subscriber.label}, which cancelled its subscription only`,
 			);
@@ -927,9 +965,9 @@ async function subscriberLeaves(run: Run): Promise<ScenarioResult> {
 		// it got (see `stopSendingReceived`). moqtail-browser cancels its reader
 		// without a reason, which arrives as 0x0, and its line is always there:
 		// that is the one place where a change of the line's form is noticed.
-		const codes = relay
-			.matches(stopSendingReceived(session))
-			.map((match) => captureGroup(match, 1));
+		const codes = (
+			await relay.linesBefore(over, stopSendingReceived(session))
+		).map((match) => captureGroup(match, 1));
 		const expectedCode = subscriber.kind === "own-browser" ? "0x1" : "0x0";
 		if (
 			codes.some((code) => code !== expectedCode) ||
@@ -1028,23 +1066,21 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 	groups.push(last);
 	await allReceive(readers, last, run);
 
-	// §10.11: no stream is opened for a subscription after its PUBLISH_DONE.
-	// `last` was sent after the cut-off, and the readers have it.
 	const slowSession = sessionOf(slow, run);
-	if (relay.matches(streamOpened(slowSession, last)).length > 0) {
+	// Only the subscription was ended: the relay had not dropped the session
+	// when it sent the Group after the cut-off on to a reader. The slow one
+	// is still stopped, or a page that does not read, and cannot have left
+	// by itself. That the relay closes no session itself, at any time, is
+	// seen in `relayServesTheTrackAgain`.
+	const [reader] = readers;
+	if (reader === undefined) throw new Error("the scenario has no reader");
+	const dropped = await relay.linesBefore(
+		{ line: streamOpened(sessionOf(reader, run), last) },
+		sessionClosed(slowSession),
+	);
+	if (dropped.length > 0) {
 		throw new Error(
-			`the relay opened a stream of Group ${last} towards ${slow.label} after it had ended its subscription`,
-		);
-	}
-	// §3.3.3: the streams the relay cut short say why. Read from the relay's
-	// log: they are the streams it could not open, so the subscriber never
-	// saw them reset.
-	const cutShort = relay
-		.matches(streamReset)
-		.map((match) => captureGroup(match, 1));
-	if (cutShort.length === 0 || cutShort.some((code) => code !== "0x5")) {
-		throw new Error(
-			`the relay reset ${cutShort.length} streams when it cut ${slow.label} off, with the codes [${[...new Set(cutShort)]}], not TOO_FAR_BEHIND alone`,
+			`the relay dropped the session of ${slow.label}, where it had to end its subscription only`,
 		);
 	}
 	if (!unread) await slow.setStopped(false);
@@ -1053,13 +1089,6 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 	// DEFAULT_PUBLISH_DONE_TIMEOUT_MS in
 	// packages/moqt/src/webtransport/connection.ts, 5 seconds.
 	const cutOff = await slow.outcome();
-	// Only the subscription was ended: the relay still serves the session,
-	// also after that wait.
-	if (relay.matches(sessionClosed(slowSession)).length > 0) {
-		throw new Error(
-			`the relay dropped the session of ${slow.label}, where it had to end its subscription only`,
-		);
-	}
 	expectPublishDone(slow, cutOff, { statusCode: TOO_FAR_BEHIND });
 	// §10.11: a publisher that cannot give the exact number of streams gives
 	// 2^62 - 1. The relay could not open every stream it had for this
@@ -1082,7 +1111,26 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 			abortedStreams: 0,
 		});
 	}
-	await relayServesTheTrackAgain(run);
+	const over = await relayServesTheTrackAgain(run);
+	// §10.11: no stream is opened for a subscription after its PUBLISH_DONE.
+	// `last` was sent after the cut-off, and the readers have it.
+	const late = await relay.linesBefore(over, streamOpened(slowSession, last));
+	if (late.length > 0) {
+		throw new Error(
+			`the relay opened a stream of Group ${last} towards ${slow.label} after it had ended its subscription`,
+		);
+	}
+	// §3.3.3: the streams the relay cut short say why. Read from the relay's
+	// log: they are the streams it could not open, so the subscriber never
+	// saw them reset.
+	const cutShort = (await relay.linesBefore(over, streamReset)).map((match) =>
+		captureGroup(match, 1),
+	);
+	if (cutShort.length === 0 || cutShort.some((code) => code !== "0x5")) {
+		throw new Error(
+			`the relay reset ${cutShort.length} streams when it cut ${slow.label} off, with the codes [${[...new Set(cutShort)]}], not TOO_FAR_BEHIND alone`,
+		);
+	}
 
 	return {
 		summary: `the ${unread ? "page that did not read" : "stopped subscriber"} was cut off with TOO_FAR_BEHIND after ${sentUntilCutOff} Objects; the others received all ${groups.length}`,
@@ -1102,12 +1150,20 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
  * subscriber once the track had ended. Without this, a change of the line's
  * form would make that check pass for the wrong reason.
  */
-function expectPublishDoneLines(subscribers: Subscriber[], run: Run): void {
+async function expectPublishDoneLines(
+	subscribers: Subscriber[],
+	run: Run,
+	over: Fence,
+): Promise<void> {
 	for (const subscriber of subscribers) {
 		const session = sessionOf(subscriber, run);
-		if (run.context.relay.matches(publishDoneSent(session)).length !== 1) {
+		const sent = await run.context.relay.linesBefore(
+			over,
+			publishDoneSent(session),
+		);
+		if (sent.length !== 1) {
 			throw new Error(
-				`the relay did not print one PUBLISH_DONE towards ${subscriber.label} (session ${session}) when the track ended`,
+				`the relay printed ${sent.length} PUBLISH_DONE towards ${subscriber.label} (session ${session}) for the track that ended, not one`,
 			);
 		}
 	}
@@ -1162,15 +1218,20 @@ function refuseOptions(
  * (docs/moqt-implementation-notes.md, "A source of a track that goes while
  * another is left"): the relay has sent none of the subscribers PUBLISH_DONE.
  * The line is seen in every run, when the last source has gone.
+ *
+ * `by` is the relay's line for what `when` names.
  */
-function expectStillSubscribed(
+async function expectStillSubscribed(
 	subscribers: Subscriber[],
 	run: Run,
 	when: string,
-): void {
+	by: Fence,
+): Promise<void> {
 	for (const subscriber of subscribers) {
-		const sent = run.context.relay.matches(
+		const sent = await run.context.relay.linesBefore(
+			by,
 			publishDoneSent(sessionOf(subscriber, run)),
+			DISCONNECT_TIMEOUT_MS,
 		);
 		if (sent.length > 0) {
 			throw new Error(
@@ -1182,7 +1243,8 @@ function expectStillSubscribed(
 
 /**
  * A publisher leaves in order, and the relay has dealt with it when this
- * returns.
+ * returns. What is returned is the fence for what the relay did until then:
+ * the end of the publisher's session.
  *
  * WHY its session is waited for: the relay prints `SESSION_CLOSED` when it
  * has printed everything else the end of that session made it do (`feed` in
@@ -1191,56 +1253,75 @@ function expectStillSubscribed(
  * WHY a page is closed for it: `end()` of the own page ends its Track and
  * keeps its session, so there would be nothing to wait for.
  */
-async function leaveInOrder(publisher: Publisher, run: Run): Promise<void> {
+async function leaveInOrder(publisher: Publisher, run: Run): Promise<Fence> {
 	await expectOwnPublishDone(publisher, await publisher.end());
 	if (isBrowserClient(publisher.kind)) await publisher.kill();
-	await run.context.relay.waitForLine(
-		sessionClosed(sessionOf(publisher, run)),
-		DISCONNECT_TIMEOUT_MS,
-	);
+	const gone = sessionClosed(sessionOf(publisher, run));
+	await run.context.relay.waitForLine(gone, DISCONNECT_TIMEOUT_MS);
+	return { line: gone };
 }
 
 /**
  * The relay has stopped `count` subgroup streams of the publisher's session,
- * each with CANCELLED: what it does with a stream for a Subgroup it took from
- * another source.
+ * each with `code`, CANCELLED where it is left out: what it does with a
+ * stream for a Subgroup it took from another source. That it stopped no
+ * more than these is for `expectStreamsStoppedInAll`, when the scenario is
+ * over.
+ *
+ * Returns the fence for what the relay did with those streams: the line for
+ * the last of them. The relay decides on the header of a stream whether it
+ * stops it or sends it on, so a stream it had sent on stands before.
  */
 async function expectStreamsStopped(
 	publisher: Publisher,
 	count: number,
 	run: Run,
-): Promise<void> {
-	const stopped = (): string[] =>
-		run.context.relay
-			.matches(dataStreamStopped(sessionOf(publisher, run)))
-			.map((match) => captureGroup(match, 1));
-	// One line a stream, printed after the client has reported its Object sent.
-	const deadline = performance.now() + STEP_TIMEOUT_MS;
-	while (stopped().length < count) {
-		if (performance.now() > deadline) {
-			throw new Error(
-				`the relay stopped ${stopped().length} of the ${count} streams ${publisher.label} sent for Groups it had from another source`,
-			);
-		}
-		await new Promise((resolve) => setTimeout(resolve, 20));
-	}
-	const codes = stopped();
-	if (codes.length !== count || codes.some((code) => code !== "0x1")) {
+	code = "0x1",
+): Promise<Fence> {
+	const line = dataStreamStopped(sessionOf(publisher, run));
+	const codes = (await run.context.relay.waitForLines(line, count)).map(
+		(match) => captureGroup(match, 1),
+	);
+	if (codes.some((each) => each !== code)) {
 		throw new Error(
-			`the relay stopped streams of ${publisher.label} with the codes [${codes}], not ${count} times CANCELLED`,
+			`the relay stopped streams of ${publisher.label} with the codes [${codes}], not ${count} times ${code}`,
+		);
+	}
+	return { line, nth: count };
+}
+
+/** The relay stopped `count` subgroup streams of the publisher's session in the whole scenario, and no other. */
+async function expectStreamsStoppedInAll(
+	publisher: Publisher,
+	count: number,
+	run: Run,
+	over: Fence,
+): Promise<void> {
+	const stopped = await run.context.relay.linesBefore(
+		over,
+		dataStreamStopped(sessionOf(publisher, run)),
+	);
+	if (stopped.length !== count) {
+		throw new Error(
+			`the relay stopped ${stopped.length} streams of ${publisher.label} in all, not ${count}: ${stopped.map((match) => match[0]).join("; ")}`,
 		);
 	}
 }
 
-/** The relay opened one stream of each Group towards each subscriber, and no second one. */
-function expectOneStreamEach(
+/**
+ * The relay opened one stream of each Group towards each subscriber, and no
+ * second one, before `by`.
+ */
+async function expectOneStreamEach(
 	subscribers: Subscriber[],
 	groups: number[],
 	run: Run,
-): void {
+	by: Fence,
+): Promise<void> {
 	for (const subscriber of subscribers) {
 		for (const group of groups) {
-			const opened = run.context.relay.matches(
+			const opened = await run.context.relay.linesBefore(
+				by,
 				streamOpened(sessionOf(subscriber, run), group),
 			);
 			if (opened.length !== 1) {
@@ -1326,12 +1407,17 @@ async function sameGroupTwice(run: Run): Promise<ScenarioResult> {
 			`${second.label} sent Group ${again}, where the scenario needs Group ${group} a second time`,
 		);
 	}
-	await expectStreamsStopped(second, 1, run);
-	expectOneStreamEach(subscribers, [group], run);
+	const stopped = await expectStreamsStopped(second, 1, run);
+	await expectOneStreamEach(subscribers, [group], run, stopped);
 
 	// The source the Subgroups came from leaves first; the track stays for the other.
-	await leaveInOrder(first, run);
-	expectStillSubscribed(subscribers, run, `when ${first.label} had left`);
+	const firstGone = await leaveInOrder(first, run);
+	await expectStillSubscribed(
+		subscribers,
+		run,
+		`when ${first.label} had left`,
+		firstGone,
+	);
 	// The one stream the second publisher counts in its PUBLISH_DONE is the
 	// one the relay stopped. A stream it stopped has ended for the relay, so
 	// an own publisher sees the relay finish the request stream all the same
@@ -1346,8 +1432,9 @@ async function sameGroupTwice(run: Run): Promise<ScenarioResult> {
 			abortedStreams: 0,
 		});
 	}
-	expectPublishDoneLines(ownOnly(subscribers), run);
-	await relayServesTheTrackAgain(run);
+	const over = await relayServesTheTrackAgain(run);
+	await expectPublishDoneLines(ownOnly(subscribers), run, over);
+	await expectStreamsStoppedInAll(second, 1, run, over);
 
 	return {
 		summary: `the relay took ${count === 1 ? `Group ${group}` : `Groups ${group} to ${count - 1}`} from ${first.label} and stopped the stream of ${second.label} for Group ${group}; every subscriber got it once`,
@@ -1443,18 +1530,19 @@ async function secondSource(run: Run): Promise<ScenarioResult> {
 	second ??= await joinSecond();
 
 	const measured: Record<string, number> = {};
+	// The relay's line for the end of the first publisher's session, once
+	// it has gone.
+	let firstGone: Fence | undefined;
 	switch (way) {
 		case "done":
-			await leaveInOrder(first, run);
+			firstGone = await leaveInOrder(first, run);
 			break;
 		case "kill":
 		case "kill-with-open-stream": {
 			const killed = performance.now();
 			await first.kill();
-			await relay.waitForLine(
-				sessionClosed(sessionOf(first, run)),
-				DISCONNECT_TIMEOUT_MS,
-			);
+			firstGone = { line: sessionClosed(sessionOf(first, run)) };
+			await relay.waitForLine(firstGone.line, DISCONNECT_TIMEOUT_MS);
 			const ms = Math.round(performance.now() - killed);
 			measured[
 				`ms from killing ${first.label} to the relay dropping its session`
@@ -1473,10 +1561,16 @@ async function secondSource(run: Run): Promise<ScenarioResult> {
 		case "stays":
 			break;
 	}
-	if (way !== "stays") {
-		expectStillSubscribed(subscribers, run, `when ${first.label} was gone`);
+	if (firstGone !== undefined) {
+		await expectStillSubscribed(
+			subscribers,
+			run,
+			`when ${first.label} was gone`,
+			firstGone,
+		);
 	}
 
+	let stoppedInAll = 0;
 	if (resends) {
 		// "A stream for a Subgroup from another source…": stopped, also after
 		// the first source's stream ended with a FIN and after that source has
@@ -1484,15 +1578,20 @@ async function secondSource(run: Run): Promise<ScenarioResult> {
 		// the relay no longer remembers a source for as well, on a track that
 		// had two sources at once.
 		const again = await second.sendBatch(firstGroups);
-		await expectStreamsStopped(second, again.length, run);
-		expectOneStreamEach(subscribers, again, run);
+		stoppedInAll = again.length;
+		const stopped = await expectStreamsStopped(second, again.length, run);
+		await expectOneStreamEach(subscribers, again, run, stopped);
 	}
 	const next = await second.send();
 	await allReceive(subscribers, next, second);
 
 	if (way === "stays") {
-		await leaveInOrder(first, run);
-		expectStillSubscribed(subscribers, run, `when ${first.label} had left`);
+		await expectStillSubscribed(
+			subscribers,
+			run,
+			`when ${first.label} had left`,
+			await leaveInOrder(first, run),
+		);
 	}
 	await expectOwnPublishDone(second, await second.end());
 	const ended = await outcomes(subscribers);
@@ -1512,8 +1611,9 @@ async function secondSource(run: Run): Promise<ScenarioResult> {
 			abortedStreams: first.streamsLeftOpen(),
 		});
 	}
-	expectPublishDoneLines(ownOnly(subscribers), run);
-	await relayServesTheTrackAgain(run);
+	const over = await relayServesTheTrackAgain(run);
+	await expectPublishDoneLines(ownOnly(subscribers), run, over);
+	await expectStreamsStoppedInAll(second, stoppedInAll, run, over);
 
 	return {
 		summary: `${first.label} ${way === "stays" ? "stayed" : `went (${way})`} and the subscribers went on to Group ${next} of ${second.label}${late ? ", which joined after them" : ""}`,
@@ -1579,18 +1679,30 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 		waiting.push({ session: await sessionOfNewClient(run), subscriber });
 	}
 	await relay.waitForLine(requestOpenedTowards(sessionOf(asked, run)));
-	for (const { session } of waiting) {
-		if (relay.matches(subscribeOkSent(session)).length > 0) {
-			throw new Error(
-				`the relay answered the subscriber of session ${session} before any publisher had the track`,
-			);
-		}
-	}
 
 	const other = await joinAsPublisher(otherKind, run, {
 		label: `pub:${otherKind}`,
 		payloadHex: hexOf(`other ${run.payloadHex}`),
 	});
+	// Nobody was answered before the publisher with the PUBLISH came.
+	//
+	// WHY the message names two causes: the relay prints nothing when a
+	// publisher answers its SUBSCRIBE, so its log does not tell a relay that
+	// answered without a source from a run in which the publisher that was
+	// asked had answered before the other one came. That happens when the
+	// other takes longer to connect than ASKED_ANSWERS_AFTER_MS, as on a
+	// machine with four of these matrices at once (6 of 24 rounds).
+	for (const { session } of waiting) {
+		const answers = await relay.linesBefore(
+			{ line: sessionOpened(sessionOf(other, run)) },
+			subscribeOkSent(session),
+		);
+		if (answers.length > 0) {
+			throw new Error(
+				`the relay answered the subscriber of session ${session} before ${other.label} came: either it answered while no publisher had the track, or ${asked.label} had answered by then (it waits ${seconds(ASKED_ANSWERS_AFTER_MS)}), and then the run does not show what it is for`,
+			);
+		}
+	}
 	// The PUBLISH gave the track its source: the subscribers are answered,
 	// and the publisher that was asked has not answered yet.
 	const subscribers: Subscriber[] = [];
@@ -1616,8 +1728,12 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 	const second = await asked.send();
 	await allReceive(subscribers, second, asked);
 
-	await leaveInOrder(asked, run);
-	expectStillSubscribed(subscribers, run, `when ${asked.label} had left`);
+	await expectStillSubscribed(
+		subscribers,
+		run,
+		`when ${asked.label} had left`,
+		await leaveInOrder(asked, run),
+	);
 	await expectOwnPublishDone(other, await other.end());
 	const ended = await outcomes(subscribers);
 	await expectOneObjectEach(subscribers, [first], other);
@@ -1629,8 +1745,11 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 			abortedStreams: 0,
 		});
 	}
-	expectPublishDoneLines(subscribers, run);
-	await relayServesTheTrackAgain(run);
+	await expectPublishDoneLines(
+		subscribers,
+		run,
+		await relayServesTheTrackAgain(run),
+	);
 
 	return {
 		summary: `the subscribers were answered by the PUBLISH of ${other.label} while ${asked.label} had not answered, and got Group ${first} from the one and Group ${second} from the other`,
@@ -1652,15 +1771,11 @@ function parsePriority(text: string): PublisherPriority {
 const priorityMeant = (priority: PublisherPriority): number =>
 	priority === "default" ? 128 : priority;
 
-/** The codes with which the relay reset or stopped request streams of the session. */
-const requestCancelCodes = (session: number, run: Run): string[] =>
-	run.context.relay
-		.matches(
-			new RegExp(
-				`^(?:RESET|STOP)_REQUEST session=${session} stream=\\d+ code=(\\S+)$`,
-			),
-		)
-		.map((match) => captureGroup(match, 1));
+/** The relay reset or stopped a request stream of the session; capture group 1 is the code. */
+const requestCancelled = (session: number): RegExp =>
+	new RegExp(
+		`^(?:RESET|STOP)_REQUEST session=${session} stream=\\d+ code=(\\S+)$`,
+	);
 
 /**
  * A Subgroup comes to the relay a second time, with the same Publisher
@@ -1752,27 +1867,27 @@ async function subgroupPriorities(run: Run): Promise<ScenarioResult> {
 			);
 		}
 	}
-	const againSession = sessionOf(again, run);
 	// What the relay does with the second stream: one stop, with the code.
-	await relayPrinted(dataStreamStopped(againSession), 1, run);
-	const stopCodes = relay
-		.matches(dataStreamStopped(againSession))
-		.map((match) => captureGroup(match, 1));
-	const expectedStop = differ ? MALFORMED_TRACK : 0x1;
-	if (stopCodes.join(",") !== `0x${expectedStop.toString(16)}`) {
-		throw new Error(
-			`the relay stopped the second stream of the Subgroup, from ${again.label}, with [${stopCodes}], not once with 0x${expectedStop.toString(16)}`,
-		);
-	}
+	// That it is the only one is seen when the scenario is over.
+	const stopped = await expectStreamsStopped(
+		again,
+		1,
+		run,
+		`0x${(differ ? MALFORMED_TRACK : 0x1).toString(16)}`,
+	);
 
 	if (!differ) {
 		// "no difference": the track goes on, and ends when its publishers leave.
 		if (second === undefined) {
 			throw new Error("the same priority twice is run with two publishers");
 		}
-		expectOneStreamEach(subscribers, [group], run);
-		await leaveInOrder(first, run);
-		expectStillSubscribed(subscribers, run, `when ${first.label} had left`);
+		await expectOneStreamEach(subscribers, [group], run, stopped);
+		await expectStillSubscribed(
+			subscribers,
+			run,
+			`when ${first.label} had left`,
+			await leaveInOrder(first, run),
+		);
 		await expectOwnPublishDone(second, await second.end());
 		const ended = await outcomes(subscribers);
 		await expectOneObjectEach(subscribers, [group], first);
@@ -1783,8 +1898,9 @@ async function subgroupPriorities(run: Run): Promise<ScenarioResult> {
 				abortedStreams: 0,
 			});
 		}
-		expectPublishDoneLines(subscribers, run);
-		await relayServesTheTrackAgain(run);
+		const over = await relayServesTheTrackAgain(run);
+		await expectPublishDoneLines(subscribers, run, over);
+		await expectStreamsStoppedInAll(again, 1, run, over);
 		return {
 			summary: `the relay took Group ${group} from ${first.label} with priority ${firstText} and stopped the stream of ${second.label} with ${secondText} as one more of the same Subgroup; the track went on`,
 			subscriptions: subscriptionsOf(ended),
@@ -1803,35 +1919,33 @@ async function subgroupPriorities(run: Run): Promise<ScenarioResult> {
 		});
 	}
 	await expectOneObjectEach(subscribers, [group], first);
-	expectPublishDoneLines(subscribers, run);
 	// "every source is cancelled": the one whose stream brought the other
 	// priority with MALFORMED_TRACK, another with CANCELLED.
 	const sources = [
 		{ publisher: again, code: "0x12" },
 		...(second === undefined ? [] : [{ publisher: first, code: "0x1" }]),
 	];
+	for (const { publisher } of sources) {
+		await relay.waitForLine(requestCancelled(sessionOf(publisher, run)));
+	}
+	// The publishers are still there: an own-rust one closes its session
+	// when its PUBLISH is ended, a page is closed. The end of a session is
+	// the fence for every line about its requests.
 	for (const { publisher, code } of sources) {
+		if (isBrowserClient(publisher.kind)) await publisher.kill();
 		const session = sessionOf(publisher, run);
-		await relayPrinted(
-			new RegExp(`^(?:RESET|STOP)_REQUEST session=${session} `),
-			1,
-			run,
-		);
-		const codes = requestCancelCodes(session, run);
-		if (codes.some((each) => each !== code)) {
+		const codes = (
+			await relay.linesBefore(
+				{ line: sessionClosed(session) },
+				requestCancelled(session),
+				DISCONNECT_TIMEOUT_MS,
+			)
+		).map((match) => captureGroup(match, 1));
+		if (codes.length === 0 || codes.some((each) => each !== code)) {
 			throw new Error(
 				`the relay cancelled the PUBLISH of ${publisher.label} with [${codes}], not with ${code}`,
 			);
 		}
-	}
-	// The publishers are still there: an own-rust one closes its session
-	// when its PUBLISH is ended, a page is closed.
-	for (const { publisher, code } of sources) {
-		if (isBrowserClient(publisher.kind)) await publisher.kill();
-		await relay.waitForLine(
-			sessionClosed(sessionOf(publisher, run)),
-			DISCONNECT_TIMEOUT_MS,
-		);
 		if (publisher.kind === "own-rust") {
 			const cancelled = await publisher.publishCancelledWith();
 			if (cancelled !== code) {
@@ -1841,7 +1955,9 @@ async function subgroupPriorities(run: Run): Promise<ScenarioResult> {
 			}
 		}
 	}
-	await relayServesTheTrackAgain(run);
+	const over = await relayServesTheTrackAgain(run);
+	await expectPublishDoneLines(subscribers, run, over);
+	await expectStreamsStoppedInAll(again, 1, run, over);
 
 	return {
 		summary: `the relay ended the track as malformed when ${again.label} sent Group ${group} again with priority ${secondText} after ${firstText}: PUBLISH_DONE 0x12 to the subscribers, 0x12 to ${again.label}${second === undefined ? "" : `, 0x1 to ${first.label}`}`,
@@ -1857,27 +1973,33 @@ const ASK_WAYS = [
 	"refusing-announcer",
 ] as const;
 
-/** How often the relay opened a request of its own towards the session. */
-const asksTowards = (session: number, run: Run): number =>
-	run.context.relay.matches(requestOpenedTowards(session)).length;
-
 /** Resolves once the relay has printed `count` lines that match. */
-function relayPrinted(pattern: RegExp, count: number, run: Run): Promise<void> {
-	return pollFor(
-		() =>
-			run.context.relay.matches(pattern).length >= count ? true : undefined,
-		`the relay to print ${pattern} ${count} time(s)`,
-	).then(() => undefined);
+async function relayPrinted(
+	pattern: RegExp,
+	count: number,
+	run: Run,
+): Promise<void> {
+	await run.context.relay.waitForLines(pattern, count);
 }
 
-/** Throws unless the relay asked each session as often as given. */
-function expectAsks(
+/**
+ * Throws unless the relay had asked each session as often as given, with a
+ * SUBSCRIBE of its own, before `by`: the relay's line for what `when` names.
+ */
+async function expectAsks(
 	expected: { who: string; session: number; asks: number }[],
 	run: Run,
 	when: string,
-): void {
+	by: Fence,
+): Promise<void> {
 	for (const { who, session, asks } of expected) {
-		const seen = asksTowards(session, run);
+		const seen = (
+			await run.context.relay.linesBefore(
+				by,
+				requestOpenedTowards(session),
+				DISCONNECT_TIMEOUT_MS,
+			)
+		).length;
 		if (seen !== asks) {
 			throw new Error(
 				`the relay had sent ${who} (session ${session}) ${seen} SUBSCRIBE(s) ${when}, not ${asks}`,
@@ -1961,6 +2083,19 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 		return rest;
 	};
 
+	// The relay's line for a client that came: what it had done before, it
+	// had done without that client.
+	const cameAt = (client: Publisher | Subscriber): Fence => ({
+		line: sessionOpened(sessionOf(client, run)),
+	});
+	// The relay's line for a Group it sends on to the subscriber that came
+	// last: every subscriber had come by then, and been dealt with.
+	const servedAt = (all: Subscriber[], group: number): Fence => {
+		const last = all.at(-1);
+		if (last === undefined) throw new Error("the scenario has no subscriber");
+		return { line: streamOpened(sessionOf(last, run), group) };
+	};
+
 	if (way === "refusing-announcer") {
 		// The page announced before the publisher came, so it is asked first
 		// where it is asked at all.
@@ -1968,8 +2103,13 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 		const refusingSession = await sessionOfNewClient(run);
 		const page = { who: refusing.label, session: refusingSession };
 		const publisher = await withPublish();
-		expectAsks([{ ...page, asks: 0 }], run, "before a subscriber came");
 		const first = await join(0);
+		await expectAsks(
+			[{ ...page, asks: 0 }],
+			run,
+			"before a subscriber came",
+			cameAt(first),
+		);
 		// "after its SUBSCRIBE_OK": the first subscriber is answered by the
 		// source there is, and the page is asked for it.
 		await relayPrinted(requestOpenedTowards(refusingSession), 1, run);
@@ -1980,20 +2120,43 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 		await allReceive([first, ...rest], group, publisher);
 		// "one that was asked and did not become a source: it refused" is not
 		// asked for the subscribers that came after.
-		expectAsks([{ ...page, asks: 1 }], run, "when every subscriber had come");
+		await expectAsks(
+			[{ ...page, asks: 1 }],
+			run,
+			"when every subscriber had come",
+			servedAt([first, ...rest], group),
+		);
 		// "A publisher is asked again once it announces a namespace of the
 		// track anew".
 		await refusing.announce();
 		await relayPrinted(requestOpenedTowards(refusingSession), 2, run);
-		await relayPrinted(ownRequestEnded(refusingSession), 2, run);
-		expectAsks([{ ...page, asks: 2 }], run, "after it announced anew");
-		expectStillSubscribed([first, ...rest], run, "after a publisher refused");
+		// The relay has dealt with the second refusal when it ended its
+		// second request.
+		const refusedAgain: Fence = {
+			line: ownRequestEnded(refusingSession),
+			nth: 2,
+		};
+		await expectAsks(
+			[{ ...page, asks: 2 }],
+			run,
+			"after it announced anew",
+			refusedAgain,
+		);
+		await expectStillSubscribed(
+			[first, ...rest],
+			run,
+			"after a publisher refused",
+			refusedAgain,
+		);
 
-		await leaveInOrder(publisher, run);
-		// Sound as a count of what the relay did not do: the line that was
-		// just waited for, the end of the publisher's session, comes after
-		// every line of what went before.
-		expectAsks([{ ...page, asks: 2 }], run, "when the publisher had left");
+		// The end of the publisher's session comes after every line of what
+		// went before.
+		await expectAsks(
+			[{ ...page, asks: 2 }],
+			run,
+			"when the publisher had left",
+			await leaveInOrder(publisher, run),
+		);
 		const ended = await outcomes([first, ...rest]);
 		for (const { subscriber, outcome } of ended) {
 			expectPublishDone(subscriber, outcome, {
@@ -2014,6 +2177,9 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 	let subscribers: Subscriber[];
 	// What the relay has asked in all when the run is over.
 	let asksInAll: { who: string; session: number; asks: number }[];
+	// "They are asked in the order they announced": the sessions of every
+	// OPEN_REQUEST line, where the way has more than one.
+	let askedInOrder: number[] | undefined;
 	if (way === "two-announcers") {
 		first = await announcer("announcer1:own-rust", 0);
 		second = await announcer("announcer2:own-rust", 1);
@@ -2021,52 +2187,48 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 			who: each.label,
 			session: sessionOf(each, run),
 		}));
-		expectAsks(
+		// The first subscriber is answered by whichever answers first.
+		subscribers = [await join(0)];
+		await expectAsks(
 			sessions.map((each) => ({ ...each, asks: 0 })),
 			run,
 			"before a subscriber came",
+			cameAt(subscribers[0] ?? first),
 		);
-		// The first subscriber is answered by whichever answers first.
-		subscribers = [await join(0)];
 		await asked(first);
 		await asked(second);
-		// "They are asked in the order they announced".
-		const order = relay
-			.matches(/^OPEN_REQUEST session=(\d+) /)
-			.map((match) => Number(captureGroup(match, 1)));
-		const expectedOrder = sessions.map(({ session }) => session);
-		if (order.join(",") !== expectedOrder.join(",")) {
-			throw new Error(
-				`the relay asked the sessions ${order.join(", ")}, not ${expectedOrder.join(", ")} in the order they announced`,
-			);
-		}
+		askedInOrder = sessions.map(({ session }) => session);
 		// Both are sources now: a subscriber that comes makes nobody be asked.
 		subscribers.push(...(await joinRest(1)));
 		asksInAll = sessions.map((each) => ({ ...each, asks: 1 }));
-		expectAsks(asksInAll, run, "when every subscriber had come");
 	} else {
 		first = await withPublish();
 		const publishing = { who: first.label, session: sessionOf(first, run) };
 		if (way === "announcer-and-publisher") {
 			second = await announcer("announcer:own-rust", 1);
 			const announced = { who: second.label, session: sessionOf(second, run) };
-			expectAsks([{ ...announced, asks: 0 }], run, "before a subscriber came");
 			subscribers = [await join(0)];
+			await expectAsks(
+				[{ ...announced, asks: 0 }],
+				run,
+				"before a subscriber came",
+				cameAt(subscribers[0] ?? second),
+			);
 			await asked(second);
 			subscribers.push(...(await joinRest(1)));
 			asksInAll = [
 				{ ...announced, asks: 1 },
 				{ ...publishing, asks: 0 },
 			];
-			expectAsks(asksInAll, run, "when every subscriber had come");
 		} else {
 			subscribers = await joinRest(0);
-			expectAsks(
+			second = await announcer("announcer:own-rust", 1);
+			await expectAsks(
 				[{ ...publishing, asks: 0 }],
 				run,
 				"before the announcer came",
+				cameAt(second),
 			);
-			second = await announcer("announcer:own-rust", 1);
 			const announced = { who: second.label, session: sessionOf(second, run) };
 			// "the relay answers it and then does the same": the SUBSCRIBE
 			// comes without a subscriber coming.
@@ -2075,22 +2237,47 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 				{ ...announced, asks: 1 },
 				{ ...publishing, asks: 0 },
 			];
-			expectAsks(asksInAll, run, "after the announcer came");
 		}
 	}
 
 	const group0 = await first.send();
 	await allReceive(subscribers, group0, first);
+	// Every subscriber had come, and the announcer where it came last, when
+	// the relay sent this Group on.
+	const served = servedAt(subscribers, group0);
+	await expectAsks(
+		asksInAll,
+		run,
+		"when every client had come and a Group was sent on",
+		served,
+	);
+	if (askedInOrder !== undefined) {
+		const order = (
+			await relay.linesBefore(served, /^OPEN_REQUEST session=(\d+) /)
+		).map((match) => Number(captureGroup(match, 1)));
+		if (order.join(",") !== askedInOrder.join(",")) {
+			throw new Error(
+				`the relay asked the sessions ${order.join(", ")}, not ${askedInOrder.join(", ")} in the order they announced`,
+			);
+		}
+	}
 	const group1 = await second.send();
 	await allReceive(subscribers, group1, second);
 
-	await leaveInOrder(first, run);
-	expectStillSubscribed(subscribers, run, `when ${first.label} had left`);
-	await leaveInOrder(second, run);
-	// Sound as a count of what the relay did not do: the line that was just
-	// waited for, the end of the last publisher's session, comes after every
-	// line of what went before.
-	expectAsks(asksInAll, run, "when both publishers had left");
+	await expectStillSubscribed(
+		subscribers,
+		run,
+		`when ${first.label} had left`,
+		await leaveInOrder(first, run),
+	);
+	// The end of the last publisher's session comes after every line of
+	// what went before.
+	await expectAsks(
+		asksInAll,
+		run,
+		"when both publishers had left",
+		await leaveInOrder(second, run),
+	);
 	const ended = await outcomes(subscribers);
 	await expectOneObjectEach(subscribers, [group0], first);
 	await expectOneObjectEach(subscribers, [group1], second);
@@ -2101,8 +2288,11 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 			abortedStreams: 0,
 		});
 	}
-	expectPublishDoneLines(subscribers, run);
-	await relayServesTheTrackAgain(run);
+	await expectPublishDoneLines(
+		subscribers,
+		run,
+		await relayServesTheTrackAgain(run),
+	);
 
 	return {
 		summary: `the relay asked ${second.label}${way === "two-announcers" ? ` and ${first.label}` : ""} once each, and the subscribers got Group ${group0} from ${first.label} and Group ${group1} from ${second.label}`,
@@ -2189,10 +2379,11 @@ async function publishAnew(run: Run): Promise<ScenarioResult> {
 	// after the relay's wait, and that is a matter of time and not of what
 	// the relay does with a PUBLISH that comes in time. A relay that does not
 	// wait at all ends here too; the time tells the two apart.
-	const gone = subscribers.filter(
-		(subscriber) =>
-			run.context.relay.matches(publishDoneSent(sessionOf(subscriber, run)))
-				.length > 0,
+	//
+	// A line that is there says so for certain. That none comes later is
+	// seen below, before the Group that is sent next.
+	const gone = subscribers.filter((subscriber) =>
+		run.context.relay.hasPrinted(publishDoneSent(sessionOf(subscriber, run))),
 	);
 	if (gone.length > 0) {
 		throw new Error(
@@ -2222,6 +2413,16 @@ async function publishAnew(run: Run): Promise<ScenarioResult> {
 
 	const second = await publisher.send();
 	await allReceive(subscribers, second, run);
+	const [anySubscriber] = subscribers;
+	if (anySubscriber === undefined) {
+		throw new Error("the scenario has no subscriber");
+	}
+	await expectStillSubscribed(
+		subscribers,
+		run,
+		"when the relay sent on the Group of the new PUBLISH",
+		{ line: streamOpened(sessionOf(anySubscriber, run), second) },
+	);
 
 	await expectOwnPublishDone(publisher, await publisher.end());
 	const ended = await outcomes(subscribers);
@@ -2233,8 +2434,11 @@ async function publishAnew(run: Run): Promise<ScenarioResult> {
 			abortedStreams: 0,
 		});
 	}
-	expectPublishDoneLines(subscribers, run);
-	await relayServesTheTrackAgain(run);
+	await expectPublishDoneLines(
+		subscribers,
+		run,
+		await relayServesTheTrackAgain(run),
+	);
 
 	return {
 		summary: `the subscribers stayed through a new PUBLISH under ${sameAlias ? "the same" : "another"} Track Alias and got Group ${first} before it and Group ${second} after; the relay ended the first PUBLISH stream by "${anew.peerEnd}" after ${seconds(anew.peerEndAfterMs)}`,

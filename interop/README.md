@@ -123,6 +123,8 @@ bun disconnect.ts --scenario subscriber-leaves --publisher own-browser --leaver 
 
 `disconnect.ts` starts the own relay and the clients like `run.ts`, plays the scenario, and prints a `RESULT` line with how each own subscription ended and what was measured, and a `SUMMARY` line that `matrix.ts` shows in its table. It exits 0 only if everything the scenario expects was seen.
 
+What a scenario counts in the relay's log, or expects not to be there, it counts before a line of the relay that it names, and never "so far": the lines of the relay and of a client reach the driver in no order, and a count taken when a client had reported something missed the relay's line that was on its way, three times in CI. `RelayLog` in `harness.ts` has no other way to count, so a scenario that does not name such a line does not pass the type check.
+
 | Option of `disconnect.ts` | Values |
 |---|---|
 | `--scenario` | `publisher-killed`, `last-object-then-close`, `subscriber-leaves`, `slow-subscriber`, `same-group-twice`, `second-source`, `publish-while-asked`, `publish-anew`, `ask-all`, `subgroup-priorities` |

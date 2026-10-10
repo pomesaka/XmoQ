@@ -308,6 +308,46 @@ The four `subgroup-priorities` runs of the matrix, each with an own-rust and an 
 - How often the NetworkError came in the last 300 rounds was not counted (the logs of rounds that pass are not kept). At 3 of 150 and 4 of 300 before, about five were to be expected.
 - `mise run check` and `mise run interop` passed after it: 74 of 74 pairings in 45.5 seconds.
 
+### The relay's lines are counted before a line of the relay, and in no other way
+
+Added on 2026-10-11, on `main` at `cdd8245b` with the changes of three pull requests that were open then on top (the record of the FETCH capture, the limit on the bidirectional streams read at once, and the correction above). In CI, the run "the first of two own-rust publishers is killed; own-rust goes on to the second" failed once (run 38085939970, no page in it): `[driver] FAILED the relay did not print one PUBLISH_DONE towards sub1:own-rust (session 2) when the track ended`. The relay had printed exactly one, `SEND session=2 stream=0 PUBLISH_DONE status_code=0x2 stream_count=2`, and the driver had counted none.
+
+**The cause is the third of one kind** (after the publisher that announces late, and the page whose write was stopped): the driver waited for a line of a client, here the subscriber's report of how its subscription ended, and then counted lines of the relay. The two processes' lines reach the driver in no order, so the relay's line can be on its way when a client's has arrived.
+
+All places in `interop/` that count lines of the relay, or expect one to be absent, and what each had waited for before it counted. "Not fenced" means that nothing of the relay had been waited for that comes after the lines counted.
+
+| What is counted | Where | Before | Now counted before |
+|---|---|---|---|
+| One PUBLISH_DONE towards each own subscriber when the track ended (`expectPublishDoneLines`) | 7 scenarios | **Not fenced**: after the subscribers' own reports. This is the check that failed | the first session of the run that follows the scenario |
+| No PUBLISH_DONE while a source is left (`expectStillSubscribed`) | 8 places | After the relay's `SESSION_CLOSED` of the source that left (5), after a second refusal was dealt with (1); counted "so far" then | the same lines, by position |
+| | publish anew: "the subscribers stay" | **Not fenced**: after the client had published anew | the Group the relay sends on after it. A line that is there already still ends the run at once, with the message about time |
+| No second stream of a Group towards a subscriber (`expectOneStreamEach`) | 3 places | After the `STOP_DATA` lines; counted "so far" | the last of those `STOP_DATA` lines |
+| The streams of a publisher the relay stopped, and their code (`expectStreamsStopped`) | 4 places | Waited until there were as many as expected, then **that there were no more was not fenced** | the codes of the first ones as before; the number in all before the run that follows |
+| How often the relay asked a publisher (`expectAsks`) | 10 places | "Before a subscriber came" (4): after the publisher had joined. "When every subscriber had come" (2): **not fenced**, after the subscribers had an Object. After a refusal and after a publisher left (4): fenced | the session of the subscriber or announcer that came next; the Group the relay sent on to the last subscriber; the end of a second refusal; the end of a publisher's session |
+| The order in which two announcers are asked | 1 | After both were seen asked; every `OPEN_REQUEST` "so far" | the Group the relay sent on to the last subscriber |
+| No SUBSCRIBE_OK while no publisher has the track | 1 | After the relay's `OPEN_REQUEST`, which says nothing of the subscribers that came later | the session of the publisher that comes with a PUBLISH |
+| The codes with which the relay cancelled a PUBLISH | 1 | After the first such line; **a later one with another code was not fenced** | the end of that publisher's session |
+| No stream towards a subscriber that cancelled, its session not dropped, the STOP_SENDING the relay printed | 3 | After the run that follows the scenario, whose last wait is for a client | the first session of that run |
+| A killed subscriber's session not yet dropped when the others got the next Group | 1 | **Not fenced**: after the others' own reports | the stream of that Group towards one of them |
+| A subscriber that was cut off: no stream after the cut-off, the streams the relay reset, the session not dropped | 3 | **Not fenced**: after the readers' reports | the first session of the run that follows; for the session, the Group sent after the cut-off |
+| The relay closed no session itself (`CLOSE_SESSION`) | 1, in the run that follows every scenario | **Not fenced**: after a subscriber's report | the end of that subscriber's session |
+
+The correction: `RelayLog` in `interop/harness.ts`, the type of the relay a driver gets, has no way to count the lines read so far. `linesBefore(fence, pattern)` waits for a line of the relay the caller names and returns the lines that stand before it; `waitForLines` waits for a number of lines; `hasPrinted` is for waiting, where a line that is there is certain and one that is not says nothing. A scenario that counts without naming a line does not pass the type check, which `mise run check` runs for `interop/`. What is counted no longer depends on when the driver looks.
+
+| Run | Result |
+|---|---|
+| The 34 leaving scenarios, once | 34 of 34 |
+| Temporary change, taken back: one PUBLISH_DONE too many is expected | the run that failed in CI fails with "the relay printed 1 PUBLISH_DONE towards sub1:own-rust", so the line is counted. The check for no PUBLISH_DONE when the first publisher was gone passes in the same run: the same line stands after that fence |
+| Temporary change, taken back: one stopped stream too many is expected in all | the same run fails: "the relay stopped 0 streams of pub2:own-rust in all" |
+| Temporary change, taken back: one SUBSCRIBE too many is expected | the four runs of `ask-all` fail at their first count, each with the number the relay printed |
+| The 34 scenarios, two matrices at once (68 scenarios at a time), 12 rounds each | 24 of 24 rounds, 816 scenarios, 25.6 to 42.1 seconds a round |
+| Four matrices at once, 6 rounds each | 18 of 24 rounds. The 6 that failed are one scenario, and a matter of time: the publisher that is asked answers after 3 seconds, and the one that is to come with a PUBLISH before it took longer to connect. The scenario said so before, at a later step; it says so now where it counts, and the message names both causes |
+| Eight matrices at once (272 scenarios at a time, load average 85), stopped in the first round | 28 scenarios had failed by then: a session that was not opened within 20 seconds (8), a run that reached the matrix's limit of 120 seconds (8), a kill noticed later than 10.5 or 7.5 seconds (4), and 8 that had printed neither a result nor a failure when the round was stopped. None on a count |
+
+- `mise run check` and `mise run interop` passed after it: 74 of 74 pairings.
+- Not run: the state before the correction under the same load, so how often the old count failed is known from CI alone, once in the runs of the pull requests since the scenario was added.
+- A fence is sound for what the scenario's author says of it, and nothing checks that: a line of the relay that can come before a line the check is about would let that line through. Each one has its reason next to it in `disconnect.ts`.
+
 ## Limitations and blockers
 
 - **The relay change was under review when the runs were made.** The last runs are on `a44c8854`; if it changes again, they have to be made again.

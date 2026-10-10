@@ -313,13 +313,62 @@ export interface LoggedProcess {
 	matches(pattern: RegExp): RegExpMatchArray[];
 }
 
+/**
+ * A line of the relay that comes after everything a check is about: the
+ * `nth` line that matches, the first where `nth` is left out.
+ */
+export interface Fence {
+	line: RegExp;
+	nth?: number;
+}
+
+/**
+ * The relay, and what a driver may ask of its log.
+ *
+ * WHY there is no `matches` here, as a client's process has: a count of the
+ * relay's lines "so far" is a count of the lines the driver has read, and
+ * the lines of two processes reach the driver in no order. A check that
+ * waited for a client's line and then counted the relay's failed in CI three
+ * times, each time for a line that was on its way. The relay writes one
+ * stream of lines, so every line before one that was read has been read:
+ * `linesBefore` waits for a line the caller names, the fence, and counts
+ * what stands before it. What is counted no longer depends on when the
+ * driver looks.
+ */
+export interface RelayLog extends Omit<LoggedProcess, "matches"> {
+	/** The first `count` lines that match, once the relay has printed that many. */
+	waitForLines(
+		pattern: RegExp,
+		count: number,
+		timeoutMs?: number,
+	): Promise<RegExpMatchArray[]>;
+	/**
+	 * The lines that match `pattern` among those the relay printed before the
+	 * fence. Waits for the fence, and fails when it does not come.
+	 *
+	 * The caller has to name a fence the relay cannot print before a line the
+	 * check is about: one that something the driver did afterwards makes it
+	 * print, or one the relay prints when it has dealt with what went before.
+	 */
+	linesBefore(
+		fence: Fence,
+		pattern: RegExp,
+		timeoutMs?: number,
+	): Promise<RegExpMatchArray[]>;
+	/**
+	 * Whether a line that matches has been read. For waiting on the relay
+	 * only: true is final, and false says nothing about what the relay did.
+	 */
+	hasPrinted(pattern: RegExp): boolean;
+}
+
 /** Spawns a child, echoes its output, and lets callers wait for a matching line. */
 function spawnLogged(
 	source: string,
 	command: string,
 	args: string[],
 	env: Record<string, string> = {},
-): LoggedProcess {
+): LoggedProcess & RelayLog {
 	const child = spawn(command, args, { env: { ...process.env, ...env } });
 	const lines: string[] = [];
 	const waiters: {
@@ -329,6 +378,49 @@ function spawnLogged(
 	const exited = new Promise<number | null>((resolve) =>
 		child.once("exit", resolve),
 	);
+	/** Called after every line, by those that wait for more than one line. */
+	const lookers: (() => void)[] = [];
+	const died = (what: string): Promise<never> =>
+		exited.then((code): never => {
+			throw new Error(`${source} exited with code ${code} before ${what}`);
+		});
+	/** The index of the `nth` line that matches, once it is there. */
+	const indexOfNth = (
+		pattern: RegExp,
+		nth: number,
+		timeoutMs?: number,
+	): Promise<number> => {
+		const find = (): number | undefined => {
+			let seen = 0;
+			for (const [index, line] of lines.entries()) {
+				if (!pattern.test(line)) continue;
+				seen += 1;
+				if (seen === nth) return index;
+			}
+			return undefined;
+		};
+		const found = find();
+		if (found !== undefined) return Promise.resolve(found);
+		const what = `printing ${pattern} ${nth} time(s)`;
+		let look: () => void = () => {};
+		const arrived = new Promise<number>((resolve) => {
+			look = () => {
+				const index = find();
+				if (index !== undefined) resolve(index);
+			};
+			lookers.push(look);
+		});
+		return withTimeout(
+			Promise.race([arrived, died(what)]),
+			`${source} ${what}`,
+			timeoutMs,
+		).finally(() => lookers.splice(lookers.indexOf(look), 1));
+	};
+	const matchesIn = (some: string[], pattern: RegExp): RegExpMatchArray[] =>
+		some.flatMap((line) => {
+			const match = line.match(pattern);
+			return match === null ? [] : [match];
+		});
 
 	const onLine = (line: string): void => {
 		// Strip the ANSI colors `tracing` adds, so the patterns can match.
@@ -336,6 +428,7 @@ function spawnLogged(
 		const clean = line.replace(/\u001b\[[0-9;]*m/g, "");
 		lines.push(clean);
 		log(source, clean);
+		for (const look of [...lookers]) look();
 		for (const waiter of [...waiters]) {
 			const match = clean.match(waiter.pattern);
 			if (match) {
@@ -366,22 +459,22 @@ function spawnLogged(
 			const matched = new Promise<RegExpMatchArray>((resolve) =>
 				waiters.push({ pattern, resolve }),
 			);
-			const died = exited.then((code): never => {
-				throw new Error(
-					`${source} exited with code ${code} before printing ${pattern}`,
-				);
-			});
 			return withTimeout(
-				Promise.race([matched, died]),
+				Promise.race([matched, died(`printing ${pattern}`)]),
 				`${source} to print ${pattern}`,
 				timeoutMs,
 			);
 		},
-		matches: (pattern) =>
-			lines.flatMap((line) => {
-				const match = line.match(pattern);
-				return match === null ? [] : [match];
-			}),
+		matches: (pattern) => matchesIn(lines, pattern),
+		async waitForLines(pattern, count, timeoutMs) {
+			const last = await indexOfNth(pattern, count, timeoutMs);
+			return matchesIn(lines.slice(0, last + 1), pattern);
+		},
+		async linesBefore(fence, pattern, timeoutMs) {
+			const at = await indexOfNth(fence.line, fence.nth ?? 1, timeoutMs);
+			return matchesIn(lines.slice(0, at), pattern);
+		},
+		hasPrinted: (pattern) => lines.some((line) => pattern.test(line)),
 	};
 }
 
@@ -465,7 +558,7 @@ async function startBrowser(
 /** A started relay and what every client needs to reach it. */
 export interface RunContext {
 	relayUrl: string;
-	relay: LoggedProcess;
+	relay: RelayLog;
 	relayVersion: string;
 	certSha256Hex: string;
 	/** Absent in a run between Rust clients, which starts no browser. */
