@@ -1,0 +1,34 @@
+[package]
+name = "xmoq-wt-library-comparison-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Spike only: compares `wtransport` and `web-transport-quinn` as the WebTransport
+# library under XmoQ. Built on its own; the root workspace excludes `spikes/`.
+[workspace]
+
+[[bin]]
+name = "wtq-server"
+path = "src/wtq_server.rs"
+
+[[bin]]
+name = "wtq-client"
+path = "src/wtq_client.rs"
+
+[[bin]]
+name = "wt-server"
+path = "src/wt_server.rs"
+
+[dependencies]
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "time"] }
+url = "=2.5.8"
+# WHY `ring` and not the default `aws-lc-rs`: `wtransport` enables `ring` on
+# rustls by default. With both backends compiled in, `crypto::default_provider`
+# of web-transport-quinn 0.13.2 panics unless a process-wide provider is
+# installed (src/crypto.rs, read 2026-10-10).
+web-transport-quinn = { version = "=0.13.2", default-features = false, features = ["ring"] }
+# `quinn` exposes the QUIC transport config, which the stream and window limits need.
+wtransport = { version = "=0.7.2", features = ["quinn"] }
+xmoq-moqt = { path = "../../crates/moqt" }

@@ -1,0 +1,5 @@
+# Generated self-signed certificate and key
+cert/
+# Output of the runs
+.logs/
+target/
