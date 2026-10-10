@@ -297,6 +297,52 @@ export function startPublisher(
 		: startRustPublisher(kind, label, run);
 }
 
+function isStringOrAbsent(value: unknown): value is string | undefined {
+	return value === undefined || typeof value === "string";
+}
+
+/** The report of the own page, checked field by field: it comes from another program. */
+function parseSubscriptionReport(text: string): SubscriptionReport {
+	const refuse = (): never => {
+		throw new Error(`not a report of a subscription: ${text}`);
+	};
+	const parsed: unknown = JSON.parse(text);
+	if (typeof parsed !== "object" || parsed === null) return refuse();
+	if (
+		!("end" in parsed && "groups" in parsed) ||
+		!("streamCount" in parsed && "objectsEnd" in parsed)
+	) {
+		return refuse();
+	}
+	const { end, groups, streamCount, objectsEnd } = parsed;
+	if (typeof end !== "object" || end === null || !("type" in end)) {
+		return refuse();
+	}
+	const statusCode = "statusCode" in end ? end.statusCode : undefined;
+	const errorReason = "errorReason" in end ? end.errorReason : undefined;
+	if (
+		typeof end.type !== "string" ||
+		!isStringOrAbsent(statusCode) ||
+		!isStringOrAbsent(errorReason) ||
+		!Array.isArray(groups) ||
+		!groups.every((group): group is string => typeof group === "string") ||
+		!(streamCount === null || typeof streamCount === "string") ||
+		typeof objectsEnd !== "string"
+	) {
+		return refuse();
+	}
+	return {
+		end: {
+			type: end.type,
+			...(statusCode === undefined ? {} : { statusCode }),
+			...(errorReason === undefined ? {} : { errorReason }),
+		},
+		groups,
+		streamCount,
+		objectsEnd,
+	};
+}
+
 /** How a subscription of an own client ended, in the terms both of them report. */
 export interface SubscriptionOutcome {
 	/**
@@ -529,7 +575,7 @@ async function startBrowserSubscriber(
 				page.evaluate(() => window.xmoqOwn.subscriptionReport()),
 				timeoutMs,
 			);
-			const report: SubscriptionReport = JSON.parse(reported);
+			const report = parseSubscriptionReport(reported);
 			return {
 				type: report.end.type,
 				statusCode:

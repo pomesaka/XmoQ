@@ -1,9 +1,10 @@
 // Runs every pairing of `run.ts` in which at least one client is an own one,
-// one after the other, and prints a table of the outcomes.
+// and the scenarios of `disconnect.ts`, and prints a table of the outcomes.
 //
 // Usage: bun matrix.ts [--relay moqtail] [--relay own] [--base-port N]
 //                      [--only TEXT] [--pairing-timeout-seconds N]
-//   --relay: the relays to run the pairings through (default: both).
+//   --relay: the relays to run the pairings through (default: both). The
+//     scenarios of `disconnect.ts` run through the own relay only.
 //   --only: runs the pairings whose name contains TEXT. The name begins with
 //     the relay, as in "own relay: own-rust to own-browser".
 //   --pairing-timeout-seconds: how long one pairing may take before it is
@@ -14,6 +15,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { ensureCertificate } from "./harness.ts";
 
 const here = import.meta.dir;
 const logDir = join(here, ".logs", "matrix");
@@ -30,13 +32,28 @@ const isOwn = (client: Client): boolean => client.startsWith("own-");
 
 interface Pairing {
 	name: string;
-	/** The arguments of `run.ts`, without the relay and the port. */
+	/** The driver that runs it. */
+	script: "run.ts" | "disconnect.ts";
+	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
+	 * Set where the run spends most of its time waiting for the relay to give
+	 * up on a client that vanished (9 to 12 seconds each, measured). These run
+	 * beside the others, so that the matrix does not grow by the sum of the
+	 * waits.
+	 */
+	mostlyWaits?: boolean;
+	/**
 	 * Absent when the Object has to arrive. Otherwise the run has to fail, and
-	 * its log has to show this: the reason, not only that something failed.
+	 * the line in which the driver says why it failed has to show this: the
+	 * reason, not only that something failed.
 	 */
 	expectedFailure?: RegExp;
+	/**
+	 * Set where the reason is in a line of a client and the driver's own line
+	 * says only that the client exited. The whole log is searched then.
+	 */
+	reasonIsInAClientLine?: boolean;
 }
 
 function transfers(): Pairing[] {
@@ -49,6 +66,7 @@ function transfers(): Pairing[] {
 			const awaitsDone = isOwn(subscriber);
 			pairings.push({
 				name: `${publisher} to ${subscriber}${awaitsDone ? ", then PUBLISH_DONE" : ""}`,
+				script: "run.ts",
 				args: [
 					"--publisher",
 					publisher,
@@ -69,6 +87,7 @@ function transfers(): Pairing[] {
 const ONE_TO_MANY: Pairing[] = [
 	{
 		name: "own-rust to 3 own-browser, then PUBLISH_DONE",
+		script: "run.ts",
 		args: [
 			"--publisher",
 			"own-rust",
@@ -81,6 +100,7 @@ const ONE_TO_MANY: Pairing[] = [
 	},
 	{
 		name: "moqtail-browser to 3 own-rust, then PUBLISH_DONE",
+		script: "run.ts",
 		args: [
 			"--publisher",
 			"moqtail-browser",
@@ -97,6 +117,7 @@ const ONE_TO_MANY: Pairing[] = [
 const REFUSALS: Pairing[] = [
 	{
 		name: "own-browser subscribes to a track nobody published",
+		script: "run.ts",
 		args: [
 			"--publisher",
 			"moqtail-rust",
@@ -109,6 +130,7 @@ const REFUSALS: Pairing[] = [
 	},
 	{
 		name: "own-rust subscribes to a track nobody published",
+		script: "run.ts",
 		args: [
 			"--publisher",
 			"moqtail-rust",
@@ -118,15 +140,214 @@ const REFUSALS: Pairing[] = [
 			"missing",
 		],
 		expectedFailure: /SUBSCRIBE rejected: error_code=0x10/,
+		reasonIsInAClientLine: true,
+	},
+];
+
+/** The arguments that name clients in one role, as in `--subscriber a --subscriber b`. */
+function each(option: string, clients: string[]): string[] {
+	return clients.flatMap((client) => [`--${option}`, client]);
+}
+
+/**
+ * The runs in which a client leaves. What each has to show is listed in
+ * docs/experiments/2026-10-10-disconnects-through-own-relay.md. They need the
+ * own relay: the driver waits for lines only it prints.
+ */
+const DISCONNECTS: Pairing[] = [
+	{
+		name: "own-rust publisher is killed; own-browser and own-rust subscribe",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"publisher-killed",
+			"--publisher",
+			"own-rust",
+			...each("subscriber", ["own-browser", "own-rust"]),
+		],
+		mostlyWaits: true,
+	},
+	{
+		name: "own-browser publisher's page is closed with a stream open; all four subscribe",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"publisher-killed",
+			"--publisher",
+			"own-browser",
+			...each("subscriber", CLIENTS.slice()),
+		],
+	},
+	{
+		name: "moqtail-browser publisher's page is closed; own-browser and own-rust subscribe",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"publisher-killed",
+			"--publisher",
+			"moqtail-browser",
+			...each("subscriber", ["own-browser", "own-rust"]),
+		],
+	},
+	{
+		name: "own-browser publisher closes right after its last Object; all four subscribe",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"last-object-then-close",
+			"--publisher",
+			"own-browser",
+			...each("subscriber", CLIENTS.slice()),
+		],
+	},
+	{
+		name: "own-browser publisher closes right after its last Object and PUBLISH_DONE; all four subscribe",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"last-object-then-close",
+			"--publisher",
+			"own-browser",
+			"--with-publish-done",
+			...each("subscriber", CLIENTS.slice()),
+		],
+	},
+	{
+		name: "own-rust publisher closes right after its last Object and PUBLISH_DONE; all four subscribe",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"last-object-then-close",
+			"--publisher",
+			"own-rust",
+			"--with-publish-done",
+			...each("subscriber", CLIENTS.slice()),
+		],
+	},
+	// moqtail-browser is left out as the publisher here: its `sendObject` queues
+	// the Object and its `disconnect()` ends the PUBLISH before the Object is
+	// written, so the relay is never given it.
+	{
+		// WHY it mostly waits: the moqtail Rust peer exits right after
+		// `connection.close()`, and in 13 of 40 runs the relay learned of it by
+		// its idle timeout only, 12 seconds later. The Object had arrived.
+		name: "moqtail-rust publisher closes right after its last Object; own-browser and own-rust subscribe",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"last-object-then-close",
+			"--publisher",
+			"moqtail-rust",
+			...each("subscriber", ["own-browser", "own-rust"]),
+		],
+		mostlyWaits: true,
+	},
+	{
+		// moqtail-rust is not among them: it leaves "in order" by exiting, which
+		// the relay saw as silence (comment above).
+		name: "subscribers leave in order (own-browser and own-rust close, moqtail-browser cancels); own-rust publishes on",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"subscriber-leaves",
+			"--publisher",
+			"own-rust",
+			...each("leaver", [
+				"own-browser:close",
+				"own-rust:close",
+				"moqtail-browser:cancel",
+			]),
+			...each("stayer", ["own-browser", "own-rust"]),
+		],
+	},
+	{
+		// moqtail-rust is not among them either: it has left by itself after the
+		// first Object. It is killed where the leavers go before the one Object.
+		name: "subscribers are killed (own-browser, own-rust, moqtail-browser); own-browser publishes on",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"subscriber-leaves",
+			"--publisher",
+			"own-browser",
+			...each("leaver", [
+				"own-browser:kill",
+				"own-rust:kill",
+				"moqtail-browser:kill",
+			]),
+			...each("stayer", ["own-browser", "own-rust"]),
+		],
+		mostlyWaits: true,
+	},
+	{
+		name: "subscribers leave before the one Object of moqtail-browser (own-browser closes, own-rust and moqtail-rust are killed)",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"subscriber-leaves",
+			"--publisher",
+			"moqtail-browser",
+			...each("leaver", [
+				"own-browser:close",
+				"own-rust:kill",
+				"moqtail-rust:kill",
+			]),
+			...each("stayer", ["own-browser", "own-rust", "moqtail-rust"]),
+		],
+	},
+	{
+		name: "subscribers leave before the one Object of moqtail-rust (own-browser is killed, moqtail-browser cancels)",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"subscriber-leaves",
+			"--publisher",
+			"moqtail-rust",
+			...each("leaver", ["own-browser:kill", "moqtail-browser:cancel"]),
+			...each("stayer", ["own-browser", "own-rust", "moqtail-browser"]),
+		],
+	},
+	{
+		// FIXME: this has to pass. `Subscription.cancel()` of @xmoq/moqt throws in
+		// Chromium 156, whose `WebTransportError` constructor takes one
+		// dictionary and not a message first (packages/moqt/src/webtransport/
+		// connect.ts builds the error of every reset and STOP_SENDING that
+		// way). Drop `expectedFailure` once the package is fixed.
+		name: "own-browser cancels its subscription; own-rust publishes on",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"subscriber-leaves",
+			"--publisher",
+			"own-rust",
+			...each("leaver", ["own-browser:cancel"]),
+			...each("stayer", ["own-rust"]),
+		],
+		expectedFailure: /Failed to construct 'WebTransportError'/,
+	},
+	{
+		// WHY own-browser publishes: own-rust waits for the acknowledgement of
+		// each stream and took 8 seconds to send what gets the subscriber cut
+		// off, close to the 9 seconds after which the relay drops a silent
+		// session. own-browser took 0.6 seconds.
+		name: "a stopped own-rust subscriber is cut off (TOO_FAR_BEHIND); own-browser and own-rust get everything",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"slow-subscriber",
+			"--publisher",
+			"own-browser",
+			...each("subscriber", ["own-browser", "own-rust"]),
+		],
 	},
 ];
 
 const { values: options } = parseArgs({
 	options: {
 		relay: { type: "string", multiple: true, default: ["moqtail", "own"] },
-		// WHY one port per pairing: a pairing that is killed at its time limit
-		// can leave its relay running, and that relay must not hold the port of
-		// the pairings after it.
+		// WHY one port per pairing: some pairings run at the same time, and a
+		// pairing that is killed at its time limit can leave its relay running,
+		// which must not hold the port of the pairings after it.
 		"base-port": { type: "string", default: "44400" },
 		only: { type: "string", default: "" },
 		// Provisional. A pairing takes about a second; `run.ts` gives each of
@@ -138,17 +359,17 @@ const { values: options } = parseArgs({
 /** After SIGTERM, how long `run.ts` gets to stop what it started. */
 const KILL_GRACE_MS = 10_000;
 
-/** The pairing that is running, so that a signal to this process reaches it. */
-let running: Bun.Subprocess | undefined;
+/** The pairings that are running, so that a signal to this process reaches them. */
+const running = new Set<Bun.Subprocess>();
 let interrupted = false;
 
-// WHY forwarded: `run.ts` stops its relay, browser and clients when it gets a
-// signal. Without this, stopping the matrix leaves them running, and the relay
-// keeps its port.
+// WHY forwarded: the drivers stop their relay, browser and clients when they
+// get a signal. Without this, stopping the matrix leaves them running, and
+// the relays keep their ports.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.once(signal, () => {
 		interrupted = true;
-		running?.kill(signal);
+		for (const child of running) child.kill(signal);
 	});
 }
 
@@ -165,12 +386,30 @@ interface Outcome {
 	log: string;
 }
 
-/** The line of a run's log that says how it ended. */
-function lastDriverLine(log: string): string {
-	const lines = log
+/** The last line of a run's log that begins with one of these words of the driver. */
+function lastDriverLine(log: string, words: string): string | undefined {
+	const pattern = new RegExp(`^\\[driver\\] (?:${words}) `);
+	return log
 		.split("\n")
-		.filter((candidate) => /^\[driver\] (RESULT|FAILED) /.test(candidate));
-	return lines.at(-1) ?? "the run printed neither RESULT nor FAILED";
+		.filter((candidate) => pattern.test(candidate))
+		.at(-1);
+}
+
+/** How a run says it ended. */
+function ending(log: string): string {
+	return (
+		lastDriverLine(log, "RESULT|FAILED") ??
+		"the run printed neither RESULT nor FAILED"
+	);
+}
+
+/** What a run that ended well showed. */
+function shown(pairing: Pairing, log: string): string {
+	if (pairing.script === "run.ts") return "the payload matched";
+	return (
+		lastDriverLine(log, "SUMMARY")?.replace("[driver] SUMMARY ", "") ??
+		"ended as the scenario expects"
+	);
 }
 
 async function runPairing(
@@ -183,23 +422,22 @@ async function runPairing(
 		logDir,
 		`${pairing.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.log`,
 	);
-	const relay = pairing.relay;
 	const child = Bun.spawn(
 		[
 			process.execPath,
-			join(here, "run.ts"),
+			join(here, pairing.script),
 			...pairing.args,
-			"--relay",
-			relay,
+			// `disconnect.ts` runs through the own relay only and takes no relay.
+			...(pairing.script === "run.ts" ? ["--relay", pairing.relay] : []),
 			"--port",
 			String(port),
 		],
 		{ cwd: here, stdout: "pipe", stderr: "pipe" },
 	);
-	running = child;
+	running.add(child);
 	let timedOut = false;
 	let killer: ReturnType<typeof setTimeout> | undefined;
-	// SIGTERM first, so that `run.ts` stops its relay and clients itself.
+	// SIGTERM first, so that the driver stops its relay and clients itself.
 	const limit = setTimeout(() => {
 		timedOut = true;
 		child.kill("SIGTERM");
@@ -212,7 +450,7 @@ async function runPairing(
 	]);
 	clearTimeout(limit);
 	clearTimeout(killer);
-	running = undefined;
+	running.delete(child);
 	const log = stdout + stderr;
 	writeFileSync(logFile, log);
 	const seconds = (performance.now() - started) / 1000;
@@ -229,35 +467,57 @@ async function runPairing(
 	if (timedOut) {
 		return outcome(
 			false,
-			`stopped after the limit of ${timeoutMs / 1000}s; ${lastDriverLine(log)}`,
+			`stopped after the limit of ${timeoutMs / 1000}s; ${ending(log)}`,
 		);
 	}
 	if (pairing.expectedFailure === undefined) {
-		const matched = exitCode === 0 && /"match":true/.test(log);
-		return outcome(
-			matched,
-			matched ? "the payload matched" : lastDriverLine(log),
-		);
+		// Both drivers exit 0 only after a RESULT line: `run.ts` when the
+		// payloads match, `disconnect.ts` when the scenario ended as it has to.
+		const passed =
+			exitCode === 0 && lastDriverLine(log, "RESULT") !== undefined;
+		return outcome(passed, passed ? shown(pairing, log) : ending(log));
 	}
-	const refused = exitCode !== 0 && pairing.expectedFailure.test(log);
+	// WHY the line of the driver and not the whole log: the same words in a
+	// line of a page would pass a run that failed for another reason.
+	const refused =
+		exitCode !== 0 &&
+		pairing.expectedFailure.test(
+			pairing.reasonIsInAClientLine === true ? log : ending(log),
+		);
 	return outcome(
 		refused,
 		refused
 			? `failed as expected (${pairing.expectedFailure.source})`
-			: `expected a failure showing ${pairing.expectedFailure.source}; got exit ${exitCode}: ${lastDriverLine(log)}`,
+			: `expected a failure showing ${pairing.expectedFailure.source}; got exit ${exitCode}: ${ending(log)}`,
 	);
 }
 
+/** Every pairing with the relay it runs through, in the order of the table. */
+function pairingsThrough(relays: string[]): RelayPairing[] {
+	const named = (relay: string, pairing: Pairing): RelayPairing => ({
+		...pairing,
+		name: `${relay} relay: ${pairing.name}`,
+		relay,
+	});
+	return [
+		...relays.flatMap((relay) =>
+			[...transfers(), ...ONE_TO_MANY, ...REFUSALS].map((pairing) =>
+				named(relay, pairing),
+			),
+		),
+		// "leaving: " lets `--only` pick these runs alone.
+		...(relays.includes("own")
+			? DISCONNECTS.map((pairing) =>
+					named("own", { ...pairing, name: `leaving: ${pairing.name}` }),
+				)
+			: []),
+	];
+}
+
 async function main(): Promise<void> {
-	const pairings: RelayPairing[] = options.relay
-		.flatMap((relay) =>
-			[...transfers(), ...ONE_TO_MANY, ...REFUSALS].map((pairing) => ({
-				...pairing,
-				name: `${relay} relay: ${pairing.name}`,
-				relay,
-			})),
-		)
-		.filter((pairing) => pairing.name.includes(options.only));
+	const pairings = pairingsThrough(options.relay).filter((pairing) =>
+		pairing.name.includes(options.only),
+	);
 	if (pairings.length === 0) {
 		throw new Error(`no pairing contains "${options.only}"`);
 	}
@@ -282,20 +542,19 @@ async function main(): Promise<void> {
 		);
 	}
 	mkdirSync(logDir, { recursive: true });
+	// WHY here: the drivers that run at the same time would each create the
+	// certificate when it is missing or about to expire, over one another.
+	ensureCertificate();
 
 	const started = performance.now();
-	const outcomes: Outcome[] = [];
-	// WHY one after the other: the pairings share one certificate directory
-	// and one Chromium installation, and a failure is easier to read alone.
-	for (const [index, pairing] of pairings.entries()) {
-		// A signal stops the pairing that is running; the rest is not started.
-		if (interrupted) break;
+	const finished = new Map<RelayPairing, Outcome>();
+	const run = async (pairing: RelayPairing): Promise<void> => {
 		const outcome = await runPairing(
 			pairing,
-			basePort + index,
+			basePort + pairings.indexOf(pairing),
 			timeoutSeconds * 1000,
 		);
-		outcomes.push(outcome);
+		finished.set(pairing, outcome);
 		console.log(
 			`${outcome.ok ? "ok  " : "FAIL"} ${pairing.name} (${outcome.seconds.toFixed(1)}s): ${outcome.detail}`,
 		);
@@ -304,8 +563,25 @@ async function main(): Promise<void> {
 			console.log(readFileSync(outcome.log, "utf8"));
 			console.log("----");
 		}
+	};
+	// WHY the pairings one after the other: a failure is easier to read alone,
+	// and a run that has the machine to itself does not fail for lack of it.
+	// The runs that mostly wait are the exception. They start together when
+	// the first of them is reached, which is after the pairings that move one
+	// Object, and go on beside the pairings that follow.
+	let waiting: Promise<void>[] = [];
+	for (const pairing of pairings) {
+		// A signal stops the pairings that are running; the rest is not started.
+		if (interrupted) break;
+		if (pairing.mostlyWaits !== true) {
+			await run(pairing);
+		} else if (waiting.length === 0) {
+			waiting = pairings.filter((each) => each.mostlyWaits === true).map(run);
+		}
 	}
+	await Promise.all(waiting);
 
+	const outcomes = pairings.flatMap((pairing) => finished.get(pairing) ?? []);
 	const failed = outcomes.filter((outcome) => !outcome.ok);
 	const total = ((performance.now() - started) / 1000).toFixed(1);
 	const table = [

@@ -187,7 +187,7 @@ async function main(): Promise<void> {
 main().catch((error: unknown) => {
 	log(
 		"driver",
-		`FAILED ${error instanceof Error ? error.message : String(error)}`,
+		`FAILED ${options.publisher} to ${options.subscriber} through the ${options.relay} relay: ${error instanceof Error ? error.message : String(error)}`,
 	);
 	process.exitCode = 1;
 });

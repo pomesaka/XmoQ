@@ -35,7 +35,7 @@ run = "scripts/ci/check-workflows.sh"
 # Not part of `check`: it builds the moqtail relay and needs a Chromium, which takes minutes the
 # first time. CI runs it in a job of its own.
 [tasks.interop]
-description = "Build the interop peers and run every pairing of own and moqtail clients"
+description = "Build the interop peers, run every pairing of own and moqtail clients and the runs in which a client leaves"
 run = "scripts/ci/interop.sh"
 
 [tasks.fmt]

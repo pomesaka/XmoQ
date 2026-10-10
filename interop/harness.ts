@@ -23,7 +23,6 @@ const certDir = join(here, ".cert");
 const certFile = join(certDir, "cert.pem");
 const keyFile = join(certDir, "key.pem");
 const logDir = join(here, ".logs");
-const distDir = join(here, ".dist");
 
 // Provisional names, the same as the Phase 0 spike.
 export const NAMESPACE = "xmoq/phase0";
@@ -235,7 +234,7 @@ export function stopEverythingOnExit(): void {
  * is ECDSA P-256 and valid for less than two weeks, so the certificate is
  * regenerated whenever it is missing or about to expire.
  */
-function ensureCertificate(): { sha256Hex: string; validTo: string } {
+export function ensureCertificate(): { sha256Hex: string; validTo: string } {
 	const oneDayMs = 24 * 60 * 60 * 1000;
 	const usable =
 		existsSync(certFile) &&
@@ -382,23 +381,24 @@ async function servePages(clients: BrowserClient[]): Promise<string> {
 	const files = new Map<string, { type: string; body: string }>();
 	for (const client of clients) {
 		const page = BROWSER_PAGES[client];
-		const outdir = join(distDir, client);
+		// WHY no `outdir`: drivers run at the same time, and a bundle written
+		// to a shared path could be read half-written by another one.
 		const build = await Bun.build({
 			entrypoints: [page.entrypoint],
 			target: "browser",
-			outdir,
 			// WHY: Bun 1.3.12 otherwise throws an error that says only "Bundle
 			// failed"; the reasons are in `build.logs`.
 			throw: false,
 		});
-		if (!build.success)
+		const [bundle] = build.outputs;
+		if (!build.success || bundle === undefined)
 			throw new Error(
 				`bundling ${page.entrypoint} failed: ${build.logs.join("\n")}`,
 			);
 		files.set(page.path, { type: "text/html", body: html });
 		files.set(`${page.path}page.js`, {
 			type: "text/javascript",
-			body: readFileSync(join(outdir, "page.js"), "utf8"),
+			body: await bundle.text(),
 		});
 	}
 	const server = Bun.serve({

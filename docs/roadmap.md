@@ -19,9 +19,9 @@ Each step replaces one `moqtail` component with an own one, so that one side of 
 - [x] One interop runner for every pairing (`interop/`), including the own Rust client, and a CI job that runs it. See the [record](experiments/2026-10-10-own-rust-and-ts-through-moqtail-relay.md). Every pairing runs through the `moqtail` relay and through the own relay, with one-to-many pairings on the own relay.
 - [x] Route by namespace in the relay: a SUBSCRIBE for a track that was announced with PUBLISH_NAMESPACE and not yet published (§9.5 of the draft, a MUST for relays). The relay sends its own SUBSCRIBE to the publisher whose matching namespace was announced first. See the [record](experiments/2026-10-10-relay-namespace-routing.md).
 - [ ] Several publishers of one track in the relay, before Phase 1: send the SUBSCRIBE to every matching publisher, take and deduplicate the Objects of one track from several of them, and subscribe to a publisher that announces a namespace later (§9.3 and §9.5 of the draft, MUSTs for relays).
-- [ ] Put the runs in which a publisher or a subscriber disconnects mid-transfer into the interop matrix, so that CI runs them. They exist as a script under `spikes/`.
+- [x] Put the runs in which a publisher or a subscriber disconnects mid-transfer into the interop matrix, so that CI runs them. See the [record](experiments/2026-10-10-disconnects-through-own-relay.md). One of the runs, a browser subscriber that cancels, is listed as failing until a defect of `@xmoq/moqt` that the record describes is fixed.
 
-**Exit:** one Object between browser and Rust through the own relay with own clients, and the same Object exchange against `moqtail` peers. Reached on 2026-10-10. The open items above are known gaps of the relay, not part of the exit.
+**Exit:** one Object between browser and Rust through the own relay with own clients, and the same Object exchange against `moqtail` peers. Reached on 2026-10-10. The open item above is a known gap of the relay, not part of the exit.
 
 ## Phase 1 — Video
 - [ ] Browser WebCodecs publisher.
