@@ -57,6 +57,7 @@ bun matrix.ts
 |---|---|
 | Every publisher with every subscriber, except moqtail with moqtail (12) | The received payload equals the sent one. Where the subscriber is an own client, the publisher then leaves and the subscriber has to see PUBLISH_DONE |
 | One publisher with three subscribers: `own-rust` to `own-browser`, `moqtail-browser` to `own-rust` (2) | Every subscriber receives the payload and then sees PUBLISH_DONE |
+| `own-browser` to `own-browser`, with two Object Properties on the Object that no relay knows: an odd type with bytes and an even type with an integer (1) | The subscriber gets the payload and the two properties, with the types, values and order that were sent (draft 18 §2.5: a relay forwards a property it does not support unchanged), and then sees PUBLISH_DONE. The run tells apart an Object that came without properties, one that came with others, and one that did not come |
 | `own-browser` and `own-rust` subscribing to a track nobody published (2) | The run fails, and its log shows REQUEST_ERROR `0x10` |
 
 The runs in which a client leaves go through the own relay only, because the driver waits for lines only that relay prints. Their names begin with `leaving:`. What each has to show, and why, is in the [record](../docs/experiments/2026-10-10-disconnects-through-own-relay.md).
@@ -104,6 +105,7 @@ bun run.ts --publisher own-browser --subscriber own-rust --await-publish-done
 | `--port` | `44330`. UDP port of the relay |
 | `--subscribe-track` | `object`. Any other name makes the relay answer REQUEST_ERROR, and the run fails by design |
 | `--await-publish-done` | off. After the transfer, makes the publisher leave and waits until the subscriber reports that PUBLISH_DONE ended its subscription. The subscriber has to be an own client |
+| `--object-properties` | off. The Object carries the two Object Properties, and the subscriber has to report the same. Both clients have to be `own-browser`, the one client that sends properties and reports the ones it gets |
 | `--verbose` | off. Sets `RUST_LOG=debug` for the moqtail relay and makes `own-rust` print the bytes of every stream |
 
 One side has to be an own client: a run between two moqtail peers checks nothing of this repository.

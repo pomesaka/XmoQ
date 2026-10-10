@@ -5,13 +5,18 @@
 
 import {
 	connect,
+	type KeyValuePair,
 	type MoqtConnection,
 	type PeerStreamEnd,
 	type PublishedTrack,
 	type Subscription,
 } from "@xmoq/moqt";
 import type { Diagnostics } from "@xmoq/moqt/diagnostics";
-import type { PageReceivedObject, SubscriptionReport } from "./xmoq-page.ts";
+import type {
+	PageProperty,
+	PageReceivedObject,
+	SubscriptionReport,
+} from "./xmoq-page.ts";
 
 /** Provisional: any value works, the relay maps it to its own alias per subscriber. */
 const PUBLISH_TRACK_ALIAS = 1n;
@@ -97,6 +102,18 @@ const diagnostics: Diagnostics = {
 	},
 };
 
+function toKeyValuePair(property: PageProperty): KeyValuePair {
+	return "varint" in property
+		? { type: BigInt(property.type), value: BigInt(property.varint) }
+		: { type: BigInt(property.type), value: fromHex(property.bytesHex) };
+}
+
+function toPageProperty({ type, value }: KeyValuePair): PageProperty {
+	return typeof value === "bigint"
+		? { type: type.toString(), varint: value.toString() }
+		: { type: type.toString(), bytesHex: toHex(value, "") };
+}
+
 function errorText(error: unknown): string {
 	return error instanceof Error
 		? `${error.name}: ${error.message}`
@@ -126,6 +143,7 @@ function readAll(subscription: Subscription): Reading {
 				group: groupId.toString(),
 				object: object.objectId.toString(),
 				payloadHex: toHex(object.payload, ""),
+				properties: object.properties.map(toPageProperty),
 			});
 			notify();
 		}
@@ -192,20 +210,27 @@ async function sendIn(
 	group: bigint,
 	payloadHex: string,
 	finish: boolean,
+	properties: PageProperty[] = [],
 ): Promise<void> {
 	const subgroup = await publishedTrack().openSubgroup({
 		groupId: group,
 		subgroupId: { mode: "Explicit", value: 0n },
 		publisherPriority: 0,
-		properties: false,
+		// §11.4.2: the bit is of the stream, and says that every Object on it
+		// has the Properties Length field.
+		properties: properties.length > 0,
 		// A finished stream holds the one Object of its Group, which is the
 		// largest. A stream left open says nothing about what follows.
 		endOfGroup: finish,
 	});
-	await subgroup.write({ objectId: 0n, payload: fromHex(payloadHex) });
+	await subgroup.write({
+		objectId: 0n,
+		payload: fromHex(payloadHex),
+		properties: properties.map(toKeyValuePair),
+	});
 	if (finish) await subgroup.close();
 	console.log(
-		`object sent: group=${group} object=0 payload_len=${payloadHex.length / 2} finished=${finish}`,
+		`object sent: group=${group} object=0 payload_len=${payloadHex.length / 2} properties=${properties.length} finished=${finish}`,
 	);
 }
 
@@ -313,8 +338,12 @@ window.xmoqOwn = {
 	}),
 
 	sendObjectIn: withPlainErrors(
-		(group: string, payloadHex: string, finish: boolean) =>
-			sendIn(BigInt(group), payloadHex, finish),
+		(
+			group: string,
+			payloadHex: string,
+			finish: boolean,
+			properties: PageProperty[],
+		) => sendIn(BigInt(group), payloadHex, finish, properties),
 	),
 
 	sendLastObjectAndClose: withPlainErrors(
@@ -354,6 +383,30 @@ window.xmoqOwn = {
 				.filter((object) => object.group === group)
 				.map((object) => object.payloadHex),
 		);
+	}),
+
+	propertiesOfGroup: withPlainErrors(async (group: string) =>
+		describe(
+			(
+				await received(
+					`the Object of Group ${group}`,
+					(object) => object.group === group,
+				)
+			).properties ?? [],
+		),
+	),
+
+	state: withPlainErrors(async () => {
+		const open = Symbol("open");
+		const closed = await Promise.race([
+			connected().closed,
+			new Promise<typeof open>((resolve) => setTimeout(resolve, 0, open)),
+		]);
+		return describe({
+			session: closed === open ? null : closed,
+			objectsRead: reading?.objects.length ?? null,
+			objectsEnd: reading?.end ?? null,
+		});
 	}),
 
 	cancelSubscription: withPlainErrors(async () => {

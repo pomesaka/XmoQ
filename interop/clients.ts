@@ -18,6 +18,7 @@ import {
 } from "./harness.ts";
 import type {
 	OwnPageExtras,
+	PageProperty,
 	SubscriptionReport,
 	XmoqPage,
 } from "./xmoq-page.ts";
@@ -87,6 +88,12 @@ export interface PublisherPlan {
 	 * happen to the track while the relay waits for the answer.
 	 */
 	servesWhenAskedAfterMs?: number;
+	/**
+	 * own-browser: the Object Properties every Object it sends carries
+	 * (§11.2.1.2), in ascending order of type as they go onto the wire. None
+	 * when left out. The other clients cannot send any.
+	 */
+	properties?: PageProperty[];
 }
 
 export interface Publisher {
@@ -158,6 +165,11 @@ async function startRustPublisher(
 	run: ClientRun,
 	plan: PublisherPlan,
 ): Promise<Publisher> {
+	if (plan.properties !== undefined) {
+		throw new Error(
+			`${label} cannot send Object Properties: only own-browser can`,
+		);
+	}
 	const firstGroup = plan.firstGroup ?? 0;
 	if (firstGroup !== 0 && kind !== "own-rust") {
 		throw new Error(
@@ -263,6 +275,11 @@ async function startBrowserPublisher(
 	const payloadHex = plan.payloadHex ?? run.payloadHex;
 	const kill = (): Promise<void> => page.context().close();
 	if (kind === "moqtail-browser") {
+		if (plan.properties !== undefined) {
+			throw new Error(
+				`${label} cannot send Object Properties: only own-browser can`,
+			);
+		}
 		if ((plan.firstGroup ?? 0) !== 0) {
 			throw new Error(
 				`${label} cannot start at Group ${plan.firstGroup}: the page sends Group 0 and nothing else`,
@@ -320,8 +337,14 @@ async function startBrowserPublisher(
 			label,
 			`send Group ${group}`,
 			page.evaluate(
-				([g, hex, fin]) => window.xmoqOwn.sendObjectIn(g, hex, fin),
-				[String(group), payloadHex, finish] satisfies [string, string, boolean],
+				([g, hex, fin, properties]) =>
+					window.xmoqOwn.sendObjectIn(g, hex, fin, properties),
+				[String(group), payloadHex, finish, plan.properties ?? []] satisfies [
+					string,
+					string,
+					boolean,
+					PageProperty[],
+				],
 			),
 		);
 		return group;
@@ -488,6 +511,16 @@ export interface Subscriber {
 	 * can tell.
 	 */
 	payloads(group: number): Promise<string[]>;
+	/**
+	 * The Object Properties of Object 0 of the Group once it arrived, in the
+	 * order they were on the wire. Only own-browser can tell.
+	 */
+	properties(group: number): Promise<PageProperty[]>;
+	/**
+	 * What the client can say when an Object does not come: whether its
+	 * session is open, and how many Objects it has. Only own-browser can tell.
+	 */
+	state(): Promise<string>;
 	/** Resolves once the subscription has ended. Only the own clients can tell. */
 	outcome(timeoutMs?: number): Promise<SubscriptionOutcome>;
 	leave(way: LeaveWay): Promise<void>;
@@ -498,11 +531,20 @@ export interface Subscriber {
 	setStopped(stopped: boolean): Promise<void>;
 }
 
-function cannotTell(kind: Client): () => Promise<never> {
-	return () =>
-		Promise.reject(
-			new Error(`${kind} does not report how a subscription ended`),
-		);
+function isPageProperty(value: unknown): value is PageProperty {
+	if (typeof value !== "object" || value === null) return false;
+	if (!("type" in value) || typeof value.type !== "string") return false;
+	return (
+		("varint" in value && typeof value.varint === "string") ||
+		("bytesHex" in value && typeof value.bytesHex === "string")
+	);
+}
+
+function cannotTell(
+	kind: Client,
+	what = "how a subscription ended",
+): () => Promise<never> {
+	return () => Promise.reject(new Error(`${kind} does not report ${what}`));
 }
 
 function cannotLeave(kind: Client, way: LeaveWay): Promise<never> {
@@ -556,6 +598,8 @@ function startRustSubscriber(
 			subscribed: client.waitForLine(/^SUBSCRIBED /),
 			object: () => objectOf(/^OBJECT .*payload_hex=([0-9a-f]*)$/),
 			payloads: cannotTell(kind),
+			properties: cannotTell(kind, "Object Properties"),
+			state: cannotTell(kind, "its state"),
 			outcome: cannotTell(kind),
 			setStopped,
 			async leave(way) {
@@ -575,6 +619,8 @@ function startRustSubscriber(
 		subscribed: client.waitForLine(/^SUBSCRIBED /),
 		object: (group) =>
 			objectOf(new RegExp(`^OBJECT group=${group} .*payload_hex=([0-9a-f]*)$`)),
+		properties: cannotTell(kind, "Object Properties"),
+		state: cannotTell(kind, "its state"),
 		payloads: (group) =>
 			Promise.resolve(
 				client
@@ -653,6 +699,8 @@ async function startBrowserSubscriber(
 				return object.payloadHex;
 			},
 			payloads: cannotTell(kind),
+			properties: cannotTell(kind, "Object Properties"),
+			state: cannotTell(kind, "its state"),
 			outcome: cannotTell(kind),
 			setStopped: cannotBeStopped(kind),
 			async leave(way) {
@@ -709,6 +757,30 @@ async function startBrowserSubscriber(
 			) {
 				throw new Error(
 					`${label} reported no list of payloads: ${String(reported)}`,
+				);
+			}
+			return reported;
+		},
+		state: () =>
+			onPage(
+				label,
+				"report its state",
+				page.evaluate(() => window.xmoqOwn.state()),
+			),
+		async properties(group) {
+			const reported: unknown = JSON.parse(
+				await onPage(
+					label,
+					`report the properties of its Object of Group ${group}`,
+					page.evaluate(
+						(g) => window.xmoqOwn.propertiesOfGroup(g),
+						String(group),
+					),
+				),
+			);
+			if (!Array.isArray(reported) || !reported.every(isPageProperty)) {
+				throw new Error(
+					`${label} reported no list of properties: ${JSON.stringify(reported)}`,
 				);
 			}
 			return reported;
