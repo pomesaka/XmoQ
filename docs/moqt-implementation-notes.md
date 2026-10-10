@@ -88,6 +88,7 @@ Choices of the relay where the draft leaves one. The limits are **provisional**.
 | Open requests of one peer; Request IDs remembered above a gap | 256; 1024 |
 | Streams of one peer read at once, which is also the QUIC limit on the streams it may have open | 64 unidirectional, 264 request streams. The 256 open requests act first (`EXCESSIVE_LOAD`); a peer that goes on is held by QUIC at 264 |
 | QUIC windows of the relay, per connection | 256 KiB received and unread a stream, 4 MiB over all streams; 4 MiB written and unacknowledged |
+| Datagrams the relay keeps for one connection (nothing reads them yet) | 1500 bytes, which is also the largest datagram frame it tells the peer it takes |
 | Undecoded bytes of subgroup streams | 1 MiB per stream, 4 MiB per session |
 | Held for an unknown Track Alias, per session | 8 streams, 32 Objects, 1 MiB, for 2 seconds |
 | Waiting to be written to one subscriber session | 4 MiB, 4096 Objects, 256 streams |

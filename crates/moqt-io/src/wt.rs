@@ -64,6 +64,23 @@ const KEEP_ALIVE: Duration = Duration::from_secs(3);
 /// (`TransportConfig::default`, read 2026-10-10).
 const IDLE_TIMEOUT_MS: u32 = 9_000;
 
+/// Bytes of datagrams a server keeps for one peer. Nothing here reads
+/// datagrams (see the FIXME in the crate root), so what arrives is held up
+/// to this many bytes; past that quinn drops the oldest (quinn-proto 0.11.19,
+/// `config/transport.rs`; read 2026-10-10).
+///
+/// WHY not switched off: quinn would then leave datagram support out of its
+/// transport parameters, while the library always announces datagrams in its
+/// HTTP/3 settings and refuses a peer that does not (web-transport-proto
+/// 0.6.2, `src/settings.rs`; read 2026-10-10). Whether a browser takes a
+/// server that announces the one without the other was not tried. The value
+/// is also the largest datagram frame quinn tells the peer it takes
+/// (quinn-proto 0.11.19, `transport_parameters.rs`), so it is kept at the
+/// size of one packet. Chromium 156 connects with it.
+///
+/// Provisional. quinn's default is 1.25 MB.
+const DATAGRAM_RECEIVE_BUFFER: usize = 1500;
+
 /// What one peer can make the QUIC layer of a server hold and open, below the
 /// stream handling of this crate. All provisional.
 ///
@@ -108,6 +125,7 @@ impl QuicLimits {
             .stream_receive_window(self.stream_receive_window.into())
             .receive_window(self.receive_window.into())
             .send_window(u64::from(self.send_window))
+            .datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER))
             .keep_alive_interval(Some(KEEP_ALIVE))
             .max_idle_timeout(Some(quinn::VarInt::from_u32(IDLE_TIMEOUT_MS).into()));
         transport
