@@ -126,6 +126,8 @@ export interface FakePeer {
 	closeInfo(): CloseInfo | undefined;
 	/** How many of the streams made by `openUni` the client has not taken from the transport. */
 	untakenUniStreams(): number;
+	/** The same for the streams made by `openBidi`. */
+	untakenBidiStreams(): number;
 }
 
 export function createFakePeer(): FakePeer {
@@ -141,6 +143,7 @@ export function createFakePeer(): FakePeer {
 	>({}, undefined, { highWaterMark: 1024 });
 	const incomingUniWriter = incomingUni.writable.getWriter();
 	const openedUnis: ReadableStream<Uint8Array>[] = [];
+	const openedBidis: ReadableStream<Uint8Array>[] = [];
 	const incomingBidiWriter = incomingBidi.writable.getWriter();
 	/** Ends every stream made so far, as the end of the session does. */
 	const streamEnders: ((error: Error) => void)[] = [];
@@ -219,6 +222,7 @@ export function createFakePeer(): FakePeer {
 		openBidi() {
 			const fromClient = pipe();
 			const toClient = pipe();
+			openedBidis.push(toClient.readable);
 			void incomingBidiWriter.write({
 				readable: toClient.readable,
 				writable: fromClient.writable,
@@ -240,5 +244,7 @@ export function createFakePeer(): FakePeer {
 		// The client locks a stream when it starts to read it.
 		untakenUniStreams: () =>
 			openedUnis.filter((readable) => !readable.locked).length,
+		untakenBidiStreams: () =>
+			openedBidis.filter((readable) => !readable.locked).length,
 	};
 }

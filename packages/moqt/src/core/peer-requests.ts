@@ -142,14 +142,10 @@ export function createPeerRequests(): PeerRequests {
 					// At most 9 + 2 + 65535 bytes of one stream: Message Length is
 					// 16 bits.
 					//
-					// FIXME: nothing here bounds how many streams hold that much at
-					// once. A request that is refused on its start holds a few
-					// bytes; a FETCH that trickles in holds up to 64 KiB until it is
-					// whole, and the streams the peer may have open are bounded by
-					// the transport alone (`webtransport/stream-io.ts` accepts every
-					// bidirectional stream; unidirectional ones have a limit there).
-					// A bound on the bytes held across incomplete FETCHes, or on the
-					// streams read at once, is a limit the project has not decided.
+					// How many streams hold that much at once is bounded where the
+					// streams are read: `maxPeerBidiStreams` of the connection, 64
+					// by default (`webtransport/stream-io.ts`). A session that is
+					// driven without that layer has no such bound.
 					stream.buffer = buffer;
 					return;
 				}

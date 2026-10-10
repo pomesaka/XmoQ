@@ -1149,6 +1149,72 @@ describe("connectOver", () => {
 		},
 	);
 
+	test.each([
+		{ value: 0, message: "maxPeerBidiStreams is a whole number from 1, not 0" },
+		{
+			value: 2.5,
+			message: "maxPeerBidiStreams is a whole number from 1, not 2.5",
+		},
+		{
+			value: Number.NaN,
+			message: "maxPeerBidiStreams is a whole number from 1, not NaN",
+		},
+		{
+			value: Number.POSITIVE_INFINITY,
+			message: "maxPeerBidiStreams is a whole number from 1, not Infinity",
+		},
+	])(
+		"connectOver rejects maxPeerBidiStreams $value with a RangeError",
+		async ({ value, message }) => {
+			const error = await rejection(
+				connectOver(createFakePeer().transport, { maxPeerBidiStreams: value }),
+			);
+			expect(error).toBeInstanceOf(RangeError);
+			expect(error).toMatchObject({ message });
+		},
+	);
+
+	// A request of the peer is held until its first message is whole, and a
+	// FETCH until all of it is there. The limit bounds how many streams can
+	// hold one at a time; the others are not taken from the transport.
+	test("requests of the peer are read as many at once as the limit, and the rest waits in the transport", async () => {
+		const { peer } = await connected({ maxPeerBidiStreams: 2 });
+		// Five streams, each with the start of a Relative Joining FETCH: Request
+		// IDs 1, 3, 5, 7, 9. No request is whole, so none is answered.
+		const requests = [1, 3, 5, 7, 9].map((requestId) => {
+			const request = peer.openBidi();
+			void request.reply.write(hex(`16 00 05 0${requestId} 02`));
+			return request;
+		});
+		await settle();
+		expect(peer.untakenBidiStreams()).toBe(3);
+
+		// The first becomes whole: it is refused, and keeps its place while the
+		// peer has not ended its direction.
+		const [first, second] = requests;
+		if (first === undefined || second === undefined) {
+			throw new Error("five requests were opened");
+		}
+		await first.reply.write(hex("00 00 00"));
+		expect(decodeControlMessage(await sentBytes(first.sent))).toMatchObject({
+			status: "ok",
+			value: { type: "REQUEST_ERROR", errorCode: 3n },
+		});
+		await settle();
+		expect(peer.untakenBidiStreams()).toBe(3);
+
+		// The peer ends its direction of the first: the third is read.
+		await first.reply.close();
+		await settle();
+		expect(peer.untakenBidiStreams()).toBe(2);
+
+		// A stream the peer resets gives up its place as well.
+		await second.reply.abort(new Error("reset by the test"));
+		await settle();
+		expect(peer.untakenBidiStreams()).toBe(1);
+		expect(peer.closeInfo()).toBeUndefined();
+	});
+
 	// A chunk can carry several Objects, and a stream hands all of them over
 	// before it waits: the limit is on streams, not on Objects.
 	test("a stream hands over every Object of a chunk before it waits for the queue", async () => {
