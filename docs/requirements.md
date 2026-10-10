@@ -6,8 +6,10 @@
 | --- | --- |
 | Own MoQ Transport implementation in Rust and TypeScript, pinned to draft 18 | Implemented for the Phase 0b scope: the codec and session in Rust and TypeScript, a client in each, and a minimal relay in Rust that routes by track and by announced namespace. One Object passes between every pairing of own and `moqtail` clients through either relay. The parts of the draft that are not implemented are listed in [implementation notes](moqt-implementation-notes.md) |
 | One-to-many live broadcast | Discussed. The relay fans one Object out to several subscribers; no media has been sent |
-| Browser publishing and viewing | Discussed |
+| Browser publishing and viewing | Decided for Phase 1: Chromium (Chrome, Edge) on desktop, video only, shown on loopback. Other browsers are undecided |
 | WebCodecs and MoQ/WebTransport | Discussed; validation required |
+| Media packaged as LOC, tracks described by an MSF catalog (`draft-ietf-moq-msf-01`), with the FETCH that needs | Decided. Which revision of LOC, whether every Object gets a stream of its own, and whether the relay caches are undecided ([open decisions](open-questions.md)) |
+| Audio | Decided: Opus, from Phase 2 |
 | Rust relay and Rust CLI | Discussed |
 | Ghostty video, audio, chat | Desired; validation required |
 | Durable Objects for room/chat state | Discussed; integration undecided |
