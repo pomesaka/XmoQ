@@ -204,6 +204,8 @@ pub enum Event {
         session: SessionKey,
         /// The publisher's Track Alias.
         track_alias: u64,
+        /// The `wait` of the action this answers.
+        wait: u64,
     },
     /// The time to hold a stream whose Track Alias is not known is over.
     /// Answers [`Action::StartEarlyTimer`].
@@ -316,6 +318,10 @@ pub enum Action {
         session: SessionKey,
         /// The publisher's Track Alias.
         track_alias: u64,
+        /// Which wait this is, to be handed back in the event. WHY: a Track
+        /// Alias is used again, the timer of an earlier wait under it cannot
+        /// be stopped, and it must not end a later one.
+        wait: u64,
     },
     /// Report [`Event::EarlyStreamTimeout`] after the time a stream is held
     /// for a Track Alias that is not known yet.

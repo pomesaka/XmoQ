@@ -331,6 +331,7 @@ fn publish_done_reaches_the_subscribers_once_the_streams_ended() {
         [Action::StartDrainTimer {
             session: PUBLISHER,
             track_alias: UPSTREAM_ALIAS,
+            wait: 0,
         }]
     );
     // The publisher closes its request stream right after; nothing ends yet.
@@ -381,6 +382,7 @@ fn publish_done_reaches_the_subscribers_once_the_streams_ended() {
         relay.step(Event::DrainTimeout {
             session: PUBLISHER,
             track_alias: UPSTREAM_ALIAS,
+            wait: 0,
         }),
         []
     );
@@ -421,6 +423,7 @@ fn the_drain_timer_ends_a_track_whose_streams_never_came() {
         relay.step(Event::DrainTimeout {
             session: PUBLISHER,
             track_alias: UPSTREAM_ALIAS,
+            wait: 0,
         }),
         expected
     );
@@ -492,6 +495,44 @@ fn a_subscriber_that_joins_inside_a_subgroup_gets_a_stream_of_its_own() {
 }
 
 #[test]
+fn a_subscriber_that_joins_inside_a_subgroup_gets_the_rest_of_the_header_as_it_came() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    // PROPERTIES says how every Object of the stream is laid out (§11.4.2),
+    // so a stream that starts inside the Subgroup has to say it as well; so
+    // for the priority and END_OF_GROUP, which are the Subgroup's.
+    let with_properties = |track_alias| SubgroupHeader {
+        publisher_priority: Some(3),
+        properties: true,
+        end_of_group: false,
+        ..header(track_alias)
+    };
+    relay.step(Event::DataStreamOpened {
+        session: PUBLISHER,
+        stream: StreamKey(7),
+        header: with_properties(UPSTREAM_ALIAS),
+    });
+    object_arrived(&mut relay, 7, 0);
+    subscribe_to_track(&mut relay, BOB);
+    assert_eq!(
+        object_arrived(&mut relay, 7, 1),
+        [
+            open_data_stream(
+                BOB,
+                1,
+                SubgroupHeader {
+                    subgroup_id: SubgroupId::Explicit(0),
+                    first_object: false,
+                    ..with_properties(0)
+                }
+            ),
+            send_object(0, 1),
+            send_object(1, 1),
+        ]
+    );
+}
+
+#[test]
 fn a_subscription_to_a_track_nobody_published_is_rejected() {
     let mut relay = relay_with_track();
     // DOES_NOT_EXIST (0x10), then a FIN (§3.3.2).
@@ -518,63 +559,59 @@ fn a_subscription_to_a_track_nobody_published_is_rejected() {
 
 #[test]
 fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
+    // The expectation below is spelled out for 4 sources.
+    assert_eq!(crate::MAX_SOURCES, 4);
     let mut relay = relay_with_track();
-    // The publisher said PUBLISH_DONE and one stream it counted has not come:
-    // its source drains.
-    relay.step(Event::RequestMessage {
-        session: PUBLISHER,
-        stream: StreamKey(0),
-        message: publish_done(0x2, 1),
-    });
-    // (who asks, on which stream; first message; REQUEST_ERROR code)
+    // Three more publishers of the track: it has all the sources it may have.
+    for session in [BOB, SessionKey(11), SessionKey(12)] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(0),
+            first: publish(0, b"a"),
+        });
+    }
+    // (first message; REQUEST_ERROR code)
     let cases = [
         // FETCH: NOT_SUPPORTED.
         (
-            ALICE,
-            0,
             ControlMessage::UnsupportedRequest {
                 message_type: 0x16,
                 request_id: 0,
             },
             0x3,
         ),
-        // The publisher publishes the track anew, under another alias, while
-        // its source drains: UNINTERESTED.
-        (
-            PUBLISHER,
-            1,
-            ControlMessage::Publish(Publish {
-                request_id: 2,
-                full_track_name: track(b"a"),
-                track_alias: 41,
-                parameters: vec![],
-                track_properties: vec![],
-            }),
-            0x20,
-        ),
+        // A fifth publisher of the track: EXCESSIVE_LOAD.
+        (publish(2, b"a"), 0x9),
     ];
-    for (session, stream, first, error_code) in cases {
-        let stream = StreamKey(stream);
+    for (index, (first, error_code)) in cases.into_iter().enumerate() {
+        let stream = StreamKey(u64::try_from(index).unwrap());
         assert_eq!(
             relay.step(Event::RequestOpened {
-                session,
+                session: ALICE,
                 stream,
                 first: first.clone(),
             }),
             [
                 Action::SendRequest {
-                    session,
+                    session: ALICE,
                     stream,
                     message: request_error(error_code),
                 },
-                Action::FinishRequest { session, stream },
+                Action::FinishRequest {
+                    session: ALICE,
+                    stream,
+                },
             ],
             "{first:?}"
         );
         // What the peer still sends on the stream is ignored.
         assert_eq!(
             relay.step(Event::RequestMessage {
-                session,
+                session: ALICE,
                 stream,
                 message: publish_done(0x2, 0),
             }),
@@ -598,7 +635,7 @@ fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
             message: ControlMessage::RequestOk(RequestOk::default()),
         }]
     );
-    assert_eq!(held(&relay), (3, 1, 0, 0, 0));
+    assert_eq!(held(&relay), (5, 1, 0, 0, 0));
 }
 
 #[test]
@@ -1099,6 +1136,7 @@ fn events_for_what_the_relay_let_go_are_ignored() {
         Event::DrainTimeout {
             session: PUBLISHER,
             track_alias: UPSTREAM_ALIAS,
+            wait: 0,
         },
         Event::SessionClosed { session: PUBLISHER },
     ];
@@ -1307,33 +1345,35 @@ fn a_finished_stream_that_is_not_written_out_is_reset_with_its_subscription() {
 
 #[test]
 fn early_streams_of_a_refused_publish_are_let_go() {
+    // The expectation below is spelled out for 4 sources.
+    assert_eq!(crate::MAX_SOURCES, 4);
     let mut relay = relay_with_track();
-    // The publisher's source drains, so its next PUBLISH for the track is
-    // refused.
-    relay.step(Event::RequestMessage {
-        session: PUBLISHER,
-        stream: StreamKey(0),
-        message: publish_done(0x2, 1),
-    });
-    // It sends eight streams ahead of that PUBLISH, under the new alias.
+    // The track has all the sources it may have, so one more PUBLISH for it
+    // is refused.
+    for session in [BOB, SessionKey(11), SessionKey(12)] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(0),
+            first: publish(0, b"a"),
+        });
+    }
+    // Alice sends eight streams ahead of her PUBLISH for the track.
     for stream in 0..8 {
         relay.step(Event::DataStreamOpened {
-            session: PUBLISHER,
+            session: ALICE,
             stream: StreamKey(10 + stream),
-            header: header(41),
+            header: header(UPSTREAM_ALIAS),
         });
     }
     assert_eq!(relay.counts().early_streams, 8);
     let actions = relay.step(Event::RequestOpened {
-        session: PUBLISHER,
-        stream: StreamKey(1),
-        first: ControlMessage::Publish(Publish {
-            request_id: 2,
-            full_track_name: track(b"a"),
-            track_alias: 41,
-            parameters: vec![],
-            track_properties: vec![],
-        }),
+        session: ALICE,
+        stream: StreamKey(0),
+        first: publish(0, b"a"),
     });
     // The eight streams are stopped with CANCELLED (0x1), then the PUBLISH is
     // refused.
@@ -1344,15 +1384,15 @@ fn early_streams_of_a_refused_publish_are_let_go() {
     assert_eq!(stopped, 8);
     assert_eq!(relay.counts().early_streams, 0);
 
-    // Its next track can run ahead of its PUBLISH again.
+    // Her next track can run ahead of its PUBLISH again.
     assert_eq!(
         relay.step(Event::DataStreamOpened {
-            session: PUBLISHER,
+            session: ALICE,
             stream: StreamKey(20),
-            header: header(42),
+            header: header(41),
         }),
         [Action::StartEarlyTimer {
-            session: PUBLISHER,
+            session: ALICE,
             stream: StreamKey(20),
         }]
     );
@@ -1681,28 +1721,57 @@ fn a_drain_timer_of_a_track_that_is_gone_does_not_end_the_next_one_of_its_name()
     relay.step(Event::DrainTimeout {
         session: PUBLISHER,
         track_alias: UPSTREAM_ALIAS,
+        wait: 0,
     });
     assert_eq!(relay.counts().tracks, 1);
 }
 
 #[test]
 fn a_refused_publish_under_the_alias_of_a_draining_source_does_not_end_its_wait() {
+    // The expectation below is spelled out for 4 sources.
+    assert_eq!(crate::MAX_SOURCES, 4);
     let mut relay = relay_with_track();
     subscribe_to_track(&mut relay, ALICE);
     data_stream_opened(&mut relay, 7);
-    // The publisher counted two streams; one has come and is open.
+    // The publisher counted two streams of "a"; one has come and is open.
     relay.step(Event::RequestMessage {
         session: PUBLISHER,
         stream: StreamKey(0),
         message: publish_done(0x2, 2),
     });
-    // It publishes the track anew under the same alias, and is refused.
-    relay.step(Event::RequestOpened {
-        session: PUBLISHER,
-        stream: StreamKey(1),
-        first: publish(2, b"a"),
-    });
-    // The first subscription still waits for its second stream: the end of
+    // Another track, "b", has all the sources it may have.
+    for session in [BOB, SessionKey(11), SessionKey(12), SessionKey(13)] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(0),
+            first: publish(0, b"b"),
+        });
+    }
+    // The publisher sends PUBLISH for "b" under the alias of its draining
+    // subscription to "a", and is refused with EXCESSIVE_LOAD (0x9).
+    assert_eq!(
+        relay.step(Event::RequestOpened {
+            session: PUBLISHER,
+            stream: StreamKey(1),
+            first: publish(2, b"b"),
+        }),
+        [
+            Action::SendRequest {
+                session: PUBLISHER,
+                stream: StreamKey(1),
+                message: request_error(0x9),
+            },
+            Action::FinishRequest {
+                session: PUBLISHER,
+                stream: StreamKey(1),
+            },
+        ]
+    );
+    // The subscription to "a" still waits for its second stream: the end of
     // the first one finishes nothing but Alice's stream for it.
     assert_eq!(
         data_stream_closed(&mut relay, 7, StreamEnd::Fin),
@@ -1710,7 +1779,7 @@ fn a_refused_publish_under_the_alias_of_a_draining_source_does_not_end_its_wait(
             out_stream: OutStreamKey(0),
         }]
     );
-    assert_eq!(relay.counts().tracks, 1);
+    assert_eq!(relay.counts().tracks, 2);
     // And the timer for the wait still ends it: a reset, since not all that
     // was counted has come.
     let mut expected = vec![Action::ResetRequest {
@@ -1723,7 +1792,64 @@ fn a_refused_publish_under_the_alias_of_a_draining_source_does_not_end_its_wait(
         relay.step(Event::DrainTimeout {
             session: PUBLISHER,
             track_alias: UPSTREAM_ALIAS,
+            wait: 0,
         }),
         expected
     );
+}
+
+#[test]
+fn a_stream_sent_ahead_for_a_refused_publish_is_taken_for_the_draining_subscription() {
+    // Known gap (implementation notes): nothing on a stream but its Track
+    // Alias says which subscription it is for.
+    assert_eq!(crate::MAX_SOURCES, 4);
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    data_stream_opened(&mut relay, 7);
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 2),
+    });
+    for session in [BOB, SessionKey(11), SessionKey(12), SessionKey(13)] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(0),
+            first: publish(0, b"b"),
+        });
+    }
+    // The PUBLISH for "b" under the alias of the draining "a" is refused.
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: publish(2, b"b"),
+    });
+    // The stream the publisher sent for "b" without waiting for the answer
+    // arrives after the refusal: it goes to Alice as a stream of "a".
+    assert_eq!(
+        data_stream_opened(&mut relay, 8),
+        [open_data_stream(ALICE, 1, header_of_group(0, 8))]
+    );
+    // And it counts as the second of the two streams "a" was to have: the
+    // first PUBLISH stream is finished although the real second one of "a"
+    // has not come, and the track ends.
+    data_stream_closed(&mut relay, 8, StreamEnd::Fin);
+    let last = data_stream_closed(&mut relay, 7, StreamEnd::Fin);
+    assert_eq!(
+        last[..2],
+        [
+            Action::FinishDataStream {
+                out_stream: OutStreamKey(0),
+            },
+            Action::FinishRequest {
+                session: PUBLISHER,
+                stream: StreamKey(0),
+            },
+        ]
+    );
+    assert_eq!(relay.counts().tracks, 1);
 }

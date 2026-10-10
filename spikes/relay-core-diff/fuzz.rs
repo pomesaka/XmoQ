@@ -37,12 +37,18 @@
 //!   first half. `compare.py` then looks at session 3 and at what session 4
 //!   gets for the track of the second half.
 //!
+//! With `XMOQ_FUZZ_STEADY` set, session 3 never says `PUBLISH_DONE`: not on
+//! a PUBLISH of its own, and not in answer to a SUBSCRIBE of the relay. In
+//! `split-one` and `shared` that makes the second half one in which no
+//! publisher drains, so that none can publish anew while it does.
+//! `compare.py` calls the two `split-steady` and `shared-steady`.
+//!
 //! `XMOQ_FUZZ_TOUCH` chooses which events count as the ones a change is
 //! about: `subgroups` (the default; a stream that leaves the Subgroup ID to
 //! its first Object, or a second stream for a Subgroup) or `publishers` (a
 //! PUBLISH for a track another session published before, or after another
-//! session announced a namespace), `republish` (a PUBLISH for a track by a
-//! session that sent PUBLISH for it before) or `waiting-or-draining` (a
+//! session announced a namespace), `republish` (a PUBLISH by a session that
+//! sent PUBLISH for the track before, or that said `PUBLISH_DONE`) or `waiting-or-draining` (a
 //! PUBLISH after another session announced a namespace, or after any
 //! `PUBLISH_DONE`).
 //!
@@ -395,7 +401,9 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
         25 => Event::OutStreamClosed { out_stream: OutStreamKey(rng.next(12)) },
         26 => match rng.next(4) {
             0 => Event::SendQueueFull { out_stream: OutStreamKey(rng.next(12)) },
-            1 => Event::DrainTimeout { session, track_alias: alias },
+            // The number of the wait is put in by the caller, which has seen
+            // the timers the relay started.
+            1 => Event::DrainTimeout { session, track_alias: alias, wait: 0 },
             2 => Event::EarlyStreamTimeout { session, stream: data_stream },
             _ => Event::RequestTimeout { session, stream },
         },
@@ -462,16 +470,47 @@ fn touches_the_publishers(event: &Event, published: &mut Vec<(u64, Option<FullTr
     }
 }
 
-/// Whether an event is a PUBLISH for a track by a session that sent PUBLISH
-/// for it before in the sequence.
-fn publishes_again(event: &Event, published: &mut Vec<(u64, Option<FullTrackName>)>) -> bool {
-    let Event::RequestOpened { session, first: ControlMessage::Publish(publish), .. } = event else {
-        return false;
-    };
-    let this = (session.0, Some(publish.full_track_name.clone()));
-    let again = published.contains(&this);
-    published.push(this);
-    again
+/// Whether an event is a PUBLISH by a session that sent PUBLISH for the track
+/// before in the sequence, or that said `PUBLISH_DONE` for anything: on its
+/// PUBLISH, or in answer to a SUBSCRIBE of the relay. A `SUBSCRIBE_OK` of
+/// a session that said `PUBLISH_DONE` counts as well: it can use the Track
+/// Alias of the subscription that drains. So does a subgroup stream of
+/// such a session: under an alias that drains it is stopped where the
+/// session is no source of the track, which is so when the track ended
+/// and another publisher made one of the name. `seen` has a session and its
+/// track, or no track for a `PUBLISH_DONE`.
+fn publishes_again(event: &Event, seen: &mut Vec<(u64, Option<FullTrackName>)>) -> bool {
+    match event {
+        Event::RequestOpened { session, first: ControlMessage::Publish(publish), .. } => {
+            let this = (session.0, Some(publish.full_track_name.clone()));
+            let again = seen.contains(&this) || seen.contains(&(session.0, None));
+            seen.push(this);
+            again
+        }
+        Event::RequestMessage { session, message: ControlMessage::PublishDone(_), .. }
+        | Event::OwnRequestMessage { session, message: ControlMessage::PublishDone(_), .. } => {
+            seen.push((session.0, None));
+            false
+        }
+        Event::OwnRequestMessage { session, message: ControlMessage::SubscribeOk(_), .. }
+        | Event::DataStreamOpened { session, .. } => seen.contains(&(session.0, None)),
+        _ => false,
+    }
+}
+
+/// The event, unless it is a `PUBLISH_DONE` of session 3: then one that
+/// leaves its subscriptions as they are. For the worlds in which the
+/// publisher of the second half is never to drain (`XMOQ_FUZZ_STEADY`).
+fn without_a_publish_done_of_session_3(event: Event) -> Event {
+    match event {
+        Event::RequestMessage { session: SessionKey(3), stream, message: ControlMessage::PublishDone(_) } => {
+            Event::RequestTimeout { session: SessionKey(3), stream }
+        }
+        Event::OwnRequestMessage { session: SessionKey(3), request, message: ControlMessage::PublishDone(_) } => {
+            Event::UpstreamTimeout { session: SessionKey(3), request }
+        }
+        other => other,
+    }
 }
 
 /// Whether an event is a PUBLISH that can meet a track that waits for a
@@ -543,6 +582,7 @@ fn the_two_cores_answer_random_events_alike() {
     let (runs, length) = (setting("XMOQ_FUZZ_RUNS", 20_000), setting("XMOQ_FUZZ_LEN", 80));
     let world = World::from_env();
     let touch = std::env::var("XMOQ_FUZZ_TOUCH").unwrap_or_else(|_| "subgroups".to_string());
+    let steady = std::env::var_os("XMOQ_FUZZ_STEADY").is_some();
     let mut events = 0u64;
     let (mut touching, mut differing, mut differing_before_touching) = (0u64, 0u64, 0u64);
     let (mut opened_downstream, mut objects_sent, mut with_an_object) = (0u64, 0u64, 0u64);
@@ -589,8 +629,21 @@ fn the_two_cores_answer_random_events_alike() {
         }
         let (mut opened, mut touched, mut differed) = (Vec::new(), false, false);
         let objects_before = objects_sent;
-        for _ in 0..length {
+        let mut waits: Vec<((SessionKey, u64), u64)> = Vec::new();
+        for index in 0..length {
             let event = random_event(&mut rng, &mut peers, world);
+            // A timer that runs out is one the relay started: the last one
+            // for the alias, or, every fourth event, the first, which a
+            // later wait under the alias must not be ended by.
+            let event = match event {
+                Event::DrainTimeout { session, track_alias, .. } => {
+                    let started = waits.iter().filter(|(of, _)| *of == (session, track_alias)).map(|(_, wait)| *wait);
+                    let wait = if index % 4 == 0 { started.min() } else { started.max() };
+                    Event::DrainTimeout { session, track_alias, wait: wait.unwrap_or(0) }
+                }
+                other => other,
+            };
+            let event = if steady { without_a_publish_done_of_session_3(event) } else { event };
             let touches = match touch.as_str() {
                 "subgroups" => touches_subgroup_selection(&event, &mut opened),
                 "publishers" => touches_the_publishers(&event, &mut published),
@@ -614,11 +667,21 @@ fn the_two_cores_answer_random_events_alike() {
             }
             let before = differences();
             let actions = relay.handle(event);
+            for action in &actions {
+                if let Action::StartDrainTimer { session, track_alias, wait } = action {
+                    waits.push(((*session, *track_alias), *wait));
+                }
+            }
             if differences() != before && !differed {
                 differed = true;
                 differing += 1;
                 // The event itself may be the one that touches.
-                differing_before_touching += u64::from(!touched && !touches);
+                if !touched && !touches {
+                    differing_before_touching += 1;
+                    // The `CORE_MISMATCH` line printed just above is the
+                    // difference; this says which sequence it is in.
+                    println!("FUZZ_BEFORE_TOUCHING seed={seed} event_index={index}");
+                }
             }
             touched |= touches;
             for action in &actions {

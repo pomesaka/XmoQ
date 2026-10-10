@@ -797,12 +797,14 @@ impl<C: Connection> Hub<C> {
             Action::StartDrainTimer {
                 session,
                 track_alias,
+                wait,
             } => (
                 session,
                 self.config.drain_timeout,
                 Event::DrainTimeout {
                     session,
                     track_alias,
+                    wait,
                 },
             ),
             Action::StartEarlyTimer { session, stream } => (
@@ -1336,6 +1338,7 @@ fn describe(action: &Action) -> Option<String> {
         Action::StartDrainTimer {
             session,
             track_alias,
+            ..
         } => format!(
             "DRAIN_TIMER session={} track_alias={track_alias}",
             session.0

@@ -5,7 +5,9 @@
     python3 spikes/relay-core-diff/compare.py --same <revision>
 
 Add `--world v1|distinct|full|split|one-publisher|split-one|shared` to either
-for what the random events are made of; `fuzz.rs` describes them. The default
+for what the random events are made of; `fuzz.rs` describes them.
+`split-steady` and `shared-steady` are `split-one` and `shared` in which the
+publisher of the second half never says PUBLISH_DONE. The default
 is `v1`. `--touch subgroups|publishers|republish|waiting-or-draining` says which events `--touching` takes
 for the ones a change is about; the default is `subgroups`.
 
@@ -78,7 +80,11 @@ were not counted.
 Nothing outside `spikes/relay-core-diff/.work` is written.
 
 Both versions have to share `events.rs`: the `Event` and `Action` types are
-those of <after>. A <before> whose events differ does not compile here.
+those of <after>. A <before> whose events differ does not compile here, with
+one exception: a <before> from the time when the timer of a drain had no
+number (`wait`) is patched to ignore the number of the event and to give
+every timer the number 0. The numbers are left out of the comparison, and
+the random events answer a timer with a number the new core gave.
 """
 import collections, os, pathlib, re, shutil, subprocess, sys
 
@@ -104,7 +110,9 @@ SPIKES = [
 
 
 TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining")
-WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared")
+WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared", "split-steady", "shared-steady")
+# Worlds of `fuzz.rs` in which, on top, session 3 never says PUBLISH_DONE.
+STEADY = {"split-steady": "split-one", "shared-steady": "shared"}
 
 
 def jj(*args):
@@ -144,6 +152,11 @@ def add_old_core(before):
     lib = once(lib, "pub use events::{", "pub use crate::events::{", "pub use events::{")
     # `Action::target` exists once for the shared type, in the new core.
     lib = lib.replace("fn target(&self)", "fn old_target(&self)").replace("action.target()", "action.old_target()")
+    if "next_drain_wait" not in lib:
+        lib, event = re.subn(r"(Event::DrainTimeout \{\s+session,\s+track_alias,)(\s+\} =>)", r"\1 ..\2", lib)
+        lib, action = re.subn(r"(Action::StartDrainTimer \{\s+session,\s+track_alias,)(\s+\}\))", r"\1 wait: 0,\2", lib)
+        if (event, action) != (1, 1):
+            sys.exit(f"cannot patch: the old core's drain timer (event {event}, action {action})")
     allow = "#![allow(dead_code, unused_imports, clippy::all, clippy::pedantic, missing_docs)]\n"
     (old / "mod.rs").write_text(allow + lib)
     routing = jj("file", "show", "-r", before, f"{CORE}/routing.rs")
@@ -282,6 +295,8 @@ impl OutNames {
 
     /// The text with every stream to a subscriber under its name.
     fn rename(&self, text: &str) -> String {
+        // The number of a drain timer: an old core that has none says 0.
+        let text = &without_the_number_after(text, "wait: ");
         // To show that the names are needed: with the numbers as they are,
         // the comparison of the world `split` has to find differences.
         if std::env::var_os("XMOQ_DIFF_RAW_NUMBERS").is_some() {
@@ -334,9 +349,14 @@ impl OutNames {
 /// `OutNames::alias_names`); the streams are told apart by their names.
 #[allow(clippy::all, clippy::pedantic)]
 fn without_aliases(line: &str) -> String {
+    without_the_number_after(line, "track_alias: ")
+}
+
+#[allow(clippy::all, clippy::pedantic)]
+fn without_the_number_after(line: &str, field: &str) -> String {
     let (mut out, mut rest) = (String::new(), line);
-    while let Some(at) = rest.find("track_alias: ") {
-        let digits = at + "track_alias: ".len();
+    while let Some(at) = rest.find(field) {
+        let digits = at + field.len();
         let end = rest[digits..].find(|c: char| !c.is_ascii_digit()).map_or(rest.len(), |found| digits + found);
         out.push_str(&rest[..digits]);
         out.push('_');
@@ -590,6 +610,10 @@ def main():
         del sys.argv[at:at + 2]
     world = os.environ.get("XMOQ_FUZZ_WORLD", "v1")
     print(f"world: {world}")
+    if world in STEADY:
+        world = STEADY[world]
+        os.environ["XMOQ_FUZZ_WORLD"] = world
+        os.environ["XMOQ_FUZZ_STEADY"] = "1"
     # The sessions of the half of the world the change is kept out of. In
     # `shared`, session 4 is one of them for one of its subscriptions only,
     # which `fuzz.rs` names.

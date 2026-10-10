@@ -548,7 +548,7 @@ impl Relay {
             asks.retain(|ask| *ask != own.ask);
         }
         let (_, track_alias) = accepted.session_and_alias();
-        let Ok(waiters) = self
+        let Ok(added) = self
             .tracks
             .add_source(&own.track, accepted, properties, largest)
         else {
@@ -560,13 +560,18 @@ impl Relay {
             // same session is the other reason `add_source` has, and does
             // not get here: a publisher that becomes a source with PUBLISH
             // has had what was asked of it cancelled.
+            //
+            // The session has given the alias to this subscription all the
+            // same, so a source that drained under it is over.
+            self.end_sources_under(publisher, track_alias, None, actions);
             self.cancel_own_request(publisher, request, actions);
             if let Some(state) = self.sessions.get_mut(&publisher) {
                 state.drop_early_streams(publisher, track_alias, actions);
             }
             return;
         };
-        for waiter in &waiters {
+        self.alias_was_taken_over(&own.track, accepted, added.replaced, actions);
+        for waiter in &added.waiters {
             self.establish(&own.track, waiter, actions);
         }
         // The publisher may have opened streams before its SUBSCRIBE_OK was
