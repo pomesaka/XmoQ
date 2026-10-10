@@ -134,6 +134,10 @@ export interface Session {
 	 * The peer opened a stream, and nothing of it was reported yet. Without
 	 * this the session does not know a stream that has sent no byte, and
 	 * `peerStreamTimedOut` does nothing for a stream it does not know.
+	 *
+	 * Once for a stream, before any of its bytes and before its end. Called
+	 * for a stream that has ended, it leaves an entry that nothing removes
+	 * before the session ends.
 	 */
 	peerStreamOpened(kind: PeerStreamKind, peerStream: number): void;
 	/**

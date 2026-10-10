@@ -828,7 +828,11 @@ export async function connectOver(
 			const stopped =
 				!resetHere() &&
 				(transport.isStreamError(error) || transport.isStopWithoutCode(error));
-			const closedHere = resetHere() && transport.isStreamError(error);
+			// Either form: the peer's stop can have come first and be what the
+			// write failed with, when `reset()` was called before this ran.
+			const closedHere =
+				resetHere() &&
+				(transport.isStreamError(error) || transport.isStopWithoutCode(error));
 			if (!stopped && !closedHere && !(error instanceof InactiveError)) {
 				throw error;
 			}
