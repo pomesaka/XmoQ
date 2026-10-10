@@ -51,6 +51,10 @@ struct SubscribedTrack {
     /// The Stream Count of the `PUBLISH_DONE` that ended the subscription. While
     /// set, the subscription is over and its last Objects are still let through.
     draining: Option<u64>,
+    /// The caller stopped waiting for the draining subscription while an
+    /// offer had its alias ([`SubscribedAliases::offer`]). It is over as soon
+    /// as it has the alias back.
+    wait_is_over: bool,
 }
 
 /// The tracks this endpoint subscribed to, by the Track Alias the publisher chose.
@@ -60,6 +64,11 @@ pub(crate) struct SubscribedAliases {
     retired: VecDeque<u64>,
     /// `(alias, data streams ended)` for aliases no subscription holds yet.
     early_closed: VecDeque<(u64, u64)>,
+    /// Draining subscriptions whose alias a subscription took that is offered
+    /// and not accepted yet ([`Self::offer`]), by that alias. One is here
+    /// only while `tracks` has the offer under the same alias, so there are
+    /// never more of them than of those.
+    set_aside: HashMap<u64, SubscribedTrack>,
 }
 
 impl SubscribedAliases {
@@ -89,8 +98,90 @@ impl SubscribedAliases {
                 full_track_name,
                 closed_streams,
                 draining: None,
+                wait_is_over: false,
             },
         );
+    }
+
+    /// Records under `alias` a subscription the peer offered and this endpoint
+    /// has not answered: a PUBLISH, whose Objects may come "possibly before
+    /// `PUBLISH_OK`" (§10.10), so that the alias has to mean the track at
+    /// once. [`Self::accept_offer`] or [`Self::refuse_offer`] follows.
+    ///
+    /// WHY a draining subscription that had the alias is set aside and not
+    /// dropped: the offer may be refused, and "a subscription that was never
+    /// established cannot end another one". Without this the refusal would
+    /// take the alias with it, and the wait for the streams the draining
+    /// subscription counted would be over without a word.
+    pub(crate) fn offer(&mut self, alias: u64, full_track_name: FullTrackName) {
+        let draining = self
+            .tracks
+            .get(&alias)
+            .is_some_and(|track| track.draining.is_some());
+        let set_aside = if draining {
+            self.tracks.remove(&alias)
+        } else {
+            None
+        };
+        self.establish(alias, full_track_name);
+        if let Some(track) = set_aside {
+            self.set_aside.insert(alias, track);
+        }
+    }
+
+    /// The offer under `alias` was accepted: the alias is the new
+    /// subscription's, and a draining one that had it is over, as when
+    /// [`Self::establish`] reuses an alias.
+    pub(crate) fn accept_offer(&mut self, alias: u64) {
+        self.set_aside.remove(&alias);
+    }
+
+    /// The offer under `alias` was refused. A draining subscription that had
+    /// the alias has it back and goes on draining, unless the caller stopped
+    /// waiting for it meanwhile. Without one, the alias is remembered as
+    /// unwanted.
+    ///
+    /// The data streams that ended under the alias while the offer had it
+    /// are counted for the draining subscription. WHY: a stream carries the
+    /// alias and nothing else that says which of the two it was for. WHY NOT
+    /// leave them out: a late stream of the draining subscription that ended
+    /// meanwhile would then never be counted, and the wait could only end
+    /// by its time. Counting one of the offer's for it ends the wait early
+    /// instead; neither is right in every case.
+    pub(crate) fn refuse_offer(&mut self, alias: u64) {
+        let Some(mut draining) = self.set_aside.remove(&alias) else {
+            self.retire(alias);
+            return;
+        };
+        let meanwhile = self
+            .tracks
+            .remove(&alias)
+            .map_or(0, |offered| offered.closed_streams);
+        draining.closed_streams = draining.closed_streams.saturating_add(meanwhile);
+        let wait_is_over = draining.wait_is_over;
+        self.tracks.insert(alias, draining);
+        if wait_is_over {
+            self.retire(alias);
+        } else {
+            self.retire_if_drained(alias);
+        }
+    }
+
+    /// The publisher ended the offer under `alias` itself, with a
+    /// `PUBLISH_DONE` that counted `stream_count` data streams, before it had
+    /// an answer (§5.1: "The publisher terminates a subscription in the
+    /// Pending (Publisher) or Established states by sending `PUBLISH_DONE`").
+    ///
+    /// WHY as a refusal where a draining subscription was set aside: the
+    /// offer was never accepted, so it ends nothing but itself, and the
+    /// alias goes back. Otherwise the alias drains for the offer, whose
+    /// Objects may have been sent ahead.
+    pub(crate) fn offer_withdrawn(&mut self, alias: u64, stream_count: u64) {
+        if self.set_aside.contains_key(&alias) {
+            self.refuse_offer(alias);
+        } else {
+            self.drain(alias, stream_count);
+        }
     }
 
     /// `PUBLISH_DONE` arrived: the alias goes on until `stream_count` data
@@ -125,6 +216,12 @@ impl SubscribedAliases {
     /// The caller stopped waiting for a draining alias. Nothing happens to an
     /// alias that is not draining.
     pub(crate) fn drain_timeout(&mut self, alias: u64) {
+        // The wait was for a subscription that an offer keeps from its
+        // alias: remembered, for when the alias is back.
+        if let Some(set_aside) = self.set_aside.get_mut(&alias) {
+            set_aside.wait_is_over = true;
+            return;
+        }
         let draining = self
             .tracks
             .get(&alias)
@@ -147,6 +244,7 @@ impl SubscribedAliases {
     pub(crate) fn retire(&mut self, alias: u64) {
         self.take_early_closed(alias);
         self.tracks.remove(&alias);
+        self.set_aside.remove(&alias);
         self.retired.retain(|retired| *retired != alias);
         self.retired.push_back(alias);
         if self.retired.len() > RETIRED_ALIAS_LIMIT {

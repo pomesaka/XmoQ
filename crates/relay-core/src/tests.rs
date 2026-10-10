@@ -1684,3 +1684,46 @@ fn a_drain_timer_of_a_track_that_is_gone_does_not_end_the_next_one_of_its_name()
     });
     assert_eq!(relay.counts().tracks, 1);
 }
+
+#[test]
+fn a_refused_publish_under_the_alias_of_a_draining_source_does_not_end_its_wait() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    data_stream_opened(&mut relay, 7);
+    // The publisher counted two streams; one has come and is open.
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 2),
+    });
+    // It publishes the track anew under the same alias, and is refused.
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: publish(2, b"a"),
+    });
+    // The first subscription still waits for its second stream: the end of
+    // the first one finishes nothing but Alice's stream for it.
+    assert_eq!(
+        data_stream_closed(&mut relay, 7, StreamEnd::Fin),
+        [Action::FinishDataStream {
+            out_stream: OutStreamKey(0),
+        }]
+    );
+    assert_eq!(relay.counts().tracks, 1);
+    // And the timer for the wait still ends it: a reset, since not all that
+    // was counted has come.
+    let mut expected = vec![Action::ResetRequest {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        code: 0x1,
+    }];
+    expected.extend(done_actions(ALICE, 0x2, 1));
+    assert_eq!(
+        relay.step(Event::DrainTimeout {
+            session: PUBLISHER,
+            track_alias: UPSTREAM_ALIAS,
+        }),
+        expected
+    );
+}

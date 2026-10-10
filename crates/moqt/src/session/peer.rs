@@ -314,10 +314,10 @@ impl Session {
                 {
                     return refused(request_error_code::UNSUPPORTED_EXTENSION);
                 }
-                // Established before the answer: §10.10 lets the publisher send
-                // Objects "possibly before PUBLISH_OK".
+                // The alias means the track before the answer: §10.10 lets the
+                // publisher send Objects "possibly before PUBLISH_OK".
                 self.subscribed_aliases
-                    .establish(message.track_alias, message.full_track_name.clone());
+                    .offer(message.track_alias, message.full_track_name.clone());
                 let state = PeerRequestState::Publish {
                     full_track_name: message.full_track_name.clone(),
                     track_alias: message.track_alias,
@@ -415,10 +415,15 @@ impl Session {
         if let Some(own) = gives_way {
             self.cancel(own);
         }
-        if let Some(PeerRequestState::Publish { established, .. }) =
-            self.peer_request_mut(request)?
+        if let Some(PeerRequestState::Publish {
+            established,
+            track_alias,
+            ..
+        }) = self.peer_request_mut(request)?
         {
             *established = true;
+            let track_alias = *track_alias;
+            self.subscribed_aliases.accept_offer(track_alias);
         }
         let ok = ControlMessage::RequestOk(RequestOk {
             parameters,
@@ -525,15 +530,23 @@ impl Session {
         match message {
             ControlMessage::RequestUpdate(_) => Ok(self.refuse_update(request.id)),
             ControlMessage::PublishDone(done) => {
-                let Some(PeerRequestState::Publish { track_alias, .. }) =
-                    self.peer.live.get(&request.id)
+                let Some(PeerRequestState::Publish {
+                    track_alias,
+                    established,
+                    ..
+                }) = self.peer.live.get(&request.id)
                 else {
                     return Err(not_allowed.into());
                 };
-                let track_alias = *track_alias;
+                let (track_alias, established) = (*track_alias, *established);
                 self.peer.live.remove(&request.id);
-                self.subscribed_aliases
-                    .drain(track_alias, done.stream_count);
+                if established {
+                    self.subscribed_aliases
+                        .drain(track_alias, done.stream_count);
+                } else {
+                    self.subscribed_aliases
+                        .offer_withdrawn(track_alias, done.stream_count);
+                }
                 Ok(PeerRequestEvent::PublishDone { track_alias, done })
             }
             _ => Err(not_allowed.into()),
@@ -697,8 +710,20 @@ impl Session {
             }
             // The subscription is over on this side, so late Objects under the
             // alias are unwanted (§11.1).
-            PeerRequestState::Publish { track_alias, .. } => {
+            PeerRequestState::Publish {
+                track_alias,
+                established: true,
+                ..
+            } => {
                 self.subscribed_aliases.retire(*track_alias);
+            }
+            // The PUBLISH was never accepted, so it ends nothing but itself.
+            PeerRequestState::Publish {
+                track_alias,
+                established: false,
+                ..
+            } => {
+                self.subscribed_aliases.refuse_offer(*track_alias);
             }
             PeerRequestState::Subscribe { .. } | PeerRequestState::PublishNamespace { .. } => {}
         }
@@ -1249,6 +1274,288 @@ mod tests {
             })
         );
         assert_eq!(session.subscribed_alias(7), SubscribedAlias::Retired);
+    }
+
+    #[test]
+    fn a_publish_that_reuses_the_alias_of_a_draining_subscription() {
+        #[derive(Debug, Clone, Copy)]
+        enum Answer {
+            Accepted,
+            Refused,
+            /// Refused, after a data stream under the alias ended.
+            RefusedAfterAStream,
+        }
+        #[derive(Debug, PartialEq)]
+        enum Alias {
+            Established,
+            Draining,
+            Retired,
+        }
+        let alias_of = |session: &Session| match session.subscribed_alias(7) {
+            SubscribedAlias::Established(_) => Alias::Established,
+            SubscribedAlias::Draining(_) => Alias::Draining,
+            SubscribedAlias::Retired => Alias::Retired,
+            SubscribedAlias::Unknown => panic!("the alias is known in every case"),
+        };
+        // The first PUBLISH, under alias 7, ended with a PUBLISH_DONE that
+        // counted 2 data streams, of which none has ended. The publisher
+        // publishes the track anew under the same alias.
+        // (what the second PUBLISH gets; the alias right after; the alias
+        //  after one more data stream under it ended; and after a second)
+        let cases = [
+            // The alias is the new subscription's, and the old one is over
+            // (the same as for a SUBSCRIBE_OK that reuses the alias).
+            (
+                Answer::Accepted,
+                Alias::Established,
+                Alias::Established,
+                Alias::Established,
+            ),
+            // A subscription that was never established ends nothing: the
+            // first one goes on draining, for the two streams it counted.
+            (
+                Answer::Refused,
+                Alias::Draining,
+                Alias::Draining,
+                Alias::Retired,
+            ),
+            // The stream that ended before the refusal was one of the two.
+            (
+                Answer::RefusedAfterAStream,
+                Alias::Draining,
+                Alias::Retired,
+                Alias::Retired,
+            ),
+        ];
+        for (answer, at_once, after_one, after_two) in cases {
+            let mut session = server();
+            let first = opened(&mut session, publish(0, b"a", 7));
+            session.accept_publish(first, vec![]).unwrap();
+            session
+                .on_peer_request_message(first, ControlMessage::PublishDone(done(2)))
+                .unwrap();
+            assert_eq!(alias_of(&session), Alias::Draining, "{answer:?}");
+
+            let second = opened(&mut session, publish(2, b"a", 7));
+            // Objects of the second may come before its answer (§10.10).
+            assert_eq!(alias_of(&session), Alias::Established, "{answer:?}");
+            match answer {
+                Answer::Accepted => {
+                    session.accept_publish(second, vec![]).unwrap();
+                }
+                Answer::Refused => {
+                    session
+                        .reject(
+                            second,
+                            request_error_code::EXCESSIVE_LOAD,
+                            0,
+                            ReasonPhrase::default(),
+                        )
+                        .unwrap();
+                }
+                Answer::RefusedAfterAStream => {
+                    session.on_data_stream_closed(7);
+                    session
+                        .reject(
+                            second,
+                            request_error_code::EXCESSIVE_LOAD,
+                            0,
+                            ReasonPhrase::default(),
+                        )
+                        .unwrap();
+                }
+            }
+            assert_eq!(alias_of(&session), at_once, "{answer:?}");
+            session.on_data_stream_closed(7);
+            assert_eq!(alias_of(&session), after_one, "{answer:?}");
+            session.on_data_stream_closed(7);
+            assert_eq!(alias_of(&session), after_two, "{answer:?}");
+        }
+    }
+
+    #[test]
+    fn a_draining_subscription_whose_alias_a_refused_publish_used_still_times_out() {
+        let mut session = server();
+        let first = opened(&mut session, publish(0, b"a", 7));
+        session.accept_publish(first, vec![]).unwrap();
+        session
+            .on_peer_request_message(first, ControlMessage::PublishDone(done(2)))
+            .unwrap();
+        let second = opened(&mut session, publish(2, b"a", 7));
+        session
+            .reject(
+                second,
+                request_error_code::EXCESSIVE_LOAD,
+                0,
+                ReasonPhrase::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            session.subscribed_alias(7),
+            SubscribedAlias::Draining(_)
+        ));
+        // The caller's wait for the two streams runs out.
+        session.on_drain_timeout(7);
+        assert_eq!(session.subscribed_alias(7), SubscribedAlias::Retired);
+    }
+
+    #[test]
+    fn an_offer_that_is_not_accepted_leaves_the_draining_subscription_its_alias() {
+        #[derive(Debug, Clone, Copy)]
+        enum Step {
+            /// A data stream under the alias ends.
+            StreamEnds,
+            /// The caller's wait for the draining subscription runs out.
+            WaitRunsOut,
+            /// The PUBLISH is refused by the caller.
+            Refused,
+            /// Its publisher ends it with `PUBLISH_DONE`, which counts 5.
+            PublishDone,
+            /// Its stream is closed before an answer.
+            StreamClosed,
+            /// A `REQUEST_UPDATE` arrives before an answer, which ends it.
+            Updated,
+        }
+        #[derive(Debug, PartialEq)]
+        enum Alias {
+            Draining,
+            Retired,
+        }
+        // A PUBLISH under alias 7 was accepted and ended with a PUBLISH_DONE
+        // that counted `counted` data streams, none of which has ended. A
+        // second PUBLISH comes under the same alias and is not accepted.
+        // (streams the first counted; what happens after the second came;
+        //  the alias then; the alias after one more data stream ended)
+        let cases: [(u64, &[Step], Alias, Alias); 8] = [
+            (2, &[Step::Refused], Alias::Draining, Alias::Draining),
+            // The stream that ended while the second had the alias is
+            // counted for the first, which has its one stream then.
+            (
+                1,
+                &[Step::StreamEnds, Step::Refused],
+                Alias::Retired,
+                Alias::Retired,
+            ),
+            // The wait ran out while the second had the alias: the first is
+            // over as soon as the alias is back.
+            (
+                2,
+                &[Step::WaitRunsOut, Step::Refused],
+                Alias::Retired,
+                Alias::Retired,
+            ),
+            // The second ends itself before it has an answer (§5.1 lets a
+            // publisher do so). It was never accepted, so the first goes on,
+            // with its own count of 2 and not the second's of 5.
+            (2, &[Step::PublishDone], Alias::Draining, Alias::Draining),
+            (1, &[Step::PublishDone], Alias::Draining, Alias::Retired),
+            (
+                2,
+                &[Step::PublishDone, Step::WaitRunsOut],
+                Alias::Retired,
+                Alias::Retired,
+            ),
+            (2, &[Step::StreamClosed], Alias::Draining, Alias::Draining),
+            (2, &[Step::Updated], Alias::Draining, Alias::Draining),
+        ];
+        for (counted, steps, then, after_a_stream) in cases {
+            let mut session = server();
+            let first = opened(&mut session, publish(0, b"a", 7));
+            session.accept_publish(first, vec![]).unwrap();
+            session
+                .on_peer_request_message(first, ControlMessage::PublishDone(done(counted)))
+                .unwrap();
+            let second = opened(&mut session, publish(2, b"a", 7));
+            for step in steps {
+                match step {
+                    Step::StreamEnds => session.on_data_stream_closed(7),
+                    Step::WaitRunsOut => session.on_drain_timeout(7),
+                    Step::Refused => {
+                        let code = request_error_code::EXCESSIVE_LOAD;
+                        session
+                            .reject(second, code, 0, ReasonPhrase::default())
+                            .unwrap();
+                    }
+                    Step::PublishDone => {
+                        session
+                            .on_peer_request_message(second, ControlMessage::PublishDone(done(5)))
+                            .unwrap();
+                    }
+                    Step::StreamClosed => session.on_peer_request_closed(second),
+                    Step::Updated => {
+                        let update = ControlMessage::RequestUpdate(RequestUpdate {
+                            request_id: 4,
+                            parameters: vec![],
+                        });
+                        session.on_peer_request_message(second, update).unwrap();
+                    }
+                }
+            }
+            let alias_of = |session: &Session| match session.subscribed_alias(7) {
+                SubscribedAlias::Draining(_) => Alias::Draining,
+                SubscribedAlias::Retired => Alias::Retired,
+                other => panic!("{counted} {steps:?}: {other:?}"),
+            };
+            assert_eq!(alias_of(&session), then, "{counted} {steps:?}");
+            session.on_data_stream_closed(7);
+            assert_eq!(alias_of(&session), after_a_stream, "{counted} {steps:?}");
+        }
+    }
+
+    #[test]
+    fn a_publish_beyond_the_limit_leaves_the_draining_subscription_its_alias() {
+        // The expectations below are spelled out for a limit of 256.
+        assert_eq!(MAX_PEER_REQUESTS, 256);
+        let mut session = server();
+        let first = opened(&mut session, publish(0, b"a", 7));
+        session.accept_publish(first, vec![]).unwrap();
+        session
+            .on_peer_request_message(first, ControlMessage::PublishDone(done(2)))
+            .unwrap();
+        for index in 1..=256 {
+            opened(&mut session, publish_namespace(index * 2));
+        }
+        // The session refuses the 257th request itself, and the alias the
+        // refused PUBLISH named is the draining subscription's again.
+        assert_eq!(
+            session.on_peer_request_opened(publish(514, b"a", 7)),
+            Ok(refusal(0x9))
+        );
+        assert!(matches!(
+            session.subscribed_alias(7),
+            SubscribedAlias::Draining(_)
+        ));
+        session.on_data_stream_closed(7);
+        session.on_data_stream_closed(7);
+        assert_eq!(session.subscribed_alias(7), SubscribedAlias::Retired);
+    }
+
+    #[test]
+    fn a_refused_publish_leaves_a_draining_subscribe_of_this_endpoint_its_alias() {
+        let mut session = server();
+        // This endpoint subscribed to "a"; the publisher chose alias 7 and
+        // ended the subscription with a PUBLISH_DONE that counted 2 streams.
+        let (own, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        let ok = ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: 7,
+            parameters: vec![],
+            track_properties: vec![],
+        });
+        session.on_request_message(own, ok).unwrap();
+        session
+            .on_request_message(own, ControlMessage::PublishDone(done(2)))
+            .unwrap();
+        // A PUBLISH of the peer for another track uses the alias, and is
+        // refused.
+        let published = opened(&mut session, publish(0, b"b", 7));
+        let code = request_error_code::UNINTERESTED;
+        session
+            .reject(published, code, 0, ReasonPhrase::default())
+            .unwrap();
+        assert_eq!(
+            session.subscribed_alias(7),
+            SubscribedAlias::Draining(&track(b"a"))
+        );
     }
 
     #[test]
