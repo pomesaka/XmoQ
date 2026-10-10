@@ -16,6 +16,7 @@ Two ways of capturing were used.
 
 - **Relay log.** The relay prints a hex dump for each control message, such as `Subscribe (34 bytes): 03 00 1f ...`. These are the bytes on the wire, not a re-encoding: for a received message the relay prints the slice of its receive buffer that the message occupied, and for a sent message it prints the buffer it writes to the stream next. Checked on 2026-10-10 in `libs/moqtail-rs/src/transport/control_stream_handler.rs` of `moqtail/moqtail` at tag `relay@0.15.0` (`send`, lines 79–95, and `next_message`, lines 165–186).
 - **Client trace.** `xmoq-moqt-client --trace` prints the bytes of every chunk as it comes off a stream.
+- **Page trace.** The own page of `interop/` prints the bytes of every chunk as it comes off a stream, with `--verbose` (capture H, on 2026-10-11).
 
 | File | Sender | Captured from | How |
 |---|---|---|---|
@@ -36,6 +37,7 @@ Two ways of capturing were used.
 | `subscribe-ok-largest-object-moqtail-relay.hex` | relay, answering a SUBSCRIBE for a track that already had Objects | client trace | capture G |
 | `subgroup-stream-object-id-gaps-from-moqtail-rs.hex` | relay, forwarding Objects published by moqtail's own test client 0.15.0 | client trace | capture G |
 | `subgroup-stream-joined-mid-group-from-moqtail-rs.hex` | same | client trace | capture G |
+| `subgroup-stream-object-properties-from-own-ts.hex` | relay, forwarding an Object with two Object Properties published by XmoQ's own browser client (`@xmoq/moqt` at `a2a3884a`) in Chromium 156 | page trace | capture H |
 
 Captures A to E use `spikes/moqtail/browser/run.mjs` from the repository root:
 
@@ -71,6 +73,14 @@ target/debug/xmoq-moqt-client --mode subscribe --objects 7 --url https://127.0.0
   --cert-sha256 <sha256> --namespace xmoq/phase0 --track object --trace
 ```
 
+Capture H, from `interop/`; the file is the line `bytes received peer-uni-1` of the subscriber:
+
+```sh
+bun run.ts --publisher own-browser --subscriber own-browser --relay moqtail --object-properties --verbose  # H
+```
+
+**The file of capture H is moqtail's encoding of a value an own client chose.** No moqtail client in this repository sends an Object Property with content, so the two properties came from the own browser client. The relay does not pass the bytes through: it parses each Object into a list of properties and serializes it again with moqtail's encoder, the type of each property as a delta from the one before. Read on 2026-10-11 at `dd8623d` in `apps/relay/src/server/subscription.rs` (`object.try_into_subgroup()`, then `sub_object.serialize(previous_object_id, has_properties)`) and `libs/moqtail-rs/src/model/common/pair.rs` (`serialize_delta`). So the file shows that moqtail's parser took what the own encoder wrote and that moqtail's encoder writes the same bytes for it; it does not show a property moqtail made up itself.
+
 Some values depend on the run and will differ when a capture is repeated: the Track Alias moqtail-ts picks at random (779698128977928661 in `publish-moqtail-ts`), the timestamp and nonce in the two 53-byte payloads, the 8 random payload bytes of capture G, and the Group that a subscriber happens to join in capture G. A repeated capture is a new fixture, not a check of the old one.
 
 The subgroup streams are what the relay wrote, not what the publisher wrote: the relay re-serializes the Subgroup Header with the subscriber's Track Alias. The streams of captures D and E had not been closed when they were captured, so those files end after the first Object. The files of capture G hold what had arrived when the subscriber left; whether a FIN followed was not observed.
@@ -96,6 +106,7 @@ The subgroup streams are what the relay wrote, not what the publisher wrote: the
 | `subgroup-stream-from-moqtail-rs` | SUBGROUP_HEADER type 0x5D (PROPERTIES, explicit Subgroup ID, END_OF_GROUP, FIRST_OBJECT), Track Alias 0, Group ID 0, Subgroup ID 0, Publisher Priority 0. One Object: Object ID 0, Properties Length 0, payload `xmoq-phase0 2026-10-10T01:19:03.764Z bb30f5dd09c8981f` |
 | `subgroup-stream-object-id-gaps-from-moqtail-rs` | SUBGROUP_HEADER type 0x5D, Track Alias 0, Group ID 4, Subgroup ID 1, Publisher Priority 128. Three Objects with the payload `4d 3b c3 24 4c 84 57 2d`: Object ID 0 with no properties; Object ID 2 (Object ID Delta 1) and Object ID 4 (Object ID Delta 1), each with the property 0x3E (Prior Object ID Gap) = 1 |
 | `subgroup-stream-joined-mid-group-from-moqtail-rs` | SUBGROUP_HEADER type 0x5D, Track Alias 0, Group ID 3, Subgroup ID 1, Publisher Priority 128. One Object: Object ID 4 (Object ID Delta 4 as the first on the stream), property 0x3E = 1, payload `4d 3b c3 24 4c 84 57 2d`. Type 0x5D has FIRST_OBJECT set although Object ID 4 is not the first Object published in the Subgroup; see [the experiment record](../../docs/experiments/2026-10-10-own-rust-client-vs-moqtail.md) |
+| `subgroup-stream-object-properties-from-own-ts` | SUBGROUP_HEADER type 0x5D, Track Alias 0, Group ID 0, Subgroup ID 0, Publisher Priority 0. One Object: Object ID 0, Properties Length 29, two properties, payload `xmoq-phase0b 2026-10-10T15:06:02.523Z c5e55f133a0eddce` (54 bytes). Property 0x0D, an odd type: Delta Type 13, Length 18, the bytes `01 42 e0 1f ff e1 00 09 67 42 e0 1f 8c 8d 40 50 00 00`. Property 0x10, an even type: Delta Type 3, the integer 1760140800123456 in 8 bytes (`fe 06 40 d6 b7 25 62 40`). Neither type is a property draft 18 defines; they are the numbers draft-ietf-moq-loc-04 gives Video Config and Timestamp, and the values are made up |
 
 ## Encodings not checked against moqtail
 

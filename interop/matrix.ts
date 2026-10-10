@@ -82,6 +82,28 @@ function transfers(): Pairing[] {
 }
 
 /**
+ * An Object with Object Properties no relay knows, one of each form of a
+ * Key-Value-Pair. Draft 18 §2.5 has a relay forward them unchanged.
+ *
+ * WHY own-browser alone: it is the one client that sends properties and
+ * reports the ones it gets. The moqtail peers send an empty set.
+ */
+const OBJECT_PROPERTIES: Pairing[] = [
+	{
+		name: "own-browser to own-browser, an Object with Object Properties, then PUBLISH_DONE",
+		script: "run.ts",
+		args: [
+			"--publisher",
+			"own-browser",
+			"--subscriber",
+			"own-browser",
+			"--object-properties",
+			"--await-publish-done",
+		],
+	},
+];
+
+/**
  * One publisher and three subscribers: every subscriber has to get the Object
  * and then see PUBLISH_DONE. One row per own client as the subscribers.
  */
@@ -662,8 +684,8 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 	});
 	return [
 		...relays.flatMap((relay) =>
-			[...transfers(), ...ONE_TO_MANY, ...REFUSALS].map((pairing) =>
-				named(relay, pairing),
+			[...transfers(), ...OBJECT_PROPERTIES, ...ONE_TO_MANY, ...REFUSALS].map(
+				(pairing) => named(relay, pairing),
 			),
 		),
 		// "leaving: " lets `--only` pick these runs alone.

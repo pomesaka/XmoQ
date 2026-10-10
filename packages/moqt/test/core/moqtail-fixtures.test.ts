@@ -280,6 +280,35 @@ const SUBGROUP_FIXTURES: {
 			},
 		],
 	},
+	{
+		name: "Type 0x5d: two Object Properties the draft does not define, one of an odd type with a length and bytes, one of an even type with an 8-byte integer",
+		source:
+			"the moqtail relay 0.15.0, which parsed the Object an own-browser client sent and serialized it again",
+		file: "subgroup-stream-object-properties-from-own-ts",
+		header: {
+			trackAlias: 0n,
+			groupId: 0n,
+			subgroupId: { mode: "Explicit", value: 0n },
+			publisherPriority: 0,
+			properties: true,
+			endOfGroup: true,
+			firstObject: true,
+		},
+		objects: [
+			{
+				objectId: 0n,
+				properties: [
+					{
+						type: 0x0dn,
+						value: hex("01 42 e0 1f ff e1 00 09 67 42 e0 1f 8c 8d 40 50 00 00"),
+					},
+					{ type: 0x10n, value: 1760140800123456n },
+				],
+				status: "Normal",
+				payload: utf8("xmoq-phase0b 2026-10-10T15:06:02.523Z c5e55f133a0eddce"),
+			},
+		],
+	},
 ];
 
 // WHY: the tests below read the files listed in the two tables. A file added

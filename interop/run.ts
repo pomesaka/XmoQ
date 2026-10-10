@@ -20,7 +20,7 @@
 
 import { randomBytes } from "node:crypto";
 import { parseArgs } from "node:util";
-import { startPublisher, startSubscriber } from "./clients.ts";
+import { type Subscriber, startPublisher, startSubscriber } from "./clients.ts";
 import {
 	type Client,
 	DISCONNECT_TIMEOUT_MS,
@@ -33,6 +33,7 @@ import {
 	TRACK,
 	withTimeout,
 } from "./harness.ts";
+import type { PageProperty } from "./xmoq-page.ts";
 
 const { values: options } = parseArgs({
 	options: {
@@ -42,6 +43,9 @@ const { values: options } = parseArgs({
 		subscribers: { type: "string", default: "1" },
 		port: { type: "string", default: "44330" },
 		"await-publish-done": { type: "boolean", default: false },
+		// The Object carries Object Properties, and every subscriber has to
+		// get them as they were sent. Between two own-browser clients only.
+		"object-properties": { type: "boolean", default: false },
 		"subscribe-track": { type: "string", default: TRACK },
 		verbose: { type: "boolean", default: false },
 	},
@@ -69,6 +73,41 @@ interface RunResult {
 	browserVersion: string | null;
 }
 
+/**
+ * What the Object of `--object-properties` carries: one property of each
+ * form of a Key-Value-Pair (draft 18 §1.4.3), in ascending order of type,
+ * which is the order on the wire. The types are the ones draft-ietf-moq-loc-04
+ * §2.3 gives Video Config and Timestamp; neither is a property draft 18
+ * defines, so a relay has to pass them unchanged (§2.5: "MUST NOT be
+ * modified, MUST be forwarded"). The values are made up.
+ */
+const OBJECT_PROPERTIES: PageProperty[] = [
+	// Odd type: a length and bytes.
+	{ type: "13", bytesHex: "0142e01fffe100096742e01f8c8d40500000" },
+	// Even type: one variable-length integer, here one that takes 8 bytes.
+	{ type: "16", varint: "1760140800123456" },
+];
+
+/**
+ * Throws unless the subscriber has the Object's properties as they were
+ * sent. The messages tell apart what a relay can have done to them.
+ */
+async function expectProperties(
+	subscriber: Subscriber,
+	group: number,
+	sent: PageProperty[],
+): Promise<void> {
+	const received = await subscriber.properties(group);
+	if (JSON.stringify(received) === JSON.stringify(sent)) return;
+	const what =
+		received.length === 0
+			? "arrived without Object Properties: they were dropped on the way"
+			: "arrived with other Object Properties than were sent";
+	throw new Error(
+		`${subscriber.label}: the Object of Group ${group} ${what}; sent ${JSON.stringify(sent)}, received ${JSON.stringify(received)}`,
+	);
+}
+
 async function transferOneObject(
 	publisher: Client,
 	subscriber: Client,
@@ -87,6 +126,15 @@ async function transferOneObject(
 	});
 
 	const run = { context, payloadHex };
+	const withProperties = options["object-properties"];
+	if (
+		withProperties &&
+		(publisher !== "own-browser" || subscriber !== "own-browser")
+	) {
+		throw new Error(
+			`--object-properties needs own-browser on both sides, the one client that sends and reports them, not ${publisher} and ${subscriber}`,
+		);
+	}
 	const awaitsPublishDone = options["await-publish-done"];
 	if (awaitsPublishDone && !isOwnClient(subscriber)) {
 		throw new Error(
@@ -96,7 +144,11 @@ async function transferOneObject(
 
 	// The publisher offers the track first: the relay rejects a SUBSCRIBE for
 	// a track nobody has published.
-	const publishing = await startPublisher(publisher, run);
+	const publishing = await startPublisher(
+		publisher,
+		run,
+		withProperties ? { properties: OBJECT_PROPERTIES } : {},
+	);
 	// The subscribers are live before the Object is sent: the Largest Object
 	// filter does not replay what was published earlier.
 	const subscribing = [];
@@ -116,8 +168,25 @@ async function transferOneObject(
 	}
 	const group = await withTimeout(publishing.send(), "the publisher to send");
 	const received = await Promise.all(
-		subscribing.map((each) => each.object(group)),
+		subscribing.map(async (each) => {
+			try {
+				return await each.object(group);
+			} catch (error) {
+				if (!withProperties) throw error;
+				// The Object did not come. Whether the session is still open
+				// tells a stream that was dropped from a session that was closed.
+				const state = await each.state().catch((failed) => String(failed));
+				throw new Error(
+					`${each.label} did not get the Object with Object Properties (${error instanceof Error ? error.message : String(error)}); its state: ${state}`,
+				);
+			}
+		}),
 	);
+	if (withProperties) {
+		for (const each of subscribing) {
+			await expectProperties(each, group, OBJECT_PROPERTIES);
+		}
+	}
 	const receivedHex = received.find((hex) => hex !== payloadHex) ?? payloadHex;
 	let subscriptionEnd: string[] | null = null;
 	if (awaitsPublishDone) {

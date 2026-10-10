@@ -2,11 +2,23 @@
 // Each page assigns an implementation to `window.xmoq`, so the driver can swap
 // one client for another without knowing which library is behind it.
 
+/**
+ * One Object Property (draft 18 §11.2.1.2), in strings that survive
+ * `page.evaluate`. `type` is decimal. An even type has a variable-length
+ * integer as its value, in decimal; an odd type has bytes, in hexadecimal
+ * (§1.4.3).
+ */
+export type PageProperty =
+	| { type: string; varint: string }
+	| { type: string; bytesHex: string };
+
 /** The first Object a page received, in strings that survive `page.evaluate`. */
 export type PageReceivedObject = {
 	group: string;
 	object: string;
 	payloadHex: string;
+	/** Absent on the moqtail page, which does not report them. */
+	properties?: PageProperty[];
 };
 
 export type XmoqPage = {
@@ -39,6 +51,7 @@ export type OwnPageExtras = {
 		group: string,
 		payloadHex: string,
 		finish: boolean,
+		properties: PageProperty[],
 	): Promise<void>;
 	/**
 	 * Sends one Object like `sendObjectIn` with `finish`, and closes the
@@ -75,6 +88,16 @@ export type OwnPageExtras = {
 	 * twice.
 	 */
 	payloadsOfGroup(group: string): Promise<string>;
+	/**
+	 * The Object Properties of Object 0 of the Group once it arrived, in the
+	 * order they were on the wire, as a JSON array of `PageProperty`.
+	 */
+	propertiesOfGroup(group: string): Promise<string>;
+	/**
+	 * For the message of a run that failed: JSON of how the session ended, or
+	 * null while it is open, how many Objects were read, and how reading ended.
+	 */
+	state(): Promise<string>;
 	/** Cancels the subscription and keeps the session. */
 	cancelSubscription(): Promise<void>;
 	/** Resolves once the subscription has ended and its Objects were read; JSON of `SubscriptionReport`. */

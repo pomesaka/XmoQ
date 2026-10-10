@@ -807,6 +807,34 @@ pub(crate) mod tests {
                     ],
                 ),
             ),
+            // Two Object Properties the draft does not define: an odd type
+            // (a length and bytes) and an even one (an integer of 8 bytes).
+            (
+                "subgroup-stream-object-properties-from-own-ts",
+                (
+                    SubgroupHeader {
+                        subgroup_id: SubgroupId::Explicit(0),
+                        properties: true,
+                        end_of_group: true,
+                        first_object: true,
+                        ..plain_header()
+                    },
+                    vec![SubgroupObject {
+                        properties: vec![
+                            KeyValuePair::bytes(
+                                0x0d,
+                                vec![
+                                    0x01, 0x42, 0xe0, 0x1f, 0xff, 0xe1, 0x00, 0x09, 0x67, 0x42,
+                                    0xe0, 0x1f, 0x8c, 0x8d, 0x40, 0x50, 0x00, 0x00,
+                                ],
+                            )
+                            .unwrap(),
+                            KeyValuePair::varint(0x10, 1_760_140_800_123_456).unwrap(),
+                        ],
+                        ..normal(0, b"xmoq-phase0b 2026-10-10T15:06:02.523Z c5e55f133a0eddce")
+                    }],
+                ),
+            ),
             // A stream the relay opened for a subscriber that joined inside
             // Group 3: its first Object has ID 4, and FIRST_OBJECT is set all the
             // same.
