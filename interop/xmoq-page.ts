@@ -139,6 +139,8 @@ export type PageFetch =
 			start: [string, string];
 			/** Group and Object of the End Location: the last Object plus 1, or Object 0 for a whole Group. */
 			end: [string, string];
+			/** FILL_TIMEOUT in milliseconds (§10.2.5); left out of the FETCH when absent. */
+			fillTimeout?: string;
 	  }
 	| { type: "RelativeJoining" | "AbsoluteJoining"; joiningStart: string };
 

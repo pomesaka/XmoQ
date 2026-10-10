@@ -312,8 +312,16 @@ async function fetchRange(
 ): Promise<PageFetchReport> {
 	const session = connected();
 	const fetch = await session.fetch(
-		// The priority the page's SUBSCRIBE has.
-		{ range: fetchRangeOf(asked), parameters: { subscriberPriority: 128 } },
+		{
+			range: fetchRangeOf(asked),
+			parameters: {
+				// The priority the page's SUBSCRIBE has.
+				subscriberPriority: 128,
+				...(asked.type === "Standalone" && asked.fillTimeout !== undefined
+					? { fillTimeout: BigInt(asked.fillTimeout) }
+					: {}),
+			},
+		},
 		{ signal: AbortSignal.timeout(timeoutMs) },
 	);
 	console.log(`fetch sent: request_id=${fetch.requestId} type=${asked.type}`);

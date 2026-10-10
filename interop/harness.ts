@@ -645,6 +645,51 @@ export async function openConnectedPage(
 	return page;
 }
 
+/**
+ * moqtail's own test client 0.15.0 as a publisher: the one publisher here
+ * that answers a FETCH. It publishes the track as soon as it is connected
+ * and sends its Groups by itself, three Objects of 8 bytes each, 250 ms
+ * apart, every Object with the same payload; it takes no commands. It
+ * prints `Track published`, and for each Group `Opening stream for group G`
+ * and `Stream flushed for group G`; a `Sent object` line it prints for some
+ * Objects only. It closes its session two seconds after the last Group.
+ *
+ * WHY `groups` is the caller's: the run has to be over before the publisher
+ * is, and a FETCH is refused once the track is gone.
+ */
+export function spawnMoqtailTestPublisher(
+	context: RunContext,
+	label: string,
+	groups: number,
+): LoggedProcess {
+	const spawned = spawnLogged(
+		label,
+		join(moqtailRoot, ".tools", "bin", "client"),
+		[
+			"--command",
+			"publish",
+			// The client makes an https:// URL of it for WebTransport.
+			"--server",
+			context.relayUrl.replace(/^https:/, "moqt:"),
+			"--no-cert-validation",
+			"--namespace",
+			NAMESPACE,
+			"--track-name",
+			TRACK,
+			"--group-count",
+			String(groups),
+			"--interval",
+			"250",
+			"--payload-size",
+			"8",
+			"--objects-per-group",
+			"3",
+		],
+	);
+	defer(() => stopProcess(spawned, "SIGTERM"));
+	return spawned;
+}
+
 export function spawnRustClient(
 	context: RunContext,
 	label: string,

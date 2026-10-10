@@ -10,6 +10,7 @@ This is the one entry point for interop runs. `spikes/moqtail/browser/run.mjs` i
 |---|---|---|
 | Relay | `relay` 0.15.0 | `moqtail/moqtail` tag `relay@0.15.0`, built with the upstream `Cargo.lock` |
 | Rust client (`moqtail-rust`, "moqtail Rust client" in the records) | `moqtail` 0.15.0, `wtransport` 0.7.2 | crates.io, `peers/moqtail/rust-client/Cargo.lock` |
+| Test client (`moqtail-test`, "moqtail's test client" in the records) | `client` 0.15.0 | the same repository and tag as the relay. It is the publisher of the FETCH runs: the one client here that answers a FETCH. It publishes by itself and takes no commands |
 | Browser client (`moqtail-browser`, "moqtail-ts client" in the records) | `moqtail` 0.13.0 | npm, the root `bun.lock` |
 | Browser driver | `playwright-core` 1.64.0 | npm, the root `bun.lock` |
 | Wire | MOQT draft 18, WebTransport subprotocol `moqt-18` | |
@@ -26,6 +27,7 @@ It runs `scripts/ci/interop.sh`, which does these steps and skips what is alread
 
 ```sh
 cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --locked --root interop/peers/moqtail/.tools relay
+cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --locked --root interop/peers/moqtail/.tools client
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
 cargo build --locked -p xmoq-moqt-client -p xmoq-relay
 bun install --frozen-lockfile
@@ -51,7 +53,7 @@ Every pairing, from `interop/`:
 bun matrix.ts
 ```
 
-`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except seven that mostly wait, four for the relay to give up on a client that vanished (6 to 9 seconds each), one for a publisher that answers the relay 3 seconds late, one for a source that drains for 2 seconds, and one for a page to give up on late streams (5 seconds): those start together after the pairings that move one Object, and go on beside the ones that follow.
+`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except six that mostly wait, four for the relay to give up on a client that vanished (6 to 9 seconds each), one for a source that drains for 2 seconds, and one for a page to give up on late streams (5 seconds): those start together after the pairings that move one Object, and go on beside the ones that follow.
 
 | Pairings, through each relay | What is expected |
 |---|---|
@@ -59,6 +61,18 @@ bun matrix.ts
 | One publisher with three subscribers: `own-rust` to `own-browser`, `moqtail-browser` to `own-rust` (2) | Every subscriber receives the payload and then sees PUBLISH_DONE |
 | Each own client to each own client, with two Object Properties on the Object that no relay knows: an odd type with bytes and an even type with an integer (4) | The subscriber gets the payload and the two properties, with the types, values and order that were sent (draft 18 §2.5: a relay forwards a property it does not support unchanged), and then sees PUBLISH_DONE. The run tells apart an Object that came without properties, one that came with others, and one that did not come |
 | `own-browser` and `own-rust` subscribing to a track nobody published (2) | The run fails, and its log shows REQUEST_ERROR `0x10` |
+
+The runs in which an own page sends a FETCH have names that begin with `fetch:`. What each has to show is written, with where it comes from, at `EXPECTED` in `fetch.ts`, before the runs; the [record](../docs/experiments/2026-10-11-fetch-from-a-page.md) has what the runs showed. The page reads the fetch stream with `decodeFetchBody` of `@xmoq/moqt`.
+
+| Runs with a FETCH (8) | Through | What is expected |
+|---|---|---|
+| The page asks for {0, 1} to {1, 2} of what moqtail's test client publishes | both relays | FETCH_OK with End Location {1, 2}, the four Objects of the range with the publisher's payload, a FIN |
+| The same publisher, {0, 0} to {2, 0} with FILL_TIMEOUT 0 | own relay | FETCH_OK with End Location {2, 0} and one End of Unknown Range indicator at {2, 2^64 - 1}: the relay asks no publisher and has no cache |
+| The page gives its FETCH up after a second, with `moqtail-rust` as the publisher, which answers no FETCH | own relay | The FETCH ends as cancelled for the page, and the relay cancels the FETCH it had sent the publisher (`CANCEL_OWN_REQUEST`, `0x1`), before any answer of the publisher |
+| `own-rust` publishes, which refuses a FETCH | both relays | The own relay: REQUEST_ERROR `DOES_NOT_EXIST` (`0x10`). The moqtail relay answers from what it holds: FETCH_OK with End Location {0, 1} and the one Object |
+| A track nobody published | both relays | REQUEST_ERROR `DOES_NOT_EXIST` |
+
+A Joining FETCH is not run: the own relay refuses one. Neither is a FETCH from the own Rust client.
 
 The runs in which a client leaves go through the own relay only, because the driver waits for lines only that relay prints. Their names begin with `leaving:`. What each has to show, and why, is in the [record](../docs/experiments/2026-10-10-disconnects-through-own-relay.md).
 
@@ -75,7 +89,7 @@ The runs in which a client leaves go through the own relay only, because the dri
 | The first of two publishers sends Group 0 and goes, by PUBLISH_DONE, by being killed, or as a page that is closed with a stream of Group 1 open; the second then sends the next Group (3) | The relay sends no subscriber PUBLISH_DONE while the second is there. The next Group arrives with the second publisher's payload. A stream the first left open ends with a reset with CANCELLED. When the second has left: PUBLISH_DONE `TRACK_ENDED`, the Stream Count of every Group, the reset one among them. A killed publisher has to be noticed within 10.5 seconds |
 | The first of two `own-rust` publishers sends ten Groups and leaves with PUBLISH_DONE; the second then sends the same ten again, and after them the next (1) | No subscriber is told when the first leaves. All ten streams the second sends again are stopped (`STOP_DATA … code=0x1`), the two for Groups the relay no longer remembers a source for among them, and none is opened towards the subscriber a second time. The next Group arrives from the second. At the end: PUBLISH_DONE `TRACK_ENDED` with eleven Groups |
 | A second publisher joins a track whose subscribers already have an Object, and sends the next Group (1) | The PUBLISH is accepted, the Group arrives with the second publisher's payload, and the subscriptions end when both have left |
-| An `own-rust` publisher announces the namespace and answers the relay's SUBSCRIBE 3 seconds late; another sends PUBLISH for the track meanwhile (1) | The subscribers get no SUBSCRIBE_OK while only the first publisher is there. The PUBLISH answers them, before the first publisher has answered the relay. They get Group 0 from the one that sent PUBLISH and, when the other has answered, Group 1 from that one. The track ends when both have left |
+| An `own-rust` publisher announces the namespace and holds back its answer to the relay's SUBSCRIBE; another, which is connected and holds back its PUBLISH, sends it then (1) | Both publishers are there before the subscribers, and the driver tells each when to go on (`--serve-on-line`, `--publish-on-line` of the own Rust client: it prints `ASKED request_id=N` and `READY_TO_PUBLISH`, and waits for the lines `serve` and `publish` on its stdin). The subscribers get no SUBSCRIBE_OK before the relay has dealt with the PUBLISH. The PUBLISH answers them, before the first publisher has answered the relay. The relay waits 5 seconds for that publisher; a run in which it gave up before the PUBLISH, or before the publisher was told to answer, fails and says that it shows nothing. They get Group 0 from the one that sent PUBLISH and, when the other has answered, Group 1 from that one. The track ends when both have left |
 | An `own-rust` publisher sends a Group, says PUBLISH_DONE with the Stream Count of a publisher that cannot count, publishes the track anew on the same session once the relay has printed that it read the PUBLISH_DONE (`DRAIN_TIMER`), under the next Track Alias or the same, and sends another Group (2) | The PUBLISH is accepted and the subscribers stay: they get no PUBLISH_DONE then, and both Groups within one subscription. The relay resets the first PUBLISH stream with CANCELLED, at once under the same alias and after its 2 seconds of waiting under another. When the publisher leaves, the subscribers see PUBLISH_DONE with Stream Count 2 |
 | Which publishers the relay asks for a track (4): two `own-rust` publishers that only announce the namespace; a publisher with PUBLISH and an `own-rust` one that announces before the subscribers come, or after; an `own-browser` page that announces and refuses what it is asked | The relay sends its own SUBSCRIBE to every publisher that announced and is no source of the track, in the order they announced, once each, also when a second subscriber comes; never to the publisher that sent PUBLISH. A publisher that announces while the track has subscribers is asked right then. Each one that accepts becomes a source, and the subscribers get its Group. The page that refuses (`@xmoq/moqt` answers a request of the peer with NOT_SUPPORTED) is not asked for the next subscriber, and is asked again when it announces anew |
 | A Subgroup comes to the relay a second time, after its first stream was delivered (4): from a second publisher with another Publisher Priority (`own-rust` and `own-rust`, `own-browser` and `own-rust`), from the same `own-browser` publisher with another, and from a second publisher with the same priority written the other way (left out by `own-rust`, 128 by `own-browser`) | Another priority: the relay stops the second stream with MALFORMED_TRACK (`0x12`), every own subscriber sees PUBLISH_DONE `0x12` and has the Group once, from the stream that came first, and the relay cancels the PUBLISH of the publisher whose stream came second with `0x12` and that of the other with CANCELLED. The same priority: the second stream is stopped with CANCELLED like any second stream of a Subgroup, and the track goes on |
@@ -86,7 +100,7 @@ Each of these runs ends by moving one more Object over the same track with a fre
 |---|---|
 | `--relay` | `moqtail` and `own`. Give it once to run through one relay only |
 | `--base-port` | `44400`. The first of the UDP ports used, one per pairing |
-| `--only` | Empty. Runs the pairings whose name contains the text, such as `--only own-rust`, `--only "own relay"` or `--only "leaving: "` |
+| `--only` | Empty. Runs the pairings whose name contains the text, such as `--only own-rust`, `--only "own relay"`, `--only "leaving: "` or `--only "fetch: "` |
 | `--pairing-timeout-seconds` | `120` (provisional). A pairing that takes longer is stopped and counted as failed |
 
 A SIGINT or SIGTERM to `matrix.ts` stops the pairings that are running, which stop their relay, browser and clients, and starts no further one.
@@ -152,7 +166,7 @@ Not every client can leave in every way. `own-rust` and `moqtail-rust` close the
 | `clients.ts` | The four clients behind one shape for a publisher and one for a subscriber |
 | `run.ts` | The driver that moves one Object |
 | `disconnect.ts` | The driver for the runs in which a client leaves |
-| `fetch.ts` | An own page sends one FETCH (`--fetch standalone`, `relative-joining` or `absent-track`) through `--relay moqtail` or `own`, and what it gets is compared with what that relay is known to answer. Not in the matrix |
+| `fetch.ts` | The driver for the runs in which an own page sends a FETCH; each case of `--fetch` has its publisher |
 | `matrix.ts` | The list of pairings, and the table |
 | `page.ts`, `xmoq-page.ts` | The own page, and the contract between the drivers and both pages |
 

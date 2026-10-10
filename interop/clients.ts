@@ -87,11 +87,18 @@ export interface PublisherPlan {
 	payloadHex?: string;
 	/**
 	 * own-rust: the client announces the namespace and sends no PUBLISH. It
-	 * serves the track when it is asked for it with a SUBSCRIBE, and answers
-	 * that SUBSCRIBE this many milliseconds late, so that something else can
-	 * happen to the track while the relay waits for the answer.
+	 * serves the track when it is asked for it with a SUBSCRIBE: "at-once",
+	 * or "on-line", where it holds its answer back until `serve()`, so that
+	 * something else can happen to the track while the relay waits for it.
 	 */
-	servesWhenAskedAfterMs?: number;
+	servesWhenAsked?: "at-once" | "on-line";
+	/**
+	 * own-rust: the client connects, announces the namespace, and holds its
+	 * PUBLISH back until `publish()`. WHY: what takes time on a loaded
+	 * machine, the start of the process and its connection, is then done
+	 * before a scenario opens a window the PUBLISH has to arrive in.
+	 */
+	publishesOnLine?: boolean;
 	/**
 	 * The own clients: the Object Properties every Object it sends carries
 	 * (§11.2.1.2), in ascending order of type as they go onto the wire. None
@@ -108,6 +115,14 @@ export interface PublisherPlan {
 }
 
 export type PublisherPriority = number | "default";
+
+/** The clients that take no line of the driver before a PUBLISH or an answer: every one but own-rust. */
+const NO_LINES: Pick<Publisher, "publish" | "asked" | "serve"> = {
+	publish: () =>
+		Promise.reject(new Error("only own-rust holds a PUBLISH back")),
+	asked: () => Promise.reject(new Error("only own-rust holds an answer back")),
+	serve: () => Promise.reject(new Error("only own-rust holds an answer back")),
+};
 
 export interface Publisher {
 	kind: Client;
@@ -194,12 +209,16 @@ export interface Publisher {
 	 */
 	peerEndAfterPublishDone(): Promise<string | undefined>;
 	/**
-	 * Whether the client has a subscription to send on. False only for a
-	 * publisher that serves when asked and has not answered yet.
+	 * Resolves once the client has a subscription to send on: at once, but
+	 * for a publisher that serves when asked and has not answered yet.
 	 */
-	isServing(): boolean;
-	/** Resolves once `isServing` holds. */
 	serving(): Promise<void>;
+	/** A publisher that holds its PUBLISH back (`publishesOnLine`): sends it, and resolves when it is accepted. */
+	publish(): Promise<void>;
+	/** A publisher that holds its answer back (`servesWhenAsked: "on-line"`): resolves when the relay's SUBSCRIBE has come to it. */
+	asked(): Promise<void>;
+	/** That publisher: answers the SUBSCRIBE, and resolves when it has. To be called after `asked()`. */
+	serve(): Promise<void>;
 	/** Kills the process, or closes the page, without a word to the relay. */
 	kill(): Promise<void>;
 	/** Sends the next Object and closes the session at once; resolves with the Group. */
@@ -248,25 +267,30 @@ async function startRustPublisher(
 		);
 	}
 	const payloadHex = plan.payloadHex ?? run.payloadHex;
-	const servesAfterMs = plan.servesWhenAskedAfterMs;
-	if (servesAfterMs !== undefined && kind !== "own-rust") {
+	const { servesWhenAsked, publishesOnLine = false } = plan;
+	if (servesWhenAsked !== undefined && publishesOnLine) {
+		throw new Error(`${label} cannot both serve when asked and send a PUBLISH`);
+	}
+	if (
+		(servesWhenAsked !== undefined || publishesOnLine) &&
+		kind !== "own-rust"
+	) {
 		throw new Error(
-			`${label} cannot serve a track when asked: only own-rust can`,
+			`${label} cannot serve a track when asked, or hold its PUBLISH back: only own-rust can`,
 		);
 	}
 	const client = spawnRustClient(
 		run.context,
 		label,
 		kind,
-		servesAfterMs === undefined ? "publish" : "publish-namespace",
+		servesWhenAsked === undefined ? "publish" : "publish-namespace",
 		TRACK,
 		[
 			"--payload-hex",
 			payloadHex,
 			...(firstGroup === 0 ? [] : ["--first-group", String(firstGroup)]),
-			...(servesAfterMs === undefined
-				? []
-				: ["--serve-delay-ms", String(servesAfterMs)]),
+			...(servesWhenAsked === "on-line" ? ["--serve-on-line"] : []),
+			...(publishesOnLine ? ["--publish-on-line"] : []),
 			...(plan.publisherPriority === undefined
 				? []
 				: ["--publisher-priority", String(plan.publisherPriority)]),
@@ -278,10 +302,17 @@ async function startRustPublisher(
 			RUST_CLIENT_TIMEOUT_SECS,
 		],
 	);
+	const PUBLISHED = /^PUBLISHED /;
 	await client.waitForLine(
-		servesAfterMs === undefined ? /^PUBLISHED / : /^NAMESPACE_PUBLISHED/,
+		servesWhenAsked !== undefined
+			? /^NAMESPACE_PUBLISHED/
+			: publishesOnLine
+				? /^READY_TO_PUBLISH$/
+				: PUBLISHED,
 	);
 	const SERVING = /^SERVING /;
+	const onLineOnly = (what: string): Error =>
+		new Error(`${label} was not started to ${what} on a line of the driver`);
 	let nextGroup = firstGroup;
 	const sent = async (): Promise<number> => {
 		const group = nextGroup;
@@ -372,10 +403,22 @@ async function startRustPublisher(
 				peerEndAfterMs: Math.round(performance.now() - started),
 			};
 		},
-		isServing: () =>
-			servesAfterMs === undefined || client.matches(SERVING).length > 0,
 		async serving() {
-			if (servesAfterMs !== undefined) await client.waitForLine(SERVING);
+			if (servesWhenAsked !== undefined) await client.waitForLine(SERVING);
+		},
+		async publish() {
+			if (!publishesOnLine) throw onLineOnly("publish");
+			client.child.stdin.write("publish\n");
+			await client.waitForLine(PUBLISHED);
+		},
+		async asked() {
+			if (servesWhenAsked !== "on-line") throw onLineOnly("serve");
+			await client.waitForLine(/^ASKED request_id=\d+$/);
+		},
+		async serve() {
+			if (servesWhenAsked !== "on-line") throw onLineOnly("serve");
+			client.child.stdin.write("serve\n");
+			await client.waitForLine(SERVING);
 		},
 		async kill() {
 			client.child.kill("SIGKILL");
@@ -473,8 +516,8 @@ async function startBrowserPublisher(
 				),
 			publishAnew: () =>
 				Promise.reject(new Error(`${kind} cannot publish its track anew`)),
-			isServing: () => true,
 			serving: () => Promise.resolve(),
+			...NO_LINES,
 			kill,
 			async sendLastAndClose() {
 				await onPage(
@@ -560,8 +603,8 @@ async function startBrowserPublisher(
 			Promise.reject(new Error(`${kind} does not say what ended its PUBLISH`)),
 		publishAnew: () =>
 			Promise.reject(new Error(`${kind} cannot publish its track anew`)),
-		isServing: () => true,
 		serving: () => Promise.resolve(),
+		...NO_LINES,
 		async peerEndAfterPublishDone() {
 			const reported = await onPage(
 				label,

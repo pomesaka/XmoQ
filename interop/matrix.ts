@@ -33,7 +33,7 @@ const isOwn = (client: Client): boolean => client.startsWith("own-");
 interface Pairing {
 	name: string;
 	/** The driver that runs it. */
-	script: "run.ts" | "disconnect.ts";
+	script: "run.ts" | "disconnect.ts" | "fetch.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -168,6 +168,50 @@ const REFUSALS: Pairing[] = [
 		],
 		expectedFailure: /SUBSCRIBE rejected: error_code=0x10/,
 		reasonIsInAClientLine: true,
+	},
+];
+
+/**
+ * An own page sends a FETCH. What each has to show, and where that is
+ * written, is at `EXPECTED` in fetch.ts. `relays` is where the case is run:
+ * two of them are about what the own relay does without a publisher's
+ * answer, which nothing is known of for the moqtail relay.
+ *
+ * WHY they run one after the other, and not beside the runs that mostly
+ * wait: each starts a page, and eight more pages at once made a run of
+ * that group miss a time of its own in CI (2 of 3 runs; the FETCH runs took
+ * 9 to 10 seconds there, and 1 to 3 alone).
+ */
+const FETCHES: (Pairing & { relays: string[] })[] = [
+	{
+		name: "own-browser fetches {0, 1} to {1, 2} of what moqtail's test client publishes",
+		script: "fetch.ts",
+		args: ["--fetch", "standalone"],
+		relays: ["moqtail", "own"],
+	},
+	{
+		name: "own-browser fetches with FILL_TIMEOUT 0 and gets one End of Unknown Range",
+		script: "fetch.ts",
+		args: ["--fetch", "fill-timeout-0"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser gives its FETCH up while moqtail-rust does not answer; the relay cancels its own",
+		script: "fetch.ts",
+		args: ["--fetch", "cancelled"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser fetches from own-rust, which refuses a FETCH",
+		script: "fetch.ts",
+		args: ["--fetch", "publisher-refuses"],
+		relays: ["moqtail", "own"],
+	},
+	{
+		name: "own-browser fetches a track nobody published",
+		script: "fetch.ts",
+		args: ["--fetch", "absent-track"],
+		relays: ["moqtail", "own"],
 	},
 ];
 
@@ -637,17 +681,17 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
-		// WHY it mostly waits: the publisher that is asked answers the relay
-		// 3 seconds late, so that the other can send its PUBLISH meanwhile.
 		name: "an own-rust publisher sends PUBLISH while the relay waits for another's answer; own-rust and own-browser are answered by it",
 		script: "disconnect.ts",
 		args: [
 			"--scenario",
 			"publish-while-asked",
 			...each("publisher", ["own-rust", "own-rust"]),
-			...each("subscriber", ["own-rust", "own-browser"]),
+			// WHY the page first: the relay's wait for the publisher that is
+			// asked starts with the first SUBSCRIBE, and the later subscribers
+			// start inside it. A process starts faster than a page.
+			...each("subscriber", ["own-browser", "own-rust"]),
 		],
-		mostlyWaits: true,
 	},
 	{
 		name: "a second own-rust publisher joins a track that has subscribers; own-rust gets its Group",
@@ -752,7 +796,7 @@ async function runPairing(
 			join(here, pairing.script),
 			...pairing.args,
 			// `disconnect.ts` runs through the own relay only and takes no relay.
-			...(pairing.script === "run.ts" ? ["--relay", pairing.relay] : []),
+			...(pairing.script === "disconnect.ts" ? [] : ["--relay", pairing.relay]),
 			"--port",
 			String(port),
 		],
@@ -827,6 +871,13 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		...relays.flatMap((relay) =>
 			[...transfers(), ...OBJECT_PROPERTIES, ...ONE_TO_MANY, ...REFUSALS].map(
 				(pairing) => named(relay, pairing),
+			),
+		),
+		// "fetch: " lets `--only` pick these runs alone.
+		...relays.flatMap((relay) =>
+			FETCHES.filter((pairing) => pairing.relays.includes(relay)).map(
+				({ relays: _where, ...pairing }) =>
+					named(relay, { ...pairing, name: `fetch: ${pairing.name}` }),
 			),
 		),
 		// "leaving: " lets `--only` pick these runs alone.

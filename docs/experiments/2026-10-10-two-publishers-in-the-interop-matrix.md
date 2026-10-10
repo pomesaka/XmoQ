@@ -363,6 +363,50 @@ Added on 2026-10-11, on `main` at `cf2a367f` with the changes of two pull reques
 - A stop with its code was not met by a write in these rounds: where the write lost the race, the browser gave the NetworkError every time. The tests with the played transport have both forms.
 - `mise run check` and `mise run interop` passed after it: 74 of 74 pairings.
 
+### The run that depends on time says so by the relay's log
+
+Added on 2026-10-11. "An own-rust publisher sends PUBLISH while the relay waits for another's answer" failed in 6 of 24 rounds with four matrices at once, with a message that named two causes: the publisher that was asked answers after 3 seconds, and the relay printed nothing for that answer. The relay now prints a publisher's answer to its own request (`RECV session=N own=K SUBSCRIBE_OK`), so the scenario tells the two apart: no such line stands before the first SUBSCRIBE_OK the relay sent a subscriber, or the run says that it shows nothing; and no subscriber was answered before the publisher with the PUBLISH came, or the relay answered without a source. The scenario waits for the `RECV` line later in every run, so a change of its form is noticed.
+
+| Run | Result |
+|---|---|
+| The run alone, two at once, 20 rounds each | 40 of 40 |
+| The 34 leaving scenarios, four matrices at once, 6 rounds each | 18 of 24 rounds. In 6 runs this scenario failed, each with "asked:own-rust had answered the relay's SUBSCRIBE before the relay answered a subscriber, after 3.0s, so the run does not show that the PUBLISH answered them" and the `RECV` line; one other scenario reached the matrix's limit of 120 seconds once |
+
+**The scenario still fails under that load**: what it is for cannot be shown when the other publisher takes longer than 3 seconds to connect. It now says that, and nothing else. The next section has what was done about it.
+
+### The race of that run is moved out of the start of a process
+
+Added on 2026-10-11, after the run failed in CI in 2 of 3 runs of one pull request, each time with the message of the section above.
+
+**Why it failed there, and not in two other pull requests of the same hour.** That pull request added eight FETCH runs to the group of runs that start together because they mostly wait. Each of the eight starts a page. In the log of the failed run, the page of this scenario's second subscriber was not connected when the publisher that was asked answered, 3 seconds after the relay had asked it; the other publisher was started only after that. The FETCH runs took 9 to 10 seconds there and take 1 to 4 alone. The check before that pull request (the client's `SERVING` line, looked at when the subscribers had been answered) fails on the same run: the line was printed before the other publisher connected. So nothing here says that the earlier check let such a run pass.
+
+**What was changed.**
+
+- Both publishers are connected before a subscriber is, and each is held back by the driver: the one that is asked prints `ASKED request_id=N` and answers on the line `serve`; the other prints `READY_TO_PUBLISH` and sends its PUBLISH on the line `publish` (`--serve-on-line` and `--publish-on-line` of the own Rust client). The subscribers start, the page first; the driver waits for the relay's `OPEN_REQUEST` towards the first publisher and for its `ASKED`, and writes `publish`.
+- **The race is not gone.** What had to fit into the publisher's 3 seconds was the start of a page and of a process with its connection. What has to fit into the relay's 5 seconds (how long it waits for a publisher's answer, provisional) is now the start of the subscribers after the first, and messages between peers that are connected.
+- A run in which the relay gave up on the publisher that was asked says so, with the relay's `CANCEL_OWN_REQUEST` line, and says that it shows nothing: before the PUBLISH was dealt with, and before the publisher was told to answer.
+- The relay's PUBLISH_OK (the second `REQUEST_OK` it sends that publisher) is the line before which no subscriber may have been answered, and the first publisher may not have answered.
+- The eight FETCH runs no longer start beside the runs that mostly wait; they run one after the other. The matrix takes 83 seconds for its 82 pairings on this machine, 58 before.
+
+| Run of this scenario alone | Result |
+|---|---|
+| One at a time, 20 rounds | 20 of 20, 1.3 seconds a run where it took 4 to 5 |
+| Two at once, 20 rounds each | 40 of 40 |
+| Four at once, 20 rounds each | 80 of 80 |
+| Four at once with `nice -n 19`, 15 rounds each, beside two matrices of the 34 leaving scenarios | 60 of 60 |
+
+Temporary changes to the driver, each taken back:
+
+| Change | The run fails with |
+|---|---|
+| The publisher that is asked is told to answer before the PUBLISH | "asked:own-rust answered the relay's SUBSCRIBE before it was told to", with the relay's `RECV` line |
+| The PUBLISH is told 6 seconds late | "the relay had ended its SUBSCRIBE to asked:own-rust (CANCEL_OWN_REQUEST session=0 ...), for which it waits 5 seconds, so the run does not show that a PUBLISH answers subscribers while the relay waits", with the subscriber's REQUEST_ERROR `0x2` |
+| The answer is told 6 seconds late | the same, "... does not show that what the relay asked stays asked", with the client's exit |
+
+- **Not certain in a run**: that the SUBSCRIBE of a subscriber after the first was read by the relay before the PUBLISH. The relay prints nothing for a subscriber it lets wait. What is checked for each is that it was not answered before the PUBLISH_OK.
+- The client that holds its PUBLISH back has announced the namespace, so the relay asks it as well, and its SUBSCRIBE to it is over before the PUBLISH_OK (`REQUEST_ERROR 0x3` from the client in the runs here). The scenario does not check that.
+- The repetitions above were made with the client built from pull request 65 at `0241ea62`, and with changes to `@xmoq/moqt` that are not part of this (a page's answer to a SUBSCRIBE, unfinished) in the working copy. On this change alone, on a `main` that has pull request 65, the whole matrix was run once: 82 of 82.
+
 ## Limitations and blockers
 
 - **The relay change was under review when the runs were made.** The last runs are on `a44c8854`; if it changes again, they have to be made again.

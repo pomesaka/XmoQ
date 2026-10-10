@@ -20,6 +20,15 @@ if [[ ! -x "${relay_root}/bin/relay" || ! -f "${relay_stamp}" ]]; then
 	touch "${relay_stamp}"
 fi
 
+# moqtail's test client, of the same tag: the publisher of the FETCH pairings, the one here
+# that answers a FETCH. A stamp of its own, so that a cache that has the relay alone gets it.
+client_stamp="${relay_root}/.client-${RELAY_TAG}"
+if [[ ! -x "${relay_root}/bin/client" || ! -f "${client_stamp}" ]]; then
+	cargo install --git https://github.com/moqtail/moqtail --tag "${RELAY_TAG}" --locked \
+		--root "${relay_root}" client
+	touch "${client_stamp}"
+fi
+
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
 cargo build --locked -p xmoq-moqt-client -p xmoq-relay
 
