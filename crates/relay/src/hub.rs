@@ -1572,9 +1572,10 @@ struct PipeWaits {
 /// five the reader of the publisher's stream holds (`FetchBody`), 16 KiB
 /// each: 96 KiB, next to the windows of the two connections.
 ///
-/// The waits start anew with every read and every write: a stream that
-/// goes on, however slowly, is not cut, and a FETCH has no time limit as a
-/// whole.
+/// The waits start anew with every read and every write, and a FETCH has no
+/// time limit as a whole. How slowly a subscriber may read without being
+/// cut is its transport's to say as well: the relay can write only as the
+/// subscriber's side gives it room.
 struct FetchPipe<C: Connection> {
     connection: Arc<C>,
     header: FetchHeader,

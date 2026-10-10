@@ -83,6 +83,13 @@ impl Session {
     /// that never answers leaves the request open; this crate has no clock,
     /// so the caller cancels it when it has waited long enough.
     ///
+    /// The peer finishing its direction of the request stream: before the
+    /// answer, no answer can come any more, and the caller cancels the FETCH
+    /// ([`Self::cancel`]); after `FETCH_OK` it ends nothing, and the caller
+    /// does not cancel. A reset of the request stream by the peer ends the
+    /// FETCH whenever it comes, and the caller cancels. A `STOP_SENDING` of
+    /// the peer for this endpoint's direction ends nothing by itself.
+    ///
     /// # Errors
     ///
     /// Fails when a parameter may not appear in FETCH, when a Standalone
