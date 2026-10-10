@@ -69,6 +69,34 @@ pub enum StreamEnd {
     Lost,
 }
 
+/// How the passing on of a fetch stream ended ([`Action::PipeFetch`]). In
+/// every case but the first the I/O side has reset the stream to the
+/// subscriber and stopped the one from the publisher, with the codes given
+/// here; the relay does what is left to do on the request streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchPipeEnd {
+    /// The publisher's stream ended with a FIN, and so did the subscriber's.
+    Finished,
+    /// The publisher reset its stream, with this code. The subscriber's was
+    /// reset with what [`crate::fetch_reset_passed_on`] makes of it.
+    UpstreamAborted(Option<u32>),
+    /// The publisher's connection ended. The subscriber's stream was reset
+    /// with `UNKNOWN_OBJECT_STATUS`.
+    UpstreamLost,
+    /// Nothing came from the publisher for the time [`Action::PipeFetch`]
+    /// gave, while the subscriber could take more. The subscriber's stream
+    /// was reset with `UNKNOWN_OBJECT_STATUS`.
+    UpstreamStalled,
+    /// The subscriber sent `STOP_SENDING` for the stream, with this code.
+    DownstreamStopped(Option<u32>),
+    /// The subscriber took nothing for the time [`Action::PipeFetch`] gave.
+    /// Its stream was reset with `TOO_FAR_BEHIND`.
+    DownstreamStalled,
+    /// The subscriber's connection ended, or no stream to it could be
+    /// opened.
+    DownstreamLost,
+}
+
 /// Something the I/O side observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -160,6 +188,24 @@ pub enum Event {
         stream: StreamKey,
         /// The Request ID of the header.
         request_id: u64,
+    },
+    /// The passing on of a fetch stream ended by itself. Not reported after
+    /// [`Action::AbortFetchPipe`].
+    FetchPipeEnded {
+        /// The session of the subscriber.
+        session: SessionKey,
+        /// The request stream of the subscriber's FETCH.
+        stream: StreamKey,
+        /// How.
+        how: FetchPipeEnd,
+    },
+    /// The I/O side is done with [`Action::WriteFetchStream`]: the stream was
+    /// written and finished, or given up.
+    FetchStreamWritten {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH.
+        stream: StreamKey,
     },
     /// An Object arrived on a subgroup stream.
     Object {
@@ -311,6 +357,57 @@ pub enum Action {
         out_stream: OutStreamKey,
         /// A Stream Reset Error Code (§3.3.3).
         code: u32,
+    },
+    /// Pass a fetch stream of a publisher on to the subscriber whose FETCH it
+    /// answers: open a unidirectional stream to the subscriber, write a
+    /// `FETCH_HEADER` with `request_id`, and then the bytes of the
+    /// publisher's stream as they are, no faster than the subscriber takes
+    /// them. The end is reported with [`Event::FetchPipeEnded`].
+    PipeFetch {
+        /// The session of the publisher.
+        from: SessionKey,
+        /// The publisher's fetch stream.
+        from_stream: StreamKey,
+        /// The session of the subscriber.
+        session: SessionKey,
+        /// The request stream of the subscriber's FETCH, which names the
+        /// pipe from here on.
+        stream: StreamKey,
+        /// The Request ID of the subscriber's FETCH.
+        request_id: u64,
+        /// How long the publisher may send nothing while the subscriber can
+        /// take more, in milliseconds.
+        upstream_wait_ms: u64,
+        /// How long the subscriber may take nothing, in milliseconds.
+        downstream_wait_ms: u64,
+    },
+    /// End the passing on of a fetch stream: reset the stream to the
+    /// subscriber with `code` and stop the publisher's with `CANCELLED`.
+    /// Does nothing when the pipe has ended.
+    AbortFetchPipe {
+        /// The session of the subscriber.
+        session: SessionKey,
+        /// The request stream of the subscriber's FETCH.
+        stream: StreamKey,
+        /// A Stream Reset Error Code (§3.3.3).
+        code: u32,
+    },
+    /// Open a unidirectional stream to the peer, write a `FETCH_HEADER` with
+    /// `request_id` and then `body`, and end the stream with a FIN. The end
+    /// is reported with [`Event::FetchStreamWritten`].
+    WriteFetchStream {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH, which names the stream in that
+        /// report.
+        stream: StreamKey,
+        /// The Request ID of the FETCH the stream answers.
+        request_id: u64,
+        /// What follows the header, encoded.
+        body: Vec<u8>,
+        /// How long the subscriber may take nothing, in milliseconds, before
+        /// the stream is reset with `TOO_FAR_BEHIND`.
+        wait_ms: u64,
     },
     /// Tell the peer to stop sending on one of its subgroup streams.
     StopDataStream {

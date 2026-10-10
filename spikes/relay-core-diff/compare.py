@@ -174,10 +174,33 @@ def add_old_core(before):
         lib, action = re.subn(r"(Action::StartDrainTimer \{\s+session,\s+track_alias,)(\s+\}\))", r"\1 wait: 0,\2", lib)
         if (event, action) != (1, 1):
             sys.exit(f"cannot patch: the old core's drain timer (event {event}, action {action})")
-    allow = "#![allow(dead_code, unused_imports, clippy::all, clippy::pedantic, missing_docs)]\n"
+    # An event or an action that <after> has and <before> has not: the old
+    # core does nothing with such an event, and is counted doing so. WHY
+    # counted: in the worlds of `fuzz.rs` no such event is made, so the count
+    # has to be 0; anything else means the new kind of event reaches a place
+    # the comparison takes for one the change does not touch.
+    lib, handled = re.subn(
+        r"(            Event::SessionClosed \{ session \} => self\.drop_session\(session, &mut actions\),\n)(        \}\n        actions\n)",
+        r"\1            _ => {\n                crate::UNKNOWN_TO_THE_OLD_CORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);\n            }\n\2",
+        lib)
+    lib, targeted = re.subn(r"(            Self::CloseSession \{ \.\. \} => Target::Closing,\n)(        \}\n)",
+                            r"\1            _ => Target::Closing,\n\2", lib)
+    if (handled, targeted) != (1, 1):
+        sys.exit(f"cannot patch: the old core's match on events ({handled}) or on actions ({targeted})")
+    allow = ("#![allow(dead_code, unused_imports, unreachable_patterns, clippy::all, clippy::pedantic, "
+             "missing_docs)]\n")
     (old / "mod.rs").write_text(allow + lib)
     routing = jj("file", "show", "-r", before, f"{CORE}/routing.rs")
     (old / "routing.rs").write_text(once(routing, "use crate::{", "use super::{", "use crate::{"))
+    # The modules a core may have besides: taken along when <before> has them.
+    # The events are the one type both cores share, so `crate::events` stays.
+    for module in ("fetch",):
+        try:
+            text = jj("file", "show", "-r", before, f"{CORE}/{module}.rs")
+        except subprocess.CalledProcessError:
+            continue
+        text = text.replace("use crate::routing::", "use super::routing::")
+        (old / f"{module}.rs").write_text(once(text, "use crate::{", "use super::{", "use crate::{"))
     (old / "fuzz.rs").write_text("#![allow(clippy::all, clippy::pedantic)]\n" + (HERE / "fuzz.rs").read_text())
 
 
@@ -194,6 +217,8 @@ def patch_new_core():
                "            names: Default::default(),\n        }",
                "the last field of Relay::new")
     lib += '''
+/// Events the old core did nothing with because it does not know their kind.
+pub(crate) static UNKNOWN_TO_THE_OLD_CORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Events for which the two cores differed in more than order, so far.
 pub(crate) static DIFFERENCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Events for which the two cores did something else to a session named in
@@ -567,7 +592,8 @@ def compared(*args):
         print("NOT COMPARED: the two cores do not build together.")
         for line in errors[:12]:
             print("    " + line[:300])
-        print("The old core is built against the xmoq-moqt of <after>; it does not fit it.")
+        print("The old core is built against the xmoq-moqt of <after>: either it does not fit that, or it has a")
+        print("module this tool does not take along (`add_old_core`).")
         sys.exit(2)
     return output
 
@@ -623,6 +649,16 @@ def report(name, output, totals, random_events=False):
         in_the_sequences = output.split("FUZZ_BYSTANDER", 1)[0].splitlines()
         for line in [line for line in in_the_sequences if "kind=bystander" in line][:3]:
             print("    " + line[:2500])
+    unknown = re.search(r"FUZZ_UNKNOWN_TO_THE_OLD_CORE events=(\d+)", output)
+    if unknown:
+        print(f"    events of a kind the old core does not know, in the random sequences: {unknown.group(1)}")
+        if int(unknown.group(1)):
+            # The comparison says nothing about a sequence with such an event.
+            totals["failed"] += 1
+            totals["not_counted"] += 1
+    elif random_events:
+        print("    THE EVENTS UNKNOWN TO THE OLD CORE WERE NOT COUNTED: no FUZZ_UNKNOWN_TO_THE_OLD_CORE line")
+        totals["not_counted"] += 1
     carried = re.search(r"FUZZ_CARRIED (.*)", output)
     if carried:
         print(f"    what the new version did in the random events: {carried.group(1)}")

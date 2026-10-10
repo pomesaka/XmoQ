@@ -40,11 +40,22 @@ pub mod stream_reset_code {
     pub const INTERNAL_ERROR: u32 = 0x0;
     /// CANCELLED: the stream was cancelled by either endpoint.
     pub const CANCELLED: u32 = 0x1;
+    /// `DELIVERY_TIMEOUT`: a delivery timeout (§8) was exceeded for the
+    /// stream.
+    pub const DELIVERY_TIMEOUT: u32 = 0x2;
     /// `SESSION_CLOSED`: the session is being closed.
     pub const SESSION_CLOSED: u32 = 0x3;
+    /// `GOING_AWAY`: the endpoint has sent or received a GOAWAY.
+    pub const GOING_AWAY: u32 = 0x4;
     /// `TOO_FAR_BEHIND`: the subscription exceeded the publisher's resource
     /// limits and is being terminated.
     pub const TOO_FAR_BEHIND: u32 = 0x5;
+    /// `UNKNOWN_OBJECT_STATUS`: in response to a FETCH, the publisher cannot
+    /// determine the status of the next Object in the requested range.
+    pub const UNKNOWN_OBJECT_STATUS: u32 = 0x6;
+    /// `EXCESSIVE_LOAD`: the endpoint is overloaded and is resetting the
+    /// stream.
+    pub const EXCESSIVE_LOAD: u32 = 0x9;
     /// `MALFORMED_TRACK`: the track was malformed (§2.4.2).
     pub const MALFORMED_TRACK: u32 = 0x12;
 }

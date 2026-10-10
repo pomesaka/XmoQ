@@ -87,6 +87,44 @@ pub(crate) async fn bytes_arrive_in_order_and_the_fin_after_them<C: Connection>(
     assert_eq!(read_to_end(&mut peer_recv).await, (vec![], Ok(())));
 }
 
+/// A fetch stream whose writer is dropped without being finished is reset,
+/// with `CANCELLED` (0x1), and does not end with a FIN: on either connection,
+/// whatever that connection makes of a sending half that is merely dropped.
+pub(crate) async fn a_fetch_stream_writer_that_is_dropped_resets_its_stream<C: Connection>(
+    a: C,
+    b: C,
+) {
+    let header = xmoq_moqt::fetch::FetchHeader { request_id: 2 };
+    let mut writer = crate::open_fetch_stream(&a, header, &crate::Trace::default(), "fetch")
+        .await
+        .expect("open");
+    writer.write(b"abc").await.expect("write");
+    let mut recv = timeout(A_WHILE, b.accept_uni())
+        .await
+        .expect("the stream arrives")
+        .expect("accept");
+    drop(writer);
+    // What was written may or may not be read before the reset is seen.
+    let (_, end) = read_to_end(&mut recv).await;
+    assert_eq!(end, Err(ReadError::Reset(Some(0x1))));
+
+    // One that is finished ends with a FIN after its bytes: the header
+    // (0x05, Request ID 2) and what was written.
+    let mut writer = crate::open_fetch_stream(&a, header, &crate::Trace::default(), "fetch")
+        .await
+        .expect("open");
+    writer.write(b"abc").await.expect("write");
+    writer.finish();
+    let mut recv = timeout(A_WHILE, b.accept_uni())
+        .await
+        .expect("the stream arrives")
+        .expect("accept");
+    assert_eq!(
+        read_to_end(&mut recv).await,
+        (vec![0x05, 0x02, b'a', b'b', b'c'], Ok(()))
+    );
+}
+
 /// `Lost` says that the connection is gone and nothing else. A stream whose
 /// writer went away without finishing it, on a connection that is still
 /// there, ends for the reader in some other way: the contract leaves open
@@ -390,6 +428,7 @@ macro_rules! contract_tests {
                 a_reset_and_a_stop_carry_their_codes,
                 a_stream_that_ends_alone_is_not_read_as_a_lost_connection,
                 dropping_a_read_loses_nothing,
+                a_fetch_stream_writer_that_is_dropped_resets_its_stream,
                 stopped_waits_until_the_peer_stops,
                 what_arrived_outlives_the_connection,
                 a_stream_that_was_not_accepted_may_go_with_the_connection,

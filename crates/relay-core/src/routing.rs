@@ -221,6 +221,13 @@ impl Declined {
     }
 }
 
+/// Which request of the relay a publisher answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnRequestKind {
+    Subscribe,
+    Fetch,
+}
+
 /// What a request is refused with: the fields of a `REQUEST_ERROR`.
 pub(crate) struct Refusal {
     error_code: u64,
@@ -262,9 +269,15 @@ impl Refusal {
     /// said when that may be. Under `INTERNAL_ERROR` in place of another code
     /// it is 0 ("SHOULD NOT be retried", §10.6.2): what the publisher's value
     /// was about is not known, and 0 promises nothing.
-    fn passed_on(error: &RequestError) -> Self {
+    pub(crate) fn passed_on(error: &RequestError, asked: OwnRequestKind) -> Self {
         use request_error_code as code;
         let error_code = match error.error_code {
+            // §10.6.2 defines these two for a range of Locations, and
+            // MALFORMED_TRACK "In response to a FETCH". The relay's SUBSCRIBE
+            // has no range (last arm).
+            passed @ (code::INVALID_RANGE | code::MALFORMED_TRACK) if asked == OwnRequestKind::Fetch => {
+                passed
+            }
             // About the track at the publisher or its load, or generic.
             passed @ (code::INTERNAL_ERROR
             | code::TIMEOUT
@@ -293,12 +306,12 @@ impl Refusal {
             // returns before it gets here). For an answer to a request that
             // is no ask any more there are no waiters to pass anything on to.
             code::NOT_SUPPORTED | code::GOING_AWAY | code::REDIRECT => code::DOES_NOT_EXIST,
-            // Codes that do not answer this SUBSCRIBE. §10.6.2 defines
-            // MALFORMED_TRACK "In response to a FETCH", and INVALID_RANGE for
-            // a "specified Filter or range of Locations", of which the
-            // relay's SUBSCRIBE has none. UNINTERESTED, PREFIX_OVERLAP and
-            // the like answer a PUBLISH or a namespace request. The rest is
-            // unknown here.
+            // Codes that do not answer the relay's request. For a SUBSCRIBE
+            // those are also MALFORMED_TRACK and INVALID_RANGE (first arm).
+            // UNINTERESTED, PREFIX_OVERLAP and the like answer a PUBLISH or a
+            // namespace request, and INVALID_JOINING_REQUEST_ID a FETCH that
+            // joins a subscription, which the relay's never does. The rest
+            // is unknown here.
             _ => code::INTERNAL_ERROR,
         };
         let passed = error_code == error.error_code;
@@ -498,7 +511,7 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
-        if state.own.len() >= MAX_OWN_REQUESTS_PER_SESSION {
+        if state.own_requests() >= MAX_OWN_REQUESTS_PER_SESSION {
             return Err(request_error_code::EXCESSIVE_LOAD);
         }
         // §9.2: "Relays SHOULD set the Forward flag to 1 when a new
@@ -791,7 +804,12 @@ impl Relay {
             return;
         }
         state.own.remove(&request);
-        self.ask_is_over(&own.track, own.ask, &Refusal::passed_on(error), actions);
+        self.ask_is_over(
+            &own.track,
+            own.ask,
+            &Refusal::passed_on(error, OwnRequestKind::Subscribe),
+            actions,
+        );
     }
 
     /// One ask of a track is over without a source: the publisher refused,

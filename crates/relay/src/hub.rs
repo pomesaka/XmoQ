@@ -12,22 +12,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use xmoq_moqt::data::SubgroupHeader;
+use xmoq_moqt::fetch::FetchHeader;
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::session::MAX_PEER_REQUESTS;
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
-    Connection, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestClose,
-    PeerRequestStreamEvent, RecvStream, RequestClose, RequestReadError, RequestReader,
-    RequestStreamEvent, SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops,
-    Trace, UniEvent, WriteError, read_request_streams, read_uni_streams, send_message,
+    Connection, FetchBody, FetchChunk, IncomingStreams, OutgoingEvent, OutgoingSubgroup,
+    PeerRequestClose, PeerRequestStreamEvent, RecvStream, RequestClose, RequestReadError,
+    RequestReader, RequestStreamEvent, SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd,
+    StreamStops, Trace, UniEvent, WriteError, open_fetch_stream, read_request_streams,
+    read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
-    Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SessionKey,
-    StreamKey,
+    Action, Event, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd,
+    Role, SessionKey, StreamKey,
 };
 
 /// Limits of the relay. Every value is provisional: the draft sets none of
@@ -217,6 +219,8 @@ pub struct Held {
     pub out_streams: usize,
     /// Tasks of request streams the relay opened, over all sessions.
     pub own_requests: usize,
+    /// Fetch streams that are being passed on.
+    pub fetch_pipes: usize,
     /// Timers that are running.
     pub timers: usize,
     /// What the relay holds.
@@ -250,11 +254,14 @@ struct SessionHandle<C: Connection> {
     /// The writers of its control and request streams, and the task that owns
     /// its readers.
     tasks: Vec<JoinHandle<()>>,
+    /// The tasks that write a fetch stream the relay made itself and are not
+    /// done.
+    fetch_writes: Vec<JoinHandle<()>>,
 }
 
 impl<C: Connection> Drop for SessionHandle<C> {
     fn drop(&mut self) {
-        for task in &self.tasks {
+        for task in self.tasks.iter().chain(&self.fetch_writes) {
             task.abort();
         }
     }
@@ -310,6 +317,7 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
         events: events.clone(),
         sessions: HashMap::new(),
         out_streams: HashMap::new(),
+        fetch_pipes: HashMap::new(),
         timers: Timers::default(),
     };
     let task = tokio::spawn(hub.run(inbox));
@@ -329,6 +337,10 @@ struct Hub<C: Connection> {
     /// The writers of the subgroup streams that are not done, with the session
     /// each writes to.
     out_streams: HashMap<OutStreamKey, (SessionKey, OutgoingSubgroup)>,
+    /// The fetch streams that are being passed on, by the subscriber's
+    /// session and the request stream of its FETCH, each with the way to cut
+    /// it short. Dropping that cuts it short as well.
+    fetch_pipes: HashMap<(SessionKey, StreamKey), oneshot::Sender<u32>>,
     timers: Timers,
 }
 
@@ -505,6 +517,7 @@ impl<C: Connection> Hub<C> {
                             .values()
                             .map(|handle| handle.own_requests.len())
                             .sum(),
+                        fetch_pipes: self.fetch_pipes.len(),
                         timers: self.timers.len(),
                         relay: self.relay.counts(),
                     });
@@ -571,6 +584,7 @@ impl<C: Connection> Hub<C> {
                 stops,
                 budget: SendBudget::new(self.config.send),
                 tasks: vec![writer, watcher],
+                fetch_writes: Vec::new(),
             },
         );
         self.feed(VecDeque::from([Event::SessionOpened {
@@ -609,6 +623,40 @@ impl<C: Connection> Hub<C> {
                 Event::SessionClosed { session } => Some(*session),
                 _ => None,
             };
+            // What a publisher answered to a request of the relay: the one
+            // thing the relay acts on that none of its own lines shows.
+            if let Event::OwnRequestMessage {
+                session,
+                request,
+                message,
+            } = &event
+            {
+                self.log(|| {
+                    format!(
+                        "RECV session={} own={} {}",
+                        session.0,
+                        request.0,
+                        name(message)
+                    )
+                });
+            }
+            if let Event::FetchPipeEnded {
+                session,
+                stream,
+                how,
+            } = &event
+            {
+                // The task is done; nothing is left to cut short.
+                self.fetch_pipes.remove(&(*session, *stream));
+                self.log(|| {
+                    format!(
+                        "FETCH_PIPE_ENDED session={} stream={} {}",
+                        session.0,
+                        stream.0,
+                        pipe_end(*how)
+                    )
+                });
+            }
             for action in self.relay.handle(event) {
                 self.execute(action, &mut pending);
             }
@@ -626,6 +674,9 @@ impl<C: Connection> Hub<C> {
 
     fn execute(&mut self, action: Action, pending: &mut VecDeque<Event>) {
         self.log_action(&action);
+        let Some(action) = self.execute_upstream(action, pending) else {
+            return;
+        };
         match action {
             Action::SendControl { session, message } => {
                 let Some(handle) = self.sessions.get(&session) else {
@@ -711,6 +762,29 @@ impl<C: Connection> Hub<C> {
             | Action::StartRequestTimer { .. }
             | Action::StartUpstreamTimer { .. }
             | Action::StopUpstreamTimer { .. } => self.set_timer(&action, pending),
+            Action::CloseSession {
+                session,
+                code,
+                reason,
+            } => self.close(session, code, &reason, pending),
+            // Taken by `execute_upstream` above.
+            Action::OpenRequest { .. }
+            | Action::FinishOwnRequest { .. }
+            | Action::CancelOwnRequest { .. }
+            | Action::PipeFetch { .. }
+            | Action::AbortFetchPipe { .. }
+            | Action::WriteFetchStream { .. } => {}
+        }
+    }
+
+    /// Carries out the actions that are about a request the relay opened, or
+    /// about a fetch stream. Returns every other action.
+    fn execute_upstream(
+        &mut self,
+        action: Action,
+        pending: &mut VecDeque<Event>,
+    ) -> Option<Action> {
+        match action {
             Action::OpenRequest {
                 session,
                 request,
@@ -724,12 +798,152 @@ impl<C: Connection> Hub<C> {
                 request,
                 code,
             } => self.own_request(session, request, OwnRequestCommand::Cancel(code)),
-            Action::CloseSession {
+            Action::PipeFetch {
+                from,
+                from_stream,
                 session,
+                stream,
+                request_id,
+                upstream_wait_ms,
+                downstream_wait_ms,
+            } => {
+                let waits = PipeWaits {
+                    upstream: Duration::from_millis(upstream_wait_ms),
+                    downstream: Duration::from_millis(downstream_wait_ms),
+                };
+                let header = FetchHeader { request_id };
+                self.pipe_fetch(
+                    (from, from_stream),
+                    (session, stream),
+                    header,
+                    waits,
+                    pending,
+                );
+            }
+            Action::AbortFetchPipe {
+                session,
+                stream,
                 code,
-                reason,
-            } => self.close(session, code, &reason, pending),
+            } => {
+                if let Some(abort) = self.fetch_pipes.remove(&(session, stream)) {
+                    // The task may have just ended; then nobody needs this.
+                    let _ = abort.send(code);
+                }
+            }
+            Action::WriteFetchStream {
+                session,
+                stream,
+                request_id,
+                body,
+                wait_ms,
+            } => self.write_fetch_stream((session, stream), request_id, body, wait_ms),
+            other => return Some(other),
         }
+        None
+    }
+
+    /// Writes a whole fetch stream that the relay made itself, and tells the
+    /// relay when that is over.
+    fn write_fetch_stream(
+        &mut self,
+        (session, stream): (SessionKey, StreamKey),
+        request_id: u64,
+        body: Vec<u8>,
+        wait_ms: u64,
+    ) {
+        let written = Event::FetchStreamWritten { session, stream };
+        let Some(handle) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        // The relay lets a session have only so many of these at once, so
+        // the list stays short. The tasks go with the session.
+        handle.fetch_writes.retain(|task| !task.is_finished());
+        let connection = Arc::clone(&handle.connection);
+        let trace = self.config.streams.trace.clone();
+        let label = format!("session#{} fetch#{request_id}", session.0);
+        let patience = Duration::from_millis(wait_ms);
+        let events = self.events.clone();
+        handle.fetch_writes.push(tokio::spawn(async move {
+            let writing = tokio::spawn(async move {
+                let header = FetchHeader { request_id };
+                let opened = tokio::time::timeout(
+                    patience,
+                    open_fetch_stream(&*connection, header, &trace, &label),
+                );
+                // Not opened in time, or not at all: the writer that was
+                // dropped with the wait has reset what it had opened.
+                let Ok(Ok(mut writer)) = opened.await else {
+                    return;
+                };
+                match tokio::time::timeout(patience, writer.write(&body)).await {
+                    Ok(Ok(())) => writer.finish(),
+                    // Stopped by the subscriber, or the connection is gone.
+                    Ok(Err(_)) => writer.reset(stream_reset_code::CANCELLED),
+                    // As for a fetch stream that is passed on and not taken.
+                    Err(_) => writer.reset(stream_reset_code::TOO_FAR_BEHIND),
+                }
+            });
+            // Told whatever became of the write, a panic included.
+            let _ = writing.await;
+            let _ = events.send(Envelope::Core(written)).await;
+        }));
+    }
+
+    /// Starts passing a publisher's fetch stream on to a subscriber.
+    fn pipe_fetch(
+        &mut self,
+        (from, from_stream): (SessionKey, StreamKey),
+        subscriber: (SessionKey, StreamKey),
+        header: FetchHeader,
+        waits: PipeWaits,
+        pending: &mut VecDeque<Event>,
+    ) {
+        let (session, stream) = subscriber;
+        let ended = move |how| Event::FetchPipeEnded {
+            session,
+            stream,
+            how,
+        };
+        let Some(publisher) = self.sessions.get(&from) else {
+            pending.push_back(ended(FetchPipeEnd::UpstreamLost));
+            return;
+        };
+        // Taken at once, so that the publisher's stream frees its slot among
+        // the streams read of that session.
+        let Some(body) = publisher.stops.take_fetch_body(from_stream.0) else {
+            pending.push_back(ended(FetchPipeEnd::UpstreamLost));
+            return;
+        };
+        // The body, dropped here, stops the publisher's stream.
+        let Some(handle) = self.sessions.get(&session) else {
+            pending.push_back(ended(FetchPipeEnd::DownstreamLost));
+            return;
+        };
+        let (abort, aborted) = oneshot::channel();
+        self.fetch_pipes.insert(subscriber, abort);
+        let pipe = FetchPipe {
+            connection: Arc::clone(&handle.connection),
+            header,
+            body,
+            waits,
+            trace: self.config.streams.trace.clone(),
+            label: format!("session#{} fetch#{}", session.0, header.request_id),
+        };
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            // WHY a task of its own for the passing on: the relay is told of
+            // its end here whatever becomes of it, a panic included, or the
+            // FETCH would stay in the relay for as long as its sessions do.
+            // Both streams go with that task: the writer resets the
+            // subscriber's, and the body, dropped, stops the publisher's.
+            let how = match tokio::spawn(pipe.run(aborted)).await {
+                Ok(how) => how,
+                Err(_) => Some(FetchPipeEnd::UpstreamLost),
+            };
+            if let Some(how) = how {
+                let _ = events.send(Envelope::Core(ended(how))).await;
+            }
+        });
     }
 
     /// Starts the writer of a subgroup stream towards a subscriber.
@@ -1285,6 +1499,166 @@ async fn run_own_request<C: Connection>(
     reader.stop(code);
 }
 
+/// How the passing on of a fetch stream ended, for the log. The three waits
+/// of a relayed FETCH show apart: the answer that did not come is a
+/// `REQUEST_ERROR` with `TIMEOUT` and no pipe, a publisher that sent nothing
+/// is `upstream_stalled`, a subscriber that took nothing `downstream_stalled`.
+fn pipe_end(how: FetchPipeEnd) -> String {
+    match how {
+        FetchPipeEnd::Finished => "finished".to_string(),
+        FetchPipeEnd::UpstreamAborted(code) => format!("upstream_reset {}", stop_code(code)),
+        FetchPipeEnd::UpstreamLost => "upstream_lost".to_string(),
+        FetchPipeEnd::UpstreamStalled => "upstream_stalled".to_string(),
+        FetchPipeEnd::DownstreamStopped(code) => {
+            format!("downstream_stopped {}", stop_code(code))
+        }
+        FetchPipeEnd::DownstreamStalled => "downstream_stalled".to_string(),
+        FetchPipeEnd::DownstreamLost => "downstream_lost".to_string(),
+    }
+}
+
+/// Bytes of a fetch stream written to the subscriber at a time. A subscriber
+/// that does not take this much within its wait takes nothing, as far as the
+/// relay goes.
+const PIPE_PIECE: usize = 1024;
+
+/// How long the two ends of a fetch stream that is passed on may keep the
+/// relay waiting.
+#[derive(Clone, Copy)]
+struct PipeWaits {
+    /// For bytes of the publisher, while the subscriber can take more.
+    upstream: Duration,
+    /// For the subscriber to take what was read.
+    downstream: Duration,
+}
+
+/// One fetch stream of a publisher on its way to a subscriber.
+///
+/// WHY a task that reads and writes in turn, where a subgroup stream goes
+/// through the relay's queues: a FETCH asks for what exists already, so the
+/// publisher can send as fast as its link allows and the subscriber sets the
+/// pace. A queue would be full at once, and a subscriber that is merely
+/// slower than the publisher would lose its FETCH. Read only when the last
+/// read is written, the publisher is held back by flow control instead.
+/// What the relay holds of the stream then is the read in hand here and the
+/// five the reader of the publisher's stream holds (`FetchBody`), 16 KiB
+/// each: 96 KiB, next to the windows of the two connections.
+///
+/// The waits start anew with every read and every write: a stream that
+/// goes on, however slowly, is not cut, and a FETCH has no time limit as a
+/// whole.
+struct FetchPipe<C: Connection> {
+    connection: Arc<C>,
+    header: FetchHeader,
+    body: FetchBody,
+    waits: PipeWaits,
+    trace: Trace,
+    label: String,
+}
+
+impl<C: Connection> FetchPipe<C> {
+    /// Passes the stream on to its end. `None` when it was cut short from
+    /// outside; then the one who cut it knows.
+    async fn run(mut self, mut aborted: oneshot::Receiver<u32>) -> Option<FetchPipeEnd> {
+        // An error means the hub dropped its end: the subscriber's session
+        // is gone.
+        let cut = |code: Result<u32, oneshot::error::RecvError>| {
+            code.unwrap_or(stream_reset_code::SESSION_CLOSED)
+        };
+        let opened = tokio::select! {
+            biased;
+            _ = &mut aborted => return None,
+            opened = tokio::time::timeout(
+                self.waits.downstream,
+                open_fetch_stream(&*self.connection, self.header, &self.trace, &self.label),
+            ) => opened,
+        };
+        let mut send = match opened {
+            Ok(Ok(send)) => send,
+            Ok(Err(WriteError::Stopped(code))) => {
+                return Some(FetchPipeEnd::DownstreamStopped(code));
+            }
+            Ok(Err(WriteError::Lost(_))) => return Some(FetchPipeEnd::DownstreamLost),
+            // The subscriber gives the relay no stream to write on.
+            Err(_) => return Some(FetchPipeEnd::DownstreamStalled),
+        };
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                code = &mut aborted => {
+                    send.reset(cut(code));
+                    return None;
+                }
+                // §5.2: the subscriber "MAY send STOP_SENDING for the data
+                // stream" of a FETCH it cancels.
+                stopped = send.stopped() => {
+                    return Some(match stopped {
+                        WriteError::Stopped(code) => {
+                            // §11.4.3: a reset answers a STOP_SENDING.
+                            send.reset(stream_reset_code::CANCELLED);
+                            FetchPipeEnd::DownstreamStopped(code)
+                        }
+                        WriteError::Lost(_) => FetchPipeEnd::DownstreamLost,
+                    });
+                }
+                chunk = tokio::time::timeout(self.waits.upstream, self.body.next()) => chunk,
+            };
+            let bytes = match chunk {
+                Ok(FetchChunk::Bytes(bytes)) => bytes,
+                Ok(FetchChunk::End(StreamEnd::Fin)) => {
+                    send.finish();
+                    return Some(FetchPipeEnd::Finished);
+                }
+                Ok(FetchChunk::End(StreamEnd::Aborted(code))) => {
+                    send.reset(xmoq_relay_core::fetch_reset_passed_on(code));
+                    return Some(FetchPipeEnd::UpstreamAborted(code));
+                }
+                // The publisher is gone, or its readers are: what came next
+                // will not be known (§3.3.3, UNKNOWN_OBJECT_STATUS).
+                Ok(FetchChunk::End(StreamEnd::Lost) | FetchChunk::Stopped) => {
+                    send.reset(stream_reset_code::UNKNOWN_OBJECT_STATUS);
+                    return Some(FetchPipeEnd::UpstreamLost);
+                }
+                Err(_) => {
+                    send.reset(stream_reset_code::UNKNOWN_OBJECT_STATUS);
+                    return Some(FetchPipeEnd::UpstreamStalled);
+                }
+            };
+            // WHY in pieces, each with the wait anew: the wait is for a
+            // subscriber that takes nothing, and a write of a whole read
+            // that does not end in time says only that it did not take all
+            // of it. A subscriber on a slow link takes a piece now and then.
+            for piece in bytes.chunks(PIPE_PIECE) {
+                let written = tokio::select! {
+                    biased;
+                    code = &mut aborted => {
+                        send.reset(cut(code));
+                        return None;
+                    }
+                    written = tokio::time::timeout(self.waits.downstream, send.write(piece)) => written,
+                };
+                match written {
+                    Ok(Ok(())) => {}
+                    Ok(Err(WriteError::Stopped(code))) => {
+                        send.reset(stream_reset_code::CANCELLED);
+                        return Some(FetchPipeEnd::DownstreamStopped(code));
+                    }
+                    Ok(Err(WriteError::Lost(_))) => return Some(FetchPipeEnd::DownstreamLost),
+                    // WHY TOO_FAR_BEHIND, which §3.3.3 defines for a
+                    // subscription: the draft has no code for a FETCH whose
+                    // subscriber does not take it, and this one says what
+                    // happened, that the receiver went over what the sender
+                    // would hold for it.
+                    Err(_) => {
+                        send.reset(stream_reset_code::TOO_FAR_BEHIND);
+                        return Some(FetchPipeEnd::DownstreamStalled);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The code of a `STOP_SENDING` or a reset for a log line. `none`: the
 /// peer's code was outside the range WebTransport gives applications, or
 /// there was none.
@@ -1377,6 +1751,9 @@ fn describe(action: &Action) -> Option<String> {
             "CANCEL_OWN_REQUEST session={} own={} code={code:#x}",
             session.0, request.0
         ),
+        Action::PipeFetch { .. }
+        | Action::AbortFetchPipe { .. }
+        | Action::WriteFetchStream { .. } => return describe_fetch(action),
         // Logged where the session is closed, whoever asked for it.
         Action::CloseSession { .. }
         | Action::StartUpstreamTimer { .. }
@@ -1384,6 +1761,42 @@ fn describe(action: &Action) -> Option<String> {
         | Action::SendObject { .. }
         | Action::StartEarlyTimer { .. }
         | Action::StartRequestTimer { .. } => return None,
+    })
+}
+
+/// The log line of an action that is about a fetch stream.
+fn describe_fetch(action: &Action) -> Option<String> {
+    Some(match action {
+        Action::PipeFetch {
+            from,
+            from_stream,
+            session,
+            stream,
+            request_id,
+            ..
+        } => format!(
+            "PIPE_FETCH session={} stream={} request_id={request_id} from_session={} from_stream={}",
+            session.0, stream.0, from.0, from_stream.0
+        ),
+        Action::AbortFetchPipe {
+            session,
+            stream,
+            code,
+        } => format!(
+            "ABORT_FETCH_PIPE session={} stream={} code={code:#x}",
+            session.0, stream.0
+        ),
+        Action::WriteFetchStream {
+            session,
+            request_id,
+            body,
+            ..
+        } => format!(
+            "WRITE_FETCH_STREAM session={} request_id={request_id} bytes={}",
+            session.0,
+            body.len()
+        ),
+        _ => return None,
     })
 }
 
