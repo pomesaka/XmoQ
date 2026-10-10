@@ -62,6 +62,17 @@ export type OwnPageExtras = {
 		publisherPriority: number | null,
 	): Promise<void>;
 	/**
+	 * Sends one Object like `sendObjectIn` with `finish`, on a stream the
+	 * subscriber may stop before the Object is written. Resolves with "sent",
+	 * or with "stopped: " and the error of the write; rejects when the write
+	 * fails for another reason.
+	 */
+	sendObjectInWhatMayBeStopped(
+		group: string,
+		payloadHex: string,
+		publisherPriority: number | null,
+	): Promise<string>;
+	/**
 	 * Sends one Object like `sendObjectIn` with `finish`, and closes the
 	 * session. With `publishDone` the Track is ended with PUBLISH_DONE first,
 	 * and the session is closed when `done()` has settled, as an application

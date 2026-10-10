@@ -8,7 +8,9 @@ import {
 	type KeyValuePair,
 	type MoqtConnection,
 	type PeerStreamEnd,
+	PublishEndedError,
 	type PublishedTrack,
+	SubgroupClosedError,
 	type Subscription,
 } from "@xmoq/moqt";
 import type { Diagnostics } from "@xmoq/moqt/diagnostics";
@@ -224,15 +226,73 @@ async function sendIn(
 		// largest. A stream left open says nothing about what follows.
 		endOfGroup: finish,
 	});
-	await subgroup.write({
-		objectId: 0n,
-		payload: fromHex(payloadHex),
-		properties: properties.map(toKeyValuePair),
-	});
+	try {
+		await subgroup.write({
+			objectId: 0n,
+			payload: fromHex(payloadHex),
+			properties: properties.map(toKeyValuePair),
+		});
+	} catch (error) {
+		// §11.4.3: "The publisher SHOULD respond with a reset" to a stream that
+		// was stopped. WHY it is needed here as well: when the write fails with
+		// Chromium's NetworkError (`stoppedByThePeer`), the library has not
+		// learned that the stream is over, and the session would refuse the
+		// PUBLISH_DONE of the track while it counts the stream as open. 4 runs
+		// of 300 ended so before this reset.
+		await subgroup.reset();
+		throw error;
+	}
 	if (finish) await subgroup.close();
 	console.log(
 		`object sent: group=${group} object=0 payload_len=${payloadHex.length / 2} properties=${properties.length} finished=${finish}`,
 	);
+}
+
+/**
+ * Whether a write to a subgroup stream failed because the subscriber stopped
+ * the stream or ended the subscription, and not for another reason.
+ *
+ * WHY these forms: a STOP_SENDING that the library has taken in rejects the
+ * write with `SubgroupClosedError`, or with `PublishEndedError` when the
+ * PUBLISH was cancelled with it. One the library has not taken in yet
+ * rejects it with the browser's error, which `SubgroupWriter.write` passes
+ * on, and Chromium has two: a `WebTransportError` with `source` "stream"
+ * ("Received STOP_SENDING.", seen in Chromium 156 on 2026-10-11 with the
+ * library's watch for a stop taken out), and a `DOMException` named
+ * NetworkError, "The stream was aborted by the remote server", which is what
+ * the failed runs had. The second is what `OutgoingStream::HandlePipeClosed`
+ * makes when the data pipe of the stream closes before the STOP_SENDING is
+ * reported (`third_party/blink/renderer/modules/webtransport/outgoing_stream.cc`,
+ * tip of Chromium's repository, read on 2026-10-11). It has no code.
+ */
+function stoppedByThePeer(error: unknown): boolean {
+	return (
+		error instanceof SubgroupClosedError ||
+		error instanceof PublishEndedError ||
+		(error instanceof WebTransportError && error.source === "stream") ||
+		(error instanceof DOMException && error.name === "NetworkError")
+	);
+}
+
+/**
+ * `sendIn` with `finish`, for a stream the subscriber is expected to stop:
+ * resolves with "sent" or with "stopped" and the error of the write. The own
+ * Rust client takes a stopped stream the same way (`STOP_SENDING_RECEIVED`).
+ */
+async function sendInWhatMayBeStopped(
+	group: bigint,
+	payloadHex: string,
+	publisherPriority: number | null,
+): Promise<string> {
+	try {
+		await sendIn(group, payloadHex, true, [], publisherPriority);
+		return "sent";
+	} catch (error) {
+		if (!stoppedByThePeer(error)) throw error;
+		const outcome = `stopped: ${errorText(error)}`;
+		console.log(`object of group=${group} ${outcome}`);
+		return outcome;
+	}
 }
 
 /**
@@ -352,6 +412,11 @@ window.xmoqOwn = {
 			publisherPriority: number | null,
 		) =>
 			sendIn(BigInt(group), payloadHex, finish, properties, publisherPriority),
+	),
+
+	sendObjectInWhatMayBeStopped: withPlainErrors(
+		(group: string, payloadHex: string, publisherPriority: number | null) =>
+			sendInWhatMayBeStopped(BigInt(group), payloadHex, publisherPriority),
 	),
 
 	sendLastObjectAndClose: withPlainErrors(

@@ -1737,8 +1737,13 @@ async function subgroupPriorities(run: Run): Promise<ScenarioResult> {
 	await allReceive(subscribers, group, first);
 	// The one whose stream comes second, and that stream's session.
 	const again = second ?? first;
+	// WHY `sendAgain` for a page: the relay stops this stream, and may do so
+	// before the page has written its Object (`Publisher.sendAgain`). An own
+	// Rust client reports a stopped stream as sent.
 	if (second === undefined) {
 		await first.sendAgain(group, secondPriority);
+	} else if (second.kind === "own-browser") {
+		await second.sendAgain(group, secondPriority);
 	} else {
 		const sent = await second.send();
 		if (sent !== group) {

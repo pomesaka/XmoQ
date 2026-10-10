@@ -145,9 +145,15 @@ export interface Publisher {
 		peerEndAfterMs: number;
 	}>;
 	/**
-	 * own-browser: sends Object 0 of a Group it has sent before, on a new
-	 * stream, with this Publisher Priority. The other clients send each
-	 * Group once.
+	 * own-browser: sends Object 0 of a Group on a new stream, with this
+	 * Publisher Priority, whether the page sent the Group before or not. The
+	 * other clients send each Group once, with `send`.
+	 *
+	 * For a stream the relay is expected to stop. Resolves as well when the
+	 * stream was stopped before the Object was written, which a relay that
+	 * decides on the Subgroup Header can do; a caller reads the relay's log
+	 * for what the relay did. WHY not `send` for it: a page whose write lost
+	 * against the STOP_SENDING failed there, 3 runs of 150 under load.
 	 */
 	sendAgain(group: number, publisherPriority: PublisherPriority): Promise<void>;
 	/**
@@ -538,7 +544,7 @@ async function startBrowserPublisher(
 				`send Group ${group} again`,
 				page.evaluate(
 					([g, hex, priority]) =>
-						window.xmoqOwn.sendObjectIn(g, hex, true, [], priority),
+						window.xmoqOwn.sendObjectInWhatMayBeStopped(g, hex, priority),
 					[
 						String(group),
 						payloadHex,
