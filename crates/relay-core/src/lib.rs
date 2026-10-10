@@ -10,9 +10,10 @@
 //!
 //! What this first relay does not do, each a rule of the draft it does not meet:
 //!
-//! Several publishers of one track (§9.3, §9.5) are not handled: see the FIXME
-//! at the top of `routing.rs`. [`TrackSource`] is one source of a track, and
-//! [`Track`] holds one of them today.
+//! Several publishers of one track (§9.3, §9.5) are handled in part: a
+//! [`Track`] takes several sources ([`TrackSource`]) that come with PUBLISH,
+//! and the relay still asks one publisher only; see the FIXME at the top of
+//! `routing.rs`.
 //!
 //! FIXME: apply the Subscription Filter of a SUBSCRIBE (§5.1.2). Every
 //! subscriber gets the Objects that arrive after its subscription, which is what
@@ -90,8 +91,8 @@ pub const MAX_EARLY_BYTES: usize = 1024 * 1024;
 /// second stream of a Subgroup that arrives must not become a second stream
 /// downstream, and to know that it is a second one the first has to be
 /// remembered. WHY not for ever: a track can go on for as long as its
-/// publisher likes. A stream of a Group older than these is passed on
-/// without a look at what came before.
+/// publisher likes. What becomes of a stream of a Group older than these
+/// is at [`Subgroups::admit`].
 pub const MAX_REMEMBERED_GROUPS: u64 = 8;
 
 /// Subgroups of one track the relay remembers at most, over all the Groups
@@ -100,6 +101,18 @@ pub const MAX_REMEMBERED_GROUPS: u64 = 8;
 /// the ones with the smallest Subgroup ID, whether their stream is still open
 /// or not. Provisional.
 pub const MAX_REMEMBERED_SUBGROUPS: usize = 256;
+
+/// Sources one track has at most: publishers whose PUBLISH the relay
+/// accepted, and publishers that accepted the relay's SUBSCRIBE.
+/// Provisional.
+///
+/// WHY a limit: §9.3 has "Relays MUST handle Objects for the same Track from
+/// multiple publishers", and every source costs the relay a subscription and
+/// its streams for as long as it sends, whether anything of it is passed on
+/// or not. §9.3 allows the limit: "An implementation can use mechanisms such
+/// as `REQUEST_ERROR` or unsubscribing ... if it cannot accept an additional
+/// publisher due to implementation constraints."
+pub const MAX_SOURCES: usize = 4;
 
 /// The Stream Count of a `PUBLISH_DONE` whose sender cannot give the exact
 /// number (§10.11: "it MUST set Stream Count to 2^62 - 1").
@@ -308,8 +321,9 @@ type InStreamKey = (SessionKey, StreamKey);
 enum TakenFrom {
     /// The stream is open.
     Open(InStreamKey),
-    /// The stream ended without a FIN: the Subgroup may have more Objects.
-    CutShort,
+    /// The stream, of that session, ended without a FIN: the Subgroup may
+    /// have more Objects.
+    CutShort(SessionKey),
     /// The stream ended with a FIN: the Subgroup was delivered whole
     /// (§11.4.3).
     Whole,
@@ -322,7 +336,8 @@ enum Admission {
     Pass,
     /// Take the Subgroup from it, in place of this stream that is still open.
     Replace(InStreamKey),
-    /// Leave it: the Subgroup was delivered whole.
+    /// Leave it: the Subgroup was delivered whole, is another source's, or
+    /// is of a Group that is too old to tell.
     Discard,
 }
 
@@ -357,10 +372,19 @@ enum Admission {
 ///   such objects to the QUIC stream, it MUST reset the stream", so a later
 ///   stream that passed would make the FIN the relay sent untrue.
 ///
-/// FIXME: with several sources of a track, a stream of another source for a
-/// Subgroup that is open is to be left, and one for a Subgroup that was cut
-/// short as well; see the FIXME at the top of `routing.rs`. The table keeps
-/// the session of the stream for that.
+/// A stream of another source than the one the Subgroup was taken from is
+/// left in all three cases: first come, first taken.
+///
+/// * While the first is open: the same Subgroup from two sources is what
+///   several publishers of a track send, and one of the two is enough. WHY
+///   the first: the subscribers have its start already.
+/// * After the first was cut short: WHY NOT go on with the other source,
+///   which §2.2 allows as well: the relay would have to know that the other
+///   source's stream starts where the first one stopped, and it has stopped
+///   that stream when it arrived, if it arrived before. Whether to do it is
+///   an open question for Phase 2. So a Subgroup ends for the subscribers
+///   where its source ends, and the next Subgroup comes from whichever source
+///   sends it first.
 ///
 /// FIXME: detect an Object past the last one of a Subgroup that ended with a
 /// FIN, and a Subgroup that comes on two streams that end with a FIN with
@@ -376,17 +400,46 @@ struct Subgroups {
 impl Subgroups {
     /// A stream arrived for a Subgroup: what becomes of it. The Subgroup is
     /// then taken from it, unless the answer is [`Admission::Discard`].
-    fn admit(&mut self, group: u64, subgroup: u64, stream: InStreamKey) -> Admission {
+    /// `several_sources`: the track has, or has had, more than one source at
+    /// a time ([`Track::had_several_sources`]).
+    ///
+    /// A stream of a Group the relay has forgotten passes for a track that
+    /// only ever had one source at a time, which may send an old Group late,
+    /// and is left otherwise. WHY: with several sources, one that is 8
+    /// Groups behind another sends what the subscribers have got already, as
+    /// a matter of course, and the relay can no longer tell; passing it on
+    /// would put the same Subgroup on a second stream of which neither was
+    /// reset (§2.2). WHY NOT leave it with one source as well: nothing has
+    /// sent that Group but the source itself. What is lost: a source that
+    /// sends an old Group late, for a reason of its own, is not heard once
+    /// its track has had a second source.
+    fn admit(
+        &mut self,
+        group: u64,
+        subgroup: u64,
+        stream: InStreamKey,
+        several_sources: bool,
+    ) -> Admission {
         let newest = self.newest_group.map_or(group, |newest| newest.max(group));
         self.newest_group = Some(newest);
         let forgotten = |group: u64| newest.saturating_sub(group) >= MAX_REMEMBERED_GROUPS;
         if forgotten(group) {
-            return Admission::Pass;
+            return if several_sources {
+                Admission::Discard
+            } else {
+                Admission::Pass
+            };
         }
+        let (source, _) = stream;
         let admission = match self.taken.get(&(group, subgroup)) {
-            Some(TakenFrom::Open(open)) if *open != stream => Admission::Replace(*open),
-            Some(TakenFrom::Whole) => return Admission::Discard,
-            Some(TakenFrom::Open(_) | TakenFrom::CutShort) | None => Admission::Pass,
+            Some(TakenFrom::Open(open)) if *open == stream => Admission::Pass,
+            Some(TakenFrom::Open(open)) if open.0 == source => Admission::Replace(*open),
+            Some(TakenFrom::CutShort(by)) if *by == source => Admission::Pass,
+            // From another source, or delivered whole.
+            Some(TakenFrom::Open(_) | TakenFrom::CutShort(_) | TakenFrom::Whole) => {
+                return Admission::Discard;
+            }
+            None => Admission::Pass,
         };
         self.taken
             .insert((group, subgroup), TakenFrom::Open(stream));
@@ -406,7 +459,7 @@ impl Subgroups {
             *taken = if fin {
                 TakenFrom::Whole
             } else {
-                TakenFrom::CutShort
+                TakenFrom::CutShort(stream.0)
             };
         }
     }
@@ -503,16 +556,36 @@ impl Source {
 #[derive(Debug)]
 struct Track {
     /// Never empty: a track whose last source is over is taken out of
-    /// [`Tracks`]. At most one of a session, since a session has at most one
-    /// subscription to a track in each role (§5.1).
+    /// [`Tracks`]. No more than [`MAX_SOURCES`], and at most one of a
+    /// session; [`Tracks::add_source`] refuses what would break either.
     ///
-    /// FIXME: take a second source; see the top of `routing.rs`. One is put
-    /// here today, and what reads the list is written for several.
+    /// WHY one of a session: the streams of a source are told from those of
+    /// another by their session. While a publisher's subscription lasts, the
+    /// session keeps a second one from coming about: the relay is the
+    /// subscriber of every source, §5.1 has an endpoint hold at most one
+    /// subscription to a track as the subscriber, and the session refuses a
+    /// PUBLISH where the relay's SUBSCRIBE or an earlier PUBLISH is
+    /// Established (`DUPLICATE_SUBSCRIPTION`). A SUBSCRIBE of the relay that
+    /// has no answer yet gives way to the PUBLISH
+    /// ([`Relay::give_way_to_publish`]). What the session does not keep out
+    /// is a PUBLISH after the publisher's own `PUBLISH_DONE`, while the relay
+    /// still waits for the streams that counted.
     sources: Vec<Source>,
+    /// The track has had more than one source at a time, now or earlier.
+    ///
+    /// WHY "or earlier", and never taken back: the source that was ahead can
+    /// be the one that goes. The one that is left then sends Groups the
+    /// subscribers have had from the other, and that is the case two sources
+    /// are there for. Which Groups those are is not known once they are older
+    /// than what the relay remembers.
+    had_several_sources: bool,
     /// What is still asked of other publishers. Empty today: one publisher
     /// is asked, and its answer is what gave the track its source.
     asks: Vec<Ask>,
-    /// Track Properties of the source; §9.6 has the relay pass them on.
+    /// Track Properties, as the source that came last gave them; §9.6 has
+    /// the relay pass them on. §2.5: "the most recent set SHOULD replace any
+    /// cached values" and "Relays MUST NOT attempt to merge sets of unknown
+    /// properties received in different messages".
     properties: Vec<KeyValuePair>,
     /// The largest Location known for the track (§10.2.11): what the source
     /// said, or a larger one seen since.
@@ -537,6 +610,7 @@ impl Track {
                 from,
                 draining: false,
             }],
+            had_several_sources: false,
             asks: Vec::new(),
             properties,
             largest,
@@ -566,7 +640,10 @@ impl Track {
             stream,
             code: stream_reset_code::CANCELLED,
         };
-        match self.subgroups.admit(subgroup.0, subgroup.1, stream) {
+        match self
+            .subgroups
+            .admit(subgroup.0, subgroup.1, stream, self.had_several_sources)
+        {
             Admission::Pass => true,
             Admission::Discard => {
                 actions.push(stop(stream));
@@ -591,6 +668,49 @@ impl Track {
                 }
                 true
             }
+        }
+    }
+
+    /// A stream of a source is over: the Subgroup it carried ends for the
+    /// subscribers as the stream did, and the track forgets the stream.
+    fn in_stream_ended(
+        &mut self,
+        stream: InStreamKey,
+        end: StreamEnd,
+        out_streams: &mut HashMap<OutStreamKey, OutStream>,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(in_stream) = self.in_streams.remove(&stream) else {
+            return;
+        };
+        if let (Passage::Passed, Some(subgroup_id)) = (in_stream.passage, in_stream.subgroup_id) {
+            let group = in_stream.header.group_id;
+            self.subgroups
+                .ended(group, subgroup_id, stream, end == StreamEnd::Fin);
+        }
+        for subscriber in &mut self.subscribers {
+            let Some(out_stream) = in_stream.outs.get(&subscriber.session).copied() else {
+                continue;
+            };
+            let code = match end {
+                // The stream stays in the relay's books until the I/O side
+                // has written it out.
+                StreamEnd::Fin => {
+                    actions.push(Action::FinishDataStream { out_stream });
+                    continue;
+                }
+                // §11.4.3: a stream that will not carry the rest of its
+                // Subgroup is reset. The publisher's code says why, when
+                // there is one.
+                StreamEnd::Aborted(code) => code.unwrap_or(stream_reset_code::INTERNAL_ERROR),
+                // WHY CANCELLED: the publisher is gone, and that is the code
+                // its other open streams get when the end of its session is
+                // what the relay sees first. Which of the two comes first is
+                // a race of the I/O side, and the subscriber is to see one
+                // code for one cause.
+                StreamEnd::Lost => stream_reset_code::CANCELLED,
+            };
+            reset_out_stream(out_streams, Some(subscriber), out_stream, code, actions);
         }
     }
 
@@ -726,35 +846,57 @@ impl Tracks {
     /// and keeps what is still asked of other publishers. Returns the
     /// subscribers that waited; answering them is the caller's.
     ///
+    /// A track that has a source gets another. Its Track Properties are the
+    /// ones of the new source from then on, and its largest Location the
+    /// larger of the two (§10.2.11: "the largest of the following").
+    ///
     /// WHY one place for a name without an entry and one that waits: what a
     /// pending track holds, subscribers that wait and requests that are open,
     /// must not be dropped without a word, and a caller that makes the entry
     /// itself has to remember that.
     ///
-    /// FIXME: add the source to a track that has one already. Today the
-    /// callers refuse a second source before they get here.
+    /// # Errors
+    ///
+    /// The track cannot take the source, and is left as it was.
     fn add_source(
         &mut self,
         name: &FullTrackName,
         from: TrackSource,
         properties: Vec<KeyValuePair>,
         largest: Option<Location>,
-    ) -> Vec<Waiter> {
+    ) -> Result<Vec<Waiter>, NoSource> {
+        if let Some(track) = self.live_mut(name) {
+            if track.source_on(from.session_and_alias().0).is_some() {
+                return Err(NoSource::OneOnTheSession);
+            }
+            if track.sources.len() >= MAX_SOURCES {
+                return Err(NoSource::TooMany);
+            }
+            track.sources.push(Source {
+                from,
+                draining: false,
+            });
+            track.had_several_sources = true;
+            track.properties = properties;
+            track.largest = track.largest.max(largest);
+            return Ok(Vec::new());
+        }
         let mut track = Track::established(from, properties, largest);
         let waiters = match self.0.remove(name) {
             Some(TrackEntry::Pending(pending)) => {
                 track.asks = pending.asks;
                 pending.waiters
             }
-            None => Vec::new(),
-            Some(live @ TrackEntry::Live(_)) => {
-                debug_assert!(false, "a second source for {name:?}: {from:?}");
-                self.0.insert(name.clone(), live);
-                return Vec::new();
-            }
+            // Not a track with a source: that was the case above.
+            Some(TrackEntry::Live(_)) | None => Vec::new(),
         };
         self.0.insert(name.clone(), TrackEntry::Live(track));
-        waiters
+        Ok(waiters)
+    }
+
+    /// Puts back a track that [`Self::take_live`] took out.
+    fn put_live(&mut self, name: &FullTrackName, track: Track) {
+        self.0.insert(name.clone(), TrackEntry::Live(track));
     }
 
     /// Puts a track without a source under a name that has no entry.
@@ -796,6 +938,18 @@ impl Tracks {
     }
 }
 
+/// Why a track does not take a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoSource {
+    /// It has [`MAX_SOURCES`] of them.
+    TooMany,
+    /// It has one on that session. The session keeps that from happening
+    /// while the publisher's subscription lasts (§5.1); this is the source
+    /// of a subscription the publisher ended with `PUBLISH_DONE`, which the
+    /// relay keeps until the streams it counted have ended.
+    OneOnTheSession,
+}
+
 /// What a relay holds, for tests and logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Counts {
@@ -817,6 +971,11 @@ pub struct Counts {
     pub in_streams: usize,
     /// Subgroup streams to subscribers that are not done.
     pub out_streams: usize,
+    /// Sources, over all tracks ([`MAX_SOURCES`] bounds them for each).
+    pub sources: usize,
+    /// What is asked of publishers and not answered, over all tracks, with a
+    /// source and without.
+    pub asks: usize,
     /// Subgroup streams held for a Track Alias that is not known yet.
     pub early_streams: usize,
     /// Subgroups the tracks remember the stream of, over all tracks
@@ -936,7 +1095,8 @@ impl Relay {
                     .and_then(|state| state.in_streams.get(&stream))
                     .cloned();
                 if let Some(track) = track {
-                    self.end_track(&track, TrackEnd::Malformed, &mut actions);
+                    let end = TrackEnd::Malformed { by: session };
+                    self.end_track(&track, end, &mut actions);
                 }
             }
             Event::OutStreamOpened { out_stream } => {
@@ -1227,23 +1387,85 @@ impl Relay {
         // two endpoints, so the sentence is about the PUBLISH of the session
         // the SUBSCRIBE went to. With another session the relay has no pending
         // subscription, and its PUBLISH is a second publisher of the track.
+        if !self.sessions.contains_key(&session) {
+            return;
+        }
         let asked_here = self.is_asked_of(&publish.full_track_name, session);
-        // A track the relay has asked another publisher for counts as taken.
+        // A track that has a source takes another (§9.3, §9.5: "When it
+        // receives an authorized PUBLISH message for a Track that has
+        // Established downstream subscriptions, it MUST respond with
+        // PUBLISH_OK"; the relay does so with and without subscribers).
+        //
+        // FIXME: take the PUBLISH in the two cases below as well. A track
+        // the relay has asked another publisher for, and has no answer about,
+        // counts as taken, and so does one whose sources have all said
+        // PUBLISH_DONE.
         let taken = match self.tracks.phase(&publish.full_track_name) {
-            Some(TrackPhase::Established | TrackPhase::Draining) => true,
+            Some(TrackPhase::Draining) => true,
             Some(TrackPhase::Pending) => !asked_here,
-            None => false,
+            Some(TrackPhase::Established) | None => false,
         };
-        if taken {
+        // WHY UNINTERESTED: it is the code §10.6.2 gives a subscriber for
+        // declining a PUBLISH, and the relay is the subscriber here. §9.3
+        // lets a relay refuse a publisher it cannot take. The PUBLISH would
+        // be accepted once the track has a source that is not draining, or
+        // is gone.
+        let mut refusal = taken.then(|| Refusal::code(request_error_code::UNINTERESTED));
+        // §10.2.11: the relay's LARGEST_OBJECT starts from the one the
+        // publisher gave.
+        let largest = publish
+            .parameters
+            .iter()
+            .find_map(|parameter| match parameter {
+                Parameter::LargestObject(location) => Some(*location),
+                _ => None,
+            });
+        let track_name = publish.full_track_name;
+        let published = TrackSource::Publisher {
+            session,
+            stream,
+            track_alias: publish.track_alias,
+        };
+        let mut waiters = Vec::new();
+        if refusal.is_none() {
+            // Before the PUBLISH_OK, as §5.1 has it. What was asked of other
+            // publishers goes on under the track with a source. WHY nothing
+            // is put back when `add_source` refuses: it refuses for a track
+            // that has a source only, and `asked_here` is about one that
+            // has none.
+            if asked_here {
+                self.give_way_to_publish(&track_name, session, actions);
+            }
+            match self
+                .tracks
+                .add_source(&track_name, published, publish.track_properties, largest)
+            {
+                Ok(waited) => waiters = waited,
+                // WHY EXCESSIVE_LOAD: "The responder is overloaded and cannot
+                // process the request at this time" (§10.6.2), the code of
+                // the relay's other limits. UNINTERESTED would say that the
+                // relay does not want the track.
+                Err(NoSource::TooMany) => {
+                    refusal = Some(Refusal::code(request_error_code::EXCESSIVE_LOAD));
+                }
+                // The publisher said PUBLISH_DONE for the track and publishes
+                // it anew while the relay still waits for the streams of the
+                // first time. WHY refuse: two sources on a session cannot be
+                // told apart where a stream closes or the session ends. WHY
+                // NOT `DUPLICATE_SUBSCRIPTION`: for the publisher the first
+                // subscription is Terminated (§5.1), so this is no second
+                // one; it is refused as a PUBLISH for a track that drains
+                // is, and would be accepted once the wait is over.
+                Err(NoSource::OneOnTheSession) => {
+                    refusal = Some(Refusal::code(request_error_code::UNINTERESTED));
+                }
+            }
+        }
+        if let Some(refusal) = refusal {
             if let Some(state) = self.sessions.get_mut(&session) {
                 state.drop_early_streams(session, publish.track_alias, actions);
             }
-            // WHY UNINTERESTED: it is the code §10.6.2 gives a subscriber for
-            // declining a PUBLISH, and the relay is the subscriber here. §9.3
-            // lets a relay refuse a publisher it cannot take. The PUBLISH
-            // would be accepted once the other publisher is gone.
-            let uninterested = Refusal::code(request_error_code::UNINTERESTED);
-            self.refuse(session, stream, request, &uninterested, actions);
+            self.refuse(session, stream, request, &refusal, actions);
             return;
         }
         let Some(state) = self.sessions.get_mut(&session) else {
@@ -1260,32 +1482,9 @@ impl Relay {
             stream,
             RequestSlot::Publish {
                 request,
-                track: publish.full_track_name.clone(),
+                track: track_name.clone(),
             },
         );
-        // §10.2.11: the relay's LARGEST_OBJECT starts from the one the
-        // publisher gave.
-        let largest = publish
-            .parameters
-            .iter()
-            .find_map(|parameter| match parameter {
-                Parameter::LargestObject(location) => Some(*location),
-                _ => None,
-            });
-        let track_name = publish.full_track_name;
-        let published = TrackSource::Publisher {
-            session,
-            stream,
-            track_alias: publish.track_alias,
-        };
-        // Before the PUBLISH_OK, as §5.1 has it. What was asked of other
-        // publishers goes on under the track with a source.
-        if asked_here {
-            self.give_way_to_publish(&track_name, session, actions);
-        }
-        let waiters =
-            self.tracks
-                .add_source(&track_name, published, publish.track_properties, largest);
         self.respond(session, stream, response, actions);
         // §9.4: the track has an Established upstream subscription now.
         for waiter in &waiters {
@@ -1419,7 +1618,13 @@ impl Relay {
                 source.draining = true;
             }
         }
-        if !self.end_track_if_drained(track_name, actions) {
+        self.retire_drained_sources(track_name, actions);
+        // Still a source: streams it counted are yet to end.
+        let waits = self
+            .tracks
+            .live(track_name)
+            .is_some_and(|track| track.sources().any(said_by));
+        if waits {
             actions.push(Action::StartDrainTimer {
                 session,
                 track_alias,
@@ -1729,58 +1934,18 @@ impl Relay {
         let Some(track) = self.tracks.live_mut(&track_name) else {
             return;
         };
-        if let Some(source) = track.source_on(session) {
-            state
-                .moqt
-                .on_data_stream_closed(source.session_and_alias().1);
+        // The alias the stream came under, where the track still knows the
+        // stream.
+        let track_alias = track
+            .in_streams
+            .get(&(session, stream))
+            .map(|in_stream| in_stream.header.track_alias)
+            .or_else(|| Some(track.source_on(session)?.session_and_alias().1));
+        if let Some(track_alias) = track_alias {
+            state.moqt.on_data_stream_closed(track_alias);
         }
-        if let Some(in_stream) = track.in_streams.remove(&(session, stream)) {
-            if let (Passage::Passed, Some(subgroup_id)) = (in_stream.passage, in_stream.subgroup_id)
-            {
-                track.subgroups.ended(
-                    in_stream.header.group_id,
-                    subgroup_id,
-                    (session, stream),
-                    end == StreamEnd::Fin,
-                );
-            }
-            for subscriber in &mut track.subscribers {
-                let Some(out_stream) = in_stream.outs.get(&subscriber.session).copied() else {
-                    continue;
-                };
-                match end {
-                    // The stream stays in the relay's books until the I/O side
-                    // has written it out.
-                    StreamEnd::Fin => actions.push(Action::FinishDataStream { out_stream }),
-                    // §11.4.3: a stream that will not carry the rest of its
-                    // Subgroup is reset. The publisher's code says why, when
-                    // there is one.
-                    StreamEnd::Aborted(code) => {
-                        let code = code.unwrap_or(stream_reset_code::INTERNAL_ERROR);
-                        reset_out_stream(
-                            &mut self.out_streams,
-                            Some(subscriber),
-                            out_stream,
-                            code,
-                            actions,
-                        );
-                    }
-                    // WHY CANCELLED: the publisher is gone, and that is the
-                    // code its other open streams get when the end of its
-                    // session is what the relay sees first. Which of the two
-                    // comes first is a race of the I/O side, and the
-                    // subscriber is to see one code for one cause.
-                    StreamEnd::Lost => reset_out_stream(
-                        &mut self.out_streams,
-                        Some(subscriber),
-                        out_stream,
-                        stream_reset_code::CANCELLED,
-                        actions,
-                    ),
-                }
-            }
-        }
-        self.end_track_if_drained(&track_name, actions);
+        track.in_stream_ended((session, stream), end, &mut self.out_streams, actions);
+        self.retire_drained_sources(&track_name, actions);
     }
 
     /// The I/O side is done with a stream: nothing more is to be said about
@@ -1809,51 +1974,96 @@ impl Relay {
         }
     }
 
-    /// Ends a track whose source said `PUBLISH_DONE` once nothing more can
-    /// arrive for it. Returns whether the track is gone.
-    fn end_track_if_drained(
-        &mut self,
-        track_name: &FullTrackName,
-        actions: &mut Vec<Action>,
-    ) -> bool {
+    /// Lets go of every source of a track that said `PUBLISH_DONE` and for
+    /// which nothing more can arrive: every stream its Stream Count named has
+    /// ended (§10.11). The track ends with the last of them.
+    fn retire_drained_sources(&mut self, track_name: &FullTrackName, actions: &mut Vec<Action>) {
         let Some(track) = self.tracks.live(track_name) else {
-            return true;
+            return;
         };
-        if !track.is_draining() {
-            return false;
-        }
-        let retired = track.sources().all(|source| {
-            let (session, track_alias) = source.session_and_alias();
-            self.sessions.get(&session).is_none_or(|state| {
-                state.moqt.subscribed_alias(track_alias) == SubscribedAlias::Retired
+        let drained: Vec<Source> = track
+            .sources()
+            .filter(|source| {
+                let (session, track_alias) = source.session_and_alias();
+                source.draining
+                    && self.sessions.get(&session).is_none_or(|state| {
+                        state.moqt.subscribed_alias(track_alias) == SubscribedAlias::Retired
+                    })
             })
-        });
-        if retired {
-            self.end_track(track_name, TrackEnd::Done, actions);
-        }
-        retired
+            .copied()
+            .collect();
+        self.source_gone(
+            track_name,
+            |source| drained.contains(source),
+            TrackEnd::Done,
+            actions,
+        );
     }
 
-    /// A source of a track is over and will send nothing more, without
-    /// having drained: it cancelled, its session is gone, or the streams it
-    /// counted did not come. `gone` picks the source.
-    ///
-    /// FIXME: when the track has other sources, let go of this one alone and
-    /// keep the track. Today a track has one source, and it ends with it.
+    /// A source of a track is over and will send nothing more: it drained,
+    /// it cancelled, its session is gone, the streams it counted did not
+    /// come, or nobody wants what the relay asked it for. `is_gone` picks the
+    /// source; this is the one place that tells the last source of a track
+    /// from one of several. The track ends with its last source
+    /// ([`Self::end_track`]); while it has another, it goes on, and only what
+    /// the relay took from this one is cut ([`Self::let_go_of_sources`]).
     fn source_gone(
         &mut self,
         track_name: &FullTrackName,
-        gone: impl Fn(&Source) -> bool,
+        is_gone: impl Fn(&Source) -> bool,
         end: TrackEnd,
         actions: &mut Vec<Action>,
     ) {
-        let is_a_source = self
-            .tracks
-            .live(track_name)
-            .is_some_and(|track| track.sources().any(gone));
-        if is_a_source {
-            self.end_track(track_name, end, actions);
+        let Some(track) = self.tracks.live(track_name) else {
+            return;
+        };
+        let (gone, kept): (Vec<Source>, Vec<Source>) =
+            track.sources().partition(|source| is_gone(source));
+        if gone.is_empty() {
+            return;
         }
+        if kept.is_empty() {
+            self.end_track(track_name, end, actions);
+        } else {
+            self.let_go_of_sources(track_name, &gone, end, actions);
+        }
+    }
+
+    /// Takes sources off a track that keeps others. Each is told that nothing
+    /// more of it is wanted, as when its track ends. The Subgroups that were
+    /// being taken from it end for the subscribers where they are: their
+    /// streams are reset, and no other source goes on with them (see
+    /// [`Subgroups`]). The subscriptions to the track are not touched.
+    fn let_go_of_sources(
+        &mut self,
+        track_name: &FullTrackName,
+        gone: &[Source],
+        end: TrackEnd,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(mut track) = self.tracks.take_live(track_name) else {
+            return;
+        };
+        track.sources.retain(|source| !gone.contains(source));
+        for source in gone {
+            let (_, reset_code) = end.codes();
+            self.release_source(&track, *source, end, reset_code, actions);
+            let (session, _) = source.session_and_alias();
+            // By stream number, for the reason `release_source` gives.
+            let streams: BTreeSet<u64> = track
+                .in_streams
+                .keys()
+                .filter(|(from, _)| *from == session)
+                .map(|(_, stream)| stream.0)
+                .collect();
+            // For the track, the streams of a source that is let go end as
+            // the streams of a publisher that is gone do.
+            for stream in streams {
+                let stream = (session, StreamKey(stream));
+                track.in_stream_ended(stream, StreamEnd::Lost, &mut self.out_streams, actions);
+            }
+        }
+        self.tracks.put_live(track_name, track);
     }
 
     /// Removes a track and ends every subscription to it.
@@ -1861,18 +2071,19 @@ impl Relay {
         let Some(mut track) = self.tracks.take_live(track_name) else {
             return;
         };
-        let (status_code, reset_code) = match end {
-            TrackEnd::Done | TrackEnd::TimedOut | TrackEnd::SourceGone | TrackEnd::Unwanted => (
-                publish_done_status::TRACK_ENDED,
-                stream_reset_code::CANCELLED,
-            ),
-            TrackEnd::Malformed => (
-                publish_done_status::MALFORMED_TRACK,
-                stream_reset_code::MALFORMED_TRACK,
-            ),
-        };
+        let (status_code, reset_code) = end.codes();
         for source in track.sources() {
-            self.release_source(&track, *source, end, reset_code, actions);
+            // §2.4.2: "it MUST cancel any corresponding subscription or
+            // fetches for that Track from that publisher". The track is over,
+            // so the other sources are cancelled as well; they did nothing
+            // wrong, and are not told that they did.
+            let to_the_source = match end {
+                TrackEnd::Malformed { by } if source.session_and_alias().0 != by => {
+                    stream_reset_code::CANCELLED
+                }
+                _ => reset_code,
+            };
+            self.release_source(&track, *source, end, to_the_source, actions);
         }
         // What was still asked of other publishers is of no use to a track
         // that is over.
@@ -1897,7 +2108,9 @@ impl Relay {
             let own: Vec<OutStreamKey> = subscriber
                 .outs
                 .iter()
-                .filter(|out_stream| end == TrackEnd::Malformed || cut_short.contains(out_stream))
+                .filter(|out_stream| {
+                    matches!(end, TrackEnd::Malformed { .. }) || cut_short.contains(out_stream)
+                })
                 .copied()
                 .collect();
             for out_stream in own {
@@ -1991,7 +2204,7 @@ impl Relay {
                 stream: publish_stream,
                 code: stream_reset_code::CANCELLED,
             }),
-            TrackEnd::Malformed => {
+            TrackEnd::Malformed { .. } => {
                 // §2.4.2: the receiver of a malformed track cancels the
                 // subscription.
                 if let Some(RequestSlot::Publish { request, .. }) =
@@ -2033,7 +2246,7 @@ impl Relay {
             // §3.3.2: the relay cancels its own request. For a malformed
             // track §2.4.2 asks for exactly that.
             TrackEnd::TimedOut
-            | TrackEnd::Malformed
+            | TrackEnd::Malformed { .. }
             | TrackEnd::SourceGone
             | TrackEnd::Unwanted => {
                 if let Some(own) = own {
@@ -2096,13 +2309,14 @@ impl Relay {
         // draft leaves the lifetime of an aggregated upstream subscription to
         // the relay (§9.4).
         //
-        // FIXME: with sources of both kinds, cancel the relay's SUBSCRIBEs
-        // and keep the track for its publishers.
-        let asked_for = |source: &Source| matches!(source.from, TrackSource::Subscription { .. });
-        let unwanted =
-            track.subscribers.is_empty() && !track.is_draining() && track.sources().all(asked_for);
-        if unwanted {
-            self.end_track(track_name, TrackEnd::Unwanted, actions);
+        // With sources of both kinds, the relay's SUBSCRIBEs are cancelled
+        // and the track stays for its publishers. A SUBSCRIBE whose publisher
+        // said PUBLISH_DONE is left to drain.
+        if track.subscribers.is_empty() {
+            let unwanted = |source: &Source| {
+                matches!(source.from, TrackSource::Subscription { .. }) && !source.draining
+            };
+            self.source_gone(track_name, unwanted, TrackEnd::Unwanted, actions);
         }
         Some(subscriber)
     }
@@ -2288,6 +2502,12 @@ impl Relay {
                 .map(|(_, track)| track.in_streams.len())
                 .sum(),
             out_streams: self.out_streams.len(),
+            sources: self
+                .tracks
+                .all_live()
+                .map(|(_, track)| track.sources.len())
+                .sum(),
+            asks: self.tracks.all_asks().count(),
             early_streams: self.sessions.values().map(|state| state.early.len()).sum(),
             remembered_subgroups: self
                 .tracks
@@ -2422,8 +2642,26 @@ enum TrackEnd {
     SourceGone,
     /// The last subscriber of a track the relay itself subscribed to is gone.
     Unwanted,
-    /// The track broke the object model (§2.4.2).
-    Malformed,
+    /// A source of the track, the one on that session, broke the object
+    /// model (§2.4.2).
+    Malformed { by: SessionKey },
+}
+
+impl TrackEnd {
+    /// The Status Code of the `PUBLISH_DONE` the subscribers get, and the
+    /// code streams are reset and stopped with.
+    fn codes(self) -> (u64, u32) {
+        match self {
+            Self::Done | Self::TimedOut | Self::SourceGone | Self::Unwanted => (
+                publish_done_status::TRACK_ENDED,
+                stream_reset_code::CANCELLED,
+            ),
+            Self::Malformed { .. } => (
+                publish_done_status::MALFORMED_TRACK,
+                stream_reset_code::MALFORMED_TRACK,
+            ),
+        }
+    }
 }
 
 /// Where an action is carried out.

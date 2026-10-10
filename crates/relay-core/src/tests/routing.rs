@@ -800,7 +800,8 @@ fn a_publish_for_a_track_the_relay_asked_for_is_refused() {
     announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
     subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
     // Bob offers the same track while the relay waits for PUBLISHER:
-    // UNINTERESTED (0x20), as for a second publisher.
+    // UNINTERESTED (0x20). Once the track has a source, Bob's PUBLISH is
+    // taken as a second one.
     assert_eq!(
         relay.step(Event::RequestOpened {
             session: BOB,

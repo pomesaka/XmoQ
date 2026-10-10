@@ -2,14 +2,14 @@
 //! for is passed on to a publisher that announced a matching namespace with
 //! `PUBLISH_NAMESPACE`, and answered when that publisher has answered.
 //!
-//! FIXME: send the SUBSCRIBE to every matching publisher, and take Objects of
-//! one track from several of them (§9.5: "Relays MUST send SUBSCRIBE messages
-//! to all matching publishers"; §9.3: "Relays MUST handle Objects for the same
-//! Track from multiple publishers"). Only the publisher whose namespace was
-//! announced first is asked, and what it answers is the answer. The same goes
-//! for a `PUBLISH_NAMESPACE` that arrives while a track is subscribed to
-//! elsewhere (§9.5: "it MUST send a SUBSCRIBE to the publisher that sent the
-//! `PUBLISH_NAMESPACE` for each matching subscription"). `docs/roadmap.md`,
+//! FIXME: send the SUBSCRIBE to every matching publisher (§9.5: "Relays MUST
+//! send SUBSCRIBE messages to all matching publishers"). Only the publisher
+//! whose namespace was announced first is asked, and what it answers is the
+//! answer. The same goes for a `PUBLISH_NAMESPACE` that arrives while a track
+//! is subscribed to elsewhere (§9.5: "it MUST send a SUBSCRIBE to the
+//! publisher that sent the `PUBLISH_NAMESPACE` for each matching
+//! subscription"). A track does take Objects from several sources (§9.3);
+//! today the further ones can only come with PUBLISH. `docs/roadmap.md`,
 //! Phase 0b, has the item.
 //!
 //! Two words for the side the Objects come from. A *publisher* is a peer: the
@@ -549,9 +549,21 @@ impl Relay {
             asks.retain(|ask| *ask != own.ask);
         }
         let (_, track_alias) = accepted.session_and_alias();
-        let waiters = self
+        let Ok(waiters) = self
             .tracks
-            .add_source(&own.track, accepted, properties, largest);
+            .add_source(&own.track, accepted, properties, largest)
+        else {
+            // The track cannot take the source. For the publisher the
+            // subscription is Established, so it is cancelled (§3.3.2), as
+            // one the relay cannot use for another reason. Not reached
+            // today: a track that waits takes its first source, always; see
+            // the FIXME above.
+            self.cancel_own_request(publisher, request, actions);
+            if let Some(state) = self.sessions.get_mut(&publisher) {
+                state.drop_early_streams(publisher, track_alias, actions);
+            }
+            return;
+        };
         for waiter in &waiters {
             self.establish(&own.track, waiter, actions);
         }
@@ -792,6 +804,11 @@ impl Relay {
 
     /// Whether the track has no source and a SUBSCRIBE of the relay for it
     /// went to that session.
+    ///
+    /// FIXME: look at what is asked for a track with a source as well
+    /// ([`Tracks::asks`]). Today such a track has nothing asked: a PUBLISH
+    /// for a track that waits is refused unless it comes from the publisher
+    /// that was asked.
     pub(crate) fn is_asked_of(&self, track_name: &FullTrackName, session: SessionKey) -> bool {
         self.tracks
             .pending(track_name)

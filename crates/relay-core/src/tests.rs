@@ -10,6 +10,7 @@ use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 
 mod routing;
+mod sources;
 mod subgroups;
 
 use super::{
@@ -518,6 +519,13 @@ fn a_subscription_to_a_track_nobody_published_is_rejected() {
 #[test]
 fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
     let mut relay = relay_with_track();
+    // The publisher said PUBLISH_DONE and one stream it counted has not come:
+    // the track drains.
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 1),
+    });
     // (first message, REQUEST_ERROR code)
     let cases = [
         // FETCH: NOT_SUPPORTED.
@@ -528,7 +536,7 @@ fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
             },
             0x3,
         ),
-        // A second publisher of the track: UNINTERESTED.
+        // A publisher of a track that drains: UNINTERESTED.
         (publish(2, b"a"), 0x20),
     ];
     for (index, (first, error_code)) in cases.into_iter().enumerate() {
@@ -1289,8 +1297,13 @@ fn a_finished_stream_that_is_not_written_out_is_reset_with_its_subscription() {
 #[test]
 fn early_streams_of_a_refused_publish_are_let_go() {
     let mut relay = relay_with_track();
-    // Alice sends eight streams ahead of a PUBLISH for the track that already
-    // has a publisher.
+    // The track drains, so a PUBLISH for it is refused.
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 1),
+    });
+    // Alice sends eight streams ahead of her PUBLISH for the track.
     for stream in 0..8 {
         relay.step(Event::DataStreamOpened {
             session: ALICE,
