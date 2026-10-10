@@ -36,6 +36,7 @@ use xmoq_relay_core::{Action, Event, OutStreamKey, Relay, Role, SessionKey, Stre
 /// |---|---|
 /// | QUIC: received on its streams and not read yet | 4 MiB (`receive_window`) |
 /// | QUIC: written to its streams and not acknowledged | 4 MiB (`send_window`) |
+/// | QUIC: datagrams it sent, which nothing reads | 1500 bytes |
 /// | Read buffers of its streams | 64 + 264 streams of 16 KiB: about 5 MiB |
 /// | Undecoded bytes of its subgroup streams | 4 MiB (`session_buffer_limit`) |
 /// | Streams held for a Track Alias that is not known | 1 MiB (`MAX_EARLY_BYTES`) |
@@ -117,6 +118,17 @@ pub struct Log {
 }
 
 impl Log {
+    /// A log whose lines a test reads.
+    #[cfg(test)]
+    pub fn collect() -> (Self, mpsc::Receiver<String>) {
+        let (lines, collected) = mpsc::channel(1024);
+        let log = Self {
+            lines,
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+        (log, collected)
+    }
+
     /// A log that prints to stdout from a task of its own.
     ///
     /// WHY a task: the hub is one task for all sessions, and a write to a
@@ -316,15 +328,18 @@ struct Timers {
 }
 
 impl Timers {
-    fn start(&mut self, session: SessionKey, wait: Duration, event: Event) {
+    /// Starts a timer. `false` when the session already has as many as it
+    /// may, and this one was not started.
+    fn start(&mut self, session: SessionKey, wait: Duration, event: Event) -> bool {
         let running = self.per_session.entry(session).or_default();
         if *running >= MAX_TIMERS_PER_SESSION {
-            return;
+            return false;
         }
         *running += 1;
         self.pending
             .insert((Instant::now() + wait, self.next), (session, event));
         self.next = self.next.wrapping_add(1);
+        true
     }
 
     /// Completes when the next timer is due; never, when none is running.
@@ -698,7 +713,9 @@ impl<C: Connection> Hub<C> {
             ),
             _ => return,
         };
-        self.timers.start(session, wait, event);
+        if !self.timers.start(session, wait, event) {
+            self.log(|| format!("TIMER_NOT_STARTED session={} too many timers", session.0));
+        }
     }
 
     /// Queues a command for the writer of a request stream. A stream whose
@@ -1069,5 +1086,61 @@ fn name(message: &ControlMessage) -> String {
         ControlMessage::UnsupportedRequest { message_type, .. } => {
             format!("unsupported request {message_type:#x}")
         }
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    fn timeout(session: u64, stream: u64) -> Event {
+        Event::RequestTimeout {
+            session: SessionKey(session),
+            stream: StreamKey(stream),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_gets_only_so_many_timers() {
+        // The expectations below are spelled out for a limit of 1024.
+        assert_eq!(MAX_TIMERS_PER_SESSION, 1024);
+        let mut timers = Timers::default();
+        let wait = Duration::from_secs(2);
+        for stream in 0..1024 {
+            assert!(timers.start(SessionKey(1), wait, timeout(1, stream)));
+        }
+        assert!(!timers.start(SessionKey(1), wait, timeout(1, 1024)));
+        // Another session is not held back by this one.
+        assert!(timers.start(SessionKey(2), wait, timeout(2, 0)));
+        assert_eq!(timers.len(), 1025);
+
+        // A timer that fired makes room for a new one.
+        tokio::time::sleep(wait).await;
+        timers.due().await;
+        assert_eq!(timers.take_due().len(), 1025);
+        assert_eq!(timers.len(), 0);
+        assert!(timers.start(SessionKey(1), wait, timeout(1, 1025)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timers_fire_in_the_order_they_are_due_and_go_with_their_session() {
+        let mut timers = Timers::default();
+        assert!(timers.start(SessionKey(1), Duration::from_secs(3), timeout(1, 0)));
+        assert!(timers.start(SessionKey(2), Duration::from_secs(1), timeout(2, 0)));
+        assert!(timers.start(SessionKey(1), Duration::from_secs(2), timeout(1, 1)));
+
+        // Nothing is due yet.
+        assert_eq!(timers.take_due(), []);
+        timers.due().await;
+        assert_eq!(timers.take_due(), [timeout(2, 0)]);
+
+        timers.forget_session(SessionKey(1));
+        assert_eq!(timers.len(), 0);
+        // With nothing running, there is nothing to wait for.
+        let waited = tokio::time::timeout(Duration::from_secs(60), timers.due()).await;
+        assert!(waited.is_err());
+        // The session starts from nothing again.
+        assert!(timers.start(SessionKey(1), Duration::from_secs(1), timeout(1, 2)));
+        assert_eq!(timers.len(), 1);
     }
 }

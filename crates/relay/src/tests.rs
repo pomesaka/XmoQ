@@ -771,3 +771,44 @@ async fn a_subscriber_that_keeps_its_stream_open_after_publish_done_is_stopped()
     );
     assert_eq!(hub.held().await.relay.requests, 0);
 }
+
+/// The lines the relay has logged so far.
+fn logged(lines: &mut mpsc::Receiver<String>) -> Vec<String> {
+    let mut logged = Vec::new();
+    while let Ok(line) = lines.try_recv() {
+        logged.push(line);
+    }
+    logged
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_of_the_control_stream_is_a_peer_leaving_when_its_connection_ends_right_after() {
+    // (how long after the stop the peer's connection ends, whether the relay
+    //  closes the session with PROTOCOL_VIOLATION first)
+    let cases = [
+        (Duration::from_millis(150), false),
+        (Duration::from_millis(250), true),
+    ];
+    for (leaves_after, violation) in cases {
+        let (log, mut lines) = hub::Log::collect();
+        let (hub, _task) = hub::spawn(HubConfig {
+            log: Some(log),
+            ..HubConfig::default()
+        });
+        let peer = Peer::connect(&hub, false).await;
+        let control = timeout(SOON, peer.connection.accept_uni())
+            .await
+            .expect("the relay opens its control stream")
+            .unwrap();
+        control.stop(0x0);
+        tokio::time::sleep(leaves_after).await;
+        peer.connection.close(0, b"");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let closed_by_relay = logged(&mut lines)
+            .iter()
+            .any(|line| line.starts_with("CLOSE_SESSION") && line.contains("code=0x3"));
+        assert_eq!(closed_by_relay, violation, "{leaves_after:?}");
+        assert_eq!(hub.held().await, NOTHING, "{leaves_after:?}");
+    }
+}

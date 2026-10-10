@@ -18,4 +18,7 @@ fi
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
+# WHY once more without features: `xmoq-moqt-io` has to build and pass with the in-memory
+# connection alone, and nothing else in the workspace builds it that way.
+cargo test -p xmoq-moqt-io --no-default-features --locked
 ran "Rust checks (fmt, clippy, test)"
