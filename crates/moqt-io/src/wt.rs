@@ -129,11 +129,7 @@ impl QuicLimits {
         // says.
         const HTTP3_UNI_STREAMS: u32 = 3;
         const CONNECT_STREAMS: u32 = 1;
-        // Beyond 49 days it is no timeout worth the name. WHY at least 2 ms:
-        // quinn reads 0 as "no timeout", and half of it is the keep-alive,
-        // where 0 would send without pause.
-        let idle = self.idle_timeout.max(Duration::from_millis(2));
-        let idle_ms = u32::try_from(idle.as_millis()).unwrap_or(u32::MAX);
+        let (idle_ms, keep_alive) = self.idle_and_keep_alive();
         let mut transport = quinn::TransportConfig::default();
         transport
             .max_concurrent_uni_streams(
@@ -146,11 +142,23 @@ impl QuicLimits {
             .receive_window(self.receive_window.into())
             .send_window(u64::from(self.send_window))
             .datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER))
-            // WHY half: the peer answers a keep-alive, which is what keeps
-            // the idle timer of a quiet connection from running out.
-            .keep_alive_interval(Some(KEEP_ALIVE.min(idle / 2)))
+            .keep_alive_interval(Some(keep_alive))
             .max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
         transport
+    }
+
+    /// The idle timeout in milliseconds as quinn takes it, and the keep-alive
+    /// that goes with it.
+    ///
+    /// WHY at least 2 ms: quinn reads 0 as "no timeout", and a keep-alive of
+    /// 0 would send without pause. Beyond 49 days it is no timeout worth the
+    /// name. WHY half of it for the keep-alive: the peer answers a
+    /// keep-alive, which is what keeps the idle timer of a quiet connection
+    /// from running out.
+    fn idle_and_keep_alive(self) -> (u32, Duration) {
+        let idle = self.idle_timeout.max(Duration::from_millis(2));
+        let idle_ms = u32::try_from(idle.as_millis()).unwrap_or(u32::MAX);
+        (idle_ms, KEEP_ALIVE.min(idle / 2))
     }
 }
 
@@ -845,14 +853,35 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_timeout_too_short_to_be_one_is_raised() {
-        // quinn takes 0 for "no timeout", and a keep-alive every 0 seconds
-        // sends without pause. Building the settings must not panic.
-        let limits = QuicLimits {
-            idle_timeout: Duration::ZERO,
-            ..TEST_LIMITS
-        };
-        let _ = limits.transport();
+    fn the_keep_alive_follows_the_idle_timeout_and_neither_is_ever_zero() {
+        // (the idle timeout asked for in microseconds, the idle timeout in
+        //  milliseconds, the keep-alive in microseconds). quinn takes an
+        //  idle timeout of 0 for "no timeout", and a keep-alive of 0 sends
+        //  without pause.
+        let cases = [
+            (0, 2, 1_000),
+            (500, 2, 1_000),
+            (2_000, 2, 1_000),
+            (2_000_000, 2_000, 1_000_000),
+            // From 6 seconds on the keep-alive stays at 3.
+            (6_000_000, 6_000, 3_000_000),
+            (30_000_000, 30_000, 3_000_000),
+            // More milliseconds than quinn's 32 bits hold: the most they hold.
+            (4_294_967_296_000, 4_294_967_295, 3_000_000),
+            (u64::MAX, 4_294_967_295, 3_000_000),
+        ];
+        for (asked_micros, idle_ms, keep_alive_micros) in cases {
+            let limits = QuicLimits {
+                idle_timeout: Duration::from_micros(asked_micros),
+                ..TEST_LIMITS
+            };
+            assert_eq!(
+                limits.idle_and_keep_alive(),
+                (idle_ms, Duration::from_micros(keep_alive_micros)),
+                "{asked_micros}"
+            );
+            let _ = limits.transport();
+        }
     }
 
     const TEST_LIMITS: QuicLimits = QuicLimits {

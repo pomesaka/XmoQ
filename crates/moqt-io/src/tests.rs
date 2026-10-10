@@ -14,10 +14,10 @@ use xmoq_moqt::message::{ControlMessage, RequestOk, Setup};
 
 use crate::memory::{MemoryConnection, MemorySend, STREAM_WINDOW, pair};
 use crate::{
-    Connection, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestStreamEvent,
-    QueueFull, ReadError, RecvStream, RequestReader, RequestStreamEvent, SendBudget, SendLimits,
-    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError,
-    read_request_streams, read_uni_streams,
+    Connection, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestClose,
+    PeerRequestStreamEvent, QueueFull, ReadError, RecvStream, RequestReader, RequestStreamEvent,
+    SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
+    WriteError, read_request_streams, read_uni_streams,
 };
 
 const SOON: Duration = Duration::from_secs(1);
@@ -472,7 +472,7 @@ async fn a_disconnect_ends_open_streams_as_lost() {
 enum Seen {
     Opened(u64, ControlMessage),
     Message(u64, ControlMessage),
-    Closed(u64, bool),
+    Closed(u64, PeerRequestClose),
     Failed(Error),
     ReaderPanicked,
 }
@@ -522,7 +522,7 @@ impl Requests {
                 Seen::Opened(stream, first)
             }
             PeerRequestStreamEvent::Message { stream, message } => Seen::Message(stream, message),
-            PeerRequestStreamEvent::Closed { stream, fin } => Seen::Closed(stream, fin),
+            PeerRequestStreamEvent::Closed { stream, how } => Seen::Closed(stream, how),
             PeerRequestStreamEvent::Failed(error) => Seen::Failed(error),
             PeerRequestStreamEvent::ReaderPanicked => Seen::ReaderPanicked,
         }
@@ -536,9 +536,19 @@ impl Requests {
 
 #[tokio::test(start_paused = true)]
 async fn request_streams_report_their_messages_and_their_end() {
-    // (how the peer ends the stream: with this reset code, or with a FIN)
-    let endings: [(&str, Option<u32>); 2] = [("FIN", None), ("reset", Some(0x1))];
-    for (name, reset) in endings {
+    // (how the peer ends the stream: with this reset code, or with a FIN;
+    //  what is reported)
+    let endings = [
+        ("FIN", None, PeerRequestClose::Fin),
+        // CANCELLED (0x1) and MALFORMED_TRACK (0x12): the code is the peer's.
+        ("reset", Some(0x1), PeerRequestClose::Reset(Some(0x1))),
+        (
+            "another reset",
+            Some(0x12),
+            PeerRequestClose::Reset(Some(0x12)),
+        ),
+    ];
+    for (name, reset, reported) in endings {
         let mut requests = requests();
         let (mut send, _recv) = requests.peer.open_bi().await.unwrap();
         send.write_all(&message_bytes(&setup())).await.unwrap();
@@ -560,7 +570,7 @@ async fn request_streams_report_their_messages_and_their_end() {
         // Only a FIN is reported as one: a reset cancels the request.
         assert_eq!(
             requests.next().await,
-            Seen::Closed(stream, reset.is_none()),
+            Seen::Closed(stream, reported),
             "{name}"
         );
         assert!(requests.stops.is_empty(), "{name}");
@@ -576,7 +586,11 @@ async fn a_request_stream_is_stopped_on_request() {
         panic!("not opened");
     };
     requests.stops.stop(stream, 0x12);
-    assert_eq!(requests.next().await, Seen::Closed(stream, false));
+    // Stopped by this endpoint: the peer said nothing about the stream.
+    assert_eq!(
+        requests.next().await,
+        Seen::Closed(stream, PeerRequestClose::Abandoned)
+    );
     assert_eq!(
         send.write_all(&[0]).await,
         Err(WriteError::Stopped(Some(0x12)))
@@ -1005,4 +1019,172 @@ async fn a_lost_connection_gives_the_budget_back_and_is_reported() {
     sending.peer.close(0, b"");
     assert_eq!(sending.report().await, (0, OutgoingEvent::Closed));
     assert_eq!(sending.budget.in_use(), (0, 0, 0));
+}
+
+/// One row of `fixtures/webtransport-close/reasons.tsv`; see its README.
+#[derive(Debug, PartialEq, Eq)]
+enum CloseReasonRow {
+    /// A reason that is text, as its UTF-8 bytes, and the bytes a browser sent
+    /// for it.
+    Utf8 {
+        name: String,
+        reason: Vec<u8>,
+        sent: Vec<u8>,
+    },
+    /// A reason that holds half of a surrogate pair. A Rust string cannot
+    /// hold it, so the row is checked for its form and then left alone.
+    Utf16,
+}
+
+/// Whole bytes in lower-case hexadecimal digits, or nothing at all: the same
+/// as `HEX_BYTES` on the TypeScript side.
+fn hex_bytes(hex: &str) -> Result<Vec<u8>, String> {
+    let digit = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(digit) {
+        return Err(format!(
+            "not whole bytes in lower-case hexadecimal: {hex:.40}"
+        ));
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).map_err(|error| error.to_string()))
+        .collect()
+}
+
+/// The rows of the table as the README has them: each ends with one line
+/// feed, the last one too. WHY not `str::lines`: it takes a carriage return
+/// before the line feed away and lets an empty last line pass, where the
+/// TypeScript side refuses both; a table that one side reads and the other
+/// does not would be pinned by one of them only.
+fn close_reason_lines(table: &str) -> Result<Vec<&str>, String> {
+    let rows = table
+        .strip_suffix('\n')
+        .ok_or("the last row does not end with a line feed")?;
+    Ok(rows.split('\n').collect())
+}
+
+/// Reads a row as strictly as the TypeScript side does
+/// (`parseCloseReasonFixture`): a row that is not what the README describes
+/// is an error, and never a row that is skipped.
+fn close_reason_row(line: &str) -> Result<CloseReasonRow, String> {
+    let columns: Vec<&str> = line.split('\t').collect();
+    let [name, encoding, reason, sent] = columns[..] else {
+        return Err(format!("{} columns, not four", columns.len()));
+    };
+    if name.is_empty() {
+        return Err("no name".to_string());
+    }
+    let (reason, sent) = (hex_bytes(reason)?, hex_bytes(sent)?);
+    match encoding {
+        "utf8" => {
+            std::str::from_utf8(&reason).map_err(|error| format!("{name}: {error}"))?;
+            Ok(CloseReasonRow::Utf8 {
+                name: name.to_string(),
+                reason,
+                sent,
+            })
+        }
+        "utf16" if reason.len().is_multiple_of(2) => Ok(CloseReasonRow::Utf16),
+        "utf16" => Err(format!("{name}: half of a UTF-16 code unit")),
+        other => Err(format!("{name}: encoding {other}, neither utf8 nor utf16")),
+    }
+}
+
+#[test]
+fn a_close_reason_is_cut_as_a_browser_cuts_it() {
+    let path = format!(
+        "{}/../../fixtures/webtransport-close/reasons.tsv",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let table = std::fs::read_to_string(&path).expect("the fixture is there");
+    let rows: Vec<CloseReasonRow> = close_reason_lines(&table)
+        .unwrap_or_else(|error| panic!("{path}: {error}"))
+        .into_iter()
+        .map(|line| close_reason_row(line).unwrap_or_else(|error| panic!("{path}: {error}")))
+        .collect();
+    // WHY counted: a loop over no rows passes, and so does one that skips
+    // every row. An emptied file, or one whose rows all turned into the kind
+    // that is skipped, has to fail here.
+    let skipped = rows
+        .iter()
+        .filter(|row| **row == CloseReasonRow::Utf16)
+        .count();
+    assert_eq!((rows.len(), skipped), (14, 2));
+    for row in rows {
+        if let CloseReasonRow::Utf8 { name, reason, sent } = row {
+            assert_eq!(crate::close_reason(&reason).into_bytes(), sent, "{name}");
+        }
+    }
+}
+
+#[test]
+fn a_row_of_the_close_reason_fixture_is_read_as_the_readme_has_it() {
+    // (a row, what it is read as)
+    let read = [
+        (
+            "short\tutf8\t627965\t6279",
+            CloseReasonRow::Utf8 {
+                name: "short".to_string(),
+                reason: b"bye".to_vec(),
+                sent: b"by".to_vec(),
+            },
+        ),
+        (
+            "empty\tutf8\t\t",
+            CloseReasonRow::Utf8 {
+                name: "empty".to_string(),
+                reason: vec![],
+                sent: vec![],
+            },
+        ),
+        (
+            "halves\tutf16\td83dd83d\tefbfbdefbfbd",
+            CloseReasonRow::Utf16,
+        ),
+    ];
+    for (row, expected) in read {
+        assert_eq!(close_reason_row(row), Ok(expected), "{row:?}");
+    }
+    let refused = [
+        // Three columns, five columns, and no row at all.
+        "short\tutf8\t627965",
+        "short\tutf8\t627965\t627965\t",
+        "",
+        "\tutf8\t627965\t627965",
+        // Half a byte in either column, a digit that is none, and capitals.
+        "short\tutf8\t62796\t627965",
+        "short\tutf8\t627965\t62796",
+        "short\tutf8\t627965\t6279zz",
+        "short\tutf8\t6279AB\t627965",
+        // A carriage return left at the end of the row.
+        "short\tutf8\t627965\t627965\r",
+        // An encoding the README does not have.
+        "short\tlatin1\t627965\t627965",
+        // Bytes that are not UTF-8 under `utf8`, and half a code unit.
+        "broken\tutf8\tff\tefbfbd",
+        "half\tutf16\td83dd8\tefbfbd",
+    ];
+    for row in refused {
+        assert!(close_reason_row(row).is_err(), "{row:?}");
+    }
+}
+
+#[test]
+fn the_rows_of_the_close_reason_fixture_end_with_a_line_feed_each() {
+    // (a table, its rows; `None`: refused)
+    let cases: [(&str, Option<&[&str]>); 5] = [
+        ("a\nb\n", Some(&["a", "b"])),
+        // An empty row is a row, and is refused where it is read.
+        ("a\n\nb\n", Some(&["a", "", "b"])),
+        ("a\r\nb\r\n", Some(&["a\r", "b\r"])),
+        ("a\nb", None),
+        ("", None),
+    ];
+    for (table, rows) in cases {
+        assert_eq!(
+            close_reason_lines(table).ok(),
+            rows.map(<[&str]>::to_vec),
+            "{table:?}"
+        );
+    }
 }

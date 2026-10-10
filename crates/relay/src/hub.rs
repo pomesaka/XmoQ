@@ -20,10 +20,10 @@ use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::session::MAX_PEER_REQUESTS;
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
-    Connection, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestStreamEvent,
-    RecvStream, RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendBudget,
-    SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError,
-    read_request_streams, read_uni_streams, send_message,
+    Connection, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestClose,
+    PeerRequestStreamEvent, RecvStream, RequestClose, RequestReadError, RequestReader,
+    RequestStreamEvent, SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops,
+    Trace, UniEvent, WriteError, read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
     Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SessionKey,
@@ -541,7 +541,10 @@ impl<C: Connection> Hub<C> {
             self.config.streams.clone(),
             stops.clone(),
             self.events.clone(),
-            move |event| request_envelope(session, event),
+            {
+                let log = self.config.log.clone();
+                move |event| request_envelope(session, event, log.as_ref())
+            },
         );
         let writer = tokio::spawn(write_control(
             session,
@@ -976,6 +979,7 @@ fn uni_envelope<C: Connection>(session: SessionKey, event: UniEvent) -> Envelope
 fn request_envelope<C: Connection>(
     session: SessionKey,
     event: PeerRequestStreamEvent<C::Send>,
+    log: Option<&Log>,
 ) -> Envelope<C> {
     match event {
         PeerRequestStreamEvent::Opened {
@@ -995,15 +999,27 @@ fn request_envelope<C: Connection>(
                 message,
             })
         }
-        PeerRequestStreamEvent::Closed { stream, fin } => Envelope::Core(Event::RequestClosed {
-            session,
-            stream: StreamKey(stream),
-            how: if fin {
-                RequestEnd::Fin
-            } else {
-                RequestEnd::Aborted
-            },
-        }),
+        PeerRequestStreamEvent::Closed { stream, how } => {
+            // WHY a line for the reset as well as for STOP_SENDING: a peer
+            // that cancels sends both (§3.3.2), and whichever the relay sees
+            // first ends the request; the other is then not looked at.
+            if let (PeerRequestClose::Reset(code), Some(log)) = (how, log) {
+                log.print(format!(
+                    "RESET_RECEIVED session={} stream={stream} {}",
+                    session.0,
+                    stop_code(code)
+                ));
+            }
+            Envelope::Core(Event::RequestClosed {
+                session,
+                stream: StreamKey(stream),
+                how: if how.is_fin() {
+                    RequestEnd::Fin
+                } else {
+                    RequestEnd::Aborted
+                },
+            })
+        }
         PeerRequestStreamEvent::Failed(error) => {
             Envelope::Core(Event::SessionFailed { session, error })
         }
@@ -1262,8 +1278,9 @@ async fn run_own_request<C: Connection>(
     reader.stop(code);
 }
 
-/// The code of a `STOP_SENDING` for a log line. `none`: the peer's code was
-/// outside the range WebTransport gives applications, or there was none.
+/// The code of a `STOP_SENDING` or a reset for a log line. `none`: the
+/// peer's code was outside the range WebTransport gives applications, or
+/// there was none.
 fn stop_code(code: Option<u32>) -> String {
     code.map_or_else(|| "code=none".to_string(), |code| format!("code={code:#x}"))
 }

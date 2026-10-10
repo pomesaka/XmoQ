@@ -1620,11 +1620,20 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        for (_, stream) in track.in_streams.keys().filter(|(from, _)| *from == session) {
-            state.in_streams.remove(stream);
+        // WHY sorted: the streams are kept in a `HashMap`, whose order differs
+        // from run to run. The same events are to lead to the same actions,
+        // so that a run can be compared with another.
+        let streams: BTreeSet<u64> = track
+            .in_streams
+            .keys()
+            .filter(|(from, _)| *from == session)
+            .map(|(_, stream)| stream.0)
+            .collect();
+        for stream in streams.into_iter().map(StreamKey) {
+            state.in_streams.remove(&stream);
             actions.push(Action::StopDataStream {
                 session,
-                stream: *stream,
+                stream,
                 code: reset_code,
             });
         }
@@ -1893,7 +1902,8 @@ impl Relay {
             .filter(|(_, out)| out.session == session)
             .map(|(out_stream, _)| *out_stream)
             .collect();
-        let sourced: Vec<FullTrackName> = self
+        // By track name, here and below: see `release_source` for why.
+        let sourced: BTreeSet<FullTrackName> = self
             .tracks
             .all_live()
             .filter(|(_, track)| {
@@ -1907,7 +1917,7 @@ impl Relay {
             self.end_track(&track, TrackEnd::SourceGone, actions);
         }
         self.drop_routing_of(session, actions);
-        let subscribed: Vec<FullTrackName> = self
+        let subscribed: BTreeSet<FullTrackName> = self
             .tracks
             .all_live()
             .filter(|(_, track)| track.subscribers.iter().any(|s| s.session == session))

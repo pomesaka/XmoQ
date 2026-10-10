@@ -132,10 +132,15 @@ export function parseCloseReasonFixture(line: string): CloseReasonFixture {
  */
 export function closeReasonFixtures(): CloseReasonFixture[] {
 	const path = join(FIXTURE_DIR, "..", "webtransport-close", "reasons.tsv");
-	const rows = readFileSync(path, "utf8")
-		.split("\n")
-		.filter((line) => line.length > 0)
-		.map(parseCloseReasonFixture);
+	const table = readFileSync(path, "utf8");
+	// WHY not filter empty lines away: every row ends with one line feed, the
+	// last one too, and the Rust side reads the table the same way. A table
+	// that one side reads and the other refuses would be pinned by one of
+	// them only.
+	if (!table.endsWith("\n")) {
+		throw new Error(`${path}: the last row does not end with a line feed`);
+	}
+	const rows = table.slice(0, -1).split("\n").map(parseCloseReasonFixture);
 	// WHY: `test.each` passes with no rows, so an emptied file, or another
 	// file at this path, would look like a fixture that holds.
 	if (rows.length === 0) throw new Error(`${path} has no rows`);

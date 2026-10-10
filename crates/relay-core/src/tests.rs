@@ -1499,3 +1499,78 @@ fn publish_done_counts_the_streams_of_a_subscriber_that_joined_late() {
     expected.extend(done_actions(BOB, 0x2, 1));
     assert_eq!(actions, expected);
 }
+
+#[test]
+fn the_open_streams_of_a_track_that_ends_are_stopped_in_the_order_of_their_numbers() {
+    // Six streams, opened in an order that is neither rising nor falling: an
+    // order left to chance would come out as the one below once in 720 times.
+    let mut relay = relay_with_track();
+    for stream in [9, 4, 11, 7, 5, 8] {
+        data_stream_opened(&mut relay, stream);
+    }
+    let actions = relay.step(Event::TrackMalformed {
+        session: PUBLISHER,
+        stream: StreamKey(7),
+    });
+    let stopped: Vec<u64> = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::StopDataStream { stream, .. } => Some(stream.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stopped, [4, 5, 7, 8, 9, 11]);
+}
+
+#[test]
+fn the_tracks_of_a_publisher_that_goes_end_in_the_order_of_their_names() {
+    // The publisher offers five tracks in an order that is not that of their
+    // names, and Alice subscribes to them in another: an order left to chance
+    // would come out as the one below once in 120 times.
+    let published = [b"d", b"a", b"e", b"c", b"b"];
+    let subscribed = [b"c", b"e", b"b", b"a", b"d"];
+    let mut relay = Relay::new("test/0");
+    for session in [PUBLISHER, ALICE] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+    }
+    for (stream, name) in (0u64..).zip(published) {
+        relay.step(Event::RequestOpened {
+            session: PUBLISHER,
+            stream: StreamKey(stream),
+            first: ControlMessage::Publish(Publish {
+                request_id: stream * 2,
+                full_track_name: track(name),
+                track_alias: 40 + stream,
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+        });
+    }
+    // Alice's request stream for a track has the number its name has in the
+    // alphabet: "a" is on stream 0, "e" on stream 4.
+    for name in subscribed {
+        let stream = u64::from(name[0] - b'a');
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(stream),
+            first: subscribe(stream * 2, name),
+        });
+    }
+    let actions = relay.step(Event::SessionClosed { session: PUBLISHER });
+    // Alice is told track by track that it is over, with PUBLISH_DONE.
+    let done_on: Vec<u64> = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::SendRequest {
+                session: ALICE,
+                stream,
+                message: ControlMessage::PublishDone(_),
+            } => Some(stream.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(done_on, [0, 1, 2, 3, 4]);
+}

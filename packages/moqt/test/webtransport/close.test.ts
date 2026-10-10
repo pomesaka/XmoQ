@@ -178,6 +178,16 @@ test("a row of the close reason fixture is read as the README says", () => {
 test.each([
 	{ row: "name\tutf8\t62", message: "does not have four columns" },
 	{ row: "name\tutf8\t62\t62\t62", message: "does not have four columns" },
+	// An empty row, and a carriage return left at the end of one.
+	{ row: "", message: "does not have four columns" },
+	{
+		row: "name\tutf8\t62\t62\r",
+		message: "has a column that is not whole bytes in hexadecimal",
+	},
+	{
+		row: "name\tutf8\t62\t627",
+		message: "has a column that is not whole bytes in hexadecimal",
+	},
 	{ row: "\tutf8\t62\t62", message: "has no name" },
 	{
 		row: "name\tlatin1\t62\t62",

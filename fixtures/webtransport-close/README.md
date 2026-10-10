@@ -4,7 +4,7 @@ Reasons an application closes a session with, and the bytes a browser sent for e
 
 ## Format
 
-`reasons.tsv`, one row per reason, four columns separated by tabs, no header:
+`reasons.tsv`, one row per reason, four columns separated by tabs, no header. Every row ends with one line feed, the last one too; there are no empty rows and no carriage returns. Hexadecimal digits are lower case. Both readers refuse a table that is written otherwise:
 
 | Column | Content |
 |---|---|

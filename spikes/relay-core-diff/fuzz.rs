@@ -4,8 +4,14 @@
 //! tests where they differ in more than order.
 //!
 //! The sequences are the same in every run (the seeds are fixed). What may
-//! differ from run to run is the number of order-only mismatches: both cores
-//! iterate over `HashMap`s, whose order is random per process.
+//! differ from run to run is the number of order-only mismatches, where a
+//! core iterates over a `HashMap`, whose order is random per process.
+//!
+//! The test also prints a digest of every list of actions the relay
+//! returned, in order. Two runs of a core whose actions depend on nothing
+//! but the events print the same digest.
+
+use std::hash::{DefaultHasher, Hasher};
 
 use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject};
 use xmoq_moqt::kvp::KeyValuePair;
@@ -231,6 +237,8 @@ fn setting(name: &str, default: u64) -> u64 {
 fn the_two_cores_answer_random_events_alike() {
     let (runs, length) = (setting("XMOQ_FUZZ_RUNS", 20_000), setting("XMOQ_FUZZ_LEN", 80));
     let mut events = 0u64;
+    // `DefaultHasher::new()` has fixed keys, unlike the hasher of a `HashMap`.
+    let mut digest = DefaultHasher::new();
     for seed in 1..=runs {
         let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let mut relay = Relay::new("fuzz/0");
@@ -241,9 +249,10 @@ fn the_two_cores_answer_random_events_alike() {
             relay.handle(Event::SessionOpened { session: SessionKey(session), role: Role::Server });
         }
         for _ in 0..length {
-            relay.handle(random_event(&mut rng, &mut peers));
+            let actions = relay.handle(random_event(&mut rng, &mut peers));
+            digest.write(format!("{actions:?}").as_bytes());
             events += 1;
         }
     }
-    println!("FUZZ runs={runs} events={events}");
+    println!("FUZZ runs={runs} events={events} digest={:016x}", digest.finish());
 }
