@@ -1,7 +1,7 @@
 # The relay finds a Subgroup that comes again with another Publisher Priority
 
 - Date: 2026-10-11
-- Commit SHA: not fixed when this was written. Compared with `main` at `01e3a89fc5e6`
+- Commit SHA: `6035f8f30aaac9ee202ed2c3c5c729ebe74f01e1`. Compared with `main` at `01e3a89fc5e6`
 - Roadmap item: Phase 0b, several publishers of one track in the relay: what two publishers send for one Subgroup is compared, as far as the header goes
 
 ## Objective
