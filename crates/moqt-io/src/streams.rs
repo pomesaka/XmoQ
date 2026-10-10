@@ -607,11 +607,16 @@ pub enum PeerRequestStreamEvent<S> {
         /// The message.
         message: ControlMessage,
     },
-    /// The peer ended the stream, by FIN or by reset, or this endpoint stopped
-    /// it. Sent for every stream that was announced with `Opened`.
+    /// Nothing more is read from the stream: the peer ended its direction, by
+    /// FIN or by reset, this endpoint stopped it, or the connection is gone.
+    /// Sent for every stream that was announced with `Opened`.
     Closed {
         /// The stream.
         stream: u64,
+        /// Whether it was a FIN, after whole messages. A requester that only
+        /// finishes its direction has not cancelled the request (§3.3.2
+        /// names a reset and `STOP_SENDING` for that).
+        fin: bool,
     },
     /// A stream held something the session cannot go on after.
     Failed(Error),
@@ -992,6 +997,7 @@ async fn read_request_stream<R: RecvStream, S: SendStream, T>(
     let mut decoder = MessageDecoder::new();
     // Handed to the consumer together with the first message.
     let mut send = Some(send);
+    let mut fin = false;
     let failed = loop {
         loop {
             let message = match decoder.next_message() {
@@ -1022,7 +1028,10 @@ async fn read_request_stream<R: RecvStream, S: SendStream, T>(
         let pushed = match reader.step().await {
             Step::Bytes(len) => decoder.push(reader.received(len)),
             Step::Fin => match decoder.finish() {
-                Ok(()) => break None,
+                Ok(()) => {
+                    fin = true;
+                    break None;
+                }
                 Err(error) => Err(error),
             },
             Step::Reset(_) | Step::Lost => break None,
@@ -1049,7 +1058,8 @@ async fn read_request_stream<R: RecvStream, S: SendStream, T>(
         }
         // Only a stream that was announced is reported closed.
         None if send.is_none() => {
-            sink.put(PeerRequestStreamEvent::Closed { stream }).await;
+            sink.put(PeerRequestStreamEvent::Closed { stream, fin })
+                .await;
         }
         None => {}
     }

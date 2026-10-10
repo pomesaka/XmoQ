@@ -5,6 +5,7 @@
 // Usage: node run.mjs [--direction browser-to-rust|rust-to-browser|browser-to-browser|rust-to-rust]
 //                     [--relay moqtail|own] [--subscribers N]
 //                     [--rust-publisher moqtail|own] [--rust-subscriber moqtail|own]
+//                     [--publish-namespace] [--subscribe-before-publish]
 //                     [--browser chromium|headless-shell|chrome]
 //                     [--cert-trust hash|spki-flag|none] [--port N] [--verbose] [--trace]
 
@@ -83,6 +84,15 @@ const { values: options } = parseArgs({
     subscribers: { type: 'string', default: '1' },
     'rust-publisher': { type: 'string', default: 'moqtail' },
     'rust-subscriber': { type: 'string', default: 'moqtail' },
+    // The publisher sends PUBLISH_NAMESPACE and no PUBLISH, and publishes the
+    // track when the relay subscribes to it (draft 18, §9.5). For the `own`
+    // Rust publisher and for the page (moqtail-ts).
+    'publish-namespace': { type: 'boolean', default: false },
+    // The subscribers ask for the track after the `own` Rust publisher
+    // announced its namespace and before its PUBLISH: the relay's SUBSCRIBE to
+    // the publisher is unanswered when the PUBLISH arrives (draft 18, §5.1).
+    // The publisher holds its PUBLISH and its answer back to make that order.
+    'subscribe-before-publish': { type: 'boolean', default: false },
     // Makes the `own` client print the raw bytes of every stream.
     trace: { type: 'boolean', default: false },
     // After the transfer, ends the Rust publisher and waits until the `own`
@@ -329,21 +339,48 @@ async function main() {
       return client
     }
 
+    const byNamespace = options['publish-namespace']
+    const subscribeFirst = options['subscribe-before-publish']
+    if (subscribeFirst && (direction.publisherInBrowser || rustPublisher !== 'own' || byNamespace || options.relay !== 'own')) {
+      throw new Error('--subscribe-before-publish needs --relay own, --rust-publisher own and no --publish-namespace')
+    }
+    // Subscriber pages connect before the publisher starts when they have to
+    // subscribe inside the publisher's delay: launching the browser takes long.
+    const subscriberPages = []
+    if (subscribeFirst && direction.subscriberInBrowser) {
+      for (let index = 0; index < subscriberCount; index++) {
+        subscriberPages.push(await openConnectedPage(`browser-sub${subscriberCount === 1 ? '' : `-${index + 1}`}`))
+      }
+    }
+
     // The publisher offers the track first: the relay rejects a SUBSCRIBE for a
-    // track nobody has published.
+    // track nobody has published or announced the namespace of.
     let sendObject
     let endPublisher
+    let published = async () => {}
     if (direction.publisherInBrowser) {
       const page = await openConnectedPage('browser-pub')
       await withTimeout(
-        page.evaluate(([ns, track]) => window.xmoq.publishTrack(ns, track), [NAMESPACE, TRACK]),
-        'browser-pub to publish the track',
+        byNamespace
+          ? page.evaluate(([ns, track]) => window.xmoq.announceTrack(ns, track), [NAMESPACE, TRACK])
+          : page.evaluate(([ns, track]) => window.xmoq.publishTrack(ns, track), [NAMESPACE, TRACK]),
+        'browser-pub to offer the track',
       )
       sendObject = () => page.evaluate(hex => window.xmoq.sendObject(hex), payloadHex)
     } else {
-      const client = spawnRustClient('rust-pub', rustPublisher, 'publish', ['--payload-hex', payloadHex])
-      await client.waitForLine(/^PUBLISHED /)
+      if (byNamespace && rustPublisher !== 'own') throw new Error('--publish-namespace needs --rust-publisher own')
+      const mode = byNamespace ? 'publish-namespace' : 'publish'
+      // 3 s for the subscribers to ask, and an answer to the relay's SUBSCRIBE
+      // that would come after the PUBLISH. Both are below the 5 s the relay
+      // waits for an answer.
+      const delays = subscribeFirst ? ['--publish-delay-ms', '3000', '--answer-delay-ms', '4000'] : []
+      const client = spawnRustClient('rust-pub', rustPublisher, mode, ['--payload-hex', payloadHex, ...delays])
+      await client.waitForLine(byNamespace || subscribeFirst ? /^NAMESPACE_PUBLISHED/ : /^PUBLISHED /)
+      if (subscribeFirst) published = () => client.waitForLine(/^PUBLISHED /)
       sendObject = async () => {
+        // The publisher has a subscriber only once the relay's SUBSCRIBE
+        // reached it.
+        if (byNamespace) await client.waitForLine(/^SERVING /)
         client.child.stdin.write('send\n')
         await client.waitForLine(/^SENT /)
       }
@@ -354,13 +391,23 @@ async function main() {
     // the LatestObject filter, which does not replay what was published earlier.
     const receivers = []
     const subscriptionEnds = []
+    // With --subscribe-before-publish the answers come only after the PUBLISH.
+    const subscribing = []
+    const subscribed = async answer => {
+      // Marked as handled: a failure elsewhere must not leave it unhandled.
+      answer.catch(() => {})
+      if (subscribeFirst) subscribing.push(answer)
+      else await answer
+    }
     for (let index = 0; index < subscriberCount; index++) {
       const label = subscriberCount === 1 ? '' : `-${index + 1}`
       if (direction.subscriberInBrowser) {
-        const page = await openConnectedPage(`browser-sub${label}`)
-        await withTimeout(
-          page.evaluate(([ns, track]) => window.xmoq.subscribe(ns, track), [NAMESPACE, TRACK]),
-          'browser-sub to subscribe',
+        const page = subscriberPages[index] ?? (await openConnectedPage(`browser-sub${label}`))
+        await subscribed(
+          withTimeout(
+            page.evaluate(([ns, track]) => window.xmoq.subscribe(ns, track), [NAMESPACE, TRACK]),
+            'browser-sub to subscribe',
+          ),
         )
         receivers.push(async () => {
           const object = await withTimeout(page.evaluate(() => window.xmoq.firstObject()), 'browser-sub to receive')
@@ -370,13 +417,22 @@ async function main() {
         // Asking for a second Object keeps the subscriber waiting after the first,
         // so it is still there when the publisher ends the track.
         const client = spawnRustClient(`rust-sub${label}`, rustSubscriber, 'subscribe', awaitPublishDone ? ['--objects', '2'] : [])
-        await client.waitForLine(/^SUBSCRIBED /)
+        await subscribed(client.waitForLine(/^SUBSCRIBED /))
         subscriptionEnds.push(() => client.waitForLine(/^SUBSCRIPTION_ENDED (.*)$/))
         receivers.push(async () => {
           const [, hex] = await client.waitForLine(/^OBJECT .*payload_hex=([0-9a-f]*)$/)
           return hex
         })
       }
+    }
+
+    if (subscribeFirst) {
+      // The order this run is about, as the relay saw it: its SUBSCRIBE went
+      // out, and gave way when the PUBLISH came.
+      await relay.waitForLine(/^OPEN_REQUEST /)
+      await published()
+      await relay.waitForLine(/^CANCEL_OWN_REQUEST /)
+      await Promise.all(subscribing)
     }
 
     await sendObject()
@@ -400,6 +456,8 @@ async function main() {
       receivedHex,
       relayVersion,
       rustPublisher,
+      publishNamespace: options['publish-namespace'],
+      subscribeBeforePublish: subscribeFirst,
       rustSubscriber,
       browser: browserSession ? options.browser : null,
       browserVersion: browserSession ? browserSession.browser.version() : null,

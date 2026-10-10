@@ -21,10 +21,14 @@ use xmoq_moqt::session::MAX_PEER_REQUESTS;
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
     Connection, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestStreamEvent,
-    SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
-    WriteError, read_request_streams, read_uni_streams, send_message,
+    RecvStream, RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendBudget,
+    SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError,
+    read_request_streams, read_uni_streams, send_message,
 };
-use xmoq_relay_core::{Action, Event, OutStreamKey, Relay, Role, SessionKey, StreamKey};
+use xmoq_relay_core::{
+    Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SessionKey,
+    StreamKey,
+};
 
 /// Limits of the relay. Every value is provisional: the draft sets none of
 /// them, and `XmoQ` has not decided any.
@@ -77,6 +81,13 @@ pub struct HubConfig {
     /// How long the relay goes on reading what had arrived on a connection
     /// after the connection is gone, before it treats the session as closed.
     pub closed_read_timeout: Duration,
+    /// Timers one session may have running at once. A timer beyond that is
+    /// not started and its event is reported at once.
+    pub max_timers_per_session: usize,
+    /// How long a publisher gets to answer a SUBSCRIBE the relay sent it for
+    /// a track of a namespace it announced. Then the subscribers that wait
+    /// are answered with `TIMEOUT` (§10.6.2).
+    pub upstream_timeout: Duration,
     /// Sent as `MOQT_IMPLEMENTATION`.
     pub implementation: String,
     /// Where one line about each thing the relay does goes, if anywhere.
@@ -102,6 +113,8 @@ impl Default for HubConfig {
             early_stream_timeout: Duration::from_secs(2),
             request_close_timeout: Duration::from_secs(2),
             closed_read_timeout: Duration::from_secs(1),
+            max_timers_per_session: 1024,
+            upstream_timeout: Duration::from_secs(5),
             implementation: concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"))
                 .to_string(),
             log: None,
@@ -202,10 +215,19 @@ pub struct Held {
     pub request_writers: usize,
     /// Writers of subgroup streams that are not done.
     pub out_streams: usize,
+    /// Tasks of request streams the relay opened, over all sessions.
+    pub own_requests: usize,
     /// Timers that are running.
     pub timers: usize,
     /// What the relay holds.
     pub relay: xmoq_relay_core::Counts,
+}
+
+/// What the hub asks the task of a request stream the relay opened to do.
+/// Either ends the task.
+enum OwnRequestCommand {
+    Finish,
+    Cancel(u32),
 }
 
 /// What the hub asks the writer of one request stream to do.
@@ -220,6 +242,8 @@ struct SessionHandle<C: Connection> {
     control: mpsc::Sender<ControlMessage>,
     /// The writers of the request streams the peer has open.
     requests: HashMap<StreamKey, mpsc::Sender<RequestCommand>>,
+    /// The tasks of the request streams the relay has open on the session.
+    own_requests: HashMap<OwnRequestKey, mpsc::Sender<OwnRequestCommand>>,
     stops: StreamStops,
     /// What waits to be written to this session's subgroup streams.
     budget: Arc<SendBudget>,
@@ -308,11 +332,6 @@ struct Hub<C: Connection> {
     timers: Timers,
 }
 
-/// Timers a session may have running at once. A timer beyond that is not
-/// started, which leaves what it would have ended to end with the session.
-/// Provisional.
-const MAX_TIMERS_PER_SESSION: usize = 1024;
-
 /// The timers the relay asked for, in one place.
 ///
 /// WHY not a task per timer: a peer decides how many timers start (every
@@ -324,22 +343,46 @@ struct Timers {
     /// By the time they are due, and a number that keeps equal times apart.
     pending: BTreeMap<(Instant, u64), (SessionKey, Event)>,
     per_session: HashMap<SessionKey, usize>,
+    /// Where the timer for the answer to a request of the relay is, so that
+    /// it can be dropped when the answer came.
+    upstream: HashMap<(SessionKey, OwnRequestKey), (Instant, u64)>,
     next: u64,
 }
 
 impl Timers {
-    /// Starts a timer. `false` when the session already has as many as it
-    /// may, and this one was not started.
-    fn start(&mut self, session: SessionKey, wait: Duration, event: Event) -> bool {
+    /// Starts a timer and returns `None`, unless the session already has
+    /// `limit` of them running; then the event is handed back.
+    fn start(
+        &mut self,
+        session: SessionKey,
+        limit: usize,
+        wait: Duration,
+        event: Event,
+    ) -> Option<Event> {
         let running = self.per_session.entry(session).or_default();
-        if *running >= MAX_TIMERS_PER_SESSION {
-            return false;
+        if *running >= limit {
+            return Some(event);
         }
         *running += 1;
-        self.pending
-            .insert((Instant::now() + wait, self.next), (session, event));
+        let at = (Instant::now() + wait, self.next);
+        if let Event::UpstreamTimeout { session, request } = event {
+            self.upstream.insert((session, request), at);
+        }
+        self.pending.insert(at, (session, event));
         self.next = self.next.wrapping_add(1);
-        true
+        None
+    }
+
+    /// Drops the timer for the answer to a request of the relay.
+    fn stop_upstream(&mut self, session: SessionKey, request: OwnRequestKey) {
+        let Some(at) = self.upstream.remove(&(session, request)) else {
+            return;
+        };
+        if self.pending.remove(&at).is_some()
+            && let Some(running) = self.per_session.get_mut(&session)
+        {
+            *running = running.saturating_sub(1);
+        }
     }
 
     /// Completes when the next timer is due; never, when none is running.
@@ -361,6 +404,9 @@ impl Timers {
             if let Some(running) = self.per_session.get_mut(&session) {
                 *running = running.saturating_sub(1);
             }
+            if let Event::UpstreamTimeout { session, request } = event {
+                self.upstream.remove(&(session, request));
+            }
             events.push_back(event);
         }
         events
@@ -369,6 +415,7 @@ impl Timers {
     fn forget_session(&mut self, session: SessionKey) {
         self.per_session.remove(&session);
         self.pending.retain(|_, (owner, _)| *owner != session);
+        self.upstream.retain(|(owner, _), _| *owner != session);
     }
 
     #[cfg(test)]
@@ -413,7 +460,11 @@ impl<C: Connection> Hub<C> {
                         // direction of it; either way the peer's direction is
                         // over (§3.3.2). What becomes of the relay's is for the
                         // relay to say, with FinishRequest or ResetRequest.
-                        Event::RequestClosed { session, stream } => {
+                        Event::RequestClosed {
+                            session,
+                            stream,
+                            how: RequestEnd::Aborted,
+                        } => {
                             if let Some(handle) = self.sessions.get(session) {
                                 handle.stops.stop(stream.0, stream_reset_code::CANCELLED);
                             }
@@ -421,6 +472,11 @@ impl<C: Connection> Hub<C> {
                         Event::OutStreamClosed { out_stream } => {
                             self.out_streams.remove(out_stream);
                         }
+                        // The publisher answered; see
+                        // `Action::StartUpstreamTimer`.
+                        Event::OwnRequestMessage {
+                            session, request, ..
+                        } => self.timers.stop_upstream(*session, *request),
                         _ => {}
                     }
                     self.feed(VecDeque::from([event]));
@@ -444,6 +500,11 @@ impl<C: Connection> Hub<C> {
                             .map(|handle| handle.requests.len())
                             .sum(),
                         out_streams: self.out_streams.len(),
+                        own_requests: self
+                            .sessions
+                            .values()
+                            .map(|handle| handle.own_requests.len())
+                            .sum(),
                         timers: self.timers.len(),
                         relay: self.relay.counts(),
                     });
@@ -503,6 +564,7 @@ impl<C: Connection> Hub<C> {
                 connection,
                 control,
                 requests: HashMap::new(),
+                own_requests: HashMap::new(),
                 stops,
                 budget: SendBudget::new(self.config.send),
                 tasks: vec![writer, watcher],
@@ -638,7 +700,21 @@ impl<C: Connection> Hub<C> {
             }
             Action::StartDrainTimer { .. }
             | Action::StartEarlyTimer { .. }
-            | Action::StartRequestTimer { .. } => self.start_timer(&action),
+            | Action::StartRequestTimer { .. }
+            | Action::StartUpstreamTimer { .. } => self.start_timer(&action, pending),
+            Action::OpenRequest {
+                session,
+                request,
+                message,
+            } => self.open_request(session, request, message),
+            Action::FinishOwnRequest { session, request } => {
+                self.own_request(session, request, OwnRequestCommand::Finish);
+            }
+            Action::CancelOwnRequest {
+                session,
+                request,
+                code,
+            } => self.own_request(session, request, OwnRequestCommand::Cancel(code)),
             Action::CloseSession {
                 session,
                 code,
@@ -688,7 +764,7 @@ impl<C: Connection> Hub<C> {
     }
 
     /// Starts the timer an action asks for.
-    fn start_timer(&mut self, action: &Action) {
+    fn start_timer(&mut self, action: &Action, pending: &mut VecDeque<Event>) {
         let (session, wait, event) = match *action {
             Action::StartDrainTimer {
                 session,
@@ -711,10 +787,63 @@ impl<C: Connection> Hub<C> {
                 self.config.request_close_timeout,
                 Event::RequestTimeout { session, stream },
             ),
+            Action::StartUpstreamTimer { session, request } => (
+                session,
+                self.config.upstream_timeout,
+                Event::UpstreamTimeout { session, request },
+            ),
             _ => return,
         };
-        if !self.timers.start(session, wait, event) {
+        let limit = self.config.max_timers_per_session;
+        if let Some(event) = self.timers.start(session, limit, wait, event) {
+            // WHY at once: see `Action::StartUpstreamTimer`. Whatever the
+            // timer guarded is let go of now instead of never.
             self.log(|| format!("TIMER_NOT_STARTED session={} too many timers", session.0));
+            pending.push_back(event);
+        }
+    }
+
+    /// Starts the task of a request the relay opens on a session.
+    fn open_request(
+        &mut self,
+        session: SessionKey,
+        request: OwnRequestKey,
+        message: ControlMessage,
+    ) {
+        let Some(handle) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        // Room for the one command that ends the task.
+        let (commands, command_inbox) = mpsc::channel(1);
+        let task = tokio::spawn(run_own_request(
+            session,
+            request,
+            Arc::clone(&handle.connection),
+            message,
+            command_inbox,
+            self.config.streams.trace.clone(),
+            self.events.clone(),
+        ));
+        handle.own_requests.insert(request, commands);
+        handle.tasks.retain(|task| !task.is_finished());
+        handle.tasks.push(task);
+    }
+
+    /// Ends the task of a request the relay opened, and the timer for its
+    /// answer with it.
+    fn own_request(
+        &mut self,
+        session: SessionKey,
+        request: OwnRequestKey,
+        command: OwnRequestCommand,
+    ) {
+        self.timers.stop_upstream(session, request);
+        let Some(handle) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        if let Some(commands) = handle.own_requests.remove(&request) {
+            // Closed: the task ended by itself, with the stream.
+            let _ = commands.try_send(command);
         }
     }
 
@@ -840,9 +969,14 @@ fn request_envelope<C: Connection>(
                 message,
             })
         }
-        PeerRequestStreamEvent::Closed { stream } => Envelope::Core(Event::RequestClosed {
+        PeerRequestStreamEvent::Closed { stream, fin } => Envelope::Core(Event::RequestClosed {
             session,
             stream: StreamKey(stream),
+            how: if fin {
+                RequestEnd::Fin
+            } else {
+                RequestEnd::Aborted
+            },
         }),
         PeerRequestStreamEvent::Failed(error) => {
             Envelope::Core(Event::SessionFailed { session, error })
@@ -970,7 +1104,11 @@ async fn write_request<C: Connection>(
                     // §3.3.2, §5.1: STOP_SENDING on a request stream cancels
                     // the request. The relay's half is reset in turn.
                     send.reset(stream_reset_code::CANCELLED);
-                    let closed = Event::RequestClosed { session, stream };
+                    let closed = Event::RequestClosed {
+                        session,
+                        stream,
+                        how: RequestEnd::Aborted,
+                    };
                     let _ = events.send(Envelope::Core(closed)).await;
                 }
                 return;
@@ -982,8 +1120,7 @@ async fn write_request<C: Connection>(
                 // the other arm of the select reports.
                 let _ = send_message(&mut send, &message, &trace, &label).await;
             }
-            // `None`: the hub let go of the stream because the peer closed its
-            // direction; the relay's is closed in order.
+            // `None`: the session is going.
             Some(RequestCommand::Finish) | None => {
                 send.finish();
                 return;
@@ -994,6 +1131,100 @@ async fn write_request<C: Connection>(
             }
         }
     }
+}
+
+/// Runs one request the relay opened: opens the stream, sends the request,
+/// reports what the peer answers, and ends the stream the way the hub says.
+async fn run_own_request<C: Connection>(
+    session: SessionKey,
+    request: OwnRequestKey,
+    connection: Arc<C>,
+    message: ControlMessage,
+    mut commands: mpsc::Receiver<OwnRequestCommand>,
+    trace: Trace,
+    events: mpsc::Sender<Envelope<C>>,
+) {
+    let label = format!("own#{}", request.0);
+    let ended = |how| {
+        Envelope::Core(Event::OwnRequestClosed {
+            session,
+            request,
+            how,
+        })
+    };
+    // Opening waits at the peer's stream limit; a cancel must get through.
+    let opened = tokio::select! {
+        opened = connection.open_bi() => opened,
+        _ = commands.recv() => return,
+    };
+    let Ok((mut send, recv)) = opened else {
+        let _ = events.send(ended(OwnRequestEnd::Unsent)).await;
+        return;
+    };
+    // Writing waits while the peer gives no flow control credit; a cancel
+    // must get through here as well.
+    let written = tokio::select! {
+        written = send_message(&mut send, &message, &trace, &label) => Some(written.is_ok()),
+        _ = commands.recv() => None,
+    };
+    if written != Some(true) {
+        send.reset(stream_reset_code::CANCELLED);
+        recv.stop(stream_reset_code::CANCELLED);
+        if written == Some(false) {
+            let _ = events.send(ended(OwnRequestEnd::Unsent)).await;
+        }
+        return;
+    }
+    let mut reader = RequestReader::new(recv, &trace, &label);
+    // Each direction is reported once; after that only the other one, and the
+    // hub's word, are waited for. What an ending means is the relay's to say.
+    let (mut reading, mut watching) = (true, true);
+    let command = loop {
+        tokio::select! {
+            command = commands.recv() => break command,
+            event = reader.next_event(), if reading => match event {
+                Ok(RequestStreamEvent::Message(message)) => {
+                    let event = Event::OwnRequestMessage { session, request, message };
+                    if events.send(Envelope::Core(event)).await.is_err() {
+                        break None;
+                    }
+                }
+                Ok(RequestStreamEvent::Closed(how)) => {
+                    reading = false;
+                    let how = match how {
+                        RequestClose::Fin => OwnRequestEnd::Fin,
+                        RequestClose::Reset(_) | RequestClose::Stopped(_) => OwnRequestEnd::Reset,
+                    };
+                    let _ = events.send(ended(how)).await;
+                }
+                Err(RequestReadError::Peer(error)) => {
+                    let failed = Event::SessionFailed { session, error };
+                    let _ = events.send(Envelope::Core(failed)).await;
+                    break None;
+                }
+                // A lost connection is reported by the watcher of the session.
+                Err(RequestReadError::Lost) => break None,
+            },
+            stopped = send.stopped(), if watching => {
+                watching = false;
+                if let WriteError::Stopped(_) = stopped {
+                    let _ = events.send(ended(OwnRequestEnd::Stopped)).await;
+                }
+            }
+        }
+    };
+    if let Some(OwnRequestCommand::Finish) = command {
+        send.finish();
+        reader.stop(stream_reset_code::CANCELLED);
+        return;
+    }
+    // `None`: the session is going; the stream is not left half open.
+    let code = match command {
+        Some(OwnRequestCommand::Cancel(code)) => code,
+        _ => stream_reset_code::CANCELLED,
+    };
+    send.reset(code);
+    reader.stop(code);
 }
 
 /// One line for the log about an action, for the actions that are rare enough
@@ -1059,8 +1290,30 @@ fn describe(action: &Action) -> Option<String> {
             "STOP_REQUEST session={} stream={} code={code:#x}",
             session.0, stream.0
         ),
+        Action::OpenRequest {
+            session,
+            request,
+            message,
+        } => format!(
+            "OPEN_REQUEST session={} own={} {}",
+            session.0,
+            request.0,
+            name(message)
+        ),
+        Action::FinishOwnRequest { session, request } => {
+            format!("FINISH_OWN_REQUEST session={} own={}", session.0, request.0)
+        }
+        Action::CancelOwnRequest {
+            session,
+            request,
+            code,
+        } => format!(
+            "CANCEL_OWN_REQUEST session={} own={} code={code:#x}",
+            session.0, request.0
+        ),
         // Logged where the session is closed, whoever asked for it.
         Action::CloseSession { .. }
+        | Action::StartUpstreamTimer { .. }
         | Action::SendObject { .. }
         | Action::StartEarlyTimer { .. }
         | Action::StartRequestTimer { .. } => return None,
@@ -1103,15 +1356,25 @@ mod timer_tests {
     #[tokio::test(start_paused = true)]
     async fn a_session_gets_only_so_many_timers() {
         // The expectations below are spelled out for a limit of 1024.
-        assert_eq!(MAX_TIMERS_PER_SESSION, 1024);
         let mut timers = Timers::default();
         let wait = Duration::from_secs(2);
         for stream in 0..1024 {
-            assert!(timers.start(SessionKey(1), wait, timeout(1, stream)));
+            assert!(
+                timers
+                    .start(SessionKey(1), 1024, wait, timeout(1, stream))
+                    .is_none()
+            );
         }
-        assert!(!timers.start(SessionKey(1), wait, timeout(1, 1024)));
+        assert_eq!(
+            timers.start(SessionKey(1), 1024, wait, timeout(1, 1024)),
+            Some(timeout(1, 1024))
+        );
         // Another session is not held back by this one.
-        assert!(timers.start(SessionKey(2), wait, timeout(2, 0)));
+        assert!(
+            timers
+                .start(SessionKey(2), 1024, wait, timeout(2, 0))
+                .is_none()
+        );
         assert_eq!(timers.len(), 1025);
 
         // A timer that fired makes room for a new one.
@@ -1119,15 +1382,31 @@ mod timer_tests {
         timers.due().await;
         assert_eq!(timers.take_due().len(), 1025);
         assert_eq!(timers.len(), 0);
-        assert!(timers.start(SessionKey(1), wait, timeout(1, 1025)));
+        assert!(
+            timers
+                .start(SessionKey(1), 1024, wait, timeout(1, 1025))
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn timers_fire_in_the_order_they_are_due_and_go_with_their_session() {
         let mut timers = Timers::default();
-        assert!(timers.start(SessionKey(1), Duration::from_secs(3), timeout(1, 0)));
-        assert!(timers.start(SessionKey(2), Duration::from_secs(1), timeout(2, 0)));
-        assert!(timers.start(SessionKey(1), Duration::from_secs(2), timeout(1, 1)));
+        assert!(
+            timers
+                .start(SessionKey(1), 8, Duration::from_secs(3), timeout(1, 0))
+                .is_none()
+        );
+        assert!(
+            timers
+                .start(SessionKey(2), 8, Duration::from_secs(1), timeout(2, 0))
+                .is_none()
+        );
+        assert!(
+            timers
+                .start(SessionKey(1), 8, Duration::from_secs(2), timeout(1, 1))
+                .is_none()
+        );
 
         // Nothing is due yet.
         assert_eq!(timers.take_due(), []);
@@ -1140,7 +1419,11 @@ mod timer_tests {
         let waited = tokio::time::timeout(Duration::from_secs(60), timers.due()).await;
         assert!(waited.is_err());
         // The session starts from nothing again.
-        assert!(timers.start(SessionKey(1), Duration::from_secs(1), timeout(1, 2)));
+        assert!(
+            timers
+                .start(SessionKey(1), 8, Duration::from_secs(1), timeout(1, 2))
+                .is_none()
+        );
         assert_eq!(timers.len(), 1);
     }
 }

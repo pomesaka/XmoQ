@@ -20,6 +20,8 @@ type XmoqPage = {
   /** `certSha256Hex` is null when Chromium trusts the relay through launch arguments. */
   connect(relayUrl: string, certSha256Hex: string | null): Promise<void>
   publishTrack(namespace: string, trackName: string): Promise<string>
+  /** Announces the namespace and registers the track, and sends no PUBLISH. */
+  announceTrack(namespace: string, trackName: string): Promise<string>
   sendObject(payloadHex: string): void
   subscribe(namespace: string, trackName: string): Promise<string>
   firstObject(): Promise<ReceivedObject>
@@ -51,6 +53,29 @@ function connected(): MOQtailClient {
   return client
 }
 
+/** PUBLISH_NAMESPACE, and the track as a source moqtail-ts answers SUBSCRIBE for. */
+async function registerTrack(moq: MOQtailClient, namespace: string, trackName: string) {
+  await moq.publishNamespace(Tuple.fromUtf8Path(namespace))
+
+  const fullTrackName = FullTrackName.tryNew(namespace, trackName)
+  let controller: ReadableStreamDefaultController<MoqtObject> | undefined
+  const stream = new ReadableStream<MoqtObject>({
+    start: c => {
+      controller = c
+    },
+  })
+  if (!controller) throw new Error('ReadableStream did not start synchronously')
+
+  moq.addOrUpdateTrack({
+    fullTrackName,
+    trackSource: { live: new LiveTrackSource(stream) },
+    publisherPriority: 0,
+  })
+  const trackAlias = moq.trackSources.get(fullTrackName.toString())?.trackAlias
+  if (trackAlias === undefined) throw new Error('track alias was not assigned')
+  return { fullTrackName, controller, trackAlias }
+}
+
 window.xmoq = {
   async connect(relayUrl, certSha256Hex) {
     client = await MOQtailClient.new({
@@ -74,24 +99,7 @@ window.xmoq = {
 
   async publishTrack(namespace, trackName) {
     const moq = connected()
-    await moq.publishNamespace(Tuple.fromUtf8Path(namespace))
-
-    const fullTrackName = FullTrackName.tryNew(namespace, trackName)
-    let controller: ReadableStreamDefaultController<MoqtObject> | undefined
-    const stream = new ReadableStream<MoqtObject>({
-      start: c => {
-        controller = c
-      },
-    })
-    if (!controller) throw new Error('ReadableStream did not start synchronously')
-
-    moq.addOrUpdateTrack({
-      fullTrackName,
-      trackSource: { live: new LiveTrackSource(stream) },
-      publisherPriority: 0,
-    })
-    const trackAlias = moq.trackSources.get(fullTrackName.toString())?.trackAlias
-    if (trackAlias === undefined) throw new Error('track alias was not assigned')
+    const { fullTrackName, controller, trackAlias } = await registerTrack(moq, namespace, trackName)
 
     const result = await moq.publish(fullTrackName, true, trackAlias)
     if (result instanceof RequestError) {
@@ -102,8 +110,15 @@ window.xmoq = {
     return trackAlias.toString()
   },
 
+  async announceTrack(namespace, trackName) {
+    const { fullTrackName, controller, trackAlias } = await registerTrack(connected(), namespace, trackName)
+    published = { fullTrackName, controller }
+    console.log(`track announced: alias=${trackAlias}`)
+    return trackAlias.toString()
+  },
+
   sendObject(payloadHex) {
-    if (!published) throw new Error('publishTrack() has not completed')
+    if (!published) throw new Error('publishTrack() or announceTrack() has not completed')
     const object = MoqtObject.newWithPayload(
       published.fullTrackName,
       new Location(0n, 0n),

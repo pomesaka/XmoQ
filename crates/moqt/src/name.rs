@@ -36,7 +36,7 @@ impl Location {
 }
 
 /// An ordered list of 0 to 32 non-empty byte fields.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TrackNamespace(Vec<Vec<u8>>);
 
 impl TrackNamespace {
@@ -55,6 +55,14 @@ impl TrackNamespace {
     #[must_use]
     pub fn fields(&self) -> &[Vec<u8>] {
         &self.0
+    }
+
+    /// Whether this namespace matches `other` by Namespace Prefix Matching
+    /// (§9.5): its fields equal the first fields of `other`, field by field.
+    /// `(foo)` and `(foo, bar)` match `(foo, bar)`; `(foobar)` does not.
+    #[must_use]
+    pub fn is_prefix_of(&self, other: &Self) -> bool {
+        other.0.starts_with(&self.0)
     }
 
     /// The sum of the field lengths, which is what the 4096-byte limit counts.
@@ -109,7 +117,7 @@ fn check_namespace(fields: &[Vec<u8>]) -> Result<(), &'static str> {
 
 /// A Track Namespace and a Track Name, the identity of a track. Together they
 /// are at most 4096 bytes (§2.4.1), which every value of this type satisfies.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FullTrackName {
     namespace: TrackNamespace,
     name: Vec<u8>,

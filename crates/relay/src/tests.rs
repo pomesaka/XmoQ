@@ -12,7 +12,10 @@ use xmoq_moqt::data::{
 use xmoq_moqt::message::{ControlMessage, PublishDone, ReasonPhrase};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
-use xmoq_moqt::session::{RequestEvent, RequestId, Role, Session, Transport};
+use xmoq_moqt::session::{
+    PeerRequest, PeerRequestId, PeerRequestOpened, RequestEvent, RequestId, Role, Session,
+    Transport,
+};
 use xmoq_moqt_io::memory::{MemoryConnection, MemoryRecv, MemorySend, STREAM_WINDOW, pair};
 use xmoq_moqt_io::{
     Connection, IncomingStreams, RecvStream, RequestClose, RequestReader, RequestStreamEvent,
@@ -158,8 +161,18 @@ impl Peer {
 
     /// Opens a subgroup stream of a Group and writes these Objects.
     async fn send_group(&self, group_id: u64, objects: &[SubgroupObject]) -> MemorySend {
+        self.send_group_as(PUBLISHER_ALIAS, group_id, objects).await
+    }
+
+    /// The same under a Track Alias of the caller's choice.
+    async fn send_group_as(
+        &self,
+        track_alias: u64,
+        group_id: u64,
+        objects: &[SubgroupObject],
+    ) -> MemorySend {
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
-            track_alias: PUBLISHER_ALIAS,
+            track_alias,
             group_id,
             subgroup_id: SubgroupId::Zero,
             publisher_priority: Some(0),
@@ -473,15 +486,21 @@ const NOTHING: Held = Held {
     sessions: 0,
     request_writers: 0,
     out_streams: 0,
+    own_requests: 0,
     timers: 0,
     relay: Counts {
         sessions: 0,
         tracks: 0,
         subscriptions: 0,
         requests: 0,
+        request_streams: 0,
+        half_closed_streams: 0,
         in_streams: 0,
         out_streams: 0,
         early_streams: 0,
+        namespaces: 0,
+        pending_tracks: 0,
+        own_requests: 0,
     },
 };
 
@@ -811,4 +830,407 @@ async fn a_stop_of_the_control_stream_is_a_peer_leaving_when_its_connection_ends
         assert_eq!(closed_by_relay, violation, "{leaves_after:?}");
         assert_eq!(hub.held().await, NOTHING, "{leaves_after:?}");
     }
+}
+
+/// A SUBSCRIBE of the relay that a publisher accepted on its side.
+struct RelaySubscription {
+    track_alias: u64,
+    send: MemorySend,
+    reader: RequestReader<MemoryRecv>,
+}
+
+impl Peer {
+    /// Announces the namespace `(xmoq)`, which the track of these tests is in.
+    async fn publish_namespace(&mut self) -> OpenRequest {
+        let namespace = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
+        let (id, message) = self.session.publish_namespace(namespace, vec![]).unwrap();
+        let (request, event) = self.request(id, message).await;
+        assert_eq!(event, RequestEvent::PublishNamespaceEstablished);
+        request
+    }
+
+    /// Sends SUBSCRIBE for the track and returns without waiting for the
+    /// answer.
+    async fn start_subscribing(&mut self) -> OpenRequest {
+        let (id, message) = self.session.subscribe(track(), vec![]).unwrap();
+        let (mut send, recv) = self.connection.open_bi().await.unwrap();
+        send_message(&mut send, &message, &Trace::default(), "request")
+            .await
+            .unwrap();
+        let reader = RequestReader::new(recv, &Trace::default(), "request");
+        OpenRequest { id, send, reader }
+    }
+
+    /// The answer to a request started with [`Self::start_subscribing`].
+    async fn answer(&mut self, request: &mut OpenRequest) -> RequestEvent {
+        let response = match timeout(SOON, request.reader.next_event()).await {
+            Ok(Ok(RequestStreamEvent::Message(response))) => response,
+            other => panic!("no response: {other:?}"),
+        };
+        self.session
+            .on_request_message(request.id, response)
+            .unwrap()
+    }
+
+    /// Takes the SUBSCRIBE the relay sends this peer, without answering it.
+    async fn relay_subscribe(&mut self) -> (PeerRequestId, MemorySend, RequestReader<MemoryRecv>) {
+        let (send, recv) = timeout(SOON, self.connection.accept_bi())
+            .await
+            .expect("the relay opens a request stream")
+            .unwrap();
+        let mut reader = RequestReader::new(recv, &Trace::default(), "relay");
+        let first = match timeout(SOON, reader.next_event()).await {
+            Ok(Ok(RequestStreamEvent::Message(first))) => first,
+            other => panic!("no request: {other:?}"),
+        };
+        match self.session.on_peer_request_opened(first).unwrap() {
+            PeerRequestOpened::Request(id, PeerRequest::Subscribe(subscribe)) => {
+                assert_eq!(subscribe.full_track_name, track());
+                // §9.2: the relay subscribes upstream with Forward State 1.
+                assert_eq!(subscribe.parameters, [Parameter::Forward(true)]);
+                (id, send, reader)
+            }
+            other => panic!("not a SUBSCRIBE: {other:?}"),
+        }
+    }
+
+    /// Takes the relay's SUBSCRIBE and accepts it.
+    async fn accept_relay_subscribe(&mut self) -> RelaySubscription {
+        let (id, mut send, reader) = self.relay_subscribe().await;
+        let (track_alias, ok) = self.session.accept_subscribe(id, vec![], vec![]).unwrap();
+        send_message(&mut send, &ok, &Trace::default(), "relay")
+            .await
+            .unwrap();
+        RelaySubscription {
+            track_alias,
+            send,
+            reader,
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscribe_is_routed_to_the_publisher_of_its_namespace() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut alice = Peer::connect(&hub, true).await;
+    let mut alice_request = alice.start_subscribing().await;
+    let mut bob = Peer::connect(&hub, true).await;
+    let mut bob_request = bob.start_subscribing().await;
+
+    // One SUBSCRIBE reaches the publisher for the two of them (§9.4), and
+    // nobody is answered before the publisher is (§9.4).
+    assert!(
+        timeout(SOON, alice_request.reader.next_event())
+            .await
+            .is_err()
+    );
+    let upstream = publisher.accept_relay_subscribe().await;
+    assert!(
+        timeout(SOON, publisher.connection.accept_bi())
+            .await
+            .is_err()
+    );
+    let RequestEvent::SubscribeEstablished {
+        track_alias: alice_alias,
+        ..
+    } = alice.answer(&mut alice_request).await
+    else {
+        panic!("Alice was not accepted");
+    };
+    let RequestEvent::SubscribeEstablished {
+        track_alias: bob_alias,
+        ..
+    } = bob.answer(&mut bob_request).await
+    else {
+        panic!("Bob was not accepted");
+    };
+
+    publisher
+        .send_group_as(upstream.track_alias, 0, &[object(0, 3), object(1, 3)])
+        .await
+        .finish();
+    assert_eq!(alice.receive_stream(alice_alias).await, [0, 1]);
+    assert_eq!(bob.receive_stream(bob_alias).await, [0, 1]);
+    let held = hub.held().await;
+    assert_eq!((held.own_requests, held.relay.own_requests), (1, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publisher_that_does_not_answer_the_relay_costs_the_subscriber_a_timeout() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+    let (_id, _send, mut reader) = publisher.relay_subscribe().await;
+
+    // Nothing for the five seconds the publisher gets.
+    assert!(
+        timeout(Duration::from_millis(4900), request.reader.next_event())
+            .await
+            .is_err()
+    );
+    // TIMEOUT (0x2) for the subscriber.
+    let event = subscriber.answer(&mut request).await;
+    assert!(
+        matches!(&event, RequestEvent::Rejected(error) if error.error_code == 0x2),
+        "{event:?}"
+    );
+    // The relay cancels its own request: a reset with CANCELLED (0x1).
+    assert_eq!(
+        timeout(SOON, reader.next_event()).await,
+        Ok(Ok(RequestStreamEvent::Closed(RequestClose::Reset(Some(
+            0x1
+        )))))
+    );
+    let held = hub.held().await;
+    assert_eq!(
+        (
+            held.own_requests,
+            held.relay.own_requests,
+            held.relay.pending_tracks
+        ),
+        (0, 0, 0)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_relay_cancels_its_subscribe_when_the_last_subscriber_is_gone() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+    let mut upstream = publisher.accept_relay_subscribe().await;
+    subscriber.answer(&mut request).await;
+
+    subscriber.connection.close(0, b"");
+
+    // Both directions of the relay's request: a reset and a STOP_SENDING,
+    // with CANCELLED (0x1) (§3.3.2).
+    assert_eq!(
+        timeout(Duration::from_secs(5), upstream.reader.next_event()).await,
+        Ok(Ok(RequestStreamEvent::Closed(RequestClose::Reset(Some(
+            0x1
+        )))))
+    );
+    assert_eq!(
+        timeout(SOON, upstream.send.stopped()).await,
+        Ok(WriteError::Stopped(Some(0x1)))
+    );
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let held = hub.held().await;
+    assert_eq!(
+        (
+            held.sessions,
+            held.own_requests,
+            held.relay.tracks,
+            held.relay.namespaces
+        ),
+        (1, 0, 0, 1)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscriber_that_finishes_its_direction_keeps_getting_objects() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let (request, track_alias) = subscriber.subscribe().await;
+    let OpenRequest {
+        send, mut reader, ..
+    } = request;
+
+    // §5.1: a subscriber ends a subscription with STOP_SENDING, not by
+    // finishing its own direction.
+    send.finish();
+    tokio::time::sleep(SOON).await;
+    publisher.send_group(0, &[object(0, 3)]).await.finish();
+    assert_eq!(subscriber.receive_stream(track_alias).await, [0]);
+    // The relay's direction is still open.
+    assert!(timeout(SOON, reader.next_event()).await.is_err());
+
+    // The subscription goes with the session.
+    subscriber.connection.close(0, b"");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let held = hub.held().await;
+    assert_eq!((held.sessions, held.relay.subscriptions), (1, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_relay_finishes_its_subscribe_when_the_publishers_track_is_done() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+    let mut upstream = publisher.accept_relay_subscribe().await;
+    subscriber.answer(&mut request).await;
+
+    // PUBLISH_DONE that counts one stream, and the publisher's FIN. The
+    // relay reads both before the counted stream comes.
+    let ended = ControlMessage::PublishDone(done(0x2, 1));
+    send_message(&mut upstream.send, &ended, &Trace::default(), "relay")
+        .await
+        .unwrap();
+    upstream.send.finish();
+    assert!(timeout(SOON, upstream.reader.next_event()).await.is_err());
+    publisher
+        .send_group_as(upstream.track_alias, 0, &[object(0, 3)])
+        .await
+        .finish();
+
+    // Every counted stream has ended now, so the relay answers with a FIN,
+    // not with a reset.
+    assert_eq!(
+        timeout(SOON, upstream.reader.next_event()).await,
+        Ok(Ok(RequestStreamEvent::Closed(RequestClose::Fin)))
+    );
+    assert_eq!(publish_done(&mut request).await, done(0x2, 1));
+    tokio::time::sleep(SOON).await;
+    let held = hub.held().await;
+    assert_eq!((held.own_requests, held.relay.own_requests), (0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timer_that_cannot_be_started_does_not_leave_a_subscriber_waiting() {
+    // No room for any timer: the wait for the publisher's answer cannot be
+    // timed, so it is over at once.
+    let config = HubConfig {
+        max_timers_per_session: 0,
+        ..HubConfig::default()
+    };
+    let (hub, _task) = hub::spawn(config);
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+
+    // TIMEOUT (0x2), without the five seconds.
+    let event = subscriber.answer(&mut request).await;
+    assert!(
+        matches!(&event, RequestEvent::Rejected(error) if error.error_code == 0x2),
+        "{event:?}"
+    );
+    let held = hub.held().await;
+    assert_eq!(
+        (
+            held.own_requests,
+            held.relay.own_requests,
+            held.relay.pending_tracks
+        ),
+        (0, 0, 0)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_timer_for_the_publishers_answer_goes_when_the_answer_comes() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+    tokio::time::sleep(SOON).await;
+    assert_eq!(hub.held().await.timers, 1);
+
+    let _upstream = publisher.accept_relay_subscribe().await;
+    subscriber.answer(&mut request).await;
+    assert_eq!(hub.held().await.timers, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publisher_that_answers_the_relay_wrongly_or_not_at_all() {
+    // (what the publisher puts on the relay's SUBSCRIBE stream, whether its
+    //  session is closed with PROTOCOL_VIOLATION (0x3) for it)
+    let cases: [(&str, &[u8], bool); 2] = [
+        // A FIN and no answer.
+        ("a FIN without an answer", &[], false),
+        // Message type 0x3f, which no message has.
+        ("bytes that are no message", &[0x3f, 0x00, 0x00], true),
+    ];
+    for (name, bytes, violation) in cases {
+        let (hub, _task) = hub::spawn(HubConfig::default());
+        let mut publisher = Peer::connect(&hub, true).await;
+        let _namespace = publisher.publish_namespace().await;
+        let mut subscriber = Peer::connect(&hub, true).await;
+        let mut request = subscriber.start_subscribing().await;
+        let (_id, mut send, _reader) = publisher.relay_subscribe().await;
+
+        send.write_all(bytes).await.unwrap();
+        send.finish();
+
+        // DOES_NOT_EXIST (0x10) for the subscriber, either way.
+        let event = subscriber.answer(&mut request).await;
+        assert!(
+            matches!(&event, RequestEvent::Rejected(error) if error.error_code == 0x10),
+            "{name}: {event:?}"
+        );
+        tokio::time::sleep(SOON).await;
+        assert_eq!(
+            publisher.connection.close_info().map(|close| close.code),
+            violation.then_some(0x3),
+            "{name}"
+        );
+        let held = hub.held().await;
+        assert_eq!(
+            (held.own_requests, held.relay.own_requests, held.timers),
+            (0, 0, 0),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publish_that_crosses_the_relays_subscribe_becomes_the_source_of_the_track() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+    tokio::time::sleep(SOON).await;
+    assert_eq!(hub.held().await.own_requests, 1);
+
+    // The publisher sends its PUBLISH before it has read the relay's
+    // SUBSCRIBE, and the relay accepts it (§5.1).
+    let _publication = publisher.publish().await;
+
+    // The relay's SUBSCRIBE gave way: its stream is reset with CANCELLED
+    // (0x1), whether or not the SUBSCRIBE on it is still read first.
+    let (_send, recv) = timeout(SOON, publisher.connection.accept_bi())
+        .await
+        .expect("the relay opened a request stream")
+        .unwrap();
+    let mut reader = RequestReader::new(recv, &Trace::default(), "relay");
+    let closed = loop {
+        match timeout(SOON, reader.next_event()).await {
+            Ok(Ok(RequestStreamEvent::Message(_))) => {}
+            other => break other,
+        }
+    };
+    assert_eq!(
+        closed,
+        Ok(Ok(RequestStreamEvent::Closed(RequestClose::Reset(Some(
+            0x1
+        )))))
+    );
+
+    // The subscriber that waited is served from the PUBLISH.
+    let RequestEvent::SubscribeEstablished { track_alias, .. } =
+        subscriber.answer(&mut request).await
+    else {
+        panic!("the subscriber was not accepted");
+    };
+    publisher
+        .send_objects(&[object(0, 3), object(1, 3)])
+        .await
+        .finish();
+    assert_eq!(subscriber.receive_stream(track_alias).await, [0, 1]);
+    let held = hub.held().await;
+    assert_eq!(
+        (held.own_requests, held.relay.own_requests, held.timers),
+        (0, 0, 0)
+    );
 }

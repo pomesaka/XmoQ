@@ -481,11 +481,6 @@ describe("connectOver", () => {
 	// How the subscriber ends a subscription made with PUBLISH.
 	test.each([
 		{
-			name: "a FIN",
-			act: (request) => request.reply.close(),
-			end: { type: "peer-closed" },
-		},
-		{
 			name: "a reset with code 1",
 			act: (request) => request.reply.abort(new FakeStreamError(1, "reset")),
 			end: { type: "peer-reset", code: 1 },
@@ -512,6 +507,17 @@ describe("connectOver", () => {
 			expect(await track.ended).toEqual(end);
 		},
 	);
+
+	test("a FIN of the subscriber alone does not end a subscription made with PUBLISH (§5.1)", async () => {
+		const { request, track } = await published();
+		await request.reply.close();
+		// The Track goes on: a subgroup can be opened and written.
+		const subgroup = await track.openSubgroup(SUBGROUP);
+		await subgroup.write({ objectId: 0n, payload: utf8("a") });
+		// STOP_SENDING after the FIN still ends it.
+		await request.sent.cancel(new FakeStreamError(7, "stop"));
+		expect(await track.ended).toEqual({ type: "peer-reset", code: 7 });
+	});
 
 	test("after its Track ended, a SubgroupWriter fails writes with PublishEndedError and lets close and reset pass", async () => {
 		const { request, track } = await published();

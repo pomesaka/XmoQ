@@ -729,6 +729,19 @@ impl Session {
         own || self.peer.publishes(full_track_name)
     }
 
+    /// The SUBSCRIBE of this endpoint for the track that has no answer yet:
+    /// the subscription in the Pending (Subscriber) state of §5.1.
+    fn pending_subscribe_to(&self, full_track_name: &FullTrackName) -> Option<RequestId> {
+        self.requests.iter().find_map(|(id, request)| {
+            matches!(
+                request,
+                Request::Subscribe { full_track_name: name, track_alias: None }
+                    if name == full_track_name
+            )
+            .then_some(RequestId(*id, self.tag))
+        })
+    }
+
     /// Whether this endpoint is the publisher of a subscription to the track,
     /// through its own PUBLISH or a SUBSCRIBE of the peer.
     fn is_publishing(&self, full_track_name: &FullTrackName) -> bool {

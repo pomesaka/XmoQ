@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::{Role, Session, check_own_parameters, first_request_id};
+use super::{Request, RequestId, Role, Session, check_own_parameters, first_request_id};
 use crate::aliases::SubscribedAlias;
 use crate::kvp::KeyValuePair;
 use crate::message::{
@@ -293,7 +293,17 @@ impl Session {
                 {
                     return Err(Error::DuplicateTrackAlias(message.track_alias));
                 }
-                if self.is_subscribed_to(&message.full_track_name) {
+                // §5.1: at most one subscription to a track as the subscriber.
+                // WHY a SUBSCRIBE of this endpoint that has no answer yet does
+                // not count: §5.1 has it give way instead, "before sending
+                // PUBLISH_OK"; see `accept_publish`. Refusing here would turn
+                // away a publisher whose PUBLISH crosses a SUBSCRIBE for the
+                // same track.
+                if self.is_subscribed_to(&message.full_track_name)
+                    && self
+                        .pending_subscribe_to(&message.full_track_name)
+                        .is_none()
+                {
                     return refused(request_error_code::DUPLICATE_SUBSCRIPTION);
                 }
                 // §2.5.1: this crate understands no Mandatory Track Property.
@@ -363,30 +373,58 @@ impl Session {
         Ok((track_alias, message))
     }
 
-    /// Accepts a PUBLISH of the peer. Returns the `PUBLISH_OK` to send.
+    /// Accepts a PUBLISH of the peer. Returns the `PUBLISH_OK` to send, and
+    /// the SUBSCRIBE of this endpoint for the same track that had no answer
+    /// yet, if there was one.
+    ///
+    /// That SUBSCRIBE is over when this returns (§5.1: "If a subscriber
+    /// receives a PUBLISH for a Track with a subscription in the Pending
+    /// (Subscriber) state, it MUST ensure the subscription it initiated
+    /// transitions to the Terminated state before sending `PUBLISH_OK`"). The
+    /// caller cancels its stream as after [`Session::cancel`], and then sends
+    /// the `PUBLISH_OK`.
     ///
     /// # Errors
     ///
-    /// Fails unless `request` is a PUBLISH waiting for its response, and when a
-    /// parameter may not appear in `PUBLISH_OK`.
+    /// Fails unless `request` is a PUBLISH waiting for its response, when a
+    /// parameter may not appear in `PUBLISH_OK`, and when a SUBSCRIBE of this
+    /// endpoint for the track was accepted since the PUBLISH came: the PUBLISH
+    /// is then to be rejected with `DUPLICATE_SUBSCRIPTION` (§5.1).
     pub fn accept_publish(
         &mut self,
         request: PeerRequestId,
         parameters: Vec<Parameter>,
-    ) -> Result<ControlMessage, UsageError> {
+    ) -> Result<(ControlMessage, Option<RequestId>), UsageError> {
         check_own_parameters(&parameters, MessageKind::PublishOk)?;
-        let Some(PeerRequestState::Publish { established, .. }) = self.peer_request_mut(request)?
+        let Some(PeerRequestState::Publish {
+            established: false,
+            full_track_name,
+            ..
+        }) = self.peer_request_mut(request)?
         else {
             return Err(NOT_PENDING);
         };
-        if *established {
-            return Err(NOT_PENDING);
+        let full_track_name = full_track_name.clone();
+        let gives_way = self.pending_subscribe_to(&full_track_name);
+        let subscribed = self.requests.values().any(|own| {
+            matches!(own, Request::Subscribe { full_track_name: name, .. } if *name == full_track_name)
+        });
+        if subscribed && gives_way.is_none() {
+            return Err(UsageError("already a subscriber of this track"));
         }
-        *established = true;
-        Ok(ControlMessage::RequestOk(RequestOk {
+        if let Some(own) = gives_way {
+            self.cancel(own);
+        }
+        if let Some(PeerRequestState::Publish { established, .. }) =
+            self.peer_request_mut(request)?
+        {
+            *established = true;
+        }
+        let ok = ControlMessage::RequestOk(RequestOk {
             parameters,
             track_properties: Vec::new(),
-        }))
+        });
+        Ok((ok, gives_way))
     }
 
     /// Accepts a `PUBLISH_NAMESPACE` of the peer. Returns the
@@ -672,6 +710,7 @@ mod tests {
     use super::*;
     use crate::message::RequestUpdate;
     use crate::name::TrackNamespace;
+    use crate::session::RequestState;
     use crate::session::Transport;
 
     fn server() -> Session {
@@ -725,6 +764,14 @@ mod tests {
             stream_count,
             error_reason: ReasonPhrase::default(),
         }
+    }
+
+    fn subscribe_ok(track_alias: u64) -> ControlMessage {
+        ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias,
+            parameters: vec![],
+            track_properties: vec![],
+        })
     }
 
     fn opened(session: &mut Session, first: ControlMessage) -> PeerRequestId {
@@ -948,6 +995,42 @@ mod tests {
     }
 
     #[test]
+    fn a_subscribe_without_an_answer_gives_way_to_the_peers_publish() {
+        // §5.1. (whether the SUBSCRIBE was answered before the PUBLISH came,
+        //  what the PUBLISH leads to)
+        let mut session = server();
+        let (pending, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        let request = opened(&mut session, publish(0, b"a", 7));
+        assert_eq!(session.request_state(pending), Some(RequestState::Pending));
+        let (_, gave_way) = session.accept_publish(request, vec![]).unwrap();
+        assert_eq!(gave_way, Some(pending));
+        assert_eq!(
+            session.request_state(pending),
+            Some(RequestState::Terminated)
+        );
+
+        // A SUBSCRIBE that was accepted is a subscription in the same role.
+        let mut session = server();
+        let (own, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        session.on_request_message(own, subscribe_ok(3)).unwrap();
+        assert_eq!(
+            session.on_peer_request_opened(publish(0, b"a", 7)),
+            Ok(refusal(0x19))
+        );
+
+        // Accepted between the PUBLISH and its answer: the PUBLISH cannot be
+        // accepted any more.
+        let mut session = server();
+        let (own, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        let request = opened(&mut session, publish(0, b"a", 7));
+        session.on_request_message(own, subscribe_ok(3)).unwrap();
+        assert_eq!(
+            session.accept_publish(request, vec![]),
+            Err(UsageError("already a subscriber of this track"))
+        );
+    }
+
+    #[test]
     fn a_publish_is_accepted_and_its_alias_drains() {
         let mut session = server();
         let request = opened(&mut session, publish(0, b"a", 7));
@@ -957,13 +1040,18 @@ mod tests {
             SubscribedAlias::Established(&track(b"a"))
         );
         assert_eq!(
-            session.accept_publish(request, vec![Parameter::Forward(true)]),
+            session
+                .accept_publish(request, vec![Parameter::Forward(true)])
+                .map(|(ok, _)| ok),
             Ok(ControlMessage::RequestOk(RequestOk {
                 parameters: vec![Parameter::Forward(true)],
                 track_properties: vec![],
             }))
         );
-        assert_eq!(session.accept_publish(request, vec![]), Err(NOT_PENDING));
+        assert_eq!(
+            session.accept_publish(request, vec![]).map(|_| ()),
+            Err(NOT_PENDING)
+        );
 
         assert_eq!(
             session.on_peer_request_message(request, ControlMessage::PublishDone(done(1))),
