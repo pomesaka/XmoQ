@@ -591,6 +591,28 @@ pub fn read_uni_streams<C: Connection, T: Send + 'static>(
     )
 }
 
+/// How the reading of a request stream the peer opened ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerRequestClose {
+    /// With a FIN, after whole messages. A requester that only finishes its
+    /// direction has not cancelled the request (§3.3.2 names a reset and
+    /// `STOP_SENDING` for that).
+    Fin,
+    /// The peer reset its direction, with this code when it gave one that
+    /// can be read.
+    Reset(Option<u32>),
+    /// This endpoint stopped the stream, or the connection is gone.
+    Abandoned,
+}
+
+impl PeerRequestClose {
+    /// Whether it was a FIN.
+    #[must_use]
+    pub fn is_fin(self) -> bool {
+        self == Self::Fin
+    }
+}
+
 /// What the request streams the peer opens produced.
 pub enum PeerRequestStreamEvent<S> {
     /// The first message of a new stream, with the half to answer on. `stream`
@@ -616,10 +638,8 @@ pub enum PeerRequestStreamEvent<S> {
     Closed {
         /// The stream.
         stream: u64,
-        /// Whether it was a FIN, after whole messages. A requester that only
-        /// finishes its direction has not cancelled the request (§3.3.2
-        /// names a reset and `STOP_SENDING` for that).
-        fin: bool,
+        /// How.
+        how: PeerRequestClose,
     },
     /// A stream held something the session cannot go on after.
     Failed(Error),
@@ -1000,7 +1020,7 @@ async fn read_request_stream<R: RecvStream, S: SendStream, T>(
     let mut decoder = MessageDecoder::new();
     // Handed to the consumer together with the first message.
     let mut send = Some(send);
-    let mut fin = false;
+    let mut how = PeerRequestClose::Abandoned;
     let failed = loop {
         loop {
             let message = match decoder.next_message() {
@@ -1032,12 +1052,16 @@ async fn read_request_stream<R: RecvStream, S: SendStream, T>(
             Step::Bytes(len) => decoder.push(reader.received(len)),
             Step::Fin => match decoder.finish() {
                 Ok(()) => {
-                    fin = true;
+                    how = PeerRequestClose::Fin;
                     break None;
                 }
                 Err(error) => Err(error),
             },
-            Step::Reset(_) | Step::Lost => break None,
+            Step::Reset(code) => {
+                how = PeerRequestClose::Reset(code);
+                break None;
+            }
+            Step::Lost => break None,
             Step::Stop(code) => {
                 reader.recv.stop(code);
                 break None;
@@ -1061,7 +1085,7 @@ async fn read_request_stream<R: RecvStream, S: SendStream, T>(
         }
         // Only a stream that was announced is reported closed.
         None if send.is_none() => {
-            sink.put(PeerRequestStreamEvent::Closed { stream, fin })
+            sink.put(PeerRequestStreamEvent::Closed { stream, how })
                 .await;
         }
         None => {}

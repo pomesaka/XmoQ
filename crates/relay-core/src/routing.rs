@@ -203,11 +203,15 @@ impl Refusal {
     /// subscriber has to interpret it.
     ///
     /// The reason is passed on with the publisher's code only; under another
-    /// code it would explain something the subscriber was not told. The
-    /// Retry Interval is the publisher's, except under `INTERNAL_ERROR` put in
-    /// place of another code: when to retry was said about something the
-    /// subscriber does not learn, and 0 ("SHOULD NOT be retried", §10.6.2)
-    /// promises nothing.
+    /// code it would explain something the subscriber was not told.
+    ///
+    /// The Retry Interval is the publisher's where the subscriber's retry
+    /// is the publisher's business: with a code that is passed on, and with
+    /// `DOES_NOT_EXIST` in place of another, since a subscriber that asks
+    /// again makes the relay ask the same publisher again, and the publisher
+    /// said when that may be. Under `INTERNAL_ERROR` in place of another code
+    /// it is 0 ("SHOULD NOT be retried", §10.6.2): what the publisher's value
+    /// was about is not known, and 0 promises nothing.
     fn passed_on(error: &RequestError) -> Self {
         use request_error_code as code;
         let error_code = match error.error_code {
@@ -233,8 +237,11 @@ impl Refusal {
             // "Relays are not required to follow redirects from upstream and
             // MAY forward" one; this relay does neither.
             //
-            // DUPLICATE_SUBSCRIPTION does not get here: it is no refusal (see
-            // where the publisher's answer is handled).
+            // DUPLICATE_SUBSCRIPTION has no arm of its own. `passed_on` is
+            // called for the answer to an ask, and that code from the
+            // publisher of an ask is no refusal (`on_upstream_refusal`
+            // returns before it gets here). For an answer to a request that
+            // is no ask any more there are no waiters to pass anything on to.
             code::NOT_SUPPORTED | code::GOING_AWAY | code::REDIRECT => code::DOES_NOT_EXIST,
             // Codes that do not answer this SUBSCRIBE. §10.6.2 defines
             // MALFORMED_TRACK "In response to a FETCH", and INVALID_RANGE for

@@ -1208,9 +1208,9 @@ fn a_publishers_error_code_is_passed_on_or_replaced() {
     //  reason goes with it, the subscriber's Retry Interval). The publisher's
     // Retry Interval is 7 in every row. REDIRECT, which needs a Redirect, is
     // a row of the table of answers above.
-    let cases: [(u64, u64, bool, u64); 16] = [
+    let cases: [(u64, u64, bool, u64); 17] = [
         // About the track at the publisher or its load, and the generic
-        // error: as they are. 0x0, 0x2, 0x9, 0x10, 0x33.
+        // error: as they are.
         (0x0, 0x0, true, 7),
         (0x2, 0x2, true, 7),
         (0x9, 0x9, true, 7),
@@ -1227,12 +1227,14 @@ fn a_publishers_error_code_is_passed_on_or_replaced() {
         // No answer to this SUBSCRIBE: INTERNAL_ERROR, and no word on a
         // retry. INVALID_RANGE (the relay names no range), MALFORMED_TRACK
         // (defined for FETCH), UNINTERESTED, PREFIX_OVERLAP,
-        // NAMESPACE_TOO_LARGE, and a code draft 18 does not have.
+        // NAMESPACE_TOO_LARGE, INVALID_JOINING_REQUEST_ID, and a code draft 18
+        // does not have.
         (0x11, 0x0, false, 0),
         (0x12, 0x0, false, 0),
         (0x20, 0x0, false, 0),
         (0x30, 0x0, false, 0),
         (0x31, 0x0, false, 0),
+        (0x32, 0x0, false, 0),
         (0x7777, 0x0, false, 0),
     ];
     for (from_publisher, to_subscriber, with_reason, retry_interval) in cases {
@@ -1559,4 +1561,117 @@ fn a_crossing_publish_brings_its_largest_object_properties_and_early_streams() {
             stream: StreamKey(8),
         }]
     );
+}
+
+#[test]
+fn the_relays_subscribes_of_a_subscriber_that_goes_are_cancelled_in_the_order_of_the_track_names() {
+    // Alice subscribes to five tracks of the publisher's namespace, in an
+    // order that is not that of their names, and the publisher accepts each.
+    // An order left to chance would come out as the one below once in 120
+    // times.
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    for (number, name) in (0u64..).zip([b"d", b"a", b"e", b"c", b"b"]) {
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(number),
+            first: subscribe(number * 2, name),
+        });
+        relay.step(upstream(
+            PUBLISHER,
+            number,
+            ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: 40 + number,
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+        ));
+    }
+    assert_eq!(routed(&relay), (1, 0, 5, 5, 5));
+
+    // With Alice gone nobody wants the tracks, and the relay cancels its own
+    // SUBSCRIBEs: the one for "a" was its request 1, for "b" 4, for "c" 3,
+    // for "d" 0 and for "e" 2.
+    let actions = relay.step(Event::SessionClosed { session: ALICE });
+    let cancelled: Vec<u64> = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::CancelOwnRequest { request, .. } => Some(request.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancelled, [1, 4, 3, 0, 2]);
+}
+
+#[test]
+fn a_subscriber_that_finished_its_direction_while_it_waited_has_still_finished_it_when_subscribed()
+{
+    // (what ends the subscription, what Alice's stream gets, the request
+    //  streams the relay still has an entry for: the publisher's
+    //  PUBLISH_NAMESPACE, unless the publisher went). Alice finishes
+    // her direction while the publisher has not answered. No report about
+    // her stream follows, so whatever ends her subscription later has to
+    // leave nothing of the stream behind.
+    let done_and_gone = vec![
+        Action::SendRequest {
+            session: ALICE,
+            stream: StreamKey(0),
+            message: publish_done(0x2, 0),
+        },
+        // No timer for a stream Alice has finished already.
+        Action::FinishRequest {
+            session: ALICE,
+            stream: StreamKey(0),
+        },
+    ];
+    let cases = [
+        (
+            "the publisher's PUBLISH_DONE",
+            upstream(PUBLISHER, 0, publish_done(0x2, 0)),
+            {
+                let mut actions = vec![Action::FinishOwnRequest {
+                    session: PUBLISHER,
+                    request: OwnRequestKey(0),
+                }];
+                actions.extend(done_and_gone.clone());
+                actions
+            },
+            1,
+        ),
+        (
+            "the publisher goes",
+            Event::SessionClosed { session: PUBLISHER },
+            done_and_gone,
+            0,
+        ),
+    ];
+    for (name, ending, expected, streams_left) in cases {
+        let mut relay = relay();
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+        assert_eq!(
+            relay.step(Event::RequestClosed {
+                session: ALICE,
+                stream: StreamKey(0),
+                how: RequestEnd::Fin,
+            }),
+            [],
+            "{name}"
+        );
+        assert_eq!(
+            relay.step(upstream(PUBLISHER, 0, upstream_subscribe_ok(None))),
+            [answered(), subscribe_ok(ALICE, None)],
+            "{name}"
+        );
+        // The mark went with her from the wait to the subscription.
+        assert_eq!(relay.counts().half_closed_streams, 1, "{name}");
+
+        assert_eq!(relay.step(ending), expected, "{name}");
+        let counts = relay.counts();
+        assert_eq!(
+            (counts.half_closed_streams, counts.request_streams),
+            (0, streams_left),
+            "{name}"
+        );
+    }
 }

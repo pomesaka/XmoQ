@@ -707,11 +707,11 @@ impl Client<'_> {
         // The same wait as after a PUBLISH: see `PUBLISH_DONE_ANSWER_WAIT`.
         let peer_ended = async {
             loop {
-                if let PeerRequestStreamEvent::Closed { stream, fin } =
+                if let PeerRequestStreamEvent::Closed { stream, how } =
                     peer_requests.next_event().await?
                     && stream == ended.stream
                 {
-                    return Ok::<_, anyhow::Error>(fin);
+                    return Ok::<_, anyhow::Error>(how.is_fin());
                 }
             }
         };
@@ -806,10 +806,10 @@ impl Client<'_> {
                     }
                 }
             }
-            PeerRequestStreamEvent::Closed { stream, fin } => {
+            PeerRequestStreamEvent::Closed { stream, how } => {
                 // A subscriber that only finishes its direction has not ended
                 // the subscription (§5.1); a reset has (§3.3.2).
-                if !fin
+                if !how.is_fin()
                     && serving
                         .as_ref()
                         .is_some_and(|served| served.stream == stream)

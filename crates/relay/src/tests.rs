@@ -1334,3 +1334,47 @@ async fn the_wait_for_an_announced_publish_ends_when_the_publish_comes() {
     let held = hub.held().await;
     assert_eq!((held.timers, held.relay.own_requests), (0, 0));
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_code_of_a_reset_and_of_a_stop_of_a_request_stream_is_logged() {
+    // (how the subscriber cancels its SUBSCRIBE, the line the relay logs for
+    //  it). A peer that cancels sends both (§3.3.2), and the relay acts on
+    //  the one it sees first; each has its line, with the peer's code.
+    //  TOO_FAR_BEHIND (0x5) and MALFORMED_TRACK (0x12) are codes the relay
+    //  does not send by itself here. The subscriber is the relay's second
+    //  session, and its SUBSCRIBE its second stream: session 1, stream 1.
+    let cases = [
+        (true, "RESET_RECEIVED session=1 stream=1 code=0x5"),
+        (false, "STOP_SENDING_RECEIVED session=1 stream=1 code=0x12"),
+    ];
+    for (resets, line) in cases {
+        let (log, mut lines) = hub::Log::collect();
+        let (hub, _task) = hub::spawn(HubConfig {
+            log: Some(log),
+            ..HubConfig::default()
+        });
+        let mut publisher = Peer::connect(&hub, true).await;
+        let _publication = publisher.publish().await;
+        let mut subscriber = Peer::connect(&hub, true).await;
+        let (request, _alias) = subscriber.subscribe().await;
+        let OpenRequest { send, reader, .. } = request;
+        // The half that is not used stays open: letting go of it would say
+        // something to the relay as well.
+        let (mut send_kept, mut reader_kept) = (None, None);
+        if resets {
+            send.reset(0x5);
+            reader_kept = Some(reader);
+        } else {
+            reader.stop(0x12);
+            send_kept = Some(send);
+        }
+        tokio::time::sleep(SOON).await;
+        let received: Vec<String> = logged(&mut lines)
+            .into_iter()
+            .filter(|logged| logged.contains("_RECEIVED "))
+            .collect();
+        assert_eq!(received, [line]);
+        assert_eq!(hub.held().await.relay.subscriptions, 0, "{line}");
+        drop((send_kept, reader_kept));
+    }
+}
