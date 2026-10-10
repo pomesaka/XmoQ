@@ -2,9 +2,10 @@
 // client, moves one MOQT Object through the relay and compares the received
 // payload with the sent one.
 //
-// Usage: node run.mjs [--direction browser-to-rust|rust-to-browser|browser-to-browser]
+// Usage: node run.mjs [--direction browser-to-rust|rust-to-browser|browser-to-browser|rust-to-rust]
+//                     [--rust-publisher moqtail|own] [--rust-subscriber moqtail|own]
 //                     [--browser chromium|headless-shell|chrome]
-//                     [--cert-trust hash|spki-flag|none] [--port N] [--verbose]
+//                     [--cert-trust hash|spki-flag|none] [--port N] [--verbose] [--trace]
 
 import { execFileSync, spawn } from 'node:child_process'
 import { X509Certificate, createHash, randomBytes } from 'node:crypto'
@@ -19,7 +20,13 @@ import { chromium } from 'playwright'
 const here = dirname(fileURLToPath(import.meta.url))
 const spikeRoot = join(here, '..')
 const relayBin = join(spikeRoot, '.tools', 'bin', 'relay')
-const rustClientBin = join(spikeRoot, 'rust-client', 'target', 'debug', 'xmoq-moqtail-spike')
+// Rust client binary per --rust-publisher / --rust-subscriber value. `moqtail` is
+// the spike client on the moqtail crate; `own` is XmoQ's client on `crates/moqt`.
+// Both take the same arguments and print the same marker lines.
+const RUST_CLIENTS = {
+  moqtail: join(spikeRoot, 'rust-client', 'target', 'debug', 'xmoq-moqtail-spike'),
+  own: join(spikeRoot, '..', '..', 'target', 'debug', 'xmoq-moqt-client'),
+}
 const certDir = join(spikeRoot, 'cert')
 const certFile = join(certDir, 'cert.pem')
 const keyFile = join(certDir, 'key.pem')
@@ -41,6 +48,7 @@ const DIRECTIONS = {
   'browser-to-rust': { publisherInBrowser: true, subscriberInBrowser: false },
   'rust-to-browser': { publisherInBrowser: false, subscriberInBrowser: true },
   'browser-to-browser': { publisherInBrowser: true, subscriberInBrowser: true },
+  'rust-to-rust': { publisherInBrowser: false, subscriberInBrowser: false },
 }
 
 // `none` is the negative control: the self-signed certificate is not trusted at all.
@@ -49,6 +57,13 @@ const CERT_TRUST_MODES = ['hash', 'spki-flag', 'none']
 const { values: options } = parseArgs({
   options: {
     direction: { type: 'string', default: 'browser-to-rust' },
+    'rust-publisher': { type: 'string', default: 'moqtail' },
+    'rust-subscriber': { type: 'string', default: 'moqtail' },
+    // Makes the `own` client print the raw bytes of every stream.
+    trace: { type: 'boolean', default: false },
+    // After the transfer, ends the Rust publisher and waits until the `own`
+    // subscriber reports that PUBLISH_DONE ended its subscription.
+    'await-publish-done': { type: 'boolean', default: false },
     browser: { type: 'string', default: 'chromium' },
     'cert-trust': { type: 'string', default: 'hash' },
     port: { type: 'string', default: '44318' },
@@ -192,7 +207,15 @@ async function main() {
   if (!launchOptions) throw new Error(`unknown --browser ${options.browser}`)
   const certTrust = options['cert-trust']
   if (!CERT_TRUST_MODES.includes(certTrust)) throw new Error(`unknown --cert-trust ${certTrust}`)
-  for (const binary of [relayBin, rustClientBin]) {
+  const rustPublisher = direction.publisherInBrowser ? null : options['rust-publisher']
+  const rustSubscriber = direction.subscriberInBrowser ? null : options['rust-subscriber']
+  for (const implementation of [rustPublisher, rustSubscriber]) {
+    if (implementation !== null && !RUST_CLIENTS[implementation]) {
+      throw new Error(`unknown Rust client ${implementation}`)
+    }
+  }
+  const binaries = [relayBin, ...[rustPublisher, rustSubscriber].filter(Boolean).map(name => RUST_CLIENTS[name])]
+  for (const binary of binaries) {
     if (!existsSync(binary)) throw new Error(`${binary} is missing; see README.md for the build steps`)
   }
 
@@ -214,6 +237,10 @@ async function main() {
         ]
       : []
   const pageCertHash = certTrust === 'hash' ? certificate.sha256Hex : null
+  const awaitPublishDone = options['await-publish-done']
+  if (awaitPublishDone && (direction.publisherInBrowser || direction.subscriberInBrowser || rustSubscriber !== 'own')) {
+    throw new Error('--await-publish-done needs --direction rust-to-rust and --rust-subscriber own')
+  }
 
   const cleanups = []
   let result
@@ -233,14 +260,20 @@ async function main() {
     })
     const [, relayVersion] = await relay.waitForLine(/(moqtail\/\S+) is running on/)
 
-    const { server, url: pageUrl } = await servePage()
-    cleanups.push(() => new Promise(resolve => server.close(resolve)))
-
-    const browser = await chromium.launch({ headless: true, args: browserArgs, ...launchOptions })
-    cleanups.push(() => browser.close())
-    log('driver', `browser=${options.browser} version=${browser.version()} args=${JSON.stringify(browserArgs)}`)
+    // rust-to-rust needs no page, so the browser is started on first use.
+    let browserSession
+    const startBrowser = async () => {
+      const { server, url: pageUrl } = await servePage()
+      cleanups.push(() => new Promise(resolve => server.close(resolve)))
+      const browser = await chromium.launch({ headless: true, args: browserArgs, ...launchOptions })
+      cleanups.push(() => browser.close())
+      log('driver', `browser=${options.browser} version=${browser.version()} args=${JSON.stringify(browserArgs)}`)
+      return { browser, pageUrl }
+    }
 
     const openConnectedPage = async label => {
+      browserSession ??= await startBrowser()
+      const { browser, pageUrl } = browserSession
       const context = await browser.newContext()
       const page = await context.newPage()
       page.on('console', message => log(label, message.text()))
@@ -253,13 +286,18 @@ async function main() {
       )
       return page
     }
-    const spawnRustClient = (label, mode, extraArgs = []) => {
-      const client = spawnLogged(label, rustClientBin, [
+    const spawnRustClient = (label, implementation, mode, extraArgs = []) => {
+      const traceArgs = options.trace && implementation === 'own' ? ['--trace'] : []
+      const client = spawnLogged(label, RUST_CLIENTS[implementation], [
         '--mode', mode, '--url', relayUrl, '--cert-sha256', certificate.sha256Hex,
-        '--namespace', NAMESPACE, '--track', TRACK, ...extraArgs,
+        '--namespace', NAMESPACE, '--track', TRACK, ...extraArgs, ...traceArgs,
       ])
       cleanups.push(async () => {
+        // Closing stdin tells a publisher to end its subscription and leave. It
+        // gets a moment to do so before it is killed, so PUBLISH_DONE reaches the relay.
         client.child.stdin.end()
+        const grace = new Promise(resolve => setTimeout(resolve, 3_000))
+        await Promise.race([client.exited, grace])
         client.child.kill('SIGTERM')
         await client.exited
       })
@@ -269,6 +307,7 @@ async function main() {
     // The publisher offers the track first: the relay rejects a SUBSCRIBE for a
     // track nobody has published.
     let sendObject
+    let endPublisher
     if (direction.publisherInBrowser) {
       const page = await openConnectedPage('browser-pub')
       await withTimeout(
@@ -277,17 +316,19 @@ async function main() {
       )
       sendObject = () => page.evaluate(hex => window.xmoq.sendObject(hex), payloadHex)
     } else {
-      const client = spawnRustClient('rust-pub', 'publish', ['--payload-hex', payloadHex])
+      const client = spawnRustClient('rust-pub', rustPublisher, 'publish', ['--payload-hex', payloadHex])
       await client.waitForLine(/^PUBLISHED /)
       sendObject = async () => {
         client.child.stdin.write('send\n')
         await client.waitForLine(/^SENT /)
       }
+      endPublisher = () => client.child.stdin.end()
     }
 
     // The subscriber is live before the Object is sent: the subscription uses the
     // LatestObject filter, which does not replay what was published earlier.
     let receiveHex
+    let awaitSubscriptionEnd
     if (direction.subscriberInBrowser) {
       const page = await openConnectedPage('browser-sub')
       await withTimeout(
@@ -299,8 +340,11 @@ async function main() {
         return object.payloadHex
       }
     } else {
-      const client = spawnRustClient('rust-sub', 'subscribe')
+      // Asking for a second Object keeps the subscriber waiting after the first,
+      // so it is still there when the publisher ends the track.
+      const client = spawnRustClient('rust-sub', rustSubscriber, 'subscribe', awaitPublishDone ? ['--objects', '2'] : [])
       await client.waitForLine(/^SUBSCRIBED /)
+      awaitSubscriptionEnd = () => client.waitForLine(/^SUBSCRIPTION_ENDED (.*)$/)
       receiveHex = async () => {
         const [, hex] = await client.waitForLine(/^OBJECT .*payload_hex=([0-9a-f]*)$/)
         return hex
@@ -309,6 +353,11 @@ async function main() {
 
     await sendObject()
     const receivedHex = await receiveHex()
+    let subscriptionEnd = null
+    if (awaitPublishDone) {
+      endPublisher()
+      ;[, subscriptionEnd] = await awaitSubscriptionEnd()
+    }
 
     result = {
       direction: options.direction,
@@ -318,9 +367,12 @@ async function main() {
       sentHex: payloadHex,
       receivedHex,
       relayVersion,
-      browser: options.browser,
-      browserVersion: browser.version(),
+      rustPublisher,
+      rustSubscriber,
+      browser: browserSession ? options.browser : null,
+      browserVersion: browserSession ? browserSession.browser.version() : null,
       certTrust,
+      subscriptionEnd,
     }
   } finally {
     for (const cleanup of cleanups.reverse()) {

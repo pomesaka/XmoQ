@@ -1,10 +1,10 @@
 # Requirements and status
 
-**Discussed** means explicitly raised in planning; **proposed** means suggested but not confirmed; **decided** means confirmed by the project owner and not yet implemented; **validation required** means not proven.
+**Discussed** means explicitly raised in planning; **proposed** means suggested but not confirmed; **decided** means confirmed by the project owner and not yet implemented; **implemented** means the code is in `main` and a recorded run in `docs/experiments/` exercised it; **validation required** means not proven.
 
 | Requirement | Status |
 | --- | --- |
-| Own MoQ Transport implementation in Rust and TypeScript, pinned to draft 18 | Decided; not implemented |
+| Own MoQ Transport implementation in Rust and TypeScript, pinned to draft 18 | Decided; partly implemented. Rust codec, client-side session and a client are implemented against `moqtail` peers. The relay and the TypeScript side are not |
 | One-to-many live broadcast | Discussed |
 | Browser publishing and viewing | Discussed |
 | WebCodecs and MoQ/WebTransport | Discussed; validation required |
@@ -18,4 +18,4 @@
 | Authentication, privacy, recording | Undecided |
 | License and contribution policy | Undecided |
 
-No CLI commands or installation steps are implemented yet.
+No user-facing CLI or installation steps are implemented yet. `xmoq-moqt-client` is a one-shot client for interop runs, not the terminal viewer.

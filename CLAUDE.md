@@ -6,7 +6,9 @@ MoQ/WebTransportを使った1対多ライブ配信の実験プロジェクト。
 
 Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。検証用のコードは`spikes/`にあり、アプリ本体の構成ではない。
 
-いまの課題は`docs/roadmap.md`のPhase 0bで、MoQ Transportの層をRustとTypeScriptで自前実装する。版はdraft 18に固定する。理由と範囲は`docs/protocols.md`にある。これを通るまで映像などの機能を作らない。
+いまの課題は`docs/roadmap.md`のPhase 0bで、MoQ Transportの層をRustとTypeScriptで自前実装する。版はdraft 18に固定する。理由と範囲は`docs/protocols.md`にある。これを通るまで映像などの機能を作らない。どこまでできているかは`docs/roadmap.md`のチェックで見る。
+
+draftが黙っている箇所と矛盾している箇所で2つの実装がどう動くかは、`docs/moqt-implementation-notes.md`に表がある。片方の実装だけを変えない。表に行を足すときと裁定を出すときは、該当の節を本文で読んでから書く。
 
 検査は`mise run check`で走らせる。道具の版は`mise.toml`と`rust-toolchain.toml`で固定してあり、初回は`mise trust`と`mise install`が要る。個別には`mise run check:rust`（fmt、clippy、test）、`check:ts`（Biome、oxlint、型検査、`bun test`）、`check:layers`（層の依存）、`check:workflows`（actionlint、shellcheck）があり、整形は`mise run fmt`。CIは同じタスクを呼ぶので、検査を足すときはワークフローでなく`scripts/ci/`を直す。
 
@@ -63,6 +65,10 @@ Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。
 | docs/open-questions.md | 仕様書 | 未決事項の一覧 |
 | docs/experiments/ | 仕様書 | 検証の実行記録 |
 | docs/assets/ | README | 文書に埋め込むSVG図 |
+| docs/moq-libraries.md | 仕様書 | ライブラリ調査の記録（終了済み） |
+| docs/moqt-implementation-notes.md | 仕様書 | draftが黙っている箇所と矛盾している箇所で、2つの実装がそろえる挙動。既知の不足 |
+| fixtures/moqt-18/README.md | 仕様書 | moqtailから採った実バイト列の出どころと復号後の値 |
+| .github/workflows/、scripts/ci/、mise.toml | コーディングポリシー | CIとローカルの検査。規約を検査で守る |
 
 ### 変更 → ドキュメント更新マッピング
 
@@ -78,3 +84,6 @@ Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。
 | ビルド・テスト・起動のコマンドを足した・変えた | CLAUDE.md、README.md |
 | 新しい文書を足した | README.md の一覧、このDocumentation Map |
 | エージェントの進め方を変えた | docs/agent-guide.md、CLAUDE.md |
+| draftの解釈や、本文に無い挙動を決めた・変えた | docs/moqt-implementation-notes.md。RustとTypeScriptの両方を同じPRで直す |
+| 受信の上限やタイムアウトの値を決めた・変えた | docs/open-questions.md、docs/moqt-implementation-notes.md |
+| moqtailから固定値を採った・採り直した | fixtures/moqt-18/README.md |

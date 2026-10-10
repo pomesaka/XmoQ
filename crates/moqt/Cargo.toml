@@ -1,0 +1,13 @@
+[package]
+name = "xmoq-moqt"
+version = "0.0.0"
+description = "MoQ Transport (draft-ietf-moq-transport-18) wire coding and session state, without I/O."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# WHY empty: this crate does no I/O, so it must not depend on wtransport, quinn
+# or tokio. Only xmoq-moqt-client touches the network.
+[dependencies]

@@ -6,9 +6,13 @@ This is the **proposed browser media path**, not a claim that all layers have be
 
 MoQ is a media Object distribution protocol, not a replacement for the entire WebRTC media stack. One WebTransport session can multiplex streams and datagrams. A MoQ Track is **not** the same thing as a QUIC stream.
 
-## MoQ implementation — decided, not implemented
+## MoQ implementation — decided, partly implemented
 
 XmoQ implements the MoQ Transport layer itself, in Rust (relay and client) and in TypeScript (browser), pinned to `draft-ietf-moq-transport-18` (WebTransport subprotocol `moqt-18`). QUIC and WebTransport are not reimplemented: Rust uses existing crates and the browser uses its native `WebTransport`.
+
+What exists is listed in the [roadmap](roadmap.md), Phase 0b. The Rust side uses `wtransport` 0.7.2 for WebTransport, the crate the `moqtail` relay is built on. `wtransport` 0.7.2 does not map WebTransport error codes and does not send CLOSE_WEBTRANSPORT_SESSION (read in its source on 2026-10-10), which has not mattered against the `moqtail` relay and has to be checked against a browser before the own relay depends on it.
+
+Where draft 18 is silent or contradicts itself, both implementations follow [MoQ Transport implementation notes](moqt-implementation-notes.md).
 
 - **Why own implementation:** the goal of the project is to understand and own the protocol. The Phase 0 runs also showed limits in each library: `moq-dev/moq` keeps the moq-lite model in MOQT mode with deliberate deviations and failed most browser-to-browser late joins; the `moqtail` crate has no client API, so a Rust client already has to drive SETUP and request streams itself.
 - **Why not moq-lite:** it is an individual draft with its own wire format, not IETF MoQ Transport.
