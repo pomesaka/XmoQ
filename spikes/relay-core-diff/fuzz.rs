@@ -7,6 +7,32 @@
 //! differ from run to run is the number of order-only mismatches, where a
 //! core iterates over a `HashMap`, whose order is random per process.
 //!
+//! `XMOQ_FUZZ_WORLD` chooses what the sequences are made of:
+//!
+//! * `v1` (the default): 25 kinds of event; every data stream is of Subgroup
+//!   0 of one of three Groups, so that streams of the same Subgroup are
+//!   common. The world of the first records.
+//! * `distinct`: three kinds more (a control message, a session that failed
+//!   on the I/O side, a `SUBSCRIBE_OK` with a Mandatory Track Property), and
+//!   no two data streams of a session are of the same Subgroup: each is of a
+//!   new Group.
+//! * `full`: the three kinds more, the three ways a Subgroup Header gives the
+//!   Subgroup ID (§11.4.2), and streams of the same Subgroup.
+//! * `split`: two halves that have nothing to do with each other. Sessions 1
+//!   and 2 publish, announce and subscribe to one track, with the streams of
+//!   `full`; sessions 3 and 4 do the same with another track in another
+//!   namespace, with the streams of `distinct`. What a change to how
+//!   Subgroups are taken does can only begin in the first half, and
+//!   `compare.py` checks that the two cores do the same to sessions 3 and 4
+//!   from the first event to the last.
+//!
+//! Every world but `v1` starts with a track that is published and subscribed
+//! to (two in `split`, one a half). WHY: from nothing, few sequences get as
+//! far as an Object that reaches a subscriber, and the streams are what the
+//! comparisons of these worlds are for; for the same reason three in four of
+//! the events about data streams are about that track. `v1` starts from
+//! nothing, as it did in the first records.
+//!
 //! The test also prints a digest of every list of actions the relay
 //! returned, in order. Two runs of a core whose actions depend on nothing
 //! but the events print the same digest.
@@ -17,14 +43,14 @@ use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError,
-    RequestUpdate, Subscribe, SubscribeOk,
+    RequestUpdate, Setup, Subscribe, SubscribeOk,
 };
 use xmoq_moqt::name::{FullTrackName, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::Role;
 
 use crate::{
-    Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, SessionKey, StreamEnd,
+    Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, SessionKey, StreamEnd,
     StreamKey,
 };
 
@@ -42,6 +68,17 @@ impl Rng {
 fn track(n: u64) -> FullTrackName {
     let namespace = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
     FullTrackName::new(namespace, vec![b'a' + u8::try_from(n).unwrap()]).unwrap()
+}
+
+/// The namespace of one half of the world `split`.
+fn namespace_of_half(half: u64) -> Vec<u8> {
+    format!("xmoq-{half}").into_bytes()
+}
+
+/// The one track of a half of the world `split`.
+fn track_of_half(half: u64) -> FullTrackName {
+    let namespace = TrackNamespace::new(vec![namespace_of_half(half)]).unwrap();
+    FullTrackName::new(namespace, b"a".to_vec()).unwrap()
 }
 
 fn error(code: u64) -> ControlMessage {
@@ -66,7 +103,59 @@ fn done() -> ControlMessage {
 struct Peer {
     next_request: u64,
     next_stream: u64,
+    next_group: u64,
     open: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum World {
+    V1,
+    Distinct,
+    Full,
+    Split,
+}
+
+impl World {
+    fn from_env() -> Self {
+        match std::env::var("XMOQ_FUZZ_WORLD").as_deref() {
+            Err(_) | Ok("v1") => Self::V1,
+            Ok("distinct") => Self::Distinct,
+            Ok("full") => Self::Full,
+            Ok("split") => Self::Split,
+            Ok(other) => panic!("XMOQ_FUZZ_WORLD={other}: not v1, distinct, full or split"),
+        }
+    }
+}
+
+/// The Group and the Subgroup ID of a new data stream, as the world has them.
+fn subgroup_of_a_new_stream(rng: &mut Rng, peer: &mut Peer, world: World) -> (u64, SubgroupId) {
+    match world {
+        World::V1 => (rng.next(3), SubgroupId::Zero),
+        World::Distinct => {
+            peer.next_group += 1;
+            (peer.next_group - 1, SubgroupId::Zero)
+        }
+        World::Split => unreachable!("a half of it has the streams of full or of distinct"),
+        World::Full => {
+            let group = rng.next(3);
+            let subgroup = match rng.next(3) {
+                0 => SubgroupId::Zero,
+                1 => SubgroupId::Explicit(rng.next(2)),
+                _ => SubgroupId::FirstObjectId,
+            };
+            (group, subgroup)
+        }
+    }
+}
+
+/// Whose data stream an event is about, and under which Track Alias. In every
+/// world but `v1`, three in four are about the track the sequence started
+/// with (of the same half, in `split`), so that Objects reach a subscriber.
+fn data_source(rng: &mut Rng, world: World, who: u64, alias: u64) -> (u64, u64) {
+    if world == World::V1 || rng.next(4) == 0 {
+        return (who, alias);
+    }
+    (if world == World::Split { who / 2 * 2 } else { 0 }, 40)
 }
 
 fn new_request(peer: &mut Peer) -> (u64, StreamKey) {
@@ -79,7 +168,7 @@ fn new_request(peer: &mut Peer) -> (u64, StreamKey) {
 /// One of 25 kinds of event, about one of 4 sessions, 2 tracks, 2 Track
 /// Aliases, 4 data streams a session, 6 requests of the relay and 12 streams
 /// to subscribers.
-fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
+fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
     let who = rng.next(4);
     let session = SessionKey(who + 1);
     let peer = &mut peers[usize::try_from(who).unwrap()];
@@ -88,7 +177,37 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
     let request = OwnRequestKey(rng.next(6));
     let name = rng.next(2);
     let alias = 40 + rng.next(2);
-    match rng.next(30) {
+    let half = who / 2;
+    let track_named = |name: u64| if world == World::Split { track_of_half(half) } else { track(name) };
+    let streams = match world {
+        World::Split if half == 0 => World::Full,
+        World::Split => World::Distinct,
+        other => other,
+    };
+    let kinds = if world == World::V1 { 30 } else { 33 };
+    match rng.next(kinds) {
+        30 => Event::ControlMessage {
+            session,
+            message: match rng.next(3) {
+                0 => ControlMessage::Setup(Setup { setup_options: vec![] }),
+                1 => done(),
+                _ => error(0x10),
+            },
+        },
+        31 => Event::SessionFailed {
+            session,
+            error: xmoq_moqt::Error::ProtocolViolation("made up by the random events"),
+        },
+        // 0x4000 is a Mandatory Track Property this relay does not know.
+        32 => Event::OwnRequestMessage {
+            session,
+            request,
+            message: ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: alias,
+                parameters: vec![],
+                track_properties: vec![KeyValuePair::varint(0x4000, 1).unwrap()],
+            }),
+        },
         0..=2 => {
             let (id, new) = new_request(peer);
             let forward_0 = rng.next(4) == 0;
@@ -97,7 +216,7 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
                 stream: new,
                 first: ControlMessage::Subscribe(Subscribe {
                     request_id: id,
-                    full_track_name: track(name),
+                    full_track_name: track_named(name),
                     parameters: if forward_0 { vec![Parameter::Forward(false)] } else { vec![] },
                 }),
             }
@@ -109,7 +228,7 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
                 stream: new,
                 first: ControlMessage::Publish(Publish {
                     request_id: id,
-                    full_track_name: track(name),
+                    full_track_name: track_named(name),
                     track_alias: alias,
                     parameters: vec![],
                     track_properties: vec![KeyValuePair::varint(2, 5).unwrap()],
@@ -119,6 +238,8 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
         5..=6 => {
             let (id, new) = new_request(peer);
             let fields = if rng.next(3) == 0 { vec![] } else { vec![b"xmoq".to_vec()] };
+            // The namespace without fields matches every track.
+            let fields = if world == World::Split { vec![namespace_of_half(half)] } else { fields };
             Event::RequestOpened {
                 session,
                 stream: new,
@@ -171,21 +292,27 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
             },
         },
         15 => Event::UpstreamTimeout { session, request },
-        16..=18 => Event::DataStreamOpened {
+        16..=18 => {
+            let (who, alias) = data_source(rng, world, who, alias);
+            let session = SessionKey(who + 1);
+            let peer = &mut peers[usize::try_from(who).unwrap()];
+            let (group_id, subgroup_id) = subgroup_of_a_new_stream(rng, peer, streams);
+            Event::DataStreamOpened {
             session,
             stream: data_stream,
             header: SubgroupHeader {
                 track_alias: alias,
-                group_id: rng.next(3),
-                subgroup_id: SubgroupId::Zero,
+                group_id,
+                subgroup_id,
                 publisher_priority: Some(0),
                 properties: false,
                 end_of_group: false,
                 first_object: true,
             },
-        },
+            }
+        }
         19..=20 => Event::Object {
-            session,
+            session: SessionKey(data_source(rng, world, who, alias).0 + 1),
             stream: data_stream,
             object: SubgroupObject {
                 object_id: rng.next(4),
@@ -195,7 +322,7 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
             },
         },
         21..=22 => Event::DataStreamClosed {
-            session,
+            session: SessionKey(data_source(rng, world, who, alias).0 + 1),
             stream: data_stream,
             end: match rng.next(4) {
                 0..=1 => StreamEnd::Fin,
@@ -218,7 +345,7 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
         }
         // The I/O side never opens a session under a key that is in use.
         28 if !peer.open => {
-            *peer = Peer { next_request: 0, next_stream: 0, open: true };
+            *peer = Peer { next_request: 0, next_stream: 0, next_group: 0, open: true };
             Event::SessionOpened { session, role: Role::Server }
         }
         _ => Event::DataStreamClosed {
@@ -229,6 +356,54 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer]) -> Event {
     }
 }
 
+/// Whether an event is one of those the change to how Subgroups are taken
+/// is about: a data stream whose header leaves the Subgroup ID to its first
+/// Object, or a data stream for a Group and Subgroup ID that a stream of the
+/// same session and Track Alias was opened for before in the sequence.
+fn touches_subgroup_selection(event: &Event, opened: &mut Vec<(u64, u64, u64, u64)>) -> bool {
+    let Event::DataStreamOpened { session, header, .. } = event else {
+        return false;
+    };
+    // A header without a Subgroup ID and one that names 0 are of the same
+    // Subgroup.
+    let subgroup = match header.subgroup_id {
+        SubgroupId::Zero => 0,
+        SubgroupId::Explicit(id) => id,
+        SubgroupId::FirstObjectId => return true,
+    };
+    let key = (session.0, header.track_alias, header.group_id, subgroup);
+    let again = opened.contains(&key);
+    opened.push(key);
+    again
+}
+
+/// Session `publisher` publishes the track under Track Alias 40, and session
+/// `subscriber` subscribes to it.
+fn start_a_track(relay: &mut Relay, peers: &mut [Peer], publisher: usize, subscriber: usize, name: &FullTrackName) {
+    let (request_id, stream) = new_request(&mut peers[publisher - 1]);
+    relay.handle(Event::RequestOpened {
+        session: SessionKey(publisher as u64),
+        stream,
+        first: ControlMessage::Publish(Publish {
+            request_id,
+            full_track_name: name.clone(),
+            track_alias: 40,
+            parameters: vec![],
+            track_properties: vec![],
+        }),
+    });
+    let (request_id, stream) = new_request(&mut peers[subscriber - 1]);
+    relay.handle(Event::RequestOpened {
+        session: SessionKey(subscriber as u64),
+        stream,
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id,
+            full_track_name: name.clone(),
+            parameters: vec![],
+        }),
+    });
+}
+
 fn setting(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
 }
@@ -236,23 +411,65 @@ fn setting(name: &str, default: u64) -> u64 {
 #[test]
 fn the_two_cores_answer_random_events_alike() {
     let (runs, length) = (setting("XMOQ_FUZZ_RUNS", 20_000), setting("XMOQ_FUZZ_LEN", 80));
+    let world = World::from_env();
     let mut events = 0u64;
+    let (mut touching, mut differing, mut differing_before_touching) = (0u64, 0u64, 0u64);
+    let (mut opened_downstream, mut objects_sent, mut with_an_object) = (0u64, 0u64, 0u64);
+    let differences = || crate::DIFFERENCES.load(std::sync::atomic::Ordering::Relaxed);
     // `DefaultHasher::new()` has fixed keys, unlike the hasher of a `HashMap`.
     let mut digest = DefaultHasher::new();
     for seed in 1..=runs {
         let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let mut relay = Relay::new("fuzz/0");
         let mut peers: Vec<Peer> = (0..4)
-            .map(|_| Peer { next_request: 0, next_stream: 0, open: true })
+            .map(|_| Peer { next_request: 0, next_stream: 0, next_group: 0, open: true })
             .collect();
         for session in 1..=4 {
             relay.handle(Event::SessionOpened { session: SessionKey(session), role: Role::Server });
         }
+        match world {
+            World::V1 => {}
+            World::Distinct | World::Full => start_a_track(&mut relay, &mut peers, 1, 2, &track(0)),
+            World::Split => {
+                start_a_track(&mut relay, &mut peers, 1, 2, &track_of_half(0));
+                start_a_track(&mut relay, &mut peers, 3, 4, &track_of_half(1));
+            }
+        }
+        let (mut opened, mut touched, mut differed) = (Vec::new(), false, false);
+        let objects_before = objects_sent;
         for _ in 0..length {
-            let actions = relay.handle(random_event(&mut rng, &mut peers));
+            let event = random_event(&mut rng, &mut peers, world);
+            let touches = touches_subgroup_selection(&event, &mut opened);
+            let before = differences();
+            let actions = relay.handle(event);
+            if differences() != before && !differed {
+                differed = true;
+                differing += 1;
+                // The event itself may be the one that touches.
+                differing_before_touching += u64::from(!touched && !touches);
+            }
+            touched |= touches;
+            for action in &actions {
+                opened_downstream += u64::from(matches!(action, Action::OpenDataStream { .. }));
+                objects_sent += u64::from(matches!(action, Action::SendObject { .. }));
+            }
             digest.write(format!("{actions:?}").as_bytes());
             events += 1;
         }
+        touching += u64::from(touched);
+        with_an_object += u64::from(objects_sent != objects_before);
     }
     println!("FUZZ runs={runs} events={events} digest={:016x}", digest.finish());
+    println!("FUZZ_WORLD {}", std::env::var("XMOQ_FUZZ_WORLD").unwrap_or_else(|_| "v1".to_string()));
+    println!(
+        "FUZZ_TOUCH sequences={runs} touching={touching} differing={differing} differing_before_touching={differing_before_touching}"
+    );
+    println!(
+        "FUZZ_CARRIED streams_opened_to_subscribers={opened_downstream} objects_sent={objects_sent} sequences_with_an_object={with_an_object} of {runs}"
+    );
+    println!(
+        "FUZZ_BYSTANDER differences={} actions={}",
+        crate::BYSTANDER_DIFFERENCES.load(std::sync::atomic::Ordering::Relaxed),
+        crate::BYSTANDER_ACTIONS.load(std::sync::atomic::Ordering::Relaxed)
+    );
 }

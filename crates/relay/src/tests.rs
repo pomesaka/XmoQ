@@ -498,6 +498,7 @@ const NOTHING: Held = Held {
         in_streams: 0,
         out_streams: 0,
         early_streams: 0,
+        remembered_subgroups: 0,
         namespaces: 0,
         pending_tracks: 0,
         own_requests: 0,

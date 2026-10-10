@@ -10,6 +10,7 @@ use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 
 mod routing;
+mod subgroups;
 
 use super::{
     Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SessionKey,
@@ -94,11 +95,13 @@ fn publish_done(status_code: u64, stream_count: u64) -> ControlMessage {
     })
 }
 
+/// The header of a stream of Subgroup 0 of Group 3. The Subgroup ID is in
+/// the header's type, so the relay knows the Subgroup when the stream opens.
 fn header(track_alias: u64) -> SubgroupHeader {
     SubgroupHeader {
         track_alias,
         group_id: 3,
-        subgroup_id: SubgroupId::FirstObjectId,
+        subgroup_id: SubgroupId::Zero,
         publisher_priority: Some(9),
         properties: false,
         end_of_group: true,
@@ -181,11 +184,29 @@ fn subscribe_ok(session: SessionKey, largest: Option<Location>) -> Action {
     }
 }
 
+/// The same for another Group.
+fn header_of_group(track_alias: u64, group_id: u64) -> SubgroupHeader {
+    SubgroupHeader {
+        group_id,
+        ..header(track_alias)
+    }
+}
+
+/// The Group of the stream `data_stream_opened` opens under a stream number.
+/// Stream 7, the one most tests use, is of Group 3, the Group of `header`;
+/// any other stream is of the Group with its own number, so that two streams
+/// of a test are never of the same Subgroup unless the test says so.
+fn group_of_stream(stream: u64) -> u64 {
+    if stream == 7 { 3 } else { stream }
+}
+
+/// The publisher opens a subgroup stream of Subgroup 0 of
+/// [`group_of_stream`].
 fn data_stream_opened(relay: &mut Relay, stream: u64) -> Vec<Action> {
     relay.step(Event::DataStreamOpened {
         session: PUBLISHER,
         stream: StreamKey(stream),
-        header: header(UPSTREAM_ALIAS),
+        header: header_of_group(UPSTREAM_ALIAS, group_of_stream(stream)),
     })
 }
 
@@ -409,8 +430,34 @@ fn the_drain_timer_ends_a_track_whose_streams_never_came() {
 fn a_subscriber_that_joins_inside_a_subgroup_gets_a_stream_of_its_own() {
     let mut relay = relay_with_track();
     subscribe_to_track(&mut relay, ALICE);
-    data_stream_opened(&mut relay, 7);
-    object_arrived(&mut relay, 7, 4);
+    // The header leaves the Subgroup ID to the first Object (§11.4.2, mode
+    // 0b01), so Alice's stream is opened when that Object comes.
+    let first_object_names_the_subgroup = SubgroupHeader {
+        subgroup_id: SubgroupId::FirstObjectId,
+        ..header(UPSTREAM_ALIAS)
+    };
+    assert_eq!(
+        relay.step(Event::DataStreamOpened {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            header: first_object_names_the_subgroup,
+        }),
+        []
+    );
+    assert_eq!(
+        object_arrived(&mut relay, 7, 4),
+        [
+            open_data_stream(
+                ALICE,
+                0,
+                SubgroupHeader {
+                    subgroup_id: SubgroupId::FirstObjectId,
+                    ..header(0)
+                }
+            ),
+            send_object(0, 4),
+        ]
+    );
 
     // LARGEST_OBJECT is there once Objects were published (§10.2.11).
     assert_eq!(
@@ -579,7 +626,7 @@ fn a_subscriber_that_leaves_does_not_disturb_the_others() {
         // A stream opened later goes to Bob alone.
         assert_eq!(
             data_stream_opened(&mut relay, 8),
-            [open_data_stream(BOB, 2, header(0))],
+            [open_data_stream(BOB, 2, header_of_group(0, 8))],
             "{name}"
         );
     }

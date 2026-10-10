@@ -36,7 +36,7 @@ mod routing;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 pub use events::{
@@ -80,6 +80,26 @@ pub const MAX_EARLY_OBJECTS: usize = 32;
 /// WHY bytes on top of the count: one Object can be as large as the I/O side
 /// lets through, so a count alone bounds nothing.
 pub const MAX_EARLY_BYTES: usize = 1024 * 1024;
+
+/// Groups of a track, counted back from the newest one seen, for which the
+/// relay remembers which stream it took each Subgroup from. Provisional.
+///
+/// WHY remember at all: §2.2 has "Objects from the same Subgroup MUST NOT be
+/// sent on different streams, unless one of the streams was reset
+/// prematurely", and the relay is the publisher towards its subscribers. A
+/// second stream of a Subgroup that arrives must not become a second stream
+/// downstream, and to know that it is a second one the first has to be
+/// remembered. WHY not for ever: a track can go on for as long as its
+/// publisher likes. A stream of a Group older than these is passed on
+/// without a look at what came before.
+pub const MAX_REMEMBERED_GROUPS: u64 = 8;
+
+/// Subgroups of one track the relay remembers at most, over all the Groups
+/// above: one Group can have as many Subgroups as its publisher likes. Past
+/// that the ones of the oldest Group are forgotten first, and within a Group
+/// the ones with the smallest Subgroup ID, whether their stream is still open
+/// or not. Provisional.
+pub const MAX_REMEMBERED_SUBGROUPS: usize = 256;
 
 /// The Stream Count of a `PUBLISH_DONE` whose sender cannot give the exact
 /// number (§10.11: "it MUST set Stream Count to 2^62 - 1").
@@ -248,18 +268,145 @@ struct OutStream {
     opened: bool,
 }
 
-/// A subgroup stream of the publisher that is being forwarded.
+/// What a subgroup stream of a source is to its track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Passage {
+    /// Which Subgroup it is of is not known yet: the header leaves the
+    /// Subgroup ID to the first Object (§11.4.2, mode 0b01), and none has
+    /// come. Nothing is opened downstream for it.
+    Undetermined,
+    /// It is the stream its Subgroup is taken from.
+    Passed,
+    /// Its Subgroup is taken from another stream, or was delivered whole
+    /// already. It was stopped, and what still arrives on it is dropped; it
+    /// is kept until it is reported closed, because it counts as a stream of
+    /// the source's subscription (§10.11, Stream Count).
+    Discarded,
+}
+
+/// A subgroup stream of a source.
 #[derive(Debug)]
 struct InStream {
     header: SubgroupHeader,
     /// The Subgroup ID, once known. With the mode "first Object ID" (§11.4.2)
     /// that is when the first Object arrives.
     subgroup_id: Option<u64>,
+    passage: Passage,
     /// Whether an Object was forwarded. A subscriber that joins after that
     /// gets a stream that does not start with the Subgroup's first Object.
     started: bool,
     /// The stream each subscriber gets this one on, by session.
     outs: HashMap<SessionKey, OutStreamKey>,
+}
+
+/// A subgroup stream of a source: the session it arrives on, and its number
+/// there.
+type InStreamKey = (SessionKey, StreamKey);
+
+/// How the stream a Subgroup was taken from stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TakenFrom {
+    /// The stream is open.
+    Open(InStreamKey),
+    /// The stream ended without a FIN: the Subgroup may have more Objects.
+    CutShort,
+    /// The stream ended with a FIN: the Subgroup was delivered whole
+    /// (§11.4.3).
+    Whole,
+}
+
+/// What to do with a stream that arrives for a Subgroup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// Take the Subgroup from it.
+    Pass,
+    /// Take the Subgroup from it, in place of this stream that is still open.
+    Replace(InStreamKey),
+    /// Leave it: the Subgroup was delivered whole.
+    Discard,
+}
+
+/// Which stream each Subgroup of a track is taken from, for the newest
+/// Groups ([`MAX_REMEMBERED_GROUPS`], [`MAX_REMEMBERED_SUBGROUPS`]).
+///
+/// The three cases of a second stream for a Subgroup, from the same source:
+///
+/// * After the first was cut short: it passes. §2.2 allows it by name
+///   ("unless one of the streams was reset prematurely"); it is the source
+///   sending the Subgroup again.
+/// * While the first is open: the one whose header arrived later takes the
+///   place of the other. §11.4 has "A publisher SHOULD NOT open more than one
+///   stream at a time with the same Subgroup Header field values", so either
+///   the source goes against that, or it reset the first stream and the
+///   relay has not seen the reset yet, since QUIC keeps no order between
+///   streams. WHY the later one: in the second case the earlier one is over
+///   and keeping it would lose the Subgroup that was sent again. WHY NOT
+///   the stream that was opened later: the relay knows the order in which
+///   the headers were read and not the QUIC stream IDs, so when the header of
+///   the first stream is read after that of the second, it is the second, the
+///   one the source goes on with, that is stopped. The stream of the other is
+///   reset downstream before a new one is opened, so that no subscriber has
+///   two streams for the Subgroup of which neither was reset (§2.2), nor two
+///   open at a time with the same header (§11.4).
+/// * After the first ended with a FIN: it is left. The Subgroup was delivered
+///   whole (§11.4.3: "An MOQT implementation that processes a stream FIN is
+///   assured it has received all objects in a subgroup"), and a second
+///   stream for it downstream is what §2.2 forbids. That holds for a first
+///   stream that was finished without an Object as well.
+///
+/// FIXME: with several sources of a track, a stream of another source for a
+/// Subgroup that is open is to be left, and one for a Subgroup that was cut
+/// short as well; see the FIXME at the top of `routing.rs`. The table keeps
+/// the session of the stream for that.
+///
+/// FIXME: detect an Object past the last one of a Subgroup that ended with a
+/// FIN, and a Subgroup that comes on two streams that end with a FIN with
+/// different last Objects (§2.4.2, the second and third example of a
+/// malformed track). A stream that is left or replaced is stopped unread.
+#[derive(Debug, Default)]
+struct Subgroups {
+    /// By Group ID and Subgroup ID.
+    taken: BTreeMap<(u64, u64), TakenFrom>,
+    newest_group: Option<u64>,
+}
+
+impl Subgroups {
+    /// A stream arrived for a Subgroup: what becomes of it. The Subgroup is
+    /// then taken from it, unless the answer is [`Admission::Discard`].
+    fn admit(&mut self, group: u64, subgroup: u64, stream: InStreamKey) -> Admission {
+        let newest = self.newest_group.map_or(group, |newest| newest.max(group));
+        self.newest_group = Some(newest);
+        let forgotten = |group: u64| newest.saturating_sub(group) >= MAX_REMEMBERED_GROUPS;
+        if forgotten(group) {
+            return Admission::Pass;
+        }
+        let admission = match self.taken.get(&(group, subgroup)) {
+            Some(TakenFrom::Open(open)) if *open != stream => Admission::Replace(*open),
+            Some(TakenFrom::Whole) => return Admission::Discard,
+            Some(TakenFrom::Open(_) | TakenFrom::CutShort) | None => Admission::Pass,
+        };
+        self.taken
+            .insert((group, subgroup), TakenFrom::Open(stream));
+        while let Some(((oldest, _), _)) = self.taken.first_key_value()
+            && (forgotten(*oldest) || self.taken.len() > MAX_REMEMBERED_SUBGROUPS)
+        {
+            self.taken.pop_first();
+        }
+        admission
+    }
+
+    /// The stream a Subgroup is taken from ended, with a FIN or without.
+    fn ended(&mut self, group: u64, subgroup: u64, stream: InStreamKey, fin: bool) {
+        if let Some(taken) = self.taken.get_mut(&(group, subgroup))
+            && *taken == TakenFrom::Open(stream)
+        {
+            *taken = if fin {
+                TakenFrom::Whole
+            } else {
+                TakenFrom::CutShort
+            };
+        }
+    }
 }
 
 /// Where the Objects of a track come from.
@@ -366,7 +513,8 @@ struct Track {
     subscribers: Vec<Subscriber>,
     /// By the session and the stream they arrive on: stream numbers repeat
     /// from session to session.
-    in_streams: HashMap<(SessionKey, StreamKey), InStream>,
+    in_streams: HashMap<InStreamKey, InStream>,
+    subgroups: Subgroups,
 }
 
 impl Track {
@@ -386,6 +534,55 @@ impl Track {
             largest,
             subscribers: Vec::new(),
             in_streams: HashMap::new(),
+            subgroups: Subgroups::default(),
+        }
+    }
+
+    /// A stream of a source turned out to be of this Subgroup. Returns
+    /// whether the Subgroup is taken from it; when not, the stream is stopped.
+    /// A stream it takes the place of is stopped, and what was opened for
+    /// that one downstream is reset.
+    ///
+    /// §11.4.3 for the stop: "A subscriber MAY send a QUIC `STOP_SENDING`
+    /// frame for a subgroup stream if the Group or Subgroup is no longer of
+    /// interest to it."
+    fn admit(
+        &mut self,
+        subgroup: (u64, u64),
+        stream: InStreamKey,
+        out_streams: &mut HashMap<OutStreamKey, OutStream>,
+        actions: &mut Vec<Action>,
+    ) -> bool {
+        let stop = |(session, stream): InStreamKey| Action::StopDataStream {
+            session,
+            stream,
+            code: stream_reset_code::CANCELLED,
+        };
+        match self.subgroups.admit(subgroup.0, subgroup.1, stream) {
+            Admission::Pass => true,
+            Admission::Discard => {
+                actions.push(stop(stream));
+                false
+            }
+            Admission::Replace(old) => {
+                if let Some(replaced) = self.in_streams.get_mut(&old) {
+                    replaced.passage = Passage::Discarded;
+                    // In the order the subscribers came, as everywhere.
+                    for subscriber in &mut self.subscribers {
+                        if let Some(out_stream) = replaced.outs.remove(&subscriber.session) {
+                            reset_out_stream(
+                                out_streams,
+                                Some(subscriber),
+                                out_stream,
+                                stream_reset_code::CANCELLED,
+                                actions,
+                            );
+                        }
+                    }
+                    actions.push(stop(old));
+                }
+                true
+            }
         }
     }
 
@@ -583,6 +780,9 @@ pub struct Counts {
     pub out_streams: usize,
     /// Subgroup streams held for a Track Alias that is not known yet.
     pub early_streams: usize,
+    /// Subgroups the tracks remember the stream of, over all tracks
+    /// ([`MAX_REMEMBERED_SUBGROUPS`] bounds them for each).
+    pub remembered_subgroups: usize,
     /// Namespaces announced with `PUBLISH_NAMESPACE` and not withdrawn.
     pub namespaces: usize,
     /// Tracks the relay asked a publisher for and has no answer about.
@@ -1347,21 +1547,39 @@ impl Relay {
             SubgroupId::Explicit(id) => Some(id),
             SubgroupId::FirstObjectId => None,
         };
+        // WHY not at once for the mode that leaves the Subgroup ID to the
+        // first Object: until then the relay cannot tell whether it has taken
+        // that Subgroup from another stream already.
+        let passage = match subgroup_id {
+            None => Passage::Undetermined,
+            Some(id) => {
+                let subgroup = (header.group_id, id);
+                if track.admit(subgroup, (session, stream), &mut self.out_streams, actions) {
+                    Passage::Passed
+                } else {
+                    Passage::Discarded
+                }
+            }
+        };
         let mut in_stream = InStream {
             header,
             subgroup_id,
+            passage,
             started: false,
             outs: HashMap::new(),
         };
-        // Every subscriber gets a stream now, also for a Subgroup that turns
-        // out to hold no Object: the header alone can say something, such as
-        // END_OF_GROUP (§11.4.2).
-        for subscriber in &mut track.subscribers {
-            let out = OutStreamAllocator {
-                next: &mut self.next_out_stream,
-                out_streams: &mut self.out_streams,
-            };
-            out.open(&track_name, subscriber, &mut in_stream, header, actions);
+        // Where the header gives the Subgroup ID, every subscriber gets a
+        // stream now, also for a Subgroup that turns out to hold no Object: a
+        // header that is followed by a reset says that there is a Subgroup
+        // the source will not send (§11.4.3).
+        if passage == Passage::Passed {
+            for subscriber in &mut track.subscribers {
+                let out = OutStreamAllocator {
+                    next: &mut self.next_out_stream,
+                    out_streams: &mut self.out_streams,
+                };
+                out.open(&track_name, subscriber, &mut in_stream, header, actions);
+            }
         }
         track.in_streams.insert((session, stream), in_stream);
     }
@@ -1383,9 +1601,33 @@ impl Relay {
         let Some(track) = self.tracks.live_mut(track_name) else {
             return;
         };
-        let Some(in_stream) = track.in_streams.get_mut(&(session, stream)) else {
+        let key = (session, stream);
+        let (group, known) = match track.in_streams.get(&key) {
+            Some(in_stream) if in_stream.passage != Passage::Discarded => {
+                (in_stream.header.group_id, in_stream.subgroup_id)
+            }
+            _ => return,
+        };
+        // §11.4.2, mode 0b01: "the Subgroup ID is the Object ID of the first
+        // Object transmitted in this Subgroup". The relay reads that as the
+        // first Object on this stream, whatever FIRST_OBJECT says: it is the
+        // one reading a subscriber can follow from the stream alone, and the
+        // header goes downstream as it came, so both arrive at the same ID.
+        let passes = known.is_some()
+            || track.admit(
+                (group, object.object_id),
+                key,
+                &mut self.out_streams,
+                actions,
+            );
+        let Some(in_stream) = track.in_streams.get_mut(&key) else {
             return;
         };
+        if !passes {
+            in_stream.passage = Passage::Discarded;
+            return;
+        }
+        in_stream.passage = Passage::Passed;
         let location = Location {
             group: in_stream.header.group_id,
             object: object.object_id,
@@ -1458,6 +1700,15 @@ impl Relay {
         let (_, track_alias) = track.source.session_and_alias();
         state.moqt.on_data_stream_closed(track_alias);
         if let Some(in_stream) = track.in_streams.remove(&(session, stream)) {
+            if let (Passage::Passed, Some(subgroup_id)) = (in_stream.passage, in_stream.subgroup_id)
+            {
+                track.subgroups.ended(
+                    in_stream.header.group_id,
+                    subgroup_id,
+                    (session, stream),
+                    end == StreamEnd::Fin,
+                );
+            }
             for subscriber in &mut track.subscribers {
                 let Some(out_stream) = in_stream.outs.get(&subscriber.session).copied() else {
                     continue;
@@ -1623,19 +1874,22 @@ impl Relay {
         // WHY sorted: the streams are kept in a `HashMap`, whose order differs
         // from run to run. The same events are to lead to the same actions,
         // so that a run can be compared with another.
-        let streams: BTreeSet<u64> = track
+        let streams: BTreeSet<(u64, bool)> = track
             .in_streams
-            .keys()
-            .filter(|(from, _)| *from == session)
-            .map(|(_, stream)| stream.0)
+            .iter()
+            .filter(|((from, _), _)| *from == session)
+            .map(|((_, stream), in_stream)| (stream.0, in_stream.passage == Passage::Discarded))
             .collect();
-        for stream in streams.into_iter().map(StreamKey) {
+        for (stream, stopped_already) in streams {
+            let stream = StreamKey(stream);
             state.in_streams.remove(&stream);
-            actions.push(Action::StopDataStream {
-                session,
-                stream,
-                code: reset_code,
-            });
+            if !stopped_already {
+                actions.push(Action::StopDataStream {
+                    session,
+                    stream,
+                    code: reset_code,
+                });
+            }
         }
         match source.from {
             TrackSource::Publisher {
@@ -1972,6 +2226,11 @@ impl Relay {
                 .sum(),
             out_streams: self.out_streams.len(),
             early_streams: self.sessions.values().map(|state| state.early.len()).sum(),
+            remembered_subgroups: self
+                .tracks
+                .all_live()
+                .map(|(_, track)| track.subgroups.taken.len())
+                .sum(),
             namespaces: self.namespaces.len(),
             pending_tracks: self.tracks.all_pending().count(),
             own_requests: self.sessions.values().map(|state| state.own.len()).sum(),

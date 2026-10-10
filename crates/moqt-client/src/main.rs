@@ -92,6 +92,12 @@ struct Args {
     /// How long the publisher waits between the answer to its
     /// `PUBLISH_NAMESPACE` and its PUBLISH.
     publish_delay: Duration,
+    /// How the Subgroup Headers this client sends give the Subgroup ID
+    /// (§11.4.2): not at all (it is 0), as the ID of the first Object, or in
+    /// the header. Every stream it sends is one Object, Object 0, so the
+    /// Subgroup ID is 0 all three ways; what differs is when a receiver
+    /// knows it.
+    subgroup_id: SubgroupId,
     /// How long a request of the peer waits for its refusal.
     ///
     /// WHY the two delays: on a real link, a SUBSCRIBE the relay sends after
@@ -135,6 +141,7 @@ fn parse_args() -> Result<Args> {
     let mut track_name = None;
     let mut timeout_secs = 20;
     let mut publish_delay_ms = 0;
+    let mut subgroup_id = SubgroupId::Zero;
     let mut answer_delay_ms = 0;
     let mut trace = false;
 
@@ -156,6 +163,14 @@ fn parse_args() -> Result<Args> {
             "--namespace" => namespace = Some(value),
             "--track" => track_name = Some(value),
             "--timeout-secs" => timeout_secs = value.parse().context("--timeout-secs")?,
+            "--subgroup-id" => {
+                subgroup_id = match value.as_str() {
+                    "zero" => SubgroupId::Zero,
+                    "first-object" => SubgroupId::FirstObjectId,
+                    "explicit" => SubgroupId::Explicit(0),
+                    other => bail!("unknown --subgroup-id {other}"),
+                };
+            }
             "--publish-delay-ms" => {
                 publish_delay_ms = value.parse().context("--publish-delay-ms")?;
             }
@@ -188,6 +203,7 @@ fn parse_args() -> Result<Args> {
         track_name: track_name.context("--track is required")?,
         timeout_secs,
         publish_delay: Duration::from_millis(publish_delay_ms),
+        subgroup_id,
         answer_delay: Duration::from_millis(answer_delay_ms),
         trace: if trace {
             Trace::new(report::trace)
@@ -522,7 +538,7 @@ impl Client<'_> {
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
             track_alias,
             group_id,
-            subgroup_id: SubgroupId::Zero,
+            subgroup_id: self.args.subgroup_id,
             publisher_priority: Some(0),
             properties: false,
             // This Object is the only one of its Group, so the stream holds the

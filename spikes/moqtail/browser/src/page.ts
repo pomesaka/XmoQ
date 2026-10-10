@@ -22,7 +22,8 @@ type XmoqPage = {
   publishTrack(namespace: string, trackName: string): Promise<string>
   /** Announces the namespace and registers the track, and sends no PUBLISH. */
   announceTrack(namespace: string, trackName: string): Promise<string>
-  sendObject(payloadHex: string): void
+  /** `subgroupInHeader: false` makes moqtail-ts leave the Subgroup ID to the first Object (draft 18, §11.4.2). */
+  sendObject(payloadHex: string, subgroupInHeader?: boolean): void
   subscribe(namespace: string, trackName: string): Promise<string>
   firstObject(): Promise<ReceivedObject>
   disconnect(): Promise<void>
@@ -117,14 +118,16 @@ window.xmoq = {
     return trackAlias.toString()
   },
 
-  sendObject(payloadHex) {
+  sendObject(payloadHex, subgroupInHeader = true) {
     if (!published) throw new Error('publishTrack() or announceTrack() has not completed')
     const object = MoqtObject.newWithPayload(
       published.fullTrackName,
       new Location(0n, 0n),
       0,
       ObjectForwardingPreference.Subgroup,
-      0n,
+      // moqtail-ts 0.13.0 picks the header type from this: 0n is "Subgroup
+      // ID 0, not in the header", null is "the ID of the first Object".
+      subgroupInHeader ? 0n : null,
       null,
       fromHex(payloadHex),
     )
