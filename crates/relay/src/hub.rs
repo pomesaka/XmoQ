@@ -1398,6 +1398,8 @@ fn name(message: &ControlMessage) -> String {
             "PUBLISH_DONE status_code={:#x} stream_count={}",
             done.status_code, done.stream_count
         ),
+        ControlMessage::Fetch(_) => "FETCH".to_string(),
+        ControlMessage::FetchOk(_) => "FETCH_OK".to_string(),
         ControlMessage::UnsupportedRequest { message_type, .. } => {
             format!("unsupported request {message_type:#x}")
         }

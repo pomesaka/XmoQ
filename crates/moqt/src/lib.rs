@@ -17,6 +17,7 @@ mod aliases;
 mod coding;
 pub mod data;
 mod error;
+pub mod fetch;
 pub mod kvp;
 pub mod message;
 pub mod name;

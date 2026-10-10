@@ -254,6 +254,13 @@ impl Session {
             ControlMessage::Subscribe(message) => message.request_id,
             ControlMessage::Publish(message) => message.request_id,
             ControlMessage::PublishNamespace(message) => message.request_id,
+            // FIXME: serve a FETCH (§10.12). It is refused with `NOT_SUPPORTED`
+            // below, like a request this crate does not decode. Unlike those
+            // it is decoded whole first, so a FETCH with a Fetch Type other
+            // than 1 to 3, or with a parameter that is unknown or not for a
+            // FETCH, has closed the session before it gets here (§10.12,
+            // §10.2.1).
+            ControlMessage::Fetch(message) => message.request_id,
             ControlMessage::UnsupportedRequest { request_id, .. } => *request_id,
             _ => {
                 return Err(Error::ProtocolViolation(
@@ -923,6 +930,41 @@ mod tests {
         assert_eq!(
             session.on_peer_request_opened(subscribe(0, b"a")),
             Err(Error::InvalidRequestId(0))
+        );
+    }
+
+    #[test]
+    fn a_fetch_is_decoded_and_refused() {
+        let mut session = server();
+        let fetch = ControlMessage::Fetch(crate::message::Fetch {
+            request_id: 0,
+            range: crate::message::FetchRange::RelativeJoining {
+                joining_request_id: 2,
+                joining_start: 0,
+            },
+            parameters: vec![],
+        });
+        // NOT_SUPPORTED (0x3), and the Request ID is used up.
+        assert_eq!(session.on_peer_request_opened(fetch), Ok(refusal(0x3)));
+        assert_eq!(
+            session.on_peer_request_opened(subscribe(0, b"a")),
+            Err(Error::InvalidRequestId(0))
+        );
+        // A FETCH_OK is no request.
+        let ok = ControlMessage::FetchOk(crate::message::FetchOk {
+            end_of_track: false,
+            end_location: crate::name::Location {
+                group: 0,
+                object: 0,
+            },
+            parameters: vec![],
+            track_properties: vec![],
+        });
+        assert_eq!(
+            session.on_peer_request_opened(ok),
+            Err(Error::ProtocolViolation(
+                "request stream did not begin with a request"
+            ))
         );
     }
 

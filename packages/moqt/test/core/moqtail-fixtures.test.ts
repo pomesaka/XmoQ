@@ -5,6 +5,11 @@ import {
 	encodeControlMessage,
 } from "../../src/core/control-message.ts";
 import {
+	createFetchStreamDecoder,
+	createFetchStreamEncoder,
+	type FetchObject,
+} from "../../src/core/fetch.ts";
+import {
 	createSubgroupStreamDecoder,
 	encodeSubgroupHeader,
 	encodeSubgroupObject,
@@ -172,6 +177,137 @@ const FIXTURES: {
 			trackProperties: [],
 		},
 	},
+	{
+		name: "FETCH, Standalone, with SUBSCRIBER_PRIORITY",
+		source: "moqtail crate 0.15.0 (its test client)",
+		file: "fetch-standalone-moqtail-rs",
+		message: {
+			type: "FETCH",
+			requestId: 0n,
+			range: {
+				fetchType: "Standalone",
+				trackNamespace: [utf8("xmoq"), utf8("phase0")],
+				trackName: utf8("object"),
+				startLocation: { group: 0n, object: 1n },
+				endLocation: { group: 1n, object: 2n },
+			},
+			parameters: { subscriberPriority: 200 },
+		},
+	},
+	{
+		name: "FETCH, Relative Joining, with SUBSCRIBER_PRIORITY",
+		source: "moqtail crate 0.15.0 (its test client)",
+		file: "fetch-relative-joining-moqtail-rs",
+		message: {
+			type: "FETCH",
+			requestId: 2n,
+			range: {
+				fetchType: "RelativeJoining",
+				joiningRequestId: 0n,
+				joiningStart: 0n,
+			},
+			parameters: { subscriberPriority: 200 },
+		},
+	},
+	{
+		name: "FETCH_OK for a Standalone FETCH",
+		source: "moqtail relay 0.15.0",
+		file: "fetch-ok-moqtail-relay",
+		message: {
+			type: "FETCH_OK",
+			endOfTrack: false,
+			endLocation: { group: 1n, object: 2n },
+			parameters: {},
+			trackProperties: [],
+		},
+	},
+	{
+		name: "FETCH_OK for a Joining FETCH",
+		source: "moqtail relay 0.15.0",
+		file: "fetch-ok-joining-moqtail-relay",
+		message: {
+			type: "FETCH_OK",
+			endOfTrack: false,
+			endLocation: { group: 6n, object: 2n },
+			parameters: {},
+			trackProperties: [],
+		},
+	},
+];
+
+/** An Object of moqtail's test client in a fetch stream: Subgroup 1, priority 128. */
+function fetched(
+	groupId: bigint,
+	objectId: bigint,
+	properties: FetchObject["properties"] = [],
+): FetchObject {
+	return {
+		groupId,
+		subgroupId: 1n,
+		objectId,
+		publisherPriority: 128,
+		properties,
+		payload: PAYLOAD,
+	};
+}
+
+// Whole fetch streams as the moqtail relay 0.15.0 wrote them in answer to a
+// FETCH. Prior Group ID Gap (0x3C) and Prior Object ID Gap (0x3E), §12.8 and
+// §12.9, are what its test client sets where it leaves IDs out.
+const FETCH_STREAM_FIXTURES: {
+	name: string;
+	file: string;
+	requestId: bigint;
+	objects: FetchObject[];
+}[] = [
+	{
+		name: "four Objects of two Groups",
+		file: "fetch-stream-from-moqtail-relay",
+		requestId: 0n,
+		objects: [
+			fetched(0n, 1n),
+			fetched(0n, 2n),
+			fetched(1n, 0n),
+			fetched(1n, 1n),
+		],
+	},
+	{
+		name: "thirteen Objects of five Groups",
+		file: "fetch-stream-five-groups-from-moqtail-relay",
+		requestId: 2n,
+		objects: [
+			fetched(2n, 0n),
+			fetched(2n, 1n),
+			fetched(2n, 2n),
+			fetched(3n, 0n),
+			fetched(3n, 1n),
+			fetched(3n, 2n),
+			fetched(4n, 0n),
+			fetched(4n, 1n),
+			fetched(4n, 2n),
+			fetched(5n, 0n),
+			fetched(5n, 1n),
+			fetched(5n, 2n),
+			fetched(6n, 0n),
+		],
+	},
+	{
+		name: "Objects with gaps in the Group IDs and the Object IDs",
+		file: "fetch-stream-gaps-from-moqtail-relay",
+		requestId: 0n,
+		objects: [
+			fetched(0n, 0n),
+			fetched(0n, 2n, [{ type: 0x3en, value: 1n }]),
+			fetched(2n, 0n, [{ type: 0x3cn, value: 1n }]),
+			fetched(2n, 2n, [{ type: 0x3en, value: 1n }]),
+		],
+	},
+	{
+		name: "a header and no Object",
+		file: "fetch-stream-empty-from-moqtail-relay",
+		requestId: 0n,
+		objects: [],
+	},
 ];
 
 // Whole subgroup streams as a subscriber received them from the relay.
@@ -311,12 +447,61 @@ const SUBGROUP_FIXTURES: {
 	},
 ];
 
-// WHY: the tests below read the files listed in the two tables. A file added
-// to fixtures/moqt-18/ and to neither table would be read by nothing, and
+// WHY: the tests below read the files listed in the three tables. A file
+// added to fixtures/moqt-18/ and to no table would be read by nothing, and
 // nobody would notice.
 test("every file of fixtures/moqt-18/ is in one of the tables, and every table entry is a file", () => {
-	const listed = [...FIXTURES, ...SUBGROUP_FIXTURES].map(({ file }) => file);
+	const listed = [
+		...FIXTURES,
+		...SUBGROUP_FIXTURES,
+		...FETCH_STREAM_FIXTURES,
+	].map(({ file }) => file);
 	expect(listed.sort()).toEqual(fixtureNames());
+});
+
+describe("fetch streams captured from moqtail", () => {
+	const LIMITS = {
+		maxObjectPayloadLength: 1024,
+		maxObjectPropertiesLength: 1024,
+	};
+	const expected = ({
+		requestId,
+		objects,
+	}: (typeof FETCH_STREAM_FIXTURES)[number]) => [
+		{ type: "header", header: { requestId } } as const,
+		...objects.map((object) => ({ type: "object", object }) as const),
+	];
+
+	test.each(FETCH_STREAM_FIXTURES)("decodes $name", (entry) => {
+		const decoder = createFetchStreamDecoder(LIMITS, "Ascending");
+		expect(decoder.push(hex(fixture(entry.file)))).toEqual({
+			items: expected(entry),
+		});
+		expect(decoder.finish()).toBeUndefined();
+	});
+
+	test.each(FETCH_STREAM_FIXTURES)("decodes $name byte by byte", (entry) => {
+		const decoder = createFetchStreamDecoder(LIMITS, "Ascending");
+		const items = Array.from(hex(fixture(entry.file))).flatMap((byte) => {
+			const result = decoder.push(Uint8Array.of(byte));
+			expect(result.failure).toBeUndefined();
+			return result.items;
+		});
+		expect(items).toEqual(expected(entry));
+		expect(decoder.finish()).toBeUndefined();
+	});
+
+	test.each(FETCH_STREAM_FIXTURES)(
+		"encodes $name to the bytes the relay wrote",
+		({ file, requestId, objects }) => {
+			const encoder = createFetchStreamEncoder({ requestId }, "Ascending");
+			const stream = [
+				encoder.header,
+				...objects.map((object) => encoder.object(object)),
+			];
+			expect(stream.map(toHex).join(" ")).toBe(fixture(file));
+		},
+	);
 });
 
 describe("subgroup streams captured from moqtail", () => {

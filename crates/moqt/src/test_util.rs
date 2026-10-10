@@ -4,8 +4,19 @@
 /// directory is shared with the TypeScript implementation; its README records
 /// where each file comes from.
 pub(crate) fn fixture(name: &str) -> Vec<u8> {
+    read_hex("moqt-18", name)
+}
+
+/// Reads `fixtures/moqt-18-by-hand/<name>.hex`, bytes written by hand from
+/// the draft, which the TypeScript implementation reads too. No other
+/// implementation wrote them.
+pub(crate) fn fixture_by_hand(name: &str) -> Vec<u8> {
+    read_hex("moqt-18-by-hand", name)
+}
+
+fn read_hex(directory: &str, name: &str) -> Vec<u8> {
     let path = format!(
-        "{}/../../fixtures/moqt-18/{name}.hex",
+        "{}/../../fixtures/{directory}/{name}.hex",
         env!("CARGO_MANIFEST_DIR")
     );
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -19,26 +30,39 @@ pub(crate) fn fixture(name: &str) -> Vec<u8> {
         .collect()
 }
 
-#[test]
-fn every_fixture_file_is_read_by_a_test() {
-    // WHY: the tests name the files they read. A capture that is added to the
-    // directory and to no test would look covered and check nothing.
-    let directory = format!("{}/../../fixtures/moqt-18", env!("CARGO_MANIFEST_DIR"));
-    let mut on_disk: Vec<String> = std::fs::read_dir(&directory)
-        .unwrap_or_else(|e| panic!("{directory}: {e}"))
+/// The names of the `.hex` files of a directory under `fixtures/`, sorted.
+fn names_on_disk(directory: &str) -> Vec<String> {
+    let path = format!("{}/../../fixtures/{directory}", env!("CARGO_MANIFEST_DIR"));
+    let mut names: Vec<String> = std::fs::read_dir(&path)
+        .unwrap_or_else(|e| panic!("{path}: {e}"))
         .filter_map(|entry| {
             let name = entry.ok()?.file_name().into_string().ok()?;
             name.strip_suffix(".hex").map(str::to_string)
         })
         .collect();
-    on_disk.sort();
+    names.sort();
+    names
+}
 
+#[test]
+fn every_fixture_file_is_read_by_a_test() {
+    // WHY: the tests name the files they read. A capture that is added to the
+    // directory and to no test would look covered and check nothing.
     let mut read: Vec<String> = crate::message::tests::fixture_names()
         .into_iter()
         .chain(crate::data::tests::fixture_names())
+        .chain(crate::fetch::tests::fixture_names())
         .map(str::to_string)
         .collect();
     read.sort();
 
-    assert_eq!(on_disk, read);
+    assert_eq!(names_on_disk("moqt-18"), read);
+}
+
+#[test]
+fn every_file_written_by_hand_is_read_by_a_test() {
+    let mut read = crate::fetch::tests::names_of_files_written_by_hand();
+    read.sort_unstable();
+
+    assert_eq!(names_on_disk("moqt-18-by-hand"), read);
 }

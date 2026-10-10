@@ -1,0 +1,11 @@
+[package]
+name = "xmoq-fetch-capture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Spike only: prints the bytes a peer sends back, to take fixtures from.
+[dependencies]
+xmoq-moqt-io = { path = "../../crates/moqt-io" }
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "time"] }
+anyhow = "=1.0.100"

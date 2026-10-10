@@ -102,6 +102,171 @@ const HAND_ENCODED: { name: string; bytes: string; message: ControlMessage }[] =
 				parameters: { forward: true },
 			},
 		},
+		// The FETCH messages below are the same bytes as
+		// `the_fetches_sent_to_take_the_fixtures_say_what_they_were_meant_to`
+		// in crates/moqt/src/message.rs: written by hand there, and sent to
+		// the moqtail relay to take its answers.
+		{
+			name: "FETCH, Relative Joining, Joining Start 1 (§10.12.2)",
+			bytes: "16 00 07 02 02 00 01 01 20 c8",
+			message: {
+				type: "FETCH",
+				requestId: 2n,
+				range: {
+					fetchType: "RelativeJoining",
+					joiningRequestId: 0n,
+					joiningStart: 1n,
+				},
+				parameters: { subscriberPriority: 200 },
+			},
+		},
+		{
+			name: "FETCH, Absolute Joining, Joining Start 2 (§10.12.2)",
+			bytes: "16 00 07 02 03 00 02 01 20 c8",
+			message: {
+				type: "FETCH",
+				requestId: 2n,
+				range: {
+					fetchType: "AbsoluteJoining",
+					joiningRequestId: 0n,
+					joiningStart: 2n,
+				},
+				parameters: { subscriberPriority: 200 },
+			},
+		},
+		{
+			name: "FETCH, Relative Joining, without parameters",
+			bytes: "16 00 05 00 02 08 00 00",
+			message: {
+				type: "FETCH",
+				requestId: 0n,
+				range: {
+					fetchType: "RelativeJoining",
+					joiningRequestId: 8n,
+					joiningStart: 0n,
+				},
+				parameters: {},
+			},
+		},
+		{
+			name: "FETCH, Standalone, with GROUP_ORDER Descending (§10.2.8)",
+			bytes:
+				"16 00 1d 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 00 00 02 00 01 22 02",
+			message: {
+				type: "FETCH",
+				requestId: 0n,
+				range: {
+					fetchType: "Standalone",
+					trackNamespace: [utf8("xmoq"), utf8("phase0")],
+					trackName: utf8("object"),
+					startLocation: { group: 0n, object: 0n },
+					endLocation: { group: 2n, object: 0n },
+				},
+				parameters: { groupOrder: "Descending" },
+			},
+		},
+		{
+			name: "FETCH, Standalone, Groups 0 to 3",
+			bytes:
+				"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 00 00 04 00 00",
+			message: {
+				type: "FETCH",
+				requestId: 0n,
+				range: {
+					fetchType: "Standalone",
+					trackNamespace: [utf8("xmoq"), utf8("phase0")],
+					trackName: utf8("object"),
+					startLocation: { group: 0n, object: 0n },
+					endLocation: { group: 4n, object: 0n },
+				},
+				parameters: {},
+			},
+		},
+		{
+			name: "FETCH, Standalone, Group 1 alone",
+			bytes:
+				"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 01 00 01 00 00",
+			message: {
+				type: "FETCH",
+				requestId: 0n,
+				range: {
+					fetchType: "Standalone",
+					trackNamespace: [utf8("xmoq"), utf8("phase0")],
+					trackName: utf8("object"),
+					startLocation: { group: 1n, object: 0n },
+					endLocation: { group: 1n, object: 0n },
+				},
+				parameters: {},
+			},
+		},
+		{
+			name: "FETCH, Standalone, Group 100 (0x64 is one byte by §1.4.1)",
+			bytes:
+				"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 64 00 65 00 00",
+			message: {
+				type: "FETCH",
+				requestId: 0n,
+				range: {
+					fetchType: "Standalone",
+					trackNamespace: [utf8("xmoq"), utf8("phase0")],
+					trackName: utf8("object"),
+					startLocation: { group: 100n, object: 0n },
+					endLocation: { group: 101n, object: 0n },
+				},
+				parameters: {},
+			},
+		},
+		// The next two are the bytes the Rust tests have for the same.
+		{
+			name: "FETCH with FILL_TIMEOUT and GROUP_ORDER Descending, as in the Rust tests",
+			bytes: "16 00 09 04 02 00 00 02 0a 05 18 02",
+			message: {
+				type: "FETCH",
+				requestId: 4n,
+				range: {
+					fetchType: "RelativeJoining",
+					joiningRequestId: 0n,
+					joiningStart: 0n,
+				},
+				parameters: { fillTimeout: 5n, groupOrder: "Descending" },
+			},
+		},
+		{
+			name: "FETCH_OK with End Of Track and a Track Property, as in the Rust tests",
+			bytes: "18 00 06 01 02 03 00 0e 05",
+			message: {
+				type: "FETCH_OK",
+				endOfTrack: true,
+				endLocation: { group: 2n, object: 3n },
+				parameters: {},
+				trackProperties: [{ type: 0x0en, value: 5n }],
+			},
+		},
+		{
+			name: "FETCH with FILL_TIMEOUT and an AUTHORIZATION_TOKEN (§10.2.5, §10.2.2)",
+			bytes: "16 00 0a 00 02 00 00 02 03 01 aa 07 05",
+			message: {
+				type: "FETCH",
+				requestId: 0n,
+				range: {
+					fetchType: "RelativeJoining",
+					joiningRequestId: 0n,
+					joiningStart: 0n,
+				},
+				parameters: { authorizationToken: [hex("aa")], fillTimeout: 5n },
+			},
+		},
+		{
+			name: "FETCH_OK with End Of Track and a Track Property (§10.13)",
+			bytes: "18 00 06 01 03 00 00 02 05",
+			message: {
+				type: "FETCH_OK",
+				endOfTrack: true,
+				endLocation: { group: 3n, object: 0n },
+				parameters: {},
+				trackProperties: [{ type: 2n, value: 5n }],
+			},
+		},
 	];
 
 describe("control messages encoded by hand from the draft", () => {
@@ -197,6 +362,48 @@ describe("decodeControlMessage", () => {
 		{
 			name: "FILL_TIMEOUT in SUBSCRIBE (§10.2.1)",
 			bytes: "03 00 06 00 00 00 01 0a 00",
+			code: 3,
+		},
+		// The FETCH and FETCH_OK cases are the same bytes as in
+		// `rejects_malformed_input` of crates/moqt/src/message.rs.
+		{
+			name: "FETCH with Fetch Type 4 (§10.12)",
+			bytes: "16 00 03 00 04 00",
+			code: 3,
+		},
+		{
+			name: "FETCH with Fetch Type 0 (§10.12)",
+			bytes: "16 00 03 00 00 00",
+			code: 3,
+		},
+		{
+			name: "FORWARD, a SUBSCRIBE parameter, in FETCH (§10.2.1)",
+			bytes: "16 00 07 02 02 00 00 01 10 01",
+			code: 3,
+		},
+		{
+			name: "GROUP_ORDER value 3 in FETCH (§10.2.8)",
+			bytes: "16 00 07 02 02 00 00 01 22 03",
+			code: 3,
+		},
+		{
+			name: "a Standalone FETCH that stops after its Start Location",
+			bytes: "16 00 07 00 01 00 01 61 00 01",
+			code: 3,
+		},
+		{
+			name: "unknown Message Parameter 0x01 in FETCH (§10.2)",
+			bytes: "16 00 07 00 02 00 00 01 01 00",
+			code: 3,
+		},
+		{
+			name: "FETCH_OK with End Of Track 2 (§10.13)",
+			bytes: "18 00 04 02 01 02 00",
+			code: 3,
+		},
+		{
+			name: "EXPIRES in FETCH_OK: no parameter lists FETCH_OK (§10.2.1)",
+			bytes: "18 00 06 00 01 02 01 08 05",
 			code: 3,
 		},
 		{
@@ -306,7 +513,7 @@ describe("decodeRequestStart", () => {
 			requestId: 1n,
 		},
 		{
-			name: "FETCH, which is not implemented",
+			name: "FETCH, whose start is all that is read here",
 			bytes: "16 00 02 05 00",
 			messageType: 22n,
 			requestId: 5n,

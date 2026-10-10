@@ -5,6 +5,7 @@ import {
 	SETUP_OPTION_MOQT_IMPLEMENTATION,
 } from "./control-stream.ts";
 import { MoqtError, NotImplementedError, protocolViolation } from "./error.ts";
+import { FETCH_HEADER_STREAM_TYPE } from "./fetch.ts";
 import type { KeyValuePair } from "./key-value-pair.ts";
 import { resolveLimits, type SessionLimits } from "./limits.ts";
 import type { OutgoingObject, SubgroupOptions } from "./outgoing-subgroups.ts";
@@ -35,7 +36,9 @@ export interface SessionOptions {
  * they are misused.
  *
  * Not implemented: the server role, requests opened by the peer (they are
- * answered with REQUEST_ERROR NOT_SUPPORTED), REQUEST_UPDATE, GOAWAY, FETCH,
+ * answered with REQUEST_ERROR NOT_SUPPORTED), REQUEST_UPDATE, GOAWAY, FETCH
+ * (its messages and its stream are decoded in `control-message.ts` and
+ * `fetch.ts`; nothing is done with them),
  * datagrams, namespace subscription and timers.
  */
 export interface Session {
@@ -122,8 +125,10 @@ type PeerUniStream =
 	/** Padding: bytes are dropped (§11.5.1). */
 	| { kind: "discard" };
 
-/** Stream types of Table 3 (§3.4) that are neither SETUP nor SUBGROUP_HEADER. */
-const STREAM_TYPE_FETCH_HEADER = 0x05n;
+/**
+ * Stream types of Table 3 (§3.4) that are neither SETUP nor SUBGROUP_HEADER.
+ * FETCH_HEADER is with its codec, in `fetch.ts`.
+ */
 const STREAM_TYPE_PADDING = 0x132b3e28n;
 
 export function createSession(options: SessionOptions = {}): Session {
@@ -172,7 +177,7 @@ export function createSession(options: SessionOptions = {}): Session {
 			return { kind: "subgroup" };
 		}
 		if (streamType === STREAM_TYPE_PADDING) return { kind: "discard" };
-		if (streamType === STREAM_TYPE_FETCH_HEADER) {
+		if (streamType === FETCH_HEADER_STREAM_TYPE) {
 			// Table 3 lists it, so the peer is within the draft. The draft has no
 			// rule for a fetch stream without a FETCH, which is the only case here.
 			throw new NotImplementedError("FETCH_HEADER stream");

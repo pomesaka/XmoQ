@@ -12,7 +12,7 @@ use crate::coding::{
 use crate::kvp::{self, KeyValuePair, Value};
 use crate::{Error, UsageError, varint};
 
-const STREAM_TYPE_FETCH_HEADER: u64 = 0x05;
+pub(crate) const STREAM_TYPE_FETCH_HEADER: u64 = 0x05;
 const STREAM_TYPE_SETUP: u64 = 0x2f00;
 const STREAM_TYPE_PADDING: u64 = 0x132b_3e28;
 
@@ -219,7 +219,7 @@ pub enum SubgroupEvent {
 /// What makes the Properties of one Object break the track, as far as the Object
 /// alone shows it. Both the decoder and the encoder apply it, so the encoder
 /// cannot produce a stream the decoder rejects.
-fn object_properties_fault(
+pub(crate) fn object_properties_fault(
     properties: &[KeyValuePair],
     group_id: u64,
     object_id: u64,

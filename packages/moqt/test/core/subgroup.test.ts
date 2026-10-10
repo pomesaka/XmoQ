@@ -327,7 +327,50 @@ describe("subgroup streams (§11.4.2)", () => {
 		object: SubgroupObject;
 	}[])("refuses to encode $name", ({ previous, object }) => {
 		expect(() =>
-			encodeSubgroupObject({ properties: false }, previous, object),
+			encodeSubgroupObject(
+				{ properties: false, groupId: 0n },
+				previous,
+				object,
+			),
+		).toThrow(RangeError);
+	});
+});
+
+// What the decoder takes for a malformed Track, the encoder does not write
+// (§2.5.1, §12.8, §12.9). The Rust encoder refuses the same.
+describe("Object Properties that break the track", () => {
+	test.each([
+		{
+			name: "a Mandatory Track Property",
+			objectId: 0n,
+			properties: [{ type: 0x4000n, value: 0n }],
+		},
+		{
+			name: "a Prior Object ID Gap larger than the Object ID",
+			objectId: 0n,
+			properties: [{ type: 0x3en, value: 1n }],
+		},
+		{
+			name: "two Prior Object ID Gaps",
+			objectId: 5n,
+			properties: [
+				{ type: 0x3en, value: 1n },
+				{ type: 0x3en, value: 1n },
+			],
+		},
+		{
+			name: "a Prior Group ID Gap larger than the Group ID",
+			objectId: 0n,
+			properties: [{ type: 0x3cn, value: 1n }],
+		},
+	])("encodeSubgroupObject refuses $name", ({ objectId, properties }) => {
+		expect(() =>
+			encodeSubgroupObject({ properties: true, groupId: 0n }, undefined, {
+				objectId,
+				properties: [...properties],
+				status: "Normal",
+				payload: new Uint8Array(0),
+			}),
 		).toThrow(RangeError);
 	});
 });

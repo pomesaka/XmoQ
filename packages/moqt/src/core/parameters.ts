@@ -50,6 +50,11 @@ export interface MessageParameters {
 	expires?: bigint;
 	/** 0x09 */
 	largestObject?: Location;
+	/**
+	 * 0x0A, milliseconds a relay may spend on getting Objects of a FETCH from
+	 * upstream; 0 for none at all (§10.2.5).
+	 */
+	fillTimeout?: bigint;
 	/** 0x10 */
 	forward?: boolean;
 	/** 0x20, 0 to 255. */
@@ -78,7 +83,10 @@ export type ParameterScope =
 	| "PUBLISH_NAMESPACE_OK"
 	| "REQUEST_OK"
 	/** REQUEST_UPDATE for a subscription (§10.9.1). */
-	| "REQUEST_UPDATE";
+	| "REQUEST_UPDATE"
+	| "FETCH"
+	/** No parameter of the draft lists FETCH_OK. */
+	| "FETCH_OK";
 
 const REQUEST_OK_KINDS: readonly ParameterScope[] = [
 	"PUBLISH_OK",
@@ -116,13 +124,13 @@ const writeVarint = (writer: ByteWriter, value: bigint): void => {
 	writer.varint(value);
 };
 
-function decodeLocation(reader: ByteReader): Location {
+export function decodeLocation(reader: ByteReader): Location {
 	const group = reader.varint();
 	const object = reader.varint();
 	return { group, object };
 }
 
-function encodeLocation(writer: ByteWriter, location: Location): void {
+export function encodeLocation(writer: ByteWriter, location: Location): void {
 	writer.varint(location.group).varint(location.object);
 }
 
@@ -200,11 +208,10 @@ function decodeForward(value: number): boolean {
  * the order §10.2 requires on the wire. Adding a parameter takes one entry
  * here and one field in `MessageParameters`.
  *
- * FILL_TIMEOUT (0x0A) and TRACK_NAMESPACE_PREFIX (0x34) have no entry: they
- * are allowed only in FETCH and in the REQUEST_UPDATE of a namespace
- * subscription, which are not implemented, so in every message decoded here
- * they are a PROTOCOL_VIOLATION (§10.2.1), the same outcome as an unknown
- * Type.
+ * TRACK_NAMESPACE_PREFIX (0x34) has no entry: it is allowed only in the
+ * REQUEST_UPDATE of a namespace subscription, which is not implemented, so in
+ * every message decoded here it is a PROTOCOL_VIOLATION (§10.2.1), the same
+ * outcome as an unknown Type.
  */
 const PARAMETERS: readonly ParameterDefinition[] = [
 	{
@@ -225,7 +232,13 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 		// project's decision on authorization.
 		name: "AUTHORIZATION_TOKEN",
 		type: 0x03n,
-		scopes: ["PUBLISH", "SUBSCRIBE", "PUBLISH_NAMESPACE", "REQUEST_UPDATE"],
+		scopes: [
+			"PUBLISH",
+			"SUBSCRIBE",
+			"PUBLISH_NAMESPACE",
+			"REQUEST_UPDATE",
+			"FETCH",
+		],
 		repeatable: true,
 		read: (reader, parameters) => {
 			const length = readLength(
@@ -292,6 +305,21 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 		writers: (parameters) => present(parameters.largestObject, encodeLocation),
 	},
 	{
+		// WHY a varint: §10.2.5 gives the meaning (milliseconds) and no
+		// encoding, like §10.2.6 for RENDEZVOUS_TIMEOUT above. The Rust
+		// implementation and the moqtail crate 0.15.0 read it so
+		// (`FillTimeout` in `src/model/parameter/message_parameter.rs` of the
+		// crate, as the Rust implementation recorded on 2026-10-11).
+		name: "FILL_TIMEOUT",
+		type: 0x0an,
+		scopes: ["FETCH"],
+		repeatable: false,
+		read: (reader, parameters) => {
+			parameters.fillTimeout = reader.varint();
+		},
+		writers: (parameters) => present(parameters.fillTimeout, writeVarint),
+	},
+	{
 		name: "FORWARD",
 		type: 0x10n,
 		scopes: ["SUBSCRIBE", "PUBLISH", "PUBLISH_OK", "REQUEST_UPDATE"],
@@ -305,9 +333,11 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 			}),
 	},
 	{
+		// §10.2.7 has the update of a FETCH as well; the REQUEST_UPDATE decoded
+		// here is the one to a subscription.
 		name: "SUBSCRIBER_PRIORITY",
 		type: 0x20n,
-		scopes: ["SUBSCRIBE", "PUBLISH_OK", "REQUEST_UPDATE"],
+		scopes: ["SUBSCRIBE", "PUBLISH_OK", "REQUEST_UPDATE", "FETCH"],
 		repeatable: false,
 		read: (reader, parameters) => {
 			parameters.subscriberPriority = reader.uint8();
@@ -346,7 +376,7 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 	{
 		name: "GROUP_ORDER",
 		type: 0x22n,
-		scopes: ["SUBSCRIBE", "PUBLISH_OK"],
+		scopes: ["SUBSCRIBE", "PUBLISH_OK", "FETCH"],
 		repeatable: false,
 		read: (reader, parameters) => {
 			parameters.groupOrder = decodeGroupOrder(reader.uint8());

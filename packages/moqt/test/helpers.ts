@@ -21,21 +21,46 @@ export function utf8(text: string): Uint8Array<ArrayBuffer> {
 	return new TextEncoder().encode(text);
 }
 
-const FIXTURE_DIR = join(
-	import.meta.dir,
-	"..",
-	"..",
-	"..",
-	"fixtures",
-	"moqt-18",
-);
+const FIXTURES = join(import.meta.dir, "..", "..", "..", "fixtures");
+const FIXTURE_DIR = join(FIXTURES, "moqt-18");
+const BY_HAND_DIR = join(FIXTURES, "moqt-18-by-hand");
 
-/** The names `fixture` accepts: every `.hex` file of `fixtures/moqt-18/`. */
-export function fixtureNames(): string[] {
-	return readdirSync(FIXTURE_DIR)
+function hexFileNames(directory: string): string[] {
+	return readdirSync(directory)
 		.filter((file) => file.endsWith(".hex"))
 		.map((file) => file.slice(0, -".hex".length))
 		.sort();
+}
+
+function hexFile(directory: string, name: string): string {
+	const path = join(directory, `${name}.hex`);
+	const digits = readFileSync(path, "utf8").replace(/\s+/g, "");
+	const pairs = digits.match(/../g);
+	if (pairs === null || digits.length % 2 !== 0) {
+		throw new Error(`${path} does not hold whole bytes`);
+	}
+	return pairs.join(" ");
+}
+
+/** The names `fixture` accepts: every `.hex` file of `fixtures/moqt-18/`. */
+export function fixtureNames(): string[] {
+	return hexFileNames(FIXTURE_DIR);
+}
+
+/** The names `byHand` accepts: every `.hex` file of `fixtures/moqt-18-by-hand/`. */
+export function byHandNames(): string[] {
+	return hexFileNames(BY_HAND_DIR);
+}
+
+/**
+ * The bytes of `fixtures/moqt-18-by-hand/<name>.hex`, in the form `hex`
+ * reads. Nobody's implementation wrote them: they were written by hand from
+ * the draft, and the Rust implementation reads the same files. They check
+ * that the two read the same bytes as the same values, and nothing against
+ * another implementation (the README there).
+ */
+export function byHand(name: string): string {
+	return hexFile(BY_HAND_DIR, name);
 }
 
 /**
@@ -44,13 +69,7 @@ export function fixtureNames(): string[] {
  * README records where each file comes from and what it decodes to.
  */
 export function fixture(name: string): string {
-	const path = join(FIXTURE_DIR, `${name}.hex`);
-	const digits = readFileSync(path, "utf8").replace(/\s+/g, "");
-	const pairs = digits.match(/../g);
-	if (pairs === null || digits.length % 2 !== 0) {
-		throw new Error(`${path} does not hold whole bytes`);
-	}
-	return pairs.join(" ");
+	return hexFile(FIXTURE_DIR, name);
 }
 
 /** SETUP of the moqtail relay 0.15.0. */
