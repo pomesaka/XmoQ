@@ -20,6 +20,7 @@ import type {
 } from "../core/session-output.ts";
 import type { SubgroupObject } from "../core/subgroup.ts";
 import type { TrackNamespace } from "../core/track.ts";
+import { closeCode, closeReason } from "./close-info.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import {
 	type PublishEnd,
@@ -208,7 +209,16 @@ export interface MoqtConnection {
 	): Promise<void>;
 	publish(request: PublishRequest): Promise<PublishedTrack>;
 	subscribe(request: SubscribeRequest): Promise<Subscription>;
-	/** Closes the session (§3.5). */
+	/**
+	 * Closes the session (§3.5). `code` is a Session Termination Error Code,
+	 * NO_ERROR when left out; a value that is not a whole number from 0 to
+	 * 2^32 - 1 throws a `RangeError` and leaves the session open. The draft
+	 * has these codes as integers of up to 62 bits; WebTransport carries 32.
+	 * `reason` is sent up to 1024 bytes of UTF-8, cut between two characters,
+	 * and `closed` reports the code and the reason as they were sent. Where
+	 * the session ends for an error instead, `closed` has that error, and
+	 * the peer gets its message cut in the same way.
+	 */
 	close(code?: number, reason?: string): void;
 }
 
@@ -391,8 +401,11 @@ export async function connectOver(
 		code: number = SessionErrorCode.INTERNAL_ERROR,
 	): void {
 		if (sessionClose !== undefined) return;
+		// WHY the error is reported whole when its message is sent cut: it is
+		// the cause this endpoint failed with, with its class and its stack,
+		// and `closed` hands that on. The peer gets the message as a reason.
 		teardown({ type: "error", error });
-		transport.close({ closeCode: code, reason: error.message });
+		transport.close({ closeCode: code, reason: closeReason(error.message) });
 	}
 
 	const subscriptionFrom = (event: EventOf<"subscribe-ok">): Subscription => {
@@ -475,7 +488,7 @@ export async function connectOver(
 			if (!Number.isInteger(code) || code < 0 || code > MAX_STREAM_ERROR_CODE) {
 				return Promise.reject(
 					new RangeError(
-						`a stream is reset with a whole number from 0 to ${MAX_STREAM_ERROR_CODE}, not ${code}`,
+						`a stream is reset with a whole number from 0 to ${MAX_STREAM_ERROR_CODE}, not ${String(code)}`,
 					),
 				);
 			}
@@ -639,13 +652,16 @@ export async function connectOver(
 		output: SessionOutput,
 	): Promise<Backpressure | undefined> => {
 		switch (output.type) {
-			case "close-session":
+			case "close-session": {
+				// The error says what the peer is told: the reason as it is sent.
+				const reason = closeReason(output.reason);
 				teardown({
 					type: "error",
-					error: new MoqtError(output.code, output.reason),
+					error: new MoqtError(output.code, reason),
 				});
-				transport.close({ closeCode: output.code, reason: output.reason });
+				transport.close({ closeCode: output.code, reason });
 				return undefined;
+			}
 			case "event":
 				return onEvent(output.event);
 			default:
@@ -780,9 +796,13 @@ export async function connectOver(
 			return request(pendingSubscribes, (s) => s.subscribe(subscribeRequest));
 		},
 		close(code = SessionErrorCode.NO_ERROR, reason = "") {
+			// Before the session is touched: a code that cannot be sent leaves it
+			// open.
+			const sentCode = closeCode(code);
 			if (sessionClose !== undefined) return;
-			teardown({ type: "local", code, reason });
-			transport.close({ closeCode: code, reason });
+			const sentReason = closeReason(reason);
+			teardown({ type: "local", code: sentCode, reason: sentReason });
+			transport.close({ closeCode: sentCode, reason: sentReason });
 		},
 	};
 }

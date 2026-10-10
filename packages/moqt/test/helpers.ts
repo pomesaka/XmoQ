@@ -55,3 +55,89 @@ export function fixture(name: string): string {
 
 /** SETUP of the moqtail relay 0.15.0. */
 export const MOQTAIL_RELAY_SETUP = fixture("setup-moqtail-relay");
+
+/** One row of `fixtures/webtransport-close/reasons.tsv`. */
+export interface CloseReasonFixture {
+	name: string;
+	/** The reason an application gives. */
+	reason: string;
+	/** The reason as Chromium sent it, in the form `hex` reads. */
+	sentHex: string;
+}
+
+function spaced(digits: string): string {
+	return (digits.match(/../g) ?? []).join(" ");
+}
+
+/** Whole bytes in lower-case hexadecimal digits, or nothing at all. */
+const HEX_BYTES = /^(?:[0-9a-f]{2})*$/;
+
+/**
+ * One row of `reasons.tsv`. Throws for a row that is not what the README of
+ * the fixture describes: a row read in another way than it was written would
+ * pin nothing.
+ */
+export function parseCloseReasonFixture(line: string): CloseReasonFixture {
+	const refuse = (what: string): never => {
+		throw new Error(`a row of the close reason fixture ${what}: ${line}`);
+	};
+	const columns = line.split("\t");
+	const [name, encoding, inputHex, sentHex] = columns;
+	if (
+		columns.length !== 4 ||
+		name === undefined ||
+		inputHex === undefined ||
+		sentHex === undefined
+	) {
+		return refuse("does not have four columns");
+	}
+	if (name === "") return refuse("has no name");
+	if (encoding !== "utf8" && encoding !== "utf16") {
+		return refuse("has an encoding that is neither utf8 nor utf16");
+	}
+	if (!HEX_BYTES.test(inputHex) || !HEX_BYTES.test(sentHex)) {
+		return refuse("has a column that is not whole bytes in hexadecimal");
+	}
+	const bytes = hex(spaced(inputHex));
+	if (encoding === "utf8") {
+		return {
+			name,
+			reason: new TextDecoder("utf-8", {
+				ignoreBOM: true,
+				fatal: true,
+			}).decode(bytes),
+			sentHex: spaced(sentHex),
+		};
+	}
+	if (bytes.length % 2 !== 0) {
+		return refuse("has half of a UTF-16 code unit");
+	}
+	// UTF-16 code units, high byte first: a reason that is not valid text.
+	const units = Array.from(
+		{ length: bytes.length / 2 },
+		(_unit, index) =>
+			((bytes[index * 2] ?? 0) << 8) | (bytes[index * 2 + 1] ?? 0),
+	);
+	return {
+		name,
+		reason: String.fromCharCode(...units),
+		sentHex: spaced(sentHex),
+	};
+}
+
+/**
+ * The rows of `fixtures/webtransport-close/reasons.tsv`: reasons of a session
+ * close and the bytes Chromium sent for each. The file is shared with the
+ * Rust implementation; its README records where the bytes come from.
+ */
+export function closeReasonFixtures(): CloseReasonFixture[] {
+	const path = join(FIXTURE_DIR, "..", "webtransport-close", "reasons.tsv");
+	const rows = readFileSync(path, "utf8")
+		.split("\n")
+		.filter((line) => line.length > 0)
+		.map(parseCloseReasonFixture);
+	// WHY: `test.each` passes with no rows, so an emptied file, or another
+	// file at this path, would look like a fixture that holds.
+	if (rows.length === 0) throw new Error(`${path} has no rows`);
+	return rows;
+}

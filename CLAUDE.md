@@ -47,7 +47,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 規約は、文章で足す前に、破ると通らない形にできないかを考える。層の境界はcrateやパッケージの依存関係で固定し、lintとCIで検査する。
 
 - 符号化と状態遷移（`xmoq-moqt`、`@xmoq/moqt`の中核）は入出力に依存させない。WebTransportのライブラリ（Rustは`web-transport-quinn`）やブラウザの`WebTransport`に触るのは、クライアントとリレーの側だけにする
-- RustとTypeScriptの実装は、名前をdraft本文の用語に合わせ、`fixtures/moqt-18/`の同じ実バイト列をテストで読む
+- RustとTypeScriptの実装は、名前をdraft本文の用語に合わせ、`fixtures/moqt-18/`の同じ実バイト列をテストで読む。draftの外の契約（セッションを閉じるときの理由の切り方など）も、2つの実装が満たすなら`fixtures/`に共有の固定値を置き、両方のテストで読む。読んで比べるだけで「同じ」としない
 - テストの固定値は`moqtail`から採った実バイト列にする。自分で符号化したものを自分で復号するだけのテストは、照合にならない
 - 受け取る側のバッファとキューには上限を置く。遅いsubscriber、キャンセル、切断の後始末を書く
 - lintを`#[allow]`や設定で黙らせるときは理由を書く。黙らせるより直すほうを先に考える
@@ -78,6 +78,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | docs/moq-libraries.md | 仕様書 | ライブラリ調査の記録（終了済み） |
 | docs/moqt-implementation-notes.md | 仕様書 | draftが黙っている箇所と矛盾している箇所で、2つの実装がそろえる挙動。既知の不足 |
 | fixtures/moqt-18/README.md | 仕様書 | moqtailから採った実バイト列の出どころと復号後の値 |
+| fixtures/webtransport-close/README.md | 仕様書 | セッションを閉じるときの理由の切り方。Chromiumが送った実バイト列の出どころ |
 | packages/moqt/README.md | 仕様書 | ブラウザ用クライアントライブラリの範囲、層の決まり、公開API |
 | interop/README.md | 運用手順書 | moqtailの相手の用意と、照合の走らせ方 |
 | .github/workflows/、scripts/ci/、mise.toml | コーディングポリシー | CIとローカルの検査。規約を検査で守る |
@@ -100,3 +101,4 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | draftの解釈や、本文に無い挙動を決めた・変えた | docs/moqt-implementation-notes.md。RustとTypeScriptの両方を同じPRで直す |
 | 受信の上限やタイムアウトの値を決めた・変えた | docs/open-questions.md、docs/moqt-implementation-notes.md |
 | moqtailから固定値を採った・採り直した | fixtures/moqt-18/README.md |
+| ブラウザやライブラリから固定値を採った・採り直した | その固定値のディレクトリのREADME（fixtures/webtransport-close/README.md など） |

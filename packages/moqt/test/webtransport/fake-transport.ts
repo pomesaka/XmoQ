@@ -25,9 +25,10 @@ export class FakeWebTransportError extends Error {
 		const message = "message" in init ? String(init.message) : "";
 		super(message);
 		const code = "streamErrorCode" in init ? init.streamErrorCode : null;
+		// `[Clamp]` turns NaN into 0.
 		this.streamErrorCode =
 			typeof code === "number"
-				? Math.min(255, Math.max(0, Math.trunc(code)))
+				? Math.min(255, Math.max(0, Math.trunc(code) || 0))
 				: null;
 	}
 
@@ -49,6 +50,33 @@ export function fakeStreamError(
 	message: string,
 ): FakeWebTransportError {
 	return new FakeWebTransportError({ message, streamErrorCode: code });
+}
+
+/**
+ * `reason` as Chromium 156 sent it (fixtures/webtransport-close): the longest
+ * run of whole characters from the start that is at most 1024 bytes of UTF-8,
+ * with U+FFFD for half of a surrogate pair and a leading U+FEFF kept.
+ */
+function sentReason(reason: string): string {
+	let sent = "";
+	let bytes = 0;
+	// Iterating a string yields whole characters, and half a pair on its own.
+	for (const character of reason) {
+		const codePoint = character.codePointAt(0) ?? 0;
+		const halfOfAPair = codePoint >= 0xd800 && codePoint <= 0xdfff;
+		const length =
+			codePoint < 0x80
+				? 1
+				: codePoint < 0x800
+					? 2
+					: codePoint < 0x10000
+						? 3
+						: 4;
+		if (bytes + length > 1024) break;
+		bytes += length;
+		sent += halfOfAPair ? "\ufffd" : character;
+	}
+	return sent;
 }
 
 /** Items handed over in order to whoever asks next. */
@@ -166,9 +194,13 @@ export function createFakePeer(): FakePeer {
 					writable: fromClient.writable,
 				});
 			},
+			// As Chromium 156 (spikes/wt-close-info): the code is wrapped to 32
+			// bits, where NaN is 0, and the peer gets the reason cut to 1024
+			// bytes of UTF-8, while `closed` resolves with the whole reason.
 			close(info) {
-				closeInfo = info;
-				resolveClosed(info);
+				const closeCode = info.closeCode >>> 0;
+				closeInfo = { closeCode, reason: sentReason(info.reason) };
+				resolveClosed({ closeCode, reason: info.reason });
 			},
 		},
 		FakeWebTransportError,
