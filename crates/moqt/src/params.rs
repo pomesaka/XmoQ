@@ -104,6 +104,9 @@ pub enum Parameter {
     Expires(u64),
     /// 0x09, the largest Location the sender has seen in the track (§10.2.11).
     LargestObject(Location),
+    /// 0x0A, milliseconds a relay may spend on getting Objects of a FETCH
+    /// from upstream; 0 for none at all (§10.2.5).
+    FillTimeout(u64),
     /// 0x10, the Forward State: whether Objects are sent (§10.2.12).
     Forward(bool),
     /// 0x20, where a lower number is a higher priority (§10.2.7).
@@ -136,6 +139,10 @@ pub enum MessageKind {
     /// `REQUEST_UPDATE` for a subscription. Updates of the other request kinds
     /// take other parameters and are not decoded by this crate.
     RequestUpdate,
+    /// FETCH.
+    Fetch,
+    /// `FETCH_OK`. No parameter of the draft lists it.
+    FetchOk,
 }
 
 impl Parameter {
@@ -147,6 +154,7 @@ impl Parameter {
             Self::SubgroupDeliveryTimeout(_) => SUBGROUP_DELIVERY_TIMEOUT,
             Self::Expires(_) => EXPIRES,
             Self::LargestObject(_) => LARGEST_OBJECT,
+            Self::FillTimeout(_) => FILL_TIMEOUT,
             Self::Forward(_) => FORWARD,
             Self::SubscriberPriority(_) => SUBSCRIBER_PRIORITY,
             Self::SubscriptionFilter(_) => SUBSCRIPTION_FILTER,
@@ -159,22 +167,26 @@ impl Parameter {
     /// appear in (§10.2.2 to §10.2.13).
     fn allowed_in(&self, kind: MessageKind) -> bool {
         use MessageKind::{
-            Publish, PublishNamespace, PublishOk, RequestUpdate, Subscribe, SubscribeOk,
+            Fetch, Publish, PublishNamespace, PublishOk, RequestUpdate, Subscribe, SubscribeOk,
         };
         let allowed: &[MessageKind] = match self {
             Self::ObjectDeliveryTimeout(_) | Self::SubgroupDeliveryTimeout(_) => {
                 &[PublishOk, Subscribe, RequestUpdate]
             }
-            Self::AuthorizationToken(_) => &[Publish, Subscribe, RequestUpdate, PublishNamespace],
+            Self::AuthorizationToken(_) => {
+                &[Publish, Subscribe, RequestUpdate, PublishNamespace, Fetch]
+            }
             Self::RendezvousTimeout(_) => &[Subscribe],
             Self::Expires(_) => &[SubscribeOk, Publish, PublishOk],
             Self::LargestObject(_) => &[SubscribeOk, Publish],
+            Self::FillTimeout(_) => &[Fetch],
             Self::Forward(_) => &[Subscribe, RequestUpdate, Publish, PublishOk],
-            Self::SubscriberPriority(_) | Self::SubscriptionFilter(_) => {
-                &[Subscribe, RequestUpdate, PublishOk]
-            }
+            // §10.2.7 has the update of a FETCH as well; the `REQUEST_UPDATE`
+            // this crate decodes is the one to a subscription.
+            Self::SubscriberPriority(_) => &[Subscribe, RequestUpdate, PublishOk, Fetch],
+            Self::SubscriptionFilter(_) => &[Subscribe, RequestUpdate, PublishOk],
             // §10.2.8 lists SUBSCRIBE, PUBLISH_OK and FETCH, and no update.
-            Self::GroupOrder(_) => &[Subscribe, PublishOk],
+            Self::GroupOrder(_) => &[Subscribe, PublishOk, Fetch],
             Self::NewGroupRequest(_) => &[PublishOk, Subscribe, RequestUpdate],
         };
         allowed.contains(&kind)
@@ -271,12 +283,17 @@ fn decode_value(ty: u64, reader: &mut Reader<'_>) -> ReadResult<Parameter> {
                 .ok_or(Error::ProtocolViolation("GROUP_ORDER is neither 1 nor 2"))?,
         ),
         NEW_GROUP_REQUEST => Parameter::NewGroupRequest(reader.varint()?),
+        // §10.2.5 does not name an encoding, like §10.2.6 above; read as a
+        // varint for the same reason. The moqtail crate 0.15.0 does the same
+        // (`FillTimeout` in `src/model/parameter/message_parameter.rs` of the
+        // crate, read 2026-10-11).
+        FILL_TIMEOUT => Parameter::FillTimeout(reader.varint()?),
         // Defined by the draft, but out of place in every message this crate
-        // decodes (§10.2.1): FILL_TIMEOUT belongs to FETCH (§10.2.5), and
-        // TRACK_NAMESPACE_PREFIX to a REQUEST_UPDATE of a SUBSCRIBE_NAMESPACE or
-        // SUBSCRIBE_TRACKS (§10.2.14), while the only REQUEST_UPDATE decoded
-        // here is one to a subscription.
-        FILL_TIMEOUT | TRACK_NAMESPACE_PREFIX => {
+        // decodes (§10.2.1): TRACK_NAMESPACE_PREFIX belongs to a
+        // REQUEST_UPDATE of a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS
+        // (§10.2.14), while the only REQUEST_UPDATE decoded here is one to a
+        // subscription.
+        TRACK_NAMESPACE_PREFIX => {
             return Err(Error::ProtocolViolation("parameter not allowed in this message").into());
         }
         unknown => return Err(Error::UnknownParameter(unknown).into()),
@@ -333,6 +350,7 @@ pub(crate) fn encode_all(parameters: &[Parameter], out: &mut Vec<u8>) -> Result<
             | Parameter::RendezvousTimeout(value)
             | Parameter::SubgroupDeliveryTimeout(value)
             | Parameter::Expires(value)
+            | Parameter::FillTimeout(value)
             | Parameter::NewGroupRequest(value) => varint::encode(*value, out),
             Parameter::AuthorizationToken(token) => put_length_prefixed(token, out),
             Parameter::LargestObject(location) => location.encode(out),
@@ -484,11 +502,6 @@ mod tests {
                 ],
                 Error::ProtocolViolation("end group exceeds 64 bits"),
             ),
-            // FILL_TIMEOUT belongs to FETCH.
-            (
-                &[0x01, 0x0a, 0x00],
-                Error::ProtocolViolation("parameter not allowed in this message"),
-            ),
             // Two parameters announced, one present.
             (
                 &[0x02, 0x10, 0x01],
@@ -569,6 +582,44 @@ mod tests {
             ),
             Err(UsageError("duplicate parameter"))
         );
+    }
+
+    #[test]
+    fn checks_which_parameters_a_fetch_and_its_answer_may_carry() {
+        let cases: &[(Parameter, MessageKind, bool)] = &[
+            // §10.2.5, §10.2.7, §10.2.8 and §10.2.2 list FETCH.
+            (Parameter::FillTimeout(0), MessageKind::Fetch, true),
+            (Parameter::FillTimeout(0), MessageKind::Subscribe, false),
+            (Parameter::SubscriberPriority(1), MessageKind::Fetch, true),
+            (
+                Parameter::GroupOrder(GroupOrder::Descending),
+                MessageKind::Fetch,
+                true,
+            ),
+            (
+                Parameter::AuthorizationToken(vec![]),
+                MessageKind::Fetch,
+                true,
+            ),
+            (Parameter::Forward(true), MessageKind::Fetch, false),
+            // No parameter lists FETCH_OK.
+            (Parameter::Expires(0), MessageKind::FetchOk, false),
+            (
+                Parameter::LargestObject(Location {
+                    group: 1,
+                    object: 0,
+                }),
+                MessageKind::FetchOk,
+                false,
+            ),
+        ];
+        for (parameter, kind, allowed) in cases {
+            assert_eq!(
+                all_allowed(std::slice::from_ref(parameter), *kind),
+                *allowed,
+                "{parameter:?} in {kind:?}"
+            );
+        }
     }
 
     #[test]

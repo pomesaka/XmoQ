@@ -4,7 +4,7 @@ use crate::coding::{
     ReadError, ReadResult, Reader, ReceiveBuffer, parse_exact, put_length_prefixed,
 };
 use crate::kvp::{self, KeyValuePair};
-use crate::name::{FullTrackName, TrackNamespace};
+use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
 use crate::{Error, UsageError, varint};
 
@@ -34,13 +34,12 @@ const UNSUPPORTED: &[u64] = &[
     NAMESPACE_DONE,
     PUBLISH_BLOCKED,
     GOAWAY,
-    FETCH_OK,
     PUBLISH_OK,
 ];
 /// Requests the draft defines and this crate does not implement. Only their
 /// Request ID is read, so that the request can be answered with `REQUEST_ERROR`
 /// `NOT_SUPPORTED` instead of ending the session.
-const UNSUPPORTED_REQUESTS: &[u64] = &[TRACK_STATUS, FETCH, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS];
+const UNSUPPORTED_REQUESTS: &[u64] = &[TRACK_STATUS, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS];
 const NAMESPACE: u64 = 0x08;
 const TRACK_STATUS: u64 = 0x0d;
 const NAMESPACE_DONE: u64 = 0x0e;
@@ -313,6 +312,185 @@ pub struct PublishDone {
     pub error_reason: ReasonPhrase,
 }
 
+/// Which Objects a FETCH asks for (§10.12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchRange {
+    /// Fetch Type 0x1: a range of a track, independent of any subscription
+    /// (§10.12.1).
+    Standalone {
+        /// The track.
+        full_track_name: FullTrackName,
+        /// The first Location of the range.
+        start: Location,
+        /// "The end Location, plus 1. A Location.Object value of 0 means
+        /// the entire group is requested."
+        end: Location,
+    },
+    /// Fetch Type 0x2: up to the Joining Location of a subscription, from
+    /// `joining_start` Groups before it (§10.12.2).
+    RelativeJoining {
+        /// The Request ID of the subscription, in the same session.
+        joining_request_id: u64,
+        /// How many Groups before the Joining Location's the range starts.
+        joining_start: u64,
+    },
+    /// Fetch Type 0x3: up to the Joining Location of a subscription, from
+    /// the Group `joining_start` (§10.12.2).
+    AbsoluteJoining {
+        /// The Request ID of the subscription, in the same session.
+        joining_request_id: u64,
+        /// The Group the range starts with.
+        joining_start: u64,
+    },
+}
+
+/// FETCH (§10.12.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fetch {
+    /// Request ID (§10.1).
+    pub request_id: u64,
+    /// The Fetch Type and what belongs to it.
+    pub range: FetchRange,
+    /// Message Parameters.
+    pub parameters: Vec<Parameter>,
+}
+
+/// `FETCH_OK` (§10.13).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchOk {
+    /// Whether the End Location is the final Object of the track.
+    pub end_of_track: bool,
+    /// The end of the range the response covers, in the encoding of a
+    /// FETCH: the last Object plus 1, or Object 0 for a whole Group.
+    pub end_location: Location,
+    /// Message Parameters. No parameter of the draft may appear here.
+    pub parameters: Vec<Parameter>,
+    /// Track Properties (§2.5).
+    pub track_properties: Vec<KeyValuePair>,
+}
+
+impl RequestError {
+    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+        let error_code = reader.varint()?;
+        let retry_interval = reader.varint()?;
+        let error_reason = ReasonPhrase::decode(reader)?;
+        let redirect = if error_code == request_error_code::REDIRECT {
+            let uri_len = reader.length()?;
+            let connect_uri = reader.bytes(uri_len)?.to_vec();
+            Some(Redirect {
+                connect_uri,
+                full_track_name: FullTrackName::decode(reader)?,
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            error_code,
+            retry_interval,
+            error_reason,
+            redirect,
+        })
+    }
+}
+
+const FETCH_TYPE_STANDALONE: u64 = 0x1;
+const FETCH_TYPE_RELATIVE_JOINING: u64 = 0x2;
+const FETCH_TYPE_ABSOLUTE_JOINING: u64 = 0x3;
+
+impl Fetch {
+    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), UsageError> {
+        varint::encode(self.request_id, out);
+        match &self.range {
+            FetchRange::Standalone {
+                full_track_name,
+                start,
+                end,
+            } => {
+                varint::encode(FETCH_TYPE_STANDALONE, out);
+                full_track_name.encode(out);
+                start.encode(out);
+                end.encode(out);
+            }
+            FetchRange::RelativeJoining {
+                joining_request_id,
+                joining_start,
+            } => {
+                varint::encode(FETCH_TYPE_RELATIVE_JOINING, out);
+                varint::encode(*joining_request_id, out);
+                varint::encode(*joining_start, out);
+            }
+            FetchRange::AbsoluteJoining {
+                joining_request_id,
+                joining_start,
+            } => {
+                varint::encode(FETCH_TYPE_ABSOLUTE_JOINING, out);
+                varint::encode(*joining_request_id, out);
+                varint::encode(*joining_start, out);
+            }
+        }
+        params::encode_all(&self.parameters, out)
+    }
+
+    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+        let request_id = reader.varint()?;
+        let range = match reader.varint()? {
+            FETCH_TYPE_STANDALONE => FetchRange::Standalone {
+                full_track_name: FullTrackName::decode(reader)?,
+                start: Location::decode(reader)?,
+                end: Location::decode(reader)?,
+            },
+            FETCH_TYPE_RELATIVE_JOINING => FetchRange::RelativeJoining {
+                joining_request_id: reader.varint()?,
+                joining_start: reader.varint()?,
+            },
+            FETCH_TYPE_ABSOLUTE_JOINING => FetchRange::AbsoluteJoining {
+                joining_request_id: reader.varint()?,
+                joining_start: reader.varint()?,
+            },
+            // §10.12: "An endpoint that receives a Fetch Type other than 0x1,
+            // 0x2 or 0x3 MUST close the session with a PROTOCOL_VIOLATION."
+            _ => return Err(Error::ProtocolViolation("unknown fetch type").into()),
+        };
+        let parameters = params::decode_all(reader)?;
+        check_parameters(&parameters, MessageKind::Fetch)?;
+        Ok(Self {
+            request_id,
+            range,
+            parameters,
+        })
+    }
+}
+
+impl FetchOk {
+    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), UsageError> {
+        out.push(u8::from(self.end_of_track));
+        self.end_location.encode(out);
+        params::encode_all(&self.parameters, out)?;
+        kvp::encode_all(&self.track_properties, out);
+        Ok(())
+    }
+
+    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+        // §10.13 gives the field 8 bits and the values 1 and 0. WHY any other
+        // value is a violation: nothing says what it would mean, and FORWARD,
+        // the other field of that kind, is read so (§10.2.12).
+        let end_of_track = match reader.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(Error::ProtocolViolation("End Of Track is neither 0 nor 1").into()),
+        };
+        let end_location = Location::decode(reader)?;
+        let parameters = params::decode_all(reader)?;
+        check_parameters(&parameters, MessageKind::FetchOk)?;
+        Ok(Self {
+            end_of_track,
+            end_location,
+            parameters,
+            track_properties: kvp::decode_all(reader)?,
+        })
+    }
+}
+
 /// One control message, of the types this crate implements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlMessage {
@@ -334,8 +512,12 @@ pub enum ControlMessage {
     RequestError(RequestError),
     /// `PUBLISH_DONE`, type 0xB.
     PublishDone(PublishDone),
-    /// A request this crate does not implement: `TRACK_STATUS` (0xD), FETCH
-    /// (0x16), `SUBSCRIBE_NAMESPACE` (0x50) or `SUBSCRIBE_TRACKS` (0x51). Only
+    /// FETCH, type 0x16.
+    Fetch(Fetch),
+    /// `FETCH_OK`, type 0x18.
+    FetchOk(FetchOk),
+    /// A request this crate does not implement: `TRACK_STATUS` (0xD),
+    /// `SUBSCRIBE_NAMESPACE` (0x50) or `SUBSCRIBE_TRACKS` (0x51). Only
     /// the Request ID, their first field, is decoded; the rest of the payload
     /// is skipped unchecked. It cannot be encoded.
     UnsupportedRequest {
@@ -463,6 +645,14 @@ impl ControlMessage {
                 put_length_prefixed(message.error_reason.as_bytes(), out);
                 PUBLISH_DONE
             }
+            Self::Fetch(message) => {
+                message.encode_payload(out)?;
+                FETCH
+            }
+            Self::FetchOk(message) => {
+                message.encode_payload(out)?;
+                FETCH_OK
+            }
         })
     }
 }
@@ -477,7 +667,7 @@ fn split_frame<'a>(reader: &mut Reader<'a>) -> ReadResult<(u64, &'a [u8])> {
 fn check_type(ty: u64) -> Result<(), Error> {
     match ty {
         SETUP | REQUEST_UPDATE | SUBSCRIBE | SUBSCRIBE_OK | REQUEST_ERROR | PUBLISH_NAMESPACE
-        | REQUEST_OK | PUBLISH_DONE | PUBLISH => Ok(()),
+        | REQUEST_OK | PUBLISH_DONE | PUBLISH | FETCH | FETCH_OK => Ok(()),
         ty if UNSUPPORTED_REQUESTS.contains(&ty) => Ok(()),
         ty if UNSUPPORTED.contains(&ty) => Err(Error::UnsupportedMessageType(ty)),
         // Includes the types Table 5 marks RESERVED (0x01, 0x20, 0x21, 0x40,
@@ -562,32 +752,14 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
             parameters: params::decode_all(reader)?,
             track_properties: kvp::decode_all(reader)?,
         }),
-        REQUEST_ERROR => {
-            let error_code = reader.varint()?;
-            let retry_interval = reader.varint()?;
-            let error_reason = ReasonPhrase::decode(reader)?;
-            let redirect = if error_code == request_error_code::REDIRECT {
-                let uri_len = reader.length()?;
-                let connect_uri = reader.bytes(uri_len)?.to_vec();
-                Some(Redirect {
-                    connect_uri,
-                    full_track_name: FullTrackName::decode(reader)?,
-                })
-            } else {
-                None
-            };
-            ControlMessage::RequestError(RequestError {
-                error_code,
-                retry_interval,
-                error_reason,
-                redirect,
-            })
-        }
+        REQUEST_ERROR => ControlMessage::RequestError(RequestError::decode(reader)?),
         PUBLISH_DONE => ControlMessage::PublishDone(PublishDone {
             status_code: reader.varint()?,
             stream_count: reader.varint()?,
             error_reason: ReasonPhrase::decode(reader)?,
         }),
+        FETCH => ControlMessage::Fetch(Fetch::decode(reader)?),
+        FETCH_OK => ControlMessage::FetchOk(FetchOk::decode(reader)?),
         ty if UNSUPPORTED_REQUESTS.contains(&ty) => {
             let request_id = reader.varint()?;
             reader.skip_rest();
@@ -698,6 +870,7 @@ pub(crate) mod tests {
     fn moqtail_messages() -> Vec<(&'static str, ControlMessage)> {
         let mut messages = moqtail_publish_side();
         messages.extend(moqtail_subscribe_side());
+        messages.extend(moqtail_fetch_side());
         messages
     }
 
@@ -832,6 +1005,66 @@ pub(crate) mod tests {
         ]
     }
 
+    /// What moqtail's test client sent for a fetch, and what its relay
+    /// answered.
+    fn moqtail_fetch_side() -> Vec<(&'static str, ControlMessage)> {
+        vec![
+            (
+                "fetch-standalone-moqtail-rs",
+                ControlMessage::Fetch(Fetch {
+                    request_id: 0,
+                    range: FetchRange::Standalone {
+                        full_track_name: xmoq_track(),
+                        start: Location {
+                            group: 0,
+                            object: 1,
+                        },
+                        end: Location {
+                            group: 1,
+                            object: 2,
+                        },
+                    },
+                    parameters: vec![Parameter::SubscriberPriority(200)],
+                }),
+            ),
+            (
+                "fetch-relative-joining-moqtail-rs",
+                ControlMessage::Fetch(Fetch {
+                    request_id: 2,
+                    range: FetchRange::RelativeJoining {
+                        joining_request_id: 0,
+                        joining_start: 0,
+                    },
+                    parameters: vec![Parameter::SubscriberPriority(200)],
+                }),
+            ),
+            (
+                "fetch-ok-moqtail-relay",
+                ControlMessage::FetchOk(FetchOk {
+                    end_of_track: false,
+                    end_location: Location {
+                        group: 1,
+                        object: 2,
+                    },
+                    parameters: vec![],
+                    track_properties: vec![],
+                }),
+            ),
+            (
+                "fetch-ok-joining-moqtail-relay",
+                ControlMessage::FetchOk(FetchOk {
+                    end_of_track: false,
+                    end_location: Location {
+                        group: 6,
+                        object: 2,
+                    },
+                    parameters: vec![],
+                    track_properties: vec![],
+                }),
+            ),
+        ]
+    }
+
     #[test]
     fn decodes_bytes_captured_from_moqtail() {
         for (name, message) in moqtail_messages() {
@@ -921,6 +1154,173 @@ pub(crate) mod tests {
         }
     }
 
+    fn fetches_sent_to_take_the_fixtures() -> Vec<(Vec<u8>, Fetch)> {
+        // Written by hand, from the two FETCH messages moqtail's test client
+        // sent, and sent to the moqtail relay to take its answers
+        // (`fixtures/moqt-18/README.md`). WHY read here: one of them was
+        // first written with the varints of QUIC, and the relay answered
+        // something else than was asked.
+        let name: &[u8] = &[
+            0x02, 0x04, b'x', b'm', b'o', b'q', 0x06, b'p', b'h', b'a', b's', b'e', b'0', 0x06,
+            b'o', b'b', b'j', b'e', b'c', b't',
+        ];
+        // The Message Length (the second and third byte) is given with
+        // each: 27 or 29 bytes.
+        let standalone = |length: u8, after_the_name: &[u8]| {
+            let mut bytes = vec![0x16, 0x00, length, 0x00, 0x01];
+            bytes.extend_from_slice(name);
+            bytes.extend_from_slice(after_the_name);
+            bytes
+        };
+        let range = |start: (u64, u64), end: (u64, u64)| FetchRange::Standalone {
+            full_track_name: xmoq_track(),
+            start: Location {
+                group: start.0,
+                object: start.1,
+            },
+            end: Location {
+                group: end.0,
+                object: end.1,
+            },
+        };
+        let joining = |request_id, range| Fetch {
+            request_id,
+            range,
+            parameters: vec![Parameter::SubscriberPriority(200)],
+        };
+        vec![
+            (
+                vec![0x16, 0x00, 0x07, 0x02, 0x02, 0x00, 0x01, 0x01, 0x20, 0xc8],
+                joining(
+                    2,
+                    FetchRange::RelativeJoining {
+                        joining_request_id: 0,
+                        joining_start: 1,
+                    },
+                ),
+            ),
+            (
+                vec![0x16, 0x00, 0x07, 0x02, 0x03, 0x00, 0x02, 0x01, 0x20, 0xc8],
+                joining(
+                    2,
+                    FetchRange::AbsoluteJoining {
+                        joining_request_id: 0,
+                        joining_start: 2,
+                    },
+                ),
+            ),
+            (
+                vec![0x16, 0x00, 0x05, 0x00, 0x02, 0x08, 0x00, 0x00],
+                Fetch {
+                    request_id: 0,
+                    range: FetchRange::RelativeJoining {
+                        joining_request_id: 8,
+                        joining_start: 0,
+                    },
+                    parameters: vec![],
+                },
+            ),
+            (
+                standalone(0x1d, &[0x00, 0x00, 0x02, 0x00, 0x01, 0x22, 0x02]),
+                Fetch {
+                    request_id: 0,
+                    range: range((0, 0), (2, 0)),
+                    parameters: vec![Parameter::GroupOrder(GroupOrder::Descending)],
+                },
+            ),
+            (
+                standalone(0x1b, &[0x00, 0x00, 0x04, 0x00, 0x00]),
+                Fetch {
+                    request_id: 0,
+                    range: range((0, 0), (4, 0)),
+                    parameters: vec![],
+                },
+            ),
+            (
+                standalone(0x1b, &[0x01, 0x00, 0x01, 0x00, 0x00]),
+                Fetch {
+                    request_id: 0,
+                    range: range((1, 0), (1, 0)),
+                    parameters: vec![],
+                },
+            ),
+            (
+                standalone(0x1b, &[0x64, 0x00, 0x65, 0x00, 0x00]),
+                Fetch {
+                    request_id: 0,
+                    range: range((100, 0), (101, 0)),
+                    parameters: vec![],
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_fetches_sent_to_take_the_fixtures_say_what_they_were_meant_to() {
+        for (bytes, fetch) in fetches_sent_to_take_the_fixtures() {
+            let message = ControlMessage::Fetch(fetch);
+            assert_eq!(
+                ControlMessage::decode(&bytes),
+                Ok(Some((message.clone(), bytes.len()))),
+                "{bytes:02x?}"
+            );
+            let mut encoded = Vec::new();
+            message.encode(&mut encoded).unwrap();
+            assert_eq!(encoded, bytes, "{message:?}");
+        }
+    }
+
+    #[test]
+    fn decodes_and_encodes_what_no_capture_has() {
+        // Bytes written by hand from §10.12, §10.13 and §10.2: the reader of
+        // the draft and the writer of the expectation are the same.
+        let cases = [
+            (
+                // A Relative Joining FETCH, Request ID 4, with two
+                // parameters: FILL_TIMEOUT (0x0A) = 5, and GROUP_ORDER
+                // (0x22, written as the delta 0x18 from 0x0A) = 2.
+                vec![
+                    0x16, 0x00, 0x09, 0x04, 0x02, 0x00, 0x00, 0x02, 0x0a, 0x05, 0x18, 0x02,
+                ],
+                ControlMessage::Fetch(Fetch {
+                    request_id: 4,
+                    range: FetchRange::RelativeJoining {
+                        joining_request_id: 0,
+                        joining_start: 0,
+                    },
+                    parameters: vec![
+                        Parameter::FillTimeout(5),
+                        Parameter::GroupOrder(GroupOrder::Descending),
+                    ],
+                }),
+            ),
+            (
+                // FETCH_OK with End Of Track 1, End Location {2, 3}, no
+                // parameters, and the Track Property 0x0E = 5.
+                vec![0x18, 0x00, 0x06, 0x01, 0x02, 0x03, 0x00, 0x0e, 0x05],
+                ControlMessage::FetchOk(FetchOk {
+                    end_of_track: true,
+                    end_location: Location {
+                        group: 2,
+                        object: 3,
+                    },
+                    parameters: vec![],
+                    track_properties: vec![KeyValuePair::varint(0x0e, 5).unwrap()],
+                }),
+            ),
+        ];
+        for (bytes, message) in cases {
+            assert_eq!(
+                ControlMessage::decode(&bytes),
+                Ok(Some((message.clone(), bytes.len()))),
+                "{bytes:02x?}"
+            );
+            let mut encoded = Vec::new();
+            message.encode(&mut encoded).unwrap();
+            assert_eq!(encoded, bytes, "{message:?}");
+        }
+    }
+
     #[test]
     fn rejects_malformed_input() {
         let cases: &[(&[u8], Error)] = &[
@@ -959,6 +1359,40 @@ pub(crate) mod tests {
             // SUBSCRIBE_OK carrying FORWARD, a SUBSCRIBE parameter.
             (
                 &[0x04, 0x00, 0x04, 0x00, 0x01, 0x10, 0x01],
+                Error::ProtocolViolation("parameter not allowed in this message"),
+            ),
+            // FETCH with Fetch Type 4, and with Fetch Type 0 (§10.12).
+            (
+                &[0x16, 0x00, 0x03, 0x00, 0x04, 0x00],
+                Error::ProtocolViolation("unknown fetch type"),
+            ),
+            (
+                &[0x16, 0x00, 0x03, 0x00, 0x00, 0x00],
+                Error::ProtocolViolation("unknown fetch type"),
+            ),
+            // A Relative Joining FETCH carrying FORWARD, a SUBSCRIBE parameter,
+            // and one carrying GROUP_ORDER 3 (§10.2.8 has 1 and 2).
+            (
+                &[0x16, 0x00, 0x07, 0x02, 0x02, 0x00, 0x00, 0x01, 0x10, 0x01],
+                Error::ProtocolViolation("parameter not allowed in this message"),
+            ),
+            (
+                &[0x16, 0x00, 0x07, 0x02, 0x02, 0x00, 0x00, 0x01, 0x22, 0x03],
+                Error::ProtocolViolation("GROUP_ORDER is neither 1 nor 2"),
+            ),
+            // A Standalone FETCH that stops after its Start Location.
+            (
+                &[0x16, 0x00, 0x07, 0x00, 0x01, 0x00, 0x01, 0x61, 0x00, 0x01],
+                Error::ProtocolViolation("length is shorter than the fields it holds"),
+            ),
+            // FETCH_OK with End Of Track 2, and one carrying EXPIRES (0x08):
+            // no parameter of the draft lists FETCH_OK.
+            (
+                &[0x18, 0x00, 0x04, 0x02, 0x01, 0x02, 0x00],
+                Error::ProtocolViolation("End Of Track is neither 0 nor 1"),
+            ),
+            (
+                &[0x18, 0x00, 0x06, 0x00, 0x01, 0x02, 0x01, 0x08, 0x05],
                 Error::ProtocolViolation("parameter not allowed in this message"),
             ),
             // REQUEST_ERROR with a 1025-byte Reason Phrase announced.
@@ -1056,9 +1490,8 @@ pub(crate) mod tests {
     fn requests_this_crate_does_not_implement_yield_their_request_id() {
         // (bytes, message type, Request ID). Only the Request ID is decoded;
         // the rest of the payload (0x01, 0x02) is skipped.
-        let cases: [(&[u8], u64, u64); 4] = [
+        let cases: [(&[u8], u64, u64); 3] = [
             (&[0x0d, 0x00, 0x03, 0x06, 0x01, 0x02], 0x0d, 6),
-            (&[0x16, 0x00, 0x03, 0x06, 0x01, 0x02], 0x16, 6),
             (&[0x50, 0x00, 0x03, 0x06, 0x01, 0x02], 0x50, 6),
             (&[0x51, 0x00, 0x03, 0x06, 0x01, 0x02], 0x51, 6),
         ];

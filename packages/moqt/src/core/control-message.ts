@@ -20,8 +20,11 @@ import {
 	TooManyEntriesError,
 } from "./key-value-pair.ts";
 import {
+	decodeLocation,
 	decodeMessageParameters,
+	encodeLocation,
 	encodeMessageParameters,
+	type Location,
 	type MessageParameters,
 } from "./parameters.ts";
 import {
@@ -109,6 +112,57 @@ export interface RequestUpdate {
 	parameters: MessageParameters;
 }
 
+/** Which Objects a FETCH asks for (§10.12). */
+export type FetchRange =
+	/** Fetch Type 0x1: a range of a track, independent of any subscription (§10.12.1). */
+	| ({
+			fetchType: "Standalone";
+			startLocation: Location;
+			/**
+			 * "The end Location, plus 1. A Location.Object value of 0 means the
+			 * entire group is requested."
+			 */
+			endLocation: Location;
+	  } & FullTrackName)
+	/**
+	 * Fetch Type 0x2: up to the Joining Location of a subscription of the
+	 * same session, from `joiningStart` Groups before it (§10.12.2).
+	 */
+	| {
+			fetchType: "RelativeJoining";
+			joiningRequestId: bigint;
+			joiningStart: bigint;
+	  }
+	/** Fetch Type 0x3: the same, from the Group `joiningStart` (§10.12.2). */
+	| {
+			fetchType: "AbsoluteJoining";
+			joiningRequestId: bigint;
+			joiningStart: bigint;
+	  };
+
+/** FETCH (§10.12.3). */
+export interface Fetch {
+	type: "FETCH";
+	requestId: bigint;
+	range: FetchRange;
+	parameters: MessageParameters;
+}
+
+/** FETCH_OK (§10.13). */
+export interface FetchOk {
+	type: "FETCH_OK";
+	/** Whether the End Location is the final Object of the track. */
+	endOfTrack: boolean;
+	/**
+	 * The end of the range the response covers, in the encoding of a FETCH:
+	 * the last Object plus 1, or Object 0 for a whole Group.
+	 */
+	endLocation: Location;
+	/** No parameter of the draft may appear here; one that does is a PROTOCOL_VIOLATION. */
+	parameters: MessageParameters;
+	trackProperties: KeyValuePair[];
+}
+
 export type ControlMessage =
 	| Setup
 	| RequestUpdate
@@ -118,7 +172,9 @@ export type ControlMessage =
 	| PublishNamespace
 	| RequestOk
 	| RequestError
-	| PublishDone;
+	| PublishDone
+	| Fetch
+	| FetchOk;
 
 type MessageName = ControlMessage["type"];
 
@@ -132,6 +188,8 @@ const MESSAGE_TYPES: Record<MessageName, bigint> = {
 	PUBLISH_NAMESPACE: 0x6n,
 	REQUEST_OK: 0x7n,
 	PUBLISH_DONE: 0xbn,
+	FETCH: 0x16n,
+	FETCH_OK: 0x18n,
 	PUBLISH: 0x1dn,
 };
 
@@ -153,8 +211,6 @@ const UNIMPLEMENTED_MESSAGE_TYPES = {
 	// it turns a planned migration into an error. Decode it and report it to
 	// the application.
 	GOAWAY: 0x10n,
-	FETCH: 0x16n,
-	FETCH_OK: 0x18n,
 	PUBLISH_OK: 0x1en,
 	SUBSCRIBE_NAMESPACE: 0x50n,
 	SUBSCRIBE_TRACKS: 0x51n,
@@ -165,11 +221,14 @@ const REQUEST_MESSAGE_TYPES: ReadonlySet<bigint> = new Set([
 	UNIMPLEMENTED_MESSAGE_TYPES.TRACK_STATUS,
 	MESSAGE_TYPES.SUBSCRIBE,
 	MESSAGE_TYPES.PUBLISH,
-	UNIMPLEMENTED_MESSAGE_TYPES.FETCH,
+	MESSAGE_TYPES.FETCH,
 	MESSAGE_TYPES.PUBLISH_NAMESPACE,
 	UNIMPLEMENTED_MESSAGE_TYPES.SUBSCRIBE_NAMESPACE,
 	UNIMPLEMENTED_MESSAGE_TYPES.SUBSCRIBE_TRACKS,
 ]);
+
+/** The Message Type of FETCH, the one request that is decoded whole before it is refused. */
+export const FETCH_MESSAGE_TYPE = MESSAGE_TYPES.FETCH;
 
 /**
  * WHY SETUP has one value in two tables: Table 3 (stream types, §3.4) and
@@ -263,6 +322,67 @@ function encodeRedirect(writer: ByteWriter, redirect: Redirect): void {
 	encodeFullTrackName(writer, redirect);
 }
 
+const FETCH_TYPES = wireEnum<FetchRange["fetchType"]>({
+	Standalone: 0x1n,
+	RelativeJoining: 0x2n,
+	AbsoluteJoining: 0x3n,
+});
+
+function decodeFetchRange(reader: ByteReader): FetchRange {
+	const value = reader.varint();
+	const fetchType = FETCH_TYPES.fromWire(value);
+	switch (fetchType) {
+		case "Standalone": {
+			const fullTrackName = decodeFullTrackName(reader);
+			const startLocation = decodeLocation(reader);
+			const endLocation = decodeLocation(reader);
+			return { fetchType, ...fullTrackName, startLocation, endLocation };
+		}
+		case "RelativeJoining":
+		case "AbsoluteJoining": {
+			const joiningRequestId = reader.varint();
+			const joiningStart = reader.varint();
+			return { fetchType, joiningRequestId, joiningStart };
+		}
+		// §10.12: "An endpoint that receives a Fetch Type other than 0x1, 0x2
+		// or 0x3 MUST close the session with a PROTOCOL_VIOLATION."
+		case undefined:
+			throw protocolViolation(`unknown Fetch Type ${value}`);
+	}
+}
+
+function encodeFetchRange(writer: ByteWriter, range: FetchRange): void {
+	writer.varint(FETCH_TYPES.toWire(range.fetchType));
+	switch (range.fetchType) {
+		case "Standalone":
+			encodeFullTrackName(writer, range);
+			encodeLocation(writer, range.startLocation);
+			encodeLocation(writer, range.endLocation);
+			break;
+		case "RelativeJoining":
+		case "AbsoluteJoining":
+			writer.varint(range.joiningRequestId).varint(range.joiningStart);
+			break;
+	}
+}
+
+/**
+ * End Of Track of FETCH_OK. §10.13 gives the field 8 bits and the values 1
+ * and 0. WHY any other value is a violation: nothing says what it would
+ * mean, and FORWARD, the other field of that kind, is read so (§10.2.12). The
+ * Rust implementation reads it the same way.
+ */
+function decodeEndOfTrack(value: number): boolean {
+	switch (value) {
+		case 0:
+			return false;
+		case 1:
+			return true;
+		default:
+			throw protocolViolation(`End Of Track value ${value} is neither 0 nor 1`);
+	}
+}
+
 function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 	switch (name) {
 		case "SETUP":
@@ -328,6 +448,25 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 			const streamCount = reader.varint();
 			const errorReason = decodeReasonPhrase(reader);
 			return { type: name, statusCode, streamCount, errorReason };
+		}
+		case "FETCH": {
+			const requestId = reader.varint();
+			const range = decodeFetchRange(reader);
+			const parameters = decodeMessageParameters(reader, name);
+			return { type: name, requestId, range, parameters };
+		}
+		case "FETCH_OK": {
+			const endOfTrack = decodeEndOfTrack(reader.uint8());
+			const endLocation = decodeLocation(reader);
+			const parameters = decodeMessageParameters(reader, name);
+			const trackProperties = decodeKeyValuePairs(reader);
+			return {
+				type: name,
+				endOfTrack,
+				endLocation,
+				parameters,
+				trackProperties,
+			};
 		}
 	}
 }
@@ -435,11 +574,14 @@ export function drainControlMessages(
  * can begin with has Request ID as its first field (Figures 10, 13, 17 and
  * the FETCH, SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS formats; TRACK_STATUS
  * uses the SUBSCRIBE format, §10.14), so the rest of the message is not
- * needed to reject the request.
+ * needed to reject the request. `messageLength` is how many bytes the whole
+ * message takes, with its Message Type and Message Length.
  */
-export function decodeRequestStart(
-	buffer: Uint8Array,
-): DecodeResult<{ messageType: bigint; requestId: bigint }> {
+export function decodeRequestStart(buffer: Uint8Array): DecodeResult<{
+	messageType: bigint;
+	requestId: bigint;
+	messageLength: number;
+}> {
 	const reader = createByteReader(buffer);
 	const header = decodeFrameHeader(reader);
 	if (header === undefined) return { status: "incomplete" };
@@ -455,6 +597,7 @@ export function decodeRequestStart(
 				: protocolViolation(`a request stream began with ${messageClass.name}`);
 		return { status: "error", error };
 	}
+	const messageLength = reader.offset + payloadLength;
 	// A varint takes at most 9 bytes, so this much of the payload decides it.
 	const needed = Math.min(payloadLength, 9);
 	const arrived = Math.min(needed, reader.remaining);
@@ -463,7 +606,7 @@ export function decodeRequestStart(
 		const requestId = start.varint();
 		return {
 			status: "ok",
-			value: { messageType, requestId },
+			value: { messageType, requestId, messageLength },
 			bytesRead: reader.offset - start.remaining,
 		};
 	} catch (error) {
@@ -529,6 +672,17 @@ function encodePayload(writer: ByteWriter, message: ControlMessage): void {
 		case "PUBLISH_DONE":
 			writer.varint(message.statusCode).varint(message.streamCount);
 			encodeReasonPhrase(writer, message.errorReason);
+			break;
+		case "FETCH":
+			writer.varint(message.requestId);
+			encodeFetchRange(writer, message.range);
+			encodeMessageParameters(writer, message.parameters, message.type);
+			break;
+		case "FETCH_OK":
+			writer.uint8(message.endOfTrack ? 1 : 0);
+			encodeLocation(writer, message.endLocation);
+			encodeMessageParameters(writer, message.parameters, message.type);
+			encodeKeyValuePairs(writer, message.trackProperties);
 			break;
 	}
 }

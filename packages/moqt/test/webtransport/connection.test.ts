@@ -918,8 +918,9 @@ describe("connectOver", () => {
 	test("answers a request from the peer with REQUEST_ERROR NOT_SUPPORTED and stays open", async () => {
 		const { peer } = await connected();
 		const request = peer.openBidi();
-		// The start of a FETCH with Request ID 1.
-		await request.reply.write(hex("16 00 02 01 00"));
+		// A Relative Joining FETCH with Request ID 1, whole: a FETCH is decoded
+		// before it is refused.
+		await request.reply.write(hex("16 00 05 01 02 00 00 00"));
 		expect(decodeControlMessage(await sentBytes(request.sent))).toMatchObject({
 			status: "ok",
 			value: { type: "REQUEST_ERROR", errorCode: 3n, retryInterval: 0n },

@@ -8,7 +8,9 @@ Status: partly implemented. The client end of a session and the messages below a
 
 Implemented: SETUP, PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE, SUBSCRIBE_OK, REQUEST_OK, REQUEST_ERROR, PUBLISH_DONE, SUBGROUP_HEADER and subgroup Objects.
 
-Not implemented: the server role, requests opened by the peer (answered with NOT_SUPPORTED), REQUEST_UPDATE (refused), GOAWAY, FETCH, namespace subscription, datagrams, the content of authorization tokens and delivery timeouts. [The experiment record](../../docs/experiments/2026-10-10-own-ts-client-vs-moqtail.md) has the full list and what the runs exercised.
+Decoded and encoded, and not served or sent yet: FETCH, FETCH_OK, and the fetch stream (FETCH_HEADER, its Objects and End of Range indicators; `src/core/fetch.ts`). A FETCH of the peer is decoded whole and then refused with NOT_SUPPORTED, so that one the draft has close the session does; a stream of type FETCH_HEADER still ends the session with INTERNAL_ERROR. The Rust implementation reads the same captures (`fixtures/moqt-18/`) and the same hand-written streams (`fixtures/moqt-18-by-hand/`).
+
+Not implemented: the server role, requests opened by the peer (answered with NOT_SUPPORTED), REQUEST_UPDATE (refused), GOAWAY, serving and sending a FETCH, namespace subscription, datagrams, the content of authorization tokens and delivery timeouts. [The experiment record](../../docs/experiments/2026-10-10-own-ts-client-vs-moqtail.md) has the full list and what the runs exercised.
 
 ## Entries
 

@@ -1,5 +1,10 @@
 import { concatBytes } from "./bytes.ts";
-import { decodeRequestStart, encodeControlMessage } from "./control-message.ts";
+import {
+	decodeControlMessage,
+	decodeRequestStart,
+	encodeControlMessage,
+	FETCH_MESSAGE_TYPE,
+} from "./control-message.ts";
 import { MoqtError, RequestErrorCode, SessionErrorCode } from "./error.ts";
 import type { SessionOutput } from "./session-output.ts";
 
@@ -23,8 +28,11 @@ export interface PeerRequests {
 type PeerRequestStream =
 	/** Message Type and Request ID have not fully arrived. */
 	| { answered: false; buffer: Uint8Array }
-	/** The request was answered; the rest of it is dropped. */
-	| { answered: true };
+	/**
+	 * The request was answered; the rest of it is dropped. `missing` is how
+	 * many bytes of its first message have not arrived yet.
+	 */
+	| { answered: true; missing: number };
 
 /**
  * Request IDs remembered above the lowest one not seen yet, while requests
@@ -34,7 +42,8 @@ const REQUEST_IDS_AHEAD_LIMIT = 1024;
 
 /**
  * Requests the peer opens. None is implemented, so each is answered with
- * REQUEST_ERROR NOT_SUPPORTED after its Request ID is checked.
+ * REQUEST_ERROR NOT_SUPPORTED after its Request ID is checked; a FETCH is
+ * decoded first.
  */
 export function createPeerRequests(): PeerRequests {
 	const streams = new Map<number, PeerRequestStream>();
@@ -86,17 +95,65 @@ export function createPeerRequests(): PeerRequests {
 			};
 			if (fin) streams.delete(peerStream);
 			else streams.set(peerStream, stream);
-			if (stream.answered) return;
+			// A stream that ends inside its first message is treated like a
+			// Message Length that its payload does not match, a
+			// PROTOCOL_VIOLATION (§10), as the Rust implementation does
+			// (`MessageDecoder::finish`). One that ends without a byte asked for
+			// nothing.
+			const endedInside = (): MoqtError =>
+				new MoqtError(
+					SessionErrorCode.PROTOCOL_VIOLATION,
+					"a request stream ended inside its first message",
+				);
+			if (stream.answered) {
+				stream.missing = Math.max(0, stream.missing - data.length);
+				if (fin && stream.missing > 0) throw endedInside();
+				return;
+			}
 
 			const buffer = concatBytes([stream.buffer, data]);
 			const decoded = decodeRequestStart(buffer);
 			if (decoded.status === "error") throw decoded.error;
 			if (decoded.status === "incomplete") {
-				// A stream that ends before its request started asked for nothing.
+				if (fin && buffer.length > 0) throw endedInside();
 				stream.buffer = buffer;
 				return;
 			}
-			const { messageType, requestId } = decoded.value;
+			const { messageType, requestId, messageLength } = decoded.value;
+			const missing = Math.max(0, messageLength - buffer.length);
+			// Before the request is looked at: a message that will never be
+			// whole is not answered.
+			if (fin && missing > 0) throw endedInside();
+			// FIXME: serve a FETCH (§10.12). It is refused with NOT_SUPPORTED
+			// below, like a request that is not decoded.
+			//
+			// WHY it is decoded whole first, where the others are refused on
+			// their Request ID: a FETCH with a Fetch Type other than 1 to 3, or
+			// with a parameter that is unknown or not for a FETCH, closes the
+			// session (§10.12, §10.2.1), and the Rust implementation, which
+			// decodes it, does. Refusing such a FETCH would be another answer to
+			// the same bytes. WHY before the Request ID is checked: the Rust
+			// implementation decodes first, so a FETCH that is wrong in both ways
+			// ends the session with the same code in both.
+			if (messageType === FETCH_MESSAGE_TYPE) {
+				const whole = decodeControlMessage(buffer);
+				if (whole.status === "error") throw whole.error;
+				if (whole.status === "incomplete") {
+					// At most 9 + 2 + 65535 bytes of one stream: Message Length is
+					// 16 bits.
+					//
+					// FIXME: nothing here bounds how many streams hold that much at
+					// once. A request that is refused on its start holds a few
+					// bytes; a FETCH that trickles in holds up to 64 KiB until it is
+					// whole, and the streams the peer may have open are bounded by
+					// the transport alone (`webtransport/stream-io.ts` accepts every
+					// bidirectional stream; unidirectional ones have a limit there).
+					// A bound on the bytes held across incomplete FETCHes, or on the
+					// streams read at once, is a limit the project has not decided.
+					stream.buffer = buffer;
+					return;
+				}
+			}
 			checkRequestId(requestId);
 			// §3.3.2: reject without application processing by REQUEST_ERROR and FIN.
 			out.push({
@@ -113,7 +170,7 @@ export function createPeerRequests(): PeerRequests {
 				type: "event",
 				event: { type: "peer-request-rejected", messageType, requestId },
 			});
-			if (!fin) streams.set(peerStream, { answered: true });
+			if (!fin) streams.set(peerStream, { answered: true, missing });
 		},
 		reset(peerStream) {
 			streams.delete(peerStream);

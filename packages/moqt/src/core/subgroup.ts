@@ -135,11 +135,36 @@ export function encodeSubgroupHeader(header: SubgroupHeader): Bytes {
 }
 
 /**
+ * Throws, for an encoder, when the Object Properties would make a receiver
+ * take the Track for malformed: a Mandatory Track Property (§2.5.1), and a
+ * Prior Group ID Gap or Prior Object ID Gap that is there twice or is larger
+ * than the ID it counts back from (§12.8, §12.9).
+ *
+ * WHY the same check as the decoder's: what this endpoint's decoder refuses,
+ * its encoder does not write. The Rust implementation holds its encoders to
+ * the check of its decoders as well.
+ */
+export function refuseObjectPropertiesThatBreakTheTrack(
+	properties: readonly KeyValuePair[],
+	groupId: bigint,
+	objectId: bigint,
+): void {
+	try {
+		checkObjectProperties(properties, groupId, objectId);
+	} catch (error) {
+		if (error instanceof DecodeStop && error.failure.scope === "track") {
+			throw new RangeError(`${error.failure.reason} (§2.5.1, §12.8, §12.9)`);
+		}
+		throw error;
+	}
+}
+
+/**
  * Encodes the Subgroup Object Fields of Figure 25. `previousObjectId` is the
  * Object ID of the Object written before this one on the same stream.
  */
 export function encodeSubgroupObject(
-	header: Pick<SubgroupHeader, "properties">,
+	header: Pick<SubgroupHeader, "properties" | "groupId">,
 	previousObjectId: bigint | undefined,
 	object: SubgroupObject,
 ): Bytes {
@@ -159,11 +184,11 @@ export function encodeSubgroupObject(
 	if (!header.properties && object.properties.length > 0) {
 		throw new RangeError("the SUBGROUP_HEADER has no PROPERTIES bit");
 	}
-	if (object.properties.some(({ type }) => isMandatoryTrackProperty(type))) {
-		throw new RangeError(
-			"a Mandatory Track Property cannot be an Object Property (§2.5.1)",
-		);
-	}
+	refuseObjectPropertiesThatBreakTheTrack(
+		object.properties,
+		header.groupId,
+		object.objectId,
+	);
 
 	// §11.4.2: the delta is from the previous Object ID plus one, or the ID itself for the first Object.
 	const delta =
@@ -195,8 +220,11 @@ export type SubgroupStreamItem =
 	| { type: "header"; header: SubgroupHeader }
 	| { type: "object"; object: SubgroupObject };
 
-/** Why a subgroup stream cannot be decoded any further, by how far the damage reaches. */
-export type SubgroupStreamFailure =
+/**
+ * Why a stream of Objects, a subgroup stream or a fetch stream, cannot be
+ * decoded any further, by how far the damage reaches.
+ */
+export type ObjectStreamFailure =
 	/** The peer broke a rule of the draft: the session ends. */
 	| { scope: "session"; error: MoqtError }
 	/** The Track is malformed (§2.4.2): its subscription is cancelled. */
@@ -207,14 +235,14 @@ export type SubgroupStreamFailure =
 export interface SubgroupStreamResult {
 	items: SubgroupStreamItem[];
 	/** Set when decoding stopped. Items before it are valid. */
-	failure?: SubgroupStreamFailure;
+	failure?: ObjectStreamFailure;
 }
 
 /** Carries a failure that is not a `MoqtError` out of the decoding steps. */
-class DecodeStop extends Error {
-	readonly failure: SubgroupStreamFailure;
+export class DecodeStop extends Error {
+	readonly failure: ObjectStreamFailure;
 
-	constructor(failure: SubgroupStreamFailure) {
+	constructor(failure: ObjectStreamFailure) {
 		super(failure.scope);
 		this.failure = failure;
 	}
@@ -228,7 +256,7 @@ interface PendingObject {
 }
 
 /** The chunks as one array, without a second copy when there is only one. */
-function joinChunks(chunks: readonly Uint8Array[]): Uint8Array {
+export function joinChunks(chunks: readonly Uint8Array[]): Uint8Array {
 	const [only] = chunks;
 	return chunks.length === 1 && only !== undefined ? only : concatBytes(chunks);
 }
@@ -270,7 +298,7 @@ function gapOf(
  * malformed (§2.4.2). Only what a single Object can show is checked here; the
  * conditions of §12.8 and §12.9 that compare Objects are not.
  */
-function checkObjectProperties(
+export function checkObjectProperties(
 	properties: readonly KeyValuePair[],
 	groupId: bigint,
 	objectId: bigint,
@@ -306,21 +334,42 @@ function checkObjectProperties(
 	}
 }
 
+/**
+ * Reads the Object Properties Length or the Object Payload Length of an
+ * Object. One over the local limit is refused when it is read: only the
+ * stream ends, since the peer broke no rule.
+ */
+export function readObjectFieldLength(
+	reader: ByteReader,
+	limit: number,
+	name: "Object Properties Length" | "Object Payload Length",
+): number {
+	const length = reader.varint();
+	if (length > BigInt(limit)) {
+		throw new DecodeStop({
+			scope: "stream",
+			reason: `${name} ${length} exceeds the limit ${limit}`,
+		});
+	}
+	return Number(length);
+}
+
 function decodeObjectProperties(
 	reader: ByteReader,
 	limits: SubgroupStreamLimits,
 ): KeyValuePair[] {
-	const length = reader.varint();
-	if (length > BigInt(limits.maxObjectPropertiesLength)) {
-		throw new DecodeStop({
-			scope: "stream",
-			reason: `Object Properties Length ${length} exceeds the limit ${limits.maxObjectPropertiesLength}`,
-		});
-	}
-	const block = reader.sub(Number(length));
-	let properties: KeyValuePair[];
+	const length = readObjectFieldLength(
+		reader,
+		limits.maxObjectPropertiesLength,
+		"Object Properties Length",
+	);
+	return decodePropertiesBlock(reader.sub(length));
+}
+
+/** Decodes Object Properties from `block`, which holds all of them and nothing else. */
+export function decodePropertiesBlock(block: ByteReader): KeyValuePair[] {
 	try {
-		properties = decodeKeyValuePairs(block);
+		return decodeKeyValuePairs(block);
 	} catch (error) {
 		// The block is complete, so running out of bytes inside it is malformed input.
 		if (error instanceof ShortBufferError) {
@@ -331,7 +380,6 @@ function decodeObjectProperties(
 		}
 		throw error;
 	}
-	return properties;
 }
 
 export interface SubgroupStreamDecoder {
@@ -385,16 +433,14 @@ export function createSubgroupStreamDecoder(
 		// waiting for a payload that would be dropped anyway.
 		checkObjectProperties(properties, streamHeader.groupId, objectId);
 
-		const payloadLength = reader.varint();
-		if (payloadLength > BigInt(limits.maxObjectPayloadLength)) {
-			throw new DecodeStop({
-				scope: "stream",
-				reason: `Object Payload Length ${payloadLength} exceeds the limit ${limits.maxObjectPayloadLength}`,
-			});
-		}
+		const payloadLength = readObjectFieldLength(
+			reader,
+			limits.maxObjectPayloadLength,
+			"Object Payload Length",
+		);
 		// §11.4.2: Object Status is present only when Object Payload Length is zero.
 		const status =
-			payloadLength === 0n ? decodeObjectStatus(reader.varint()) : "Normal";
+			payloadLength === 0 ? decodeObjectStatus(reader.varint()) : "Normal";
 		if (status !== "Normal" && properties.length > 0) {
 			throw protocolViolation(
 				"properties on an Object whose status is not Normal",
@@ -404,7 +450,7 @@ export function createSubgroupStreamDecoder(
 			objectId,
 			properties,
 			status,
-			payloadLength: Number(payloadLength),
+			payloadLength,
 		};
 	};
 
