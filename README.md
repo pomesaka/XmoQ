@@ -5,7 +5,7 @@
 </div>
 
 > [!IMPORTANT]
-> **Early implementation.** No working streaming implementation is claimed. What exists is a MoQ Transport codec with a client in Rust and in TypeScript, each exchanging single Objects with `moqtail` peers.
+> **Early implementation.** No working streaming implementation is claimed. No media has been sent. What exists is an own MoQ Transport implementation: a client in Rust and in TypeScript and a minimal relay in Rust, which exchange single Objects with each other and with `moqtail` peers.
 
 XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCodecs, a Rust relay and terminal CLI, and Cloudflare Durable Objects for application state. Future directions include bidirectional media and integration with events in a separately developed SNS; neither is committed for the MVP.
 

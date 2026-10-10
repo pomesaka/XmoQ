@@ -21,7 +21,7 @@ if [[ ! -x "${relay_root}/bin/relay" || ! -f "${relay_stamp}" ]]; then
 fi
 
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
-cargo build --locked -p xmoq-moqt-client
+cargo build --locked -p xmoq-moqt-client -p xmoq-relay
 
 bun install --frozen-lockfile
 
@@ -40,4 +40,4 @@ fi
 
 bun interop/matrix.ts "$@"
 interop_verdict ran
-ran "Interop run (every pairing of own and moqtail clients)"
+ran "Interop run (every pairing of own and moqtail clients, through the moqtail relay and the own relay)"

@@ -73,6 +73,13 @@ impl<'a> Reader<'a> {
         Ok(bytes)
     }
 
+    /// Skips whatever is left, for a payload whose remaining fields are not
+    /// decoded.
+    pub(crate) fn skip_rest(&mut self) {
+        let len = self.rest.len();
+        self.advance(&[], len);
+    }
+
     fn advance(&mut self, rest: &'a [u8], by: usize) {
         self.rest = rest;
         self.consumed = self.consumed.saturating_add(by);

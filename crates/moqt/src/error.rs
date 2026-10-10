@@ -9,9 +9,6 @@ pub enum TerminationCode {
     /// `PROTOCOL_VIOLATION`: the peer did something the draft forbids.
     ProtocolViolation,
     /// `INVALID_REQUEST_ID` (§10.1).
-    ///
-    /// FIXME: nothing returns this yet. Checking the Request IDs of a peer
-    /// belongs to the responder side, which arrives with the relay.
     InvalidRequestId,
     /// `DUPLICATE_TRACK_ALIAS` (§11.1).
     DuplicateTrackAlias,
@@ -43,6 +40,11 @@ pub mod stream_reset_code {
     pub const INTERNAL_ERROR: u32 = 0x0;
     /// CANCELLED: the stream was cancelled by either endpoint.
     pub const CANCELLED: u32 = 0x1;
+    /// `SESSION_CLOSED`: the session is being closed.
+    pub const SESSION_CLOSED: u32 = 0x3;
+    /// `TOO_FAR_BEHIND`: the subscription exceeded the publisher's resource
+    /// limits and is being terminated.
+    pub const TOO_FAR_BEHIND: u32 = 0x5;
     /// `MALFORMED_TRACK`: the track was malformed (§2.4.2).
     pub const MALFORMED_TRACK: u32 = 0x12;
 }
@@ -88,6 +90,9 @@ pub enum Error {
     UnknownParameter(u64),
     /// A Track Alias already in use for another track (§11.1).
     DuplicateTrackAlias(u64),
+    /// A Request ID of the wrong parity for its sender, or one the sender
+    /// already used (§10.1).
+    InvalidRequestId(u64),
     /// AUTHORITY from a server or over WebTransport (§10.3.1.1).
     InvalidAuthority,
     /// PATH from a server or over WebTransport (§10.3.1.2).
@@ -143,6 +148,7 @@ impl Error {
             | Self::UnknownStreamType(_)
             | Self::UnknownParameter(_) => session(TerminationCode::ProtocolViolation),
             Self::DuplicateTrackAlias(_) => session(TerminationCode::DuplicateTrackAlias),
+            Self::InvalidRequestId(_) => session(TerminationCode::InvalidRequestId),
             Self::InvalidAuthority => session(TerminationCode::InvalidAuthority),
             Self::InvalidPath => session(TerminationCode::InvalidPath),
             // The peer was within the draft; the limitation is ours.
@@ -186,6 +192,7 @@ impl fmt::Display for Error {
             Self::UnsupportedStreamType(ty) => write!(f, "unsupported stream type {ty:#x}"),
             Self::UnknownParameter(ty) => write!(f, "unknown message parameter {ty:#x}"),
             Self::DuplicateTrackAlias(alias) => write!(f, "duplicate track alias {alias}"),
+            Self::InvalidRequestId(id) => write!(f, "invalid request id {id}"),
             Self::InvalidAuthority => write!(f, "AUTHORITY option not allowed here"),
             Self::InvalidPath => write!(f, "PATH option not allowed here"),
             Self::MalformedTrack(why) => write!(f, "malformed track: {why}"),
@@ -231,6 +238,48 @@ impl fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
+/// Why a message for a request could not be taken: the peer broke the protocol,
+/// or the caller named a request that is not this session's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestFault {
+    /// The peer is at fault. The session has to be closed with
+    /// [`Error::termination_code`].
+    Peer(Error),
+    /// The caller is at fault. Nothing was changed and nothing is sent to the
+    /// peer.
+    Usage(UsageError),
+}
+
+impl From<Error> for RequestFault {
+    fn from(error: Error) -> Self {
+        Self::Peer(error)
+    }
+}
+
+impl From<UsageError> for RequestFault {
+    fn from(error: UsageError) -> Self {
+        Self::Usage(error)
+    }
+}
+
+impl fmt::Display for RequestFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Peer(error) => error.fmt(f),
+            Self::Usage(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RequestFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Peer(error) => Some(error),
+            Self::Usage(error) => Some(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +321,11 @@ mod tests {
                 Error::DuplicateTrackAlias(7),
                 ErrorScope::Session(TerminationCode::DuplicateTrackAlias),
                 Some(0x5),
+            ),
+            (
+                Error::InvalidRequestId(3),
+                ErrorScope::Session(TerminationCode::InvalidRequestId),
+                Some(0x4),
             ),
             (
                 Error::InvalidPath,

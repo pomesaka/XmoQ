@@ -13,4 +13,6 @@ Read README, requirements, architecture, protocols, roadmap, validation and open
 
 Each change should report objective, changed files, verification commands, actual results, blockers and open questions.
 
-Current assignment: Phase 0b in the [roadmap](roadmap.md), the own MoQ Transport implementation pinned to draft 18. Implement from the draft text, cite the section for non-obvious behaviour, and run every own component against a `moqtail` peer before pairing it with another own component. Do not build media features before this gate.
+Current assignment: the two open items of Phase 0b in the [roadmap](roadmap.md) (routing by namespace in the relay, disconnect runs in the interop matrix), then Phase 1. The Phase 0b exit is reached. Implement from the draft text, cite the section for non-obvious behaviour, and run every own component against a `moqtail` peer before pairing it with another own component.
+
+Before implementing a part of the draft, list what the draft requires for that part (the MUST and SHOULD statements, with section numbers) and what a long-running server has to guarantee (bounds, cleanup, isolation between sessions). Write tests for the abnormal paths from that list, not only for a successful transfer. Reviews of the first implementations found most of their issues there.

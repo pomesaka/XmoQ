@@ -5,7 +5,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "${REPO_ROOT}"
 
 # Crates that must stay free of I/O, as "package name:directory".
-SANS_IO_CRATES=("xmoq-moqt:crates/moqt")
+SANS_IO_CRATES=("xmoq-moqt:crates/moqt" "xmoq-relay-core:crates/relay-core")
 
 # WHY the socket-layer crates and not only the transports: banning wtransport and quinn by name
 # would miss the next transport crate. mio, socket2, polling, async-io and quinn-udp sit under

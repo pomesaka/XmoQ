@@ -10,9 +10,11 @@ Do not infer answers.
   - What a receiver does when a chunk is missing (H.264 and VP8 decoders show corrupt pictures without an error)
   - `latencyMode` and `optimizeForLatency`; whether `duration` travels; whether resolution may change during a broadcast
   - Whether the Opus `description` is passed to the decoder
-- Receive limits of the MoQ implementation (Object size, buffered bytes per stream, concurrent streams, key-value pairs per message, drain timeout after PUBLISH_DONE) and what happens when one is exceeded: **provisional values in the code**, marked as such. The behaviour on overflow is in [implementation notes](moqt-implementation-notes.md)
-- Whether the relay caches Objects for late joiners, and how much: **undecided**; the first relay keeps none
-- Whether the relay accepts native QUIC as well as WebTransport: **undecided**; the first relay accepts WebTransport only
+- Receive limits of the MoQ implementation (Object size, buffered bytes per stream, concurrent streams, key-value pairs per message, drain timeout after PUBLISH_DONE) : **provisional values in the code**, marked as such and listed in [implementation notes](moqt-implementation-notes.md). What happens when one is exceeded is decided and is in the same document
+- How a viewer who joins mid-broadcast gets its first picture: **undecided**, to be compared in Phase 1 with video. The draft (§5.1.3) offers waiting for the next Group, asking the publisher for a new Group (NEW_GROUP_REQUEST, which needs REQUEST_UPDATE), and fetching the current Group from a relay cache (needs FETCH and a cache). The relay keeps no cache for now
+- Whether a slow subscriber should lose whole old Groups and stay subscribed (delivery timeout, §8 of the draft) instead of having its subscription ended: **to look at in Phase 2**, with measurements of how often subscriptions are ended
+- The Rust WebTransport library: **undecided**. `wtransport` 0.7.2 cannot deliver a session's close code to a browser; `web-transport-quinn` 0.13.2 can. See the [comparison](experiments/2026-10-10-webtransport-library-comparison.md)
+- Messages the relay does not accept, and what each waits for: REQUEST_UPDATE (the late-join decision above), GOAWAY (hosting), SUBSCRIBE_NAMESPACE (whether rooms are discovered through MoQ or through Durable Objects), TRACK_STATUS (no use planned)
 - Authorization token handling in MoQ messages (§10.2.2 of the draft): **undecided**, follows the authentication decision
 - Latency goal, room size, expected concurrent rooms: **undecided**
 - Supported browsers, operating systems, Ghostty versions: **undecided**

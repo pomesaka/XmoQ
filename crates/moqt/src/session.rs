@@ -1,12 +1,17 @@
 //! Session and request state (§3.3, §5.1, §6.2, §10.1, §11.1).
 //!
-//! FIXME: add the responder side, which a relay needs: accepting SUBSCRIBE,
-//! PUBLISH and `PUBLISH_NAMESPACE` from a peer, checking the peer's Request IDs
-//! (§10.1, `INVALID_REQUEST_ID`) and answering request types this crate does not
-//! implement with `REQUEST_ERROR` `NOT_SUPPORTED`. Today only the endpoint that
-//! opens a request is covered.
+//! This file holds the SETUP exchange and the requests this endpoint opens;
+//! [`peer`] holds the requests the peer opens.
 
-use std::collections::{HashMap, HashSet};
+mod peer;
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub use peer::{
+    AfterRefusal, MAX_PEER_REQUESTS, PeerRequest, PeerRequestEvent, PeerRequestId,
+    PeerRequestOpened, REQUEST_IDS_AHEAD_LIMIT,
+};
 
 pub use crate::aliases::SubscribedAlias;
 use crate::aliases::SubscribedAliases;
@@ -17,7 +22,7 @@ use crate::message::{
 };
 use crate::name::{FullTrackName, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
-use crate::{Error, UsageError};
+use crate::{Error, RequestFault, UsageError};
 
 /// Setup Options this crate knows to be single-instance. §10.3: a sender MUST NOT
 /// repeat an option unless its definition allows it, and only AUTHORIZATION TOKEN
@@ -48,13 +53,23 @@ pub enum Transport {
     NativeQuic,
 }
 
+/// Requests this endpoint ended with `PUBLISH_DONE` that are remembered until
+/// their stream is reported gone, oldest dropped first. A caller that never
+/// reports the stream gone cannot make the session grow without bound; a
+/// message for a request that was dropped is then a protocol violation.
+const ENDED_BY_PUBLISH_DONE_LIMIT: usize = 64;
+
+/// Gives every [`Session`] of the process a number of its own, which its
+/// request handles carry.
+static NEXT_SESSION_TAG: AtomicU64 = AtomicU64::new(0);
+
 /// Names one request this endpoint opened. Only [`Session`] creates these.
 ///
-/// A `RequestId` is only meaningful to the `Session` that returned it. Passing
-/// one to another `Session` is not detected: the number may name a different
-/// request there.
+/// A handle belongs to the `Session` that returned it. A relay holds many
+/// sessions whose Request IDs repeat, so every handle carries the number of its
+/// session, and a session refuses a handle of another one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RequestId(u64);
+pub struct RequestId(u64, u64);
 
 impl RequestId {
     /// The Request ID as it appears on the wire (§10.1).
@@ -86,6 +101,7 @@ enum Request {
         track_alias: Option<u64>,
     },
     Publish {
+        full_track_name: FullTrackName,
         track_alias: u64,
         state: PublishState,
     },
@@ -188,10 +204,15 @@ pub struct Session {
     /// Track Aliases this endpoint chose in PUBLISH. A separate space: each
     /// publisher numbers its own tracks (§11.1).
     published_aliases: HashSet<u64>,
+    /// The alias the next accepted SUBSCRIBE of the peer gets.
+    next_published_alias: u64,
     /// PUBLISH requests this endpoint ended with `PUBLISH_DONE` whose streams
     /// are not yet reported gone. What still arrives on them was sent before
     /// the peer saw the `PUBLISH_DONE`.
-    ended_by_publish_done: HashSet<u64>,
+    ended_by_publish_done: VecDeque<u64>,
+    /// The number this session's request handles carry.
+    tag: u64,
+    peer: peer::PeerRequests,
 }
 
 impl Session {
@@ -208,7 +229,11 @@ impl Session {
             requests: HashMap::new(),
             subscribed_aliases: SubscribedAliases::default(),
             published_aliases: HashSet::new(),
-            ended_by_publish_done: HashSet::new(),
+            next_published_alias: 0,
+            ended_by_publish_done: VecDeque::new(),
+            // Relaxed: the numbers only have to differ.
+            tag: NEXT_SESSION_TAG.fetch_add(1, Ordering::Relaxed),
+            peer: peer::PeerRequests::new(role),
         }
     }
 
@@ -298,13 +323,18 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails when a parameter may not appear in SUBSCRIBE.
+    /// Fails when a parameter may not appear in SUBSCRIBE, and when this
+    /// endpoint already is a subscriber of the track in this session (§5.1: at
+    /// most one subscription to a track in each role).
     pub fn subscribe(
         &mut self,
         full_track_name: FullTrackName,
         parameters: Vec<Parameter>,
     ) -> Result<(RequestId, ControlMessage), UsageError> {
         check_own_parameters(&parameters, MessageKind::Subscribe)?;
+        if self.is_subscribed_to(&full_track_name) {
+            return Err(UsageError("already a subscriber of this track"));
+        }
         let request_id = self.open(Request::Subscribe {
             full_track_name: full_track_name.clone(),
             track_alias: None,
@@ -325,8 +355,9 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails for an alias already in use, or when a parameter may not appear in
-    /// PUBLISH.
+    /// Fails for an alias already in use, when a parameter may not appear in
+    /// PUBLISH, and when this endpoint already is a publisher of the track in
+    /// this session (§5.1).
     pub fn publish(
         &mut self,
         full_track_name: FullTrackName,
@@ -338,7 +369,11 @@ impl Session {
         if self.published_aliases.contains(&track_alias) {
             return Err(UsageError("track alias already in use"));
         }
+        if self.is_publishing(&full_track_name) {
+            return Err(UsageError("already a publisher of this track"));
+        }
         let request_id = self.open(Request::Publish {
+            full_track_name: full_track_name.clone(),
             track_alias,
             state: PublishState::Pending,
         })?;
@@ -377,6 +412,9 @@ impl Session {
     /// The state of a request, or `None` for a handle this session never issued.
     #[must_use]
     pub fn request_state(&self, request: RequestId) -> Option<RequestState> {
+        if request.1 != self.tag {
+            return None;
+        }
         match self.requests.get(&request.0) {
             Some(live) if live.is_established() => Some(RequestState::Established),
             Some(_) => Some(RequestState::Pending),
@@ -389,10 +427,20 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// An error means the peer broke the protocol and the session has to be
-    /// closed with [`Error::termination_code`]; the request is left as it was.
-    /// A message for a request that is no longer open is such an error.
+    /// [`RequestFault::Peer`] means the peer broke the protocol and the session
+    /// has to be closed with [`Error::termination_code`]; the request is left as
+    /// it was. A message for a request that is no longer open is such an error.
+    /// [`RequestFault::Usage`] means `request` belongs to another session.
     pub fn on_request_message(
+        &mut self,
+        request: RequestId,
+        message: ControlMessage,
+    ) -> Result<RequestEvent, RequestFault> {
+        self.check_own(request)?;
+        Ok(self.on_own_request_message(request, message)?)
+    }
+
+    fn on_own_request_message(
         &mut self,
         request: RequestId,
         message: ControlMessage,
@@ -517,6 +565,7 @@ impl Session {
         stream_count: u64,
         error_reason: ReasonPhrase,
     ) -> Result<ControlMessage, UsageError> {
+        self.check_own(request)?;
         let Some(Request::Publish { state, .. }) = self.requests.get(&request.0) else {
             return Err(UsageError(
                 "PUBLISH_DONE ends a live subscription opened with PUBLISH",
@@ -529,7 +578,10 @@ impl Session {
                 "a refused REQUEST_UPDATE ends the subscription with UPDATE_FAILED",
             ));
         }
-        self.ended_by_publish_done.insert(request.0);
+        self.ended_by_publish_done.push_back(request.0);
+        if self.ended_by_publish_done.len() > ENDED_BY_PUBLISH_DONE_LIMIT {
+            self.ended_by_publish_done.pop_front();
+        }
         self.end_request(request);
         Ok(ControlMessage::PublishDone(PublishDone {
             status_code,
@@ -547,7 +599,11 @@ impl Session {
     /// Alias is retired at once (§10.11 lets a subscriber that unsubscribed skip
     /// the wait).
     pub fn cancel(&mut self, request: RequestId) {
-        self.ended_by_publish_done.remove(&request.0);
+        if request.1 != self.tag {
+            return;
+        }
+        self.ended_by_publish_done
+            .retain(|ended| *ended != request.0);
         self.end_request(request);
     }
 
@@ -637,7 +693,7 @@ impl Session {
             .checked_add(2)
             .ok_or(UsageError("request ids are exhausted"))?;
         self.requests.insert(request_id, request);
-        Ok(RequestId(request_id))
+        Ok(RequestId(request_id, self.tag))
     }
 
     /// Drops a request together with what it held, without waiting for anything.
@@ -654,6 +710,32 @@ impl Session {
             }
             Some(Request::Subscribe { .. } | Request::PublishNamespace { .. }) | None => {}
         }
+    }
+
+    fn check_own(&self, request: RequestId) -> Result<(), UsageError> {
+        if request.1 == self.tag {
+            Ok(())
+        } else {
+            Err(UsageError("the request belongs to another session"))
+        }
+    }
+
+    /// Whether this endpoint is the subscriber of a subscription to the track,
+    /// through its own SUBSCRIBE or a PUBLISH of the peer.
+    fn is_subscribed_to(&self, full_track_name: &FullTrackName) -> bool {
+        let own = self.requests.values().any(|request| {
+            matches!(request, Request::Subscribe { full_track_name: name, .. } if name == full_track_name)
+        });
+        own || self.peer.publishes(full_track_name)
+    }
+
+    /// Whether this endpoint is the publisher of a subscription to the track,
+    /// through its own PUBLISH or a SUBSCRIBE of the peer.
+    fn is_publishing(&self, full_track_name: &FullTrackName) -> bool {
+        let own = self.requests.values().any(|request| {
+            matches!(request, Request::Publish { full_track_name: name, .. } if name == full_track_name)
+        });
+        own || self.peer.subscribes_to(full_track_name)
     }
 
     fn was_issued(&self, request: RequestId) -> bool {
@@ -752,6 +834,22 @@ mod tests {
         TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap()
     }
 
+    impl Session {
+        /// `on_request_message` for a handle of this session, where only the
+        /// peer can be at fault.
+        fn feed(
+            &mut self,
+            request: RequestId,
+            message: ControlMessage,
+        ) -> Result<RequestEvent, Error> {
+            self.on_request_message(request, message)
+                .map_err(|fault| match fault {
+                    RequestFault::Peer(error) => error,
+                    RequestFault::Usage(error) => panic!("{error}"),
+                })
+        }
+    }
+
     fn client() -> Session {
         Session::new(Role::Client, Transport::WebTransport)
     }
@@ -819,7 +917,7 @@ mod tests {
             );
             for (index, (message, expected, state)) in steps.into_iter().enumerate() {
                 assert_eq!(
-                    session.on_request_message(request, message),
+                    session.feed(request, message),
                     expected,
                     "{name}, step {index}"
                 );
@@ -1307,7 +1405,7 @@ mod tests {
             let mut session = Session::new(Role::Server, Transport::WebTransport);
             let (request, _) = session.subscribe(track(b"a"), vec![]).unwrap();
             assert_eq!(
-                session.on_request_message(
+                session.feed(
                     request,
                     ControlMessage::RequestError(redirect(connect_uri, b"b"))
                 ),
@@ -1324,22 +1422,20 @@ mod tests {
         let (second, _) = session.subscribe(track(b"b"), vec![]).unwrap();
         assert_eq!(session.subscribed_alias(7), SubscribedAlias::Unknown);
 
-        session
-            .on_request_message(first, subscribe_ok(7, vec![]))
-            .unwrap();
+        session.feed(first, subscribe_ok(7, vec![])).unwrap();
         assert_eq!(
             session.subscribed_alias(7),
             SubscribedAlias::Established(&track(b"a"))
         );
         assert_eq!(
-            session.on_request_message(second, subscribe_ok(7, vec![])),
+            session.feed(second, subscribe_ok(7, vec![])),
             Err(Error::DuplicateTrackAlias(7))
         );
         // The duplicate alias closes the session even when the same SUBSCRIBE_OK
         // also names a Mandatory Track Property, which alone would only end the
         // request.
         assert_eq!(
-            session.on_request_message(
+            session.feed(
                 second,
                 subscribe_ok(7, vec![KeyValuePair::varint(0x4000, 1).unwrap()])
             ),
@@ -1351,11 +1447,7 @@ mod tests {
         // to another track.
         session.cancel(first);
         assert_eq!(session.subscribed_alias(7), SubscribedAlias::Retired);
-        assert!(
-            session
-                .on_request_message(second, subscribe_ok(7, vec![]))
-                .is_ok()
-        );
+        assert!(session.feed(second, subscribe_ok(7, vec![])).is_ok());
         assert_eq!(
             session.subscribed_alias(7),
             SubscribedAlias::Established(&track(b"b"))
@@ -1367,7 +1459,7 @@ mod tests {
         let mut session = client();
         let (request, _) = session.subscribe(track(b"a"), vec![]).unwrap();
         session
-            .on_request_message(
+            .feed(
                 request,
                 subscribe_ok(7, vec![KeyValuePair::varint(0x4000, 1).unwrap()]),
             )
@@ -1381,12 +1473,10 @@ mod tests {
         let (request, _) = session.subscribe(track(b"a"), vec![]).unwrap();
         // The data stream is handled before the SUBSCRIBE_OK that explains it.
         session.on_data_stream_closed(7);
-        session
-            .on_request_message(request, subscribe_ok(7, vec![]))
-            .unwrap();
+        session.feed(request, subscribe_ok(7, vec![])).unwrap();
         // Stream Count 1: the one stream already ended.
         session
-            .on_request_message(request, ControlMessage::PublishDone(publish_done()))
+            .feed(request, ControlMessage::PublishDone(publish_done()))
             .unwrap();
         assert_eq!(session.subscribed_alias(7), SubscribedAlias::Retired);
     }
@@ -1406,11 +1496,9 @@ mod tests {
         for (name, report) in reports {
             let mut session = client();
             let (request, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+            session.feed(request, subscribe_ok(7, vec![])).unwrap();
             session
-                .on_request_message(request, subscribe_ok(7, vec![]))
-                .unwrap();
-            session
-                .on_request_message(request, ControlMessage::PublishDone(publish_done()))
+                .feed(request, ControlMessage::PublishDone(publish_done()))
                 .unwrap();
             assert_eq!(
                 session.request_state(request),
@@ -1478,16 +1566,14 @@ mod tests {
             let mut session = client();
             let (request, _) = session.publish(track(b"a"), 1, vec![], vec![]).unwrap();
             if accepted {
-                session
-                    .on_request_message(request, request_ok(vec![]))
-                    .unwrap();
+                session.feed(request, request_ok(vec![])).unwrap();
             }
             session
                 .publish_done(request, 2, 0, ReasonPhrase::default())
                 .unwrap();
             for message in late {
                 assert_eq!(
-                    session.on_request_message(request, message.clone()),
+                    session.feed(request, message.clone()),
                     Ok(RequestEvent::LateMessage),
                     "accepted {accepted}: {message:?}"
                 );
@@ -1495,7 +1581,7 @@ mod tests {
             // Once the stream is reported gone, the request is forgotten.
             session.cancel(request);
             assert_eq!(
-                session.on_request_message(request, update()),
+                session.feed(request, update()),
                 Err(ENDED),
                 "accepted {accepted}"
             );
@@ -1522,27 +1608,19 @@ mod tests {
         let mut session = client();
         let (publish, _) = session.publish(track(b"a"), 1, vec![], vec![]).unwrap();
         // Before PUBLISH_OK there is no subscription to update.
-        assert_eq!(
-            session.on_request_message(publish, update()),
-            Err(NOT_ALLOWED)
-        );
-        session
-            .on_request_message(publish, request_ok(vec![]))
-            .unwrap();
-        assert_eq!(session.on_request_message(publish, update()), Ok(refused));
+        assert_eq!(session.feed(publish, update()), Err(NOT_ALLOWED));
+        session.feed(publish, request_ok(vec![])).unwrap();
+        assert_eq!(session.feed(publish, update()), Ok(refused));
         assert_eq!(
             session.request_state(publish),
             Some(RequestState::Established)
         );
         // Further updates get no second answer, and nothing else is taken.
         assert_eq!(
-            session.on_request_message(publish, update()),
+            session.feed(publish, update()),
             Ok(RequestEvent::UpdateAlreadyRefused)
         );
-        assert_eq!(
-            session.on_request_message(publish, request_ok(vec![])),
-            Err(NOT_ALLOWED)
-        );
+        assert_eq!(session.feed(publish, request_ok(vec![])), Err(NOT_ALLOWED));
         // The subscription can only end with UPDATE_FAILED (0x8).
         assert_eq!(
             session.publish_done(publish, 0x2, 1, ReasonPhrase::default()),
@@ -1565,13 +1643,8 @@ mod tests {
 
         // The publisher of a track this endpoint subscribed to may not update.
         let (subscribe, _) = session.subscribe(track(b"b"), vec![]).unwrap();
-        session
-            .on_request_message(subscribe, subscribe_ok(7, vec![]))
-            .unwrap();
-        assert_eq!(
-            session.on_request_message(subscribe, update()),
-            Err(NOT_ALLOWED)
-        );
+        session.feed(subscribe, subscribe_ok(7, vec![])).unwrap();
+        assert_eq!(session.feed(subscribe, update()), Err(NOT_ALLOWED));
     }
 
     #[test]
@@ -1599,11 +1672,23 @@ mod tests {
     fn a_handle_from_another_session_is_not_a_request_here() {
         let (foreign, _) = client().subscribe(track(b"a"), vec![]).unwrap();
         let mut session = client();
+        // The same Request ID is live in this session: the handle is told
+        // apart by its session, not by its number.
+        let (own, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        assert_eq!(own.value(), foreign.value());
+        let other_session = UsageError("the request belongs to another session");
+
         assert_eq!(session.request_state(foreign), None);
         assert_eq!(
             session.on_request_message(foreign, subscribe_ok(7, vec![])),
-            Err(ENDED)
+            Err(RequestFault::Usage(other_session))
         );
+        assert_eq!(
+            session.publish_done(foreign, 2, 0, ReasonPhrase::default()),
+            Err(other_session)
+        );
+        session.cancel(foreign);
+        assert_eq!(session.request_state(own), Some(RequestState::Pending));
     }
 
     #[test]

@@ -1,0 +1,25 @@
+[package]
+name = "xmoq-moqt-io"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+description = "Moves MoQ Transport messages and Objects over WebTransport streams; shared by the XmoQ client and relay"
+
+[lints]
+workspace = true
+
+[features]
+default = ["wtransport"]
+# The connection over the `wtransport` crate. Without it the crate has the
+# stream handling and the in-memory connection only, and pulls in no QUIC stack.
+wtransport = ["dep:wtransport"]
+
+[dependencies]
+xmoq-moqt = { path = "../moqt" }
+tokio = { version = "=1.49.0", features = ["macros", "rt", "sync", "time"] }
+# WHY the `quinn` feature: it is the only way wtransport 0.7.2 lets its user set
+# the QUIC flow control windows and stream limits (`wt::QuicLimits`).
+wtransport = { version = "=0.7.2", optional = true, features = ["quinn"] }
+
+[dev-dependencies]
+tokio = { version = "=1.49.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }

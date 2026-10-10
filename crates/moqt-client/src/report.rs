@@ -5,20 +5,13 @@
 //! `SENT`, and read the payload from `OBJECT`. The other lines are for people
 //! reading a log. Keeping all of them here keeps that contract in one place.
 
-use std::fmt::Display;
-
 use xmoq_moqt::Error as MoqtError;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
 use xmoq_moqt::message::{PublishDone, Setup};
 
-use crate::hex;
+use xmoq_moqt_io::Direction;
 
-/// Which way the bytes of a `TRACE` line travelled.
-#[derive(Clone, Copy)]
-pub enum Direction {
-    Send,
-    Recv,
-}
+use crate::hex;
 
 pub fn connected(url: &str) {
     println!("CONNECTED url={url}");
@@ -79,8 +72,8 @@ pub fn update_refused() {
     println!("UPDATE_REFUSED");
 }
 
-pub fn sent(payload_len: usize) {
-    println!("SENT group=0 object=0 payload_len={payload_len}");
+pub fn sent(group_id: u64, payload_len: usize) {
+    println!("SENT group={group_id} object=0 payload_len={payload_len}");
 }
 
 /// The raw bytes of one write or one read, printed with `--trace`.
@@ -92,12 +85,11 @@ pub fn trace(direction: Direction, stream: &str, bytes: &[u8]) {
     println!("TRACE {direction} {stream} {}", hex::encode(bytes));
 }
 
-/// The peer reset a stream.
-pub fn stream_reset(stream: &str, code: u64) {
-    println!("STREAM_RESET {stream} code={code:#x}");
-}
-
-/// This client stopped reading a stream.
-pub fn stream_stopped(stream: &str, why: impl Display) {
-    println!("STREAM_STOPPED {stream} {why}");
+/// A subgroup stream ended without a FIN: reset by the peer with this code,
+/// stopped by this client, or lost.
+pub fn stream_aborted(stream: u64, code: Option<u32>) {
+    match code {
+        Some(code) => println!("STREAM_ABORTED uni#{stream} code={code:#x}"),
+        None => println!("STREAM_ABORTED uni#{stream}"),
+    }
 }

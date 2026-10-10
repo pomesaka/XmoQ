@@ -1,0 +1,12 @@
+[package]
+name = "xmoq-relay-core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+description = "Routing and delivery decisions of the XmoQ relay, without I/O"
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-moqt = { path = "../moqt" }
