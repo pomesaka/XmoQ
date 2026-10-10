@@ -213,6 +213,9 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
+		// Without PUBLISH_DONE the Object may be lost with the session, and the
+		// run passes either way; its summary says which (disconnect.ts,
+		// `closedWithoutPublishDone`).
 		name: "own-browser publisher closes right after its last Object; all four subscribe",
 		script: "disconnect.ts",
 		args: [

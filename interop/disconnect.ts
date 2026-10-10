@@ -624,7 +624,9 @@ async function lastObjectThenClose(run: Run): Promise<ScenarioResult> {
 	);
 
 	const group = await publisher.sendLastAndClose(publishDone);
-	if (publishDone) await expectRelayFinished(publisher);
+	if (!publishDone) return closedWithoutPublishDone(run, subscribers, group);
+
+	await expectRelayFinished(publisher);
 	await allReceive(subscribers, group, run);
 	const ended = await outcomes(subscribers);
 	for (const { subscriber, outcome } of ended) {
@@ -640,6 +642,75 @@ async function lastObjectThenClose(run: Run): Promise<ScenarioResult> {
 		summary: "every subscriber received the last Object",
 		subscriptions: subscriptionsOf(ended),
 		measured: {},
+	};
+}
+
+/**
+ * The end of `last-object-then-close` for a publisher that sent no
+ * PUBLISH_DONE: its last Object arrives at every subscriber or at none, and
+ * the track ends either way.
+ *
+ * WHY the Object may be missing: nothing tells such a publisher that the
+ * relay has read its last stream. When the session ends, a stream that has
+ * arrived and was not read is dropped (docs/protocols.md, on what the
+ * WebTransport library cost), and so is the rest of one whose header was
+ * read. Both were seen: the first in 1 of 200 runs on a loaded machine, the
+ * second in CI. PUBLISH_DONE and the wait for the relay's FIN are what a
+ * publisher has against it, and the run with --with-publish-done holds that
+ * the Object arrives then.
+ *
+ * WHY not a wait before the close, which would make the Object arrive: the
+ * run would then show a delivery that nothing promises.
+ */
+async function closedWithoutPublishDone(
+	run: Run,
+	subscribers: Subscriber[],
+	group: number,
+): Promise<ScenarioResult> {
+	// The subscriptions end first: where the Object was lost, a subscriber
+	// that is waited on for it would never have it.
+	const ended = await outcomes(subscribers);
+	const took = ended.filter(({ outcome }) => outcome.groups.includes(group));
+	if (took.length !== 0 && took.length !== ended.length) {
+		throw new Error(
+			`the last Object reached ${took.map(({ subscriber }) => subscriber.label).join(", ")} and not the other own subscribers, of ${ended.length}`,
+		);
+	}
+	const delivered = took.length > 0;
+	if (delivered) await allReceive(subscribers, group, run);
+	for (const { subscriber, outcome } of ended) {
+		if (delivered) {
+			expectPublishDone(subscriber, outcome, {
+				statusCode: TRACK_ENDED,
+				groups: [group],
+				abortedStreams: 0,
+			});
+			continue;
+		}
+		// The relay had opened a stream towards the subscriber, when it had
+		// read the header of the publisher's, or it had not: one stream that
+		// ends with the relay's reset, or none.
+		const opened = outcome.streamCount === "1" ? 1 : 0;
+		expectPublishDone(subscriber, outcome, {
+			statusCode: TRACK_ENDED,
+			streamCount: opened,
+			abortedStreams: opened,
+		});
+		if ((await subscriber.payloads(group)).length !== 0) {
+			throw new Error(
+				`${subscriber.label} has an Object of Group ${group} that its subscription did not count`,
+			);
+		}
+	}
+	expectPublishDoneLines(ownOnly(subscribers), run);
+	await relayServesTheTrackAgain(run);
+
+	return {
+		summary: delivered
+			? "every subscriber received the last Object"
+			: "the last Object was lost with the publisher's session, and every own subscriber saw the track end",
+		subscriptions: subscriptionsOf(ended),
+		measured: { "last Object delivered": delivered ? 1 : 0 },
 	};
 }
 

@@ -20,7 +20,7 @@ Listed before the scenarios were written, from `draft-ietf-moq-transport-18` (§
 | 2 | The status of that PUBLISH_DONE is `TRACK_ENDED` (`0x2`) | Implementation notes, "What ends the upstream subscription" | the same |
 | 3 | PUBLISH_DONE is sent only after every stream of the subscription is closed, and its Stream Count is the number of streams opened, or 2^62 - 1 | §10.11 (MUST NOT, MUST), §5.1.1 | The count: every scenario, where both own subscribers compare it with the streams they got, and the stopped subscriber, which has to get 2^62 - 1. The order is not checked: a subscriber cannot tell it. own-rust reports only that the counted streams had ended before its wait of 2 seconds was over. Covered by the relay's tests |
 | 4 | A subgroup stream that got all its Objects ends with a FIN; one that did not ends with a reset | §11.4.3 (MUST) | publisher killed, where own-browser and moqtail-browser leave a stream open; own-rust reports every stream that ended without a FIN |
-| 5 | A stream the publisher had finished is delivered whole to the subscribers when the publisher's connection goes right after | Implementation notes, "A publisher whose connection goes" | last Object then close |
+| 5 | A stream the publisher had finished is delivered whole to the subscribers when the publisher's connection goes right after, **where the relay had the whole of it; without PUBLISH_DONE it may not (added 2026-10-11, section below)** | Implementation notes, "A publisher whose connection goes" | last Object then close |
 | 6 | The relay notices a peer that vanished without closing, within its idle timeout and one keep-alive interval (6 and 3 seconds, provisional) | Table of limits in the implementation notes | publisher killed (own-rust); subscribers killed. The scenarios fail above 10.5 seconds for a publisher and 7.5 for a subscriber. Measured: 9.0 seconds for a killed publisher, 6.0 to 6.1 for a killed subscriber. While the idle timeout was 9 seconds, a killed publisher was noticed after 12.0, later than the row said then |
 | 7 | After a publisher is gone, the relay holds nothing of it: the track can be published again | Clean-up of a long-running server; the relay refuses a second PUBLISH for a track | every scenario ends with a fresh publisher and subscriber on the same track |
 | 8 | When a subscriber leaves, the publisher and the other subscribers are not affected | §9.4, §11.4.1; architecture | subscribers leave |
@@ -191,9 +191,34 @@ The relay sent PUBLISH_DONE `TRACK_ENDED` in every case (rows 1, 2 and 4), with 
 | own-rust | Reads "send" and the end of its input together: Object, PUBLISH_DONE, session closed | The same |
 | moqtail-rust | The same input; it has no PUBLISH_DONE and calls `connection.close()` | Both own subscribers received the Object and saw PUBLISH_DONE `0x2` |
 
-The Object arrived in every run (row 5). Whether it arrived before or after PUBLISH_DONE was not looked at, so row 12 is not shown. With moqtail-rust the run took either about 1.5 seconds or about 13.5, the latter in 13 of 40 runs (20 of 71 before the change of library, which did not touch this peer): in those the relay learned that the publisher was gone by its idle timeout only. The same happened once in a pairing that moves one Object, `moqtail-rust to own-browser, then PUBLISH_DONE`, which took 13.4 seconds where it takes 0.6; the wait of that driver for the subscription's end is 30 seconds now, as here. The peer returns from `main` right after `connection.close()`, so the likely cause is that the process ends before the close is sent; this was not verified with a packet capture.
+The Object arrived in every run of this record (row 5). **Later it did not, for the own-browser publisher that sends no PUBLISH_DONE**; see "The last Object of a publisher that sends no PUBLISH_DONE can be lost" below. Whether it arrived before or after PUBLISH_DONE was not looked at, so row 12 is not shown. With moqtail-rust the run took either about 1.5 seconds or about 13.5, the latter in 13 of 40 runs (20 of 71 before the change of library, which did not touch this peer): in those the relay learned that the publisher was gone by its idle timeout only. The same happened once in a pairing that moves one Object, `moqtail-rust to own-browser, then PUBLISH_DONE`, which took 13.4 seconds where it takes 0.6; the wait of that driver for the subscription's end is 30 seconds now, as here. The peer returns from `main` right after `connection.close()`, so the likely cause is that the process ends before the close is sent; this was not verified with a packet capture.
 
 moqtail-browser is not a publisher here. Its `sendObject` queues the Object, and its `disconnect()` ends the PUBLISH before the Object is written: the relay sent PUBLISH_DONE with Stream Count 0 and was never given the Object.
+
+### The last Object of a publisher that sends no PUBLISH_DONE can be lost
+
+Added on 2026-10-11. The scenario in which the own-browser page writes its Object, closes the stream and closes the session, without PUBLISH_DONE, failed in CI (run 38063872794, on a change that did not touch it) and then here. In both the page had logged the header, the Object and the close of its stream before it closed the session, and the subscribers got no Object.
+
+| Where | How often | What the relay's log shows |
+|---|---|---|
+| CI | once; how many runs passed before was not counted | The relay read the Subgroup Header and opened the stream towards all four subscribers. Then the publisher's session ended, the relay stopped the publisher's stream and reset the four with `CANCELLED`, and sent PUBLISH_DONE `0x2` with Stream Count 1. The own subscribers saw one stream end without a FIN and no Object |
+| Here, one run at a time | 0 of 40 | |
+| Here, eight runs side by side, before the scenario was changed | **1 of 200** | The publisher's session ended first, and PUBLISH_DONE `0x2` went out with Stream Count 0. **The stream turned up after that**, and the relay stopped it (`STOP_DATA session=0 stream=3`). So its bytes had reached the relay |
+
+- The run here is the loss the [protocols document](../protocols.md) names as the cost of the WebTransport library: a stream that had arrived and was not accepted when the session closed.
+- **The run in CI is another one: the stream was accepted and its header read, and the Object behind it was not.** The implementation notes have the relay read what had arrived on an accepted stream before it treats the session as closed. Whether the Object had not left Chromium when the session was closed, or had reached the relay and was dropped there, cannot be told from the two logs; no packet capture was made.
+- Nothing promises this Object. A publisher that sends no PUBLISH_DONE has no word from the relay that its last stream was read; PUBLISH_DONE and the wait for the relay's FIN are what the notes give a publisher for it, and the same scenario with PUBLISH_DONE has not lost an Object in any run.
+
+**The scenario was changed to what holds.** Without PUBLISH_DONE the last Object reaches every subscriber or none; the own subscribers see PUBLISH_DONE `0x2` in both cases, with one stream that ended by the relay's reset or with none where the Object was lost; and the relay serves the track again afterwards. The summary line and the measured value "last Object delivered" say which it was. No wait was put before the close: it would make the Object arrive and show a delivery nothing promises. The scenario with PUBLISH_DONE is as strict as before.
+
+| Check of the new branch | Result |
+|---|---|
+| The page, changed for one run, closes without writing anything | passes as "lost", Stream Count 0 |
+| The page, changed for one run, opens the stream, writes no Object and closes 300 ms later | passes as "lost", Stream Count 1, one stream reset at the own Rust subscriber. The first form of the branch failed here ("PUBLISH_DONE has Stream Count 1, not 0") and was corrected: it had not allowed for the stream the relay had already opened, which is the case of the CI run |
+| The page as it is | passes as "every subscriber received the last Object" |
+| The page as it is, eight runs side by side, 200 runs | 200 pass: 199 as delivered and **1 as lost. That one had the form of the CI run**: the header read, the stream opened towards the four subscribers, then the session ended, the four streams reset, Stream Count 1. So both forms occur on this machine |
+
+The moqtail-rust publisher of this scenario stands on the same premise and runs through the same code now. Its close is not sent at all in a third of the runs, so its Object has seconds to arrive, and it arrived in every run so far.
 
 ### Subscribers that leave
 
