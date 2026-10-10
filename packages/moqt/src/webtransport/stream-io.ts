@@ -1,5 +1,5 @@
 import type { Session } from "../core/session.ts";
-import type { SessionOutput } from "../core/session-output.ts";
+import type { PeerStreamKind, SessionOutput } from "../core/session-output.ts";
 import { createStreamSlots } from "./stream-slots.ts";
 import type { MoqtTransport } from "./transport.ts";
 
@@ -35,6 +35,11 @@ export interface StreamIoOptions {
 	 * ones are not taken from the transport until one of these has ended.
 	 */
 	maxPeerBidiStreams: number;
+	/**
+	 * How long a stream of the peer has, from the moment it is taken from
+	 * the transport, to say what it is. One that has not is stopped.
+	 */
+	firstBytesTimeoutMs: number;
 	/** Called with the bytes of every stream. */
 	trace(direction: "sent" | "received", stream: string, data: Uint8Array): void;
 	/**
@@ -63,6 +68,13 @@ export interface StreamIo {
 	clear(): void;
 }
 
+/** A stream the peer opened, while its receiving side is read. */
+interface PeerStream {
+	reader: ReadableStreamDefaultReader<unknown>;
+	/** Runs out when the stream has not said what it is in time; cleared when it has. */
+	firstBytesTimer: ReturnType<typeof setTimeout>;
+}
+
 interface LocalStream {
 	writer: WritableStreamDefaultWriter<Uint8Array>;
 	/** Present on bidirectional streams until their read side has ended. */
@@ -89,19 +101,54 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		transport,
 		maxPeerUniStreams,
 		maxPeerBidiStreams,
+		firstBytesTimeoutMs,
 		trace,
 		input,
 		fatal,
 	} = options;
 	const localStreams = new Map<number, LocalStream>();
-	const peerUniReaders = new Map<
-		number,
-		ReadableStreamDefaultReader<unknown>
-	>();
+	const peerUniStreams = new Map<number, PeerStream>();
 	const peerBidiWriters = new Map<
 		number,
 		WritableStreamDefaultWriter<Uint8Array>
 	>();
+	/** The peer's bidirectional streams, until their receiving sides have ended. */
+	const peerBidiStreams = new Map<number, PeerStream>();
+	/**
+	 * Starts the time a stream of the peer has to say what it is. The timer
+	 * is kept with the stream (`PeerStream`), so that it goes when the
+	 * stream does.
+	 *
+	 * WHY: a stream that never says anything would hold one of the places
+	 * for the streams read at once for as long as the session lasts, and as
+	 * many of them as there are places would keep every later stream of the
+	 * peer from being read. The time runs from when the stream is taken: one
+	 * that waits in the transport for a place has none yet, as in the Rust
+	 * implementation (`first_bytes_timeout` in crates/moqt-io).
+	 *
+	 * The session decides whether the stream is stopped: it may have said
+	 * what it is in a read whose outputs are still in the queue.
+	 *
+	 * A browser runs the timer late in a page that is in the background
+	 * (docs/experiments/2026-10-11-first-bytes-timeout-in-chromium.md has by
+	 * how much). The stream then holds its place for longer; it is not
+	 * stopped early.
+	 */
+	const startFirstBytesTimer = (
+		kind: PeerStreamKind,
+		peerStream: number,
+	): ReturnType<typeof setTimeout> =>
+		setTimeout(() => {
+			void input((session) => session.peerStreamTimedOut(kind, peerStream));
+		}, firstBytesTimeoutMs);
+	const peerStreamsOf = (kind: PeerStreamKind): Map<number, PeerStream> =>
+		kind === "uni" ? peerUniStreams : peerBidiStreams;
+	/** The stream has ended: its timer and what was kept of it go. */
+	const forgetPeerStream = (kind: PeerStreamKind, peerStream: number): void => {
+		const streams = peerStreamsOf(kind);
+		clearTimeout(streams.get(peerStream)?.firstBytesTimer);
+		streams.delete(peerStream);
+	};
 	let nextPeerStream = 0;
 	/** Set by `clear`: nothing more is taken from the transport. */
 	let cleared = false;
@@ -166,14 +213,17 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * A stream holds its place until the peer has ended its direction, also
 	 * after the request was answered.
 	 *
-	 * FIXME: before this endpoint serves a request of the peer (a FETCH, or
-	 * the SUBSCRIBE a relay sends a publisher), give a stream a time by which
-	 * it has to say what it is. Nothing ends a stream here whose peer sends
-	 * the first bytes of a request and stops, or does not end its direction
-	 * after the answer: as many of them as the limit keep every later request
-	 * of the peer from being read. Today each request is refused, so nothing
-	 * is lost but the refusal. The Rust implementation stops such a stream
-	 * after 10 seconds (`first_bytes_timeout` in crates/moqt-io/src/streams.rs).
+	 * A stream that does not send its first message whole is stopped after
+	 * `firstBytesTimeoutMs` (`startFirstBytesTimer` above).
+	 *
+	 * FIXME: nothing ends a stream whose request was answered and whose peer
+	 * does not end its direction: as many of them as the limit keep every
+	 * later request of the peer from being read. The same holds for a subgroup
+	 * stream that stays open after its header, among the unidirectional
+	 * streams. The Rust implementation has the same ("how long it stays open
+	 * is the business of the two endpoints", crates/moqt-io/src/streams.rs).
+	 * Before this endpoint serves a request of the peer, decide what ends
+	 * such a stream.
 	 */
 	const bidiSlots = createStreamSlots(maxPeerBidiStreams);
 
@@ -282,7 +332,8 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 				// Only the read is guarded: it fails when the transport session
 				// ends, which `transport.closed` reports to the connection.
 				const next = await reader.read().catch(() => undefined);
-				if (next === undefined || next.done) return;
+				// The session may have ended while this waited for a stream.
+				if (next === undefined || next.done || cleared) return;
 				start(nextPeerStream, next.value);
 				nextPeerStream += 1;
 			}
@@ -387,6 +438,27 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 						.catch(() => {});
 					return undefined;
 				}
+				case "peer-stream-identified":
+					clearTimeout(
+						peerStreamsOf(output.kind).get(output.peerStream)?.firstBytesTimer,
+					);
+					return undefined;
+				case "abandon-peer-request": {
+					const error = transport.streamError(
+						output.code,
+						"given up by the MOQT session",
+					);
+					// Each fails on a direction that has ended, and then nothing is
+					// left to give up.
+					void peerBidiStreams
+						.get(output.peerStream)
+						?.reader.cancel(error)
+						.catch(() => {});
+					const writer = peerBidiWriters.get(output.peerStream);
+					peerBidiWriters.delete(output.peerStream);
+					void writer?.abort(error).catch(() => {});
+					return undefined;
+				}
 				case "stop-sending": {
 					const error = transport.streamError(
 						output.code,
@@ -394,9 +466,9 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 					);
 					// Fails when the stream already ended, and then nothing is left
 					// to stop.
-					void peerUniReaders
+					void peerUniStreams
 						.get(output.peerStream)
-						?.cancel(error)
+						?.reader.cancel(error)
 						.catch(() => {});
 					return undefined;
 				}
@@ -412,8 +484,16 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 				transport.incomingUnidirectionalStreams,
 				(peerStream, stream) => {
 					const reader = stream.getReader();
-					peerUniReaders.set(peerStream, reader);
+					peerUniStreams.set(peerStream, {
+						reader,
+						firstBytesTimer: startFirstBytesTimer("uni", peerStream),
+					});
 					uniSlots.take();
+					// Before any byte: the session stops only streams it knows.
+					void input((session) => {
+						session.peerStreamOpened("uni", peerStream);
+						return [];
+					});
 					void pump({
 						name: streamName("peer-uni", peerStream),
 						reader,
@@ -425,7 +505,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 								transport.streamErrorCode(error),
 							),
 						onEnd() {
-							peerUniReaders.delete(peerStream);
+							forgetPeerStream("uni", peerStream);
 							uniSlots.release();
 						},
 					});
@@ -436,15 +516,25 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 				transport.incomingBidirectionalStreams,
 				(peerStream, stream) => {
 					const writer = stream.writable.getWriter();
+					const reader = stream.readable.getReader();
 					peerBidiWriters.set(peerStream, writer);
+					peerBidiStreams.set(peerStream, {
+						reader,
+						firstBytesTimer: startFirstBytesTimer("bidi", peerStream),
+					});
 					bidiSlots.take();
+					void input((session) => {
+						session.peerStreamOpened("bidi", peerStream);
+						return [];
+					});
 					void pump({
 						name: streamName("peer-bidi", peerStream),
-						reader: stream.readable.getReader(),
+						reader,
 						onData: (session, data, fin) =>
 							session.receivePeerBidiStreamData(peerStream, data, fin),
 						onReset: (session) => session.peerBidiStreamReset(peerStream),
 						onEnd() {
+							forgetPeerStream("bidi", peerStream);
 							bidiSlots.release();
 							// The request ended without an answer from this endpoint,
 							// so the send side was never used. Closing it can only fail
@@ -461,7 +551,12 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 
 		clear() {
 			localStreams.clear();
-			peerUniReaders.clear();
+			for (const streams of [peerUniStreams, peerBidiStreams]) {
+				for (const { firstBytesTimer } of streams.values()) {
+					clearTimeout(firstBytesTimer);
+				}
+				streams.clear();
+			}
 			peerBidiWriters.clear();
 			cleared = true;
 			uniSlots.close();

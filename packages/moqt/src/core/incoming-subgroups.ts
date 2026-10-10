@@ -73,6 +73,16 @@ export interface IncomingSubgroups {
 	): void;
 	/** The peer reset the stream. */
 	reset(peerStream: number, out: SessionOutput[]): void;
+	/**
+	 * Drops what is held of a stream whose Subgroup Header has not fully
+	 * arrived, and says whether there was such a stream. One that has its
+	 * header, or was abandoned, is left as it is.
+	 *
+	 * WHY one call that asks and drops: whoever asks does so to stop the
+	 * stream, and a stream that was stopped and not dropped would stay here
+	 * for as long as the session lasts.
+	 */
+	dropBeforeHeader(peerStream: number): boolean;
 	/** A SUBSCRIBE left Pending: deliver or drop what was held for it. */
 	resolveHeld(out: SessionOutput[]): void;
 	clear(): void;
@@ -431,6 +441,9 @@ export function createIncomingSubgroups(
 			if (failure?.scope === "session") throw failure.error;
 
 			for (const item of result.items) {
+				if (item.type === "header") {
+					out.push({ type: "peer-stream-identified", kind: "uni", peerStream });
+				}
 				const stopReason =
 					item.type === "header"
 						? onHeader(stream, item.header)
@@ -471,6 +484,14 @@ export function createIncomingSubgroups(
 			if (stream.requestId !== undefined) countEnded(stream, out);
 			else if (stream.held.length > 0) finishedHeld.push(stream);
 			else countEarlyClosed(header.trackAlias);
+		},
+
+		dropBeforeHeader(peerStream) {
+			const stream = streams.get(peerStream);
+			if (stream === undefined || stream.abandoned) return false;
+			if (stream.header !== undefined) return false;
+			streams.delete(peerStream);
+			return true;
 		},
 
 		reset(peerStream, out) {

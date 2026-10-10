@@ -23,6 +23,15 @@ function started(limits?: SessionLimits): Session {
 	return session;
 }
 
+/**
+ * The outputs without the ones that say that a stream of the peer has said
+ * what it is (`peer-stream-identified`), so that a test lists what a stream
+ * leads to; `session-first-bytes.test.ts` has when that output comes.
+ */
+function said(outputs: SessionOutput[]): SessionOutput[] {
+	return outputs.filter((output) => output.type !== "peer-stream-identified");
+}
+
 /** A session with SUBSCRIBE on stream 1 (Request ID 0) and PUBLISH on stream 2 (Request ID 2, Track Alias 1). */
 function withRequests(): Session {
 	const session = started();
@@ -120,7 +129,9 @@ describe("Session", () => {
 		});
 
 		expect(
-			session.receivePeerUniStreamData(0, hex(MOQTAIL_RELAY_SETUP), false),
+			said(
+				session.receivePeerUniStreamData(0, hex(MOQTAIL_RELAY_SETUP), false),
+			),
 		).toEqual([
 			{
 				type: "event",
@@ -145,7 +156,13 @@ describe("Session", () => {
 			},
 		]);
 		expect(
-			session.receivePeerUniStreamData(1, hex("14 00 03 00 80 00 01 61"), true),
+			said(
+				session.receivePeerUniStreamData(
+					1,
+					hex("14 00 03 00 80 00 01 61"),
+					true,
+				),
+			),
 		).toEqual([
 			{
 				type: "event",
@@ -254,7 +271,13 @@ describe("Session", () => {
 		session.subscribe(TRACK);
 
 		expect(
-			session.receivePeerUniStreamData(0, hex("14 09 00 00 00 00 01 61"), true),
+			said(
+				session.receivePeerUniStreamData(
+					0,
+					hex("14 09 00 00 00 00 01 61"),
+					true,
+				),
+			),
 		).toEqual([]);
 		expect(
 			session.receiveRequestStreamData(1, hex("04 00 02 09 00"), false),
@@ -278,31 +301,33 @@ describe("Session", () => {
 		session.subscribe(TRACK);
 
 		expect(
-			session.receivePeerUniStreamData(
-				0,
-				hex("14 09 00 00 00 00 00 00"),
-				false,
+			said(
+				session.receivePeerUniStreamData(
+					0,
+					hex("14 09 00 00 00 00 00 00"),
+					false,
+				),
 			),
 		).toEqual([]);
-		expect(session.receivePeerUniStreamData(0, hex("00 00 00"), false)).toEqual(
-			[
-				{ type: "stop-sending", peerStream: 0, code: 0 },
-				{
-					type: "event",
-					event: {
-						type: "subgroup-abandoned",
-						trackAlias: 9n,
-						reason: "too many Objects before SUBSCRIBE_OK",
-					},
+		expect(
+			said(session.receivePeerUniStreamData(0, hex("00 00 00"), false)),
+		).toEqual([
+			{ type: "stop-sending", peerStream: 0, code: 0 },
+			{
+				type: "event",
+				event: {
+					type: "subgroup-abandoned",
+					trackAlias: 9n,
+					reason: "too many Objects before SUBSCRIBE_OK",
 				},
-			],
-		);
+			},
+		]);
 	});
 
 	test("stops a subgroup stream whose Track Alias no subscription can establish", () => {
 		const session = started();
 		expect(
-			session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false),
+			said(session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false)),
 		).toEqual([
 			{ type: "stop-sending", peerStream: 0, code: 1 },
 			{
@@ -318,7 +343,7 @@ describe("Session", () => {
 
 	test("a cancelled SUBSCRIBE stops its open subgroup streams, resets its request stream and drops later Objects (§10.11, §11.1)", () => {
 		const session = subscribed();
-		session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false);
+		said(session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false));
 		// A second SUBSCRIBE is Pending, so an unknown alias would be held.
 		session.subscribe({ trackNamespace: NAMESPACE, trackName: utf8("other") });
 
@@ -326,11 +351,11 @@ describe("Session", () => {
 			{ type: "stop-sending", peerStream: 0, code: 1 },
 			{ type: "reset", stream: 1, code: 1 },
 		]);
-		expect(session.receivePeerUniStreamData(0, hex("00 01 61"), false)).toEqual(
-			[],
-		);
 		expect(
-			session.receivePeerUniStreamData(1, hex("14 09 01 00 00"), false),
+			said(session.receivePeerUniStreamData(0, hex("00 01 61"), false)),
+		).toEqual([]);
+		expect(
+			said(session.receivePeerUniStreamData(1, hex("14 09 01 00 00"), false)),
 		).toEqual([
 			{ type: "stop-sending", peerStream: 1, code: 1 },
 			{
@@ -347,7 +372,7 @@ describe("Session", () => {
 	test("counts a subgroup stream that ended without an Object before SUBSCRIBE_OK (§10.11)", () => {
 		const session = started();
 		session.subscribe(TRACK);
-		session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), true);
+		said(session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), true));
 		session.receiveRequestStreamData(1, hex("04 00 02 09 00"), false);
 		// PUBLISH_DONE with Stream Count 1: the one stream has already ended.
 		expect(
@@ -475,7 +500,13 @@ describe("Session", () => {
 			},
 		]);
 		expect(
-			session.receivePeerUniStreamData(0, hex("14 09 00 00 00 00 01 61"), true),
+			said(
+				session.receivePeerUniStreamData(
+					0,
+					hex("14 09 00 00 00 00 01 61"),
+					true,
+				),
+			),
 		).toEqual([OBJECT_ON_ALIAS_9, ...CLOSED_AFTER_PUBLISH_DONE]);
 	});
 
@@ -496,7 +527,7 @@ describe("Session", () => {
 			...CLOSED_AFTER_PUBLISH_DONE,
 		]);
 		expect(
-			session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false),
+			said(session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false)),
 		).toEqual([
 			{ type: "stop-sending", peerStream: 0, code: 1 },
 			{
@@ -540,10 +571,12 @@ describe("Session", () => {
 	test("cancels a subscription whose Object carries a Mandatory Track Property, with MALFORMED_TRACK (§2.4.2, §3.3.3)", () => {
 		const session = subscribed();
 		expect(
-			session.receivePeerUniStreamData(
-				0,
-				hex("15 09 00 00 00 00 04 c0 40 00 01 01 61"),
-				false,
+			said(
+				session.receivePeerUniStreamData(
+					0,
+					hex("15 09 00 00 00 00 04 c0 40 00 01 01 61"),
+					false,
+				),
 			),
 		).toEqual([
 			{ type: "stop-sending", peerStream: 0, code: 18 },
@@ -697,9 +730,13 @@ describe("Session", () => {
 			session.receiveRequestStreamData(1, hex("0b 00 03 02 01 00"), false);
 			expect(act(session)).toEqual([]);
 			expect(
-				session
-					.receivePeerUniStreamData(0, hex("14 09 00 00 00 00 01 61"), true)
-					.slice(0, 2),
+				said(
+					session.receivePeerUniStreamData(
+						0,
+						hex("14 09 00 00 00 00 01 61"),
+						true,
+					),
+				).slice(0, 2),
 			).toEqual([OBJECT_ON_ALIAS_9, ...CLOSED_AFTER_PUBLISH_DONE.slice(0, 1)]);
 		},
 	);
@@ -712,10 +749,8 @@ describe("Session", () => {
 
 	test("answers a request the peer opens with REQUEST_ERROR NOT_SUPPORTED", () => {
 		const session = started();
-		const [respond, event] = session.receivePeerBidiStreamData(
-			0,
-			hex("03 00 1f 01"),
-			false,
+		const [respond, event] = said(
+			session.receivePeerBidiStreamData(0, hex("03 00 1f 01"), false),
 		);
 		if (respond?.type !== "respond") {
 			throw new Error("the first output is not a response");
@@ -786,12 +821,10 @@ describe("Session", () => {
 		const whole = hex(bytes);
 		// Its start alone asks for nothing yet.
 		expect(
-			session.receivePeerBidiStreamData(0, whole.subarray(0, 5), false),
+			said(session.receivePeerBidiStreamData(0, whole.subarray(0, 5), false)),
 		).toEqual([]);
-		const [respond, event] = session.receivePeerBidiStreamData(
-			0,
-			whole.subarray(5),
-			false,
+		const [respond, event] = said(
+			session.receivePeerBidiStreamData(0, whole.subarray(5), false),
 		);
 		if (respond?.type !== "respond") {
 			throw new Error("the first output is not a response");
@@ -812,7 +845,9 @@ describe("Session", () => {
 		expect(session.closed).toBe(false);
 		// The Request ID is used up.
 		expect(
-			session.receivePeerBidiStreamData(1, hex("0d 00 02 01 00"), false).at(-1),
+			said(
+				session.receivePeerBidiStreamData(1, hex("0d 00 02 01 00"), false),
+			).at(-1),
 		).toMatchObject({ type: "close-session", code: 4 });
 	});
 
@@ -841,7 +876,7 @@ describe("Session", () => {
 		"closes the session on a FETCH of the peer with $name",
 		({ bytes, code }) => {
 			expect(
-				started().receivePeerBidiStreamData(0, hex(bytes), false).at(-1),
+				said(started().receivePeerBidiStreamData(0, hex(bytes), false)).at(-1),
 			).toMatchObject({ type: "close-session", code });
 		},
 	);
@@ -856,10 +891,12 @@ describe("Session", () => {
 		{
 			name: "at the start of a stream the peer opened (§3.3)",
 			feed: (session: Session) =>
-				session.receivePeerBidiStreamData(
-					0,
-					hex("18 00 04 00 01 02 00"),
-					false,
+				said(
+					session.receivePeerBidiStreamData(
+						0,
+						hex("18 00 04 00 01 02 00"),
+						false,
+					),
 				),
 		},
 	])(
@@ -884,7 +921,7 @@ describe("Session", () => {
 		"closes the session when the stream of $name ends inside the message",
 		({ bytes }) => {
 			expect(
-				started().receivePeerBidiStreamData(0, hex(bytes), true).at(-1),
+				said(started().receivePeerBidiStreamData(0, hex(bytes), true)).at(-1),
 			).toMatchObject({ type: "close-session", code: 3 });
 		},
 	);
@@ -893,20 +930,22 @@ describe("Session", () => {
 		const session = started();
 		// A SUBSCRIBE of 31 bytes, of which one has come: it is refused.
 		expect(
-			session
-				.receivePeerBidiStreamData(0, hex("03 00 1f 01"), false)
-				.map((output) => output.type),
+			said(session.receivePeerBidiStreamData(0, hex("03 00 1f 01"), false)).map(
+				(output) => output.type,
+			),
 		).toEqual(["respond", "event"]);
 		// Ten more bytes, and the end.
 		expect(
-			session.receivePeerBidiStreamData(0, new Uint8Array(10), true).at(-1),
+			said(session.receivePeerBidiStreamData(0, new Uint8Array(10), true)).at(
+				-1,
+			),
 		).toMatchObject({ type: "close-session", code: 3 });
 	});
 
 	test("a stream of the peer that ends without a byte asked for nothing", () => {
 		const session = started();
 		expect(
-			session.receivePeerBidiStreamData(0, new Uint8Array(0), true),
+			said(session.receivePeerBidiStreamData(0, new Uint8Array(0), true)),
 		).toEqual([]);
 		expect(session.closed).toBe(false);
 	});
@@ -927,7 +966,7 @@ describe("Session", () => {
 	])("closes the session on $name", ({ requests, code }) => {
 		const session = started(SMALL_LIMITS);
 		const outputs = requests.map((bytes, peerStream) =>
-			session.receivePeerBidiStreamData(peerStream, hex(bytes), false),
+			said(session.receivePeerBidiStreamData(peerStream, hex(bytes), false)),
 		);
 		expect(outputs.at(-1)?.at(-1)).toMatchObject({
 			type: "close-session",
@@ -944,14 +983,14 @@ describe("Session", () => {
 		for (let index = 0; index < 1100; index++) {
 			const requestId = (3 + index * 2).toString(16).padStart(16, "0");
 			const bytes = `0d 00 09 ff ${requestId.match(/../g)?.join(" ")}`;
-			session.receivePeerBidiStreamData(index, hex(bytes), true);
+			said(session.receivePeerBidiStreamData(index, hex(bytes), true));
 		}
 		expect(session.closed).toBe(false);
 		// The late request with Request ID 1 is still a new request.
 		expect(
-			session
-				.receivePeerBidiStreamData(2000, hex("0d 00 02 01 00"), true)
-				.map((output) => output.type),
+			said(
+				session.receivePeerBidiStreamData(2000, hex("0d 00 02 01 00"), true),
+			).map((output) => output.type),
 		).toEqual(["respond", "event"]);
 	});
 
@@ -965,7 +1004,9 @@ describe("Session", () => {
 		).toEqual([]);
 		// Its Request ID was used all the same: a request that uses it again is a duplicate.
 		expect(
-			session.receivePeerBidiStreamData(0, hex("0d 00 02 01 00"), false).at(-1),
+			said(
+				session.receivePeerBidiStreamData(0, hex("0d 00 02 01 00"), false),
+			).at(-1),
 		).toMatchObject({ type: "close-session", code: 4 });
 	});
 
@@ -1053,14 +1094,20 @@ describe("Session", () => {
 		]);
 		// The draining subscription still gets its late stream, and then ends.
 		expect(
-			session.receivePeerUniStreamData(0, hex("14 09 00 00 00 00 01 61"), true),
+			said(
+				session.receivePeerUniStreamData(
+					0,
+					hex("14 09 00 00 00 00 01 61"),
+					true,
+				),
+			),
 		).toEqual([OBJECT_ON_ALIAS_9, ...CLOSED_AFTER_PUBLISH_DONE]);
 	});
 
 	test("counts a subgroup stream that was reset before SUBSCRIBE_OK (§10.11)", () => {
 		const session = started();
 		session.subscribe(TRACK);
-		session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false);
+		said(session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false));
 		session.peerUniStreamReset(0);
 		session.receiveRequestStreamData(1, hex("04 00 02 09 00"), false);
 		expect(
@@ -1075,13 +1122,15 @@ describe("Session", () => {
 		session.subscribe(TRACK);
 		// One stream without an Object for Track Alias 9, then one each for 64
 		// other aliases (0x40 to 0x7f, written as 2-byte varints).
-		session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), true);
+		said(session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), true));
 		for (let index = 0; index < 64; index++) {
 			const alias = (0x40 + index).toString(16);
-			session.receivePeerUniStreamData(
-				1 + index,
-				hex(`14 80 ${alias} 00 00 00`),
-				true,
+			said(
+				session.receivePeerUniStreamData(
+					1 + index,
+					hex(`14 80 ${alias} 00 00 00`),
+					true,
+				),
 			);
 		}
 		session.receiveRequestStreamData(1, hex("04 00 02 09 00"), false);
@@ -1154,9 +1203,40 @@ describe("Session", () => {
 		).toMatchObject({ type: "close-session", code: 3 });
 	});
 
-	test("drops a unidirectional stream that ends inside its type", () => {
+	// The draft has no rule for it. It is read like a stream that ends
+	// inside an Object (§11.4), as the Rust implementation reads it.
+	// `80` starts a type of two bytes (§1.4.1).
+	test.each([
+		{ name: "in one read", chunks: ["80"] },
+		{ name: "after a read that brought the first byte", chunks: ["80", ""] },
+	])(
+		"closes the session when a unidirectional stream ends inside its type, $name",
+		({ chunks }) => {
+			const session = started();
+			const outputs = chunks.map((chunk, index) =>
+				said(
+					session.receivePeerUniStreamData(
+						0,
+						hex(chunk),
+						index === chunks.length - 1,
+					),
+				),
+			);
+			expect(outputs.at(-1)).toMatchObject([
+				{ type: "close-session", code: 3 },
+			]);
+		},
+	);
+
+	test("a unidirectional stream that ends without a byte, or is reset inside its type, carried nothing (§11.4.1)", () => {
 		const session = started();
-		expect(session.receivePeerUniStreamData(0, hex("80"), true)).toEqual([]);
+		expect(said(session.receivePeerUniStreamData(0, hex(""), true))).toEqual(
+			[],
+		);
+		expect(said(session.receivePeerUniStreamData(1, hex("80"), false))).toEqual(
+			[],
+		);
+		expect(session.peerUniStreamReset(1)).toEqual([]);
 		expect(session.closed).toBe(false);
 	});
 
@@ -1298,13 +1378,17 @@ describe("Session", () => {
 	}[])("closes the session on $name", ({ on, bytes, fin, code }) => {
 		const session = withRequests();
 		const feed: Record<typeof on, () => SessionOutput[]> = {
-			"peer-uni": () => session.receivePeerUniStreamData(0, hex(bytes), fin),
+			"peer-uni": () =>
+				said(session.receivePeerUniStreamData(0, hex(bytes), fin)),
 			subscribe: () => session.receiveRequestStreamData(1, hex(bytes), fin),
 			publish: () => session.receiveRequestStreamData(2, hex(bytes), fin),
-			"peer-bidi": () => session.receivePeerBidiStreamData(0, hex(bytes), fin),
+			"peer-bidi": () =>
+				said(session.receivePeerBidiStreamData(0, hex(bytes), fin)),
 		};
 		expect(feed[on]().at(-1)).toMatchObject({ type: "close-session", code });
 		expect(session.closed).toBe(true);
-		expect(session.receivePeerUniStreamData(5, hex("3f"), false)).toEqual([]);
+		expect(said(session.receivePeerUniStreamData(5, hex("3f"), false))).toEqual(
+			[],
+		);
 	});
 });

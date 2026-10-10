@@ -84,6 +84,12 @@ const FETCH_BODY_HIGH_WATER_MARK = 4;
 const MAX_STREAM_ERROR_CODE = 255;
 const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
 /**
+ * Provisional, and the value of the Rust implementation
+ * (`first_bytes_timeout` in crates/moqt-io); docs/open-questions.md, on the
+ * receive limits.
+ */
+const DEFAULT_FIRST_BYTES_TIMEOUT_MS = 10_000;
+/**
  * §10.11 asks for at least the larger of the two delivery timeouts. Neither
  * is implemented, so this is a fixed value for now.
  */
@@ -167,6 +173,20 @@ export interface SessionConnectOptions {
 	 * 64 KiB each, for a FETCH that is decoded whole before it is refused.
 	 */
 	maxPeerBidiStreams?: number;
+	/**
+	 * How long a stream the peer opens has to say what it is, 10000 when left
+	 * out: for a unidirectional stream its type, with its whole Subgroup
+	 * Header or FETCH_HEADER where it has one, and for a bidirectional one
+	 * its first message, whole. A stream that has not by then is stopped,
+	 * and the session stays open. The time runs from when the stream is read,
+	 * so not for one that waits for a place among `maxPeerUniStreams` or
+	 * `maxPeerBidiStreams`. A page in the background runs its timers late,
+	 * so there the time can be longer, never shorter.
+	 *
+	 * 0 does not switch this off: a stream that has not said what it is in
+	 * its first read is then stopped at once. There is no value for "never".
+	 */
+	firstBytesTimeoutMs?: number;
 	/**
 	 * How long to wait for the peer's SETUP before closing with
 	 * CONTROL_MESSAGE_TIMEOUT. Like the two waits below, a whole number from
@@ -533,6 +553,10 @@ export async function connectOver(
 		"publishDoneTimeoutMs",
 		options.publishDoneTimeoutMs ?? DEFAULT_PUBLISH_DONE_TIMEOUT_MS,
 	);
+	const firstBytesTimeoutMs = timerDelay(
+		"firstBytesTimeoutMs",
+		options.firstBytesTimeoutMs ?? DEFAULT_FIRST_BYTES_TIMEOUT_MS,
+	);
 	const setupTimeoutMs = timerDelay(
 		"setupTimeoutMs",
 		options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
@@ -563,6 +587,7 @@ export async function connectOver(
 		transport,
 		maxPeerUniStreams,
 		maxPeerBidiStreams,
+		firstBytesTimeoutMs,
 		trace: (direction, name, data) =>
 			options.diagnostics?.onBytes?.(direction, name, data),
 		input: (action) => applyInput(action),
@@ -1073,6 +1098,7 @@ export async function connectOver(
 				};
 			}
 			case "subgroup-abandoned":
+			case "peer-stream-timed-out":
 			case "peer-request-rejected":
 				// Reported through `options.diagnostics` only.
 				return undefined;

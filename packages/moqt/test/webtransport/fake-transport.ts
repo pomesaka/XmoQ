@@ -130,7 +130,15 @@ export interface FakePeer {
 	untakenBidiStreams(): number;
 }
 
-export function createFakePeer(): FakePeer {
+/**
+ * `holdBidi`: `createBidirectionalStream` of the client does not resolve
+ * before this has, as when the peer gives no credit for a stream. The
+ * connection performs its outputs in order, so everything behind the
+ * request that waits for the stream waits with it.
+ */
+export function createFakePeer(
+	options: { holdBidi?: Promise<void> } = {},
+): FakePeer {
 	const clientUnis = handover<ReadableStreamDefaultReader<Uint8Array>>();
 	const clientBidis = handover<PeerBidiStream>();
 	const incomingUni = new TransformStream<
@@ -185,17 +193,18 @@ export function createFakePeer(): FakePeer {
 				clientUnis.put(stream.readable.getReader());
 				return Promise.resolve(stream.writable);
 			},
-			createBidirectionalStream() {
+			async createBidirectionalStream() {
+				await options.holdBidi;
 				const fromClient = pipe();
 				const toClient = pipe();
 				clientBidis.put({
 					sent: fromClient.readable.getReader(),
 					reply: toClient.writable.getWriter(),
 				});
-				return Promise.resolve({
+				return {
 					readable: toClient.readable,
 					writable: fromClient.writable,
-				});
+				};
 			},
 			// As Chromium 156 (spikes/wt-close-info): the code is wrapped to 32
 			// bits, where NaN is 0, and the peer gets the reason cut to 1024
