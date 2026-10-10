@@ -1,7 +1,7 @@
 # The relay takes each Subgroup from one stream
 
 - Date: 2026-10-10
-- Commit SHA: not fixed when this was written; the jj change is `smuwyoqzxssx`. Compared with `main` at `4fc65f5bfe46`, whose relay core is the one of `63ce3bbfcbae`
+- Commit SHA: `600a645687b1dc7db2c3af738c26cf0aa716e4f1` (the jj change `smuwyoqzxssx`). Compared with `main` at `4fc65f5bfe46`, whose relay core is the one of `63ce3bbfcbae`
 - Roadmap item: Phase 0b, take one track from several publishers. This is the first of five steps: the relay still has one source per track
 
 ## Objective

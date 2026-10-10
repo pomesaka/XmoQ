@@ -3,7 +3,7 @@
 Do not infer answers.
 
 - When to move the MoQ implementation from draft 18 to a newer draft: **undecided**
-- Codec/profile, Track/Object packaging, audio pipeline: **undecided**. Facts for the decision are in the [WebCodecs loopback record](experiments/2026-10-10-webcodecs-loopback.md). The parts to decide:
+- Codec/profile, Track/Object packaging, audio pipeline: **undecided**. Facts for the decision are in the [WebCodecs loopback record](experiments/2026-10-10-webcodecs-loopback.md) and, for the other browsers, in the [record of browser support](experiments/2026-10-10-browser-support-webtransport-webcodecs.md). The parts to decide:
   - Video codec, and for H.264 or HEVC the bitstream format (`avc`/`hevc` with a `description`, or `annexb`)
   - How a late joiner gets the current `decoderConfig`, which WebCodecs emits only once
   - Key frame interval, and whether a receiver can ask for a key frame
