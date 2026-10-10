@@ -230,7 +230,8 @@ const DISCONNECTS: Pairing[] = [
 	{
 		// WHY it mostly waits: the moqtail Rust peer exits right after
 		// `connection.close()`, and in 13 of 40 runs the relay learned of it by
-		// its idle timeout only, 12 seconds later. The Object had arrived.
+		// its idle timeout only (12 seconds later then, 6 to 9 now). The Object
+		// had arrived.
 		name: "moqtail-rust publisher closes right after its last Object; own-browser and own-rust subscribe",
 		script: "disconnect.ts",
 		args: [

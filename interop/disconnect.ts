@@ -37,6 +37,7 @@ import {
 } from "./clients.ts";
 import {
 	type Client,
+	captureGroup,
 	DISCONNECT_TIMEOUT_MS,
 	isOwnClient,
 	isRustClient,
@@ -64,26 +65,33 @@ const SLOW_SUBSCRIBER_BATCH = 64;
 const STREAM_COUNT_UNKNOWN = "4611686018427387903";
 
 /**
- * How long the relay may take to notice a client that was killed.
- * FIXME: bring this down to the relay's idle timeout of 9 seconds plus a
- * margin once the relay notices in that time. It takes 12.0 seconds after a
- * kill today, where it had sent nothing since the client's last packet, and
- * 9.0 where it had. This bound holds the relay to what it does now.
+ * How long the relay may take to notice a publisher, and a subscriber, that
+ * was killed. A killed process says nothing, so the relay notices by its
+ * idle timeout of 6 seconds (provisional). The timer starts anew when the
+ * relay sends after a silence, which for a publisher is its next keep-alive,
+ * up to 3 seconds later, and for a subscriber the Object it is sent right
+ * after the kill. Measured in 40 rounds: 9.0 seconds for the publisher, 6.0
+ * to 6.1 for the subscriber.
  *
- * WHY 3 seconds above the 12: the time is taken in this driver, after the
- * subscribers have reported, and these runs go on beside others. On the one
- * machine they ran on, 120 runs took 11.8 to 12.0 seconds; no run was made on
- * a CI runner. Provisional.
+ * WHY 1.5 seconds above what was measured, and not more: with the idle
+ * timeout of 9 seconds the relay had before, the two took 12.0 (11.8 once)
+ * and 9.0 seconds, and a relay that falls back to that has to fail here. The
+ * 1.5 seconds are for the time this driver takes to see the outcome and for
+ * the runs that go on beside. No run was made on a CI runner. Provisional.
  */
-const KILL_NOTICED_WITHIN_MS = 15_000;
+const PUBLISHER_KILL_NOTICED_WITHIN_MS = 10_500;
+const SUBSCRIBER_KILL_NOTICED_WITHIN_MS = 7_500;
 
 // Lines of the own relay (crates/relay/src/hub.rs). They are waited for where
 // no client can tell that the relay has acted: a killed client says nothing,
 // and a stopped one reads nothing. Where a scenario expects a SESSION_CLOSED
 // or an OPEN_DATA line to be absent, the run that follows every scenario
 // waits for a line of the same form, so that a change of the form is noticed.
-// Nothing does that for CLOSE_SESSION: no scenario makes the relay print it,
-// so a change of its form would go unnoticed and that check would pass.
+// Two kinds of lines have no such check in every run:
+// - CLOSE_SESSION: no scenario makes the relay print it, so a change of its
+//   form would go unnoticed and the check for its absence would pass.
+// - STOP_SENDING_RECEIVED: it is waited for only where moqtail-browser
+//   cancels. In the other runs a change of its form would go unnoticed.
 //
 // Which session a client has is taken from the order in which the clients of
 // a run connect, one after the other; the relay prints no address to tell
@@ -95,6 +103,20 @@ const sessionClosed = (session: number): RegExp =>
 /** The relay ended a request of the session on its side, as it does when the peer cancels. */
 const requestEnded = (session: number): RegExp =>
 	new RegExp(`^(?:FINISH|RESET)_REQUEST session=${session} stream=\\d+`);
+/**
+ * The relay got STOP_SENDING on a request stream of the session; capture
+ * group 1 is the code, or "none".
+ *
+ * The relay prints this only where it sees the STOP_SENDING before the reset
+ * of the other direction, which an own client that cancels sends as well
+ * (§3.3.2). For the own page it saw the reset first, and printed nothing, in
+ * 7 of 60 rounds. moqtail-browser sends a FIN in that direction and no
+ * reset, and the line was there in every round.
+ */
+const stopSendingReceived = (session: number): RegExp =>
+	new RegExp(
+		`^STOP_SENDING_RECEIVED session=${session} stream=\\d+ code=(\\S+)$`,
+	);
 /** The relay opened a subgroup stream of the Group towards the session. */
 const streamOpened = (session: number, group: number): RegExp =>
 	new RegExp(`^OPEN_DATA session=${session} out=\\d+ .* group=${group}$`);
@@ -227,17 +249,18 @@ function tookGroups(outcome: SubscriptionOutcome, groups: number[]): boolean {
 }
 
 /**
- * The Stream Reset Error Codes the relay may give a stream that its publisher
- * left unfinished (§11.4.3: such a stream ends with a reset). Which one it
- * gives depends on what it sees first of a publisher that goes: the end of
- * the PUBLISH, after which it cancels the stream with CANCELLED (0x1), or the
- * stream breaking off without a code, which it passes on as INTERNAL_ERROR
- * (0x0). Each was seen in about half of the runs of the same scenario.
+ * The Stream Reset Error Code the relay gives a stream that its publisher
+ * left unfinished (§11.4.3: such a stream ends with a reset): CANCELLED, the
+ * code of docs/moqt-implementation-notes.md for a subscription that ended.
+ *
+ * The relay gives CANCELLED where the publisher's session ended. Where the
+ * publisher resets the stream itself, the relay hands on the publisher's
+ * code instead. A browser that reset its streams before it closed the
+ * session of a page that is closed would therefore fail these runs. In 20
+ * rounds the relay saw the session end before any of the 111 streams of a
+ * closed page (own-browser and moqtail-browser) was reset.
  */
-// FIXME: leave CANCELLED alone here once the relay gives one code. The table
-// in docs/moqt-implementation-notes.md has CANCELLED for a subscription that
-// ended, so INTERNAL_ERROR is the relay departing from it.
-const RESET_CODES: ReadonlySet<string> = new Set(["0x0", "0x1"]);
+const RESET_BY_RELAY = "0x1";
 
 /**
  * What an own subscriber has to report of a subscription that PUBLISH_DONE
@@ -291,10 +314,10 @@ function expectPublishDone(
 		outcome.abortedStreams !== null &&
 		expected.abortedStreams !== undefined &&
 		(outcome.abortedStreams.length !== expected.abortedStreams ||
-			outcome.abortedStreams.some((code) => !RESET_CODES.has(code)))
+			outcome.abortedStreams.some((code) => code !== RESET_BY_RELAY))
 	) {
 		fail(
-			`streams ended without a FIN with the codes [${outcome.abortedStreams}], not ${expected.abortedStreams} of ${[...RESET_CODES].join(" or ")}`,
+			`streams ended without a FIN with the codes [${outcome.abortedStreams}], not ${expected.abortedStreams} of ${RESET_BY_RELAY}`,
 		);
 	}
 }
@@ -418,9 +441,9 @@ async function publisherKilled(run: Run): Promise<ScenarioResult> {
 	await relayServesTheTrackAgain(run);
 
 	const slowest = Math.max(...ended.map(({ ms }) => ms));
-	if (slowest > KILL_NOTICED_WITHIN_MS) {
+	if (slowest > PUBLISHER_KILL_NOTICED_WITHIN_MS) {
 		throw new Error(
-			`the subscribers saw PUBLISH_DONE ${seconds(slowest)} after the publisher was killed, later than ${seconds(KILL_NOTICED_WITHIN_MS)}`,
+			`the subscribers saw PUBLISH_DONE ${seconds(slowest)} after the publisher was killed, later than ${seconds(PUBLISHER_KILL_NOTICED_WITHIN_MS)}`,
 		);
 	}
 	return {
@@ -570,9 +593,9 @@ async function subscriberLeaves(run: Run): Promise<ScenarioResult> {
 					measured[
 						`${subscriber.label} ms from ${way} to the relay dropping the session`
 					] = ms;
-					if (way === "kill" && ms > KILL_NOTICED_WITHIN_MS) {
+					if (way === "kill" && ms > SUBSCRIBER_KILL_NOTICED_WITHIN_MS) {
 						throw new Error(
-							`the relay dropped the session of ${subscriber.label} ${seconds(ms)} after it was killed, later than ${seconds(KILL_NOTICED_WITHIN_MS)}`,
+							`the relay dropped the session of ${subscriber.label} ${seconds(ms)} after it was killed, later than ${seconds(SUBSCRIBER_KILL_NOTICED_WITHIN_MS)}`,
 						);
 					}
 				}),
@@ -638,6 +661,26 @@ async function subscriberLeaves(run: Run): Promise<ScenarioResult> {
 				`the relay dropped the session of ${subscriber.label}, which cancelled its subscription only`,
 			);
 		}
+		// §3.3.3: a relevant code. The own page cancels with a
+		// `WebTransportError` that carries CANCELLED (0x1), and the browser has
+		// to send that code and no other; the relay does not always print what
+		// it got (see `stopSendingReceived`). moqtail-browser cancels its reader
+		// without a reason, which arrives as 0x0, and its line is always there:
+		// that is the one place where a change of the line's form is noticed.
+		const codes = relay
+			.matches(stopSendingReceived(session))
+			.map((match) => captureGroup(match, 1));
+		const expectedCode = subscriber.kind === "own-browser" ? "0x1" : "0x0";
+		if (
+			codes.some((code) => code !== expectedCode) ||
+			(subscriber.kind === "moqtail-browser" && codes.length === 0)
+		) {
+			throw new Error(
+				`${subscriber.label} cancelled, and the relay printed STOP_SENDING for its request stream with the codes [${codes}], not ${expectedCode}`,
+			);
+		}
+		measured[`${subscriber.label} STOP_SENDING seen by the relay`] =
+			codes.length;
 	}
 
 	return {

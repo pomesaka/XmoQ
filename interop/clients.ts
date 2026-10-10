@@ -32,7 +32,8 @@ declare const window: {
 
 /**
  * Bounds each Rust client. WHY not their default of 20 seconds: a run that
- * waits for the relay's idle timeout takes half of that before it is over.
+ * waits for the relay's idle timeout, 6 to 9 seconds, and has several steps
+ * before and after must not end because a client gave up.
  */
 const RUST_CLIENT_TIMEOUT_SECS = "100";
 
