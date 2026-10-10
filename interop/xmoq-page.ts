@@ -58,6 +58,8 @@ export type OwnPageExtras = {
 		payloadHex: string,
 		finish: boolean,
 		properties: PageProperty[],
+		/** The Publisher Priority in the Subgroup Header; null leaves it out (§11.4.2). */
+		publisherPriority: number | null,
 	): Promise<void>;
 	/**
 	 * Sends one Object like `sendObjectIn` with `finish`, and closes the

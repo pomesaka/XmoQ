@@ -254,6 +254,34 @@ Added on 2026-10-11. The interop job of the pull request that added `ask-all` en
 
 **A fault of the driver that made the first failure look like a time limit.** Two waits added with these scenarios (`nextMatch` in `clients.ts`, `relayPrinted` in `disconnect.ts`) went on looking after their time was up: the run printed `FAILED` after 20 seconds and did not end, and the matrix stopped it at its limit of 120 seconds. Both now use `pollFor` in `harness.ts`, which stops at its limit. With a line that never comes, a run now ends 20 seconds in, with its own message.
 
+### A Subgroup that comes again with another Publisher Priority
+
+Added on 2026-10-11, on `main` at `55c0d370`, for a change to the relay merged in between (a Subgroup that comes again with another Publisher Priority ends the track as malformed). Scenario `subgroup-priorities` of `disconnect.ts` with `--priorities <first>,<second>`. The expectations were written from the notes' rows "A Subgroup that comes again with another Publisher Priority (relay)" and "A malformed track that has several sources" before the runs and not changed after. Subscribers were own-rust and own-browser.
+
+In every run the first stream of the Group is delivered to the subscribers before the second is sent, so which one "came first" and "is taken as given" is not a race. The first stream has ended with a FIN by then.
+
+| Requirement, from the rows | Checked by |
+|---|---|
+| "The stream that brought the other priority is stopped with `MALFORMED_TRACK`" | one `STOP_DATA` line for the session whose stream came second, code `0x12` |
+| "every subscription ends with PUBLISH_DONE `MALFORMED_TRACK`" | the own subscribers see PUBLISH_DONE `0x12`, Stream Count 1, and have the Group once, with the payload of the stream that came first |
+| "every source is cancelled: the one that sent what broke the object model with `MALFORMED_TRACK`, the others with `CANCELLED`" | the relay's lines for the request streams of each publisher's session carry `0x12` for the one whose stream came second and `0x1` for the other; an own-rust publisher ends with the same code in its last line |
+| "one publisher that sends a Subgroup again with another priority ends its own track" | the same with one own-browser publisher, which sends Group 0 with priority 0 and again with 1 |
+| "A Subgroup that two sources send with the same priority, one in the header and one by its default, is no difference" | the second stream is stopped with `0x1`, as any second stream of a Subgroup; no PUBLISH_DONE then; the track ends with `TRACK_ENDED` when both publishers have left |
+
+| Run | Result |
+|---|---|
+| 0 and 1: own-rust and own-rust; own-browser and own-rust; own-rust and own-browser; own-browser alone | all four passed at the first run, as first written |
+| 128 and left out: own-rust and own-rust; left out and 128: own-rust and own-browser | both passed at the first run. The headers on the wire: own-rust sent type `0x78` (the DEFAULT_PRIORITY bit, no priority byte), own-browser `5c 01 00 00 80` |
+| `mise run check`, `mise run interop` | passed; 74 of 74 pairings in 62.7 seconds, after the correction below (73 of 74 before it). The matrix has four: 0 and 1 from two own-rust publishers, from own-browser and own-rust, and from one own-browser publisher; left out and 128 from own-rust and own-browser |
+| The 34 leaving scenarios, 20 rounds | 20 of 20 rounds, 23.9 to 39.2 seconds a round (04:34 to 04:43, no sleep in the power log) |
+| Temporary change to the relay core, taken back: a difference is never found | the runs with 0 and 1 fail: the relay does not stop the second stream at all (`timed out waiting for the relay to print /^STOP_DATA .../`) |
+| Temporary change, taken back: a header without a priority counts as 0 and not as 128 | the run with 128 and left out fails: "the relay stopped the second stream of the Subgroup, from pub2:own-rust, with [0x12], not once with 0x1" |
+
+- **The first form of the check on the own-rust publisher failed in the first run of the whole matrix**, and was the scenario's fault: it waited for the client's `STOP_SENDING_RECEIVED` line. The relay cancels a PUBLISH by resetting its direction of the request stream and stopping the publisher's, with the same code, and which of the two the client sees first differs from run to run: that run had the reset first and no STOP_SENDING line, where the six single runs before all had the STOP_SENDING. The check reads the code from the client's last line now (`Error: the subscriber ended the subscription: reset, code 0x12`, or `STOP_SENDING, code 0x12`). The client prints that line when its process ends, which is when its stdin does, so the driver closes the stdin once the relay has seen the client's session end. In 8 runs after the change the reset came first in 5 and the STOP_SENDING in 3, and all passed.
+- **The own page reports the cancel as a reset**: its library's event is `request-closed`, reason `peer-reset`, reset code 18 (`0x12`). The scenario reads the relay's lines for a page and the client's own line for own-rust.
+- **`@xmoq/moqt` can set the priority of a stream and can leave it out**, which the page of these runs now passes on; it could send priority 0 only before.
+- Not run: a Subgroup that comes again while its first stream is still open (the clients finish every stream they send in this scenario); a DEFAULT PUBLISHER PRIORITY among the Track Properties (no client here sends one); a publisher that publishes anew with another default; a header that leaves the Subgroup ID to the first Object.
+
 ## Limitations and blockers
 
 - **The relay change was under review when the runs were made.** The last runs are on `a44c8854`; if it changes again, they have to be made again.

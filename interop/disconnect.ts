@@ -39,6 +39,12 @@
 //     announces after they came. refusing-announcer: an own-browser page
 //     announces and refuses what it is asked; it is not asked again until it
 //     announces anew.
+//   subgroup-priorities     --priorities <first>,<second> --publisher <own client> [--publisher <own client>] --subscriber <own client>...
+//     A Subgroup comes twice, with these Publisher Priorities (0 to 255, or
+//     default for a header without one). With two publishers the second
+//     sends the Group the first has sent; with one, own-browser, it sends
+//     the Group again itself. Where the priorities differ the track ends as
+//     malformed; where they are the same the second stream is only stopped.
 //   publish-anew            --publisher own-rust --subscriber <client>... [--same-alias]
 //     The publisher sends a Group, says PUBLISH_DONE and publishes the track
 //     anew on the same session, under the next Track Alias or the same, and
@@ -61,6 +67,7 @@ import {
 	type LeaveWay,
 	type Publisher,
 	type PublisherPlan,
+	type PublisherPriority,
 	type Subscriber,
 	type SubscriberPlan,
 	type SubscriptionOutcome,
@@ -88,6 +95,8 @@ import {
 /** PUBLISH_DONE Status Codes (§10.11). */
 const TRACK_ENDED = 0x2;
 const TOO_FAR_BEHIND = 0x5;
+/** Also the Stream Reset Error Code and the STOP_SENDING code of the same name. */
+const MALFORMED_TRACK = 0x12;
 
 /**
  * Objects the slow-subscriber run sends at most before it gives up. The
@@ -206,6 +215,7 @@ const SCENARIOS = [
 	"publish-while-asked",
 	"publish-anew",
 	"ask-all",
+	"subgroup-priorities",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
 type OptionOfTwoSources =
@@ -238,6 +248,9 @@ const { values: options } = parseArgs({
 		"same-alias": { type: "boolean", default: false },
 		// ask-all: which publishers there are and when they announce.
 		ask: { type: "string" },
+		// subgroup-priorities: the Publisher Priority of the first and of the
+		// second stream of the Subgroup, as "0,1" or "128,default".
+		priorities: { type: "string" },
 		"second-joins": { type: "string" },
 		port: { type: "string", default: "44340" },
 		verbose: { type: "boolean", default: false },
@@ -1626,6 +1639,212 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 	};
 }
 
+function parsePriority(text: string): PublisherPriority {
+	if (text === "default") return text;
+	const value = Number(text);
+	if (!/^\d+$/.test(text) || value > 255) {
+		throw new Error(`"${text}" is no Publisher Priority: 0 to 255, or default`);
+	}
+	return value;
+}
+
+/** The priority a header with this setting means: 128 where it is left out and the publisher gave no default (§11.4.2). */
+const priorityMeant = (priority: PublisherPriority): number =>
+	priority === "default" ? 128 : priority;
+
+/** The codes with which the relay reset or stopped request streams of the session. */
+const requestCancelCodes = (session: number, run: Run): string[] =>
+	run.context.relay
+		.matches(
+			new RegExp(
+				`^(?:RESET|STOP)_REQUEST session=${session} stream=\\d+ code=(\\S+)$`,
+			),
+		)
+		.map((match) => captureGroup(match, 1));
+
+/**
+ * A Subgroup comes to the relay a second time, with the same Publisher
+ * Priority or another: from a second publisher, or, with one own-browser
+ * publisher, from the same one.
+ *
+ * The notes, "A Subgroup that comes again with another Publisher Priority
+ * (relay)": "Malformed Track: every subscription ends with PUBLISH_DONE
+ * `MALFORMED_TRACK`, and every source is cancelled [...] The stream that
+ * brought the other priority is stopped with `MALFORMED_TRACK` and its source
+ * is the one that gets that code. Which of the two is wrong the relay cannot
+ * know; the one that came first is taken as given." "A Subgroup that two
+ * sources send with the same priority, one in the header and one by its
+ * default, is no difference". And "A malformed track that has several
+ * sources": "the one that sent what broke the object model with
+ * `MALFORMED_TRACK`, the others with `CANCELLED`".
+ */
+async function subgroupPriorities(run: Run): Promise<ScenarioResult> {
+	const [firstText, secondText, ...more] = (options.priorities ?? "").split(
+		",",
+	);
+	if (firstText === undefined || secondText === undefined || more.length > 0) {
+		throw new Error(
+			`--priorities "${options.priorities}" is not <first>,<second>, each 0 to 255 or default`,
+		);
+	}
+	const priorities = [parsePriority(firstText), parsePriority(secondText)];
+	const [firstPriority, secondPriority] = priorities;
+	if (firstPriority === undefined || secondPriority === undefined) {
+		throw new Error("two priorities are needed");
+	}
+	const differ = priorityMeant(firstPriority) !== priorityMeant(secondPriority);
+	const kinds = publisherKinds();
+	const [firstKind, secondKind] = kinds;
+	if (firstKind === undefined || kinds.length > 2) {
+		throw new Error("--scenario subgroup-priorities has one or two publishers");
+	}
+	if (secondKind === undefined && firstKind !== "own-browser") {
+		throw new Error(
+			`one publisher that sends a Subgroup twice has to be own-browser, the one client that can, not ${firstKind}`,
+		);
+	}
+	const subscriberKinds = options.subscriber.map((value) =>
+		parseClient("subscriber", value),
+	);
+	const passing = subscriberKinds.find((kind) => !isOwnClient(kind));
+	if (passing !== undefined) {
+		throw new Error(
+			`--scenario subgroup-priorities needs own subscribers, which say how their subscription ended, not ${passing}`,
+		);
+	}
+	const relay = run.context.relay;
+	const first = await joinAsPublisher(firstKind, run, {
+		label: `pub1:${firstKind}`,
+		payloadHex: hexOf(`first ${run.payloadHex}`),
+		publisherPriority: firstPriority,
+	});
+	const second =
+		secondKind === undefined
+			? undefined
+			: await joinAsPublisher(secondKind, run, {
+					label: `pub2:${secondKind}`,
+					payloadHex: hexOf(`second ${run.payloadHex}`),
+					publisherPriority: secondPriority,
+				});
+	const subscribers = await joinAsSubscribers(subscriberKinds, "sub", run);
+
+	// WHY the first stream is delivered before the second is sent: "the one
+	// that came first is taken as given", and which came first is then not a
+	// race. The stream has ended with a FIN by then; the clients finish
+	// every stream they send here, so a Subgroup that comes again while its
+	// first stream is open is not run.
+	const group = await first.send();
+	await allReceive(subscribers, group, first);
+	// The one whose stream comes second, and that stream's session.
+	const again = second ?? first;
+	if (second === undefined) {
+		await first.sendAgain(group, secondPriority);
+	} else {
+		const sent = await second.send();
+		if (sent !== group) {
+			throw new Error(
+				`${second.label} sent Group ${sent}, where the scenario needs Group ${group} a second time`,
+			);
+		}
+	}
+	const againSession = sessionOf(again, run);
+	// What the relay does with the second stream: one stop, with the code.
+	await relayPrinted(dataStreamStopped(againSession), 1, run);
+	const stopCodes = relay
+		.matches(dataStreamStopped(againSession))
+		.map((match) => captureGroup(match, 1));
+	const expectedStop = differ ? MALFORMED_TRACK : 0x1;
+	if (stopCodes.join(",") !== `0x${expectedStop.toString(16)}`) {
+		throw new Error(
+			`the relay stopped the second stream of the Subgroup, from ${again.label}, with [${stopCodes}], not once with 0x${expectedStop.toString(16)}`,
+		);
+	}
+
+	if (!differ) {
+		// "no difference": the track goes on, and ends when its publishers leave.
+		if (second === undefined) {
+			throw new Error("the same priority twice is run with two publishers");
+		}
+		expectOneStreamEach(subscribers, [group], run);
+		await leaveInOrder(first, run);
+		expectStillSubscribed(subscribers, run, `when ${first.label} had left`);
+		await expectOwnPublishDone(second, await second.end());
+		const ended = await outcomes(subscribers);
+		await expectOneObjectEach(subscribers, [group], first);
+		for (const { subscriber, outcome } of ended) {
+			expectPublishDone(subscriber, outcome, {
+				statusCode: TRACK_ENDED,
+				groups: [group],
+				abortedStreams: 0,
+			});
+		}
+		expectPublishDoneLines(subscribers, run);
+		await relayServesTheTrackAgain(run);
+		return {
+			summary: `the relay took Group ${group} from ${first.label} with priority ${firstText} and stopped the stream of ${second.label} with ${secondText} as one more of the same Subgroup; the track went on`,
+			subscriptions: subscriptionsOf(ended),
+			measured: {},
+		};
+	}
+
+	// "every subscription ends with PUBLISH_DONE MALFORMED_TRACK". The Group
+	// they have is the one that came first, whole.
+	const ended = await outcomes(subscribers);
+	for (const { subscriber, outcome } of ended) {
+		expectPublishDone(subscriber, outcome, {
+			statusCode: MALFORMED_TRACK,
+			groups: [group],
+			abortedStreams: 0,
+		});
+	}
+	await expectOneObjectEach(subscribers, [group], first);
+	expectPublishDoneLines(subscribers, run);
+	// "every source is cancelled": the one whose stream brought the other
+	// priority with MALFORMED_TRACK, another with CANCELLED.
+	const sources = [
+		{ publisher: again, code: "0x12" },
+		...(second === undefined ? [] : [{ publisher: first, code: "0x1" }]),
+	];
+	for (const { publisher, code } of sources) {
+		const session = sessionOf(publisher, run);
+		await relayPrinted(
+			new RegExp(`^(?:RESET|STOP)_REQUEST session=${session} `),
+			1,
+			run,
+		);
+		const codes = requestCancelCodes(session, run);
+		if (codes.some((each) => each !== code)) {
+			throw new Error(
+				`the relay cancelled the PUBLISH of ${publisher.label} with [${codes}], not with ${code}`,
+			);
+		}
+	}
+	// The publishers are still there: an own-rust one closes its session
+	// when its PUBLISH is ended, a page is closed.
+	for (const { publisher, code } of sources) {
+		if (isBrowserClient(publisher.kind)) await publisher.kill();
+		await relay.waitForLine(
+			sessionClosed(sessionOf(publisher, run)),
+			DISCONNECT_TIMEOUT_MS,
+		);
+		if (publisher.kind === "own-rust") {
+			const cancelled = await publisher.publishCancelledWith();
+			if (cancelled !== code) {
+				throw new Error(
+					`${publisher.label} saw its PUBLISH ended with ${cancelled}, not ${code}`,
+				);
+			}
+		}
+	}
+	await relayServesTheTrackAgain(run);
+
+	return {
+		summary: `the relay ended the track as malformed when ${again.label} sent Group ${group} again with priority ${secondText} after ${firstText}: PUBLISH_DONE 0x12 to the subscribers, 0x12 to ${again.label}${second === undefined ? "" : `, 0x1 to ${first.label}`}`,
+		subscriptions: subscriptionsOf(ended),
+		measured: {},
+	};
+}
+
 const ASK_WAYS = [
 	"two-announcers",
 	"announcer-and-publisher",
@@ -2033,6 +2252,7 @@ const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"publish-while-asked": publishWhileAsked,
 	"publish-anew": publishAnew,
 	"ask-all": askAll,
+	"subgroup-priorities": subgroupPriorities,
 };
 
 async function main(): Promise<void> {

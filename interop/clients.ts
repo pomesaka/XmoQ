@@ -95,7 +95,16 @@ export interface PublisherPlan {
 	 * when left out. The moqtail clients cannot send any.
 	 */
 	properties?: PageProperty[];
+	/**
+	 * The own clients: the Publisher Priority in the Subgroup Headers it
+	 * sends, or "default" for headers that leave it out (§11.4.2: the
+	 * Subgroup then has the track's default, 128 where the publisher gave
+	 * none). 0 when left out, as the clients did before they could be told.
+	 */
+	publisherPriority?: PublisherPriority;
 }
+
+export type PublisherPriority = number | "default";
 
 export interface Publisher {
 	kind: Client;
@@ -135,6 +144,26 @@ export interface Publisher {
 		peerEnd: string;
 		peerEndAfterMs: number;
 	}>;
+	/**
+	 * own-browser: sends Object 0 of a Group it has sent before, on a new
+	 * stream, with this Publisher Priority. The other clients send each
+	 * Group once.
+	 */
+	sendAgain(group: number, publisherPriority: PublisherPriority): Promise<void>;
+	/**
+	 * own-rust: resolves with the code with which the subscriber ended its
+	 * PUBLISH, as "0x1", once it has. The client ends with an error then.
+	 *
+	 * WHY the code alone: a relay that cancels a PUBLISH resets its direction
+	 * of the request stream and stops the publisher's with the same code, and
+	 * which of the two the client sees first differs from run to run.
+	 *
+	 * To be called when the relay has seen the client's session end. WHY: the
+	 * client prints the line as its process ends, and the process ends when
+	 * its stdin does, so this closes the stdin; on a client whose PUBLISH is
+	 * still there, that would end the track in order instead.
+	 */
+	publishCancelledWith(): Promise<string>;
 	/** Like `send`, and leaves the stream open. Only own-browser can. */
 	sendUnfinished(): Promise<number>;
 	/**
@@ -193,6 +222,11 @@ async function startRustPublisher(
 	run: ClientRun,
 	plan: PublisherPlan,
 ): Promise<Publisher> {
+	if (plan.publisherPriority !== undefined && kind !== "own-rust") {
+		throw new Error(
+			`${label} cannot be told a Publisher Priority: only the own clients can`,
+		);
+	}
 	if (plan.properties !== undefined && kind !== "own-rust") {
 		throw new Error(
 			`${label} cannot send Object Properties: only the own clients can`,
@@ -224,6 +258,9 @@ async function startRustPublisher(
 			...(servesAfterMs === undefined
 				? []
 				: ["--serve-delay-ms", String(servesAfterMs)]),
+			...(plan.publisherPriority === undefined
+				? []
+				: ["--publisher-priority", String(plan.publisherPriority)]),
 			...(plan.properties ?? []).flatMap((property) => [
 				"--object-property",
 				rustPropertyText(property, "="),
@@ -270,6 +307,16 @@ async function startRustPublisher(
 			Promise.resolve(
 				client.matches(/^PUBLISH_DONE_PEER_ENDED how=(.*)$/).at(-1)?.[1],
 			),
+		sendAgain: () => Promise.reject(new Error(`${kind} sends each Group once`)),
+		async publishCancelledWith() {
+			client.child.stdin.end();
+			return captureGroup(
+				await client.waitForLine(
+					/^Error: the subscriber ended the subscription: (?:reset|STOP_SENDING), code (\S+)$/,
+				),
+				1,
+			);
+		},
 		async publishAnew(sameAlias, peerHasReadPublishDone) {
 			const PUBLISHED = /^PUBLISHED track_alias=(\d+) /;
 			const PEER_ENDED = /^PUBLISH_DONE_PEER_ENDED how=(.*)$/;
@@ -409,6 +456,12 @@ async function startBrowserPublisher(
 				return "page closed";
 			},
 			peerEndAfterPublishDone: () => Promise.resolve(undefined),
+			sendAgain: () =>
+				Promise.reject(new Error(`${kind} sends each Group once`)),
+			publishCancelledWith: () =>
+				Promise.reject(
+					new Error(`${kind} does not say what ended its PUBLISH`),
+				),
 			publishAnew: () =>
 				Promise.reject(new Error(`${kind} cannot publish its track anew`)),
 			isServing: () => true,
@@ -429,6 +482,8 @@ async function startBrowserPublisher(
 	}
 	let nextGroup = plan.firstGroup ?? 0;
 	let leftOpen = 0;
+	const pagePriority =
+		plan.publisherPriority === "default" ? null : (plan.publisherPriority ?? 0);
 	const sendIn = async (finish: boolean): Promise<number> => {
 		const group = nextGroup;
 		nextGroup += 1;
@@ -437,14 +492,15 @@ async function startBrowserPublisher(
 			label,
 			`send Group ${group}`,
 			page.evaluate(
-				([g, hex, fin, properties]) =>
-					window.xmoqOwn.sendObjectIn(g, hex, fin, properties),
-				[String(group), payloadHex, finish, plan.properties ?? []] satisfies [
-					string,
-					string,
-					boolean,
-					PageProperty[],
-				],
+				([g, hex, fin, properties, priority]) =>
+					window.xmoqOwn.sendObjectIn(g, hex, fin, properties, priority),
+				[
+					String(group),
+					payloadHex,
+					finish,
+					plan.properties ?? [],
+					pagePriority,
+				] satisfies [string, string, boolean, PageProperty[], number | null],
 			),
 		);
 		return group;
@@ -476,6 +532,23 @@ async function startBrowserPublisher(
 				page.evaluate(() => window.xmoqOwn.publishEnd()),
 			);
 		},
+		async sendAgain(group, publisherPriority) {
+			await onPage(
+				label,
+				`send Group ${group} again`,
+				page.evaluate(
+					([g, hex, priority]) =>
+						window.xmoqOwn.sendObjectIn(g, hex, true, [], priority),
+					[
+						String(group),
+						payloadHex,
+						publisherPriority === "default" ? null : publisherPriority,
+					] satisfies [string, string, number | null],
+				),
+			);
+		},
+		publishCancelledWith: () =>
+			Promise.reject(new Error(`${kind} does not say what ended its PUBLISH`)),
 		publishAnew: () =>
 			Promise.reject(new Error(`${kind} cannot publish its track anew`)),
 		isServing: () => true,
