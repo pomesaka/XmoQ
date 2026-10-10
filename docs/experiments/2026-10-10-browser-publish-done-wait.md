@@ -1,7 +1,7 @@
 # `@xmoq/moqt` waits for the subscriber after PUBLISH_DONE
 
 - Date: 2026-10-10
-- Commit SHA: the commit that changes `PublishedTrack.done()` in `packages/moqt/src/webtransport/connection.ts` together with this record. The runs were made on its working copy on top of `4fc65f5`
+- Commit SHA: `a440f0cf552341283ec3aafcf787f9e94fb0fb2e`. The runs were made on its working copy on top of `4fc65f5`
 - Roadmap item: Phase 0b, own TypeScript browser client. Closes the gap the [implementation notes](../moqt-implementation-notes.md) name in the row "A publisher that ended its PUBLISH with PUBLISH_DONE and wants to close the session": the Rust client did this since [the change of library](2026-10-10-webtransport-library-switch.md), the browser client did not
 
 ## Objective
