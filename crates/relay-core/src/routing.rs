@@ -11,14 +11,24 @@
 //! elsewhere (§9.5: "it MUST send a SUBSCRIBE to the publisher that sent the
 //! `PUBLISH_NAMESPACE` for each matching subscription"). `docs/roadmap.md`,
 //! Phase 0b, has the item.
+//!
+//! Two words for the side the Objects come from. A *publisher* is a peer: the
+//! session that announced a namespace, or that sent PUBLISH. *Upstream* is the
+//! relay's own part towards it: the SUBSCRIBE it sends, the wait for the
+//! answer, the subscription it then holds (§9.4 says "upstream subscription").
+//! So a function that is about the relay's request says upstream, and a field
+//! that says who is on the other end says publisher. In the same way a
+//! *waiter* is a downstream SUBSCRIBE that has no answer yet, and a
+//! *subscriber* one that has its `SUBSCRIBE_OK`. A *source* of a track is an
+//! upstream subscription that is Established: a PUBLISH the relay accepted,
+//! or a SUBSCRIBE of the relay that a publisher accepted. An *ask* is a
+//! SUBSCRIBE of the relay that is not a source yet.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
-use xmoq_moqt::message::{
-    ControlMessage, ReasonPhrase, RequestError, Subscribe, request_error_code,
-};
+use xmoq_moqt::message::{ControlMessage, ReasonPhrase, RequestError, request_error_code};
 use xmoq_moqt::name::{FullTrackName, TrackNamespace};
-use xmoq_moqt::params::{self, Parameter};
+use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
@@ -90,26 +100,90 @@ pub(crate) struct Waiter {
     forward: bool,
 }
 
-/// A track the relay has asked a publisher for and has no answer about yet.
-/// §9.4: no `SUBSCRIBE_OK` goes downstream before the upstream subscription
-/// is Established.
+impl Waiter {
+    /// Whether this is the SUBSCRIBE on that request stream of that session.
+    pub(crate) fn is_on(&self, session: SessionKey, stream: StreamKey) -> bool {
+        self.session == session && self.stream == stream
+    }
+
+    pub(crate) fn new(
+        session: SessionKey,
+        stream: StreamKey,
+        request: PeerRequestId,
+        forward: bool,
+    ) -> Self {
+        Self {
+            session,
+            stream,
+            request,
+            forward,
+        }
+    }
+}
+
+/// How far a track has come with one request of the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamPhase {
+    /// The publisher has not answered.
+    Asked,
+    /// The publisher answered `DUPLICATE_SUBSCRIPTION`: the request is over
+    /// on its stream and in the session, and its PUBLISH for the track is
+    /// awaited. Nothing that arrives for the request means anything any more.
+    AwaitsPublish,
+    /// The publisher accepted, and the request is the source of the track.
+    Established,
+    /// The publisher said `PUBLISH_DONE` on it.
+    Draining,
+}
+
+/// What the relay knows about one of its requests: the one place the three
+/// handlers of what comes back on a request look it up.
+struct OwnRequestView {
+    id: RequestId,
+    track: FullTrackName,
+    ask: Ask,
+    /// `None`: the track is gone, or has gone on without the request.
+    phase: Option<UpstreamPhase>,
+}
+
+/// A SUBSCRIBE of the relay to one publisher that is not Established: the
+/// publisher has not answered, or has announced a PUBLISH instead
+/// (`DUPLICATE_SUBSCRIPTION`).
+///
+/// WHY a thing of its own, kept by a track whether or not it has a source:
+/// with several publishers asked for one track, one can have accepted while
+/// another has not answered. Today one publisher is asked, so a track has at
+/// most one, and none once it has a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ask {
+    pub(crate) publisher: SessionKey,
+    pub(crate) request: OwnRequestKey,
+}
+
+/// A track that has no source and that publishers were asked for. §9.4: no
+/// `SUBSCRIBE_OK` goes downstream before an upstream subscription is
+/// Established, so the subscribers wait.
 #[derive(Debug)]
 pub(crate) struct PendingTrack {
-    /// The session of the publisher that was asked.
-    session: SessionKey,
-    request: OwnRequestKey,
+    /// Never empty: when the last ask is over, the waiters are refused and
+    /// the track is forgotten.
+    pub(crate) asks: Vec<Ask>,
     waiters: Vec<Waiter>,
 }
 
-/// What every waiter of a pending track is told when the track does not come.
-struct Refusal {
+/// What a request is refused with: the fields of a `REQUEST_ERROR`.
+pub(crate) struct Refusal {
     error_code: u64,
     retry_interval: u64,
     reason: ReasonPhrase,
 }
 
 impl Refusal {
-    fn code(error_code: u64) -> Self {
+    /// With that code and nothing else.
+    ///
+    /// FIXME: a Retry Interval where a retry can succeed later, as when a
+    /// publisher may still appear. §10.6.2 reads 0 as "do not retry".
+    pub(crate) fn code(error_code: u64) -> Self {
         Self {
             error_code,
             retry_interval: 0,
@@ -236,54 +310,61 @@ impl Relay {
             .retain(|entry| !(entry.session == session && entry.stream == stream));
     }
 
-    /// A SUBSCRIBE for a track that has no Established upstream subscription.
-    /// Returns the subscriber's slot when the SUBSCRIBE now waits, and `None`
-    /// when it was refused.
-    pub(crate) fn subscribe_through_namespace(
-        &mut self,
-        session: SessionKey,
-        stream: StreamKey,
-        request: PeerRequestId,
-        subscribe: &Subscribe,
-        actions: &mut Vec<Action>,
-    ) -> Result<RequestSlot, u64> {
-        let track = &subscribe.full_track_name;
-        let waiter = Waiter {
-            session,
-            stream,
-            request,
-            forward: params::forward(&subscribe.parameters),
-        };
-        let waiting = RequestSlot::Waiting {
-            request,
-            track: track.clone(),
-        };
-        // §9.4 lets a relay make one upstream subscription for several
-        // subscribers; the ones that come while it is not answered wait for
-        // the same answer.
-        if let Some(pending) = self.pending.get_mut(track) {
-            if pending.waiters.len() >= MAX_WAITING_SUBSCRIBERS {
-                return Err(request_error_code::EXCESSIVE_LOAD);
-            }
-            pending.waiters.push(waiter);
-            return Ok(waiting);
-        }
-        // §9.5: Namespace Prefix Matching, field by field. §9.5 also has a
-        // publisher announce a namespace explicitly to get subscriptions
-        // routed to it, so sessions that only sent PUBLISH are not asked.
-        // The first match by the order of announcing; see the FIXME at the
-        // top for the others.
-        let Some(publisher) = self
-            .namespaces
+    /// The sessions that announced a namespace the track is in, in the order
+    /// they announced it.
+    ///
+    /// §9.5: Namespace Prefix Matching, field by field. §9.5 also has a
+    /// publisher announce a namespace explicitly to get subscriptions routed
+    /// to it, so sessions that only sent PUBLISH are not among them.
+    pub(crate) fn matching_publishers<'a>(
+        &'a self,
+        track: &'a FullTrackName,
+    ) -> impl Iterator<Item = SessionKey> + 'a {
+        self.namespaces
             .iter()
-            .find(|entry| entry.namespace.is_prefix_of(track.namespace()))
+            .filter(|entry| entry.namespace.is_prefix_of(track.namespace()))
             .map(|entry| entry.session)
-        else {
-            // §10.2.6: without RENDEZVOUS_TIMEOUT, or with 0, "MUST
-            // immediately return REQUEST_ERROR with error code
-            // DOES_NOT_EXIST if no publisher is available".
+    }
+
+    /// Lets one more subscriber wait for the answer to an upstream SUBSCRIBE
+    /// that is under way.
+    ///
+    /// §9.4 lets a relay make one upstream subscription for several
+    /// subscribers; the ones that come while it is not answered wait for the
+    /// same answer.
+    ///
+    /// # Errors
+    ///
+    /// The Error Code to refuse the subscriber with.
+    pub(crate) fn wait_with_the_others(
+        &mut self,
+        track: &FullTrackName,
+        waiter: Waiter,
+    ) -> Result<(), u64> {
+        // Never absent: the caller comes here for a track it found pending.
+        let Some(pending) = self.tracks.pending_mut(track) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
+        if pending.waiters.len() >= MAX_WAITING_SUBSCRIBERS {
+            return Err(request_error_code::EXCESSIVE_LOAD);
+        }
+        pending.waiters.push(waiter);
+        Ok(())
+    }
+
+    /// Sends the relay's SUBSCRIBE for a track to a publisher, with the first
+    /// subscriber that waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// The Error Code to refuse the subscriber with.
+    pub(crate) fn ask(
+        &mut self,
+        publisher: SessionKey,
+        track: &FullTrackName,
+        waiter: Waiter,
+        actions: &mut Vec<Action>,
+    ) -> Result<(), u64> {
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
@@ -320,11 +401,13 @@ impl Relay {
                 awaits_publish: false,
             },
         );
-        self.pending.insert(
+        self.tracks.insert_pending(
             track.clone(),
             PendingTrack {
-                session: publisher,
-                request: own,
+                asks: vec![Ask {
+                    publisher,
+                    request: own,
+                }],
                 waiters: vec![waiter],
             },
         );
@@ -337,7 +420,39 @@ impl Relay {
             session: publisher,
             request: own,
         });
-        Ok(waiting)
+        Ok(())
+    }
+
+    /// Looks up a request of the relay, and how far its track has come with
+    /// it.
+    fn own_request_of(
+        &self,
+        session: SessionKey,
+        request: OwnRequestKey,
+    ) -> Option<OwnRequestView> {
+        let own = self.sessions.get(&session)?.own.get(&request)?;
+        let ask = Ask {
+            publisher: session,
+            request,
+        };
+        let asked = self.tracks.asks(&own.track).contains(&ask);
+        let draining = self
+            .tracks
+            .live(&own.track)
+            .and_then(|track| track.subscription_is_draining(session, request));
+        let phase = match (asked, draining) {
+            (true, _) if own.awaits_publish => Some(UpstreamPhase::AwaitsPublish),
+            (true, _) => Some(UpstreamPhase::Asked),
+            (false, Some(true)) => Some(UpstreamPhase::Draining),
+            (false, Some(false)) => Some(UpstreamPhase::Established),
+            (false, None) => None,
+        };
+        Some(OwnRequestView {
+            id: own.id,
+            track: own.track.clone(),
+            ask,
+            phase,
+        })
     }
 
     pub(crate) fn on_own_request_message(
@@ -347,16 +462,16 @@ impl Relay {
         message: ControlMessage,
         actions: &mut Vec<Action>,
     ) {
+        let Some(own) = self.own_request_of(session, request) else {
+            return;
+        };
+        if own.phase == Some(UpstreamPhase::AwaitsPublish) {
+            return;
+        }
+        // Never absent: the request was just found in this session.
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        let Some(own) = state.own.get(&request) else {
-            return;
-        };
-        if own.awaits_publish {
-            return;
-        }
-        let track_name = own.track.clone();
         let event = match state.moqt.on_request_message(own.id, message) {
             Ok(event) => event,
             Err(RequestFault::Peer(error)) => {
@@ -375,89 +490,114 @@ impl Relay {
                 parameters,
                 track_properties,
             } => {
-                let Some(pending) = self.pending.remove(&track_name) else {
-                    return;
+                let accepted = TrackSource::Subscription {
+                    session,
+                    request,
+                    track_alias,
                 };
-                // The answer came, and the request goes on.
-                actions.push(Action::StopUpstreamTimer { session, request });
-                // §10.2.11: the relay's LARGEST_OBJECT starts from the one
-                // the publisher gave. §9.6: its Track Properties are passed
-                // on.
                 let largest = parameters.iter().find_map(|parameter| match parameter {
                     Parameter::LargestObject(location) => Some(*location),
                     _ => None,
                 });
-                self.tracks.insert(
-                    track_name.clone(),
-                    Track {
-                        source: TrackSource::Subscription {
-                            session,
-                            request,
-                            track_alias,
-                        },
-                        properties: track_properties,
-                        largest,
-                        subscribers: Vec::new(),
-                        in_streams: HashMap::new(),
-                        ending: false,
-                    },
-                );
-                for waiter in &pending.waiters {
-                    self.establish(&track_name, waiter, actions);
-                }
-                // The publisher may have opened streams before its
-                // SUBSCRIBE_OK was read.
-                self.replay_early_streams(session, track_alias, actions);
+                // §10.2.11: the relay's LARGEST_OBJECT starts from the one
+                // the publisher gave. §9.6: its Track Properties are passed
+                // on.
+                let track = Track::established(accepted, track_properties, largest);
+                self.on_upstream_accept(&own, track, actions);
             }
             RequestEvent::UnsupportedTrack { track_alias, .. } => {
-                // §2.5.1: the subscription is not established, and the stream
-                // is cancelled. So are the streams that came ahead of the
-                // answer under its alias.
-                state.own.remove(&request);
-                state.drop_early_streams(session, track_alias, actions);
-                actions.push(Action::CancelOwnRequest {
-                    session,
-                    request,
-                    code: stream_reset_code::CANCELLED,
-                });
-                self.refuse_waiters(
-                    &track_name,
-                    &Refusal::code(request_error_code::UNSUPPORTED_EXTENSION),
-                    actions,
-                );
+                self.on_upstream_unsupported(&own, track_alias, actions);
             }
-            RequestEvent::Rejected(error) => {
-                self.on_upstream_refusal(session, request, &track_name, &error, actions);
-            }
-            RequestEvent::SubscriptionDone(_) => {
-                // The same wait for the streams the publisher counted as for a
-                // track that came with PUBLISH (§10.11).
-                let Some(track) = self.tracks.get_mut(&track_name) else {
-                    return;
-                };
-                track.ending = true;
-                let (_, track_alias) = track.source.session_and_alias();
-                if !self.end_track_if_drained(&track_name, actions) {
-                    actions.push(Action::StartDrainTimer {
-                        session,
-                        track_alias,
-                    });
-                }
-            }
+            RequestEvent::Rejected(error) => self.on_upstream_refusal(&own, &error, actions),
+            RequestEvent::SubscriptionDone(_) => self.on_upstream_done(&own, actions),
             // Nothing else answers a SUBSCRIBE; the session has dealt with it.
             _ => {}
         }
     }
 
+    /// The publisher accepted the relay's SUBSCRIBE: the track has an
+    /// Established upstream subscription (§9.4), and the subscribers that
+    /// waited are answered.
+    fn on_upstream_accept(
+        &mut self,
+        own: &OwnRequestView,
+        mut track: Track,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(mut pending) = self.tracks.take_pending(&own.track) else {
+            return;
+        };
+        let Ask { publisher, request } = own.ask;
+        // The answer came, and the request goes on. What was asked of other
+        // publishers is still asked.
+        actions.push(Action::StopUpstreamTimer {
+            session: publisher,
+            request,
+        });
+        pending.asks.retain(|ask| *ask != own.ask);
+        track.asks = pending.asks;
+        let (_, track_alias) = track.source.session_and_alias();
+        self.tracks.insert_live(own.track.clone(), track);
+        for waiter in &pending.waiters {
+            self.establish(&own.track, waiter, actions);
+        }
+        // The publisher may have opened streams before its SUBSCRIBE_OK was
+        // read.
+        self.replay_early_streams(publisher, track_alias, actions);
+    }
+
+    /// The publisher accepted with a Mandatory Track Property the relay does
+    /// not understand. §2.5.1: the subscription is not established, and the
+    /// stream is cancelled. So are the streams that came ahead of the answer
+    /// under its alias.
+    fn on_upstream_unsupported(
+        &mut self,
+        own: &OwnRequestView,
+        track_alias: u64,
+        actions: &mut Vec<Action>,
+    ) {
+        let Ask { publisher, request } = own.ask;
+        let Some(state) = self.sessions.get_mut(&publisher) else {
+            return;
+        };
+        state.own.remove(&request);
+        state.drop_early_streams(publisher, track_alias, actions);
+        actions.push(Action::CancelOwnRequest {
+            session: publisher,
+            request,
+            code: stream_reset_code::CANCELLED,
+        });
+        let unsupported = Refusal::code(request_error_code::UNSUPPORTED_EXTENSION);
+        self.ask_is_over(&own.track, own.ask, &unsupported, actions);
+    }
+
+    /// The publisher said `PUBLISH_DONE` on the relay's SUBSCRIBE.
+    fn on_upstream_done(&mut self, own: &OwnRequestView, actions: &mut Vec<Action>) {
+        let Ask { publisher, request } = own.ask;
+        let Some(track) = self.tracks.live(&own.track) else {
+            return;
+        };
+        let (_, track_alias) = track.source.session_and_alias();
+        self.source_done(
+            &own.track,
+            |source| source.is_subscription(publisher, request),
+            publisher,
+            track_alias,
+            actions,
+        );
+    }
+
     /// The publisher answered the relay's SUBSCRIBE with `REQUEST_ERROR`.
     fn on_upstream_refusal(
         &mut self,
-        session: SessionKey,
-        request: OwnRequestKey,
-        track_name: &FullTrackName,
+        own: &OwnRequestView,
         error: &RequestError,
         actions: &mut Vec<Action>,
     ) {
+        let Ask {
+            publisher: session,
+            request,
+        } = own.ask;
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
@@ -489,10 +629,7 @@ impl Relay {
         // send in this place: it says nothing about a PUBLISH, and a
         // track that is not coming would cost every subscriber the
         // whole wait.
-        let asked = self
-            .pending
-            .get(track_name)
-            .is_some_and(|pending| pending.request == request);
+        let asked = own.phase == Some(UpstreamPhase::Asked);
         if asked && error.error_code == request_error_code::DUPLICATE_SUBSCRIPTION {
             if let Some(own) = state.own.get_mut(&request) {
                 own.awaits_publish = true;
@@ -501,7 +638,32 @@ impl Relay {
             return;
         }
         state.own.remove(&request);
-        self.refuse_waiters(track_name, &Refusal::passed_on(error), actions);
+        self.ask_is_over(&own.track, own.ask, &Refusal::passed_on(error), actions);
+    }
+
+    /// One ask of a track is over without a source: the publisher refused,
+    /// did not answer, or is gone. When it was the last one of a track that
+    /// has no source, the subscribers that waited are refused with `refusal`.
+    ///
+    /// WHY the last one: a track another publisher was asked for may still
+    /// come. And a track that has a source loses nothing with an ask.
+    fn ask_is_over(
+        &mut self,
+        track_name: &FullTrackName,
+        ask: Ask,
+        refusal: &Refusal,
+        actions: &mut Vec<Action>,
+    ) {
+        if let Some(asks) = self.tracks.asks_mut(track_name) {
+            asks.retain(|other| *other != ask);
+        }
+        let hopeless = self
+            .tracks
+            .pending(track_name)
+            .is_some_and(|pending| pending.asks.is_empty());
+        if hopeless {
+            self.refuse_waiters(track_name, refusal, actions);
+        }
     }
 
     /// Something ended on a request stream the relay opened.
@@ -528,51 +690,22 @@ impl Relay {
         if how == OwnRequestEnd::Stopped {
             return;
         }
-        let Some(state) = self.sessions.get_mut(&session) else {
+        let Some(own) = self.own_request_of(session, request) else {
             return;
         };
-        let Some(own) = state.own.get(&request) else {
-            return;
-        };
-        // The publisher closes the stream after its REQUEST_ERROR (§3.3.2).
-        if own.awaits_publish {
-            return;
-        }
-        let track_name = own.track.clone();
-        let asked = self
-            .pending
-            .get(&track_name)
-            .is_some_and(|pending| pending.request == request);
-        if asked {
-            state.moqt.cancel(own.id);
-            state.own.remove(&request);
-            actions.push(Action::CancelOwnRequest {
-                session,
-                request,
-                code: stream_reset_code::CANCELLED,
-            });
-            self.refuse_waiters(
-                &track_name,
-                &Refusal::code(request_error_code::DOES_NOT_EXIST),
-                actions,
-            );
-            return;
-        }
-        let sourced = self
-            .tracks
-            .get(&track_name)
-            .is_some_and(|track| track.source.is_subscription(session, request));
-        if !sourced {
-            return;
-        }
-        let ending = self
-            .tracks
-            .get(&track_name)
-            .is_some_and(|track| track.ending);
-        // After PUBLISH_DONE the publisher closes the stream (§10.11) and the
-        // track goes on draining.
-        if !ending {
-            self.end_track(&track_name, TrackEnd::SourceGone, actions);
+        match own.phase {
+            Some(UpstreamPhase::Asked) => {
+                self.cancel_own_request(session, request, actions);
+                let nobody = Refusal::code(request_error_code::DOES_NOT_EXIST);
+                self.ask_is_over(&own.track, own.ask, &nobody, actions);
+            }
+            Some(UpstreamPhase::Established) => {
+                self.end_track(&own.track, TrackEnd::SourceGone, actions);
+            }
+            // The publisher closes the stream after its REQUEST_ERROR
+            // (§3.3.2). After PUBLISH_DONE it closes it as well (§10.11), and
+            // the track goes on draining.
+            Some(UpstreamPhase::AwaitsPublish | UpstreamPhase::Draining) | None => {}
         }
     }
 
@@ -584,84 +717,88 @@ impl Relay {
         request: OwnRequestKey,
         actions: &mut Vec<Action>,
     ) {
+        let Some(own) = self.own_request_of(session, request) else {
+            return;
+        };
+        // Never absent: the request was just found in this session.
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        let Some(own) = state.own.get(&request) else {
-            return;
-        };
-        let track_name = own.track.clone();
-        let asked = self
-            .pending
-            .get(&track_name)
-            .is_some_and(|pending| pending.request == request);
-        if !asked {
-            return;
-        }
         // The timer has run out, so only the request is left to let go of.
-        if let Some(own) = state.own.remove(&request)
-            && !own.awaits_publish
-        {
-            state.moqt.cancel(own.id);
-            actions.push(Action::CancelOwnRequest {
-                session,
-                request,
-                code: stream_reset_code::CANCELLED,
-            });
+        match own.phase {
+            Some(UpstreamPhase::Asked) => {
+                state.own.remove(&request);
+                state.moqt.cancel(own.id);
+                actions.push(Action::CancelOwnRequest {
+                    session,
+                    request,
+                    code: stream_reset_code::CANCELLED,
+                });
+            }
+            Some(UpstreamPhase::AwaitsPublish) => {
+                state.own.remove(&request);
+            }
+            Some(UpstreamPhase::Established | UpstreamPhase::Draining) | None => return,
         }
         // §10.6.2, TIMEOUT: "a relay could not establish an upstream
         // subscription within the timeout".
-        self.refuse_waiters(
-            &track_name,
-            &Refusal::code(request_error_code::TIMEOUT),
-            actions,
-        );
+        let too_late = Refusal::code(request_error_code::TIMEOUT);
+        self.ask_is_over(&own.track, own.ask, &too_late, actions);
     }
 
-    /// Takes a subscriber that waited off its pending track. When it was the
-    /// last one, the upstream SUBSCRIBE is cancelled: nobody wants the answer.
-    pub(crate) fn waiter_left(
+    /// Takes the subscribers that `gone` picks off a pending track. When
+    /// nobody is left, what was asked upstream is cancelled: nobody wants the
+    /// answer.
+    pub(crate) fn waiters_left(
         &mut self,
         track_name: &FullTrackName,
-        session: SessionKey,
-        stream: StreamKey,
+        gone: impl Fn(&Waiter) -> bool,
         actions: &mut Vec<Action>,
     ) {
-        let Some(pending) = self.pending.get_mut(track_name) else {
+        let Some(pending) = self.tracks.pending_mut(track_name) else {
             return;
         };
-        pending
-            .waiters
-            .retain(|waiter| !(waiter.session == session && waiter.stream == stream));
+        pending.waiters.retain(|waiter| !gone(waiter));
         if !pending.waiters.is_empty() {
             return;
         }
-        let (publisher, request) = (pending.session, pending.request);
-        self.pending.remove(track_name);
-        self.cancel_own_request(publisher, request, actions);
+        for ask in self
+            .tracks
+            .take_pending(track_name)
+            .map_or(Vec::new(), |pending| pending.asks)
+        {
+            self.cancel_own_request(ask.publisher, ask.request, actions);
+        }
     }
 
-    /// Whether the relay's SUBSCRIBE for the track went to that session and has
-    /// no answer yet.
+    /// Whether the track has no source and a SUBSCRIBE of the relay for it
+    /// went to that session.
     pub(crate) fn is_asked_of(&self, track_name: &FullTrackName, session: SessionKey) -> bool {
-        self.pending
-            .get(track_name)
-            .is_some_and(|pending| pending.session == session)
+        self.tracks
+            .pending(track_name)
+            .is_some_and(|pending| pending.asks.iter().any(|ask| ask.publisher == session))
     }
 
-    /// The publisher that was asked for the track sent PUBLISH for it: the
-    /// relay's SUBSCRIBE is cancelled (§5.1). Returns the subscribers that
-    /// waited for its answer.
+    /// A publisher that was asked for the track sent PUBLISH for it: the
+    /// relay's SUBSCRIBE to it is cancelled (§5.1). Returns the subscribers
+    /// that waited, and what is still asked of other publishers.
     pub(crate) fn give_way_to_publish(
         &mut self,
         track_name: &FullTrackName,
+        publisher: SessionKey,
         actions: &mut Vec<Action>,
-    ) -> Vec<Waiter> {
-        let Some(pending) = self.pending.remove(track_name) else {
-            return Vec::new();
+    ) -> (Vec<Waiter>, Vec<Ask>) {
+        let Some(pending) = self.tracks.take_pending(track_name) else {
+            return (Vec::new(), Vec::new());
         };
-        self.cancel_own_request(pending.session, pending.request, actions);
-        pending.waiters
+        let (given_up, others): (Vec<Ask>, Vec<Ask>) = pending
+            .asks
+            .into_iter()
+            .partition(|ask| ask.publisher == publisher);
+        for ask in given_up {
+            self.cancel_own_request(ask.publisher, ask.request, actions);
+        }
+        (pending.waiters, others)
     }
 
     /// Cancels a request the relay opened and forgets it (§3.3.2).
@@ -693,41 +830,35 @@ impl Relay {
     }
 
     /// What a session that is gone leaves in the routing state of the others.
+    ///
+    /// By track name both times, so that the same events lead to the same
+    /// actions.
     pub(crate) fn drop_routing_of(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
         self.namespaces.retain(|entry| entry.session != session);
-        // Tracks that were asked of the session: it will not answer.
-        let asked: BTreeSet<FullTrackName> = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| pending.session == session)
-            .map(|(track, _)| track.clone())
+        // What was asked of the session: it will not answer.
+        let asked: BTreeSet<(FullTrackName, OwnRequestKey)> = self
+            .tracks
+            .all_asks()
+            .filter(|(_, ask)| ask.publisher == session)
+            .map(|(track, ask)| (track.clone(), ask.request))
             .collect();
-        for track in asked {
-            self.refuse_waiters(
-                &track,
-                &Refusal::code(request_error_code::DOES_NOT_EXIST),
-                actions,
-            );
+        let nobody = Refusal::code(request_error_code::DOES_NOT_EXIST);
+        for (track, request) in asked {
+            let ask = Ask {
+                publisher: session,
+                request,
+            };
+            self.ask_is_over(&track, ask, &nobody, actions);
         }
         // Tracks it waited for.
         let waited: BTreeSet<FullTrackName> = self
-            .pending
-            .iter()
+            .tracks
+            .all_pending()
             .filter(|(_, pending)| pending.waiters.iter().any(|w| w.session == session))
             .map(|(track, _)| track.clone())
             .collect();
         for track in waited {
-            let streams: Vec<StreamKey> = self
-                .pending
-                .get(&track)
-                .into_iter()
-                .flat_map(|pending| &pending.waiters)
-                .filter(|waiter| waiter.session == session)
-                .map(|waiter| waiter.stream)
-                .collect();
-            for stream in streams {
-                self.waiter_left(&track, session, stream, actions);
-            }
+            self.waiters_left(&track, |waiter| waiter.session == session, actions);
         }
     }
 
@@ -739,26 +870,41 @@ impl Relay {
         refusal: &Refusal,
         actions: &mut Vec<Action>,
     ) {
-        let Some(pending) = self.pending.remove(track_name) else {
+        let Some(pending) = self.tracks.take_pending(track_name) else {
             return;
         };
         for waiter in pending.waiters {
-            let Some(state) = self.sessions.get_mut(&waiter.session) else {
-                continue;
-            };
-            let response = state.moqt.reject(
+            self.refuse(
+                waiter.session,
+                waiter.stream,
                 waiter.request,
-                refusal.error_code,
-                refusal.retry_interval,
-                refusal.reason.clone(),
+                refusal,
+                actions,
             );
-            state.finish_slot(waiter.stream);
-            self.respond(waiter.session, waiter.stream, response, actions);
-            actions.push(Action::FinishRequest {
-                session: waiter.session,
-                stream: waiter.stream,
-            });
         }
+    }
+
+    /// Answers a request with `REQUEST_ERROR` and a FIN (§3.3.2).
+    pub(crate) fn refuse(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        request: PeerRequestId,
+        refusal: &Refusal,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        let response = state.moqt.reject(
+            request,
+            refusal.error_code,
+            refusal.retry_interval,
+            refusal.reason.clone(),
+        );
+        state.finish_slot(stream);
+        self.respond(session, stream, response, actions);
+        actions.push(Action::FinishRequest { session, stream });
     }
 
     /// Answers a subscriber that waited with `SUBSCRIBE_OK`, now that the
@@ -777,7 +923,7 @@ impl Relay {
         } = *waiter;
         if let Some(subscriber) =
             self.accept_subscriber(track_name, session, stream, request, forward, actions)
-            && let Some(track) = self.tracks.get_mut(track_name)
+            && let Some(track) = self.tracks.live_mut(track_name)
         {
             track.subscribers.push(subscriber);
         }
@@ -785,7 +931,7 @@ impl Relay {
 
     /// Sends `SUBSCRIBE_OK` for a track that has an upstream subscription and
     /// returns the subscriber to add to it.
-    pub(crate) fn accept_subscriber(
+    fn accept_subscriber(
         &mut self,
         track_name: &FullTrackName,
         session: SessionKey,
@@ -794,7 +940,7 @@ impl Relay {
         forward: bool,
         actions: &mut Vec<Action>,
     ) -> Option<Subscriber> {
-        let track = self.tracks.get(track_name)?;
+        let track = self.tracks.live(track_name)?;
         let state = self.sessions.get_mut(&session)?;
         // §10.2.11: LARGEST_OBJECT is present once Objects were published.
         let parameters = track
@@ -807,11 +953,15 @@ impl Relay {
             .accept_subscribe(request, parameters, track.properties.clone())
         {
             Ok((track_alias, message)) => {
+                // A subscriber that finished its direction while it waited
+                // has still finished it.
+                let peer_finished = state.peer_finished(stream);
                 state.requests.insert(
                     stream,
                     RequestSlot::Subscribe {
                         request,
                         track: track_name.clone(),
+                        peer_finished,
                     },
                 );
                 actions.push(Action::SendRequest {
