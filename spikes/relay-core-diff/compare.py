@@ -4,6 +4,29 @@
     python3 spikes/relay-core-diff/compare.py <before> <after> [--spikes] [--mutate]
     python3 spikes/relay-core-diff/compare.py --same <revision>
 
+Add `--world v1|distinct|full|split` to either for what the random events are
+made of; `fuzz.rs` describes the four. The default is `v1`.
+
+`--touching` is for a change that is meant to alter what the relay does with
+some inputs and nothing else. `fuzz.rs` knows which events those inputs are
+(a stream whose header leaves the Subgroup ID to its first Object, a second
+stream for a Subgroup). Once the two versions have parted in a sequence,
+everything after it differs too, so the differences are not counted as
+failures; what has to hold is that no sequence shows a difference before its
+first such event. That says nothing about what follows the first such event.
+For that there is the world `split`: what the change is about happens in one
+half of it, and the sessions of the other half (3 and 4) have to be treated
+alike by both versions from the first event to the last. A difference there
+is counted as `bystander`, with or without `--touching`, and fails the run.
+
+Streams to subscribers are compared under a name, the session and how many
+streams the version opened to it before, and not by their number: a version
+numbers them from one counter, so a difference in one track shifts the
+numbers in every other. An event that names such a stream is taken to mean
+the stream of the new version and is passed to the old one under the number
+it gave the stream of that name. `--raw-numbers` turns the names off; it is
+the check that the comparison of `split` can fail (it has to).
+
 <before> and <after> are jj revisions; <after> may also be the word `disk`,
 for the files of the working directory as they are. The tool exports `crates/` of <after>
 into a scratch workspace, puts `lib.rs` and `routing.rs` of `xmoq-relay-core`
@@ -28,7 +51,8 @@ digest of every list of actions. A core that pushes actions while it walks a
 For every event it compares, in this order, and counts the first that differs:
 
   content   the actions as a multiset: what is done, to whom, with what
-  state     `Relay::counts()` after the event: what each version still holds
+  state     `Relay::counts()` after the event: what each version still holds.
+            What only <after> counts is left out
   sequence  the actions for each session, in order, leaving out
             `StopDataStream`. Not looked at for an event that drops a session
             (`SessionClosed`, or an action `CloseSession`): there both
@@ -37,6 +61,9 @@ For every event it compares, in this order, and counts the first that differs:
 
 It exits with 1 when any event differed in content, state or sequence, when a
 test failed, or when the random events did not run in the number asked for.
+With `--touching` it exits with 1 when a sequence differed before its first
+such event, when a bystander was treated differently, or when the sequences
+were not counted.
 Nothing outside `spikes/relay-core-diff/.work` is written.
 
 Both versions have to share `events.rs`: the `Event` and `Action` types are
@@ -63,6 +90,9 @@ SPIKES = [
     "--publish-namespace --direction browser-to-rust --rust-subscriber moqtail",
     "--publish-namespace --direction browser-to-browser --subscribers 2",
 ]
+
+
+WORLDS = ("v1", "distinct", "full", "split")
 
 
 def jj(*args):
@@ -115,28 +145,122 @@ def patch_new_core():
     lib = once(lib, "mod events;\n", "mod events;\nmod old;\n", "mod events;")
     lib = once(lib, "    pub fn handle(&mut self, event: Event) -> Vec<Action> {",
                "    fn decide(&mut self, event: Event) -> Vec<Action> {", "pub fn handle")
-    lib = once(lib, "    next_own_request: u64,\n}", "    next_own_request: u64,\n    shadow: old::Relay,\n}",
+    lib = once(lib, "    next_own_request: u64,\n}", "    next_own_request: u64,\n    shadow: old::Relay,\n    names: (OutNames, OutNames),\n}",
                "the last field of Relay")
     lib = once(lib, "            next_own_request: 0,\n        }",
-               "            next_own_request: 0,\n            shadow: old::Relay::new(implementation),\n        }",
+               "            next_own_request: 0,\n            shadow: old::Relay::new(implementation),\n"
+               "            names: Default::default(),\n        }",
                "the last field of Relay::new")
     lib += '''
+/// Events for which the two cores differed in more than order, so far.
+pub(crate) static DIFFERENCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Events for which the two cores did something else to a session named in
+/// `XMOQ_DIFF_BYSTANDERS`, so far.
+pub(crate) static BYSTANDER_DIFFERENCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Actions of the new core for those sessions, so far.
+pub(crate) static BYSTANDER_ACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The streams to subscribers of one core, under a name that does not depend
+/// on how the core numbers them: the session, and how many streams the core
+/// opened to that session before. WHY: the two cores number the streams from
+/// one counter each, so once they differ in one track, every later stream of
+/// every track has another number in the one than in the other.
+#[derive(Debug, Default)]
+struct OutNames {
+    by_key: HashMap<u64, (u64, u64)>,
+    opened: HashMap<u64, u64>,
+}
+
+#[allow(clippy::all, clippy::pedantic)]
+impl OutNames {
+    fn note(&mut self, actions: &[Action]) {
+        for action in actions {
+            if let Action::OpenDataStream { session, out_stream, .. } = action {
+                let opened = self.opened.entry(session.0).or_default();
+                self.by_key.insert(out_stream.0, (session.0, *opened));
+                *opened += 1;
+            }
+        }
+    }
+
+    fn key_of(&self, name: (u64, u64)) -> Option<u64> {
+        self.by_key.iter().find(|(_, known)| **known == name).map(|(key, _)| *key)
+    }
+
+    /// The text with every stream to a subscriber under its name.
+    fn rename(&self, text: &str) -> String {
+        // To show that the names are needed: with the numbers as they are,
+        // the comparison of the world `split` has to find differences.
+        if std::env::var_os("XMOQ_DIFF_RAW_NUMBERS").is_some() {
+            return text.to_string();
+        }
+        let (mut out, mut rest) = (String::new(), text);
+        while let Some(at) = rest.find("OutStreamKey(") {
+            let digits = at + "OutStreamKey(".len();
+            let end = rest[digits..].find(')').map_or(rest.len(), |found| digits + found);
+            out.push_str(&rest[..at]);
+            match rest[digits..end].parse::<u64>().ok().and_then(|key| self.by_key.get(&key)) {
+                Some((session, nth)) => out.push_str(&format!("Out({session}#{nth}")),
+                None => out.push_str(&rest[at..end]),
+            }
+            rest = &rest[end..];
+        }
+        out + rest
+    }
+
+    fn session_of(&self, action: &Action) -> Option<u64> {
+        match action.target() {
+            Target::Session(session) => Some(session.0),
+            Target::OutStream(out_stream) => self.by_key.get(&out_stream.0).map(|name| name.0),
+            Target::Closing => match action {
+                Action::CloseSession { session, .. } => Some(session.0),
+                _ => None,
+            },
+        }
+    }
+}
+
+#[allow(clippy::all, clippy::pedantic)]
 impl Relay {
+    /// The event as the old core has to be told it. Whoever calls `handle`
+    /// got the numbers of the streams from the new core.
+    fn for_old(&self, event: &Event) -> Event {
+        if std::env::var_os("XMOQ_DIFF_RAW_NUMBERS").is_some() {
+            return event.clone();
+        }
+        let old_key = |key: &OutStreamKey| {
+            let name = self.names.1.by_key.get(&key.0);
+            // A stream the old core does not have gets a number nobody has.
+            OutStreamKey(name.and_then(|name| self.names.0.key_of(*name)).unwrap_or(u64::MAX - key.0))
+        };
+        match event {
+            Event::OutStreamOpened { out_stream } => Event::OutStreamOpened { out_stream: old_key(out_stream) },
+            Event::OutStreamClosed { out_stream } => Event::OutStreamClosed { out_stream: old_key(out_stream) },
+            Event::SendQueueFull { out_stream } => Event::SendQueueFull { out_stream: old_key(out_stream) },
+            other => other.clone(),
+        }
+    }
+
     /// Feeds the event to both cores and reports where they differ.
-    #[allow(clippy::all, clippy::pedantic, missing_docs)]
+    #[allow(missing_docs)]
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         let said = format!("{event:?}");
         let drops_a_session = matches!(event, Event::SessionClosed { .. });
-        let before = self.shadow.handle(event.clone());
+        let before = self.shadow.handle(self.for_old(&event));
         let after = self.decide(event);
-        let sorted = |actions: &[Action]| {
-            let mut lines: Vec<String> = actions.iter().map(|a| format!("{a:?}")).collect();
+        self.names.0.note(&before);
+        self.names.1.note(&after);
+        let in_order = |actions: &[Action], names: &OutNames| -> Vec<String> {
+            actions.iter().map(|a| names.rename(&format!("{a:?}"))).collect()
+        };
+        let sorted = |actions: &[Action], names: &OutNames| {
+            let mut lines = in_order(actions, names);
             lines.sort();
             lines
         };
         // The actions for each session and each stream to a subscriber, in
         // the order they were pushed.
-        let by_target = |actions: &[Action]| {
+        let by_target = |actions: &[Action], names: &OutNames| {
             let mut lines: std::collections::BTreeMap<String, Vec<String>> = Default::default();
             for action in actions {
                 if matches!(action, Action::StopDataStream { .. }) {
@@ -144,33 +268,62 @@ impl Relay {
                 }
                 let target = match action.target() {
                     Target::Session(session) => format!("session {}", session.0),
-                    Target::OutStream(out_stream) => format!("out {}", out_stream.0),
+                    Target::OutStream(out_stream) => names.rename(&format!("{out_stream:?}")),
                     Target::Closing => "closing".to_string(),
                 };
-                lines.entry(target).or_default().push(format!("{action:?}"));
+                lines.entry(target).or_default().push(names.rename(&format!("{action:?}")));
             }
             lines
         };
         let closes = before.iter().any(|a| matches!(a, Action::CloseSession { .. }));
+        // What the new core counts and the old one does not is left out.
         let held_before = format!("{:?}", self.shadow.counts());
+        let known = |field: &&str| {
+            let name = field.split(':').next().and_then(|name| name.split_whitespace().last());
+            name.is_some_and(|name| held_before.contains(&format!(" {name}:")))
+        };
         let held_after = format!("{:?}", self.counts());
-        let kind = if sorted(&before) != sorted(&after) {
+        let held_after = held_after.split(", ").filter(known).collect::<Vec<_>>().join(", ");
+        let held_after = if held_after.ends_with('}') { held_after } else { held_after + " }" };
+        let (old, new) = (&self.names.0, &self.names.1);
+        let kind = if sorted(&before, old) != sorted(&after, new) {
             Some("content")
         } else if held_before != held_after {
             Some("state")
-        } else if !drops_a_session && !closes && by_target(&before) != by_target(&after) {
+        } else if !drops_a_session && !closes && by_target(&before, old) != by_target(&after, new) {
             Some("sequence")
-        } else if before != after {
+        } else if in_order(&before, old) != in_order(&after, new) {
             Some("order")
         } else {
             None
         };
+        let line = format!(
+            "event={said} before={before:?} after={after:?} held_before={held_before} held_after={held_after}"
+        );
+        // Sessions that have no part in what the change is about: what is
+        // done to them, and in what order, has to be the same throughout.
+        if let Ok(bystanders) = std::env::var("XMOQ_DIFF_BYSTANDERS") {
+            let bystanders: Vec<u64> = bystanders.split(',').filter_map(|n| n.parse().ok()).collect();
+            let to_them = |actions: &[Action], names: &OutNames| -> Vec<String> {
+                actions
+                    .iter()
+                    .filter(|action| names.session_of(action).is_some_and(|s| bystanders.contains(&s)))
+                    .map(|action| names.rename(&format!("{action:?}")))
+                    .collect()
+            };
+            BYSTANDER_ACTIONS.fetch_add(to_them(&after, new).len() as u64, std::sync::atomic::Ordering::Relaxed);
+            if to_them(&before, old) != to_them(&after, new) {
+                println!("CORE_MISMATCH kind=bystander {line}");
+                BYSTANDER_DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         if let Some(kind) = kind {
-            let line = format!(
-                "CORE_MISMATCH kind={kind} event={said} before={before:?} after={after:?} held_before={held_before} held_after={held_after}"
-            );
-            println!("{line}");
-            assert!(kind == "order" || !cfg!(test), "{line}");
+            println!("CORE_MISMATCH kind={kind} {line}");
+            if kind != "order" {
+                DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let keep_going = std::env::var_os("XMOQ_DIFF_KEEP_GOING").is_some();
+            assert!(kind == "order" || !cfg!(test) || keep_going, "CORE_MISMATCH kind={kind} {line}");
         }
         after
     }
@@ -186,7 +339,13 @@ def same(revision):
     export(revision)
     (WORK / CORE / "fuzz.rs").write_text("#![allow(clippy::all, clippy::pedantic)]\n" + (HERE / "fuzz.rs").read_text())
     path = WORK / CORE / "lib.rs"
-    path.write_text(once(path.read_text(), "mod events;\n", "mod events;\n#[cfg(test)]\nmod fuzz;\n", "mod events;"))
+    stub = ("\n/// Nothing is compared in this build.\n#[cfg(test)]\n"
+            "pub(crate) static DIFFERENCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);\n"
+            "#[cfg(test)]\n"
+            "pub(crate) static BYSTANDER_DIFFERENCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);\n"
+            "#[cfg(test)]\n"
+            "pub(crate) static BYSTANDER_ACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);\n")
+    path.write_text(once(path.read_text(), "mod events;\n", "mod events;\n#[cfg(test)]\nmod fuzz;\n", "mod events;") + stub)
     digests = []
     for _ in range(3):
         code, output = cargo("test", "--locked", "-p", "xmoq-relay-core", "fuzz::", "--", "--nocapture")
@@ -224,13 +383,14 @@ def order_cause(line):
 def report(name, output, totals, random_events=False):
     lines = [line for line in output.splitlines() if "CORE_MISMATCH" in line]
     kinds = collections.Counter(re.search(r"kind=(\w+)", line).group(1) for line in lines)
-    wrong = [line for line in lines if "kind=order" not in line]
+    wrong = [line for line in lines if "kind=order" not in line and "kind=bystander" not in line]
     order = [line for line in lines if "kind=order" in line]
     results = re.findall(r"test result: (\w+)\. (\d+) passed; (\d+) failed", output)
     fuzz = re.search(r"FUZZ runs=(\d+) events=(\d+)", output)
     passed = sum(int(p) for _, p, _ in results)
     failed = sum(int(f) for _, _, f in results)
     print(f"{name}: content={kinds['content']} state={kinds['state']} sequence={kinds['sequence']} order={kinds['order']}"
+
           + (f" tests passed={passed} failed={failed}" if results else "")
           + (f" random events={fuzz.group(2)}" if fuzz else ""))
     for cause, count in collections.Counter(order_cause(line) for line in order).most_common():
@@ -240,6 +400,28 @@ def report(name, output, totals, random_events=False):
     for kind in ("content", "state", "sequence", "order"):
         totals[kind] += kinds[kind]
     totals["failed"] += failed
+    touch = re.search(r"FUZZ_TOUCH sequences=(\d+) touching=(\d+) differing=(\d+) differing_before_touching=(\d+)", output)
+    if touch:
+        print(f"    sequences: {touch.group(1)}; with an event the change is about: {touch.group(2)}; "
+              f"in which the versions differ: {touch.group(3)}; differ before such an event: {touch.group(4)}")
+        totals["before_touching"] += int(touch.group(4))
+    elif random_events and "--touching" in sys.argv:
+        # WHY checked: without the line nothing was counted, and 0 would read as a pass.
+        print("    THE SEQUENCES WERE NOT COUNTED: no FUZZ_TOUCH line")
+        totals["not_counted"] += 1
+    # Only the random events of the world `split` keep the bystanders out of
+    # what the change is about; the tests of the crate use the same sessions.
+    bystander = re.search(r"FUZZ_BYSTANDER differences=(\d+) actions=(\d+)", output)
+    if bystander and "XMOQ_DIFF_BYSTANDERS" in os.environ:
+        print(f"    events of the random sequences in which the bystanders were treated differently: {bystander.group(1)}"
+              f" (actions for the bystanders: {bystander.group(2)})")
+        totals["bystander"] += int(bystander.group(1))
+        in_the_sequences = output.split("FUZZ_BYSTANDER", 1)[0].splitlines()
+        for line in [line for line in in_the_sequences if "kind=bystander" in line][:3]:
+            print("    " + line[:2500])
+    carried = re.search(r"FUZZ_CARRIED (.*)", output)
+    if carried:
+        print(f"    what the new version did in the random events: {carried.group(1)}")
     if random_events:
         # WHY checked: a run in which the random events did not happen ends
         # with no difference found, and would read as a pass.
@@ -254,6 +436,22 @@ def report(name, output, totals, random_events=False):
 
 
 def main():
+    if "--world" in sys.argv:
+        at = sys.argv.index("--world")
+        if at + 1 >= len(sys.argv) or sys.argv[at + 1] not in WORLDS:
+            sys.exit(f"--world takes one of {', '.join(WORLDS)}")
+        os.environ["XMOQ_FUZZ_WORLD"] = sys.argv[at + 1]
+        del sys.argv[at:at + 2]
+    world = os.environ.get("XMOQ_FUZZ_WORLD", "v1")
+    print(f"world: {world}")
+    if world == "split":
+        # The sessions of the half of that world the change is kept out of.
+        os.environ["XMOQ_DIFF_BYSTANDERS"] = "3,4"
+    if "--touching" in sys.argv:
+        os.environ["XMOQ_DIFF_KEEP_GOING"] = "1"
+    if "--raw-numbers" in sys.argv:
+        os.environ["XMOQ_DIFF_RAW_NUMBERS"] = "1"
+        print("RAW NUMBERS: streams to subscribers are compared by the number each version gave them")
     args = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
     if "--same" in sys.argv:
         if len(args) != 1:
@@ -292,7 +490,13 @@ def main():
             totals["failed"] += not matched
     print(f"TOTAL content={totals['content']} state={totals['state']} sequence={totals['sequence']} "
           f"order={totals['order']} failed={totals['failed']}")
-    wrong = totals["content"] or totals["state"] or totals["sequence"] or totals["failed"]
+    if "--touching" in sys.argv:
+        # The tests of the new version hold the new behaviour, so tests that
+        # differ are expected; a difference before the change is touched is not.
+        print(f"TOUCHING differing_before_touching={totals['before_touching']} bystander={totals['bystander']} "
+              f"not_counted={totals['not_counted']}")
+        sys.exit(1 if totals["before_touching"] or totals["bystander"] or totals["not_counted"] else 0)
+    wrong = totals["content"] or totals["state"] or totals["sequence"] or totals["bystander"] or totals["failed"]
     sys.exit(1 if wrong else 0)
 
 

@@ -94,6 +94,10 @@ const { values: options } = parseArgs({
     // the publisher is unanswered when the PUBLISH arrives (draft 18, §5.1).
     // The publisher holds its PUBLISH and its answer back to make that order.
     'subscribe-before-publish': { type: 'boolean', default: false },
+    // How the publisher's Subgroup Headers give the Subgroup ID (draft 18,
+    // §11.4.2): zero, first-object or explicit. The `own` Rust publisher has
+    // all three; the page (moqtail-ts) has zero and first-object.
+    'subgroup-id': { type: 'string', default: 'zero' },
     // Makes the `own` client print the raw bytes of every stream.
     trace: { type: 'boolean', default: false },
     // After the transfer, ends the Rust publisher and waits until the `own`
@@ -367,7 +371,8 @@ async function main() {
           : page.evaluate(([ns, track]) => window.xmoq.publishTrack(ns, track), [NAMESPACE, TRACK]),
         'browser-pub to offer the track',
       )
-      sendObject = () => page.evaluate(hex => window.xmoq.sendObject(hex), payloadHex)
+      const subgroupInHeader = options['subgroup-id'] !== 'first-object'
+      sendObject = () => page.evaluate(([hex, inHeader]) => window.xmoq.sendObject(hex, inHeader), [payloadHex, subgroupInHeader])
     } else {
       if (byNamespace && rustPublisher !== 'own') throw new Error('--publish-namespace needs --rust-publisher own')
       const mode = byNamespace ? 'publish-namespace' : 'publish'
@@ -375,7 +380,9 @@ async function main() {
       // that would come after the PUBLISH. Both are below the 5 s the relay
       // waits for an answer.
       const delays = subscribeFirst ? ['--publish-delay-ms', '3000', '--answer-delay-ms', '4000'] : []
-      const client = spawnRustClient('rust-pub', rustPublisher, mode, ['--payload-hex', payloadHex, ...delays])
+      const subgroupId = options['subgroup-id'] === 'zero' ? [] : ['--subgroup-id', options['subgroup-id']]
+      if (subgroupId.length > 0 && rustPublisher !== 'own') throw new Error('--subgroup-id needs --rust-publisher own')
+      const client = spawnRustClient('rust-pub', rustPublisher, mode, ['--payload-hex', payloadHex, ...delays, ...subgroupId])
       await client.waitForLine(byNamespace || subscribeFirst ? /^NAMESPACE_PUBLISHED/ : /^PUBLISHED /)
       if (subscribeFirst) published = () => client.waitForLine(/^PUBLISHED /)
       sendObject = async () => {
