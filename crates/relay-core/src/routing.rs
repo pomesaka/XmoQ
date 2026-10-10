@@ -8,9 +8,10 @@
 //! answer. The same goes for a `PUBLISH_NAMESPACE` that arrives while a track
 //! is subscribed to elsewhere (§9.5: "it MUST send a SUBSCRIBE to the
 //! publisher that sent the `PUBLISH_NAMESPACE` for each matching
-//! subscription"). A track does take Objects from several sources (§9.3);
-//! today the further ones can only come with PUBLISH. `docs/roadmap.md`,
-//! Phase 0b, has the item.
+//! subscription"). A track does take Objects from several sources (§9.3):
+//! publishers that send PUBLISH for it, and the one publisher the relay
+//! asked, when its answer comes after a PUBLISH of another gave the track
+//! its first source. `docs/roadmap.md`, Phase 0b, has the item.
 //!
 //! Two words for the side the Objects come from. A *publisher* is a peer: the
 //! session that announced a namespace, or that sent PUBLISH. *Upstream* is the
@@ -35,7 +36,7 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 
 use crate::{
     Action, OwnRequestEnd, OwnRequestKey, Relay, RequestSlot, SessionKey, Source, StreamKey,
-    Subscriber, TrackEnd, TrackSource, internal_error,
+    Subscriber, TrackEnd, TrackSource, internal_error, largest_object,
 };
 
 /// Namespaces one session may have announced at once. One more is refused
@@ -152,9 +153,10 @@ struct OwnRequestView {
 /// (`DUPLICATE_SUBSCRIPTION`).
 ///
 /// WHY a thing of its own, kept by a track whether or not it has a source:
-/// with several publishers asked for one track, one can have accepted while
-/// another has not answered. Today one publisher is asked, so a track has at
-/// most one, and none once it has a source.
+/// a track can get a source while the publisher that was asked has not
+/// answered, from a PUBLISH of another publisher, and with several
+/// publishers asked for one track, one can have accepted while another has
+/// not answered. Today one publisher is asked, so a track has at most one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ask {
     pub(crate) publisher: SessionKey,
@@ -503,10 +505,7 @@ impl Relay {
                     request,
                     track_alias,
                 };
-                let largest = parameters.iter().find_map(|parameter| match parameter {
-                    Parameter::LargestObject(location) => Some(*location),
-                    _ => None,
-                });
+                let largest = largest_object(&parameters);
                 // §10.2.11: the relay's LARGEST_OBJECT starts from the one
                 // the publisher gave. §9.6: its Track Properties are passed
                 // on.
@@ -533,9 +532,9 @@ impl Relay {
         largest: Option<Location>,
         actions: &mut Vec<Action>,
     ) {
-        // FIXME: an answer for a track that has a source already makes a
-        // second source of it. Today no request is left open on such a track.
-        if self.tracks.pending(&own.track).is_none() {
+        // An answer to what was asked, whether the track still waits for its
+        // first source or got one from another publisher since.
+        if own.phase != Some(UpstreamPhase::Asked) {
             return;
         }
         let Ask { publisher, request } = own.ask;
@@ -553,11 +552,14 @@ impl Relay {
             .tracks
             .add_source(&own.track, accepted, properties, largest)
         else {
-            // The track cannot take the source. For the publisher the
+            // The track got its sources elsewhere while the relay waited for
+            // this answer, and cannot take another. For the publisher the
             // subscription is Established, so it is cancelled (§3.3.2), as
-            // one the relay cannot use for another reason. Not reached
-            // today: a track that waits takes its first source, always; see
-            // the FIXME above.
+            // one the relay cannot use for another reason. Reached for a
+            // track that has all the sources it may have. A source on the
+            // same session is the other reason `add_source` has, and does
+            // not get here: a publisher that becomes a source with PUBLISH
+            // has had what was asked of it cancelled.
             self.cancel_own_request(publisher, request, actions);
             if let Some(state) = self.sessions.get_mut(&publisher) {
                 state.drop_early_streams(publisher, track_alias, actions);
@@ -582,6 +584,9 @@ impl Relay {
         track_alias: u64,
         actions: &mut Vec<Action>,
     ) {
+        // WHY the phase is not looked at: the session reports this for the
+        // one answer a SUBSCRIBE gets, so the request is one that was asked
+        // and had no answer.
         let Ask { publisher, request } = own.ask;
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return;
@@ -802,17 +807,13 @@ impl Relay {
         }
     }
 
-    /// Whether the track has no source and a SUBSCRIBE of the relay for it
-    /// went to that session.
-    ///
-    /// FIXME: look at what is asked for a track with a source as well
-    /// ([`Tracks::asks`]). Today such a track has nothing asked: a PUBLISH
-    /// for a track that waits is refused unless it comes from the publisher
-    /// that was asked.
+    /// Whether a SUBSCRIBE of the relay for the track went to that session
+    /// and has no answer yet, whether or not the track has a source.
     pub(crate) fn is_asked_of(&self, track_name: &FullTrackName, session: SessionKey) -> bool {
         self.tracks
-            .pending(track_name)
-            .is_some_and(|pending| pending.asks.iter().any(|ask| ask.publisher == session))
+            .asks(track_name)
+            .iter()
+            .any(|ask| ask.publisher == session)
     }
 
     /// A publisher that was asked for the track sent PUBLISH for it: the

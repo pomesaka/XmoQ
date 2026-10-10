@@ -794,21 +794,380 @@ fn a_publisher_that_ends_the_relays_subscribe_without_publish_done_ends_the_trac
     assert_eq!(routed(&relay), (1, 0, 0, 0, 0));
 }
 
-#[test]
-fn a_publish_for_a_track_the_relay_asked_for_is_refused() {
+/// PUBLISHER announced `(xmoq)`, Alice subscribed to `(xmoq)/a`, and the
+/// relay asked PUBLISHER for the track (its request 0). Before PUBLISHER
+/// answered, Bob sent PUBLISH for the track: the track has Bob as its source,
+/// Alice is subscribed, and what the relay asked of PUBLISHER is still asked.
+fn relay_with_a_source_and_an_ask() -> Relay {
     let mut relay = relay();
     announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
     subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
-    // Bob offers the same track while the relay waits for PUBLISHER:
-    // UNINTERESTED (0x20). Once the track has a source, Bob's PUBLISH is
-    // taken as a second one.
+    // Bob's PUBLISH is accepted, and Alice, who waited, is answered with what
+    // Bob's PUBLISH brought.
     assert_eq!(
         relay.step(Event::RequestOpened {
             session: BOB,
             stream: StreamKey(0),
             first: publish(0, b"a"),
         }),
-        refused(BOB, 0, error(0x20))
+        [
+            Action::SendRequest {
+                session: BOB,
+                stream: StreamKey(0),
+                message: ControlMessage::RequestOk(RequestOk {
+                    parameters: vec![Parameter::Forward(true)],
+                    track_properties: vec![],
+                }),
+            },
+            subscribe_ok(ALICE, None),
+        ]
+    );
+    let counts = relay.counts();
+    assert_eq!(
+        (
+            counts.tracks,
+            counts.pending_tracks,
+            counts.sources,
+            counts.asks,
+            counts.own_requests
+        ),
+        (1, 0, 1, 1, 1)
+    );
+    relay
+}
+
+/// A name, the events, what the last of them leads to, and `(sources, asks,
+/// requests of the relay)` after it.
+type AskCase = (&'static str, Vec<Event>, Vec<Action>, (usize, usize, usize));
+
+/// What can become of what the relay asked of PUBLISHER while the track has
+/// Bob as a source. Nothing of it is told to Alice, who has her
+/// `SUBSCRIBE_OK`.
+fn what_becomes_of_the_ask() -> Vec<AskCase> {
+    let cancelled = Action::CancelOwnRequest {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+        code: 0x1,
+    };
+    let finished = Action::FinishOwnRequest {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+    };
+    let publishes = Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: publish(2, b"a"),
+    };
+    let publish_ok = Action::SendRequest {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        message: ControlMessage::RequestOk(RequestOk {
+            parameters: vec![Parameter::Forward(true)],
+            track_properties: vec![],
+        }),
+    };
+    let timeout = Event::UpstreamTimeout {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+    };
+    let duplicate = upstream(PUBLISHER, 0, ControlMessage::RequestError(error(0x19)));
+    vec![
+        (
+            "the publisher accepts: a second source",
+            vec![upstream(PUBLISHER, 0, upstream_subscribe_ok(None))],
+            vec![answered()],
+            (2, 0, 1),
+        ),
+        (
+            "the publisher refuses",
+            vec![upstream(
+                PUBLISHER,
+                0,
+                ControlMessage::RequestError(error(0x10)),
+            )],
+            // The hub stops the timer of a request that is finished.
+            vec![finished.clone()],
+            (1, 0, 0),
+        ),
+        (
+            "the publisher does not answer in time",
+            vec![timeout.clone()],
+            vec![cancelled.clone()],
+            (1, 0, 0),
+        ),
+        (
+            "the publisher sends PUBLISH: the SUBSCRIBE gives way",
+            vec![publishes.clone()],
+            vec![cancelled, publish_ok.clone()],
+            (2, 0, 0),
+        ),
+        (
+            "the publisher goes",
+            vec![Event::SessionClosed { session: PUBLISHER }],
+            vec![],
+            (1, 0, 0),
+        ),
+        // DUPLICATE_SUBSCRIPTION (0x19): a PUBLISH of the publisher is on its
+        // way, and the relay waits for it, for the time an answer gets.
+        (
+            "the publisher answers DUPLICATE_SUBSCRIPTION",
+            vec![duplicate.clone()],
+            vec![
+                finished,
+                Action::StartUpstreamTimer {
+                    session: PUBLISHER,
+                    request: OwnRequestKey(0),
+                },
+            ],
+            (1, 1, 1),
+        ),
+        (
+            "DUPLICATE_SUBSCRIPTION, and the PUBLISH comes",
+            vec![duplicate.clone(), publishes],
+            vec![answered(), publish_ok],
+            (2, 0, 0),
+        ),
+        (
+            "DUPLICATE_SUBSCRIPTION, and no PUBLISH comes in time",
+            vec![duplicate, timeout],
+            vec![],
+            (1, 0, 0),
+        ),
+    ]
+}
+
+#[test]
+fn what_was_asked_of_a_publisher_stays_asked_when_another_publishes_the_track() {
+    for (name, events, expected, held) in what_becomes_of_the_ask() {
+        let mut relay = relay_with_a_source_and_an_ask();
+        let mut last = Vec::new();
+        for event in events {
+            last = relay.step(event);
+        }
+        assert_eq!(last, expected, "{name}");
+        let counts = relay.counts();
+        assert_eq!(
+            (counts.sources, counts.asks, counts.own_requests),
+            held,
+            "{name}"
+        );
+        // Alice is subscribed throughout, to the one track.
+        assert_eq!((counts.tracks, counts.subscriptions), (1, 1), "{name}");
+    }
+}
+
+#[test]
+fn a_timer_that_fires_late_for_what_was_asked_does_nothing() {
+    let timeout = Event::UpstreamTimeout {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+    };
+    // (what ended the wait for the answer before its timer was reported)
+    let cases = [
+        (
+            "the publisher accepted",
+            upstream(PUBLISHER, 0, upstream_subscribe_ok(None)),
+        ),
+        (
+            "the publisher sent PUBLISH",
+            Event::RequestOpened {
+                session: PUBLISHER,
+                stream: StreamKey(1),
+                first: publish(2, b"a"),
+            },
+        ),
+        ("the track ended", Event::SessionClosed { session: BOB }),
+    ];
+    for (name, event) in cases {
+        let mut relay = relay_with_a_source_and_an_ask();
+        relay.step(event);
+        let before = relay.counts();
+        assert_eq!(relay.step(timeout.clone()), [], "{name}");
+        assert_eq!(relay.counts(), before, "{name}");
+    }
+}
+
+#[test]
+fn a_malformed_track_takes_what_was_asked_with_it() {
+    let mut relay = relay_with_a_source_and_an_ask();
+    relay.step(Event::DataStreamOpened {
+        session: BOB,
+        stream: StreamKey(7),
+        header: header(UPSTREAM_ALIAS),
+    });
+    // What Bob sends breaks the object model. Bob and Alice are told so, with
+    // MALFORMED_TRACK (0x12); what was asked of PUBLISHER is cancelled with
+    // CANCELLED (0x1).
+    let mut expected = vec![
+        Action::StopDataStream {
+            session: BOB,
+            stream: StreamKey(7),
+            code: 0x12,
+        },
+        Action::ResetRequest {
+            session: BOB,
+            stream: StreamKey(0),
+            code: 0x12,
+        },
+        Action::CancelOwnRequest {
+            session: PUBLISHER,
+            request: OwnRequestKey(0),
+            code: 0x1,
+        },
+        Action::ResetDataStream {
+            out_stream: OutStreamKey(0),
+            code: 0x12,
+        },
+    ];
+    expected.extend(done_actions(ALICE, 0x12, 1));
+    assert_eq!(
+        relay.step(Event::TrackMalformed {
+            session: BOB,
+            stream: StreamKey(7),
+        }),
+        expected
+    );
+    let counts = relay.counts();
+    assert_eq!((counts.tracks, counts.asks, counts.own_requests), (0, 0, 0));
+}
+
+#[test]
+fn an_answer_that_comes_when_the_track_has_all_its_sources_is_cancelled() {
+    // The expectation below is spelled out for 4 sources.
+    assert_eq!(crate::MAX_SOURCES, 4);
+    let mut relay = relay_with_a_source_and_an_ask();
+    // Three more publishers send PUBLISH for the track: it has four sources.
+    for session in [CAROL, SessionKey(11), SessionKey(12)] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(0),
+            first: publish(0, b"a"),
+        });
+    }
+    assert_eq!(relay.counts().sources, 4);
+    // PUBLISHER sent a stream ahead of its SUBSCRIBE_OK, which comes now.
+    // For PUBLISHER the subscription is Established; the relay cancels it,
+    // and stops the stream, both with CANCELLED (0x1).
+    relay.step(Event::DataStreamOpened {
+        session: PUBLISHER,
+        stream: StreamKey(5),
+        header: header(UPSTREAM_ALIAS),
+    });
+    assert_eq!(relay.counts().early_streams, 1);
+    assert_eq!(
+        relay.step(upstream(PUBLISHER, 0, upstream_subscribe_ok(None))),
+        [
+            answered(),
+            Action::CancelOwnRequest {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+                code: 0x1,
+            },
+            Action::StopDataStream {
+                session: PUBLISHER,
+                stream: StreamKey(5),
+                code: 0x1,
+            },
+        ]
+    );
+    let counts = relay.counts();
+    assert_eq!(
+        (
+            counts.sources,
+            counts.asks,
+            counts.own_requests,
+            counts.early_streams
+        ),
+        (4, 0, 0, 0)
+    );
+}
+
+#[test]
+fn what_was_asked_is_cancelled_when_the_last_subscriber_goes() {
+    let mut relay = relay_with_a_source_and_an_ask();
+    // Alice cancels. Nobody would get what PUBLISHER might answer with, so
+    // the SUBSCRIBE to it is cancelled. The track stays: Bob sends unasked.
+    assert_eq!(
+        relay.step(Event::RequestClosed {
+            session: ALICE,
+            stream: StreamKey(0),
+            how: RequestEnd::Aborted,
+        }),
+        [
+            Action::FinishRequest {
+                session: ALICE,
+                stream: StreamKey(0),
+            },
+            Action::CancelOwnRequest {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+                code: 0x1,
+            },
+        ]
+    );
+    let counts = relay.counts();
+    assert_eq!(
+        (
+            counts.tracks,
+            counts.sources,
+            counts.asks,
+            counts.own_requests
+        ),
+        (1, 1, 0, 0)
+    );
+}
+
+#[test]
+fn what_was_asked_is_cancelled_when_the_track_ends_with_its_last_source() {
+    let mut relay = relay_with_a_source_and_an_ask();
+    // Bob goes before PUBLISHER answered. The track has no source and ends
+    // for Alice; the relay does not wait for PUBLISHER on her behalf.
+    let mut expected = vec![Action::CancelOwnRequest {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+        code: 0x1,
+    }];
+    expected.extend(done_actions(ALICE, 0x2, 0));
+    assert_eq!(relay.step(Event::SessionClosed { session: BOB }), expected);
+    assert_eq!(routed(&relay), (1, 0, 0, 0, 0));
+}
+
+#[test]
+fn everyone_who_waited_is_answered_when_another_publisher_publishes_the_track() {
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // Carol waits as well, with Forward State 0.
+    relay.step(Event::RequestOpened {
+        session: CAROL,
+        stream: StreamKey(0),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            full_track_name: track_in(&[b"xmoq"]),
+            parameters: vec![Parameter::Forward(false)],
+        }),
+    });
+    let actions = relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: StreamKey(0),
+        first: publish(0, b"a"),
+    });
+    assert_eq!(
+        actions[1..],
+        [subscribe_ok(ALICE, None), subscribe_ok(CAROL, None)]
+    );
+    // What Bob sends is opened for Alice only (§5.1, Forward State 0).
+    assert_eq!(
+        relay.step(Event::DataStreamOpened {
+            session: BOB,
+            stream: StreamKey(7),
+            header: header(UPSTREAM_ALIAS),
+        }),
+        [open_data_stream(ALICE, 0, header(0))]
     );
 }
 
