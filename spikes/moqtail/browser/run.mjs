@@ -127,6 +127,13 @@ const { values: options } = parseArgs({
     //   late-announcer:           one sends PUBLISH, the subscriber comes,
     //                             and then the other announces the namespace
     'ask-all': { type: 'string' },
+    // Two own Rust publishers send Group 0 of one track, the second after
+    // the first, to an own Rust subscriber.
+    //   differs:           with the Publisher Priorities 0 and 1. The relay
+    //                      has to end the track as malformed (§2.4.2).
+    //   written-two-ways:  one with 128 in the header, the other with none,
+    //                      which is 128 as well (§12.4). The track goes on.
+    priorities: { type: 'string' },
     // After the first Object, the `own` Rust publisher ends its subscription
     // with PUBLISH_DONE and publishes the track anew at once, under the next
     // Track Alias (`other`) or the same one (`same`), and then sends its next
@@ -232,6 +239,10 @@ function spawnLogged(source, command, args, env = {}) {
     /** How many lines printed so far match. */
     count(pattern) {
       return lines.filter(line => pattern.test(line)).length
+    },
+    /** The lines printed so far that match. */
+    lines(pattern) {
+      return lines.filter(line => pattern.test(line))
     },
     waitForLine(pattern) {
       for (const line of lines) {
@@ -423,6 +434,53 @@ async function main() {
       }
       log('driver', `RESULT ${JSON.stringify(result)}`)
       if (!result.match) throw new Error('the subscriber was answered at another time than expected')
+      return
+    }
+    if (options.priorities) {
+      const scenario = options.priorities
+      if (!['differs', 'written-two-ways'].includes(scenario)) {
+        throw new Error('--priorities takes differs or written-two-ways')
+      }
+      if (options.relay !== 'own' || direction.publisherInBrowser || direction.subscriberInBrowser) {
+        throw new Error('--priorities needs --relay own and --direction rust-to-rust')
+      }
+      const [firstPriority, secondPriority] = scenario === 'differs' ? ['0', '1'] : ['128', 'default']
+      const publisher = (label, priority) => spawnRustClient(label, 'own', 'publish', [
+        '--payload-hex', payloadHex, '--publisher-priority', priority,
+      ])
+      const first = publisher('rust-pub', firstPriority)
+      await first.waitForLine(/^PUBLISHED /)
+      const second = publisher('rust-pub2', secondPriority)
+      await second.waitForLine(/^PUBLISHED /)
+      const subscriber = spawnRustClient('rust-sub', 'own', 'subscribe', ['--objects', '2'])
+      await subscriber.waitForLine(/^SUBSCRIBED /)
+      first.child.stdin.write('send\n')
+      await first.waitForLine(/^SENT group=0 /)
+      await subscriber.waitForLine(/^OBJECT group=0 /)
+      second.child.stdin.write('send\n')
+      await second.waitForLine(/^SENT group=0 /)
+      if (scenario === 'differs') {
+        await subscriber.waitForLine(/^SUBSCRIPTION_ENDED /)
+      } else {
+        // The track goes on: the first publisher's next Group arrives.
+        first.child.stdin.write('send\n')
+        await first.waitForLine(/^SENT group=1 /)
+        await subscriber.waitForLine(/^OBJECT group=1 /)
+      }
+      const resets = code => relay.lines(new RegExp(`^RESET_REQUEST .* code=${code}$`))
+      result = {
+        scenario: `priorities ${scenario}`,
+        subscriptionEnded: subscriber.lines(/^SUBSCRIPTION_ENDED /),
+        malformedTrackTo: resets('0x12'),
+        cancelledTo: resets('0x1'),
+        group0: subscriber.count(/^OBJECT group=0 /),
+        relayVersion,
+      }
+      result.match = scenario === 'differs'
+        ? result.subscriptionEnded.length === 1 && result.malformedTrackTo.length === 1 && result.cancelledTo.length === 1
+        : result.subscriptionEnded.length === 0 && result.malformedTrackTo.length === 0 && result.group0 === 1
+      log('driver', `RESULT ${JSON.stringify(result)}`)
+      if (!result.match) throw new Error('the track did not end, or did not go on, as the priorities ask')
       return
     }
     if (options['ask-all']) {

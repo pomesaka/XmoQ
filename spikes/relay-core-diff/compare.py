@@ -9,7 +9,9 @@ for what the random events are made of; `fuzz.rs` describes them.
 `split-steady` and `shared-steady` are `split-one` and `shared` in which the
 publisher of the second half never says PUBLISH_DONE, and `no-announce` is
 `full` in which nobody announces a namespace. The default
-is `v1`. `--touch subgroups|publishers|republish|waiting-or-draining|asks` says which events `--touching` takes
+is `v1`. With `--priorities` the subgroup streams have one of three Publisher
+Priorities, where they all have the same without it.
+`--touch subgroups|publishers|republish|waiting-or-draining|asks|priority` says which events `--touching` takes
 for the ones a change is about; the default is `subgroups`.
 
 `--touching` is for a change that is meant to alter what the relay does with
@@ -115,7 +117,7 @@ SPIKES = [
 ]
 
 
-TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks")
+TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks", "priority")
 WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared", "split-steady", "shared-steady",
           "no-announce")
 # Worlds of `fuzz.rs` with something taken out on top: the world, and the
@@ -640,6 +642,9 @@ def main():
     print(f"touch: {os.environ.get('XMOQ_FUZZ_TOUCH', 'subgroups')}")
     if "--touching" in sys.argv:
         os.environ["XMOQ_DIFF_KEEP_GOING"] = "1"
+    if "--priorities" in sys.argv:
+        os.environ["XMOQ_FUZZ_PRIORITIES"] = "1"
+        print("PRIORITIES: the subgroup streams have one of three Publisher Priorities")
     if "--raw-numbers" in sys.argv:
         os.environ["XMOQ_DIFF_RAW_NUMBERS"] = "1"
         print("RAW NUMBERS: streams to subscribers are compared by the number each version gave them")

@@ -12,10 +12,15 @@
 //!
 //! Several publishers of one track (§9.3, §9.5) are handled in part: a
 //! [`Track`] takes several sources ([`TrackSource`]), and the publishers of
-//! its namespace are asked for it, but no more of them than the track has
-//! room for ([`Relay::ask_the_publishers`]), and a SUBSCRIBE for a track
-//! whose sources all drain is refused where the draft has those publishers
-//! asked.
+//! its namespace are asked for it ([`Relay::ask_the_publishers`]). Five
+//! things the draft asks for are not done, and
+//! `docs/moqt-implementation-notes.md` has them under its known gaps: no
+//! more publishers are asked than the track has room for; one that was
+//! passed over for the requests open on it is not asked when one ends; one
+//! that was asked and did not become a source is not asked again until it
+//! announces anew; a `PUBLISH_NAMESPACE` does not get its publisher asked
+//! for a track nobody is subscribed to; and a SUBSCRIBE for a track whose
+//! sources all drain is refused.
 //!
 //! FIXME: apply the Subscription Filter of a SUBSCRIBE (§5.1.2). Every
 //! subscriber gets the Objects that arrive after its subscription, which is what
@@ -306,6 +311,12 @@ struct InStream {
     /// The Subgroup ID, once known. With the mode "first Object ID" (§11.4.2)
     /// that is when the first Object arrives.
     subgroup_id: Option<u64>,
+    /// The Publisher Priority of the Subgroup: the one in the header, or
+    /// the default of the source the stream came from when it was opened.
+    /// `None` where the relay cannot tell which subscription the stream is
+    /// of, and so not which default it has: see
+    /// [`Relay::on_data_stream_opened`].
+    priority: Option<u8>,
     passage: Passage,
     /// Whether an Object was forwarded. A subscriber that joins after that
     /// gets a stream that does not start with the Subgroup's first Object.
@@ -342,6 +353,25 @@ enum TakenFrom {
     Whole,
 }
 
+/// A Subgroup the relay has taken from a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Taken {
+    from: TakenFrom,
+    /// The Publisher Priority of that stream ([`InStream::priority`]).
+    priority: Option<u8>,
+}
+
+/// What became of a stream that arrived for a Subgroup of a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Taking {
+    /// The Subgroup is taken from it.
+    Taken,
+    /// It was stopped: the Subgroup is taken from elsewhere.
+    Left,
+    /// It makes the track malformed; ending the track is the caller's.
+    Malformed,
+}
+
 /// What to do with a stream that arrives for a Subgroup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Admission {
@@ -352,6 +382,9 @@ enum Admission {
     /// Leave it: the Subgroup was delivered whole, is another source's, or
     /// is of a Group that is too old to tell.
     Discard,
+    /// The track is malformed: the Subgroup came before with another
+    /// Publisher Priority (§2.4.2).
+    Malformed,
 }
 
 /// Which stream each Subgroup of a track is taken from, for the newest
@@ -399,6 +432,15 @@ enum Admission {
 ///   where its source ends, and the next Subgroup comes from whichever source
 ///   sends it first.
 ///
+/// A stream for a Subgroup that came before with another Publisher Priority
+/// makes the track malformed, from the same source or another, and however
+/// the first stream stands. §2.4.2 has it as its first example: "An Object
+/// with a particular Subgroup ID is received, but its Publisher Priority is
+/// different from that of the previous Object with the same Subgroup ID".
+/// WHY the priority and nothing else of the header: `END_OF_GROUP` is a hint
+/// a publisher need not give (§11.4.2), `PROPERTIES` says how the Objects
+/// are laid out, and what the Objects hold is not compared at all.
+///
 /// FIXME: detect an Object past the last one of a Subgroup that ended with a
 /// FIN, and a Subgroup that comes on two streams that end with a FIN with
 /// different last Objects (§2.4.2, the second and third example of a
@@ -406,7 +448,7 @@ enum Admission {
 #[derive(Debug, Default)]
 struct Subgroups {
     /// By Group ID and Subgroup ID.
-    taken: BTreeMap<(u64, u64), TakenFrom>,
+    taken: BTreeMap<(u64, u64), Taken>,
     newest_group: Option<u64>,
 }
 
@@ -432,6 +474,7 @@ impl Subgroups {
         subgroup: u64,
         stream: InStreamKey,
         track_alias: u64,
+        priority: Option<u8>,
         several_sources: bool,
     ) -> Admission {
         let newest = self.newest_group.map_or(group, |newest| newest.max(group));
@@ -445,20 +488,31 @@ impl Subgroups {
             };
         }
         let source: SourceId = (stream.0, track_alias);
-        let admission = match self.taken.get(&(group, subgroup)) {
-            Some(TakenFrom::Open(open, _)) if *open == stream => Admission::Pass,
-            Some(TakenFrom::Open(open, alias)) if (open.0, *alias) == source => {
-                Admission::Replace(*open)
+        let taken = self.taken.get(&(group, subgroup));
+        // Two priorities that are known and differ. One the relay is not
+        // sure of is not held against the track.
+        let differs = |taken: &Taken| match (taken.priority, priority) {
+            (Some(before), Some(now)) => before != now,
+            _ => false,
+        };
+        if taken.is_some_and(differs) {
+            return Admission::Malformed;
+        }
+        let admission = match taken.map(|taken| taken.from) {
+            Some(TakenFrom::Open(open, _)) if open == stream => Admission::Pass,
+            Some(TakenFrom::Open(open, alias)) if (open.0, alias) == source => {
+                Admission::Replace(open)
             }
-            Some(TakenFrom::CutShort(by)) if *by == source => Admission::Pass,
+            Some(TakenFrom::CutShort(by)) if by == source => Admission::Pass,
             // From another source, or delivered whole.
             Some(TakenFrom::Open(..) | TakenFrom::CutShort(_) | TakenFrom::Whole) => {
                 return Admission::Discard;
             }
             None => Admission::Pass,
         };
+        let from = TakenFrom::Open(stream, track_alias);
         self.taken
-            .insert((group, subgroup), TakenFrom::Open(stream, track_alias));
+            .insert((group, subgroup), Taken { from, priority });
         while let Some(((oldest, _), _)) = self.taken.first_key_value()
             && (forgotten(*oldest) || self.taken.len() > MAX_REMEMBERED_SUBGROUPS)
         {
@@ -470,10 +524,10 @@ impl Subgroups {
     /// The stream a Subgroup is taken from ended, with a FIN or without.
     fn ended(&mut self, group: u64, subgroup: u64, stream: InStreamKey, fin: bool) {
         if let Some(taken) = self.taken.get_mut(&(group, subgroup))
-            && let TakenFrom::Open(open, track_alias) = *taken
+            && let TakenFrom::Open(open, track_alias) = taken.from
             && open == stream
         {
-            *taken = if fin {
+            taken.from = if fin {
                 TakenFrom::Whole
             } else {
                 TakenFrom::CutShort((stream.0, track_alias))
@@ -555,6 +609,10 @@ struct Source {
     /// The wait for those streams, as [`Action::StartDrainTimer`] numbers
     /// it, once one runs.
     wait: Option<u64>,
+    /// The Publisher Priority of its Subgroups that carry none (§11.4.2:
+    /// such a Subgroup "inherits the Publisher Priority specified in the
+    /// control message that established the subscription").
+    default_priority: u8,
 }
 
 impl Source {
@@ -645,6 +703,7 @@ impl Track {
                 from,
                 draining: false,
                 wait: None,
+                default_priority: default_publisher_priority(&properties),
             }],
             had_several_sources: false,
             asks: Vec::new(),
@@ -657,10 +716,11 @@ impl Track {
         }
     }
 
-    /// A stream of a source turned out to be of this Subgroup. Returns
-    /// whether the Subgroup is taken from it; when not, the stream is stopped.
+    /// A stream of a source turned out to be of this Subgroup. Says whether
+    /// the Subgroup is taken from it; when it is left, the stream is stopped.
     /// A stream it takes the place of is stopped, and what was opened for
-    /// that one downstream is reset.
+    /// that one downstream is reset. `priority` is the Publisher Priority of
+    /// the stream ([`InStream::priority`]).
     ///
     /// §11.4.3 for the stop: "A subscriber MAY send a QUIC `STOP_SENDING`
     /// frame for a subgroup stream if the Group or Subgroup is no longer of
@@ -669,24 +729,26 @@ impl Track {
         &mut self,
         subgroup: (u64, u64),
         stream: InStreamKey,
-        track_alias: u64,
+        (track_alias, priority): (u64, Option<u8>),
         out_streams: &mut HashMap<OutStreamKey, OutStream>,
         actions: &mut Vec<Action>,
-    ) -> bool {
+    ) -> Taking {
         let stop = |(session, stream): InStreamKey| Action::StopDataStream {
             session,
             stream,
             code: stream_reset_code::CANCELLED,
         };
         let several = self.had_several_sources;
+        let (group, subgroup) = subgroup;
         match self
             .subgroups
-            .admit(subgroup.0, subgroup.1, stream, track_alias, several)
+            .admit(group, subgroup, stream, track_alias, priority, several)
         {
-            Admission::Pass => true,
+            Admission::Pass => Taking::Taken,
+            Admission::Malformed => Taking::Malformed,
             Admission::Discard => {
                 actions.push(stop(stream));
-                false
+                Taking::Left
             }
             Admission::Replace(old) => {
                 if let Some(replaced) = self.in_streams.get_mut(&old) {
@@ -705,7 +767,7 @@ impl Track {
                     }
                     actions.push(stop(old));
                 }
-                true
+                Taking::Taken
             }
         }
     }
@@ -903,6 +965,7 @@ impl Tracks {
                 from,
                 draining: false,
                 wait: None,
+                default_priority: default_publisher_priority(&properties),
             };
             let (session, track_alias) = new.session_and_alias();
             // The same session under the same alias: the alias is the new
@@ -1046,7 +1109,7 @@ impl Tracks {
 
     /// Lets a session be asked again for the tracks `of` picks. Every track
     /// is looked at, for each namespace that is announced and each session
-    /// that goes; see [`Relay::alias_was_taken_over`] for when that is to be
+    /// that goes; see [`Relay::end_sources_under`] for when that is to be
     /// looked up another way.
     fn forget_declined(&mut self, session: SessionKey, of: impl Fn(&FullTrackName) -> bool) {
         for (name, entry) in &mut self.0 {
@@ -2062,11 +2125,11 @@ impl Relay {
         // taken for an Object of the new track, and no source would be
         // there to let go of it with.
         let id = (session, header.track_alias);
-        let track = self
-            .tracks
-            .live_mut(&track_name)
-            .filter(|track| track.sources().any(|source| source.sent(id)));
-        let Some(track) = track else {
+        let of_its_source = self.tracks.live_mut(&track_name).and_then(|track| {
+            let source = track.sources().find(|source| source.sent(id))?;
+            Some((source.default_priority, source.draining, track))
+        });
+        let Some((default_priority, draining, track)) = of_its_source else {
             actions.push(Action::StopDataStream {
                 session,
                 stream,
@@ -2083,22 +2146,39 @@ impl Relay {
         // WHY not at once for the mode that leaves the Subgroup ID to the
         // first Object: until then the relay cannot tell whether it has taken
         // that Subgroup from another stream already.
+        // §11.4.2: a header without a Publisher Priority has the one of the
+        // subscription the stream came on, which is that of its source.
+        //
+        // WHY not where the source drains: the publisher may have sent
+        // PUBLISH anew under the alias, with another default, and this
+        // stream ahead of it (§5.1); it carries nothing that says which of
+        // the two it is for. Taking the wrong default would end a track
+        // that nothing is wrong with, for every subscriber. WHY NOT compare
+        // all the same: what is lost is a difference that is not found,
+        // which a relay that remembers 8 Groups does not promise anyway.
+        let of_the_source = (!draining).then_some(default_priority);
+        let priority = header.publisher_priority.or(of_the_source);
+        let mut malformed = false;
         let passage = match subgroup_id {
             None => Passage::Undetermined,
             Some(id) => {
                 let subgroup = (header.group_id, id);
                 let key = (session, stream);
-                let alias = header.track_alias;
-                if track.admit(subgroup, key, alias, &mut self.out_streams, actions) {
-                    Passage::Passed
-                } else {
-                    Passage::Discarded
+                let of = (header.track_alias, priority);
+                match track.admit(subgroup, key, of, &mut self.out_streams, actions) {
+                    Taking::Taken => Passage::Passed,
+                    Taking::Left => Passage::Discarded,
+                    Taking::Malformed => {
+                        malformed = true;
+                        Passage::Discarded
+                    }
                 }
             }
         };
         let mut in_stream = InStream {
             header,
             subgroup_id,
+            priority,
             passage,
             started: false,
             of_the_subscription_before: false,
@@ -2118,6 +2198,16 @@ impl Relay {
             }
         }
         track.in_streams.insert((session, stream), in_stream);
+        if malformed {
+            // WHY stopped here: the track ends below, and what ends it stops
+            // the streams it took Objects from, not one it had left.
+            actions.push(Action::StopDataStream {
+                session,
+                stream,
+                code: stream_reset_code::MALFORMED_TRACK,
+            });
+            self.on_track_malformed(session, stream, actions);
+        }
     }
 
     fn on_object(
@@ -2138,10 +2228,10 @@ impl Relay {
             return;
         };
         let key = (session, stream);
-        let (group, track_alias, known) = match track.in_streams.get(&key) {
+        let (group, of, known) = match track.in_streams.get(&key) {
             Some(in_stream) if in_stream.passage != Passage::Discarded => (
                 in_stream.header.group_id,
-                in_stream.header.track_alias,
+                (in_stream.header.track_alias, in_stream.priority),
                 in_stream.subgroup_id,
             ),
             _ => return,
@@ -2151,20 +2241,25 @@ impl Relay {
         // first Object on this stream, whatever FIRST_OBJECT says: it is the
         // one reading a subscriber can follow from the stream alone, and the
         // header goes downstream as it came, so both arrive at the same ID.
-        let passes = known.is_some()
-            || track.admit(
-                (group, object.object_id),
-                key,
-                track_alias,
-                &mut self.out_streams,
-                actions,
-            );
+        let taking = if known.is_some() {
+            Taking::Taken
+        } else {
+            let subgroup = (group, object.object_id);
+            track.admit(subgroup, key, of, &mut self.out_streams, actions)
+        };
         let Some(in_stream) = track.in_streams.get_mut(&key) else {
             return;
         };
-        if !passes {
-            in_stream.passage = Passage::Discarded;
-            return;
+        match taking {
+            Taking::Taken => {}
+            Taking::Left => {
+                in_stream.passage = Passage::Discarded;
+                return;
+            }
+            Taking::Malformed => {
+                self.on_track_malformed(session, stream, actions);
+                return;
+            }
         }
         in_stream.passage = Passage::Passed;
         let location = Location {
@@ -2976,6 +3071,31 @@ impl TrackEnd {
             ),
         }
     }
+}
+
+/// DEFAULT PUBLISHER PRIORITY (§12.4), a Track Property, and what holds
+/// without it: "If omitted, the Default Publisher Priority is 128."
+const DEFAULT_PUBLISHER_PRIORITY_PROPERTY: u64 = 0x0e;
+const DEFAULT_PUBLISHER_PRIORITY: u8 = 128;
+
+/// The Publisher Priority of the Subgroups of a subscription that carry
+/// none, from the Track Properties of the PUBLISH or `SUBSCRIBE_OK` that
+/// established it.
+///
+/// WHY a value above 255 counts as none: §12.4 has "Priorities above 255
+/// are invalid" and does not say what a receiver does with one; the relay
+/// passes the property on as it came and only has to compare with it. Of
+/// two such properties in one message the first counts; nothing refuses a
+/// second.
+fn default_publisher_priority(properties: &[KeyValuePair]) -> u8 {
+    properties
+        .iter()
+        .find(|property| property.ty() == DEFAULT_PUBLISHER_PRIORITY_PROPERTY)
+        .and_then(|property| match property.value() {
+            Value::Varint(priority) => u8::try_from(*priority).ok(),
+            Value::Bytes(_) => None,
+        })
+        .unwrap_or(DEFAULT_PUBLISHER_PRIORITY)
 }
 
 /// The `LARGEST_OBJECT` among the parameters of a PUBLISH or a

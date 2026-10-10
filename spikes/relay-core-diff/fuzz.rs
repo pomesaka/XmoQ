@@ -43,6 +43,13 @@
 //! publisher drains, so that none can publish anew while it does.
 //! `compare.py` calls the two `split-steady` and `shared-steady`.
 //!
+//! With `XMOQ_FUZZ_PRIORITIES` set, the subgroup streams have one of three
+//! Publisher Priorities (0, 1, and none, which is the default of 128), by
+//! the number of the stream and its Group; without it they all have 0. In
+//! the worlds with two halves only the streams of the first half vary, so
+//! that the second stays one in which no Subgroup comes with two
+//! priorities. `compare.py` sets it for `--priorities`.
+//!
 //! With `XMOQ_FUZZ_NO_ANNOUNCE` set, nobody announces a namespace, so that
 //! the relay has no publisher to ask. `compare.py` calls `full` with it
 //! `no-announce`.
@@ -517,6 +524,39 @@ fn without_a_publish_done_of_session_3(event: Event) -> Event {
     }
 }
 
+/// The event, with one of three Publisher Priorities if it opens a subgroup
+/// stream (`XMOQ_FUZZ_PRIORITIES`). WHY by the numbers of the stream and
+/// the Group and not at random: the sequences stay the ones they are
+/// without it.
+fn with_a_priority_of_three(event: Event, world: World) -> Event {
+    match event {
+        Event::DataStreamOpened { session, stream, header } if !world.is_split() || session.0 <= 2 => {
+            let publisher_priority = match (stream.0 + header.group_id) % 3 {
+                0 => Some(0),
+                1 => Some(1),
+                _ => None,
+            };
+            Event::DataStreamOpened { session, stream, header: SubgroupHeader { publisher_priority, ..header } }
+        }
+        other => other,
+    }
+}
+
+/// Whether an event opens a subgroup stream of a Group that a stream was
+/// opened for before with another Publisher Priority. Wider than what makes
+/// a track malformed, which takes the same track and the same Subgroup: the
+/// track and the Subgroup are not looked at. `seen` has the Group and the
+/// priority of every stream so far.
+fn opens_a_group_with_another_priority(event: &Event, seen: &mut Vec<(u64, Option<u8>)>) -> bool {
+    let Event::DataStreamOpened { header, .. } = event else {
+        return false;
+    };
+    let opened = (header.group_id, header.publisher_priority);
+    let touches = seen.iter().any(|(group, priority)| *group == opened.0 && *priority != opened.1);
+    seen.push(opened);
+    touches
+}
+
 /// The event, unless it announces a namespace: then one that does nothing
 /// (`XMOQ_FUZZ_NO_ANNOUNCE`).
 fn without_an_announcement(event: Event) -> Event {
@@ -620,6 +660,7 @@ fn the_two_cores_answer_random_events_alike() {
     let touch = std::env::var("XMOQ_FUZZ_TOUCH").unwrap_or_else(|_| "subgroups".to_string());
     let steady = std::env::var_os("XMOQ_FUZZ_STEADY").is_some();
     let no_announce = std::env::var_os("XMOQ_FUZZ_NO_ANNOUNCE").is_some();
+    let priorities = std::env::var_os("XMOQ_FUZZ_PRIORITIES").is_some();
     let mut events = 0u64;
     let (mut touching, mut differing, mut differing_before_touching) = (0u64, 0u64, 0u64);
     let (mut opened_downstream, mut objects_sent, mut with_an_object) = (0u64, 0u64, 0u64);
@@ -643,6 +684,7 @@ fn the_two_cores_answer_random_events_alike() {
         };
         watch(&watched);
         let mut published = Vec::new();
+        let mut priorities_of_groups = Vec::new();
         match world {
             World::V1 => {}
             World::Distinct | World::Full | World::OnePublisher => {
@@ -682,12 +724,14 @@ fn the_two_cores_answer_random_events_alike() {
             };
             let event = if steady { without_a_publish_done_of_session_3(event) } else { event };
             let event = if no_announce { without_an_announcement(event) } else { event };
+            let event = if priorities { with_a_priority_of_three(event, world) } else { event };
             let touches = match touch.as_str() {
                 "subgroups" => touches_subgroup_selection(&event, &mut opened),
                 "publishers" => touches_the_publishers(&event, &mut published),
                 "republish" => publishes_again(&event, &mut published),
                 "waiting-or-draining" => publishes_to_a_waiting_or_draining_track(&event, &mut published),
                 "asks" => several_can_be_asked(&event, &mut published),
+                "priority" => opens_a_group_with_another_priority(&event, &mut priorities_of_groups),
                 other => panic!("XMOQ_FUZZ_TOUCH={other}: not a kind of event fuzz.rs knows"),
             };
             if world == World::Shared {

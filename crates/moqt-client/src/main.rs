@@ -108,6 +108,13 @@ struct Args {
     /// one of them. To see a track go on with the publisher that is left,
     /// the second has to start where the first stopped.
     first_group: u64,
+    /// The Publisher Priority in the header of every subgroup stream this
+    /// client sends; `None`, from `--publisher-priority default`, leaves it
+    /// out, so that the Subgroup has the default of the subscription
+    /// (§11.4.2). WHY a flag: a relay that takes a track from two publishers
+    /// has to find a Subgroup that they send with different priorities
+    /// (§2.4.2).
+    publisher_priority: Option<u8>,
     /// The Object Properties of every Object this client sends (§11.2.1.2),
     /// from `--object-property`. Empty: the streams do not announce any.
     object_properties: Vec<KeyValuePair>,
@@ -166,6 +173,18 @@ fn parse_object_property(text: &str) -> Result<KeyValuePair> {
     pair.map_err(|error| anyhow!("--object-property {text}: {error:?}"))
 }
 
+/// Reads the value of `--publisher-priority`: a Publisher Priority, which is
+/// one byte (§11.4.2), or `default` for a header without one.
+fn parse_publisher_priority(text: &str) -> Result<Option<u8>> {
+    if text == "default" {
+        return Ok(None);
+    }
+    let priority = text
+        .parse()
+        .with_context(|| format!("--publisher-priority {text} is not 0 to 255 or `default`"))?;
+    Ok(Some(priority))
+}
+
 fn parse_args() -> Result<Args> {
     let mut mode = None;
     let mut payload_hex = None;
@@ -178,6 +197,7 @@ fn parse_args() -> Result<Args> {
     let mut publish_delay_ms = 0;
     let mut subgroup_id = SubgroupId::Zero;
     let mut first_group = 0;
+    let mut publisher_priority = Some(0);
     let mut object_properties = Vec::new();
     let mut serve_delay_ms = 0;
     let mut answer_delay_ms = 0;
@@ -210,6 +230,7 @@ fn parse_args() -> Result<Args> {
                 };
             }
             "--first-group" => first_group = value.parse().context("--first-group")?,
+            "--publisher-priority" => publisher_priority = parse_publisher_priority(&value)?,
             "--object-property" => object_properties.push(parse_object_property(&value)?),
             "--serve-delay-ms" => {
                 serve_delay_ms = value.parse().context("--serve-delay-ms")?;
@@ -248,6 +269,7 @@ fn parse_args() -> Result<Args> {
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
         first_group,
+        publisher_priority,
         object_properties,
         serve_delay: Duration::from_millis(serve_delay_ms),
         answer_delay: Duration::from_millis(answer_delay_ms),
@@ -600,7 +622,7 @@ impl Client<'_> {
             track_alias,
             group_id,
             subgroup_id: self.args.subgroup_id,
-            publisher_priority: Some(0),
+            publisher_priority: self.args.publisher_priority,
             // §11.4.2: the bit is of the stream, and says that every Object
             // on it has the Properties Length field.
             properties: !self.args.object_properties.is_empty(),
@@ -1169,6 +1191,23 @@ mod tests {
         ];
         assert_eq!(report::properties(&both), "13:01,16:7");
         assert_eq!(report::properties(&[]), "none");
+    }
+
+    #[test]
+    fn a_publisher_priority_is_a_byte_or_left_to_the_default() {
+        let cases = [
+            ("0", Some(0)),
+            ("128", Some(128)),
+            ("255", Some(255)),
+            ("default", None),
+        ];
+        for (flag, priority) in cases {
+            assert_eq!(parse_publisher_priority(flag).unwrap(), priority, "{flag}");
+        }
+        // Past a byte, below it, no number, and another word.
+        for flag in ["256", "-1", "1.5", "", "Default", "none"] {
+            assert!(parse_publisher_priority(flag).is_err(), "{flag}");
+        }
     }
 
     #[test]

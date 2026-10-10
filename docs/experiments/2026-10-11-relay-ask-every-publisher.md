@@ -1,7 +1,7 @@
 # The relay asks every publisher of a matching namespace
 
 - Date: 2026-10-11
-- Commit SHA: not fixed when this was written. Built on `065753f3eb3ce5b76e8830a32ff288856a8b8ad2`; compared with `main` at `ed70d28082d8`, which differs from that commit in nothing the relay's core and the session state are made of
+- Commit SHA: `3dfb27c834fcfa7ba7cf2bdd9d78a37c41e3d140`. Built on `065753f3eb3ce5b76e8830a32ff288856a8b8ad2`; compared with `main` at `ed70d28082d8`, which differs from that commit in nothing the relay's core and the session state are made of
 - Roadmap item: Phase 0b, several publishers of one track in the relay: "send the SUBSCRIBE to every matching publisher" and "subscribe to a publisher that announces a namespace later"
 
 ## Objective
