@@ -282,6 +282,32 @@ In every run the first stream of the Group is delivered to the subscribers befor
 - **`@xmoq/moqt` can set the priority of a stream and can leave it out**, which the page of these runs now passes on; it could send priority 0 only before.
 - Not run: a Subgroup that comes again while its first stream is still open (the clients finish every stream they send in this scenario); a DEFAULT PUBLISHER PRIORITY among the Track Properties (no client here sends one); a publisher that publishes anew with another default; a header that leaves the Subgroup ID to the first Object.
 
+### A page whose write lost against the relay's STOP_SENDING
+
+Added on 2026-10-11, on `main` at `cdd8245b` with two changes on top that touch neither the scenario nor a stream this endpoint writes. The run "own-rust leaves the Publisher Priority out and own-browser writes 128" failed once in another working copy: `[driver] FAILED evaluate: Error: NetworkError: The stream was aborted by the remote server`. The relay had done what the scenario expects (`STOP_DATA session=1 stream=3 code=0x1`); the page's call to send failed.
+
+The relay decides on the Subgroup Header, so its STOP_SENDING can reach the page before the page has written the Object. What the write is rejected with then depends on how far the stop has got, seen in Chromium 156:
+
+| Where the stop is when the page writes | The write is rejected with | Seen |
+|---|---|---|
+| `@xmoq/moqt` has taken it in | `SubgroupClosedError`, or `PublishEndedError` when the PUBLISH was cancelled with it | with the write held back 400 ms (temporary change to the page, taken back) |
+| The browser has it, the library not yet | `WebTransportError`, `source` "stream", `streamErrorCode` 1, "Received STOP_SENDING." | with the write held back and the library's watch for a stop taken out (temporary change to `stream-io.ts`, taken back) |
+| The data pipe of the stream closed before the browser reported the stop | `DOMException` named NetworkError, "The stream was aborted by the remote server", no code | the failed runs. `OutgoingStream::HandlePipeClosed` in Chromium's `third_party/blink/renderer/modules/webtransport/outgoing_stream.cc`, tip of the repository, read on 2026-10-11 |
+
+The four `subgroup-priorities` runs of the matrix, each with an own-rust and an own-browser subscriber, six in parallel on six ports as load:
+
+| State of the scenario | Rounds of each run | Failed |
+|---|---|---|
+| Before | 150 | left out and 128, own-rust then own-browser: 3, with the NetworkError. The other three: 0 |
+| The page takes a write that was stopped for sent | 300 | the same run: 4, later, at the end of the track: "PUBLISH_DONE must not be sent while subgroup streams are open (§10.11)". The others: 0 |
+| And the page resets a stream whose write failed | 300 | 0 in all four |
+
+- **The correction is to the page and the scenario.** For the stream the relay is expected to stop, the page reports a write that was stopped as an outcome and not as a failure, as the own Rust client does (`STOP_SENDING_RECEIVED`, then "sent"). The scenario still requires one `STOP_DATA` line for that session with the expected code.
+- **The second failure shows a gap in `@xmoq/moqt`, which is not mended here.** It learns that a stream was stopped from `writer.closed`, and takes only a `WebTransportError` with `source` "stream" for a stop (so that the end of the session is not taken for one). When Chromium rejects with the NetworkError instead, the library goes on counting the stream as open: `write` passes the browser's error on, and PUBLISH_DONE is refused until the application resets the stream. The page now resets a stream whose write failed (§11.4.3: "The publisher SHOULD respond with a reset"), which is what an application has to do today.
+- The runs with 0 and 1 where a page sends the second stream have the same race and did not fail in 150 rounds; held back, their write is rejected with `PublishEndedError`, which the page takes the same way. Where own-rust sends the second stream nothing changes: the client has taken a stopped stream for sent since the relay change.
+- How often the NetworkError came in the last 300 rounds was not counted (the logs of rounds that pass are not kept). At 3 of 150 and 4 of 300 before, about five were to be expected.
+- `mise run check` and `mise run interop` passed after it: 74 of 74 pairings in 45.5 seconds.
+
 ## Limitations and blockers
 
 - **The relay change was under review when the runs were made.** The last runs are on `a44c8854`; if it changes again, they have to be made again.
