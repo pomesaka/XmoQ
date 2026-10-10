@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Each job runs one mise task. The checks themselves live in scripts/ci/ so that `mise run check`
+# on a developer machine runs exactly what runs here.
+#
+# A task whose target does not exist yet (no root Cargo.toml, no packages/*/package.json) exits 0
+# and writes "skipped" to the job summary and a notice annotation. Once the target exists the
+# same task runs the checks, and it fails if the target exists only in part.
+#
+# FIXME: add a job that runs the own components against moqtail peers (docs/roadmap.md Phase 0b).
+# Left out for now: the run is heavy and its launch scripts are still changing.
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: 2026.3.8
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: hashFiles('Cargo.toml') != ''
+      - run: mise run check:rust
+
+  typescript:
+    name: TypeScript (biome, oxlint, typecheck, test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: 2026.3.8
+      - run: mise run check:ts
+
+  layers:
+    name: Layer dependencies
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: 2026.3.8
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - run: mise run check:layers
+
+  workflows:
+    name: Workflows and CI scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: 2026.3.8
+      - run: mise run check:workflows

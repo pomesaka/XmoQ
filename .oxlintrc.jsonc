@@ -1,0 +1,18 @@
+{
+	// WHY oxlint next to Biome: Biome 2.5.15 has no rule that bans type assertions, and a Biome
+	// GritQL plugin for it flagged `import { a as b }` and `as const` and missed `<T>x` when
+	// tried on 2026-10-10. oxlint ports typescript-eslint's consistent-type-assertions, which
+	// always allows `as const`.
+	// WHY only this one rule: Biome owns formatting and every other lint. Two linters with
+	// overlapping rule sets would report the same problem twice and disagree on fixes.
+	"plugins": ["typescript"],
+	// WHY listed here: oxlint 1.87.0 linted packages/*/node_modules when the repository had no
+	// root .gitignore, so this does not rely on one existing.
+	"ignorePatterns": ["**/node_modules/**"],
+	"categories": {
+		"correctness": "off"
+	},
+	"rules": {
+		"typescript/consistent-type-assertions": ["error", { "assertionStyle": "never" }]
+	}
+}

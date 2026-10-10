@@ -8,7 +8,7 @@ Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。
 
 いまの課題は`docs/roadmap.md`のPhase 0bで、MoQ Transportの層をRustとTypeScriptで自前実装する。版はdraft 18に固定する。理由と範囲は`docs/protocols.md`にある。これを通るまで映像などの機能を作らない。
 
-ビルド、テスト、lintのコマンドはまだ無い。最初のコードを足したPRで、この節にコマンドを書く。
+検査は`mise run check`で走らせる。道具の版は`mise.toml`と`rust-toolchain.toml`で固定してあり、初回は`mise trust`と`mise install`が要る。個別には`mise run check:rust`（fmt、clippy、test）、`check:ts`（Biome、oxlint、型検査、`bun test`）、`check:layers`（層の依存）、`check:workflows`（actionlint、shellcheck）があり、整形は`mise run fmt`。CIは同じタスクを呼ぶので、検査を足すときはワークフローでなく`scripts/ci/`を直す。
 
 ## 着手前に読む
 
@@ -24,6 +24,23 @@ Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。
 - 自前の部品は、先に`moqtail`の相手とつないで確かめる。自前どうしだけで通っても、両側が同じ読み違いをしている場合を見つけられない
 - 状態を表す語は`docs/requirements.md`の定義にそろえる（discussed、proposed、undecided、validation required、implemented）。図や文書で、未実装のものを実装済みに見える書き方にしない
 - `docs/`配下とREADMEは英語、このファイルは日本語で書く
+
+## 開発の流れ
+
+本体のコード（`crates/`、`packages/`）は、次の順で`main`に入れる。`spikes/`は検証用で、lintとレビューの対象外にする。本体から`spikes/`に依存させない。
+
+1. 実装する。終わったと報告する前に`mise run check`を実際に走らせ、その出力を報告に含める。通っていない状態で終わったと報告しない
+2. 実装者とは別のレビュアーがコードを読む（`/review-team-xmoq`）。レビュアーには実装者の報告を渡さず、差分だけを渡す
+3. 指摘は実装者が直す。直したことは差分と検査の再実行で確かめる
+4. ブランチをPRにする。CIが通ってからマージする。`main`へ直接pushしない
+
+規約は、文章で足す前に、破ると通らない形にできないかを考える。層の境界はcrateやパッケージの依存関係で固定し、lintとCIで検査する。
+
+- 符号化と状態遷移（`xmoq-moqt`、`@xmoq/moqt`の中核）は入出力に依存させない。`wtransport`や`WebTransport`に触るのは、クライアントとリレーの側だけにする
+- RustとTypeScriptの実装は、名前をdraft本文の用語に合わせ、`fixtures/moqt-18/`の同じ実バイト列をテストで読む
+- テストの固定値は`moqtail`から採った実バイト列にする。自分で符号化したものを自分で復号するだけのテストは、照合にならない
+- 受け取る側のバッファとキューには上限を置く。遅いsubscriber、キャンセル、切断の後始末を書く
+- lintを`#[allow]`や設定で黙らせるときは理由を書く。黙らせるより直すほうを先に考える
 
 ## Documentation Map
 

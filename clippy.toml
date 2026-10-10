@@ -1,0 +1,7 @@
+# WHY: the workspace lints ban unwrap, expect, panic and indexing because a relay must not
+# crash on bytes from a peer. A test that panics only fails that test, and tests assert by
+# panicking, so the ban buys nothing there.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
