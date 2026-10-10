@@ -112,6 +112,52 @@ The lock file grew because it lists every platform and optional path: `rustls-pl
 
 `crates/moqt-io/src/codes.rs`, XmoQ's own mapping of stream codes, is deleted; the library maps.
 
+### The `:protocol` token of newer WebTransport drafts (added 2026-10-11)
+
+A client of another implementation (`mlmsub` of moqlivemock v0.16.1, [record](2026-10-10-loc-msf-fetch-survey.md), section 8) could not open a WebTransport session to the own relay: it sent `:protocol` = `webtransport-h3`, and `web-transport-proto` 0.6.2 takes `webtransport` alone. This is what reading and two runs showed about how far that reaches. Nothing in `crates/` was changed.
+
+**The texts** (`draft-ietf-webtrans-http3`, fetched 2026-10-11 from `https://www.ietf.org/archive/id/`):
+
+| Revision | `:protocol` | The setting a server announces WebTransport with |
+|---|---|---|
+| -07 (June 2023) to -12 | `webtransport` | SETTINGS_WEBTRANSPORT_MAX_SESSIONS, `0xc671706a` |
+| -13 (July 2025), -14 (20 October 2025) | -14 §3.2: "MUST be set to webtransport" | SETTINGS_WT_MAX_SESSIONS, `0x14e9cd29`; -14 §7.1: "The wire format aspects of the protocol are negotiated by changing the codepoint used for the SETTINGS_WT_MAX_SESSIONS setting" |
+| **-15 (2 March 2026)**, -16 (6 July 2026, the newest; there is no -17) | -16 §3.2: "MUST be set to webtransport-h3" | SETTINGS_WT_ENABLED, `0x2c7cf000` |
+
+- The token changed in -15. -16 §2.1.2 gives the reason: WebTransport over HTTP/2 keeps `webtransport`, and "The two protocols are distinguished by their upgrade tokens".
+- **A client that follows -16 does not send the new token to a server of an older draft.** §3.1: "Clients MUST NOT attempt to establish WebTransport sessions with the "webtransport-h3" token until they have received the setting indicating WebTransport support from the server", and that setting is SETTINGS_WT_ENABLED. No sentence asks a server to accept both tokens. §7 has the version follow the setting's codepoint and the token: a server "offer[s] multiple versions simultaneously" by announcing several.
+- So the version is chosen by what the server announces. The own relay announces `0xc671706a` (and the two codepoints from before -07) and nothing newer (`web-transport-proto` 0.6.2, `src/settings.rs`).
+
+**Who sends and accepts what**, read in the sources on 2026-10-11 unless a run is named:
+
+| Implementation | Sends | Accepts | Source |
+|---|---|---|---|
+| Chromium, at the tip of its repository | `webtransport`, with the header `sec-webtransport-http3-draft02: 1`; versions draft-02 and draft-07 | | `net/quic/dedicated_web_transport_http3_client.cc` lines 1001 and 1002, and 264 to 266 |
+| QUICHE, Chromium's QUIC library, at `c8b1052048` (2026-10-09) | | `webtransport` alone (`quic_spdy_stream.cc`); its versions are `kDraft02` and `kDraft07`, its settings `0x2b603742` and `0xc671706a`. **No trace of -14, -15 or `webtransport-h3`** | `quiche/quic/core/http/` |
+| Chromium 156, the build the interop runs use | `webtransport`: it connects to the own relay in every interop run, and the relay's library refuses any other value | | by run and by the library's check |
+| `web-transport-proto` 0.6.2 (the own relay and own Rust client); the same on the repository's `main` at `d4e4e458` (2026-10-09) | `webtransport` | `webtransport` alone (`src/connect.rs` line 162). 0.6.2 and `web-transport-quinn` 0.13.2 are the newest releases; no issue or pull request about the new token was found | `moq-dev/web-transport`, `rs/web-transport-proto/src/` |
+| `wtransport-proto` 0.7.2 (the moqtail relay) | `webtransport` | `webtransport` alone (`src/session.rs` line 245). Issue #328, "Accept new `:protocol` value from latest draft", open since 2026-09-25 | registry source |
+| `Eyevinn/webtransport-go` at `dfc839273d65` (moqlivemock's clients) | **`webtransport-h3` by default, also to a server that announced an old setting only**: it takes `0x2c7cf000`, `0xc671706a` or `0x2b603742` as "WebTransport enabled" and then sends the new token. `Transport.LegacyConnectProtocol` sends the old one; no moqlivemock command sets it | both, as a server | `client_conn.go`, `protocol.go`, `transport.go` |
+| Firefox (`mozilla/neqo`) | not read. A code search found no `webtransport-h3`; issue #2795, "Update WebTransport implementation from draft 4 to latest", is open, and work on parts of -15 was merged in 2026 (#3850) | | search only |
+| Safari | not looked at | | |
+
+**Runs** (2026-10-11, loopback, a scratch copy of moqlivemock outside the repository):
+
+| Client | Server | Result |
+|---|---|---|
+| `mlmsub` as released | own relay | fails: the relay's library reports `WrongProtocol(Some("webtransport-h3"))` |
+| `mlmsub` as released | moqtail relay 0.15.0 | fails the same way on the client's side: `http3: parsing frame failed: EOF` |
+| `mlmsub` built with `LegacyConnectProtocol: true` | own relay, moqtail relay | the session is established with both |
+| own Rust client | `mlmpub`, `mlmrel` | established (the Go server takes the old token) |
+
+**What follows.**
+
+- The failure is one of this Go library's default against any server of an older draft, the moqtail relay included. It is not what a browser does today, and by -16 §3.1 not what a browser that implements -16 would do against the own relay.
+- **Accepting `webtransport-h3` in the relay would not make it a -15 server.** A browser that moves to -15 and keeps -07 goes on connecting as now. One that drops -07 would not get as far as the CONNECT request: the relay does not announce SETTINGS_WT_ENABLED. What -15 changed beside the token (the settings, flow control of a session, the capsules) was not compared for this record.
+- Chromium's sources show no start of that move.
+
+**The relay's log does not say why a handshake failed.** `crates/moqt-io/src/wt.rs` turns the library's error into text with `to_string()`, and the library's `ServerError::ConnectError` prints "failed to exchange h3 connect" without its cause. The cause above was seen with a temporary change that printed the error with `{:?}`. Nothing in `interop/` reads the `HANDSHAKE_FAILED` line.
+
 ## Limitations and blockers
 
 No blocker.
