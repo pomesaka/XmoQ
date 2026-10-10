@@ -1,6 +1,6 @@
 //! The contract of [`Connection`], [`SendStream`] and [`RecvStream`] as tests
 //! that run against every implementation: the in-memory pair, and a
-//! `wtransport` client and server over the loopback interface.
+//! `web-transport-quinn` client and server over the loopback interface.
 //!
 //! WHY both: the stream handling and the relay are tested on the in-memory
 //! connection. Such a test says something about a real connection only where
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use crate::{Connection, ReadError, RecvStream, SendStream, WriteError};
+use crate::{Connection, ConnectionEnd, ReadError, RecvStream, SendStream, WriteError};
 
 /// Longer than anything here takes on a loopback interface.
 const IN_TIME: Duration = Duration::from_secs(5);
@@ -139,10 +139,9 @@ pub(crate) async fn what_arrived_outlives_the_connection<C: Connection>(a: C, b:
     assert_eq!(read_to_end(&mut recv).await, (b"abc".to_vec(), Ok(())));
 }
 
-/// The same for a stream nobody has accepted yet.
-pub(crate) async fn a_stream_that_arrived_can_be_accepted_after_the_connection_went<
-    C: Connection,
->(
+/// A stream nobody had accepted when the connection went may be lost, also
+/// when it had arrived. What is accepted afterwards, if anything, is whole.
+pub(crate) async fn a_stream_that_was_not_accepted_may_go_with_the_connection<C: Connection>(
     a: C,
     b: C,
 ) {
@@ -153,11 +152,10 @@ pub(crate) async fn a_stream_that_arrived_can_be_accepted_after_the_connection_w
         .expect("everything arrives");
     a.close(0, b"done");
     soon("closed", b.closed()).await;
-    let mut recv = soon("accept_uni", b.accept_uni())
-        .await
-        .expect("the stream had arrived");
-    assert_eq!(read_to_end(&mut recv).await, (b"abc".to_vec(), Ok(())));
-    // Nothing else had: now the connection shows as gone.
+    if let Ok(mut recv) = soon("accept_uni", b.accept_uni()).await {
+        assert_eq!(read_to_end(&mut recv).await, (b"abc".to_vec(), Ok(())));
+    }
+    // And then nothing.
     assert!(soon("accept_uni", b.accept_uni()).await.is_err());
 }
 
@@ -237,17 +235,17 @@ pub(crate) async fn finish_and_wait_fails_on_a_stopped_stream<C: Connection>(a: 
     );
 }
 
-/// Opening waits once the peer has `at_most` streams of this endpoint that it
-/// has not dealt with, or fewer, and goes on when the peer has dealt with them.
+/// Opening waits once the peer has exactly `limit` streams of this endpoint
+/// that it has not dealt with, and goes on when the peer has dealt with them.
 pub(crate) async fn opening_waits_at_the_peers_stream_limit<C: Connection>(
     a: C,
     b: C,
-    at_most: usize,
+    limit: usize,
 ) {
     let mut open = Vec::new();
     let waited = loop {
         assert!(
-            open.len() <= at_most,
+            open.len() <= limit,
             "{} streams were opened without waiting",
             open.len()
         );
@@ -260,7 +258,9 @@ pub(crate) async fn opening_waits_at_the_peers_stream_limit<C: Connection>(
             Err(_) => break open.len(),
         }
     };
-    assert!(waited > 0);
+    // Not fewer either: a limit that is not the configured one is not in
+    // effect.
+    assert_eq!(waited, limit);
     // The peer takes every stream to its end, which makes room.
     // WHY not while the next open is waiting: the peer would then see that
     // stream among the others, in no order this test could rely on.
@@ -272,6 +272,66 @@ pub(crate) async fn opening_waits_at_the_peers_stream_limit<C: Connection>(
         assert_eq!(read_to_end(&mut recv).await, (b"x".to_vec(), Ok(())));
     }
     assert!(soon("open_uni", a.open_uni()).await.is_ok());
+}
+
+/// A reset that has arrived takes the bytes the receiver had not read.
+pub(crate) async fn a_reset_takes_what_was_not_read<C: Connection>(a: C, b: C) {
+    let (mut send, mut recv) = uni(&a, &b, b"abc").await;
+    send.write_all(b"def").await.expect("write");
+    // CANCELLED (0x1).
+    send.reset(0x1);
+    // Time for the reset to arrive. Before that, what arrived is still read.
+    tokio::time::sleep(A_WHILE).await;
+    assert_eq!(
+        read_to_end(&mut recv).await,
+        (vec![], Err(ReadError::Reset(Some(0x1))))
+    );
+}
+
+/// The code and reason of a close reach the peer, in both directions.
+pub(crate) async fn a_close_reaches_the_peer_with_its_code_and_reason<C: Connection>(a: C, b: C) {
+    // PROTOCOL_VIOLATION (0x3).
+    a.close(0x3, b"protocol violation");
+    assert_eq!(
+        soon("closed", b.closed()).await,
+        ConnectionEnd::ClosedByPeer {
+            code: 0x3,
+            reason: "protocol violation".to_string(),
+        }
+    );
+    assert_eq!(
+        soon("closed", a.closed()).await,
+        ConnectionEnd::ClosedLocally
+    );
+}
+
+/// A reason longer than WebTransport takes is cut at a character boundary.
+pub(crate) async fn a_long_close_reason_is_cut_at_a_character<C: Connection>(a: C, b: C) {
+    // 1023 bytes of ASCII and a character of two bytes that straddles the
+    // limit of 1024.
+    let reason = format!("{}\u{e9}tail", "a".repeat(1023));
+    a.close(0x1, reason.as_bytes());
+    let ConnectionEnd::ClosedByPeer { code, reason } = soon("closed", b.closed()).await else {
+        panic!("the close did not reach the peer");
+    };
+    assert_eq!(code, 0x1);
+    assert_eq!(reason, "a".repeat(1023));
+}
+
+pub(crate) async fn a_close_by_the_other_end_reaches_this_one<C: Connection>(a: C, b: C) {
+    // GOAWAY_TIMEOUT (0x10), and no reason.
+    b.close(0x10, b"");
+    assert_eq!(
+        soon("closed", a.closed()).await,
+        ConnectionEnd::ClosedByPeer {
+            code: 0x10,
+            reason: String::new(),
+        }
+    );
+    assert_eq!(
+        soon("closed", b.closed()).await,
+        ConnectionEnd::ClosedLocally
+    );
 }
 
 /// Writing waits while the peer does not read, and goes on when it does.
@@ -312,13 +372,17 @@ macro_rules! contract_tests {
                 dropping_a_read_loses_nothing,
                 stopped_waits_until_the_peer_stops,
                 what_arrived_outlives_the_connection,
-                a_stream_that_arrived_can_be_accepted_after_the_connection_went,
+                a_stream_that_was_not_accepted_may_go_with_the_connection,
                 a_read_fails_once_the_connection_is_gone,
                 a_read_fails_after_closing_the_connection_oneself,
                 nothing_is_opened_or_accepted_once_the_connection_is_gone,
                 an_accept_that_waits_fails_when_the_connection_goes,
                 writing_fails_once_the_connection_is_gone,
                 finish_and_wait_fails_on_a_stopped_stream,
+                a_reset_takes_what_was_not_read,
+                a_close_reaches_the_peer_with_its_code_and_reason,
+                a_close_by_the_other_end_reaches_this_one,
+                a_long_close_reason_is_cut_at_a_character,
             ]);
 
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -356,7 +420,7 @@ contract_tests!(
 );
 
 /// Small limits, so that the cases reach them with little data.
-#[cfg(feature = "wtransport")]
+#[cfg(feature = "quic")]
 const LOOPBACK_LIMITS: crate::wt::QuicLimits = crate::wt::QuicLimits {
     max_uni_streams: 8,
     max_bi_streams: 8,
@@ -365,12 +429,13 @@ const LOOPBACK_LIMITS: crate::wt::QuicLimits = crate::wt::QuicLimits {
     send_window: 16 * 1024,
 };
 
-#[cfg(feature = "wtransport")]
+#[cfg(feature = "quic")]
 contract_tests!(
-    wtransport,
+    web_transport_quinn,
     pair: crate::wt::loopback(crate::contract::LOOPBACK_LIMITS),
-    // The 8 of the limits, and the 2 that a wtransport client leaves unused of
-    // the 3 streams HTTP/3 is given room for (it opens no QPACK streams).
+    // The 8 of the limits, and the 2 that a web-transport-quinn client leaves
+    // unused of the 3 streams HTTP/3 is given room for: it opens the control
+    // stream and no QPACK streams.
     streams_before_opening_waits: 10,
     more_than_a_window: 64 * 1024,
 );

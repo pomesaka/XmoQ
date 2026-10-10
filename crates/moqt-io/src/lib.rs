@@ -3,7 +3,7 @@
 //!
 //! The `XmoQ` client and relay both use this crate, so the handling of resets,
 //! limits and deadlines exists once. The connection is a trait,
-//! [`Connection`], with two implementations: [`wt`] over `wtransport`, and
+//! [`Connection`], with two implementations: [`wt`] over `web-transport-quinn`, and
 //! [`memory`], a pair of in-process endpoints that the tests of this crate and
 //! of its users run on.
 //!
@@ -19,23 +19,22 @@
 //! an unknown datagram type does not close the session, which §11 of
 //! `draft-ietf-moq-transport-18` requires.
 
-pub mod codes;
 #[cfg(test)]
 mod contract;
 pub mod memory;
 mod streams;
 #[cfg(test)]
 mod tests;
-#[cfg(feature = "wtransport")]
+#[cfg(feature = "quic")]
 pub mod wt;
 
 use std::future::Future;
 
 pub use streams::{
     Direction, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestStreamEvent, QueueFull,
-    RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendError, SendLimits,
-    StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, read_request_streams, read_uni_streams,
-    send_message,
+    RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendError,
+    SendLimits, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, read_request_streams,
+    read_uni_streams, send_message,
 };
 
 /// Why reading from a stream stopped short of a FIN.
@@ -55,6 +54,41 @@ pub enum WriteError {
     Stopped(Option<u32>),
     /// The connection is gone.
     Lost(String),
+}
+
+/// How a connection ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionEnd {
+    /// The peer closed the session, with this Session Termination Error Code
+    /// and reason.
+    ClosedByPeer {
+        /// The code.
+        code: u32,
+        /// The reason, with what is not UTF-8 replaced.
+        reason: String,
+    },
+    /// This endpoint closed the session, or the peer ended it in order
+    /// without saying why.
+    ClosedLocally,
+    /// The connection went without a close: a timeout or a transport error.
+    Lost(String),
+}
+
+/// The longest reason of a session close, in bytes of UTF-8.
+/// `draft-ietf-webtrans-http3-16` §6: the Application Error Message of
+/// `WT_CLOSE_SESSION` "MUST NOT exceed 1024 bytes", and a sender that
+/// truncates "MUST do so at a UTF-8 character boundary".
+pub const MAX_CLOSE_REASON_LEN: usize = 1024;
+
+/// The reason of a close as it is sent: see [`Connection::close`].
+fn close_reason(reason: &[u8]) -> String {
+    let mut reason = String::from_utf8_lossy(reason).into_owned();
+    let mut len = reason.len().min(MAX_CLOSE_REASON_LEN);
+    while !reason.is_char_boundary(len) {
+        len -= 1;
+    }
+    reason.truncate(len);
+    reason
 }
 
 /// The connection is gone; nothing more can be opened or accepted on it.
@@ -82,14 +116,12 @@ pub trait RecvStream: Send + 'static {
     ///   them.
     /// * Dropping the future loses nothing: bytes are taken only when it
     ///   completes.
-    /// * Once the peer has reset the stream, the call fails with
+    /// * Once the peer's reset has arrived, the call fails with
     ///   [`ReadError::Reset`]; bytes that were not read yet are gone.
     /// * Once the connection is gone, bytes and a FIN that had arrived before
     ///   are still read, and then the call fails with [`ReadError::Lost`].
     ///   Whether something had arrived is a matter of timing, unless the
-    ///   sender waited for it with [`SendStream::finish_and_wait`]. Checked
-    ///   against quinn 0.11.12 under wtransport 0.7.2 by the tests in
-    ///   `contract.rs`.
+    ///   sender waited for it with [`SendStream::finish_and_wait`].
     fn read(
         &mut self,
         buffer: &mut [u8],
@@ -163,9 +195,20 @@ pub trait Connection: Send + Sync + 'static {
         &self,
     ) -> impl Future<Output = Result<(Self::Send, Self::Recv), ConnectionLost>> + Send;
 
-    /// The next unidirectional stream the peer opened. Once the connection is
-    /// gone, the streams that had arrived before are still accepted, and then
-    /// the call fails.
+    /// The next unidirectional stream the peer opened. Streams are not
+    /// necessarily accepted in the order they were opened.
+    ///
+    /// Once the connection is gone the call fails. A stream that was not
+    /// accepted by then may be lost, also when it had arrived: only the bytes
+    /// and the FIN of streams that were already accepted are still read
+    /// ([`RecvStream::read`]). So "the peer's transport has it"
+    /// ([`SendStream::finish_and_wait`]) does not mean the peer will read it,
+    /// and an endpoint that must know asks at the level above; see
+    /// `docs/moqt-implementation-notes.md` for what `XmoQ` does after
+    /// `PUBLISH_DONE`.
+    ///
+    /// A stream the peer reset right after opening it may never be accepted
+    /// either.
     fn accept_uni(&self) -> impl Future<Output = Result<Self::Recv, ConnectionLost>> + Send;
 
     /// The next bidirectional stream the peer opened, like
@@ -174,15 +217,24 @@ pub trait Connection: Send + Sync + 'static {
         &self,
     ) -> impl Future<Output = Result<(Self::Send, Self::Recv), ConnectionLost>> + Send;
 
-    /// Closes the session with a Session Termination Error Code and a reason.
-    /// Does not wait. Every stream of the connection is gone with it, and with
-    /// them what was written and had not reached the peer yet: see
-    /// [`SendStream::finish_and_wait`].
+    /// Closes the session with a Session Termination Error Code and a reason,
+    /// which reach the peer: its [`Self::closed`] completes with
+    /// [`ConnectionEnd::ClosedByPeer`] and both.
     ///
-    /// Whether the peer learns the code and the reason depends on the
-    /// implementation; see [`wt`].
+    /// The reason is sent as UTF-8, with what is not UTF-8 replaced, and cut
+    /// to at most [`MAX_CLOSE_REASON_LEN`] bytes at a character boundary.
+    ///
+    /// Does not wait. The connection is gone when [`Self::closed`] completes,
+    /// which can take a moment, and until then calls on it may still succeed.
+    /// A caller that ends its process right after closing waits for
+    /// [`Self::closed`] first, or the peer may see the connection lost
+    /// instead.
+    ///
+    /// Every stream of the connection is gone with it, and with them what was
+    /// written and had not reached the peer yet: see
+    /// [`SendStream::finish_and_wait`].
     fn close(&self, code: u32, reason: &[u8]);
 
-    /// Completes when the connection is gone, whoever closed it.
-    fn closed(&self) -> impl Future<Output = ()> + Send;
+    /// Completes when the connection is gone, and says how it ended.
+    fn closed(&self) -> impl Future<Output = ConnectionEnd> + Send;
 }

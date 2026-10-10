@@ -9,17 +9,23 @@ description = "Moves MoQ Transport messages and Objects over WebTransport stream
 workspace = true
 
 [features]
-default = ["wtransport"]
-# The connection over the `wtransport` crate. Without it the crate has the
-# stream handling and the in-memory connection only, and pulls in no QUIC stack.
-wtransport = ["dep:wtransport"]
+default = ["quic"]
+# The connection over WebTransport (`wt`). Without it the crate has the stream
+# handling and the in-memory connection only, and pulls in no QUIC stack.
+quic = ["dep:web-transport-quinn", "dep:url"]
 
 [dependencies]
 xmoq-moqt = { path = "../moqt" }
 tokio = { version = "=1.49.0", features = ["macros", "rt", "sync", "time"] }
-# WHY the `quinn` feature: it is the only way wtransport 0.7.2 lets its user set
-# the QUIC flow control windows and stream limits (`wt::QuicLimits`).
-wtransport = { version = "=0.7.2", optional = true, features = ["quinn"] }
+# WHY `ring` and not the default `aws-lc-rs`: one crypto backend in the binary.
+# With both compiled in, the library's default lookup panics unless a
+# process-wide provider is installed (web-transport-quinn 0.13.2,
+# `src/crypto.rs`, read 2026-10-10), and `aws-lc-rs` builds a C library.
+web-transport-quinn = { version = "=0.13.2", optional = true, default-features = false, features = ["ring"] }
+# The URL type of the library's connect request.
+url = { version = "=2.5.8", optional = true }
 
 [dev-dependencies]
 tokio = { version = "=1.49.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+# The self-signed certificate of the loopback server in the contract tests.
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "ring"] }

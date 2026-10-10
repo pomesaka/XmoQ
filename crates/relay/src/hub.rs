@@ -7,13 +7,14 @@
 //! queue, and a queue that is full ends that session or that subscription
 //! instead of holding up the others.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use xmoq_moqt::data::SubgroupHeader;
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::session::MAX_PEER_REQUESTS;
@@ -189,6 +190,8 @@ pub struct Held {
     pub request_writers: usize,
     /// Writers of subgroup streams that are not done.
     pub out_streams: usize,
+    /// Timers that are running.
+    pub timers: usize,
     /// What the relay holds.
     pub relay: xmoq_relay_core::Counts,
 }
@@ -271,6 +274,7 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
         events: events.clone(),
         sessions: HashMap::new(),
         out_streams: HashMap::new(),
+        timers: Timers::default(),
     };
     let task = tokio::spawn(hub.run(inbox));
     let handle = HubHandle {
@@ -289,11 +293,87 @@ struct Hub<C: Connection> {
     /// The writers of the subgroup streams that are not done, with the session
     /// each writes to.
     out_streams: HashMap<OutStreamKey, (SessionKey, OutgoingSubgroup)>,
+    timers: Timers,
+}
+
+/// Timers a session may have running at once. A timer beyond that is not
+/// started, which leaves what it would have ended to end with the session.
+/// Provisional.
+const MAX_TIMERS_PER_SESSION: usize = 1024;
+
+/// The timers the relay asked for, in one place.
+///
+/// WHY not a task per timer: a peer decides how many timers start (every
+/// stream it opens ahead of its PUBLISH starts one), and a task cannot be
+/// taken back when its session goes. Here a session's timers are counted,
+/// bounded, and dropped with the session.
+#[derive(Default)]
+struct Timers {
+    /// By the time they are due, and a number that keeps equal times apart.
+    pending: BTreeMap<(Instant, u64), (SessionKey, Event)>,
+    per_session: HashMap<SessionKey, usize>,
+    next: u64,
+}
+
+impl Timers {
+    fn start(&mut self, session: SessionKey, wait: Duration, event: Event) {
+        let running = self.per_session.entry(session).or_default();
+        if *running >= MAX_TIMERS_PER_SESSION {
+            return;
+        }
+        *running += 1;
+        self.pending
+            .insert((Instant::now() + wait, self.next), (session, event));
+        self.next = self.next.wrapping_add(1);
+    }
+
+    /// Completes when the next timer is due; never, when none is running.
+    async fn due(&self) {
+        match self.pending.first_key_value() {
+            Some(((at, _), _)) => tokio::time::sleep_until(*at).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn take_due(&mut self) -> VecDeque<Event> {
+        let now = Instant::now();
+        let mut events = VecDeque::new();
+        while let Some(entry) = self.pending.first_entry() {
+            if entry.key().0 > now {
+                break;
+            }
+            let (session, event) = entry.remove();
+            if let Some(running) = self.per_session.get_mut(&session) {
+                *running = running.saturating_sub(1);
+            }
+            events.push_back(event);
+        }
+        events
+    }
+
+    fn forget_session(&mut self, session: SessionKey) {
+        self.per_session.remove(&session);
+        self.pending.retain(|_, (owner, _)| *owner != session);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
 }
 
 impl<C: Connection> Hub<C> {
     async fn run(mut self, mut inbox: mpsc::Receiver<Envelope<C>>) {
-        while let Some(envelope) = inbox.recv().await {
+        loop {
+            let envelope = tokio::select! {
+                envelope = inbox.recv() => envelope,
+                () = self.timers.due() => {
+                    let events = self.timers.take_due();
+                    self.feed(events);
+                    continue;
+                }
+            };
+            let Some(envelope) = envelope else { return };
             match envelope {
                 Envelope::NewSession {
                     session,
@@ -314,12 +394,12 @@ impl<C: Connection> Hub<C> {
                 }
                 Envelope::Core(event) => {
                     match &event {
-                        // The peer closed the stream; the relay's half is
-                        // closed too. Dropping the queue ends the writer, which
-                        // finishes the stream.
+                        // The peer ended the stream, or stopped the relay's
+                        // direction of it; either way the peer's direction is
+                        // over (§3.3.2). What becomes of the relay's is for the
+                        // relay to say, with FinishRequest or ResetRequest.
                         Event::RequestClosed { session, stream } => {
-                            if let Some(handle) = self.sessions.get_mut(session) {
-                                handle.requests.remove(stream);
+                            if let Some(handle) = self.sessions.get(session) {
                                 handle.stops.stop(stream.0, stream_reset_code::CANCELLED);
                             }
                         }
@@ -349,6 +429,7 @@ impl<C: Connection> Hub<C> {
                             .map(|handle| handle.requests.len())
                             .sum(),
                         out_streams: self.out_streams.len(),
+                        timers: self.timers.len(),
                         relay: self.relay.counts(),
                     });
                 }
@@ -398,6 +479,7 @@ impl<C: Connection> Hub<C> {
             Arc::clone(&connection),
             [uni, requests],
             self.config.closed_read_timeout,
+            self.config.log.clone(),
             self.events.clone(),
         ));
         self.sessions.insert(
@@ -591,12 +673,13 @@ impl<C: Connection> Hub<C> {
     }
 
     /// Starts the timer an action asks for.
-    fn start_timer(&self, action: &Action) {
-        let (wait, event) = match *action {
+    fn start_timer(&mut self, action: &Action) {
+        let (session, wait, event) = match *action {
             Action::StartDrainTimer {
                 session,
                 track_alias,
             } => (
+                session,
                 self.config.drain_timeout,
                 Event::DrainTimeout {
                     session,
@@ -604,25 +687,18 @@ impl<C: Connection> Hub<C> {
                 },
             ),
             Action::StartEarlyTimer { session, stream } => (
+                session,
                 self.config.early_stream_timeout,
                 Event::EarlyStreamTimeout { session, stream },
             ),
             Action::StartRequestTimer { session, stream } => (
+                session,
                 self.config.request_close_timeout,
                 Event::RequestTimeout { session, stream },
             ),
             _ => return,
         };
-        self.after(wait, event);
-    }
-
-    /// Reports `event` to the hub after `wait`.
-    fn after(&self, wait: Duration, event: Event) {
-        let events = self.events.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(wait).await;
-            let _ = events.send(Envelope::Core(event)).await;
-        });
+        self.timers.start(session, wait, event);
     }
 
     /// Queues a command for the writer of a request stream. A stream whose
@@ -691,6 +767,7 @@ impl<C: Connection> Hub<C> {
             }
             *owner != session
         });
+        self.timers.forget_session(session);
     }
 }
 
@@ -779,9 +856,13 @@ async fn watch_session<C: Connection>(
     connection: Arc<C>,
     mut readers: [IncomingStreams; 2],
     closed_read_timeout: Duration,
+    log: Option<Log>,
     events: mpsc::Sender<Envelope<C>>,
 ) {
-    connection.closed().await;
+    let end = connection.closed().await;
+    if let Some(log) = &log {
+        log.print(format!("CONNECTION_ENDED session={} {end:?}", session.0));
+    }
     let read = async {
         for reader in &mut readers {
             reader.done().await;
@@ -792,6 +873,11 @@ async fn watch_session<C: Connection>(
         .send(Envelope::Core(Event::SessionClosed { session }))
         .await;
 }
+
+/// How long after a `STOP_SENDING` on the relay's control stream the peer's
+/// connection may end for the stop to count as part of its leaving.
+/// Provisional.
+const LEAVING_GRACE: Duration = Duration::from_millis(200);
 
 /// Writes the relay's control stream of one session.
 async fn write_control<C: Connection>(
@@ -811,6 +897,15 @@ async fn write_control<C: Connection>(
             message = messages.recv() => message,
             stopped = control.stopped() => {
                 if let WriteError::Stopped(_) = stopped {
+                    // WHY wait and see: an endpoint that goes away lets go of
+                    // its streams, which QUIC stacks turn into STOP_SENDING,
+                    // and the close of its connection can arrive a moment
+                    // later. That is a peer leaving, and the session then
+                    // ends by itself, with what had arrived still read.
+                    let leaving = tokio::time::timeout(LEAVING_GRACE, connection.closed());
+                    if leaving.await.is_ok() {
+                        return;
+                    }
                     // §3.3: closing a control stream is a PROTOCOL_VIOLATION,
                     // and a STOP_SENDING closes this one.
                     let broken = Envelope::Broken {

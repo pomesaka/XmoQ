@@ -8,6 +8,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# WHY empty: this crate does no I/O, so it must not depend on wtransport, quinn
+# WHY empty: this crate does no I/O, so it must not depend on web-transport-quinn, quinn
 # or tokio. Only xmoq-moqt-client touches the network.
 [dependencies]

@@ -302,7 +302,7 @@ impl Relay {
                 message,
             } => self.on_request_message(session, stream, message, &mut actions),
             Event::RequestClosed { session, stream } => {
-                self.on_request_closed(session, stream, &mut actions);
+                self.on_request_closed(session, stream, true, &mut actions);
             }
             Event::DataStreamOpened {
                 session,
@@ -387,7 +387,7 @@ impl Relay {
             _ => return,
         };
         state.moqt.on_drain_timeout(track_alias);
-        self.end_track_if_drained(&track, actions);
+        self.end_track(&track, TrackEnd::TimedOut, actions);
     }
 
     /// Lets go of a request the relay ended with `PUBLISH_DONE` and whose
@@ -757,7 +757,7 @@ impl Relay {
                         // held in the relay goes the way of a closed stream.
                         // The slot stays until the stream really closes, so
                         // that what the peer still sends on it is ignored.
-                        self.on_request_closed(session, stream, actions);
+                        self.on_request_closed(session, stream, false, actions);
                         if let Some(state) = self.sessions.get_mut(&session) {
                             state.requests.insert(stream, RequestSlot::Finished(None));
                         }
@@ -768,16 +768,38 @@ impl Relay {
         }
     }
 
+    /// Lets go of what a request stream stood for. With `finish`, the relay's
+    /// direction of the stream is finished if the relay has not ended it yet:
+    /// the peer ended its own, and nothing more will be said.
+    ///
+    /// The exception is a PUBLISH whose publisher said `PUBLISH_DONE`: the
+    /// relay's direction stays open until the track's last streams arrived,
+    /// and how it ends then tells the publisher whether they did
+    /// ([`Self::release_source`]).
     fn on_request_closed(
         &mut self,
         session: SessionKey,
         stream: StreamKey,
+        finish: bool,
         actions: &mut Vec<Action>,
     ) {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        match state.requests.remove(&stream) {
+        let slot = state.requests.remove(&stream);
+        if finish
+            && matches!(
+                slot,
+                Some(
+                    RequestSlot::Subscribe { .. }
+                        | RequestSlot::Publish { .. }
+                        | RequestSlot::PublishNamespace { .. }
+                )
+            )
+        {
+            actions.push(Action::FinishRequest { session, stream });
+        }
+        match slot {
             Some(RequestSlot::Subscribe { request, track }) => {
                 state.moqt.on_peer_request_closed(request);
                 // The subscriber cancelled (§3.3.2, §5.1.1 "MUST reset any open
@@ -1057,7 +1079,7 @@ impl Relay {
             return;
         };
         let (status_code, reset_code) = match end {
-            TrackEnd::Done | TrackEnd::SourceGone => (
+            TrackEnd::Done | TrackEnd::TimedOut | TrackEnd::SourceGone => (
                 publish_done_status::TRACK_ENDED,
                 stream_reset_code::CANCELLED,
             ),
@@ -1128,6 +1150,25 @@ impl Relay {
                 stream: *stream,
                 code: reset_code,
             });
+        }
+        // WHY answer a PUBLISH_DONE on the request stream: the publisher may
+        // want to close its session next, and a stream that arrived and was
+        // not accepted yet can be lost with the connection. A FIN says that
+        // every stream the Stream Count named has ended here; a reset says the
+        // relay stopped waiting for them. The draft gives the subscriber's
+        // direction no meaning after PUBLISH_DONE (§10.11, §5.1.1), so a peer
+        // that knows nothing of this sees an ordinary end of the stream.
+        match end {
+            TrackEnd::Done => actions.push(Action::FinishRequest {
+                session,
+                stream: publish_stream,
+            }),
+            TrackEnd::TimedOut => actions.push(Action::ResetRequest {
+                session,
+                stream: publish_stream,
+                code: stream_reset_code::CANCELLED,
+            }),
+            TrackEnd::SourceGone | TrackEnd::Malformed => {}
         }
         if end == TrackEnd::Malformed {
             // §2.4.2: the receiver of a malformed track cancels the
@@ -1451,8 +1492,10 @@ fn hold_early_object(
 /// Why a track ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrackEnd {
-    /// `PUBLISH_DONE`, and the last streams have ended or the wait is over.
+    /// `PUBLISH_DONE`, and every stream its Stream Count named has ended.
     Done,
+    /// `PUBLISH_DONE`, and the wait for the streams it named is over.
+    TimedOut,
     /// The source cancelled or its session is gone.
     SourceGone,
     /// The track broke the object model (§2.4.2).

@@ -616,8 +616,16 @@ async fn request_streams_that_break_the_rules() {
 #[tokio::test(start_paused = true)]
 async fn a_request_reader_yields_the_response_and_the_end() {
     // (how the peer ends the stream, what the reader says)
-    let endings: [(Option<u32>, &str); 2] = [(None, "FIN"), (Some(0x10), "reset, code 0x10")];
-    for (reset, expected) in endings {
+    let endings = [
+        (None, crate::RequestClose::Fin, "FIN"),
+        (
+            Some(0x10),
+            crate::RequestClose::Reset(Some(0x10)),
+            "reset, code 0x10",
+        ),
+    ];
+    for (reset, expected, text) in endings {
+        assert_eq!(expected.to_string(), text);
         let (local, peer) = pair();
         let (_send, recv) = local.open_bi().await.unwrap();
         let (mut peer_send, _peer_recv) = peer.accept_bi().await.unwrap();
@@ -637,7 +645,7 @@ async fn a_request_reader_yields_the_response_and_the_end() {
         }
         assert_eq!(
             reader.next_event().await,
-            Ok(RequestStreamEvent::Closed(expected.to_string()))
+            Ok(RequestStreamEvent::Closed(expected))
         );
     }
 }

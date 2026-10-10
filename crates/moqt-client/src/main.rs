@@ -50,6 +50,17 @@ const CLOSE_GRACE: Duration = Duration::from_secs(2);
 /// delivered yet, and this client closes right after its last write.
 const DELIVERY_WAIT: Duration = Duration::from_secs(5);
 
+/// How long the subscriber gets to end its direction of the request stream
+/// after this client's `PUBLISH_DONE`, before the session is closed without
+/// knowing whether everything arrived. Provisional.
+///
+/// WHY short: a peer that follows only the draft may never end it, and every
+/// run against such a peer waits this long.
+/// WHY longer than the 2 seconds an `XmoQ` relay waits for the counted
+/// streams: the relay's reset at the end of its wait is to be seen, not cut
+/// off by this client's own limit.
+const PUBLISH_DONE_ANSWER_WAIT: Duration = Duration::from_secs(3);
+
 /// How long the last Objects of a subscription are waited for after
 /// `PUBLISH_DONE`, when fewer data streams ended than it counted (§10.11).
 ///
@@ -537,9 +548,13 @@ impl Client<'_> {
             ReasonPhrase::default(),
         )?;
         publish_stream.send(&done).await?;
-        tokio::time::timeout(DELIVERY_WAIT, publish_stream.finish_and_wait())
-            .await
-            .map_err(|_| anyhow!("the peer did not take PUBLISH_DONE in time"))?
+        let answered = publish_stream
+            .finish_and_await_close(PUBLISH_DONE_ANSWER_WAIT)
+            .await?;
+        // Whatever the peer did is reported and is not an error of this run:
+        // the draft does not ask a subscriber to close its direction at all.
+        report::publish_done_peer_ended(answered);
+        Ok(())
     }
 
     async fn run_mode(&mut self) -> Result<()> {
@@ -550,23 +565,35 @@ impl Client<'_> {
     }
 }
 
-/// Runs the session until its mode is done. `control` receives this endpoint's
-/// control stream, which the caller keeps open until the session is closed.
+/// What has to stay until the session is closed, so the caller keeps it.
+#[derive(Default)]
+struct UntilClosed {
+    /// This endpoint's control stream. §3.3: it stays open for the whole
+    /// session; ending it earlier is a `PROTOCOL_VIOLATION` for the peer.
+    control: Option<<WtConnection as Connection>::Send>,
+    /// The readers of the peer's streams, its control stream among them.
+    /// WHY kept: letting go of a stream that is not over tells the peer to
+    /// stop sending on it, and the close of the session takes a moment to
+    /// reach the peer. A relay that sees its control stream stopped first
+    /// closes the session with `PROTOCOL_VIOLATION`.
+    readers: Option<io::Readers>,
+}
+
+/// Runs the session until its mode is done. `kept` receives what has to
+/// outlive this function.
 async fn run_session(
     connection: &Arc<WtConnection>,
-    control: &mut Option<<WtConnection as Connection>::Send>,
+    kept: &mut UntilClosed,
     args: &Args,
 ) -> Result<()> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
-    let (mut session_inbox, objects, _readers) =
+    let (mut session_inbox, objects, readers) =
         io::start_readers(Arc::clone(connection), args.trace.clone(), stops.clone());
+    kept.readers = Some(readers);
 
-    // §3.3: each peer opens one control stream that begins with SETUP and stays
-    // open for the whole session. It is kept by the caller: dropping it here
-    // would end it with a FIN before the session is closed, which the peer has
-    // to answer with PROTOCOL_VIOLATION.
-    let control = control.insert(connection.open_uni().await?);
+    // §3.3: each peer opens one control stream that begins with SETUP.
+    let control = kept.control.insert(connection.open_uni().await?);
     let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
     let setup = session.setup(vec![KeyValuePair::bytes(
         setup_option::MOQT_IMPLEMENTATION,
@@ -628,15 +655,17 @@ async fn run(args: &Args) -> Result<()> {
 
     // WHY the timeout sits here and not around `run`: the close below has to
     // happen on every path, a timeout included.
-    let mut control = None;
-    let session = run_session(&connection, &mut control, args);
+    let mut kept = UntilClosed::default();
+    let session = run_session(&connection, &mut kept, args);
     let result = match tokio::time::timeout_at(deadline, session).await {
         Ok(result) => result,
         Err(_) => Err(timed_out()),
     };
     connection.close(termination_code(&result), b"");
+    // The close carries its code to the peer, which takes a moment; a process
+    // that exits before that leaves the peer with a lost connection.
     let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
-    drop(control);
+    drop(kept);
     result
 }
 

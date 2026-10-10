@@ -330,9 +330,17 @@ fn publish_done_reaches_the_subscribers_once_the_streams_ended() {
         ]
     );
 
-    let mut expected = vec![Action::FinishDataStream {
-        out_stream: OutStreamKey(0),
-    }];
+    let mut expected = vec![
+        Action::FinishDataStream {
+            out_stream: OutStreamKey(0),
+        },
+        // The one stream PUBLISH_DONE counted has ended: the relay says so to
+        // the publisher by finishing its direction of the request stream.
+        Action::FinishRequest {
+            session: PUBLISHER,
+            stream: StreamKey(0),
+        },
+    ];
     // TRACK_ENDED (0x2), and the one stream the relay opened for Alice.
     expected.extend(done_actions(ALICE, 0x2, 1));
     assert_eq!(data_stream_closed(&mut relay, 7, StreamEnd::Fin), expected);
@@ -366,6 +374,13 @@ fn the_drain_timer_ends_a_track_whose_streams_never_came() {
         Action::StopDataStream {
             session: PUBLISHER,
             stream: StreamKey(7),
+            code: 0x1,
+        },
+        // The relay stopped waiting: a reset, CANCELLED (0x1), where a FIN
+        // would have said that everything arrived.
+        Action::ResetRequest {
+            session: PUBLISHER,
+            stream: StreamKey(0),
             code: 0x1,
         },
         Action::ResetDataStream {
@@ -524,10 +539,16 @@ fn a_subscriber_that_leaves_does_not_disturb_the_others() {
                 session: ALICE,
                 stream: StreamKey(0),
             },
-            vec![Action::ResetDataStream {
-                out_stream: OutStreamKey(0),
-                code: 0x1,
-            }],
+            vec![
+                Action::FinishRequest {
+                    session: ALICE,
+                    stream: StreamKey(0),
+                },
+                Action::ResetDataStream {
+                    out_stream: OutStreamKey(0),
+                    code: 0x1,
+                },
+            ],
         ),
         // Nothing can be done on a session that is gone.
         (
@@ -567,12 +588,19 @@ fn a_publisher_that_leaves_ends_the_track_for_every_subscriber() {
                 session: PUBLISHER,
                 stream: StreamKey(0),
             },
-            // The publisher is still there: its stream is stopped (§10.11).
-            vec![Action::StopDataStream {
-                session: PUBLISHER,
-                stream: StreamKey(7),
-                code: 0x1,
-            }],
+            // The publisher is still there: the relay ends its direction of
+            // the request stream, and the data stream is stopped (§10.11).
+            vec![
+                Action::FinishRequest {
+                    session: PUBLISHER,
+                    stream: StreamKey(0),
+                },
+                Action::StopDataStream {
+                    session: PUBLISHER,
+                    stream: StreamKey(7),
+                    code: 0x1,
+                },
+            ],
             (3, 0, 0, 0, 0),
         ),
         (

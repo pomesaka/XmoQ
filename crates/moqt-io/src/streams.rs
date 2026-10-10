@@ -297,9 +297,35 @@ impl<R: RecvStream> Reader<R> {
 pub enum RequestStreamEvent {
     /// A message.
     Message(ControlMessage),
-    /// The peer ended the stream, by FIN or by reset, which ends the request
-    /// (§11.4.1). The text says how.
-    Closed(String),
+    /// The stream is over for this request (§3.3.2).
+    Closed(RequestClose),
+}
+
+/// How a request stream ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestClose {
+    /// The peer finished its direction.
+    Fin,
+    /// The peer reset its direction, with this code if it gave one.
+    Reset(Option<u32>),
+    /// The peer sent `STOP_SENDING` for this endpoint's direction, with this
+    /// code if it gave one. [`RequestReader`] never reports it; whoever
+    /// watches the sending half does.
+    Stopped(Option<u32>),
+}
+
+impl std::fmt::Display for RequestClose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (what, code) = match self {
+            Self::Fin => return f.write_str("FIN"),
+            Self::Reset(code) => ("reset", code),
+            Self::Stopped(code) => ("STOP_SENDING", code),
+        };
+        match code {
+            Some(code) => write!(f, "{what}, code {code:#x}"),
+            None => write!(f, "{what}, without an application code"),
+        }
+    }
 }
 
 /// Why a request stream could not be read further.
@@ -333,7 +359,7 @@ impl std::error::Error for RequestReadError {
 ///
 /// To cancel the request, call [`Self::stop`] and reset the sending half.
 /// Merely dropping the two halves does not reset anything: with quinn 0.11.12,
-/// which `wtransport` 0.7.2 wraps, a dropped sending half ends with a FIN and a
+/// which `web-transport-quinn` 0.13.2 wraps, a dropped sending half ends with a FIN and a
 /// dropped receiving half sends `STOP_SENDING` with code 0 (`impl Drop for
 /// SendStream` and `for RecvStream`; read 2026-10-10).
 pub struct RequestReader<R> {
@@ -383,13 +409,10 @@ impl<R: RecvStream> RequestReader<R> {
                 }
                 Step::Fin => {
                     self.decoder.finish().map_err(RequestReadError::Peer)?;
-                    return Ok(RequestStreamEvent::Closed("FIN".to_string()));
+                    return Ok(RequestStreamEvent::Closed(RequestClose::Fin));
                 }
                 Step::Reset(code) => {
-                    return Ok(RequestStreamEvent::Closed(match code {
-                        Some(code) => format!("reset, code {code:#x}"),
-                        None => "reset, without an application code".to_string(),
-                    }));
+                    return Ok(RequestStreamEvent::Closed(RequestClose::Reset(code)));
                 }
                 // No deadline is set, and nobody else holds the stop registry.
                 Step::Lost | Step::Stop(_) | Step::TimedOut => return Err(RequestReadError::Lost),
@@ -516,11 +539,16 @@ impl<E, T> Sink<E, T> {
 /// peer that sends faster than the consumer takes is slowed by flow control
 /// instead of growing memory.
 ///
-/// WHY that cannot starve the request streams of flow control (§11.4.2 asks
-/// that control streams get it first): only per-stream windows fill up. The
-/// connection-level receive window is unlimited by default (`receive_window:
-/// VarInt::MAX` in `TransportConfig::default`, quinn-proto 0.11.19, which
-/// `wtransport` 0.7.2 uses; read 2026-10-10).
+/// FIXME: give connection flow control to the request streams before the
+/// data streams (§11.4.2, MUST, "to prevent deadlocks"). With quinn's defaults
+/// only per-stream windows fill up, because the connection-level receive
+/// window is unlimited (`receive_window: VarInt::MAX` in
+/// `TransportConfig::default`, quinn-proto 0.11.19; read 2026-10-10). A
+/// server that bounds that window, as the relay does, can have it taken up by
+/// subgroup streams whose readers wait here, and the request streams of the
+/// same session then wait as well. The deadlock the draft names does not
+/// arise here: a stream whose Track Alias is unknown is read and held within
+/// limits, not left unread until its PUBLISH comes.
 pub fn read_uni_streams<C: Connection, T: Send + 'static>(
     connection: Arc<C>,
     config: StreamConfig,

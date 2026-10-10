@@ -15,9 +15,9 @@ use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{RequestEvent, RequestId, Role, Session, Transport};
 use xmoq_moqt_io::memory::{MemoryConnection, MemoryRecv, MemorySend, STREAM_WINDOW, pair};
 use xmoq_moqt_io::{
-    Connection, IncomingStreams, RecvStream, RequestReader, RequestStreamEvent, SendLimits,
-    SendStream, StreamConfig, StreamStops, Trace, UniEvent, WriteError, read_uni_streams,
-    send_message,
+    Connection, IncomingStreams, RecvStream, RequestClose, RequestReader, RequestStreamEvent,
+    SendLimits, SendStream, StreamConfig, StreamStops, Trace, UniEvent, WriteError,
+    read_uni_streams, send_message,
 };
 use xmoq_relay_core::Counts;
 
@@ -473,6 +473,7 @@ const NOTHING: Held = Held {
     sessions: 0,
     request_writers: 0,
     out_streams: 0,
+    timers: 0,
     relay: Counts {
         sessions: 0,
         tracks: 0,
@@ -654,18 +655,12 @@ async fn a_session_whose_messages_pile_up_is_closed() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_publisher_that_closes_right_after_its_last_write_loses_nothing() {
-    let (hub, _task) = hub::spawn(HubConfig::default());
-    let mut publisher = Peer::connect(&hub, true).await;
-    let mut publication = publisher.publish().await;
-    let mut subscriber = Peer::connect(&hub, true).await;
-    let (mut request, track_alias) = subscriber.subscribe().await;
-
-    // The last Object, PUBLISH_DONE, and the close, with nothing in between
-    // but the wait for each stream to arrive.
+/// What a publisher does at its end: the last Object on a new stream, then
+/// `PUBLISH_DONE` that counts the stream, then a FIN.
+async fn send_last_object_and_publish_done(publisher: &mut Peer, publication: &mut OpenRequest) {
     let data = publisher.send_objects(&[object(0, 3)]).await;
     data.finish_and_wait().await.unwrap();
+    // TRACK_ENDED (0x2), one stream.
     let ended = publisher
         .session
         .publish_done(publication.id, 0x2, 1, ReasonPhrase::default())
@@ -673,11 +668,83 @@ async fn a_publisher_that_closes_right_after_its_last_write_loses_nothing() {
     send_message(&mut publication.send, &ended, &Trace::default(), "publish")
         .await
         .unwrap();
-    publication.send.finish_and_wait().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publisher_that_waits_for_the_relays_fin_before_closing_loses_nothing() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let mut publication = publisher.publish().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let (mut request, track_alias) = subscriber.subscribe().await;
+
+    send_last_object_and_publish_done(&mut publisher, &mut publication).await;
+    let OpenRequest {
+        send, mut reader, ..
+    } = publication;
+    send.finish();
+    // The relay finishes its direction once the one stream that PUBLISH_DONE
+    // counted has ended there. Only then does the publisher close.
+    assert_eq!(
+        timeout(SOON, reader.next_event()).await,
+        Ok(Ok(RequestStreamEvent::Closed(RequestClose::Fin)))
+    );
     publisher.connection.close(0, b"");
 
     assert_eq!(subscriber.receive_stream(track_alias).await, [0]);
     assert_eq!(publish_done(&mut request).await, done(0x2, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publisher_that_closes_without_waiting_can_lose_its_last_object() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let mut publication = publisher.publish().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let (mut request, _) = subscriber.subscribe().await;
+
+    // Everything reached the relay's transport (`finish_and_wait`), and the
+    // publisher closes at once. The relay had not accepted the data stream,
+    // and on this connection such a stream is always lost with the close.
+    send_last_object_and_publish_done(&mut publisher, &mut publication).await;
+    publication.send.finish_and_wait().await.unwrap();
+    publisher.connection.close(0, b"");
+
+    // The subscriber is told the track ended, and was sent no stream.
+    assert_eq!(publish_done(&mut request).await, done(0x2, 0));
+    let (events, _) = subscriber.data.as_mut().expect("this peer reads");
+    assert!(timeout(SOON, events.recv()).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_relay_resets_the_publish_stream_when_the_counted_streams_do_not_come() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let mut publication = publisher.publish().await;
+
+    // PUBLISH_DONE counts one stream, and none is ever opened.
+    let ended = publisher
+        .session
+        .publish_done(publication.id, 0x2, 1, ReasonPhrase::default())
+        .unwrap();
+    send_message(&mut publication.send, &ended, &Trace::default(), "publish")
+        .await
+        .unwrap();
+    publication.send.finish();
+
+    // Nothing for the two seconds of the wait, then a reset with CANCELLED
+    // (0x1) where a FIN would have said that everything arrived.
+    assert!(
+        timeout(Duration::from_millis(1900), publication.reader.next_event())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        timeout(SOON, publication.reader.next_event()).await,
+        Ok(Ok(RequestStreamEvent::Closed(RequestClose::Reset(Some(
+            0x1
+        )))))
+    );
 }
 
 #[tokio::test(start_paused = true)]
