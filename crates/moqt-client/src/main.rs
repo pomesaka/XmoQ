@@ -253,16 +253,15 @@ struct Serving {
     streams: u64,
 }
 
-/// Completes when the subscriber sent `STOP_SENDING` on the stream of the
-/// subscription that is being served; never, when none is.
-async fn stopped(serving: &mut Option<Serving>) {
+/// Completes with the code of the `STOP_SENDING` the subscriber sent on the
+/// stream of the subscription that is being served; never, when none is.
+async fn stopped(serving: &mut Option<Serving>) -> Option<u32> {
     match serving {
-        Some(serving) => {
-            if let xmoq_moqt_io::WriteError::Lost(_) = serving.send.stopped().await {
-                // A lost connection is reported where the session is watched.
-                std::future::pending::<()>().await;
-            }
-        }
+        Some(serving) => match serving.send.stopped().await {
+            xmoq_moqt_io::WriteError::Stopped(code) => code,
+            // A lost connection is reported where the session is watched.
+            xmoq_moqt_io::WriteError::Lost(_) => std::future::pending().await,
+        },
         None => std::future::pending().await,
     }
 }
@@ -377,8 +376,12 @@ impl Client<'_> {
                     UniEvent::SubgroupClosed { stream, header, end } => {
                         self.open_streams.remove(&stream);
                         self.session.on_data_stream_closed(header.track_alias);
-                        if let StreamEnd::Aborted(code) = end {
-                            report::stream_aborted(stream, code);
+                        match end {
+                            StreamEnd::Fin => {}
+                            StreamEnd::Aborted(code) => report::stream_aborted(stream, code),
+                            // The same line as for a reset without a code:
+                            // the drivers of interop runs read it.
+                            StreamEnd::Lost => report::stream_aborted(stream, None),
                         }
                     }
                     UniEvent::TrackMalformed { header, error, .. } => {
@@ -544,7 +547,10 @@ impl Client<'_> {
         // with a FIN.
         match tokio::time::timeout(DELIVERY_WAIT, data.finish_and_wait()).await {
             // A peer that does not want the stream (§11.4.1) has what it wants.
-            Ok(Ok(()) | Err(xmoq_moqt_io::WriteError::Stopped(_))) => {}
+            Ok(Ok(())) => {}
+            Ok(Err(xmoq_moqt_io::WriteError::Stopped(code))) => {
+                report::stop_sending_received(&format!("data#{group_id}"), code);
+            }
             Ok(Err(error)) => return Err(failed(error)),
             Err(_) => bail!("the peer did not take the subgroup stream in time"),
         }
@@ -596,6 +602,9 @@ impl Client<'_> {
                         report::subscriber_finished_its_direction();
                     }
                     RequestStreamEvent::Closed(how) => {
+                        if let RequestClose::Stopped(code) = how {
+                            report::stop_sending_received("request", code);
+                        }
                         self.session.cancel(publish_request);
                         publish_stream.cancel();
                         bail!("the subscriber ended the subscription: {how}");
@@ -670,7 +679,8 @@ impl Client<'_> {
                 // §5.1: the subscriber ends the subscription with STOP_SENDING.
                 // This client has no subgroup stream open between Objects, so
                 // there is none to reset (§5.1.1).
-                () = stopped(&mut serving) => {
+                code = stopped(&mut serving) => {
+                    report::stop_sending_received("request", code);
                     if let Some(ended) = serving.take() {
                         self.session.on_peer_request_closed(ended.request);
                         ended.send.reset(stream_reset_code::CANCELLED);

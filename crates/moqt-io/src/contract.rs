@@ -87,6 +87,25 @@ pub(crate) async fn bytes_arrive_in_order_and_the_fin_after_them<C: Connection>(
     assert_eq!(read_to_end(&mut peer_recv).await, (vec![], Ok(())));
 }
 
+/// `Lost` says that the connection is gone and nothing else. A stream whose
+/// writer went away without finishing it, on a connection that is still
+/// there, ends for the reader in some other way: the contract leaves open
+/// which, and a writer that lets go of a half that way has not said.
+pub(crate) async fn a_stream_that_ends_alone_is_not_read_as_a_lost_connection<C: Connection>(
+    a: C,
+    b: C,
+) {
+    let (send, mut recv) = uni(&a, &b, b"abc").await;
+    drop(send);
+    let (_, end) = read_to_end(&mut recv).await;
+    assert!(!is_lost_read(&end), "{end:?}");
+
+    // The connection is still good for another stream.
+    let (send, mut recv) = uni(&a, &b, b"def").await;
+    send.finish();
+    assert_eq!(read_to_end(&mut recv).await, (b"def".to_vec(), Ok(())));
+}
+
 pub(crate) async fn a_reset_and_a_stop_carry_their_codes<C: Connection>(a: C, b: C) {
     // CANCELLED (0x1) one way, MALFORMED_TRACK (0x12) the other.
     let (send, mut recv) = uni(&a, &b, b"abc").await;
@@ -369,6 +388,7 @@ macro_rules! contract_tests {
             contract_tests!(@plain $pair, [
                 bytes_arrive_in_order_and_the_fin_after_them,
                 a_reset_and_a_stop_carry_their_codes,
+                a_stream_that_ends_alone_is_not_read_as_a_lost_connection,
                 dropping_a_read_loses_nothing,
                 stopped_waits_until_the_peer_stops,
                 what_arrived_outlives_the_connection,
@@ -427,6 +447,7 @@ const LOOPBACK_LIMITS: crate::wt::QuicLimits = crate::wt::QuicLimits {
     stream_receive_window: 4096,
     receive_window: 16 * 1024,
     send_window: 16 * 1024,
+    idle_timeout: crate::wt::IDLE_TIMEOUT,
 };
 
 #[cfg(feature = "quic")]

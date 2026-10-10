@@ -9,7 +9,7 @@ use tokio::time::timeout;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
-use xmoq_moqt::message::{ControlMessage, PublishDone, ReasonPhrase};
+use xmoq_moqt::message::{ControlMessage, PublishDone, ReasonPhrase, RequestError};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{
@@ -886,8 +886,9 @@ impl Peer {
         match self.session.on_peer_request_opened(first).unwrap() {
             PeerRequestOpened::Request(id, PeerRequest::Subscribe(subscribe)) => {
                 assert_eq!(subscribe.full_track_name, track());
-                // §9.2: the relay subscribes upstream with Forward State 1.
-                assert_eq!(subscribe.parameters, [Parameter::Forward(true)]);
+                // §9.2: the relay subscribes upstream with Forward State 1,
+                // the value of a SUBSCRIBE without FORWARD (§10.2.12).
+                assert_eq!(subscribe.parameters, []);
                 (id, send, reader)
             }
             other => panic!("not a SUBSCRIBE: {other:?}"),
@@ -1233,4 +1234,103 @@ async fn a_publish_that_crosses_the_relays_subscribe_becomes_the_source_of_the_t
         (held.own_requests, held.relay.own_requests, held.timers),
         (0, 0, 0)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_message_after_duplicate_subscription_does_not_end_the_wait_for_the_publish() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+    let (_id, mut send, _reader) = publisher.relay_subscribe().await;
+
+    // DUPLICATE_SUBSCRIPTION (0x19), and a second message right behind it in
+    // one write, so that the relay reads both before it has dealt with the
+    // first. DOES_NOT_EXIST (0x10) would refuse the subscriber if it counted.
+    let refusal = |error_code| {
+        ControlMessage::RequestError(RequestError {
+            error_code,
+            retry_interval: 0,
+            error_reason: ReasonPhrase::default(),
+            redirect: None,
+        })
+    };
+    let mut bytes = Vec::new();
+    refusal(0x19).encode(&mut bytes).unwrap();
+    refusal(0x10).encode(&mut bytes).unwrap();
+    send.write_all(&bytes).await.unwrap();
+    send.finish();
+
+    // The wait for the PUBLISH is timed, by one timer, and the subscriber is
+    // not answered while it runs.
+    tokio::time::sleep(SOON).await;
+    let held = hub.held().await;
+    assert_eq!(
+        (
+            held.timers,
+            held.relay.pending_tracks,
+            held.relay.own_requests
+        ),
+        (1, 1, 1)
+    );
+    assert!(
+        timeout(Duration::from_secs(3), request.reader.next_event())
+            .await
+            .is_err()
+    );
+    // No PUBLISH came in the five seconds: TIMEOUT (0x2), and nothing is
+    // left.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let event = subscriber.answer(&mut request).await;
+    assert!(
+        matches!(&event, RequestEvent::Rejected(error) if error.error_code == 0x2),
+        "{event:?}"
+    );
+    let held = hub.held().await;
+    assert_eq!(
+        (
+            held.timers,
+            held.own_requests,
+            held.relay.pending_tracks,
+            held.relay.own_requests
+        ),
+        (0, 0, 0, 0)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_wait_for_an_announced_publish_ends_when_the_publish_comes() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+    // The publisher sends its PUBLISH without having read the relay's
+    // SUBSCRIBE, and answers that one with DUPLICATE_SUBSCRIPTION (0x19) by
+    // hand, as §5.1 has it: here the answer is read first.
+    let (mut send, _recv) = timeout(SOON, publisher.connection.accept_bi())
+        .await
+        .expect("the relay opened a request stream")
+        .unwrap();
+    let duplicate = ControlMessage::RequestError(RequestError {
+        error_code: 0x19,
+        retry_interval: 0,
+        error_reason: ReasonPhrase::default(),
+        redirect: None,
+    });
+    send_message(&mut send, &duplicate, &Trace::default(), "relay")
+        .await
+        .unwrap();
+    send.finish();
+    tokio::time::sleep(SOON).await;
+    assert_eq!(hub.held().await.timers, 1);
+
+    let _publication = publisher.publish().await;
+    let RequestEvent::SubscribeEstablished { .. } = subscriber.answer(&mut request).await else {
+        panic!("the subscriber was not accepted");
+    };
+    // The timer went with the wait.
+    let held = hub.held().await;
+    assert_eq!((held.timers, held.relay.own_requests), (0, 0));
 }

@@ -431,9 +431,12 @@ impl<R: RecvStream> RequestReader<R> {
 pub enum StreamEnd {
     /// With a FIN.
     Fin,
-    /// Without one: reset by the peer with this code, stopped by this endpoint,
-    /// or lost with the connection.
+    /// Without one: reset by the peer with this code, or stopped by this
+    /// endpoint.
     Aborted(Option<u32>),
+    /// Cut off by the end of the connection. The peer said nothing about the
+    /// stream itself.
+    Lost,
 }
 
 /// What the peer's unidirectional streams produced.
@@ -896,7 +899,7 @@ async fn read_subgroup_stream<R: RecvStream, T>(
                 return;
             }
             Step::Lost => {
-                close_subgroup(&decoder, stream, StreamEnd::Aborted(None), sink).await;
+                close_subgroup(&decoder, stream, StreamEnd::Lost, sink).await;
                 return;
             }
             Step::Stop(code) => {
@@ -1187,6 +1190,10 @@ pub enum OutgoingEvent {
     /// The stream was opened. From here on it counts as a stream of the
     /// subscription (§10.11, Stream Count).
     Opened,
+    /// The peer sent `STOP_SENDING` with this code, which a write ran into.
+    /// The writer resets the stream in answer (§11.4.3). A stop that arrives
+    /// while nothing is being written is not seen until the next write.
+    Stopped(Option<u32>),
     /// The writer is done: the stream was finished, reset, or never opened.
     /// Reported once for every writer, and last.
     Closed,
@@ -1362,7 +1369,10 @@ impl Writer {
                         Ok(()) => None,
                         // §11.4.3: "The publisher SHOULD respond with a reset"
                         // to a STOP_SENDING.
-                        Err(WriteError::Stopped(_)) => Some(stream_reset_code::CANCELLED),
+                        Err(WriteError::Stopped(code)) => {
+                            report(OutgoingEvent::Stopped(code)).await;
+                            Some(stream_reset_code::CANCELLED)
+                        }
                         // Nothing more can be written or reset, and nobody
                         // may be left to end this writer through its handle.
                         Err(WriteError::Lost(_)) => return,

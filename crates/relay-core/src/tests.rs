@@ -704,8 +704,12 @@ fn a_stream_that_is_cut_short_is_reset_downstream() {
     let cases = [
         // The publisher's own code is passed on: DELIVERY_TIMEOUT (0x2).
         (StreamEnd::Aborted(Some(0x2)), 0x2),
-        // Stopped by the relay or lost: INTERNAL_ERROR (0x0).
+        // Reset without a code the relay can read, or stopped by the relay:
+        // INTERNAL_ERROR (0x0).
         (StreamEnd::Aborted(None), 0x0),
+        // Cut off with the publisher's connection: CANCELLED (0x1), the code
+        // the stream gets when the end of the session is seen first.
+        (StreamEnd::Lost, 0x1),
     ];
     for (end, code) in cases {
         let mut relay = relay_with_track();

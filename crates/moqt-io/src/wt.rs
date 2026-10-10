@@ -53,22 +53,26 @@ use crate::{
     Connection, ConnectionEnd, ConnectionLost, ReadError, RecvStream, SendStream, WriteError,
 };
 
-/// Keeps a NAT binding and the idle timer alive while nothing is sent.
-/// Provisional.
+/// The longest a server waits between two keep-alives. Provisional.
 const KEEP_ALIVE: Duration = Duration::from_secs(3);
 
-/// How long nothing may arrive from a peer before the connection counts as
-/// lost, in milliseconds. A peer that vanishes without closing is only noticed
-/// this way, and until then its tracks and subscriptions stay.
+/// How long nothing may arrive from a peer before a server counts the
+/// connection as lost, unless the caller says otherwise. A peer that
+/// vanishes without closing is only noticed this way, and until then its
+/// tracks and subscriptions stay. Provisional; the default of quinn-proto
+/// 0.11.19 is 30 seconds (`TransportConfig::default`, read 2026-10-10).
 ///
-/// WHY three keep-alive periods: the server sends a keep-alive every
-/// [`KEEP_ALIVE`] and the peer acknowledges it, whether or not the peer sends
-/// keep-alives of its own (a browser does not). So a healthy connection is
-/// never silent for that long, and two lost exchanges in a row do not end it.
-///
-/// Provisional. The default of quinn-proto 0.11.19 is 30 seconds
-/// (`TransportConfig::default`, read 2026-10-10).
-const IDLE_TIMEOUT_MS: u32 = 9_000;
+/// WHY 6 seconds and a keep-alive every 3: a vanished peer is noticed after
+/// at most the two together, 9 seconds, and not after the idle timeout alone.
+/// The idle timer starts again when a packet arrives, and also when the
+/// first ack-eliciting packet after one is sent (RFC 9000 §10.1; quinn-proto
+/// 0.11.19, `permit_idle_reset` in `connection/packet_builder.rs`, read
+/// 2026-10-10). A server that sent nothing since the peer's last packet sends
+/// its keep-alive one period later, and the timer runs in full from there.
+/// A server that had already sent something notices after the idle timeout
+/// alone. The keep-alive that got no answer is repeated by loss detection,
+/// so one lost packet does not end a healthy connection.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Bytes of datagrams a server keeps for one peer. Nothing here reads
 /// datagrams (see the FIXME in the crate root), so what arrives is held up
@@ -108,6 +112,11 @@ pub struct QuicLimits {
     /// Bytes written to all streams of the connection that the peer has not
     /// acknowledged yet.
     pub send_window: u32,
+    /// How long nothing may arrive from the peer; [`IDLE_TIMEOUT`] unless
+    /// there is a reason. A keep-alive is sent after half of it without a
+    /// packet from the peer, and after 3 seconds at the latest, so a peer
+    /// that vanished is noticed after at most one and a half times this.
+    pub idle_timeout: Duration,
 }
 
 impl QuicLimits {
@@ -120,6 +129,11 @@ impl QuicLimits {
         // says.
         const HTTP3_UNI_STREAMS: u32 = 3;
         const CONNECT_STREAMS: u32 = 1;
+        // Beyond 49 days it is no timeout worth the name. WHY at least 2 ms:
+        // quinn reads 0 as "no timeout", and half of it is the keep-alive,
+        // where 0 would send without pause.
+        let idle = self.idle_timeout.max(Duration::from_millis(2));
+        let idle_ms = u32::try_from(idle.as_millis()).unwrap_or(u32::MAX);
         let mut transport = quinn::TransportConfig::default();
         transport
             .max_concurrent_uni_streams(
@@ -132,8 +146,10 @@ impl QuicLimits {
             .receive_window(self.receive_window.into())
             .send_window(u64::from(self.send_window))
             .datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER))
-            .keep_alive_interval(Some(KEEP_ALIVE))
-            .max_idle_timeout(Some(quinn::VarInt::from_u32(IDLE_TIMEOUT_MS).into()));
+            // WHY half: the peer answers a keep-alive, which is what keeps
+            // the idle timer of a quiet connection from running out.
+            .keep_alive_interval(Some(KEEP_ALIVE.min(idle / 2)))
+            .max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
         transport
     }
 }
@@ -211,9 +227,19 @@ impl RecvStream for WtRecv {
             Ok(read) => Ok(read),
             Err(web_transport_quinn::ReadError::Reset(code)) => Err(ReadError::Reset(Some(code))),
             // A code outside the WebTransport range: see the module
-            // documentation.
-            Err(web_transport_quinn::ReadError::InvalidReset(_)) => Err(ReadError::Reset(None)),
-            Err(other) => Err(ReadError::Lost(other.to_string())),
+            // documentation. The other two say that the stream is over while
+            // the connection is not; neither is reached through this type,
+            // since `stop` takes the stream by value and every read is an
+            // ordered one.
+            Err(
+                web_transport_quinn::ReadError::InvalidReset(_)
+                | web_transport_quinn::ReadError::ClosedStream
+                | web_transport_quinn::ReadError::IllegalOrderedRead,
+            ) => Err(ReadError::Reset(None)),
+            // The connection is gone, which is all that `Lost` means.
+            Err(web_transport_quinn::ReadError::SessionError(error)) => {
+                Err(ReadError::Lost(error.to_string()))
+            }
         }
     }
 
@@ -317,9 +343,9 @@ impl Connection for WtConnection {
     }
 }
 
-/// How long a client waits for its session, from the first packet to the
-/// answer to its CONNECT request. Provisional; the same 10 seconds a server
-/// gives a handshake.
+/// How long a client waits for its session, from looking up the server's
+/// name to the answer to its CONNECT request. Provisional; the same 10
+/// seconds a server gives a handshake.
 ///
 /// WHY a limit of its own: quinn gives up on a handshake that gets no answer
 /// only after its idle timeout, 30 seconds by default, and says "timed out"
@@ -433,6 +459,9 @@ fn client_config(cert_sha256: [u8; 32]) -> Result<quinn::ClientConfig, Connectio
 /// server to that other socket. The server's answers never arrive and the
 /// handshake does not end (`docs/experiments/2026-10-10-client-socket-family.md`).
 /// An IPv4 socket cannot get a port another IPv4 socket holds.
+///
+/// `remote` is in the form [`resolve`] gives it, where an IPv4 address is
+/// never written as an IPv6 one.
 fn local_address_for(remote: SocketAddr) -> SocketAddr {
     let wildcard = match remote {
         SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -451,18 +480,68 @@ fn local_address_for(remote: SocketAddr) -> SocketAddr {
 /// only is a setup to fix, not to work around here.
 async fn resolve(url: &url::Url) -> Result<(String, SocketAddr), ConnectionLost> {
     let port = url.port().unwrap_or(443);
-    match url.host() {
-        Some(url::Host::Ipv4(address)) => Ok((address.to_string(), (address, port).into())),
-        Some(url::Host::Ipv6(address)) => Ok((address.to_string(), (address, port).into())),
+    let (name, remote) = match url.host() {
+        Some(url::Host::Ipv4(address)) => (address.to_string(), (address, port).into()),
+        Some(url::Host::Ipv6(address)) => (address.to_string(), (address, port).into()),
         Some(url::Host::Domain(domain)) => {
             let remote = tokio::net::lookup_host((domain, port))
                 .await
                 .map_err(|error| lost(&error))?
                 .next()
                 .ok_or_else(|| ConnectionLost(format!("{domain} has no address")))?;
-            Ok((domain.to_string(), remote))
+            (domain.to_string(), remote)
         }
-        None => Err(ConnectionLost("the URL has no host".to_string())),
+        None => return Err(ConnectionLost("the URL has no host".to_string())),
+    };
+    Ok((name, unmapped(remote)))
+}
+
+/// An IPv4 address that is written as an IPv6 one (`::ffff:a.b.c.d`) in its
+/// IPv4 form; any other address as it is, with the scope of a link-local
+/// IPv6 address that a resolver gave.
+///
+/// WHY: such a server is an IPv4 server, and a client would bind the socket
+/// for both families to reach it, which [`local_address_for`] is there to
+/// avoid.
+fn unmapped(remote: SocketAddr) -> SocketAddr {
+    match remote.ip().to_canonical() {
+        IpAddr::V4(address) if remote.is_ipv6() => {
+            SocketAddr::new(IpAddr::V4(address), remote.port())
+        }
+        _ => remote,
+    }
+}
+
+/// What a client was waiting for when its time ran out.
+#[derive(Debug, Clone, Copy, Default)]
+enum ConnectStage {
+    #[default]
+    Resolving,
+    Handshake {
+        remote: SocketAddr,
+        local: SocketAddr,
+    },
+    ConnectRequest {
+        remote: SocketAddr,
+        local: SocketAddr,
+    },
+}
+
+impl ConnectStage {
+    fn timed_out(self, limit: Duration) -> ConnectionLost {
+        ConnectionLost(match self {
+            Self::Resolving => {
+                format!("the server's name was not resolved within {limit:?}")
+            }
+            Self::Handshake { remote, local } => format!(
+                "no session with {remote} within {limit:?}, sending from {local}: \
+                 the QUIC handshake did not complete"
+            ),
+            Self::ConnectRequest { remote, local } => format!(
+                "no session with {remote} within {limit:?}, sending from {local}: \
+                 the CONNECT request got no answer"
+            ),
+        })
     }
 }
 
@@ -473,9 +552,9 @@ async fn resolve(url: &url::Url) -> Result<(String, SocketAddr), ConnectionLost>
 ///
 /// # Errors
 ///
-/// Fails when the URL is not one, when the connection or the WebTransport
-/// handshake fails or takes more than 10 seconds, and when the server does
-/// not select the subprotocol.
+/// Fails when the URL is not one, when looking up the name, the connection
+/// or the WebTransport handshake fails, when the three together take more
+/// than 10 seconds, and when the server does not select the subprotocol.
 pub async fn connect(url: &str, cert_sha256: [u8; 32]) -> Result<WtConnection, ConnectionLost> {
     connect_within(url, cert_sha256, CONNECT_TIMEOUT, None).await
 }
@@ -489,30 +568,41 @@ async fn connect_within(
     local: Option<SocketAddr>,
 ) -> Result<WtConnection, ConnectionLost> {
     let url: url::Url = url.parse().map_err(|error| lost(&error))?;
-    let (server_name, remote) = resolve(&url).await?;
-    let local = local.unwrap_or_else(|| local_address_for(remote));
-    let endpoint = quinn::Endpoint::client(local).map_err(|error| lost(&error))?;
     let config = client_config(cert_sha256)?;
-    let request = ConnectRequest::new(url).with_protocol(xmoq_moqt::PROTOCOL);
+    // WHY not a `Cell`: a reference to one held across an await would make
+    // this future one that cannot be sent to another thread, and so one that
+    // cannot be spawned.
+    let stage = std::sync::Mutex::new(ConnectStage::Resolving);
+    let at = |reached| {
+        if let Ok(mut stage) = stage.lock() {
+            *stage = reached;
+        }
+    };
     let establish = async {
+        let (server_name, remote) = resolve(&url).await?;
+        let local = local.unwrap_or_else(|| local_address_for(remote));
+        let endpoint = quinn::Endpoint::client(local).map_err(|error| lost(&error))?;
+        // The port the kernel chose, for the message.
+        let local = endpoint.local_addr().unwrap_or(local);
+        at(ConnectStage::Handshake { remote, local });
         let connection = endpoint
             .connect_with(config, remote, &server_name)
             .map_err(|error| lost(&error))?
             .await
             .map_err(|error| lost(&error))?;
-        Session::connect(connection, request)
+        at(ConnectStage::ConnectRequest { remote, local });
+        let request = ConnectRequest::new(url.clone()).with_protocol(xmoq_moqt::PROTOCOL);
+        let session = Session::connect(connection, request)
             .await
-            .map_err(|error| lost(&error))
+            .map_err(|error| lost(&error))?;
+        Ok::<_, ConnectionLost>((session, endpoint))
     };
-    let Ok(session) = tokio::time::timeout(limit, establish).await else {
-        let from = endpoint
-            .local_addr()
-            .map_or_else(|error| error.to_string(), |address| address.to_string());
-        return Err(ConnectionLost(format!(
-            "no session with {remote} within {limit:?}, sending from {from}"
-        )));
+    // Dropping what was begun lets go of the socket and the connection.
+    let Ok(established) = tokio::time::timeout(limit, establish).await else {
+        let reached = stage.lock().map(|stage| *stage).unwrap_or_default();
+        return Err(reached.timed_out(limit));
     };
-    let session = session?;
+    let (session, endpoint) = established?;
     // The library fails the connect when the server selects a protocol that
     // was not offered; a server that selects none is refused here.
     if session.protocol() != Some(xmoq_moqt::PROTOCOL) {
@@ -731,12 +821,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_ipv4_server_under_its_ipv6_name_is_an_ipv4_server() {
+        // (the address as resolved, the address a client connects to)
+        let cases = [
+            ("[::ffff:127.0.0.1]:4433", "127.0.0.1:4433"),
+            ("[::ffff:203.0.113.7]:443", "203.0.113.7:443"),
+            ("127.0.0.1:4433", "127.0.0.1:4433"),
+            ("[2001:db8::7]:443", "[2001:db8::7]:443"),
+            // The scope of a link-local address stays.
+            ("[fe80::1%5]:443", "[fe80::1%5]:443"),
+        ];
+        for (resolved, connected) in cases {
+            let resolved: SocketAddr = resolved.parse().unwrap();
+            assert_eq!(unmapped(resolved).to_string(), connected);
+        }
+    }
+
+    #[test]
+    fn connecting_can_be_spawned() {
+        fn sendable<T: Send>(_: &T) {}
+        sendable(&connect("https://127.0.0.1:1/", [0; 32]));
+    }
+
+    #[test]
+    fn an_idle_timeout_too_short_to_be_one_is_raised() {
+        // quinn takes 0 for "no timeout", and a keep-alive every 0 seconds
+        // sends without pause. Building the settings must not panic.
+        let limits = QuicLimits {
+            idle_timeout: Duration::ZERO,
+            ..TEST_LIMITS
+        };
+        let _ = limits.transport();
+    }
+
     const TEST_LIMITS: QuicLimits = QuicLimits {
         max_uni_streams: 8,
         max_bi_streams: 8,
         stream_receive_window: 65_536,
         receive_window: 262_144,
         send_window: 262_144,
+        idle_timeout: IDLE_TIMEOUT,
     };
 
     /// Runs the handshakes of every attempt that reaches the server.
@@ -765,29 +890,36 @@ mod tests {
         // macOS allows it, and gives the server's answers to the IPv4 socket:
         // the client hears nothing, and now says so when its time is up. Other
         // systems may refuse the bind, which is an error at once.
-        let both_families = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
-        let limit = Duration::from_millis(1500);
-        let Err(ConnectionLost(failure)) =
-            connect_within(&url, hash, limit, Some(both_families)).await
-        else {
-            panic!("connected through a port whose IPv4 traffic goes elsewhere");
-        };
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            failure,
-            format!(
-                "no session with {} within 1.5s, sending from [::]:{port}",
-                url.trim_start_matches("https://").trim_end_matches('/')
-            )
-        );
-        // WHY not the same text: where the bind is refused the client never
-        // gets as far as waiting. A stall here would mean this system hands
-        // the port out like macOS does, which is worth a failing test.
-        #[cfg(not(target_os = "macos"))]
-        assert!(
-            !failure.starts_with("no session with"),
-            "the bind was expected to fail, but the client waited: {failure}"
-        );
+        //
+        // WHY on these two systems only: what a third one does with the two
+        // binds is not known here, and each outcome would be a guess.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let both_families = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+            let limit = Duration::from_millis(1500);
+            let Err(ConnectionLost(failure)) =
+                connect_within(&url, hash, limit, Some(both_families)).await
+            else {
+                panic!("connected through a port whose IPv4 traffic goes elsewhere");
+            };
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                failure,
+                format!(
+                    "no session with {} within 1.5s, sending from [::]:{port}: \
+                     the QUIC handshake did not complete",
+                    url.trim_start_matches("https://").trim_end_matches('/')
+                )
+            );
+            // WHY not the same text: where the bind is refused the client never
+            // gets as far as waiting. A stall here would mean this system hands
+            // the port out like macOS does, which is worth a failing test.
+            #[cfg(target_os = "linux")]
+            assert!(
+                !failure.starts_with("no session with"),
+                "the bind was expected to fail, but the client waited: {failure}"
+            );
+        }
 
         // The socket a client binds for an IPv4 server cannot get that port,
         // and the client connects while the other socket is still there.

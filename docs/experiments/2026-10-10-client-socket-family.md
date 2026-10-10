@@ -8,7 +8,7 @@
 
 An own Rust client now and then never got connected and printed nothing. The cause was found in another record (`2026-10-10-client-handshake-timeout.md`, not merged when this was written): the client bound its UDP socket to `[::]:0`, a socket for IPv4 and IPv6 at once; macOS can give such a socket a port that an IPv4 socket of another process holds, and then delivers what an IPv4 server sends to that other socket.
 
-Three things had to be shown: that the kernel does choose such a port by itself when a socket is bound to port 0 (the other record tried a bind to a port it named), that the client no longer gets into that state, and that a client that cannot connect says so instead of waiting without a word.
+Three things had to be shown: that the kernel does choose such a port by itself when a socket is bound to port 0 (the other record tried a bind to a port it named), that the client no longer gets into that state when the server has an IPv4 address, and that a client that cannot connect says so instead of waiting without a word.
 
 Not shown here: that the failures seen in the interop runs had this cause. Their ports were not recorded.
 
@@ -23,7 +23,7 @@ Not shown here: that the failures seen in the interop runs had this cause. Their
 
 `connect` in `crates/moqt-io/src/wt.rs` builds the QUIC endpoint itself and binds `0.0.0.0:0` for an IPv4 server and `[::]:0` for an IPv6 one. `ClientBuilder` of the library binds `[::]:0` in the call that builds the client and hands out neither the endpoint nor the configuration, so what it sets is repeated: the verifier for a pinned certificate hash, TLS 1.3 only, the ALPN `h3`, no client certificate, quinn's default transport settings. For a host name, the first address of the resolver decides.
 
-The session has to be there within 10 seconds (provisional), or the client fails with the server's address and its own.
+The session has to be there within 10 seconds (provisional), or the client fails with what it was waiting for, the server's address and its own.
 
 ## Commands
 
@@ -53,7 +53,7 @@ mise run interop
 **Passed.** The test `a_port_that_an_ipv4_socket_of_someone_else_holds_does_not_stop_a_client` makes the state on purpose, against a server on the loopback interface:
 
 1. It binds an IPv4 UDP socket to `0.0.0.0:0` and reads the port `P` the kernel chose. This stands for the socket of another process.
-2. It connects from a socket bound to `[::]:P`, which is what the client used to bind when the kernel happened to choose `P`. macOS allowed the bind, and the connect ended after the 1.5 seconds the test allows, with `no session with 127.0.0.1:<port> within 1.5s, sending from [::]:P`. The test compares that text on macOS. **This is the hang, reproduced every time**, and now it ends with a message.
+2. It connects from a socket bound to `[::]:P`, which is what the client used to bind when the kernel happened to choose `P`. macOS allowed the bind, and the connect ended after the 1.5 seconds the test allows, with `no session with 127.0.0.1:<port> within 1.5s, sending from [::]:P: the QUIC handshake did not complete`. The test compares that text on macOS. **This is the hang, reproduced every time**, and now it ends with a message.
 3. With the IPv4 socket still held, it calls `connect` as the clients do. The session is established, the client's socket is an IPv4 one, and its port is not `P`.
 
 `mise run check` ended with `OK` for all four parts, and `mise run interop` with `32 of 32 pairings ended as expected`.

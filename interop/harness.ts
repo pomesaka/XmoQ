@@ -32,7 +32,7 @@ export const STEP_TIMEOUT_MS = 20_000;
  * How long a subscriber may take to learn that its publisher is gone.
  * Provisional, like the idle timeout of the own relay that it has to cover:
  * a client that was killed, or that exits before its close is sent, says
- * nothing, and the relay notices 9 to 12 seconds later (measured).
+ * nothing, and the relay notices 6 to 9 seconds later (measured).
  */
 export const DISCONNECT_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 5_000;

@@ -62,9 +62,11 @@ pub enum RequestEnd {
 pub enum StreamEnd {
     /// With a FIN: every Object of the Subgroup was delivered (§11.4.3).
     Fin,
-    /// Without one: reset by the peer, stopped by the I/O side, or lost. The
-    /// code is the peer's Stream Reset Error Code when it gave one.
+    /// Without one: reset by the peer, or stopped by the I/O side. The code
+    /// is the peer's Stream Reset Error Code when it gave one.
     Aborted(Option<u32>),
+    /// Cut off by the end of the peer's connection.
+    Lost,
 }
 
 /// Something the I/O side observed.
@@ -373,9 +375,16 @@ pub enum Action {
         code: u32,
     },
     /// Report [`Event::UpstreamTimeout`] after the time a publisher gets to
-    /// answer a SUBSCRIBE of the relay. The timer is of no use once a message
-    /// arrived on the request, or the request was finished or cancelled, and
-    /// the I/O side may drop it then.
+    /// answer a SUBSCRIBE of the relay. The timer ends when it has run out,
+    /// with [`Action::FinishOwnRequest`] or [`Action::CancelOwnRequest`] for
+    /// the request, or with [`Action::StopUpstreamTimer`]; asked for again, it
+    /// replaces the one that runs for the request.
+    ///
+    /// WHY the relay ends the timer and the I/O side never does by itself:
+    /// the relay also starts one anew, for the PUBLISH a publisher announces
+    /// with `DUPLICATE_SUBSCRIPTION`. An I/O side that dropped the timer on
+    /// what it saw arrive could drop the new one for an event it read before
+    /// the relay had started it.
     ///
     /// For this and every other timer: an I/O side that cannot start one
     /// reports its event at once. A wait that is cut short costs the peer
@@ -383,6 +392,14 @@ pub enum Action {
     /// holds.
     StartUpstreamTimer {
         /// The session of the publisher.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
+    },
+    /// Drop the timer of [`Action::StartUpstreamTimer`] for this request: what
+    /// it waited for has come, or is not wanted any more.
+    StopUpstreamTimer {
+        /// The session.
         session: SessionKey,
         /// The request.
         request: OwnRequestKey,

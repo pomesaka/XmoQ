@@ -141,6 +141,11 @@ impl SessionState {
     /// WHY the slot goes at once when the peer had finished its direction: a
     /// slot is otherwise taken away when the stream is reported closed, and
     /// that report came already. It would stay for the life of the session.
+    ///
+    /// WHY the other places put `Finished` in directly: they answer a request
+    /// in the step that opened it, or end a PUBLISH, and neither can have the
+    /// mark; a FIN on a PUBLISH ends it there and then. A new place that
+    /// answers a request later than it was opened belongs here.
     fn finish_slot(&mut self, stream: StreamKey) {
         if self.half_closed.remove(&stream) {
             self.requests.remove(&stream);
@@ -324,8 +329,11 @@ pub struct Counts {
     /// Tracks the relay asked a publisher for and has no answer about.
     pub pending_tracks: usize,
     /// Requests the relay opened and has not let go of, as the relay counts
-    /// them. The I/O side has a task for each; a test that compares the two
-    /// numbers sees a request one side forgot.
+    /// them. The I/O side has a task for each that is not answered or is
+    /// Established; a test that compares the two numbers then sees a request
+    /// one side forgot. A request whose publisher announced a PUBLISH with
+    /// `DUPLICATE_SUBSCRIPTION` is counted here until that wait is over, and
+    /// has no task any more.
     pub own_requests: usize,
 }
 
@@ -1211,6 +1219,18 @@ impl Relay {
                             actions,
                         );
                     }
+                    // WHY CANCELLED: the publisher is gone, and that is the
+                    // code its other open streams get when the end of its
+                    // session is what the relay sees first. Which of the two
+                    // comes first is a race of the I/O side, and the
+                    // subscriber is to see one code for one cause.
+                    StreamEnd::Lost => reset_out_stream(
+                        &mut self.out_streams,
+                        Some(subscriber),
+                        out_stream,
+                        stream_reset_code::CANCELLED,
+                        actions,
+                    ),
                 }
             }
         }
@@ -1782,7 +1802,8 @@ impl Action {
             | Self::OpenRequest { session, .. }
             | Self::FinishOwnRequest { session, .. }
             | Self::CancelOwnRequest { session, .. }
-            | Self::StartUpstreamTimer { session, .. } => Target::Session(*session),
+            | Self::StartUpstreamTimer { session, .. }
+            | Self::StopUpstreamTimer { session, .. } => Target::Session(*session),
             Self::SendObject { out_stream, .. }
             | Self::FinishDataStream { out_stream }
             | Self::ResetDataStream { out_stream, .. } => Target::OutStream(*out_stream),

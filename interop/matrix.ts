@@ -38,7 +38,7 @@ interface Pairing {
 	args: string[];
 	/**
 	 * Set where the run spends most of its time waiting for the relay to give
-	 * up on a client that vanished (9 to 12 seconds each, measured). These run
+	 * up on a client that vanished (6 to 9 seconds each, measured). These run
 	 * beside the others, so that the matrix does not grow by the sum of the
 	 * waits.
 	 */
@@ -322,8 +322,9 @@ const DISCONNECTS: Pairing[] = [
 	{
 		// WHY own-browser publishes: own-rust waits for the acknowledgement of
 		// each stream and took 8 seconds to send what gets the subscriber cut
-		// off, close to the 9 seconds after which the relay drops a silent
-		// session. own-browser took 0.6 seconds.
+		// off, longer than the 6 seconds after which the relay drops a silent
+		// session (9 seconds when this was measured). own-browser took 0.6
+		// seconds.
 		name: "a stopped own-rust subscriber is cut off (TOO_FAR_BEHIND); own-browser and own-rust get everything",
 		script: "disconnect.ts",
 		args: [

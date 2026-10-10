@@ -39,6 +39,11 @@ pub const MAX_WAITING_SUBSCRIBERS: usize = 64;
 /// to a publisher. A subscriber whose SUBSCRIBE would need one more is
 /// refused with `EXCESSIVE_LOAD`. Provisional.
 ///
+/// A SUBSCRIBE that the publisher answered with `DUPLICATE_SUBSCRIPTION`
+/// counts until the PUBLISH it announced has come or the wait for it is over:
+/// subscribers still wait on it, and a publisher that answers every SUBSCRIBE
+/// that way must not get more of them for it.
+///
 /// WHY a limit per publisher: each one costs the publisher a stream and
 /// state, and subscribers choose the track names. Without it, the
 /// subscribers of a relay could open as many requests on one publisher as
@@ -69,6 +74,11 @@ pub(crate) struct Announcement {
 pub(crate) struct OwnRequest {
     pub(crate) id: RequestId,
     pub(crate) track: FullTrackName,
+    /// The publisher answered `DUPLICATE_SUBSCRIPTION`: the request is over on
+    /// its stream and in the session, and what is still waited for is the
+    /// publisher's PUBLISH for the track. Nothing that arrives for the request
+    /// means anything any more.
+    pub(crate) awaits_publish: bool,
 }
 
 /// A downstream SUBSCRIBE that waits for the upstream one to be answered.
@@ -108,18 +118,71 @@ impl Refusal {
     }
 
     /// What a publisher's `REQUEST_ERROR` becomes for the subscribers.
+    ///
+    /// WHY not the publisher's code in every case: a code speaks about the
+    /// two endpoints of the request it answers, and the subscriber reads it as
+    /// a statement about its own request to the relay. Codes that mean the
+    /// same one hop on are passed on. The others are replaced: what only says
+    /// that this publisher will not serve the track becomes `DOES_NOT_EXIST`,
+    /// and what a publisher may not answer this SUBSCRIBE with, or a code
+    /// this relay does not know, becomes `INTERNAL_ERROR`, so that no
+    /// subscriber has to interpret it.
+    ///
+    /// The reason is passed on with the publisher's code only; under another
+    /// code it would explain something the subscriber was not told. The
+    /// Retry Interval is the publisher's, except under `INTERNAL_ERROR` put in
+    /// place of another code: when to retry was said about something the
+    /// subscriber does not learn, and 0 ("SHOULD NOT be retried", §10.6.2)
+    /// promises nothing.
     fn passed_on(error: &RequestError) -> Self {
-        // WHY not REDIRECT itself: it carries a Redirect, which names a URI and
-        // a track for the publisher's peer, the relay. §10.6.2: "Relays are
-        // not required to follow redirects from upstream and MAY forward"
-        // one; this relay does neither, and the track is not here.
-        if error.error_code == request_error_code::REDIRECT {
-            return Self::code(request_error_code::DOES_NOT_EXIST);
-        }
+        use request_error_code as code;
+        let error_code = match error.error_code {
+            // About the track at the publisher or its load, or generic.
+            passed @ (code::INTERNAL_ERROR
+            | code::TIMEOUT
+            | code::EXCESSIVE_LOAD
+            | code::DOES_NOT_EXIST
+            | code::UNSUPPORTED_EXTENSION
+            // FIXME: decide what a subscriber gets for these three. As they
+            // are, they tell a subscriber to mend its token and try again,
+            // which cannot help: the relay sends no token upstream. What to
+            // do instead follows from the decision on authorization
+            // (`docs/open-questions.md`).
+            | code::UNAUTHORIZED
+            | code::MALFORMED_AUTH_TOKEN
+            | code::EXPIRED_AUTH_TOKEN) => passed,
+            // The publisher does not answer SUBSCRIBE (the relay does), or is
+            // going away (the relay is not).
+            //
+            // WHY not REDIRECT itself: it carries a Redirect, which names a
+            // URI and a track for the publisher's peer, the relay. §10.6.2:
+            // "Relays are not required to follow redirects from upstream and
+            // MAY forward" one; this relay does neither.
+            //
+            // DUPLICATE_SUBSCRIPTION does not get here: it is no refusal (see
+            // where the publisher's answer is handled).
+            code::NOT_SUPPORTED | code::GOING_AWAY | code::REDIRECT => code::DOES_NOT_EXIST,
+            // Codes that do not answer this SUBSCRIBE. §10.6.2 defines
+            // MALFORMED_TRACK "In response to a FETCH", and INVALID_RANGE for
+            // a "specified Filter or range of Locations", of which the
+            // relay's SUBSCRIBE has none. UNINTERESTED, PREFIX_OVERLAP and
+            // the like answer a PUBLISH or a namespace request. The rest is
+            // unknown here.
+            _ => code::INTERNAL_ERROR,
+        };
+        let passed = error_code == error.error_code;
         Self {
-            error_code: error.error_code,
-            retry_interval: error.retry_interval,
-            reason: shortened(&error.error_reason),
+            error_code,
+            retry_interval: if passed || error_code == code::DOES_NOT_EXIST {
+                error.retry_interval
+            } else {
+                0
+            },
+            reason: if passed {
+                shortened(&error.error_reason)
+            } else {
+                ReasonPhrase::default()
+            },
         }
     }
 }
@@ -228,13 +291,20 @@ impl Relay {
             return Err(request_error_code::EXCESSIVE_LOAD);
         }
         // §9.2: "Relays SHOULD set the Forward flag to 1 when a new
-        // subscription needs to be sent upstream". Nothing of the downstream
-        // SUBSCRIBE is copied: §7 keeps its priorities out, and what a
-        // token of the subscriber means to the publisher is undecided.
-        let Ok((id, message)) = state
-            .moqt
-            .subscribe(track.clone(), vec![Parameter::Forward(true)])
-        else {
+        // subscription needs to be sent upstream", and §9.5: "MUST use
+        // Forward=1 when subscribing upstream". No parameter says that:
+        // §10.2.12, "If the parameter is omitted from any other message, the
+        // default value is 1."
+        //
+        // WHY omitted and not sent as 1: the two mean the same, and moqtail-ts
+        // 0.13.0 copies the parameters of a SUBSCRIBE into its SUBSCRIBE_OK,
+        // where FORWARD may not appear (§10.2.12, §10.2.1): a SUBSCRIBE that
+        // carries it cannot be answered by such a publisher.
+        //
+        // Nothing of the downstream SUBSCRIBE is copied: §7 keeps its
+        // priorities out, and what a token of the subscriber means to the
+        // publisher is undecided.
+        let Ok((id, message)) = state.moqt.subscribe(track.clone(), vec![]) else {
             // The session already has a subscription to the track in this
             // role, which is one that PUBLISH_DONE ended and that still
             // drains. The track is over for now.
@@ -247,6 +317,7 @@ impl Relay {
             OwnRequest {
                 id,
                 track: track.clone(),
+                awaits_publish: false,
             },
         );
         self.pending.insert(
@@ -282,6 +353,9 @@ impl Relay {
         let Some(own) = state.own.get(&request) else {
             return;
         };
+        if own.awaits_publish {
+            return;
+        }
         let track_name = own.track.clone();
         let event = match state.moqt.on_request_message(own.id, message) {
             Ok(event) => event,
@@ -304,6 +378,8 @@ impl Relay {
                 let Some(pending) = self.pending.remove(&track_name) else {
                     return;
                 };
+                // The answer came, and the request goes on.
+                actions.push(Action::StopUpstreamTimer { session, request });
                 // §10.2.11: the relay's LARGEST_OBJECT starts from the one
                 // the publisher gave. §9.6: its Track Properties are passed
                 // on.
@@ -351,9 +427,7 @@ impl Relay {
                 );
             }
             RequestEvent::Rejected(error) => {
-                state.own.remove(&request);
-                actions.push(Action::FinishOwnRequest { session, request });
-                self.refuse_waiters(&track_name, &Refusal::passed_on(&error), actions);
+                self.on_upstream_refusal(session, request, &track_name, &error, actions);
             }
             RequestEvent::SubscriptionDone(_) => {
                 // The same wait for the streams the publisher counted as for a
@@ -373,6 +447,61 @@ impl Relay {
             // Nothing else answers a SUBSCRIBE; the session has dealt with it.
             _ => {}
         }
+    }
+
+    /// The publisher answered the relay's SUBSCRIBE with `REQUEST_ERROR`.
+    fn on_upstream_refusal(
+        &mut self,
+        session: SessionKey,
+        request: OwnRequestKey,
+        track_name: &FullTrackName,
+        error: &RequestError,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        actions.push(Action::FinishOwnRequest { session, request });
+        // §5.1: "If a publisher receives a SUBSCRIBE request for a
+        // Track with an existing subscription in Pending (publisher)
+        // state, it MUST fail that request with a
+        // DUPLICATE_SUBSCRIPTION error." In that case the publisher's
+        // PUBLISH for the track is on its way; it travels on another
+        // stream and may be read after this answer.
+        //
+        // WHY wait and not refuse: the subscribers would be turned
+        // away a moment before the track they asked for is there. The
+        // wait is bounded by the same time a publisher gets to answer,
+        // counted anew.
+        //
+        // FIXME: ask again where no PUBLISH is coming. The code has a
+        // second meaning (§5.1: "a second subscription to a Track
+        // with the same role"): the publisher still holds a
+        // subscription of the relay, such as one the relay cancelled
+        // and the publisher has not let go of yet. No PUBLISH follows
+        // then, and the subscribers wait in vain and get TIMEOUT.
+        // WHY not ask again now: §10.6.2 leaves that to the
+        // publisher's Retry Interval ("If the value is 0, the request
+        // SHOULD NOT be retried"), which needs a timer of its own,
+        // and the own session always sends 0.
+        //
+        // WHY not for NOT_SUPPORTED as well, which the own clients
+        // send in this place: it says nothing about a PUBLISH, and a
+        // track that is not coming would cost every subscriber the
+        // whole wait.
+        let asked = self
+            .pending
+            .get(track_name)
+            .is_some_and(|pending| pending.request == request);
+        if asked && error.error_code == request_error_code::DUPLICATE_SUBSCRIPTION {
+            if let Some(own) = state.own.get_mut(&request) {
+                own.awaits_publish = true;
+            }
+            actions.push(Action::StartUpstreamTimer { session, request });
+            return;
+        }
+        state.own.remove(&request);
+        self.refuse_waiters(track_name, &Refusal::passed_on(error), actions);
     }
 
     /// Something ended on a request stream the relay opened.
@@ -405,6 +534,10 @@ impl Relay {
         let Some(own) = state.own.get(&request) else {
             return;
         };
+        // The publisher closes the stream after its REQUEST_ERROR (§3.3.2).
+        if own.awaits_publish {
+            return;
+        }
         let track_name = own.track.clone();
         let asked = self
             .pending
@@ -443,7 +576,8 @@ impl Relay {
         }
     }
 
-    /// The publisher did not answer the relay's SUBSCRIBE in time.
+    /// The publisher did not answer the relay's SUBSCRIBE in time, or the
+    /// PUBLISH it announced did not come in time.
     pub(crate) fn on_upstream_timeout(
         &mut self,
         session: SessionKey,
@@ -464,13 +598,17 @@ impl Relay {
         if !asked {
             return;
         }
-        state.moqt.cancel(own.id);
-        state.own.remove(&request);
-        actions.push(Action::CancelOwnRequest {
-            session,
-            request,
-            code: stream_reset_code::CANCELLED,
-        });
+        // The timer has run out, so only the request is left to let go of.
+        if let Some(own) = state.own.remove(&request)
+            && !own.awaits_publish
+        {
+            state.moqt.cancel(own.id);
+            actions.push(Action::CancelOwnRequest {
+                session,
+                request,
+                code: stream_reset_code::CANCELLED,
+            });
+        }
         // §10.6.2, TIMEOUT: "a relay could not establish an upstream
         // subscription within the timeout".
         self.refuse_waiters(
@@ -536,13 +674,21 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        if let Some(own) = state.own.remove(&request) {
-            state.moqt.cancel(own.id);
-            actions.push(Action::CancelOwnRequest {
-                session,
-                request,
-                code: stream_reset_code::CANCELLED,
-            });
+        match state.own.remove(&request) {
+            // The request ended with the publisher's answer; what is left of
+            // it is the wait for the PUBLISH.
+            Some(own) if own.awaits_publish => {
+                actions.push(Action::StopUpstreamTimer { session, request });
+            }
+            Some(own) => {
+                state.moqt.cancel(own.id);
+                actions.push(Action::CancelOwnRequest {
+                    session,
+                    request,
+                    code: stream_reset_code::CANCELLED,
+                });
+            }
+            None => {}
         }
     }
 
