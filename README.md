@@ -24,6 +24,8 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Roadmap](docs/roadmap.md)
 - [Validation](docs/validation.md)
 - [Open questions](docs/open-questions.md)
+- [Decision records](docs/adr/README.md)
+- [Experiment records](docs/experiments/README.md)
 - [Agent guide](docs/agent-guide.md)
 
 License, deployment, supported platforms, codec profiles, authentication, and performance targets are undecided.
