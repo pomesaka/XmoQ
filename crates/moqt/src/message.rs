@@ -57,16 +57,32 @@ const SUBSCRIBE_TRACKS: u64 = 0x51;
 
 /// `REQUEST_ERROR` Error Codes (§15.10.2).
 pub mod request_error_code {
+    /// `INTERNAL_ERROR`: an implementation specific or generic error.
+    pub const INTERNAL_ERROR: u64 = 0x0;
+    /// `UNAUTHORIZED`: the sender is not authorized for the request.
+    pub const UNAUTHORIZED: u64 = 0x1;
     /// `TIMEOUT`: "The subscription could not be completed before an
     /// implementation specific timeout. For example, a relay could not
     /// establish an upstream subscription within the timeout."
     pub const TIMEOUT: u64 = 0x2;
     /// `NOT_SUPPORTED`: the endpoint does not support the type of request.
     pub const NOT_SUPPORTED: u64 = 0x3;
+    /// `MALFORMED_AUTH_TOKEN`: the token could not be parsed.
+    pub const MALFORMED_AUTH_TOKEN: u64 = 0x4;
+    /// `EXPIRED_AUTH_TOKEN`: the token has expired.
+    pub const EXPIRED_AUTH_TOKEN: u64 = 0x5;
+    /// `GOING_AWAY`: "The endpoint has received a GOAWAY and MAY reject new
+    /// requests."
+    pub const GOING_AWAY: u64 = 0x6;
     /// `EXCESSIVE_LOAD`: the responder cannot process the request now.
     pub const EXCESSIVE_LOAD: u64 = 0x9;
     /// `DOES_NOT_EXIST`: the track or namespace is not available at the publisher.
     pub const DOES_NOT_EXIST: u64 = 0x10;
+    /// `INVALID_RANGE`: the requested range of a subscription or fetch is not
+    /// valid.
+    pub const INVALID_RANGE: u64 = 0x11;
+    /// `MALFORMED_TRACK`: the track was found to be malformed (§2.4.2).
+    pub const MALFORMED_TRACK: u64 = 0x12;
     /// `DUPLICATE_SUBSCRIPTION`: the request would create a second subscription
     /// to a track in the same role (§5.1).
     pub const DUPLICATE_SUBSCRIPTION: u64 = 0x19;

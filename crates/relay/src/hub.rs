@@ -359,6 +359,11 @@ impl Timers {
         wait: Duration,
         event: Event,
     ) -> Option<Event> {
+        // A new wait for the same request replaces the one that runs, and
+        // takes its place in the count.
+        if let Event::UpstreamTimeout { session, request } = event {
+            self.stop_upstream(session, request);
+        }
         let running = self.per_session.entry(session).or_default();
         if *running >= limit {
             return Some(event);
@@ -472,11 +477,6 @@ impl<C: Connection> Hub<C> {
                         Event::OutStreamClosed { out_stream } => {
                             self.out_streams.remove(out_stream);
                         }
-                        // The publisher answered; see
-                        // `Action::StartUpstreamTimer`.
-                        Event::OwnRequestMessage {
-                            session, request, ..
-                        } => self.timers.stop_upstream(*session, *request),
                         _ => {}
                     }
                     self.feed(VecDeque::from([event]));
@@ -587,6 +587,7 @@ impl<C: Connection> Hub<C> {
             send,
             command_inbox,
             self.config.streams.trace.clone(),
+            self.config.log.clone(),
             self.events.clone(),
         ));
         handle.requests.insert(stream, commands);
@@ -614,10 +615,14 @@ impl<C: Connection> Hub<C> {
         }
     }
 
-    fn execute(&mut self, action: Action, pending: &mut VecDeque<Event>) {
-        if let Some(line) = describe(&action) {
+    fn log_action(&self, action: &Action) {
+        if let Some(line) = describe(action) {
             self.log(|| line);
         }
+    }
+
+    fn execute(&mut self, action: Action, pending: &mut VecDeque<Event>) {
+        self.log_action(&action);
         match action {
             Action::SendControl { session, message } => {
                 let Some(handle) = self.sessions.get(&session) else {
@@ -701,7 +706,8 @@ impl<C: Connection> Hub<C> {
             Action::StartDrainTimer { .. }
             | Action::StartEarlyTimer { .. }
             | Action::StartRequestTimer { .. }
-            | Action::StartUpstreamTimer { .. } => self.start_timer(&action, pending),
+            | Action::StartUpstreamTimer { .. }
+            | Action::StopUpstreamTimer { .. } => self.set_timer(&action, pending),
             Action::OpenRequest {
                 session,
                 request,
@@ -735,12 +741,27 @@ impl<C: Connection> Hub<C> {
             return;
         };
         let events = self.events.clone();
+        let log = self.config.log.clone();
         let report = move |event| {
             let events = events.clone();
+            let log = log.clone();
             async move {
                 let event = match event {
                     OutgoingEvent::Opened => Event::OutStreamOpened { out_stream },
                     OutgoingEvent::Closed => Event::OutStreamClosed { out_stream },
+                    // For the log only: the writer resets the stream and
+                    // reports it closed.
+                    OutgoingEvent::Stopped(code) => {
+                        if let Some(log) = &log {
+                            log.print(format!(
+                                "STOP_SENDING_RECEIVED session={} out={} {}",
+                                session.0,
+                                out_stream.0,
+                                stop_code(code)
+                            ));
+                        }
+                        return;
+                    }
                 };
                 let _ = events.send(Envelope::Core(event)).await;
             }
@@ -763,9 +784,13 @@ impl<C: Connection> Hub<C> {
         }
     }
 
-    /// Starts the timer an action asks for.
-    fn start_timer(&mut self, action: &Action, pending: &mut VecDeque<Event>) {
+    /// Starts or stops the timer an action asks for.
+    fn set_timer(&mut self, action: &Action, pending: &mut VecDeque<Event>) {
         let (session, wait, event) = match *action {
+            Action::StopUpstreamTimer { session, request } => {
+                self.timers.stop_upstream(session, request);
+                return;
+            }
             Action::StartDrainTimer {
                 session,
                 track_alias,
@@ -940,6 +965,7 @@ fn uni_envelope<C: Connection>(session: SessionKey, event: UniEvent) -> Envelope
             end: match end {
                 StreamEnd::Fin => xmoq_relay_core::StreamEnd::Fin,
                 StreamEnd::Aborted(code) => xmoq_relay_core::StreamEnd::Aborted(code),
+                StreamEnd::Lost => xmoq_relay_core::StreamEnd::Lost,
             },
         },
         UniEvent::Failed(error) => Event::SessionFailed { session, error },
@@ -1093,6 +1119,7 @@ async fn write_request<C: Connection>(
     mut send: C::Send,
     mut commands: mpsc::Receiver<RequestCommand>,
     trace: Trace,
+    log: Option<Log>,
     events: mpsc::Sender<Envelope<C>>,
 ) {
     let label = format!("bi#{}", stream.0);
@@ -1100,7 +1127,15 @@ async fn write_request<C: Connection>(
         let command = tokio::select! {
             command = commands.recv() => command,
             stopped = send.stopped() => {
-                if let WriteError::Stopped(_) = stopped {
+                if let WriteError::Stopped(code) = stopped {
+                    if let Some(log) = &log {
+                        log.print(format!(
+                            "STOP_SENDING_RECEIVED session={} stream={} {}",
+                            session.0,
+                            stream.0,
+                            stop_code(code)
+                        ));
+                    }
                     // §3.3.2, §5.1: STOP_SENDING on a request stream cancels
                     // the request. The relay's half is reset in turn.
                     send.reset(stream_reset_code::CANCELLED);
@@ -1227,6 +1262,12 @@ async fn run_own_request<C: Connection>(
     reader.stop(code);
 }
 
+/// The code of a `STOP_SENDING` for a log line. `none`: the peer's code was
+/// outside the range WebTransport gives applications, or there was none.
+fn stop_code(code: Option<u32>) -> String {
+    code.map_or_else(|| "code=none".to_string(), |code| format!("code={code:#x}"))
+}
+
 /// One line for the log about an action, for the actions that are rare enough
 /// to log. An Object forwarded to a subscriber is not.
 fn describe(action: &Action) -> Option<String> {
@@ -1314,6 +1355,7 @@ fn describe(action: &Action) -> Option<String> {
         // Logged where the session is closed, whoever asked for it.
         Action::CloseSession { .. }
         | Action::StartUpstreamTimer { .. }
+        | Action::StopUpstreamTimer { .. }
         | Action::SendObject { .. }
         | Action::StartEarlyTimer { .. }
         | Action::StartRequestTimer { .. } => return None,

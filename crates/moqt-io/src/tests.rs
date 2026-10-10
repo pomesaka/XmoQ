@@ -443,7 +443,7 @@ async fn what_was_read_before_a_disconnect_is_still_delivered() {
         UniEvent::SubgroupClosed {
             stream,
             header: header(),
-            end: StreamEnd::Aborted(None),
+            end: StreamEnd::Lost,
         }
     );
     // Then the readers are done.
@@ -451,7 +451,7 @@ async fn what_was_read_before_a_disconnect_is_still_delivered() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_disconnect_ends_open_streams_as_aborted() {
+async fn a_disconnect_ends_open_streams_as_lost() {
     let mut reading = reading(StreamConfig::default(), 8);
     let _send = open_with(&reading.peer, &subgroup_bytes(&[])).await;
     let stream = reading.opened().await;
@@ -461,7 +461,7 @@ async fn a_disconnect_ends_open_streams_as_aborted() {
         UniEvent::SubgroupClosed {
             stream,
             header: header(),
-            end: StreamEnd::Aborted(None),
+            end: StreamEnd::Lost,
         }
     );
     assert_eq!(timeout(SOON, reading.events.recv()).await, Ok(None));
@@ -866,12 +866,13 @@ async fn a_stream_reset_before_it_was_opened_is_never_reported_opened() {
 
 #[tokio::test(start_paused = true)]
 async fn a_stream_the_receiver_stopped_does_not_count_as_slow() {
-    let sending = sending(2, 8);
+    let mut sending = sending(2, 8);
     let out = sending.open(0).unwrap();
     let mut recv = sending.peer.accept_uni().await.unwrap();
     // The header arrives, then the receiver stops the stream.
     read_exactly(&mut recv, 1).await;
-    recv.stop(0x1);
+    // DELIVERY_TIMEOUT (0x2), a code the writer itself never uses.
+    recv.stop(0x2);
     // Far more Objects than the budget holds: each is taken and dropped.
     for object_id in 0..20 {
         out.send(Arc::new(object(object_id, 4 * STREAM_WINDOW)))
@@ -881,6 +882,19 @@ async fn a_stream_the_receiver_stopped_does_not_count_as_slow() {
     out.finish();
     tokio::time::sleep(SOON).await;
     assert_eq!(sending.budget.in_use(), (0, 0, 0));
+    // The receiver's code is reported, once, by the write that ran into it.
+    assert_eq!(
+        [
+            sending.report().await,
+            sending.report().await,
+            sending.report().await,
+        ],
+        [
+            (0, OutgoingEvent::Opened),
+            (0, OutgoingEvent::Stopped(Some(0x2))),
+            (0, OutgoingEvent::Closed),
+        ]
+    );
 }
 
 #[tokio::test(start_paused = true)]

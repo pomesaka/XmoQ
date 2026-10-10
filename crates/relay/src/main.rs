@@ -56,7 +56,7 @@ const MAX_HANDSHAKES: usize = 64;
 ///
 /// The windows bound what the QUIC layer holds for one peer; `HubConfig` adds
 /// them up with the rest.
-fn quic_limits(streams: &StreamConfig) -> QuicLimits {
+fn quic_limits(streams: &StreamConfig, idle_timeout: Duration) -> QuicLimits {
     const STREAM_RECEIVE_WINDOW: u32 = 256 * 1024;
     const RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
     const SEND_WINDOW: u32 = 4 * 1024 * 1024;
@@ -66,6 +66,7 @@ fn quic_limits(streams: &StreamConfig) -> QuicLimits {
         stream_receive_window: STREAM_RECEIVE_WINDOW,
         receive_window: RECEIVE_WINDOW,
         send_window: SEND_WINDOW,
+        idle_timeout,
     }
 }
 
@@ -73,12 +74,17 @@ struct Args {
     port: u16,
     cert_file: String,
     key_file: String,
+    /// How long nothing may arrive from a peer before its connection counts
+    /// as lost. A run that waits for the relay to notice a vanished peer
+    /// sets it lower than the default.
+    idle_timeout: Duration,
 }
 
 fn parse_args() -> Result<Args> {
     let mut port = None;
     let mut cert_file = None;
     let mut key_file = None;
+    let mut idle_timeout = xmoq_moqt_io::wt::IDLE_TIMEOUT;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -88,6 +94,13 @@ fn parse_args() -> Result<Args> {
             "--port" => port = Some(value.parse().context("--port")?),
             "--cert-file" => cert_file = Some(value),
             "--key-file" => key_file = Some(value),
+            "--idle-timeout-ms" => {
+                let millis: u64 = value.parse().context("--idle-timeout-ms")?;
+                if millis == 0 {
+                    bail!("--idle-timeout-ms must be more than 0");
+                }
+                idle_timeout = Duration::from_millis(millis);
+            }
             other => bail!("unknown flag {other}"),
         }
     }
@@ -95,6 +108,7 @@ fn parse_args() -> Result<Args> {
         port: port.context("--port is required")?,
         cert_file: cert_file.context("--cert-file is required")?,
         key_file: key_file.context("--key-file is required")?,
+        idle_timeout,
     })
 }
 
@@ -106,7 +120,7 @@ async fn main() -> Result<()> {
         log: Some(log.clone()),
         ..HubConfig::default()
     };
-    let limits = quic_limits(&config.streams);
+    let limits = quic_limits(&config.streams, args.idle_timeout);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
     let (hub, hub_task) = hub::spawn(config);

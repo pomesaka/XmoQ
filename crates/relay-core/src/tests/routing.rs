@@ -65,9 +65,10 @@ fn asked(session: SessionKey, own: u64, request_id: u64, fields: &[&[u8]]) -> [A
             message: ControlMessage::Subscribe(Subscribe {
                 request_id,
                 full_track_name: track_in(fields),
-                // §9.2: Forward State 1 upstream, and nothing of the
-                // downstream SUBSCRIBE.
-                parameters: vec![Parameter::Forward(true)],
+                // §9.2: Forward State 1 upstream, which is what no FORWARD
+                // parameter means (§10.2.12), and nothing of the downstream
+                // SUBSCRIBE.
+                parameters: vec![],
             }),
         },
         Action::StartUpstreamTimer {
@@ -108,6 +109,14 @@ fn upstream(session: SessionKey, own: u64, message: ControlMessage) -> Event {
     }
 }
 
+/// The relay stops waiting for the publisher's answer to its request 0.
+fn answered() -> Action {
+    Action::StopUpstreamTimer {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+    }
+}
+
 fn upstream_subscribe_ok(largest: Option<Location>) -> ControlMessage {
     ControlMessage::SubscribeOk(SubscribeOk {
         track_alias: UPSTREAM_ALIAS,
@@ -127,7 +136,7 @@ fn relay_with_routed_track() -> Relay {
     );
     assert_eq!(
         relay.step(upstream(PUBLISHER, 0, upstream_subscribe_ok(None))),
-        [subscribe_ok(ALICE, None)]
+        [answered(), subscribe_ok(ALICE, None)]
     );
     relay
 }
@@ -345,7 +354,7 @@ fn answer_cases() -> [AnswerCase; 7] {
         (
             "SUBSCRIBE_OK",
             upstream(PUBLISHER, 0, upstream_subscribe_ok(Some(UPSTREAM_LARGEST))),
-            vec![],
+            vec![answered()],
             None,
         ),
         (
@@ -506,6 +515,7 @@ fn a_stream_that_overtakes_subscribe_ok_belongs_to_the_routed_track() {
     assert_eq!(
         relay.step(upstream(PUBLISHER, 0, upstream_subscribe_ok(None))),
         [
+            answered(),
             subscribe_ok(ALICE, None),
             open_data_stream(ALICE, 0, header(0)),
             send_object(0, 0),
@@ -1163,6 +1173,9 @@ fn a_reason_that_is_passed_on_is_cut_between_characters() {
     cut_inside.extend_from_slice(&[0xe3, 0x81, 0x82]);
     let cases = [
         (cut_inside, vec![b'r'; 127]),
+        // Exactly as long as may be passed on, and nothing at all.
+        (vec![b'r'; 128], vec![b'r'; 128]),
+        (vec![], vec![]),
         // Not UTF-8: nothing of it is passed on.
         (vec![0xff, 0xfe], vec![]),
     ];
@@ -1187,4 +1200,363 @@ fn a_reason_that_is_passed_on_is_cut_between_characters() {
             Some(refused(ALICE, 0, expected).as_slice())
         );
     }
+}
+
+#[test]
+fn a_publishers_error_code_is_passed_on_or_replaced() {
+    // (the publisher's Error Code, the subscriber's, whether the publisher's
+    //  reason goes with it, the subscriber's Retry Interval). The publisher's
+    // Retry Interval is 7 in every row. REDIRECT, which needs a Redirect, is
+    // a row of the table of answers above.
+    let cases: [(u64, u64, bool, u64); 16] = [
+        // About the track at the publisher or its load, and the generic
+        // error: as they are. 0x0, 0x2, 0x9, 0x10, 0x33.
+        (0x0, 0x0, true, 7),
+        (0x2, 0x2, true, 7),
+        (0x9, 0x9, true, 7),
+        (0x10, 0x10, true, 7),
+        (0x33, 0x33, true, 7),
+        // The three about tokens: as they are, until authorization is decided.
+        (0x1, 0x1, true, 7),
+        (0x4, 0x4, true, 7),
+        (0x5, 0x5, true, 7),
+        // NOT_SUPPORTED and GOING_AWAY are true of the publisher and the
+        // relay only: DOES_NOT_EXIST, to be retried when the publisher said.
+        (0x3, 0x10, false, 7),
+        (0x6, 0x10, false, 7),
+        // No answer to this SUBSCRIBE: INTERNAL_ERROR, and no word on a
+        // retry. INVALID_RANGE (the relay names no range), MALFORMED_TRACK
+        // (defined for FETCH), UNINTERESTED, PREFIX_OVERLAP,
+        // NAMESPACE_TOO_LARGE, and a code draft 18 does not have.
+        (0x11, 0x0, false, 0),
+        (0x12, 0x0, false, 0),
+        (0x20, 0x0, false, 0),
+        (0x30, 0x0, false, 0),
+        (0x31, 0x0, false, 0),
+        (0x7777, 0x0, false, 0),
+    ];
+    for (from_publisher, to_subscriber, with_reason, retry_interval) in cases {
+        let mut relay = relay();
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+        let actions = relay.step(rejected(RequestError {
+            error_code: from_publisher,
+            retry_interval: 7,
+            error_reason: ReasonPhrase::new(b"why".to_vec()).unwrap(),
+            redirect: None,
+        }));
+        let reason: &[u8] = if with_reason { b"why" } else { b"" };
+        let expected = RequestError {
+            error_code: to_subscriber,
+            retry_interval,
+            error_reason: ReasonPhrase::new(reason.to_vec()).unwrap(),
+            redirect: None,
+        };
+        assert_eq!(
+            actions.get(1..),
+            Some(refused(ALICE, 0, expected).as_slice()),
+            "{from_publisher:#x}"
+        );
+    }
+}
+
+/// What the relay holds for routing, by name.
+#[derive(Debug, PartialEq, Eq)]
+struct Routed {
+    namespaces: usize,
+    pending_tracks: usize,
+    own_requests: usize,
+    tracks: usize,
+    subscriptions: usize,
+}
+
+fn routed_by_name(relay: &Relay) -> Routed {
+    let (namespaces, pending_tracks, own_requests, tracks, subscriptions) = routed(relay);
+    Routed {
+        namespaces,
+        pending_tracks,
+        own_requests,
+        tracks,
+        subscriptions,
+    }
+}
+
+/// What can follow a publisher's `DUPLICATE_SUBSCRIPTION` while Alice and Bob
+/// wait: what comes next, what the relay does, and what it holds then.
+type AwaitedPublishCase = (&'static str, Vec<Event>, Vec<Action>, Routed);
+
+fn awaited_publish_cases() -> [AwaitedPublishCase; 4] {
+    let stop_waiting = Action::StopUpstreamTimer {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+    };
+    let published = vec![
+        stop_waiting.clone(),
+        Action::SendRequest {
+            session: PUBLISHER,
+            stream: StreamKey(1),
+            message: ControlMessage::RequestOk(RequestOk {
+                parameters: vec![Parameter::Forward(true)],
+                track_properties: vec![],
+            }),
+        },
+        subscribe_ok(ALICE, None),
+        subscribe_ok(BOB, None),
+    ];
+    // TIMEOUT (0x2) for both; the timer has run out and needs no stopping.
+    let mut timed_out = refused(ALICE, 0, error(0x2)).to_vec();
+    timed_out.extend(refused(BOB, 0, error(0x2)));
+    // DOES_NOT_EXIST (0x10) for both.
+    let mut publisher_gone = refused(ALICE, 0, error(0x10)).to_vec();
+    publisher_gone.extend(refused(BOB, 0, error(0x10)));
+    let nothing_left = Routed {
+        namespaces: 1,
+        pending_tracks: 0,
+        own_requests: 0,
+        tracks: 0,
+        subscriptions: 0,
+    };
+    [
+        (
+            "the PUBLISH",
+            vec![Event::RequestOpened {
+                session: PUBLISHER,
+                stream: StreamKey(1),
+                first: publish(2, b"a"),
+            }],
+            published,
+            Routed {
+                namespaces: 1,
+                pending_tracks: 0,
+                own_requests: 0,
+                tracks: 1,
+                subscriptions: 2,
+            },
+        ),
+        (
+            "no PUBLISH in time",
+            vec![Event::UpstreamTimeout {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+            }],
+            timed_out,
+            nothing_left,
+        ),
+        (
+            "both subscribers leave",
+            vec![
+                Event::RequestClosed {
+                    session: ALICE,
+                    stream: StreamKey(0),
+                    how: RequestEnd::Aborted,
+                },
+                Event::RequestClosed {
+                    session: BOB,
+                    stream: StreamKey(0),
+                    how: RequestEnd::Aborted,
+                },
+            ],
+            // Each gets the FIN of its stream; with the last one gone the
+            // wait is over.
+            vec![
+                Action::FinishRequest {
+                    session: ALICE,
+                    stream: StreamKey(0),
+                },
+                Action::FinishRequest {
+                    session: BOB,
+                    stream: StreamKey(0),
+                },
+                stop_waiting,
+            ],
+            Routed {
+                namespaces: 1,
+                pending_tracks: 0,
+                own_requests: 0,
+                tracks: 0,
+                subscriptions: 0,
+            },
+        ),
+        (
+            "the publisher leaves",
+            vec![Event::SessionClosed { session: PUBLISHER }],
+            publisher_gone,
+            Routed {
+                namespaces: 0,
+                pending_tracks: 0,
+                own_requests: 0,
+                tracks: 0,
+                subscriptions: 0,
+            },
+        ),
+    ]
+}
+
+#[test]
+fn a_publisher_that_answers_duplicate_subscription_is_waited_for() {
+    // §5.1: a publisher answers the relay's SUBSCRIBE with
+    // DUPLICATE_SUBSCRIPTION (0x19) when its own PUBLISH for the track is
+    // under way, and also when it still holds another subscription of the
+    // relay to the track, in which case no PUBLISH follows. The relay cannot
+    // tell the two apart and waits. The cases are in `awaited_publish_cases`.
+    for (name, next, expected, left) in awaited_publish_cases() {
+        let mut relay = relay();
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+        // The relay's request is over on its stream, and the wait for the
+        // PUBLISH is timed anew. Alice is not answered.
+        assert_eq!(
+            relay.step(rejected(error(0x19))),
+            [
+                Action::FinishOwnRequest {
+                    session: PUBLISHER,
+                    request: OwnRequestKey(0),
+                },
+                Action::StartUpstreamTimer {
+                    session: PUBLISHER,
+                    request: OwnRequestKey(0),
+                },
+            ],
+            "{name}"
+        );
+        // Whatever else arrives for the request changes nothing: a second
+        // message, which the I/O side may have read before the first was
+        // dealt with, and the publisher's FIN after its answer.
+        let ignored = [
+            rejected(error(0x10)),
+            upstream(PUBLISHER, 0, upstream_subscribe_ok(None)),
+            Event::OwnRequestClosed {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+                how: OwnRequestEnd::Fin,
+            },
+        ];
+        for event in ignored {
+            let what = format!("{event:?}");
+            assert_eq!(relay.step(event), [], "{name}: {what}");
+        }
+        // Bob waits with Alice; the publisher is not asked a second time. The
+        // request still counts as one of the relay's on that publisher.
+        assert_eq!(subscribe_to(&mut relay, BOB, 0, &[b"xmoq"]), [], "{name}");
+        assert_eq!(
+            routed_by_name(&relay),
+            Routed {
+                namespaces: 1,
+                pending_tracks: 1,
+                own_requests: 1,
+                tracks: 0,
+                subscriptions: 0,
+            },
+            "{name}"
+        );
+
+        let actions: Vec<Action> = next
+            .into_iter()
+            .flat_map(|event| relay.step(event))
+            .collect();
+        assert_eq!(actions, expected, "{name}");
+        assert_eq!(routed_by_name(&relay), left, "{name}");
+    }
+}
+
+#[test]
+fn a_request_that_waits_for_a_publish_counts_against_the_publishers_limit() {
+    // The expectation below is spelled out for a limit of 64.
+    assert_eq!(crate::MAX_OWN_REQUESTS_PER_SESSION, 64);
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    // The publisher answers every SUBSCRIBE of the relay with
+    // DUPLICATE_SUBSCRIPTION (0x19) and never sends a PUBLISH.
+    for number in 0..65u64 {
+        let name = format!("track-{number}");
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(number),
+            first: subscribe(number * 2, name.as_bytes()),
+        });
+        match number {
+            0..=63 => {
+                assert!(
+                    matches!(actions.first(), Some(Action::OpenRequest { .. })),
+                    "track {number}: {actions:?}"
+                );
+                relay.step(upstream(PUBLISHER, number, request_error(0x19)));
+            }
+            // The 65th: EXCESSIVE_LOAD (0x9).
+            _ => assert_eq!(actions, refused(ALICE, 64, error(0x9))),
+        }
+    }
+    assert_eq!(relay.counts().own_requests, 64);
+    assert_eq!(relay.counts().pending_tracks, 64);
+}
+
+#[test]
+fn a_crossing_publish_brings_its_largest_object_properties_and_early_streams() {
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // A subgroup stream of the publisher overtakes its PUBLISH (§10.10 lets
+    // Objects come before PUBLISH_OK): it is held, with its Object and FIN.
+    assert_eq!(
+        data_stream_opened(&mut relay, 7),
+        [Action::StartEarlyTimer {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+        }]
+    );
+    assert_eq!(object_arrived(&mut relay, 7, 0), []);
+    assert_eq!(data_stream_closed(&mut relay, 7, StreamEnd::Fin), []);
+
+    let actions = relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: ControlMessage::Publish(Publish {
+            request_id: 2,
+            full_track_name: track(b"a"),
+            track_alias: UPSTREAM_ALIAS,
+            parameters: vec![Parameter::LargestObject(UPSTREAM_LARGEST)],
+            track_properties: vec![KeyValuePair::varint(2, 5).unwrap()],
+        }),
+    });
+    assert_eq!(
+        actions,
+        [
+            Action::CancelOwnRequest {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+                code: 0x1,
+            },
+            Action::SendRequest {
+                session: PUBLISHER,
+                stream: StreamKey(1),
+                message: ControlMessage::RequestOk(RequestOk {
+                    parameters: vec![Parameter::Forward(true)],
+                    track_properties: vec![],
+                }),
+            },
+            // §9.6, §10.2.11: the Track Properties and the LARGEST_OBJECT of
+            // the PUBLISH, as for a subscriber that comes after it.
+            subscribe_ok(ALICE, Some(UPSTREAM_LARGEST)),
+            // The held stream follows the SUBSCRIBE_OK, whole.
+            open_data_stream(ALICE, 0, header(0)),
+            send_object(0, 0),
+            Action::FinishDataStream {
+                out_stream: OutStreamKey(0),
+            },
+        ]
+    );
+    // A stream under another alias, such as one the publisher would have
+    // given the SUBSCRIBE that gave way, is nothing the relay knows: held for
+    // a while like any other, and then stopped.
+    assert_eq!(
+        relay.step(Event::DataStreamOpened {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            header: header(41),
+        }),
+        [Action::StartEarlyTimer {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+        }]
+    );
 }

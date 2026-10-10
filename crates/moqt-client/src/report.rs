@@ -116,6 +116,16 @@ pub fn subscription_cancelled() {
     println!("SUBSCRIPTION_CANCELLED");
 }
 
+/// The peer sent `STOP_SENDING` for a stream this client writes: `what` says
+/// which. `code=none`: the peer's code was outside the range WebTransport
+/// gives applications, or there was none.
+pub fn stop_sending_received(what: &str, code: Option<u32>) {
+    match code {
+        Some(code) => println!("STOP_SENDING_RECEIVED {what} code={code:#x}"),
+        None => println!("STOP_SENDING_RECEIVED {what} code=none"),
+    }
+}
+
 pub fn sent(group_id: u64, payload_len: usize) {
     println!("SENT group={group_id} object=0 payload_len={payload_len}");
 }
