@@ -7,6 +7,7 @@
 
 use xmoq_moqt::Error as MoqtError;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
+use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{PublishDone, Setup};
 
 use xmoq_moqt_io::{Direction, RequestClose};
@@ -25,15 +26,36 @@ pub fn subscribed(track_alias: u64) {
     println!("SUBSCRIBED track_alias={track_alias}");
 }
 
+/// WHY `payload_hex` stays the last field: the drivers read it up to the end
+/// of the line.
 pub fn object(header: &SubgroupHeader, object: &SubgroupObject) {
     println!(
-        "OBJECT group={} object={} status={:?} payload_len={} payload_hex={}",
+        "OBJECT group={} object={} status={:?} properties={} payload_len={} payload_hex={}",
         header.group_id,
         object.object_id,
         object.status,
+        properties(&object.properties),
         object.payload.len(),
         hex::encode(&object.payload),
     );
+}
+
+/// Object Properties as `<type>:<value>` joined by commas, in the order they
+/// were on the wire: the type in decimal, the value of an even type in
+/// decimal and that of an odd type in hexadecimal. `none` for an Object
+/// without any, which keeps the field one word.
+pub fn properties(pairs: &[KeyValuePair]) -> String {
+    if pairs.is_empty() {
+        return "none".to_string();
+    }
+    let texts: Vec<String> = pairs
+        .iter()
+        .map(|pair| match pair.value() {
+            Value::Varint(value) => format!("{}:{value}", pair.ty()),
+            Value::Bytes(bytes) => format!("{}:{}", pair.ty(), hex::encode(bytes)),
+        })
+        .collect();
+    texts.join(",")
 }
 
 /// An Object that belongs to no subscription this client holds.

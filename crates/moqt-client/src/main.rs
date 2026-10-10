@@ -108,6 +108,9 @@ struct Args {
     /// one of them. To see a track go on with the publisher that is left,
     /// the second has to start where the first stopped.
     first_group: u64,
+    /// The Object Properties of every Object this client sends (§11.2.1.2),
+    /// from `--object-property`. Empty: the streams do not announce any.
+    object_properties: Vec<KeyValuePair>,
     /// How long a SUBSCRIBE of the peer that this client serves waits for its
     /// `SUBSCRIBE_OK`. WHY a flag: a relay that asked this publisher for a
     /// track takes a PUBLISH for it from another publisher meanwhile, and on
@@ -146,6 +149,23 @@ impl Args {
     }
 }
 
+/// Reads `<type>=<value>` of `--object-property`: both in the form the
+/// `OBJECT` line prints them, the type in decimal, the value of an even type
+/// in decimal and that of an odd type in hexadecimal (§1.4.3: an even type
+/// has one integer, an odd type bytes).
+fn parse_object_property(text: &str) -> Result<KeyValuePair> {
+    let (ty, value) = text
+        .split_once('=')
+        .with_context(|| format!("--object-property {text} is not <type>=<value>"))?;
+    let ty: u64 = ty.parse().context("the type of --object-property")?;
+    let pair = if ty.is_multiple_of(2) {
+        KeyValuePair::varint(ty, value.parse().context("the value of an even type")?)
+    } else {
+        KeyValuePair::bytes(ty, hex::decode(value).context("the value of an odd type")?)
+    };
+    pair.map_err(|error| anyhow!("--object-property {text}: {error:?}"))
+}
+
 fn parse_args() -> Result<Args> {
     let mut mode = None;
     let mut payload_hex = None;
@@ -158,6 +178,7 @@ fn parse_args() -> Result<Args> {
     let mut publish_delay_ms = 0;
     let mut subgroup_id = SubgroupId::Zero;
     let mut first_group = 0;
+    let mut object_properties = Vec::new();
     let mut serve_delay_ms = 0;
     let mut answer_delay_ms = 0;
     let mut trace = false;
@@ -189,6 +210,7 @@ fn parse_args() -> Result<Args> {
                 };
             }
             "--first-group" => first_group = value.parse().context("--first-group")?,
+            "--object-property" => object_properties.push(parse_object_property(&value)?),
             "--serve-delay-ms" => {
                 serve_delay_ms = value.parse().context("--serve-delay-ms")?;
             }
@@ -226,6 +248,7 @@ fn parse_args() -> Result<Args> {
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
         first_group,
+        object_properties,
         serve_delay: Duration::from_millis(serve_delay_ms),
         answer_delay: Duration::from_millis(answer_delay_ms),
         trace: if trace {
@@ -578,7 +601,9 @@ impl Client<'_> {
             group_id,
             subgroup_id: self.args.subgroup_id,
             publisher_priority: Some(0),
-            properties: false,
+            // §11.4.2: the bit is of the stream, and says that every Object
+            // on it has the Properties Length field.
+            properties: !self.args.object_properties.is_empty(),
             // This Object is the only one of its Group, so the stream holds the
             // Group's largest Object and its first.
             end_of_group: true,
@@ -586,7 +611,7 @@ impl Client<'_> {
         });
         encoder.object(&SubgroupObject {
             object_id: 0,
-            properties: vec![],
+            properties: self.args.object_properties.clone(),
             status: ObjectStatus::Normal,
             payload: payload.to_vec(),
         })?;
@@ -1124,6 +1149,36 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_object_property_is_read_as_the_object_line_prints_it() {
+        let cases = [
+            // An even type has an integer, an odd type bytes (§1.4.3).
+            ("16=1760140800123456", "16:1760140800123456"),
+            ("13=0142e01f", "13:0142e01f"),
+            ("13=", "13:"),
+            ("0=0", "0:0"),
+        ];
+        for (flag, printed) in cases {
+            let pair = parse_object_property(flag).unwrap();
+            assert_eq!(report::properties(&[pair]), printed, "{flag}");
+        }
+        let both = [
+            parse_object_property("13=01").unwrap(),
+            parse_object_property("16=7").unwrap(),
+        ];
+        assert_eq!(report::properties(&both), "13:01,16:7");
+        assert_eq!(report::properties(&[]), "none");
+    }
+
+    #[test]
+    fn an_object_property_that_does_not_fit_its_type_is_refused() {
+        // No value at all, bytes for an even type, an integer that is no
+        // hexadecimal for an odd one, a type that is no number.
+        for flag in ["16", "16=0x10", "13=xyz", "video=1"] {
+            assert!(parse_object_property(flag).is_err(), "{flag}");
+        }
+    }
 
     #[test]
     fn closes_with_the_code_of_the_protocol_error() {

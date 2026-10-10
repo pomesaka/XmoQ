@@ -81,27 +81,31 @@ function transfers(): Pairing[] {
 	return pairings;
 }
 
+const OWN_CLIENTS = CLIENTS.filter(isOwn);
+
 /**
  * An Object with Object Properties no relay knows, one of each form of a
  * Key-Value-Pair. Draft 18 §2.5 has a relay forward them unchanged.
  *
- * WHY own-browser alone: it is the one client that sends properties and
- * reports the ones it gets. The moqtail peers send an empty set.
+ * WHY the own clients alone: they are the ones that send properties with
+ * content and report the ones they get. The moqtail peers send an empty set.
  */
-const OBJECT_PROPERTIES: Pairing[] = [
-	{
-		name: "own-browser to own-browser, an Object with Object Properties, then PUBLISH_DONE",
-		script: "run.ts",
-		args: [
-			"--publisher",
-			"own-browser",
-			"--subscriber",
-			"own-browser",
-			"--object-properties",
-			"--await-publish-done",
-		],
-	},
-];
+const OBJECT_PROPERTIES: Pairing[] = OWN_CLIENTS.flatMap((publisher) =>
+	OWN_CLIENTS.map(
+		(subscriber): Pairing => ({
+			name: `${publisher} to ${subscriber}, an Object with Object Properties, then PUBLISH_DONE`,
+			script: "run.ts",
+			args: [
+				"--publisher",
+				publisher,
+				"--subscriber",
+				subscriber,
+				"--object-properties",
+				"--await-publish-done",
+			],
+		}),
+	),
+);
 
 /**
  * One publisher and three subscribers: every subscriber has to get the Object
@@ -495,6 +499,32 @@ const DISCONNECTS: Pairing[] = [
 			"--first",
 			"kill-with-open-stream",
 			...each("publisher", ["own-browser", "own-rust"]),
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
+		// WHY it mostly waits: the first source drains for the 2 seconds the
+		// relay gives the streams a PUBLISH_DONE counted.
+		name: "an own-rust publisher says PUBLISH_DONE and publishes anew under another Track Alias; own-rust and own-browser stay",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"publish-anew",
+			"--publisher",
+			"own-rust",
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+		mostlyWaits: true,
+	},
+	{
+		name: "an own-rust publisher says PUBLISH_DONE and publishes anew under the same Track Alias; own-rust and own-browser stay",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"publish-anew",
+			"--publisher",
+			"own-rust",
+			"--same-alias",
 			...each("subscriber", ["own-rust", "own-browser"]),
 		],
 	},

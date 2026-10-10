@@ -78,9 +78,20 @@ The bytes of the Object, the same on the publisher's stream and on the subscribe
 | The own relay reverses the list | **passes**: the Rust encoder writes properties in ascending order of type whatever the order of the list, as the delta encoding needs. A relay built on it cannot reorder them on the wire |
 | One byte of the fixture changed | the decoding and the encoding test fail, in both suites |
 
+### The own Rust client (added later on 2026-10-11, on `main` at `07322d4c`)
+
+The own Rust client got a flag for the properties of the Objects it sends (`--object-property <type>=<value>`, repeated) and prints the ones it receives in its `OBJECT` line (`properties=13:0142...,16:1760140800123456`, or `properties=none`; `payload_hex` stays the last field, which the drivers read to the end of the line). The pairings are now each own client to each own client, four through each relay.
+
+| Run | Result |
+|---|---|
+| own-browser to own-rust, own-rust to own-browser, own-rust to own-rust; own relay and moqtail relay | all six passed at the first run, with the expectation of the run above unchanged |
+| Temporary change to the own relay, taken back: the properties cleared, or the first one kept | the three pairings with the Rust client fail, with the messages above, at the Rust subscriber and at the page |
+
+So the Rust client's writing and reading of properties, which the first run could not show, holds against the own TypeScript client and through moqtail's parser and encoder.
+
 ## Limitations and blockers
 
-- **The Rust client took no part.** Its reading and writing of properties has not been in an interop run; it needs a flag for the properties to send and the properties in its `OBJECT` line. Planned for after a change another session has in that file.
+- The Rust client took no part in the first run; the section above has it.
 - **No property came from a moqtail encoder as its origin.** The moqtail peers here send none with content. The moqtail npm library has types for LOC properties (with older numbers); a publisher built on it was not written, because the relay's own parsing and serializing already puts moqtail's encoder into the path.
 - One Object a stream, and the subscriber was there before it was sent. **A subscriber that joins while a stream with properties is under way was not run.** The own relay builds that subscriber's header from the one it received and changes two fields of it, neither the PROPERTIES bit (`crates/relay-core/src/lib.rs`, `late_header`); the core's test of that header (`tests.rs`, the subscriber that joins inside Group 3) uses a stream without the bit, so no test would notice the bit being dropped there.
 - Properties on an Object that is not Normal, a property the draft defines, more than two properties, and the cache (§2.5's third MUST; neither relay was asked for a FETCH) are outside this run.

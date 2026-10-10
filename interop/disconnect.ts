@@ -31,6 +31,10 @@
 //     The first publisher sends and goes, or stays; the second sends the next
 //     Group, which the subscribers get. With --second-resends the second
 //     first sends again every Group the first has sent.
+//   publish-anew            --publisher own-rust --subscriber <client>... [--same-alias]
+//     The publisher sends a Group, says PUBLISH_DONE and publishes the track
+//     anew on the same session, under the next Track Alias or the same, and
+//     sends another Group. The subscribers stay and get both.
 //   publish-while-asked     --publisher own-rust --publisher <client> --subscriber <client>...
 //     The first publisher announces the namespace and answers the relay's
 //     SUBSCRIBE late; the second sends PUBLISH for the track meanwhile, which
@@ -187,6 +191,7 @@ const SCENARIOS = [
 	"same-group-twice",
 	"second-source",
 	"publish-while-asked",
+	"publish-anew",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
 type OptionOfTwoSources =
@@ -215,6 +220,8 @@ const { values: options } = parseArgs({
 		first: { type: "string" },
 		"first-sends": { type: "string" },
 		"second-resends": { type: "boolean" },
+		// publish-anew: the new PUBLISH has the Track Alias of the first.
+		"same-alias": { type: "boolean", default: false },
 		"second-joins": { type: "string" },
 		port: { type: "string", default: "44340" },
 		verbose: { type: "boolean", default: false },
@@ -690,7 +697,12 @@ async function closedWithoutPublishDone(
 		// The relay had opened a stream towards the subscriber, when it had
 		// read the header of the publisher's, or it had not: one stream that
 		// ends with the relay's reset, or none.
-		const opened = outcome.streamCount === "1" ? 1 : 0;
+		if (outcome.streamCount !== "0" && outcome.streamCount !== "1") {
+			throw new Error(
+				`${subscriber.label}: PUBLISH_DONE has Stream Count ${outcome.streamCount} for a track whose one Object was lost, not 0 or 1: ${outcome.reported}`,
+			);
+		}
+		const opened = Number(outcome.streamCount);
 		expectPublishDone(subscriber, outcome, {
 			statusCode: TRACK_ENDED,
 			streamCount: opened,
@@ -1598,6 +1610,112 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 	};
 }
 
+/**
+ * How long the relay waits for the streams a PUBLISH_DONE counted before it
+ * gives the source up (`drain_timeout` in crates/relay/src/hub.rs,
+ * provisional). The bounds below are this value with room on either side.
+ */
+const RELAY_DRAIN_TIMEOUT_MS = 2_000;
+
+/**
+ * A publisher says PUBLISH_DONE and publishes its track anew on the same
+ * session, while the relay still waits for streams the first subscription
+ * counted.
+ *
+ * The notes, "PUBLISH for a track the relay knows already": "Once the session
+ * has said PUBLISH_DONE, its PUBLISH for the track is accepted, also while
+ * the relay still waits for the streams the first subscription counted.
+ * Under another Track Alias the two are two sources of the track, told apart
+ * by the alias: the first drains as it would have [...] Under the same Track
+ * Alias the alias is the new subscription's and the first one is over at
+ * once: the relay stops waiting for what the first counted and resets its
+ * PUBLISH stream (`CANCELLED`)". And: "If a counted stream is still under
+ * way, the PUBLISH is accepted for the track as it is, and the subscribers
+ * stay."
+ */
+async function publishAnew(run: Run): Promise<ScenarioResult> {
+	const kind = onePublisherKind();
+	if (kind !== "own-rust") {
+		throw new Error(
+			`--scenario publish-anew needs own-rust as its publisher, the one client that publishes a track anew, not ${kind}`,
+		);
+	}
+	const subscriberKinds = options.subscriber.map((value) =>
+		parseClient("subscriber", value),
+	);
+	const passing = subscriberKinds.find((each) => !isOwnClient(each));
+	if (passing !== undefined) {
+		throw new Error(
+			`--scenario publish-anew needs own subscribers, which stay for more than one Object, not ${passing}`,
+		);
+	}
+	const sameAlias = options["same-alias"];
+	const publisher = await joinAsPublisher(kind, run);
+	const subscribers = await joinAsSubscribers(subscriberKinds, "sub", run);
+
+	const first = await publisher.send();
+	await allReceive(subscribers, first, run);
+
+	const anew = await publisher.publishAnew(sameAlias);
+	// The client's first PUBLISH has Track Alias 1 (crates/moqt-client).
+	const expectedAlias = sameAlias ? 1 : 2;
+	if (anew.trackAlias !== expectedAlias) {
+		throw new Error(
+			`${publisher.label} published anew under Track Alias ${anew.trackAlias}, not ${expectedAlias}`,
+		);
+	}
+	// "The subscribers stay": the track did not end between the two.
+	expectStillSubscribed(
+		subscribers,
+		run,
+		`when ${publisher.label} had published the track anew`,
+	);
+	// The first PUBLISH stream cannot get a FIN: the streams its PUBLISH_DONE
+	// counted never all end. Under the same alias the relay resets it at
+	// once; under another the first source drains until the relay's wait for
+	// it runs out.
+	if (!anew.peerEnd.startsWith("reset")) {
+		throw new Error(
+			`${publisher.label}: the relay ended the first PUBLISH stream by "${anew.peerEnd}", not by a reset`,
+		);
+	}
+	if (sameAlias && anew.peerEnd !== `reset, code ${RESET_BY_RELAY}`) {
+		throw new Error(
+			`${publisher.label}: the relay reset the first PUBLISH stream with "${anew.peerEnd}", not with CANCELLED (${RESET_BY_RELAY})`,
+		);
+	}
+	const atOnce = anew.peerEndAfterMs < RELAY_DRAIN_TIMEOUT_MS - 500;
+	if (sameAlias !== atOnce) {
+		throw new Error(
+			`${publisher.label}: the relay ended the first PUBLISH stream ${seconds(anew.peerEndAfterMs)} after the new PUBLISH was asked for; ${sameAlias ? "under the same alias it has to be at once" : `under another alias the first source drains for ${seconds(RELAY_DRAIN_TIMEOUT_MS)}`}`,
+		);
+	}
+
+	const second = await publisher.send();
+	await allReceive(subscribers, second, run);
+
+	await expectOwnPublishDone(publisher, await publisher.end());
+	const ended = await outcomes(subscribers);
+	await expectOneObjectEach(subscribers, [first, second], publisher);
+	for (const { subscriber, outcome } of ended) {
+		expectPublishDone(subscriber, outcome, {
+			statusCode: TRACK_ENDED,
+			groups: [first, second],
+			abortedStreams: 0,
+		});
+	}
+	expectPublishDoneLines(subscribers, run);
+	await relayServesTheTrackAgain(run);
+
+	return {
+		summary: `the subscribers stayed through a new PUBLISH under ${sameAlias ? "the same" : "another"} Track Alias and got Group ${first} before it and Group ${second} after; the relay ended the first PUBLISH stream by "${anew.peerEnd}" after ${seconds(anew.peerEndAfterMs)}`,
+		subscriptions: subscriptionsOf(ended),
+		measured: {
+			"ms until the first PUBLISH stream ended": anew.peerEndAfterMs,
+		},
+	};
+}
+
 const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"publisher-killed": publisherKilled,
 	"last-object-then-close": lastObjectThenClose,
@@ -1606,6 +1724,7 @@ const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"same-group-twice": sameGroupTwice,
 	"second-source": secondSource,
 	"publish-while-asked": publishWhileAsked,
+	"publish-anew": publishAnew,
 };
 
 async function main(): Promise<void> {
