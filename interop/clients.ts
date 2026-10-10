@@ -88,6 +88,12 @@ export interface Publisher {
 	 * no way to and end the session.
 	 */
 	end(): Promise<string>;
+	/**
+	 * How the subscriber ended its direction of the request stream after
+	 * this client's PUBLISH_DONE: "FIN", or what else the client says it saw.
+	 * `undefined` for a client that sent none or does not say (moqtail).
+	 */
+	peerEndAfterPublishDone(): Promise<string | undefined>;
 	/** Kills the process, or closes the page, without a word to the relay. */
 	kill(): Promise<void>;
 	/** Sends the next Object and closes the session at once; resolves with the Group. */
@@ -154,6 +160,10 @@ async function startRustPublisher(
 			client.child.stdin.end();
 			return exitedCleanly(client, label);
 		},
+		peerEndAfterPublishDone: () =>
+			Promise.resolve(
+				client.matches(/^PUBLISH_DONE_PEER_ENDED how=(.*)$/).at(-1)?.[1],
+			),
 		async kill() {
 			client.child.kill("SIGKILL");
 			await client.exited;
@@ -209,6 +219,7 @@ async function startBrowserPublisher(
 				await kill();
 				return "page closed";
 			},
+			peerEndAfterPublishDone: () => Promise.resolve(undefined),
 			kill,
 			async sendLastAndClose() {
 				await onPage(
@@ -264,6 +275,15 @@ async function startBrowserPublisher(
 				"report how its subscription ended",
 				page.evaluate(() => window.xmoqOwn.publishEnd()),
 			);
+		},
+		async peerEndAfterPublishDone() {
+			const reported = await onPage(
+				label,
+				"report how the subscriber ended its direction",
+				page.evaluate(() => window.xmoqOwn.peerStreamEnd()),
+			);
+			if (reported === "null") return undefined;
+			return reported === '{"type":"fin"}' ? "FIN" : reported;
 		},
 		kill,
 		async sendLastAndClose(publishDone) {

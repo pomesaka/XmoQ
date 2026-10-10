@@ -19,6 +19,8 @@ Not implemented: the server role, requests opened by the peer (answered with NOT
 
 How a subscription, a published Track or the session ended is a value with a `type` (`Subscription.ended`, `PublishedTrack.ended`, `MoqtConnection.closed`), and every rejection is one of the error classes listed at `RequestFailedError` in `src/webtransport/endings.ts`.
 
+`PublishedTrack.done()` sends PUBLISH_DONE and then waits for the subscriber to end its direction of the request stream, for at most `peerStreamEndTimeoutMs` (3 seconds) from the moment PUBLISH_DONE and the FIN were written. It resolves with what it saw, a `PeerStreamEnd`: `fin`, `reset` with its code, `nothing-in-time`, or `session-closed`. None of them is an error. Close the session after `done()` has settled: a session closed right after the last Object can lose it, and `close()` called without waiting for `done()` can end the session before PUBLISH_DONE has gone out. `fin` says that the subscriber finished its direction, not that everything arrived; it can be read so only when the peer is an XmoQ relay and did not finish before PUBLISH_DONE ([implementation notes](../../docs/moqt-implementation-notes.md), "A publisher that ended its PUBLISH with PUBLISH_DONE"). With `peerStreamEndTimeoutMs: 0`, `done()` does not wait and stops the subscriber's direction at once. A second `done()` rejects with `PublishEndedError`.
+
 ## Layout
 
 | Path | Content | May import |

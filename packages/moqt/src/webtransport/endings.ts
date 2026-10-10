@@ -39,6 +39,37 @@ export type PublishEnd =
 	| { type: "update-failed" }
 	| { type: "session-closed"; close: SessionClose };
 
+/**
+ * How the subscriber ended its direction of the request stream after this
+ * endpoint's PUBLISH_DONE. These say what was seen and no more: the draft
+ * gives that direction no meaning after PUBLISH_DONE (§10.11, §5.1.1).
+ */
+export type PeerStreamEnd =
+	/**
+	 * The subscriber finished its direction. This does not say that
+	 * everything arrived. It can be read so only when the peer is an XmoQ
+	 * relay, which finishes once as many subgroup streams as the Stream
+	 * Count named have ended there. A peer that knows nothing of that
+	 * finishes for reasons of its own. A subscriber that had finished its
+	 * direction before PUBLISH_DONE is reported in the same way, and then
+	 * the FIN says nothing about the streams, whatever the peer is.
+	 */
+	| { type: "fin" }
+	/**
+	 * The subscriber reset its direction. An XmoQ relay does so (CANCELLED)
+	 * when its wait for the counted streams ran out. `code` is a Stream Reset
+	 * Error Code (§3.3.3).
+	 */
+	| { type: "reset"; code: number | undefined }
+	/**
+	 * This endpoint saw neither before its wait was over, and stopped the
+	 * subscriber's direction (CANCELLED). That is not to say the subscriber
+	 * did not end it: a FIN that arrives as the wait ends is not seen.
+	 */
+	| { type: "nothing-in-time" }
+	/** The session ended first. */
+	| { type: "session-closed"; close: SessionClose };
+
 function describeClose(close: SessionClose): string {
 	switch (close.type) {
 		case "local":

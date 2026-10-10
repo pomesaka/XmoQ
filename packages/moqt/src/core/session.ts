@@ -62,6 +62,12 @@ export interface Session {
 	 * belongs to the caller; the session has none.
 	 */
 	expireSubscription(requestId: bigint): SessionOutput[];
+	/**
+	 * The wait for the subscriber to end its direction of the request stream
+	 * after `publishDone` is over. The timer belongs to the caller. Stops
+	 * that direction (CANCELLED); does nothing when it has ended.
+	 */
+	expirePublishDonePeerEnd(requestId: bigint): SessionOutput[];
 	/** Opens a subgroup stream with its SUBGROUP_HEADER (§11.4.2). Returns the stream number. */
 	openSubgroup(
 		requestId: bigint,
@@ -260,6 +266,8 @@ export function createSession(options: SessionOptions = {}): Session {
 			closed ? [] : requests.cancelRequest(requestId),
 		expireSubscription: (requestId) =>
 			guard((out) => requests.subscriptionExpired(requestId, out)),
+		expirePublishDonePeerEnd: (requestId) =>
+			guard((out) => requests.publishDonePeerEndExpired(requestId, out)),
 
 		receiveRequestStreamData: (stream, data, fin) =>
 			guard((out) => requests.receiveStreamData(stream, data, fin, out)),

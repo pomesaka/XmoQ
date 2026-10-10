@@ -92,6 +92,12 @@ export interface Requests {
 	): SessionResult<number>;
 	/** The caller's wait for late streams after PUBLISH_DONE ran out. */
 	subscriptionExpired(requestId: bigint, out: SessionOutput[]): void;
+	/**
+	 * The wait for the subscriber to end its direction of the request stream
+	 * after this endpoint's PUBLISH_DONE is over: that direction is stopped.
+	 * Does nothing when the subscriber has ended it.
+	 */
+	publishDonePeerEndExpired(requestId: bigint, out: SessionOutput[]): void;
 	receiveStreamData(
 		stream: number,
 		data: Uint8Array,
@@ -132,6 +138,12 @@ interface RequestCommon {
 	 * it saw that can still arrive and is not a mistake of the peer.
 	 */
 	endedLocally: boolean;
+	/**
+	 * The peer finished its direction of the request stream while the request
+	 * went on, which only the subscriber of an Established PUBLISH can do
+	 * without ending the request.
+	 */
+	peerFinished: boolean;
 }
 
 interface NamespaceEntry extends RequestCommon {
@@ -221,6 +233,33 @@ export function createRequests(options: RequestsOptions): Requests {
 		if (request.sendClosed) return;
 		request.sendClosed = true;
 		out.push({ type: "finish", stream: request.stream });
+	};
+
+	/**
+	 * This endpoint sent PUBLISH_DONE for its PUBLISH, the application's or
+	 * the UPDATE_FAILED of a refused REQUEST_UPDATE. How the subscriber then
+	 * ends its direction of the request stream is reported, and the caller's
+	 * wait for it ends with `publishDonePeerEndExpired`.
+	 */
+	const awaitsPeerEnd = (request: RequestEntry): boolean =>
+		request.kind === "PUBLISH" && request.endedLocally;
+
+	const reportPeerEndAfterPublishDone = (
+		request: RequestEntry,
+		how: "fin" | "reset",
+		resetCode: number | undefined,
+		out: SessionOutput[],
+	): void => {
+		if (!awaitsPeerEnd(request)) return;
+		out.push({
+			type: "event",
+			event: {
+				type: "publish-done-peer-ended",
+				requestId: request.requestId,
+				how,
+				resetCode,
+			},
+		});
 	};
 
 	/** Abandons the request stream in both directions (§3.3.2). The peer's later bytes on it are not read. */
@@ -566,6 +605,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			inbound: new Uint8Array(0),
 			sendClosed: false,
 			endedLocally: false,
+			peerFinished: false,
 		});
 		const data = encodeControlMessage(message);
 		// §10.1: each endpoint increments its Request ID by 2.
@@ -679,7 +719,29 @@ export function createRequests(options: RequestsOptions): Requests {
 				}
 				finishSend(request, out);
 			});
+			// The subscriber had finished its direction already; nothing more
+			// comes on the stream.
+			if (request.peerFinished) {
+				requestStreams.delete(request.stream);
+				reportPeerEndAfterPublishDone(request, "fin", undefined, out);
+			}
 			return out;
+		},
+
+		publishDonePeerEndExpired(requestId, out) {
+			for (const [stream, request] of requestStreams) {
+				if (request.requestId !== requestId || !awaitsPeerEnd(request)) {
+					continue;
+				}
+				// What the peer sends on the stream from here on is not read.
+				requestStreams.delete(stream);
+				out.push({
+					type: "stop-peer-direction",
+					stream,
+					code: StreamResetErrorCode.CANCELLED,
+				});
+				return;
+			}
 		},
 
 		openSubgroup(requestId, subgroupOptions) {
@@ -732,10 +794,14 @@ export function createRequests(options: RequestsOptions): Requests {
 			// no REQUEST_UPDATE any more, and has asked for nothing to end.
 			// WHY the stream stays known: STOP_SENDING for it can still come.
 			if (request.kind === "PUBLISH" && request.state === "Established") {
+				request.peerFinished = true;
 				return;
 			}
 			requestStreams.delete(stream);
-			if (request.state === "Terminated") return;
+			if (request.state === "Terminated") {
+				reportPeerEndAfterPublishDone(request, "fin", undefined, out);
+				return;
+			}
 			// After PUBLISH_DONE the FIN is expected (§10.11) and the subscription
 			// lives on until its late streams are accounted for.
 			if (isDraining(request)) return;
@@ -754,6 +820,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			// that late Objects still arrive (§10.11).
 			if (request.state === "Terminated" || isDraining(request)) {
 				requestStreams.delete(stream);
+				reportPeerEndAfterPublishDone(request, "reset", code, out);
 				return;
 			}
 			abandonRequest(request, "peer-reset", out, code);

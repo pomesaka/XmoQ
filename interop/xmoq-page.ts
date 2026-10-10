@@ -42,8 +42,9 @@ export type OwnPageExtras = {
 	): Promise<void>;
 	/**
 	 * Sends one Object like `sendObjectIn` with `finish`, and closes the
-	 * session without waiting for anything in between. With `publishDone` the
-	 * Track is ended with PUBLISH_DONE before the session is closed.
+	 * session. With `publishDone` the Track is ended with PUBLISH_DONE first,
+	 * and the session is closed when `done()` has settled, as an application
+	 * of the library does; without, nothing is waited for in between.
 	 */
 	sendLastObjectAndClose(
 		group: string,
@@ -52,6 +53,12 @@ export type OwnPageExtras = {
 	): Promise<void>;
 	/** How the subscription made with PUBLISH ended, as JSON of the library's `PublishEnd`. */
 	publishEnd(): Promise<string>;
+	/**
+	 * What `done()` resolved with, as JSON of the library's `PeerStreamEnd`:
+	 * how the subscriber ended its direction of the request stream after
+	 * PUBLISH_DONE. "null" when no PUBLISH_DONE was sent.
+	 */
+	peerStreamEnd(): Promise<string>;
 	/**
 	 * Subscribes like `subscribe` and never reads the Objects, as an
 	 * application that has stopped taking them.
