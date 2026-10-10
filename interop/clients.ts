@@ -80,6 +80,13 @@ export interface PublisherPlan {
 	 * Object came from.
 	 */
 	payloadHex?: string;
+	/**
+	 * own-rust: the client announces the namespace and sends no PUBLISH. It
+	 * serves the track when it is asked for it with a SUBSCRIBE, and answers
+	 * that SUBSCRIBE this many milliseconds late, so that something else can
+	 * happen to the track while the relay waits for the answer.
+	 */
+	servesWhenAskedAfterMs?: number;
 }
 
 export interface Publisher {
@@ -113,6 +120,13 @@ export interface Publisher {
 	 * `undefined` for a client that sent none or does not say (moqtail).
 	 */
 	peerEndAfterPublishDone(): Promise<string | undefined>;
+	/**
+	 * Whether the client has a subscription to send on. False only for a
+	 * publisher that serves when asked and has not answered yet.
+	 */
+	isServing(): boolean;
+	/** Resolves once `isServing` holds. */
+	serving(): Promise<void>;
 	/** Kills the process, or closes the page, without a word to the relay. */
 	kill(): Promise<void>;
 	/** Sends the next Object and closes the session at once; resolves with the Group. */
@@ -151,14 +165,33 @@ async function startRustPublisher(
 		);
 	}
 	const payloadHex = plan.payloadHex ?? run.payloadHex;
-	const client = spawnRustClient(run.context, label, kind, "publish", TRACK, [
-		"--payload-hex",
-		payloadHex,
-		...(firstGroup === 0 ? [] : ["--first-group", String(firstGroup)]),
-		"--timeout-secs",
-		RUST_CLIENT_TIMEOUT_SECS,
-	]);
-	await client.waitForLine(/^PUBLISHED /);
+	const servesAfterMs = plan.servesWhenAskedAfterMs;
+	if (servesAfterMs !== undefined && kind !== "own-rust") {
+		throw new Error(
+			`${label} cannot serve a track when asked: only own-rust can`,
+		);
+	}
+	const client = spawnRustClient(
+		run.context,
+		label,
+		kind,
+		servesAfterMs === undefined ? "publish" : "publish-namespace",
+		TRACK,
+		[
+			"--payload-hex",
+			payloadHex,
+			...(firstGroup === 0 ? [] : ["--first-group", String(firstGroup)]),
+			...(servesAfterMs === undefined
+				? []
+				: ["--serve-delay-ms", String(servesAfterMs)]),
+			"--timeout-secs",
+			RUST_CLIENT_TIMEOUT_SECS,
+		],
+	);
+	await client.waitForLine(
+		servesAfterMs === undefined ? /^PUBLISHED / : /^NAMESPACE_PUBLISHED/,
+	);
+	const SERVING = /^SERVING /;
 	let nextGroup = firstGroup;
 	const sent = async (): Promise<number> => {
 		const group = nextGroup;
@@ -193,6 +226,11 @@ async function startRustPublisher(
 			Promise.resolve(
 				client.matches(/^PUBLISH_DONE_PEER_ENDED how=(.*)$/).at(-1)?.[1],
 			),
+		isServing: () =>
+			servesAfterMs === undefined || client.matches(SERVING).length > 0,
+		async serving() {
+			if (servesAfterMs !== undefined) await client.waitForLine(SERVING);
+		},
 		async kill() {
 			client.child.kill("SIGKILL");
 			await client.exited;
@@ -256,6 +294,8 @@ async function startBrowserPublisher(
 				return "page closed";
 			},
 			peerEndAfterPublishDone: () => Promise.resolve(undefined),
+			isServing: () => true,
+			serving: () => Promise.resolve(),
 			kill,
 			async sendLastAndClose() {
 				await onPage(
@@ -313,6 +353,8 @@ async function startBrowserPublisher(
 				page.evaluate(() => window.xmoqOwn.publishEnd()),
 			);
 		},
+		isServing: () => true,
+		serving: () => Promise.resolve(),
 		async peerEndAfterPublishDone() {
 			const reported = await onPage(
 				label,

@@ -474,6 +474,19 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
+		// WHY it mostly waits: the publisher that is asked answers the relay
+		// 3 seconds late, so that the other can send its PUBLISH meanwhile.
+		name: "an own-rust publisher sends PUBLISH while the relay waits for another's answer; own-rust and own-browser are answered by it",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"publish-while-asked",
+			...each("publisher", ["own-rust", "own-rust"]),
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+		mostlyWaits: true,
+	},
+	{
 		name: "a second own-rust publisher joins a track that has subscribers; own-rust gets its Group",
 		script: "disconnect.ts",
 		args: [

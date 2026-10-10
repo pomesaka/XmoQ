@@ -31,6 +31,10 @@
 //     The first publisher sends and goes, or stays; the second sends the next
 //     Group, which the subscribers get. With --second-resends the second
 //     first sends again every Group the first has sent.
+//   publish-while-asked     --publisher own-rust --publisher <client> --subscriber <client>...
+//     The first publisher announces the namespace and answers the relay's
+//     SUBSCRIBE late; the second sends PUBLISH for the track meanwhile, which
+//     answers the subscribers. Both then send a Group.
 //   <client>: own-browser | own-rust | moqtail-browser | moqtail-rust
 //
 // What each scenario has to show is listed in
@@ -64,6 +68,7 @@ import {
 	STEP_TIMEOUT_MS,
 	startRun,
 	stopEverythingOnExit,
+	withTimeout,
 } from "./harness.ts";
 
 /** PUBLISH_DONE Status Codes (§10.11). */
@@ -158,6 +163,12 @@ const dataStreamStopped = (session: number): RegExp =>
 /** The relay sent PUBLISH_DONE to the session. */
 const publishDoneSent = (session: number): RegExp =>
 	new RegExp(`^SEND session=${session} stream=\\d+ PUBLISH_DONE `);
+/** The relay sent SUBSCRIBE_OK to the session. */
+const subscribeOkSent = (session: number): RegExp =>
+	new RegExp(`^SEND session=${session} stream=\\d+ SUBSCRIBE_OK`);
+/** The relay opened a request of its own towards the session: the SUBSCRIBE it sends a publisher that announced the namespace. */
+const requestOpenedTowards = (session: number): RegExp =>
+	new RegExp(`^OPEN_REQUEST session=${session} `);
 /** The relay opened a subgroup stream of the Group towards the session. */
 const streamOpened = (session: number, group: number): RegExp =>
 	new RegExp(`^OPEN_DATA session=${session} out=\\d+ .* group=${group}$`);
@@ -175,6 +186,7 @@ const SCENARIOS = [
 	"slow-subscriber",
 	"same-group-twice",
 	"second-source",
+	"publish-while-asked",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
 type OptionOfTwoSources =
@@ -1398,6 +1410,123 @@ async function secondSource(run: Run): Promise<ScenarioResult> {
 	};
 }
 
+/**
+ * How late the publisher that announced the namespace answers the relay's
+ * SUBSCRIBE. WHY this long: the other publisher has to connect and send its
+ * PUBLISH in that time. WHY not longer: the relay gives a publisher 5 seconds
+ * to answer (provisional), and this one has to answer.
+ */
+const ASKED_ANSWERS_AFTER_MS = 3_000;
+
+/**
+ * A publisher sends PUBLISH for a track while the relay waits for another
+ * publisher's answer to its SUBSCRIBE for that track.
+ *
+ * The notes, "PUBLISH for a track the relay knows already": "A track the
+ * relay has asked a publisher for and has no answer about: the PUBLISH gives
+ * it its source, the subscribers that waited get SUBSCRIBE_OK with what the
+ * PUBLISH brought, and what the relay asked stays asked." And "The
+ * publisher's answer to the relay's SUBSCRIBE", when the track got a source
+ * meanwhile: "SUBSCRIBE_OK: the publisher is a further source".
+ */
+async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
+	const [askedKind, otherKind] = twoPublisherKinds();
+	if (askedKind !== "own-rust") {
+		throw new Error(
+			`--scenario publish-while-asked needs own-rust as its first publisher, the one that announces and is asked, not ${askedKind}`,
+		);
+	}
+	const subscriberKinds = options.subscriber.map((value) =>
+		parseClient("subscriber", value),
+	);
+	const passing = subscriberKinds.find((kind) => !isOwnClient(kind));
+	if (passing !== undefined) {
+		throw new Error(
+			`--scenario publish-while-asked needs own subscribers, which stay for more than one Object, not ${passing}`,
+		);
+	}
+	const relay = run.context.relay;
+	// It announces the namespace and waits to be asked. Its Groups start
+	// after the one the other publisher sends, as a source that goes on with
+	// the track's Group IDs does.
+	const asked = await joinAsPublisher(askedKind, run, {
+		label: `asked:${askedKind}`,
+		firstGroup: 1,
+		payloadHex: hexOf(`asked ${run.payloadHex}`),
+		servesWhenAskedAfterMs: ASKED_ANSWERS_AFTER_MS,
+	});
+
+	// The subscribers subscribe and are not answered: "Subscribers while the
+	// publisher has not answered the relay's SUBSCRIBE: They wait, and no
+	// SUBSCRIBE_OK is sent."
+	const waiting: { session: number; subscriber: Promise<Subscriber> }[] = [];
+	for (const [index, kind] of subscriberKinds.entries()) {
+		const subscriber = startSubscriber(kind, `sub${index + 1}:${kind}`, run);
+		// Observed here already, so that a failure while it waits is not unhandled.
+		subscriber.catch(() => {});
+		waiting.push({ session: await sessionOfNewClient(run), subscriber });
+	}
+	await relay.waitForLine(requestOpenedTowards(sessionOf(asked, run)));
+	for (const { session } of waiting) {
+		if (relay.matches(subscribeOkSent(session)).length > 0) {
+			throw new Error(
+				`the relay answered the subscriber of session ${session} before any publisher had the track`,
+			);
+		}
+	}
+
+	const other = await joinAsPublisher(otherKind, run, {
+		label: `pub:${otherKind}`,
+		payloadHex: hexOf(`other ${run.payloadHex}`),
+	});
+	// The PUBLISH gave the track its source: the subscribers are answered,
+	// and the publisher that was asked has not answered yet.
+	const subscribers: Subscriber[] = [];
+	for (const { session, subscriber } of waiting) {
+		const answered = await withTimeout(
+			subscriber,
+			`the subscriber of session ${session} to be answered after the PUBLISH`,
+		);
+		run.sessionOf.set(answered, session);
+		subscribers.push(answered);
+	}
+	if (asked.isServing()) {
+		throw new Error(
+			`${asked.label} had answered the relay's SUBSCRIBE when the subscribers were answered, so the run does not show that the PUBLISH answered them`,
+		);
+	}
+	const first = await other.send();
+	await allReceive(subscribers, first, other);
+
+	// "What the relay asked stays asked": the answer makes the publisher a
+	// further source, and its Group reaches the subscribers.
+	await asked.serving();
+	const second = await asked.send();
+	await allReceive(subscribers, second, asked);
+
+	await leaveInOrder(asked, run);
+	expectStillSubscribed(subscribers, run, `when ${asked.label} had left`);
+	await expectOwnPublishDone(other, await other.end());
+	const ended = await outcomes(subscribers);
+	await expectOneObjectEach(subscribers, [first], other);
+	await expectOneObjectEach(subscribers, [second], asked);
+	for (const { subscriber, outcome } of ended) {
+		expectPublishDone(subscriber, outcome, {
+			statusCode: TRACK_ENDED,
+			groups: [first, second],
+			abortedStreams: 0,
+		});
+	}
+	expectPublishDoneLines(subscribers, run);
+	await relayServesTheTrackAgain(run);
+
+	return {
+		summary: `the subscribers were answered by the PUBLISH of ${other.label} while ${asked.label} had not answered, and got Group ${first} from the one and Group ${second} from the other`,
+		subscriptions: subscriptionsOf(ended),
+		measured: {},
+	};
+}
+
 const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"publisher-killed": publisherKilled,
 	"last-object-then-close": lastObjectThenClose,
@@ -1405,6 +1534,7 @@ const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"slow-subscriber": slowSubscriber,
 	"same-group-twice": sameGroupTwice,
 	"second-source": secondSource,
+	"publish-while-asked": publishWhileAsked,
 };
 
 async function main(): Promise<void> {
@@ -1415,6 +1545,7 @@ async function main(): Promise<void> {
 		);
 	}
 	if (scenario !== "same-group-twice" && scenario !== "second-source") {
+		// `publish-while-asked` has two publishers and takes none of these.
 		refuseOptions(scenario, [
 			"first",
 			"first-sends",
