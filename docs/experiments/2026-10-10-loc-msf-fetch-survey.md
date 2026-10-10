@@ -1,7 +1,7 @@
 # What following LOC and MSF takes: the drafts, FETCH, and who else implements them
 
 - Date: 2026-10-10
-- Commit SHA: the commit that adds this record. Nothing in `crates/`, `packages/` or `interop/` was run or changed for it
+- Commit SHA: the commit that adds this record. Nothing in `crates/`, `packages/` or `interop/` was changed for it, and nothing was run for sections 1 to 7. Section 8, added on 2026-10-11, ran the parts of `main` at `1af2dbf9`
 - Roadmap item: groundwork for Phase 1. Material for how media is packaged; nothing is decided here, and no roadmap item is closed
 
 ## Objective
@@ -14,7 +14,7 @@ The project owner wants Phase 1 to package video as `draft-ietf-moq-loc` (LOC) a
 |---|---|
 | How | Reading. Two research passes were run for this record, one over the drafts and one over other implementations, both told to write nothing from memory and to quote. Their full tables are in [`spikes/msf-loc/msf-loc-moqt-sources.md`](../../spikes/msf-loc/msf-loc-moqt-sources.md) (541 lines) and [`spikes/msf-loc/implementations-sources.md`](../../spikes/msf-loc/implementations-sources.md) (161 lines), with a section, URL and quote a row |
 | Drafts, fetched 2026-10-10 from `https://www.ietf.org/archive/id/` | `draft-ietf-moq-msf-01` (2 June 2026), `draft-ietf-moq-loc-04` (20 July 2026) and its revisions `-00` to `-03`, `draft-ietf-moq-transport-18` and `-19` |
-| Implementations | Read on GitHub and in package registries on 2026-10-10. **None was built, run or connected to.** |
+| Implementations | Read on GitHub and in package registries on 2026-10-10. **None was built, run or connected to**, except moqlivemock in section 8, a day later |
 
 **Checked a second time for this record, from the source:** MSF-01 §4.1, §5 (the catalog and the Joining FETCH sentence), §6, §6.1 and §6.2; the reference entries of MSF-01; the transport revision each LOC revision cites; LOC-04's table of property IDs; the two property tables of transport draft 18 (§15.8); draft 18 §9.1 on caching and the numbers of FETCH, FETCH_OK and FETCH_HEADER; that draft 18 has no FETCH_CANCEL; the latest release of `Eyevinn/moqlivemock`, its publisher's source (`internal/pub/pub.go`), its README, its `go.mod` and the flags of its three commands. **Everything else is as the research passes wrote it**, in particular the count of MSF's requirements, the differences between transport drafts 18 and 19, and every implementation other than moqlivemock.
 
@@ -181,11 +181,67 @@ Read from the repository at `v0.16.1`; nothing was built.
 | Namespaces | LOC with an MSF catalog under `mlm/msf/clear`; the prefix is set with `-nsprefix` |
 | Transport | `moqt-18` only, over WebTransport and native QUIC |
 
-Not found out: how `mlmpub` is told to connect to a relay instead of listening (the flag texts imply it can); whether `mlmsub` and `mlmpub` accept the own relay's certificate by hash or need `mkcert`; how the interop directory would hold a Go program (the moqtail peers are copied sources that are built from `interop/peers/`). The README of moqlivemock names `draft-ietf-moq-msf-00` and `draft-mzanaty-moq-loc` in its LOC section and MSF-01 in its section on session setup, and its source LOC-04 for the Timestamp; which text it follows where it matters has to be read in the source.
+Section 8 has what running it showed. Not found out when this section was written: how `mlmpub` is told to connect to a relay instead of listening (the flag texts imply it can); whether `mlmsub` and `mlmpub` accept the own relay's certificate by hash or need `mkcert`; how the interop directory would hold a Go program (the moqtail peers are copied sources that are built from `interop/peers/`). The README of moqlivemock names `draft-ietf-moq-msf-00` and `draft-mzanaty-moq-loc` in its LOC section and MSF-01 in its section on session setup, and its source LOC-04 for the Timestamp; which text it follows where it matters has to be read in the source.
+
+### 8. moqlivemock run against the own parts (added 2026-10-11)
+
+A spike to fill in what section 7 lists as not found out. **Nothing was added to `interop/`, and `crates/`, `packages/` and `interop/` were not changed.** The source was cloned into a scratch directory outside the repository at tag `v0.16.1` (commit `91d903e9933a452f8baaa860f9fcd20cf195e077`) and built with Go 1.26.0 from `mise`, which the project's `mise.toml` still does not have. The own parts were those of `main` at `1af2dbf9`; macOS 14.4 arm64, loopback, ports 47200 to 47220.
+
+```sh
+go build -o ../bin/mlmpub ./cmd/mlmpub        # and mlmsub, mlmrel
+(cd cmd/mlmpub && mlmpub -addr 127.0.0.1:47200 -sideport 47201)
+xmoq-moqt-client --mode subscribe --objects 1  --url https://127.0.0.1:47200/moq --cert-sha256 <fingerprint> --namespace mlm/msf/clear --track catalog --trace
+xmoq-moqt-client --mode subscribe --objects 60 --url https://127.0.0.1:47200/moq --cert-sha256 <fingerprint> --namespace mlm/msf/clear --track video_400kbps_avc --trace
+mlmrel -addr 127.0.0.1:47220 -upstream https://127.0.0.1:47200/moq           # then the same two subscriptions against port 47220
+xmoq-relay --port 47210 ...; xmoq-moqt-client --mode publish --namespace xmoq/phase0 --track object ...
+mlmsub -addr https://127.0.0.1:47210 -namespace xmoq/phase0 -catalog-track object -duration 8
+```
+
+| | Question | Found |
+|---|---|---|
+| 1 | Do the three commands build? | **Yes**, at the first try. Run from `cmd/mlmpub`, `mlmpub` finds its asset; without certificate files each server makes a self-signed one in memory |
+| 2 | Can `mlmpub` connect to a relay? | **No.** It only listens: `cmd/mlmpub` has no call that dials, and its help text says it "acts as a MoQ server and publisher". The "listen or connect address" of `-addr` is misleading. **So `mlmpub` cannot publish through the own relay**, which does not connect to a publisher either. What can be run is an own client against `mlmpub`, an own client against `mlmrel` with `mlmpub` upstream, and `mlmsub` against the own relay |
+| 3 | Certificates | No `mkcert` and no change to the machine's trust was needed. As servers, `mlmpub` and `mlmrel` print the SHA-256 of the certificate they made (ECDSA, 14 days), `mlmpub` also serves it at `/fingerprint` of `-sideport`, and the own Rust client pins it. As clients, `mlmsub` and `mlmrel` do not verify the server's certificate at all (`InsecureSkipVerify: true` in the source, no flag) |
+| 4 | WebTransport | Both ways exist: `https://` in `-addr` or `-upstream` is WebTransport, at the path `/moq` on the servers. **Own client to moqlivemock server: works. moqlivemock client to the own relay: the WebTransport handshake fails**, below |
+| 5 | The catalog and a LOC video track at an own subscriber | Received, directly from `mlmpub` and through `mlmrel`, below |
+| 6 | `mlmsub` against the own relay | With the handshake worked around: SUBSCRIBE, then a Relative Joining FETCH, which the relay refuses, and `mlmsub` stops there. Below |
+
+**The WebTransport handshake between a moqlivemock client and the own relay fails on the `:protocol` of the CONNECT request.** The Go library moqlivemock uses (`Eyevinn/webtransport-go`, a fork of `quic-go/webtransport-go` 0.12.0) sends `webtransport-h3`, the token of `draft-ietf-webtrans-http3-15`; `web-transport-proto` 0.6.2, under the own relay's `web-transport-quinn` 0.13.2, accepts `webtransport` alone (`src/connect.rs`: `if protocol != Some("webtransport")`). `mlmsub` reports `http3: parsing frame failed: Application error 0x0 (remote)`; the relay prints `HANDSHAKE_FAILED connection lost: failed to exchange h3 connect`, and with the cause printed for one run (a temporary change, taken back), `WrongProtocol(Some("webtransport-h3"))`. The Go library has a switch for the old token, `Transport.LegacyConnectProtocol`, whose comment names exactly this case; **no command of moqlivemock has a flag for it.** For the rest of item 6 the scratch copy of `mlmsub` was built with that field set, a change of one line. The other direction needs nothing: the Go server takes the old token the own client sends.
+
+**What an own subscriber got from `mlmpub`** (and the same through `mlmrel`, which made no difference to what follows):
+
+| | Catalog track | `video_400kbps_avc` |
+|---|---|---|
+| SUBSCRIBE_OK | Track Alias 0, LARGEST_OBJECT {0, 0} | Track Alias 0, no parameter |
+| Objects | one: Group 0, Object 0, 2,715 bytes of JSON. **It came on the SUBSCRIBE alone, although the filter was Largest Object and the Object is the largest**: the publisher writes it to every new subscription "for backward compatibility with subscribe-only clients" (`internal/pub/pub.go`) | 60 asked for: 25 of Group 1791645264, 25 of 1791645265, 10 of the next. 25 frames a second |
+| Streams | one, header type `0x1C` (explicit Subgroup ID 0, END_OF_GROUP, no properties) | **one stream a Group**, as read in the source and unlike MSF-01 §6. Header type `0x15`: properties, explicit Subgroup ID 0, Publisher Priority 128, neither END_OF_GROUP nor FIRST_OBJECT |
+| Group ID | 0 | the wall-clock second |
+| Object Properties | none | **one on every Object: `0x10`, an integer of 8 bytes, the wall-clock time in microseconds** (1791645264000000 on the first Object of Group 1791645264). Properties Length 9. No Video Config (`0x0D`) and no Frame Marking |
+| Payload | | begins `00 00 00 19 67 4d 40 1f`: a length of 4 bytes and then the NAL unit, the SPS first on the key frame (20,434 bytes; the other frames about 900). Length-prefixed, not Annex B, with the parameter sets in the stream |
+
+The catalog: `"version":"draft-01"`, a `generatedAt`, 13 tracks, all `"packaging":"loc"` and `"isLive":true`: nine video (AVC `avc3.4D401F`, HEVC, AV1, at three bitrates) and four audio (AAC, Opus). A video track has `name`, `role`, `codec`, `bitrate`, `width`, `height`, `framerate`, `renderGroup`, `altGroup`, `lang`; none has `initData` or `timescale`.
+
+**The own Rust client read all of it without an error**: the SETUP, both SUBSCRIBE_OKs, a stream with 25 Objects, the property. That is the first time an own implementation read Objects and a property another implementation's publisher made up.
+
+**What `mlmsub` sent the own relay**, from its own log of control messages (the built copy with the old token; an own publisher had the track `object` in `xmoq/phase0`, and `mlmsub` was told to take that track for its catalog):
+
+| Step | Message |
+|---|---|
+| 1 | SETUP both ways; the session is established |
+| 2 | SUBSCRIBE, Request ID 0. The relay answers SUBSCRIBE_OK, Track Alias 0, LARGEST_OBJECT {0, 0} |
+| 3 | **FETCH, Request ID 2, Fetch Type 2 (Relative Joining), Joining Request ID 0, Joining Start 0** |
+| 4 | The relay answers REQUEST_ERROR, code `0x3` (NOT_SUPPORTED), Retry Interval 0 |
+| 5 | `mlmsub` logs `failed to retrieve catalog ... request rejected: NOT_SUPPORTED`, cancels the subscription (the relay sees a reset and STOP_SENDING with `0x1` on both request streams), asks for nothing else, and ends when its `-duration` is over. The relay closes the session then with "the peer closed its control stream" |
+
+When the track had no Object yet, the SUBSCRIBE_OK carried no LARGEST_OBJECT and `mlmsub` sent no FETCH at all: `catalog subscription reported no content; cannot perform joining fetch`. `mlmsub` has `-catalog-mode subscribe`, which was not run.
+
+**What this means for a FETCH in the own parts**, as facts: the one FETCH this peer sends is a Relative Joining FETCH with Joining Start 0 for a track with one Object; it is sent right after SUBSCRIBE_OK and only when that carried LARGEST_OBJECT; and a peer that is refused gives up the whole session's purpose, with no fallback to the Object the subscription delivers anyway.
+
+Not run: `mlmsub` against `mlmpub` (both theirs); `mlmrel` with the own relay or an own publisher as its upstream (it dials and subscribes to all namespaces); the own browser client against `mlmpub`; audio, HEVC, AV1 and the CMAF namespaces; a FETCH from any own part; decoding the video.
 
 ## Limitations and blockers
 
-- **Nothing was run.** Whether any of these implementations exchanges an Object, a catalog or a FETCH with XmoQ is not known. That an implementation "has" a feature means identifiers and code paths were found, mostly by the research pass.
+- **Nothing was run for sections 1 to 7; section 8 was added a day later and is the one run.** Apart from it, whether any of these implementations exchanges an Object, a catalog or a FETCH with XmoQ is not known. That an implementation "has" a feature means identifiers and code paths were found, mostly by the research pass.
 - **Only what is listed under "Checked a second time" was verified for this record.** The rest rests on the two research passes; their files say for each row where it comes from, and end with what they could not find.
 - MSF-01 and LOC-04 were read in full by the research pass, the earlier LOC revisions only for dates, references and IDs, and transport drafts 18 and 19 only in the sections on FETCH, properties, caching and subscriptions.
 - The drafts move: LOC changed its property numbers in three revisions in a row, and Joining FETCH is gone from transport draft 20. What is written here is the state of 2026-10-10.
