@@ -129,6 +129,33 @@ Against `mlmrel` with `mlmpub` upstream, while an `mlmsub` through the relay kep
 
 Nine captured messages were decoded by both own decoders to the same values, and encoded again by the TypeScript one to the same bytes: the Relative Joining FETCH and its FETCH_OK, three Standalone FETCHes (one with GROUP_ORDER Descending, one with Group IDs of five bytes), three FETCH_OKs, and the REQUEST_ERROR. They are in [`spikes/moqlivemock-fetch/out/messages.txt`](../../spikes/moqlivemock-fetch/out/messages.txt).
 
+### 5. A FETCH with FILL_TIMEOUT, and one with GROUP_ORDER, sent to `mlmpub` and to `mlmrel`
+
+Added later on 2026-10-11, with the own relay about to copy a subscriber's GROUP_ORDER and FILL_TIMEOUT into the FETCH it sends a publisher. §10.2.1 has a receiver close the session for a parameter it does not know in a message, so one subscriber's FETCH could end the session every subscriber of that publisher uses. The question: does this publisher close the session?
+
+Three Standalone FETCHes for (`mlm`, `msf`, `clear`) / `catalog`, {0, 0} to {1, 0}, each in a session of its own, written by hand and sent with `spikes/fetch-capture` (it writes the bytes it is given and prints what comes back; SETUP `af 00 00 00`). **Both hand-written messages were decoded by the own TypeScript decoder before they were sent**, and read as meant: FILL_TIMEOUT 500, and GROUP_ORDER Descending.
+
+```sh
+N=03036d6c6d036d736605636c65617207636174616c6f67      # the Track Namespace and Track Name
+C="spikes/fetch-capture/target/debug/xmoq-fetch-capture --url https://127.0.0.1:47200/moq --cert-sha256 <fingerprint mlmpub prints> --control af000000 --wait-ms 3000"
+$C --request "16001e00 01 $N 0000 0100 00"              # no parameter
+$C --request "16002100 01 $N 0000 0100 01 0a 81f4"      # FILL_TIMEOUT (0x0A) 500: 81 f4 by §1.4.1
+$C --request "16002000 01 $N 0000 0100 01 22 02"        # GROUP_ORDER (0x22) Descending
+# and the same three to mlmrel on 47220, started with -upstream moqt://127.0.0.1:47200
+```
+
+| Sent to | FETCH | Answer | The session |
+|---|---|---|---|
+| `mlmpub` | no parameter | FETCH_OK `18 00 04 00 01 00 00` (End Location {1, 0}), and a fetch stream with the catalog as Object {0, 0}, ended with a FIN | open until the tool left, 3 seconds later |
+| `mlmpub` | FILL_TIMEOUT 500 | the same | the same |
+| `mlmpub` | GROUP_ORDER Descending | the same | the same |
+| `mlmrel` | all three | the same three answers, from `mlmpub`: its log has "proxying fetch" | open, and so was the session between `mlmrel` and `mlmpub`, which served all three |
+
+- **Neither closed a session, and neither refused.** `mlmpub` logged "served catalog via FETCH" for each. Its session ended when the tool left without closing in order ("peer closed its control stream"), 3 seconds after the FETCH_OK.
+- **`mlmrel` does not pass FILL_TIMEOUT on, and always sends a GROUP_ORDER.** What `mlmpub` received from it for the three: `... 01 22 01`, `... 01 22 01` and `... 01 22 02`, with Request IDs 2, 4 and 6. So the FETCH with FILL_TIMEOUT went upstream without it and with GROUP_ORDER Ascending, and the one with Descending kept its order.
+- Whether either of them does anything with the two parameters was not seen: the catalog is one Object in one Group, so no order shows, and nothing has to be waited for.
+- One run each. `mlmpub` answers a FETCH for its catalog only, so no other track was asked for.
+
 ## Limitations and blockers
 
 - **The indicators were written by the library because this spike told it to**, with values chosen here. They show how that library encodes and decodes an indicator, which is what the readings in question are about; they are not something a deployed publisher sent.
