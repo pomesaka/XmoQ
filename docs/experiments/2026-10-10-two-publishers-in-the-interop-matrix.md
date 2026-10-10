@@ -158,6 +158,28 @@ A review of the scenarios found two checks that passed where they should not, an
 
 The driver also refuses options that mean nothing where they are given: the options of these two scenarios in another one, a moqtail client as the second publisher, a moqtail subscriber in `second-source`, and `--second-resends` with another `--first` than `done`.
 
+### A PUBLISH while the relay waits for another publisher's answer
+
+Added on 2026-10-11, on `main` at `eff75aaa`, for a change to the relay that was merged in between (a PUBLISH from another session than the one the relay has asked is accepted and answers the subscribers). Scenario `publish-while-asked` of `disconnect.ts`; the expectations were written from the notes before the run and not changed after it.
+
+| Requirement | Row of the notes | Checked by |
+|---|---|---|
+| Subscribers wait, without SUBSCRIBE_OK, while the publisher the relay asked has not answered | "Subscribers while the publisher has not answered the relay's SUBSCRIBE"; §9.4 | no SUBSCRIBE_OK line towards a subscriber when the relay has opened its request towards the publisher that announced the namespace |
+| A PUBLISH from another session gives the track its source, and the subscribers that waited get SUBSCRIBE_OK | "PUBLISH for a track the relay knows already" | the subscribers are answered after the PUBLISH, and the publisher that was asked has not answered then (it answers 3 seconds late; the run fails if it had) |
+| What the relay asked stays asked, and the answer makes that publisher a further source | the same row; "The publisher's answer to the relay's SUBSCRIBE" | Group 0 arrives with the payload of the publisher that sent PUBLISH, Group 1 with that of the one that was asked; one Object each at every subscriber; the subscriptions go on when the one that was asked leaves, and end with PUBLISH_DONE `TRACK_ENDED`, Stream Count 2, when both have left |
+
+Run: two own-rust publishers, an own-rust and an own-browser subscriber. A spike of the relay change had the same flow with Rust clients only.
+
+| Run | Result |
+|---|---|
+| The scenario, once, as first written | passed |
+| `mise run check` | passed, 392 TypeScript tests |
+| `mise run interop` | 56 of 56 pairings in 34.9 seconds |
+| The 24 leaving scenarios, 20 rounds | 20 of 20 rounds, 17.5 to 26.6 seconds a round; this scenario took 3.8 to 4.7 seconds and runs beside the ones that wait. A killed own-rust publisher was noticed after 9.0 seconds in 20 of 20, a killed subscriber after 6.0 to 6.1 |
+| Temporary change to the relay core, taken back: a PUBLISH no longer answers the subscribers that waited | the scenario fails: `timed out waiting for sub1:own-rust to print /^SUBSCRIBED /` |
+
+Not run: a PUBLISH from the same session that was asked, where the relay's SUBSCRIBE gives way; the relay's tests cover it.
+
 ## Limitations and blockers
 
 - **The relay change was under review when the runs were made.** The last runs are on `a44c8854`; if it changes again, they have to be made again.

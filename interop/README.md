@@ -51,7 +51,7 @@ Every pairing, from `interop/`:
 bun matrix.ts
 ```
 
-`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except five that mostly wait, four for the relay to give up on a client that vanished (6 to 9 seconds each) and one for a page to give up on late streams (5 seconds): those start together after the pairings that move one Object, and go on beside the ones that follow.
+`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except six that mostly wait, four for the relay to give up on a client that vanished (6 to 9 seconds each), one for a publisher that answers the relay 3 seconds late, and one for a page to give up on late streams (5 seconds): those start together after the pairings that move one Object, and go on beside the ones that follow.
 
 | Pairings, through each relay | What is expected |
 |---|---|
@@ -61,7 +61,7 @@ bun matrix.ts
 
 The runs in which a client leaves go through the own relay only, because the driver waits for lines only that relay prints. Their names begin with `leaving:`. What each has to show, and why, is in the [record](../docs/experiments/2026-10-10-disconnects-through-own-relay.md).
 
-| Runs with a client that leaves, or with two publishers of the track (23) | What is expected |
+| Runs with a client that leaves, or with two publishers of the track (24) | What is expected |
 |---|---|
 | The publisher is killed, or its page closed, after its Objects arrived (3) | Every own subscriber sees PUBLISH_DONE `TRACK_ENDED` with the Stream Count of the streams it got, and a stream the publisher left open ends with a reset with CANCELLED. A killed publisher has to be noticed within 10.5 seconds, and a killed subscriber within 7.5 |
 | The publisher sends one Object and closes its session at once (4) | Every subscriber receives the Object, and every own subscriber then sees PUBLISH_DONE |
@@ -74,6 +74,7 @@ The runs in which a client leaves go through the own relay only, because the dri
 | The first of two publishers sends Group 0 and goes, by PUBLISH_DONE, by being killed, or as a page that is closed with a stream of Group 1 open; the second then sends the next Group (3) | The relay sends no subscriber PUBLISH_DONE while the second is there. The next Group arrives with the second publisher's payload. A stream the first left open ends with a reset with CANCELLED. When the second has left: PUBLISH_DONE `TRACK_ENDED`, the Stream Count of every Group, the reset one among them. A killed publisher has to be noticed within 10.5 seconds |
 | The first of two `own-rust` publishers sends ten Groups and leaves with PUBLISH_DONE; the second then sends the same ten again, and after them the next (1) | No subscriber is told when the first leaves. All ten streams the second sends again are stopped (`STOP_DATA … code=0x1`), the two for Groups the relay no longer remembers a source for among them, and none is opened towards the subscriber a second time. The next Group arrives from the second. At the end: PUBLISH_DONE `TRACK_ENDED` with eleven Groups |
 | A second publisher joins a track whose subscribers already have an Object, and sends the next Group (1) | The PUBLISH is accepted, the Group arrives with the second publisher's payload, and the subscriptions end when both have left |
+| An `own-rust` publisher announces the namespace and answers the relay's SUBSCRIBE 3 seconds late; another sends PUBLISH for the track meanwhile (1) | The subscribers get no SUBSCRIBE_OK while only the first publisher is there. The PUBLISH answers them, before the first publisher has answered the relay. They get Group 0 from the one that sent PUBLISH and, when the other has answered, Group 1 from that one. The track ends when both have left |
 
 Each of these runs ends by moving one more Object over the same track with a fresh publisher and two fresh subscribers, and by having that publisher leave. One subscriber stays and has to see PUBLISH_DONE: a relay that still held a source of the run would take the fresh publisher as one more source and pass the Object, but it could not end the track when that publisher leaves.
 
@@ -119,8 +120,8 @@ bun disconnect.ts --scenario subscriber-leaves --publisher own-browser --leaver 
 
 | Option of `disconnect.ts` | Values |
 |---|---|
-| `--scenario` | `publisher-killed`, `last-object-then-close`, `subscriber-leaves`, `slow-subscriber`, `same-group-twice`, `second-source` |
-| `--publisher` | A client, `own-rust` by default. `same-group-twice` and `second-source` take it twice, the first publisher and the second; the other scenarios take one and refuse more |
+| `--scenario` | `publisher-killed`, `last-object-then-close`, `subscriber-leaves`, `slow-subscriber`, `same-group-twice`, `second-source`, `publish-while-asked` |
+| `--publisher` | A client, `own-rust` by default. `same-group-twice`, `second-source` and `publish-while-asked` take it twice, the first publisher and the second (in `publish-while-asked` the first is the one that is asked and has to be `own-rust`); the other scenarios take one and refuse more |
 | `--subscriber` | A client; give it once per subscriber. Used by every scenario but `subscriber-leaves` |
 | `--leaver` | `subscriber-leaves` only, once per subscriber that leaves: `<client>:cancel` (the subscription ends, the session stays), `<client>:close` (the client closes its session in order) or `<client>:kill` (the process is killed, or the page closed) |
 | `--stayer` | `subscriber-leaves` only: a client, once per subscriber that stays |

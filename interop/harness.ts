@@ -532,7 +532,9 @@ export function spawnRustClient(
 	context: RunContext,
 	label: string,
 	client: RustClient,
-	mode: "publish" | "subscribe",
+	// "publish-namespace" is a mode of the own Rust client alone: it announces
+	// the namespace and serves the track when it is asked for it.
+	mode: "publish" | "publish-namespace" | "subscribe",
 	track: string,
 	extraArgs: string[] = [],
 ): LoggedProcess {
