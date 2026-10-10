@@ -131,7 +131,38 @@ struct Args {
     /// On loopback that window is too short to hit on purpose; the delays
     /// widen it.
     answer_delay: Duration,
+    /// `--publish-on-line`: the publisher prints `READY_TO_PUBLISH` where it
+    /// would send its PUBLISH, and sends it when the driver writes the line
+    /// `publish`.
+    ///
+    /// WHY a line and not only a delay: a driver that wants the PUBLISH to
+    /// arrive within a window some other peer opens (a relay that waits a few
+    /// seconds for an answer) cannot have this client start and connect
+    /// inside that window on a loaded machine. Everything that takes time is
+    /// done before the line.
+    publish_on_line: bool,
+    /// `--serve-on-line`: the client prints `ASKED request_id=N` for the
+    /// SUBSCRIBE it would serve, and sends `SUBSCRIBE_OK` when the driver
+    /// writes the line `serve`.
+    serve_on_line: bool,
     trace: Trace,
+}
+
+/// The lines of the driver, on stdin.
+type DriverLines = tokio::io::Lines<BufReader<tokio::io::Stdin>>;
+
+/// Waits for the line `expected` of the driver.
+///
+/// # Errors
+///
+/// Fails for another line, and when stdin is closed: the driver is gone, and
+/// the client leaves as it does wherever it waits for a line.
+async fn wait_for_line(stdin: &mut DriverLines, expected: &str) -> Result<()> {
+    match stdin.next_line().await? {
+        Some(line) if line.trim() == expected => Ok(()),
+        Some(line) => bail!("waited for the line {expected}, not {line:?}"),
+        None => bail!("stdin closed before the line {expected}"),
+    }
 }
 
 impl Args {
@@ -228,12 +259,20 @@ fn parse_args() -> Result<Args> {
     let mut object_properties = Vec::new();
     let mut serve_delay_ms = 0;
     let mut answer_delay_ms = 0;
+    let mut publish_on_line = false;
+    let mut serve_on_line = false;
     let mut trace = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
-        if flag == "--trace" {
-            trace = true;
+        let switch = match flag.as_str() {
+            "--trace" => Some(&mut trace),
+            "--publish-on-line" => Some(&mut publish_on_line),
+            "--serve-on-line" => Some(&mut serve_on_line),
+            _ => None,
+        };
+        if let Some(switch) = switch {
+            *switch = true;
             continue;
         }
         let value = args
@@ -300,6 +339,8 @@ fn parse_args() -> Result<Args> {
         object_properties,
         serve_delay: Duration::from_millis(serve_delay_ms),
         answer_delay: Duration::from_millis(answer_delay_ms),
+        publish_on_line,
+        serve_on_line,
         trace: if trace {
             Trace::new(report::trace)
         } else {
@@ -599,7 +640,10 @@ impl Client<'_> {
 
     /// Announces the namespace and offers the track. The returned streams have
     /// to stay open for as long as the track is published.
-    async fn offer_track(&mut self) -> Result<(RequestStream, RequestId, RequestStream)> {
+    async fn offer_track(
+        &mut self,
+        stdin: &mut DriverLines,
+    ) -> Result<(RequestStream, RequestId, RequestStream)> {
         let (namespace_request, message) = self
             .session
             .publish_namespace(self.args.track_namespace()?, vec![])?;
@@ -614,6 +658,10 @@ impl Client<'_> {
             }
         }
         tokio::time::sleep(self.args.publish_delay).await;
+        if self.args.publish_on_line {
+            report::ready_to_publish();
+            wait_for_line(stdin, "publish").await?;
+        }
 
         let (publish_request, message) = self.session.publish(
             self.args.full_track_name()?,
@@ -698,8 +746,9 @@ impl Client<'_> {
     }
 
     async fn publish(&mut self, payload: &[u8]) -> Result<()> {
+        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
         let (_namespace_stream, mut publish_request, mut publish_stream) =
-            self.offer_track().await?;
+            self.offer_track(&mut stdin).await?;
 
         // The driver writes a line for every Object it wants sent, once the
         // subscribers are ready, and closes stdin when it is done; the session
@@ -711,7 +760,6 @@ impl Client<'_> {
         // Track Alias or the same one; see `Self::publish_anew`. `publish-done`
         // and then `publish-anew` or `publish-anew-same-alias` do the same in
         // two steps, with whatever the driver waits for in between.
-        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
         let mut track_alias = PUBLISH_TRACK_ALIAS;
         // Objects sent in all, and data streams of the subscription as it is.
         let (mut sent, mut stream_count) = (0, 0);
@@ -947,7 +995,8 @@ impl Client<'_> {
                     None => break,
                 },
                 event = peer_requests.next_event() => {
-                    self.on_peer_request_event(event?, &track, &mut serving).await?;
+                    self.on_peer_request_event(event?, &track, &mut serving, &mut stdin)
+                        .await?;
                 }
                 // §5.1: the subscriber ends the subscription with STOP_SENDING.
                 // This client has no subgroup stream open between Objects, so
@@ -1014,12 +1063,24 @@ impl Client<'_> {
         Ok(())
     }
 
+    /// What the flags put between a SUBSCRIBE of the peer and its
+    /// `SUBSCRIBE_OK`: a time, and a line of the driver.
+    async fn before_serving(&self, request: PeerRequestId, stdin: &mut DriverLines) -> Result<()> {
+        tokio::time::sleep(self.args.serve_delay).await;
+        if self.args.serve_on_line {
+            report::asked(request.value());
+            wait_for_line(stdin, "serve").await?;
+        }
+        Ok(())
+    }
+
     /// One event of a request stream the peer opened, in the serving mode.
     async fn on_peer_request_event(
         &mut self,
         event: PeerRequestStreamEvent<<WtConnection as Connection>::Send>,
         track: &FullTrackName,
         serving: &mut Option<Serving>,
+        stdin: &mut DriverLines,
     ) -> Result<()> {
         let wire = &self.args.trace;
         match event {
@@ -1042,7 +1103,7 @@ impl Client<'_> {
                     PeerRequest::Subscribe(subscribe) if subscribe.full_track_name == *track
                 );
                 if wanted && serving.is_none() {
-                    tokio::time::sleep(self.args.serve_delay).await;
+                    self.before_serving(request, stdin).await?;
                     let (track_alias, ok) =
                         self.session.accept_subscribe(request, vec![], vec![])?;
                     xmoq_moqt_io::send_message(&mut send, &ok, wire, &label).await?;

@@ -175,3 +175,15 @@ pub fn stream_aborted(stream: u64, code: Option<u32>) {
         None => println!("STREAM_ABORTED uni#{stream}"),
     }
 }
+
+/// `--publish-on-line`: the publisher has done everything before its PUBLISH
+/// and waits for the driver's line `publish`.
+pub fn ready_to_publish() {
+    println!("READY_TO_PUBLISH");
+}
+
+/// `--serve-on-line`: the SUBSCRIBE this client would serve has come, with
+/// this Request ID, and waits for the driver's line `serve`.
+pub fn asked(request_id: u64) {
+    println!("ASKED request_id={request_id}");
+}
