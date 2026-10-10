@@ -26,9 +26,17 @@ export const StreamResetErrorCode = {
 	MALFORMED_TRACK: 0x12,
 } satisfies Record<string, number>;
 
-/** REQUEST_ERROR codes (§15.10.2) this implementation sends. */
+/** REQUEST_ERROR codes (§15.10.2): the ones this implementation sends, and one an application refuses a request with. */
 export const RequestErrorCode = {
+	/** An error of this endpoint: a handler of the application failed. */
+	INTERNAL_ERROR: 0x0n,
 	NOT_SUPPORTED: 0x3n,
+	/** Too many requests of the peer are open (§10.6.2). */
+	EXCESSIVE_LOAD: 0x9n,
+	/** The Track is not one this endpoint has (§10.6.2). Not sent by the library; for an application that refuses a request. */
+	DOES_NOT_EXIST: 0x10n,
+	/** The request would make a second subscription to a Track in one role (§5.1). */
+	DUPLICATE_SUBSCRIPTION: 0x19n,
 	/** The range of a FETCH is not valid (§10.6.2). */
 	INVALID_RANGE: 0x11n,
 	/** The Joining Request ID of a Joining FETCH names no subscription of the session (§10.12.2). */

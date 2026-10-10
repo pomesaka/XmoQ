@@ -64,6 +64,12 @@ export interface StreamIo {
 	perform(output: StreamOutput): Promise<Backpressure | undefined>;
 	/** Starts accepting the streams the peer opens. */
 	acceptPeerStreams(): void;
+	/**
+	 * How many streams something is kept of, in either direction. Nothing
+	 * acts on it; a test reads it to see that a stream that has ended in
+	 * both directions is forgotten.
+	 */
+	heldStreams(): number;
 	/** Forgets every stream. The transport session is closing and takes them down. */
 	clear(): void;
 }
@@ -76,6 +82,8 @@ interface PeerStream {
 }
 
 interface LocalStream {
+	/** Name of the stream in `trace`. */
+	name: string;
 	writer: WritableStreamDefaultWriter<Uint8Array>;
 	/** Present on bidirectional streams until their read side has ended. */
 	reader: ReadableStreamDefaultReader<unknown> | undefined;
@@ -114,6 +122,12 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	>();
 	/** The peer's bidirectional streams, until their receiving sides have ended. */
 	const peerBidiStreams = new Map<number, PeerStream>();
+	/**
+	 * The peer's bidirectional streams the session took over
+	 * (`adopt-peer-stream`), with the number it gave each, until their
+	 * receiving sides have ended.
+	 */
+	const adoptedPeerStreams = new Map<number, number>();
 	/**
 	 * Starts the time a stream of the peer has to say what it is. The timer
 	 * is kept with the stream (`PeerStream`), so that it goes when the
@@ -211,29 +225,30 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * and the rest stays with the transport, where the peer waits.
 	 *
 	 * A stream holds its place until the peer has ended its direction, also
-	 * after the request was answered.
+	 * after the request was answered. A SUBSCRIBE that was accepted holds it
+	 * for as long as the subscription lasts, unless its subscriber finishes
+	 * its direction before.
 	 *
 	 * A stream that does not send its first message whole is stopped after
 	 * `firstBytesTimeoutMs` (`startFirstBytesTimer` above).
 	 *
-	 * FIXME: nothing ends a stream whose request was answered and whose peer
+	 * FIXME: nothing ends a stream whose request was refused and whose peer
 	 * does not end its direction: as many of them as the limit keep every
-	 * later request of the peer from being read. The same holds for a subgroup
-	 * stream that stays open after its header, among the unidirectional
-	 * streams. The Rust implementation has the same ("how long it stays open
-	 * is the business of the two endpoints", crates/moqt-io/src/streams.rs).
-	 * Before this endpoint serves a request of the peer, decide what ends
-	 * such a stream.
+	 * later request of the peer from being read. (A subscription this
+	 * endpoint ended with PUBLISH_DONE is not among them: the peer's
+	 * direction is stopped after `peerStreamEndTimeoutMs`.) The Rust
+	 * implementation has the same ("how long it stays open is the business
+	 * of the two endpoints", crates/moqt-io/src/streams.rs).
+	 *
+	 * A subgroup stream that stays open after its header holds a place among
+	 * the unidirectional streams in the same way, and is left to: a time
+	 * would end a Group that is sent slowly, which is a way to publish.
 	 */
 	const bidiSlots = createStreamSlots(maxPeerBidiStreams);
 
-	const write = (
-		stream: number,
-		writer: WritableStreamDefaultWriter<Uint8Array>,
-		data: Uint8Array,
-	): Promise<void> => {
-		trace("sent", streamName("local", stream), data);
-		return writer.write(data);
+	const write = (local: LocalStream, data: Uint8Array): Promise<void> => {
+		trace("sent", local.name, data);
+		return local.writer.write(data);
 	};
 
 	/**
@@ -355,20 +370,28 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 				case "open-uni-stream": {
 					const writable = await transport.createUnidirectionalStream();
 					const writer = writable.getWriter();
-					localStreams.set(output.stream, {
+					const local: LocalStream = {
+						name: streamName("local", output.stream),
 						writer,
 						reader: undefined,
 						sendClosed: false,
-					});
+					};
+					localStreams.set(output.stream, local);
 					watchStop(output.stream, writer);
-					return { settled: write(output.stream, writer, output.data) };
+					return { settled: write(local, output.data) };
 				}
 				case "open-bidi-stream": {
 					const { stream } = output;
 					const bidi = await transport.createBidirectionalStream();
 					const writer = bidi.writable.getWriter();
 					const reader = bidi.readable.getReader();
-					localStreams.set(stream, { writer, reader, sendClosed: false });
+					const local: LocalStream = {
+						name: streamName("local", stream),
+						writer,
+						reader,
+						sendClosed: false,
+					};
+					localStreams.set(stream, local);
 					void pump({
 						name: streamName("local", stream),
 						reader,
@@ -386,14 +409,35 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 						},
 					});
 					watchStop(stream, writer);
-					return { settled: write(stream, writer, output.data) };
+					return { settled: write(local, output.data) };
+				}
+				case "adopt-peer-stream": {
+					const { peerStream, stream } = output;
+					const writer = peerBidiWriters.get(peerStream);
+					const reader = peerBidiStreams.get(peerStream)?.reader;
+					// The session adopts a stream while it handles bytes of it,
+					// and the stream is forgotten only after that.
+					if (writer === undefined || reader === undefined) {
+						throw new Error(`peer stream ${peerStream} is not open`);
+					}
+					peerBidiWriters.delete(peerStream);
+					adoptedPeerStreams.set(peerStream, stream);
+					localStreams.set(stream, {
+						name: streamName("peer-bidi", peerStream),
+						writer,
+						reader,
+						sendClosed: false,
+					});
+					// A subscriber ends its subscription by stopping this stream.
+					watchStop(stream, writer);
+					return undefined;
 				}
 				case "send": {
 					const local = localStreams.get(output.stream);
 					if (local === undefined) {
 						throw new Error(`stream ${output.stream} is not open`);
 					}
-					return { settled: write(output.stream, local.writer, output.data) };
+					return { settled: write(local, output.data) };
 				}
 				case "finish": {
 					const local = localStreams.get(output.stream);
@@ -539,10 +583,22 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 						reader,
 						onData: (session, data, fin) =>
 							session.receivePeerBidiStreamData(peerStream, data, fin),
-						onReset: (session) => session.peerBidiStreamReset(peerStream),
+						onReset: (session, error) =>
+							session.peerBidiStreamReset(
+								peerStream,
+								transport.streamErrorCode(error),
+							),
 						onEnd() {
 							forgetPeerStream("bidi", peerStream);
 							bidiSlots.release();
+							// A stream the session took over is ended by the session.
+							const adopted = adoptedPeerStreams.get(peerStream);
+							if (adopted !== undefined) {
+								adoptedPeerStreams.delete(peerStream);
+								const local = localStreams.get(adopted);
+								if (local !== undefined) local.reader = undefined;
+								releaseLocalStream(adopted);
+							}
 							// The request ended without an answer from this endpoint,
 							// so the send side was never used. Closing it can only fail
 							// if the peer already stopped it.
@@ -556,6 +612,13 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 			);
 		},
 
+		heldStreams: () =>
+			localStreams.size +
+			peerUniStreams.size +
+			peerBidiStreams.size +
+			peerBidiWriters.size +
+			adoptedPeerStreams.size,
+
 		clear() {
 			localStreams.clear();
 			for (const streams of [peerUniStreams, peerBidiStreams]) {
@@ -565,6 +628,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 				streams.clear();
 			}
 			peerBidiWriters.clear();
+			adoptedPeerStreams.clear();
 			cleared = true;
 			uniSlots.close();
 			bidiSlots.close();

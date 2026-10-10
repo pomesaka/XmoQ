@@ -1139,6 +1139,147 @@ mod tests {
         }
     }
 
+    /// One row of `fixtures/peer-subscribe/opened.tsv`; see its README.
+    #[derive(Debug)]
+    struct OpenedRow {
+        name: String,
+        before: String,
+        /// One SUBSCRIBE, whole, as the server sends it.
+        sent: Vec<u8>,
+        /// `handed`, `refused 0x..` or `closed 0x..`.
+        outcome: String,
+    }
+
+    fn opened_rows(table: &str) -> Result<Vec<OpenedRow>, String> {
+        let Some(body) = table.strip_suffix('\n') else {
+            return Err("the last row does not end with a line feed".to_string());
+        };
+        let mut rows = Vec::new();
+        for line in body.split('\n') {
+            let columns: Vec<&str> = line.split('\t').collect();
+            let [name, before, hex, outcome] = columns.as_slice() else {
+                return Err(format!("not four fields: {line:?}"));
+            };
+            if hex.len() % 2 != 0
+                || hex
+                    .bytes()
+                    .any(|digit| !b"0123456789abcdef".contains(&digit))
+            {
+                return Err(format!("not lower-case hexadecimal bytes: {hex:?}"));
+            }
+            let sent = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
+                .collect::<Result<Vec<u8>, _>>()
+                .map_err(|error| format!("{hex:?}: {error}"))?;
+            if rows.iter().any(|row: &OpenedRow| row.name == *name) {
+                return Err(format!("twice: {name:?}"));
+            }
+            rows.push(OpenedRow {
+                name: (*name).to_string(),
+                before: (*before).to_string(),
+                sent,
+                outcome: (*outcome).to_string(),
+            });
+        }
+        Ok(rows)
+    }
+
+    /// The one message `bytes` are.
+    fn whole_message(bytes: &[u8]) -> ControlMessage {
+        match ControlMessage::decode(bytes) {
+            Ok(Some((message, used))) if used == bytes.len() => message,
+            other => panic!("not one whole message: {other:?}"),
+        }
+    }
+
+    /// A client's session in the state the column `before` of
+    /// `fixtures/peer-subscribe/opened.tsv` names. `subscribe` is the
+    /// SUBSCRIBE of the server with the Request ID 1 for the track "object".
+    fn session_before(before: &str, subscribe: &ControlMessage) -> Session {
+        let mut session = Session::new(Role::Client, Transport::WebTransport);
+        session.setup(vec![]).unwrap();
+        let object = FullTrackName::new(
+            TrackNamespace::new(vec![b"xmoq".to_vec(), b"phase0".to_vec()]).unwrap(),
+            b"object".to_vec(),
+        )
+        .unwrap();
+        // The request of the server that came before, handed to the caller.
+        let handed = |session: &mut Session| match session.on_peer_request_opened(subscribe.clone())
+        {
+            Ok(PeerRequestOpened::Request(request, PeerRequest::Subscribe(_))) => request,
+            other => panic!("{before}: {other:?}"),
+        };
+        match before {
+            "nothing" => {}
+            "publish" => {
+                session.publish(object, 1, vec![], vec![]).unwrap();
+            }
+            "subscribe" => {
+                handed(&mut session);
+            }
+            "subscribe-accepted" => {
+                let request = handed(&mut session);
+                session.accept_subscribe(request, vec![], vec![]).unwrap();
+            }
+            "subscribe-done" => {
+                let request = handed(&mut session);
+                session.accept_subscribe(request, vec![], vec![]).unwrap();
+                session
+                    .subscribe_done(request, 0x2, 0, ReasonPhrase::default())
+                    .unwrap();
+            }
+            "subscribe-rejected" => {
+                let request = handed(&mut session);
+                session
+                    .reject(request, 0x10, 0, ReasonPhrase::default())
+                    .unwrap();
+            }
+            other => panic!("a state the test does not know: {other}"),
+        }
+        session
+    }
+
+    /// The contract `fixtures/peer-subscribe/` pins for both implementations:
+    /// what the session makes of a SUBSCRIBE the peer sends, before the
+    /// caller sees it.
+    #[test]
+    fn a_subscribe_of_the_peer_is_handed_on_refused_or_fatal_where_the_shared_table_says() {
+        let path = format!(
+            "{}/../../fixtures/peer-subscribe/opened.tsv",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let table = std::fs::read_to_string(&path).expect("the fixture is there");
+        let rows = opened_rows(&table).unwrap_or_else(|error| panic!("{path}: {error}"));
+        // Every row of the table is read here; a row that is added is run.
+        assert_eq!(rows.len(), 10, "{path}");
+        // The README has the request that came before be the SUBSCRIBE of
+        // the first row: Request ID 1, for the track "object".
+        let first = rows.first().expect("rows");
+        assert_eq!(
+            (first.name.as_str(), first.before.as_str()),
+            ("first-request", "nothing")
+        );
+        let subscribe = whole_message(&first.sent);
+        for row in &rows {
+            let mut session = session_before(&row.before, &subscribe);
+            let outcome = match session.on_peer_request_opened(whole_message(&row.sent)) {
+                Ok(PeerRequestOpened::Request(_, PeerRequest::Subscribe(_))) => {
+                    "handed".to_string()
+                }
+                Ok(PeerRequestOpened::Refused {
+                    response: ControlMessage::RequestError(error),
+                }) => format!("refused {:#x}", error.error_code),
+                Err(error) => match error.termination_code() {
+                    Some(code) => format!("closed {:#x}", code.code()),
+                    None => panic!("{row:?}: an error that closes no session: {error:?}"),
+                },
+                other => panic!("{row:?}: {other:?}"),
+            };
+            assert_eq!(outcome, row.outcome, "{row:?}");
+        }
+    }
+
     #[test]
     fn requests_this_crate_does_not_implement_are_refused_not_fatal() {
         let mut session = server();

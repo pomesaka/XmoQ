@@ -108,6 +108,25 @@ const OBJECT_PROPERTIES: Pairing[] = OWN_CLIENTS.flatMap((publisher) =>
 );
 
 /**
+ * A page that announces the namespace and sends no PUBLISH: the relay asks
+ * it for the track with a SUBSCRIBE of its own, and the page sends on that
+ * subscription (`serve` of `@xmoq/moqt`). Both relays ask.
+ */
+const ANNOUNCE_ONLY: Pairing[] = ["moqtail-rust", "own-rust"].map(
+	(subscriber): Pairing => ({
+		name: `own-browser only announces the namespace, and serves ${subscriber} when the relay asks it`,
+		script: "run.ts",
+		args: [
+			"--publisher",
+			"own-browser",
+			"--subscriber",
+			subscriber,
+			"--announce-only",
+		],
+	}),
+);
+
+/**
  * One publisher and three subscribers: every subscriber has to get the Object
  * and then see PUBLISH_DONE. One row per own client as the subscribers.
  */
@@ -547,6 +566,21 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
+		// The page sends on a subscription the relay asked for: `serve` of
+		// `@xmoq/moqt`. It is the first to announce and the first to send, so
+		// its Group is Group 0, the one a page can start at.
+		name: "an own-browser page and an own-rust publisher only announce the namespace; the relay asks both, and own-rust and own-browser get a Group of each",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"ask-all",
+			"--ask",
+			"two-announcers",
+			...each("publisher", ["own-browser", "own-rust"]),
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
 		name: "two own-rust publishers only announce the namespace; the relay asks both, and own-rust and own-browser get a Group of each",
 		script: "disconnect.ts",
 		args: [
@@ -869,9 +903,13 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 	});
 	return [
 		...relays.flatMap((relay) =>
-			[...transfers(), ...OBJECT_PROPERTIES, ...ONE_TO_MANY, ...REFUSALS].map(
-				(pairing) => named(relay, pairing),
-			),
+			[
+				...transfers(),
+				...OBJECT_PROPERTIES,
+				...ANNOUNCE_ONLY,
+				...ONE_TO_MANY,
+				...REFUSALS,
+			].map((pairing) => named(relay, pairing)),
 		),
 		// "fetch: " lets `--only` pick these runs alone.
 		...relays.flatMap((relay) =>

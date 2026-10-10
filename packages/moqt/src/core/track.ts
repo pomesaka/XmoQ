@@ -110,3 +110,17 @@ export function encodeFullTrackName(
 	writeNamespace(writer, trackNamespace);
 	writer.varint(trackName.length).bytes(trackName);
 }
+
+/** Whether two Full Track Names are the same, field by field and byte by byte (§2.4.1). */
+export function sameFullTrackName(a: FullTrackName, b: FullTrackName): boolean {
+	const sameBytes = (x: Uint8Array, y: Uint8Array): boolean =>
+		x.length === y.length && x.every((byte, index) => byte === y[index]);
+	return (
+		sameBytes(a.trackName, b.trackName) &&
+		a.trackNamespace.length === b.trackNamespace.length &&
+		a.trackNamespace.every((field, index) => {
+			const other = b.trackNamespace[index];
+			return other !== undefined && sameBytes(field, other);
+		})
+	);
+}

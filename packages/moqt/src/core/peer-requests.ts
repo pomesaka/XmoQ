@@ -5,10 +5,37 @@ import {
 	encodeControlMessage,
 	FETCH_MESSAGE_TYPE,
 	type FetchRange,
+	SUBSCRIBE_MESSAGE_TYPE,
+	type Subscribe,
 } from "./control-message.ts";
 import { MoqtError, RequestErrorCode, SessionErrorCode } from "./error.ts";
 import { endsBefore } from "./parameters.ts";
+import type { PeerSubscribeOpened } from "./requests.ts";
 import type { SessionOutput } from "./session-output.ts";
+
+export interface PeerRequestsOptions {
+	/**
+	 * A SUBSCRIBE of the peer, whole, with its Request ID checked. Says
+	 * whether it is refused, or taken over with its stream.
+	 */
+	subscribe(
+		message: Subscribe,
+		peerStream: number,
+		out: SessionOutput[],
+	): PeerSubscribeOpened;
+	/**
+	 * Whether the Request ID names a SUBSCRIBE of the peer that waits for its
+	 * answer or was accepted, and is not over: the one kind of request of
+	 * the peer that stays open here.
+	 */
+	isOpenSubscribe(requestId: bigint): boolean;
+}
+
+/** A stream that was taken over with its request: what it is named from here on, and the bytes that followed the request. */
+export interface AdoptedPeerStream {
+	stream: number;
+	rest: Uint8Array;
+}
 
 export interface PeerRequests {
 	/**
@@ -16,13 +43,19 @@ export interface PeerRequests {
 	 * wrong parity or a duplicate. A gap in the IDs is not an error.
 	 */
 	checkRequestId(requestId: bigint): void;
-	/** Bytes on a bidirectional stream the peer opened. Throws the `MoqtError` that ends the session. */
+	/**
+	 * Bytes on a bidirectional stream the peer opened. Throws the `MoqtError`
+	 * that ends the session. Returns something when the request was taken
+	 * over with its stream: nothing of that stream is kept here then, and the
+	 * caller passes on what arrives on it, starting with `rest` and with
+	 * `fin`.
+	 */
 	receive(
 		peerStream: number,
 		data: Uint8Array,
 		fin: boolean,
 		out: SessionOutput[],
-	): void;
+	): AdoptedPeerStream | undefined;
 	reset(peerStream: number): void;
 	/** The peer opened the stream; nothing of it has arrived yet. */
 	open(peerStream: number): void;
@@ -33,6 +66,8 @@ export interface PeerRequests {
 	 * that the stream was given up.
 	 */
 	giveUpUnidentified(peerStream: number): boolean;
+	/** How many streams something is kept of. */
+	heldStreams(): number;
 	clear(): void;
 }
 
@@ -69,7 +104,10 @@ const NOT_SUPPORTED = {
  * implementation answers by itself for the same FETCH, so that the same
  * bytes get the same code from both.
  */
-function fetchRefusal(range: FetchRange): { code: bigint; reason: string } {
+function fetchRefusal(
+	range: FetchRange,
+	isOpenSubscribe: (requestId: bigint) => boolean,
+): { code: bigint; reason: string } {
 	switch (range.fetchType) {
 		case "Standalone":
 			// §10.12.3: "End Location MUST specify the same or a larger Location
@@ -88,23 +126,41 @@ function fetchRefusal(range: FetchRange): { code: bigint; reason: string } {
 			// §10.12.2: the Joining Request ID has to name "a subscription in
 			// the same session in the Established or Pending (subscriber)
 			// states", or "it MUST return a REQUEST_ERROR with error code
-			// INVALID_JOINING_REQUEST_ID". Every SUBSCRIBE of the peer was
-			// refused here, and this endpoint sends it no PUBLISH that is
-			// accepted as a subscription of its own to join, so no ID names one.
-			return {
-				code: RequestErrorCode.INVALID_JOINING_REQUEST_ID,
-				reason: "the Joining Request ID names no subscription",
-			};
+			// INVALID_JOINING_REQUEST_ID". A SUBSCRIBE of the peer is such a
+			// subscription until it is over; a PUBLISH of this endpoint is not
+			// taken as one (the notes, known gaps), as in the Rust session.
+			// A Joining FETCH that names one is not served, like every FETCH.
+			if (!isOpenSubscribe(range.joiningRequestId)) {
+				return {
+					code: RequestErrorCode.INVALID_JOINING_REQUEST_ID,
+					reason: "the Joining Request ID names no subscription",
+				};
+			}
+			break;
 	}
 	return NOT_SUPPORTED;
 }
 
+/** Why the session itself refuses a SUBSCRIBE of the peer. */
+const SUBSCRIBE_REFUSALS = new Map<bigint, string>([
+	[
+		RequestErrorCode.DUPLICATE_SUBSCRIPTION,
+		"this endpoint is already the publisher of a subscription to the Track",
+	],
+	// FIXME: give a Retry Interval. §10.6.2 has the sender of EXCESSIVE_LOAD
+	// say when to retry, and 0, which every refusal here carries, says "do
+	// not retry". The Rust session has the same.
+	[RequestErrorCode.EXCESSIVE_LOAD, "too many requests of the peer are open"],
+]);
+
 /**
- * Requests the peer opens. None is implemented, so each is answered with
- * REQUEST_ERROR after its Request ID is checked: NOT_SUPPORTED, or for a
- * FETCH, which is decoded first, what `fetchRefusal` has.
+ * Requests the peer opens, until it is known what becomes of them. A
+ * SUBSCRIBE is handed on (`PeerRequestsOptions.subscribe`). Every other
+ * request is answered here with REQUEST_ERROR after its Request ID is
+ * checked: NOT_SUPPORTED, or for a FETCH, which is decoded first, what
+ * `fetchRefusal` has.
  */
-export function createPeerRequests(): PeerRequests {
+export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 	const streams = new Map<number, PeerRequestStream>();
 	// §10.1: the server generates odd Request IDs starting at 1. This endpoint
 	// is always the client.
@@ -125,7 +181,16 @@ export function createPeerRequests(): PeerRequests {
 				`Request ID ${requestId} from the server is even`,
 			);
 		}
-		if (requestId < lowestUnseen || seenAhead.has(requestId)) {
+		// WHY the open requests are asked as well: the ID of one can have
+		// been pushed out of the memory below, and taking it for new would
+		// put a second request in the place of the first, which could then
+		// not be ended. The Rust session looks at its open requests in the
+		// same way (`take_id`).
+		if (
+			requestId < lowestUnseen ||
+			seenAhead.has(requestId) ||
+			options.isOpenSubscribe(requestId)
+		) {
 			throw new MoqtError(
 				SessionErrorCode.INVALID_REQUEST_ID,
 				`duplicate Request ID ${requestId}`,
@@ -171,7 +236,7 @@ export function createPeerRequests(): PeerRequests {
 				if (wasMissing > 0 && stream.missing === 0) {
 					out.push(identified(peerStream));
 				}
-				return;
+				return undefined;
 			}
 
 			const buffer = concatBytes([stream.buffer, data]);
@@ -180,7 +245,7 @@ export function createPeerRequests(): PeerRequests {
 			if (decoded.status === "incomplete") {
 				if (fin && buffer.length > 0) throw endedInside();
 				stream.buffer = buffer;
-				return;
+				return undefined;
 			}
 			const { messageType, requestId, messageLength } = decoded.value;
 			const missing = Math.max(0, messageLength - buffer.length);
@@ -190,16 +255,21 @@ export function createPeerRequests(): PeerRequests {
 			// FIXME: serve a FETCH (§10.12). It is refused below, like a request
 			// that is not decoded.
 			//
-			// WHY it is decoded whole first, where the others are refused on
-			// their Request ID: a FETCH with a Fetch Type other than 1 to 3, or
-			// with a parameter that is unknown or not for a FETCH, closes the
-			// session (§10.12, §10.2.1), and the Rust implementation, which
-			// decodes it, does. Refusing such a FETCH would be another answer to
-			// the same bytes. WHY before the Request ID is checked: the Rust
-			// implementation decodes first, so a FETCH that is wrong in both ways
-			// ends the session with the same code in both.
+			// WHY a FETCH and a SUBSCRIBE are decoded whole first, where the
+			// others are refused on their Request ID: a FETCH with a Fetch Type
+			// other than 1 to 3, and either with a parameter that is unknown or
+			// not for its message, closes the session (§10.12, §10.2.1), and
+			// the Rust implementation, which decodes them, does. Refusing such a
+			// request would be another answer to the same bytes. WHY before the
+			// Request ID is checked: the Rust implementation decodes first, so
+			// a request that is wrong in both ways ends the session with the
+			// same code in both.
 			let refusal = NOT_SUPPORTED;
-			if (messageType === FETCH_MESSAGE_TYPE) {
+			let subscribe: { message: Subscribe; bytesRead: number } | undefined;
+			if (
+				messageType === FETCH_MESSAGE_TYPE ||
+				messageType === SUBSCRIBE_MESSAGE_TYPE
+			) {
 				const whole = decodeControlMessage(buffer);
 				if (whole.status === "error") throw whole.error;
 				if (whole.status === "incomplete") {
@@ -211,10 +281,13 @@ export function createPeerRequests(): PeerRequests {
 					// by default (`webtransport/stream-io.ts`). A session that is
 					// driven without that layer has no such bound.
 					stream.buffer = buffer;
-					return;
+					return undefined;
 				}
 				if (whole.value.type === "FETCH") {
-					refusal = fetchRefusal(whole.value.range);
+					refusal = fetchRefusal(whole.value.range, options.isOpenSubscribe);
+				}
+				if (whole.value.type === "SUBSCRIBE") {
+					subscribe = { message: whole.value, bytesRead: whole.bytesRead };
 				}
 			}
 			checkRequestId(requestId);
@@ -222,6 +295,20 @@ export function createPeerRequests(): PeerRequests {
 			// on its Request ID: a stream that sent the start of a request and
 			// stops has not said what it is, as in the Rust implementation.
 			if (missing === 0) out.push(identified(peerStream));
+			if (subscribe !== undefined) {
+				const opened = options.subscribe(subscribe.message, peerStream, out);
+				if ("stream" in opened) {
+					streams.delete(peerStream);
+					return {
+						stream: opened.stream,
+						rest: buffer.subarray(subscribe.bytesRead),
+					};
+				}
+				refusal = {
+					code: opened.refused,
+					reason: SUBSCRIBE_REFUSALS.get(opened.refused) ?? "",
+				};
+			}
 			// §3.3.2: reject without application processing by REQUEST_ERROR and FIN.
 			out.push({
 				type: "respond",
@@ -243,6 +330,7 @@ export function createPeerRequests(): PeerRequests {
 				},
 			});
 			if (!fin) streams.set(peerStream, { answered: true, missing });
+			return undefined;
 		},
 		reset(peerStream) {
 			streams.delete(peerStream);
@@ -263,6 +351,7 @@ export function createPeerRequests(): PeerRequests {
 			streams.set(peerStream, { answered: true, missing: 0 });
 			return true;
 		},
+		heldStreams: () => streams.size,
 		clear() {
 			streams.clear();
 			seenAhead.clear();

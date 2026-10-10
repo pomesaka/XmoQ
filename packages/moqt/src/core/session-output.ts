@@ -3,6 +3,7 @@ import type { Redirect } from "./control-message.ts";
 import type { KeyValuePair } from "./key-value-pair.ts";
 import type { Location, MessageParameters } from "./parameters.ts";
 import type { SubgroupObject } from "./subgroup.ts";
+import type { TrackNamespace } from "./track.ts";
 
 export type RequestClosedReason =
 	/** The peer closed the request stream with a FIN and without PUBLISH_DONE. */
@@ -10,9 +11,12 @@ export type RequestClosedReason =
 	/** The peer reset the request stream or sent STOP_SENDING for it. */
 	| "peer-reset"
 	/**
-	 * §10.9.1: the peer sent a REQUEST_UPDATE for a subscription made with
-	 * PUBLISH. Updates are not implemented, so it was refused and the
-	 * subscription ended with PUBLISH_DONE UPDATE_FAILED.
+	 * §10.9.1: the peer sent a REQUEST_UPDATE for a subscription this
+	 * endpoint is the publisher of. Updates are not implemented, so it was
+	 * refused and the subscription ended with PUBLISH_DONE UPDATE_FAILED. For
+	 * a SUBSCRIBE of the peer that had no answer yet, the REQUEST_ERROR for
+	 * the update is the one answer the request gets, and no PUBLISH_DONE
+	 * follows.
 	 */
 	| "update-failed"
 	/**
@@ -129,6 +133,20 @@ export type SessionEvent =
 	 * gives it, and was stopped. The session stays open.
 	 */
 	| { type: "peer-stream-timed-out"; kind: PeerStreamKind; peerStream: number }
+	/**
+	 * The peer asks for a subscription with SUBSCRIBE. The caller answers
+	 * with `acceptSubscribe` or `rejectPeerRequest`; `request-closed` for the
+	 * same Request ID says that the request went before it was answered.
+	 * Once accepted, the subscription is used like one made with PUBLISH,
+	 * under this Request ID.
+	 */
+	| {
+			type: "peer-subscribe";
+			requestId: bigint;
+			trackNamespace: TrackNamespace;
+			trackName: Uint8Array;
+			parameters: MessageParameters;
+	  }
 	/** A request the peer opened was answered with REQUEST_ERROR, with this code. */
 	| {
 			type: "peer-request-rejected";
@@ -153,6 +171,17 @@ export type SessionOutput =
 	| { type: "finish"; stream: number }
 	/** Reset the send side and, on a bidirectional stream, send STOP_SENDING (§3.3.2). */
 	| { type: "reset"; stream: number; code: number }
+	/**
+	 * A bidirectional stream the peer opened is from here on named `stream`,
+	 * like one this endpoint opened: `send`, `finish`, `reset` and
+	 * `stop-peer-direction` act on it, and a STOP_SENDING of the peer for it
+	 * is reported with that number. What arrives on it is still reported
+	 * with `peerStream`.
+	 *
+	 * WHY: a request of the peer that this endpoint serves is written to and
+	 * ended like a request of its own, so the session keeps it with those.
+	 */
+	| { type: "adopt-peer-stream"; peerStream: number; stream: number }
 	/** Write `data` to the peer-opened bidirectional stream, then FIN. */
 	| { type: "respond"; peerStream: number; data: Bytes }
 	| { type: "stop-sending"; peerStream: number; code: number }

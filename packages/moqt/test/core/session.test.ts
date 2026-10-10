@@ -14,6 +14,7 @@ const TRACK = { trackNamespace: NAMESPACE, trackName: TRACK_NAME };
 const SMALL_LIMITS: SessionLimits = {
 	maxObjectPayloadLength: 16,
 	maxObjectPropertiesLength: 16,
+	maxPeerRequests: 64,
 	maxHeldSubgroupBytes: 64,
 };
 
@@ -797,10 +798,13 @@ describe("Session", () => {
 		]);
 	});
 
-	test("answers a request the peer opens with REQUEST_ERROR NOT_SUPPORTED", () => {
+	// A TRACK_STATUS, which has the format of a SUBSCRIBE and another type
+	// (§10.14). A SUBSCRIBE is handed to the application
+	// (session-peer-subscribe.test.ts).
+	test("answers a request the peer opens, and that is not served, with REQUEST_ERROR NOT_SUPPORTED", () => {
 		const session = started();
 		const [respond, event] = said(
-			session.receivePeerBidiStreamData(0, hex("03 00 1f 01"), false),
+			session.receivePeerBidiStreamData(0, hex("0d 00 1f 01"), false),
 		);
 		if (respond?.type !== "respond") {
 			throw new Error("the first output is not a response");
@@ -813,7 +817,7 @@ describe("Session", () => {
 			type: "event",
 			event: {
 				type: "peer-request-rejected",
-				messageType: 3n,
+				messageType: 13n,
 				requestId: 1n,
 				errorCode: 3n,
 			},
@@ -978,9 +982,9 @@ describe("Session", () => {
 
 	test("closes the session when a request that was refused on its start ends before it is whole", () => {
 		const session = started();
-		// A SUBSCRIBE of 31 bytes, of which one has come: it is refused.
+		// A TRACK_STATUS of 31 bytes, of which one has come: it is refused.
 		expect(
-			said(session.receivePeerBidiStreamData(0, hex("03 00 1f 01"), false)).map(
+			said(session.receivePeerBidiStreamData(0, hex("0d 00 1f 01"), false)).map(
 				(output) => output.type,
 			),
 		).toEqual(["respond", "event"]);
@@ -1005,12 +1009,12 @@ describe("Session", () => {
 	test.each([
 		{
 			name: "an even Request ID from the server (§10.1)",
-			requests: ["03 00 1f 02"],
+			requests: ["0d 00 1f 02"],
 			code: 4,
 		},
 		{
 			name: "a duplicate Request ID (§10.1)",
-			requests: ["03 00 1f 01", "0d 00 02 01 00"],
+			requests: ["0d 00 1f 01", "0d 00 02 01 00"],
 			code: 4,
 		},
 	])("closes the session on $name", ({ requests, code }) => {

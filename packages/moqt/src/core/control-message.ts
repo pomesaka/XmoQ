@@ -230,6 +230,9 @@ const REQUEST_MESSAGE_TYPES: ReadonlySet<bigint> = new Set([
 /** The Message Type of FETCH, the one request that is decoded whole before it is refused. */
 export const FETCH_MESSAGE_TYPE = MESSAGE_TYPES.FETCH;
 
+/** The Message Type of SUBSCRIBE, which is decoded whole and handed to the application. */
+export const SUBSCRIBE_MESSAGE_TYPE = MESSAGE_TYPES.SUBSCRIBE;
+
 /**
  * WHY SETUP has one value in two tables: Table 3 (stream types, §3.4) and
  * Table 5 (message types, §10) both say 0x2F00, because the control stream

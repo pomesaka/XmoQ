@@ -33,7 +33,8 @@
 //     first sends again every Group the first has sent.
 //   ask-all                 --ask <way> [--publisher <client>] --subscriber <own client> --subscriber <own client>...
 //     Which publishers the relay sends its own SUBSCRIBE. two-announcers: two
-//     own-rust publishers announce the namespace and send no PUBLISH.
+//     publishers announce the namespace and send no PUBLISH, own-rust ones
+//     unless --publisher names the two (own clients).
 //     announcer-and-publisher: --publisher sends PUBLISH, and an own-rust
 //     publisher announces before the subscribers come. late-announcer: it
 //     announces after they came. refusing-announcer: an own-browser page
@@ -2120,13 +2121,24 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 	}
 	const relay = run.context.relay;
 	// A publisher that only announces: it serves the track when it is asked.
-	const announcer = (label: string, firstGroup: number): Promise<Publisher> =>
-		joinAsPublisher("own-rust", run, {
+	const announcer = (
+		name: string,
+		firstGroup: number,
+		kind: Client = "own-rust",
+	): Promise<Publisher> => {
+		if (!isOwnClient(kind)) {
+			throw new Error(
+				`--scenario ask-all needs own clients as its announcers, which serve a track when they are asked, not ${kind}`,
+			);
+		}
+		const label = `${name}:${kind}`;
+		return joinAsPublisher(kind, run, {
 			label,
 			firstGroup,
 			payloadHex: hexOf(`${label} ${run.payloadHex}`),
 			servesWhenAsked: "at-once",
 		});
+	};
 	// The publisher with PUBLISH, of the ways that have one.
 	const withPublish = (): Promise<Publisher> => {
 		const kind = onePublisherKind();
@@ -2258,8 +2270,13 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 	// OPEN_REQUEST line, where the way has more than one.
 	let askedInOrder: number[] | undefined;
 	if (way === "two-announcers") {
-		first = await announcer("announcer1:own-rust", 0);
-		second = await announcer("announcer2:own-rust", 1);
+		// --publisher twice names the two; own-rust both where it is left out.
+		const [firstKind, secondKind] =
+			options.publisher.length === 0
+				? (["own-rust", "own-rust"] satisfies Client[])
+				: twoPublisherKinds();
+		first = await announcer("announcer1", 0, firstKind);
+		second = await announcer("announcer2", 1, secondKind);
 		const sessions = [first, second].map((each) => ({
 			who: each.label,
 			session: sessionOf(each, run),
@@ -2282,7 +2299,7 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 		first = await withPublish();
 		const publishing = { who: first.label, session: sessionOf(first, run) };
 		if (way === "announcer-and-publisher") {
-			second = await announcer("announcer:own-rust", 1);
+			second = await announcer("announcer", 1);
 			const announced = { who: second.label, session: sessionOf(second, run) };
 			subscribers = [await join(0)];
 			await expectAsks(
@@ -2299,7 +2316,7 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 			];
 		} else {
 			subscribers = await joinRest(0);
-			second = await announcer("announcer:own-rust", 1);
+			second = await announcer("announcer", 1);
 			await expectAsks(
 				[{ ...publishing, asks: 0 }],
 				run,

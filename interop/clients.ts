@@ -86,10 +86,11 @@ export interface PublisherPlan {
 	 */
 	payloadHex?: string;
 	/**
-	 * own-rust: the client announces the namespace and sends no PUBLISH. It
-	 * serves the track when it is asked for it with a SUBSCRIBE: "at-once",
-	 * or "on-line", where it holds its answer back until `serve()`, so that
-	 * something else can happen to the track while the relay waits for it.
+	 * The own clients: the client announces the namespace and sends no
+	 * PUBLISH. It serves the track when it is asked for it with a SUBSCRIBE:
+	 * "at-once", or, own-rust only, "on-line", where it holds its answer
+	 * back until `serve()`, so that something else can happen to the track
+	 * while the relay waits for it.
 	 */
 	servesWhenAsked?: "at-once" | "on-line";
 	/**
@@ -460,15 +461,38 @@ async function startBrowserPublisher(
 	run: ClientRun,
 	plan: PublisherPlan,
 ): Promise<Publisher> {
+	if (plan.publishesOnLine === true || plan.servesWhenAsked === "on-line") {
+		throw new Error(
+			`${label} cannot hold a PUBLISH or an answer back until it is told: only own-rust can`,
+		);
+	}
+	const servesWhenAsked = plan.servesWhenAsked !== undefined;
+	if (servesWhenAsked && kind !== "own-browser") {
+		throw new Error(
+			`${label} cannot serve a track when asked: only the own clients can`,
+		);
+	}
 	const page = await openConnectedPage(run.context, label, kind);
-	await onPage(
-		label,
-		"publish the track",
-		page.evaluate(([ns, track]) => window.xmoq.publishTrack(ns, track), [
-			NAMESPACE,
-			TRACK,
-		] satisfies [string, string]),
-	);
+	const names = [NAMESPACE, TRACK] satisfies [string, string];
+	if (servesWhenAsked) {
+		await onPage(
+			label,
+			"announce the namespace",
+			page.evaluate(
+				([ns, track]) => window.xmoqOwn.serveTrack(ns, track),
+				names,
+			),
+		);
+	} else {
+		await onPage(
+			label,
+			"publish the track",
+			page.evaluate(
+				([ns, track]) => window.xmoq.publishTrack(ns, track),
+				names,
+			),
+		);
+	}
 	const payloadHex = plan.payloadHex ?? run.payloadHex;
 	const kill = (): Promise<void> => page.context().close();
 	if (kind === "moqtail-browser") {
@@ -603,7 +627,14 @@ async function startBrowserPublisher(
 			Promise.reject(new Error(`${kind} does not say what ended its PUBLISH`)),
 		publishAnew: () =>
 			Promise.reject(new Error(`${kind} cannot publish its track anew`)),
-		serving: () => Promise.resolve(),
+		async serving() {
+			if (!servesWhenAsked) return;
+			await onPage(
+				label,
+				"accept the SUBSCRIBE it is asked with",
+				page.evaluate(() => window.xmoqOwn.servingTrack()),
+			);
+		},
 		...NO_LINES,
 		async peerEndAfterPublishDone() {
 			const reported = await onPage(
