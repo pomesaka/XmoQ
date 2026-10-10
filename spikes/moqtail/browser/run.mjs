@@ -98,6 +98,19 @@ const { values: options } = parseArgs({
     // §11.4.2): zero, first-object or explicit. The `own` Rust publisher has
     // all three; the page (moqtail-ts) has zero and first-object.
     'subgroup-id': { type: 'string', default: 'zero' },
+    // A second Rust publisher of the same track, moqtail or own, that
+    // publishes after the first and sends the same Object (Group 0, the same
+    // payload). Needs Rust subscribers. The run then also checks that every
+    // subscriber got Group 0 once, that the subscription goes on when the
+    // first publisher has left, and, with an `own` second publisher, that
+    // its next Object (Group 1) arrives.
+    'second-rust-publisher': { type: 'string' },
+    // The Group ID of the first Object of the `own` Rust publisher.
+    'first-group': { type: 'string', default: '0' },
+    // Bytes of padding after the payload's text. With a second publisher, a
+    // payload that takes a while to write lets the relay's STOP_SENDING for
+    // the second copy arrive while that publisher is still writing it.
+    'payload-padding': { type: 'string', default: '0' },
     // Makes the `own` client print the raw bytes of every stream.
     trace: { type: 'boolean', default: false },
     // After the transfer, ends the Rust publisher and waits until the `own`
@@ -194,6 +207,10 @@ function spawnLogged(source, command, args, env = {}) {
   return {
     child,
     exited,
+    /** How many lines printed so far match. */
+    count(pattern) {
+      return lines.filter(line => pattern.test(line)).length
+    },
     waitForLine(pattern) {
       for (const line of lines) {
         const match = line.match(pattern)
@@ -266,7 +283,10 @@ async function main() {
   log('driver', `certificate sha256=${certificate.sha256Hex} validTo=${certificate.validTo}`)
   const relayAuthority = `127.0.0.1:${options.port}`
   const relayUrl = `https://${relayAuthority}`
-  const payload = Buffer.from(`xmoq-phase0 ${new Date().toISOString()} ${randomBytes(8).toString('hex')}`)
+  const payload = Buffer.concat([
+    Buffer.from(`xmoq-phase0 ${new Date().toISOString()} ${randomBytes(8).toString('hex')}`),
+    Buffer.alloc(Number.parseInt(options['payload-padding'], 10), 0x2e),
+  ])
   const payloadHex = payload.toString('hex')
 
   // `hash` pins the certificate from the page (serverCertificateHashes).
@@ -362,6 +382,8 @@ async function main() {
     // track nobody has published or announced the namespace of.
     let sendObject
     let endPublisher
+    let secondPublisher = null
+    const subscriberClients = []
     let published = async () => {}
     if (direction.publisherInBrowser) {
       const page = await openConnectedPage('browser-pub')
@@ -382,7 +404,9 @@ async function main() {
       const delays = subscribeFirst ? ['--publish-delay-ms', '3000', '--answer-delay-ms', '4000'] : []
       const subgroupId = options['subgroup-id'] === 'zero' ? [] : ['--subgroup-id', options['subgroup-id']]
       if (subgroupId.length > 0 && rustPublisher !== 'own') throw new Error('--subgroup-id needs --rust-publisher own')
-      const client = spawnRustClient('rust-pub', rustPublisher, mode, ['--payload-hex', payloadHex, ...delays, ...subgroupId])
+      const firstGroup = options['first-group'] === '0' ? [] : ['--first-group', options['first-group']]
+      if (firstGroup.length > 0 && rustPublisher !== 'own') throw new Error('--first-group needs --rust-publisher own')
+      const client = spawnRustClient('rust-pub', rustPublisher, mode, ['--payload-hex', payloadHex, ...delays, ...subgroupId, ...firstGroup])
       await client.waitForLine(byNamespace || subscribeFirst ? /^NAMESPACE_PUBLISHED/ : /^PUBLISHED /)
       if (subscribeFirst) published = () => client.waitForLine(/^PUBLISHED /)
       sendObject = async () => {
@@ -393,6 +417,21 @@ async function main() {
         await client.waitForLine(/^SENT /)
       }
       endPublisher = () => client.child.stdin.end()
+      if (options['second-rust-publisher']) {
+        if (byNamespace || subscribeFirst || direction.subscriberInBrowser || options.relay !== 'own') {
+          throw new Error('--second-rust-publisher needs --relay own, Rust subscribers and a plain PUBLISH')
+        }
+        // PUBLISHED is printed after PUBLISH_OK: the relay took the second
+        // publisher of the track.
+        secondPublisher = spawnRustClient('rust-pub2', options['second-rust-publisher'], 'publish', ['--payload-hex', payloadHex])
+        await secondPublisher.waitForLine(/^PUBLISHED /)
+        const sendFirst = sendObject
+        sendObject = async () => {
+          await sendFirst()
+          secondPublisher.child.stdin.write('send\n')
+          await secondPublisher.waitForLine(/^SENT group=0 /)
+        }
+      }
     }
 
     // The subscribers are live before the Object is sent: the subscription uses
@@ -424,7 +463,12 @@ async function main() {
       } else {
         // Asking for a second Object keeps the subscriber waiting after the first,
         // so it is still there when the publisher ends the track.
-        const client = spawnRustClient(`rust-sub${label}`, rustSubscriber, 'subscribe', awaitPublishDone ? ['--objects', '2'] : [])
+        // With two publishers the own subscriber is kept waiting as well: it
+        // is to see what comes after the first Object, or that nothing does.
+        // (The moqtail client has no such flag; it reads until it is ended.)
+        const more = awaitPublishDone || (options['second-rust-publisher'] && rustSubscriber === 'own')
+        const client = spawnRustClient(`rust-sub${label}`, rustSubscriber, 'subscribe', more ? ['--objects', '2'] : [])
+        subscriberClients.push(client)
         await subscribed(client.waitForLine(/^SUBSCRIBED /))
         subscriptionEnds.push(() => client.waitForLine(/^SUBSCRIPTION_ENDED (.*)$/))
         receivers.push(async () => {
@@ -446,6 +490,39 @@ async function main() {
     await sendObject()
     const receivedHexes = await Promise.all(receivers.map(receive => receive()))
     const receivedHex = receivedHexes[0]
+    let twoPublishers = null
+    if (secondPublisher) {
+      // The first publisher leaves with PUBLISH_DONE. The relay has to keep
+      // the track, which has another source.
+      endPublisher()
+      // The first publisher is the relay's first session, session 0. The
+      // relay finishes its PUBLISH stream once the stream it counted has
+      // ended there; a publisher that closes without waiting just goes.
+      await relay.waitForLine(/^(FINISH_REQUEST|SESSION_CLOSED) session=0\b/)
+      const nextFromOwn = options['second-rust-publisher'] === 'own'
+      if (nextFromOwn) {
+        // The own client numbers its Groups itself: the next one is Group 1.
+        secondPublisher.child.stdin.write('send\n')
+        await secondPublisher.waitForLine(/^SENT group=1 /)
+        // The moqtail subscriber of this spike leaves after its first
+        // Object, so only an own subscriber can show the next one.
+        if (rustSubscriber === 'own') {
+          await Promise.all(subscriberClients.map(client => client.waitForLine(/^OBJECT group=1 /)))
+        }
+      } else {
+        // The moqtail client sends one Object. Give a second copy of Group 0
+        // or an end of the subscription the time to show up.
+        await new Promise(resolve => setTimeout(resolve, 1500))
+      }
+      twoPublishers = {
+        second: options['second-rust-publisher'],
+        group0PerSubscriber: subscriberClients.map(client => client.count(/^OBJECT group=0 /)),
+        endedWhileOnePublisherWasLeft: subscriberClients.some(client => client.count(/^SUBSCRIPTION_ENDED /) > 0),
+        nextGroupArrived: nextFromOwn && rustSubscriber === 'own',
+        // What the moqtail subscriber shows is its first Object only.
+        subscriberStays: rustSubscriber === 'own',
+      }
+    }
     let subscriptionEnd = null
     if (awaitPublishDone) {
       endPublisher()
@@ -455,7 +532,11 @@ async function main() {
 
     result = {
       direction: options.direction,
-      match: receivedHexes.every(hex => hex === payloadHex),
+      match:
+        receivedHexes.every(hex => hex === payloadHex) &&
+        (twoPublishers === null ||
+          (twoPublishers.group0PerSubscriber.every(count => count === 1) && !twoPublishers.endedWhileOnePublisherWasLeft)),
+      twoPublishers,
       relay: options.relay,
       subscribers: subscriberCount,
       sentText: payload.toString(),

@@ -4,8 +4,10 @@
     python3 spikes/relay-core-diff/compare.py <before> <after> [--spikes] [--mutate]
     python3 spikes/relay-core-diff/compare.py --same <revision>
 
-Add `--world v1|distinct|full|split` to either for what the random events are
-made of; `fuzz.rs` describes the four. The default is `v1`.
+Add `--world v1|distinct|full|split|one-publisher|split-one|shared` to either
+for what the random events are made of; `fuzz.rs` describes them. The default
+is `v1`. `--touch subgroups|publishers|republish|waiting-or-draining` says which events `--touching` takes
+for the ones a change is about; the default is `subgroups`.
 
 `--touching` is for a change that is meant to alter what the relay does with
 some inputs and nothing else. `fuzz.rs` knows which events those inputs are
@@ -14,10 +16,19 @@ stream for a Subgroup). Once the two versions have parted in a sequence,
 everything after it differs too, so the differences are not counted as
 failures; what has to hold is that no sequence shows a difference before its
 first such event. That says nothing about what follows the first such event.
-For that there is the world `split`: what the change is about happens in one
-half of it, and the sessions of the other half (3 and 4) have to be treated
-alike by both versions from the first event to the last. A difference there
-is counted as `bystander`, with or without `--touching`, and fails the run.
+For that there are the worlds `split` and `split-one`: what the change is
+about happens in one half, and the sessions of the other half (3 and 4) have
+to be treated alike by both versions from the first event to the last. A
+difference there is counted as `bystander`, with or without `--touching`, and
+fails the run. In `shared`, session 4 subscribes to the tracks of both halves,
+and what has to be alike is what is done to session 3 and to session 4's
+subscription to the track of the second half: what is said on its request
+stream, the streams opened for it, and what closes the session. The Track
+Alias of that subscription is not compared; the relay numbers the aliases of a
+session as it accepts subscriptions, of whichever track.
+
+Requests the relay opens are compared in the same way, under the session and
+how many the version opened on it before.
 
 Streams to subscribers are compared under a name, the session and how many
 streams the version opened to it before, and not by their number: a version
@@ -92,7 +103,8 @@ SPIKES = [
 ]
 
 
-WORLDS = ("v1", "distinct", "full", "split")
+TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining")
+WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared")
 
 
 def jj(*args):
@@ -160,31 +172,112 @@ pub(crate) static BYSTANDER_DIFFERENCES: std::sync::atomic::AtomicU64 = std::syn
 /// Actions of the new core for those sessions, so far.
 pub(crate) static BYSTANDER_ACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Request streams of a session that is a bystander in part: what is done on
+/// them, and to the subscription that was accepted on them, has to be the
+/// same in both cores. Set by `fuzz.rs`.
+pub(crate) static BYSTANDER_STREAMS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
 /// The streams to subscribers of one core, under a name that does not depend
-/// on how the core numbers them: the session, and how many streams the core
-/// opened to that session before. WHY: the two cores number the streams from
+/// on how the core numbers them: the session, the Track Alias of the header,
+/// and how many streams the core opened to that session with that alias
+/// before. WHY the alias: a session can subscribe to a track in which the
+/// cores differ and to one in which they must not. WHY: the two cores number the streams from
 /// one counter each, so once they differ in one track, every later stream of
 /// every track has another number in the one than in the other.
 #[derive(Debug, Default)]
 struct OutNames {
-    by_key: HashMap<u64, (u64, u64)>,
-    opened: HashMap<u64, u64>,
+    by_key: HashMap<u64, (u64, String, u64)>,
+    opened: HashMap<(u64, String), u64>,
+    /// A watched subscription under a name of its own, in place of its Track
+    /// Alias: which of the session's watched subscriptions it is. WHY: the
+    /// relay numbers the aliases of a session as it accepts subscriptions, so
+    /// one more or less to a track in which the cores differ shifts the
+    /// alias of a subscription in which they must not.
+    alias_names: HashMap<(u64, u64), String>,
+    watched: HashMap<u64, u64>,
+    /// The session and Track Alias of a subscription that was accepted on one
+    /// of `BYSTANDER_STREAMS`, and the streams opened for one.
+    watched_aliases: HashSet<(u64, u64)>,
+    watched_outs: HashSet<u64>,
+    /// The requests the core opened, named in the same way and for the same
+    /// reason: the session, and how many it opened on that session before.
+    own_by_key: HashMap<u64, (u64, u64)>,
+    own_opened: HashMap<u64, u64>,
 }
 
 #[allow(clippy::all, clippy::pedantic)]
 impl OutNames {
-    fn note(&mut self, actions: &[Action]) {
+    fn note(&mut self, actions: &[Action], streams: &[(u64, u64)]) {
         for action in actions {
-            if let Action::OpenDataStream { session, out_stream, .. } = action {
-                let opened = self.opened.entry(session.0).or_default();
-                self.by_key.insert(out_stream.0, (session.0, *opened));
+            if let Action::SendRequest { session, stream, message: ControlMessage::SubscribeOk(ok) } = action
+                && streams.contains(&(session.0, stream.0))
+            {
+                self.watched_aliases.insert((session.0, ok.track_alias));
+                let nth = self.watched.entry(session.0).or_default();
+                self.alias_names.insert((session.0, ok.track_alias), format!("watched {nth}"));
+                *nth += 1;
+            }
+            if let Action::OpenRequest { session, request, .. } = action {
+                let opened = self.own_opened.entry(session.0).or_default();
+                self.own_by_key.insert(request.0, (session.0, *opened));
                 *opened += 1;
+            }
+            if let Action::OpenDataStream { session, out_stream, header } = action {
+                let alias = (session.0, header.track_alias);
+                let name = self.alias_names.get(&alias).cloned().unwrap_or_else(|| alias.1.to_string());
+                let opened = self.opened.entry((alias.0, name.clone())).or_default();
+                self.by_key.insert(out_stream.0, (alias.0, name, *opened));
+                *opened += 1;
+                if self.watched_aliases.contains(&alias) {
+                    self.watched_outs.insert(out_stream.0);
+                }
             }
         }
     }
 
-    fn key_of(&self, name: (u64, u64)) -> Option<u64> {
-        self.by_key.iter().find(|(_, known)| **known == name).map(|(key, _)| *key)
+    /// A session key is used anew: its aliases start over, and with them the
+    /// count of the streams of each. WHY the count as well: the alias that was
+    /// a track in which the cores differ can be one in which they must not
+    /// in the next session under the key.
+    fn forget_session(&mut self, session: SessionKey) {
+        self.watched_aliases.retain(|(watched, _)| *watched != session.0);
+        self.alias_names.retain(|(named, _), _| *named != session.0);
+        self.watched.remove(&session.0);
+        self.opened.retain(|(opened, _), _| *opened != session.0);
+        self.by_key.retain(|_, (named, _, _)| *named != session.0);
+        self.own_opened.remove(&session.0);
+        self.own_by_key.retain(|_, (named, _)| *named != session.0);
+    }
+
+    fn own_key_of(&self, name: (u64, u64)) -> Option<u64> {
+        self.own_by_key.iter().find(|(_, known)| **known == name).map(|(key, _)| *key)
+    }
+
+    /// Whether the action is done to a bystander: a session of `whole`, or
+    /// the part of a session that `streams` names. What closes such a session
+    /// or is said on its control stream counts, whichever track caused it.
+    fn is_about_a_bystander(&self, action: &Action, whole: &[u64], streams: &[(u64, u64)]) -> bool {
+        let in_part = |session: &SessionKey| streams.iter().any(|(watched, _)| *watched == session.0);
+        let watched = match action {
+            Action::SendRequest { session, stream, .. }
+            | Action::FinishRequest { session, stream, .. }
+            | Action::ResetRequest { session, stream, .. }
+            | Action::StopRequest { session, stream, .. }
+            | Action::StartRequestTimer { session, stream, .. } => streams.contains(&(session.0, stream.0)),
+            Action::OpenDataStream { session, header, .. } => {
+                self.watched_aliases.contains(&(session.0, header.track_alias))
+            }
+            Action::SendObject { out_stream, .. }
+            | Action::FinishDataStream { out_stream, .. }
+            | Action::ResetDataStream { out_stream, .. } => self.watched_outs.contains(&out_stream.0),
+            Action::CloseSession { session, .. } | Action::SendControl { session, .. } => in_part(session),
+            _ => false,
+        };
+        watched || self.session_of(action).is_some_and(|session| whole.contains(&session))
+    }
+
+    fn key_of(&self, name: &(u64, String, u64)) -> Option<u64> {
+        self.by_key.iter().find(|(_, known)| *known == name).map(|(key, _)| *key)
     }
 
     /// The text with every stream to a subscriber under its name.
@@ -194,13 +287,29 @@ impl OutNames {
         if std::env::var_os("XMOQ_DIFF_RAW_NUMBERS").is_some() {
             return text.to_string();
         }
-        let (mut out, mut rest) = (String::new(), text);
+        let text = &self.rename_own(text);
+        let (mut out, mut rest) = (String::new(), text.as_str());
         while let Some(at) = rest.find("OutStreamKey(") {
             let digits = at + "OutStreamKey(".len();
             let end = rest[digits..].find(')').map_or(rest.len(), |found| digits + found);
             out.push_str(&rest[..at]);
             match rest[digits..end].parse::<u64>().ok().and_then(|key| self.by_key.get(&key)) {
-                Some((session, nth)) => out.push_str(&format!("Out({session}#{nth}")),
+                Some((session, alias, nth)) => out.push_str(&format!("Out({session}.{alias}#{nth}")),
+                None => out.push_str(&rest[at..end]),
+            }
+            rest = &rest[end..];
+        }
+        out + rest
+    }
+
+    fn rename_own(&self, text: &str) -> String {
+        let (mut out, mut rest) = (String::new(), text);
+        while let Some(at) = rest.find("OwnRequestKey(") {
+            let digits = at + "OwnRequestKey(".len();
+            let end = rest[digits..].find(')').map_or(rest.len(), |found| digits + found);
+            out.push_str(&rest[..at]);
+            match rest[digits..end].parse::<u64>().ok().and_then(|key| self.own_by_key.get(&key)) {
+                Some((session, nth)) => out.push_str(&format!("Own({session}#{nth}")),
                 None => out.push_str(&rest[at..end]),
             }
             rest = &rest[end..];
@@ -220,6 +329,22 @@ impl OutNames {
     }
 }
 
+/// The line with every Track Alias blanked. For a session that is watched
+/// in part, the number of an alias is not held against a core (see
+/// `OutNames::alias_names`); the streams are told apart by their names.
+#[allow(clippy::all, clippy::pedantic)]
+fn without_aliases(line: &str) -> String {
+    let (mut out, mut rest) = (String::new(), line);
+    while let Some(at) = rest.find("track_alias: ") {
+        let digits = at + "track_alias: ".len();
+        let end = rest[digits..].find(|c: char| !c.is_ascii_digit()).map_or(rest.len(), |found| digits + found);
+        out.push_str(&rest[..digits]);
+        out.push('_');
+        rest = &rest[end..];
+    }
+    out + rest
+}
+
 #[allow(clippy::all, clippy::pedantic)]
 impl Relay {
     /// The event as the old core has to be told it. Whoever calls `handle`
@@ -231,9 +356,22 @@ impl Relay {
         let old_key = |key: &OutStreamKey| {
             let name = self.names.1.by_key.get(&key.0);
             // A stream the old core does not have gets a number nobody has.
-            OutStreamKey(name.and_then(|name| self.names.0.key_of(*name)).unwrap_or(u64::MAX - key.0))
+            OutStreamKey(name.and_then(|name| self.names.0.key_of(name)).unwrap_or(u64::MAX - key.0))
+        };
+        let old_own = |key: &OwnRequestKey| {
+            let name = self.names.1.own_by_key.get(&key.0);
+            OwnRequestKey(name.and_then(|name| self.names.0.own_key_of(*name)).unwrap_or(u64::MAX - key.0))
         };
         match event {
+            Event::OwnRequestMessage { session, request, message } => {
+                Event::OwnRequestMessage { session: *session, request: old_own(request), message: message.clone() }
+            }
+            Event::OwnRequestClosed { session, request, how } => {
+                Event::OwnRequestClosed { session: *session, request: old_own(request), how: *how }
+            }
+            Event::UpstreamTimeout { session, request } => {
+                Event::UpstreamTimeout { session: *session, request: old_own(request) }
+            }
             Event::OutStreamOpened { out_stream } => Event::OutStreamOpened { out_stream: old_key(out_stream) },
             Event::OutStreamClosed { out_stream } => Event::OutStreamClosed { out_stream: old_key(out_stream) },
             Event::SendQueueFull { out_stream } => Event::SendQueueFull { out_stream: old_key(out_stream) },
@@ -246,10 +384,15 @@ impl Relay {
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         let said = format!("{event:?}");
         let drops_a_session = matches!(event, Event::SessionClosed { .. });
+        if let Event::SessionOpened { session, .. } = &event {
+            self.names.0.forget_session(*session);
+            self.names.1.forget_session(*session);
+        }
+        let streams = BYSTANDER_STREAMS.lock().unwrap().clone();
         let before = self.shadow.handle(self.for_old(&event));
         let after = self.decide(event);
-        self.names.0.note(&before);
-        self.names.1.note(&after);
+        self.names.0.note(&before, &streams);
+        self.names.1.note(&after, &streams);
         let in_order = |actions: &[Action], names: &OutNames| -> Vec<String> {
             actions.iter().map(|a| names.rename(&format!("{a:?}"))).collect()
         };
@@ -307,8 +450,9 @@ impl Relay {
             let to_them = |actions: &[Action], names: &OutNames| -> Vec<String> {
                 actions
                     .iter()
-                    .filter(|action| names.session_of(action).is_some_and(|s| bystanders.contains(&s)))
+                    .filter(|action| names.is_about_a_bystander(action, &bystanders, &streams))
                     .map(|action| names.rename(&format!("{action:?}")))
+                    .map(|line| if streams.is_empty() { line } else { without_aliases(&line) })
                     .collect()
             };
             BYSTANDER_ACTIONS.fetch_add(to_them(&after, new).len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -344,7 +488,9 @@ def same(revision):
             "#[cfg(test)]\n"
             "pub(crate) static BYSTANDER_DIFFERENCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);\n"
             "#[cfg(test)]\n"
-            "pub(crate) static BYSTANDER_ACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);\n")
+            "pub(crate) static BYSTANDER_ACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);\n"
+            "#[cfg(test)]\n"
+            "pub(crate) static BYSTANDER_STREAMS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());\n")
     path.write_text(once(path.read_text(), "mod events;\n", "mod events;\n#[cfg(test)]\nmod fuzz;\n", "mod events;") + stub)
     digests = []
     for _ in range(3):
@@ -444,9 +590,19 @@ def main():
         del sys.argv[at:at + 2]
     world = os.environ.get("XMOQ_FUZZ_WORLD", "v1")
     print(f"world: {world}")
-    if world == "split":
-        # The sessions of the half of that world the change is kept out of.
-        os.environ["XMOQ_DIFF_BYSTANDERS"] = "3,4"
+    # The sessions of the half of the world the change is kept out of. In
+    # `shared`, session 4 is one of them for one of its subscriptions only,
+    # which `fuzz.rs` names.
+    bystanders = {"split": "3,4", "split-one": "3,4", "shared": "3"}
+    if world in bystanders:
+        os.environ["XMOQ_DIFF_BYSTANDERS"] = bystanders[world]
+    if "--touch" in sys.argv:
+        at = sys.argv.index("--touch")
+        if at + 1 >= len(sys.argv) or sys.argv[at + 1] not in TOUCHES:
+            sys.exit(f"--touch takes one of {', '.join(TOUCHES)}")
+        os.environ["XMOQ_FUZZ_TOUCH"] = sys.argv[at + 1]
+        del sys.argv[at:at + 2]
+    print(f"touch: {os.environ.get('XMOQ_FUZZ_TOUCH', 'subgroups')}")
     if "--touching" in sys.argv:
         os.environ["XMOQ_DIFF_KEEP_GOING"] = "1"
     if "--raw-numbers" in sys.argv:

@@ -98,6 +98,12 @@ struct Args {
     /// Subgroup ID is 0 all three ways; what differs is when a receiver
     /// knows it.
     subgroup_id: SubgroupId,
+    /// The Group ID of the first Object this client sends; each Object after
+    /// it is the next Group. WHY a flag: two publishers of one track that
+    /// both count from 0 send the same Groups, and a relay takes each from
+    /// one of them. To see a track go on with the publisher that is left,
+    /// the second has to start where the first stopped.
+    first_group: u64,
     /// How long a request of the peer waits for its refusal.
     ///
     /// WHY the two delays: on a real link, a SUBSCRIBE the relay sends after
@@ -142,6 +148,7 @@ fn parse_args() -> Result<Args> {
     let mut timeout_secs = 20;
     let mut publish_delay_ms = 0;
     let mut subgroup_id = SubgroupId::Zero;
+    let mut first_group = 0;
     let mut answer_delay_ms = 0;
     let mut trace = false;
 
@@ -171,6 +178,7 @@ fn parse_args() -> Result<Args> {
                     other => bail!("unknown --subgroup-id {other}"),
                 };
             }
+            "--first-group" => first_group = value.parse().context("--first-group")?,
             "--publish-delay-ms" => {
                 publish_delay_ms = value.parse().context("--publish-delay-ms")?;
             }
@@ -204,6 +212,7 @@ fn parse_args() -> Result<Args> {
         timeout_secs,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
+        first_group,
         answer_delay: Duration::from_millis(answer_delay_ms),
         trace: if trace {
             Trace::new(report::trace)
@@ -540,6 +549,15 @@ impl Client<'_> {
     }
 
     /// Sends one Object as Object 0 of a new Group, on a new subgroup stream.
+    ///
+    /// A `STOP_SENDING` for the stream is not an error, whenever it comes:
+    /// §11.4.3 has "A subscriber MAY send a QUIC `STOP_SENDING` frame for a
+    /// subgroup stream if the Group or Subgroup is no longer of interest to
+    /// it", and "Resets and `STOP_SENDING` on SUBSCRIBE data streams have no
+    /// impact on other Subgroups in the Group or the subscription". A relay
+    /// that takes the track from another publisher as well does it to every
+    /// Subgroup it has from the other one. `SENT` is printed all the same: it
+    /// says that this client did its part.
     async fn send_object(&self, track_alias: u64, group_id: u64, payload: &[u8]) -> Result<()> {
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
             track_alias,
@@ -564,7 +582,18 @@ impl Client<'_> {
             .trace
             .bytes(Direction::Send, &format!("data#{group_id}"), &bytes);
         let failed = |error| anyhow!("could not write the subgroup stream: {error:?}");
-        data.write_all(&bytes).await.map_err(failed)?;
+        match data.write_all(&bytes).await {
+            Ok(()) => {}
+            // The stream was stopped before all of it was written. §11.4.3:
+            // "The publisher SHOULD respond with a reset."
+            Err(xmoq_moqt_io::WriteError::Stopped(code)) => {
+                data.reset(stream_reset_code::CANCELLED);
+                report::stop_sending_received(&format!("data#{group_id}"), code);
+                report::sent(group_id, payload.len());
+                return Ok(());
+            }
+            Err(error) => return Err(failed(error)),
+        }
         // §11.4.3: every Object of the Subgroup was written, so the stream ends
         // with a FIN.
         match tokio::time::timeout(DELIVERY_WAIT, data.finish_and_wait()).await {
@@ -594,7 +623,8 @@ impl Client<'_> {
                 line = stdin.next_line() => match line? {
                     Some(_) => {
                         // Each Object is a Group of its own, numbered from 0.
-                        self.send_object(PUBLISH_TRACK_ALIAS, stream_count, payload)
+                        let group_id = self.args.first_group + stream_count;
+                        self.send_object(PUBLISH_TRACK_ALIAS, group_id, payload)
                             .await?;
                         stream_count += 1;
                     }
@@ -685,7 +715,7 @@ impl Client<'_> {
         let mut serving: Option<Serving> = None;
         // Each Object is a Group of its own, numbered from 0 across
         // subscriptions.
-        let mut group_id = 0;
+        let mut group_id = self.args.first_group;
         loop {
             tokio::select! {
                 line = stdin.next_line() => match line? {

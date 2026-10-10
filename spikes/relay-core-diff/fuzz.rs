@@ -26,6 +26,26 @@
 //!   `compare.py` checks that the two cores do the same to sessions 3 and 4
 //!   from the first event to the last.
 //!
+//! * `one-publisher`: the streams of `full`, and one session, the first, is
+//!   the only one that sends PUBLISH, `PUBLISH_NAMESPACE` or data streams. No
+//!   track can get a second publisher.
+//! * `split-one`: `split`, with one publisher in the second half: session 3
+//!   publishes, announces and sends, session 4 subscribes. In the first half
+//!   both sessions do all of it for the one track, so that a track with two
+//!   publishers can only come about there.
+//! * `shared`: `split-one`, and session 4 also subscribes to the track of the
+//!   first half. `compare.py` then looks at session 3 and at what session 4
+//!   gets for the track of the second half.
+//!
+//! `XMOQ_FUZZ_TOUCH` chooses which events count as the ones a change is
+//! about: `subgroups` (the default; a stream that leaves the Subgroup ID to
+//! its first Object, or a second stream for a Subgroup) or `publishers` (a
+//! PUBLISH for a track another session published before, or after another
+//! session announced a namespace), `republish` (a PUBLISH for a track by a
+//! session that sent PUBLISH for it before) or `waiting-or-draining` (a
+//! PUBLISH after another session announced a namespace, or after any
+//! `PUBLISH_DONE`).
+//!
 //! Every world but `v1` starts with a track that is published and subscribed
 //! to (two in `split`, one a half). WHY: from nothing, few sequences get as
 //! far as an Object that reaches a subscriber, and the streams are what the
@@ -113,6 +133,9 @@ enum World {
     Distinct,
     Full,
     Split,
+    OnePublisher,
+    SplitOne,
+    Shared,
 }
 
 impl World {
@@ -122,7 +145,10 @@ impl World {
             Ok("distinct") => Self::Distinct,
             Ok("full") => Self::Full,
             Ok("split") => Self::Split,
-            Ok(other) => panic!("XMOQ_FUZZ_WORLD={other}: not v1, distinct, full or split"),
+            Ok("one-publisher") => Self::OnePublisher,
+            Ok("split-one") => Self::SplitOne,
+            Ok("shared") => Self::Shared,
+            Ok(other) => panic!("XMOQ_FUZZ_WORLD={other}: not a world of fuzz.rs"),
         }
     }
 }
@@ -135,7 +161,9 @@ fn subgroup_of_a_new_stream(rng: &mut Rng, peer: &mut Peer, world: World) -> (u6
             peer.next_group += 1;
             (peer.next_group - 1, SubgroupId::Zero)
         }
-        World::Split => unreachable!("a half of it has the streams of full or of distinct"),
+        World::Split | World::OnePublisher | World::SplitOne | World::Shared => {
+            unreachable!("it has the streams of full or of distinct")
+        }
         World::Full => {
             let group = rng.next(3);
             let subgroup = match rng.next(3) {
@@ -153,9 +181,25 @@ fn subgroup_of_a_new_stream(rng: &mut Rng, peer: &mut Peer, world: World) -> (u6
 /// with (of the same half, in `split`), so that Objects reach a subscriber.
 fn data_source(rng: &mut Rng, world: World, who: u64, alias: u64) -> (u64, u64) {
     if world == World::V1 || rng.next(4) == 0 {
-        return (who, alias);
+        return (publisher_for(world, who), alias);
     }
-    (if world == World::Split { who / 2 * 2 } else { 0 }, 40)
+    (if world.is_split() { who / 2 * 2 } else { 0 }, 40)
+}
+
+/// The session that publishes where `who` would: itself, unless the world
+/// has one publisher there.
+fn publisher_for(world: World, who: u64) -> u64 {
+    match world {
+        World::OnePublisher => 0,
+        World::SplitOne | World::Shared if who / 2 == 1 => 2,
+        _ => who,
+    }
+}
+
+impl World {
+    fn is_split(self) -> bool {
+        matches!(self, Self::Split | Self::SplitOne | Self::Shared)
+    }
 }
 
 fn new_request(peer: &mut Peer) -> (u64, StreamKey) {
@@ -178,10 +222,14 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
     let name = rng.next(2);
     let alias = 40 + rng.next(2);
     let half = who / 2;
-    let track_named = |name: u64| if world == World::Split { track_of_half(half) } else { track(name) };
+    let published = |name: u64| if world.is_split() { track_of_half(half) } else { track(name) };
+    // Session 4 of `shared` subscribes to the tracks of both halves.
+    let subscribed = |name: u64| if world == World::Shared && who == 3 { track_of_half(name) } else { published(name) };
+    let publishes = publisher_for(world, who);
     let streams = match world {
-        World::Split if half == 0 => World::Full,
-        World::Split => World::Distinct,
+        split if split.is_split() && half == 0 => World::Full,
+        split if split.is_split() => World::Distinct,
+        World::OnePublisher => World::Full,
         other => other,
     };
     let kinds = if world == World::V1 { 30 } else { 33 };
@@ -216,19 +264,20 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
                 stream: new,
                 first: ControlMessage::Subscribe(Subscribe {
                     request_id: id,
-                    full_track_name: track_named(name),
+                    full_track_name: subscribed(name),
                     parameters: if forward_0 { vec![Parameter::Forward(false)] } else { vec![] },
                 }),
             }
         }
         3..=4 => {
-            let (id, new) = new_request(peer);
+            let session = SessionKey(publishes + 1);
+            let (id, new) = new_request(&mut peers[usize::try_from(publishes).unwrap()]);
             Event::RequestOpened {
                 session,
                 stream: new,
                 first: ControlMessage::Publish(Publish {
                     request_id: id,
-                    full_track_name: track_named(name),
+                    full_track_name: published(name),
                     track_alias: alias,
                     parameters: vec![],
                     track_properties: vec![KeyValuePair::varint(2, 5).unwrap()],
@@ -236,10 +285,11 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
             }
         }
         5..=6 => {
-            let (id, new) = new_request(peer);
+            let session = SessionKey(publishes + 1);
+            let (id, new) = new_request(&mut peers[usize::try_from(publishes).unwrap()]);
             let fields = if rng.next(3) == 0 { vec![] } else { vec![b"xmoq".to_vec()] };
             // The namespace without fields matches every track.
-            let fields = if world == World::Split { vec![namespace_of_half(half)] } else { fields };
+            let fields = if world.is_split() { vec![namespace_of_half(half)] } else { fields };
             Event::RequestOpened {
                 session,
                 stream: new,
@@ -250,6 +300,16 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
                 }),
             }
         }
+        // WHY not from session 4 of `shared`: a message that is an error on a
+        // request closes the session in the core where the request is still
+        // open, and not in the one where it is over. On a stream of the first
+        // half that is the change itself, and it takes the session's other
+        // subscription with it.
+        7 | 8 if world == World::Shared && who == 3 => Event::RequestClosed {
+            session,
+            stream,
+            how: RequestEnd::Fin,
+        },
         7 => Event::RequestMessage { session, stream, message: done() },
         8 => {
             peer.next_request += 2;
@@ -377,6 +437,85 @@ fn touches_subgroup_selection(event: &Event, opened: &mut Vec<(u64, u64, u64, u6
     again
 }
 
+/// Whether an event is a PUBLISH for a track that another session published
+/// before in the sequence, or that comes after another session announced a
+/// namespace. `published` has a session and its track, or no track for a
+/// namespace, which is taken to match every track.
+fn touches_the_publishers(event: &Event, published: &mut Vec<(u64, Option<FullTrackName>)>) -> bool {
+    let Event::RequestOpened { session, first, .. } = event else {
+        return false;
+    };
+    match first {
+        ControlMessage::Publish(publish) => {
+            let name = &publish.full_track_name;
+            let again = published
+                .iter()
+                .any(|(other, track)| *other != session.0 && track.as_ref().is_none_or(|track| track == name));
+            published.push((session.0, Some(name.clone())));
+            again
+        }
+        ControlMessage::PublishNamespace(_) => {
+            published.push((session.0, None));
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Whether an event is a PUBLISH for a track by a session that sent PUBLISH
+/// for it before in the sequence.
+fn publishes_again(event: &Event, published: &mut Vec<(u64, Option<FullTrackName>)>) -> bool {
+    let Event::RequestOpened { session, first: ControlMessage::Publish(publish), .. } = event else {
+        return false;
+    };
+    let this = (session.0, Some(publish.full_track_name.clone()));
+    let again = published.contains(&this);
+    published.push(this);
+    again
+}
+
+/// Whether an event is a PUBLISH that can meet a track that waits for a
+/// publisher's answer or whose sources drain: one that comes after another
+/// session announced a namespace, or after a `PUBLISH_DONE` from anyone.
+/// Wider than it has to be, which only makes the check stricter. `seen` has
+/// a session and no track for a namespace it announced, and session 0, which
+/// is no session, for a `PUBLISH_DONE`.
+fn publishes_to_a_waiting_or_draining_track(
+    event: &Event,
+    seen: &mut Vec<(u64, Option<FullTrackName>)>,
+) -> bool {
+    match event {
+        Event::RequestOpened { session, first: ControlMessage::Publish(_), .. } => {
+            seen.iter().any(|(other, track)| track.is_none() && *other != session.0)
+        }
+        Event::RequestOpened { session, first: ControlMessage::PublishNamespace(_), .. } => {
+            seen.push((session.0, None));
+            false
+        }
+        Event::RequestMessage { message: ControlMessage::PublishDone(_), .. }
+        | Event::OwnRequestMessage { message: ControlMessage::PublishDone(_), .. } => {
+            seen.push((0, None));
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Session `subscriber` subscribes to the track. Returns the request stream.
+fn subscribe_to(relay: &mut Relay, peers: &mut [Peer], subscriber: usize, name: &FullTrackName) -> StreamKey {
+    let (request_id, stream) = new_request(&mut peers[subscriber - 1]);
+    relay.handle(Event::RequestOpened {
+        session: SessionKey(subscriber as u64),
+        stream,
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id,
+            full_track_name: name.clone(),
+            parameters: vec![],
+        }),
+    });
+    stream
+}
+
 /// Session `publisher` publishes the track under Track Alias 40, and session
 /// `subscriber` subscribes to it.
 fn start_a_track(relay: &mut Relay, peers: &mut [Peer], publisher: usize, subscriber: usize, name: &FullTrackName) {
@@ -392,16 +531,7 @@ fn start_a_track(relay: &mut Relay, peers: &mut [Peer], publisher: usize, subscr
             track_properties: vec![],
         }),
     });
-    let (request_id, stream) = new_request(&mut peers[subscriber - 1]);
-    relay.handle(Event::RequestOpened {
-        session: SessionKey(subscriber as u64),
-        stream,
-        first: ControlMessage::Subscribe(Subscribe {
-            request_id,
-            full_track_name: name.clone(),
-            parameters: vec![],
-        }),
-    });
+    subscribe_to(relay, peers, subscriber, name);
 }
 
 fn setting(name: &str, default: u64) -> u64 {
@@ -412,6 +542,7 @@ fn setting(name: &str, default: u64) -> u64 {
 fn the_two_cores_answer_random_events_alike() {
     let (runs, length) = (setting("XMOQ_FUZZ_RUNS", 20_000), setting("XMOQ_FUZZ_LEN", 80));
     let world = World::from_env();
+    let touch = std::env::var("XMOQ_FUZZ_TOUCH").unwrap_or_else(|_| "subgroups".to_string());
     let mut events = 0u64;
     let (mut touching, mut differing, mut differing_before_touching) = (0u64, 0u64, 0u64);
     let (mut opened_downstream, mut objects_sent, mut with_an_object) = (0u64, 0u64, 0u64);
@@ -427,19 +558,60 @@ fn the_two_cores_answer_random_events_alike() {
         for session in 1..=4 {
             relay.handle(Event::SessionOpened { session: SessionKey(session), role: Role::Server });
         }
+        // What session 4 of `shared` asked for the track of the second half:
+        // the part of that session `compare.py` holds the two cores to.
+        let mut watched: Vec<(u64, u64)> = Vec::new();
+        let watch = |watched: &[(u64, u64)]| {
+            *crate::BYSTANDER_STREAMS.lock().unwrap() = watched.to_vec();
+        };
+        watch(&watched);
+        let mut published = Vec::new();
         match world {
             World::V1 => {}
-            World::Distinct | World::Full => start_a_track(&mut relay, &mut peers, 1, 2, &track(0)),
-            World::Split => {
+            World::Distinct | World::Full | World::OnePublisher => {
+                start_a_track(&mut relay, &mut peers, 1, 2, &track(0));
+                published.push((1, Some(track(0))));
+            }
+            World::Split | World::SplitOne | World::Shared => {
                 start_a_track(&mut relay, &mut peers, 1, 2, &track_of_half(0));
+                if world == World::Shared {
+                    // The stream the next request of session 4 is opened on.
+                    watched.push((4, peers[3].next_stream));
+                    watch(&watched);
+                }
                 start_a_track(&mut relay, &mut peers, 3, 4, &track_of_half(1));
+                if world == World::Shared {
+                    subscribe_to(&mut relay, &mut peers, 4, &track_of_half(0));
+                }
+                published.push((1, Some(track_of_half(0))));
+                published.push((3, Some(track_of_half(1))));
             }
         }
         let (mut opened, mut touched, mut differed) = (Vec::new(), false, false);
         let objects_before = objects_sent;
         for _ in 0..length {
             let event = random_event(&mut rng, &mut peers, world);
-            let touches = touches_subgroup_selection(&event, &mut opened);
+            let touches = match touch.as_str() {
+                "subgroups" => touches_subgroup_selection(&event, &mut opened),
+                "publishers" => touches_the_publishers(&event, &mut published),
+                "republish" => publishes_again(&event, &mut published),
+                "waiting-or-draining" => publishes_to_a_waiting_or_draining_track(&event, &mut published),
+                other => panic!("XMOQ_FUZZ_TOUCH={other}: not a kind of event fuzz.rs knows"),
+            };
+            if world == World::Shared {
+                match &event {
+                    Event::RequestOpened {
+                        session: SessionKey(4),
+                        stream,
+                        first: ControlMessage::Subscribe(subscribe),
+                    } if subscribe.full_track_name == track_of_half(1) => watched.push((4, stream.0)),
+                    Event::SessionOpened { session: SessionKey(4), .. }
+                    | Event::SessionClosed { session: SessionKey(4) }
+                    | Event::SessionFailed { session: SessionKey(4), .. } => watched.clear(),
+                    _ => {}
+                }
+                watch(&watched);
+            }
             let before = differences();
             let actions = relay.handle(event);
             if differences() != before && !differed {
@@ -460,7 +632,7 @@ fn the_two_cores_answer_random_events_alike() {
         with_an_object += u64::from(objects_sent != objects_before);
     }
     println!("FUZZ runs={runs} events={events} digest={:016x}", digest.finish());
-    println!("FUZZ_WORLD {}", std::env::var("XMOQ_FUZZ_WORLD").unwrap_or_else(|_| "v1".to_string()));
+    println!("FUZZ_WORLD {} touch={touch}", std::env::var("XMOQ_FUZZ_WORLD").unwrap_or_else(|_| "v1".to_string()));
     println!(
         "FUZZ_TOUCH sequences={runs} touching={touching} differing={differing} differing_before_touching={differing_before_touching}"
     );
