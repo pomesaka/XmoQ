@@ -58,6 +58,27 @@ What the tests hold, and what breaks them (`packages/moqt/test/core/session-fetc
 
 `mise run check` and `mise run interop` passed: 624 tests of the TypeScript packages, 74 of 74 pairings.
 
+### The runs in the matrix, with a publisher that answers a FETCH
+
+Added later on 2026-10-11, on `main` at `2ed2c70b` with the changes of three pull requests that were open then on top. Since the runs above, the own relay passes a Standalone FETCH on to a publisher and has an answer of its own for FILL_TIMEOUT 0, and `interop/` got moqtail's test client 0.15.0 as a publisher: it answers a FETCH, publishes by itself, three Objects of 8 bytes a Group, four a second, and gives every Object the same payload.
+
+`fetch.ts` now has a case for each run, each with its publisher, and `matrix.ts` runs them (`--only "fetch: "`). **What is expected was written before the runs**, from the implementation notes for the own relay and from the records for the moqtail relay and for moqtail's publisher; `EXPECTED` in `fetch.ts` has each with its source. The page takes the payload it compares with from an Object it gets by its subscription.
+
+| Run | Through | Expected, and seen in every run |
+|---|---|---|
+| {0, 1} to {1, 2} of moqtail's test client | both | FETCH_OK, End Location {1, 2}; Objects {0, 1}, {0, 2}, {1, 0}, {1, 1} with the publisher's payload; a FIN |
+| {0, 0} to {2, 0} with FILL_TIMEOUT 0, the same publisher | own | FETCH_OK, End Location {2, 0}; one End of Unknown Range at {2, 2^64 - 1}; a FIN |
+| The page gives the FETCH up after 1 second; `moqtail-rust` publishes and answers no FETCH | own | the FETCH ends as cancelled; the relay prints `OPEN_REQUEST session=0 own=K FETCH` and then `CANCEL_OWN_REQUEST session=0 own=K code=0x1`, with no `RECV session=0 own=K` before it |
+| `own-rust` publishes and refuses the FETCH | own | REQUEST_ERROR `0x10` |
+| | moqtail | FETCH_OK, End Location {0, 1}, the one Object, a FIN |
+| A track nobody published | both | REQUEST_ERROR `0x10` |
+
+- **No expectation was changed after a run.** What was changed after the first run is what the driver waits for of moqtail's test client: it prints a `Sent object` line for some Objects only, so the driver waits for `Stream flushed for group 2`.
+- The eight runs, two matrices at once, 20 rounds each: 40 of 40 rounds, 320 runs. `mise run interop`: 82 of 82 pairings.
+- Temporary changes to the driver, each taken back: with the page giving up after 7 seconds the cancelled run fails, with the relay's own `TIMEOUT` (`0x2`) as the page's answer after 5; without FILL_TIMEOUT the second run fails with the six Objects of Groups 0 and 1 on the stream, which is what moqtail's publisher sends for an End Location {2, 0}; with {0, 0} as the start the first run fails with five Objects.
+- The range of the first run ends inside a Group and is asked in Ascending order, so that it does not touch the two places where moqtail's publisher leaves the draft (a Group named by Object 0 as the end is left out; Descending gives the first Group alone). The second row of the temporary changes shows the first of them.
+- Not run: a Joining FETCH (the own relay refuses one), a FETCH from the own Rust client, a fetch stream larger than a window, a FETCH that the publisher resets.
+
 ## Limitations and blockers
 
 No blocker.
@@ -68,7 +89,7 @@ No blocker.
 - The own relay refuses every FETCH, so a FETCH that it serves, a fetch stream that it resets, and a FETCH it cancels were run against the played transport only.
 - **A FETCH without an answer stays open** until the caller cancels it; the run with `moqtail-rust` as the publisher is that case. Nothing in `@xmoq/moqt` ends it after a time.
 - A fetch stream whose FETCH_HEADER does not come is not stopped after a time (implementation notes, known gaps: a stream that never says what it is).
-- `fetch.ts` is not in the matrix. Chromium only, loopback only.
+- When the first runs were made, `fetch.ts` was not in the matrix; it is since the section above. Chromium only, loopback only.
 
 ## Open questions raised
 

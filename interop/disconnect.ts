@@ -49,10 +49,11 @@
 //     The publisher sends a Group, says PUBLISH_DONE and publishes the track
 //     anew on the same session, under the next Track Alias or the same, and
 //     sends another Group. The subscribers stay and get both.
-//   publish-while-asked     --publisher own-rust --publisher <client> --subscriber <client>...
-//     The first publisher announces the namespace and answers the relay's
-//     SUBSCRIBE late; the second sends PUBLISH for the track meanwhile, which
-//     answers the subscribers. Both then send a Group.
+//   publish-while-asked     --publisher own-rust --publisher own-rust --subscriber <client>...
+//     The first publisher announces the namespace and holds back its answer
+//     to the relay's SUBSCRIBE; the second, which is connected already, sends
+//     PUBLISH for the track then, which answers the subscribers. Both then
+//     send a Group. The driver tells each publisher when to go on.
 //   <client>: own-browser | own-rust | moqtail-browser | moqtail-rust
 //
 // What each scenario has to show is listed in
@@ -1623,14 +1624,6 @@ async function secondSource(run: Run): Promise<ScenarioResult> {
 }
 
 /**
- * How late the publisher that announced the namespace answers the relay's
- * SUBSCRIBE. WHY this long: the other publisher has to connect and send its
- * PUBLISH in that time. WHY not longer: the relay gives a publisher 5 seconds
- * to answer (provisional), and this one has to answer.
- */
-const ASKED_ANSWERS_AFTER_MS = 3_000;
-
-/**
  * A publisher sends PUBLISH for a track while the relay waits for another
  * publisher's answer to its SUBSCRIBE for that track.
  *
@@ -1657,7 +1650,23 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 			`--scenario publish-while-asked needs own subscribers, which stay for more than one Object, not ${passing}`,
 		);
 	}
+	if (otherKind !== "own-rust") {
+		throw new Error(
+			`--scenario publish-while-asked needs own-rust as its second publisher, which holds its PUBLISH back until it is told, not ${otherKind}`,
+		);
+	}
 	const relay = run.context.relay;
+	// WHY both publishers are there before a subscriber is, each held back
+	// by the driver: the relay waits 5 seconds (provisional) for the answer
+	// to its SUBSCRIBE, and the PUBLISH has to come in that time. With a
+	// publisher that started when the relay had asked, and an answer that
+	// came 3 seconds late by itself, the start of a process and its
+	// connection had to fit into the 3 seconds, and did not on a loaded
+	// machine (6 of 24 rounds with four matrices at once, and once in CI).
+	// The race is not gone: what has to fit into the relay's 5 seconds now
+	// is the later subscribers' start and messages between peers that are
+	// connected.
+	//
 	// It announces the namespace and waits to be asked. Its Groups start
 	// after the one the other publisher sends, as a source that goes on with
 	// the track's Group IDs does.
@@ -1665,8 +1674,19 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 		label: `asked:${askedKind}`,
 		firstGroup: 1,
 		payloadHex: hexOf(`asked ${run.payloadHex}`),
-		servesWhenAskedAfterMs: ASKED_ANSWERS_AFTER_MS,
+		servesWhenAsked: "on-line",
 	});
+	// It announces the namespace as well, as every own-rust publisher does,
+	// so the relay asks it too; its PUBLISH then makes the relay's SUBSCRIBE
+	// to it give way (the notes, "A PUBLISH for a track the relay has asked
+	// a publisher for and has no answer about").
+	const other = await joinAsPublisher(otherKind, run, {
+		label: `pub:${otherKind}`,
+		payloadHex: hexOf(`other ${run.payloadHex}`),
+		publishesOnLine: true,
+	});
+	const askedSession = sessionOf(asked, run);
+	const otherSession = sessionOf(other, run);
 
 	// The subscribers subscribe and are not answered: "Subscribers while the
 	// publisher has not answered the relay's SUBSCRIBE: They wait, and no
@@ -1678,53 +1698,110 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 		subscriber.catch(() => {});
 		waiting.push({ session: await sessionOfNewClient(run), subscriber });
 	}
-	await relay.waitForLine(requestOpenedTowards(sessionOf(asked, run)));
+	// The relay's SUBSCRIBE has come to the publisher, which holds its
+	// answer back. The first subscriber's SUBSCRIBE is what made the relay
+	// ask. Of a later subscriber the relay prints nothing while it waits, so
+	// that its SUBSCRIBE was read before the PUBLISH is not certain; what is
+	// checked for each is that it was not answered before the PUBLISH.
+	await relay.waitForLine(requestOpenedTowards(askedSession));
+	await asked.asked();
 
-	const other = await joinAsPublisher(otherKind, run, {
-		label: `pub:${otherKind}`,
-		payloadHex: hexOf(`other ${run.payloadHex}`),
-	});
-	// Nobody was answered before the publisher with the PUBLISH came.
-	//
-	// WHY the message names two causes: the relay prints nothing when a
-	// publisher answers its SUBSCRIBE, so its log does not tell a relay that
-	// answered without a source from a run in which the publisher that was
-	// asked had answered before the other one came. That happens when the
-	// other takes longer to connect than ASKED_ANSWERS_AFTER_MS, as on a
-	// machine with four of these matrices at once (6 of 24 rounds).
-	for (const { session } of waiting) {
-		const answers = await relay.linesBefore(
-			{ line: sessionOpened(sessionOf(other, run)) },
-			subscribeOkSent(session),
-		);
-		if (answers.length > 0) {
+	/**
+	 * Runs a step that fails when the relay has given up on the publisher
+	 * that was asked, and says so then, in place of what the step failed
+	 * with.
+	 *
+	 * WHY this is said apart from a fault of the relay: it is a matter of
+	 * time, the relay's 5 seconds, and the run then shows nothing.
+	 */
+	const unlessTheRelayGaveUp = async <T>(
+		step: Promise<T>,
+		shows: string,
+	): Promise<T> => {
+		try {
+			return await step;
+		} catch (error) {
+			// The relay's line and the client's failure reach the driver in
+			// no order, so the line is given a moment.
+			const gaveUp = await relay
+				.waitForLine(ownRequestEnded(askedSession), 2_000)
+				.catch(() => undefined);
+			if (gaveUp === undefined) throw error;
 			throw new Error(
-				`the relay answered the subscriber of session ${session} before ${other.label} came: either it answered while no publisher had the track, or ${asked.label} had answered by then (it waits ${seconds(ASKED_ANSWERS_AFTER_MS)}), and then the run does not show what it is for`,
+				`the relay had ended its SUBSCRIBE to ${asked.label} (${gaveUp[0]}), for which it waits 5 seconds, so the run does not show that ${shows}: ${String(error)}`,
 			);
 		}
-	}
-	// The PUBLISH gave the track its source: the subscribers are answered,
-	// and the publisher that was asked has not answered yet.
+	};
+	const answersWhileWaiting =
+		"a PUBLISH answers subscribers while the relay waits";
+
+	await other.publish();
+	// The PUBLISH gave the track its source: the subscribers are answered.
 	const subscribers: Subscriber[] = [];
 	for (const { session, subscriber } of waiting) {
-		const answered = await withTimeout(
-			subscriber,
-			`the subscriber of session ${session} to be answered after the PUBLISH`,
+		const answered = await unlessTheRelayGaveUp(
+			withTimeout(
+				subscriber,
+				`the subscriber of session ${session} to be answered after the PUBLISH`,
+			),
+			answersWhileWaiting,
 		);
 		run.sessionOf.set(answered, session);
 		subscribers.push(answered);
 	}
-	if (asked.isServing()) {
+	// The relay's PUBLISH_OK: the second REQUEST_OK it sends the publisher,
+	// after the one for its namespace. It is sent when the PUBLISH was dealt
+	// with.
+	const publishOk: Fence = {
+		line: new RegExp(`^SEND session=${otherSession} stream=\\d+ REQUEST_OK`),
+		nth: 2,
+	};
+	const answerOfAsked = new RegExp(
+		`^RECV session=${askedSession} own=\\d+ SUBSCRIBE_OK`,
+	);
+	// The relay had not given up on the publisher that was asked, and had no
+	// answer from it, when it dealt with the PUBLISH: its own request to
+	// that session was open, so the PUBLISH came "while the relay waits".
+	const givenUp = await relay.linesBefore(
+		publishOk,
+		ownRequestEnded(askedSession),
+	);
+	if (givenUp.length > 0) {
 		throw new Error(
-			`${asked.label} had answered the relay's SUBSCRIBE when the subscribers were answered, so the run does not show that the PUBLISH answered them`,
+			`the relay had ended its SUBSCRIBE to ${asked.label} (${givenUp[0]?.[0]}), for which it waits 5 seconds, before the PUBLISH of ${other.label} was dealt with, so the run does not show that ${answersWhileWaiting}`,
 		);
+	}
+	// The publisher holds its answer back until it is told below, so an
+	// answer before the PUBLISH is a fault of the client or of this driver.
+	const answeredByAsked = await relay.linesBefore(publishOk, answerOfAsked);
+	if (answeredByAsked.length > 0) {
+		throw new Error(
+			`${asked.label} answered the relay's SUBSCRIBE before it was told to: ${answeredByAsked[0]?.[0]}`,
+		);
+	}
+	// Nobody was answered before the PUBLISH was dealt with: with the
+	// publisher that was asked silent until then, no publisher had the
+	// track. And each was answered before that publisher answered.
+	for (const { session } of waiting) {
+		const early = await relay.linesBefore(publishOk, subscribeOkSent(session));
+		if (early.length > 0) {
+			throw new Error(
+				`the relay answered the subscriber of session ${session} before any publisher had the track: ${early[0]?.[0]}`,
+			);
+		}
 	}
 	const first = await other.send();
 	await allReceive(subscribers, first, other);
 
 	// "What the relay asked stays asked": the answer makes the publisher a
 	// further source, and its Group reaches the subscribers.
-	await asked.serving();
+	//
+	// The relay may have given up on the publisher by now: the client then
+	// fails to send its SUBSCRIBE_OK, and ends.
+	await unlessTheRelayGaveUp(asked.serve(), "what the relay asked stays asked");
+	// The relay prints the answer in every run: a change of the line's form
+	// would otherwise make the check above pass for the wrong reason.
+	await relay.waitForLine(answerOfAsked);
 	const second = await asked.send();
 	await allReceive(subscribers, second, asked);
 
@@ -2048,7 +2125,7 @@ async function askAll(run: Run): Promise<ScenarioResult> {
 			label,
 			firstGroup,
 			payloadHex: hexOf(`${label} ${run.payloadHex}`),
-			servesWhenAskedAfterMs: 0,
+			servesWhenAsked: "at-once",
 		});
 	// The publisher with PUBLISH, of the ways that have one.
 	const withPublish = (): Promise<Publisher> => {
