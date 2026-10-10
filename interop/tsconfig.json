@@ -1,0 +1,20 @@
+{
+	// The driver, which runs on Bun. The pages run in a browser and are checked
+	// by tsconfig.page.json, so that neither side can use the other's globals.
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"lib": ["ES2022"],
+		"types": ["bun"],
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"noImplicitOverride": true,
+		"noFallthroughCasesInSwitch": true,
+		"verbatimModuleSyntax": true,
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"skipLibCheck": true
+	},
+	"include": ["run.ts"]
+}

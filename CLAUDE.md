@@ -31,6 +31,8 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 
 本体のコード（`crates/`、`packages/`）は、次の順で`main`に入れる。`spikes/`は検証用で、lintとレビューの対象外にする。本体から`spikes/`に依存させない。
 
+`interop/`は、自前の部品を`moqtail`の相手とつないで確かめるスクリプトの置き場で、lintと型検査の対象にする。`interop/peers/`は`moqtail`のコードの写しなので、整形もlintもしない（元との差分を読めるようにするため）。`interop/`は`packages/`に依存してよいが、逆は禁止する。照合の実行そのものは、まだCIに入っていない。
+
 1. 実装する。終わったと報告する前に`mise run check`を実際に走らせ、その出力を報告に含める。通っていない状態で終わったと報告しない
 2. 実装者とは別のレビュアーがコードを読む（`/review-team-xmoq`）。レビュアーには実装者の報告を渡さず、差分だけを渡す
 3. 指摘は実装者が直す。直したことは差分と検査の再実行で確かめる
@@ -68,6 +70,8 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | docs/moq-libraries.md | 仕様書 | ライブラリ調査の記録（終了済み） |
 | docs/moqt-implementation-notes.md | 仕様書 | draftが黙っている箇所と矛盾している箇所で、2つの実装がそろえる挙動。既知の不足 |
 | fixtures/moqt-18/README.md | 仕様書 | moqtailから採った実バイト列の出どころと復号後の値 |
+| packages/moqt/README.md | 仕様書 | ブラウザ用クライアントライブラリの範囲、層の決まり、公開API |
+| interop/README.md | 運用手順書 | moqtailの相手の用意と、照合の走らせ方 |
 | .github/workflows/、scripts/ci/、mise.toml | コーディングポリシー | CIとローカルの検査。規約を検査で守る |
 
 ### 変更 → ドキュメント更新マッピング

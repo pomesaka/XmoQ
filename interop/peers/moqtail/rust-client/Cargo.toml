@@ -1,0 +1,13 @@
+[package]
+name = "xmoq-interop-moqtail-peer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Interop peer only. Versions match the Cargo.lock of moqtail/moqtail at tag relay@0.15.0.
+[dependencies]
+moqtail = "=0.15.0"
+wtransport = { version = "=0.7.2", features = ["quinn", "dangerous-configuration"] }
+tokio = { version = "=1.49.0", features = ["full"] }
+anyhow = "=1.0.100"
+bytes = "=1.11.1"

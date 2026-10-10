@@ -1,0 +1,8 @@
+{
+	"name": "xmoq",
+	"private": true,
+	"workspaces": [
+		"packages/*",
+		"interop"
+	]
+}

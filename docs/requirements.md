@@ -4,7 +4,7 @@
 
 | Requirement | Status |
 | --- | --- |
-| Own MoQ Transport implementation in Rust and TypeScript, pinned to draft 18 | Decided; partly implemented. Rust codec, client-side session and a client are implemented against `moqtail` peers. The relay and the TypeScript side are not |
+| Own MoQ Transport implementation in Rust and TypeScript, pinned to draft 18 | Decided; partly implemented. The codec, the client-side session and a client are implemented in Rust and in TypeScript, each against `moqtail` peers. The relay is not, and the two own sides have not been run against each other |
 | One-to-many live broadcast | Discussed |
 | Browser publishing and viewing | Discussed |
 | WebCodecs and MoQ/WebTransport | Discussed; validation required |

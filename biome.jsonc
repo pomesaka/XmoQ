@@ -4,7 +4,17 @@
 		// WHY a list of what is covered, not "everything except spikes": spikes/ holds throwaway
 		// code that reproduces one experiment with pinned library versions and is not kept to the
 		// standard of packages/. Listing packages/ also keeps Biome out of target/ and fixtures/.
-		"includes": ["packages/**"]
+		// WHY interop/ file by file: "interop/**" would take in generated output (.dist/, .cert/)
+		// and interop/peers/. The peers are copies of code written for moqtail, kept as they
+		// came so that a diff against their source stays readable; reformatting or relinting
+		// them would bury that diff.
+		"includes": [
+			"package.json",
+			"packages/**",
+			"interop/*.ts",
+			"interop/*.json",
+			"interop/*.html"
+		]
 	},
 	"linter": {
 		"rules": {
@@ -20,11 +30,54 @@
 							{
 								"group": ["**/spikes/**"],
 								"message": "spikes/ is throwaway validation code; packages must not depend on it."
+							},
+							{
+								"group": ["**/interop/**", "@xmoq/interop", "@xmoq/interop/**"],
+								"message": "interop/ checks the packages against other implementations; a package must not depend on it."
 							}
 						]
 					}
 				}
 			}
 		}
-	}
+	},
+	"overrides": [
+		{
+			// WHY: tsconfig.core.json stops src/core from using I/O globals, but a file of
+			// src/webtransport that uses none of them could still be imported and would
+			// compile. The codec and the session must not know the connection at all.
+			// An override replaces the options of the rule, so the two patterns above are
+			// repeated here.
+			"includes": ["packages/moqt/src/core/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["**/spikes/**"],
+										"message": "spikes/ is throwaway validation code; packages must not depend on it."
+									},
+									{
+										"group": [
+											"**/interop/**",
+											"@xmoq/interop",
+											"@xmoq/interop/**"
+										],
+										"message": "interop/ checks the packages against other implementations; a package must not depend on it."
+									},
+									{
+										"group": ["**/webtransport/**"],
+										"message": "src/core has no I/O; src/webtransport depends on it, not the other way round."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		}
+	]
 }

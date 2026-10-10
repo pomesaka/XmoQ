@@ -1,0 +1,35 @@
+export interface MoqtBidirectionalStream {
+	readonly readable: ReadableStream<unknown>;
+	readonly writable: WritableStream<Uint8Array>;
+}
+
+/**
+ * The part of a WebTransport session the connection uses. The browser's
+ * `WebTransport` is adapted to it in `connect.ts`; tests supply their own.
+ */
+export interface MoqtTransport {
+	readonly closed: Promise<{ closeCode?: number; reason?: string }>;
+	readonly incomingUnidirectionalStreams: ReadableStream<
+		ReadableStream<unknown>
+	>;
+	readonly incomingBidirectionalStreams: ReadableStream<MoqtBidirectionalStream>;
+	createUnidirectionalStream(): Promise<WritableStream<Uint8Array>>;
+	createBidirectionalStream(): Promise<MoqtBidirectionalStream>;
+	close(info: { closeCode: number; reason: string }): void;
+	/**
+	 * The value to abort a writable or cancel a readable with, so that the
+	 * stream is reset or its sender stopped with `code`.
+	 */
+	streamError(code: number, message: string): unknown;
+	/**
+	 * Whether a read or `writer.closed` failed with `error` because the peer
+	 * reset or stopped that one stream. False when the whole session ended,
+	 * which fails every stream too and is reported by `closed`.
+	 */
+	isStreamError(error: unknown): boolean;
+	/**
+	 * The error code the peer reset or stopped a stream with, from the value
+	 * the stream failed with. Undefined when the value carries none.
+	 */
+	streamErrorCode(error: unknown): number | undefined;
+}
