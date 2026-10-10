@@ -65,9 +65,28 @@ function onPage<T>(
 	return withTimeout(call, `${label} to ${what}`, timeoutMs);
 }
 
+/** What a publisher is started with, where the defaults of a run do not do. */
+export interface PublisherPlan {
+	/** Tells the publishers of a run apart in the log; `pub:<kind>` when left out. */
+	label?: string;
+	/**
+	 * The Group of its first Object, 0 when left out. The moqtail clients
+	 * cannot start elsewhere: they send Group 0 and nothing else.
+	 */
+	firstGroup?: number;
+	/**
+	 * What its Objects carry, the payload of the run when left out. Two
+	 * publishers with different payloads show a subscriber which of them an
+	 * Object came from.
+	 */
+	payloadHex?: string;
+}
+
 export interface Publisher {
 	kind: Client;
 	label: string;
+	/** What every Object it sends carries. */
+	payloadHex: string;
 	/** The moqtail clients send Object 0 of Group 0 and nothing else. */
 	sendsSeveral: boolean;
 	/** Sends Object 0 of the next Group on a stream of its own, finishes the stream, and resolves with the Group. */
@@ -123,15 +142,24 @@ async function startRustPublisher(
 	kind: RustClient,
 	label: string,
 	run: ClientRun,
+	plan: PublisherPlan,
 ): Promise<Publisher> {
+	const firstGroup = plan.firstGroup ?? 0;
+	if (firstGroup !== 0 && kind !== "own-rust") {
+		throw new Error(
+			`${label} cannot start at Group ${firstGroup}: the client sends Group 0 and nothing else`,
+		);
+	}
+	const payloadHex = plan.payloadHex ?? run.payloadHex;
 	const client = spawnRustClient(run.context, label, kind, "publish", TRACK, [
 		"--payload-hex",
-		run.payloadHex,
+		payloadHex,
+		...(firstGroup === 0 ? [] : ["--first-group", String(firstGroup)]),
 		"--timeout-secs",
 		RUST_CLIENT_TIMEOUT_SECS,
 	]);
 	await client.waitForLine(/^PUBLISHED /);
-	let nextGroup = 0;
+	let nextGroup = firstGroup;
 	const sent = async (): Promise<number> => {
 		const group = nextGroup;
 		nextGroup += 1;
@@ -141,6 +169,7 @@ async function startRustPublisher(
 	return {
 		kind,
 		label,
+		payloadHex,
 		sendsSeveral: kind === "own-rust",
 		send() {
 			client.child.stdin.write("send\n");
@@ -182,6 +211,7 @@ async function startBrowserPublisher(
 	kind: BrowserClient,
 	label: string,
 	run: ClientRun,
+	plan: PublisherPlan,
 ): Promise<Publisher> {
 	const page = await openConnectedPage(run.context, label, kind);
 	await onPage(
@@ -192,13 +222,19 @@ async function startBrowserPublisher(
 			TRACK,
 		] satisfies [string, string]),
 	);
-	const payloadHex = run.payloadHex;
+	const payloadHex = plan.payloadHex ?? run.payloadHex;
 	const kill = (): Promise<void> => page.context().close();
 	if (kind === "moqtail-browser") {
+		if ((plan.firstGroup ?? 0) !== 0) {
+			throw new Error(
+				`${label} cannot start at Group ${plan.firstGroup}: the page sends Group 0 and nothing else`,
+			);
+		}
 		let sentGroup0 = false;
 		return {
 			kind,
 			label,
+			payloadHex,
 			sendsSeveral: false,
 			async send() {
 				await page.evaluate((hex) => window.xmoq.sendObject(hex), payloadHex);
@@ -234,7 +270,7 @@ async function startBrowserPublisher(
 			},
 		};
 	}
-	let nextGroup = 0;
+	let nextGroup = plan.firstGroup ?? 0;
 	let leftOpen = 0;
 	const sendIn = async (finish: boolean): Promise<number> => {
 		const group = nextGroup;
@@ -253,6 +289,7 @@ async function startBrowserPublisher(
 	return {
 		kind,
 		label,
+		payloadHex,
 		sendsSeveral: true,
 		send: () => sendIn(true),
 		async sendBatch(count) {
@@ -311,11 +348,12 @@ async function startBrowserPublisher(
 export function startPublisher(
 	kind: Client,
 	run: ClientRun,
+	plan: PublisherPlan = {},
 ): Promise<Publisher> {
-	const label = `pub:${kind}`;
+	const label = plan.label ?? `pub:${kind}`;
 	return isBrowserClient(kind)
-		? startBrowserPublisher(kind, label, run)
-		: startRustPublisher(kind, label, run);
+		? startBrowserPublisher(kind, label, run, plan)
+		: startRustPublisher(kind, label, run, plan);
 }
 
 function isStringOrAbsent(value: unknown): value is string | undefined {
@@ -402,6 +440,12 @@ export interface Subscriber {
 	 * moqtail client reports its first Object only, whatever its Group.
 	 */
 	object(group: number): Promise<string>;
+	/**
+	 * The payload of every Object of the Group the client has got so far:
+	 * more than one where the Group came to it twice. Only the own clients
+	 * can tell.
+	 */
+	payloads(group: number): Promise<string[]>;
 	/** Resolves once the subscription has ended. Only the own clients can tell. */
 	outcome(timeoutMs?: number): Promise<SubscriptionOutcome>;
 	leave(way: LeaveWay): Promise<void>;
@@ -469,6 +513,7 @@ function startRustSubscriber(
 			label,
 			subscribed: client.waitForLine(/^SUBSCRIBED /),
 			object: () => objectOf(/^OBJECT .*payload_hex=([0-9a-f]*)$/),
+			payloads: cannotTell(kind),
 			outcome: cannotTell(kind),
 			setStopped,
 			async leave(way) {
@@ -488,6 +533,14 @@ function startRustSubscriber(
 		subscribed: client.waitForLine(/^SUBSCRIBED /),
 		object: (group) =>
 			objectOf(new RegExp(`^OBJECT group=${group} .*payload_hex=([0-9a-f]*)$`)),
+		payloads: (group) =>
+			Promise.resolve(
+				client
+					.matches(
+						new RegExp(`^OBJECT group=${group} .*payload_hex=([0-9a-f]*)$`),
+					)
+					.map((match) => captureGroup(match, 1)),
+			),
 		async outcome(timeoutMs) {
 			const ended = captureGroup(
 				await client.waitForLine(
@@ -557,6 +610,7 @@ async function startBrowserSubscriber(
 				);
 				return object.payloadHex;
 			},
+			payloads: cannotTell(kind),
 			outcome: cannotTell(kind),
 			setStopped: cannotBeStopped(kind),
 			async leave(way) {
@@ -596,6 +650,27 @@ async function startBrowserSubscriber(
 				`receive Group ${group}`,
 				page.evaluate((g) => window.xmoqOwn.objectOfGroup(g), String(group)),
 			),
+		async payloads(group) {
+			const reported: unknown = JSON.parse(
+				await onPage(
+					label,
+					`report its Objects of Group ${group}`,
+					page.evaluate(
+						(g) => window.xmoqOwn.payloadsOfGroup(g),
+						String(group),
+					),
+				),
+			);
+			if (
+				!Array.isArray(reported) ||
+				!reported.every((item): item is string => typeof item === "string")
+			) {
+				throw new Error(
+					`${label} reported no list of payloads: ${String(reported)}`,
+				);
+			}
+			return reported;
+		},
 		async outcome(timeoutMs) {
 			const reported = await onPage(
 				label,

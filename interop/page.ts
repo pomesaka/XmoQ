@@ -347,6 +347,15 @@ window.xmoqOwn = {
 			).payloadHex,
 	),
 
+	payloadsOfGroup: withPlainErrors(async (group: string) => {
+		if (reading === undefined) throw new Error("subscribe() has not completed");
+		return describe(
+			reading.objects
+				.filter((object) => object.group === group)
+				.map((object) => object.payloadHex),
+		);
+	}),
+
 	cancelSubscription: withPlainErrors(async () => {
 		await currentSubscription().cancel();
 		console.log("subscription cancelled");

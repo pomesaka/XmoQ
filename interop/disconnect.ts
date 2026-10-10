@@ -1,6 +1,9 @@
 // Interop driver for the runs in which a client leaves: a publisher that is
 // killed or closes right after its last Object, a subscriber that leaves while
-// others stay, and a subscriber that takes nothing. Every run goes through
+// others stay, a subscriber that takes nothing, and two publishers of one
+// track. The last kind is here although nobody has to leave in it: it needs
+// the same parts, and what it adds is what happens when one of the two goes.
+// Every run goes through
 // the own relay and ends by moving one more Object over the same track with
 // fresh clients, which the relay refuses if it still holds the old publisher.
 // `matrix.ts` runs the scenarios.
@@ -17,6 +20,17 @@
 //     A subscriber that takes nothing is cut off; the others get every Object.
 //     stopped-own-rust: an own-rust client whose process is stopped.
 //     unread-own-browser: an own-browser page that subscribes and never reads.
+//   same-group-twice        --publisher <client> --publisher <client> --subscriber <client>...
+//                           [--first-sends N]
+//     Two publishers send the same Group, one after the other; the
+//     subscribers get it once. With --first-sends N the first sends N Groups
+//     before the second sends Group 0, a source that is far behind.
+//   second-source           --publisher <client> --publisher <client> --subscriber <client>...
+//                           [--first done|kill|kill-with-open-stream|stays] [--second-joins before|after]
+//                           [--first-sends N] [--second-resends]
+//     The first publisher sends and goes, or stays; the second sends the next
+//     Group, which the subscribers get. With --second-resends the second
+//     first sends again every Group the first has sent.
 //   <client>: own-browser | own-rust | moqtail-browser | moqtail-rust
 //
 // What each scenario has to show is listed in
@@ -30,6 +44,7 @@ import {
 	LAST_OBJECT_WITH_PUBLISH_DONE,
 	type LeaveWay,
 	type Publisher,
+	type PublisherPlan,
 	type Subscriber,
 	type SubscriberPlan,
 	type SubscriptionOutcome,
@@ -40,11 +55,13 @@ import {
 	type Client,
 	captureGroup,
 	DISCONNECT_TIMEOUT_MS,
+	isBrowserClient,
 	isOwnClient,
 	isRustClient,
 	log,
 	parseClient,
 	runCleanups,
+	STEP_TIMEOUT_MS,
 	startRun,
 	stopEverythingOnExit,
 } from "./harness.ts";
@@ -104,6 +121,10 @@ const SUBSCRIBER_KILL_NOTICED_WITHIN_MS = 7_500;
 //   form would go unnoticed and the check for its absence would pass.
 // - STOP_SENDING_RECEIVED: it is waited for only where moqtail-browser
 //   cancels. In the other runs a change of its form would go unnoticed.
+// The runs with two publishers wait for two more: STOP_DATA, for a stream of
+// a publisher that the relay stopped, and SEND … PUBLISH_DONE towards a
+// subscriber, which has to be absent while a source is left and is seen once
+// for every own subscriber when the track has ended.
 //
 // Which session a client has is taken from the order in which the clients of
 // a run connect, one after the other; the relay prints no address to tell
@@ -131,6 +152,12 @@ const stopSendingReceived = (session: number): RegExp =>
 	);
 /** The relay reset a stream towards a subscriber; capture group 1 is the code. */
 const streamReset = /^RESET_DATA out=\d+ code=(\S+)$/;
+/** The relay stopped a subgroup stream of the session (STOP_SENDING); capture group 1 is the code. */
+const dataStreamStopped = (session: number): RegExp =>
+	new RegExp(`^STOP_DATA session=${session} stream=\\d+ code=(\\S+)$`);
+/** The relay sent PUBLISH_DONE to the session. */
+const publishDoneSent = (session: number): RegExp =>
+	new RegExp(`^SEND session=${session} stream=\\d+ PUBLISH_DONE `);
 /** The relay opened a subgroup stream of the Group towards the session. */
 const streamOpened = (session: number, group: number): RegExp =>
 	new RegExp(`^OPEN_DATA session=${session} out=\\d+ .* group=${group}$`);
@@ -146,8 +173,15 @@ const SCENARIOS = [
 	"last-object-then-close",
 	"subscriber-leaves",
 	"slow-subscriber",
+	"same-group-twice",
+	"second-source",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
+type OptionOfTwoSources =
+	| "first"
+	| "first-sends"
+	| "second-resends"
+	| "second-joins";
 
 function isScenario(value: string): value is Scenario {
 	return SCENARIOS.some((scenario) => scenario === value);
@@ -156,12 +190,20 @@ function isScenario(value: string): value is Scenario {
 const { values: options } = parseArgs({
 	options: {
 		scenario: { type: "string", default: "" },
-		publisher: { type: "string", default: "own-rust" },
+		// Once per publisher of the track; own-rust alone when left out.
+		publisher: { type: "string", multiple: true, default: [] },
 		subscriber: { type: "string", multiple: true, default: [] },
 		leaver: { type: "string", multiple: true, default: [] },
 		stayer: { type: "string", multiple: true, default: [] },
 		"with-publish-done": { type: "boolean", default: false },
 		slow: { type: "string", default: "stopped-own-rust" },
+		// The four below are for the scenarios with two publishers. They have
+		// no default here, so that one that was given where it means nothing
+		// can be told and refused.
+		first: { type: "string" },
+		"first-sends": { type: "string" },
+		"second-resends": { type: "boolean" },
+		"second-joins": { type: "string" },
 		port: { type: "string", default: "44340" },
 		verbose: { type: "boolean", default: false },
 	},
@@ -173,11 +215,28 @@ function hexOf(payload: string): string {
 	return Buffer.from(payload).toString("hex");
 }
 
-/** A run and the number the relay gave the session of each of its subscribers. */
+/** A run and the number the relay gave the session of each of its clients. */
 interface Run extends ClientRun {
 	/** The relay numbers its sessions from 0 in the order it accepts them. */
 	sessions: number;
-	sessionOf: Map<Subscriber, number>;
+	sessionOf: Map<Publisher | Subscriber, number>;
+}
+
+/** The publishers `--publisher` names, in the order given. */
+function publisherKinds(): Client[] {
+	const given = options.publisher.length > 0 ? options.publisher : ["own-rust"];
+	return given.map((value) => parseClient("publisher", value));
+}
+
+/** The publisher of a scenario that has one. */
+function onePublisherKind(): Client {
+	const [kind, ...more] = publisherKinds();
+	if (kind === undefined || more.length > 0) {
+		throw new Error(
+			`--scenario ${options.scenario} has one publisher, and --publisher was given ${options.publisher.length} times`,
+		);
+	}
+	return kind;
 }
 
 /**
@@ -191,9 +250,13 @@ async function sessionOfNewClient(run: Run): Promise<number> {
 	return session;
 }
 
-async function joinAsPublisher(kind: Client, run: Run): Promise<Publisher> {
-	const publisher = await startPublisher(kind, run);
-	await sessionOfNewClient(run);
+async function joinAsPublisher(
+	kind: Client,
+	run: Run,
+	plan?: PublisherPlan,
+): Promise<Publisher> {
+	const publisher = await startPublisher(kind, run, plan);
+	run.sessionOf.set(publisher, await sessionOfNewClient(run));
 	return publisher;
 }
 
@@ -208,10 +271,10 @@ async function joinAsSubscriber(
 	return subscriber;
 }
 
-function sessionOf(subscriber: Subscriber, run: Run): number {
-	const session = run.sessionOf.get(subscriber);
+function sessionOf(client: Publisher | Subscriber, run: Run): number {
+	const session = run.sessionOf.get(client);
 	if (session === undefined) {
-		throw new Error(`${subscriber.label} did not join through this run`);
+		throw new Error(`${client.label} did not join through this run`);
 	}
 	return session;
 }
@@ -234,18 +297,21 @@ async function joinAsSubscribers(
 const ownOnly = (subscribers: Subscriber[]): Subscriber[] =>
 	subscribers.filter((subscriber) => isOwnClient(subscriber.kind));
 
-/** Every subscriber has to receive the Object of the Group with the payload of the run. */
+/**
+ * Every subscriber has the Object of the Group, with the payload `from`
+ * sends: a publisher, or the run where its publishers all send the same.
+ */
 async function allReceive(
 	subscribers: Subscriber[],
 	group: number,
-	run: Run,
+	from: { payloadHex: string },
 ): Promise<void> {
 	await Promise.all(
 		subscribers.map(async (subscriber) => {
 			const received = await subscriber.object(group);
-			if (received !== run.payloadHex) {
+			if (received !== from.payloadHex) {
 				throw new Error(
-					`${subscriber.label} received ${received} in Group ${group}, not the sent payload`,
+					`${subscriber.label} received ${received} in Group ${group}, not the sent payload ${from.payloadHex}`,
 				);
 			}
 		}),
@@ -290,6 +356,12 @@ function expectPublishDone(
 		/** Absent where the Groups taken depend on timing. */
 		groups?: number[];
 		/**
+		 * The Stream Count of the PUBLISH_DONE, where it is not the number of
+		 * `groups`: with several publishers, the streams the relay opened
+		 * towards the subscriber are not one for each Group that was sent.
+		 */
+		streamCount?: number;
+		/**
 		 * How many streams have to end without a FIN. Absent where the number
 		 * depends on timing.
 		 */
@@ -312,12 +384,13 @@ function expectPublishDone(
 	}
 	// §10.11: the Stream Count is the number of streams opened for the
 	// subscription. Every Group here has one stream of its own.
+	const streamCount = expected.streamCount ?? expected.groups?.length;
 	if (
-		expected.groups !== undefined &&
-		outcome.streamCount !== String(expected.groups.length)
+		streamCount !== undefined &&
+		outcome.streamCount !== String(streamCount)
 	) {
 		fail(
-			`PUBLISH_DONE has Stream Count ${outcome.streamCount}, not ${expected.groups.length}`,
+			`PUBLISH_DONE has Stream Count ${outcome.streamCount}, not ${streamCount}`,
 		);
 	}
 	// §10.11: PUBLISH_DONE comes after every stream is closed, so with an
@@ -361,16 +434,39 @@ async function outcomes(
 }
 
 /**
- * Moves one Object over the same track with a fresh publisher and subscriber.
- * The relay refuses a PUBLISH for a track that has a publisher, so this fails
- * if it still holds the one that left.
+ * Moves one Object over the same track with a fresh publisher and two fresh
+ * subscribers, and has the track end with that publisher.
+ *
+ * WHY the track has to end: a relay that still held a source of the scenario
+ * would take the fresh publisher as one more source of the track, and the
+ * Object would pass all the same. What such a relay cannot do is end the
+ * track when the fresh publisher leaves, since for it a source is left. So
+ * the subscriber that stays has to see PUBLISH_DONE.
+ *
+ * A scenario calls this itself, as its last step and only when every
+ * publisher it started has left: one that is still there would make the
+ * fresh publisher a second one of the track.
  *
  * It is also where the lines that the scenarios expect to be absent are seen
  * once: a stream opened towards a session, and a session dropped.
  */
+/** The Group of the Object that is moved after a scenario; the scenarios stay far below it. */
+const AFTER_GROUP = 1_000_000;
+
 async function relayServesTheTrackAgain(run: Run): Promise<void> {
 	const relay = run.context.relay;
-	const publisher = await joinAsPublisher("own-rust", run);
+	// WHY a label and a payload of its own: the log tells this publisher from
+	// the one of the scenario, and an Object of the scenario that came late
+	// would not pass for this one.
+	// WHY a Group no scenario reaches: a relay that still held a source of
+	// the scenario could also remember which Groups it took from it, and
+	// would stop a Group 0 sent again. The step would then fail for the
+	// Object and not show whether the track ends.
+	const publisher = await joinAsPublisher("own-rust", run, {
+		label: "pub-after:own-rust",
+		firstGroup: AFTER_GROUP,
+		payloadHex: hexOf(`after ${run.payloadHex}`),
+	});
 	const subscriber = await joinAsSubscriber(
 		"own-rust",
 		"sub-after:own-rust",
@@ -379,13 +475,19 @@ async function relayServesTheTrackAgain(run: Run): Promise<void> {
 			leavesAfterObjects: 1,
 		},
 	);
+	const staying = await joinAsSubscriber("own-rust", "sub-end:own-rust", run);
 	const session = sessionOf(subscriber, run);
 	const group = await publisher.send();
-	await allReceive([subscriber], group, run);
+	await allReceive([subscriber, staying], group, publisher);
 	await relay.waitForLine(streamOpened(session, group));
 	await subscriber.leave("close");
 	await relay.waitForLine(sessionClosed(session));
-	await publisher.end();
+	await expectOwnPublishDone(publisher, await publisher.end());
+	expectPublishDone(staying, await staying.outcome(), {
+		statusCode: TRACK_ENDED,
+		groups: [group],
+		abortedStreams: 0,
+	});
 	// §3.3: a control stream is not closed while the session lasts. The relay
 	// closes the session of a client that stops its control stream, which
 	// own-rust did before it closed its session, on `wtransport`.
@@ -448,7 +550,7 @@ function seconds(ms: number): string {
 }
 
 async function publisherKilled(run: Run): Promise<ScenarioResult> {
-	const kind = parseClient("publisher", options.publisher);
+	const kind = onePublisherKind();
 	const publisher = await joinAsPublisher(kind, run);
 	const subscribers = await joinAsSubscribers(
 		options.subscriber.map((value) => parseClient("subscriber", value)),
@@ -495,7 +597,7 @@ async function publisherKilled(run: Run): Promise<ScenarioResult> {
 }
 
 async function lastObjectThenClose(run: Run): Promise<ScenarioResult> {
-	const kind = parseClient("publisher", options.publisher);
+	const kind = onePublisherKind();
 	const publishDone = options["with-publish-done"];
 	if (!LAST_OBJECT_WITH_PUBLISH_DONE[kind].includes(publishDone)) {
 		throw new Error(
@@ -538,10 +640,7 @@ function parseLeaver(value: string): { kind: Client; way: LeaveWay } {
 }
 
 async function subscriberLeaves(run: Run): Promise<ScenarioResult> {
-	const publisher = await joinAsPublisher(
-		parseClient("publisher", options.publisher),
-		run,
-	);
+	const publisher = await joinAsPublisher(onePublisherKind(), run);
 	const leavers: { subscriber: Subscriber; way: LeaveWay }[] = [];
 	for (const [index, value] of options.leaver.entries()) {
 		const { kind, way } = parseLeaver(value);
@@ -728,10 +827,7 @@ async function subscriberLeaves(run: Run): Promise<ScenarioResult> {
 }
 
 async function slowSubscriber(run: Run): Promise<ScenarioResult> {
-	const publisher = await joinAsPublisher(
-		parseClient("publisher", options.publisher),
-		run,
-	);
+	const publisher = await joinAsPublisher(onePublisherKind(), run);
 	if (!publisher.sendsSeveral) {
 		throw new Error(
 			`${publisher.kind} sends one Object, too few to fall behind`,
@@ -877,11 +973,438 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 	};
 }
 
+/**
+ * The line `expectStillSubscribed` looks for was printed for every
+ * subscriber once the track had ended. Without this, a change of the line's
+ * form would make that check pass for the wrong reason.
+ */
+function expectPublishDoneLines(subscribers: Subscriber[], run: Run): void {
+	for (const subscriber of subscribers) {
+		const session = sessionOf(subscriber, run);
+		if (run.context.relay.matches(publishDoneSent(session)).length !== 1) {
+			throw new Error(
+				`the relay did not print one PUBLISH_DONE towards ${subscriber.label} (session ${session}) when the track ended`,
+			);
+		}
+	}
+}
+
+/** The two publishers of a scenario with two sources of one track. */
+function twoPublisherKinds(): [Client, Client] {
+	const kinds = publisherKinds();
+	const [first, second] = kinds;
+	if (first === undefined || second === undefined || kinds.length !== 2) {
+		throw new Error(
+			`--scenario ${options.scenario} has two publishers, and --publisher was given ${options.publisher.length} times`,
+		);
+	}
+	// WHY: the second publisher is the one whose stream the relay stops, or
+	// the one that sends a Group after Group 0. The moqtail clients end with
+	// an error when their stream is stopped before they have written it out
+	// (moqtail 0.15.0), and send Group 0 only.
+	if (!isOwnClient(second)) {
+		throw new Error(
+			`--scenario ${options.scenario} needs an own client as its second publisher, not ${second}`,
+		);
+	}
+	return [first, second];
+}
+
+/** `--first-sends`: how many Groups the first publisher sends before the second sends. */
+function firstSends(): number {
+	const given = options["first-sends"] ?? "1";
+	const count = Number(given);
+	if (!Number.isInteger(count) || count < 1) {
+		throw new Error(`--first-sends "${given}" is not a whole number from 1`);
+	}
+	return count;
+}
+
+/** Fails for an option that was given and means nothing in the scenario. */
+function refuseOptions(
+	scenario: Scenario,
+	names: readonly OptionOfTwoSources[],
+): void {
+	for (const name of names) {
+		const value = options[name];
+		if (value !== undefined && value !== false) {
+			throw new Error(`--${name} means nothing in --scenario ${scenario}`);
+		}
+	}
+}
+
+/**
+ * The subscriptions go on while the track has a source left
+ * (docs/moqt-implementation-notes.md, "A source of a track that goes while
+ * another is left"): the relay has sent none of the subscribers PUBLISH_DONE.
+ * The line is seen in every run, when the last source has gone.
+ */
+function expectStillSubscribed(
+	subscribers: Subscriber[],
+	run: Run,
+	when: string,
+): void {
+	for (const subscriber of subscribers) {
+		const sent = run.context.relay.matches(
+			publishDoneSent(sessionOf(subscriber, run)),
+		);
+		if (sent.length > 0) {
+			throw new Error(
+				`the relay ended the subscription of ${subscriber.label} ${when}, while the track had another source: ${sent[0]?.[0]}`,
+			);
+		}
+	}
+}
+
+/**
+ * A publisher leaves in order, and the relay has dealt with it when this
+ * returns.
+ *
+ * WHY its session is waited for: the relay prints `SESSION_CLOSED` when it
+ * has printed everything else the end of that session made it do (`feed` in
+ * crates/relay/src/hub.rs). A check for a line the relay must not print is
+ * sound only after that; a client's own word that it has left comes earlier.
+ * WHY a page is closed for it: `end()` of the own page ends its Track and
+ * keeps its session, so there would be nothing to wait for.
+ */
+async function leaveInOrder(publisher: Publisher, run: Run): Promise<void> {
+	await expectOwnPublishDone(publisher, await publisher.end());
+	if (isBrowserClient(publisher.kind)) await publisher.kill();
+	await run.context.relay.waitForLine(
+		sessionClosed(sessionOf(publisher, run)),
+		DISCONNECT_TIMEOUT_MS,
+	);
+}
+
+/**
+ * The relay has stopped `count` subgroup streams of the publisher's session,
+ * each with CANCELLED: what it does with a stream for a Subgroup it took from
+ * another source.
+ */
+async function expectStreamsStopped(
+	publisher: Publisher,
+	count: number,
+	run: Run,
+): Promise<void> {
+	const stopped = (): string[] =>
+		run.context.relay
+			.matches(dataStreamStopped(sessionOf(publisher, run)))
+			.map((match) => captureGroup(match, 1));
+	// One line a stream, printed after the client has reported its Object sent.
+	const deadline = performance.now() + STEP_TIMEOUT_MS;
+	while (stopped().length < count) {
+		if (performance.now() > deadline) {
+			throw new Error(
+				`the relay stopped ${stopped().length} of the ${count} streams ${publisher.label} sent for Groups it had from another source`,
+			);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+	const codes = stopped();
+	if (codes.length !== count || codes.some((code) => code !== "0x1")) {
+		throw new Error(
+			`the relay stopped streams of ${publisher.label} with the codes [${codes}], not ${count} times CANCELLED`,
+		);
+	}
+}
+
+/** The relay opened one stream of each Group towards each subscriber, and no second one. */
+function expectOneStreamEach(
+	subscribers: Subscriber[],
+	groups: number[],
+	run: Run,
+): void {
+	for (const subscriber of subscribers) {
+		for (const group of groups) {
+			const opened = run.context.relay.matches(
+				streamOpened(sessionOf(subscriber, run), group),
+			);
+			if (opened.length !== 1) {
+				throw new Error(
+					`the relay opened ${opened.length} streams of Group ${group} towards ${subscriber.label}, not 1`,
+				);
+			}
+		}
+	}
+}
+
+/**
+ * Every own subscriber got one Object for each of the Groups, with the
+ * payload of `from`: what a subscriber itself shows of a Subgroup that came
+ * to it twice. Called when the subscriptions have ended, so that nothing is
+ * still on its way.
+ *
+ * WHY NOT `Subscriber.object`: it gives the first Object of a Group and says
+ * nothing of a second one.
+ */
+async function expectOneObjectEach(
+	subscribers: Subscriber[],
+	groups: number[],
+	from: { label: string; payloadHex: string },
+): Promise<void> {
+	for (const subscriber of ownOnly(subscribers)) {
+		for (const group of groups) {
+			const payloads = await subscriber.payloads(group);
+			if (payloads.length !== 1 || payloads[0] !== from.payloadHex) {
+				throw new Error(
+					`${subscriber.label} got ${payloads.length} Objects for Group ${group}, not the one of ${from.label}: [${payloads.map((payload) => (payload === from.payloadHex ? `that of ${from.label}` : payload.slice(0, 32))).join(", ")}]`,
+				);
+			}
+		}
+	}
+}
+
+/**
+ * Two publishers send the same Subgroup of one track, one after the other.
+ * The notes, "A stream for a Subgroup from another source than the one it
+ * was taken from": the relay takes the Subgroup from the source that sent it
+ * first, stops the other's stream and sends nothing of it downstream.
+ */
+async function sameGroupTwice(run: Run): Promise<ScenarioResult> {
+	refuseOptions("same-group-twice", [
+		"first",
+		"second-joins",
+		"second-resends",
+	]);
+	const [firstKind, secondKind] = twoPublisherKinds();
+	const count = firstSends();
+	// WHY payloads of their own where the first is an own client: what a
+	// subscriber holds for the Group then shows which source it came from. A
+	// moqtail client sends the payload of the run and nothing else, so beside
+	// it the two send the same, as two sources of a Subgroup do.
+	const apart = isOwnClient(firstKind);
+	const first = await joinAsPublisher(firstKind, run, {
+		label: `pub1:${firstKind}`,
+		...(apart ? { payloadHex: hexOf(`first ${run.payloadHex}`) } : {}),
+	});
+	// "PUBLISH for a track that already has a source": accepted.
+	const second = await joinAsPublisher(secondKind, run, {
+		label: `pub2:${secondKind}`,
+		...(apart ? { payloadHex: hexOf(`second ${run.payloadHex}`) } : {}),
+	});
+	const subscribers = await joinAsSubscribers(
+		options.subscriber.map((value) => parseClient("subscriber", value)),
+		"sub",
+		run,
+	);
+
+	const group = await first.send();
+	await allReceive(subscribers, group, first);
+	const groups = [group];
+	if (count > 1) {
+		groups.push(...(await first.sendBatch(count - 1)));
+		await allReceive(ownOnly(subscribers), count - 1, first);
+	}
+	// WHY the second only now: which source is first is then not a race.
+	const again = await second.send();
+	if (again !== group) {
+		throw new Error(
+			`${second.label} sent Group ${again}, where the scenario needs Group ${group} a second time`,
+		);
+	}
+	await expectStreamsStopped(second, 1, run);
+	expectOneStreamEach(subscribers, [group], run);
+
+	// The source the Subgroups came from leaves first; the track stays for the other.
+	await leaveInOrder(first, run);
+	expectStillSubscribed(subscribers, run, `when ${first.label} had left`);
+	// The one stream the second publisher counts in its PUBLISH_DONE is the
+	// one the relay stopped. A stream it stopped has ended for the relay, so
+	// an own publisher sees the relay finish the request stream all the same
+	// (checked in `expectOwnPublishDone`).
+	await expectOwnPublishDone(second, await second.end());
+	const ended = await outcomes(subscribers);
+	await expectOneObjectEach(subscribers, groups, first);
+	for (const { subscriber, outcome } of ended) {
+		expectPublishDone(subscriber, outcome, {
+			statusCode: TRACK_ENDED,
+			groups,
+			abortedStreams: 0,
+		});
+	}
+	expectPublishDoneLines(ownOnly(subscribers), run);
+	await relayServesTheTrackAgain(run);
+
+	return {
+		summary: `the relay took ${count === 1 ? `Group ${group}` : `Groups ${group} to ${count - 1}`} from ${first.label} and stopped the stream of ${second.label} for Group ${group}; every subscriber got it once`,
+		subscriptions: subscriptionsOf(ended),
+		measured: {},
+	};
+}
+
+const FIRST_SOURCE_WAYS = [
+	"done",
+	"kill",
+	"kill-with-open-stream",
+	"stays",
+] as const;
+
+/**
+ * A track with two sources, of which the first sends, and then the second
+ * sends the next Group: after the first left (`--first done`, `kill`,
+ * `kill-with-open-stream`) or beside it (`stays`). With `--second-joins
+ * after`, the second publishes when the subscribers already have an Object.
+ *
+ * The notes, "A source of a track that goes while another is left": the track
+ * goes on, nothing is said to the subscribers, and a stream that was open for
+ * a Subgroup of the source that went is reset.
+ */
+async function secondSource(run: Run): Promise<ScenarioResult> {
+	const [firstKind, secondKind] = twoPublisherKinds();
+	const given = options.first ?? "done";
+	const way = FIRST_SOURCE_WAYS.find((value) => value === given);
+	if (way === undefined) {
+		throw new Error(
+			`--first "${given}" is not one of ${FIRST_SOURCE_WAYS.join(", ")}`,
+		);
+	}
+	const joins = options["second-joins"] ?? "before";
+	if (joins !== "before" && joins !== "after") {
+		throw new Error(`--second-joins "${joins}" is neither before nor after`);
+	}
+	const late = joins === "after";
+	const sends = firstSends();
+	const resends = options["second-resends"] === true;
+	// WHY done alone: what the second sends again has to be stopped because
+	// the first delivered it whole, and a first that was killed, or left a
+	// stream open, makes that a matter of which of its streams had ended.
+	if (resends && way !== "done") {
+		throw new Error(`--second-resends goes with --first done, not ${way}`);
+	}
+	const subscriberKinds = options.subscriber.map((value) =>
+		parseClient("subscriber", value),
+	);
+	// WHY: the moqtail clients take one Object and leave; here a subscriber
+	// has to stay for the Group of the second publisher.
+	const passing = subscriberKinds.find((kind) => !isOwnClient(kind));
+	if (passing !== undefined) {
+		throw new Error(
+			`--scenario second-source needs own subscribers, which stay for more than one Object, not ${passing}`,
+		);
+	}
+	const relay = run.context.relay;
+	// WHY payloads of their own: a subscriber then shows which source a Group
+	// came from.
+	const first = await joinAsPublisher(firstKind, run, {
+		label: `pub1:${firstKind}`,
+		payloadHex: hexOf(`first ${run.payloadHex}`),
+	});
+	// The first source sends `--first-sends` Groups, and one more on a stream
+	// it leaves open where that is asked for. The second starts after those,
+	// or, with --second-resends, at Group 0: a source that is behind and
+	// sends again what the first has sent, before it sends the next Group.
+	const firstGroups = sends + (way === "kill-with-open-stream" ? 1 : 0);
+	const joinSecond = (): Promise<Publisher> =>
+		joinAsPublisher(secondKind, run, {
+			label: `pub2:${secondKind}`,
+			firstGroup: resends ? 0 : firstGroups,
+			payloadHex: hexOf(`second ${run.payloadHex}`),
+		});
+	let second = late ? undefined : await joinSecond();
+	const subscribers = await joinAsSubscribers(subscriberKinds, "sub", run);
+
+	const fromFirst = [await first.send()];
+	await allReceive(subscribers, 0, first);
+	if (sends > 1) {
+		fromFirst.push(...(await first.sendBatch(sends - 1)));
+		await allReceive(subscribers, sends - 1, first);
+	}
+	if (way === "kill-with-open-stream") {
+		const open = await first.sendUnfinished();
+		fromFirst.push(open);
+		await allReceive(subscribers, open, first);
+	}
+	// "PUBLISH for a track that already has a source": accepted "whether or
+	// not the track has subscribers".
+	second ??= await joinSecond();
+
+	const measured: Record<string, number> = {};
+	switch (way) {
+		case "done":
+			await leaveInOrder(first, run);
+			break;
+		case "kill":
+		case "kill-with-open-stream": {
+			const killed = performance.now();
+			await first.kill();
+			await relay.waitForLine(
+				sessionClosed(sessionOf(first, run)),
+				DISCONNECT_TIMEOUT_MS,
+			);
+			const ms = Math.round(performance.now() - killed);
+			measured[
+				`ms from killing ${first.label} to the relay dropping its session`
+			] = ms;
+			// A killed process is noticed by the idle timeout; a closed page says so itself.
+			if (
+				!isBrowserClient(firstKind) &&
+				ms > PUBLISHER_KILL_NOTICED_WITHIN_MS
+			) {
+				throw new Error(
+					`the relay dropped the session of ${first.label} ${seconds(ms)} after it was killed, later than ${seconds(PUBLISHER_KILL_NOTICED_WITHIN_MS)}`,
+				);
+			}
+			break;
+		}
+		case "stays":
+			break;
+	}
+	if (way !== "stays") {
+		expectStillSubscribed(subscribers, run, `when ${first.label} was gone`);
+	}
+
+	if (resends) {
+		// "A stream for a Subgroup from another source…": stopped, also after
+		// the first source's stream ended with a FIN and after that source has
+		// gone, and nothing of it goes downstream. That holds for the Groups
+		// the relay no longer remembers a source for as well, on a track that
+		// had two sources at once.
+		const again = await second.sendBatch(firstGroups);
+		await expectStreamsStopped(second, again.length, run);
+		expectOneStreamEach(subscribers, again, run);
+	}
+	const next = await second.send();
+	await allReceive(subscribers, next, second);
+
+	if (way === "stays") {
+		await leaveInOrder(first, run);
+		expectStillSubscribed(subscribers, run, `when ${first.label} had left`);
+	}
+	await expectOwnPublishDone(second, await second.end());
+	const ended = await outcomes(subscribers);
+	// What a subscriber holds, Group by Group: one Object each, the first
+	// publisher's for what that one sent, also where the second sent it again.
+	await expectOneObjectEach(subscribers, fromFirst, first);
+	await expectOneObjectEach(subscribers, [next], second);
+	const groups = [...fromFirst, next];
+	for (const { subscriber, outcome } of ended) {
+		expectPublishDone(subscriber, outcome, {
+			statusCode: TRACK_ENDED,
+			groups,
+			// "Stream Count in the PUBLISH_DONE the relay sends": the streams it
+			// opened for the subscription, one a Group here, the reset one
+			// among them.
+			streamCount: groups.length,
+			abortedStreams: first.streamsLeftOpen(),
+		});
+	}
+	expectPublishDoneLines(ownOnly(subscribers), run);
+	await relayServesTheTrackAgain(run);
+
+	return {
+		summary: `${first.label} ${way === "stays" ? "stayed" : `went (${way})`} and the subscribers went on to Group ${next} of ${second.label}${late ? ", which joined after them" : ""}`,
+		subscriptions: subscriptionsOf(ended),
+		measured,
+	};
+}
+
 const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"publisher-killed": publisherKilled,
 	"last-object-then-close": lastObjectThenClose,
 	"subscriber-leaves": subscriberLeaves,
 	"slow-subscriber": slowSubscriber,
+	"same-group-twice": sameGroupTwice,
+	"second-source": secondSource,
 };
 
 async function main(): Promise<void> {
@@ -891,12 +1414,20 @@ async function main(): Promise<void> {
 			`--scenario "${scenario}" is not one of ${SCENARIOS.join(", ")}`,
 		);
 	}
+	if (scenario !== "same-group-twice" && scenario !== "second-source") {
+		refuseOptions(scenario, [
+			"first",
+			"first-sends",
+			"second-resends",
+			"second-joins",
+		]);
+	}
 	const subscribers = [
 		...options.subscriber,
 		...options.stayer,
 		...options.leaver.map((value) => parseLeaver(value).kind),
 	].map((value) => parseClient("subscriber", value));
-	const publisher = parseClient("publisher", options.publisher);
+	const publishers = publisherKinds();
 
 	let result: ScenarioResult;
 	let relayVersion: string;
@@ -906,7 +1437,7 @@ async function main(): Promise<void> {
 			relay: "own",
 			port: options.port,
 			clients: [
-				publisher,
+				...publishers,
 				...subscribers,
 				...(options.slow === "unread-own-browser"
 					? ["own-browser" as const]
@@ -932,7 +1463,9 @@ async function main(): Promise<void> {
 
 	log(
 		"driver",
-		`RESULT ${JSON.stringify({ scenario, publisher, ...result, relayVersion, browserVersion })}`,
+		// WHY one name where there is one publisher: the records and whoever
+		// reads this line have `publisher` as a client's name.
+		`RESULT ${JSON.stringify({ scenario, publisher: publishers.length === 1 ? publishers[0] : publishers, ...result, relayVersion, browserVersion })}`,
 	);
 	log("driver", `SUMMARY ${result.summary}`);
 }

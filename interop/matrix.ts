@@ -357,6 +357,136 @@ const DISCONNECTS: Pairing[] = [
 		// The cut-off comes within 2 seconds; the 5 seconds after it are the
 		// library's wait for late streams before it ends the subscription.
 		mostlyWaits: true,
+	}, // Two sources of one track (docs/moqt-implementation-notes.md, the rows on
+	// a PUBLISH for a track that has a source, on a Subgroup from another
+	// source, and on a source that goes while another is left).
+	{
+		name: "two own-rust publishers send the same Group; own-rust and own-browser get it once",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"same-group-twice",
+			...each("publisher", ["own-rust", "own-rust"]),
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
+		// More Groups than the relay remembers a source for (8, provisional):
+		// the second source's Group 0 is then an old one and must not be opened
+		// towards the subscribers a second time (§2.2).
+		name: "an own-rust publisher sends Group 0 again when another has sent ten; own-rust gets it once",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"same-group-twice",
+			"--first-sends",
+			"10",
+			...each("publisher", ["own-rust", "own-rust"]),
+			"--subscriber",
+			"own-rust",
+		],
+	},
+	{
+		// The moqtail client sends its one Object with the payload of the run,
+		// as the own one does here: two sources of a Subgroup send the same.
+		// WHY moqtail first: the second publisher's stream is stopped, and the
+		// moqtail client 0.15.0 ends with an error when that happens before it
+		// has written the stream out. So it is the source the Group is taken
+		// from here, and the own client the one that is stopped.
+		name: "moqtail-rust and own-rust send the same Group; own-rust and moqtail-rust get it once",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"same-group-twice",
+			...each("publisher", ["moqtail-rust", "own-rust"]),
+			...each("subscriber", ["own-rust", "moqtail-rust"]),
+		],
+	},
+
+	{
+		name: "own-browser and own-rust send the same Group; own-rust gets it once",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"same-group-twice",
+			...each("publisher", ["own-browser", "own-rust"]),
+			"--subscriber",
+			"own-rust",
+		],
+	},
+	{
+		name: "the first of two own-rust publishers leaves with PUBLISH_DONE; own-rust goes on to the second",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"second-source",
+			"--first",
+			"done",
+			...each("publisher", ["own-rust", "own-rust"]),
+			"--subscriber",
+			"own-rust",
+		],
+	},
+	{
+		// The source that was ahead has gone, and the track is back to one
+		// source: what the subscribers have from the first must still not be
+		// opened towards them again, also for Groups older than the relay
+		// remembers a source for (8, provisional).
+		name: "the first of two own-rust publishers sends ten Groups and leaves; the second sends them again and then the next, which own-rust gets",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"second-source",
+			"--first",
+			"done",
+			"--first-sends",
+			"10",
+			"--second-resends",
+			...each("publisher", ["own-rust", "own-rust"]),
+			"--subscriber",
+			"own-rust",
+		],
+	},
+	{
+		name: "the first of two own-rust publishers is killed; own-rust goes on to the second",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"second-source",
+			"--first",
+			"kill",
+			...each("publisher", ["own-rust", "own-rust"]),
+			"--subscriber",
+			"own-rust",
+		],
+		mostlyWaits: true,
+	},
+	{
+		name: "an own-browser publisher's page is closed with a stream open; own-rust and own-browser go on to an own-rust publisher",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"second-source",
+			"--first",
+			"kill-with-open-stream",
+			...each("publisher", ["own-browser", "own-rust"]),
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
+		name: "a second own-rust publisher joins a track that has subscribers; own-rust gets its Group",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"second-source",
+			"--first",
+			"stays",
+			"--second-joins",
+			"after",
+			...each("publisher", ["own-rust", "own-rust"]),
+			"--subscriber",
+			"own-rust",
+		],
 	},
 ];
 
