@@ -62,7 +62,9 @@ impl RequestStream {
 
     /// Ends this endpoint's half of the stream with a FIN and waits for the
     /// peer to end its own, for at most `wait`. Returns how the peer did, or
-    /// `None` when it did not in time.
+    /// `None` when it did not in time. `late` gets what the peer still says
+    /// on the stream: the session has to see it, since a `REQUEST_UPDATE`
+    /// that crossed uses up a Request ID (§10.1).
     ///
     /// WHY wait for the peer and not only for the transport: after
     /// `PUBLISH_DONE`, an `XmoQ` relay finishes its direction once it has
@@ -71,16 +73,20 @@ impl RequestStream {
     /// close the session without losing what it sent last. The transport
     /// alone cannot: a stream that arrived and was not accepted yet can be
     /// lost when the connection closes (`xmoq_moqt_io::Connection::accept_uni`).
-    pub async fn finish_and_await_close(mut self, wait: Duration) -> Result<Option<RequestClose>> {
+    pub async fn finish_and_await_close(
+        mut self,
+        wait: Duration,
+        mut late: impl FnMut(ControlMessage) -> Result<()>,
+    ) -> Result<Option<RequestClose>> {
         self.send.finish();
         if self.peer_finished {
             return Ok(Some(RequestClose::Fin));
         }
         let closed = async {
             loop {
-                // Whatever the peer still says on the stream changes nothing.
-                if let RequestStreamEvent::Closed(how) = self.reader.next_event().await? {
-                    return Ok::<_, anyhow::Error>(how);
+                match self.reader.next_event().await? {
+                    RequestStreamEvent::Closed(how) => return Ok::<_, anyhow::Error>(how),
+                    RequestStreamEvent::Message(message) => late(message)?,
                 }
             }
         };
