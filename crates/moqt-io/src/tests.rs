@@ -10,14 +10,15 @@ use xmoq_moqt::Error;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
+use xmoq_moqt::fetch::FetchHeader;
 use xmoq_moqt::message::{ControlMessage, RequestOk, Setup};
 
 use crate::memory::{MemoryConnection, MemorySend, STREAM_WINDOW, pair};
 use crate::{
-    Connection, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestClose,
-    PeerRequestStreamEvent, QueueFull, ReadError, RecvStream, RequestReader, RequestStreamEvent,
-    SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
-    WriteError, read_request_streams, read_uni_streams,
+    Connection, FetchBody, FetchChunk, IncomingStreams, OutgoingEvent, OutgoingSubgroup,
+    PeerRequestClose, PeerRequestStreamEvent, QueueFull, ReadError, RecvStream, RequestReader,
+    RequestStreamEvent, SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops,
+    Trace, UniEvent, WriteError, read_request_streams, read_uni_streams,
 };
 
 const SOON: Duration = Duration::from_secs(1);
@@ -403,6 +404,194 @@ async fn a_stream_cancelled_before_its_type_changes_nothing() {
         reading.next().await,
         UniEvent::Failed(Error::UnknownStreamType(0x20))
     );
+}
+
+impl Reading {
+    /// The next event is a fetch stream with Request ID 2.
+    async fn fetch_opened(&mut self) -> u64 {
+        match self.next().await {
+            UniEvent::FetchOpened { stream, header } => {
+                assert_eq!(header, FetchHeader { request_id: 2 });
+                stream
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+/// Reads a body to its end: the bytes, and how the stream ended.
+async fn read_body(body: &mut FetchBody) -> (Vec<u8>, StreamEnd) {
+    let mut bytes = Vec::new();
+    loop {
+        match timeout(SOON, body.next()).await.expect("a chunk in time") {
+            FetchChunk::Bytes(chunk) => bytes.extend_from_slice(&chunk),
+            FetchChunk::End(end) => return (bytes, end),
+            FetchChunk::Stopped => panic!("the stream was stopped"),
+        }
+    }
+}
+
+/// `FETCH_HEADER` with Request ID 2.
+const FETCH_HEADER_BYTES: [u8; 2] = [0x05, 0x02];
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_stream_is_announced_and_its_bytes_are_handed_over_undecoded() {
+    let mut reading = reading(StreamConfig::default(), 8);
+    // The header and the first bytes in one write, the rest in another. The
+    // bytes are no Objects: nothing here decodes them.
+    let mut send = open_with(&reading.peer, &[0x05, 0x02, 0xaa, 0xbb]).await;
+    let stream = reading.fetch_opened().await;
+    let mut body = reading.stops.take_fetch_body(stream).expect("the body");
+    assert!(reading.stops.take_fetch_body(stream).is_none());
+
+    send.write_all(&[0xcc]).await.unwrap();
+    send.finish();
+    assert_eq!(
+        read_body(&mut body).await,
+        (vec![0xaa, 0xbb, 0xcc], StreamEnd::Fin)
+    );
+    // Nothing of the stream went into the queue but its opening.
+    reading.assert_quiet().await;
+    // The reader is gone, though the body is still held.
+    assert!(reading.stops.is_empty());
+    drop(body);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_stream_that_ended_keeps_its_bytes_and_its_slot_until_they_are_taken() {
+    let config = StreamConfig {
+        max_uni_streams: 1,
+        ..StreamConfig::default()
+    };
+    let mut reading = reading(config, 8);
+    let first = open_with(&reading.peer, &[0x05, 0x02, 0xaa]).await;
+    first.finish();
+    let _second = open_with(&reading.peer, &subgroup_bytes(&[])).await;
+
+    let stream = reading.fetch_opened().await;
+    // The one slot is held, so the second stream waits unaccepted.
+    reading.assert_quiet().await;
+    assert_eq!(reading.stops.len(), 1);
+
+    let mut body = reading.stops.take_fetch_body(stream).expect("the body");
+    // Taking the body frees the slot; reading it can wait.
+    reading.opened().await;
+    assert_eq!(read_body(&mut body).await, (vec![0xaa], StreamEnd::Fin));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_ways_a_fetch_stream_ends_are_told_apart() {
+    // Reset by the peer, with a code.
+    let mut reading = reading(StreamConfig::default(), 8);
+    let send = open_with(&reading.peer, &FETCH_HEADER_BYTES).await;
+    let stream = reading.fetch_opened().await;
+    let mut body = reading.stops.take_fetch_body(stream).expect("the body");
+    send.reset(0x6);
+    assert_eq!(
+        read_body(&mut body).await,
+        (vec![], StreamEnd::Aborted(Some(0x6)))
+    );
+
+    // Stopped by this endpoint: the peer sees the code, and the body ends
+    // without a FIN.
+    let mut send = open_with(&reading.peer, &FETCH_HEADER_BYTES).await;
+    let stream = reading.fetch_opened().await;
+    let mut body = reading.stops.take_fetch_body(stream).expect("the body");
+    reading.stops.stop(stream, 0x12);
+    assert_eq!(body.next().await, FetchChunk::Stopped);
+    assert_eq!(
+        send.write_all(&[0]).await,
+        Err(WriteError::Stopped(Some(0x12)))
+    );
+
+    // Stopped before the body was taken: there is none to take.
+    let mut send = open_with(&reading.peer, &FETCH_HEADER_BYTES).await;
+    let stream = reading.fetch_opened().await;
+    reading.stops.stop(stream, 0x1);
+    assert!(reading.stops.take_fetch_body(stream).is_none());
+    // The reader acts on the stop when it runs next.
+    tokio::time::sleep(SOON).await;
+    assert_eq!(
+        send.write_all(&[0]).await,
+        Err(WriteError::Stopped(Some(0x1)))
+    );
+
+    // The body is dropped while the peer sends nothing: the stream is
+    // stopped with CANCELLED (0x1) and its slot is free, without a byte
+    // from the peer.
+    let mut send = open_with(&reading.peer, &FETCH_HEADER_BYTES).await;
+    let stream = reading.fetch_opened().await;
+    drop(reading.stops.take_fetch_body(stream));
+    tokio::time::sleep(SOON).await;
+    assert!(reading.stops.is_empty());
+    assert_eq!(send.stopped().await, WriteError::Stopped(Some(0x1)));
+
+    // After the end of a stream, the body has nothing more to say.
+    let send = open_with(&reading.peer, &FETCH_HEADER_BYTES).await;
+    let stream = reading.fetch_opened().await;
+    let mut body = reading.stops.take_fetch_body(stream).expect("the body");
+    send.finish();
+    assert_eq!(body.next().await, FetchChunk::End(StreamEnd::Fin));
+    assert_eq!(body.next().await, FetchChunk::Stopped);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_body_nobody_reads_holds_the_sender_back() {
+    let mut reading = reading(StreamConfig::default(), 8);
+    let mut send = open_with(&reading.peer, &FETCH_HEADER_BYTES).await;
+    let stream = reading.fetch_opened().await;
+    let mut body = reading.stops.take_fetch_body(stream).expect("the body");
+
+    let bytes = vec![0x5a; 1024 * 1024];
+    let expected = bytes.clone();
+    let write = tokio::spawn(async move {
+        send.write_all(&bytes).await.unwrap();
+        send.finish();
+    });
+    // Nobody reads the body: the writer gets stuck on the stream's window.
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    assert!(!write.is_finished(), "the whole stream was taken");
+
+    let (received, end) = read_body(&mut body).await;
+    assert_eq!(end, StreamEnd::Fin);
+    assert!(received == expected, "{} bytes", received.len());
+    write.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_stream_without_its_header() {
+    // Ends inside the header: the session cannot go on (§10.12.3 has the
+    // header on every fetch stream).
+    let mut reading = reading(StreamConfig::default(), 8);
+    let send = open_with(&reading.peer, &[0x05]).await;
+    send.finish();
+    assert_eq!(
+        reading.next().await,
+        UniEvent::Failed(Error::ProtocolViolation(
+            "stream ended before its FETCH_HEADER"
+        ))
+    );
+
+    // Reset inside the header: as a stream cancelled before its type.
+    let mut reading = reading_again();
+    let send = open_with(&reading.peer, &[0x05]).await;
+    send.reset(0x1);
+    reading.assert_quiet().await;
+    assert!(reading.stops.is_empty());
+
+    // Never completes its header: stopped at the deadline, like a stream
+    // that never says what it is.
+    let mut reading = reading_again();
+    let mut send = open_with(&reading.peer, &[0x05]).await;
+    reading.assert_quiet().await;
+    assert_eq!(
+        send.write_all(&[0]).await,
+        Err(WriteError::Stopped(Some(0x0)))
+    );
+}
+
+fn reading_again() -> Reading {
+    reading(StreamConfig::default(), 8)
 }
 
 #[tokio::test(start_paused = true)]

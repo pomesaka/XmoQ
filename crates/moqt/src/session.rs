@@ -3,11 +3,13 @@
 //! This file holds the SETUP exchange and the requests this endpoint opens;
 //! [`peer`] holds the requests the peer opens.
 
+mod fetch;
 mod peer;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub use fetch::{FetchStreamOpened, NO_FETCH_FOR_THE_STREAM};
 pub use peer::{
     AfterRefusal, MAX_PEER_REQUESTS, PeerRequest, PeerRequestEvent, PeerRequestId,
     PeerRequestOpened, REQUEST_IDS_AHEAD_LIMIT,
@@ -20,7 +22,7 @@ use crate::message::{
     ControlMessage, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError, Setup,
     Subscribe, SubscribeOk, publish_done_status, request_error_code, setup_option,
 };
-use crate::name::{FullTrackName, TrackNamespace};
+use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
 use crate::{Error, RequestFault, UsageError};
 
@@ -108,6 +110,7 @@ enum Request {
     PublishNamespace {
         established: bool,
     },
+    Fetch(fetch::OwnFetch),
 }
 
 /// Where a PUBLISH this endpoint sent stands.
@@ -127,6 +130,7 @@ impl Request {
             Self::Subscribe { track_alias, .. } => track_alias.is_some(),
             Self::Publish { state, .. } => *state != PublishState::Pending,
             Self::PublishNamespace { established } => *established,
+            Self::Fetch(fetch) => fetch.answered,
         }
     }
 }
@@ -163,6 +167,23 @@ pub enum RequestEvent {
     },
     /// `PUBLISH_NAMESPACE_OK`: the peer accepted the namespace.
     PublishNamespaceEstablished,
+    /// `FETCH_OK`: the peer serves the FETCH.
+    FetchEstablished {
+        /// Whether the End Location is the last Object of the track.
+        end_of_track: bool,
+        /// The end of what the fetch stream covers, in the encoding of a
+        /// FETCH: the last Object plus 1, or Object 0 for the whole Group.
+        end_location: Location,
+        /// Track Properties of the `FETCH_OK`.
+        track_properties: Vec<KeyValuePair>,
+    },
+    /// `FETCH_OK` named a Mandatory Track Property, none of which this crate
+    /// understands. The request is Terminated and the caller has to cancel
+    /// its stream and stop the fetch stream (§2.5.1).
+    UnsupportedFetch {
+        /// Type of the first Mandatory Track Property found.
+        property_type: u64,
+    },
     /// `REQUEST_ERROR`: the peer rejected the request, which is now Terminated.
     Rejected(RequestError),
     /// `PUBLISH_DONE` ended a subscription this endpoint asked for. The request
@@ -544,6 +565,9 @@ impl Session {
                 *established = true;
                 Ok(RequestEvent::PublishNamespaceEstablished)
             }
+            (Request::Fetch(_), ControlMessage::FetchOk(ok)) if !established => {
+                self.on_fetch_ok(request, ok)
+            }
             // §5.1 and §6.2: exactly one response per request, and every other
             // message decoded here either opens a request or answers a different
             // kind.
@@ -720,7 +744,10 @@ impl Session {
             Some(Request::Publish { track_alias, .. }) => {
                 self.published_aliases.remove(&track_alias);
             }
-            Some(Request::Subscribe { .. } | Request::PublishNamespace { .. }) | None => {}
+            Some(
+                Request::Subscribe { .. } | Request::PublishNamespace { .. } | Request::Fetch(_),
+            )
+            | None => {}
         }
     }
 

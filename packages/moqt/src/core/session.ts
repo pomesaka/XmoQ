@@ -4,7 +4,7 @@ import {
 	createPeerControlStream,
 	SETUP_OPTION_MOQT_IMPLEMENTATION,
 } from "./control-stream.ts";
-import { MoqtError, NotImplementedError, protocolViolation } from "./error.ts";
+import { MoqtError, protocolViolation } from "./error.ts";
 import { FETCH_HEADER_STREAM_TYPE } from "./fetch.ts";
 import type { KeyValuePair } from "./key-value-pair.ts";
 import { resolveLimits, type SessionLimits } from "./limits.ts";
@@ -12,6 +12,7 @@ import type { OutgoingObject, SubgroupOptions } from "./outgoing-subgroups.ts";
 import { createPeerRequests } from "./peer-requests.ts";
 import {
 	createRequests,
+	type FetchRequest,
 	type PublishNamespaceRequest,
 	type PublishRequest,
 	type SubscribeRequest,
@@ -36,10 +37,9 @@ export interface SessionOptions {
  * they are misused.
  *
  * Not implemented: the server role, requests opened by the peer (they are
- * answered with REQUEST_ERROR NOT_SUPPORTED), REQUEST_UPDATE, GOAWAY, FETCH
- * (its messages and its stream are decoded in `control-message.ts` and
- * `fetch.ts`; nothing is done with them),
- * datagrams, namespace subscription and timers.
+ * answered with REQUEST_ERROR), REQUEST_UPDATE, GOAWAY, datagrams, namespace
+ * subscription and timers. Of a FETCH this endpoint sends, the fetch stream
+ * is handed on as bytes; `fetch.ts` decodes them for whoever wants Objects.
  */
 export interface Session {
 	readonly closed: boolean;
@@ -49,6 +49,8 @@ export interface Session {
 	publishNamespace(request: PublishNamespaceRequest): SessionResult<bigint>;
 	publish(request: PublishRequest): SessionResult<bigint>;
 	subscribe(request: SubscribeRequest): SessionResult<bigint>;
+	/** Sends a FETCH (§10.12). `Requests.fetch` has when the request is over. */
+	fetch(request: FetchRequest): SessionResult<bigint>;
 	/** Cancels a request this endpoint made (§3.3.2). */
 	cancelRequest(requestId: bigint): SessionOutput[];
 	/**
@@ -103,8 +105,11 @@ export interface Session {
 		data: Uint8Array,
 		fin: boolean,
 	): SessionOutput[];
-	/** The peer reset a unidirectional stream it opened. */
-	peerUniStreamReset(peerStream: number): SessionOutput[];
+	/**
+	 * The peer reset a unidirectional stream it opened. `code` is the error
+	 * code of the reset, when the transport reported one.
+	 */
+	peerUniStreamReset(peerStream: number, code?: number): SessionOutput[];
 	/** Bytes on a bidirectional stream the peer opened. */
 	receivePeerBidiStreamData(
 		peerStream: number,
@@ -122,6 +127,10 @@ type PeerUniStream =
 	| { kind: "unknown"; buffer: Uint8Array }
 	| { kind: "control" }
 	| { kind: "subgroup" }
+	/** A fetch stream whose Request ID has not fully arrived (§11.4.4). */
+	| { kind: "fetch-header"; buffer: Uint8Array }
+	/** The fetch stream of the open FETCH `requestId`, after its FETCH_HEADER. */
+	| { kind: "fetch"; requestId: bigint }
 	/** Padding: bytes are dropped (§11.5.1). */
 	| { kind: "discard" };
 
@@ -130,6 +139,8 @@ type PeerUniStream =
  * FETCH_HEADER is with its codec, in `fetch.ts`.
  */
 const STREAM_TYPE_PADDING = 0x132b3e28n;
+
+const EMPTY = new Uint8Array(0);
 
 export function createSession(options: SessionOptions = {}): Session {
 	const limits = resolveLimits(options.limits);
@@ -178,13 +189,52 @@ export function createSession(options: SessionOptions = {}): Session {
 		}
 		if (streamType === STREAM_TYPE_PADDING) return { kind: "discard" };
 		if (streamType === FETCH_HEADER_STREAM_TYPE) {
-			// Table 3 lists it, so the peer is within the draft. The draft has no
-			// rule for a fetch stream without a FETCH, which is the only case here.
-			throw new NotImplementedError("FETCH_HEADER stream");
+			return { kind: "fetch-header", buffer };
 		}
 		// §3.4: "An endpoint that receives an unknown stream type MUST close the
 		// session." The draft names no code; PROTOCOL_VIOLATION is used.
 		throw protocolViolation(`unknown stream type 0x${streamType.toString(16)}`);
+	};
+
+	/**
+	 * Reads the FETCH_HEADER of a fetch stream once it is whole, and says
+	 * what the stream is from then on. `buffer` starts with the Stream Type.
+	 * Returns the bytes after the header as well.
+	 */
+	const openFetchStream = (
+		peerStream: number,
+		buffer: Uint8Array,
+		fin: boolean,
+		out: SessionOutput[],
+	): { stream: PeerUniStream; rest: Uint8Array } => {
+		const reader = createByteReader(buffer);
+		let requestId: bigint;
+		try {
+			reader.varint();
+			requestId = reader.varint();
+		} catch (error) {
+			if (!(error instanceof ShortBufferError)) throw error;
+			// §10.12.3 has the FETCH_HEADER on every fetch stream, also one
+			// without Objects, so a stream that ends inside it is not one the
+			// draft allows. A reset is another matter (§11.4.1) and does not
+			// come here.
+			//
+			// FIXME: a stream whose peer sent the type and stops holds its place
+			// among the streams read at once for as long as the session lasts,
+			// also when its FETCH is cancelled: the stream is not known to be
+			// that FETCH's before its Request ID is read. The Rust
+			// implementation stops it after 10 seconds. This goes, with the
+			// FIXME at `bidiSlots` in `webtransport/stream-io.ts`, when a stream
+			// gets a time by which it has to say what it is.
+			if (fin)
+				throw protocolViolation("fetch stream ended in its FETCH_HEADER");
+			return { stream: { kind: "fetch-header", buffer }, rest: EMPTY };
+		}
+		const rest = buffer.subarray(reader.offset);
+		const opened = requests.fetchStreamOpened(requestId, peerStream, out);
+		// A stream that was stopped: what still arrives on it is dropped.
+		if (opened === "ended") return { stream: { kind: "discard" }, rest: EMPTY };
+		return { stream: { kind: "fetch", requestId }, rest };
 	};
 
 	/** Clears everything. Used when the session ends, whoever ended it. */
@@ -255,6 +305,7 @@ export function createSession(options: SessionOptions = {}): Session {
 			whileOpen(() => requests.publishNamespace(request)),
 		publish: (request) => whileOpen(() => requests.publish(request)),
 		subscribe: (request) => whileOpen(() => requests.subscribe(request)),
+		fetch: (request) => whileOpen(() => requests.fetch(request)),
 		publishDone: (requestId, statusCode, errorReason) =>
 			whileOpen(() => requests.publishDone(requestId, statusCode, errorReason)),
 		openSubgroup: (requestId, subgroupOptions) =>
@@ -308,6 +359,16 @@ export function createSession(options: SessionOptions = {}): Session {
 				if (stream.kind === "unknown") {
 					input = concatBytes([stream.buffer, data]);
 					stream = classifyPeerUniStream(peerStream, input);
+				} else if (stream.kind === "fetch-header") {
+					input = concatBytes([stream.buffer, data]);
+				}
+				if (stream.kind === "fetch-header") {
+					({ stream, rest: input } = openFetchStream(
+						peerStream,
+						input,
+						fin,
+						out,
+					));
 				}
 				if (fin) peerUniStreams.delete(peerStream);
 				else peerUniStreams.set(peerStream, stream);
@@ -316,7 +377,17 @@ export function createSession(options: SessionOptions = {}): Session {
 					case "unknown":
 					// The draft has no rule for a stream that ends inside its type;
 					// it carried nothing, so it is dropped.
+					case "fetch-header":
 					case "discard":
+						break;
+					case "fetch":
+						requests.fetchStreamData(
+							stream.requestId,
+							peerStream,
+							input,
+							fin,
+							out,
+						);
 						break;
 					case "control":
 						controlStream.receive(input, fin, out);
@@ -328,13 +399,20 @@ export function createSession(options: SessionOptions = {}): Session {
 			});
 		},
 
-		peerUniStreamReset(peerStream) {
+		peerUniStreamReset(peerStream, code) {
 			return guard((out) => {
 				// §3.3: a control stream must stay open for the whole session.
 				if (peerStream === peerControlStream) {
 					throw protocolViolation("the peer reset its control stream");
 				}
+				const stream = peerUniStreams.get(peerStream);
 				peerUniStreams.delete(peerStream);
+				// A fetch stream that is reset inside its FETCH_HEADER carried
+				// nothing, like a stream reset before its type (§11.4.1).
+				if (stream?.kind === "fetch") {
+					requests.fetchStreamReset(stream.requestId, peerStream, code, out);
+					return;
+				}
 				requests.incoming.reset(peerStream, out);
 			});
 		},

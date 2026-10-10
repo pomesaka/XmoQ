@@ -288,8 +288,19 @@ pub fn start_readers(
     // different places, and neither wait may swallow what the other needs.
     let router = tokio::spawn(async move {
         while let Some(event) = incoming.recv().await {
+            // FIXME: read the fetch stream of a FETCH this client sent. Until
+            // it sends one, a fetch stream answers none.
+            let event = match event {
+                UniEvent::FetchOpened { .. } => {
+                    UniEvent::Failed(xmoq_moqt::session::NO_FETCH_FOR_THE_STREAM)
+                }
+                event => event,
+            };
             let queue = match &event {
-                UniEvent::Control(_) | UniEvent::Failed(_) | UniEvent::ReaderPanicked => &session,
+                UniEvent::Control(_)
+                | UniEvent::Failed(_)
+                | UniEvent::ReaderPanicked
+                | UniEvent::FetchOpened { .. } => &session,
                 UniEvent::SubgroupOpened { .. }
                 | UniEvent::Object { .. }
                 | UniEvent::TrackMalformed { .. }

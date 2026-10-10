@@ -4,7 +4,8 @@
 // them yet. The types of `ConnectOptions.diagnostics` are in the entry
 // "@xmoq/moqt/diagnostics".
 
-export type { Redirect } from "./core/control-message.ts";
+export type { FetchRange, Redirect } from "./core/control-message.ts";
+export type { FetchObject, RangeEnd } from "./core/fetch.ts";
 export type { KeyValuePair } from "./core/key-value-pair.ts";
 export type { SessionLimits } from "./core/limits.ts";
 export type {
@@ -17,7 +18,11 @@ export type {
 	MessageParameters,
 	SubscriptionFilter,
 } from "./core/parameters.ts";
-export type { PublishRequest, SubscribeRequest } from "./core/requests.ts";
+export type {
+	FetchRequest,
+	PublishRequest,
+	SubscribeRequest,
+} from "./core/requests.ts";
 export type {
 	ObjectStatus,
 	SubgroupId,
@@ -27,6 +32,9 @@ export type { FullTrackName, TrackNamespace } from "./core/track.ts";
 export type { ConnectOptions } from "./webtransport/connect.ts";
 export { connect } from "./webtransport/connect.ts";
 export type {
+	Fetch,
+	FetchCallOptions,
+	FetchResponse,
 	MoqtConnection,
 	PublishedTrack,
 	ReceivedObject,
@@ -35,6 +43,7 @@ export type {
 	Subscription,
 } from "./webtransport/connection.ts";
 export type {
+	FetchEnd,
 	PeerStreamEnd,
 	PublishEnd,
 	RequestAbort,
@@ -42,6 +51,8 @@ export type {
 	SubscriptionEnd,
 } from "./webtransport/endings.ts";
 export {
+	FetchEndedError,
+	FetchStreamResetError,
 	PublishEndedError,
 	RequestAbortedError,
 	RequestFailedError,
@@ -49,3 +60,11 @@ export {
 	SubgroupClosedError,
 	SubscriptionEndedError,
 } from "./webtransport/endings.ts";
+export type {
+	DecodeFetchBodyOptions,
+	FetchItem,
+} from "./webtransport/fetch-objects.ts";
+export {
+	decodeFetchBody,
+	FetchBodyError,
+} from "./webtransport/fetch-objects.ts";

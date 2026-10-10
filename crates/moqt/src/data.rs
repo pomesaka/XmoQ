@@ -42,6 +42,8 @@ pub enum UniStreamType {
     /// A padding stream (§11.5.1). The receiver has to discard everything on it,
     /// or may cancel it; it carries nothing for the session.
     Padding,
+    /// A fetch stream: a `FETCH_HEADER`, then what [`crate::fetch`] decodes.
+    Fetch,
 }
 
 /// Classifies a unidirectional stream from its first bytes, or returns `None`
@@ -50,8 +52,7 @@ pub enum UniStreamType {
 ///
 /// # Errors
 ///
-/// [`Error::UnknownStreamType`] for a type the draft does not define, and
-/// [`Error::UnsupportedStreamType`] for a fetch stream.
+/// [`Error::UnknownStreamType`] for a type the draft does not define.
 pub fn uni_stream_type(buf: &[u8]) -> Result<Option<UniStreamType>, Error> {
     let Some((ty, _)) = varint::decode(buf) else {
         return Ok(None);
@@ -60,7 +61,7 @@ pub fn uni_stream_type(buf: &[u8]) -> Result<Option<UniStreamType>, Error> {
         STREAM_TYPE_SETUP => Ok(Some(UniStreamType::Control)),
         STREAM_TYPE_PADDING => Ok(Some(UniStreamType::Padding)),
         ty if is_subgroup_header_type(ty) => Ok(Some(UniStreamType::Subgroup)),
-        STREAM_TYPE_FETCH_HEADER => Err(Error::UnsupportedStreamType(ty)),
+        STREAM_TYPE_FETCH_HEADER => Ok(Some(UniStreamType::Fetch)),
         ty => Err(Error::UnknownStreamType(ty)),
     }
 }
@@ -889,7 +890,7 @@ pub(crate) mod tests {
             (&[0x7d], Ok(Some(UniStreamType::Subgroup))),
             (&[], Ok(None)),
             (&[0xaf], Ok(None)),
-            (&[0x05], Err(Error::UnsupportedStreamType(0x05))),
+            (&[0x05], Ok(Some(UniStreamType::Fetch))),
             (
                 &[0xf0, 0x13, 0x2b, 0x3e, 0x28],
                 Ok(Some(UniStreamType::Padding)),
@@ -1134,6 +1135,26 @@ pub(crate) mod tests {
                 vec![],
                 with(2, property(0x3e, 3)),
                 "prior object id gap larger than the object id",
+            ),
+            // Prior Group ID Gap (0x3C) twice, and one of 2^40, which is
+            // larger than the Group ID of the header.
+            (
+                announcing_properties(),
+                vec![],
+                with(
+                    2,
+                    vec![
+                        KeyValuePair::varint(0x3c, 1).unwrap(),
+                        KeyValuePair::varint(0x3c, 1).unwrap(),
+                    ],
+                ),
+                "more than one prior group id gap",
+            ),
+            (
+                announcing_properties(),
+                vec![],
+                with(2, property(0x3c, 1 << 40)),
+                "prior group id gap larger than the group id",
             ),
         ];
         for (header, accepted, refused, why) in cases {

@@ -8,10 +8,9 @@
 //!
 //! Section numbers in comments (`§10.7`) refer to that draft.
 //!
-//! Only part of the draft is implemented. A message or stream type that the draft
+//! Only part of the draft is implemented. A message type that the draft
 //! defines and this crate does not decode is reported as
-//! [`Error::UnsupportedMessageType`] or [`Error::UnsupportedStreamType`], never
-//! mistaken for an unknown one.
+//! [`Error::UnsupportedMessageType`], never mistaken for an unknown one.
 
 mod aliases;
 mod coding;

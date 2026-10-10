@@ -88,6 +88,9 @@ pub mod request_error_code {
     /// `UNINTERESTED`: the subscriber is not interested in the track or
     /// namespace.
     pub const UNINTERESTED: u64 = 0x20;
+    /// `INVALID_JOINING_REQUEST_ID`: the Joining Request ID of a Joining FETCH
+    /// names no subscription of the session (§10.12.2).
+    pub const INVALID_JOINING_REQUEST_ID: u64 = 0x32;
     /// `UNSUPPORTED_EXTENSION`: the track has a Mandatory Track Property the
     /// endpoint does not understand (§2.5.1).
     pub const UNSUPPORTED_EXTENSION: u64 = 0x33;
@@ -1295,6 +1298,38 @@ pub(crate) mod tests {
                 }),
             ),
             (
+                // A Relative Joining FETCH with AUTHORIZATION_TOKEN (0x03),
+                // one byte `aa`, and FILL_TIMEOUT (0x0A, the delta 0x07) = 5.
+                vec![
+                    0x16, 0x00, 0x0a, 0x00, 0x02, 0x00, 0x00, 0x02, 0x03, 0x01, 0xaa, 0x07, 0x05,
+                ],
+                ControlMessage::Fetch(Fetch {
+                    request_id: 0,
+                    range: FetchRange::RelativeJoining {
+                        joining_request_id: 0,
+                        joining_start: 0,
+                    },
+                    parameters: vec![
+                        Parameter::AuthorizationToken(vec![0xaa]),
+                        Parameter::FillTimeout(5),
+                    ],
+                }),
+            ),
+            (
+                // FETCH_OK with End Of Track 1, End Location {3, 0}, no
+                // parameters, and the Track Property 0x02 = 5.
+                vec![0x18, 0x00, 0x06, 0x01, 0x03, 0x00, 0x00, 0x02, 0x05],
+                ControlMessage::FetchOk(FetchOk {
+                    end_of_track: true,
+                    end_location: Location {
+                        group: 3,
+                        object: 0,
+                    },
+                    parameters: vec![],
+                    track_properties: vec![KeyValuePair::varint(0x02, 5).unwrap()],
+                }),
+            ),
+            (
                 // FETCH_OK with End Of Track 1, End Location {2, 3}, no
                 // parameters, and the Track Property 0x0E = 5.
                 vec![0x18, 0x00, 0x06, 0x01, 0x02, 0x03, 0x00, 0x0e, 0x05],
@@ -1384,6 +1419,12 @@ pub(crate) mod tests {
             (
                 &[0x16, 0x00, 0x07, 0x00, 0x01, 0x00, 0x01, 0x61, 0x00, 0x01],
                 Error::ProtocolViolation("length is shorter than the fields it holds"),
+            ),
+            // A Relative Joining FETCH with the parameter 0x01, which draft 18
+            // does not define (§10.2.1).
+            (
+                &[0x16, 0x00, 0x07, 0x00, 0x02, 0x00, 0x00, 0x01, 0x01, 0x00],
+                Error::UnknownParameter(0x01),
             ),
             // FETCH_OK with End Of Track 2, and one carrying EXPIRES (0x08):
             // no parameter of the draft lists FETCH_OK.
@@ -1547,13 +1588,30 @@ pub(crate) mod tests {
 
     #[test]
     fn a_stream_must_not_end_inside_a_message() {
-        let mut decoder = MessageDecoder::new();
-        decoder.push(&[0x07, 0x00]).unwrap();
-        assert_eq!(decoder.next_message(), Ok(None));
-        assert_eq!(
-            decoder.finish(),
-            Err(Error::ProtocolViolation("stream ended inside a message"))
-        );
+        // What had arrived when the stream ended. None of these is a whole
+        // message, so the decoder has yielded nothing.
+        let cases: [&[u8]; 5] = [
+            // REQUEST_OK: the type and half of the length.
+            &[0x07, 0x00],
+            // FETCH: a length of 5, and 3 bytes of the payload.
+            &[0x16, 0x00, 0x05, 0x01, 0x02, 0x00],
+            // TRACK_STATUS, which is not decoded: a length of 9, and 2 bytes.
+            &[0x0d, 0x00, 0x09, 0x01, 0x00],
+            // SUBSCRIBE: a length of 31, and 1 byte.
+            &[0x03, 0x00, 0x1f, 0x80],
+            // SUBSCRIBE: the type alone.
+            &[0x03],
+        ];
+        for bytes in cases {
+            let mut decoder = MessageDecoder::new();
+            decoder.push(bytes).unwrap();
+            assert_eq!(decoder.next_message(), Ok(None), "{bytes:02x?}");
+            assert_eq!(
+                decoder.finish(),
+                Err(Error::ProtocolViolation("stream ended inside a message")),
+                "{bytes:02x?}"
+            );
+        }
     }
 
     #[test]

@@ -139,6 +139,9 @@ pub enum MessageKind {
     /// `REQUEST_UPDATE` for a subscription. Updates of the other request kinds
     /// take other parameters and are not decoded by this crate.
     RequestUpdate,
+    /// `REQUEST_UPDATE` for a FETCH. The decoder cannot tell it from the one
+    /// for a subscription; the session checks it where it knows the request.
+    FetchUpdate,
     /// FETCH.
     Fetch,
     /// `FETCH_OK`. No parameter of the draft lists it.
@@ -167,23 +170,34 @@ impl Parameter {
     /// appear in (§10.2.2 to §10.2.13).
     fn allowed_in(&self, kind: MessageKind) -> bool {
         use MessageKind::{
-            Fetch, Publish, PublishNamespace, PublishOk, RequestUpdate, Subscribe, SubscribeOk,
+            Fetch, FetchUpdate, Publish, PublishNamespace, PublishOk, RequestUpdate, Subscribe,
+            SubscribeOk,
         };
+        // WHY `FetchUpdate` in three lists only: §10.2.2, §10.2.3 and §10.2.4
+        // name `REQUEST_UPDATE` without saying of which request, and §10.2.7
+        // has "REQUEST_UPDATE (for a subscription or FETCH)". FORWARD, the
+        // Subscription Filter and `NEW_GROUP_REQUEST` have "REQUEST_UPDATE
+        // (for a subscription)" (§10.2.12, §10.2.9, §10.2.13).
         let allowed: &[MessageKind] = match self {
             Self::ObjectDeliveryTimeout(_) | Self::SubgroupDeliveryTimeout(_) => {
-                &[PublishOk, Subscribe, RequestUpdate]
+                &[PublishOk, Subscribe, RequestUpdate, FetchUpdate]
             }
-            Self::AuthorizationToken(_) => {
-                &[Publish, Subscribe, RequestUpdate, PublishNamespace, Fetch]
-            }
+            Self::AuthorizationToken(_) => &[
+                Publish,
+                Subscribe,
+                RequestUpdate,
+                FetchUpdate,
+                PublishNamespace,
+                Fetch,
+            ],
             Self::RendezvousTimeout(_) => &[Subscribe],
             Self::Expires(_) => &[SubscribeOk, Publish, PublishOk],
             Self::LargestObject(_) => &[SubscribeOk, Publish],
             Self::FillTimeout(_) => &[Fetch],
             Self::Forward(_) => &[Subscribe, RequestUpdate, Publish, PublishOk],
-            // §10.2.7 has the update of a FETCH as well; the `REQUEST_UPDATE`
-            // this crate decodes is the one to a subscription.
-            Self::SubscriberPriority(_) => &[Subscribe, RequestUpdate, PublishOk, Fetch],
+            Self::SubscriberPriority(_) => {
+                &[Subscribe, RequestUpdate, FetchUpdate, PublishOk, Fetch]
+            }
             Self::SubscriptionFilter(_) => &[Subscribe, RequestUpdate, PublishOk],
             // §10.2.8 lists SUBSCRIBE, PUBLISH_OK and FETCH, and no update.
             Self::GroupOrder(_) => &[Subscribe, PublishOk, Fetch],
@@ -602,6 +616,45 @@ mod tests {
                 true,
             ),
             (Parameter::Forward(true), MessageKind::Fetch, false),
+            // The update of a FETCH: what §10.2 lets a REQUEST_UPDATE carry
+            // without saying "for a subscription".
+            (
+                Parameter::SubscriberPriority(1),
+                MessageKind::FetchUpdate,
+                true,
+            ),
+            (
+                Parameter::AuthorizationToken(vec![]),
+                MessageKind::FetchUpdate,
+                true,
+            ),
+            (
+                Parameter::ObjectDeliveryTimeout(1),
+                MessageKind::FetchUpdate,
+                true,
+            ),
+            (
+                Parameter::SubgroupDeliveryTimeout(1),
+                MessageKind::FetchUpdate,
+                true,
+            ),
+            (Parameter::Forward(true), MessageKind::FetchUpdate, false),
+            (
+                Parameter::SubscriptionFilter(SubscriptionFilter::LargestObject),
+                MessageKind::FetchUpdate,
+                false,
+            ),
+            (
+                Parameter::NewGroupRequest(0),
+                MessageKind::FetchUpdate,
+                false,
+            ),
+            (
+                Parameter::GroupOrder(GroupOrder::Ascending),
+                MessageKind::FetchUpdate,
+                false,
+            ),
+            (Parameter::FillTimeout(0), MessageKind::FetchUpdate, false),
             // No parameter lists FETCH_OK.
             (Parameter::Expires(0), MessageKind::FetchOk, false),
             (

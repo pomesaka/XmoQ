@@ -4,8 +4,10 @@ import {
 	decodeRequestStart,
 	encodeControlMessage,
 	FETCH_MESSAGE_TYPE,
+	type FetchRange,
 } from "./control-message.ts";
 import { MoqtError, RequestErrorCode, SessionErrorCode } from "./error.ts";
+import { endsBefore } from "./parameters.ts";
 import type { SessionOutput } from "./session-output.ts";
 
 export interface PeerRequests {
@@ -40,10 +42,51 @@ type PeerRequestStream =
  */
 const REQUEST_IDS_AHEAD_LIMIT = 1024;
 
+const NOT_SUPPORTED = {
+	code: RequestErrorCode.NOT_SUPPORTED,
+	reason: "requests from the peer are not implemented",
+};
+
+/**
+ * What a FETCH of the peer is refused with, and why. No FETCH is served, so
+ * every one is refused; the first two are what the session of the Rust
+ * implementation answers by itself for the same FETCH, so that the same
+ * bytes get the same code from both.
+ */
+function fetchRefusal(range: FetchRange): { code: bigint; reason: string } {
+	switch (range.fetchType) {
+		case "Standalone":
+			// §10.12.3: "End Location MUST specify the same or a larger Location
+			// than Start Location". WHY a REQUEST_ERROR and not the end of the
+			// session, which the draft does not ask for either: the range is this
+			// request's alone, and INVALID_RANGE is the code for it (§10.6.2).
+			if (endsBefore(range.startLocation, range.endLocation)) {
+				return {
+					code: RequestErrorCode.INVALID_RANGE,
+					reason: "the range ends before it starts",
+				};
+			}
+			break;
+		case "RelativeJoining":
+		case "AbsoluteJoining":
+			// §10.12.2: the Joining Request ID has to name "a subscription in
+			// the same session in the Established or Pending (subscriber)
+			// states", or "it MUST return a REQUEST_ERROR with error code
+			// INVALID_JOINING_REQUEST_ID". Every SUBSCRIBE of the peer was
+			// refused here, and this endpoint sends it no PUBLISH that is
+			// accepted as a subscription of its own to join, so no ID names one.
+			return {
+				code: RequestErrorCode.INVALID_JOINING_REQUEST_ID,
+				reason: "the Joining Request ID names no subscription",
+			};
+	}
+	return NOT_SUPPORTED;
+}
+
 /**
  * Requests the peer opens. None is implemented, so each is answered with
- * REQUEST_ERROR NOT_SUPPORTED after its Request ID is checked; a FETCH is
- * decoded first.
+ * REQUEST_ERROR after its Request ID is checked: NOT_SUPPORTED, or for a
+ * FETCH, which is decoded first, what `fetchRefusal` has.
  */
 export function createPeerRequests(): PeerRequests {
 	const streams = new Map<number, PeerRequestStream>();
@@ -124,8 +167,8 @@ export function createPeerRequests(): PeerRequests {
 			// Before the request is looked at: a message that will never be
 			// whole is not answered.
 			if (fin && missing > 0) throw endedInside();
-			// FIXME: serve a FETCH (§10.12). It is refused with NOT_SUPPORTED
-			// below, like a request that is not decoded.
+			// FIXME: serve a FETCH (§10.12). It is refused below, like a request
+			// that is not decoded.
 			//
 			// WHY it is decoded whole first, where the others are refused on
 			// their Request ID: a FETCH with a Fetch Type other than 1 to 3, or
@@ -135,6 +178,7 @@ export function createPeerRequests(): PeerRequests {
 			// the same bytes. WHY before the Request ID is checked: the Rust
 			// implementation decodes first, so a FETCH that is wrong in both ways
 			// ends the session with the same code in both.
+			let refusal = NOT_SUPPORTED;
 			if (messageType === FETCH_MESSAGE_TYPE) {
 				const whole = decodeControlMessage(buffer);
 				if (whole.status === "error") throw whole.error;
@@ -149,6 +193,9 @@ export function createPeerRequests(): PeerRequests {
 					stream.buffer = buffer;
 					return;
 				}
+				if (whole.value.type === "FETCH") {
+					refusal = fetchRefusal(whole.value.range);
+				}
 			}
 			checkRequestId(requestId);
 			// §3.3.2: reject without application processing by REQUEST_ERROR and FIN.
@@ -157,14 +204,19 @@ export function createPeerRequests(): PeerRequests {
 				peerStream,
 				data: encodeControlMessage({
 					type: "REQUEST_ERROR",
-					errorCode: RequestErrorCode.NOT_SUPPORTED,
+					errorCode: refusal.code,
 					retryInterval: 0n,
-					errorReason: "requests from the peer are not implemented",
+					errorReason: refusal.reason,
 				}),
 			});
 			out.push({
 				type: "event",
-				event: { type: "peer-request-rejected", messageType, requestId },
+				event: {
+					type: "peer-request-rejected",
+					messageType,
+					requestId,
+					errorCode: refusal.code,
+				},
 			});
 			if (!fin) streams.set(peerStream, { answered: true, missing });
 		},

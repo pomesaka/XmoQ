@@ -152,6 +152,7 @@ Not every client can leave in every way. `own-rust` and `moqtail-rust` close the
 | `clients.ts` | The four clients behind one shape for a publisher and one for a subscriber |
 | `run.ts` | The driver that moves one Object |
 | `disconnect.ts` | The driver for the runs in which a client leaves |
+| `fetch.ts` | An own page sends one FETCH (`--fetch standalone`, `relative-joining` or `absent-track`) through `--relay moqtail` or `own`, and what it gets is compared with what that relay is known to answer. Not in the matrix |
 | `matrix.ts` | The list of pairings, and the table |
 | `page.ts`, `xmoq-page.ts` | The own page, and the contract between the drivers and both pages |
 

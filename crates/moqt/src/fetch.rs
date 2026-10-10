@@ -126,6 +126,23 @@ impl Prior {
     }
 }
 
+/// Decodes the `FETCH_HEADER` a fetch stream begins with. Returns it and the
+/// number of bytes it took, or `None` until it has arrived. For a reader that
+/// passes the rest of the stream on as it is, and so has no use for a
+/// [`FetchStreamDecoder`].
+///
+/// # Errors
+///
+/// [`Error::ProtocolViolation`] when the stream is of another type.
+pub fn decode_fetch_header(buf: &[u8]) -> Result<Option<(FetchHeader, usize)>, Error> {
+    let mut reader = Reader::new(buf);
+    match FetchStreamDecoder::decode_header(&mut reader) {
+        Ok(header) => Ok(Some((header, reader.position()))),
+        Err(ReadError::Short) => Ok(None),
+        Err(ReadError::Invalid(error)) => Err(error),
+    }
+}
+
 /// The Group ID a Group ID Delta stands for after `prior` (§11.4.4.1).
 fn group_after(prior: u64, delta: u64, order: GroupOrder) -> Option<u64> {
     let step = delta.checked_add(1)?;
@@ -635,6 +652,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_header_alone_is_decoded_from_the_streams_moqtail_wrote() {
+        // (the file; the Request ID). Two bytes each: the type 0x05 and a
+        // Request ID of one byte.
+        let cases = [
+            ("fetch-stream-from-moqtail-relay", 0),
+            ("fetch-stream-five-groups-from-moqtail-relay", 2),
+            ("fetch-stream-gaps-from-moqtail-relay", 0),
+            ("fetch-stream-empty-from-moqtail-relay", 0),
+        ];
+        for (name, request_id) in cases {
+            let bytes = fixture(name);
+            assert_eq!(
+                decode_fetch_header(&bytes),
+                Ok(Some((FetchHeader { request_id }, 2))),
+                "{name}"
+            );
+            // Not there until its last byte is.
+            assert_eq!(decode_fetch_header(&bytes[..1]), Ok(None), "{name}");
+        }
+        assert_eq!(decode_fetch_header(&[]), Ok(None));
+        // A subgroup stream.
+        assert_eq!(
+            decode_fetch_header(&[0x10, 0x00]),
+            Err(Error::ProtocolViolation("not a fetch stream"))
+        );
+    }
+
+    #[test]
     fn decodes_the_streams_moqtail_wrote_whole_and_byte_by_byte() {
         for (name, events) in moqtail_streams() {
             let bytes = fixture(name);
@@ -816,6 +861,28 @@ pub(crate) mod tests {
                 ],
                 violation("id exceeds 64 bits"),
             ),
+            // Object ID 2^64 - 1 (flags 0x1C), then the prior Object ID plus
+            // one (flags 0x00), and the prior one plus the Object ID Delta 1
+            // (flags 0x04).
+            (
+                &[
+                    0x05, 0x00, 0x1c, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0x07, 0x00, 0x00, 0x00,
+                ],
+                violation("id exceeds 64 bits"),
+            ),
+            (
+                &[
+                    0x05, 0x00, 0x1c, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0x07, 0x00, 0x04, 0x01, 0x00,
+                ],
+                violation("id exceeds 64 bits"),
+            ),
+            // Object Properties of 1025 bytes announced, over the limit.
+            (
+                &[0x05, 0x00, 0x3c, 0x00, 0x00, 0x07, 0x84, 0x01],
+                Error::ObjectTooLarge { limit: LIMIT },
+            ),
             // Mandatory Track Property 0x4000 on an Object (§2.5.1).
             (
                 &[
@@ -840,6 +907,63 @@ pub(crate) mod tests {
                 Err(error.clone()),
                 "{bytes:02x?}"
             );
+        }
+    }
+
+    #[test]
+    fn more_object_properties_than_the_limit_end_the_stream() {
+        // Flags 0x3C, Group 0, Object 0, priority 7, then Properties of 130
+        // bytes (the length 0x80 0x82): 65 pairs of a type that is 2 more
+        // than the one before and the value 0. Then a payload of 0 bytes.
+        let mut bytes = vec![0x05, 0x00, 0x3c, 0x00, 0x00, 0x07, 0x80, 0x82];
+        for _ in 0..65 {
+            bytes.extend_from_slice(&[0x02, 0x00]);
+        }
+        bytes.push(0x00);
+        assert_eq!(
+            decode_stream(&bytes, bytes.len(), GroupOrder::Ascending),
+            Err(Error::TooManyObjectProperties { limit: 64 })
+        );
+    }
+
+    #[test]
+    fn refuses_to_encode_properties_that_break_the_track() {
+        let gap = |ty, value| KeyValuePair::varint(ty, value).unwrap();
+        // (the properties of an Object at {2, 3}; why it is refused).
+        let cases = [
+            (
+                vec![gap(0x4000, 1)],
+                "mandatory track property on an object",
+            ),
+            // Prior Group ID Gap (0x3C) twice, and larger than the Group ID.
+            (
+                vec![gap(0x3c, 1), gap(0x3c, 1)],
+                "more than one prior group id gap",
+            ),
+            (
+                vec![gap(0x3c, 3)],
+                "prior group id gap larger than the group id",
+            ),
+            // Prior Object ID Gap (0x3E) larger than the Object ID.
+            (
+                vec![gap(0x3e, 4)],
+                "prior object id gap larger than the object id",
+            ),
+        ];
+        for (properties, why) in cases {
+            let mut encoder =
+                FetchStreamEncoder::new(FetchHeader { request_id: 0 }, GroupOrder::Ascending);
+            encoder.take_bytes();
+            let object = FetchObject {
+                group_id: 2,
+                subgroup_id: Some(0),
+                object_id: 3,
+                publisher_priority: 0,
+                properties,
+                payload: vec![],
+            };
+            assert_eq!(encoder.object(&object), Err(UsageError(why)), "{why}");
+            assert_eq!(encoder.take_bytes(), [], "{why}");
         }
     }
 

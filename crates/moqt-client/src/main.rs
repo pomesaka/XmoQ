@@ -1061,6 +1061,8 @@ impl Client<'_> {
                 // does not get here: the session refuses it itself
                 // (DUPLICATE_SUBSCRIPTION, §5.1).
                 let error_code = match peer_request {
+                    // FIXME: answer a FETCH for the track (§10.12).
+                    PeerRequest::Fetch(_) => request_error_code::NOT_SUPPORTED,
                     PeerRequest::Subscribe(_) => request_error_code::DOES_NOT_EXIST,
                     PeerRequest::Publish(_) | PeerRequest::PublishNamespace(_) => {
                         request_error_code::UNINTERESTED
@@ -1071,6 +1073,10 @@ impl Client<'_> {
                         .reject(request, error_code, 0, ReasonPhrase::default())?;
                 xmoq_moqt_io::send_message(&mut send, &response, wire, &label).await?;
                 send.finish();
+                // What still arrives on the stream is not given to the
+                // session (below), so the session is told now that the
+                // request is gone. It holds a rejected FETCH until then.
+                self.session.on_peer_request_closed(request);
             }
             PeerRequestStreamEvent::Message { stream, message } => {
                 let Some(served) = serving.as_mut().filter(|served| served.stream == stream) else {

@@ -121,6 +121,42 @@ export type OwnPageExtras = {
 	cancelSubscription(): Promise<void>;
 	/** Resolves once the subscription has ended and its Objects were read; JSON of `SubscriptionReport`. */
 	subscriptionReport(): Promise<string>;
+	/**
+	 * Sends a FETCH and resolves once it is over, with JSON of
+	 * `PageFetchReport`. The FETCH is cancelled when it is not over after
+	 * `timeoutMs`. A Joining FETCH joins the page's subscription.
+	 */
+	fetchRange(fetch: PageFetch, timeoutMs: number): Promise<string>;
+};
+
+/** A FETCH for an own page to send (draft 18 §10.12). Numbers are decimal strings. */
+export type PageFetch =
+	| {
+			type: "Standalone";
+			namespace: string;
+			trackName: string;
+			/** Group and Object of the Start Location. */
+			start: [string, string];
+			/** Group and Object of the End Location: the last Object plus 1, or Object 0 for a whole Group. */
+			end: [string, string];
+	  }
+	| { type: "RelativeJoining" | "AbsoluteJoining"; joiningStart: string };
+
+/** What an own page saw of one FETCH. Numbers are decimal strings. */
+export type PageFetchReport = {
+	/** The FETCH_OK, or what `response` rejected with: a REQUEST_ERROR has its code. */
+	response:
+		| { endOfTrack: boolean; endLocation: [string, string] }
+		| { error: string; errorCode?: string };
+	/** What the fetch stream decoded to, in order. */
+	items: (
+		| { type: "object"; group: string; object: string; payloadHex: string }
+		| { type: "end-of-range"; kind: string; group: string; object: string }
+	)[];
+	/** How reading the fetch stream ended: "closed", or the error it failed with. */
+	bodyEnd: string;
+	/** The library's `FetchEnd`, with its `type` first. */
+	end: { type: string; code?: number; error?: { errorCode: string } };
 };
 
 /** What an own page saw of one subscription. Numbers are decimal strings. */

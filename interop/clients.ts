@@ -13,12 +13,15 @@ import {
 	pollFor,
 	type RunContext,
 	type RustClient,
+	STEP_TIMEOUT_MS,
 	spawnRustClient,
 	TRACK,
 	withTimeout,
 } from "./harness.ts";
 import type {
 	OwnPageExtras,
+	PageFetch,
+	PageFetchReport,
 	PageProperty,
 	SubscriptionReport,
 	XmoqPage,
@@ -702,6 +705,11 @@ export interface Subscriber {
 	 * session is open, and how many Objects it has. Only the own clients can tell.
 	 */
 	state(): Promise<string>;
+	/**
+	 * own-browser: sends a FETCH and resolves once it is over, with what the
+	 * page saw of it. The FETCH is cancelled after `timeoutMs`.
+	 */
+	fetch(fetch: PageFetch, timeoutMs: number): Promise<PageFetchReport>;
 	/** Resolves once the subscription has ended. Only the own clients can tell. */
 	outcome(timeoutMs?: number): Promise<SubscriptionOutcome>;
 	leave(way: LeaveWay): Promise<void>;
@@ -812,6 +820,7 @@ function startRustSubscriber(
 			payloads: cannotTell(kind),
 			properties: cannotTell(kind, "Object Properties"),
 			state: cannotTell(kind, "its state"),
+			fetch: cannotTell(kind, "a FETCH: it sends none"),
 			outcome: cannotTell(kind),
 			setStopped,
 			async leave(way) {
@@ -837,6 +846,7 @@ function startRustSubscriber(
 			);
 			return parseRustProperties(printed, label);
 		},
+		fetch: cannotTell(kind, "a FETCH: it sends none"),
 		state: () =>
 			Promise.resolve(
 				`${client.matches(/^OBJECT /).length} OBJECT lines, ${client.matches(/^STREAM_ABORTED /).length} STREAM_ABORTED, last line: ${client.matches(/^.*$/).at(-1)?.[0] ?? "none"}`,
@@ -921,6 +931,7 @@ async function startBrowserSubscriber(
 			payloads: cannotTell(kind),
 			properties: cannotTell(kind, "Object Properties"),
 			state: cannotTell(kind, "its state"),
+			fetch: cannotTell(kind, "a FETCH: it sends none"),
 			outcome: cannotTell(kind),
 			setStopped: cannotBeStopped(kind),
 			async leave(way) {
@@ -987,6 +998,20 @@ async function startBrowserSubscriber(
 				"report its state",
 				page.evaluate(() => window.xmoqOwn.state()),
 			),
+		async fetch(fetch, timeoutMs) {
+			const reported: PageFetchReport = JSON.parse(
+				await onPage(
+					label,
+					`send a ${fetch.type} FETCH and report it`,
+					page.evaluate(
+						([asked, limit]) => window.xmoqOwn.fetchRange(asked, limit),
+						[fetch, timeoutMs] satisfies [PageFetch, number],
+					),
+					timeoutMs + STEP_TIMEOUT_MS,
+				),
+			);
+			return reported;
+		},
 		async properties(group) {
 			const reported: unknown = JSON.parse(
 				await onPage(

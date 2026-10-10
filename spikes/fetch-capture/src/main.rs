@@ -23,13 +23,25 @@
 //! `bidi n` is the answer on the n-th `--request`; `uni n` the n-th
 //! unidirectional stream the peer opened, the first of which is its control
 //! stream.
+//!
+//! With `--readers on` the peer's unidirectional streams are read by the
+//! readers of `xmoq-moqt-io` instead, to see that they take a fetch stream of
+//! a real peer as they take one of the in-memory connection of their tests:
+//!
+//! ```text
+//! IO fetch stream=1 request_id=0
+//! IO body stream=1 end=Fin 1f 00 01 ...
+//! ```
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use xmoq_moqt_io::wt;
-use xmoq_moqt_io::{Connection, ReadError, RecvStream, SendStream};
+use xmoq_moqt_io::{
+    Connection, FetchChunk, ReadError, RecvStream, SendStream, StreamConfig, StreamStops, UniEvent,
+    read_uni_streams,
+};
 
 /// What was read from a stream, and how the stream stands.
 struct Received {
@@ -83,9 +95,45 @@ async fn read_all(mut stream: impl RecvStream, label: String, log: Log) {
     }
 }
 
+/// Reads the peer's unidirectional streams with the readers of
+/// `xmoq-moqt-io` and prints every fetch stream when it has ended.
+fn read_with_the_readers(connection: Arc<wt::WtConnection>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let stops = StreamStops::default();
+        let (queue, mut events) = tokio::sync::mpsc::channel(64);
+        let _readers =
+            read_uni_streams(connection, StreamConfig::default(), stops.clone(), queue, |event| event);
+        while let Some(event) = events.recv().await {
+            let UniEvent::FetchOpened { stream, header } = event else {
+                if !matches!(event, UniEvent::Control(_)) {
+                    println!("IO other {event:?}");
+                }
+                continue;
+            };
+            println!("IO fetch stream={stream} request_id={}", header.request_id);
+            let Some(mut body) = stops.take_fetch_body(stream) else {
+                println!("IO body stream={stream} missing");
+                continue;
+            };
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                let end = loop {
+                    match body.next().await {
+                        FetchChunk::Bytes(chunk) => bytes.extend_from_slice(&chunk),
+                        FetchChunk::End(end) => break end,
+                    }
+                };
+                let bytes: Vec<String> = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+                println!("IO body stream={stream} end={end:?} {}", bytes.join(" "));
+            });
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let (mut url, mut cert, mut control, mut requests, mut wait_ms) = (None, None, None, Vec::new(), 2000);
+    let mut readers = false;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().with_context(|| format!("{flag} needs a value"))?;
@@ -95,6 +143,7 @@ async fn main() -> Result<()> {
             "--control" => control = Some(hex(&value)?),
             "--request" => requests.push(hex(&value)?),
             "--wait-ms" => wait_ms = value.parse().context("--wait-ms")?,
+            "--readers" => readers = value == "on",
             other => bail!("unknown flag {other}"),
         }
     }
@@ -109,7 +158,9 @@ async fn main() -> Result<()> {
     let connection = Arc::new(wt::connect(&url, cert).await.map_err(|lost| anyhow::anyhow!("{lost}"))?);
     let log: Log = Arc::default();
 
-    let accepting = {
+    let accepting = if readers {
+        read_with_the_readers(Arc::clone(&connection))
+    } else {
         let (connection, log) = (Arc::clone(&connection), Arc::clone(&log));
         tokio::spawn(async move {
             let mut count = 0;

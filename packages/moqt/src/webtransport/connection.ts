@@ -10,8 +10,16 @@ import type {
 	OutgoingObject,
 	SubgroupOptions,
 } from "../core/outgoing-subgroups.ts";
-import type { MessageParameters } from "../core/parameters.ts";
-import type { PublishRequest, SubscribeRequest } from "../core/requests.ts";
+import type {
+	GroupOrder,
+	Location,
+	MessageParameters,
+} from "../core/parameters.ts";
+import type {
+	FetchRequest,
+	PublishRequest,
+	SubscribeRequest,
+} from "../core/requests.ts";
 import { createSession, type Session } from "../core/session.ts";
 import type {
 	SessionEvent,
@@ -23,9 +31,13 @@ import type { TrackNamespace } from "../core/track.ts";
 import { closeCode, closeReason } from "./close-info.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import {
+	type FetchEnd,
+	FetchEndedError,
+	FetchStreamResetError,
 	type PeerStreamEnd,
 	type PublishEnd,
 	PublishEndedError,
+	type RequestAbort,
 	RequestAbortedError,
 	RequestFailedError,
 	type SessionClose,
@@ -46,10 +58,18 @@ const DEFAULT_SUBSCRIPTION_HIGH_WATER_MARK = 16;
  */
 const DEFAULT_MAX_PEER_UNI_STREAMS = 64;
 /**
- * Provisional, like every limit here. The same number as the Rust
- * implementation reads at once (`max_request_streams` of `StreamConfig`).
+ * Provisional, like every limit here (docs/open-questions.md, on the
+ * receive limits). The same number as the Rust implementation reads at once
+ * (`max_request_streams` of `StreamConfig`).
  */
 const DEFAULT_MAX_PEER_BIDI_STREAMS = 64;
+/**
+ * Reads of a fetch stream that `Fetch.body` holds; with the last of them
+ * the connection stops reading the stream. Provisional. The Rust reader
+ * holds five, four in its queue and one that waits for room. How large a
+ * read is is the transport's affair.
+ */
+const FETCH_BODY_HIGH_WATER_MARK = 4;
 /**
  * The largest code an application may reset a stream with.
  *
@@ -94,6 +114,19 @@ function timerDelay(name: string, value: number): number {
 	if (!Number.isInteger(value) || value < 0 || value > MAX_TIMER_DELAY_MS) {
 		throw new RangeError(
 			`${name} is a whole number from 0 to ${MAX_TIMER_DELAY_MS}, not ${String(value)}`,
+		);
+	}
+	return value;
+}
+
+/**
+ * A limit on the streams read at once, checked. NaN and Infinity would
+ * switch the limit off, and a fraction is no number of streams.
+ */
+function streamLimit(name: string, value: number, least: number): number {
+	if (!Number.isInteger(value) || value < least) {
+		throw new RangeError(
+			`${name} is a whole number from ${least}, not ${String(value)}`,
 		);
 	}
 	return value;
@@ -272,6 +305,84 @@ export interface Subscription {
 	cancel(): Promise<void>;
 }
 
+/** What a FETCH_OK says (§10.13). */
+export interface FetchResponse {
+	/** Whether `endLocation` is the final Object of the track. */
+	readonly endOfTrack: boolean;
+	/** The end of the range the response covers: the last Object plus 1, or Object 0 for a whole Group. */
+	readonly endLocation: Location;
+	readonly parameters: MessageParameters;
+	readonly trackProperties: KeyValuePair[];
+}
+
+/**
+ * A FETCH this endpoint sent (§10.12). Provisional: the shape can change
+ * while nothing but tests uses it.
+ *
+ * The answer and the Objects come on two streams, in either order (§10.13),
+ * so they are two things here. The FETCH is over when it was rejected or
+ * cancelled, or when both `response` has resolved and `body` has ended. A
+ * publisher that never answers leaves it open, where it takes up one of the
+ * requests the session may have: nothing here ends it after a time, so give
+ * the call a `signal` or call `cancel()`.
+ */
+export interface Fetch {
+	readonly requestId: bigint;
+	/**
+	 * The Group Order the FETCH asked for, Ascending where it named none
+	 * (§10.2.8). The fetch stream counts its Group IDs up or down by it and
+	 * does not carry it, so whoever decodes `body` needs it from here.
+	 */
+	readonly groupOrder: GroupOrder;
+	/**
+	 * Resolves with the FETCH_OK. Rejects with `RequestFailedError` for a
+	 * REQUEST_ERROR, with `RequestAbortedError` when the FETCH ended without
+	 * an answer, and with `SessionClosedError`. A rejection nobody handles is
+	 * not reported as unhandled.
+	 */
+	readonly response: Promise<FetchResponse>;
+	/**
+	 * The fetch stream after its FETCH_HEADER, as it came: Objects and End of
+	 * Range indicators in the encoding of §11.4.4, not decoded, cut wherever
+	 * a read ended. `decodeFetchBody` makes Objects of it.
+	 *
+	 * The connection reads the stream only as fast as this is read: it holds
+	 * a few reads and then leaves the rest with the transport, where flow
+	 * control holds the publisher back. A body nobody reads keeps one of the
+	 * unidirectional streams read at once (`maxPeerUniStreams`).
+	 *
+	 * | What happened | `body` |
+	 * |---|---|
+	 * | The publisher finished the fetch stream | delivers what is left, then closes |
+	 * | The publisher reset the fetch stream | delivers what is left, then fails with `FetchStreamResetError` |
+	 * | The FETCH was rejected, or ended by the publisher or with the session, before the stream ended | delivers what is left, then fails with `FetchEndedError`, or `SessionClosedError` |
+	 * | `cancel()`, the `signal`, or this endpoint closed the session | fails at once with `FetchEndedError` or `SessionClosedError`; what was not read is dropped |
+	 * | A reader cancels `body` | the FETCH is cancelled; that reader sees no error |
+	 *
+	 * So a `body` that closes has every byte the publisher sent on the
+	 * stream, and one that fails says by the class and `end` of its error
+	 * whether the publisher, the session or this endpoint ended it.
+	 */
+	readonly body: ReadableStream<Uint8Array>;
+	/** Resolves once the FETCH is over, with how. Never rejects. */
+	readonly ended: Promise<FetchEnd>;
+	/**
+	 * Cancels the FETCH (§5.2): the request stream is reset and stopped, and
+	 * the fetch stream is stopped at once, which frees its place among the
+	 * streams read. Does nothing once the FETCH or the session has ended.
+	 */
+	cancel(): Promise<void>;
+}
+
+export interface FetchCallOptions {
+	/**
+	 * Cancels the FETCH when it aborts, like `cancel()`. With a signal that
+	 * has aborted already nothing is sent, and `fetch` rejects with its
+	 * reason.
+	 */
+	signal?: AbortSignal;
+}
+
 export interface MoqtConnection {
 	/** Setup Options of the peer's SETUP. */
 	readonly peerSetupOptions: readonly KeyValuePair[];
@@ -287,6 +398,15 @@ export interface MoqtConnection {
 	): Promise<void>;
 	publish(request: PublishRequest): Promise<PublishedTrack>;
 	subscribe(request: SubscribeRequest): Promise<Subscription>;
+	/**
+	 * Sends a FETCH (§10.12) and resolves once it is with the transport,
+	 * before any answer. Rejects with a `RangeError`, and sends nothing, for
+	 * a parameter that is none of a FETCH, for a Standalone range that ends
+	 * before it starts, and for a Joining Request ID that is not a SUBSCRIBE
+	 * of this connection that is pending or established; and with
+	 * `SessionClosedError`.
+	 */
+	fetch(request: FetchRequest, options?: FetchCallOptions): Promise<Fetch>;
 	/**
 	 * Closes the session (§3.5). `code` is a Session Termination Error Code,
 	 * NO_ERROR when left out; a value that is not a whole number from 0 to
@@ -328,6 +448,15 @@ interface ActiveSubscription {
 	/** PUBLISH_DONE, once it arrived. */
 	publishDone: EventOf<"publish-done"> | undefined;
 	publishDoneTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+/** What the connection keeps for a FETCH, from the moment it is sent. */
+interface ActiveFetch {
+	body: ObjectQueue<Uint8Array>;
+	response: Deferred<FetchResponse>;
+	ended: Deferred<FetchEnd>;
+	/** How the publisher ended the fetch stream, once it has. */
+	streamEnd: EventOf<"fetch-stream-ended"> | undefined;
 }
 
 /** A `done()` that waits for the subscriber to end its direction of the request stream. */
@@ -381,25 +510,21 @@ export async function connectOver(
 	transport: MoqtTransport,
 	options: SessionConnectOptions = {},
 ): Promise<MoqtConnection> {
-	const maxPeerUniStreams =
-		options.maxPeerUniStreams ?? DEFAULT_MAX_PEER_UNI_STREAMS;
 	// WHY from 2: one place is the peer's control stream for as long as the
 	// session lasts, so with 1 no data stream would ever be read, and with 0
-	// not even SETUP. NaN and Infinity would switch the limit off.
-	if (!Number.isInteger(maxPeerUniStreams) || maxPeerUniStreams < 2) {
-		throw new RangeError(
-			`maxPeerUniStreams is a whole number from 2, not ${String(maxPeerUniStreams)}`,
-		);
-	}
-	const maxPeerBidiStreams =
-		options.maxPeerBidiStreams ?? DEFAULT_MAX_PEER_BIDI_STREAMS;
+	// not even SETUP.
+	const maxPeerUniStreams = streamLimit(
+		"maxPeerUniStreams",
+		options.maxPeerUniStreams ?? DEFAULT_MAX_PEER_UNI_STREAMS,
+		2,
+	);
 	// WHY from 1: with 0 no request of the peer would ever be read, and so
-	// never answered. NaN and Infinity would switch the limit off.
-	if (!Number.isInteger(maxPeerBidiStreams) || maxPeerBidiStreams < 1) {
-		throw new RangeError(
-			`maxPeerBidiStreams is a whole number from 1, not ${String(maxPeerBidiStreams)}`,
-		);
-	}
+	// never answered.
+	const maxPeerBidiStreams = streamLimit(
+		"maxPeerBidiStreams",
+		options.maxPeerBidiStreams ?? DEFAULT_MAX_PEER_BIDI_STREAMS,
+		1,
+	);
 	const peerStreamEndTimeoutMs = timerDelay(
 		"peerStreamEndTimeoutMs",
 		options.peerStreamEndTimeoutMs ?? DEFAULT_PEER_STREAM_END_TIMEOUT_MS,
@@ -423,6 +548,7 @@ export async function connectOver(
 	const pendingPublishAliases = new Map<bigint, bigint>();
 	const subscriptions = new Map<bigint, ActiveSubscription>();
 	const publishes = new Map<bigint, ActivePublish>();
+	const fetches = new Map<bigint, ActiveFetch>();
 	const peerStreamWaits = new Map<bigint, PeerStreamWait>();
 	/** Serializes outputs so that writes reach each stream in the order the session produced them. */
 	let queue: Promise<unknown> = Promise.resolve();
@@ -494,6 +620,56 @@ export async function connectOver(
 		publish.ended.resolve(end);
 	};
 
+	/**
+	 * Ends a FETCH for whoever holds it. `response` is rejected where it had
+	 * not resolved; `body` ends by the table in the doc of `Fetch.body`.
+	 */
+	const endFetch = (requestId: bigint, end: FetchEnd): void => {
+		const fetch = fetches.get(requestId);
+		if (fetch === undefined) return;
+		fetches.delete(requestId);
+		const aborted = (abort: RequestAbort): void => {
+			fetch.response.reject(new RequestAbortedError(abort));
+			fetch.body.end(new FetchEndedError(end));
+		};
+		switch (end.type) {
+			case "served":
+			case "stream-reset":
+				// Both have come: the answer, and the end of the stream.
+				break;
+			case "rejected":
+				fetch.response.reject(end.error);
+				fetch.body.end(new FetchEndedError(end));
+				break;
+			case "peer-closed":
+				aborted({ type: "peer-closed" });
+				break;
+			case "peer-reset":
+				aborted({ type: "peer-reset", code: end.code });
+				break;
+			case "unsupported-track-property":
+				aborted({ type: "unsupported-track-property" });
+				break;
+			case "cancelled":
+				fetch.response.reject(new RequestAbortedError({ type: "cancelled" }));
+				fetch.body.abort(new FetchEndedError(end));
+				break;
+			case "session-closed": {
+				const error = new SessionClosedError(end.close);
+				fetch.response.reject(error);
+				if (end.close.type === "local") fetch.body.abort(error);
+				else fetch.body.end(error);
+				break;
+			}
+			default: {
+				// A kind of ending that is not handled above does not compile.
+				const unhandled: never = end;
+				throw new Error(`unknown end of a FETCH: ${String(unhandled)}`);
+			}
+		}
+		fetch.ended.resolve(end);
+	};
+
 	const rejectPending = (requestId: bigint, error: Error): void => {
 		pendingNamespaces.get(requestId)?.reject(error);
 		pendingPublishes.get(requestId)?.reject(error);
@@ -524,6 +700,9 @@ export async function connectOver(
 		}
 		for (const requestId of [...publishes.keys()]) {
 			endPublish(requestId, { type: "session-closed", close });
+		}
+		for (const requestId of [...fetches.keys()]) {
+			endFetch(requestId, { type: "session-closed", close });
 		}
 		for (const requestId of [...peerStreamWaits.keys()]) {
 			endPeerStreamWait(requestId, { type: "session-closed", close });
@@ -694,6 +873,34 @@ export async function connectOver(
 		};
 	};
 
+	/** Registers a FETCH the session has just taken, so that what comes for it finds it. */
+	const fetchFrom = (requestId: bigint, groupOrder: GroupOrder): Fetch => {
+		const cancel = (): Promise<void> => {
+			if (!fetches.has(requestId)) return Promise.resolve();
+			endFetch(requestId, { type: "cancelled" });
+			// The session agrees: cancelling after the end does nothing.
+			if (sessionClose !== undefined) return Promise.resolve();
+			return applyVoid((s) => s.cancelRequest(requestId));
+		};
+		const active: ActiveFetch = {
+			body: createObjectQueue<Uint8Array>(FETCH_BODY_HIGH_WATER_MARK, cancel),
+			response: deferred(),
+			ended: deferred(),
+			streamEnd: undefined,
+		};
+		// A caller that reads `body` and `ended` alone leaves this unhandled.
+		active.response.promise.catch(() => {});
+		fetches.set(requestId, active);
+		return {
+			requestId,
+			groupOrder,
+			response: active.response.promise,
+			body: active.body.readable,
+			ended: active.ended.promise,
+			cancel,
+		};
+	};
+
 	/** Tells whoever waits on a request how it ended, from the session's reason and what arrived before it. */
 	const onRequestClosed = (event: EventOf<"request-closed">): void => {
 		const { requestId, reason, resetCode } = event;
@@ -705,6 +912,7 @@ export async function connectOver(
 				);
 				endSubscription(requestId, { type: "peer-closed" });
 				endPublish(requestId, { type: "peer-closed" });
+				endFetch(requestId, { type: "peer-closed" });
 				return;
 			case "peer-reset":
 				rejectPending(
@@ -713,14 +921,27 @@ export async function connectOver(
 				);
 				endSubscription(requestId, { type: "peer-reset", code: resetCode });
 				endPublish(requestId, { type: "peer-reset", code: resetCode });
+				endFetch(requestId, { type: "peer-reset", code: resetCode });
 				return;
 			case "unsupported-track-property":
-				// Happens on SUBSCRIBE_OK, so only the pending subscribe() learns of it.
+				// Happens on SUBSCRIBE_OK, where only the pending subscribe()
+				// learns of it, and on FETCH_OK.
 				rejectPending(
 					requestId,
 					new RequestAbortedError({ type: "unsupported-track-property" }),
 				);
+				endFetch(requestId, { type: "unsupported-track-property" });
 				return;
+			case "fetch-served": {
+				const streamEnd = fetches.get(requestId)?.streamEnd;
+				endFetch(
+					requestId,
+					streamEnd?.how === "reset"
+						? { type: "stream-reset", code: streamEnd.resetCode }
+						: { type: "served" },
+				);
+				return;
+			}
 			case "update-failed": {
 				endPublish(requestId, { type: "update-failed" });
 				// The session sent PUBLISH_DONE UPDATE_FAILED itself. Nobody
@@ -785,9 +1006,37 @@ export async function connectOver(
 					?.resolve(subscriptionFrom(event));
 				pendingSubscribes.delete(event.requestId);
 				return undefined;
-			case "request-error":
-				rejectPending(event.requestId, new RequestFailedError(event));
+			case "request-error": {
+				const error = new RequestFailedError(event);
+				rejectPending(event.requestId, error);
+				endFetch(event.requestId, { type: "rejected", error });
 				return undefined;
+			}
+			case "fetch-ok":
+				fetches.get(event.requestId)?.response.resolve({
+					endOfTrack: event.endOfTrack,
+					endLocation: event.endLocation,
+					parameters: event.parameters,
+					trackProperties: event.trackProperties,
+				});
+				return undefined;
+			case "fetch-data": {
+				const fetch = fetches.get(event.requestId);
+				if (fetch === undefined) return undefined;
+				// The fetch stream is not read further until `body` has room.
+				return { settled: fetch.body.push(event.data) };
+			}
+			case "fetch-stream-ended": {
+				const fetch = fetches.get(event.requestId);
+				if (fetch === undefined) return undefined;
+				fetch.streamEnd = event;
+				fetch.body.end(
+					event.how === "reset"
+						? new FetchStreamResetError(event.resetCode)
+						: undefined,
+				);
+				return undefined;
+			}
 			case "request-closed":
 				onRequestClosed(event);
 				return undefined;
@@ -976,6 +1225,37 @@ export async function connectOver(
 		},
 		subscribe(subscribeRequest) {
 			return request(pendingSubscribes, (s) => s.subscribe(subscribeRequest));
+		},
+		async fetch(fetchRequest, fetchOptions = {}) {
+			const { signal } = fetchOptions;
+			signal?.throwIfAborted();
+			const handle = await apply((s) => {
+				const { value, outputs } = s.fetch(fetchRequest);
+				// Registered before the request is sent, so that its answer and
+				// its stream find it.
+				return {
+					value: fetchFrom(
+						value,
+						fetchRequest.parameters?.groupOrder ?? "Ascending",
+					),
+					outputs,
+				};
+			});
+			if (signal !== undefined) {
+				// WHY the rejection is dropped: `cancel()` rejects when the reset
+				// could not be written, which ends the session, and `closed` and
+				// `ended` report that. Nobody holds the promise of this call.
+				const onAbort = (): void => {
+					handle.cancel().catch(() => {});
+				};
+				signal.addEventListener("abort", onAbort, { once: true });
+				void handle.ended.then(() =>
+					signal.removeEventListener("abort", onAbort),
+				);
+				// It may have aborted while the FETCH was written.
+				if (signal.aborted) onAbort();
+			}
+			return handle;
 		},
 		close(code = SessionErrorCode.NO_ERROR, reason = "") {
 			// Before the session is touched: a code that cannot be sent leaves it

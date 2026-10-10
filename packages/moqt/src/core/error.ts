@@ -29,6 +29,10 @@ export const StreamResetErrorCode = {
 /** REQUEST_ERROR codes (§15.10.2) this implementation sends. */
 export const RequestErrorCode = {
 	NOT_SUPPORTED: 0x3n,
+	/** The range of a FETCH is not valid (§10.6.2). */
+	INVALID_RANGE: 0x11n,
+	/** The Joining Request ID of a Joining FETCH names no subscription of the session (§10.12.2). */
+	INVALID_JOINING_REQUEST_ID: 0x32n,
 } satisfies Record<string, bigint>;
 
 /**

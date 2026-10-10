@@ -918,9 +918,11 @@ describe("connectOver", () => {
 	test("answers a request from the peer with REQUEST_ERROR NOT_SUPPORTED and stays open", async () => {
 		const { peer } = await connected();
 		const request = peer.openBidi();
-		// A Relative Joining FETCH with Request ID 1, whole: a FETCH is decoded
-		// before it is refused.
-		await request.reply.write(hex("16 00 05 01 02 00 00 00"));
+		// A Standalone FETCH for ["a"] "b" from {1, 0} to {3, 0}, with Request
+		// ID 1, whole: a FETCH is decoded before it is refused.
+		await request.reply.write(
+			hex("16 00 0c 01 01 01 01 61 01 62 01 00 03 00 00"),
+		);
 		expect(decodeControlMessage(await sentBytes(request.sent))).toMatchObject({
 			status: "ok",
 			value: { type: "REQUEST_ERROR", errorCode: 3n, retryInterval: 0n },
@@ -936,9 +938,9 @@ describe("connectOver", () => {
 			code: 3,
 		},
 		{
-			name: "the peer uses a stream type that is not implemented (FETCH_HEADER)",
+			name: "a fetch stream comes for no FETCH of this endpoint",
 			bytes: "05 00",
-			code: 1,
+			code: 3,
 		},
 	])(
 		"closes the transport and fails what waits when $name",
@@ -1152,6 +1154,10 @@ describe("connectOver", () => {
 	test.each([
 		{ value: 0, message: "maxPeerBidiStreams is a whole number from 1, not 0" },
 		{
+			value: -1,
+			message: "maxPeerBidiStreams is a whole number from 1, not -1",
+		},
+		{
 			value: 2.5,
 			message: "maxPeerBidiStreams is a whole number from 1, not 2.5",
 		},
@@ -1173,6 +1179,16 @@ describe("connectOver", () => {
 			expect(error).toMatchObject({ message });
 		},
 	);
+
+	test("without the option, 64 requests of the peer are read at once", async () => {
+		const { peer } = await connected();
+		// 65 streams with the start of a request each, which holds its place.
+		for (let count = 0; count < 65; count++) {
+			void peer.openBidi().reply.write(hex("16"));
+		}
+		await settle();
+		expect(peer.untakenBidiStreams()).toBe(1);
+	});
 
 	// A request of the peer is held until its first message is whole, and a
 	// FETCH until all of it is there. The limit bounds how many streams can
@@ -1196,9 +1212,10 @@ describe("connectOver", () => {
 			throw new Error("five requests were opened");
 		}
 		await first.reply.write(hex("00 00 00"));
+		// INVALID_JOINING_REQUEST_ID: no SUBSCRIBE of the peer is accepted.
 		expect(decodeControlMessage(await sentBytes(first.sent))).toMatchObject({
 			status: "ok",
-			value: { type: "REQUEST_ERROR", errorCode: 3n },
+			value: { type: "REQUEST_ERROR", errorCode: 0x32n },
 		});
 		await settle();
 		expect(peer.untakenBidiStreams()).toBe(3);
