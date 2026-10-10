@@ -46,6 +46,9 @@ bun spikes/browser-support/moqt.ts <chromium|firefox> --port 47420 --objects 100
 bun spikes/browser-support/error-and-codecs.ts <chromium|firefox>
 bun spikes/browser-support/moqt.ts <chromium|firefox> --port 47430 --close-publisher
 bun spikes/browser-support/codecs.ts          # twice
+bun spikes/browser-support/cpu.ts chromium --seconds 120 --out <file>
+bun spikes/browser-support/cpu.ts chromium --seconds 120 --only "^encode (H.264 software|VP8|VP9|AV1) 1280x720|^encode .* 1920x1080"
+bun spikes/browser-support/cpu.ts chrome --seconds 120 --only "^idle|^encode (H.264 hardware|H.264 software|VP9) 1280x720"
 ```
 
 ## Observed results
@@ -144,6 +147,8 @@ The decision is the project owner's. This table puts the options side by side; "
 
 The times are the median of the serial encode at 1280x720 in browser A of [the loopback record](2026-10-10-webcodecs-loopback.md): one machine, one run, a generated picture. They show that no codec is out of reach for one 720p stream on that machine, and nothing about Firefox, Safari or a phone.
 
+The CPU measurement further down was made after this table. For Chromium alone it adds a reason that the table does not have: the hardware H.264 encoder took a tenth of the CPU time of the software encoders, and in software H.264 was the cheapest to decode.
+
 A recommendation, for the owner to take or leave: **H.264 in Annex B with Opus** reaches every desktop browser that has WebTransport, keeps late join free of a separate configuration message, and has hardware encoders and decoders on the platforms read about. VP8 and VP9 reach the same browsers in software and have the simpler bitstream. Between Chromium and Playwright's Firefox on this Mac, all three were encoded in under 10 ms a frame and decoded by the other browser. The choice between them is not settled by anything here: Safari rests on published sources alone, Firefox on one build on one machine, and no source read compares their latency across browsers.
 
 ### Runs in the Playwright builds of Firefox and WebKit
@@ -216,7 +221,59 @@ All 20 combinations gave 90 frames of 1280x720 and no error, in both runs.
 
 An answer of "yes" from `isConfigSupported` was followed by a working encoder and decoder in each of these cases.
 
+### CPU time of encoding and decoding in Chromium, in real time
+
+Added after the project owner chose Chromium alone as the browser of Phase 1, which takes "every desktop browser has it" out of the reasons for a codec and leaves the question of what a codec costs the publisher and the viewers.
+
+`cpu.ts`: a page draws a moving picture 30 times a second for 120 seconds (the hue of a gradient over the whole frame moves, a bar crosses, a number counts; the picture of the earlier runs moved in the same way) and encodes each frame as it is drawn, with `latencyMode: "realtime"`, a key frame every 30 frames, and 3 bits a pixel a second (2,764,800 and 6,220,800 bit/s). The driver reads the CPU time of **every process of that browser** from `ps` before and after, and divides by the 120 seconds. For decoding, 3600 frames are encoded first, as fast as it goes and outside the measurement, and then decoded 30 a second in the same page; the frames are closed and not drawn. Which encoder and decoder the browser used is read from the DevTools `Media` domain. Headless, on the Mac of the other runs (Apple M3 Pro, macOS 14.4). **CPU time stands in for power, which was not measured.**
+
+Chromium 156.0.8078.4 (Playwright), percent of one core over 120 seconds:
+
+| | 1280x720 | 1920x1080 | Implementation, as the browser named it |
+|---|---|---|---|
+| A page that does nothing | 0.3 | | |
+| Drawing only, no encoder | 1.9 | 1.5 | |
+| Encode H.264, `prefer-hardware` | **4.0** | **11.8** | `VideoToolbox`, a platform encoder; most of the time is in the GPU process |
+| Encode H.264, `prefer-software` | 71.2 | 105.5 | `OpenH264VideoEncoder`, in the renderer |
+| Encode VP8 | 32.9 | 62.3 | `VpxVideoEncoder`, in the renderer |
+| Encode VP9 | 54.0 | 107.2 | `VpxVideoEncoder`, in the renderer |
+| Encode AV1 | 55.1 | 131.9 | `Av1VideoEncoder`, in the renderer |
+| Decode H.264, `prefer-hardware` | 3.2 | | `VideoToolboxVideoDecoder` |
+| Decode H.264, `prefer-software` | 6.9 | | `FFmpegVideoDecoder` |
+| Decode VP8 | 9.2 | | `VpxVideoDecoder` |
+| Decode VP9, no preference | 4.8 | | `VideoToolboxVideoDecoder` |
+| Decode AV1, no preference | 5.2 | | `VideoToolboxVideoDecoder` |
+| Decode VP9, `prefer-software` | 22.3 | | `VpxVideoDecoder` |
+| Decode AV1, `prefer-software` | 27.8 | | `Dav1dVideoDecoder` |
+
+In every condition all 3600 frames were handed to the encoder or decoder at their time (none more than a frame late) and 3600 chunks or frames had come out at the end. **How late each output came was not measured.** What there is, is the length of the encoder's or decoder's queue at the moment a frame was handed in: at most 8 in every condition of Chromium 156, and 1 in most. The bytes produced in 120 seconds at 1280x720, as a bit rate: H.264 hardware 2.35 Mbit/s, H.264 software 2.72, VP8 2.78, VP9 2.29, AV1 1.90, against 2.76 asked for. That is what each encoder spent, not a comparison of picture quality, which was not measured.
+
+Google Chrome 155.0.8059.39, four conditions at 1280x720: nothing 0.4, H.264 hardware 9.9 (VideoToolbox, platform encoder), H.264 software 70.2, VP9 53.6. The software numbers are those of Chromium 156 within a percent. The hardware one is higher than in Chromium 156 (4.0), and **its encode queue reached 91 frames at one moment**, about three seconds of picture waiting to be encoded, where every other condition stayed at 8 or less. So in that run the hardware encoder was not keeping up for a while, although all 3600 chunks had come out at the end; when it happened, for how long, and why, was not looked at. It is one run.
+
+- **The hardware H.264 encoder costs a tenth of any software encoder here, or less**: 4 to 12 percent of a core against 33 to 132. H.264 is the only codec of the four with a hardware encoder on this machine.
+- **Among the software encoders VP8 is the cheapest**: 33 percent at 1280x720, against 54 to 71 for VP9, AV1 and H.264. At 1920x1080, software H.264, VP9 and AV1 each take more than one core.
+- **Decoding is cheap where the platform decodes** (3 to 5 percent for H.264, VP9 and AV1). **In software, H.264 is the cheapest to decode (6.9), then VP8 (9.2); VP9 and AV1 take 22 and 28.** A viewer's machine without a hardware decoder for VP9 or AV1 pays three to four times what it pays for H.264.
+
+**The numbers moved with what else the machine did, and not in the direction one would expect.** During the first run, another session built and tested Rust code on the same machine from about 21:53 to 22:05, which six conditions fell into; they were measured again when the machine was quiet:
+
+| Condition | With the other work | Quiet |
+|---|---|---|
+| Encode H.264 software 1280x720 | 39.7 | 71.2 |
+| Encode VP8 1280x720 | 25.5 | 32.9 |
+| Encode VP9 1280x720 | 43.6 | 54.0 |
+| Encode AV1 1280x720 | 47.7 | 55.1 |
+| Encode H.264 hardware 1920x1080 | 10.8 | 11.8 |
+| Encode H.264 software 1920x1080 | 102.9 | 105.5 |
+| Encode VP8, VP9, AV1 1920x1080 (the first two at the edge of that time, the third after it) | 59.1, 95.6, 121.0 | 62.3, 107.2, 131.9 |
+
+The same picture, the same number of frames and, for all but one condition, the same number of bytes out, and up to 1.8 times the CPU time. The cause was not found. This machine has cores of two kinds, and the same work takes more CPU time on the slower kind; that the busy machine moved the browser's work to the faster cores would fit, and was not checked. So **these numbers order the conditions and say roughly how far apart they are; a single number is not a property of the codec.** The quiet values of the two browsers agree (71.2 and 70.2, 54.0 and 53.6), which is the only repetition there is.
+
+The raw rows are in `spikes/browser-support/out/`.
+
 ## Limitations and blockers
+
+- **The CPU measurement does not show how late an encoded or decoded frame comes**, only that the frames went in on time and all came out, and how long the queue was when a frame went in. In one run of Chrome 155 with the hardware H.264 encoder the queue was 91 frames long at one moment.
+- **The CPU measurement is one Mac, one generated picture, one run a condition, and CPU time, not power.** It varied by up to 1.8 times with other work on the machine (above). Rendering the decoded frames is not in it. A camera was not used. Which cores did the work was not recorded.
 
 - **The Firefox that was run is Playwright's build of 157.0, not the shipped 157.0.1,** on one Mac, over loopback, headless. A result here is not a result for the stable Firefox, for Linux or Windows, or for Firefox for Android.
 - **WebKit was not measured at all** (above), so the two points that matter most for Safari stay open: whether it connects to the own relay, and whether it stops after 7600 streams. A window that is not headless was not tried, as it would open on the user's screen. It needs a machine with Safari 26.4 or later.
