@@ -1799,7 +1799,7 @@ fn a_refused_publish_under_the_alias_of_a_draining_source_does_not_end_its_wait(
 }
 
 #[test]
-fn a_stream_sent_ahead_for_a_refused_publish_is_taken_for_the_draining_subscription() {
+fn known_gap_a_stream_sent_ahead_for_a_refused_publish_is_taken_for_the_draining_one() {
     // Known gap (implementation notes): nothing on a stream but its Track
     // Alias says which subscription it is for.
     assert_eq!(crate::MAX_SOURCES, 4);

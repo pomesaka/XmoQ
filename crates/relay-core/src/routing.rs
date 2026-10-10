@@ -440,6 +440,11 @@ impl Relay {
         first: Option<SessionKey>,
         actions: &mut Vec<Action>,
     ) -> Asked {
+        // WHY the sources are left out here, though the session state would
+        // refuse a second subscription to the track on a session that is a
+        // source (§5.1) and the relay would then open nothing: which
+        // sessions are asked is this function's to say, and the room of the
+        // track is counted from the same list. No test tells the two apart.
         let mut taken: Vec<SessionKey> = self.tracks.live(track).map_or(Vec::new(), |live| {
             live.sources()
                 .map(|source| source.session_and_alias().0)

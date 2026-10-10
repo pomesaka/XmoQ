@@ -1683,7 +1683,7 @@ fn a_stream_of_the_subscription_before_is_not_counted_for_the_new_one() {
 }
 
 #[test]
-fn a_late_stream_of_the_subscription_before_is_counted_for_the_new_one() {
+fn known_gap_a_late_stream_of_the_subscription_before_is_counted_for_the_new_one() {
     // A known gap, pinned. The first subscription counted two streams and
     // one had come. The second comes after the PUBLISH under the same alias,
     // and nothing tells it from a stream of the new subscription.
@@ -2011,4 +2011,674 @@ fn a_stream_of_a_session_that_is_no_source_of_the_track_is_stopped() {
     );
     let counts = relay.counts();
     assert_eq!((counts.in_streams, counts.remembered_subgroups), (0, 0));
+}
+
+/// DEFAULT PUBLISHER PRIORITY (§12.4), a Track Property.
+const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
+
+/// A relay where the publisher and Bob publish the track "a", each with a
+/// DEFAULT PUBLISHER PRIORITY of its own, or with none.
+fn relay_with_default_priorities(publishers: Option<u64>, bobs: Option<u64>) -> Relay {
+    let property = |priority: Option<u64>| -> Vec<KeyValuePair> {
+        priority
+            .map(|priority| KeyValuePair::varint(DEFAULT_PUBLISHER_PRIORITY, priority).unwrap())
+            .into_iter()
+            .collect()
+    };
+    let mut relay = Relay::new("test/0");
+    for session in [PUBLISHER, ALICE, BOB] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+    }
+    for (session, alias, priority) in [
+        (PUBLISHER, UPSTREAM_ALIAS, publishers),
+        (BOB, BOBS_ALIAS, bobs),
+    ] {
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(0),
+            first: publish_of_a(alias, vec![], property(priority)),
+        });
+    }
+    relay
+}
+
+#[test]
+fn known_gap_a_subgroup_without_a_priority_reaches_the_subscriber_under_another_default() {
+    // A known gap, pinned. The publisher's default is 10 and Bob's 200.
+    let mut relay = relay_with_default_priorities(Some(10), Some(200));
+    // The subscriber is told the Track Properties of the source that came
+    // last (§2.5), so a default of 200.
+    assert_eq!(
+        subscribe_to_track(&mut relay, ALICE),
+        [Action::SendRequest {
+            session: ALICE,
+            stream: StreamKey(0),
+            message: ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: 0,
+                parameters: vec![],
+                track_properties: vec![
+                    KeyValuePair::varint(DEFAULT_PUBLISHER_PRIORITY, 200).unwrap()
+                ],
+            }),
+        }]
+    );
+    // A Subgroup of the publisher that leaves its priority to the default
+    // (§11.4.2) has priority 10. Its header goes on as it came, and to the
+    // subscriber it now says 200.
+    let inherits = |track_alias| SubgroupHeader {
+        publisher_priority: None,
+        ..header_of_group(track_alias, 1)
+    };
+    assert_eq!(
+        relay.step(Event::DataStreamOpened {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            header: inherits(UPSTREAM_ALIAS),
+        }),
+        [open_data_stream(ALICE, 0, inherits(0))]
+    );
+}
+
+/// A header of Subgroup 0 of `group` with that Publisher Priority; `None`
+/// leaves it to the default of the subscription (§11.4.2).
+fn with_priority(track_alias: u64, group: u64, priority: Option<u8>) -> SubgroupHeader {
+    SubgroupHeader {
+        publisher_priority: priority,
+        ..header_of_group(track_alias, group)
+    }
+}
+
+fn opens(
+    relay: &mut Relay,
+    session: SessionKey,
+    stream: u64,
+    header: SubgroupHeader,
+) -> Vec<Action> {
+    relay.step(Event::DataStreamOpened {
+        session,
+        stream: StreamKey(stream),
+        header,
+    })
+}
+
+fn malformed_stop(session: SessionKey, stream: u64) -> Action {
+    Action::StopDataStream {
+        session,
+        stream: StreamKey(stream),
+        code: 0x12,
+    }
+}
+
+fn publish_reset(session: SessionKey, code: u32) -> Action {
+    Action::ResetRequest {
+        session,
+        stream: StreamKey(0),
+        code,
+    }
+}
+
+#[test]
+fn a_subgroup_that_another_source_sends_with_another_priority_makes_the_track_malformed() {
+    let mut relay = relay_with_two_publishers();
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, Some(9)),
+    );
+    // §2.4.2, the first example. The stream that brought the other priority
+    // is stopped with MALFORMED_TRACK (0x12), and its source is cancelled
+    // with that code; the source that sent the Subgroup first did nothing
+    // the relay can hold against it, and is cancelled with CANCELLED (0x1).
+    // Alice's stream is reset and her subscription ends, MALFORMED_TRACK.
+    let mut expected = vec![
+        malformed_stop(BOB, 8),
+        stopped(PUBLISHER, 7),
+        publish_reset(PUBLISHER, 0x1),
+        publish_reset(BOB, 0x12),
+        reset(0, 0x12),
+    ];
+    expected.extend(done_actions(ALICE, 0x12, 1));
+    assert_eq!(
+        opens(&mut relay, BOB, 8, with_priority(BOBS_ALIAS, 1, Some(8))),
+        expected
+    );
+    let counts = relay.counts();
+    assert_eq!(
+        (counts.tracks, counts.sources, counts.in_streams),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn a_subgroup_that_comes_again_with_another_priority_makes_the_track_malformed() {
+    #[derive(Debug, Clone, Copy)]
+    enum First {
+        StillOpen,
+        CutShort,
+        Finished,
+    }
+    // (how the publisher's first stream for the Subgroup stands; who sends
+    //  the second, with priority 8 where the first had 9). The track ends in
+    //  all six, also where the second stream would have been left unread or
+    //  would have taken the place of the first. The source of the second
+    //  stream gets MALFORMED_TRACK (0x12) on its PUBLISH stream and the
+    //  other CANCELLED (0x1).
+    let cases = [
+        (First::StillOpen, PUBLISHER, (0x12, 0x1)),
+        (First::CutShort, PUBLISHER, (0x12, 0x1)),
+        (First::Finished, PUBLISHER, (0x12, 0x1)),
+        (First::StillOpen, BOB, (0x1, 0x12)),
+        (First::CutShort, BOB, (0x1, 0x12)),
+        (First::Finished, BOB, (0x1, 0x12)),
+    ];
+    for (first, second, (to_the_publisher, to_bob)) in cases {
+        let mut relay = relay_with_two_publishers();
+        subscribe_to_track(&mut relay, ALICE);
+        opens(
+            &mut relay,
+            PUBLISHER,
+            7,
+            with_priority(UPSTREAM_ALIAS, 1, Some(9)),
+        );
+        match first {
+            First::StillOpen => {}
+            First::CutShort => {
+                closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Aborted(Some(0x2)));
+            }
+            First::Finished => {
+                closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Fin);
+            }
+        }
+        let alias = if second == BOB {
+            BOBS_ALIAS
+        } else {
+            UPSTREAM_ALIAS
+        };
+        let actions = opens(&mut relay, second, 8, with_priority(alias, 1, Some(8)));
+        let resets: Vec<&Action> = actions
+            .iter()
+            .filter(|action| matches!(action, Action::ResetRequest { .. }))
+            .collect();
+        assert_eq!(
+            resets,
+            [
+                &publish_reset(PUBLISHER, to_the_publisher),
+                &publish_reset(BOB, to_bob)
+            ],
+            "{first:?} {second:?}"
+        );
+        assert_eq!(
+            actions.first(),
+            Some(&malformed_stop(second, 8)),
+            "{first:?} {second:?}"
+        );
+        assert_eq!(relay.counts().tracks, 0, "{first:?} {second:?}");
+    }
+}
+
+#[test]
+fn the_priority_of_a_subgroup_is_the_one_in_its_header_or_the_default_of_its_source() {
+    // (the DEFAULT PUBLISHER PRIORITY of the publisher's PUBLISH and the
+    //  priority in its header; the same for Bob, who sends the Subgroup
+    //  second; whether the track is malformed). §12.4: without the property
+    //  the default is 128.
+    let cases = [
+        // The same priority, written two ways: no difference.
+        (None, None, None, Some(128), false),
+        (Some(10), None, None, Some(10), false),
+        (Some(10), None, Some(10), None, false),
+        (None, Some(9), None, Some(9), false),
+        // Both leave it to their default, and the defaults differ.
+        (Some(10), None, Some(200), None, true),
+        (None, None, Some(200), None, true),
+        (None, Some(9), None, Some(8), true),
+        // A header overrides the default (§12.4).
+        (Some(10), Some(9), Some(200), Some(9), false),
+        // 300 is no priority (§12.4), and counts as no default: 128.
+        (Some(300), None, None, Some(128), false),
+        (Some(300), None, None, Some(44), true),
+    ];
+    for (publishers_default, publishers, bobs_default, bobs, malformed) in cases {
+        let case = format!("{publishers_default:?} {publishers:?} {bobs_default:?} {bobs:?}");
+        let mut relay = relay_with_default_priorities(publishers_default, bobs_default);
+        subscribe_to_track(&mut relay, ALICE);
+        opens(
+            &mut relay,
+            PUBLISHER,
+            7,
+            with_priority(UPSTREAM_ALIAS, 1, publishers),
+        );
+        let actions = opens(&mut relay, BOB, 8, with_priority(BOBS_ALIAS, 1, bobs));
+        if malformed {
+            assert_eq!(actions.first(), Some(&malformed_stop(BOB, 8)), "{case}");
+            assert_eq!(relay.counts().tracks, 0, "{case}");
+        } else {
+            // Left like any Subgroup another source sent first; the header
+            // the subscriber got is the publisher's, as it came.
+            assert_eq!(actions, [stopped(BOB, 8)], "{case}");
+            assert_eq!(relay.counts().tracks, 1, "{case}");
+        }
+    }
+}
+
+#[test]
+fn another_priority_is_found_when_the_first_object_names_the_subgroup() {
+    let mut relay = relay_with_two_publishers();
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, Some(9)),
+    );
+    // Bob's header leaves the Subgroup ID to the first Object (§11.4.2), so
+    // which Subgroup the priority 8 is for is known only then.
+    let unnamed = SubgroupHeader {
+        subgroup_id: SubgroupId::FirstObjectId,
+        ..with_priority(BOBS_ALIAS, 1, Some(8))
+    };
+    assert_eq!(opens(&mut relay, BOB, 8, unnamed), []);
+    let mut expected = vec![
+        stopped(PUBLISHER, 7),
+        publish_reset(PUBLISHER, 0x1),
+        malformed_stop(BOB, 8),
+        publish_reset(BOB, 0x12),
+        reset(0, 0x12),
+    ];
+    expected.extend(done_actions(ALICE, 0x12, 1));
+    assert_eq!(object_from(&mut relay, BOB, 8, 0), expected);
+}
+
+#[test]
+fn one_publisher_that_sends_a_subgroup_again_with_another_priority_makes_its_track_malformed() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, Some(9)),
+    );
+    closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Aborted(Some(0x2)));
+    // With the priority it had, the Subgroup that was cut short passes.
+    assert_eq!(
+        opens(
+            &mut relay,
+            PUBLISHER,
+            8,
+            with_priority(UPSTREAM_ALIAS, 1, Some(9))
+        ),
+        [open_data_stream(ALICE, 1, with_priority(0, 1, Some(9)))]
+    );
+    closed_from(&mut relay, PUBLISHER, 8, StreamEnd::Aborted(Some(0x2)));
+    let mut expected = vec![malformed_stop(PUBLISHER, 9), publish_reset(PUBLISHER, 0x12)];
+    expected.extend(done_actions(ALICE, 0x12, 2));
+    assert_eq!(
+        opens(
+            &mut relay,
+            PUBLISHER,
+            9,
+            with_priority(UPSTREAM_ALIAS, 1, Some(8))
+        ),
+        expected
+    );
+}
+
+#[test]
+fn known_gap_a_priority_is_not_compared_for_a_subgroup_the_relay_has_forgotten() {
+    // A known gap, pinned: the relay remembers the 8 newest Groups.
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, Some(9)),
+    );
+    closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Fin);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        8,
+        with_priority(UPSTREAM_ALIAS, 20, Some(9)),
+    );
+    assert_eq!(
+        opens(
+            &mut relay,
+            PUBLISHER,
+            9,
+            with_priority(UPSTREAM_ALIAS, 1, Some(8))
+        ),
+        [open_data_stream(ALICE, 2, with_priority(0, 1, Some(8)))]
+    );
+}
+
+/// `relay_with_default_priorities` with a default of 10 for the publisher,
+/// where Alice subscribed, the publisher sent `first` and whatever `then`
+/// does, and said `PUBLISH_DONE` for three streams, so that it drains.
+fn relay_with_a_draining_default_of_10(then: impl Fn(&mut Relay)) -> Relay {
+    let mut relay = relay_with_default_priorities(Some(10), None);
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, None),
+    );
+    then(&mut relay);
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 3),
+    });
+    relay
+}
+
+/// The publisher publishes "a" anew under the same alias, with a DEFAULT
+/// PUBLISHER PRIORITY of 200.
+fn publishes_anew_with_a_default_of_200(relay: &mut Relay) {
+    publishes_anew_under(relay, UPSTREAM_ALIAS);
+}
+
+#[test]
+fn a_stream_has_the_default_priority_of_the_subscription_it_came_on() {
+    // (the priority in the header of the stream that delivered Subgroup 0
+    //  of Group 1 whole, on a subscription with a default of 10; whether
+    //  the track is malformed). The second stream for the Subgroup has no
+    //  priority, and opens while that subscription goes on: its priority is
+    //  10, and stays 10 when the alias goes to a subscription with a default
+    //  of 200 before the Object comes that names its Subgroup (§11.4.2).
+    //  10 and 10 are the same; 200 and 10 are not, though 200 is the
+    //  default of the subscription that has the alias by then.
+    for (first, malformed) in [(None, false), (Some(200), true)] {
+        let mut relay = relay_with_default_priorities(Some(10), None);
+        subscribe_to_track(&mut relay, ALICE);
+        opens(
+            &mut relay,
+            PUBLISHER,
+            7,
+            with_priority(UPSTREAM_ALIAS, 1, first),
+        );
+        closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Fin);
+        let unnamed = SubgroupHeader {
+            subgroup_id: SubgroupId::FirstObjectId,
+            ..with_priority(UPSTREAM_ALIAS, 1, None)
+        };
+        assert_eq!(opens(&mut relay, PUBLISHER, 8, unnamed), [], "{first:?}");
+        relay.step(Event::RequestMessage {
+            session: PUBLISHER,
+            stream: StreamKey(0),
+            message: publish_done(0x2, 3),
+        });
+        publishes_anew_with_a_default_of_200(&mut relay);
+        let actions = object_from(&mut relay, PUBLISHER, 8, 0);
+        if malformed {
+            assert_eq!(relay.counts().tracks, 0, "{first:?}");
+        } else {
+            // Left like any second stream for a Subgroup that was delivered
+            // whole.
+            assert_eq!(actions, [stopped(PUBLISHER, 8)], "{first:?}");
+            assert_eq!(relay.counts().tracks, 1, "{first:?}");
+        }
+    }
+}
+
+#[test]
+fn a_subgroup_sent_again_under_a_new_default_priority_makes_the_track_malformed() {
+    // The stream of Subgroup 0 of Group 1, with the default of 10, is open
+    // when the publisher publishes anew under the same alias with a default
+    // of 200, and goes on as a stream of the new subscription.
+    let mut relay = relay_with_a_draining_default_of_10(|_| {});
+    publishes_anew_with_a_default_of_200(&mut relay);
+    // The publisher sends the Subgroup again and leaves the priority to the
+    // default, now 200: the Subgroup has two priorities (§2.4.2), and the
+    // track ends. Bob, the other source, is cancelled.
+    let mut expected = vec![
+        malformed_stop(PUBLISHER, 9),
+        malformed_stop(PUBLISHER, 7),
+        Action::ResetRequest {
+            session: PUBLISHER,
+            stream: StreamKey(1),
+            code: 0x12,
+        },
+        publish_reset(BOB, 0x1),
+        reset(0, 0x12),
+    ];
+    expected.extend(done_actions(ALICE, 0x12, 1));
+    assert_eq!(
+        opens(
+            &mut relay,
+            PUBLISHER,
+            9,
+            with_priority(UPSTREAM_ALIAS, 1, None)
+        ),
+        expected
+    );
+}
+
+/// The publisher publishes "a" anew on its stream 1, with a DEFAULT
+/// PUBLISHER PRIORITY of 200.
+fn publishes_anew_under(relay: &mut Relay, track_alias: u64) {
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: ControlMessage::Publish(Publish {
+            request_id: 2,
+            full_track_name: track(b"a"),
+            track_alias,
+            parameters: vec![],
+            track_properties: vec![KeyValuePair::varint(DEFAULT_PUBLISHER_PRIORITY, 200).unwrap()],
+        }),
+    });
+}
+
+#[test]
+fn a_subgroup_that_was_cut_short_is_sent_again_across_a_new_default_priority() {
+    // Subgroup 0 of Group 1 came with the default of 10 and was cut short.
+    // The publisher sends it again on a stream that has no priority either
+    // and whose first Object will name the Subgroup (§11.4.2), says
+    // PUBLISH_DONE, and publishes anew under the alias with a default of
+    // 200. Then the Object comes.
+    let unnamed = |track_alias| SubgroupHeader {
+        subgroup_id: SubgroupId::FirstObjectId,
+        ..with_priority(track_alias, 1, None)
+    };
+    let mut relay = relay_with_a_draining_default_of_10(|relay| {
+        closed_from(relay, PUBLISHER, 7, StreamEnd::Aborted(Some(0x2)));
+        opens(relay, PUBLISHER, 8, unnamed(UPSTREAM_ALIAS));
+    });
+    publishes_anew_with_a_default_of_200(&mut relay);
+    // The stream is of the first subscription: priority 10, as before, and
+    // the Subgroup goes on (§2.2).
+    assert_eq!(
+        object_from(&mut relay, PUBLISHER, 8, 0),
+        [open_data_stream(ALICE, 1, unnamed(0)), send_object(1, 0)]
+    );
+}
+
+#[test]
+fn a_stream_without_a_priority_under_an_alias_that_drains_is_not_compared() {
+    // Subgroup 0 of Group 1 came with 200 in its header, on a subscription
+    // with a default of 10, and was cut short.
+    let mut relay = relay_with_default_priorities(Some(10), None);
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, Some(200)),
+    );
+    closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Aborted(Some(0x2)));
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 3),
+    });
+    // The publisher publishes anew with a default of 200 and sends the
+    // Subgroup again without a priority; the stream is read before the
+    // PUBLISH (§5.1). Under the subscription that drains it would have
+    // priority 10, which it has not. The relay does not know, and passes it
+    // as the same source's second stream for a Subgroup that was cut short.
+    assert_eq!(
+        opens(
+            &mut relay,
+            PUBLISHER,
+            9,
+            with_priority(UPSTREAM_ALIAS, 1, None)
+        ),
+        [open_data_stream(ALICE, 1, with_priority(0, 1, None))]
+    );
+    publishes_anew_with_a_default_of_200(&mut relay);
+    assert_eq!(relay.counts().tracks, 1);
+}
+
+#[test]
+fn known_gap_a_late_stream_is_read_with_the_default_of_the_subscription_that_took_its_alias() {
+    // Subgroup 0 of Group 1 came with the default of 10 and was cut short;
+    // the alias went to a subscription with a default of 200.
+    let mut relay = relay_with_a_draining_default_of_10(|relay| {
+        closed_from(relay, PUBLISHER, 7, StreamEnd::Aborted(Some(0x2)));
+    });
+    publishes_anew_with_a_default_of_200(&mut relay);
+    // A stream of the first subscription comes late and sends the Subgroup
+    // again, with priority 10 as before. Nothing tells it from a stream of
+    // the new subscription, so the relay reads 200, and ends a track that
+    // nothing is wrong with.
+    let actions = opens(
+        &mut relay,
+        PUBLISHER,
+        9,
+        with_priority(UPSTREAM_ALIAS, 1, None),
+    );
+    assert_eq!(actions.first(), Some(&malformed_stop(PUBLISHER, 9)));
+    assert_eq!(relay.counts().tracks, 0);
+}
+
+#[test]
+fn each_of_the_two_sources_of_a_session_has_its_own_default_priority() {
+    // (the priority in the header of the stream of the first subscription,
+    //  whose default is 10; whether a stream without a priority under the
+    //  alias of the second, whose default is 200, makes the track malformed).
+    for (first, malformed) in [(Some(200), false), (None, true)] {
+        let mut relay = relay_with_default_priorities(Some(10), None);
+        subscribe_to_track(&mut relay, ALICE);
+        opens(
+            &mut relay,
+            PUBLISHER,
+            7,
+            with_priority(UPSTREAM_ALIAS, 1, first),
+        );
+        relay.step(Event::RequestMessage {
+            session: PUBLISHER,
+            stream: StreamKey(0),
+            message: publish_done(0x2, 3),
+        });
+        publishes_anew_under(&mut relay, 42);
+        let actions = opens(&mut relay, PUBLISHER, 9, with_priority(42, 1, None));
+        if malformed {
+            assert_eq!(
+                actions.first(),
+                Some(&malformed_stop(PUBLISHER, 9)),
+                "{first:?}"
+            );
+        } else {
+            // Another source's Subgroup, with the same priority: left.
+            assert_eq!(actions, [stopped(PUBLISHER, 9)], "{first:?}");
+        }
+    }
+}
+
+#[test]
+fn a_publisher_that_accepted_the_relays_subscribe_has_the_default_priority_it_gave_then() {
+    let mut relay = Relay::new("test/0");
+    for session in [PUBLISHER, ALICE, BOB] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+    }
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 0,
+            track_namespace: namespace(),
+            parameters: vec![],
+        }),
+    });
+    subscribe_to_track(&mut relay, ALICE);
+    // The publisher accepts with a default of 10 (§12.4); Bob publishes the
+    // track without one, which is 128.
+    relay.step(Event::OwnRequestMessage {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+        message: ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: UPSTREAM_ALIAS,
+            parameters: vec![],
+            track_properties: vec![KeyValuePair::varint(DEFAULT_PUBLISHER_PRIORITY, 10).unwrap()],
+        }),
+    });
+    publishes_a(&mut relay, BOB, BOBS_ALIAS);
+    // 10 by the default, and 10 in Bob's header: the same.
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, None),
+    );
+    assert_eq!(
+        opens(&mut relay, BOB, 8, with_priority(BOBS_ALIAS, 1, Some(10))),
+        [stopped(BOB, 8)]
+    );
+    // 128 by Bob's default, and 10 by the publisher's: the track is
+    // malformed, and the relay's SUBSCRIBE is cancelled with that code.
+    opens(&mut relay, BOB, 9, with_priority(BOBS_ALIAS, 2, None));
+    let actions = opens(
+        &mut relay,
+        PUBLISHER,
+        10,
+        with_priority(UPSTREAM_ALIAS, 2, None),
+    );
+    assert_eq!(actions.first(), Some(&malformed_stop(PUBLISHER, 10)));
+    assert!(actions.contains(&Action::CancelOwnRequest {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+        code: 0x12,
+    }));
+    assert_eq!(relay.counts().tracks, 0);
+}
+
+#[test]
+fn known_gap_a_stream_sent_ahead_of_a_publish_is_read_before_the_publish_done() {
+    // Subgroup 0 of Group 1 came with 200 in its header, on a subscription
+    // with a default of 10, and was cut short. The publisher says
+    // PUBLISH_DONE, publishes anew under the alias with a default of 200,
+    // and sends the Subgroup again without a priority, which is 200 as
+    // before. The three travel on three streams, and the relay reads the
+    // last of them first: to it the subscription goes on, the stream has
+    // its default of 10, and the track is malformed, though the publisher
+    // sent the Subgroup with 200 both times. Nothing tells this from one
+    // subscription that sends a Subgroup again with another priority.
+    let mut relay = relay_with_default_priorities(Some(10), None);
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, Some(200)),
+    );
+    closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Aborted(Some(0x2)));
+    let actions = opens(
+        &mut relay,
+        PUBLISHER,
+        9,
+        with_priority(UPSTREAM_ALIAS, 1, None),
+    );
+    assert_eq!(actions.first(), Some(&malformed_stop(PUBLISHER, 9)));
+    assert_eq!(relay.counts().tracks, 0);
 }
