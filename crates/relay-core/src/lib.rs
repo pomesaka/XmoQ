@@ -351,8 +351,11 @@ enum Admission {
 /// * After the first ended with a FIN: it is left. The Subgroup was delivered
 ///   whole (§11.4.3: "An MOQT implementation that processes a stream FIN is
 ///   assured it has received all objects in a subgroup"), and a second
-///   stream for it downstream is what §2.2 forbids. That holds for a first
-///   stream that was finished without an Object as well.
+///   stream for it downstream is what §2.2 forbids. A first stream that was
+///   finished without an Object counts the same: the relay passed the FIN
+///   on, and §11.4.3 has "If a sender closes the stream before delivering all
+///   such objects to the QUIC stream, it MUST reset the stream", so a later
+///   stream that passed would make the FIN the relay sent untrue.
 ///
 /// FIXME: with several sources of a track, a stream of another source for a
 /// Subgroup that is open is to be left, and one for a Subgroup that was cut
@@ -499,9 +502,13 @@ impl Source {
 /// one whose last source drains.
 #[derive(Debug)]
 struct Track {
-    /// FIXME: several of them; see the top of `routing.rs`. What is asked of
-    /// "the sources" below is written so that it holds for several.
-    source: Source,
+    /// Never empty: a track whose last source is over is taken out of
+    /// [`Tracks`]. At most one of a session, since a session has at most one
+    /// subscription to a track in each role (§5.1).
+    ///
+    /// FIXME: take a second source; see the top of `routing.rs`. One is put
+    /// here today, and what reads the list is written for several.
+    sources: Vec<Source>,
     /// What is still asked of other publishers. Empty today: one publisher
     /// is asked, and its answer is what gave the track its source.
     asks: Vec<Ask>,
@@ -518,17 +525,18 @@ struct Track {
 }
 
 impl Track {
-    /// The one place a track with a source is made.
+    /// A track with its first source; [`Tracks::add_source`] is the one
+    /// place that makes one.
     fn established(
         from: TrackSource,
         properties: Vec<KeyValuePair>,
         largest: Option<Location>,
     ) -> Self {
         Self {
-            source: Source {
+            sources: vec![Source {
                 from,
                 draining: false,
-            },
+            }],
             asks: Vec::new(),
             properties,
             largest,
@@ -587,11 +595,17 @@ impl Track {
     }
 
     fn sources(&self) -> impl Iterator<Item = &Source> {
-        std::iter::once(&self.source)
+        self.sources.iter()
     }
 
     fn sources_mut(&mut self) -> impl Iterator<Item = &mut Source> {
-        std::iter::once(&mut self.source)
+        self.sources.iter_mut()
+    }
+
+    /// The source whose Objects arrive on that session.
+    fn source_on(&self, session: SessionKey) -> Option<&Source> {
+        self.sources()
+            .find(|source| source.session_and_alias().0 == session)
     }
 
     /// WHY every source: a track goes on for as long as one of its sources
@@ -707,15 +721,40 @@ impl Tracks {
         })
     }
 
-    /// Puts a track with a source under a name that has no entry.
+    /// Gives a track a source: an Established upstream subscription (§9.4).
+    /// A track of the name that waited for one becomes a track with a source
+    /// and keeps what is still asked of other publishers. Returns the
+    /// subscribers that waited; answering them is the caller's.
     ///
-    /// WHY "no entry": a pending track of the name holds subscribers that
-    /// wait and requests that are open, and replacing it would drop both
-    /// without a word. Whoever gives a pending track its source takes it out
-    /// first ([`Self::take_pending`]) and hands on what it held.
-    fn insert_live(&mut self, name: FullTrackName, track: Track) {
-        let replaced = self.0.insert(name, TrackEntry::Live(track));
-        debug_assert!(replaced.is_none(), "a track was replaced: {replaced:?}");
+    /// WHY one place for a name without an entry and one that waits: what a
+    /// pending track holds, subscribers that wait and requests that are open,
+    /// must not be dropped without a word, and a caller that makes the entry
+    /// itself has to remember that.
+    ///
+    /// FIXME: add the source to a track that has one already. Today the
+    /// callers refuse a second source before they get here.
+    fn add_source(
+        &mut self,
+        name: &FullTrackName,
+        from: TrackSource,
+        properties: Vec<KeyValuePair>,
+        largest: Option<Location>,
+    ) -> Vec<Waiter> {
+        let mut track = Track::established(from, properties, largest);
+        let waiters = match self.0.remove(name) {
+            Some(TrackEntry::Pending(pending)) => {
+                track.asks = pending.asks;
+                pending.waiters
+            }
+            None => Vec::new(),
+            Some(live @ TrackEntry::Live(_)) => {
+                debug_assert!(false, "a second source for {name:?}: {from:?}");
+                self.0.insert(name.clone(), live);
+                return Vec::new();
+            }
+        };
+        self.0.insert(name.clone(), TrackEntry::Live(track));
+        waiters
     }
 
     /// Puts a track without a source under a name that has no entry.
@@ -958,7 +997,8 @@ impl Relay {
             _ => return,
         };
         state.moqt.on_drain_timeout(track_alias);
-        self.end_track(&track, TrackEnd::TimedOut, actions);
+        let timed_out = |source: &Source| source.session_and_alias() == (session, track_alias);
+        self.source_gone(&track, timed_out, TrackEnd::TimedOut, actions);
     }
 
     /// Lets go of a request the relay ended with `PUBLISH_DONE` and whose
@@ -1238,19 +1278,14 @@ impl Relay {
             stream,
             track_alias: publish.track_alias,
         };
-        let mut track = Track::established(published, publish.track_properties, largest);
-        // Before the PUBLISH_OK, as §5.1 has it. And before the track gets
-        // its entry: the pending track of the name is taken out with its
-        // waiters, and what it had asked of other publishers goes on under
-        // the new one.
-        let waiters = if asked_here {
-            let (waiters, still_asked) = self.give_way_to_publish(&track_name, session, actions);
-            track.asks = still_asked;
-            waiters
-        } else {
-            Vec::new()
-        };
-        self.tracks.insert_live(track_name.clone(), track);
+        // Before the PUBLISH_OK, as §5.1 has it. What was asked of other
+        // publishers goes on under the track with a source.
+        if asked_here {
+            self.give_way_to_publish(&track_name, session, actions);
+        }
+        let waiters =
+            self.tracks
+                .add_source(&track_name, published, publish.track_properties, largest);
         self.respond(session, stream, response, actions);
         // §9.4: the track has an Established upstream subscription now.
         for waiter in &waiters {
@@ -1434,14 +1469,11 @@ impl Relay {
             }
             Some(RequestSlot::Publish { request, track }) => {
                 state.moqt.on_peer_request_closed(request);
-                let cancelled = self.tracks.live(&track).is_some_and(|track| {
-                    track
-                        .sources()
-                        .any(|source| source.is_publish(session, stream) && !source.draining)
-                });
-                if cancelled {
-                    self.end_track(&track, TrackEnd::SourceGone, actions);
-                }
+                // After PUBLISH_DONE the stream may close, and the source
+                // goes on draining.
+                let cancelled =
+                    |source: &Source| source.is_publish(session, stream) && !source.draining;
+                self.source_gone(&track, cancelled, TrackEnd::SourceGone, actions);
             }
             Some(RequestSlot::Waiting { request, track, .. }) => {
                 state.moqt.on_peer_request_closed(request);
@@ -1697,8 +1729,11 @@ impl Relay {
         let Some(track) = self.tracks.live_mut(&track_name) else {
             return;
         };
-        let (_, track_alias) = track.source.session_and_alias();
-        state.moqt.on_data_stream_closed(track_alias);
+        if let Some(source) = track.source_on(session) {
+            state
+                .moqt
+                .on_data_stream_closed(source.session_and_alias().1);
+        }
         if let Some(in_stream) = track.in_streams.remove(&(session, stream)) {
             if let (Passage::Passed, Some(subgroup_id)) = (in_stream.passage, in_stream.subgroup_id)
             {
@@ -1787,14 +1822,38 @@ impl Relay {
         if !track.is_draining() {
             return false;
         }
-        let (source, track_alias) = track.source.session_and_alias();
-        let retired = self.sessions.get(&source).is_none_or(|state| {
-            state.moqt.subscribed_alias(track_alias) == SubscribedAlias::Retired
+        let retired = track.sources().all(|source| {
+            let (session, track_alias) = source.session_and_alias();
+            self.sessions.get(&session).is_none_or(|state| {
+                state.moqt.subscribed_alias(track_alias) == SubscribedAlias::Retired
+            })
         });
         if retired {
             self.end_track(track_name, TrackEnd::Done, actions);
         }
         retired
+    }
+
+    /// A source of a track is over and will send nothing more, without
+    /// having drained: it cancelled, its session is gone, or the streams it
+    /// counted did not come. `gone` picks the source.
+    ///
+    /// FIXME: when the track has other sources, let go of this one alone and
+    /// keep the track. Today a track has one source, and it ends with it.
+    fn source_gone(
+        &mut self,
+        track_name: &FullTrackName,
+        gone: impl Fn(&Source) -> bool,
+        end: TrackEnd,
+        actions: &mut Vec<Action>,
+    ) {
+        let is_a_source = self
+            .tracks
+            .live(track_name)
+            .is_some_and(|track| track.sources().any(gone));
+        if is_a_source {
+            self.end_track(track_name, end, actions);
+        }
     }
 
     /// Removes a track and ends every subscription to it.
@@ -2036,9 +2095,12 @@ impl Relay {
         // that came with PUBLISH stays; its publisher sends unasked. The
         // draft leaves the lifetime of an aggregated upstream subscription to
         // the relay (§9.4).
-        let unwanted = track.subscribers.is_empty()
-            && !track.is_draining()
-            && matches!(track.source.from, TrackSource::Subscription { .. });
+        //
+        // FIXME: with sources of both kinds, cancel the relay's SUBSCRIBEs
+        // and keep the track for its publishers.
+        let asked_for = |source: &Source| matches!(source.from, TrackSource::Subscription { .. });
+        let unwanted =
+            track.subscribers.is_empty() && !track.is_draining() && track.sources().all(asked_for);
         if unwanted {
             self.end_track(track_name, TrackEnd::Unwanted, actions);
         }
@@ -2168,7 +2230,8 @@ impl Relay {
             .map(|(name, _)| name.clone())
             .collect();
         for track in sourced {
-            self.end_track(&track, TrackEnd::SourceGone, actions);
+            let on_the_session = |source: &Source| source.session_and_alias().0 == session;
+            self.source_gone(&track, on_the_session, TrackEnd::SourceGone, actions);
         }
         self.drop_routing_of(session, actions);
         let subscribed: BTreeSet<FullTrackName> = self
