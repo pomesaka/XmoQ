@@ -73,14 +73,14 @@ The Rust decoder gives these values for the eight files, and the Rust encoder wr
 
 Run 11, a track nobody published: REQUEST_ERROR `DOES_NOT_EXIST`, as the draft has it.
 
-**Which of b, c and e is the relay's doing is not known.** The relay passes a FETCH on to the publisher where it cannot answer from what it holds (`fetch_handler.rs`, "An upstream FETCH issued before FETCH_OK to learn the End Location"), and the publisher was moqtail's test client, which answers a FETCH itself. The relay's own function for the range (`resolve_standalone_fetch_range`) takes Object 0 for the whole Group and refuses a Start beyond the largest Object with `INVALID_RANGE`, which is not what came back. a and d are in the relay's code.
+**Which of b, c and e is the relay's doing was not known from these runs.** The relay passes a FETCH on to the publisher where it cannot answer from what it holds (`fetch_handler.rs`, "An upstream FETCH issued before FETCH_OK to learn the End Location"), and the publisher was moqtail's test client, which answers a FETCH itself. The relay's own function for the range (`resolve_standalone_fetch_range`) takes Object 0 for the whole Group and refuses a Start beyond the largest Object with `INVALID_RANGE`, which is not what came back. a and d are in the relay's code. A later run without a moqtail relay in between showed b and e to be what the test client does as the publisher ([record](2026-10-11-standalone-fetch-through-own-relay.md), runs 6 and 7); c is still open.
 
 ## Limitations and blockers
 
 No blocker.
 
 - **One run each.** a depends on what the publisher had sent when the FETCH arrived.
-- For b, c and e it is not known whether the relay or moqtail's test client as the publisher decides; the two were not run apart.
+- For b, c and e these runs do not show whether the relay or moqtail's test client as the publisher decides; the two were not run apart here.
 - **No fetch stream in Descending Group Order and none with an End of Range indicator was obtained.** The Rust tests for those read bytes written by hand from §11.4.4 (`fixtures/moqt-18-by-hand/`), where the reader of the draft and the writer of the expectation are the same. The reading of an indicator's two fields as a Location, and not as deltas, is provisional until another implementation's bytes are seen; the moqtail crate reads them so as well, and differs in what follows an indicator (implementation notes).
 - The moqtail npm package and a browser were not run.
 - The own relay and the own clients do not handle a FETCH yet: the request is decoded and refused with `NOT_SUPPORTED`, and a fetch stream is an unsupported stream type.

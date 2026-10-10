@@ -9,7 +9,8 @@ use tokio::time::timeout;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
-use xmoq_moqt::message::{ControlMessage, PublishDone, ReasonPhrase, RequestError};
+use xmoq_moqt::fetch::FetchHeader;
+use xmoq_moqt::message::{ControlMessage, FetchRange, PublishDone, ReasonPhrase, RequestError};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{
@@ -18,9 +19,10 @@ use xmoq_moqt::session::{
 };
 use xmoq_moqt_io::memory::{MemoryConnection, MemoryRecv, MemorySend, STREAM_WINDOW, pair};
 use xmoq_moqt_io::{
-    Connection, IncomingStreams, RecvStream, RequestClose, RequestReader, RequestStreamEvent,
-    SendLimits, SendStream, StreamConfig, StreamStops, Trace, UniEvent, WriteError,
-    read_uni_streams, send_message,
+    Connection, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, ReadError, RecvStream,
+    RequestClose, RequestReader, RequestStreamEvent, SendLimits, SendStream, StreamConfig,
+    StreamEnd, StreamStops, Trace, UniEvent, WriteError, open_fetch_stream, read_uni_streams,
+    send_message,
 };
 use xmoq_relay_core::Counts;
 
@@ -51,6 +53,8 @@ struct Peer {
     _control: MemorySend,
     /// Set for peers that read the streams the relay opens.
     data: Option<(mpsc::Receiver<UniEvent>, IncomingStreams)>,
+    /// Where such a peer takes what a fetch stream carries.
+    stops: StreamStops,
 }
 
 /// A request this peer opened: the handle, and the two halves of its stream.
@@ -74,12 +78,13 @@ impl Peer {
         send_message(&mut control, &setup, &Trace::default(), "control")
             .await
             .unwrap();
+        let stops = StreamStops::default();
         let data = reads.then(|| {
             let (queue, events) = mpsc::channel(64);
             let readers = read_uni_streams(
                 Arc::clone(&connection),
                 StreamConfig::default(),
-                StreamStops::default(),
+                stops.clone(),
                 queue,
                 |event| event,
             );
@@ -90,6 +95,7 @@ impl Peer {
             session,
             _control: control,
             data,
+            stops,
         };
         if reads {
             let UniEvent::Control(setup) = peer.next_data().await else {
@@ -487,6 +493,7 @@ const NOTHING: Held = Held {
     request_writers: 0,
     out_streams: 0,
     own_requests: 0,
+    fetch_pipes: 0,
     timers: 0,
     relay: Counts {
         sessions: 0,
@@ -505,6 +512,7 @@ const NOTHING: Held = Held {
         namespaces: 0,
         pending_tracks: 0,
         own_requests: 0,
+        fetches: 0,
     },
 };
 
@@ -1381,4 +1389,620 @@ async fn the_code_of_a_reset_and_of_a_stop_of_a_request_stream_is_logged() {
         assert_eq!(hub.held().await.relay.subscriptions, 0, "{line}");
         drop((send_kept, reader_kept));
     }
+}
+
+/// The request stream of a FETCH the relay sent this peer.
+struct RelayFetch {
+    id: PeerRequestId,
+    send: MemorySend,
+    reader: RequestReader<MemoryRecv>,
+}
+
+fn at(group: u64, object: u64) -> Location {
+    Location { group, object }
+}
+
+impl Peer {
+    /// Sends a Standalone FETCH for {0, 0} to {2, 0} of the track and returns
+    /// without waiting for the answer.
+    async fn start_fetching(&mut self, parameters: Vec<Parameter>) -> OpenRequest {
+        let range = FetchRange::Standalone {
+            full_track_name: track(),
+            start: at(0, 0),
+            end: at(2, 0),
+        };
+        let (id, message) = self.session.fetch(range, parameters).unwrap();
+        let (mut send, recv) = self.connection.open_bi().await.unwrap();
+        send_message(&mut send, &message, &Trace::default(), "request")
+            .await
+            .unwrap();
+        let reader = RequestReader::new(recv, &Trace::default(), "request");
+        OpenRequest { id, send, reader }
+    }
+
+    /// Takes the FETCH the relay sends this peer, without answering it.
+    async fn relay_fetch(&mut self) -> RelayFetch {
+        let (send, recv) = timeout(SOON, self.connection.accept_bi())
+            .await
+            .expect("the relay opens a request stream")
+            .unwrap();
+        let mut reader = RequestReader::new(recv, &Trace::default(), "relay");
+        let first = match timeout(SOON, reader.next_event()).await {
+            Ok(Ok(RequestStreamEvent::Message(first))) => first,
+            other => panic!("no request: {other:?}"),
+        };
+        match self.session.on_peer_request_opened(first).unwrap() {
+            PeerRequestOpened::Request(id, PeerRequest::Fetch(fetch)) => {
+                let FetchRange::Standalone {
+                    full_track_name,
+                    start,
+                    end,
+                } = fetch.range
+                else {
+                    panic!("not a Standalone FETCH");
+                };
+                assert_eq!((full_track_name, start, end), (track(), at(0, 0), at(2, 0)));
+                RelayFetch { id, send, reader }
+            }
+            other => panic!("not a FETCH: {other:?}"),
+        }
+    }
+
+    /// Answers the relay's FETCH with `FETCH_OK`, End Location {2, 0}.
+    async fn accept_relay_fetch(&mut self, fetch: &mut RelayFetch) {
+        let (ok, _) = self
+            .session
+            .accept_fetch(fetch.id, false, at(2, 0), vec![])
+            .unwrap();
+        send_message(&mut fetch.send, &ok, &Trace::default(), "relay")
+            .await
+            .unwrap();
+    }
+
+    /// Opens the fetch stream that answers the relay's FETCH.
+    async fn open_fetch_stream(&self, fetch: &RelayFetch) -> FetchStreamWriter<MemorySend> {
+        let header = FetchHeader {
+            request_id: fetch.id.value(),
+        };
+        open_fetch_stream(&*self.connection, header, &Trace::default(), "fetch")
+            .await
+            .unwrap()
+    }
+
+    /// The fetch stream the relay opens for `request`: what it carries.
+    async fn fetch_body(&mut self, request: &OpenRequest) -> FetchBody {
+        match self.next_data().await {
+            UniEvent::FetchOpened { stream, header } => {
+                assert_eq!(header.request_id, request.id.value());
+                self.session.on_fetch_stream(header.request_id).unwrap();
+                self.stops.take_fetch_body(stream).expect("the body")
+            }
+            other => panic!("not a fetch stream: {other:?}"),
+        }
+    }
+}
+
+/// Reads a fetch stream to its end: the bytes, and the end.
+async fn read_fetch(body: &mut FetchBody) -> (Vec<u8>, FetchChunk) {
+    let mut bytes = Vec::new();
+    loop {
+        match timeout(Duration::from_secs(60), body.next())
+            .await
+            .expect("a chunk in time")
+        {
+            FetchChunk::Bytes(chunk) => bytes.extend_from_slice(&chunk),
+            end => return (bytes, end),
+        }
+    }
+}
+
+async fn request_end(reader: &mut RequestReader<MemoryRecv>) -> RequestStreamEvent {
+    timeout(Duration::from_secs(60), reader.next_event())
+        .await
+        .expect("the stream ends in time")
+        .expect("the stream is read")
+}
+
+/// A relay with a publisher of the track and a subscriber that has sent a
+/// FETCH, which the relay has passed on to the publisher.
+async fn fetching(
+    log: Option<hub::Log>,
+    reads: bool,
+) -> (
+    HubHandle<MemoryConnection>,
+    Peer,
+    Peer,
+    OpenRequest,
+    RelayFetch,
+) {
+    let (hub, _task) = hub::spawn(HubConfig {
+        log,
+        ..HubConfig::default()
+    });
+    let mut publisher = Peer::connect(&hub, true).await;
+    let publication = publisher.publish().await;
+    // Kept open by the peer's connection; the track goes on without the
+    // handle.
+    std::mem::forget(publication);
+    let mut alice = Peer::connect(&hub, reads).await;
+    let request = alice.start_fetching(vec![]).await;
+    let upstream = publisher.relay_fetch().await;
+    (hub, publisher, alice, request, upstream)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_is_passed_on_to_the_publisher_and_its_stream_back() {
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, mut publisher, mut alice, mut request, mut upstream) =
+        fetching(Some(log), true).await;
+    // Nobody is answered before the publisher is (§9.4).
+    assert!(timeout(SOON, request.reader.next_event()).await.is_err());
+
+    publisher.accept_relay_fetch(&mut upstream).await;
+    assert_eq!(
+        alice.answer(&mut request).await,
+        RequestEvent::FetchEstablished {
+            end_of_track: false,
+            end_location: at(2, 0),
+            track_properties: vec![],
+        }
+    );
+    // More than the relay or a stream window holds at once, and no Objects:
+    // the relay does not look at what it passes on.
+    let sent: Vec<u8> = (0..300_000u32)
+        .map(|index| index.to_le_bytes()[0])
+        .collect();
+    let mut stream = publisher.open_fetch_stream(&upstream).await;
+    let expected = sent.clone();
+    let writing = tokio::spawn(async move {
+        stream.write(&sent).await.unwrap();
+        stream.finish();
+    });
+    let mut body = alice.fetch_body(&request).await;
+    let (received, end) = read_fetch(&mut body).await;
+    assert_eq!(end, FetchChunk::End(StreamEnd::Fin));
+    assert!(received == expected, "{} bytes", received.len());
+    writing.await.unwrap();
+
+    // The relay ends both request streams with a FIN, and holds nothing.
+    assert_eq!(
+        request_end(&mut request.reader).await,
+        RequestStreamEvent::Closed(RequestClose::Fin)
+    );
+    assert_eq!(
+        request_end(&mut upstream.reader).await,
+        RequestStreamEvent::Closed(RequestClose::Fin)
+    );
+    let held = hub.held().await;
+    assert_eq!(
+        (
+            held.fetch_pipes,
+            held.relay.fetches,
+            held.own_requests,
+            held.relay.own_requests
+        ),
+        (0, 0, 0, 0)
+    );
+    // Alice is the relay's second session, 1. The streams of a session are
+    // numbered as the relay comes to read them: her FETCH is her second,
+    // after her control stream, and the publisher's fetch stream its third,
+    // after its control stream and its PUBLISH.
+    let lines = logged(&mut lines);
+    for line in [
+        "OPEN_REQUEST session=0 own=0 FETCH",
+        "RECV session=0 own=0 FETCH_OK",
+        "PIPE_FETCH session=1 stream=1 request_id=0 from_session=0 from_stream=2",
+        "FETCH_PIPE_ENDED session=1 stream=1 finished",
+    ] {
+        assert!(
+            lines.iter().any(|logged| logged == line),
+            "{line}: {lines:#?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscriber_that_does_not_read_its_fetch_holds_the_publisher_back_and_is_cut_off() {
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, mut publisher, alice, mut request, mut upstream) = fetching(Some(log), false).await;
+    publisher.accept_relay_fetch(&mut upstream).await;
+    // Alice reads her request stream, and no data stream.
+    assert!(matches!(
+        request_end(&mut request.reader).await,
+        RequestStreamEvent::Message(ControlMessage::FetchOk(_))
+    ));
+    let mut stream = publisher.open_fetch_stream(&upstream).await;
+    let writing = tokio::spawn(async move { stream.write(&vec![0x5a; 1024 * 1024]).await });
+
+    // Alice takes nothing. The publisher is held back, not read into memory.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(!writing.is_finished(), "the whole stream was taken");
+    assert_eq!(hub.held().await.fetch_pipes, 1);
+
+    // After 10 seconds without progress the relay gives the FETCH up: the
+    // publisher's stream is stopped and its FETCH cancelled, both with
+    // CANCELLED (0x1), and Alice's request stream is reset with
+    // TOO_FAR_BEHIND (0x5).
+    assert_eq!(
+        timeout(Duration::from_secs(60), writing)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(WriteError::Stopped(Some(0x1)))
+    );
+    assert_eq!(
+        request_end(&mut upstream.reader).await,
+        RequestStreamEvent::Closed(RequestClose::Reset(Some(0x1)))
+    );
+    assert_eq!(
+        request_end(&mut request.reader).await,
+        RequestStreamEvent::Closed(RequestClose::Reset(Some(0x5)))
+    );
+    // The fetch stream she never read was reset with the same code, and not
+    // left to end as if it had come whole.
+    // The first stream the relay opened to her is its control stream.
+    let _control = timeout(SOON, alice.connection.accept_uni())
+        .await
+        .expect("the relay's control stream")
+        .unwrap();
+    let mut unread = timeout(SOON, alice.connection.accept_uni())
+        .await
+        .expect("the relay opened it")
+        .unwrap();
+    loop {
+        match unread.read(&mut [0; 64]).await {
+            Ok(Some(_)) => {}
+            end => {
+                assert_eq!(end, Err(ReadError::Reset(Some(0x5))));
+                break;
+            }
+        }
+    }
+    let held = hub.held().await;
+    assert_eq!(
+        (held.fetch_pipes, held.relay.fetches, held.own_requests),
+        (0, 0, 0)
+    );
+    let lines = logged(&mut lines);
+    let line = "FETCH_PIPE_ENDED session=1 stream=1 downstream_stalled";
+    assert!(lines.iter().any(|logged| logged == line), "{lines:#?}");
+}
+
+/// What happens to a FETCH after the publisher answered, opened its stream
+/// and sent two bytes.
+#[derive(Debug, Clone, Copy)]
+enum Then {
+    /// It sends nothing more.
+    PublisherStalls,
+    /// It resets its stream with `UNKNOWN_OBJECT_STATUS` (0x6).
+    PublisherResets,
+    /// It disconnects.
+    PublisherLeaves,
+    /// Alice stops the fetch stream with CANCELLED (0x1).
+    SubscriberStops,
+    /// Alice resets the request stream of her FETCH.
+    SubscriberCancels,
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_ways_a_passed_on_fetch_is_cut_short() {
+    // (what happens; how Alice's fetch stream ends, where she still reads it;
+    //  how her request stream ends; the line of the log)
+    let reset = |code| FetchChunk::End(StreamEnd::Aborted(Some(code)));
+    let cases = [
+        (
+            Then::PublisherStalls,
+            Some(reset(0x6)),
+            Some(RequestClose::Fin),
+            "FETCH_PIPE_ENDED session=1 stream=1 upstream_stalled",
+        ),
+        (
+            Then::PublisherResets,
+            Some(reset(0x6)),
+            Some(RequestClose::Fin),
+            "FETCH_PIPE_ENDED session=1 stream=1 upstream_reset code=0x6",
+        ),
+        (
+            Then::PublisherLeaves,
+            Some(reset(0x6)),
+            Some(RequestClose::Fin),
+            "ABORT_FETCH_PIPE session=1 stream=1 code=0x6",
+        ),
+        (
+            Then::SubscriberStops,
+            None,
+            Some(RequestClose::Reset(Some(0x1))),
+            "FETCH_PIPE_ENDED session=1 stream=1 downstream_stopped code=0x1",
+        ),
+        (
+            Then::SubscriberCancels,
+            Some(reset(0x1)),
+            None,
+            "ABORT_FETCH_PIPE session=1 stream=1 code=0x1",
+        ),
+    ];
+    for (then, stream_end, request_close, line) in cases {
+        let (log, mut lines) = hub::Log::collect();
+        let (hub, mut publisher, mut alice, mut request, mut upstream) =
+            fetching(Some(log), true).await;
+        publisher.accept_relay_fetch(&mut upstream).await;
+        alice.answer(&mut request).await;
+        let mut stream = publisher.open_fetch_stream(&upstream).await;
+        stream.write(&[0xaa, 0xbb]).await.unwrap();
+        let mut stream = Some(stream);
+        let mut body = Some(alice.fetch_body(&request).await);
+        if let Some(body) = &mut body {
+            assert_eq!(
+                body.next().await,
+                FetchChunk::Bytes(vec![0xaa, 0xbb]),
+                "{then:?}"
+            );
+        }
+
+        let mut publisher = Some(publisher);
+        match then {
+            Then::PublisherStalls => {}
+            Then::PublisherResets => {
+                if let Some(stream) = stream.take() {
+                    stream.reset(0x6);
+                }
+            }
+            Then::PublisherLeaves => drop(publisher.take()),
+            // Dropping what a fetch stream carries stops the stream.
+            Then::SubscriberStops => body = None,
+            Then::SubscriberCancels => request.send.reset(0x1),
+        }
+        if let (Some(expected), Some(body)) = (stream_end, &mut body) {
+            assert_eq!(read_fetch(body).await, (vec![], expected), "{then:?}");
+        }
+        if let Some(expected) = request_close {
+            assert_eq!(
+                request_end(&mut request.reader).await,
+                RequestStreamEvent::Closed(expected),
+                "{then:?}"
+            );
+        }
+        // The publisher is not left sending into nothing: its stream is
+        // stopped, and the relay's FETCH is over.
+        if let (Some(stream), true) = (&mut stream, publisher.is_some()) {
+            assert_eq!(
+                timeout(Duration::from_secs(60), stream.stopped()).await,
+                Ok(WriteError::Stopped(Some(0x1))),
+                "{then:?}"
+            );
+        }
+        tokio::time::sleep(SOON).await;
+        let held = hub.held().await;
+        assert_eq!(
+            (
+                held.fetch_pipes,
+                held.relay.fetches,
+                held.own_requests,
+                held.relay.own_requests
+            ),
+            (0, 0, 0, 0),
+            "{then:?}"
+        );
+        let lines = logged(&mut lines);
+        assert!(
+            lines.iter().any(|logged| logged == line),
+            "{then:?}: {lines:#?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publisher_that_does_not_answer_a_fetch_costs_the_subscriber_a_timeout() {
+    let (hub, _publisher, mut alice, mut request, upstream) = fetching(None, true).await;
+    // Nothing within the 5 seconds a publisher has; then TIMEOUT (0x2).
+    assert!(
+        timeout(Duration::from_secs(4), request.reader.next_event())
+            .await
+            .is_err()
+    );
+    let RequestStreamEvent::Message(response) = request_end(&mut request.reader).await else {
+        panic!("no answer");
+    };
+    let answer = alice.session.on_request_message(request.id, response);
+    assert!(
+        matches!(&answer, Ok(RequestEvent::Rejected(error)) if error.error_code == 0x2),
+        "{answer:?}"
+    );
+    drop(upstream);
+    tokio::time::sleep(SOON).await;
+    let held = hub.held().await;
+    assert_eq!(
+        (held.relay.fetches, held.own_requests, held.timers),
+        (0, 0, 0)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_that_waits_for_nothing_gets_a_stream_that_says_unknown() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let (id, message) = publisher
+        .session
+        .publish(
+            track(),
+            PUBLISHER_ALIAS,
+            vec![Parameter::LargestObject(at(1, 4))],
+            vec![],
+        )
+        .unwrap();
+    let _publication = publisher.request(id, message).await;
+    let mut alice = Peer::connect(&hub, true).await;
+    let mut request = alice.start_fetching(vec![Parameter::FillTimeout(0)]).await;
+
+    // The range {0, 0} to {2, 0} is cut at the largest Location, {1, 4}.
+    assert_eq!(
+        alice.answer(&mut request).await,
+        RequestEvent::FetchEstablished {
+            end_of_track: false,
+            end_location: at(1, 5),
+            track_properties: vec![],
+        }
+    );
+    // One End of Unknown Range indicator (0x10C) at {1, 4}, and a FIN.
+    let mut body = alice.fetch_body(&request).await;
+    assert_eq!(
+        read_fetch(&mut body).await,
+        (
+            vec![0x81, 0x0c, 0x01, 0x04],
+            FetchChunk::End(StreamEnd::Fin)
+        )
+    );
+    assert_eq!(
+        request_end(&mut request.reader).await,
+        RequestStreamEvent::Closed(RequestClose::Fin)
+    );
+    // The publisher was not asked, and nothing is left of the FETCH.
+    assert!(
+        timeout(SOON, publisher.connection.accept_bi())
+            .await
+            .is_err()
+    );
+    assert_eq!(hub.held().await.relay.fetches, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_is_left_of_a_fetch_whose_sessions_disconnected() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    tokio::time::sleep(SOON).await;
+    let tasks_before = alive_tasks();
+    {
+        let mut publisher = Peer::connect(&hub, true).await;
+        let publication = publisher.publish().await;
+        let mut alice = Peer::connect(&hub, false).await;
+        let request = alice.start_fetching(vec![]).await;
+        let mut upstream = publisher.relay_fetch().await;
+        publisher.accept_relay_fetch(&mut upstream).await;
+        let mut stream = publisher.open_fetch_stream(&upstream).await;
+        // Stuck in the window of a subscriber that does not read.
+        let writing = tokio::spawn(async move { stream.write(&vec![0; 1024 * 1024]).await });
+        tokio::time::sleep(SOON).await;
+        assert_eq!(hub.held().await.fetch_pipes, 1);
+        writing.abort();
+        drop((publication, request, upstream, publisher, alice));
+    }
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(hub.held().await, NOTHING);
+    assert_eq!(alive_tasks(), tasks_before);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_that_goes_on_slowly_is_not_cut() {
+    // A publisher that sends a byte every 4 seconds, five times: 20 seconds
+    // in all, and never 5 seconds without a byte.
+    let (_hub, mut publisher, mut alice, mut request, mut upstream) = fetching(None, true).await;
+    publisher.accept_relay_fetch(&mut upstream).await;
+    alice.answer(&mut request).await;
+    let mut stream = publisher.open_fetch_stream(&upstream).await;
+    let writing = tokio::spawn(async move {
+        for byte in 1..=5u8 {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            stream.write(&[byte]).await.unwrap();
+        }
+        stream.finish();
+    });
+    let mut body = alice.fetch_body(&request).await;
+    assert_eq!(
+        read_fetch(&mut body).await,
+        (vec![1, 2, 3, 4, 5], FetchChunk::End(StreamEnd::Fin))
+    );
+    writing.await.unwrap();
+
+    // A subscriber that takes a little every half second: 4000 bytes take
+    // far longer than the 10 seconds it has for each piece, and no piece
+    // takes that long.
+    let (_hub, mut publisher, mut alice, mut request, mut upstream) = fetching(None, true).await;
+    publisher.accept_relay_fetch(&mut upstream).await;
+    alice.answer(&mut request).await;
+    let mut stream = publisher.open_fetch_stream(&upstream).await;
+    let writing = tokio::spawn(async move {
+        stream.write(&[0x5a; 4000]).await.unwrap();
+        stream.finish();
+    });
+    let mut body = alice.fetch_body(&request).await;
+    let started = tokio::time::Instant::now();
+    let mut received = 0;
+    let end = loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        match body.next().await {
+            FetchChunk::Bytes(chunk) => received += chunk.len(),
+            end => break end,
+        }
+    };
+    assert_eq!((received, end), (4000, FetchChunk::End(StreamEnd::Fin)));
+    assert!(
+        started.elapsed() > Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    writing.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publisher_that_answers_a_fetch_and_opens_no_stream_costs_the_subscriber_the_fetch() {
+    let (hub, mut publisher, mut alice, mut request, mut upstream) = fetching(None, true).await;
+    publisher.accept_relay_fetch(&mut upstream).await;
+    alice.answer(&mut request).await;
+    // Nothing for the 5 seconds a publisher has to open its stream; then the
+    // request stream is reset with UNKNOWN_OBJECT_STATUS (0x6): no fetch
+    // stream will come.
+    assert!(
+        timeout(Duration::from_secs(4), request.reader.next_event())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        request_end(&mut request.reader).await,
+        RequestStreamEvent::Closed(RequestClose::Reset(Some(0x6)))
+    );
+    // The relay's FETCH is cancelled, with CANCELLED (0x1).
+    assert_eq!(
+        request_end(&mut upstream.reader).await,
+        RequestStreamEvent::Closed(RequestClose::Reset(Some(0x1)))
+    );
+    let held = hub.held().await;
+    assert_eq!(
+        (held.relay.fetches, held.own_requests, held.timers),
+        (0, 0, 0)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn fetches_nobody_reads_do_not_keep_the_publisher_from_publishing() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    let mut bob = Peer::connect(&hub, true).await;
+    let (_bob_request, bob_alias) = bob.subscribe().await;
+    // Alice asks for as many FETCHes as a session may, reads none of them,
+    // and the publisher answers each with a stream that gets stuck.
+    let mut alice = Peer::connect(&hub, false).await;
+    let mut stuck = Vec::new();
+    for _ in 0..16 {
+        let request = alice.start_fetching(vec![]).await;
+        let mut upstream = publisher.relay_fetch().await;
+        publisher.accept_relay_fetch(&mut upstream).await;
+        let mut stream = publisher.open_fetch_stream(&upstream).await;
+        let writing = tokio::spawn(async move { stream.write(&vec![0; 64 * 1024]).await });
+        stuck.push((request, upstream, writing));
+    }
+    tokio::time::sleep(SOON).await;
+    assert_eq!(hub.held().await.fetch_pipes, 16);
+    // One more is refused: EXCESSIVE_LOAD (0x9).
+    let mut one_more = alice.start_fetching(vec![]).await;
+    let RequestStreamEvent::Message(response) = request_end(&mut one_more.reader).await else {
+        panic!("no answer");
+    };
+    let answer = alice.session.on_request_message(one_more.id, response);
+    assert!(
+        matches!(&answer, Ok(RequestEvent::Rejected(error)) if error.error_code == 0x9),
+        "{answer:?}"
+    );
+    // The publisher's subgroup stream is read all the same, and reaches Bob.
+    publisher.send_objects(&[object(0, 3)]).await.finish();
+    assert_eq!(bob.receive_stream(bob_alias).await, [0]);
 }

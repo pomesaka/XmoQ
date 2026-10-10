@@ -119,15 +119,16 @@ pub struct QuicLimits {
     pub idle_timeout: Duration,
 }
 
+/// WHY added to the streams a peer may open: the limits of QUIC count every
+/// stream of the connection. An HTTP/3 peer opens a control stream and may
+/// open the two QPACK streams (RFC 9114 §6.2, RFC 9204 §4.2). A peer that
+/// opens fewer of them gets that many streams more than the limit says.
+const HTTP3_UNI_STREAMS: u32 = 3;
+
 impl QuicLimits {
     fn transport(self) -> quinn::TransportConfig {
-        // WHY the additions: the limits of QUIC count every stream of the
-        // connection. An HTTP/3 peer opens a control stream and may open the
-        // two QPACK streams (RFC 9114 §6.2, RFC 9204 §4.2), and the WebTransport
-        // session is the bidirectional stream of its CONNECT request. A peer
-        // that opens fewer of them gets that many streams more than the limit
-        // says.
-        const HTTP3_UNI_STREAMS: u32 = 3;
+        // The WebTransport session is the bidirectional stream of the
+        // client's CONNECT request, which counts against the server's limit.
         const CONNECT_STREAMS: u32 = 1;
         let (idle_ms, keep_alive) = self.idle_and_keep_alive();
         let mut transport = quinn::TransportConfig::default();
@@ -456,7 +457,22 @@ impl ServerCertVerifier for PinnedCertificate {
 /// The QUIC settings are the defaults of quinn, without a keep-alive: a
 /// client talks to the one server it chose, and the server's keep-alive keeps
 /// the connection up.
-fn client_config(cert_sha256: [u8; 32]) -> Result<quinn::ClientConfig, ConnectionLost> {
+/// The streams of each kind, unidirectional and bidirectional, that the
+/// readers of this crate read at once with `streams`: what a peer is let
+/// open in QUIC, by a client ([`connect`]) and by a server ([`QuicLimits`]).
+#[must_use]
+pub fn streams_read_at_once(streams: &crate::StreamConfig) -> (u32, u32) {
+    let count = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
+    (
+        count(streams.max_uni_streams),
+        count(streams.max_request_streams),
+    )
+}
+
+fn client_config(
+    cert_sha256: [u8; 32],
+    streams: &crate::StreamConfig,
+) -> Result<quinn::ClientConfig, ConnectionLost> {
     // WHY `ring`, named here: see `WtServer::with_certificate`.
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     // WHY pin the hash: test relays run on a self-signed certificate that no
@@ -474,7 +490,19 @@ fn client_config(cert_sha256: [u8; 32]) -> Result<quinn::ClientConfig, Connectio
         .with_no_client_auth();
     tls.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
     let crypto = QuicClientConfig::try_from(tls).map_err(|error| lost(&error))?;
-    Ok(quinn::ClientConfig::new(Arc::new(crypto)))
+    let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+    // WHY the server may open as many streams as the readers of this crate
+    // read at once, and no more: quinn's default lets it open 100 of each
+    // kind, and what a client does not read would wait in QUIC, each stream
+    // with a receive window of its own, where no limit of this crate sees
+    // it. Everything else is left at quinn's defaults, as before.
+    let (uni, bi) = streams_read_at_once(streams);
+    let mut transport = quinn::TransportConfig::default();
+    transport
+        .max_concurrent_uni_streams(uni.saturating_add(HTTP3_UNI_STREAMS).into())
+        .max_concurrent_bidi_streams(bi.into());
+    config.transport_config(Arc::new(transport));
+    Ok(config)
 }
 
 /// The address a client binds its UDP socket to, for a server at `remote`: any
@@ -576,14 +604,20 @@ impl ConnectStage {
 /// subprotocol of this crate's draft.
 ///
 /// The server certificate is accepted when its SHA-256 equals `cert_sha256`.
+/// `streams` is what the caller reads the connection with: the server is
+/// let open as many streams as that reads at once.
 ///
 /// # Errors
 ///
 /// Fails when the URL is not one, when looking up the name, the connection
 /// or the WebTransport handshake fails, when the three together take more
 /// than 10 seconds, and when the server does not select the subprotocol.
-pub async fn connect(url: &str, cert_sha256: [u8; 32]) -> Result<WtConnection, ConnectionLost> {
-    connect_within(url, cert_sha256, CONNECT_TIMEOUT, None).await
+pub async fn connect(
+    url: &str,
+    cert_sha256: [u8; 32],
+    streams: &crate::StreamConfig,
+) -> Result<WtConnection, ConnectionLost> {
+    connect_within(url, cert_sha256, streams, CONNECT_TIMEOUT, None).await
 }
 
 /// [`connect`] with the time limit and the local address of the caller's
@@ -591,11 +625,12 @@ pub async fn connect(url: &str, cert_sha256: [u8; 32]) -> Result<WtConnection, C
 async fn connect_within(
     url: &str,
     cert_sha256: [u8; 32],
+    streams: &crate::StreamConfig,
     limit: Duration,
     local: Option<SocketAddr>,
 ) -> Result<WtConnection, ConnectionLost> {
     let url: url::Url = url.parse().map_err(|error| lost(&error))?;
-    let config = client_config(cert_sha256)?;
+    let config = client_config(cert_sha256, streams)?;
     // WHY not a `Cell`: a reference to one held across an await would make
     // this future one that cannot be sent to another thread, and so one that
     // cannot be spawned.
@@ -792,7 +827,8 @@ fn loopback_server(limits: QuicLimits) -> (WtServer, String, [u8; 32]) {
 #[cfg(test)]
 pub(crate) async fn loopback(limits: QuicLimits) -> (WtConnection, WtConnection, WtServer) {
     let (server, url, hash) = loopback_server(limits);
-    let (client, accepted) = tokio::join!(connect(&url, hash), async {
+    let streams = crate::StreamConfig::default();
+    let (client, accepted) = tokio::join!(connect(&url, hash, &streams), async {
         accept(server.incoming().await.expect("an attempt")).await
     });
     let (accepted, _) = accepted.expect("the server accepts");
@@ -926,7 +962,8 @@ mod tests {
     #[test]
     fn connecting_can_be_spawned() {
         fn sendable<T: Send>(_: &T) {}
-        sendable(&connect("https://127.0.0.1:1/", [0; 32]));
+        let streams = crate::StreamConfig::default();
+        sendable(&connect("https://127.0.0.1:1/", [0; 32], &streams));
     }
 
     #[test]
@@ -970,6 +1007,90 @@ mod tests {
         idle_timeout: IDLE_TIMEOUT,
     };
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_client_lets_the_server_open_as_many_streams_as_it_reads_at_once() {
+        assert_eq!(crate::StreamConfig::default().max_uni_streams, 64);
+        let (client, server, _keep) = loopback(TEST_LIMITS).await;
+        // The 64 the readers read at once, and the 2 that a
+        // web-transport-quinn server leaves unused of the 3 streams HTTP/3 is
+        // given room for. quinn's default would be 100.
+        crate::contract::opening_waits_at_the_peers_stream_limit(server, client, 66).await;
+    }
+
+    /// What the contract leaves open, as this transport has it: a sending
+    /// half that is merely dropped ends its stream with a FIN (quinn 0.11.12
+    /// through web-transport-quinn 0.13.2). WHY pinned: it is the reason a
+    /// stream that must not look complete is reset by hand, and a version of
+    /// the library that does otherwise should be noticed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sending_half_that_is_merely_dropped_ends_with_a_fin_here() {
+        let (client, server, _keep) = loopback(TEST_LIMITS).await;
+        let mut send = server.open_uni().await.expect("open");
+        send.write_all(b"abc").await.expect("write");
+        drop(send);
+        let mut recv = client.accept_uni().await.expect("accept");
+        let mut received = Vec::new();
+        let mut buffer = [0; 16];
+        let end = loop {
+            match recv.read(&mut buffer).await {
+                Ok(Some(len)) => received.extend_from_slice(&buffer[..len]),
+                other => break other,
+            }
+        };
+        assert_eq!((received, end), (b"abc".to_vec(), Ok(None)));
+    }
+
+    /// The test of the same name on the in-memory connection, on a real one:
+    /// there the window that stops the writer is that connection's own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fetch_body_nobody_reads_holds_the_sender_back() {
+        use crate::{FetchChunk, StreamEnd, StreamStops, UniEvent, read_uni_streams};
+
+        let (client, server, _keep) = loopback(TEST_LIMITS).await;
+        let stops = StreamStops::default();
+        let (queue, mut events) = tokio::sync::mpsc::channel(8);
+        let _readers = read_uni_streams(
+            Arc::new(client),
+            crate::StreamConfig::default(),
+            stops.clone(),
+            queue,
+            |event| event,
+        );
+        // `FETCH_HEADER` with Request ID 2, then 4 MiB that are no Objects.
+        let mut send = server.open_uni().await.expect("open");
+        send.write_all(&[0x05, 0x02]).await.expect("the header");
+        let payload = vec![0x5a; 4 * 1024 * 1024];
+        let expected = payload.len();
+        let write = tokio::spawn(async move {
+            send.write_all(&payload).await.expect("write");
+            send.finish();
+        });
+        let UniEvent::FetchOpened { stream, header } =
+            events.recv().await.expect("the readers are running")
+        else {
+            panic!("not a fetch stream");
+        };
+        assert_eq!(header.request_id, 2);
+        let mut body = stops.take_fetch_body(stream).expect("the body");
+
+        // Nobody reads the body: the writer gets stuck.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!write.is_finished(), "the whole stream was taken");
+
+        let mut received = 0;
+        let end = loop {
+            match body.next().await {
+                FetchChunk::Bytes(chunk) => {
+                    assert!(chunk.iter().all(|byte| *byte == 0x5a));
+                    received += chunk.len();
+                }
+                other => break other,
+            }
+        };
+        assert_eq!((received, end), (expected, FetchChunk::End(StreamEnd::Fin)));
+        write.await.expect("the writer ends");
+    }
+
     /// Runs the handshakes of every attempt that reaches the server.
     fn accept_all(server: WtServer) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
@@ -1003,8 +1124,14 @@ mod tests {
         {
             let both_families = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
             let limit = Duration::from_millis(1500);
-            let Err(ConnectionLost(failure)) =
-                connect_within(&url, hash, limit, Some(both_families)).await
+            let Err(ConnectionLost(failure)) = connect_within(
+                &url,
+                hash,
+                &crate::StreamConfig::default(),
+                limit,
+                Some(both_families),
+            )
+            .await
             else {
                 panic!("connected through a port whose IPv4 traffic goes elsewhere");
             };
@@ -1029,7 +1156,9 @@ mod tests {
 
         // The socket a client binds for an IPv4 server cannot get that port,
         // and the client connects while the other socket is still there.
-        let client = connect(&url, hash).await.expect("the client connects");
+        let client = connect(&url, hash, &crate::StreamConfig::default())
+            .await
+            .expect("the client connects");
         let WtConnection {
             _client: Some(endpoint),
             ..

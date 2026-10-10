@@ -60,9 +60,10 @@ fn quic_limits(streams: &StreamConfig, idle_timeout: Duration) -> QuicLimits {
     const STREAM_RECEIVE_WINDOW: u32 = 256 * 1024;
     const RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
     const SEND_WINDOW: u32 = 4 * 1024 * 1024;
+    let (max_uni_streams, max_bi_streams) = xmoq_moqt_io::wt::streams_read_at_once(streams);
     QuicLimits {
-        max_uni_streams: u32::try_from(streams.max_uni_streams).unwrap_or(u32::MAX),
-        max_bi_streams: u32::try_from(streams.max_request_streams).unwrap_or(u32::MAX),
+        max_uni_streams,
+        max_bi_streams,
         stream_receive_window: STREAM_RECEIVE_WINDOW,
         receive_window: RECEIVE_WINDOW,
         send_window: SEND_WINDOW,

@@ -34,7 +34,7 @@ use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
     Connection, Direction, PeerRequestStreamEvent, RequestClose, RequestStreamEvent, SendStream,
-    StreamEnd, StreamStops, Trace, UniEvent,
+    StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
 };
 
 use crate::io::{DataInbox, RequestStream};
@@ -1232,9 +1232,12 @@ async fn run(args: &Args) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(args.timeout_secs);
     let timed_out = || anyhow!("timed out after {}s", args.timeout_secs);
 
-    let connection = tokio::time::timeout_at(deadline, wt::connect(&args.url, args.cert_sha256))
-        .await
-        .map_err(|_| timed_out())??;
+    let connection = tokio::time::timeout_at(
+        deadline,
+        wt::connect(&args.url, args.cert_sha256, &StreamConfig::default()),
+    )
+    .await
+    .map_err(|_| timed_out())??;
     let connection = Arc::new(connection);
     report::connected(&args.url);
 

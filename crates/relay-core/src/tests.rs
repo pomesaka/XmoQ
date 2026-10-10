@@ -9,6 +9,7 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 
+mod fetch;
 mod routing;
 mod sources;
 mod subgroups;
@@ -587,13 +588,14 @@ fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
         ),
         // A fifth publisher of the track: EXCESSIVE_LOAD.
         (publish(2, b"a"), 0x9),
-        // FETCH, which the session hands to the relay: NOT_SUPPORTED, and
-        // the same actions as for the request the session refused.
+        // A FETCH for a track nobody has, which the session hands to the
+        // relay: DOES_NOT_EXIST, and the same actions as for a request the
+        // session refused.
         (
             ControlMessage::Fetch(Fetch {
                 request_id: 6,
                 range: FetchRange::Standalone {
-                    full_track_name: track(b"a"),
+                    full_track_name: track(b"nobody"),
                     start: Location {
                         group: 0,
                         object: 0,
@@ -605,7 +607,7 @@ fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
                 },
                 parameters: vec![],
             }),
-            0x3,
+            0x10,
         ),
     ];
     for (index, (first, error_code)) in cases.into_iter().enumerate() {
@@ -665,7 +667,7 @@ fn a_refused_fetch_leaves_nothing_in_the_session() {
         ControlMessage::Fetch(Fetch {
             request_id,
             range: FetchRange::Standalone {
-                full_track_name: track(b"a"),
+                full_track_name: track(b"nobody"),
                 start: Location {
                     group: 0,
                     object: 0,
@@ -689,7 +691,22 @@ fn a_refused_fetch_leaves_nothing_in_the_session() {
             stream,
             first: fetch(round * 4),
         });
-        assert_eq!(actions.len(), 2, "round {round}: {actions:?}");
+        // DOES_NOT_EXIST (0x10) every round, and never EXCESSIVE_LOAD.
+        assert_eq!(
+            actions,
+            [
+                Action::SendRequest {
+                    session: ALICE,
+                    stream,
+                    message: request_error(0x10),
+                },
+                Action::FinishRequest {
+                    session: ALICE,
+                    stream,
+                },
+            ],
+            "round {round}"
+        );
         // A REQUEST_UPDATE that crossed the REQUEST_ERROR gets no answer.
         assert_eq!(
             relay.step(Event::RequestMessage {

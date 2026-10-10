@@ -1059,6 +1059,7 @@ fn nothing_is_left_when_everyone_has_gone() {
             namespaces: 0,
             pending_tracks: 0,
             own_requests: 0,
+            fetches: 0,
         }
     );
 }

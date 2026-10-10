@@ -786,6 +786,10 @@ fn the_two_cores_answer_random_events_alike() {
         "FUZZ_CARRIED streams_opened_to_subscribers={opened_downstream} objects_sent={objects_sent} sequences_with_an_object={with_an_object} of {runs}"
     );
     println!(
+        "FUZZ_UNKNOWN_TO_THE_OLD_CORE events={}",
+        crate::UNKNOWN_TO_THE_OLD_CORE.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
         "FUZZ_BYSTANDER differences={} actions={}",
         crate::BYSTANDER_DIFFERENCES.load(std::sync::atomic::Ordering::Relaxed),
         crate::BYSTANDER_ACTIONS.load(std::sync::atomic::Ordering::Relaxed)

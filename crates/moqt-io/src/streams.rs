@@ -14,8 +14,9 @@ use xmoq_moqt::data::{
     SubgroupEvent, SubgroupHeader, SubgroupObject, SubgroupStreamDecoder, SubgroupStreamEncoder,
     UniStreamType, uni_stream_type,
 };
-use xmoq_moqt::fetch::{FetchHeader, decode_fetch_header};
+use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder, decode_fetch_header};
 use xmoq_moqt::message::{ControlMessage, MessageDecoder};
+use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::{Error, ErrorScope, UsageError, stream_reset_code};
 
 use crate::{Connection, ReadError, RecvStream, SendStream, WriteError};
@@ -152,6 +153,100 @@ pub async fn send_message<S: SendStream>(
     message.encode(&mut bytes).map_err(SendError::Usage)?;
     trace.bytes(Direction::Send, label, &bytes);
     stream.write_all(&bytes).await.map_err(SendError::Write)
+}
+
+/// A fetch stream this endpoint writes (§11.4.4), after its `FETCH_HEADER`.
+///
+/// WHY a type of its own around the sending half: whoever writes a fetch
+/// stream waits on its peer, and gives up after a while; the wait is a future
+/// that is dropped then, and the half with it. What a peer sees of a half
+/// that is merely dropped is up to the transport ([`SendStream`]), and with
+/// quinn it is a FIN: a fetch stream cut short would read as one that came
+/// to its end, with every Object after the cut "not existing" (§10.12.3).
+/// This type resets the stream when it is dropped without having been
+/// finished or reset.
+pub struct FetchStreamWriter<S: SendStream> {
+    /// `None` once the stream was finished or reset.
+    send: Option<S>,
+    trace: Trace,
+    label: String,
+}
+
+impl<S: SendStream> FetchStreamWriter<S> {
+    /// Writes bytes of the stream: Objects and End of Range indicators as
+    /// §11.4.4 has them, or what another fetch stream carried. Waits while
+    /// the peer does not take them.
+    ///
+    /// # Errors
+    ///
+    /// As [`SendStream::write_all`].
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<(), WriteError> {
+        let Some(send) = &mut self.send else {
+            return Err(WriteError::Lost("the stream was ended".to_string()));
+        };
+        self.trace.bytes(Direction::Send, &self.label, bytes);
+        send.write_all(bytes).await
+    }
+
+    /// Ends the stream with a FIN: everything of the fetch was written.
+    pub fn finish(mut self) {
+        if let Some(send) = self.send.take() {
+            send.finish();
+        }
+    }
+
+    /// Resets the stream with a Stream Reset Error Code (§3.3.3).
+    pub fn reset(mut self, code: u32) {
+        if let Some(send) = self.send.take() {
+            send.reset(code);
+        }
+    }
+
+    /// Completes when the peer sent `STOP_SENDING` or the connection is
+    /// gone, as [`SendStream::stopped`].
+    pub async fn stopped(&mut self) -> WriteError {
+        match &mut self.send {
+            Some(send) => send.stopped().await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+impl<S: SendStream> Drop for FetchStreamWriter<S> {
+    fn drop(&mut self) {
+        if let Some(send) = self.send.take() {
+            send.reset(stream_reset_code::CANCELLED);
+        }
+    }
+}
+
+/// Opens a unidirectional stream and writes the `FETCH_HEADER` that begins a
+/// fetch stream (§11.4.4). Dropping the call while it waits resets what it
+/// had opened.
+///
+/// # Errors
+///
+/// Fails when the connection is gone, and when the peer stops the stream
+/// before the header is written.
+pub async fn open_fetch_stream<C: Connection>(
+    connection: &C,
+    header: FetchHeader,
+    trace: &Trace,
+    label: &str,
+) -> Result<FetchStreamWriter<C::Send>, WriteError> {
+    let send = connection
+        .open_uni()
+        .await
+        .map_err(|lost| WriteError::Lost(lost.0))?;
+    let mut writer = FetchStreamWriter {
+        send: Some(send),
+        trace: trace.clone(),
+        label: label.to_string(),
+    };
+    // The Group Order has no part in the header.
+    let bytes = FetchStreamEncoder::new(header, GroupOrder::Ascending).take_bytes();
+    writer.write(&bytes).await?;
+    Ok(writer)
 }
 
 /// Tells readers of this crate to stop reading a stream, by the number the
