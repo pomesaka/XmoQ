@@ -785,4 +785,164 @@ describe("connectOver", () => {
 			PublishEndedError,
 		);
 	});
+
+	/**
+	 * 40 subgroup streams of one Object each, Groups 0 to 39, sent to a
+	 * subscription that nobody reads, with a queue of 16 and 8 streams of the
+	 * peer read at once. Resolves with the streams, the last of which is left
+	 * open, and a count of the Objects the session has handed over.
+	 */
+	async function flooded(options: SessionConnectOptions = {}): Promise<{
+		peer: FakePeer;
+		connection: MoqtConnection;
+		request: PeerBidiStream;
+		subscription: Subscription;
+		streams: WritableStreamDefaultWriter<Uint8Array>[];
+		handedOver(): number;
+	}> {
+		let objects = 0;
+		const context = await subscribed({
+			subscriptionHighWaterMark: 16,
+			maxPeerUniStreams: 8,
+			diagnostics: {
+				onEvent(event) {
+					if (event.type === "object") objects += 1;
+				},
+			},
+			...options,
+		});
+		const streams: WritableStreamDefaultWriter<Uint8Array>[] = [];
+		for (let group = 0; group < 40; group++) {
+			const stream = context.peer.openUni();
+			streams.push(stream);
+			await stream.write(subgroupHeader(group));
+			await stream.write(objectWith(0x61));
+			// Closing is not awaited: it settles when the stream has been read.
+			if (group < 39) void stream.close().catch(() => {});
+		}
+		await settle();
+		return { ...context, streams, handedOver: () => objects };
+	}
+
+	// The queue takes 15 Objects without making their streams wait. One of
+	// the 8 streams read at once is the peer's control stream, so 7 more
+	// streams each hand over their Object and wait: 22. The other 18 stay in
+	// the transport. Without the limit on streams all 40 were handed over.
+	test("a subscription nobody reads holds the Objects of the streams read at once, and no more", async () => {
+		const { peer, subscription, handedOver } = await flooded();
+		expect(handedOver()).toBe(22);
+		// The other 18 streams were not taken from the transport.
+		expect(peer.untakenUniStreams()).toBe(18);
+
+		// Reading lets the rest in: nothing was dropped.
+		const reader = subscription.objects.getReader();
+		const groups: bigint[] = [];
+		for (let read = 0; read < 40; read++) {
+			const next = await reader.read();
+			if (next.value !== undefined) groups.push(next.value.groupId);
+		}
+		expect(groups.sort((a, b) => Number(a - b))).toEqual(
+			Array.from({ length: 40 }, (_, group) => BigInt(group)),
+		);
+		expect(handedOver()).toBe(40);
+		expect(peer.untakenUniStreams()).toBe(0);
+	});
+
+	// The last stream is one the connection had not taken from the transport
+	// when the subscription ended. It has to be taken then and stopped, so
+	// that neither it nor a stream that waited on the queue stays behind.
+	test.each([
+		{
+			ending: "the application cancels",
+			end: ({ subscription }: Awaited<ReturnType<typeof flooded>>) =>
+				subscription.cancel(),
+		},
+		{
+			ending: "PUBLISH_DONE arrives and the wait for late streams is over",
+			end: ({ request }: Awaited<ReturnType<typeof flooded>>) =>
+				request.reply.write(hex("0b 00 03 02 01 00")),
+		},
+	])(
+		"streams that waited for a subscription nobody reads are stopped when $ending",
+		async ({ end }) => {
+			const context = await flooded({ publishDoneTimeoutMs: 5 });
+			// Stream 39 is among the 18 that wait in the transport.
+			expect(context.peer.untakenUniStreams()).toBe(18);
+			await end(context);
+			const waited = context.streams[39];
+			if (waited === undefined) throw new Error("the last stream is missing");
+			expect(await rejection(waited.closed)).toMatchObject({
+				streamErrorCode: 1,
+			});
+			await context.subscription.ended;
+			expect(context.peer.untakenUniStreams()).toBe(0);
+		},
+	);
+
+	test("closing the session stops taking the streams that waited", async () => {
+		const { peer, connection } = await flooded();
+		expect(peer.untakenUniStreams()).toBe(18);
+		connection.close();
+		await settle();
+		expect(peer.closeInfo()).toEqual({ closeCode: 0, reason: "" });
+		// The readers are forgotten at the close, which makes room; the loop
+		// must not use it to take what waited.
+		expect(peer.untakenUniStreams()).toBe(18);
+	});
+
+	// One place is the peer's control stream, so 1 would read no data stream
+	// and 0 not even SETUP; NaN and Infinity would switch the limit off.
+	test.each([
+		{ value: 1, message: "maxPeerUniStreams is a whole number from 2, not 1" },
+		{ value: 0, message: "maxPeerUniStreams is a whole number from 2, not 0" },
+		{
+			value: 2.5,
+			message: "maxPeerUniStreams is a whole number from 2, not 2.5",
+		},
+		{
+			value: Number.NaN,
+			message: "maxPeerUniStreams is a whole number from 2, not NaN",
+		},
+		{
+			value: Number.POSITIVE_INFINITY,
+			message: "maxPeerUniStreams is a whole number from 2, not Infinity",
+		},
+	])(
+		"connectOver rejects maxPeerUniStreams $value with a RangeError",
+		async ({ value, message }) => {
+			const error = await rejection(
+				connectOver(createFakePeer().transport, { maxPeerUniStreams: value }),
+			);
+			expect(error).toBeInstanceOf(RangeError);
+			expect(error).toMatchObject({ message });
+		},
+	);
+
+	// A chunk can carry several Objects, and a stream hands all of them over
+	// before it waits: the limit is on streams, not on Objects.
+	test("a stream hands over every Object of a chunk before it waits for the queue", async () => {
+		let objects = 0;
+		const { peer } = await subscribed({
+			subscriptionHighWaterMark: 2,
+			maxPeerUniStreams: 2,
+			diagnostics: {
+				onEvent(event) {
+					if (event.type === "object") objects += 1;
+				},
+			},
+		});
+		const stream = peer.openUni();
+		await stream.write(
+			Uint8Array.of(
+				...subgroupHeader(0),
+				...objectWith(0x61),
+				...objectWith(0x62),
+				...objectWith(0x63),
+				...objectWith(0x64),
+				...objectWith(0x65),
+			),
+		);
+		await settle();
+		expect(objects).toBe(5);
+	});
 });
