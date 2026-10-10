@@ -16,7 +16,8 @@
 | SNS event integration | Future goal |
 | Multiple publishers / bidirectional calls | Future possibility |
 | Reactions | Proposed; delivery undecided |
-| Specific codec, latency, capacity | Undecided |
+| Video codec | Decided for Phase 1: H.264 in Annex B format. Profile, level and key frame interval are undecided ([open decisions](open-questions.md)) |
+| Latency, capacity | Undecided |
 | Authentication, privacy, recording | Undecided |
 | License and contribution policy | Undecided |
 
