@@ -102,8 +102,53 @@ The same without the limit, where the relay does not end the first subscription 
 
 **Without the limit it did not happen** in the same shape of traffic (table above): the library read every stream into memory, at the cost shown in the first table. When this was first reported it was an inference from that; the runs without the limit were made afterwards. The Rust implementation has a related `FIXME:` at `read_uni_streams` in `crates/moqt-io/src/streams.rs`, about a server that bounds its receive window; the library has one at `uniStreamSlot` in `stream-io.ts`.
 
+### Objects of the size of a video frame, in real time
+
+Added later the same day, on `main` at `7c7a4033`, for the question of how Phase 1 puts frames on streams: `draft-ietf-moq-msf-01` §6 asks for a new stream for every Object, and the runs above had only 57-byte and 100,000-byte Objects, sent as fast as the page could.
+
+`spikes/frame-streams/run.ts`: an own page publishes Objects of 10,000 bytes, 30 a second (it kept 30.0 a second in every run and was never a frame late), 30 to a Group, which is the shape of a one-second group of pictures at about 2.4 Mbit/s. Shape A puts every Object on a stream of its own, each a Subgroup named by its Object ID; shape B puts a Group on one stream. Three pages on `@xmoq/moqt` subscribe through the own relay: one never reads, one reads 15 Objects a second, one reads everything. After the time of the run, the page that never reads subscribes to a second track of the same publisher, which never carries an Object.
+
+```sh
+bun spikes/frame-streams/run.ts --one-per-stream --seconds 90     # twice, and twice with --seconds 180
+bun spikes/frame-streams/run.ts --seconds 90                      # twice, and once with --seconds 300
+```
+
+Runs of the same kind gave the same numbers, to the tenth of a second.
+
+| | A: one Object a stream | B: a Group a stream |
+|---|---|---|
+| The page that never reads: cut off by the relay (PUBLISH_DONE `TOO_FAR_BEHIND`, Stream Count 2^62 - 1) | after 60.9 s | after 171.2 s; not within 90 s |
+| Streams the relay had booked towards it by then | 1828, of which it reset the 257 it could not open, with `0x5` | 172. The relay reset 30 streams in that run, for the two pages it cut off; how many for this one was not counted |
+| Objects its library had taken | 78 | 78 |
+| Is that page told? (`Subscription.ended`, and whether it saw PUBLISH_DONE) | **no**: `ended` had not resolved and no PUBLISH_DONE had been seen 39 s after the cut (the 90-second runs). In the 180-second runs it ended 119 s after the cut, with the session and not with PUBLISH_DONE (below) | **no**, 139 s after the cut |
+| Its second SUBSCRIBE, made after the cut | **no answer in 10 s** (at 90 s). At 180 s the browser refused the stream ("Failed to create bidirectional stream."), and the library closed the session for it, with code 1 | **no answer in 10 s** (at 300 s) |
+| The same second SUBSCRIBE before the cut | | answered after 2 ms (at 90 s) |
+| The page that reads 15 a second: cut off | after 87.1 s | after 197.5 s; not within 90 s |
+| Is that page told? | yes: it read what had arrived (1607 Objects), `objects` closed, `ended` is `publish-done` with status 5 | yes, after 4535 Objects |
+| The page that reads everything | read every Object that was sent; not cut off | the same |
+| Sessions the relay closed itself | none | none |
+
+- **The page that never reads is not told that it was cut off, with Objects of the size of a frame too, and in both shapes.** The requests it makes afterwards get no answer, and two minutes later the session is lost. So what the first table of this record showed for one 100,000-byte Object a stream is not a matter of that size or of that shape. It is a matter of time: shape B reaches the same state after 171 seconds where shape A takes 61.
+- **"With 30 such Objects a stream … it did not happen" above was for 100,000-byte Objects sent as fast as the page could**, where the relay cut the subscription off after 0.1 seconds and the page was told. With a Group of 30 frame-sized Objects on a stream, at 30 a second, the relay cuts it off after 171 seconds, and then it does happen.
+- **A page that only reads too slowly is told.** It reads on, reaches the end of what had arrived, and gets PUBLISH_DONE. It is cut off after 87 seconds in shape A at half the rate of the Objects.
+- **The relay's limit is reached much later than its own number suggests.** The relay ends a subscription at 256 streams waiting to be written, which 30 streams a second would fill in 8.5 seconds. It took 61, because the streams do not wait at the relay: Chromium takes them off the connection although the page does not read. From the relay's log, about 1570 streams (15.7 MB) had gone to the browser in shape A before 256 waited, and, if 15 of the 30 resets were this page's, about 157 streams (47 MB) in shape B. How much Chromium takes that way was not looked up; these are counts from the relay's log, not a measurement in the browser.
+- The page that reads everything was not held back in any run.
+
+**A stream that cannot be opened ends the whole session of the library.** In the 180-second runs of shape A, the page's second SUBSCRIBE failed in the browser, and the relay printed `CONNECTION_ENDED session=1 ClosedByPeer { code: 1, reason: "Failed to create bidirectional stream." }`. That is the library's doing, as read in `packages/moqt/src/webtransport/`: the session state hands the connection an output to open a request stream, `stream-io.ts` calls `createBidirectionalStream()`, and when any output fails, `enqueue` in `connection.ts` calls `fatal`, which ends everything the application holds and closes the transport with `INTERNAL_ERROR`. So one request that the browser could not start took the other subscriptions of the page with it. Three ways it could be instead, none of them tried:
+
+| | What it would take | What it leaves open |
+|---|---|---|
+| As it is: the session fails | nothing | a page loses subscriptions that still worked |
+| Only that request fails, and the session stays | the session state has given the request a Request ID and a stream number before the stream is opened, so it would need an input that says "this request stream was never opened", which ends the request for the application. The peer would see a Request ID that was never used, which both implementations take as no fault (the notes, "Request IDs from the peer that arrive out of order or leave gaps") | whether a browser that refuses a stream is in a state where the session is worth keeping. Here it was not: the page was already cut off from the answers to its requests |
+| The request waits for the browser to let a stream through | a bound on that wait | in the 90-second runs the stream was opened and the answer did not come, so waiting would not have helped there |
+
+What made Chromium refuse the stream after two minutes and accept it 29 seconds after the cut was not looked at.
+
+What this means for the open question "whether a browser client should end a subscription itself when its application does not read": the constraint written there, that one large Object a stream is to be avoided, is not enough. With frames of 10,000 bytes the same state is reached in both shapes; the choice of shape moves when (61 seconds or 171) and how much the browser holds by then (about 16 MB or about 47 MB, from the relay's counts), not whether.
+
 ## Limitations and blockers
 
+- **In the frame-sized runs every Object has 10,000 bytes.** Real frames differ in size and a key frame is larger. One track, one subscription a page, loopback, Chromium 156 alone. Whether a page that starts to read after it was cut off learns of the end, as it did in the earlier runs, was not looked at in these. Whether other work on the machine ran beside them (23:26 to 23:45) is not known; the publisher kept its rate.
 - **One browser, one machine, loopback, single runs** for most rows. The times and counts vary between runs as shown.
 - **Why PUBLISH_DONE and SUBSCRIBE_OK did not arrive is an inference**; no packet was captured, and the size of Chromium's flow-control window was not looked up. That the relay sent them is in its log.
 - **With the limit, the second subscription was made after the relay had ended the first.** Whether it also fails while the first is still being served was not run. Without the limit it was made while the first was served, in two of the three shapes, so the two tables do not compare the same moment.
