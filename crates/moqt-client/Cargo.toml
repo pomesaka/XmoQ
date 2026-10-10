@@ -1,0 +1,15 @@
+[package]
+name = "xmoq-moqt-client"
+version = "0.0.0"
+description = "MoQ Transport client over WebTransport, built on xmoq-moqt."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-moqt = { path = "../moqt" }
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+wtransport = "=0.7.2"
