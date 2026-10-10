@@ -23,8 +23,20 @@ export type XmoqPage = {
 	disconnect(): Promise<void>;
 };
 
+/**
+ * What only the own page offers. The moqtail page is a copy that is kept as
+ * it came, so these are not part of `XmoqPage`.
+ */
+export type OwnPageExtras = {
+	/** Ends the published Track with PUBLISH_DONE, Status Code TRACK_ENDED. */
+	endTrack(): Promise<void>;
+	/** How the subscription ended, as JSON of the library's `SubscriptionEnd`. */
+	subscriptionEnd(): Promise<string>;
+};
+
 declare global {
 	interface Window {
 		xmoq: XmoqPage;
+		xmoqOwn?: OwnPageExtras;
 	}
 }

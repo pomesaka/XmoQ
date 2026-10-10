@@ -1,15 +1,18 @@
-// Interop driver: moves one MOQT Object through the moqtail relay between two
-// clients, at least one of which is an own client, and compares the received
-// payload with the sent one.
+// Interop driver: moves one MOQT Object through a relay between two clients,
+// at least one of which is an own client, and compares the received payload
+// with the sent one. `matrix.ts` runs every pairing with it.
 //
-// Usage: bun run.ts --publisher <client> --subscriber <client> [--port N] [--verbose]
-//                   [--subscribe-track NAME]
-//   <client>: own-browser | moqtail-browser | moqtail-rust
+// Usage: bun run.ts --publisher <client> --subscriber <client> [--relay moqtail]
+//                   [--port N] [--subscribe-track NAME] [--await-publish-done]
+//                   [--verbose]
+//   <client>: own-browser | own-rust | moqtail-browser | moqtail-rust
 //   --subscribe-track: track the subscriber asks for (default: the published one).
 //     Another name makes the relay answer REQUEST_ERROR, and the run fails by design.
+//   --await-publish-done: after the transfer, ends the publisher and waits until
+//     the subscriber, which has to be an own client, has seen PUBLISH_DONE.
 //
-// The relay and the moqtail clients live under peers/moqtail; build them with
-// the steps in README.md.
+// The relay and the moqtail clients live under peers/moqtail, the own Rust
+// client in crates/moqt-client; build them with the steps in README.md.
 
 import {
 	type ChildProcessWithoutNullStreams,
@@ -21,15 +24,17 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { type Browser, chromium, type Page } from "playwright-core";
-import type { XmoqPage } from "./xmoq-page.ts";
+import type { OwnPageExtras, XmoqPage } from "./xmoq-page.ts";
 
 // The functions passed to `page.evaluate` run in the page, where this global
 // exists. This file is checked without the DOM lib, so it is declared here.
-declare const window: { readonly xmoq: XmoqPage };
+declare const window: {
+	readonly xmoq: XmoqPage;
+	readonly xmoqOwn?: OwnPageExtras;
+};
 
 const here = import.meta.dir;
 const moqtailRoot = join(here, "peers", "moqtail");
-const relayBin = join(moqtailRoot, ".tools", "bin", "relay");
 const certDir = join(here, ".cert");
 const certFile = join(certDir, "cert.pem");
 const keyFile = join(certDir, "key.pem");
@@ -43,7 +48,7 @@ const STEP_TIMEOUT_MS = 20_000;
 const KILL_GRACE_MS = 5_000;
 
 type BrowserClient = "own-browser" | "moqtail-browser";
-type RustClient = "moqtail-rust";
+type RustClient = "own-rust" | "moqtail-rust";
 type Client = BrowserClient | RustClient;
 
 /** Path each browser client is served under, and the entry point bundled for it. */
@@ -60,9 +65,13 @@ const BROWSER_PAGES: Record<
 
 /**
  * Every binary here takes the flags and prints the `PUBLISHED`, `SENT`,
- * `SUBSCRIBED` and `OBJECT` lines of peers/moqtail/rust-client.
+ * `SUBSCRIBED` and `OBJECT` lines of crates/moqt-client/src/report.rs, and
+ * sends its Object when it reads a line on stdin. Closing stdin makes a
+ * publisher leave: the own client ends its Track with PUBLISH_DONE first, the
+ * moqtail one closes the session.
  */
 const RUST_CLIENT_BINARIES: Record<RustClient, string> = {
+	"own-rust": join(here, "..", "target", "debug", "xmoq-moqt-client"),
 	"moqtail-rust": join(
 		moqtailRoot,
 		"rust-client",
@@ -72,7 +81,48 @@ const RUST_CLIENT_BINARIES: Record<RustClient, string> = {
 	),
 };
 
-const OWN_CLIENTS: ReadonlySet<Client> = new Set<Client>(["own-browser"]);
+const OWN_CLIENTS: ReadonlySet<Client> = new Set<Client>([
+	"own-browser",
+	"own-rust",
+]);
+
+/** How a relay is started, and the line it prints once it accepts sessions. */
+interface Relay {
+	binary: string;
+	args(port: string): string[];
+	/** Capture group 1 is the version the relay reports. */
+	ready: RegExp;
+	verboseEnv: Record<string, string>;
+}
+
+// WHY a table with one row: an own relay is being written (docs/roadmap.md,
+// Phase 0b). It becomes a second row here, and every pairing can then run
+// against it with `--relay`.
+const RELAYS: Record<string, Relay> = {
+	moqtail: {
+		binary: join(moqtailRoot, ".tools", "bin", "relay"),
+		args: (port) => [
+			"--port",
+			port,
+			"--host",
+			"127.0.0.1",
+			"--cert-file",
+			certFile,
+			"--key-file",
+			keyFile,
+			"--log-folder",
+			logDir,
+		],
+		ready: /(moqtail\/\S+) is running on/,
+		verboseEnv: { RUST_LOG: "debug" },
+	},
+};
+
+function relayNamed(name: string): Relay {
+	const relay = RELAYS[name];
+	if (relay === undefined) throw new Error(`unknown relay ${name}`);
+	return relay;
+}
 
 function isBrowserClient(value: string): value is BrowserClient {
 	return Object.hasOwn(BROWSER_PAGES, value);
@@ -96,7 +146,9 @@ const { values: options } = parseArgs({
 	options: {
 		publisher: { type: "string", default: "own-browser" },
 		subscriber: { type: "string", default: "moqtail-rust" },
+		relay: { type: "string", default: "moqtail" },
 		port: { type: "string", default: "44330" },
+		"await-publish-done": { type: "boolean", default: false },
 		"subscribe-track": { type: "string", default: TRACK },
 		verbose: { type: "boolean", default: false },
 	},
@@ -303,23 +355,12 @@ async function stopProcess(
 	clearTimeout(escalation);
 }
 
-function startRelay(port: string): LoggedProcess {
+function startRelay(config: Relay, port: string): LoggedProcess {
 	const relay = spawnLogged(
 		"relay",
-		relayBin,
-		[
-			"--port",
-			port,
-			"--host",
-			"127.0.0.1",
-			"--cert-file",
-			certFile,
-			"--key-file",
-			keyFile,
-			"--log-folder",
-			logDir,
-		],
-		options.verbose ? { RUST_LOG: "debug" } : {},
+		config.binary,
+		config.args(port),
+		options.verbose ? config.verboseEnv : {},
 	);
 	defer(() => stopProcess(relay, "SIGINT"));
 	return relay;
@@ -370,8 +411,8 @@ async function servePages(clients: BrowserClient[]): Promise<string> {
 interface RunContext {
 	relayUrl: string;
 	certSha256Hex: string;
-	pagesOrigin: string;
-	browser: Browser;
+	/** Absent in a run between two Rust clients, which starts no browser. */
+	pages: { origin: string; browser: Browser } | undefined;
 }
 
 async function openConnectedPage(
@@ -379,11 +420,15 @@ async function openConnectedPage(
 	label: string,
 	client: BrowserClient,
 ): Promise<Page> {
-	const browserContext = await context.browser.newContext();
+	if (context.pages === undefined) {
+		throw new Error(`${label} needs the browser, which was not started`);
+	}
+	const { origin, browser } = context.pages;
+	const browserContext = await browser.newContext();
 	const page = await browserContext.newPage();
 	page.on("console", (message) => log(label, message.text()));
 	page.on("pageerror", (error) => log(label, `pageerror: ${error.message}`));
-	await page.goto(`${context.pagesOrigin}${BROWSER_PAGES[client].path}`);
+	await page.goto(`${origin}${BROWSER_PAGES[client].path}`);
 	await page.waitForFunction(() => typeof window.xmoq === "object");
 	await withTimeout(
 		page.evaluate(([url, hash]) => window.xmoq.connect(url, hash), [
@@ -415,6 +460,8 @@ function spawnRustClient(
 		"--track",
 		track,
 		...extraArgs,
+		// Only the own client can print the bytes of every stream.
+		...(options.verbose && client === "own-rust" ? ["--trace"] : []),
 	]);
 	defer(async () => {
 		spawned.child.stdin.end();
@@ -423,12 +470,48 @@ function spawnRustClient(
 	return spawned;
 }
 
+/** The own page's extras, which the moqtail page does not have. */
+function ownPageCall(
+	page: Page,
+	label: string,
+	method: keyof OwnPageExtras,
+): Promise<string | undefined> {
+	return withTimeout(
+		page.evaluate(async (name) => {
+			if (window.xmoqOwn === undefined) {
+				throw new Error("this page has no window.xmoqOwn");
+			}
+			return (await window.xmoqOwn[name]()) ?? undefined;
+		}, method),
+		`${label} to finish ${method}()`,
+	);
+}
+
 interface Publisher {
 	sendObject(): Promise<void>;
+	/**
+	 * Makes the publisher leave. The own clients end their Track with
+	 * PUBLISH_DONE; the moqtail clients have no way to and close the session,
+	 * after which the relay sends a PUBLISH_DONE of its own.
+	 */
+	end(): Promise<void>;
 }
 
 interface Subscriber {
 	receiveHex(): Promise<string>;
+	/**
+	 * Resolves once the subscription has ended, with what the client reports
+	 * about the ending. Rejects unless a PUBLISH_DONE ended it.
+	 */
+	publishDone(): Promise<string>;
+}
+
+/** A client that cannot report how its subscription ended. */
+function cannotAwaitPublishDone(kind: Client): () => Promise<never> {
+	return () =>
+		Promise.reject(
+			new Error(`--await-publish-done needs an own subscriber, not ${kind}`),
+		);
 }
 
 /** Connects a publisher and offers the track. `payloadHex` is the Object it sends later. */
@@ -451,6 +534,10 @@ async function startPublisher(
 			async sendObject() {
 				await page.evaluate((hex) => window.xmoq.sendObject(hex), payloadHex);
 			},
+			async end() {
+				if (kind === "own-browser") await ownPageCall(page, label, "endTrack");
+				else await page.context().close();
+			},
 		};
 	}
 	// The Rust client takes the payload when it starts and sends it on a line on stdin.
@@ -463,6 +550,10 @@ async function startPublisher(
 		async sendObject() {
 			client.child.stdin.write("send\n");
 			await client.waitForLine(/^SENT /);
+		},
+		async end() {
+			client.child.stdin.end();
+			await withTimeout(client.exited, `${label} to exit`);
 		},
 	};
 }
@@ -491,9 +582,32 @@ async function startSubscriber(
 				);
 				return object.payloadHex;
 			},
+			publishDone:
+				kind === "own-browser"
+					? async () => {
+							const end = await ownPageCall(page, label, "subscriptionEnd");
+							if (end === undefined || !end.includes('"type":"publish-done"')) {
+								throw new Error(
+									`${label}: the subscription ended without PUBLISH_DONE: ${end}`,
+								);
+							}
+							return end;
+						}
+					: cannotAwaitPublishDone(kind),
 		};
 	}
-	const client = spawnRustClient(context, label, kind, "subscribe", track);
+	const client = spawnRustClient(
+		context,
+		label,
+		kind,
+		"subscribe",
+		track,
+		// WHY a second Object that never comes: it keeps the own client
+		// subscribed after the first, so that it is there when the Track ends.
+		options["await-publish-done"] && kind === "own-rust"
+			? ["--objects", "2"]
+			: [],
+	);
 	await client.waitForLine(/^SUBSCRIBED /);
 	return {
 		async receiveHex() {
@@ -502,6 +616,14 @@ async function startSubscriber(
 				1,
 			);
 		},
+		publishDone:
+			kind === "own-rust"
+				? async () => {
+						const done = await client.waitForLine(/^PUBLISH_DONE (.*)$/);
+						const ended = await client.waitForLine(/^SUBSCRIPTION_ENDED (.*)$/);
+						return `${captureGroup(done, 1)}; ${captureGroup(ended, 1)}`;
+					}
+				: cannotAwaitPublishDone(kind),
 	};
 }
 
@@ -513,8 +635,32 @@ interface RunResult {
 	receivedText: string;
 	sentHex: string;
 	receivedHex: string;
+	/** What the subscriber reported about the PUBLISH_DONE, with --await-publish-done. */
+	subscriptionEnd: string | null;
+	relay: string;
 	relayVersion: string;
-	browserVersion: string;
+	/** Null in a run between two Rust clients. */
+	browserVersion: string | null;
+}
+
+/** Serves the pages and launches Chromium, when a client of the run is a page. */
+async function startBrowser(
+	clients: BrowserClient[],
+): Promise<RunContext["pages"]> {
+	if (clients.length === 0) return undefined;
+	const origin = await servePages(clients);
+	const browser = await chromium.launch({
+		headless: true,
+		channel: "chromium",
+		// WHY off: the handlers above own the teardown. The SIGINT handler of
+		// playwright-core 1.64.0 closes the browser and then calls process.exit(130),
+		// which would skip stopping the relay and the Rust clients.
+		handleSIGINT: false,
+		handleSIGTERM: false,
+	});
+	defer(() => browser.close());
+	log("driver", `browser=chromium version=${browser.version()}`);
+	return { origin, browser };
 }
 
 async function transferOneObject(
@@ -532,30 +678,19 @@ async function transferOneObject(
 	);
 	const payloadHex = payload.toString("hex");
 
-	const relay = startRelay(options.port);
+	const relayConfig = relayNamed(options.relay);
+	const relay = startRelay(relayConfig, options.port);
 	const relayVersion = captureGroup(
-		await relay.waitForLine(/(moqtail\/\S+) is running on/),
+		await relay.waitForLine(relayConfig.ready),
 		1,
 	);
-	const pagesOrigin = await servePages(
+	const pages = await startBrowser(
 		[publisher, subscriber].filter(isBrowserClient),
 	);
-	const browser = await chromium.launch({
-		headless: true,
-		channel: "chromium",
-		// WHY off: the handlers above own the teardown. The SIGINT handler of
-		// playwright-core 1.64.0 closes the browser and then calls process.exit(130),
-		// which would skip stopping the relay and the Rust clients.
-		handleSIGINT: false,
-		handleSIGTERM: false,
-	});
-	defer(() => browser.close());
-	log("driver", `browser=chromium version=${browser.version()}`);
 	const context: RunContext = {
 		relayUrl: `https://127.0.0.1:${options.port}`,
 		certSha256Hex: certificate.sha256Hex,
-		pagesOrigin,
-		browser,
+		pages,
 	};
 
 	// The publisher offers the track first: the relay rejects a SUBSCRIBE for
@@ -570,6 +705,11 @@ async function transferOneObject(
 	);
 	await withTimeout(publishing.sendObject(), "the publisher to send");
 	const receivedHex = await subscribing.receiveHex();
+	let subscriptionEnd: string | null = null;
+	if (options["await-publish-done"]) {
+		await publishing.end();
+		subscriptionEnd = await subscribing.publishDone();
+	}
 
 	return {
 		publisher,
@@ -579,8 +719,10 @@ async function transferOneObject(
 		receivedText: Buffer.from(receivedHex, "hex").toString(),
 		sentHex: payloadHex,
 		receivedHex,
+		subscriptionEnd,
+		relay: options.relay,
 		relayVersion,
-		browserVersion: browser.version(),
+		browserVersion: pages?.browser.version() ?? null,
 	};
 }
 
@@ -595,7 +737,7 @@ async function main(): Promise<void> {
 	const rustBinaries = [publisher, subscriber]
 		.filter(isRustClient)
 		.map((client) => RUST_CLIENT_BINARIES[client]);
-	for (const binary of [relayBin, ...rustBinaries]) {
+	for (const binary of [relayNamed(options.relay).binary, ...rustBinaries]) {
 		if (!existsSync(binary)) {
 			throw new Error(
 				`${binary} is missing; see ${join(here, "README.md")} for the build steps`,

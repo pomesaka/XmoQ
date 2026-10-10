@@ -19,8 +19,8 @@ concurrency:
 # and writes "skipped" to the job summary and a notice annotation. Once the target exists the
 # same task runs the checks, and it fails if the target exists only in part.
 #
-# FIXME: add a job that runs the own components against moqtail peers (docs/roadmap.md Phase 0b).
-# Left out for now: the run is heavy and its launch scripts are still changing.
+# The interop job is the exception to "one job per check:* task": `mise run check` leaves it out
+# because it builds a relay and drives a browser. It still calls one task, `mise run interop`.
 
 jobs:
   rust:
@@ -76,3 +76,75 @@ jobs:
         with:
           version: 2026.3.8
       - run: mise run check:workflows
+
+  interop:
+    name: Interop (own and moqtail clients through the moqtail relay)
+    runs-on: ubuntu-24.04
+    # A first run builds the relay and both Rust clients from nothing.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The scope step compares with the base of the pull request.
+          fetch-depth: 0
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: 2026.3.8
+      # Skips the rest for a pull request that cannot change the result, and says so in the job
+      # summary. See the script for why this is not a `paths:` filter.
+      #
+      # WHY the later steps test `!= 'false'` and not `== 'true'`: if this step's output is ever
+      # lost (a renamed id, a typo), the pairings then run. The other way round, every step
+      # would be skipped and the job would be green without having checked anything.
+      - name: Decide whether this change can affect the run
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/ci/interop-scope.sh
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        if: steps.scope.outputs.run != 'false'
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.scope.outputs.run != 'false'
+        with:
+          workspaces: |
+            . -> target
+            interop/peers/moqtail/rust-client -> target
+      # The relay is built from a fixed tag, so its binary changes only with the script that
+      # names the tag.
+      # WHY restore and save as two steps: the combined action saves only when the job succeeds,
+      # and a failing pairing would then throw away a relay build of several minutes.
+      - name: Restore the moqtail relay
+        id: relay-cache
+        if: steps.scope.outputs.run != 'false'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: interop/peers/moqtail/.tools
+          key: moqtail-relay-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/interop.sh', 'rust-toolchain.toml') }}
+      # bun.lock pins playwright-core, and with it the Chromium build that is downloaded.
+      - name: Cache the Chromium that Playwright downloads
+        if: steps.scope.outputs.run != 'false'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+      - if: steps.scope.outputs.run != 'false'
+        run: mise run interop
+      - name: Save the moqtail relay
+        if: always() && steps.relay-cache.outputs.cache-hit != 'true' && hashFiles('interop/peers/moqtail/.tools/bin/relay') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: interop/peers/moqtail/.tools
+          key: ${{ steps.relay-cache.outputs.cache-primary-key }}
+      - name: Keep the logs of every pairing
+        if: always() && steps.scope.outputs.run != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-logs
+          path: interop/.logs/matrix
+          if-no-files-found: ignore
+      # Fails unless the job recorded that it ran the pairings or that it skipped them. A job
+      # that did neither checked nothing, whatever colour its steps have.
+      - name: Check that the run was performed or reported as skipped
+        run: scripts/ci/interop-verdict.sh

@@ -16,7 +16,7 @@ Each step replaces one `moqtail` component with an own one, so that one side of 
 - [ ] Own Rust relay against the `moqtail` browser client and the own Rust client.
 - [x] Own TypeScript browser client against the `moqtail` relay. See the [record](experiments/2026-10-10-own-ts-client-vs-moqtail.md). Done ahead of the relay, because it needs only `moqtail` peers.
 - [ ] Own TypeScript browser client against the own relay.
-- [ ] One interop runner for every pairing (`interop/`), including the own Rust client, and a CI job that runs it.
+- [x] One interop runner for every pairing (`interop/`), including the own Rust client, and a CI job that runs it. See the [record](experiments/2026-10-10-own-rust-and-ts-through-moqtail-relay.md). The pairings use the `moqtail` relay; the own relay is added to the same runner when it exists.
 
 **Exit:** one Object between browser and Rust through the own relay with own clients, and the same Object exchange against `moqtail` peers.
 

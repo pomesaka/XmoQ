@@ -53,6 +53,10 @@ type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
 let connection: MoqtConnection | undefined;
 let published: PublishedTrack | undefined;
 let received: Promise<Settled<PageReceivedObject>> | undefined;
+let subscribed: Subscription | undefined;
+
+/** PUBLISH_DONE Status Code TRACK_ENDED (§10.11). */
+const TRACK_ENDED = 0x2n;
 
 function connected(): MoqtConnection {
 	if (connection === undefined) throw new Error("connect() has not completed");
@@ -207,6 +211,7 @@ window.xmoq = {
 			(value) => ({ ok: true, value }),
 			(error: unknown) => ({ ok: false, error }),
 		);
+		subscribed = subscription;
 		console.log(
 			`subscribed: request_id=${subscription.requestId} alias=${subscription.trackAlias}`,
 		);
@@ -224,6 +229,21 @@ window.xmoq = {
 	disconnect: withPlainErrors(async () => {
 		connection?.close();
 		connection = undefined;
+	}),
+};
+
+window.xmoqOwn = {
+	endTrack: withPlainErrors(async () => {
+		if (published === undefined)
+			throw new Error("publishTrack() has not completed");
+		await published.done(TRACK_ENDED, "");
+		console.log(`track ended: ${describe(await published.ended)}`);
+	}),
+
+	subscriptionEnd: withPlainErrors(async () => {
+		if (subscribed === undefined)
+			throw new Error("subscribe() has not completed");
+		return describe(await subscribed.ended);
 	}),
 };
 
