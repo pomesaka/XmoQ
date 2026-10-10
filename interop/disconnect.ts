@@ -31,6 +31,14 @@
 //     The first publisher sends and goes, or stays; the second sends the next
 //     Group, which the subscribers get. With --second-resends the second
 //     first sends again every Group the first has sent.
+//   ask-all                 --ask <way> [--publisher <client>] --subscriber <own client> --subscriber <own client>...
+//     Which publishers the relay sends its own SUBSCRIBE. two-announcers: two
+//     own-rust publishers announce the namespace and send no PUBLISH.
+//     announcer-and-publisher: --publisher sends PUBLISH, and an own-rust
+//     publisher announces before the subscribers come. late-announcer: it
+//     announces after they came. refusing-announcer: an own-browser page
+//     announces and refuses what it is asked; it is not asked again until it
+//     announces anew.
 //   publish-anew            --publisher own-rust --subscriber <client>... [--same-alias]
 //     The publisher sends a Group, says PUBLISH_DONE and publishes the track
 //     anew on the same session, under the next Track Alias or the same, and
@@ -57,6 +65,7 @@ import {
 	type SubscriberPlan,
 	type SubscriptionOutcome,
 	startPublisher,
+	startRefusingAnnouncer,
 	startSubscriber,
 } from "./clients.ts";
 import {
@@ -68,6 +77,7 @@ import {
 	isRustClient,
 	log,
 	parseClient,
+	pollFor,
 	runCleanups,
 	STEP_TIMEOUT_MS,
 	startRun,
@@ -173,6 +183,9 @@ const subscribeOkSent = (session: number): RegExp =>
 /** The relay opened a request of its own towards the session: the SUBSCRIBE it sends a publisher that announced the namespace. */
 const requestOpenedTowards = (session: number): RegExp =>
 	new RegExp(`^OPEN_REQUEST session=${session} `);
+/** The relay ended a request of its own towards the session. */
+const ownRequestEnded = (session: number): RegExp =>
+	new RegExp(`^(?:FINISH|CANCEL)_OWN_REQUEST session=${session} `);
 /** The relay opened a subgroup stream of the Group towards the session. */
 const streamOpened = (session: number, group: number): RegExp =>
 	new RegExp(`^OPEN_DATA session=${session} out=\\d+ .* group=${group}$`);
@@ -192,6 +205,7 @@ const SCENARIOS = [
 	"second-source",
 	"publish-while-asked",
 	"publish-anew",
+	"ask-all",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
 type OptionOfTwoSources =
@@ -222,6 +236,8 @@ const { values: options } = parseArgs({
 		"second-resends": { type: "boolean" },
 		// publish-anew: the new PUBLISH has the Track Alias of the first.
 		"same-alias": { type: "boolean", default: false },
+		// ask-all: which publishers there are and when they announce.
+		ask: { type: "string" },
 		"second-joins": { type: "string" },
 		port: { type: "string", default: "44340" },
 		verbose: { type: "boolean", default: false },
@@ -1610,6 +1626,267 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 	};
 }
 
+const ASK_WAYS = [
+	"two-announcers",
+	"announcer-and-publisher",
+	"late-announcer",
+	"refusing-announcer",
+] as const;
+
+/** How often the relay opened a request of its own towards the session. */
+const asksTowards = (session: number, run: Run): number =>
+	run.context.relay.matches(requestOpenedTowards(session)).length;
+
+/** Resolves once the relay has printed `count` lines that match. */
+function relayPrinted(pattern: RegExp, count: number, run: Run): Promise<void> {
+	return pollFor(
+		() =>
+			run.context.relay.matches(pattern).length >= count ? true : undefined,
+		`the relay to print ${pattern} ${count} time(s)`,
+	).then(() => undefined);
+}
+
+/** Throws unless the relay asked each session as often as given. */
+function expectAsks(
+	expected: { who: string; session: number; asks: number }[],
+	run: Run,
+	when: string,
+): void {
+	for (const { who, session, asks } of expected) {
+		const seen = asksTowards(session, run);
+		if (seen !== asks) {
+			throw new Error(
+				`the relay had sent ${who} (session ${session}) ${seen} SUBSCRIBE(s) ${when}, not ${asks}`,
+			);
+		}
+	}
+}
+
+/**
+ * The relay asks every publisher that announced a matching namespace for a
+ * track, and none that is a source of it already.
+ *
+ * The notes, "A SUBSCRIBE for a track that has no source, and which
+ * publishers the relay asks": "The relay sends its own SUBSCRIBE to every
+ * publisher whose announced namespace matches [...] They are asked in the
+ * order they announced". "The same is done for a track that has a source,
+ * each time a subscriber comes, after its SUBSCRIBE_OK: the publishers of
+ * the namespace that are not a source of the track are asked, and one that
+ * accepts is one more source." "Not asked are a session that is a source of
+ * the track, one that is asked for it and has not answered, and one that was
+ * asked and did not become a source: it refused [...] A publisher is asked
+ * again once it announces a namespace of the track anew". "When a
+ * PUBLISH_NAMESPACE arrives, the relay answers it and then does the same for
+ * every track in that namespace that has a subscriber".
+ */
+async function askAll(run: Run): Promise<ScenarioResult> {
+	const way = ASK_WAYS.find((value) => value === options.ask);
+	if (way === undefined) {
+		throw new Error(
+			`--ask "${options.ask}" is not one of ${ASK_WAYS.join(", ")}`,
+		);
+	}
+	const subscriberKinds = options.subscriber.map((value) =>
+		parseClient("subscriber", value),
+	);
+	const passing = subscriberKinds.find((kind) => !isOwnClient(kind));
+	if (passing !== undefined || subscriberKinds.length < 2) {
+		throw new Error(
+			"--scenario ask-all needs two or more own subscribers: they stay for more than one Object, and the second shows what a later subscriber makes the relay ask",
+		);
+	}
+	const relay = run.context.relay;
+	// A publisher that only announces: it serves the track when it is asked.
+	const announcer = (label: string, firstGroup: number): Promise<Publisher> =>
+		joinAsPublisher("own-rust", run, {
+			label,
+			firstGroup,
+			payloadHex: hexOf(`${label} ${run.payloadHex}`),
+			servesWhenAskedAfterMs: 0,
+		});
+	// The publisher with PUBLISH, of the ways that have one.
+	const withPublish = (): Promise<Publisher> => {
+		const kind = onePublisherKind();
+		return joinAsPublisher(kind, run, {
+			label: `pub:${kind}`,
+			payloadHex: hexOf(`publish ${run.payloadHex}`),
+		});
+	};
+	// The publisher serves the track, and the relay's line for the SUBSCRIBE
+	// it sent has been read.
+	//
+	// WHY the relay's line is waited for as well: the publisher's `SERVING`
+	// says the SUBSCRIBE came, but the two processes' lines reach the driver
+	// in no order, and a count of the relay's lines taken on `SERVING` alone
+	// can miss the one that is on its way (seen in CI). The relay prints the
+	// line when it sends the SUBSCRIBE, so it is certain to come.
+	const asked = async (publisher: Publisher): Promise<void> => {
+		await publisher.serving();
+		await relayPrinted(requestOpenedTowards(sessionOf(publisher, run)), 1, run);
+	};
+	const join = (index: number): Promise<Subscriber> => {
+		const kind = subscriberKinds[index];
+		if (kind === undefined) throw new Error(`no subscriber ${index + 1}`);
+		return joinAsSubscriber(kind, `sub${index + 1}:${kind}`, run);
+	};
+	const joinRest = async (from: number): Promise<Subscriber[]> => {
+		const rest: Subscriber[] = [];
+		for (let index = from; index < subscriberKinds.length; index++) {
+			rest.push(await join(index));
+		}
+		return rest;
+	};
+
+	if (way === "refusing-announcer") {
+		// The page announced before the publisher came, so it is asked first
+		// where it is asked at all.
+		const refusing = await startRefusingAnnouncer("announcer:own-browser", run);
+		const refusingSession = await sessionOfNewClient(run);
+		const page = { who: refusing.label, session: refusingSession };
+		const publisher = await withPublish();
+		expectAsks([{ ...page, asks: 0 }], run, "before a subscriber came");
+		const first = await join(0);
+		// "after its SUBSCRIBE_OK": the first subscriber is answered by the
+		// source there is, and the page is asked for it.
+		await relayPrinted(requestOpenedTowards(refusingSession), 1, run);
+		// The relay has dealt with the refusal when it ended its request.
+		await relayPrinted(ownRequestEnded(refusingSession), 1, run);
+		const rest = await joinRest(1);
+		const group = await publisher.send();
+		await allReceive([first, ...rest], group, publisher);
+		// "one that was asked and did not become a source: it refused" is not
+		// asked for the subscribers that came after.
+		expectAsks([{ ...page, asks: 1 }], run, "when every subscriber had come");
+		// "A publisher is asked again once it announces a namespace of the
+		// track anew".
+		await refusing.announce();
+		await relayPrinted(requestOpenedTowards(refusingSession), 2, run);
+		await relayPrinted(ownRequestEnded(refusingSession), 2, run);
+		expectAsks([{ ...page, asks: 2 }], run, "after it announced anew");
+		expectStillSubscribed([first, ...rest], run, "after a publisher refused");
+
+		await leaveInOrder(publisher, run);
+		// Sound as a count of what the relay did not do: the line that was
+		// just waited for, the end of the publisher's session, comes after
+		// every line of what went before.
+		expectAsks([{ ...page, asks: 2 }], run, "when the publisher had left");
+		const ended = await outcomes([first, ...rest]);
+		for (const { subscriber, outcome } of ended) {
+			expectPublishDone(subscriber, outcome, {
+				statusCode: TRACK_ENDED,
+				groups: [group],
+				abortedStreams: 0,
+			});
+		}
+		return {
+			summary: `the relay asked ${refusing.label} once for two subscribers after it refused, and again when it announced anew; the subscribers got Group ${group} from ${publisher.label}`,
+			subscriptions: subscriptionsOf(ended),
+			measured: {},
+		};
+	}
+
+	let first: Publisher;
+	let second: Publisher;
+	let subscribers: Subscriber[];
+	// What the relay has asked in all when the run is over.
+	let asksInAll: { who: string; session: number; asks: number }[];
+	if (way === "two-announcers") {
+		first = await announcer("announcer1:own-rust", 0);
+		second = await announcer("announcer2:own-rust", 1);
+		const sessions = [first, second].map((each) => ({
+			who: each.label,
+			session: sessionOf(each, run),
+		}));
+		expectAsks(
+			sessions.map((each) => ({ ...each, asks: 0 })),
+			run,
+			"before a subscriber came",
+		);
+		// The first subscriber is answered by whichever answers first.
+		subscribers = [await join(0)];
+		await asked(first);
+		await asked(second);
+		// "They are asked in the order they announced".
+		const order = relay
+			.matches(/^OPEN_REQUEST session=(\d+) /)
+			.map((match) => Number(captureGroup(match, 1)));
+		const expectedOrder = sessions.map(({ session }) => session);
+		if (order.join(",") !== expectedOrder.join(",")) {
+			throw new Error(
+				`the relay asked the sessions ${order.join(", ")}, not ${expectedOrder.join(", ")} in the order they announced`,
+			);
+		}
+		// Both are sources now: a subscriber that comes makes nobody be asked.
+		subscribers.push(...(await joinRest(1)));
+		asksInAll = sessions.map((each) => ({ ...each, asks: 1 }));
+		expectAsks(asksInAll, run, "when every subscriber had come");
+	} else {
+		first = await withPublish();
+		const publishing = { who: first.label, session: sessionOf(first, run) };
+		if (way === "announcer-and-publisher") {
+			second = await announcer("announcer:own-rust", 1);
+			const announced = { who: second.label, session: sessionOf(second, run) };
+			expectAsks([{ ...announced, asks: 0 }], run, "before a subscriber came");
+			subscribers = [await join(0)];
+			await asked(second);
+			subscribers.push(...(await joinRest(1)));
+			asksInAll = [
+				{ ...announced, asks: 1 },
+				{ ...publishing, asks: 0 },
+			];
+			expectAsks(asksInAll, run, "when every subscriber had come");
+		} else {
+			subscribers = await joinRest(0);
+			expectAsks(
+				[{ ...publishing, asks: 0 }],
+				run,
+				"before the announcer came",
+			);
+			second = await announcer("announcer:own-rust", 1);
+			const announced = { who: second.label, session: sessionOf(second, run) };
+			// "the relay answers it and then does the same": the SUBSCRIBE
+			// comes without a subscriber coming.
+			await asked(second);
+			asksInAll = [
+				{ ...announced, asks: 1 },
+				{ ...publishing, asks: 0 },
+			];
+			expectAsks(asksInAll, run, "after the announcer came");
+		}
+	}
+
+	const group0 = await first.send();
+	await allReceive(subscribers, group0, first);
+	const group1 = await second.send();
+	await allReceive(subscribers, group1, second);
+
+	await leaveInOrder(first, run);
+	expectStillSubscribed(subscribers, run, `when ${first.label} had left`);
+	await leaveInOrder(second, run);
+	// Sound as a count of what the relay did not do: the line that was just
+	// waited for, the end of the last publisher's session, comes after every
+	// line of what went before.
+	expectAsks(asksInAll, run, "when both publishers had left");
+	const ended = await outcomes(subscribers);
+	await expectOneObjectEach(subscribers, [group0], first);
+	await expectOneObjectEach(subscribers, [group1], second);
+	for (const { subscriber, outcome } of ended) {
+		expectPublishDone(subscriber, outcome, {
+			statusCode: TRACK_ENDED,
+			groups: [group0, group1],
+			abortedStreams: 0,
+		});
+	}
+	expectPublishDoneLines(subscribers, run);
+	await relayServesTheTrackAgain(run);
+
+	return {
+		summary: `the relay asked ${second.label}${way === "two-announcers" ? ` and ${first.label}` : ""} once each, and the subscribers got Group ${group0} from ${first.label} and Group ${group1} from ${second.label}`,
+		subscriptions: subscriptionsOf(ended),
+		measured: {},
+	};
+}
+
 /**
  * How long the relay waits for the streams a PUBLISH_DONE counted before it
  * gives the source up (`drain_timeout` in crates/relay/src/hub.rs,
@@ -1656,20 +1933,48 @@ async function publishAnew(run: Run): Promise<ScenarioResult> {
 	const first = await publisher.send();
 	await allReceive(subscribers, first, run);
 
-	const anew = await publisher.publishAnew(sameAlias);
 	// The client's first PUBLISH has Track Alias 1 (crates/moqt-client).
-	const expectedAlias = sameAlias ? 1 : 2;
+	const firstAlias = 1;
+	// WHY the relay's line is waited for between the PUBLISH_DONE and the
+	// PUBLISH: a relay that reads the PUBLISH first refuses it, as §5.1 has
+	// it do (`publishAnew` in clients.ts). `DRAIN_TIMER` is printed when the
+	// relay has read the PUBLISH_DONE and waits for the streams it counted,
+	// which is the state this scenario is about.
+	//
+	// What is left to time: the relay waits 2 seconds, and the PUBLISH has
+	// to be read within them. One that comes later finds the track over; the
+	// run fails then, and says that this is what happened.
+	const anew = await publisher.publishAnew(sameAlias, () =>
+		relayPrinted(
+			new RegExp(
+				`^DRAIN_TIMER session=${sessionOf(publisher, run)} track_alias=${firstAlias}$`,
+			),
+			1,
+			run,
+		),
+	);
+	const expectedAlias = sameAlias ? firstAlias : firstAlias + 1;
 	if (anew.trackAlias !== expectedAlias) {
 		throw new Error(
 			`${publisher.label} published anew under Track Alias ${anew.trackAlias}, not ${expectedAlias}`,
 		);
 	}
 	// "The subscribers stay": the track did not end between the two.
-	expectStillSubscribed(
-		subscribers,
-		run,
-		`when ${publisher.label} had published the track anew`,
+	//
+	// WHY a message of its own: this is where a run ends whose PUBLISH came
+	// after the relay's wait, and that is a matter of time and not of what
+	// the relay does with a PUBLISH that comes in time. A relay that does not
+	// wait at all ends here too; the time tells the two apart.
+	const gone = subscribers.filter(
+		(subscriber) =>
+			run.context.relay.matches(publishDoneSent(sessionOf(subscriber, run)))
+				.length > 0,
 	);
+	if (gone.length > 0) {
+		throw new Error(
+			`the track was over when the relay read the new PUBLISH of ${publisher.label}: it had sent PUBLISH_DONE to ${gone.map(({ label }) => label).join(", ")}. The PUBLISH was established ${seconds(anew.publishedAfterMs)} after this driver read the relay's DRAIN_TIMER line, and the relay waits ${seconds(RELAY_DRAIN_TIMEOUT_MS)} from that line. The run did not reach the state it is about`,
+		);
+	}
 	// The first PUBLISH stream cannot get a FIN: the streams its PUBLISH_DONE
 	// counted never all end. Under the same alias the relay resets it at
 	// once; under another the first source drains until the relay's wait for
@@ -1711,6 +2016,8 @@ async function publishAnew(run: Run): Promise<ScenarioResult> {
 		summary: `the subscribers stayed through a new PUBLISH under ${sameAlias ? "the same" : "another"} Track Alias and got Group ${first} before it and Group ${second} after; the relay ended the first PUBLISH stream by "${anew.peerEnd}" after ${seconds(anew.peerEndAfterMs)}`,
 		subscriptions: subscriptionsOf(ended),
 		measured: {
+			"ms from the relay reading PUBLISH_DONE to the new PUBLISH":
+				anew.publishedAfterMs,
 			"ms until the first PUBLISH stream ended": anew.peerEndAfterMs,
 		},
 	};
@@ -1725,6 +2032,7 @@ const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"second-source": secondSource,
 	"publish-while-asked": publishWhileAsked,
 	"publish-anew": publishAnew,
+	"ask-all": askAll,
 };
 
 async function main(): Promise<void> {

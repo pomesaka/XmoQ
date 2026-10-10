@@ -332,6 +332,11 @@ async function endWithPublishDone(): Promise<void> {
 }
 
 window.xmoqOwn = {
+	announceNamespace: withPlainErrors(async (namespace: string) => {
+		await connected().publishNamespace(namespaceFromPath(namespace));
+		console.log(`namespace announced: ${namespace}`);
+	}),
+
 	endTrack: withPlainErrors(async () => {
 		await endWithPublishDone();
 		console.log(`track ended: ${describe(await publishedTrack().ended)}`);

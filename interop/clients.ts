@@ -10,6 +10,7 @@ import {
 	type LoggedProcess,
 	NAMESPACE,
 	openConnectedPage,
+	pollFor,
 	type RunContext,
 	type RustClient,
 	spawnRustClient,
@@ -109,17 +110,31 @@ export interface Publisher {
 	sendBatch(count: number): Promise<number[]>;
 	/**
 	 * own-rust: ends its subscription with PUBLISH_DONE and publishes the
-	 * track anew on the same session at once, under the same Track Alias or
-	 * the next. The PUBLISH_DONE has the Stream Count of a publisher that
-	 * cannot count (2^62 - 1), so that the relay is still waiting for streams
-	 * of the first subscription when the PUBLISH comes. Resolves when the
-	 * client is ready to send again, with the alias of the new PUBLISH and
-	 * how, and how long after the request, the relay ended its direction of
-	 * the first PUBLISH stream.
+	 * track anew on the same session, under the same Track Alias or the next.
+	 * The PUBLISH_DONE has the Stream Count of a publisher that cannot count
+	 * (2^62 - 1), so that the relay is still waiting for streams of the first
+	 * subscription when the PUBLISH comes.
+	 *
+	 * `peerHasReadPublishDone` is awaited between the two: the PUBLISH is
+	 * sent when it resolves. WHY: the two messages are on two streams,
+	 * between which QUIC keeps no order, and a relay that reads the PUBLISH
+	 * first has to refuse it (`DUPLICATE_SUBSCRIPTION`, §5.1). A publisher
+	 * has no way to know; a driver that reads the relay's log has.
+	 *
+	 * Resolves when the client is ready to send again, with the alias of the
+	 * new PUBLISH, how long after `peerHasReadPublishDone` the PUBLISH was
+	 * established, and how, and how long after it, the relay ended its
+	 * direction of the first PUBLISH stream.
 	 */
 	publishAnew(
 		sameAlias: boolean,
-	): Promise<{ trackAlias: number; peerEnd: string; peerEndAfterMs: number }>;
+		peerHasReadPublishDone: () => Promise<void>,
+	): Promise<{
+		trackAlias: number;
+		publishedAfterMs: number;
+		peerEnd: string;
+		peerEndAfterMs: number;
+	}>;
 	/** Like `send`, and leaves the stream open. Only own-browser can. */
 	sendUnfinished(): Promise<number>;
 	/**
@@ -255,34 +270,50 @@ async function startRustPublisher(
 			Promise.resolve(
 				client.matches(/^PUBLISH_DONE_PEER_ENDED how=(.*)$/).at(-1)?.[1],
 			),
-		async publishAnew(sameAlias) {
+		async publishAnew(sameAlias, peerHasReadPublishDone) {
 			const PUBLISHED = /^PUBLISHED track_alias=(\d+) /;
 			const PEER_ENDED = /^PUBLISH_DONE_PEER_ENDED how=(.*)$/;
 			const before = {
 				published: client.matches(PUBLISHED).length,
 				peerEnded: client.matches(PEER_ENDED).length,
 			};
+			client.child.stdin.write("publish-done\n");
+			await client.waitForLine(/^PUBLISH_DONE_SENT$/);
+			await peerHasReadPublishDone();
 			const started = performance.now();
 			client.child.stdin.write(
-				sameAlias ? "republish-same-alias\n" : "republish\n",
+				sameAlias ? "publish-anew-same-alias\n" : "publish-anew\n",
 			);
+			// A client whose PUBLISH is refused ends with a line that says so;
+			// the run then fails with that line and not at a time limit.
+			let exited = false;
+			void client.exited.then(() => {
+				exited = true;
+			});
+			const orItsError = (pattern: RegExp, already: number) => () => {
+				const found = client.matches(pattern)[already];
+				if (found !== undefined || !exited) return found;
+				const error = client.matches(/^Error: (.*)$/).at(-1)?.[1];
+				throw new Error(
+					`${label} ended before it had published the track anew: ${error ?? "it printed no error"}`,
+				);
+			};
+			const published = await pollFor(
+				orItsError(PUBLISHED, before.published),
+				`${label} to print PUBLISHED for its new PUBLISH`,
+			);
+			const publishedAfterMs = Math.round(performance.now() - started);
 			// The client prints the line of the first subscription's end last,
 			// and reads its next line after that.
-			const peerEnded = await nextMatch(
-				client,
-				PEER_ENDED,
-				before.peerEnded,
+			const peerEnded = await pollFor(
+				orItsError(PEER_ENDED, before.peerEnded),
 				`${label} to say how the relay ended the first PUBLISH stream`,
 			);
-			const peerEndAfterMs = Math.round(performance.now() - started);
-			const published = client.matches(PUBLISHED)[before.published];
-			if (published === undefined) {
-				throw new Error(`${label} did not print PUBLISHED for its new PUBLISH`);
-			}
 			return {
 				trackAlias: Number(captureGroup(published, 1)),
+				publishedAfterMs,
 				peerEnd: captureGroup(peerEnded, 1),
-				peerEndAfterMs,
+				peerEndAfterMs: Math.round(performance.now() - started),
 			};
 		},
 		isServing: () =>
@@ -302,6 +333,26 @@ async function startRustPublisher(
 			return group;
 		},
 	};
+}
+
+/**
+ * An own page that announces the namespace and publishes nothing: a
+ * publisher that refuses when a relay asks it for a track of the namespace
+ * (`announceNamespace` in xmoq-page.ts).
+ */
+export async function startRefusingAnnouncer(
+	label: string,
+	run: ClientRun,
+): Promise<{ label: string; announce(): Promise<void> }> {
+	const page = await openConnectedPage(run.context, label, "own-browser");
+	const announce = (): Promise<void> =>
+		onPage(
+			label,
+			"announce the namespace",
+			page.evaluate((ns) => window.xmoqOwn.announceNamespace(ns), NAMESPACE),
+		);
+	await announce();
+	return { label, announce };
 }
 
 async function startBrowserPublisher(
@@ -589,27 +640,6 @@ function isPageProperty(value: unknown): value is PageProperty {
 		("varint" in value && typeof value.varint === "string") ||
 		("bytesHex" in value && typeof value.bytesHex === "string")
 	);
-}
-
-/**
- * The match of the pattern after the first `already` ones, once the process
- * printed it. WHY not `waitForLine`: that takes the first match there is,
- * and here the same line comes a second time.
- */
-async function nextMatch(
-	client: LoggedProcess,
-	pattern: RegExp,
-	already: number,
-	what: string,
-): Promise<RegExpMatchArray> {
-	const poll = async (): Promise<RegExpMatchArray> => {
-		for (;;) {
-			const found = client.matches(pattern)[already];
-			if (found !== undefined) return found;
-			await new Promise((resolve) => setTimeout(resolve, 20));
-		}
-	};
-	return withTimeout(poll(), what);
 }
 
 /**

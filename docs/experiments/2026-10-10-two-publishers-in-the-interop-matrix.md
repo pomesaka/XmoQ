@@ -208,6 +208,52 @@ That the reset after the wait has the code `0x1` under another alias as well was
 
 Subscribers were own-rust and own-browser. Not run: a stream of the first subscription that is still open when the track is published anew (the client finishes every stream it opens), and a publisher that counts from 0 again.
 
+### Which publishers the relay asks
+
+Added on 2026-10-11, on `main` at `3dfb27c8`, for a change to the relay merged in between (the relay sends its own SUBSCRIBE to every publisher that announced a matching namespace, where it asked the first one only). Scenario `ask-all` of `disconnect.ts` with `--ask`. The expectations were written from the notes' row "A SUBSCRIBE for a track that has no source, and which publishers the relay asks" before the runs and not changed after. Subscribers were own-rust and then own-browser in every run; what the relay asked is counted from its `OPEN_REQUEST` lines, a session at a time.
+
+| `--ask` | Who there is | Requirement, from the row | Checked by |
+|---|---|---|---|
+| `two-announcers` | two own-rust publishers that announce the namespace and send no PUBLISH | "The relay sends its own SUBSCRIBE to every publisher whose announced namespace matches [...] They are asked in the order they announced" | no SUBSCRIBE before a subscriber comes; then one to each, the first announcer's first; both accept; when the second subscriber has come, still one each. Group 0 comes from the first and Group 1 from the second, once each |
+| `announcer-and-publisher` | a publisher with PUBLISH, and an own-rust one that announces before the subscribers come | "The same is done for a track that has a source, each time a subscriber comes [...] the publishers of the namespace that are not a source of the track are asked, and one that accepts is one more source" | one SUBSCRIBE to the announcer when the first subscriber comes and none more for the second; none to the publisher with PUBLISH, which announced the namespace as well; a Group of each arrives |
+| `late-announcer` | the same, and the announcer comes after the subscribers | "When a PUBLISH_NAMESPACE arrives, the relay answers it and then does the same for every track in that namespace that has a subscriber" | no SUBSCRIBE while only the publisher with PUBLISH is there; one to the announcer when it has announced, without a subscriber coming; it accepts, and its Group arrives |
+| `refusing-announcer` | an own-browser page that announces and sends no PUBLISH, and an own-rust publisher with PUBLISH | "Not asked are [...] one that was asked and did not become a source: it refused [...] A publisher is asked again once it announces a namespace of the track anew" | one SUBSCRIBE to the page when the first subscriber comes; still one when the second has come; a second one when the page has announced the same namespace again. The subscribers stay and get the publisher's Group |
+
+In the first three, both publishers then leave one after the other: the subscriptions go on when the first has left, and end with PUBLISH_DONE `TRACK_ENDED`, Stream Count 2, when the second has, and the relay serves the track again.
+
+**An own-browser publisher cannot answer the relay's SUBSCRIBE.** `@xmoq/moqt` answers every request the peer opens with REQUEST_ERROR NOT_SUPPORTED (`0x3`); its README lists that as not implemented. A page that announces a namespace without PUBLISH therefore refuses, and `refusing-announcer` uses exactly that: the page's log has the relay's SUBSCRIBE arrive and REQUEST_ERROR `0x3` go back, twice. A browser publisher that is to be asked for tracks needs that part of the library first. The own Rust client is the one client here that only announces and serves; the copies of the moqtail clients send PUBLISH (read in `interop/peers/`, not run).
+
+| Run | Result |
+|---|---|
+| `two-announcers`; `announcer-and-publisher` and `late-announcer`, each with an own-rust and with an own-browser publisher with PUBLISH; `refusing-announcer` | all six passed at the first run, as first written |
+| `mise run check`, `mise run interop` | passed; 70 of 70 pairings in 45.7 seconds. The matrix has four of the six: `two-announcers`, `announcer-and-publisher` with own-browser, `late-announcer` with own-rust, `refusing-announcer` |
+| The 30 leaving scenarios, 20 rounds, 03:24 to 03:32 with no sleep in the power log | 20 of 20 rounds, 22.4 to 33.9 seconds a round |
+| Temporary change to the relay core, taken back: only the first publisher that can be asked is asked | `two-announcers` fails: `timed out waiting for announcer2:own-rust to print /^SERVING /` |
+| Temporary change, taken back: publishers that refused are not left out | `refusing-announcer` fails: "the relay had sent announcer:own-browser (session 0) 2 SUBSCRIBE(s) when every subscriber had come, not 1" |
+| Temporary change, taken back: the sources of the track are not left out of those to ask | **`announcer-and-publisher` and `late-announcer` still pass.** The publisher with PUBLISH was not sent a SUBSCRIBE all the same: the relay's session with it refuses a second subscription to the track, a second guard (`ask` in `crates/relay-core/src/routing.rs`). So the check "none to the publisher with PUBLISH" was not seen to fail |
+
+Not run: a publisher that refuses with another code or does not answer in 5 seconds, more publishers than a track has room for, a namespace that matches as a prefix only, and a refusal that ends a track without a source.
+
+### Two failures in CI, and what they were
+
+Added on 2026-10-11. The interop job of the pull request that added `ask-all` ended with 68 of 70 (run 38076391019). Neither failure was the relay's.
+
+**1. `publish-anew` under the same Track Alias: the PUBLISH was read before the PUBLISH_DONE.** The relay answered the new PUBLISH with REQUEST_ERROR `0x19` (DUPLICATE_SUBSCRIPTION) and printed `DRAIN_TIMER` for the first subscription right after: it read the PUBLISH, on its stream, before the PUBLISH_DONE, on another. QUIC keeps no order between streams, and until the PUBLISH_DONE is read the first subscription is Established, so the refusal is what draft 18 §5.1 asks for ("If an endpoint receives a message attempting to establish a second subscription to a Track with the same role, it MUST fail that request with a DUPLICATE_SUBSCRIPTION error"). The check is in `crates/moqt/src/session/peer.rs` and does not look at the Track Alias, so the pairing under another alias can fail the same way. The implementation notes have this as the third outcome of a PUBLISH that follows a PUBLISH_DONE at once ("And there is a third outcome", row "PUBLISH for a track the relay knows already").
+
+| | |
+|---|---|
+| Here, eight runs side by side, the two pairings in turn, as they were | 1 of 287 runs, under the same alias, with the same order of lines as in CI |
+| The scenario as it is now | The client's step is two lines on its stdin: `publish-done`, then `publish-anew` or `publish-anew-same-alias`. Between them the driver waits for the relay's `DRAIN_TIMER session=N track_alias=1`, which the relay prints when it has read the PUBLISH_DONE and waits for the streams it counted. The state the scenario is about is then reached by what is observed, and not by which stream is read first |
+| The same load, as it is now | **640 of 640 runs passed**, 320 of each pairing (04:17 to 04:21, no sleep in the power log) |
+| What is still a matter of time | The relay waits 2 seconds from that line, and the PUBLISH has to be read within them. A run in which it is not fails with "the track was over when the relay read the new PUBLISH ... The run did not reach the state it is about" (seen by holding the PUBLISH back for 2.3 seconds, a temporary change) |
+| A refusal all the same | The run fails at once with the client's own line: "pub:own-rust ended before it had published the track anew: PUBLISH rejected: error_code=0x19" (seen with a client changed, for one run, to send no PUBLISH_DONE and a driver that did not wait) |
+
+**For a publisher outside these runs the race stays.** The driver can order the two because it reads the relay's log; a publisher cannot, and all it has is what the notes say there.
+
+**2. `ask-all`, `late-announcer`: the driver counted the relay's lines too early.** "the relay had sent announcer:own-rust (session 3) 0 SUBSCRIBE(s) after the announcer came, not 1", while the relay's log of that run has the `OPEN_REQUEST` two lines later. The driver waited for the publisher's `SERVING` and then counted the relay's lines; the lines of two processes reach the driver in no order. Now it waits for the relay's `OPEN_REQUEST` towards that session as well, which is certain to come once the publisher serves, in all four ways. What the relay did not ask is counted once more after the line of the last publisher's session ending, which comes after every line of what went before; no time is waited for it.
+
+**A fault of the driver that made the first failure look like a time limit.** Two waits added with these scenarios (`nextMatch` in `clients.ts`, `relayPrinted` in `disconnect.ts`) went on looking after their time was up: the run printed `FAILED` after 20 seconds and did not end, and the matrix stopped it at its limit of 120 seconds. Both now use `pollFor` in `harness.ts`, which stops at its limit. With a line that never comes, a run now ends 20 seconds in, with its own message.
+
 ## Limitations and blockers
 
 - **The relay change was under review when the runs were made.** The last runs are on `a44c8854`; if it changes again, they have to be made again.

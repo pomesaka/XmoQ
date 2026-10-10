@@ -94,6 +94,12 @@ pub fn update_refused() {
     println!("UPDATE_REFUSED");
 }
 
+/// This client sent `PUBLISH_DONE` and goes on with the session: the first
+/// of the two steps of publishing a track anew.
+pub fn publish_done_sent() {
+    println!("PUBLISH_DONE_SENT");
+}
+
 /// How the peer ended its direction of the request stream after this client's
 /// `PUBLISH_DONE`, or `None` when it did not in time.
 ///

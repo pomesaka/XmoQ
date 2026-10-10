@@ -40,6 +40,12 @@ export type XmoqPage = {
  * it came, so these are not part of `XmoqPage`.
  */
 export type OwnPageExtras = {
+	/**
+	 * Sends PUBLISH_NAMESPACE and no PUBLISH. `@xmoq/moqt` answers a request
+	 * the peer opens with REQUEST_ERROR NOT_SUPPORTED, so a page that only
+	 * announced refuses the SUBSCRIBE a relay sends it for a track.
+	 */
+	announceNamespace(namespace: string): Promise<void>;
 	/** Ends the published Track with PUBLISH_DONE, Status Code TRACK_ENDED. */
 	endTrack(): Promise<void>;
 	/**
