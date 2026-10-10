@@ -97,7 +97,7 @@ bun disconnect.ts --scenario publisher-killed --publisher own-rust --subscriber 
 
 Three of them wait for the relay to give up on a client that vanished: 9 to 13 seconds when this table was made, 6 to 9 since the relay's idle timeout is 6 seconds. They start together, after the 32 pairings, and go on beside the ten others. With everything built, `mise run interop` took 30.0 to 44.6 seconds for the 45 pairings in four runs; it took 17.7 seconds for the 32 before this change. The longer runs are those in which moqtail-rust left without the relay hearing of it (below), which adds 13 seconds to a pairing.
 
-The 13 scenarios were run 20 times in a row with `bun matrix.ts --relay own --only "leaving: "`, twelve times over:
+The 13 scenarios were run 20 times in a row with `bun matrix.ts --relay own --only "leaving: "`, 15 times over (sets 1 to 12 with 13 scenarios, sets 13 to 15 with 14):
 
 | Set of 20 rounds | Library of the relay and own-rust | Driver | Rounds in which all 13 ended as expected | Seconds a round |
 |---|---|---|---|---|
@@ -112,7 +112,10 @@ The 13 scenarios were run 20 times in a row with `bun matrix.ts --relay own --on
 | 9 | The same | As committed | 20 | 13.1 to 14.9 |
 | 10 | The relay with an idle timeout of 6 seconds and CANCELLED for every stream it cuts short (`main` after pull request 17) | With a bound of 12 seconds and CANCELLED alone accepted, and a wait for the relay to print the STOP_SENDING of a page that cancels | 18 | 12.4 to 33.6 |
 | 11 | The same | The STOP_SENDING is looked at where it was printed | 20 | 12.3 to 24.3 |
-| 12 | The same | As committed: bounds of 10.5 seconds for a killed publisher and 7.5 for a killed subscriber, and the STOP_SENDING of moqtail-browser has to be printed | 20 | 12.5 to 21.4 |
+| 12 | The same | Bounds of 10.5 seconds for a killed publisher and 7.5 for a killed subscriber, and the STOP_SENDING of moqtail-browser has to be printed | 20 | 12.5 to 21.4 |
+| 13 | The same, and `@xmoq/moqt` with its bound on the streams it takes (64). Run on the driver as it was before set 12: a bound of 12 seconds for a killed client | 14 scenarios, with the page that does not read, one after the other | 20 | 19.2 to 24.9 |
+| 14 | The same, on the driver of set 12 | The page that does not read runs beside the three runs that wait | 20 | 13.3 to 24.0 |
+| 15 | The same | As committed: also the checks that no stream is opened after the cut-off and that the streams cut short carry TOO_FAR_BEHIND, and at most 833 Objects for the page | 20 | 13.2 to 17.8 |
 
 **Three runs failed, one of 780 before the change of library and two of 780 after it, all because an own-rust client could not connect to the relay.** Nothing of the scenario itself had started in the first, and the scenario was over in the two others.
 
@@ -243,6 +246,29 @@ With own-rust as the publisher the cut-off came after 8.1 seconds (measured befo
 
 Two things are behind it. Chromium takes a short stream off the connection whether or not the page reads it, so the relay never runs out of stream credit. And `@xmoq/moqt` holds more than its `subscriptionHighWaterMark` of 16 Objects: every subgroup stream reads up to its first whole Object and only then waits for room, so with one Object per stream the queue grew by one Object per stream without a bound. The second is a defect of the package against the rule that receive queues are bounded.
 
+**Since `@xmoq/moqt` takes a bounded number of the peer's streams at once (64 by default), a page that does not read is cut off**, and the matrix has it as a 14th scenario (`--slow unread-own-browser`). The page subscribes and never reads `Subscription.objects`; an own-browser publisher sends 57-byte Objects, one a stream; an own-browser and an own-rust subscriber read. 20 rounds each:
+
+| Measured | Set 13, one after the other | Sets 14 and 15, beside the three runs that wait |
+|---|---|---|
+| Rounds in which the page got PUBLISH_DONE `TOO_FAR_BEHIND` with Stream Count 2^62 - 1, its session stayed, and the two readers got every Object | 20 of 20 | 40 of 40 |
+| Objects the publisher had sent when the driver saw the cut-off (it looks after every 64) | 577 or 641 | 577 in 37 rounds, 641 in 3 |
+| Time from the first Object the page did not take to the cut-off | 0.8 to 1.6 seconds | 1.3 to 3.5 seconds |
+| Time of the scenario | 6.7 to 7.8 seconds | 8.3 to 10.9 seconds |
+| Time from killing an own-rust publisher to PUBLISH_DONE, in the run beside it | 9.0 seconds, 20 of 20 (set 12, without this scenario) | 9.0 seconds, 40 of 40 |
+| Time from killing an own-rust subscriber to the relay dropping its session, in the run beside it | 6.0 to 6.1 seconds (set 12) | 6.0 to 6.1 seconds |
+
+**The scenario runs beside the three that wait.** Its first seconds are busy, and they are the first seconds of the runs that have a bound of 10.5 and 7.5 seconds on how long the relay takes to notice a killed client. Those times did not move in 40 rounds, and no round failed. A round of the leaving scenarios takes 13.2 seconds at best with it, where it took 12.5 without and 19.2 with the scenario run alone. The scenario itself is slower beside the others; what it is judged on is counted, not timed.
+
+What the numbers count, in one run looked at line by line. The publisher had sent 641 Objects when the driver saw the cut-off. The relay had taken 603 of them by then and printed `OPEN_DATA` for 603 streams towards the page, which it prints when it books a stream and not when the stream is open. It reset 257 of the 603, the 256 that waited and the one that made it cut the subscription off, with `RESET_DATA … code=0x5`, TOO_FAR_BEHIND. So 346 streams reached the page's browser, of which the library took 64. In sets 14 and 15 every run reset 257 streams, and every code was `0x5`; the stopped own-rust subscriber of the other scenario was cut off after 385 Objects in 20 of 20, also with 257 resets of `0x5`.
+
+The driver checks these since set 15: the relay opens no stream towards the page for the Group sent after the cut-off (§10.11), the session is still there after the page's wait, every stream the relay reset has code `0x5` and there is at least one (§3.3.3), and the publisher needs at most 833 Objects, so that a library that takes a few hundred streams more fails. The code is read from the relay's log: the page never sees those streams, as they were not opened. With the expected code changed, the run failed.
+
+The page reports the end about 5 seconds after the cut-off: the Stream Count says nothing, so the library waits for late streams (`DEFAULT_PUBLISH_DONE_TIMEOUT_MS` in `packages/moqt/src/webtransport/connection.ts`).
+
+Not in the matrix: a page that does not read while each stream carries one large Object. There the page was not told that its subscription had ended ([record](2026-10-10-subscription-backlog-in-chromium.md)), a known gap.
+
+**A STOP_SENDING on a data stream was not produced by this scenario either.** The Objects are small, so the relay had finished every stream it opened before the page stopped anything, and it printed no `STOP_SENDING_RECEIVED … out=` line. A stream the relay is still writing when the subscriber stops it needs an Object too large for the flow control window, which is the case above that is not in the matrix.
+
 ### How `Subscription.ended` resolved in own-browser
 
 | Scenario | `ended` | `objects` |
@@ -253,7 +279,7 @@ Two things are behind it. Chromium takes a short stream off the connection wheth
 | Another subscriber leaves, in any way | Not resolved until the track ends, then `publish-done`, status 2 | Every Object, then closed |
 | The page closes its own session (`close()`) | `session-closed` | Closed at once |
 | The page cancels (`cancel()`) | Not reached: `cancel()` rejects with a TypeError (above) | |
-| The relay cuts the subscription off (`TOO_FAR_BEHIND`) | Not produced: no page could be made slow (above) | |
+| The relay cuts the subscription off (`TOO_FAR_BEHIND`) | `publish-done` with status `0x5`, after the library's wait for late streams, since the page that does not read is cut off. When this table was made: Not produced: no page could be made slow (above) | |
 
 `peer-closed` and `peer-reset` did not occur. The own relay ends a subscription it serves with PUBLISH_DONE in every case reached here, which is what §11.4.1 asks for, so `publish-done` is the expected reason in all of them and none differs from the draft. `session-closed` by the relay did not occur either: no scenario makes the relay close the session of a browser subscriber, so none of the expected values here depends on what a browser sees of a session the relay closes.
 
@@ -263,7 +289,7 @@ Two things are behind it. Chromium takes a short stream off the connection wheth
 - **Three runs of 1560 failed because a client could not connect to the relay** (above), all with an own-rust client that bound a socket for IPv4 and IPv6. own-rust binds differently since `7f98929`; moqtail-rust does not, so the same can still fail the CI job.
 - **Two runs of 520 after that failed because the relay's port was in use**, for a reason that is not known (above).
 - Fixed since, see the section on the defect; kept as it was written. **One run is expected to fail**, the browser subscriber that cancels, until `@xmoq/moqt` builds `WebTransportError` the way Chromium takes it. Until then rows 13 and 14 are not shown for the browser client.
-- **The slow subscriber is a stopped process, not a slow reader.** It takes nothing at all and acknowledges nothing. A reader that is merely slower than the publisher is not covered, and neither is a browser.
+- When this was written: **The slow subscriber is a stopped process, not a slow reader.** It takes nothing at all and acknowledges nothing. A reader that is merely slower than the publisher is not covered, and neither is a browser. Since set 13 a browser is covered, by a page that does not read; it too takes nothing at all, and a reader that is merely slower is still not covered.
 - **Three runs depend on the relay's idle timeout** and so on a provisional value. They run beside the others to keep the matrix short, which puts up to four Chromium instances on the machine at its start.
 - **The driver reads six kinds of lines of the own relay's log**: `SESSION_OPENED`, `SESSION_CLOSED`, `FINISH_REQUEST` or `RESET_REQUEST`, `OPEN_DATA`, the `SEND` of a PUBLISH_DONE with status `0x5`, and `CLOSE_SESSION`. A killed client says nothing and a stopped one reads nothing, so there is no other place to wait. A change to the form of the first five fails the runs, because each is waited for at least once in every run. A change to `CLOSE_SESSION` does not: that line only has to be absent.
 - **Which session belongs to which client is taken from the order in which the clients connect.** The relay prints no address. A client that connected out of turn would be mistaken for another.

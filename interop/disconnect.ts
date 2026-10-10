@@ -13,9 +13,10 @@
 //     The publisher sends one Object and closes the session at once.
 //   subscriber-leaves       --leaver <client>:<cancel|close|kill>... --stayer <client>...
 //     The publisher and the stayers go on after the leavers left.
-//   slow-subscriber         --subscriber <client>...
-//     An own-rust subscriber whose process is stopped takes nothing and is cut
-//     off; the others get every Object.
+//   slow-subscriber         --subscriber <client>... [--slow stopped-own-rust|unread-own-browser]
+//     A subscriber that takes nothing is cut off; the others get every Object.
+//     stopped-own-rust: an own-rust client whose process is stopped.
+//     unread-own-browser: an own-browser page that subscribes and never reads.
 //   <client>: own-browser | own-rust | moqtail-browser | moqtail-rust
 //
 // What each scenario has to show is listed in
@@ -58,6 +59,17 @@ const TOO_FAR_BEHIND = 0x5;
  * `SendLimits` in crates/moqt-io), on top of the streams it could still open.
  */
 const SLOW_SUBSCRIBER_MAX_OBJECTS = 2000;
+/**
+ * The same for a page that does not read. The page's library takes 64
+ * streams at once (`maxPeerUniStreams`) and Chromium holds some more; in 60
+ * rounds the publisher had sent 577 or 641 Objects when the relay cut the
+ * page off, alone or beside other runs. The number follows from counts and
+ * not from time.
+ *
+ * WHY so close to what was measured: a library that takes a few hundred
+ * streams more would still be cut off, only later, and has to fail here.
+ */
+const UNREAD_PAGE_MAX_OBJECTS = 833;
 /** Objects it sends before it looks whether the relay has cut the subscriber off. */
 const SLOW_SUBSCRIBER_BATCH = 64;
 
@@ -117,6 +129,8 @@ const stopSendingReceived = (session: number): RegExp =>
 	new RegExp(
 		`^STOP_SENDING_RECEIVED session=${session} stream=\\d+ code=(\\S+)$`,
 	);
+/** The relay reset a stream towards a subscriber; capture group 1 is the code. */
+const streamReset = /^RESET_DATA out=\d+ code=(\S+)$/;
 /** The relay opened a subgroup stream of the Group towards the session. */
 const streamOpened = (session: number, group: number): RegExp =>
 	new RegExp(`^OPEN_DATA session=${session} out=\\d+ .* group=${group}$`);
@@ -147,6 +161,7 @@ const { values: options } = parseArgs({
 		leaver: { type: "string", multiple: true, default: [] },
 		stayer: { type: "string", multiple: true, default: [] },
 		"with-publish-done": { type: "boolean", default: false },
+		slow: { type: "string", default: "stopped-own-rust" },
 		port: { type: "string", default: "44340" },
 		verbose: { type: "boolean", default: false },
 	},
@@ -700,10 +715,23 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 			`${publisher.kind} sends one Object, too few to fall behind`,
 		);
 	}
-	// WHY a stopped process and not a page that does not read: a page that
-	// never read its Objects took every one of them, see the record named at
-	// the top of this file.
-	const slow = await joinAsSubscriber("own-rust", "slow:own-rust", run);
+	// Two ways not to take what is sent. A stopped process answers nothing
+	// at all; a page that does not read leaves the streams with its browser,
+	// and its session goes on answering.
+	if (
+		options.slow !== "stopped-own-rust" &&
+		options.slow !== "unread-own-browser"
+	) {
+		throw new Error(
+			`--slow "${options.slow}" is neither stopped-own-rust nor unread-own-browser`,
+		);
+	}
+	const unread = options.slow === "unread-own-browser";
+	const slow = unread
+		? await joinAsSubscriber("own-browser", "slow:own-browser", run, {
+				withoutReading: true,
+			})
+		: await joinAsSubscriber("own-rust", "slow:own-rust", run);
 	const readers = await joinAsSubscribers(
 		options.subscriber.map((value) => parseClient("subscriber", value)),
 		"sub",
@@ -711,13 +739,17 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 	);
 	const relay = run.context.relay;
 
-	// It is a working subscriber until it is stopped.
 	const groups = [await publisher.send()];
-	await allReceive([slow, ...readers], 0, run);
-	await slow.setStopped(true);
+	if (unread) {
+		await allReceive(readers, 0, run);
+	} else {
+		// It is a working subscriber until it is stopped.
+		await allReceive([slow, ...readers], 0, run);
+		await slow.setStopped(true);
+	}
 	const stopped = performance.now();
 
-	// Sends until the relay has cut the stopped subscriber off.
+	// Sends until the relay has cut the subscriber off.
 	let cut: "cut" | Error | undefined;
 	const watching = relay
 		.waitForLine(cutOffSent(sessionOf(slow, run)), DISCONNECT_TIMEOUT_MS)
@@ -730,7 +762,10 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 			},
 		);
 	while (cut === undefined) {
-		if (groups.length >= SLOW_SUBSCRIBER_MAX_OBJECTS) {
+		if (
+			groups.length >=
+			(unread ? UNREAD_PAGE_MAX_OBJECTS : SLOW_SUBSCRIBER_MAX_OBJECTS)
+		) {
 			throw new Error(
 				`${slow.label} was not cut off after ${groups.length} Objects it did not take`,
 			);
@@ -751,14 +786,38 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 	groups.push(last);
 	await allReceive(readers, last, run);
 
-	// Only the subscription was ended: the relay still serves the session.
-	if (relay.matches(sessionClosed(sessionOf(slow, run))).length > 0) {
+	// §10.11: no stream is opened for a subscription after its PUBLISH_DONE.
+	// `last` was sent after the cut-off, and the readers have it.
+	const slowSession = sessionOf(slow, run);
+	if (relay.matches(streamOpened(slowSession, last)).length > 0) {
+		throw new Error(
+			`the relay opened a stream of Group ${last} towards ${slow.label} after it had ended its subscription`,
+		);
+	}
+	// §3.3.3: the streams the relay cut short say why. Read from the relay's
+	// log: they are the streams it could not open, so the subscriber never
+	// saw them reset.
+	const cutShort = relay
+		.matches(streamReset)
+		.map((match) => captureGroup(match, 1));
+	if (cutShort.length === 0 || cutShort.some((code) => code !== "0x5")) {
+		throw new Error(
+			`the relay reset ${cutShort.length} streams when it cut ${slow.label} off, with the codes [${[...new Set(cutShort)]}], not TOO_FAR_BEHIND alone`,
+		);
+	}
+	if (!unread) await slow.setStopped(false);
+	// The page ends the subscription only when the library's wait for late
+	// streams is over, as the Stream Count says nothing:
+	// DEFAULT_PUBLISH_DONE_TIMEOUT_MS in
+	// packages/moqt/src/webtransport/connection.ts, 5 seconds.
+	const cutOff = await slow.outcome();
+	// Only the subscription was ended: the relay still serves the session,
+	// also after that wait.
+	if (relay.matches(sessionClosed(slowSession)).length > 0) {
 		throw new Error(
 			`the relay dropped the session of ${slow.label}, where it had to end its subscription only`,
 		);
 	}
-	await slow.setStopped(false);
-	const cutOff = await slow.outcome();
 	expectPublishDone(slow, cutOff, { statusCode: TOO_FAR_BEHIND });
 	// §10.11: a publisher that cannot give the exact number of streams gives
 	// 2^62 - 1. The relay could not open every stream it had for this
@@ -768,9 +827,9 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 			`${slow.label}: PUBLISH_DONE has Stream Count ${cutOff.streamCount}, not 2^62 - 1: ${cutOff.reported}`,
 		);
 	}
-	// Not compared: the streams it sees reset. In every run so far it saw
-	// none, because the streams the relay reset were the ones it could not
-	// open while the subscriber gave it no more stream credit.
+	// Not compared: the streams the subscriber sees reset. In every run so
+	// far it saw none, because the streams the relay reset were the ones it
+	// could not open while the subscriber gave it no more stream credit.
 
 	expectOwnPublishDone(publisher, await publisher.end());
 	const ended = await outcomes(readers);
@@ -784,14 +843,14 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 	await relayServesTheTrackAgain(run);
 
 	return {
-		summary: `the stopped subscriber was cut off with TOO_FAR_BEHIND after ${sentUntilCutOff} Objects; the others received all ${groups.length}`,
+		summary: `the ${unread ? "page that did not read" : "stopped subscriber"} was cut off with TOO_FAR_BEHIND after ${sentUntilCutOff} Objects; the others received all ${groups.length}`,
 		subscriptions: subscriptionsOf([
 			...ended,
 			{ subscriber: slow, outcome: cutOff },
 		]),
 		measured: {
 			"Objects sent until the relay cut the subscriber off": sentUntilCutOff,
-			"ms from stopping the subscriber to the cut-off": msUntilCutOff,
+			"ms from the first Object it did not take to the cut-off": msUntilCutOff,
 		},
 	};
 }
@@ -827,6 +886,9 @@ async function main(): Promise<void> {
 			clients: [
 				publisher,
 				...subscribers,
+				...(options.slow === "unread-own-browser"
+					? ["own-browser" as const]
+					: []),
 				// The run that follows every scenario uses the own Rust client.
 				"own-rust",
 			],

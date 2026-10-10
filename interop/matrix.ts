@@ -37,8 +37,9 @@ interface Pairing {
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
-	 * Set where the run spends most of its time waiting for the relay to give
-	 * up on a client that vanished (6 to 9 seconds each, measured). These run
+	 * Set where the run spends most of its time waiting: for the relay to give
+	 * up on a client that vanished (6 to 9 seconds each, measured), or for a
+	 * page to give up on late streams (5 seconds). These run
 	 * beside the others, so that the matrix does not grow by the sum of the
 	 * waits.
 	 */
@@ -335,6 +336,27 @@ const DISCONNECTS: Pairing[] = [
 			"own-browser",
 			...each("subscriber", ["own-browser", "own-rust"]),
 		],
+	},
+	{
+		// The publisher has sent 577 or 641 Objects, one a stream, when the relay
+		// cuts the page off: 256 streams wait that the browser does not let it
+		// open. The Objects are small on purpose: with one large Object a
+		// stream, the page was not told that its subscription had ended
+		// (docs/experiments/2026-10-10-subscription-backlog-in-chromium.md).
+		name: "an own-browser page that does not read is cut off (TOO_FAR_BEHIND); own-browser and own-rust get everything",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"slow-subscriber",
+			"--slow",
+			"unread-own-browser",
+			"--publisher",
+			"own-browser",
+			...each("subscriber", ["own-browser", "own-rust"]),
+		],
+		// The cut-off comes within 2 seconds; the 5 seconds after it are the
+		// library's wait for late streams before it ends the subscription.
+		mostlyWaits: true,
 	},
 ];
 

@@ -52,6 +52,14 @@ export type OwnPageExtras = {
 	): Promise<void>;
 	/** How the subscription made with PUBLISH ended, as JSON of the library's `PublishEnd`. */
 	publishEnd(): Promise<string>;
+	/**
+	 * Subscribes like `subscribe` and never reads the Objects, as an
+	 * application that has stopped taking them.
+	 */
+	subscribeWithoutReading(
+		namespace: string,
+		trackName: string,
+	): Promise<string>;
 	/** The payload of Object 0 of the Group, once it has arrived. */
 	objectOfGroup(group: string): Promise<string>;
 	/** Cancels the subscription and keeps the session. */
