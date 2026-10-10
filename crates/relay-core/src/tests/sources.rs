@@ -1099,3 +1099,160 @@ fn nothing_is_left_when_everyone_has_gone() {
         }
     );
 }
+
+#[test]
+fn a_track_whose_sources_drain_goes_on_with_a_publisher_that_comes() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    stream_from(&mut relay, PUBLISHER, 7, 1);
+    // The publisher says PUBLISH_DONE and counts two streams, of which one
+    // has come: the track drains.
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 2),
+    });
+    // Bob's PUBLISH is accepted, and the track is one a subscriber can come
+    // to again (§9.4): Carol gets SUBSCRIBE_OK, with Bob's Track Properties.
+    assert_eq!(publishes_a(&mut relay, BOB, BOBS_ALIAS), [publish_ok(BOB)]);
+    let carol = SessionKey(4);
+    relay.step(Event::SessionOpened {
+        session: carol,
+        role: Role::Server,
+    });
+    assert_eq!(
+        subscribe_to_track(&mut relay, carol),
+        [Action::SendRequest {
+            session: carol,
+            stream: StreamKey(0),
+            message: ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: 0,
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+        }]
+    );
+    // Alice, who was there, gets what Bob sends, and so does Carol.
+    assert_eq!(
+        stream_from(&mut relay, BOB, 8, 2),
+        [
+            open_data_stream(ALICE, 1, header_of_group(0, 2)),
+            open_data_stream(carol, 2, header_of_group(0, 2)),
+        ]
+    );
+    // The publisher's second stream comes and ends, and then its first: the
+    // publisher is let go, and nothing is said to the subscribers.
+    stream_from(&mut relay, PUBLISHER, 9, 3);
+    closed_from(&mut relay, PUBLISHER, 9, StreamEnd::Fin);
+    let last = closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Fin);
+    assert_eq!(
+        last,
+        [
+            Action::FinishDataStream {
+                out_stream: OutStreamKey(0),
+            },
+            Action::FinishRequest {
+                session: PUBLISHER,
+                stream: StreamKey(0),
+            },
+        ]
+    );
+    let counts = relay.counts();
+    assert_eq!(
+        (counts.tracks, counts.sources, counts.subscriptions),
+        (1, 1, 2)
+    );
+}
+
+#[test]
+fn a_track_drains_again_when_the_publisher_that_came_goes_first() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    stream_from(&mut relay, PUBLISHER, 7, 1);
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 2),
+    });
+    // Bob comes to the draining track, and goes before the publisher's last
+    // stream has come. Alice stays subscribed: the track still has the
+    // publisher's source, which drains.
+    assert_eq!(publishes_a(&mut relay, BOB, BOBS_ALIAS), [publish_ok(BOB)]);
+    assert_eq!(relay.step(Event::SessionClosed { session: BOB }), []);
+    let counts = relay.counts();
+    assert_eq!(
+        (counts.tracks, counts.sources, counts.subscriptions),
+        (1, 1, 1)
+    );
+    // No Established source is left, so a subscriber that comes now is turned
+    // away with DOES_NOT_EXIST (0x10), as before Bob came.
+    let carol = SessionKey(4);
+    relay.step(Event::SessionOpened {
+        session: carol,
+        role: Role::Server,
+    });
+    assert_eq!(
+        subscribe_to_track(&mut relay, carol),
+        [
+            Action::SendRequest {
+                session: carol,
+                stream: StreamKey(0),
+                message: request_error(0x10),
+            },
+            Action::FinishRequest {
+                session: carol,
+                stream: StreamKey(0),
+            },
+        ]
+    );
+    // The track ends when the wait for the publisher's streams is over.
+    let mut expected = vec![
+        stopped(PUBLISHER, 7),
+        Action::ResetRequest {
+            session: PUBLISHER,
+            stream: StreamKey(0),
+            code: 0x1,
+        },
+        reset(0, 0x1),
+    ];
+    expected.extend(done_actions(ALICE, 0x2, 1));
+    assert_eq!(
+        relay.step(Event::DrainTimeout {
+            session: PUBLISHER,
+            track_alias: UPSTREAM_ALIAS,
+        }),
+        expected
+    );
+}
+
+#[test]
+fn a_publisher_that_takes_over_a_draining_track_has_to_go_on_with_its_groups() {
+    // The expectations below are spelled out for 8 Groups.
+    assert_eq!(crate::MAX_REMEMBERED_GROUPS, 8);
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    // The publisher is at Group 50 when it says PUBLISH_DONE; one stream it
+    // counted has not come, so the track drains.
+    stream_from(&mut relay, PUBLISHER, 7, 50);
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 2),
+    });
+    assert_eq!(publishes_a(&mut relay, BOB, BOBS_ALIAS), [publish_ok(BOB)]);
+    // (the Group Bob sends). Bob counts from 0. Alice is subscribed to the
+    // track as it was and has had Groups up to 50, so what is 8 or more
+    // behind that is left; Bob is told nothing but the stop of each stream.
+    for (stream, group) in [(1, 0), (2, 1), (3, 41), (4, 42)] {
+        assert_eq!(
+            stream_from(&mut relay, BOB, stream, group),
+            [stopped(BOB, stream)],
+            "{group}"
+        );
+    }
+    // From Group 43 on Bob is heard: Alice's second stream.
+    assert_eq!(
+        stream_from(&mut relay, BOB, 5, 43),
+        [open_data_stream(ALICE, 1, header_of_group(0, 43))]
+    );
+}

@@ -579,8 +579,10 @@ struct Track {
     /// are there for. Which Groups those are is not known once they are older
     /// than what the relay remembers.
     had_several_sources: bool,
-    /// What is still asked of other publishers. Empty today: one publisher
-    /// is asked, and its answer is what gave the track its source.
+    /// What is asked of a publisher and not answered yet. A track has one
+    /// when it got its source from a PUBLISH of another publisher while the
+    /// relay waited for this answer; it ends with the answer, with its time,
+    /// with the publisher, with the last subscriber and with the track.
     asks: Vec<Ask>,
     /// Track Properties, as the source that came last gave them; §9.6 has
     /// the relay pass them on. §2.5: "the most recent set SHOULD replace any
@@ -1377,97 +1379,20 @@ impl Relay {
         publish: Publish,
         actions: &mut Vec<Action>,
     ) {
-        // §5.1: "If a subscriber receives a PUBLISH for a Track with a
-        // subscription in the Pending (Subscriber) state, it MUST ensure the
-        // subscription it initiated transitions to the Terminated state
-        // before sending PUBLISH_OK." The relay's SUBSCRIBE to this session
-        // gives way, and the PUBLISH becomes the source of the track.
-        //
-        // WHY only for the session that was asked: a subscription is between
-        // two endpoints, so the sentence is about the PUBLISH of the session
-        // the SUBSCRIBE went to. With another session the relay has no pending
-        // subscription, and its PUBLISH is a second publisher of the track.
         if !self.sessions.contains_key(&session) {
             return;
         }
-        let asked_here = self.is_asked_of(&publish.full_track_name, session);
-        // A track that has a source takes another (§9.3, §9.5: "When it
-        // receives an authorized PUBLISH message for a Track that has
-        // Established downstream subscriptions, it MUST respond with
-        // PUBLISH_OK"; the relay does so with and without subscribers).
-        //
-        // FIXME: take the PUBLISH in the two cases below as well. A track
-        // the relay has asked another publisher for, and has no answer about,
-        // counts as taken, and so does one whose sources have all said
-        // PUBLISH_DONE.
-        let taken = match self.tracks.phase(&publish.full_track_name) {
-            Some(TrackPhase::Draining) => true,
-            Some(TrackPhase::Pending) => !asked_here,
-            Some(TrackPhase::Established) | None => false,
-        };
-        // WHY UNINTERESTED: it is the code §10.6.2 gives a subscriber for
-        // declining a PUBLISH, and the relay is the subscriber here. §9.3
-        // lets a relay refuse a publisher it cannot take. The PUBLISH would
-        // be accepted once the track has a source that is not draining, or
-        // is gone.
-        let mut refusal = taken.then(|| Refusal::code(request_error_code::UNINTERESTED));
-        // §10.2.11: the relay's LARGEST_OBJECT starts from the one the
-        // publisher gave.
-        let largest = publish
-            .parameters
-            .iter()
-            .find_map(|parameter| match parameter {
-                Parameter::LargestObject(location) => Some(*location),
-                _ => None,
-            });
-        let track_name = publish.full_track_name;
-        let published = TrackSource::Publisher {
-            session,
-            stream,
-            track_alias: publish.track_alias,
-        };
-        let mut waiters = Vec::new();
-        if refusal.is_none() {
-            // Before the PUBLISH_OK, as §5.1 has it. What was asked of other
-            // publishers goes on under the track with a source. WHY nothing
-            // is put back when `add_source` refuses: it refuses for a track
-            // that has a source only, and `asked_here` is about one that
-            // has none.
-            if asked_here {
-                self.give_way_to_publish(&track_name, session, actions);
-            }
-            match self
-                .tracks
-                .add_source(&track_name, published, publish.track_properties, largest)
-            {
-                Ok(waited) => waiters = waited,
-                // WHY EXCESSIVE_LOAD: "The responder is overloaded and cannot
-                // process the request at this time" (§10.6.2), the code of
-                // the relay's other limits. UNINTERESTED would say that the
-                // relay does not want the track.
-                Err(NoSource::TooMany) => {
-                    refusal = Some(Refusal::code(request_error_code::EXCESSIVE_LOAD));
+        let track_alias = publish.track_alias;
+        let (track_name, waiters) = match self.take_publish(session, stream, publish, actions) {
+            Ok(taken) => taken,
+            Err(refusal) => {
+                if let Some(state) = self.sessions.get_mut(&session) {
+                    state.drop_early_streams(session, track_alias, actions);
                 }
-                // The publisher said PUBLISH_DONE for the track and publishes
-                // it anew while the relay still waits for the streams of the
-                // first time. WHY refuse: two sources on a session cannot be
-                // told apart where a stream closes or the session ends. WHY
-                // NOT `DUPLICATE_SUBSCRIPTION`: for the publisher the first
-                // subscription is Terminated (§5.1), so this is no second
-                // one; it is refused as a PUBLISH for a track that drains
-                // is, and would be accepted once the wait is over.
-                Err(NoSource::OneOnTheSession) => {
-                    refusal = Some(Refusal::code(request_error_code::UNINTERESTED));
-                }
+                self.refuse(session, stream, request, &refusal, actions);
+                return;
             }
-        }
-        if let Some(refusal) = refusal {
-            if let Some(state) = self.sessions.get_mut(&session) {
-                state.drop_early_streams(session, publish.track_alias, actions);
-            }
-            self.refuse(session, stream, request, &refusal, actions);
-            return;
-        }
+        };
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
@@ -1490,7 +1415,82 @@ impl Relay {
         for waiter in &waiters {
             self.establish(&track_name, waiter, actions);
         }
-        self.replay_early_streams(session, publish.track_alias, actions);
+        self.replay_early_streams(session, track_alias, actions);
+    }
+
+    /// Makes the publisher of a PUBLISH a source of its track. Returns the
+    /// track and the subscribers that waited for it, or what the PUBLISH is
+    /// refused with. A SUBSCRIBE of the relay to the same publisher for the
+    /// track has given way when this returns; the `PUBLISH_OK` is the caller's.
+    fn take_publish(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        publish: Publish,
+        actions: &mut Vec<Action>,
+    ) -> Result<(FullTrackName, Vec<Waiter>), Refusal> {
+        // §5.1: "If a subscriber receives a PUBLISH for a Track with a
+        // subscription in the Pending (Subscriber) state, it MUST ensure the
+        // subscription it initiated transitions to the Terminated state
+        // before sending PUBLISH_OK." The relay's SUBSCRIBE to this session
+        // gives way, and the PUBLISH becomes the source of the track.
+        //
+        // WHY only for the session that was asked: a subscription is between
+        // two endpoints, so the sentence is about the PUBLISH of the session
+        // the SUBSCRIBE went to. What the relay asked of other sessions is
+        // still asked, and an answer that comes makes a further source.
+        let asked_here = self.is_asked_of(&publish.full_track_name, session);
+        // A track takes the source in whatever state it is (§9.3, §9.5: "When
+        // it receives an authorized PUBLISH message for a Track that has
+        // Established downstream subscriptions, it MUST respond with
+        // PUBLISH_OK"; the relay does so with and without subscribers). One
+        // that waited for a publisher's answer has its source now, and the
+        // subscribers that waited are answered. One whose sources have all
+        // said `PUBLISH_DONE` goes on with this one, for the subscribers it
+        // has and for new ones.
+        //
+        // §10.2.11: the relay's LARGEST_OBJECT starts from the one the
+        // publisher gave.
+        let largest = largest_object(&publish.parameters);
+        let track_name = publish.full_track_name;
+        let published = TrackSource::Publisher {
+            session,
+            stream,
+            track_alias: publish.track_alias,
+        };
+        let waiters = self
+            .tracks
+            .add_source(&track_name, published, publish.track_properties, largest)
+            .map_err(|refused| match refused {
+                // WHY EXCESSIVE_LOAD: "The responder is overloaded and cannot
+                // process the request at this time" (§10.6.2), the code of
+                // the relay's other limits. UNINTERESTED would say that the
+                // relay does not want the track.
+                NoSource::TooMany => Refusal::code(request_error_code::EXCESSIVE_LOAD),
+                // The publisher said PUBLISH_DONE for the track and publishes
+                // it anew while the relay still waits for the streams of the
+                // first time. WHY refuse: two sources on a session cannot be
+                // told apart where a stream closes or the session ends. WHY
+                // NOT `DUPLICATE_SUBSCRIPTION`: for the publisher the first
+                // subscription is Terminated (§5.1), so this is no second
+                // one. WHY UNINTERESTED: it is the code §10.6.2 gives a
+                // subscriber for declining a PUBLISH, and the relay is the
+                // subscriber here; §9.3 lets a relay refuse a publisher it
+                // cannot take. The PUBLISH would be accepted once the wait is
+                // over.
+                //
+                // FIXME: take it, and tell the two sources of the session
+                // apart by their Track Alias.
+                NoSource::OneOnTheSession => Refusal::code(request_error_code::UNINTERESTED),
+            })?;
+        // Before the PUBLISH_OK, as §5.1 has it. What was asked of other
+        // publishers goes on under the track with a source. WHY after the
+        // source is there: a PUBLISH that is refused leaves what the relay
+        // asked as it was.
+        if asked_here {
+            self.give_way_to_publish(&track_name, session, actions);
+        }
+        Ok((track_name, waiters))
     }
 
     /// Feeds the streams that were waiting for this alias back in.
@@ -2311,8 +2311,13 @@ impl Relay {
         //
         // With sources of both kinds, the relay's SUBSCRIBEs are cancelled
         // and the track stays for its publishers. A SUBSCRIBE whose publisher
-        // said PUBLISH_DONE is left to drain.
+        // said PUBLISH_DONE is left to drain. A SUBSCRIBE that has no answer
+        // yet is cancelled as well: it asks for what nobody would get.
         if track.subscribers.is_empty() {
+            let unanswered = std::mem::take(&mut track.asks);
+            for ask in unanswered {
+                self.cancel_own_request(ask.publisher, ask.request, actions);
+            }
             let unwanted = |source: &Source| {
                 matches!(source.from, TrackSource::Subscription { .. }) && !source.draining
             };
@@ -2662,6 +2667,15 @@ impl TrackEnd {
             ),
         }
     }
+}
+
+/// The `LARGEST_OBJECT` among the parameters of a PUBLISH or a
+/// `SUBSCRIBE_OK` (§10.2.11).
+pub(crate) fn largest_object(parameters: &[Parameter]) -> Option<Location> {
+    parameters.iter().find_map(|parameter| match parameter {
+        Parameter::LargestObject(location) => Some(*location),
+        _ => None,
+    })
 }
 
 /// Where an action is carried out.

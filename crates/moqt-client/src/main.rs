@@ -104,6 +104,11 @@ struct Args {
     /// one of them. To see a track go on with the publisher that is left,
     /// the second has to start where the first stopped.
     first_group: u64,
+    /// How long a SUBSCRIBE of the peer that this client serves waits for its
+    /// `SUBSCRIBE_OK`. WHY a flag: a relay that asked this publisher for a
+    /// track takes a PUBLISH for it from another publisher meanwhile, and on
+    /// loopback the answer is there before anyone else can publish.
+    serve_delay: Duration,
     /// How long a request of the peer waits for its refusal.
     ///
     /// WHY the two delays: on a real link, a SUBSCRIBE the relay sends after
@@ -149,6 +154,7 @@ fn parse_args() -> Result<Args> {
     let mut publish_delay_ms = 0;
     let mut subgroup_id = SubgroupId::Zero;
     let mut first_group = 0;
+    let mut serve_delay_ms = 0;
     let mut answer_delay_ms = 0;
     let mut trace = false;
 
@@ -179,6 +185,9 @@ fn parse_args() -> Result<Args> {
                 };
             }
             "--first-group" => first_group = value.parse().context("--first-group")?,
+            "--serve-delay-ms" => {
+                serve_delay_ms = value.parse().context("--serve-delay-ms")?;
+            }
             "--publish-delay-ms" => {
                 publish_delay_ms = value.parse().context("--publish-delay-ms")?;
             }
@@ -213,6 +222,7 @@ fn parse_args() -> Result<Args> {
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
         first_group,
+        serve_delay: Duration::from_millis(serve_delay_ms),
         answer_delay: Duration::from_millis(answer_delay_ms),
         trace: if trace {
             Trace::new(report::trace)
@@ -825,6 +835,7 @@ impl Client<'_> {
                     PeerRequest::Subscribe(subscribe) if subscribe.full_track_name == *track
                 );
                 if wanted && serving.is_none() {
+                    tokio::time::sleep(self.args.serve_delay).await;
                     let (track_alias, ok) =
                         self.session.accept_subscribe(request, vec![], vec![])?;
                     xmoq_moqt_io::send_message(&mut send, &ok, wire, &label).await?;

@@ -520,50 +520,61 @@ fn a_subscription_to_a_track_nobody_published_is_rejected() {
 fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
     let mut relay = relay_with_track();
     // The publisher said PUBLISH_DONE and one stream it counted has not come:
-    // the track drains.
+    // its source drains.
     relay.step(Event::RequestMessage {
         session: PUBLISHER,
         stream: StreamKey(0),
         message: publish_done(0x2, 1),
     });
-    // (first message, REQUEST_ERROR code)
+    // (who asks, on which stream; first message; REQUEST_ERROR code)
     let cases = [
         // FETCH: NOT_SUPPORTED.
         (
+            ALICE,
+            0,
             ControlMessage::UnsupportedRequest {
                 message_type: 0x16,
                 request_id: 0,
             },
             0x3,
         ),
-        // A publisher of a track that drains: UNINTERESTED.
-        (publish(2, b"a"), 0x20),
+        // The publisher publishes the track anew, under another alias, while
+        // its source drains: UNINTERESTED.
+        (
+            PUBLISHER,
+            1,
+            ControlMessage::Publish(Publish {
+                request_id: 2,
+                full_track_name: track(b"a"),
+                track_alias: 41,
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+            0x20,
+        ),
     ];
-    for (index, (first, error_code)) in cases.into_iter().enumerate() {
-        let stream = StreamKey(u64::try_from(index).unwrap());
+    for (session, stream, first, error_code) in cases {
+        let stream = StreamKey(stream);
         assert_eq!(
             relay.step(Event::RequestOpened {
-                session: ALICE,
+                session,
                 stream,
                 first: first.clone(),
             }),
             [
                 Action::SendRequest {
-                    session: ALICE,
+                    session,
                     stream,
                     message: request_error(error_code),
                 },
-                Action::FinishRequest {
-                    session: ALICE,
-                    stream,
-                },
+                Action::FinishRequest { session, stream },
             ],
             "{first:?}"
         );
         // What the peer still sends on the stream is ignored.
         assert_eq!(
             relay.step(Event::RequestMessage {
-                session: ALICE,
+                session,
                 stream,
                 message: publish_done(0x2, 0),
             }),
@@ -1297,25 +1308,32 @@ fn a_finished_stream_that_is_not_written_out_is_reset_with_its_subscription() {
 #[test]
 fn early_streams_of_a_refused_publish_are_let_go() {
     let mut relay = relay_with_track();
-    // The track drains, so a PUBLISH for it is refused.
+    // The publisher's source drains, so its next PUBLISH for the track is
+    // refused.
     relay.step(Event::RequestMessage {
         session: PUBLISHER,
         stream: StreamKey(0),
         message: publish_done(0x2, 1),
     });
-    // Alice sends eight streams ahead of her PUBLISH for the track.
+    // It sends eight streams ahead of that PUBLISH, under the new alias.
     for stream in 0..8 {
         relay.step(Event::DataStreamOpened {
-            session: ALICE,
+            session: PUBLISHER,
             stream: StreamKey(10 + stream),
-            header: header(UPSTREAM_ALIAS),
+            header: header(41),
         });
     }
     assert_eq!(relay.counts().early_streams, 8);
     let actions = relay.step(Event::RequestOpened {
-        session: ALICE,
-        stream: StreamKey(0),
-        first: publish(0, b"a"),
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: ControlMessage::Publish(Publish {
+            request_id: 2,
+            full_track_name: track(b"a"),
+            track_alias: 41,
+            parameters: vec![],
+            track_properties: vec![],
+        }),
     });
     // The eight streams are stopped with CANCELLED (0x1), then the PUBLISH is
     // refused.
@@ -1326,15 +1344,15 @@ fn early_streams_of_a_refused_publish_are_let_go() {
     assert_eq!(stopped, 8);
     assert_eq!(relay.counts().early_streams, 0);
 
-    // Her next track can run ahead of its PUBLISH again.
+    // Its next track can run ahead of its PUBLISH again.
     assert_eq!(
         relay.step(Event::DataStreamOpened {
-            session: ALICE,
+            session: PUBLISHER,
             stream: StreamKey(20),
-            header: header(41),
+            header: header(42),
         }),
         [Action::StartEarlyTimer {
-            session: ALICE,
+            session: PUBLISHER,
             stream: StreamKey(20),
         }]
     );

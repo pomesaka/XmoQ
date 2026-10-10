@@ -111,6 +111,14 @@ const { values: options } = parseArgs({
     // payload that takes a while to write lets the relay's STOP_SENDING for
     // the second copy arrive while that publisher is still writing it.
     'payload-padding': { type: 'string', default: '0' },
+    // A scenario of its own, with own Rust clients and the own relay: a
+    // publisher announces the namespace and answers the relay's SUBSCRIBE
+    // only after 4 s; a subscriber subscribes, so that the relay asks that
+    // publisher; a second publisher sends PUBLISH for the track meanwhile.
+    // The subscriber has to be answered then, get what the second publisher
+    // sends (Group 0), and, once the first has answered, what that one sends
+    // (Group 1).
+    'publish-while-asked': { type: 'boolean', default: false },
     // Makes the `own` client print the raw bytes of every stream.
     trace: { type: 'boolean', default: false },
     // After the transfer, ends the Rust publisher and waits until the `own`
@@ -364,6 +372,45 @@ async function main() {
       return client
     }
 
+    if (options['publish-while-asked']) {
+      if (options.relay !== 'own' || direction.publisherInBrowser || direction.subscriberInBrowser) {
+        throw new Error('--publish-while-asked needs --relay own and --direction rust-to-rust')
+      }
+      const asked = spawnRustClient('rust-pub', 'own', 'publish-namespace', [
+        '--payload-hex', payloadHex, '--serve-delay-ms', '4000', '--first-group', '1',
+      ])
+      await asked.waitForLine(/^NAMESPACE_PUBLISHED/)
+      const subscriber = spawnRustClient('rust-sub', 'own', 'subscribe', ['--objects', '2'])
+      // The relay asks the publisher that announced the namespace.
+      await relay.waitForLine(/^OPEN_REQUEST /)
+      const answeredBeforeThePublish = subscriber.count(/^SUBSCRIBED /) > 0
+      const other = spawnRustClient('rust-pub2', 'own', 'publish', ['--payload-hex', payloadHex])
+      await other.waitForLine(/^PUBLISHED /)
+      // The PUBLISH gave the track its source: the subscriber is answered,
+      // although the publisher that was asked has not answered yet.
+      await subscriber.waitForLine(/^SUBSCRIBED /)
+      const askedHadAnswered = asked.count(/^SERVING /) > 0
+      other.child.stdin.write('send\n')
+      await other.waitForLine(/^SENT group=0 /)
+      await subscriber.waitForLine(/^OBJECT group=0 /)
+      // The publisher that was asked answers now, and is a second source.
+      await asked.waitForLine(/^SERVING /)
+      asked.child.stdin.write('send\n')
+      await asked.waitForLine(/^SENT group=1 /)
+      await subscriber.waitForLine(/^OBJECT group=1 /)
+      result = {
+        scenario: 'publish-while-asked',
+        match: !answeredBeforeThePublish && !askedHadAnswered,
+        answeredBeforeThePublish,
+        askedHadAnsweredWhenTheSubscriberWasAnswered: askedHadAnswered,
+        group0: subscriber.count(/^OBJECT group=0 /),
+        group1: subscriber.count(/^OBJECT group=1 /),
+        relayVersion,
+      }
+      log('driver', `RESULT ${JSON.stringify(result)}`)
+      if (!result.match) throw new Error('the subscriber was answered at another time than expected')
+      return
+    }
     const byNamespace = options['publish-namespace']
     const subscribeFirst = options['subscribe-before-publish']
     if (subscribeFirst && (direction.publisherInBrowser || rustPublisher !== 'own' || byNamespace || options.relay !== 'own')) {
