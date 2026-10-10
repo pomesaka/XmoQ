@@ -43,7 +43,7 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run check:ts` | Biome (format and lint), oxlint (`as` assertions), `typecheck` for packages and `interop/`, `bun test` per package |
 | `mise run check:layers` | Dependency rules: `xmoq-moqt` stays free of I/O crates, nothing depends on `spikes/`, packages do not depend on `interop/` |
 | `mise run check:workflows` | `actionlint` and `shellcheck` |
-| `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through the relay for every pairing of own and `moqtail` clients, in a real Chromium. Not part of `check` |
+| `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
 | `mise run fmt` | Apply formatting and safe fixes |
 
 CI (`.github/workflows/ci.yml`) runs the same tasks. A task whose target does not exist yet prints `SKIP` and succeeds; `spikes/` is outside every check, and so are the copies of `moqtail` code under `interop/peers/`. The interop run is a CI job of its own, which calls `mise run interop`; for a pull request that touches nothing the run depends on, the job reports that it skipped the pairings.

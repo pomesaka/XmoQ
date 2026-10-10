@@ -27,8 +27,8 @@ bun install --frozen-lockfile
 
 # WHY the CLI of the installed package: it downloads the Chromium build that this version of
 # playwright-core drives (bun.lock pins the version), and does nothing if it is already there.
-# WHY --no-shell: run.ts launches the full browser (`channel: "chromium"`), not the headless
-# shell.
+# WHY --no-shell: interop/harness.ts launches the full browser (`channel: "chromium"`), not the
+# headless shell.
 # WHY `bun run` in interop/: it finds the command of the package wherever the package manager put
 # it (interop/node_modules or the hoisted node_modules of the root).
 playwright_install=(bun run --cwd interop playwright-core install --no-shell)
@@ -40,4 +40,4 @@ fi
 
 bun interop/matrix.ts "$@"
 interop_verdict ran
-ran "Interop run (every pairing of own and moqtail clients, through the moqtail relay and the own relay)"
+ran "Interop run (every pairing of own and moqtail clients through the moqtail relay and the own relay, and the runs in which a client leaves)"

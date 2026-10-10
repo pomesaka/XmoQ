@@ -1,6 +1,6 @@
 # Interop
 
-Moves one MOQT draft 18 Object through a relay between two clients, at least one of which is an own client, and checks that the received payload equals the sent one. The own clients are the browser client on [`@xmoq/moqt`](../packages/moqt/) and the Rust client [`xmoq-moqt-client`](../crates/moqt-client/). The relay is the [moqtail](https://github.com/moqtail/moqtail) relay or the own relay [`xmoq-relay`](../crates/relay/). The browser clients run in a real Chromium. Results go to [`docs/experiments/`](../docs/experiments/).
+Moves MOQT draft 18 Objects through a relay between clients, at least one of which is an own client, and checks that the received payload equals the sent one. One set of runs moves a single Object between every pair of clients; another has a client leave on the way and checks what the others see. The own clients are the browser client on [`@xmoq/moqt`](../packages/moqt/) and the Rust client [`xmoq-moqt-client`](../crates/moqt-client/). The relay is the [moqtail](https://github.com/moqtail/moqtail) relay or the own relay [`xmoq-relay`](../crates/relay/). The browser clients run in a real Chromium. Results go to [`docs/experiments/`](../docs/experiments/).
 
 This is the one entry point for interop runs. `spikes/moqtail/browser/run.mjs` is kept only to reproduce the Phase 0 records.
 
@@ -39,7 +39,7 @@ The Chromium is the build that the pinned `playwright-core` drives; it goes to P
 
 ## Checks
 
-`mise run check:ts` lints and type-checks `run.ts`, `matrix.ts`, `page.ts` and `xmoq-page.ts`. It does not perform a run. `peers/` is outside lint and formatting, because it holds copies of code written for moqtail that are kept as they came.
+`mise run check:ts` lints and type-checks every `.ts` file of this directory. It does not perform a run. `peers/` is outside lint and formatting, because it holds copies of code written for moqtail that are kept as they came.
 
 The runs are the CI job `interop`, which calls `mise run interop`. On a pull request that changes nothing the run depends on (`scripts/ci/interop-scope.sh` has the list), the job ends green without running the pairings and says so in its summary and in a notice. A job that ran shows the table of pairings in its summary and keeps their logs as the artifact `interop-logs`. Its last step fails if the job did neither.
 
@@ -51,7 +51,7 @@ Every pairing, from `interop/`:
 bun matrix.ts
 ```
 
-`matrix.ts` starts `run.ts` once per pairing and relay, one after the other and each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`.
+`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except three that mostly wait for the relay to give up on a client that vanished (9 to 13 seconds each): those start together after the pairings that move one Object, and go on beside the ones that follow.
 
 | Pairings, through each relay | What is expected |
 |---|---|
@@ -59,22 +59,34 @@ bun matrix.ts
 | One publisher with three subscribers: `own-rust` to `own-browser`, `moqtail-browser` to `own-rust` (2) | Every subscriber receives the payload and then sees PUBLISH_DONE |
 | `own-browser` and `own-rust` subscribing to a track nobody published (2) | The run fails, and its log shows REQUEST_ERROR `0x10` |
 
+The runs in which a client leaves go through the own relay only, because the driver waits for lines only that relay prints. Their names begin with `leaving:`. What each has to show, and why, is in the [record](../docs/experiments/2026-10-10-disconnects-through-own-relay.md).
+
+| Runs with a client that leaves (13) | What is expected |
+|---|---|
+| The publisher is killed, or its page closed, after its Objects arrived (3) | Every own subscriber sees PUBLISH_DONE `TRACK_ENDED` with the Stream Count of the streams it got, and a stream the publisher left open ends with a reset |
+| The publisher sends one Object and closes its session at once (4) | Every subscriber receives the Object, and every own subscriber then sees PUBLISH_DONE |
+| Subscribers leave, by cancelling, by closing their session or by being killed, while others stay (4) | The publisher goes on, and the subscribers that stay receive what is sent after the others left, also before the relay has noticed that a killed process is gone, which the run checks |
+| `own-browser` cancels its subscription (1) | The run fails, by a defect of `@xmoq/moqt` that the pairing names in `matrix.ts`. It has to be turned into a passing run when the defect is fixed |
+| An `own-rust` subscriber is stopped with SIGSTOP and takes nothing (1) | The relay ends that subscription with PUBLISH_DONE `TOO_FAR_BEHIND` and keeps its session; the other subscribers receive every Object |
+
+Each of these runs ends by moving one more Object over the same track with a fresh publisher and subscriber. The relay refuses a PUBLISH for a track that has a publisher, so this step fails if the relay still holds the one that left.
+
 | Option of `matrix.ts` | Values (default first) |
 |---|---|
 | `--relay` | `moqtail` and `own`. Give it once to run through one relay only |
 | `--base-port` | `44400`. The first of the UDP ports used, one per pairing |
-| `--only` | Empty. Runs the pairings whose name contains the text, such as `--only own-rust` or `--only "own relay"` |
+| `--only` | Empty. Runs the pairings whose name contains the text, such as `--only own-rust`, `--only "own relay"` or `--only "leaving: "` |
 | `--pairing-timeout-seconds` | `120` (provisional). A pairing that takes longer is stopped and counted as failed |
 
-A SIGINT or SIGTERM to `matrix.ts` stops the pairing that is running, which stops its relay, browser and clients, and starts no further one.
+A SIGINT or SIGTERM to `matrix.ts` stops the pairings that are running, which stop their relay, browser and clients, and starts no further one.
 
-One pairing:
+One pairing that moves a single Object:
 
 ```sh
 bun run.ts --publisher own-browser --subscriber own-rust --await-publish-done
 ```
 
-`run.ts` generates the certificate, starts the relay, serves the pages and launches headless Chromium when a client is a page, sends one Object and stops everything it started. It prints a `RESULT` line and exits 0 when the payloads match.
+`run.ts` generates the certificate, starts the relay, serves the pages and launches headless Chromium when a client is a page, sends one Object and stops everything it started, also when it is stopped by a signal or fails in a way nothing caught. It prints a `RESULT` line and exits 0 when the payloads match.
 
 | Option of `run.ts` | Values (default first) |
 |---|---|
@@ -89,7 +101,37 @@ bun run.ts --publisher own-browser --subscriber own-rust --await-publish-done
 
 One side has to be an own client: a run between two moqtail peers checks nothing of this repository.
 
-An own publisher leaves by sending PUBLISH_DONE. A moqtail publisher has no way to and closes its session, after which the relay sends PUBLISH_DONE to the subscriber on its own.
+An own publisher leaves by sending PUBLISH_DONE. A moqtail publisher has no way to and ends its session, after which the relay sends PUBLISH_DONE to the subscriber on its own.
+
+One run with a client that leaves:
+
+```sh
+bun disconnect.ts --scenario subscriber-leaves --publisher own-browser --leaver own-rust:kill --stayer own-browser
+```
+
+`disconnect.ts` starts the own relay and the clients like `run.ts`, plays the scenario, and prints a `RESULT` line with how each own subscription ended and what was measured, and a `SUMMARY` line that `matrix.ts` shows in its table. It exits 0 only if everything the scenario expects was seen.
+
+| Option of `disconnect.ts` | Values |
+|---|---|
+| `--scenario` | `publisher-killed`, `last-object-then-close`, `subscriber-leaves`, `slow-subscriber` |
+| `--publisher` | A client. `own-rust` by default |
+| `--subscriber` | A client; give it once per subscriber. Used by every scenario but `subscriber-leaves` |
+| `--leaver` | `subscriber-leaves` only, once per subscriber that leaves: `<client>:cancel` (the subscription ends, the session stays), `<client>:close` (the client closes its session in order) or `<client>:kill` (the process is killed, or the page closed) |
+| `--stayer` | `subscriber-leaves` only: a client, once per subscriber that stays |
+| `--with-publish-done` | `last-object-then-close` only: the publisher sends PUBLISH_DONE before it closes. `own-rust` always does and needs the flag; the moqtail clients cannot |
+| `--port` | `44340`. UDP port of the relay |
+| `--verbose` | off. Makes `own-rust` print the bytes of every stream |
+
+Not every client can leave in every way. `own-rust` and `moqtail-rust` close their session only by having the Objects they were started for; `moqtail-browser` cancels by its `disconnect()`, which leaves its session open; only `own-browser` can cancel and keep going. A client that is asked for what it cannot do fails the run with a message that says so.
+
+| File | Content |
+|---|---|
+| `harness.ts` | The certificate, the relay, the browser, the Rust client processes, and the teardown of all of them |
+| `clients.ts` | The four clients behind one shape for a publisher and one for a subscriber |
+| `run.ts` | The driver that moves one Object |
+| `disconnect.ts` | The driver for the runs in which a client leaves |
+| `matrix.ts` | The list of pairings, and the table |
+| `page.ts`, `xmoq-page.ts` | The own page, and the contract between the drivers and both pages |
 
 | Client | Code |
 |---|---|
@@ -100,7 +142,7 @@ An own publisher leaves by sending PUBLISH_DONE. A moqtail publisher has no way 
 
 ## Certificate
 
-The relay runs on a self-signed certificate that `run.ts` creates under `.cert/` and re-creates when less than a day of validity is left. No root CA is installed and no browser flag is set.
+The relay runs on a self-signed certificate that the drivers create under `.cert/` and re-creates when less than a day of validity is left. No root CA is installed and no browser flag is set.
 
 | Requirement | Reason |
 |---|---|
@@ -117,7 +159,6 @@ None of these is tracked.
 |---|---|
 | `.cert/` | Certificate and key |
 | `.logs/` | Relay log files, and in `.logs/matrix/` the output of each pairing |
-| `.dist/` | Bundled pages |
 | `peers/moqtail/.tools/` | Binary of the moqtail relay. The own relay is built into `target/` of the repository root |
 | `peers/moqtail/rust-client/target/` | Build of the moqtail Rust client. The own Rust client is built into `target/` of the repository root |
 | `node_modules/` | Links into the `node_modules/` of the repository root |
