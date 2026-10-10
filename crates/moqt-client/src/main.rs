@@ -156,6 +156,33 @@ impl Args {
     }
 }
 
+/// A line of the driver on a publisher's stdin.
+#[derive(Debug, PartialEq, Eq)]
+enum PublisherLine {
+    /// Any other line: one Object is sent.
+    Send,
+    /// `republish`, `republish-same-alias`: `PUBLISH_DONE` and a new PUBLISH
+    /// at once.
+    Republish { same_alias: bool },
+    /// `publish-done`: the `PUBLISH_DONE` alone.
+    PublishDone,
+    /// `publish-anew`, `publish-anew-same-alias`: the new PUBLISH after it.
+    PublishAnew { same_alias: bool },
+}
+
+impl PublisherLine {
+    fn read(line: &str) -> Self {
+        match line {
+            "republish" => Self::Republish { same_alias: false },
+            "republish-same-alias" => Self::Republish { same_alias: true },
+            "publish-done" => Self::PublishDone,
+            "publish-anew" => Self::PublishAnew { same_alias: false },
+            "publish-anew-same-alias" => Self::PublishAnew { same_alias: true },
+            _ => Self::Send,
+        }
+    }
+}
+
 /// Reads `<type>=<value>` of `--object-property`: both in the form the
 /// `OBJECT` line prints them, the type in decimal, the value of an even type
 /// in decimal and that of an odd type in hexadecimal (§1.4.3: an even type
@@ -681,16 +708,18 @@ impl Client<'_> {
         //
         // A line `republish` or `republish-same-alias` ends the subscription
         // with PUBLISH_DONE and publishes the track anew, under the next
-        // Track Alias or the same one; see `Self::publish_anew`.
+        // Track Alias or the same one; see `Self::publish_anew`. `publish-done`
+        // and then `publish-anew` or `publish-anew-same-alias` do the same in
+        // two steps, with whatever the driver waits for in between.
         let mut stdin = BufReader::new(tokio::io::stdin()).lines();
         let mut track_alias = PUBLISH_TRACK_ALIAS;
         // Objects sent in all, and data streams of the subscription as it is.
         let (mut sent, mut stream_count) = (0, 0);
         let status_code = loop {
             tokio::select! {
-                line = stdin.next_line() => match line?.as_deref() {
-                    Some(line @ ("republish" | "republish-same-alias")) => {
-                        if line == "republish" {
+                line = stdin.next_line() => match line?.as_deref().map(PublisherLine::read) {
+                    Some(PublisherLine::Republish { same_alias }) => {
+                        if !same_alias {
                             track_alias += 1;
                         }
                         (publish_request, publish_stream) = self
@@ -698,7 +727,32 @@ impl Client<'_> {
                             .await?;
                         stream_count = 0;
                     }
-                    Some(_) => {
+                    Some(PublisherLine::PublishDone) => {
+                        self.end_without_a_count(publish_request, &mut publish_stream)
+                            .await?;
+                        report::publish_done_sent();
+                        // Nothing is read from the first PUBLISH stream
+                        // meanwhile: how the peer ends it is read after the
+                        // new PUBLISH, as in `publish_anew`.
+                        let next = stdin.next_line().await?;
+                        let same_alias = match next.as_deref().map(PublisherLine::read) {
+                            Some(PublisherLine::PublishAnew { same_alias }) => same_alias,
+                            other => bail!(
+                                "after publish-done comes publish-anew or publish-anew-same-alias, not {other:?}"
+                            ),
+                        };
+                        if !same_alias {
+                            track_alias += 1;
+                        }
+                        (publish_request, publish_stream) = self
+                            .publish_after_done(publish_request, publish_stream, track_alias)
+                            .await?;
+                        stream_count = 0;
+                    }
+                    Some(PublisherLine::PublishAnew { .. }) => {
+                        bail!("publish-anew without a publish-done before it")
+                    }
+                    Some(PublisherLine::Send) => {
                         // Each Object is a Group of its own. The Groups go on
                         // through a `republish`: it is the same track.
                         let group_id = self.args.first_group + sent;
@@ -778,12 +832,31 @@ impl Client<'_> {
     /// once. This value keeps it waiting, which is the state a publisher is
     /// in whose last stream is still under way when it publishes anew, and
     /// the one this is for.
+    ///
+    /// WHY there are the two steps as well (`publish-done`, then
+    /// `publish-anew`): the `PUBLISH_DONE` and the PUBLISH are on two streams,
+    /// between which QUIC keeps no order. A peer that reads the PUBLISH first
+    /// still has the first subscription and has to refuse the second with
+    /// `DUPLICATE_SUBSCRIPTION` (§5.1), and nothing tells a publisher that its
+    /// `PUBLISH_DONE` was read. A driver that can see the peer read it sends
+    /// the second step then; this function, in one step, can be refused.
     async fn publish_anew(
         &mut self,
         request: RequestId,
         mut stream: RequestStream,
         track_alias: u64,
     ) -> Result<(RequestId, RequestStream)> {
+        self.end_without_a_count(request, &mut stream).await?;
+        self.publish_after_done(request, stream, track_alias).await
+    }
+
+    /// Sends `PUBLISH_DONE` for `request` with the Stream Count of a
+    /// publisher that cannot count, and leaves its stream open.
+    async fn end_without_a_count(
+        &mut self,
+        request: RequestId,
+        stream: &mut RequestStream,
+    ) -> Result<()> {
         let done = self.session.publish_done(
             request,
             publish_done_status::TRACK_ENDED,
@@ -791,6 +864,18 @@ impl Client<'_> {
             ReasonPhrase::default(),
         )?;
         stream.send(&done).await?;
+        Ok(())
+    }
+
+    /// Publishes the track anew under `track_alias` after the `PUBLISH_DONE`
+    /// of `request`, and then reports how the peer ended the stream of
+    /// `request`. Returns the new request and its stream.
+    async fn publish_after_done(
+        &mut self,
+        request: RequestId,
+        stream: RequestStream,
+        track_alias: u64,
+    ) -> Result<(RequestId, RequestStream)> {
         let (new_request, message) = self.session.publish(
             self.args.full_track_name()?,
             track_alias,
@@ -1171,6 +1256,31 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lines_of_a_driver_are_told_apart() {
+        let cases = [
+            ("send", PublisherLine::Send),
+            ("", PublisherLine::Send),
+            ("republish", PublisherLine::Republish { same_alias: false }),
+            (
+                "republish-same-alias",
+                PublisherLine::Republish { same_alias: true },
+            ),
+            ("publish-done", PublisherLine::PublishDone),
+            (
+                "publish-anew",
+                PublisherLine::PublishAnew { same_alias: false },
+            ),
+            (
+                "publish-anew-same-alias",
+                PublisherLine::PublishAnew { same_alias: true },
+            ),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(PublisherLine::read(line), expected, "{line:?}");
+        }
+    }
 
     #[test]
     fn an_object_property_is_read_as_the_object_line_prints_it() {

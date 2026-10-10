@@ -162,6 +162,30 @@ export function withTimeout<T>(
 	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * Looks every 20 ms until `look` returns something, and fails like
+ * `withTimeout` when it has not by then.
+ *
+ * WHY it stops looking at the limit: a loop that went on would keep the
+ * process alive after the run has failed, and the run would end at the limit
+ * of whoever started it and not with its own message.
+ */
+export async function pollFor<T>(
+	look: () => T | undefined,
+	what: string,
+	timeoutMs: number = STEP_TIMEOUT_MS,
+): Promise<T> {
+	const deadline = performance.now() + timeoutMs;
+	for (;;) {
+		const found = look();
+		if (found !== undefined) return found;
+		if (performance.now() >= deadline) {
+			throw new Error(`timed out waiting for ${what}`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
 export function captureGroup(match: RegExpMatchArray, index: number): string {
 	const value = match[index];
 	if (value === undefined)

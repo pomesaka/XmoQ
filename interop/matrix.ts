@@ -503,6 +503,56 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
+		name: "two own-rust publishers only announce the namespace; the relay asks both, and own-rust and own-browser get a Group of each",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"ask-all",
+			"--ask",
+			"two-announcers",
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
+		name: "own-browser publishes and an own-rust publisher announces before the subscribers come; the relay asks the one that announced",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"ask-all",
+			"--ask",
+			"announcer-and-publisher",
+			"--publisher",
+			"own-browser",
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
+		name: "own-rust publishes, own-rust and own-browser subscribe, and an own-rust publisher announces then; the relay asks it at once",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"ask-all",
+			"--ask",
+			"late-announcer",
+			"--publisher",
+			"own-rust",
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
+		name: "an own-browser page announces and refuses what it is asked; the relay asks it once for two subscribers, and again when it announces anew",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"ask-all",
+			"--ask",
+			"refusing-announcer",
+			"--publisher",
+			"own-rust",
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
 		// WHY it mostly waits: the first source drains for the 2 seconds the
 		// relay gives the streams a PUBLISH_DONE counted.
 		name: "an own-rust publisher says PUBLISH_DONE and publishes anew under another Track Alias; own-rust and own-browser stay",
