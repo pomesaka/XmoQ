@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { decodeControlMessage } from "../../src/core/control-message.ts";
 import {
 	connectOver,
@@ -179,6 +179,54 @@ describe("a stream this endpoint writes is stopped by the peer", () => {
 		const refused = await rejection(writing);
 		expect(refused).toBeInstanceOf(SubgroupClosedError);
 		expect(refused).toMatchObject({ metStop: false, code: undefined });
+	});
+
+	// The subscriber's stop came first and is what the write failed with,
+	// but `reset()` was called before the failure was looked at. Either form
+	// of the stop: the stream is closed by this endpoint's own doing as
+	// well, and the caller is not handed the browser's error.
+	test.each(STOPS)(
+		"a write that failed with a stop $form, on a stream this endpoint reset meanwhile, fails with SubgroupClosedError",
+		async ({ error }) => {
+			const { peer, track } = await published();
+			const subgroup = await track.openSubgroup(SUBGROUP);
+			const stream = await peer.clientUni();
+			await stream.read();
+			void stream.cancel(error());
+			const writing = subgroup.write(OBJECT);
+			void subgroup.reset(5);
+			const refused = await rejection(writing);
+			expect(refused).toBeInstanceOf(SubgroupClosedError);
+			expect(refused).toMatchObject({ metStop: false, code: undefined });
+		},
+	);
+
+	// The wait for the session's end is over when the end is reported, not
+	// only when its one turn of the timers has passed: here no timer runs
+	// at all, and the write is answered with how the session ended.
+	test("a write that fails with an error of the session is answered as soon as the session's end is reported", async () => {
+		const { peer, connection, track } = await published();
+		const subgroup = await track.openSubgroup(SUBGROUP);
+		const stream = await peer.clientUni();
+		await stream.read();
+		jest.useFakeTimers();
+		try {
+			void stream.cancel(FakeWebTransportError.sessionEnded());
+			let outcome: unknown = "pending";
+			subgroup.write(OBJECT).catch((refused: unknown) => {
+				outcome = refused;
+			});
+			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			expect(outcome).toBe("pending");
+			connection.close(7, "enough");
+			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			expect(outcome).toBeInstanceOf(SessionClosedError);
+			expect(outcome).toMatchObject({
+				close: { type: "local", code: 7, reason: "enough" },
+			});
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	// Chromium rejects `createUnidirectionalStream` with a NetworkError too,

@@ -34,10 +34,10 @@ A stream that is stopped gets STOP_SENDING `INTERNAL_ERROR` (`0x0`) where it is 
 
 **The second and third column were written for this table, and the fourth is a decision, not an observation.** No other implementation was asked: the time is XmoQ's own. The decision is the row "A stream of the peer that does not say what it is" in [the implementation notes](../../docs/moqt-implementation-notes.md), and it follows where the Rust reader cleared its deadline when the table was written (`crates/moqt-io/src/streams.rs`).
 
-The bytes are cut from what the draft and the captures have:
+Where the bytes come from:
 
 - `af 00` is the start of a SETUP, `f0 13 2b 3e 28` the padding type 0x132B3E28 (§11.5.1), `05` the type of a FETCH_HEADER and `80` the first byte of a type that takes two (§1.4.1).
-- `5d 00 00 00 00` is a Subgroup Header of type 0x5D: Track Alias 0, Group 0, Subgroup 0, Publisher Priority 0. `00 05 61` after it is the start of an Object whose payload of 5 bytes has not all come.
+- `5d 00 00 00 00` is a Subgroup Header of type 0x5D: Track Alias 0, Group 0, Subgroup 0, Publisher Priority 0. `00 05 61` after it is the start of an Object, written for this table and found in no capture: Object ID Delta 0, then, since 0x5D has the PROPERTIES bit (§11.4.2), an Object Properties Length of 5, of which one byte has come.
 - The request is the SUBSCRIBE of [`fixtures/moqt-18/subscribe-moqtail-rs.hex`](../moqt-18/README.md) with its Request ID changed from 0 to 1, cut at six lengths.
 
-`said.tsv` is written by a script from that capture, not by hand; the script is in the commit that added the table.
+`said.tsv` is written by `generate.ts` next to it, from that capture and the bytes above, not by hand: `bun fixtures/first-bytes/generate.ts`.

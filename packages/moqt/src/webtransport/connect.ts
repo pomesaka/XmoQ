@@ -116,9 +116,9 @@ export function adaptWebTransport(
 		// WebTransportError with `source` "session"
 		// (docs/experiments/2026-10-11-write-abort-in-chromium.md). The code
 		// of the stop does not reach the page then.
-		// WHY the control stream is left out where this is used: "none in
-		// 1080" is not "cannot", and a stop of that stream is a violation of
-		// the peer.
+		// "None in 1080" is not "cannot", so this reading must close no
+		// session: the session takes it in a way that does nothing for the
+		// control stream (`Session.localStreamAborted`).
 		isStopWithoutCode: (error) =>
 			error instanceof DOMException && error.name === "NetworkError",
 		isSessionError: (error) =>

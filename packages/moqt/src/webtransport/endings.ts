@@ -165,6 +165,12 @@ export class RequestAbortedError extends Error {
 
 export class SessionClosedError extends Error {
 	override readonly name = "SessionClosedError";
+	/**
+	 * How the session ended, as `MoqtConnection.closed` has it. One exception:
+	 * a write that the browser failed for the end of the session, when the
+	 * browser had not reported that end a moment later, has `type` "error"
+	 * with the browser's error here, and `closed` has the rest when it comes.
+	 */
 	readonly close: SessionClose;
 
 	constructor(close: SessionClose) {
