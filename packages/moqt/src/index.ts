@@ -5,6 +5,7 @@
 // "@xmoq/moqt/diagnostics".
 
 export type { FetchRange, Redirect } from "./core/control-message.ts";
+export { RequestErrorCode } from "./core/error.ts";
 export type { FetchObject, RangeEnd } from "./core/fetch.ts";
 export type { KeyValuePair } from "./core/key-value-pair.ts";
 export type { SessionLimits } from "./core/limits.ts";
@@ -21,6 +22,7 @@ export type {
 export type {
 	FetchRequest,
 	PublishRequest,
+	SubscribeAnswer,
 	SubscribeRequest,
 } from "./core/requests.ts";
 export type {
@@ -36,8 +38,10 @@ export type {
 	FetchCallOptions,
 	FetchResponse,
 	MoqtConnection,
+	PeerSubscribe,
 	PublishedTrack,
 	ReceivedObject,
+	ServeHandlers,
 	SessionConnectOptions,
 	SubgroupWriter,
 	Subscription,

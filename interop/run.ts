@@ -46,6 +46,9 @@ const { values: options } = parseArgs({
 		// The Object carries Object Properties, and every subscriber has to
 		// get them as they were sent. Between own clients only.
 		"object-properties": { type: "boolean", default: false },
+		// The publisher announces the namespace and sends no PUBLISH: it
+		// sends on the subscription the relay asks it for. own-browser only.
+		"announce-only": { type: "boolean", default: false },
 		"subscribe-track": { type: "string", default: TRACK },
 		verbose: { type: "boolean", default: false },
 	},
@@ -139,13 +142,18 @@ async function transferOneObject(
 		);
 	}
 
+	const announceOnly = options["announce-only"];
+	if (announceOnly && publisher !== "own-browser") {
+		throw new Error(
+			`--announce-only needs own-browser as the publisher, the page that serves a track it is asked for, not ${publisher}`,
+		);
+	}
 	// The publisher offers the track first: the relay rejects a SUBSCRIBE for
-	// a track nobody has published.
-	const publishing = await startPublisher(
-		publisher,
-		run,
-		withProperties ? { properties: OBJECT_PROPERTIES } : {},
-	);
+	// a track nobody has published, or announced the namespace of.
+	const publishing = await startPublisher(publisher, run, {
+		...(withProperties ? { properties: OBJECT_PROPERTIES } : {}),
+		...(announceOnly ? { servesWhenAsked: "at-once" } : {}),
+	});
 	// The subscribers are live before the Object is sent: the Largest Object
 	// filter does not replay what was published earlier.
 	const subscribing = [];
@@ -163,6 +171,12 @@ async function transferOneObject(
 			}),
 		);
 	}
+	// A publisher that only announced has a subscription to send on once the
+	// relay has asked it, which a subscriber makes it do.
+	await withTimeout(
+		publishing.serving(),
+		"the publisher to accept the SUBSCRIBE the relay sends it",
+	);
 	const group = await withTimeout(publishing.send(), "the publisher to send");
 	const received = await Promise.all(
 		subscribing.map(async (each) => {

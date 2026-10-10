@@ -151,7 +151,13 @@ export type RequestAbort =
 	/** §2.5.1: the SUBSCRIBE_OK or FETCH_OK had a Mandatory Track Property this endpoint does not understand, so it cancelled. */
 	| { type: "unsupported-track-property" }
 	/** This endpoint cancelled the request before it was answered. Only a FETCH is handed out before its answer. */
-	| { type: "cancelled" };
+	| { type: "cancelled" }
+	/**
+	 * For a request of the peer: it sent a REQUEST_UPDATE before this
+	 * endpoint had answered. Updates are not implemented, so the update was
+	 * refused, and the request ended with that (§10.9).
+	 */
+	| { type: "update-failed" };
 
 export class RequestAbortedError extends Error {
 	override readonly name = "RequestAbortedError";

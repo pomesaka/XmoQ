@@ -1,6 +1,7 @@
 import {
 	InactiveError,
 	MoqtError,
+	RequestErrorCode,
 	SessionErrorCode,
 	StreamResetErrorCode,
 } from "../core/error.ts";
@@ -18,6 +19,7 @@ import type {
 import type {
 	FetchRequest,
 	PublishRequest,
+	SubscribeAnswer,
 	SubscribeRequest,
 } from "../core/requests.ts";
 import { createSession, type Session } from "../core/session.ts";
@@ -27,7 +29,7 @@ import type {
 	SessionResult,
 } from "../core/session-output.ts";
 import type { SubgroupObject } from "../core/subgroup.ts";
-import type { TrackNamespace } from "../core/track.ts";
+import type { FullTrackName, TrackNamespace } from "../core/track.ts";
 import { closeCode, closeReason } from "./close-info.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import {
@@ -170,7 +172,12 @@ export interface SessionConnectOptions {
 	 * peer has ended its direction.
 	 *
 	 * This bounds what requests that have not fully arrived can hold: up to
-	 * 64 KiB each, for a FETCH that is decoded whole before it is refused.
+	 * 64 KiB each, for a FETCH or a SUBSCRIBE, which are decoded whole.
+	 *
+	 * A SUBSCRIBE that was accepted (`MoqtConnection.serve`) keeps its stream
+	 * open, and its place, while the subscription lasts. With as many
+	 * subscriptions accepted as this number, no further request of the peer
+	 * is read until one of them ends.
 	 */
 	maxPeerBidiStreams?: number;
 	/**
@@ -251,11 +258,16 @@ export interface SubgroupWriter {
 	reset(code?: number): Promise<void>;
 }
 
-/** A subscription this endpoint started with PUBLISH. */
+/**
+ * A subscription this endpoint is the publisher of: one it started with
+ * PUBLISH, or one the peer asked for with a SUBSCRIBE that was accepted
+ * (`MoqtConnection.serve`).
+ */
 export interface PublishedTrack {
+	/** The Request ID of the PUBLISH, or of the peer's SUBSCRIBE. */
 	readonly requestId: bigint;
 	readonly trackAlias: bigint;
-	/** Parameters of the PUBLISH_OK. */
+	/** What the subscriber asked for: the parameters of its PUBLISH_OK, or of its SUBSCRIBE. */
 	readonly parameters: MessageParameters;
 	/** Resolves once the subscription has ended, with how. Never rejects. */
 	readonly ended: Promise<PublishEnd>;
@@ -407,7 +419,92 @@ export interface FetchCallOptions {
 	signal?: AbortSignal;
 }
 
+/**
+ * A SUBSCRIBE of the peer, to be answered once with `accept` or `reject`.
+ *
+ * Nothing limits how long the answer takes. A relay gives up on a
+ * publisher that does not answer (an XmoQ relay after 5 seconds) and
+ * cancels, which `signal` reports.
+ */
+export interface PeerSubscribe extends FullTrackName {
+	readonly requestId: bigint;
+	/** Parameters of the SUBSCRIBE: its filter, FORWARD, and the rest of §10.7. */
+	readonly parameters: MessageParameters;
+	/**
+	 * Aborts when the request went before it was answered. Its reason is a
+	 * `RequestAbortedError` when the peer cancelled, or sent a REQUEST_UPDATE,
+	 * and a `SessionClosedError` when the session ended. Not aborted by an
+	 * answer.
+	 *
+	 * The `code` of a cancellation is there when the browser gave one. A
+	 * relay cancels by resetting its direction of the stream and stopping
+	 * this endpoint's; Chromium reports the first with its code and the
+	 * second without one, and whichever is seen first ends the request. The
+	 * same holds for the `code` of `PublishedTrack.ended` after `accept`.
+	 */
+	readonly signal: AbortSignal;
+	/**
+	 * Sends SUBSCRIBE_OK (§10.8) and resolves with the subscription, which is
+	 * used like one made with PUBLISH. The Track Alias is chosen here:
+	 * counted up from 0, the first number after the one given last that no
+	 * subscription this endpoint publishes uses. The alias of a subscription
+	 * that ended is not given again at once. An application that also calls
+	 * `publish()` picks its own aliases clear of these.
+	 *
+	 * **A publisher that has published Objects of the Track has to give
+	 * `parameters.largestObject`**, the largest Location it has published
+	 * (§10.2.11: "If Objects have been published on this Track the Publisher
+	 * MUST include this parameter"; left out, it says that none were). The
+	 * library keeps no Object and cannot tell, so this is the application's
+	 * to do. A relay works out the range of a viewer's Joining FETCH from
+	 * it, and refuses that FETCH with `INVALID_RANGE` where it is missing.
+	 *
+	 * Rejects with the reason of `signal` for a request that is gone, with
+	 * an `Error` for one that was answered, and with a `RangeError` for an
+	 * answer that cannot be sent: a parameter that is none of SUBSCRIBE_OK,
+	 * or a value that does not fit its field. After a `RangeError` nothing
+	 * was sent, and the request still waits for `accept` or `reject`.
+	 */
+	accept(answer?: SubscribeAnswer): Promise<PublishedTrack>;
+	/**
+	 * Sends REQUEST_ERROR with a code of §15.10.2 (`RequestErrorCode` has
+	 * the ones this library sends itself) and ends the request.
+	 *
+	 * Rejects like `accept`: with a `RangeError`, and the request still
+	 * waiting, for a code that is no whole number from 0 to 2^62 - 1 and for
+	 * a reason of more than 1024 bytes of UTF-8.
+	 */
+	reject(errorCode: bigint, errorReason?: string): Promise<void>;
+}
+
+/** What an application does with the requests the peer opens. */
+export interface ServeHandlers {
+	/**
+	 * Called for each SUBSCRIBE of the peer, which a relay sends to the
+	 * publisher of a namespace. The request may be answered later, also
+	 * after the handler has returned. Without this, a SUBSCRIBE is refused
+	 * with `NOT_SUPPORTED`. A handler that throws, or returns a promise that
+	 * rejects, refuses the request with `INTERNAL_ERROR` unless it was
+	 * answered, and the error is reported with `reportError`.
+	 *
+	 * Not called for a Track this endpoint already publishes to the peer
+	 * (`DUPLICATE_SUBSCRIPTION`, §5.1), nor while `limits.maxPeerRequests`
+	 * requests of the peer are open (`EXCESSIVE_LOAD`).
+	 */
+	// WHY `void` and not `void | Promise<void>`: with `void` alone, a
+	// function that returns something else is still taken, an `async` one
+	// among them, and what it returns is looked at when it is called.
+	subscribe?(request: PeerSubscribe): void;
+}
+
 export interface MoqtConnection {
+	/**
+	 * Says how the requests the peer opens are answered, from the next one
+	 * on; a later call replaces the handlers. Until it is called, every
+	 * request of the peer is refused with `NOT_SUPPORTED`, so call it before
+	 * `publishNamespace()`.
+	 */
+	serve(handlers: ServeHandlers): void;
 	/** Setup Options of the peer's SETUP. */
 	readonly peerSetupOptions: readonly KeyValuePair[];
 	/** Resolves once the session has ended, with how. Never rejects. */
@@ -415,6 +512,13 @@ export interface MoqtConnection {
 	/**
 	 * The three requests reject with `RequestFailedError`,
 	 * `RequestAbortedError` or `SessionClosedError`.
+	 *
+	 * `publish()` rejects with a `RangeError`, and sends nothing, for a Track
+	 * Alias that a subscription this endpoint publishes uses (§11.1), and for
+	 * a Track it already publishes to the peer (§5.1 allows one subscription
+	 * to a Track in each role): one it sent PUBLISH for before, answered or
+	 * not, and one the peer asked for with a SUBSCRIBE that waits for its
+	 * answer or was accepted.
 	 */
 	publishNamespace(
 		trackNamespace: TrackNamespace,
@@ -578,6 +682,9 @@ export async function connectOver(
 	const publishes = new Map<bigint, ActivePublish>();
 	const fetches = new Map<bigint, ActiveFetch>();
 	const peerStreamWaits = new Map<bigint, PeerStreamWait>();
+	/** Requests of the peer the application has not answered; each is aborted when its request goes. */
+	const pendingPeerRequests = new Map<bigint, AbortController>();
+	let serveHandlers: ServeHandlers = {};
 	/** Serializes outputs so that writes reach each stream in the order the session produced them. */
 	let queue: Promise<unknown> = Promise.resolve();
 	let sessionClose: SessionClose | undefined;
@@ -639,6 +746,15 @@ export async function connectOver(
 			endPeerStreamWait(requestId, { type: "nothing-in-time" });
 			void applyInput((s) => s.expirePublishDonePeerEnd(requestId));
 		}, peerStreamEndTimeoutMs);
+	};
+
+	/** A request of the peer went before the application answered it. */
+	const endPendingPeerRequest = (requestId: bigint, reason: Error): boolean => {
+		const gone = pendingPeerRequests.get(requestId);
+		if (gone === undefined) return false;
+		pendingPeerRequests.delete(requestId);
+		gone.abort(reason);
+		return true;
 	};
 
 	const endPublish = (requestId: bigint, end: PublishEnd): void => {
@@ -735,6 +851,9 @@ export async function connectOver(
 		}
 		for (const requestId of [...peerStreamWaits.keys()]) {
 			endPeerStreamWait(requestId, { type: "session-closed", close });
+		}
+		for (const requestId of [...pendingPeerRequests.keys()]) {
+			endPendingPeerRequest(requestId, error);
 		}
 		closed.resolve(close);
 	}
@@ -908,11 +1027,12 @@ export async function connectOver(
 		};
 	};
 
+	/** `subscription` is the Request ID of the subscription and what its subscriber asked for. */
 	const publishedTrackFrom = (
-		event: EventOf<"publish-ok">,
+		subscription: { requestId: bigint; parameters: MessageParameters },
 		trackAlias: bigint,
 	): PublishedTrack => {
-		const { requestId } = event;
+		const { requestId } = subscription;
 		const publish: ActivePublish = {
 			ended: deferred(),
 			end: undefined,
@@ -922,7 +1042,7 @@ export async function connectOver(
 		return {
 			requestId,
 			trackAlias,
-			parameters: event.parameters,
+			parameters: subscription.parameters,
 			ended: publish.ended.promise,
 			openSubgroup: (subgroupOptions) =>
 				onPublish(publish, async () =>
@@ -996,6 +1116,103 @@ export async function connectOver(
 		};
 	};
 
+	const peerSubscribeFrom = (
+		event: EventOf<"peer-subscribe">,
+	): PeerSubscribe => {
+		const { requestId } = event;
+		const gone = new AbortController();
+		pendingPeerRequests.set(requestId, gone);
+		/** Gives the session the answer, unless the request is gone or has one. */
+		const answer = async <T>(
+			action: (session: Session) => SessionResult<T>,
+		): Promise<T> => {
+			gone.signal.throwIfAborted();
+			if (pendingPeerRequests.get(requestId) !== gone) {
+				throw new Error("the request was answered already");
+			}
+			try {
+				return await apply((s) => {
+					const result = action(s);
+					// Once the session took the answer: one it refuses (a
+					// parameter that is none of the message) leaves the request
+					// waiting.
+					pendingPeerRequests.delete(requestId);
+					return result;
+				});
+			} catch (error) {
+				if (!(error instanceof InactiveError)) throw error;
+				// The session had ended the request already, and the event that
+				// says so is still in the queue.
+				await queue;
+				gone.signal.throwIfAborted();
+				throw error;
+			}
+		};
+		return {
+			requestId,
+			trackNamespace: event.trackNamespace,
+			trackName: event.trackName,
+			parameters: event.parameters,
+			signal: gone.signal,
+			accept: (subscribeAnswer = {}) =>
+				answer((s) => {
+					const { value: trackAlias, outputs } = s.acceptSubscribe(
+						requestId,
+						subscribeAnswer,
+					);
+					// The Track is registered in the same step, so that an ending
+					// right behind the SUBSCRIBE_OK finds it.
+					return { value: publishedTrackFrom(event, trackAlias), outputs };
+				}),
+			reject: (errorCode, errorReason = "") =>
+				answer((s) => ({
+					value: undefined,
+					outputs: s.rejectPeerRequest(requestId, errorCode, errorReason),
+				})),
+		};
+	};
+
+	/** Hands a SUBSCRIBE of the peer to the application, or refuses it where nobody serves one. */
+	const onPeerSubscribe = (event: EventOf<"peer-subscribe">): void => {
+		const handler = serveHandlers.subscribe;
+		const request = peerSubscribeFrom(event);
+		if (handler === undefined) {
+			// WHY through `request`, like an application's answer, and not
+			// straight to the session: the session may have ended the request
+			// in the read that brought it (a REQUEST_UPDATE right behind the
+			// SUBSCRIBE, which §10.9 allows). An answer to a request that is
+			// gone is no fault of anyone, and must not end the session.
+			request
+				.reject(
+					RequestErrorCode.NOT_SUPPORTED,
+					"this endpoint serves no SUBSCRIBE",
+				)
+				.catch(() => {});
+			return;
+		}
+		const failed = (error: unknown): void => {
+			// The handler may have answered before it failed, and the request
+			// may be gone.
+			request
+				.reject(
+					RequestErrorCode.INTERNAL_ERROR,
+					"the publisher failed to handle the request",
+				)
+				.catch(() => {});
+			// WHY not the end of the session: the error is the application's,
+			// and of one request. It is reported like an error in an event
+			// listener.
+			reportError(error);
+		};
+		try {
+			const returned: unknown = handler(request);
+			// An `async` handler fails by the promise it returns.
+			if (returned instanceof Promise) returned.catch(failed);
+		} catch (error) {
+			failed(error);
+		}
+	};
+
 	/** Tells whoever waits on a request how it ended, from the session's reason and what arrived before it. */
 	const onRequestClosed = (event: EventOf<"request-closed">): void => {
 		const { requestId, reason, resetCode } = event;
@@ -1011,6 +1228,10 @@ export async function connectOver(
 				return;
 			case "peer-reset":
 				rejectPending(
+					requestId,
+					new RequestAbortedError({ type: "peer-reset", code: resetCode }),
+				);
+				endPendingPeerRequest(
 					requestId,
 					new RequestAbortedError({ type: "peer-reset", code: resetCode }),
 				);
@@ -1038,6 +1259,16 @@ export async function connectOver(
 				return;
 			}
 			case "update-failed": {
+				// A SUBSCRIBE of the peer that had no answer: no PUBLISH_DONE was
+				// sent, so there is no wait for what follows one.
+				if (
+					endPendingPeerRequest(
+						requestId,
+						new RequestAbortedError({ type: "update-failed" }),
+					)
+				) {
+					return;
+				}
 				endPublish(requestId, { type: "update-failed" });
 				// The session sent PUBLISH_DONE UPDATE_FAILED itself. Nobody
 				// asked how the subscriber ends its direction, but the stream is
@@ -1167,6 +1398,9 @@ export async function connectOver(
 					}),
 				};
 			}
+			case "peer-subscribe":
+				onPeerSubscribe(event);
+				return undefined;
 			case "subgroup-abandoned":
 			case "peer-stream-timed-out":
 			case "peer-request-rejected":
@@ -1305,6 +1539,9 @@ export async function connectOver(
 	}
 
 	return {
+		serve(handlers) {
+			serveHandlers = handlers;
+		},
 		peerSetupOptions,
 		closed: closed.promise,
 		publishNamespace(trackNamespace, parameters) {

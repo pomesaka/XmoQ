@@ -25,6 +25,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Wire fixtures captured from moqtail](fixtures/moqt-18/README.md)
 - [Bytes written by hand from the draft, read by both implementations](fixtures/moqt-18-by-hand/README.md)
 - [The points at which a stream of the peer has said what it is](fixtures/first-bytes/README.md)
+- [What becomes of a SUBSCRIBE the peer sends](fixtures/peer-subscribe/README.md)
 - [Browser client library `@xmoq/moqt`](packages/moqt/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
 - [MoQ library candidates](docs/moq-libraries.md)

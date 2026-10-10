@@ -8,6 +8,8 @@ import {
 	type RequestError,
 	type RequestOk,
 	type RequestUpdate,
+	SUBSCRIBE_MESSAGE_TYPE,
+	type Subscribe,
 	type SubscribeOk,
 } from "./control-message.ts";
 import {
@@ -43,7 +45,11 @@ import type {
 	SessionOutput,
 	SessionResult,
 } from "./session-output.ts";
-import type { FullTrackName, TrackNamespace } from "./track.ts";
+import {
+	type FullTrackName,
+	sameFullTrackName,
+	type TrackNamespace,
+} from "./track.ts";
 
 export interface PublishNamespaceRequest {
 	trackNamespace: TrackNamespace;
@@ -76,6 +82,22 @@ export type FetchStreamOpened =
 	 * The stream was stopped; nothing is wrong.
 	 */
 	| "ended";
+
+/** What the application answers a SUBSCRIBE of the peer with (§10.8). */
+export interface SubscribeAnswer {
+	/**
+	 * Parameters of the SUBSCRIBE_OK. LARGEST_OBJECT is where a publisher
+	 * says how far it is, and §10.2.11 has a MUST for it: "If Objects have
+	 * been published on this Track the Publisher MUST include this
+	 * parameter." The session knows nothing of earlier subscriptions to the
+	 * Track, so its caller has to keep that.
+	 */
+	parameters?: MessageParameters;
+	trackProperties?: KeyValuePair[];
+}
+
+/** What became of a SUBSCRIBE of the peer: it is refused with this code, or it waits for the application on this stream. */
+export type PeerSubscribeOpened = { refused: bigint } | { stream: number };
 
 export interface RequestsOptions {
 	limits: SessionLimits;
@@ -162,6 +184,37 @@ export interface Requests {
 		out: SessionOutput[],
 	): void;
 	cancelRequest(requestId: bigint): SessionOutput[];
+	/**
+	 * A SUBSCRIBE of the peer, whole, with a Request ID that was checked.
+	 * Unless it is refused here, the stream it came on is adopted
+	 * (`adopt-peer-stream`), and the request waits for `acceptSubscribe` or
+	 * `rejectPeerRequest`. What arrives on the stream from then on goes to
+	 * `receiveStreamData`, `streamReset` and `streamStopped`, with the number
+	 * returned.
+	 */
+	peerSubscribeOpened(
+		message: Subscribe,
+		peerStream: number,
+		out: SessionOutput[],
+	): PeerSubscribeOpened;
+	/** Whether the Request ID names a SUBSCRIBE of the peer that waits for its answer or was accepted, and is not over (§10.12.2). */
+	isOpenPeerSubscribe(requestId: bigint): boolean;
+	/**
+	 * Accepts a SUBSCRIBE of the peer: sends SUBSCRIBE_OK. Returns the Track
+	 * Alias this endpoint chose. From here on the subscription is one this
+	 * endpoint is the publisher of, like one made with PUBLISH, under the
+	 * peer's Request ID.
+	 */
+	acceptSubscribe(
+		requestId: bigint,
+		answer: SubscribeAnswer,
+	): SessionResult<bigint>;
+	/** Refuses a request of the peer that waits for its answer: REQUEST_ERROR and a FIN (§3.3.2). */
+	rejectPeerRequest(
+		requestId: bigint,
+		errorCode: bigint,
+		errorReason: string,
+	): SessionOutput[];
 	publishDone(
 		requestId: bigint,
 		statusCode: bigint,
@@ -197,6 +250,8 @@ export interface Requests {
 		code: number | undefined,
 		out: SessionOutput[],
 	): void;
+	/** How many request streams something is kept of: the open requests, and the ones that ended while the peer can still send on their stream. */
+	heldStreams(): number;
 	clear(): void;
 }
 
@@ -231,10 +286,27 @@ interface NamespaceEntry extends RequestCommon {
 	kind: "PUBLISH_NAMESPACE";
 }
 
+/**
+ * A subscription this endpoint is the publisher of: one it made with
+ * PUBLISH, or one the peer made with a SUBSCRIBE that was accepted. The two
+ * differ in who opened the request stream and whose Request ID names them,
+ * and in nothing that follows.
+ */
 interface PublishEntry extends RequestCommon {
 	kind: "PUBLISH";
+	/** Who opened the request: this endpoint with PUBLISH, or the peer with SUBSCRIBE. */
+	openedBy: "self" | "peer";
+	fullTrackName: FullTrackName;
 	trackAlias: bigint;
 	/** The Forward State of §5.1. */
+	forward: boolean;
+}
+
+/** A SUBSCRIBE of the peer that waits for the application's answer: Pending (Publisher) of §5.1. */
+interface PeerSubscribeEntry extends RequestCommon {
+	kind: "PEER_SUBSCRIBE";
+	fullTrackName: FullTrackName;
+	/** FORWARD of the SUBSCRIBE (§10.2.12). */
 	forward: boolean;
 }
 
@@ -262,7 +334,12 @@ interface FetchEntry extends RequestCommon {
 	fetchStream: "none" | "ended" | { peerStream: number };
 }
 
-type RequestEntry = NamespaceEntry | PublishEntry | SubscribeEntry | FetchEntry;
+type RequestEntry =
+	| NamespaceEntry
+	| PublishEntry
+	| PeerSubscribeEntry
+	| SubscribeEntry
+	| FetchEntry;
 
 /** §10.2.12: FORWARD defaults to 1 wherever it is omitted, except in REQUEST_UPDATE. */
 const DEFAULT_FORWARD = true;
@@ -286,6 +363,12 @@ export function createRequests(options: RequestsOptions): Requests {
 	 * its subscription ends.
 	 */
 	const publishedAliases = new Set<bigint>();
+	/**
+	 * Where the search for a free Track Alias for an accepted SUBSCRIBE of the
+	 * peer starts: counted up from 0, past the ones in use, as in the Rust
+	 * session (`next_free_alias`).
+	 */
+	let nextServedAlias = 0n;
 	const outgoing = createOutgoingSubgroups(options.allocateStream);
 	// The three callbacks are function declarations further down, so that this
 	// table of dependencies can stand before the code that uses it.
@@ -304,6 +387,37 @@ export function createRequests(options: RequestsOptions): Requests {
 		}
 		return false;
 	}
+
+	/**
+	 * §5.1 allows one subscription to a Track in each role: whether this
+	 * endpoint is the publisher of one, through its own PUBLISH or a
+	 * SUBSCRIBE of the peer, answered or not.
+	 */
+	const isPublishing = (name: FullTrackName): boolean => {
+		for (const request of requests.values()) {
+			if (
+				(request.kind === "PUBLISH" || request.kind === "PEER_SUBSCRIBE") &&
+				sameFullTrackName(request.fullTrackName, name)
+			) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	/** Requests of the peer that are open: waiting for their answer, or accepted. */
+	const openPeerRequests = (): number => {
+		let count = 0;
+		for (const request of requests.values()) {
+			if (
+				request.kind === "PEER_SUBSCRIBE" ||
+				(request.kind === "PUBLISH" && request.openedBy === "peer")
+			) {
+				count += 1;
+			}
+		}
+		return count;
+	};
 
 	const closedEvent = (
 		request: RequestEntry,
@@ -726,6 +840,38 @@ export function createRequests(options: RequestsOptions): Requests {
 		});
 	};
 
+	/**
+	 * A REQUEST_UPDATE for a SUBSCRIBE of the peer that has no answer yet. It
+	 * is refused, and the request is over with that.
+	 *
+	 * WHY the request ends: responses carry no Request ID, so the
+	 * REQUEST_ERROR for the update can only be read as the response to the
+	 * SUBSCRIBE itself. The Rust session does the same (`answer_update`).
+	 */
+	const onUpdateBeforeAnswer = (
+		request: PeerSubscribeEntry,
+		message: RequestUpdate,
+		out: SessionOutput[],
+	): void => {
+		// §10.1: REQUEST_UPDATE consumes a Request ID of its sender.
+		options.checkPeerRequestId(message.requestId);
+		request.endedLocally = true;
+		endRequest(request, out, () => {
+			out.push({
+				type: "send",
+				stream: request.stream,
+				data: encodeControlMessage({
+					type: "REQUEST_ERROR",
+					errorCode: RequestErrorCode.NOT_SUPPORTED,
+					retryInterval: 0n,
+					errorReason: "REQUEST_UPDATE is not implemented",
+				}),
+			});
+			out.push(closedEvent(request, "update-failed"));
+			finishSend(request, out);
+		});
+	};
+
 	const onResponse = (
 		request: RequestEntry,
 		message: ControlMessage,
@@ -737,6 +883,13 @@ export function createRequests(options: RequestsOptions): Requests {
 			`unexpected ${message.type} on the ${request.kind} request stream`,
 		);
 		if (isDraining(request)) throw unexpected;
+		// §10.9: the subscriber sends nothing else on the stream of its
+		// SUBSCRIBE.
+		if (request.kind === "PEER_SUBSCRIBE") {
+			if (message.type !== "REQUEST_UPDATE") throw unexpected;
+			onUpdateBeforeAnswer(request, message, out);
+			return;
+		}
 		switch (message.type) {
 			case "REQUEST_ERROR":
 				if (request.state !== "Pending") throw unexpected;
@@ -774,8 +927,8 @@ export function createRequests(options: RequestsOptions): Requests {
 				return;
 			}
 			case "REQUEST_UPDATE":
-				// §10.9: on a stream this endpoint opened, only the subscriber of an
-				// Established PUBLISH may send it.
+				// §10.9: only the subscriber of an Established subscription this
+				// endpoint is the publisher of may send it.
 				if (request.state !== "Established" || request.kind !== "PUBLISH") {
 					throw unexpected;
 				}
@@ -827,6 +980,25 @@ export function createRequests(options: RequestsOptions): Requests {
 		return request;
 	};
 
+	const pendingPeerSubscribe = (requestId: bigint): PeerSubscribeEntry => {
+		const request = requests.get(requestId);
+		if (request?.kind !== "PEER_SUBSCRIBE") {
+			throw new InactiveError(
+				`Request ID ${requestId} is not a SUBSCRIBE of the peer that waits for its answer`,
+			);
+		}
+		return request;
+	};
+
+	/**
+	 * A subscription this endpoint is the publisher of, whose subscriber can
+	 * end its direction of the request stream and leave the subscription as
+	 * it is: answered or not.
+	 */
+	const outlivesPeerFin = (request: RequestEntry): boolean =>
+		(request.kind === "PUBLISH" && request.state === "Established") ||
+		(request.kind === "PEER_SUBSCRIBE" && request.state === "Pending");
+
 	return {
 		incoming,
 		outgoing,
@@ -849,11 +1021,23 @@ export function createRequests(options: RequestsOptions): Requests {
 					`Track Alias ${request.trackAlias} is already in use (§11.1)`,
 				);
 			}
+			// §5.1: one subscription to a Track in each role. The Rust session
+			// refuses the same call.
+			if (isPublishing(request)) {
+				throw new RangeError(
+					"this endpoint is already the publisher of a subscription to the Track (§5.1)",
+				);
+			}
 			const parameters = request.parameters ?? {};
 			const result = openRequest((common) => ({
 				entry: {
 					...common,
 					kind: "PUBLISH",
+					openedBy: "self",
+					fullTrackName: {
+						trackNamespace: request.trackNamespace,
+						trackName: request.trackName,
+					},
 					trackAlias: request.trackAlias,
 					forward: parameters.forward ?? DEFAULT_FORWARD,
 				},
@@ -986,6 +1170,117 @@ export function createRequests(options: RequestsOptions): Requests {
 			return out;
 		},
 
+		peerSubscribeOpened(message, peerStream, out) {
+			// The order of the Rust session (`on_peer_request_opened`): the
+			// subscription that exists is named before the load is.
+			if (isPublishing(message)) {
+				return { refused: RequestErrorCode.DUPLICATE_SUBSCRIPTION };
+			}
+			if (openPeerRequests() >= options.limits.maxPeerRequests) {
+				return { refused: RequestErrorCode.EXCESSIVE_LOAD };
+			}
+			const entry: PeerSubscribeEntry = {
+				requestId: message.requestId,
+				stream: options.allocateStream(),
+				state: "Pending",
+				inbound: new Uint8Array(0),
+				sendClosed: false,
+				endedLocally: false,
+				peerFinished: false,
+				kind: "PEER_SUBSCRIBE",
+				fullTrackName: {
+					trackNamespace: message.trackNamespace,
+					trackName: message.trackName,
+				},
+				forward: message.parameters.forward ?? DEFAULT_FORWARD,
+			};
+			requests.set(entry.requestId, entry);
+			requestStreams.set(entry.stream, entry);
+			out.push({ type: "adopt-peer-stream", peerStream, stream: entry.stream });
+			out.push({
+				type: "event",
+				event: {
+					type: "peer-subscribe",
+					requestId: message.requestId,
+					trackNamespace: message.trackNamespace,
+					trackName: message.trackName,
+					parameters: message.parameters,
+				},
+			});
+			return { stream: entry.stream };
+		},
+
+		isOpenPeerSubscribe(requestId) {
+			const request = requests.get(requestId);
+			return (
+				request?.kind === "PEER_SUBSCRIBE" ||
+				(request?.kind === "PUBLISH" && request.openedBy === "peer")
+			);
+		},
+
+		acceptSubscribe(requestId, answer) {
+			const pending = pendingPeerSubscribe(requestId);
+			let trackAlias = nextServedAlias;
+			while (publishedAliases.has(trackAlias)) trackAlias += 1n;
+			// Before anything changes: a parameter that is none of SUBSCRIBE_OK
+			// throws here.
+			const data = encodeControlMessage({
+				type: "SUBSCRIBE_OK",
+				trackAlias,
+				parameters: answer.parameters ?? {},
+				trackProperties: answer.trackProperties ?? [],
+			});
+			nextServedAlias = trackAlias + 1n;
+			publishedAliases.add(trackAlias);
+			const { kind: _, ...kept } = pending;
+			const entry: PublishEntry = {
+				...kept,
+				kind: "PUBLISH",
+				openedBy: "peer",
+				state: "Established",
+				trackAlias,
+			};
+			requests.set(requestId, entry);
+			// A subscriber that had finished its direction is still known by
+			// its stream: its STOP_SENDING can come.
+			requestStreams.set(entry.stream, entry);
+			return {
+				value: trackAlias,
+				outputs: [{ type: "send", stream: entry.stream, data }],
+			};
+		},
+
+		rejectPeerRequest(requestId, errorCode, errorReason) {
+			const request = pendingPeerSubscribe(requestId);
+			const data = encodeControlMessage({
+				type: "REQUEST_ERROR",
+				errorCode,
+				retryInterval: 0n,
+				errorReason,
+			});
+			const out: SessionOutput[] = [];
+			// What the peer sent before it saw the answer still arrives, and
+			// gets none.
+			request.endedLocally = true;
+			endRequest(request, out, () => {
+				out.push({ type: "send", stream: request.stream, data });
+				out.push({
+					type: "event",
+					event: {
+						type: "peer-request-rejected",
+						messageType: SUBSCRIBE_MESSAGE_TYPE,
+						requestId,
+						errorCode,
+					},
+				});
+				finishSend(request, out);
+			});
+			// The subscriber had finished its direction already; nothing more
+			// comes on the stream.
+			if (request.peerFinished) requestStreams.delete(request.stream);
+			return out;
+		},
+
 		// §5.1: "The publisher terminates a subscription in the Pending
 		// (Publisher) or Established states by sending PUBLISH_DONE".
 		publishDone(requestId, statusCode, errorReason) {
@@ -1083,8 +1378,11 @@ export function createRequests(options: RequestsOptions): Requests {
 			// §5.1: the subscriber of a subscription made with PUBLISH ends it with
 			// STOP_SENDING. A subscriber that only finishes its direction can send
 			// no REQUEST_UPDATE any more, and has asked for nothing to end.
+			// The same holds for a SUBSCRIBE of the peer, before its answer and
+			// after: the Rust client goes on serving a subscriber that only
+			// finished its direction.
 			// WHY the stream stays known: STOP_SENDING for it can still come.
-			if (request.kind === "PUBLISH" && request.state === "Established") {
+			if (outlivesPeerFin(request)) {
 				request.peerFinished = true;
 				return;
 			}
@@ -1131,15 +1429,20 @@ export function createRequests(options: RequestsOptions): Requests {
 			// the direction this endpoint sends in. The response to a SUBSCRIBE,
 			// its PUBLISH_DONE and the Objects of a draining subscription are
 			// still on their way and have to be read.
-			if (request.kind === "PUBLISH" && request.state === "Established") {
+			// A subscriber that stops the stream of its SUBSCRIBE reads no
+			// answer and no PUBLISH_DONE on it (§3.3.2 has it cancel that way).
+			if (outlivesPeerFin(request)) {
 				abandonRequest(request, "peer-reset", out, code);
 			}
 		},
+
+		heldStreams: () => requestStreams.size,
 
 		clear() {
 			requests.clear();
 			requestStreams.clear();
 			publishedAliases.clear();
+			nextServedAlias = 0n;
 			outgoing.clear();
 			incoming.clear();
 		},

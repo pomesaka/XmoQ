@@ -46,6 +46,7 @@ function toHex(bytes: Uint8Array, separator: string): string {
 }
 
 const utf8 = new TextEncoder();
+const utf8Decoder = new TextDecoder();
 
 /** "xmoq/phase0" names the Track Namespace Fields "xmoq" and "phase0", as moqtail's `Tuple.fromUtf8Path` does. */
 function namespaceFromPath(path: string): Uint8Array[] {
@@ -72,6 +73,8 @@ interface Reading {
 
 let connection: MoqtConnection | undefined;
 let published: PublishedTrack | undefined;
+/** The subscription `serveTrack` accepted, once it has. */
+let served: Promise<PublishedTrack> | undefined;
 let subscribed: Subscription | undefined;
 /** Absent while nothing is subscribed, and for a subscription that is not read. */
 let reading: Reading | undefined;
@@ -485,6 +488,46 @@ window.xmoqOwn = {
 	announceNamespace: withPlainErrors(async (namespace: string) => {
 		await connected().publishNamespace(namespaceFromPath(namespace));
 		console.log(`namespace announced: ${namespace}`);
+	}),
+
+	serveTrack: withPlainErrors(async (namespace: string, trackName: string) => {
+		const moq = connected();
+		const wanted = utf8.encode(trackName);
+		const sameName = (name: Uint8Array): boolean =>
+			name.length === wanted.length &&
+			name.every((byte, index) => byte === wanted[index]);
+		let asked = false;
+		served = new Promise((resolve, reject) => {
+			// Before the namespace is announced: a relay asks as soon as it has
+			// a subscriber.
+			moq.serve({
+				subscribe(request) {
+					console.log(
+						`asked: request_id=${request.requestId} track=${utf8Decoder.decode(request.trackName)}`,
+					);
+					if (asked || !sameName(request.trackName)) {
+						// DOES_NOT_EXIST. A request that went meanwhile needs none.
+						request.reject(0x10n, "not a track of this page").catch(() => {});
+						return;
+					}
+					asked = true;
+					request.accept().then((track) => {
+						published = track;
+						console.log(`serving: alias=${track.trackAlias}`);
+						resolve(track);
+					}, reject);
+				},
+			});
+		});
+		// Observed here already: a failure is reported by `servingTrack`.
+		served.catch(() => {});
+		await moq.publishNamespace(namespaceFromPath(namespace));
+		console.log(`namespace announced: ${namespace}`);
+	}),
+
+	servingTrack: withPlainErrors(async () => {
+		if (served === undefined) throw new Error("serveTrack() was not called");
+		return (await served).trackAlias.toString();
 	}),
 
 	endTrack: withPlainErrors(async () => {

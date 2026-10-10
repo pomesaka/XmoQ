@@ -41,11 +41,21 @@ export type XmoqPage = {
  */
 export type OwnPageExtras = {
 	/**
-	 * Sends PUBLISH_NAMESPACE and no PUBLISH. `@xmoq/moqt` answers a request
-	 * the peer opens with REQUEST_ERROR NOT_SUPPORTED, so a page that only
-	 * announced refuses the SUBSCRIBE a relay sends it for a track.
+	 * Sends PUBLISH_NAMESPACE and no PUBLISH. A page that does not say how it
+	 * serves the requests of the peer refuses them with REQUEST_ERROR
+	 * NOT_SUPPORTED, so this page refuses the SUBSCRIBE a relay sends it for
+	 * a track.
 	 */
 	announceNamespace(namespace: string): Promise<void>;
+	/**
+	 * Sends PUBLISH_NAMESPACE and no PUBLISH, and accepts the first SUBSCRIBE
+	 * the peer sends for the track (`MoqtConnection.serve`); one for another
+	 * track is refused with DOES_NOT_EXIST. The page then sends on that
+	 * subscription as it does on one made with `publishTrack`.
+	 */
+	serveTrack(namespace: string, trackName: string): Promise<void>;
+	/** Resolves with the Track Alias once the SUBSCRIBE was accepted. To be called after `serveTrack`. */
+	servingTrack(): Promise<string>;
 	/** Ends the published Track with PUBLISH_DONE, Status Code TRACK_ENDED. */
 	endTrack(): Promise<void>;
 	/**

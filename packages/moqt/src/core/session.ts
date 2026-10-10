@@ -15,6 +15,8 @@ import {
 	type FetchRequest,
 	type PublishNamespaceRequest,
 	type PublishRequest,
+	type Requests,
+	type SubscribeAnswer,
 	type SubscribeRequest,
 } from "./requests.ts";
 import type {
@@ -40,10 +42,11 @@ export interface SessionOptions {
  * becomes a `close-session` output. Methods the application calls throw when
  * they are misused.
  *
- * Not implemented: the server role, requests opened by the peer (they are
- * answered with REQUEST_ERROR), REQUEST_UPDATE, GOAWAY, datagrams, namespace
- * subscription and timers. Of a FETCH this endpoint sends, the fetch stream
- * is handed on as bytes; `fetch.ts` decodes them for whoever wants Objects.
+ * Not implemented: the server role, requests opened by the peer other than
+ * SUBSCRIBE (they are answered with REQUEST_ERROR), REQUEST_UPDATE, GOAWAY,
+ * datagrams, namespace subscription and timers. Of a FETCH this endpoint
+ * sends, the fetch stream is handed on as bytes; `fetch.ts` decodes them for
+ * whoever wants Objects.
  */
 export interface Session {
 	readonly closed: boolean;
@@ -58,8 +61,33 @@ export interface Session {
 	/** Cancels a request this endpoint made (§3.3.2). */
 	cancelRequest(requestId: bigint): SessionOutput[];
 	/**
-	 * Ends a subscription made with PUBLISH: sends PUBLISH_DONE and a FIN
-	 * (§10.11). Every subgroup stream of the subscription has to be closed first.
+	 * Accepts a SUBSCRIBE of the peer that the event `peer-subscribe`
+	 * reported: sends SUBSCRIBE_OK (§10.8). Returns the Track Alias, which
+	 * the session chooses. The subscription is then used like one made with
+	 * PUBLISH, under the peer's Request ID: `openSubgroup`, `publishDone`,
+	 * and the events of its end.
+	 *
+	 * Throws an `InactiveError` for a request that does not wait for its
+	 * answer, and a `RangeError` for a parameter that is none of SUBSCRIBE_OK.
+	 */
+	acceptSubscribe(
+		requestId: bigint,
+		answer: SubscribeAnswer,
+	): SessionResult<bigint>;
+	/**
+	 * Refuses a request of the peer that waits for its answer: REQUEST_ERROR
+	 * and a FIN (§3.3.2). Throws an `InactiveError` for a request that does
+	 * not.
+	 */
+	rejectPeerRequest(
+		requestId: bigint,
+		errorCode: bigint,
+		errorReason: string,
+	): SessionOutput[];
+	/**
+	 * Ends a subscription this endpoint is the publisher of: sends
+	 * PUBLISH_DONE and a FIN (§10.11). Every subgroup stream of the
+	 * subscription has to be closed first.
 	 */
 	publishDone(
 		requestId: bigint,
@@ -128,8 +156,11 @@ export interface Session {
 		data: Uint8Array,
 		fin: boolean,
 	): SessionOutput[];
-	/** The peer reset a bidirectional stream it opened. */
-	peerBidiStreamReset(peerStream: number): SessionOutput[];
+	/**
+	 * The peer reset a bidirectional stream it opened. `code` is the error
+	 * code of the reset, when the transport reported one.
+	 */
+	peerBidiStreamReset(peerStream: number, code?: number): SessionOutput[];
 	/**
 	 * The peer opened a stream, and nothing of it was reported yet. Without
 	 * this the session does not know a stream that has sent no byte, and
@@ -152,6 +183,14 @@ export interface Session {
 	 * caller that reports the time late, or twice, does no harm.
 	 */
 	peerStreamTimedOut(kind: PeerStreamKind, peerStream: number): SessionOutput[];
+	/**
+	 * How many streams the session keeps something of: request streams of
+	 * either side, and the peer's streams by the numbers the I/O layer gave
+	 * them. Nothing acts on it. It is here so that a test can see that what
+	 * is kept for a stream goes when the stream does: a place that forgets
+	 * to drop it shows in nothing else, and grows with every request.
+	 */
+	heldStreams(): number;
 	/** The transport session ended. Drops all state; no further output is produced. */
 	transportClosed(): void;
 }
@@ -189,8 +228,18 @@ export function createSession(options: SessionOptions = {}): Session {
 		nextStream += 1;
 		return stream;
 	};
-	const peerRequests = createPeerRequests();
-	const requests = createRequests({
+	/**
+	 * Bidirectional streams of the peer whose request this endpoint took
+	 * over, by the number the I/O layer gave them, with the number the
+	 * session gave them (`adopt-peer-stream`).
+	 */
+	const adoptedPeerStreams = new Map<number, number>();
+	const peerRequests = createPeerRequests({
+		subscribe: (message, peerStream, out) =>
+			requests.peerSubscribeOpened(message, peerStream, out),
+		isOpenSubscribe: (requestId) => requests.isOpenPeerSubscribe(requestId),
+	});
+	const requests: Requests = createRequests({
 		limits,
 		allocateStream,
 		checkPeerRequestId: peerRequests.checkRequestId,
@@ -299,6 +348,7 @@ export function createSession(options: SessionOptions = {}): Session {
 		closed = true;
 		requests.clear();
 		peerRequests.clear();
+		adoptedPeerStreams.clear();
 		peerUniStreams.clear();
 		peerControlStream = undefined;
 	};
@@ -363,6 +413,12 @@ export function createSession(options: SessionOptions = {}): Session {
 		publish: (request) => whileOpen(() => requests.publish(request)),
 		subscribe: (request) => whileOpen(() => requests.subscribe(request)),
 		fetch: (request) => whileOpen(() => requests.fetch(request)),
+		acceptSubscribe: (requestId, answer) =>
+			whileOpen(() => requests.acceptSubscribe(requestId, answer)),
+		rejectPeerRequest: (requestId, errorCode, errorReason) =>
+			whileOpen(() =>
+				requests.rejectPeerRequest(requestId, errorCode, errorReason),
+			),
 		publishDone: (requestId, statusCode, errorReason) =>
 			whileOpen(() => requests.publishDone(requestId, statusCode, errorReason)),
 		openSubgroup: (requestId, subgroupOptions) =>
@@ -489,9 +545,28 @@ export function createSession(options: SessionOptions = {}): Session {
 		},
 
 		receivePeerBidiStreamData: (peerStream, data, fin) =>
-			guard((out) => peerRequests.receive(peerStream, data, fin, out)),
-		peerBidiStreamReset: (peerStream) =>
-			guard(() => peerRequests.reset(peerStream)),
+			guard((out) => {
+				let stream = adoptedPeerStreams.get(peerStream);
+				let rest = data;
+				if (stream === undefined) {
+					const adopted = peerRequests.receive(peerStream, data, fin, out);
+					if (adopted === undefined) return;
+					({ stream, rest } = adopted);
+					adoptedPeerStreams.set(peerStream, stream);
+				}
+				if (fin) adoptedPeerStreams.delete(peerStream);
+				requests.receiveStreamData(stream, rest, fin, out);
+			}),
+		peerBidiStreamReset: (peerStream, code) =>
+			guard((out) => {
+				const stream = adoptedPeerStreams.get(peerStream);
+				if (stream === undefined) {
+					peerRequests.reset(peerStream);
+					return;
+				}
+				adoptedPeerStreams.delete(peerStream);
+				requests.streamReset(stream, code, out);
+			}),
 
 		peerStreamOpened(kind, peerStream) {
 			if (closed) return;
@@ -548,6 +623,12 @@ export function createSession(options: SessionOptions = {}): Session {
 				});
 			});
 		},
+
+		heldStreams: () =>
+			requests.heldStreams() +
+			peerRequests.heldStreams() +
+			adoptedPeerStreams.size +
+			peerUniStreams.size,
 
 		transportClosed: shutdown,
 	};
