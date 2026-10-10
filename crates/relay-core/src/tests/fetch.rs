@@ -2036,3 +2036,75 @@ fn a_fetch_that_is_refused_after_its_subscriber_finished_the_stream_leaves_nothi
         (before.requests, before.request_streams, 0, 0)
     );
 }
+
+#[test]
+fn a_fetch_that_is_served_after_its_subscriber_finished_the_stream_leaves_nothing() {
+    let mut relay = relay_with_track();
+    let before = relay.counts();
+    // Alice sends the FETCH and finishes her direction of its request
+    // stream; the FETCH goes on, is answered, and its stream is passed on to
+    // the end.
+    relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        first: standalone(0, b"a", (at(0, 0), at(2, 0)), vec![]),
+    });
+    relay.step(Event::RequestClosed {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        how: RequestEnd::Fin,
+    });
+    assert_eq!(relay.counts().fetches, 1);
+    for happens in [
+        Happens::Ok,
+        Happens::Stream,
+        Happens::PipeEnded(FetchPipeEnd::Finished),
+    ] {
+        happen(&mut relay, &happens);
+    }
+    let after = relay.counts();
+    assert_eq!(
+        (after.requests, after.request_streams, after.fetches),
+        (before.requests, before.request_streams, 0)
+    );
+}
+
+#[test]
+fn a_fetch_the_relay_answers_itself_after_its_subscriber_finished_the_stream_leaves_nothing() {
+    // A Joining FETCH with FILL_TIMEOUT 0 waits for Alice's SUBSCRIBE, and
+    // Alice finishes her direction of the FETCH's request stream meanwhile.
+    let mut relay = relay_with_a_pending_subscription(true);
+    relay.step(joining(true, 0, vec![Parameter::FillTimeout(0)]));
+    relay.step(Event::RequestClosed {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        how: RequestEnd::Fin,
+    });
+    let with_the_fetch = relay.counts();
+    // Bob accepts the SUBSCRIBE; the relay answers the FETCH itself, and its
+    // stream is written.
+    let actions = bob_answers(
+        &mut relay,
+        ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: UPSTREAM_ALIAS,
+            parameters: vec![Parameter::LargestObject(at(7, 1))],
+            track_properties: vec![],
+        }),
+    );
+    assert!(
+        matches!(actions.last(), Some(Action::WriteFetchStream { .. })),
+        "{actions:?}"
+    );
+    assert_eq!(relay.step(written(None)), [FINISH]);
+    // The request and its stream are gone from the session; the SUBSCRIBE
+    // is still there.
+    let after = relay.counts();
+    assert_eq!(
+        (after.requests, after.request_streams, after.fetches),
+        (
+            with_the_fetch.requests - 1,
+            with_the_fetch.request_streams - 1,
+            0
+        )
+    );
+}

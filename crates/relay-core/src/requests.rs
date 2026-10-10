@@ -43,10 +43,18 @@ impl Joinable {
 }
 
 /// The request streams the peer has open on a session, by stream.
-#[derive(Debug, Default)]
+///
+/// WHY no `Default`: `std::mem::take` would empty the map from anywhere in
+/// the crate, past the three functions below. Putting another value in its
+/// place by assignment the type cannot keep anyone from.
+#[derive(Debug)]
 pub(crate) struct Requests(HashMap<StreamKey, RequestSlot>);
 
 impl Requests {
+    pub(crate) fn new() -> Self {
+        Self(HashMap::new())
+    }
+
     pub(crate) fn get(&self, stream: StreamKey) -> Option<&RequestSlot> {
         self.0.get(&stream)
     }

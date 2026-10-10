@@ -194,12 +194,13 @@ def add_old_core(before):
     (old / "routing.rs").write_text(once(routing, "use crate::{", "use super::{", "use crate::{"))
     # The modules a core may have besides: taken along when <before> has them.
     # The events are the one type both cores share, so `crate::events` stays.
-    for module in ("fetch",):
+    for module in ("fetch", "requests"):
         try:
             text = jj("file", "show", "-r", before, f"{CORE}/{module}.rs")
         except subprocess.CalledProcessError:
             continue
-        text = text.replace("use crate::routing::", "use super::routing::")
+        for sibling in ("routing", "requests"):
+            text = text.replace(f"use crate::{sibling}::", f"use super::{sibling}::")
         (old / f"{module}.rs").write_text(once(text, "use crate::{", "use super::{", "use crate::{"))
     (old / "fuzz.rs").write_text("#![allow(clippy::all, clippy::pedantic)]\n" + (HERE / "fuzz.rs").read_text())
 

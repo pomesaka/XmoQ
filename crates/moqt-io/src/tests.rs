@@ -1402,9 +1402,14 @@ async fn a_fetch_stream_given_up_while_its_header_waits_is_reset_with_the_caller
         }
     };
     assert_eq!(end, Err(ReadError::Reset(Some(0x5))));
+}
 
-    // A writer that is dropped after the call returned says CANCELLED (0x1),
-    // whatever the call was given.
+/// A writer that is dropped after `open_fetch_stream` returned says
+/// CANCELLED (0x1), whatever code the call was given for giving up.
+#[tokio::test(start_paused = true)]
+async fn a_fetch_stream_writer_dropped_after_it_opened_says_cancelled() {
+    let header = FetchHeader { request_id: 2 };
+    let mut buffer = [0; 8];
     let (local, peer) = pair();
     let writer = crate::open_fetch_stream(&local, header, &Trace::default(), "fetch", 0x5)
         .await
@@ -1418,4 +1423,134 @@ async fn a_fetch_stream_given_up_while_its_header_waits_is_reset_with_the_caller
         }
     };
     assert_eq!(end, Err(ReadError::Reset(Some(0x1))));
+}
+
+/// One row of `fixtures/first-bytes/said.tsv`; see its README.
+#[derive(Debug, PartialEq, Eq)]
+struct FirstBytesRow {
+    name: String,
+    bidirectional: bool,
+    /// What the stream has sent when its time runs out.
+    bytes: Vec<u8>,
+    /// Whether the stream has said what it is with those, and is left alone.
+    said: bool,
+}
+
+fn first_bytes_rows(table: &str) -> Result<Vec<FirstBytesRow>, String> {
+    let Some(body) = table.strip_suffix('\n') else {
+        return Err("the last row does not end with a line feed".to_string());
+    };
+    let mut rows = Vec::new();
+    for line in body.split('\n') {
+        let columns: Vec<&str> = line.split('\t').collect();
+        let [name, kind, hex, said] = columns.as_slice() else {
+            return Err(format!("not four columns: {line:?}"));
+        };
+        let bidirectional = match *kind {
+            "uni" => false,
+            "bidi" => true,
+            other => return Err(format!("neither uni nor bidi: {other:?}")),
+        };
+        let said = match *said {
+            "said" => true,
+            "not-yet" => false,
+            other => return Err(format!("neither said nor not-yet: {other:?}")),
+        };
+        if hex.len() % 2 != 0
+            || hex
+                .bytes()
+                .any(|digit| !b"0123456789abcdef".contains(&digit))
+        {
+            return Err(format!("not lower-case hexadecimal bytes: {hex:?}"));
+        }
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|error| format!("{hex:?}: {error}"))?;
+        let row = FirstBytesRow {
+            name: (*name).to_string(),
+            bidirectional,
+            bytes,
+            said,
+        };
+        if rows.iter().any(|other: &FirstBytesRow| {
+            (&other.name, other.bidirectional) == (&row.name, row.bidirectional)
+        }) {
+            return Err(format!("twice: {line:?}"));
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// Sends the bytes of a row on a stream, in pieces of `piece` bytes with a
+/// tenth of a second between them, and says whether the reader has stopped
+/// the stream once the time for its first bytes (10 seconds) has run out:
+/// the code of the `STOP_SENDING`, or `None` for a stream that is left alone.
+async fn stopped_after_the_first_bytes_timeout(
+    send: &mut MemorySend,
+    bytes: &[u8],
+    piece: usize,
+) -> Option<Option<u32>> {
+    for piece in bytes.chunks(piece) {
+        send.write_all(piece).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    match timeout(SOON, send.stopped()).await {
+        Ok(WriteError::Stopped(code)) => Some(code),
+        Ok(other) => panic!("the connection is gone: {other:?}"),
+        Err(_) => None,
+    }
+}
+
+/// The contract `fixtures/first-bytes/` pins for both implementations: with
+/// which bytes a stream of the peer has said what it is, so that the time
+/// for that does not stop it.
+#[tokio::test(start_paused = true)]
+async fn a_stream_has_said_what_it_is_where_the_shared_table_says() {
+    let path = format!(
+        "{}/../../fixtures/first-bytes/said.tsv",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let table = std::fs::read_to_string(&path).expect("the fixture is there");
+    let rows = first_bytes_rows(&table).unwrap_or_else(|error| panic!("{path}: {error}"));
+    // Every row of the table is read here; a row that is added is run.
+    assert_eq!(rows.len(), 18, "{path}");
+    // All at once, and a byte at a time: what counts is what has come, not
+    // in how many reads.
+    for piece in [usize::MAX, 1] {
+        for row in &rows {
+            let stopped = if row.bidirectional {
+                let mut requests = requests();
+                let (mut send, _recv) = requests.peer.open_bi().await.unwrap();
+                let stopped =
+                    stopped_after_the_first_bytes_timeout(&mut send, &row.bytes, piece).await;
+                // The session stays open whatever became of the stream.
+                while let Ok(event) = requests.events.try_recv() {
+                    assert!(
+                        !matches!(event, PeerRequestStreamEvent::Failed(_)),
+                        "{row:?}: the session failed"
+                    );
+                }
+                // A request is given up with CANCELLED (0x1).
+                stopped.map(|code| (code, Some(0x1)))
+            } else {
+                let mut reading = reading(StreamConfig::default(), 8);
+                let mut send = reading.peer.open_uni().await.unwrap();
+                let stopped =
+                    stopped_after_the_first_bytes_timeout(&mut send, &row.bytes, piece).await;
+                while let Ok(event) = reading.events.try_recv() {
+                    assert!(!matches!(event, UniEvent::Failed(_)), "{row:?}: {event:?}");
+                }
+                // INTERNAL_ERROR (0x0).
+                stopped.map(|code| (code, Some(0x0)))
+            };
+            assert_eq!(stopped.is_none(), row.said, "{row:?}, in pieces of {piece}");
+            if let Some((code, expected)) = stopped {
+                assert_eq!(code, expected, "{row:?}, in pieces of {piece}");
+            }
+        }
+    }
 }
