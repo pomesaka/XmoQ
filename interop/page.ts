@@ -211,11 +211,12 @@ async function sendIn(
 	payloadHex: string,
 	finish: boolean,
 	properties: PageProperty[] = [],
+	publisherPriority: number | null = 0,
 ): Promise<void> {
 	const subgroup = await publishedTrack().openSubgroup({
 		groupId: group,
 		subgroupId: { mode: "Explicit", value: 0n },
-		publisherPriority: 0,
+		...(publisherPriority === null ? {} : { publisherPriority }),
 		// §11.4.2: the bit is of the stream, and says that every Object on it
 		// has the Properties Length field.
 		properties: properties.length > 0,
@@ -348,7 +349,9 @@ window.xmoqOwn = {
 			payloadHex: string,
 			finish: boolean,
 			properties: PageProperty[],
-		) => sendIn(BigInt(group), payloadHex, finish, properties),
+			publisherPriority: number | null,
+		) =>
+			sendIn(BigInt(group), payloadHex, finish, properties, publisherPriority),
 	),
 
 	sendLastObjectAndClose: withPlainErrors(
