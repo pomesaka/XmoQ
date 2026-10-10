@@ -51,7 +51,7 @@ Every pairing, from `interop/`:
 bun matrix.ts
 ```
 
-`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except three that mostly wait for the relay to give up on a client that vanished (6 to 9 seconds each): those start together after the pairings that move one Object, and go on beside the ones that follow.
+`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except four that mostly wait, three for the relay to give up on a client that vanished (6 to 9 seconds each) and one for a page to give up on late streams (5 seconds): those start together after the pairings that move one Object, and go on beside the ones that follow.
 
 | Pairings, through each relay | What is expected |
 |---|---|
@@ -61,13 +61,14 @@ bun matrix.ts
 
 The runs in which a client leaves go through the own relay only, because the driver waits for lines only that relay prints. Their names begin with `leaving:`. What each has to show, and why, is in the [record](../docs/experiments/2026-10-10-disconnects-through-own-relay.md).
 
-| Runs with a client that leaves (13) | What is expected |
+| Runs with a client that leaves (14) | What is expected |
 |---|---|
 | The publisher is killed, or its page closed, after its Objects arrived (3) | Every own subscriber sees PUBLISH_DONE `TRACK_ENDED` with the Stream Count of the streams it got, and a stream the publisher left open ends with a reset with CANCELLED. A killed publisher has to be noticed within 10.5 seconds, and a killed subscriber within 7.5 |
 | The publisher sends one Object and closes its session at once (4) | Every subscriber receives the Object, and every own subscriber then sees PUBLISH_DONE |
 | Subscribers leave, by cancelling, by closing their session or by being killed, while others stay (4) | The publisher goes on, and the subscribers that stay receive what is sent after the others left, also before the relay has noticed that a killed process is gone, which the run checks |
 | `own-browser` cancels its subscription (1) | The relay ends the request, opens no stream for what the publisher sends later, and keeps the session. Where the relay printed the STOP_SENDING it got on the request stream, its code has to be CANCELLED (`0x1`). The relay does not always print it: it did in 53 of 60 rounds, and a round without the line is not judged on the code. For `moqtail-browser`, which cancels in two of the four runs above, the line has to be there with code `0x0` |
 | An `own-rust` subscriber is stopped with SIGSTOP and takes nothing (1) | The relay ends that subscription with PUBLISH_DONE `TOO_FAR_BEHIND` and keeps its session; the other subscribers receive every Object |
+| An `own-browser` page subscribes and never reads its Objects (1) | The same. The Objects are small, one a stream: with one large Object a stream the page is not told that its subscription ended, a known gap of `@xmoq/moqt`, and that case is not run. The streams the relay cut short have to carry `TOO_FAR_BEHIND`, read from the relay's log, and the relay opens no stream for what is sent after. The run takes 8 to 11 seconds, 5 of them the library's wait for late streams, and goes on beside the runs that wait for the relay's idle timeout |
 
 Each of these runs ends by moving one more Object over the same track with a fresh publisher and subscriber. The relay refuses a PUBLISH for a track that has a publisher, so this step fails if the relay still holds the one that left.
 
@@ -119,6 +120,7 @@ bun disconnect.ts --scenario subscriber-leaves --publisher own-browser --leaver 
 | `--leaver` | `subscriber-leaves` only, once per subscriber that leaves: `<client>:cancel` (the subscription ends, the session stays), `<client>:close` (the client closes its session in order) or `<client>:kill` (the process is killed, or the page closed) |
 | `--stayer` | `subscriber-leaves` only: a client, once per subscriber that stays |
 | `--with-publish-done` | `last-object-then-close` only: the publisher sends PUBLISH_DONE before it closes. `own-rust` always does and needs the flag; the moqtail clients cannot |
+| `--slow` | `slow-subscriber` only: `stopped-own-rust` (default), an own-rust client whose process is stopped, or `unread-own-browser`, a page that subscribes and never reads |
 | `--port` | `44340`. UDP port of the relay |
 | `--verbose` | off. Makes `own-rust` print the bytes of every stream |
 

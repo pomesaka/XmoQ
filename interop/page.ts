@@ -320,6 +320,11 @@ window.xmoqOwn = {
 		describe(await publishedTrack().ended),
 	),
 
+	subscribeWithoutReading: withPlainErrors(
+		async (namespace: string, trackName: string) =>
+			(await subscribeTo(namespace, trackName)).requestId.toString(),
+	),
+
 	objectOfGroup: withPlainErrors(
 		async (group: string) =>
 			(

@@ -413,6 +413,8 @@ export interface SubscriberPlan {
 	track?: string;
 	/** own-rust: how many Objects it takes before it leaves in order. Absent: it stays. */
 	leavesAfterObjects?: number;
+	/** own-browser: subscribes and never reads the Objects. */
+	withoutReading?: boolean;
 }
 
 function startRustSubscriber(
@@ -558,7 +560,12 @@ async function startBrowserSubscriber(
 	await onPage(
 		label,
 		"subscribe",
-		page.evaluate(([ns, name]) => window.xmoq.subscribe(ns, name), names),
+		plan.withoutReading === true
+			? page.evaluate(
+					([ns, name]) => window.xmoqOwn.subscribeWithoutReading(ns, name),
+					names,
+				)
+			: page.evaluate(([ns, name]) => window.xmoq.subscribe(ns, name), names),
 	);
 	return {
 		kind,
