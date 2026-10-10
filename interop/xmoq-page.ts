@@ -69,6 +69,12 @@ export type OwnPageExtras = {
 	): Promise<string>;
 	/** The payload of Object 0 of the Group, once it has arrived. */
 	objectOfGroup(group: string): Promise<string>;
+	/**
+	 * The payloads of every Object of the Group that has arrived so far, as a
+	 * JSON array of hexadecimal strings: more than one where the Group came
+	 * twice.
+	 */
+	payloadsOfGroup(group: string): Promise<string>;
 	/** Cancels the subscription and keeps the session. */
 	cancelSubscription(): Promise<void>;
 	/** Resolves once the subscription has ended and its Objects were read; JSON of `SubscriptionReport`. */
