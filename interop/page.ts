@@ -6,6 +6,7 @@
 import {
 	connect,
 	type MoqtConnection,
+	type PeerStreamEnd,
 	type PublishedTrack,
 	type Subscription,
 } from "@xmoq/moqt";
@@ -296,9 +297,18 @@ function currentSubscription(): Subscription {
 	return subscribed;
 }
 
+/** What `done()` resolved with, once it has. */
+let peerStreamEnd: PeerStreamEnd | undefined;
+
+async function endWithPublishDone(): Promise<void> {
+	peerStreamEnd = await publishedTrack().done(TRACK_ENDED, "");
+	// The line of the Rust client, with the library's value.
+	console.log(`PUBLISH_DONE_PEER_ENDED how=${describe(peerStreamEnd)}`);
+}
+
 window.xmoqOwn = {
 	endTrack: withPlainErrors(async () => {
-		await publishedTrack().done(TRACK_ENDED, "");
+		await endWithPublishDone();
 		console.log(`track ended: ${describe(await publishedTrack().ended)}`);
 	}),
 
@@ -310,7 +320,7 @@ window.xmoqOwn = {
 	sendLastObjectAndClose: withPlainErrors(
 		async (group: string, payloadHex: string, publishDone: boolean) => {
 			await sendIn(BigInt(group), payloadHex, true);
-			if (publishDone) await publishedTrack().done(TRACK_ENDED, "");
+			if (publishDone) await endWithPublishDone();
 			connected().close();
 			console.log(`session closed after the last Object: done=${publishDone}`);
 		},
@@ -319,6 +329,8 @@ window.xmoqOwn = {
 	publishEnd: withPlainErrors(async () =>
 		describe(await publishedTrack().ended),
 	),
+
+	peerStreamEnd: withPlainErrors(async () => describe(peerStreamEnd ?? null)),
 
 	subscribeWithoutReading: withPlainErrors(
 		async (namespace: string, trackName: string) =>

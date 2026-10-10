@@ -23,6 +23,7 @@ import type { TrackNamespace } from "../core/track.ts";
 import { closeCode, closeReason } from "./close-info.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import {
+	type PeerStreamEnd,
 	type PublishEnd,
 	PublishEndedError,
 	RequestAbortedError,
@@ -63,6 +64,36 @@ const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
  */
 const DEFAULT_PUBLISH_DONE_TIMEOUT_MS = 5_000;
 
+/**
+ * The value the Rust client has (PUBLISH_DONE_ANSWER_WAIT in
+ * crates/moqt-client). Provisional.
+ *
+ * WHY short: a peer that follows only the draft may never end its
+ * direction, and every `done()` against such a peer takes this long.
+ * WHY longer than the 2 seconds an XmoQ relay waits for the counted
+ * streams: the relay's reset at the end of its wait is to be seen.
+ */
+const DEFAULT_PEER_STREAM_END_TIMEOUT_MS = 3_000;
+
+/** The longest delay `setTimeout` takes (HTML, "timer initialization steps": a signed 32-bit number of milliseconds). */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+/**
+ * A wait of the connect options, checked for what a timer takes.
+ *
+ * WHY refused and not corrected: NaN and a negative value make a timer fire
+ * at once, and so does a delay above 2^31 - 1, Infinity among them. A wait
+ * that was asked for and does not happen is not noticed.
+ */
+function timerDelay(name: string, value: number): number {
+	if (!Number.isInteger(value) || value < 0 || value > MAX_TIMER_DELAY_MS) {
+		throw new RangeError(
+			`${name} is a whole number from 0 to ${MAX_TIMER_DELAY_MS}, not ${String(value)}`,
+		);
+	}
+	return value;
+}
+
 export interface SessionConnectOptions {
 	/** Value of the MOQT_IMPLEMENTATION Setup Option. */
 	implementation?: string;
@@ -88,13 +119,31 @@ export interface SessionConnectOptions {
 	 * Objects are small; neither Objects nor bytes are counted.
 	 */
 	maxPeerUniStreams?: number;
-	/** How long to wait for the peer's SETUP before closing with CONTROL_MESSAGE_TIMEOUT. */
+	/**
+	 * How long to wait for the peer's SETUP before closing with
+	 * CONTROL_MESSAGE_TIMEOUT. Like the two waits below, a whole number from
+	 * 0 to 2147483647, the longest delay a timer takes, or `connect` rejects
+	 * with a `RangeError`. With 0, only a SETUP that has arrived already is
+	 * in time.
+	 */
 	setupTimeoutMs?: number;
 	/**
 	 * How long a subscription waits for late streams after PUBLISH_DONE when
-	 * its Stream Count is not reached (§10.11).
+	 * its Stream Count is not reached (§10.11). With 0 it does not wait: the
+	 * subscription ends with PUBLISH_DONE, and the Objects still on their
+	 * way are lost.
 	 */
 	publishDoneTimeoutMs?: number;
+	/**
+	 * How long `PublishedTrack.done()` waits for the subscriber to end its
+	 * direction of the request stream, 3000 when left out.
+	 *
+	 * With 0, `done()` does not wait: it resolves with `fin` for a subscriber
+	 * that had finished before, and with `nothing-in-time` otherwise, after
+	 * it has stopped the subscriber's direction as at the end of any wait. A
+	 * session closed right after it can lose what was sent last.
+	 */
+	peerStreamEndTimeoutMs?: number;
 	/** Hooks for logging, typed in the entry "@xmoq/moqt/diagnostics". */
 	diagnostics?: Diagnostics;
 }
@@ -141,12 +190,26 @@ export interface PublishedTrack {
 	/** Rejects with `PublishEndedError` once the subscription is over. */
 	openSubgroup(options: SubgroupOptions): Promise<SubgroupWriter>;
 	/**
-	 * Sends PUBLISH_DONE and closes the request stream (§10.11). Every
-	 * subgroup stream has to be closed or reset first; otherwise this rejects
-	 * with an `Error` and nothing is sent. Rejects with `PublishEndedError`
-	 * once the subscription is over.
+	 * Sends PUBLISH_DONE and closes the request stream (§10.11), then waits
+	 * for the subscriber to end its direction of that stream, and resolves
+	 * with what it saw. The wait is at most `peerStreamEndTimeoutMs` (3
+	 * seconds) from the moment PUBLISH_DONE and the FIN were written; a
+	 * subscriber that does not read can hold up that write, and `done()` with
+	 * it. `ended` resolves when PUBLISH_DONE was sent and does not wait.
+	 *
+	 * Every subgroup stream has to be closed or reset first; otherwise this
+	 * rejects with an `Error` and nothing is sent. Rejects with
+	 * `PublishEndedError` once the subscription is over, which a second call
+	 * finds: only the first one waits and resolves.
+	 *
+	 * WHY it waits: a transport can lose a stream that arrived and was not
+	 * accepted when the session closes, so a session closed right after the
+	 * last Object can lose it. An XmoQ relay finishes its direction once it
+	 * has the streams PUBLISH_DONE counted. Close the session after this
+	 * promise has settled. Calling `close()` without waiting for it can end
+	 * the session before PUBLISH_DONE itself has gone out.
 	 */
-	done(statusCode: bigint, errorReason: string): Promise<void>;
+	done(statusCode: bigint, errorReason: string): Promise<PeerStreamEnd>;
 }
 
 /** A subscription this endpoint started with SUBSCRIBE. */
@@ -252,11 +315,19 @@ interface ActiveSubscription {
 	publishDoneTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
+/** A `done()` that waits for the subscriber to end its direction of the request stream. */
+interface PeerStreamWait {
+	ended: Deferred<PeerStreamEnd>;
+	timer: ReturnType<typeof setTimeout> | undefined;
+}
+
 /** What the connection keeps for a PUBLISH, from its PUBLISH_OK on. */
 interface ActivePublish {
 	ended: Deferred<PublishEnd>;
 	/** Set once the subscription has ended. */
 	end: PublishEnd | undefined;
+	/** The session took a PUBLISH_DONE for it; `end` follows when it is written. */
+	doneTaken: boolean;
 }
 
 function toError(value: unknown): Error {
@@ -305,6 +376,18 @@ export async function connectOver(
 			`maxPeerUniStreams is a whole number from 2, not ${String(maxPeerUniStreams)}`,
 		);
 	}
+	const peerStreamEndTimeoutMs = timerDelay(
+		"peerStreamEndTimeoutMs",
+		options.peerStreamEndTimeoutMs ?? DEFAULT_PEER_STREAM_END_TIMEOUT_MS,
+	);
+	const publishDoneTimeoutMs = timerDelay(
+		"publishDoneTimeoutMs",
+		options.publishDoneTimeoutMs ?? DEFAULT_PUBLISH_DONE_TIMEOUT_MS,
+	);
+	const setupTimeoutMs = timerDelay(
+		"setupTimeoutMs",
+		options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
+	);
 	const session: Session = createSession({
 		implementation: options.implementation,
 		limits: options.limits,
@@ -316,6 +399,7 @@ export async function connectOver(
 	const pendingPublishAliases = new Map<bigint, bigint>();
 	const subscriptions = new Map<bigint, ActiveSubscription>();
 	const publishes = new Map<bigint, ActivePublish>();
+	const peerStreamWaits = new Map<bigint, PeerStreamWait>();
 	/** Serializes outputs so that writes reach each stream in the order the session produced them. */
 	let queue: Promise<unknown> = Promise.resolve();
 	let sessionClose: SessionClose | undefined;
@@ -351,6 +435,30 @@ export async function connectOver(
 				break;
 		}
 		subscription.ended.resolve(end);
+	};
+
+	/** Settles a `done()` that waits for the subscriber to end its direction of the request stream. */
+	const endPeerStreamWait = (requestId: bigint, end: PeerStreamEnd): void => {
+		const wait = peerStreamWaits.get(requestId);
+		if (wait === undefined) return;
+		peerStreamWaits.delete(requestId);
+		clearTimeout(wait.timer);
+		wait.ended.resolve(end);
+	};
+
+	/**
+	 * Starts the wait for the subscriber to end its direction of the request
+	 * stream. When it is over, that direction is stopped and the session
+	 * forgets the stream.
+	 */
+	const startPeerStreamTimer = (
+		requestId: bigint,
+		wait: PeerStreamWait,
+	): void => {
+		wait.timer = setTimeout(() => {
+			endPeerStreamWait(requestId, { type: "nothing-in-time" });
+			void applyInput((s) => s.expirePublishDonePeerEnd(requestId));
+		}, peerStreamEndTimeoutMs);
 	};
 
 	const endPublish = (requestId: bigint, end: PublishEnd): void => {
@@ -391,6 +499,9 @@ export async function connectOver(
 		}
 		for (const requestId of [...publishes.keys()]) {
 			endPublish(requestId, { type: "session-closed", close });
+		}
+		for (const requestId of [...peerStreamWaits.keys()]) {
+			endPeerStreamWait(requestId, { type: "session-closed", close });
 		}
 		closed.resolve(close);
 	}
@@ -503,7 +614,11 @@ export async function connectOver(
 		trackAlias: bigint,
 	): PublishedTrack => {
 		const { requestId } = event;
-		const publish: ActivePublish = { ended: deferred(), end: undefined };
+		const publish: ActivePublish = {
+			ended: deferred(),
+			end: undefined,
+			doneTaken: false,
+		};
 		publishes.set(requestId, publish);
 		return {
 			requestId,
@@ -519,10 +634,37 @@ export async function connectOver(
 				),
 			done: (statusCode, errorReason) =>
 				onPublish(publish, async () => {
-					await applyVoid((s) =>
-						s.publishDone(requestId, statusCode, errorReason),
-					);
+					// WHY not left to the session: it refuses a second PUBLISH_DONE
+					// as a request it no longer has, which reads as a closed
+					// subgroup until `end` is set.
+					if (publish.doneTaken) throw new PublishEndedError({ type: "done" });
+					const wait: PeerStreamWait = { ended: deferred(), timer: undefined };
+					try {
+						await applyVoid((s) => {
+							const outputs = s.publishDone(requestId, statusCode, errorReason);
+							// WHY here, and only once the session took the call: a
+							// second `done()` is refused by the session and must not
+							// replace the wait of the first. The event for a
+							// subscriber that had finished its direction is among
+							// these outputs, so the wait is there before it is
+							// handled.
+							peerStreamWaits.set(requestId, wait);
+							publish.doneTaken = true;
+							return outputs;
+						});
+					} catch (error) {
+						// PUBLISH_DONE could not be written: nobody waits.
+						if (peerStreamWaits.get(requestId) === wait) {
+							peerStreamWaits.delete(requestId);
+						}
+						throw error;
+					}
 					endPublish(requestId, { type: "done" });
+					// The subscriber may have ended its direction meanwhile.
+					if (peerStreamWaits.get(requestId) === wait) {
+						startPeerStreamTimer(requestId, wait);
+					}
+					return wait.ended.promise;
 				}),
 		};
 	};
@@ -554,9 +696,16 @@ export async function connectOver(
 					new RequestAbortedError({ type: "unsupported-track-property" }),
 				);
 				return;
-			case "update-failed":
+			case "update-failed": {
 				endPublish(requestId, { type: "update-failed" });
+				// The session sent PUBLISH_DONE UPDATE_FAILED itself. Nobody
+				// asked how the subscriber ends its direction, but the stream is
+				// not left open for it: the same wait, as in the Rust client.
+				const wait: PeerStreamWait = { ended: deferred(), timer: undefined };
+				peerStreamWaits.set(requestId, wait);
+				startPeerStreamTimer(requestId, wait);
 				return;
+			}
 			case "malformed-track":
 				endSubscription(requestId, { type: "malformed-track" });
 				return;
@@ -617,6 +766,14 @@ export async function connectOver(
 			case "request-closed":
 				onRequestClosed(event);
 				return undefined;
+			case "publish-done-peer-ended":
+				endPeerStreamWait(
+					event.requestId,
+					event.how === "fin"
+						? { type: "fin" }
+						: { type: "reset", code: event.resetCode },
+				);
+				return undefined;
 			case "publish-done": {
 				const { requestId } = event;
 				const subscription = subscriptions.get(requestId);
@@ -625,7 +782,7 @@ export async function connectOver(
 				clearTimeout(subscription.publishDoneTimer);
 				subscription.publishDoneTimer = setTimeout(
 					() => applyInput((s) => s.expireSubscription(requestId)),
-					options.publishDoneTimeoutMs ?? DEFAULT_PUBLISH_DONE_TIMEOUT_MS,
+					publishDoneTimeoutMs,
 				);
 				return undefined;
 			}
@@ -764,7 +921,7 @@ export async function connectOver(
 				),
 				SessionErrorCode.CONTROL_MESSAGE_TIMEOUT,
 			),
-		options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
+		setupTimeoutMs,
 	);
 	let peerSetupOptions: KeyValuePair[];
 	try {

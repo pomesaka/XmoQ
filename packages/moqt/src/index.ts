@@ -35,6 +35,7 @@ export type {
 	Subscription,
 } from "./webtransport/connection.ts";
 export type {
+	PeerStreamEnd,
 	PublishEnd,
 	RequestAbort,
 	SessionClose,

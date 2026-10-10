@@ -58,6 +58,19 @@ export type SessionEvent =
 	  }
 	/** The request ended and no REQUEST_ERROR said so. */
 	| {
+			/**
+			 * After this endpoint's PUBLISH_DONE, the subscriber ended its
+			 * direction of the request stream: with a FIN, or with a reset.
+			 * Nothing in the draft gives that a meaning; the implementation
+			 * notes have what an XmoQ relay means by it.
+			 */
+			type: "publish-done-peer-ended";
+			requestId: bigint;
+			how: "fin" | "reset";
+			/** With "reset": the error code of the reset, when the transport reported one. */
+			resetCode?: number;
+	  }
+	| {
 			type: "request-closed";
 			requestId: bigint;
 			reason: RequestClosedReason;
@@ -99,6 +112,8 @@ export type SessionOutput =
 	/** Write `data` to the peer-opened bidirectional stream, then FIN. */
 	| { type: "respond"; peerStream: number; data: Bytes }
 	| { type: "stop-sending"; peerStream: number; code: number }
+	/** Send STOP_SENDING for the peer's direction of a bidirectional stream this endpoint opened. Its own direction is left as it is. */
+	| { type: "stop-peer-direction"; stream: number; code: number }
 	| { type: "close-session"; code: number; reason: string }
 	| { type: "event"; event: SessionEvent };
 

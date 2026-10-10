@@ -96,13 +96,13 @@ async function subscribed(options: SessionConnectOptions = {}): Promise<{
 }
 
 /** Publishes with Track Alias 1 and lets the peer accept. */
-async function published(): Promise<{
+async function published(options: SessionConnectOptions = {}): Promise<{
 	peer: FakePeer;
 	connection: MoqtConnection;
 	request: PeerBidiStream;
 	track: PublishedTrack;
 }> {
-	const { peer, connection } = await connected();
+	const { peer, connection } = await connected(options);
 	await peer.clientUni();
 	const publishing = connection.publish({ ...TRACK, trackAlias: 1n });
 	const request = await peer.clientBidi();
@@ -321,10 +321,240 @@ describe("connectOver", () => {
 		expect(await sentHex(stream)).toBe("00 01 61");
 		expect(await stream.read()).toEqual(END_OF_STREAM);
 
-		await track.done(2n, "");
+		const done = track.done(2n, "");
 		expect(await sentHex(publishRequest.sent)).toBe("0b 00 03 02 01 00");
 		expect(await publishRequest.sent.read()).toEqual(END_OF_STREAM);
 		expect(await track.ended).toEqual({ type: "done" });
+		await publishRequest.reply.close();
+		expect(await done).toEqual({ type: "fin" });
+	});
+
+	// After PUBLISH_DONE, `done()` waits for the subscriber to end its
+	// direction of the request stream and says what it saw (the row "A
+	// publisher that ended its PUBLISH with PUBLISH_DONE" of the notes).
+	test.each([
+		{
+			name: "a FIN",
+			act: (request: PeerBidiStream) => request.reply.close(),
+			end: { type: "fin" },
+		},
+		{
+			name: "a reset",
+			act: (request: PeerBidiStream) =>
+				request.reply.abort(fakeStreamError(1, "reset")),
+			end: { type: "reset", code: 1 },
+		},
+		{
+			// What the subscriber still says on the stream changes nothing
+			// (§5.1): a REQUEST_UPDATE that crossed PUBLISH_DONE, then the FIN.
+			name: "a message and then a FIN",
+			act: async (request: PeerBidiStream) => {
+				await request.reply.write(hex("02 00 02 01 00"));
+				await request.reply.close();
+			},
+			end: { type: "fin" },
+		},
+	])(
+		"done() resolves with how the subscriber ended its direction: $name",
+		async ({ act, end }) => {
+			const { request, track } = await published();
+			let settled = false;
+			const done = track.done(2n, "").then((value) => {
+				settled = true;
+				return value;
+			});
+			await request.sent.read();
+			await settle();
+			// PUBLISH_DONE is out, and the wait goes on.
+			expect(await track.ended).toEqual({ type: "done" });
+			expect(settled).toBe(false);
+			await act(request);
+			expect(await done).toEqual(end);
+		},
+	);
+
+	test("done() does not wait for a subscriber that had finished its direction", async () => {
+		// WHY a wait no test could sit through: only the FIN seen before
+		// PUBLISH_DONE can settle this.
+		const { request, track } = await published({
+			peerStreamEndTimeoutMs: 3_600_000,
+		});
+		await request.reply.close();
+		await settle();
+		expect(await track.done(2n, "")).toEqual({ type: "fin" });
+	});
+
+	// WHY 0 and not a short wait: the test waits for no clock. The path is
+	// the one every wait ends on.
+	test("done() gives up when its wait is over and stops the subscriber's direction", async () => {
+		const { request, track } = await published({ peerStreamEndTimeoutMs: 0 });
+		expect(await track.done(2n, "")).toEqual({ type: "nothing-in-time" });
+		// STOP_SENDING with CANCELLED reached the subscriber.
+		expect(await rejection(request.reply.closed)).toMatchObject({
+			streamErrorCode: 1,
+		});
+	});
+
+	// WHY STOP_SENDING does not end the wait: this endpoint has finished its
+	// direction, so there is nothing left to stop, and the Rust client goes on
+	// waiting as well.
+	test("done() goes on waiting when the subscriber sends STOP_SENDING", async () => {
+		const { request, track } = await published({
+			peerStreamEndTimeoutMs: 3_600_000,
+		});
+		let settled = false;
+		const done = track.done(2n, "").then((value) => {
+			settled = true;
+			return value;
+		});
+		await request.sent.read();
+		await request.sent.cancel(fakeStreamError(7, "stop"));
+		await settle();
+		expect(settled).toBe(false);
+		await request.reply.close();
+		expect(await done).toEqual({ type: "fin" });
+	});
+
+	// The session sends PUBLISH_DONE UPDATE_FAILED itself (§10.9.1). The
+	// subscriber's direction is not left open after it either, as in the
+	// Rust client.
+	test("after a refused REQUEST_UPDATE, the subscriber's direction is stopped when the wait is over", async () => {
+		const { request, track } = await published({ peerStreamEndTimeoutMs: 0 });
+		await request.reply.write(hex("02 00 02 01 00"));
+		expect(await track.ended).toEqual({ type: "update-failed" });
+		expect(await rejection(request.reply.closed)).toMatchObject({
+			streamErrorCode: 1,
+		});
+	});
+
+	// The session refuses a second PUBLISH_DONE. It must not take the wait of
+	// the first call away, whether it comes at once or later.
+	test("a second done() rejects with PublishEndedError and leaves the first one waiting", async () => {
+		const { request, track } = await published({
+			peerStreamEndTimeoutMs: 3_600_000,
+		});
+		const first = track.done(2n, "");
+		const second = rejection(track.done(2n, ""));
+		expect(await second).toBeInstanceOf(PublishEndedError);
+		expect(await second).toMatchObject({ end: { type: "done" } });
+		await request.reply.close();
+		expect(await first).toEqual({ type: "fin" });
+		expect(await rejection(track.done(2n, ""))).toBeInstanceOf(
+			PublishEndedError,
+		);
+	});
+
+	test("done() resolves when the transport fails while it waits", async () => {
+		const { peer, request, track } = await published({
+			peerStreamEndTimeoutMs: 3_600_000,
+		});
+		const done = track.done(2n, "");
+		await request.sent.read();
+		peer.fail(new Error("connection lost"));
+		expect(await done).toMatchObject({
+			type: "session-closed",
+			close: { type: "error" },
+		});
+	});
+
+	test("done() rejects when PUBLISH_DONE cannot be written, and the session's end finds no wait left", async () => {
+		const { peer, connection, track } = await published({
+			peerStreamEndTimeoutMs: 3_600_000,
+		});
+		// The streams fail now; the session learns of it a turn later.
+		peer.fail(new Error("connection lost"));
+		expect(await rejection(track.done(2n, ""))).toBeInstanceOf(Error);
+		expect(await connection.closed).toMatchObject({ type: "error" });
+	});
+
+	test("done() resolves when the session ends while it waits", async () => {
+		const { connection, request, track } = await published({
+			peerStreamEndTimeoutMs: 3_600_000,
+		});
+		const done = track.done(2n, "");
+		await request.sent.read();
+		connection.close(0, "bye");
+		expect(await done).toEqual({
+			type: "session-closed",
+			close: { type: "local", code: 0, reason: "bye" },
+		});
+	});
+
+	// A timer fires at once for NaN, a negative delay and a delay above
+	// 2^31 - 1, so a wait that was asked for would not happen.
+	test.each([
+		{
+			options: { peerStreamEndTimeoutMs: 2147483648 },
+			message:
+				"peerStreamEndTimeoutMs is a whole number from 0 to 2147483647, not 2147483648",
+		},
+		{
+			options: { peerStreamEndTimeoutMs: -1 },
+			message:
+				"peerStreamEndTimeoutMs is a whole number from 0 to 2147483647, not -1",
+		},
+		{
+			options: { peerStreamEndTimeoutMs: 2.5 },
+			message:
+				"peerStreamEndTimeoutMs is a whole number from 0 to 2147483647, not 2.5",
+		},
+		{
+			options: { peerStreamEndTimeoutMs: Number.NaN },
+			message:
+				"peerStreamEndTimeoutMs is a whole number from 0 to 2147483647, not NaN",
+		},
+		{
+			options: { peerStreamEndTimeoutMs: Number.POSITIVE_INFINITY },
+			message:
+				"peerStreamEndTimeoutMs is a whole number from 0 to 2147483647, not Infinity",
+		},
+		{
+			options: { publishDoneTimeoutMs: 2147483648 },
+			message:
+				"publishDoneTimeoutMs is a whole number from 0 to 2147483647, not 2147483648",
+		},
+		{
+			options: { publishDoneTimeoutMs: -1 },
+			message:
+				"publishDoneTimeoutMs is a whole number from 0 to 2147483647, not -1",
+		},
+		{
+			options: { publishDoneTimeoutMs: Number.NaN },
+			message:
+				"publishDoneTimeoutMs is a whole number from 0 to 2147483647, not NaN",
+		},
+		{
+			options: { setupTimeoutMs: 2147483648 },
+			message:
+				"setupTimeoutMs is a whole number from 0 to 2147483647, not 2147483648",
+		},
+		{
+			options: { setupTimeoutMs: -1 },
+			message: "setupTimeoutMs is a whole number from 0 to 2147483647, not -1",
+		},
+		{
+			options: { setupTimeoutMs: Number.NaN },
+			message: "setupTimeoutMs is a whole number from 0 to 2147483647, not NaN",
+		},
+	])(
+		"connectOver rejects with a RangeError: $message",
+		async ({ options, message }) => {
+			const error = await rejection(
+				connectOver(createFakePeer().transport, options),
+			);
+			expect(error).toBeInstanceOf(RangeError);
+			expect(error).toMatchObject({ message });
+		},
+	);
+
+	test("connectOver takes the longest delay a timer has for its waits", async () => {
+		const { connection } = await connected({
+			peerStreamEndTimeoutMs: 2147483647,
+			publishDoneTimeoutMs: 2147483647,
+			setupTimeoutMs: 2147483647,
+		});
+		connection.close();
+		expect(await connection.closed).toMatchObject({ type: "local" });
 	});
 
 	// How the publisher ends a subscription, what `ended` says and whether

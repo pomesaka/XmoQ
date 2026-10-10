@@ -348,6 +348,19 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 					void writer.write(output.data).catch(() => {});
 					return { settled: writer.close().catch(() => {}) };
 				}
+				case "stop-peer-direction": {
+					const error = transport.streamError(
+						output.code,
+						"stopped by the MOQT session",
+					);
+					// Fails when the peer's direction already ended, and then
+					// nothing is left to stop.
+					void localStreams
+						.get(output.stream)
+						?.reader?.cancel(error)
+						.catch(() => {});
+					return undefined;
+				}
 				case "stop-sending": {
 					const error = transport.streamError(
 						output.code,

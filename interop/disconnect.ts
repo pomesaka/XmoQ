@@ -398,10 +398,31 @@ async function relayServesTheTrackAgain(run: Run): Promise<void> {
 }
 
 /** An own-browser publisher has to see its subscription end by its own PUBLISH_DONE. */
-function expectOwnPublishDone(publisher: Publisher, reported: string): void {
+async function expectOwnPublishDone(
+	publisher: Publisher,
+	reported: string,
+): Promise<void> {
 	if (publisher.kind === "own-browser" && reported !== '{"type":"done"}') {
 		throw new Error(
 			`${publisher.label}: its subscription ended as ${reported}, not by its own PUBLISH_DONE`,
+		);
+	}
+	await expectRelayFinished(publisher);
+}
+
+/**
+ * The relay finished its direction of the PUBLISH request stream after the
+ * client's PUBLISH_DONE, which an XmoQ relay does once the streams the
+ * Stream Count named have ended there (docs/moqt-implementation-notes.md,
+ * "A publisher that ended its PUBLISH with PUBLISH_DONE"). Both own clients
+ * wait for it before they close the session.
+ */
+async function expectRelayFinished(publisher: Publisher): Promise<void> {
+	if (!isOwnClient(publisher.kind)) return;
+	const how = await publisher.peerEndAfterPublishDone();
+	if (how !== "FIN") {
+		throw new Error(
+			`${publisher.label} sent PUBLISH_DONE and saw the relay end its direction of the request stream as ${how ?? "nothing"}, not with a FIN`,
 		);
 	}
 }
@@ -489,6 +510,7 @@ async function lastObjectThenClose(run: Run): Promise<ScenarioResult> {
 	);
 
 	const group = await publisher.sendLastAndClose(publishDone);
+	if (publishDone) await expectRelayFinished(publisher);
 	await allReceive(subscribers, group, run);
 	const ended = await outcomes(subscribers);
 	for (const { subscriber, outcome } of ended) {
@@ -620,7 +642,7 @@ async function subscriberLeaves(run: Run): Promise<ScenarioResult> {
 		await allReceive(stayers, afterDropped, run);
 	}
 
-	expectOwnPublishDone(publisher, await publisher.end());
+	await expectOwnPublishDone(publisher, await publisher.end());
 	const ended = await outcomes(stayers);
 	for (const { subscriber, outcome } of ended) {
 		expectPublishDone(subscriber, outcome, {
@@ -831,7 +853,7 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 	// far it saw none, because the streams the relay reset were the ones it
 	// could not open while the subscriber gave it no more stream credit.
 
-	expectOwnPublishDone(publisher, await publisher.end());
+	await expectOwnPublishDone(publisher, await publisher.end());
 	const ended = await outcomes(readers);
 	for (const { subscriber, outcome } of ended) {
 		expectPublishDone(subscriber, outcome, {
