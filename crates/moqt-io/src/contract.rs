@@ -146,11 +146,15 @@ pub(crate) async fn a_fetch_stream_given_up_while_a_write_waits_is_reset_with_th
         timeout(A_WHILE, writer.write(&body)).await.is_err(),
         "the write waits for the reader"
     );
-    writer.reset(0x5);
+    // Accepted before the reset. WHY not after: a stream that is reset
+    // before its peer took it need not be handed to the peer at all
+    // (`Connection::accept_uni`), and on a real connection that depends on
+    // which of the two is first.
     let mut recv = timeout(A_WHILE, b.accept_uni())
         .await
         .expect("the stream arrives")
         .expect("accept");
+    writer.reset(0x5);
     let (received, end) = read_to_end(&mut recv).await;
     assert_eq!(end, Err(ReadError::Reset(Some(0x5))));
     assert!(received.len() < 2 + body.len(), "{}", received.len());

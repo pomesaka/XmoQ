@@ -4,6 +4,7 @@
 //! one Object. What it prints to stdout is a contract with the scripts that
 //! drive it; see `report`.
 
+mod fetching;
 mod hex;
 mod io;
 mod report;
@@ -18,26 +19,28 @@ use tokio::time::Instant;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
+use xmoq_moqt::fetch::FetchHeader;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, ReasonPhrase, RequestError, publish_done_status, request_error_code,
-    setup_option,
+    ControlMessage, FetchRange, ReasonPhrase, RequestError, publish_done_status,
+    request_error_code, setup_option,
 };
-use xmoq_moqt::name::{FullTrackName, TrackNamespace};
+use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
 use xmoq_moqt::session::{
-    PeerRequest, PeerRequestEvent, PeerRequestId, PeerRequestOpened, RequestEvent, RequestId,
-    RequestState, Role, Session, SubscribedAlias, Transport,
+    FetchStreamOpened, PeerRequest, PeerRequestEvent, PeerRequestId, PeerRequestOpened,
+    RequestEvent, RequestId, RequestState, Role, Session, SubscribedAlias, Transport,
 };
 
-use xmoq_moqt::stream_reset_code;
+use xmoq_moqt::{ErrorScope, stream_reset_code};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
     Connection, Direction, PeerRequestStreamEvent, RequestClose, RequestStreamEvent, SendStream,
     StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
 };
 
-use crate::io::{DataInbox, RequestStream};
+use crate::fetching::{BodyEnd, Fetches, Happened, Note, Reading, StreamEnded, Tell};
+use crate::io::{DataInbox, FetchStreams, RequestStream};
 
 /// Track Alias this client announces in PUBLISH. It publishes one track per
 /// session, so any value is unique (§11.1).
@@ -78,6 +81,9 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 enum Mode {
     /// Prints this many Objects, then leaves.
     Subscribe { objects: u64 },
+    /// Sends Standalone FETCH requests for this range of the track, prints
+    /// what comes on their fetch streams, and leaves when all are over.
+    Fetch { start: Location, end: Location },
     /// Publishes one Object carrying this payload.
     Publish { payload: Vec<u8> },
     /// Announces the namespace with `PUBLISH_NAMESPACE` and sends no PUBLISH:
@@ -145,6 +151,8 @@ struct Args {
     /// SUBSCRIBE it would serve, and sends `SUBSCRIBE_OK` when the driver
     /// writes the line `serve`.
     serve_on_line: bool,
+    /// What the flags say of the FETCH requests this client sends.
+    fetch: FetchArgs,
     trace: Trace,
 }
 
@@ -163,6 +171,182 @@ async fn wait_for_line(stdin: &mut DriverLines, expected: &str) -> Result<()> {
         Some(line) => bail!("waited for the line {expected}, not {line:?}"),
         None => bail!("stdin closed before the line {expected}"),
     }
+}
+
+/// What the flags say of the FETCH requests this client sends.
+struct FetchArgs {
+    /// How many FETCH requests `--mode fetch` sends, all for the same range.
+    /// WHY a flag: a relay asks one publisher for only so many at once.
+    count: u64,
+    /// The `FILL_TIMEOUT` of the FETCH requests this client sends (§10.2.5), in
+    /// milliseconds; none without the flag.
+    fill_timeout_ms: Option<u64>,
+    /// Their `GROUP_ORDER` (§10.2.8); none without the flag, which asks for
+    /// Ascending.
+    group_order: Option<GroupOrder>,
+    /// `--join`: the subscriber also sends a Joining FETCH that names its
+    /// SUBSCRIBE (§10.12.2).
+    join: Option<Join>,
+    /// How this client reads a fetch stream.
+    reading: Reading,
+}
+
+/// The Joining FETCH of `--join`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Join {
+    /// Relative (`relative:N`) or Absolute (`absolute:N`).
+    relative: bool,
+    /// The Joining Start.
+    start: u64,
+    /// `--join-at-once`: the FETCH is sent right after the SUBSCRIBE, before
+    /// its `SUBSCRIBE_OK`. WHY not always: the two travel on streams of
+    /// their own, and a publisher that reads the FETCH first knows no
+    /// subscription for it. Without the flag the FETCH waits for the
+    /// `SUBSCRIBE_OK`.
+    at_once: bool,
+}
+
+/// The most FETCH requests `--fetch-count` sends. WHY a limit: the client
+/// sends them all before it reads an answer, on streams of which the peer
+/// lets it have only so many open: 64 with an `XmoQ` relay, which lets a peer
+/// open as many request streams as it reads at once
+/// (`StreamConfig::max_request_streams`).
+const MAX_FETCH_COUNT: u64 = 32;
+
+/// The flags about FETCH, as they were read.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FetchFlags {
+    start: Option<Location>,
+    end: Option<Location>,
+    count: Option<u64>,
+    fill_timeout_ms: Option<u64>,
+    group_order: Option<GroupOrder>,
+    join: Option<(bool, u64)>,
+    join_at_once: bool,
+    read_after_ms: u64,
+    read_every_ms: u64,
+    cancel_after_objects: Option<u64>,
+}
+
+impl FetchFlags {
+    /// Takes a flag with its value. `false` for a flag that is not about
+    /// FETCH.
+    fn read(&mut self, flag: &str, value: &str) -> Result<bool> {
+        match flag {
+            "--fetch-start" => self.start = Some(parse_location(value)?),
+            "--fetch-end" => self.end = Some(parse_location(value)?),
+            "--fetch-count" => self.count = Some(value.parse().context("--fetch-count")?),
+            "--fill-timeout-ms" => {
+                self.fill_timeout_ms = Some(value.parse().context("--fill-timeout-ms")?);
+            }
+            "--group-order" => {
+                self.group_order = Some(match value {
+                    "ascending" => GroupOrder::Ascending,
+                    "descending" => GroupOrder::Descending,
+                    other => bail!("unknown --group-order {other}"),
+                });
+            }
+            "--join" => self.join = Some(parse_join(value)?),
+            "--fetch-read-after-ms" => {
+                self.read_after_ms = value.parse().context("--fetch-read-after-ms")?;
+            }
+            "--fetch-read-every-ms" => {
+                self.read_every_ms = value.parse().context("--fetch-read-every-ms")?;
+            }
+            "--fetch-cancel-after-objects" => {
+                self.cancel_after_objects =
+                    Some(value.parse().context("--fetch-cancel-after-objects")?);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Why the flags do not go together with each other or with `mode`.
+    ///
+    /// WHY refused and not ignored: a driver that mistypes a flag would run
+    /// another test than it means to, and see it pass.
+    fn misuse(&self, mode: &str) -> Option<&'static str> {
+        let fetches = mode == "fetch";
+        let joins = mode == "subscribe" && self.join.is_some();
+        let of_a_range = self.start.is_some() || self.end.is_some() || self.count.is_some();
+        let of_any_fetch = self.fill_timeout_ms.is_some()
+            || self.group_order.is_some()
+            || self.read_after_ms != 0
+            || self.read_every_ms != 0
+            || self.cancel_after_objects.is_some();
+        if of_a_range && !fetches {
+            return Some("--fetch-start, --fetch-end and --fetch-count belong to --mode fetch");
+        }
+        if self.join.is_some() && mode != "subscribe" {
+            return Some("--join belongs to --mode subscribe");
+        }
+        if self.join_at_once && self.join.is_none() {
+            return Some("--join-at-once needs --join");
+        }
+        if of_any_fetch && !fetches && !joins {
+            return Some(
+                "the flags of a FETCH belong to --mode fetch and to --mode subscribe with --join",
+            );
+        }
+        if self
+            .count
+            .is_some_and(|count| count == 0 || count > MAX_FETCH_COUNT)
+        {
+            return Some("--fetch-count is 1 to 32");
+        }
+        if self.cancel_after_objects == Some(0) {
+            return Some("--fetch-cancel-after-objects 0 is never reached");
+        }
+        // A range that ends before it starts is the session's to refuse,
+        // where the FETCH is made (`Session::fetch`).
+        None
+    }
+
+    fn args(&self) -> FetchArgs {
+        FetchArgs {
+            count: self.count.unwrap_or(1),
+            fill_timeout_ms: self.fill_timeout_ms,
+            group_order: self.group_order,
+            join: self.join.map(|(relative, start)| Join {
+                relative,
+                start,
+                at_once: self.join_at_once,
+            }),
+            reading: Reading {
+                after: Duration::from_millis(self.read_after_ms),
+                every: Duration::from_millis(self.read_every_ms),
+                cancel_after_objects: self.cancel_after_objects,
+            },
+        }
+    }
+}
+
+/// Reads `<group>,<object>` of `--fetch-start` and `--fetch-end`.
+fn parse_location(text: &str) -> Result<Location> {
+    let (group, object) = text
+        .split_once(',')
+        .with_context(|| format!("{text} is not <group>,<object>"))?;
+    Ok(Location {
+        group: group.parse().context("the Group of a Location")?,
+        object: object.parse().context("the Object of a Location")?,
+    })
+}
+
+/// Reads `relative:<n>` or `absolute:<n>` of `--join`.
+fn parse_join(text: &str) -> Result<(bool, u64)> {
+    let (kind, start) = text
+        .split_once(':')
+        .with_context(|| format!("--join {text} is not relative:<n> or absolute:<n>"))?;
+    let relative = match kind {
+        "relative" => true,
+        "absolute" => false,
+        other => bail!("--join {other} is neither relative nor absolute"),
+    };
+    Ok((
+        relative,
+        start.parse().context("the Joining Start of --join")?,
+    ))
 }
 
 impl Args {
@@ -243,6 +427,36 @@ fn parse_publisher_priority(text: &str) -> Result<Option<u8>> {
     Ok(Some(priority))
 }
 
+/// The mode `--mode` names, with what that mode needs of the other flags.
+fn read_mode(
+    mode: Option<String>,
+    payload_hex: Option<&str>,
+    objects: u64,
+    fetch: &FetchFlags,
+) -> Result<Mode> {
+    let payload = || -> Result<Vec<u8>> {
+        hex::decode(payload_hex.context("--payload-hex is required to publish")?)
+    };
+    let mode = mode.context("--mode is required")?;
+    if let Some(misuse) = fetch.misuse(&mode) {
+        bail!("{misuse}");
+    }
+    Ok(match mode.as_str() {
+        "subscribe" => Mode::Subscribe { objects },
+        "fetch" => Mode::Fetch {
+            start: fetch.start.context("--fetch-start is required to fetch")?,
+            end: fetch.end.context("--fetch-end is required to fetch")?,
+        },
+        "publish" => Mode::Publish {
+            payload: payload()?,
+        },
+        "publish-namespace" => Mode::PublishNamespace {
+            payload: payload()?,
+        },
+        other => bail!("unknown --mode {other}"),
+    })
+}
+
 fn parse_args() -> Result<Args> {
     let mut mode = None;
     let mut payload_hex = None;
@@ -261,6 +475,7 @@ fn parse_args() -> Result<Args> {
     let mut answer_delay_ms = 0;
     let mut publish_on_line = false;
     let mut serve_on_line = false;
+    let mut fetch = FetchFlags::default();
     let mut trace = false;
 
     let mut args = std::env::args().skip(1);
@@ -269,6 +484,7 @@ fn parse_args() -> Result<Args> {
             "--trace" => Some(&mut trace),
             "--publish-on-line" => Some(&mut publish_on_line),
             "--serve-on-line" => Some(&mut serve_on_line),
+            "--join-at-once" => Some(&mut fetch.join_at_once),
             _ => None,
         };
         if let Some(switch) = switch {
@@ -307,20 +523,15 @@ fn parse_args() -> Result<Args> {
             "--answer-delay-ms" => {
                 answer_delay_ms = value.parse().context("--answer-delay-ms")?;
             }
-            other => bail!("unknown flag {other}"),
+            other => {
+                if !fetch.read(other, &value)? {
+                    bail!("unknown flag {other}");
+                }
+            }
         }
     }
 
-    let mode = match mode.context("--mode is required")?.as_str() {
-        "subscribe" => Mode::Subscribe { objects },
-        "publish" => Mode::Publish {
-            payload: hex::decode(&payload_hex.context("--payload-hex is required to publish")?)?,
-        },
-        "publish-namespace" => Mode::PublishNamespace {
-            payload: hex::decode(&payload_hex.context("--payload-hex is required to publish")?)?,
-        },
-        other => bail!("unknown --mode {other}"),
-    };
+    let mode = read_mode(mode, payload_hex.as_deref(), objects, &fetch)?;
     let cert_sha256 = hex::decode(&cert_sha256.context("--cert-sha256 is required")?)?
         .try_into()
         .map_err(|_| anyhow!("--cert-sha256 must be 32 bytes"))?;
@@ -341,6 +552,7 @@ fn parse_args() -> Result<Args> {
         answer_delay: Duration::from_millis(answer_delay_ms),
         publish_on_line,
         serve_on_line,
+        fetch: fetch.args(),
         trace: if trace {
             Trace::new(report::trace)
         } else {
@@ -434,25 +646,8 @@ impl Client<'_> {
         message: &ControlMessage,
         label: &str,
     ) -> Result<(RequestStream, RequestEvent)> {
-        let mut stream = match RequestStream::open(self.connection, &self.args.trace, label).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                self.session.cancel(request_id);
-                return Err(error);
-            }
-        };
-        let response = async {
-            stream.send(message).await?;
-            match stream.next_event().await? {
-                RequestStreamEvent::Message(response) => {
-                    Ok(self.session.on_request_message(request_id, response)?)
-                }
-                RequestStreamEvent::Closed(how) => {
-                    bail!("the peer closed the {label} stream without a response: {how}")
-                }
-            }
-        };
-        match response.await {
+        let mut stream = self.open_request(request_id, message, label).await?;
+        match self.response(request_id, &mut stream, label).await {
             Ok(event) => Ok((stream, event)),
             Err(error) => {
                 self.session.cancel(request_id);
@@ -472,7 +667,35 @@ impl Client<'_> {
                 Parameter::GroupOrder(GroupOrder::Ascending),
             ],
         )?;
-        let (stream, event) = self.request(request_id, &message, "subscribe").await?;
+        let mut fetches = Fetches::new(self.args.fetch.reading);
+        let joining = self.args.fetch.join.map(|join| {
+            let joining_request_id = request_id.value();
+            let range = if join.relative {
+                FetchRange::RelativeJoining {
+                    joining_request_id,
+                    joining_start: join.start,
+                }
+            } else {
+                FetchRange::AbsoluteJoining {
+                    joining_request_id,
+                    joining_start: join.start,
+                }
+            };
+            (range, join.at_once)
+        });
+        let mut stream = self.open_request(request_id, &message, "subscribe").await?;
+        if let Some((range, true)) = &joining {
+            self.send_fetch(&mut fetches, range.clone()).await?;
+        }
+        let event = self.response(request_id, &mut stream, "subscribe").await;
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                self.session.cancel(request_id);
+                stream.cancel();
+                return Err(error);
+            }
+        };
         let track_alias = match event {
             RequestEvent::SubscribeEstablished { track_alias, .. } => track_alias,
             RequestEvent::UnsupportedTrack {
@@ -492,8 +715,218 @@ impl Client<'_> {
             }
         };
         report::subscribed(track_alias);
-        self.receive_objects(request_id, stream, track_alias, wanted)
-            .await
+        if let Some((range, false)) = joining {
+            self.send_fetch(&mut fetches, range).await?;
+        }
+        let received = self
+            .receive_objects(request_id, stream, track_alias, wanted, &mut fetches)
+            .await;
+        // The subscription can be over before its Joining FETCH is.
+        self.leave_fetches(&mut fetches);
+        received
+    }
+
+    /// `--mode fetch`: sends the Standalone FETCH requests and sees each to
+    /// its end.
+    async fn fetch(&mut self, start: Location, end: Location) -> Result<()> {
+        let mut fetches = Fetches::new(self.args.fetch.reading);
+        let full_track_name = self.args.full_track_name()?;
+        for _ in 0..self.args.fetch.count {
+            let range = FetchRange::Standalone {
+                full_track_name: full_track_name.clone(),
+                start,
+                end,
+            };
+            self.send_fetch(&mut fetches, range).await?;
+        }
+        while !fetches.all_over() {
+            tokio::select! {
+                note = fetches.next_note() => self.on_fetch_note(&mut fetches, note)?,
+                event = self.objects.next_event() => match event? {
+                    UniEvent::FetchOpened { stream, header } => {
+                        self.on_fetch_stream(&mut fetches, stream, header)?;
+                    }
+                    // This client subscribed to nothing (§11.4.2).
+                    UniEvent::SubgroupOpened { stream, header } => {
+                        report::ignored(header.track_alias);
+                        self.stops.stop(stream, stream_reset_code::CANCELLED);
+                    }
+                    _ => {}
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// Sends a FETCH on a new request stream and leaves the stream to
+    /// `fetches`.
+    async fn send_fetch(&mut self, fetches: &mut Fetches, range: FetchRange) -> Result<()> {
+        let mut parameters = Vec::new();
+        if let Some(millis) = self.args.fetch.fill_timeout_ms {
+            parameters.push(Parameter::FillTimeout(millis));
+        }
+        if let Some(group_order) = self.args.fetch.group_order {
+            parameters.push(Parameter::GroupOrder(group_order));
+        }
+        let (request_id, message) = self.session.fetch(range, parameters)?;
+        let label = format!("fetch#{}", request_id.value());
+        let stream = self.open_request(request_id, &message, &label).await?;
+        report::fetch_sent(request_id.value());
+        // §10.2.8: without the parameter the Groups come in Ascending order.
+        let group_order = self.args.fetch.group_order.unwrap_or(GroupOrder::Ascending);
+        fetches.add(request_id, group_order, stream);
+        Ok(())
+    }
+
+    /// A fetch stream of the peer opened: the session says what it belongs
+    /// to.
+    fn on_fetch_stream(
+        &mut self,
+        fetches: &mut Fetches,
+        stream: u64,
+        header: FetchHeader,
+    ) -> Result<()> {
+        let opened = self.session.on_fetch_stream(header.request_id)?;
+        // Taken in every case: a body that is dropped stops its stream,
+        // which is what a stream for a FETCH that is over gets.
+        let body = self.stops.take_fetch_body(stream);
+        if let (FetchStreamOpened::Fetch(request_id), Some(body)) = (opened, body)
+            && let Some(index) = fetches.index_of(request_id)
+        {
+            fetches.read(index, header, body);
+        }
+        Ok(())
+    }
+
+    /// What a task of a FETCH reported: what it means is read here, and what
+    /// follows from it is `fetching::step`'s to say.
+    fn on_fetch_note(&mut self, fetches: &mut Fetches, note: Note) -> Result<()> {
+        let (index, happened) = match note {
+            Note::Message(index, message) => {
+                let Some(fetch) = fetches.sent.get(index) else {
+                    return Ok(());
+                };
+                let id = fetch.id.value();
+                // A FETCH that is over hears the peer where it came to its
+                // end or was refused: a message after the last is one the
+                // session finds out. Not where this client gave it up.
+                if !fetch.progress.hears_the_peer() {
+                    return Ok(());
+                }
+                let happened = match self.session.on_request_message(fetch.id, message)? {
+                    RequestEvent::FetchEstablished {
+                        end_of_track,
+                        end_location,
+                        track_properties,
+                    } => {
+                        report::fetch_ok(id, end_location, end_of_track, &track_properties);
+                        Happened::Answered
+                    }
+                    RequestEvent::Rejected(error) => {
+                        report::fetch_refused(id, error.error_code);
+                        Happened::Refused
+                    }
+                    // §2.5.1: the session ended the request; the streams are
+                    // cancelled to tell the publisher.
+                    RequestEvent::UnsupportedFetch { .. } => Happened::UnsupportedTrackProperty,
+                    other => bail!("unexpected message on a fetch request stream: {other:?}"),
+                };
+                (index, happened)
+            }
+            Note::RequestClosed(index, how) => (index, Happened::RequestClosed(how)),
+            Note::RequestBroken(error) => return Err(error),
+            Note::Body(index, end) => {
+                let happened = match end {
+                    BodyEnd::Fin => Happened::StreamEnded(StreamEnded::Fin),
+                    BodyEnd::Reset(code) => Happened::StreamEnded(StreamEnded::Reset(code)),
+                    BodyEnd::Lost => bail!("the connection was lost while a fetch stream was read"),
+                    BodyEnd::Stopped => Happened::StreamStopped,
+                    BodyEnd::GaveUp => Happened::GaveUp,
+                    // By what the error ends, and not by its name: one that
+                    // ends the session closes it, any other ends this
+                    // FETCH (§2.4.2 for a track that is at fault).
+                    BodyEnd::Broken(error) => {
+                        if matches!(error.scope(), ErrorScope::Session(_)) {
+                            return Err(error.into());
+                        }
+                        if let Some(fetch) = fetches.sent.get(index) {
+                            report::fetch_stream_refused(fetch.id.value(), &error);
+                        }
+                        Happened::StreamRefused
+                    }
+                };
+                (index, happened)
+            }
+        };
+        self.fetch_happened(fetches, index, happened);
+        Ok(())
+    }
+
+    /// Applies what happened to a FETCH: to the session, to its streams, and
+    /// to stdout, where every FETCH gets one `FETCH_ENDED`.
+    fn fetch_happened(&mut self, fetches: &mut Fetches, index: usize, happened: Happened) {
+        let Some(fetch) = fetches.sent.get_mut(index) else {
+            return;
+        };
+        let step = fetching::step(fetch.progress, happened);
+        fetch.progress = step.progress;
+        match step.tell {
+            Some(Tell::Cancel) => self.session.cancel(fetch.id),
+            Some(Tell::StreamClosed) => self.session.on_fetch_stream_closed(fetch.id),
+            None => {}
+        }
+        if let Some(ended) = step.ended {
+            fetch.print_ended(ended);
+            fetches.end(index, ended.cancel);
+        }
+    }
+
+    /// The client leaves: every FETCH that is still open is given up, and
+    /// said to be.
+    fn leave_fetches(&mut self, fetches: &mut Fetches) {
+        for index in 0..fetches.sent.len() {
+            self.fetch_happened(fetches, index, Happened::Left);
+        }
+    }
+
+    /// Opens a request stream and sends the request on it. On a failure the
+    /// request is cancelled in the session.
+    async fn open_request(
+        &mut self,
+        request_id: RequestId,
+        message: &ControlMessage,
+        label: &str,
+    ) -> Result<RequestStream> {
+        let mut stream = match RequestStream::open(self.connection, &self.args.trace, label).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.session.cancel(request_id);
+                return Err(error);
+            }
+        };
+        if let Err(error) = stream.send(message).await {
+            self.session.cancel(request_id);
+            stream.cancel();
+            return Err(error);
+        }
+        Ok(stream)
+    }
+
+    /// The event the response to a request produces.
+    async fn response(
+        &mut self,
+        request_id: RequestId,
+        stream: &mut RequestStream,
+        label: &str,
+    ) -> Result<RequestEvent> {
+        match stream.next_event().await? {
+            RequestStreamEvent::Message(response) => {
+                Ok(self.session.on_request_message(request_id, response)?)
+            }
+            RequestStreamEvent::Closed(how) => {
+                bail!("the peer closed the {label} stream without a response: {how}")
+            }
+        }
     }
 
     /// Prints Objects of the subscription until `wanted` arrived or the
@@ -506,15 +939,21 @@ impl Client<'_> {
         stream: RequestStream,
         track_alias: u64,
         wanted: u64,
+        fetches: &mut Fetches,
     ) -> Result<()> {
         let mut stream = Some(stream);
         let mut drain_deadline = None;
         let mut drain_timed_out = false;
         let mut received = 0;
 
-        while received < wanted {
+        // A Joining FETCH is seen to its end as well.
+        while received < wanted || !fetches.all_over() {
             tokio::select! {
+                note = fetches.next_note() => self.on_fetch_note(fetches, note)?,
                 event = self.objects.next_event() => match event? {
+                    UniEvent::FetchOpened { stream, header } => {
+                        self.on_fetch_stream(fetches, stream, header)?;
+                    }
                     UniEvent::SubgroupOpened { stream, header } => {
                         if self.belongs_to(header.track_alias, track_alias) {
                             self.open_streams.insert(stream, header.track_alias);
@@ -1197,6 +1636,7 @@ impl Client<'_> {
     async fn run_mode(&mut self) -> Result<()> {
         match &self.args.mode {
             Mode::Subscribe { objects } => self.subscribe(*objects).await,
+            Mode::Fetch { start, end } => self.fetch(*start, *end).await,
             Mode::Publish { payload } => self.publish(payload).await,
             Mode::PublishNamespace { payload } => self.serve(payload).await,
         }
@@ -1227,11 +1667,20 @@ async fn run_session(
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
     let serve = matches!(args.mode, Mode::PublishNamespace { .. });
+    // A client that sends no FETCH has no fetch stream to read.
+    let fetches = match args.mode {
+        Mode::Fetch { .. } => FetchStreams::Handed,
+        Mode::Subscribe { .. } if args.fetch.join.is_some() => FetchStreams::Handed,
+        Mode::Subscribe { .. } | Mode::Publish { .. } | Mode::PublishNamespace { .. } => {
+            FetchStreams::Refused
+        }
+    };
     let (mut session_inbox, objects, peer_requests, readers) = io::start_readers(
         Arc::clone(connection),
         args.trace.clone(),
         stops.clone(),
         serve,
+        fetches,
         args.answer_delay,
     );
     kept.readers = Some(readers);
@@ -1396,6 +1845,173 @@ mod tests {
         // hexadecimal for an odd one, a type that is no number.
         for flag in ["16", "16=0x10", "13=xyz", "video=1"] {
             assert!(parse_object_property(flag).is_err(), "{flag}");
+        }
+    }
+
+    /// The flags of a FETCH with these set and no other.
+    fn flags(set: impl FnOnce(&mut FetchFlags)) -> FetchFlags {
+        let mut flags = FetchFlags::default();
+        set(&mut flags);
+        flags
+    }
+
+    fn at(group: u64, object: u64) -> Location {
+        Location { group, object }
+    }
+
+    #[test]
+    fn the_flags_of_a_fetch_are_read() {
+        // (flag; value; the flags after it alone)
+        let cases = [
+            ("--fetch-start", "3,7", flags(|f| f.start = Some(at(3, 7)))),
+            ("--fetch-end", "4,0", flags(|f| f.end = Some(at(4, 0)))),
+            ("--fetch-count", "17", flags(|f| f.count = Some(17))),
+            (
+                "--fill-timeout-ms",
+                "0",
+                flags(|f| f.fill_timeout_ms = Some(0)),
+            ),
+            (
+                "--group-order",
+                "descending",
+                flags(|f| f.group_order = Some(GroupOrder::Descending)),
+            ),
+            (
+                "--group-order",
+                "ascending",
+                flags(|f| f.group_order = Some(GroupOrder::Ascending)),
+            ),
+            ("--join", "relative:2", flags(|f| f.join = Some((true, 2)))),
+            ("--join", "absolute:0", flags(|f| f.join = Some((false, 0)))),
+            (
+                "--fetch-read-after-ms",
+                "13000",
+                flags(|f| f.read_after_ms = 13_000),
+            ),
+            (
+                "--fetch-read-every-ms",
+                "500",
+                flags(|f| f.read_every_ms = 500),
+            ),
+            (
+                "--fetch-cancel-after-objects",
+                "2",
+                flags(|f| f.cancel_after_objects = Some(2)),
+            ),
+        ];
+        for (flag, value, expected) in cases {
+            let mut read = FetchFlags::default();
+            assert!(read.read(flag, value).unwrap(), "{flag}");
+            assert_eq!(read, expected, "{flag} {value}");
+        }
+        // A flag that is not about FETCH is left to the caller.
+        assert!(!FetchFlags::default().read("--objects", "1").unwrap());
+        // No comma, no number, no kind, another kind, another order.
+        for (flag, value) in [
+            ("--fetch-start", "3"),
+            ("--fetch-end", "a,b"),
+            ("--join", "2"),
+            ("--join", "backwards:2"),
+            ("--join", "relative:x"),
+            ("--group-order", "random"),
+            ("--fetch-count", "-1"),
+        ] {
+            assert!(
+                FetchFlags::default().read(flag, value).is_err(),
+                "{flag} {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn flags_that_go_together_are_taken() {
+        let range = |f: &mut FetchFlags| (f.start, f.end) = (Some(at(0, 0)), Some(at(2, 0)));
+        // (mode; flags)
+        let cases = [
+            ("fetch", flags(range)),
+            ("fetch", flags(|f| (range(f), f.count = Some(32)).1)),
+            (
+                "fetch",
+                flags(|f| (range(f), f.read_every_ms = 500, f.fill_timeout_ms = Some(0)).2),
+            ),
+            ("subscribe", flags(|_| ())),
+            ("subscribe", flags(|f| f.join = Some((true, 1)))),
+            (
+                "subscribe",
+                flags(|f| (f.join, f.join_at_once) = (Some((false, 0)), true)),
+            ),
+            (
+                "subscribe",
+                flags(|f| (f.join, f.cancel_after_objects) = (Some((true, 1)), Some(1))),
+            ),
+            ("publish", flags(|_| ())),
+            ("publish-namespace", flags(|_| ())),
+            // The same Group, to its end or to a later Object.
+            (
+                "fetch",
+                flags(|f| (f.start, f.end) = (Some(at(1, 3)), Some(at(1, 0)))),
+            ),
+            (
+                "fetch",
+                flags(|f| (f.start, f.end) = (Some(at(1, 3)), Some(at(1, 4)))),
+            ),
+        ];
+        for (mode, flags) in cases {
+            assert_eq!(flags.misuse(mode), None, "{mode} {flags:?}");
+        }
+    }
+
+    #[test]
+    fn flags_that_do_not_go_together_are_refused() {
+        const RANGE: &str = "--fetch-start, --fetch-end and --fetch-count belong to --mode fetch";
+        const ANY: &str =
+            "the flags of a FETCH belong to --mode fetch and to --mode subscribe with --join";
+        let range = |f: &mut FetchFlags| (f.start, f.end) = (Some(at(0, 0)), Some(at(2, 0)));
+        // (mode; flags; why they are refused)
+        let cases = [
+            ("subscribe", flags(range), RANGE),
+            ("publish", flags(|f| f.count = Some(2)), RANGE),
+            (
+                "fetch",
+                flags(|f| (range(f), f.join = Some((true, 1))).1),
+                "--join belongs to --mode subscribe",
+            ),
+            (
+                "publish",
+                flags(|f| f.join = Some((true, 1))),
+                "--join belongs to --mode subscribe",
+            ),
+            (
+                "subscribe",
+                flags(|f| f.join_at_once = true),
+                "--join-at-once needs --join",
+            ),
+            ("subscribe", flags(|f| f.read_after_ms = 1), ANY),
+            ("subscribe", flags(|f| f.fill_timeout_ms = Some(0)), ANY),
+            (
+                "publish-namespace",
+                flags(|f| f.group_order = Some(GroupOrder::Descending)),
+                ANY,
+            ),
+            ("publish", flags(|f| f.cancel_after_objects = Some(1)), ANY),
+            (
+                "fetch",
+                flags(|f| (range(f), f.count = Some(0)).1),
+                "--fetch-count is 1 to 32",
+            ),
+            (
+                "fetch",
+                flags(|f| (range(f), f.count = Some(33)).1),
+                "--fetch-count is 1 to 32",
+            ),
+            (
+                "fetch",
+                flags(|f| (range(f), f.cancel_after_objects = Some(0)).1),
+                "--fetch-cancel-after-objects 0 is never reached",
+            ),
+        ];
+        for (mode, flags, why) in cases {
+            assert_eq!(flags.misuse(mode), Some(why), "{mode} {flags:?}");
         }
     }
 

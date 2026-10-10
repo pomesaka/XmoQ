@@ -7,8 +7,10 @@
 
 use xmoq_moqt::Error as MoqtError;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
+use xmoq_moqt::fetch::{FetchObject, RangeEnd};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{PublishDone, Setup};
+use xmoq_moqt::name::Location;
 
 use xmoq_moqt_io::{Direction, RequestClose};
 
@@ -186,4 +188,74 @@ pub fn ready_to_publish() {
 /// this Request ID, and waits for the driver's line `serve`.
 pub fn asked(request_id: u64) {
     println!("ASKED request_id={request_id}");
+}
+
+/// A FETCH of this client went out, with this Request ID.
+pub fn fetch_sent(request_id: u64) {
+    println!("FETCH_SENT request_id={request_id}");
+}
+
+pub fn fetch_ok(
+    request_id: u64,
+    end_location: Location,
+    end_of_track: bool,
+    track_properties: &[KeyValuePair],
+) {
+    println!(
+        "FETCH_OK request_id={request_id} end_group={} end_object={} end_of_track={end_of_track} track_properties={}",
+        end_location.group,
+        end_location.object,
+        properties(track_properties),
+    );
+}
+
+/// The peer refused a FETCH of this client. `FETCH_ENDED` follows, as for
+/// every FETCH.
+pub fn fetch_refused(request_id: u64, error_code: u64) {
+    println!("FETCH_REFUSED request_id={request_id} error_code={error_code:#x}");
+}
+
+/// `payload_hex` is the last field, as in `OBJECT`. WHY it has the first 64
+/// bytes of the payload only, where `OBJECT` has all of it: a fetch stream is
+/// asked for Objects of megabytes, to see a subscriber that reads slowly.
+/// `payload_len` is the whole length.
+pub fn fetch_object(request_id: u64, object: &FetchObject) {
+    let shown = object.payload.get(..64).unwrap_or(&object.payload);
+    println!(
+        "FETCH_OBJECT request_id={request_id} group={} object={} subgroup={} properties={} payload_len={} payload_hex={}",
+        object.group_id,
+        object.object_id,
+        object
+            .subgroup_id
+            .map_or_else(|| "none".to_string(), |id| id.to_string()),
+        properties(&object.properties),
+        object.payload.len(),
+        hex::encode(shown),
+    );
+}
+
+/// An End of Range indicator of a fetch stream (§11.4.4.2).
+pub fn fetch_range_end(request_id: u64, kind: RangeEnd, location: Location) {
+    let kind = match kind {
+        RangeEnd::NonExistent => "non-existent",
+        RangeEnd::Unknown => "unknown",
+    };
+    println!(
+        "FETCH_RANGE_END request_id={request_id} kind={kind} group={} object={}",
+        location.group, location.object
+    );
+}
+
+/// A FETCH of this client is over: printed once for every FETCH that was
+/// sent, whatever became of it. `how` is one word; `code` is the code of the
+/// reset that ended it, where one did; `objects` counts the
+/// `FETCH_OBJECT` lines printed for it.
+pub fn fetch_ended(request_id: u64, how: &str, code: Option<u32>, objects: u64) {
+    let code = code.map_or_else(|| "none".to_string(), |code| format!("{code:#x}"));
+    println!("FETCH_ENDED request_id={request_id} how={how} code={code} objects={objects}");
+}
+
+/// What a fetch stream carried was refused, and the FETCH given up for it.
+pub fn fetch_stream_refused(request_id: u64, error: &MoqtError) {
+    println!("FETCH_STREAM_REFUSED request_id={request_id} error={error}");
 }

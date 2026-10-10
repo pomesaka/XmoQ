@@ -631,6 +631,11 @@ impl Session {
     /// terminal event, or the request stays open in this session. Does nothing
     /// for a request that already ended.
     ///
+    /// A FIN of the peer is such an end for a request that has no answer
+    /// yet. For a FETCH that has its `FETCH_OK` it is not, and this is not
+    /// called for it: the request stream has nothing more to carry then, and
+    /// the FETCH goes on until its fetch stream ends ([`Self::fetch`]).
+    ///
     /// A cancelled subscription has no more use for its Objects, so its Track
     /// Alias is retired at once (§10.11 lets a subscriber that unsubscribed skip
     /// the wait).

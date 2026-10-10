@@ -98,6 +98,12 @@ impl RequestStream {
         }
     }
 
+    /// Ends this endpoint's half of the stream with a FIN and reads no more
+    /// of the peer's.
+    pub fn finish(self) {
+        self.send.finish();
+    }
+
     /// Cancels the request: resets the send half and stops the receive half,
     /// both with CANCELLED (§3.3.2).
     pub fn cancel(self) {
@@ -244,9 +250,21 @@ fn refuse_requests(
     (streams, refuser)
 }
 
+/// What becomes of a fetch stream the peer opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchStreams {
+    /// Handed to the client with the data, for it to ask its session what
+    /// the stream belongs to.
+    Handed,
+    /// The session is closed: the client sent no FETCH.
+    Refused,
+}
+
 /// Starts reading the peer's streams. With `serve`, the requests the peer
 /// opens are handed to the caller; without, each is answered with
-/// `NOT_SUPPORTED` after `answer_delay`.
+/// `NOT_SUPPORTED` after `answer_delay`. With `fetches`, the fetch streams
+/// the peer opens come with the data, for a caller that asks its session
+/// what each belongs to.
 ///
 /// §3.3 lets Objects arrive before the control stream; they wait in the data
 /// queue until asked for.
@@ -255,6 +273,7 @@ pub fn start_readers(
     trace: Trace,
     stops: StreamStops,
     serve: bool,
+    fetches: FetchStreams,
     answer_delay: Duration,
 ) -> (SessionInbox, DataInbox, Option<PeerRequests>, Readers) {
     let (all, mut incoming) = mpsc::channel(EVENT_QUEUE);
@@ -288,20 +307,22 @@ pub fn start_readers(
     // different places, and neither wait may swallow what the other needs.
     let router = tokio::spawn(async move {
         while let Some(event) = incoming.recv().await {
-            // FIXME: read the fetch stream of a FETCH this client sent. Until
-            // it sends one, a fetch stream answers none.
+            // FIXME: ask the session in the modes that publish as well. They
+            // send no FETCH, so a fetch stream answers none of theirs; the
+            // session would have one that names a request of this client
+            // that is over stopped, and the session left open
+            // (`Session::on_fetch_stream`). Nobody reads the data queue
+            // there.
             let event = match event {
-                UniEvent::FetchOpened { .. } => {
+                UniEvent::FetchOpened { .. } if fetches == FetchStreams::Refused => {
                     UniEvent::Failed(xmoq_moqt::session::NO_FETCH_FOR_THE_STREAM)
                 }
                 event => event,
             };
             let queue = match &event {
-                UniEvent::Control(_)
-                | UniEvent::Failed(_)
-                | UniEvent::ReaderPanicked
-                | UniEvent::FetchOpened { .. } => &session,
-                UniEvent::SubgroupOpened { .. }
+                UniEvent::Control(_) | UniEvent::Failed(_) | UniEvent::ReaderPanicked => &session,
+                UniEvent::FetchOpened { .. }
+                | UniEvent::SubgroupOpened { .. }
                 | UniEvent::Object { .. }
                 | UniEvent::TrackMalformed { .. }
                 | UniEvent::SubgroupClosed { .. } => &data,
