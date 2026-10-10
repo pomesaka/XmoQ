@@ -46,6 +46,11 @@ const DEFAULT_SUBSCRIPTION_HIGH_WATER_MARK = 16;
  */
 const DEFAULT_MAX_PEER_UNI_STREAMS = 64;
 /**
+ * Provisional, like every limit here. The same number as the Rust
+ * implementation reads at once (`max_request_streams` of `StreamConfig`).
+ */
+const DEFAULT_MAX_PEER_BIDI_STREAMS = 64;
+/**
  * The largest code an application may reset a stream with.
  *
  * WHY 255 and not the 2^32 - 1 of W3C WebTransport (`[Clamp] unsigned long?
@@ -119,6 +124,16 @@ export interface SessionConnectOptions {
 	 * Objects are small; neither Objects nor bytes are counted.
 	 */
 	maxPeerUniStreams?: number;
+	/**
+	 * Bidirectional streams of the peer read at once, which are its requests;
+	 * a whole number from 1, or `connect` rejects with a `RangeError`. Further
+	 * streams wait in the transport, and a stream holds its place until the
+	 * peer has ended its direction.
+	 *
+	 * This bounds what requests that have not fully arrived can hold: up to
+	 * 64 KiB each, for a FETCH that is decoded whole before it is refused.
+	 */
+	maxPeerBidiStreams?: number;
 	/**
 	 * How long to wait for the peer's SETUP before closing with
 	 * CONTROL_MESSAGE_TIMEOUT. Like the two waits below, a whole number from
@@ -376,6 +391,15 @@ export async function connectOver(
 			`maxPeerUniStreams is a whole number from 2, not ${String(maxPeerUniStreams)}`,
 		);
 	}
+	const maxPeerBidiStreams =
+		options.maxPeerBidiStreams ?? DEFAULT_MAX_PEER_BIDI_STREAMS;
+	// WHY from 1: with 0 no request of the peer would ever be read, and so
+	// never answered. NaN and Infinity would switch the limit off.
+	if (!Number.isInteger(maxPeerBidiStreams) || maxPeerBidiStreams < 1) {
+		throw new RangeError(
+			`maxPeerBidiStreams is a whole number from 1, not ${String(maxPeerBidiStreams)}`,
+		);
+	}
 	const peerStreamEndTimeoutMs = timerDelay(
 		"peerStreamEndTimeoutMs",
 		options.peerStreamEndTimeoutMs ?? DEFAULT_PEER_STREAM_END_TIMEOUT_MS,
@@ -412,6 +436,7 @@ export async function connectOver(
 	const io = createStreamIo({
 		transport,
 		maxPeerUniStreams,
+		maxPeerBidiStreams,
 		trace: (direction, name, data) =>
 			options.diagnostics?.onBytes?.(direction, name, data),
 		input: (action) => applyInput(action),
