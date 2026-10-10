@@ -119,6 +119,12 @@ const { values: options } = parseArgs({
     // sends (Group 0), and, once the first has answered, what that one sends
     // (Group 1).
     'publish-while-asked': { type: 'boolean', default: false },
+    // After the first Object, the `own` Rust publisher ends its subscription
+    // with PUBLISH_DONE and publishes the track anew at once, under the next
+    // Track Alias (`other`) or the same one (`same`), and then sends its next
+    // Object (Group 1). The subscriber, an `own` Rust one, has to stay
+    // subscribed and get that Object.
+    republish: { type: 'string' },
     // Makes the `own` client print the raw bytes of every stream.
     trace: { type: 'boolean', default: false },
     // After the transfer, ends the Rust publisher and waits until the `own`
@@ -430,6 +436,7 @@ async function main() {
     let sendObject
     let endPublisher
     let secondPublisher = null
+    let firstPublisher = null
     const subscriberClients = []
     let published = async () => {}
     if (direction.publisherInBrowser) {
@@ -454,6 +461,7 @@ async function main() {
       const firstGroup = options['first-group'] === '0' ? [] : ['--first-group', options['first-group']]
       if (firstGroup.length > 0 && rustPublisher !== 'own') throw new Error('--first-group needs --rust-publisher own')
       const client = spawnRustClient('rust-pub', rustPublisher, mode, ['--payload-hex', payloadHex, ...delays, ...subgroupId, ...firstGroup])
+      firstPublisher = client
       await client.waitForLine(byNamespace || subscribeFirst ? /^NAMESPACE_PUBLISHED/ : /^PUBLISHED /)
       if (subscribeFirst) published = () => client.waitForLine(/^PUBLISHED /)
       sendObject = async () => {
@@ -513,7 +521,7 @@ async function main() {
         // With two publishers the own subscriber is kept waiting as well: it
         // is to see what comes after the first Object, or that nothing does.
         // (The moqtail client has no such flag; it reads until it is ended.)
-        const more = awaitPublishDone || (options['second-rust-publisher'] && rustSubscriber === 'own')
+        const more = awaitPublishDone || ((options['second-rust-publisher'] || options.republish) && rustSubscriber === 'own')
         const client = spawnRustClient(`rust-sub${label}`, rustSubscriber, 'subscribe', more ? ['--objects', '2'] : [])
         subscriberClients.push(client)
         await subscribed(client.waitForLine(/^SUBSCRIBED /))
@@ -570,6 +578,25 @@ async function main() {
         subscriberStays: rustSubscriber === 'own',
       }
     }
+    let republished = null
+    if (options.republish) {
+      if (rustPublisher !== 'own' || rustSubscriber !== 'own' || byNamespace || !['same', 'other'].includes(options.republish)) {
+        throw new Error('--republish same|other needs own Rust clients and a plain PUBLISH')
+      }
+      firstPublisher.child.stdin.write(options.republish === 'same' ? 'republish-same-alias\n' : 'republish\n')
+      // Printed once the new PUBLISH has its PUBLISH_OK and the stream of
+      // the first one has ended, or 3 s have passed.
+      const [, firstEnded] = await firstPublisher.waitForLine(/^PUBLISH_DONE_PEER_ENDED how=(.*)$/)
+      firstPublisher.child.stdin.write('send\n')
+      await firstPublisher.waitForLine(/^SENT group=1 /)
+      await Promise.all(subscriberClients.map(client => client.waitForLine(/^OBJECT group=1 /)))
+      republished = {
+        alias: options.republish,
+        publishOks: firstPublisher.count(/^PUBLISHED /),
+        firstSubscriptionEnded: firstEnded,
+        subscriptionEndedForASubscriber: subscriberClients.some(client => client.count(/^SUBSCRIPTION_ENDED /) > 0),
+      }
+    }
     let subscriptionEnd = null
     if (awaitPublishDone) {
       endPublisher()
@@ -582,8 +609,10 @@ async function main() {
       match:
         receivedHexes.every(hex => hex === payloadHex) &&
         (twoPublishers === null ||
-          (twoPublishers.group0PerSubscriber.every(count => count === 1) && !twoPublishers.endedWhileOnePublisherWasLeft)),
+          (twoPublishers.group0PerSubscriber.every(count => count === 1) && !twoPublishers.endedWhileOnePublisherWasLeft)) &&
+        (republished === null || (republished.publishOks === 2 && !republished.subscriptionEndedForASubscriber)),
       twoPublishers,
+      republished,
       relay: options.relay,
       subscribers: subscriberCount,
       sentText: payload.toString(),

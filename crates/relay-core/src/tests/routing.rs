@@ -714,6 +714,7 @@ fn publish_done_of_a_routed_track_reaches_the_subscribers() {
             Event::DrainTimeout {
                 session: PUBLISHER,
                 track_alias: UPSTREAM_ALIAS,
+                wait: 0,
             },
             vec![
                 Action::StopDataStream {
@@ -741,6 +742,7 @@ fn publish_done_of_a_routed_track_reaches_the_subscribers() {
             [Action::StartDrainTimer {
                 session: PUBLISHER,
                 track_alias: UPSTREAM_ALIAS,
+                wait: 0,
             }],
             "{name}"
         );

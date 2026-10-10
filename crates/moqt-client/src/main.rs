@@ -43,6 +43,10 @@ use crate::io::{DataInbox, RequestStream};
 /// session, so any value is unique (§11.1).
 const PUBLISH_TRACK_ALIAS: u64 = 1;
 
+/// The Stream Count of a `PUBLISH_DONE` whose sender cannot give the number
+/// (§10.11).
+const STREAM_COUNT_UNKNOWN: u64 = (1 << 62) - 1;
+
 /// How long the peer gets to acknowledge the close before the process exits.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
@@ -620,25 +624,42 @@ impl Client<'_> {
     }
 
     async fn publish(&mut self, payload: &[u8]) -> Result<()> {
-        let (_namespace_stream, publish_request, mut publish_stream) = self.offer_track().await?;
+        let (_namespace_stream, mut publish_request, mut publish_stream) =
+            self.offer_track().await?;
 
         // The driver writes a line for every Object it wants sent, once the
         // subscribers are ready, and closes stdin when it is done; the session
         // has to stay open in between. The request stream is read all the while: the subscriber
         // may update the subscription on it, or cancel by closing it.
+        //
+        // A line `republish` or `republish-same-alias` ends the subscription
+        // with PUBLISH_DONE and publishes the track anew, under the next
+        // Track Alias or the same one; see `Self::publish_anew`.
         let mut stdin = BufReader::new(tokio::io::stdin()).lines();
-        let mut stream_count = 0;
+        let mut track_alias = PUBLISH_TRACK_ALIAS;
+        // Objects sent in all, and data streams of the subscription as it is.
+        let (mut sent, mut stream_count) = (0, 0);
         let status_code = loop {
             tokio::select! {
-                line = stdin.next_line() => match line? {
-                    Some(_) => {
-                        // Each Object is a Group of its own, numbered from 0.
-                        let group_id = self.args.first_group + stream_count;
-                        self.send_object(PUBLISH_TRACK_ALIAS, group_id, payload)
+                line = stdin.next_line() => match line?.as_deref() {
+                    Some(line @ ("republish" | "republish-same-alias")) => {
+                        if line == "republish" {
+                            track_alias += 1;
+                        }
+                        (publish_request, publish_stream) = self
+                            .publish_anew(publish_request, publish_stream, track_alias)
                             .await?;
+                        stream_count = 0;
+                    }
+                    Some(_) => {
+                        // Each Object is a Group of its own. The Groups go on
+                        // through a `republish`: it is the same track.
+                        let group_id = self.args.first_group + sent;
+                        self.send_object(track_alias, group_id, payload).await?;
+                        sent += 1;
                         stream_count += 1;
                     }
-                    None if stream_count == 0 => bail!("stdin closed before the send trigger"),
+                    None if sent == 0 => bail!("stdin closed before the send trigger"),
                     None => break publish_done_status::TRACK_ENDED,
                 },
                 // This client has no subgroup stream open between Objects, so a
@@ -696,6 +717,60 @@ impl Client<'_> {
         // the draft does not ask a subscriber to close its direction at all.
         report::publish_done_peer_ended(answered);
         Ok(())
+    }
+
+    /// Ends the subscription of `request` with `PUBLISH_DONE` and publishes
+    /// the track anew under `track_alias`, before the peer can have seen the
+    /// end of what the first subscription counted. Returns the new request
+    /// and its stream.
+    ///
+    /// WHY the Stream Count of a publisher that cannot count (§10.11: "it
+    /// MUST set Stream Count to 2^62 - 1"), though this client can: every
+    /// stream it sends has ended before the `PUBLISH_DONE` goes out, so with
+    /// the exact number a relay would be done with the first subscription at
+    /// once. This value keeps it waiting, which is the state a publisher is
+    /// in whose last stream is still under way when it publishes anew, and
+    /// the one this is for.
+    async fn publish_anew(
+        &mut self,
+        request: RequestId,
+        mut stream: RequestStream,
+        track_alias: u64,
+    ) -> Result<(RequestId, RequestStream)> {
+        let done = self.session.publish_done(
+            request,
+            publish_done_status::TRACK_ENDED,
+            STREAM_COUNT_UNKNOWN,
+            ReasonPhrase::default(),
+        )?;
+        stream.send(&done).await?;
+        let (new_request, message) = self.session.publish(
+            self.args.full_track_name()?,
+            track_alias,
+            vec![Parameter::Forward(true)],
+            vec![],
+        )?;
+        let (new_stream, event) = self.request(new_request, &message, "publish").await?;
+        match event {
+            RequestEvent::PublishEstablished { forward, .. } => {
+                report::published(track_alias, forward);
+            }
+            other => {
+                new_stream.cancel();
+                return Err(refused("PUBLISH", other));
+            }
+        }
+        // How the peer ends the first subscription's stream: a relay that
+        // stops waiting for the stream that was counted resets it.
+        let session = &mut self.session;
+        let answered = stream
+            .finish_and_await_close(PUBLISH_DONE_ANSWER_WAIT, |message| {
+                session.on_request_message(request, message)?;
+                Ok(())
+            })
+            .await?;
+        report::publish_done_peer_ended(answered);
+        Ok((new_request, new_stream))
     }
 
     /// Announces the namespace and publishes the track to the peer when it
