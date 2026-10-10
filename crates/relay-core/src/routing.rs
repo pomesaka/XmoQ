@@ -26,15 +26,16 @@
 
 use std::collections::BTreeSet;
 
+use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{ControlMessage, ReasonPhrase, RequestError, request_error_code};
-use xmoq_moqt::name::{FullTrackName, TrackNamespace};
+use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
 use crate::{
-    Action, OwnRequestEnd, OwnRequestKey, Relay, RequestSlot, SessionKey, StreamKey, Subscriber,
-    Track, TrackEnd, TrackSource, internal_error,
+    Action, OwnRequestEnd, OwnRequestKey, Relay, RequestSlot, SessionKey, Source, StreamKey,
+    Subscriber, TrackEnd, TrackSource, internal_error,
 };
 
 /// Namespaces one session may have announced at once. One more is refused
@@ -168,7 +169,7 @@ pub(crate) struct PendingTrack {
     /// Never empty: when the last ask is over, the waiters are refused and
     /// the track is forgotten.
     pub(crate) asks: Vec<Ask>,
-    waiters: Vec<Waiter>,
+    pub(crate) waiters: Vec<Waiter>,
 }
 
 /// What a request is refused with: the fields of a `REQUEST_ERROR`.
@@ -509,8 +510,7 @@ impl Relay {
                 // §10.2.11: the relay's LARGEST_OBJECT starts from the one
                 // the publisher gave. §9.6: its Track Properties are passed
                 // on.
-                let track = Track::established(accepted, track_properties, largest);
-                self.on_upstream_accept(&own, track, actions);
+                self.on_upstream_accept(&own, accepted, track_properties, largest, actions);
             }
             RequestEvent::UnsupportedTrack { track_alias, .. } => {
                 self.on_upstream_unsupported(&own, track_alias, actions);
@@ -528,12 +528,16 @@ impl Relay {
     fn on_upstream_accept(
         &mut self,
         own: &OwnRequestView,
-        mut track: Track,
+        accepted: TrackSource,
+        properties: Vec<KeyValuePair>,
+        largest: Option<Location>,
         actions: &mut Vec<Action>,
     ) {
-        let Some(mut pending) = self.tracks.take_pending(&own.track) else {
+        // FIXME: an answer for a track that has a source already makes a
+        // second source of it. Today no request is left open on such a track.
+        if self.tracks.pending(&own.track).is_none() {
             return;
-        };
+        }
         let Ask { publisher, request } = own.ask;
         // The answer came, and the request goes on. What was asked of other
         // publishers is still asked.
@@ -541,11 +545,14 @@ impl Relay {
             session: publisher,
             request,
         });
-        pending.asks.retain(|ask| *ask != own.ask);
-        track.asks = pending.asks;
-        let (_, track_alias) = track.source.session_and_alias();
-        self.tracks.insert_live(own.track.clone(), track);
-        for waiter in &pending.waiters {
+        if let Some(asks) = self.tracks.asks_mut(&own.track) {
+            asks.retain(|ask| *ask != own.ask);
+        }
+        let (_, track_alias) = accepted.session_and_alias();
+        let waiters = self
+            .tracks
+            .add_source(&own.track, accepted, properties, largest);
+        for waiter in &waiters {
             self.establish(&own.track, waiter, actions);
         }
         // The publisher may have opened streams before its SUBSCRIBE_OK was
@@ -581,10 +588,14 @@ impl Relay {
     /// The publisher said `PUBLISH_DONE` on the relay's SUBSCRIBE.
     fn on_upstream_done(&mut self, own: &OwnRequestView, actions: &mut Vec<Action>) {
         let Ask { publisher, request } = own.ask;
-        let Some(track) = self.tracks.live(&own.track) else {
+        let done = self.tracks.live(&own.track).and_then(|track| {
+            track
+                .sources()
+                .find(|source| source.is_subscription(publisher, request))
+        });
+        let Some((_, track_alias)) = done.map(|source| source.session_and_alias()) else {
             return;
         };
-        let (_, track_alias) = track.source.session_and_alias();
         self.source_done(
             &own.track,
             |source| source.is_subscription(publisher, request),
@@ -707,7 +718,8 @@ impl Relay {
                 self.ask_is_over(&own.track, own.ask, &nobody, actions);
             }
             Some(UpstreamPhase::Established) => {
-                self.end_track(&own.track, TrackEnd::SourceGone, actions);
+                let closed = |source: &Source| source.is_subscription(session, request);
+                self.source_gone(&own.track, closed, TrackEnd::SourceGone, actions);
             }
             // The publisher closes the stream after its REQUEST_ERROR
             // (§3.3.2). After PUBLISH_DONE it closes it as well (§10.11), and
@@ -787,25 +799,24 @@ impl Relay {
     }
 
     /// A publisher that was asked for the track sent PUBLISH for it: the
-    /// relay's SUBSCRIBE to it is cancelled (§5.1). Returns the subscribers
-    /// that waited, and what is still asked of other publishers.
+    /// relay's SUBSCRIBE to it is cancelled (§5.1). What is asked of other
+    /// publishers is still asked.
     pub(crate) fn give_way_to_publish(
         &mut self,
         track_name: &FullTrackName,
         publisher: SessionKey,
         actions: &mut Vec<Action>,
-    ) -> (Vec<Waiter>, Vec<Ask>) {
-        let Some(pending) = self.tracks.take_pending(track_name) else {
-            return (Vec::new(), Vec::new());
+    ) {
+        let Some(asks) = self.tracks.asks_mut(track_name) else {
+            return;
         };
-        let (given_up, others): (Vec<Ask>, Vec<Ask>) = pending
-            .asks
+        let (given_up, others): (Vec<Ask>, Vec<Ask>) = std::mem::take(asks)
             .into_iter()
             .partition(|ask| ask.publisher == publisher);
+        *asks = others;
         for ask in given_up {
             self.cancel_own_request(ask.publisher, ask.request, actions);
         }
-        (pending.waiters, others)
     }
 
     /// Cancels a request the relay opened and forgets it (§3.3.2).
