@@ -761,6 +761,7 @@ impl<C: Connection> Hub<C> {
             | Action::StartEarlyTimer { .. }
             | Action::StartRequestTimer { .. }
             | Action::StartUpstreamTimer { .. }
+            | Action::StartFetchStreamTimer { .. }
             | Action::StopUpstreamTimer { .. } => self.set_timer(&action, pending),
             Action::CloseSession {
                 session,
@@ -851,7 +852,11 @@ impl<C: Connection> Hub<C> {
         body: Vec<u8>,
         wait_ms: u64,
     ) {
-        let written = Event::FetchStreamWritten { session, stream };
+        let written = move |given_up| Event::FetchStreamWritten {
+            session,
+            stream,
+            given_up,
+        };
         let Some(handle) = self.sessions.get_mut(&session) else {
             return;
         };
@@ -865,27 +870,41 @@ impl<C: Connection> Hub<C> {
         let events = self.events.clone();
         handle.fetch_writes.push(tokio::spawn(async move {
             let writing = tokio::spawn(async move {
+                // One wait for all of it. A subscriber that does not take
+                // the stream in that time is told so on both streams, with
+                // the code of a fetch stream that is passed on and not
+                // taken; one that stops the stream, or is gone, with
+                // `CANCELLED`.
+                let not_taken = stream_reset_code::TOO_FAR_BEHIND;
+                let deadline = tokio::time::Instant::now() + patience;
                 let header = FetchHeader { request_id };
-                let opened = tokio::time::timeout(
-                    patience,
-                    open_fetch_stream(&*connection, header, &trace, &label),
-                );
-                // Not opened in time, or not at all: the writer that was
-                // dropped with the wait has reset what it had opened.
-                let Ok(Ok(mut writer)) = opened.await else {
-                    return;
+                let opening = open_fetch_stream(&*connection, header, &trace, &label, not_taken);
+                let mut writer = match tokio::time::timeout_at(deadline, opening).await {
+                    Ok(Ok(writer)) => writer,
+                    Ok(Err(_)) => return Some(stream_reset_code::CANCELLED),
+                    Err(_) => return Some(not_taken),
                 };
-                match tokio::time::timeout(patience, writer.write(&body)).await {
-                    Ok(Ok(())) => writer.finish(),
-                    // Stopped by the subscriber, or the connection is gone.
-                    Ok(Err(_)) => writer.reset(stream_reset_code::CANCELLED),
-                    // As for a fetch stream that is passed on and not taken.
-                    Err(_) => writer.reset(stream_reset_code::TOO_FAR_BEHIND),
+                match tokio::time::timeout_at(deadline, writer.write(&body)).await {
+                    Ok(Ok(())) => {
+                        writer.finish();
+                        None
+                    }
+                    Ok(Err(_)) => {
+                        writer.reset(stream_reset_code::CANCELLED);
+                        Some(stream_reset_code::CANCELLED)
+                    }
+                    Err(_) => {
+                        writer.reset(not_taken);
+                        Some(not_taken)
+                    }
                 }
             });
-            // Told whatever became of the write, a panic included.
-            let _ = writing.await;
-            let _ = events.send(Envelope::Core(written)).await;
+            // Told whatever became of the write. A panic: the writer that
+            // went with it reset the stream.
+            let given_up = writing
+                .await
+                .unwrap_or(Some(stream_reset_code::INTERNAL_ERROR));
+            let _ = events.send(Envelope::Core(written(given_up))).await;
         }));
     }
 
@@ -1034,6 +1053,15 @@ impl<C: Connection> Hub<C> {
             Action::StartUpstreamTimer { session, request } => (
                 session,
                 self.config.upstream_timeout,
+                Event::UpstreamTimeout { session, request },
+            ),
+            Action::StartFetchStreamTimer {
+                session,
+                request,
+                wait_ms,
+            } => (
+                session,
+                Duration::from_millis(wait_ms),
                 Event::UpstreamTimeout { session, request },
             ),
             _ => return,
@@ -1570,7 +1598,15 @@ impl<C: Connection> FetchPipe<C> {
             _ = &mut aborted => return None,
             opened = tokio::time::timeout(
                 self.waits.downstream,
-                open_fetch_stream(&*self.connection, self.header, &self.trace, &self.label),
+                // Given up for a subscriber that gives the relay no stream:
+                // the code its request stream is reset with for that.
+                open_fetch_stream(
+                    &*self.connection,
+                    self.header,
+                    &self.trace,
+                    &self.label,
+                    stream_reset_code::TOO_FAR_BEHIND,
+                ),
             ) => opened,
         };
         let mut send = match opened {
@@ -1594,7 +1630,8 @@ impl<C: Connection> FetchPipe<C> {
                 stopped = send.stopped() => {
                     return Some(match stopped {
                         WriteError::Stopped(code) => {
-                            // §11.4.3: a reset answers a STOP_SENDING.
+                            // §5.2: a reset answers the STOP_SENDING of a
+                            // subscriber that gives its FETCH up.
                             send.reset(stream_reset_code::CANCELLED);
                             FetchPipeEnd::DownstreamStopped(code)
                         }
@@ -1757,6 +1794,7 @@ fn describe(action: &Action) -> Option<String> {
         // Logged where the session is closed, whoever asked for it.
         Action::CloseSession { .. }
         | Action::StartUpstreamTimer { .. }
+        | Action::StartFetchStreamTimer { .. }
         | Action::StopUpstreamTimer { .. }
         | Action::SendObject { .. }
         | Action::StartEarlyTimer { .. }

@@ -1377,3 +1377,45 @@ fn the_rows_of_the_close_reason_fixture_end_with_a_line_feed_each() {
         );
     }
 }
+
+/// What the caller of `open_fetch_stream` says the stream is reset with when
+/// it gives the call up reaches the peer: here while the second byte of the
+/// `FETCH_HEADER` waits for a reader that takes nothing.
+#[tokio::test(start_paused = true)]
+async fn a_fetch_stream_given_up_while_its_header_waits_is_reset_with_the_callers_code() {
+    let (local, peer) = crate::memory::pair_with_window(1);
+    let header = FetchHeader { request_id: 2 };
+    let trace = Trace::default();
+    let opening = crate::open_fetch_stream(&local, header, &trace, "fetch", 0x5);
+    assert!(
+        timeout(SOON, opening).await.is_err(),
+        "the header waits for the reader"
+    );
+    let mut recv = peer.accept_uni().await.unwrap();
+    // The type of the stream came, 0x05; whether it is read before the
+    // reset is seen is up to the connection.
+    let mut buffer = [0; 8];
+    let end = loop {
+        match recv.read(&mut buffer).await {
+            Ok(Some(_)) => {}
+            other => break other,
+        }
+    };
+    assert_eq!(end, Err(ReadError::Reset(Some(0x5))));
+
+    // A writer that is dropped after the call returned says CANCELLED (0x1),
+    // whatever the call was given.
+    let (local, peer) = pair();
+    let writer = crate::open_fetch_stream(&local, header, &Trace::default(), "fetch", 0x5)
+        .await
+        .unwrap();
+    drop(writer);
+    let mut recv = peer.accept_uni().await.unwrap();
+    let end = loop {
+        match recv.read(&mut buffer).await {
+            Ok(Some(_)) => {}
+            other => break other,
+        }
+    };
+    assert_eq!(end, Err(ReadError::Reset(Some(0x1))));
+}

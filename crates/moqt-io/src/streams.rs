@@ -168,6 +168,8 @@ pub async fn send_message<S: SendStream>(
 pub struct FetchStreamWriter<S: SendStream> {
     /// `None` once the stream was finished or reset.
     send: Option<S>,
+    /// What the stream is reset with when the writer is dropped.
+    dropped_with: u32,
     trace: Trace,
     label: String,
 }
@@ -215,14 +217,16 @@ impl<S: SendStream> FetchStreamWriter<S> {
 impl<S: SendStream> Drop for FetchStreamWriter<S> {
     fn drop(&mut self) {
         if let Some(send) = self.send.take() {
-            send.reset(stream_reset_code::CANCELLED);
+            send.reset(self.dropped_with);
         }
     }
 }
 
 /// Opens a unidirectional stream and writes the `FETCH_HEADER` that begins a
 /// fetch stream (§11.4.4). Dropping the call while it waits resets what it
-/// had opened.
+/// had opened, with `given_up`: the caller knows why it stopped waiting, as
+/// for a peer that takes nothing. A writer that is dropped after the call
+/// returned resets with `CANCELLED`.
 ///
 /// # Errors
 ///
@@ -233,6 +237,7 @@ pub async fn open_fetch_stream<C: Connection>(
     header: FetchHeader,
     trace: &Trace,
     label: &str,
+    given_up: u32,
 ) -> Result<FetchStreamWriter<C::Send>, WriteError> {
     let send = connection
         .open_uni()
@@ -240,12 +245,14 @@ pub async fn open_fetch_stream<C: Connection>(
         .map_err(|lost| WriteError::Lost(lost.0))?;
     let mut writer = FetchStreamWriter {
         send: Some(send),
+        dropped_with: given_up,
         trace: trace.clone(),
         label: label.to_string(),
     };
     // The Group Order has no part in the header.
     let bytes = FetchStreamEncoder::new(header, GroupOrder::Ascending).take_bytes();
     writer.write(&bytes).await?;
+    writer.dropped_with = stream_reset_code::CANCELLED;
     Ok(writer)
 }
 

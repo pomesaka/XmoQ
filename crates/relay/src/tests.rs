@@ -1464,7 +1464,7 @@ impl Peer {
         let header = FetchHeader {
             request_id: fetch.id.value(),
         };
-        open_fetch_stream(&*self.connection, header, &Trace::default(), "fetch")
+        open_fetch_stream(&*self.connection, header, &Trace::default(), "fetch", 0x1)
             .await
             .unwrap()
     }
@@ -2005,4 +2005,69 @@ async fn fetches_nobody_reads_do_not_keep_the_publisher_from_publishing() {
     // The publisher's subgroup stream is read all the same, and reaches Bob.
     publisher.send_objects(&[object(0, 3)]).await.finish();
     assert_eq!(bob.receive_stream(bob_alias).await, [0]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publisher_has_the_fill_timeout_to_open_its_stream_after_it_answered() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    let mut alice = Peer::connect(&hub, true).await;
+    let mut request = alice
+        .start_fetching(vec![Parameter::FillTimeout(20_000)])
+        .await;
+    let mut upstream = publisher.relay_fetch().await;
+    publisher.accept_relay_fetch(&mut upstream).await;
+    alice.answer(&mut request).await;
+    // 6 seconds after its FETCH_OK, which is more than the 5 a FETCH without
+    // FILL_TIMEOUT gets, the publisher opens its stream; it is passed on.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let mut stream = publisher.open_fetch_stream(&upstream).await;
+    stream.write(&[7]).await.unwrap();
+    stream.finish();
+    let mut body = alice.fetch_body(&request).await;
+    assert_eq!(
+        read_fetch(&mut body).await,
+        (vec![7], FetchChunk::End(StreamEnd::Fin))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscriber_that_takes_no_stream_is_told_that_none_comes() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let (id, message) = publisher
+        .session
+        .publish(
+            track(),
+            PUBLISHER_ALIAS,
+            vec![Parameter::LargestObject(at(1, 4))],
+            vec![],
+        )
+        .unwrap();
+    let _publication = publisher.request(id, message).await;
+    // Alice accepts no unidirectional stream. The connection holds four that
+    // are not accepted: the relay's control stream and three fetch streams.
+    let mut alice = Peer::connect(&hub, false).await;
+    let mut requests = Vec::new();
+    for _ in 0..6 {
+        let mut request = alice.start_fetching(vec![Parameter::FillTimeout(0)]).await;
+        assert!(matches!(
+            alice.answer(&mut request).await,
+            RequestEvent::FetchEstablished { .. }
+        ));
+        requests.push(request);
+    }
+    // Three were written, and their request streams finished. For the other
+    // three the relay waits 10 seconds for a stream to write on, and then
+    // resets the request stream with TOO_FAR_BEHIND (0x5): FETCH_OK was
+    // sent, and no fetch stream comes.
+    let mut ends = Vec::new();
+    for request in &mut requests {
+        ends.push(request_end(&mut request.reader).await);
+    }
+    let fin = || RequestStreamEvent::Closed(RequestClose::Fin);
+    let reset = || RequestStreamEvent::Closed(RequestClose::Reset(Some(0x5)));
+    assert_eq!(ends, [fin(), fin(), fin(), reset(), reset(), reset()]);
+    assert_eq!(hub.held().await.relay.fetches, 0);
 }

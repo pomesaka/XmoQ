@@ -164,7 +164,8 @@ pub enum Event {
         how: OwnRequestEnd,
     },
     /// The time a publisher gets to answer a SUBSCRIBE of the relay is over.
-    /// Answers [`Action::StartUpstreamTimer`].
+    /// Answers [`Action::StartUpstreamTimer`] and
+    /// [`Action::StartFetchStreamTimer`].
     UpstreamTimeout {
         /// The session of the publisher.
         session: SessionKey,
@@ -206,6 +207,10 @@ pub enum Event {
         session: SessionKey,
         /// The request stream of the FETCH.
         stream: StreamKey,
+        /// `None` for a stream that was written and finished. For one that
+        /// was given up, the Stream Reset Error Code that says why; what was
+        /// opened of it was reset with the same.
+        given_up: Option<u32>,
     },
     /// An Object arrived on a subgroup stream.
     Object {
@@ -508,8 +513,20 @@ pub enum Action {
         /// The request.
         request: OwnRequestKey,
     },
-    /// Drop the timer of [`Action::StartUpstreamTimer`] for this request: what
-    /// it waited for has come, or is not wanted any more.
+    /// As [`Action::StartUpstreamTimer`], for the fetch stream a publisher
+    /// owes after its `FETCH_OK`, with a wait of the request's own. It takes
+    /// the place of a timer that runs for the request.
+    StartFetchStreamTimer {
+        /// The session of the publisher.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
+        /// How long to wait, in milliseconds.
+        wait_ms: u64,
+    },
+    /// Drop the timer of [`Action::StartUpstreamTimer`] or
+    /// [`Action::StartFetchStreamTimer`] for this request: what it waited for
+    /// has come, or is not wanted any more.
     StopUpstreamTimer {
         /// The session.
         session: SessionKey,

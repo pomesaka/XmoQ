@@ -8,6 +8,9 @@
 //! whole thing is cut short; moving the bytes is the I/O side's
 //! ([`Action::PipeFetch`]).
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder, RangeEnd};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{ControlMessage, Fetch, FetchRange, RequestOk, request_error_code};
@@ -17,6 +20,7 @@ use xmoq_moqt::session::{FetchStreamOpened, PeerRequestId, RequestEvent, Request
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
 use crate::events::{Event, FetchPipeEnd};
+use crate::requests::{Joinable, Subscribed};
 use crate::routing::{MAX_OWN_REQUESTS_PER_SESSION, OwnRequestKind, Refusal};
 use crate::{
     Action, OwnRequestEnd, OwnRequestKey, Relay, RequestSlot, SessionKey, StreamKey, internal_error,
@@ -49,6 +53,10 @@ pub(crate) const FETCH_UPSTREAM_WAIT_MS: u64 = 5_000;
 /// (§10.2.5: "the relay MAY use a shorter timeout without informing the
 /// subscriber"). Provisional.
 pub(crate) const MAX_FETCH_UPSTREAM_WAIT_MS: u64 = 30_000;
+
+/// The least a publisher gets to open its fetch stream after its `FETCH_OK`,
+/// in milliseconds, however short the `FILL_TIMEOUT`. Provisional.
+pub(crate) const MIN_FETCH_STREAM_WAIT_MS: u64 = 1_000;
 
 /// How long a subscriber may take nothing of a fetch stream before the relay
 /// stops passing it on. Provisional.
@@ -85,6 +93,157 @@ pub(crate) struct RelayedFetch {
     upstream_wait_ms: u64,
     /// `REQUEST_UPDATE`s that wait for the answer.
     held_updates: u32,
+    /// For a Joining FETCH: the request stream of the SUBSCRIBE it names.
+    joins: Option<StreamKey>,
+}
+
+/// A Joining FETCH that waits for its SUBSCRIBE to be answered.
+#[derive(Debug)]
+pub(crate) struct HeldFetch {
+    request: PeerRequestId,
+    /// The request stream of the SUBSCRIBE it names.
+    joins: StreamKey,
+    fetch: Fetch,
+    /// `REQUEST_UPDATE`s that wait for the answer.
+    held_updates: u32,
+}
+
+/// Where a FETCH of a subscriber stands.
+#[derive(Debug)]
+enum Standing {
+    /// A Joining FETCH that waits for its SUBSCRIBE to be answered.
+    Held(HeldFetch),
+    /// Asked of a publisher.
+    Relayed(RelayedFetch),
+    /// Answered by the relay itself; the I/O side has not reported its
+    /// fetch stream written yet.
+    Written,
+}
+
+/// The FETCH requests of subscribers that the relay has not let go of, by
+/// the subscriber's session and request stream.
+///
+/// WHY one map for the three ways a FETCH can stand: a FETCH is in one of
+/// them at a time, and what is said of all of them (how many a session has
+/// open, what a session that is gone leaves) is then said in one place.
+#[derive(Debug, Default)]
+pub(crate) struct Fetches(HashMap<(SessionKey, StreamKey), Standing>);
+
+impl Fetches {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// How many FETCH requests of `session` are open.
+    fn open_of(&self, session: SessionKey) -> usize {
+        self.0
+            .keys()
+            .filter(|(subscriber, _)| *subscriber == session)
+            .count()
+    }
+
+    /// Forgets what `session` has that nothing was asked of a publisher
+    /// for.
+    fn forget_idle_of(&mut self, session: SessionKey) {
+        self.0.retain(|(subscriber, _), standing| {
+            *subscriber != session || matches!(standing, Standing::Relayed(_))
+        });
+    }
+
+    fn hold(&mut self, subscriber: (SessionKey, StreamKey), held: HeldFetch) {
+        self.0.insert(subscriber, Standing::Held(held));
+    }
+
+    fn relay(&mut self, subscriber: (SessionKey, StreamKey), fetch: RelayedFetch) {
+        self.0.insert(subscriber, Standing::Relayed(fetch));
+    }
+
+    fn write(&mut self, subscriber: (SessionKey, StreamKey)) {
+        self.0.insert(subscriber, Standing::Written);
+    }
+
+    fn relayed(&self, subscriber: &(SessionKey, StreamKey)) -> Option<&RelayedFetch> {
+        match self.0.get(subscriber)? {
+            Standing::Relayed(fetch) => Some(fetch),
+            Standing::Held(_) | Standing::Written => None,
+        }
+    }
+
+    fn relayed_mut(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<&mut RelayedFetch> {
+        match self.0.get_mut(subscriber)? {
+            Standing::Relayed(fetch) => Some(fetch),
+            Standing::Held(_) | Standing::Written => None,
+        }
+    }
+
+    fn held_mut(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<&mut HeldFetch> {
+        match self.0.get_mut(subscriber)? {
+            Standing::Held(held) => Some(held),
+            Standing::Relayed(_) | Standing::Written => None,
+        }
+    }
+
+    /// Lets go of a FETCH that a publisher was asked for, and of no other.
+    fn take_relayed(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<RelayedFetch> {
+        match self.0.entry(*subscriber) {
+            Entry::Occupied(entry) if matches!(entry.get(), Standing::Relayed(_)) => {
+                match entry.remove() {
+                    Standing::Relayed(fetch) => Some(fetch),
+                    Standing::Held(_) | Standing::Written => None,
+                }
+            }
+            Entry::Occupied(_) | Entry::Vacant(_) => None,
+        }
+    }
+
+    /// Lets go of a FETCH that waits for its SUBSCRIBE, and of no other.
+    fn take_held(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<HeldFetch> {
+        match self.0.entry(*subscriber) {
+            Entry::Occupied(entry) if matches!(entry.get(), Standing::Held(_)) => {
+                match entry.remove() {
+                    Standing::Held(held) => Some(held),
+                    Standing::Relayed(_) | Standing::Written => None,
+                }
+            }
+            Entry::Occupied(_) | Entry::Vacant(_) => None,
+        }
+    }
+
+    /// Lets go of a FETCH whose stream the relay wrote itself. Whether
+    /// there was one.
+    fn finish_written(&mut self, subscriber: &(SessionKey, StreamKey)) -> bool {
+        if !matches!(self.0.get(subscriber), Some(Standing::Written)) {
+            return false;
+        }
+        self.0.remove(subscriber).is_some()
+    }
+
+    fn all_relayed(&self) -> impl Iterator<Item = (&(SessionKey, StreamKey), &RelayedFetch)> {
+        self.0
+            .iter()
+            .filter_map(|(subscriber, standing)| match standing {
+                Standing::Relayed(fetch) => Some((subscriber, fetch)),
+                Standing::Held(_) | Standing::Written => None,
+            })
+    }
+
+    fn all_held(&self) -> impl Iterator<Item = (&(SessionKey, StreamKey), &HeldFetch)> {
+        self.0
+            .iter()
+            .filter_map(|(subscriber, standing)| match standing {
+                Standing::Held(held) => Some((subscriber, held)),
+                Standing::Relayed(_) | Standing::Written => None,
+            })
+    }
+}
+
+/// What a FETCH of a subscriber asks for, once the relay knows it.
+struct AskedRange {
+    track: FullTrackName,
+    start: Location,
+    end: Location,
+    /// For a Joining FETCH: the request stream of the SUBSCRIBE it names.
+    joins: Option<StreamKey>,
 }
 
 /// The relay's FETCH to a publisher, as the publisher's session holds it.
@@ -134,6 +293,44 @@ fn upstream_parameters(parameters: &[Parameter]) -> Vec<Parameter> {
         .collect()
 }
 
+/// The range of a Joining FETCH for a subscription with the Joining Location
+/// `joining` (§10.12.2.1): Start Location and End Location. `None` for an
+/// Absolute Joining FETCH that starts after the Joining Location, which is a
+/// range that ends before it starts (§10.12.3).
+///
+/// WHY Group 0 where a Relative Joining FETCH asks for more Groups back than
+/// there are: the draft has "{Joining Location.Group - Joining Start, 0}"
+/// and does not say what it is when that cannot be subtracted. The request
+/// is for so many Groups before the live edge, and the Groups that exist are
+/// what can be had of that. Refusing it with `INVALID_RANGE` would be the
+/// other reading.
+fn joining_range(range: &FetchRange, joining: Location) -> Option<(Location, Location)> {
+    let start_group = match range {
+        FetchRange::RelativeJoining { joining_start, .. } => {
+            joining.group.saturating_sub(*joining_start)
+        }
+        FetchRange::AbsoluteJoining { joining_start, .. } => *joining_start,
+        FetchRange::Standalone { .. } => return None,
+    };
+    if start_group > joining.group {
+        return None;
+    }
+    let start = Location {
+        group: start_group,
+        object: 0,
+    };
+    // "{Joining Location.Group, Joining Location.Object + 1}": the last
+    // Object of the response is the one at the Joining Location. Where that
+    // is the last Object ID there is, the number after it cannot be written,
+    // and Object 0 says the same: "A Location.Object value of 0 means the
+    // entire group is requested" (§10.12.1).
+    let end = Location {
+        group: joining.group,
+        object: joining.object.checked_add(1).unwrap_or(0),
+    };
+    Some((start, end))
+}
+
 /// The last Location an End Location covers: an End Location names the last
 /// Object plus 1, and with Object 0 the whole Group (§10.12.1).
 fn last_location(end: Location) -> Location {
@@ -163,9 +360,11 @@ impl Relay {
                 stream,
                 how,
             } => self.on_fetch_pipe_ended(session, stream, how, actions),
-            Event::FetchStreamWritten { session, stream } => {
-                self.on_fetch_stream_written(session, stream);
-            }
+            Event::FetchStreamWritten {
+                session,
+                stream,
+                given_up,
+            } => self.on_fetch_stream_written(session, stream, given_up, actions),
             Event::OwnRequestMessage {
                 session,
                 request,
@@ -188,6 +387,22 @@ impl Relay {
         None
     }
 
+    /// Tells the Joining FETCH requests that name a SUBSCRIBE what became
+    /// of it. Every change of a request slot leads here (module `requests`).
+    pub(crate) fn joined(
+        &mut self,
+        session: SessionKey,
+        subscribe: StreamKey,
+        change: Joinable,
+        actions: &mut Vec<Action>,
+    ) {
+        match change {
+            Joinable::Unchanged => {}
+            Joinable::Established => self.release_held_fetches(session, subscribe, actions),
+            Joinable::Over => self.subscribe_is_over(session, subscribe, actions),
+        }
+    }
+
     /// A subscriber sent FETCH.
     pub(crate) fn on_fetch(
         &mut self,
@@ -195,6 +410,167 @@ impl Relay {
         stream: StreamKey,
         request: PeerRequestId,
         fetch: &Fetch,
+        actions: &mut Vec<Action>,
+    ) {
+        if self.fetches.open_of(session) >= MAX_FETCHES_PER_SESSION {
+            let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
+            return self.refuse_fetch(session, stream, request, &too_many, actions);
+        }
+        let slot = RequestSlot::Fetch {
+            request,
+            peer_finished: false,
+        };
+        self.put_slot(session, stream, slot, actions);
+        match &fetch.range {
+            FetchRange::Standalone {
+                full_track_name,
+                start,
+                end,
+            } => {
+                let asked = AskedRange {
+                    track: full_track_name.clone(),
+                    start: *start,
+                    end: *end,
+                    joins: None,
+                };
+                self.ask_for(session, stream, request, &asked, &fetch.parameters, actions);
+            }
+            FetchRange::RelativeJoining {
+                joining_request_id, ..
+            }
+            | FetchRange::AbsoluteJoining {
+                joining_request_id, ..
+            } => self.on_joining_fetch(
+                session,
+                stream,
+                request,
+                *joining_request_id,
+                fetch,
+                actions,
+            ),
+        }
+    }
+
+    /// A Joining FETCH (§10.12.2). The session has seen to it that it names
+    /// a SUBSCRIBE of the same session that is Pending or Established.
+    fn on_joining_fetch(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        request: PeerRequestId,
+        joining_request_id: u64,
+        fetch: &Fetch,
+        actions: &mut Vec<Action>,
+    ) {
+        let joined = self.sessions.get(&session).and_then(|state| {
+            state.requests.iter().find_map(|(subscribe, slot)| {
+                let (request, subscribed) = slot.subscription()?;
+                (request.value() == joining_request_id).then_some((*subscribe, subscribed))
+            })
+        });
+        match joined {
+            Some((subscribe, Subscribed::Accepted)) => {
+                self.join(session, stream, request, subscribe, fetch, actions);
+            }
+            // §10.12.2: "if that subscription has not yet been established,
+            // the Publisher receiving the Joining Fetch buffers the pending
+            // Joining Fetch until either the Subscription is established or
+            // the request times out". The time is the subscription's: the
+            // FETCH is answered when the SUBSCRIBE is. A SUBSCRIBE waits
+            // only on a track that publishers are asked for, and each of
+            // those requests has the upstream timer running, from when it
+            // was sent and anew from a `DUPLICATE_SUBSCRIPTION` that
+            // promises a PUBLISH; when the last is over the SUBSCRIBE is
+            // refused, and this FETCH with it. What the wait has no limit
+            // for is publishers that keep coming: each one that announces
+            // the namespace meanwhile is asked, with a timer of its own.
+            Some((subscribe, Subscribed::Waiting)) => {
+                self.fetches.hold(
+                    (session, stream),
+                    HeldFetch {
+                        request,
+                        joins: subscribe,
+                        fetch: fetch.clone(),
+                        held_updates: 0,
+                    },
+                );
+            }
+            // The relay has let go of the subscription in the step before.
+            None => {
+                let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
+                self.refuse_fetch(session, stream, request, &gone, actions);
+            }
+        }
+    }
+
+    /// Turns a Joining FETCH for an Established subscription into a range of
+    /// the track and asks a publisher for it.
+    ///
+    /// WHY a Standalone FETCH upstream and not a Joining one: the range is
+    /// counted from the Joining Location, which is each subscription's own,
+    /// "the Largest Location communicated in `SUBSCRIBE_OK`" (§5.1). The
+    /// relay's subscription to the publisher has another than the
+    /// subscriber's to the relay, and a publisher asked to count from that
+    /// would send another range.
+    fn join(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        request: PeerRequestId,
+        subscribe: StreamKey,
+        fetch: &Fetch,
+        actions: &mut Vec<Action>,
+    ) {
+        let subscription = self.sessions.get(&session).and_then(|state| {
+            let RequestSlot::Subscribe { track, .. } = state.requests.get(subscribe)? else {
+                return None;
+            };
+            let subscriber = self
+                .tracks
+                .live(track)?
+                .subscribers
+                .iter()
+                .find(|subscriber| {
+                    subscriber.session == session && subscriber.stream == subscribe
+                })?;
+            Some((track.clone(), subscriber.forward, subscriber.joining))
+        });
+        let Some((track, forward, joining)) = subscription else {
+            let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
+            return self.refuse_fetch(session, stream, request, &gone, actions);
+        };
+        // §10.12.2: "A Joining Fetch is only permitted when the associated
+        // subscription has Forward State 1; otherwise the publisher MUST
+        // respond with a REQUEST_ERROR with error code INVALID_RANGE", and
+        // "If no Objects have been published for the track the publisher
+        // MUST respond with a REQUEST_ERROR with error code INVALID_RANGE".
+        // What is looked at for the second is the subscription: its
+        // `SUBSCRIBE_OK` had no `LARGEST_OBJECT`, so it has no Joining
+        // Location (§5.1), whatever was published since.
+        let range = joining
+            .filter(|_| forward)
+            .and_then(|joining| joining_range(&fetch.range, joining));
+        let Some((start, end)) = range else {
+            let invalid = Refusal::code(request_error_code::INVALID_RANGE);
+            return self.refuse_fetch(session, stream, request, &invalid, actions);
+        };
+        let asked = AskedRange {
+            track,
+            start,
+            end,
+            joins: Some(subscribe),
+        };
+        self.ask_for(session, stream, request, &asked, &fetch.parameters, actions);
+    }
+
+    /// Asks a publisher for a range of a track, for a FETCH of a subscriber.
+    fn ask_for(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        request: PeerRequestId,
+        asked: &AskedRange,
+        parameters: &[Parameter],
         actions: &mut Vec<Action>,
     ) {
         let refuse = |relay: &mut Self, error_code, actions: &mut Vec<Action>| {
@@ -206,30 +582,19 @@ impl Relay {
                 actions,
             );
         };
-        // FIXME: serve a Joining FETCH (§10.12.2).
-        let FetchRange::Standalone {
-            full_track_name,
-            start,
-            end,
-        } = &fetch.range
-        else {
-            return refuse(self, request_error_code::NOT_SUPPORTED, actions);
-        };
-        let open = self
-            .fetches
-            .keys()
-            .chain(&self.written_fetches)
-            .filter(|(subscriber, _)| *subscriber == session)
-            .count();
-        if open >= MAX_FETCHES_PER_SESSION {
-            return refuse(self, request_error_code::EXCESSIVE_LOAD, actions);
-        }
-        let fill_timeout = fill_timeout(&fetch.parameters);
+        let fill_timeout = fill_timeout(parameters);
         if fill_timeout == Some(0) {
-            let (name, range) = (full_track_name.clone(), (*start, *end));
-            return self.answer_without_asking(session, stream, request, &name, range, actions);
+            let range = (asked.start, asked.end);
+            return self.answer_without_asking(
+                session,
+                stream,
+                request,
+                &asked.track,
+                range,
+                actions,
+            );
         }
-        let Some(publisher) = self.whom_to_ask(full_track_name, session) else {
+        let Some(publisher) = self.whom_to_ask(&asked.track, session) else {
             return refuse(self, request_error_code::DOES_NOT_EXIST, actions);
         };
         let Some(state) = self.sessions.get_mut(&publisher) else {
@@ -242,12 +607,14 @@ impl Relay {
         {
             return refuse(self, request_error_code::EXCESSIVE_LOAD, actions);
         }
-        let asked = state
-            .moqt
-            .fetch(fetch.range.clone(), upstream_parameters(&fetch.parameters));
-        let Ok((id, message)) = asked else {
+        let range = FetchRange::Standalone {
+            full_track_name: asked.track.clone(),
+            start: asked.start,
+            end: asked.end,
+        };
+        let Ok((id, message)) = state.moqt.fetch(range, upstream_parameters(parameters)) else {
             // The range and the parameters passed the session's checks when
-            // they came in.
+            // they came in, or were made here.
             return refuse(self, request_error_code::INTERNAL_ERROR, actions);
         };
         let own = OwnRequestKey(self.next_own_request);
@@ -268,11 +635,11 @@ impl Relay {
             session: publisher,
             request: own,
         });
-        self.fetches.insert(
+        self.fetches.relay(
             (session, stream),
             RelayedFetch {
                 request,
-                track: full_track_name.clone(),
+                track: asked.track.clone(),
                 publisher,
                 own,
                 answered: false,
@@ -281,17 +648,99 @@ impl Relay {
                     .unwrap_or(FETCH_UPSTREAM_WAIT_MS)
                     .min(MAX_FETCH_UPSTREAM_WAIT_MS),
                 held_updates: 0,
+                joins: asked.joins,
             },
         );
-        if let Some(state) = self.sessions.get_mut(&session) {
-            state.requests.insert(
+    }
+
+    /// The SUBSCRIBE on `subscribe` was accepted: the Joining FETCH requests that
+    /// waited for it are asked of a publisher.
+    fn release_held_fetches(
+        &mut self,
+        session: SessionKey,
+        subscribe: StreamKey,
+        actions: &mut Vec<Action>,
+    ) {
+        for (stream, held) in self.take_held(session, subscribe) {
+            self.join(
+                session,
                 stream,
-                RequestSlot::Fetch {
-                    request,
-                    peer_finished: false,
-                },
+                held.request,
+                subscribe,
+                &held.fetch,
+                actions,
+            );
+            // The updates that came while it waited go on waiting, for the
+            // publisher's answer.
+            if let Some(fetch) = self.fetches.relayed_mut(&(session, stream)) {
+                fetch.held_updates = held.held_updates;
+            }
+        }
+    }
+
+    /// The subscription on `subscribe` is over: refused, ended with
+    /// `PUBLISH_DONE`, or cancelled.
+    ///
+    /// Its Joining FETCH requests that have no `FETCH_OK` yet go with it:
+    /// the ones that waited for it, and the ones a publisher is asked for.
+    /// The subscription they name is not there (§10.12.2,
+    /// `INVALID_JOINING_REQUEST_ID`), and the session makes no `FETCH_OK`
+    /// for a Joining FETCH whose SUBSCRIBE is over.
+    ///
+    /// WHY one that has its `FETCH_OK` goes on: §10.12.2 has "Changing the
+    /// Forward State of the associated subscription to 0 after the Joining
+    /// Fetch has been accepted has no effect on the Joining Fetch", and
+    /// says nothing of a subscription that ends. What was accepted is a
+    /// range of the track, which the end of the subscription does not
+    /// change; and a subscriber the relay drops as too far behind while it
+    /// reads a large FETCH would lose the past along with the present.
+    fn subscribe_is_over(
+        &mut self,
+        session: SessionKey,
+        subscribe: StreamKey,
+        actions: &mut Vec<Action>,
+    ) {
+        let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
+        for (stream, held) in self.take_held(session, subscribe) {
+            self.refuse_fetch(session, stream, held.request, &gone, actions);
+        }
+        let mut joined: Vec<StreamKey> = self
+            .fetches
+            .all_relayed()
+            .filter(|((subscriber, _), fetch)| {
+                *subscriber == session && fetch.joins == Some(subscribe) && !fetch.answered
+            })
+            .map(|((_, stream), _)| *stream)
+            .collect();
+        joined.sort_unstable_by_key(|stream| stream.0);
+        for stream in joined {
+            self.fail_fetch(
+                (session, stream),
+                &gone,
+                stream_reset_code::CANCELLED,
+                actions,
             );
         }
+    }
+
+    /// Takes the Joining FETCH requests of `session` that wait for the SUBSCRIBE on
+    /// `subscribe`, in the order of their request streams.
+    fn take_held(
+        &mut self,
+        session: SessionKey,
+        subscribe: StreamKey,
+    ) -> Vec<(StreamKey, HeldFetch)> {
+        let mut streams: Vec<StreamKey> = self
+            .fetches
+            .all_held()
+            .filter(|((subscriber, _), held)| *subscriber == session && held.joins == subscribe)
+            .map(|((_, stream), _)| *stream)
+            .collect();
+        streams.sort_unstable_by_key(|stream| stream.0);
+        streams
+            .into_iter()
+            .filter_map(|stream| Some((stream, self.fetches.take_held(&(session, stream))?)))
+            .collect()
     }
 
     /// The one publisher a FETCH for the track is sent to (§9.5: "the Relay
@@ -390,17 +839,14 @@ impl Relay {
             return;
         };
         let request_id = request.value();
-        let (ok, owed) = match state.moqt.accept_fetch(request, false, end, properties) {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                actions.push(internal_error(session, &error));
-                self.drop_session(session, actions);
-                return;
-            }
+        let Ok((ok, owed)) = state.moqt.accept_fetch(request, false, end, properties) else {
+            // As where a publisher's answer cannot be passed on: this FETCH
+            // alone.
+            let failed = Refusal::code(request_error_code::INTERNAL_ERROR);
+            return self.refuse_fetch(session, stream, request, &failed, actions);
         };
-        state
-            .requests
-            .insert(stream, RequestSlot::Finished(Some(request)));
+        let peer_finished = state.peer_finished(stream);
+        self.fetch_has_its_answer(session, stream, request, peer_finished, actions);
         // An indicator is a Location, written the same in either Group
         // Order. WHY the last Location of the range also for a Descending
         // FETCH, which begins there: §11.4.4.2 has an indicator cover what
@@ -426,15 +872,39 @@ impl Relay {
             body: encoder.take_bytes(),
             wait_ms: FETCH_DOWNSTREAM_WAIT_MS,
         });
-        actions.push(Action::FinishRequest { session, stream });
         // Counted as one of the session's FETCHes until its stream is
-        // written, or given up.
-        self.written_fetches.insert((session, stream));
+        // written, or given up. The request stream is ended then.
+        self.fetches.write((session, stream));
     }
 
     /// The I/O side is done with a fetch stream the relay made itself.
-    fn on_fetch_stream_written(&mut self, session: SessionKey, stream: StreamKey) {
-        self.written_fetches.remove(&(session, stream));
+    ///
+    /// WHY the request stream is ended here and not with the `FETCH_OK`: a
+    /// subscriber that got `FETCH_OK` and a FIN is owed a fetch stream, and
+    /// one that gives the relay no stream to write on would wait for it
+    /// with nothing left to tell it by. The reset says that none comes.
+    ///
+    /// A track found malformed meanwhile does not reach a stream that is
+    /// written here: it carries one End of Range indicator and no Object.
+    fn on_fetch_stream_written(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        given_up: Option<u32>,
+        actions: &mut Vec<Action>,
+    ) {
+        // Not there when the session is gone.
+        if !self.fetches.finish_written(&(session, stream)) {
+            return;
+        }
+        actions.push(match given_up {
+            None => Action::FinishRequest { session, stream },
+            Some(code) => Action::ResetRequest {
+                session,
+                stream,
+                code,
+            },
+        });
     }
 
     /// The track was found malformed, by what a subscription to it brought
@@ -448,7 +918,7 @@ impl Relay {
     ) {
         let mut of_the_track: Vec<(SessionKey, StreamKey)> = self
             .fetches
-            .iter()
+            .all_relayed()
             .filter(|(_, fetch)| fetch.track == *track)
             .map(|(subscriber, _)| *subscriber)
             .collect();
@@ -475,11 +945,41 @@ impl Relay {
         refusal: &Refusal,
         actions: &mut Vec<Action>,
     ) {
+        // Read before the refusal, which takes the slot of a stream the
+        // peer has finished.
+        let peer_finished = self
+            .sessions
+            .get(&session)
+            .is_some_and(|state| state.peer_finished(stream));
         self.refuse(session, stream, request, refusal, actions);
-        if let Some(state) = self.sessions.get_mut(&session) {
-            state
-                .requests
-                .insert(stream, RequestSlot::Finished(Some(request)));
+        self.fetch_has_its_answer(session, stream, request, peer_finished, actions);
+    }
+
+    /// The slot of a FETCH the relay has said its last on, whether that was
+    /// `FETCH_OK` or a refusal.
+    ///
+    /// The session keeps such a FETCH until its stream is gone, for the
+    /// `REQUEST_UPDATE` that can still be on its way, and the slot tells it
+    /// when that is. WHY not where the peer has finished its direction:
+    /// nothing more comes then, and no report of the stream closing either;
+    /// a slot left there, and the request in the session, would stay for the
+    /// life of the session and count against what the peer may have open.
+    fn fetch_has_its_answer(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        request: PeerRequestId,
+        peer_finished: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        if peer_finished {
+            if let Some(state) = self.sessions.get_mut(&session) {
+                state.moqt.on_peer_request_closed(request);
+            }
+            self.take_slot(session, stream, actions);
+        } else {
+            let slot = RequestSlot::Finished(Some(request));
+            self.put_slot(session, stream, slot, actions);
         }
     }
 
@@ -518,7 +1018,7 @@ impl Relay {
         pipe_code: u32,
         actions: &mut Vec<Action>,
     ) {
-        let Some(fetch) = self.fetches.remove(&subscriber) else {
+        let Some(fetch) = self.fetches.take_relayed(&subscriber) else {
             return;
         };
         let (session, stream) = subscriber;
@@ -539,8 +1039,8 @@ impl Relay {
             // closes the stream with a FIN"). No stream will come, and a FIN
             // on the request stream would not say so.
             (true, Pipe::NotOpen) => {
+                self.take_slot(session, stream, actions);
                 if let Some(state) = self.sessions.get_mut(&session) {
-                    state.requests.remove(&stream);
                     state.moqt.on_peer_request_closed(fetch.request);
                 }
                 actions.push(Action::ResetRequest {
@@ -568,14 +1068,8 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        if state.peer_finished(stream) {
-            state.requests.remove(&stream);
-            state.moqt.on_peer_request_closed(request);
-        } else {
-            state
-                .requests
-                .insert(stream, RequestSlot::Finished(Some(request)));
-        }
+        let peer_finished = state.peer_finished(stream);
+        self.fetch_has_its_answer(session, stream, request, peer_finished, actions);
         actions.push(Action::FinishRequest { session, stream });
     }
 
@@ -584,12 +1078,12 @@ impl Relay {
     fn finish_if_served(&mut self, subscriber: (SessionKey, StreamKey), actions: &mut Vec<Action>) {
         let served = self
             .fetches
-            .get(&subscriber)
+            .relayed(&subscriber)
             .is_some_and(|fetch| fetch.answered && fetch.pipe == Pipe::Done);
         if !served {
             return;
         }
-        let Some(fetch) = self.fetches.remove(&subscriber) else {
+        let Some(fetch) = self.fetches.take_relayed(&subscriber) else {
             return;
         };
         if let Some(state) = self.sessions.get_mut(&fetch.publisher)
@@ -640,17 +1134,32 @@ impl Relay {
                 // WHY the timer goes on where no fetch stream has opened yet:
                 // the answer promises one, and a publisher that never opens
                 // it would leave the subscriber waiting with its FETCH_OK for
-                // as long as the two sessions live. The same time again, from
-                // the answer. With the stream open or passed on, the timer
+                // as long as the two sessions live. From the answer, for as
+                // long as the publisher may send nothing on its stream: the
+                // subscriber's FILL_TIMEOUT, which the publisher was told,
+                // would otherwise be cut short by a publisher that answers
+                // first and opens its stream after. With the stream open or passed on, the timer
                 // is not running.
                 let waits_for_the_stream = self
                     .fetches
-                    .get(&subscriber)
+                    .relayed(&subscriber)
                     .is_some_and(|fetch| fetch.pipe == Pipe::NotOpen);
+                // WHY not less than a second, where the FILL_TIMEOUT is: the
+                // answer and the stream travel on streams of their own, and
+                // a wait of milliseconds would decide by the order the two
+                // happen to be read in. A fetch stream that is open has no
+                // such floor: the time it may send nothing is what the
+                // subscriber said it would wait for Objects.
+                let wait_ms = self
+                    .fetches
+                    .relayed(&subscriber)
+                    .map_or(FETCH_UPSTREAM_WAIT_MS, |fetch| fetch.upstream_wait_ms)
+                    .max(MIN_FETCH_STREAM_WAIT_MS);
                 actions.push(if waits_for_the_stream {
-                    Action::StartUpstreamTimer {
+                    Action::StartFetchStreamTimer {
                         session,
                         request: own,
+                        wait_ms,
                     }
                 } else {
                     Action::StopUpstreamTimer {
@@ -721,7 +1230,7 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let (session, stream) = subscriber;
-        let Some(fetch) = self.fetches.get_mut(&subscriber) else {
+        let Some(fetch) = self.fetches.relayed_mut(&subscriber) else {
             return;
         };
         let Some(state) = self.sessions.get_mut(&session) else {
@@ -731,15 +1240,28 @@ impl Relay {
             state
                 .moqt
                 .accept_fetch(fetch.request, end_of_track, end_location, track_properties);
-        let (ok, owed) = match accepted {
-            Ok(accepted) => accepted,
-            // The publisher's session took this End Location for the same
-            // range, so it is not before the Start Location here either.
-            Err(error) => {
-                actions.push(internal_error(session, &error));
-                self.drop_session(session, actions);
-                return;
-            }
+        let Ok((ok, owed)) = accepted else {
+            // Not reached as far as the relay knows. The session refuses to
+            // make a `FETCH_OK` for three reasons, and the relay has seen to
+            // each. The request is no FETCH that waits for its answer: the
+            // relay answers a FETCH once, and lets go of it when the session
+            // does. The End Location is before the Start Location of a
+            // Standalone FETCH: the publisher's session took this End
+            // Location for a FETCH of the same range; a Joining FETCH names
+            // no Start Location to compare with. The SUBSCRIBE of a Joining
+            // FETCH is not accepted: such a FETCH is held until it is, and
+            // let go of when the subscription ends (module `requests`).
+            //
+            // WHY this FETCH alone is refused, with `INTERNAL_ERROR`: if the
+            // relay's picture and the session's do part, the subscriber did
+            // nothing wrong, and its other requests are not in doubt. The
+            // session stays where it still has the FETCH waiting for its
+            // answer, and takes the refusal. Where it has not, the first of
+            // the three, it does not make the refusal either, and is closed
+            // (`Relay::respond`).
+            let failed = Refusal::code(request_error_code::INTERNAL_ERROR);
+            let reset = stream_reset_code::INTERNAL_ERROR;
+            return self.fail_fetch(subscriber, &failed, reset, actions);
         };
         fetch.answered = true;
         actions.push(Action::SendRequest {
@@ -767,7 +1289,7 @@ impl Relay {
         };
         let answered = self
             .fetches
-            .get(&subscriber)
+            .relayed(&subscriber)
             .is_some_and(|fetch| fetch.answered);
         // After its FETCH_OK a publisher may finish its direction; how the
         // FETCH went on shows on the fetch stream.
@@ -843,7 +1365,7 @@ impl Relay {
             actions.push(stop);
             return;
         };
-        let Some(fetch) = self.fetches.get_mut(&subscriber) else {
+        let Some(fetch) = self.fetches.relayed_mut(&subscriber) else {
             actions.push(stop);
             return;
         };
@@ -877,7 +1399,7 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let subscriber = (session, stream);
-        let Some(fetch) = self.fetches.get_mut(&subscriber) else {
+        let Some(fetch) = self.fetches.relayed_mut(&subscriber) else {
             return;
         };
         if fetch.pipe != Pipe::Running {
@@ -939,21 +1461,25 @@ impl Relay {
         code: u32,
         actions: &mut Vec<Action>,
     ) {
-        let Some(fetch) = self.fetches.remove(&subscriber) else {
+        let (session, stream) = subscriber;
+        let request = if let Some(held) = self.fetches.take_held(&subscriber) {
+            held.request
+        } else if let Some(fetch) = self.fetches.take_relayed(&subscriber) {
+            if fetch.pipe == Pipe::Running {
+                actions.push(Action::AbortFetchPipe {
+                    session,
+                    stream,
+                    code,
+                });
+            }
+            self.cancel_upstream(&fetch, actions);
+            fetch.request
+        } else {
             return;
         };
-        let (session, stream) = subscriber;
-        if fetch.pipe == Pipe::Running {
-            actions.push(Action::AbortFetchPipe {
-                session,
-                stream,
-                code,
-            });
-        }
-        self.cancel_upstream(&fetch, actions);
+        self.take_slot(session, stream, actions);
         if let Some(state) = self.sessions.get_mut(&session) {
-            state.requests.remove(&stream);
-            state.moqt.on_peer_request_closed(fetch.request);
+            state.moqt.on_peer_request_closed(request);
             actions.push(Action::ResetRequest {
                 session,
                 stream,
@@ -970,12 +1496,21 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let subscriber = (session, stream);
-        let Some(fetch) = self.fetches.get_mut(&subscriber) else {
+        let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
+        if let Some(held) = self.fetches.held_mut(&subscriber) {
+            held.held_updates = held.held_updates.saturating_add(1);
+            if held.held_updates > MAX_HELD_FETCH_UPDATES
+                && let Some(held) = self.fetches.take_held(&subscriber)
+            {
+                self.refuse_fetch(session, stream, held.request, &too_many, actions);
+            }
+            return;
+        }
+        let Some(fetch) = self.fetches.relayed_mut(&subscriber) else {
             return;
         };
         fetch.held_updates = fetch.held_updates.saturating_add(1);
         if fetch.held_updates > MAX_HELD_FETCH_UPDATES {
-            let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
             let unknown = stream_reset_code::UNKNOWN_OBJECT_STATUS;
             self.fail_fetch(subscriber, &too_many, unknown, actions);
         }
@@ -994,18 +1529,18 @@ impl Relay {
 
     /// What a session that is gone leaves of relayed FETCH requests.
     pub(crate) fn drop_fetches_of(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
-        self.written_fetches
-            .retain(|(subscriber, _)| *subscriber != session);
+        self.fetches.forget_idle_of(session);
         // By key, so that the same events lead to the same actions.
         let mut as_subscriber: Vec<(SessionKey, StreamKey)> = self
             .fetches
-            .keys()
+            .all_relayed()
+            .map(|(subscriber, _)| subscriber)
             .filter(|(subscriber, _)| *subscriber == session)
             .copied()
             .collect();
         as_subscriber.sort_unstable_by_key(|(_, stream)| stream.0);
         for subscriber in as_subscriber {
-            let Some(fetch) = self.fetches.remove(&subscriber) else {
+            let Some(fetch) = self.fetches.take_relayed(&subscriber) else {
                 continue;
             };
             if fetch.pipe == Pipe::Running {
@@ -1019,7 +1554,7 @@ impl Relay {
         }
         let mut as_publisher: Vec<(SessionKey, StreamKey)> = self
             .fetches
-            .iter()
+            .all_relayed()
             .filter(|(_, fetch)| fetch.publisher == session)
             .map(|(subscriber, _)| *subscriber)
             .collect();
@@ -1036,9 +1571,9 @@ impl Relay {
         }
     }
 
-    /// FETCH requests of subscribers the relay has asked a publisher for.
+    /// FETCH requests of subscribers the relay has not let go of.
     pub(crate) fn fetch_count(&self) -> usize {
-        self.fetches.len() + self.written_fetches.len()
+        self.fetches.len()
     }
 }
 
