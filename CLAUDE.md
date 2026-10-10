@@ -46,7 +46,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 
 規約は、文章で足す前に、破ると通らない形にできないかを考える。層の境界はcrateやパッケージの依存関係で固定し、lintとCIで検査する。
 
-- 符号化と状態遷移（`xmoq-moqt`、`@xmoq/moqt`の中核）は入出力に依存させない。`wtransport`や`WebTransport`に触るのは、クライアントとリレーの側だけにする
+- 符号化と状態遷移（`xmoq-moqt`、`@xmoq/moqt`の中核）は入出力に依存させない。WebTransportのライブラリ（Rustは`web-transport-quinn`）やブラウザの`WebTransport`に触るのは、クライアントとリレーの側だけにする
 - RustとTypeScriptの実装は、名前をdraft本文の用語に合わせ、`fixtures/moqt-18/`の同じ実バイト列をテストで読む
 - テストの固定値は`moqtail`から採った実バイト列にする。自分で符号化したものを自分で復号するだけのテストは、照合にならない
 - 受け取る側のバッファとキューには上限を置く。遅いsubscriber、キャンセル、切断の後始末を書く
@@ -79,6 +79,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | packages/moqt/README.md | 仕様書 | ブラウザ用クライアントライブラリの範囲、層の決まり、公開API |
 | interop/README.md | 運用手順書 | moqtailの相手の用意と、照合の走らせ方 |
 | .github/workflows/、scripts/ci/、mise.toml | コーディングポリシー | CIとローカルの検査。規約を検査で守る |
+| .claude/agents/、.claude/skills/ | コーディングポリシー | レビュアーのsubagentと`/review-team-xmoq`。報告は`.claude/tmp/reviews/`に書かれ、コミットされない |
 
 ### 変更 → ドキュメント更新マッピング
 
