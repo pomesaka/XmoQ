@@ -16,5 +16,11 @@
 		"noEmit": true,
 		"skipLibCheck": true
 	},
-	"include": ["run.ts", "matrix.ts"]
+	"include": [
+		"harness.ts",
+		"clients.ts",
+		"run.ts",
+		"disconnect.ts",
+		"matrix.ts"
+	]
 }

@@ -30,8 +30,46 @@ export type XmoqPage = {
 export type OwnPageExtras = {
 	/** Ends the published Track with PUBLISH_DONE, Status Code TRACK_ENDED. */
 	endTrack(): Promise<void>;
-	/** How the subscription ended, as JSON of the library's `SubscriptionEnd`. */
-	subscriptionEnd(): Promise<string>;
+	/**
+	 * Sends one Object as Object 0 of the Group, on a subgroup stream of its
+	 * own. With `finish` false the stream is left open, as it is while more
+	 * Objects of the Subgroup are to come.
+	 */
+	sendObjectIn(
+		group: string,
+		payloadHex: string,
+		finish: boolean,
+	): Promise<void>;
+	/**
+	 * Sends one Object like `sendObjectIn` with `finish`, and closes the
+	 * session without waiting for anything in between. With `publishDone` the
+	 * Track is ended with PUBLISH_DONE before the session is closed.
+	 */
+	sendLastObjectAndClose(
+		group: string,
+		payloadHex: string,
+		publishDone: boolean,
+	): Promise<void>;
+	/** How the subscription made with PUBLISH ended, as JSON of the library's `PublishEnd`. */
+	publishEnd(): Promise<string>;
+	/** The payload of Object 0 of the Group, once it has arrived. */
+	objectOfGroup(group: string): Promise<string>;
+	/** Cancels the subscription and keeps the session. */
+	cancelSubscription(): Promise<void>;
+	/** Resolves once the subscription has ended and its Objects were read; JSON of `SubscriptionReport`. */
+	subscriptionReport(): Promise<string>;
+};
+
+/** What an own page saw of one subscription. Numbers are decimal strings. */
+export type SubscriptionReport = {
+	/** The library's `SubscriptionEnd`, with its `type` first. */
+	end: { type: string; statusCode?: string; errorReason?: string };
+	/** The Group ID of every Object read, in the order read. */
+	groups: string[];
+	/** Stream Count of the PUBLISH_DONE, or null when none arrived. */
+	streamCount: string | null;
+	/** How reading the Objects ended: "closed", or the error `objects` failed with. */
+	objectsEnd: string;
 };
 
 declare global {
