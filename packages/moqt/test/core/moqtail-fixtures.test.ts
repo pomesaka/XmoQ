@@ -11,36 +11,30 @@ import {
 	type SubgroupHeader,
 	type SubgroupObject,
 } from "../../src/core/subgroup.ts";
-import { hex, toHex, utf8 } from "../helpers.ts";
+import { fixture, fixtureNames, hex, toHex, utf8 } from "../helpers.ts";
 
-// Control messages produced by moqtail implementations, copied from the hex the
-// moqtail relay 0.15.0 (moqtail/0.15.0+dd8623d) logs for every control message.
-// `source` names the implementation that encoded the bytes.
-//
-// The log shows the bytes of the wire, not a re-encoding: the relay prints what
-// it read from the stream and what it is about to write
-// (libs/moqtail-rs/src/transport/control_stream_handler.rs at tag relay@0.15.0,
-// lines 84-90 and 175-179, read with `gh api` on 2026-10-10).
-//
-// FIXME: move these byte fixtures to a place the Rust crates share, so both
-// implementations are pinned to the same bytes.
+// Bytes moqtail put on the wire, read from fixtures/moqt-18/, which the Rust
+// implementation reads too. The README there records how each file was
+// captured and the value it decodes to. `source` names the implementation
+// that encoded the bytes.
+const PAYLOAD = hex("4d 3b c3 24 4c 84 57 2d");
+
 const FIXTURES: {
 	name: string;
 	source: string;
-	bytes: string;
+	file: string;
 	message: ControlMessage;
 }[] = [
 	{
 		name: "SETUP without Setup Options",
 		source: "moqtail-ts 0.13.0",
-		bytes: "af 00 00 00",
+		file: "setup-moqtail-ts",
 		message: { type: "SETUP", setupOptions: [] },
 	},
 	{
 		name: "SETUP with MOQT_IMPLEMENTATION",
 		source: "moqtail relay 0.15.0",
-		bytes:
-			"af 00 00 18 07 16 6d 6f 71 74 61 69 6c 2f 30 2e 31 35 2e 30 2b 64 64 38 36 32 33 64",
+		file: "setup-moqtail-relay",
 		message: {
 			type: "SETUP",
 			setupOptions: [{ type: 7n, value: utf8("moqtail/0.15.0+dd8623d") }],
@@ -49,7 +43,7 @@ const FIXTURES: {
 	{
 		name: "PUBLISH_NAMESPACE",
 		source: "moqtail-ts 0.13.0",
-		bytes: "06 00 0f 00 02 04 78 6d 6f 71 06 70 68 61 73 65 30 00",
+		file: "publish-namespace-moqtail-ts",
 		message: {
 			type: "PUBLISH_NAMESPACE",
 			requestId: 0n,
@@ -60,14 +54,13 @@ const FIXTURES: {
 	{
 		name: "REQUEST_OK without parameters (PUBLISH_NAMESPACE_OK)",
 		source: "moqtail relay 0.15.0",
-		bytes: "07 00 01 00",
+		file: "request-ok-publish-namespace-moqtail-relay",
 		message: { type: "REQUEST_OK", parameters: {}, trackProperties: [] },
 	},
 	{
 		name: "PUBLISH with a 9-byte Track Alias and FORWARD",
 		source: "moqtail-ts 0.13.0",
-		bytes:
-			"1d 00 21 02 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 ff 0a d2 0b 51 39 c4 21 d5 01 10 01",
+		file: "publish-moqtail-ts",
 		message: {
 			type: "PUBLISH",
 			requestId: 2n,
@@ -81,7 +74,7 @@ const FIXTURES: {
 	{
 		name: "REQUEST_OK with FORWARD and GROUP_ORDER (PUBLISH_OK)",
 		source: "moqtail relay 0.15.0",
-		bytes: "07 00 05 02 10 01 12 01",
+		file: "request-ok-publish-moqtail-relay",
 		message: {
 			type: "REQUEST_OK",
 			parameters: { forward: true, groupOrder: "Ascending" },
@@ -91,8 +84,7 @@ const FIXTURES: {
 	{
 		name: "SUBSCRIBE with four parameters",
 		source: "moqtail crate 0.15.0",
-		bytes:
-			"03 00 1f 00 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 04 10 01 10 80 01 01 02 01 01",
+		file: "subscribe-moqtail-rs",
 		message: {
 			type: "SUBSCRIBE",
 			requestId: 0n,
@@ -109,8 +101,7 @@ const FIXTURES: {
 	{
 		name: "SUBSCRIBE with three parameters, without GROUP_ORDER",
 		source: "moqtail-ts 0.13.0",
-		bytes:
-			"03 00 1d 00 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 03 10 01 10 80 01 01 02",
+		file: "subscribe-moqtail-ts",
 		message: {
 			type: "SUBSCRIBE",
 			requestId: 0n,
@@ -126,7 +117,7 @@ const FIXTURES: {
 	{
 		name: "SUBSCRIBE_OK without parameters",
 		source: "moqtail relay 0.15.0",
-		bytes: "04 00 02 00 00",
+		file: "subscribe-ok-moqtail-relay",
 		message: {
 			type: "SUBSCRIBE_OK",
 			trackAlias: 0n,
@@ -137,8 +128,7 @@ const FIXTURES: {
 	{
 		name: "PUBLISH with a 1-byte Track Alias",
 		source: "moqtail crate 0.15.0",
-		bytes:
-			"1d 00 19 00 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 01 01 10 01",
+		file: "publish-moqtail-rs",
 		message: {
 			type: "PUBLISH",
 			requestId: 0n,
@@ -152,8 +142,7 @@ const FIXTURES: {
 	{
 		name: "REQUEST_ERROR DOES_NOT_EXIST for a SUBSCRIBE to a track nobody published",
 		source: "moqtail relay 0.15.0",
-		bytes:
-			"05 00 1a 10 00 17 55 6e 6b 6e 6f 77 6e 20 74 72 61 63 6b 20 6e 61 6d 65 73 70 61 63 65",
+		file: "request-error-does-not-exist-moqtail-relay",
 		message: {
 			type: "REQUEST_ERROR",
 			errorCode: 16n,
@@ -164,8 +153,7 @@ const FIXTURES: {
 	{
 		name: "PUBLISH_DONE TRACK_ENDED after the publisher disconnected",
 		source: "moqtail relay 0.15.0",
-		bytes:
-			"0b 00 19 02 01 16 50 75 62 6c 69 73 68 65 72 20 64 69 73 63 6f 6e 6e 65 63 74 65 64",
+		file: "publish-done-moqtail-relay",
 		message: {
 			type: "PUBLISH_DONE",
 			statusCode: 2n,
@@ -173,23 +161,34 @@ const FIXTURES: {
 			errorReason: "Publisher disconnected",
 		},
 	},
+	{
+		name: "SUBSCRIBE_OK with LARGEST_OBJECT",
+		source: "moqtail relay 0.15.0",
+		file: "subscribe-ok-largest-object-moqtail-relay",
+		message: {
+			type: "SUBSCRIBE_OK",
+			trackAlias: 0n,
+			parameters: { largestObject: { group: 3n, object: 2n } },
+			trackProperties: [],
+		},
+	},
 ];
 
-// Whole subgroup streams as the own browser subscriber received them from the
-// relay. `source` names the publisher whose SUBGROUP_HEADER Type the relay
-// forwarded; the relay replaced the Track Alias with its own.
+// Whole subgroup streams as a subscriber received them from the relay.
+// `source` names the publisher whose SUBGROUP_HEADER Type the relay forwarded;
+// the relay replaced the Track Alias with its own.
+const GAP_OF_ONE = [{ type: 0x3en, value: 1n }];
 const SUBGROUP_FIXTURES: {
 	name: string;
 	source: string;
-	bytes: string;
+	file: string;
 	header: SubgroupHeader;
-	object: SubgroupObject;
+	objects: SubgroupObject[];
 }[] = [
 	{
 		name: "Type 0x5d: explicit Subgroup ID, priority, empty Object Properties",
 		source: "moqtail crate 0.15.0 through the relay",
-		bytes:
-			"5d 00 00 00 00 00 00 36 78 6d 6f 71 2d 70 68 61 73 65 30 62 20 32 30 32 36 2d 31 30 2d 31 30 54 30 31 3a 32 38 3a 31 31 2e 32 39 38 5a 20 63 63 65 63 36 63 32 35 65 63 37 63 34 34 36 65",
+		file: "subgroup-stream-from-moqtail-rs",
 		header: {
 			trackAlias: 0n,
 			groupId: 0n,
@@ -199,18 +198,19 @@ const SUBGROUP_FIXTURES: {
 			endOfGroup: true,
 			firstObject: true,
 		},
-		object: {
-			objectId: 0n,
-			properties: [],
-			status: "Normal",
-			payload: utf8("xmoq-phase0b 2026-10-10T01:28:11.298Z ccec6c25ec7c446e"),
-		},
+		objects: [
+			{
+				objectId: 0n,
+				properties: [],
+				status: "Normal",
+				payload: utf8("xmoq-phase0 2026-10-10T01:19:03.764Z bb30f5dd09c8981f"),
+			},
+		],
 	},
 	{
 		name: "Type 0x58: Subgroup ID 0 without the field, priority, no Object Properties",
 		source: "moqtail-ts 0.13.0 through the relay",
-		bytes:
-			"58 00 00 00 00 36 78 6d 6f 71 2d 70 68 61 73 65 30 62 20 32 30 32 36 2d 31 30 2d 31 30 54 30 31 3a 32 38 3a 32 35 2e 30 36 34 5a 20 37 65 39 35 35 62 31 39 36 32 30 36 64 35 35 31",
+		file: "subgroup-stream-from-moqtail-ts",
 		header: {
 			trackAlias: 0n,
 			groupId: 0n,
@@ -220,27 +220,88 @@ const SUBGROUP_FIXTURES: {
 			endOfGroup: true,
 			firstObject: true,
 		},
-		object: {
-			objectId: 0n,
-			properties: [],
-			status: "Normal",
-			payload: utf8("xmoq-phase0b 2026-10-10T01:28:25.064Z 7e955b196206d551"),
+		objects: [
+			{
+				objectId: 0n,
+				properties: [],
+				status: "Normal",
+				payload: utf8("xmoq-phase0 2026-10-10T01:18:43.029Z f69e3bea2a578c6b"),
+			},
+		],
+	},
+	{
+		name: "three Objects with Object ID Deltas and Prior Object ID Gap",
+		source: "moqtail test client 0.15.0 through the relay",
+		file: "subgroup-stream-object-id-gaps-from-moqtail-rs",
+		header: {
+			trackAlias: 0n,
+			groupId: 4n,
+			subgroupId: { mode: "Explicit", value: 1n },
+			publisherPriority: 128,
+			properties: true,
+			endOfGroup: true,
+			firstObject: true,
 		},
+		objects: [
+			{ objectId: 0n, properties: [], status: "Normal", payload: PAYLOAD },
+			{
+				objectId: 2n,
+				properties: GAP_OF_ONE,
+				status: "Normal",
+				payload: PAYLOAD,
+			},
+			{
+				objectId: 4n,
+				properties: GAP_OF_ONE,
+				status: "Normal",
+				payload: PAYLOAD,
+			},
+		],
+	},
+	{
+		name: "a stream joined in the middle of a Group: first Object ID 4",
+		source: "moqtail test client 0.15.0 through the relay",
+		file: "subgroup-stream-joined-mid-group-from-moqtail-rs",
+		header: {
+			trackAlias: 0n,
+			groupId: 3n,
+			subgroupId: { mode: "Explicit", value: 1n },
+			publisherPriority: 128,
+			properties: true,
+			endOfGroup: true,
+			firstObject: true,
+		},
+		objects: [
+			{
+				objectId: 4n,
+				properties: GAP_OF_ONE,
+				status: "Normal",
+				payload: PAYLOAD,
+			},
+		],
 	},
 ];
+
+// WHY: the tests below read the files listed in the two tables. A file added
+// to fixtures/moqt-18/ and to neither table would be read by nothing, and
+// nobody would notice.
+test("every file of fixtures/moqt-18/ is in one of the tables, and every table entry is a file", () => {
+	const listed = [...FIXTURES, ...SUBGROUP_FIXTURES].map(({ file }) => file);
+	expect(listed.sort()).toEqual(fixtureNames());
+});
 
 describe("subgroup streams captured from moqtail", () => {
 	test.each(SUBGROUP_FIXTURES)(
 		"decodes $name ($source)",
-		({ bytes, header, object }) => {
+		({ file, header, objects }) => {
 			const decoder = createSubgroupStreamDecoder({
 				maxObjectPayloadLength: 1024,
 				maxObjectPropertiesLength: 1024,
 			});
-			expect(decoder.push(hex(bytes))).toEqual({
+			expect(decoder.push(hex(fixture(file)))).toEqual({
 				items: [
-					{ type: "header", header },
-					{ type: "object", object },
+					{ type: "header", header } as const,
+					...objects.map((object) => ({ type: "object", object }) as const),
 				],
 			});
 			expect(decoder.finish()).toBeUndefined();
@@ -249,19 +310,21 @@ describe("subgroup streams captured from moqtail", () => {
 
 	test.each(SUBGROUP_FIXTURES)(
 		"encodes $name to the bytes received",
-		({ bytes, header, object }) => {
-			const stream = [
-				encodeSubgroupHeader(header),
-				encodeSubgroupObject(header, undefined, object),
-			];
-			expect(stream.map(toHex).join(" ")).toBe(bytes);
+		({ file, header, objects }) => {
+			const stream = [encodeSubgroupHeader(header)];
+			let previousObjectId: bigint | undefined;
+			for (const object of objects) {
+				stream.push(encodeSubgroupObject(header, previousObjectId, object));
+				previousObjectId = object.objectId;
+			}
+			expect(stream.map(toHex).join(" ")).toBe(fixture(file));
 		},
 	);
 });
 
 describe("control messages captured from moqtail", () => {
-	test.each(FIXTURES)("decodes $name ($source)", ({ bytes, message }) => {
-		const input = hex(bytes);
+	test.each(FIXTURES)("decodes $name ($source)", ({ file, message }) => {
+		const input = hex(fixture(file));
 		expect(decodeControlMessage(input)).toEqual({
 			status: "ok",
 			value: message,
@@ -271,8 +334,8 @@ describe("control messages captured from moqtail", () => {
 
 	test.each(FIXTURES)(
 		"encodes $name to the bytes $source sent",
-		({ bytes, message }) => {
-			expect(toHex(encodeControlMessage(message))).toBe(bytes);
+		({ file, message }) => {
+			expect(toHex(encodeControlMessage(message))).toBe(fixture(file));
 		},
 	);
 });

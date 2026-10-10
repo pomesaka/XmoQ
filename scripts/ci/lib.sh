@@ -20,6 +20,14 @@ skip() {
 	fi
 }
 
+# Records how the interop job ended, for scripts/ci/interop-verdict.sh. Outside GitHub Actions
+# there is no job to account for, and nothing is written.
+interop_verdict() {
+	if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+		echo "$1" >"${RUNNER_TEMP}/interop-verdict"
+	fi
+}
+
 ran() {
 	local what="$1"
 	echo "OK: ${what}"

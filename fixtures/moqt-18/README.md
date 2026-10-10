@@ -6,7 +6,7 @@ Bytes that moqtail put on the wire, used as fixed expectations by XmoQ's own imp
 
 One file per control message or per stream. The content is hexadecimal digits; spaces and newlines are ignored. A control message file holds the whole message, including Message Type and Message Length. A subgroup stream file holds the stream from its first byte: the Subgroup Header, then the Objects.
 
-Tests read these files and are expected to do both: decode the bytes into the value listed below, and encode that value back into the same bytes.
+Tests read these files and are expected to do both: decode the bytes into the value listed below, and encode that value back into the same bytes. The Rust tests (`crates/moqt`) and the TypeScript tests (`packages/moqt/test/core/moqtail-fixtures.test.ts`) read every file.
 
 ## Source
 

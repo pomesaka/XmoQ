@@ -32,6 +32,12 @@ run = "scripts/ci/check-layers.sh"
 description = "actionlint for workflows and shellcheck for scripts/ci"
 run = "scripts/ci/check-workflows.sh"
 
+# Not part of `check`: it builds the moqtail relay and needs a Chromium, which takes minutes the
+# first time. CI runs it in a job of its own.
+[tasks.interop]
+description = "Build the interop peers and run every pairing of own and moqtail clients"
+run = "scripts/ci/interop.sh"
+
 [tasks.fmt]
 description = "Apply formatting and safe lint fixes"
 run = "scripts/ci/fmt.sh"
