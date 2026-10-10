@@ -119,6 +119,14 @@ const { values: options } = parseArgs({
     // sends (Group 0), and, once the first has answered, what that one sends
     // (Group 1).
     'publish-while-asked': { type: 'boolean', default: false },
+    // Two own Rust publishers of one track, of which the relay has to ask
+    // both (§9.5), and an own Rust subscriber that gets a Group of each.
+    //   two-announcers:           both only announce the namespace
+    //   announcer-and-publisher:  one sends PUBLISH, the other announced
+    //                             the namespace before the subscriber came
+    //   late-announcer:           one sends PUBLISH, the subscriber comes,
+    //                             and then the other announces the namespace
+    'ask-all': { type: 'string' },
     // After the first Object, the `own` Rust publisher ends its subscription
     // with PUBLISH_DONE and publishes the track anew at once, under the next
     // Track Alias (`other`) or the same one (`same`), and then sends its next
@@ -415,6 +423,74 @@ async function main() {
       }
       log('driver', `RESULT ${JSON.stringify(result)}`)
       if (!result.match) throw new Error('the subscriber was answered at another time than expected')
+      return
+    }
+    if (options['ask-all']) {
+      const scenario = options['ask-all']
+      if (!['two-announcers', 'announcer-and-publisher', 'late-announcer'].includes(scenario)) {
+        throw new Error('--ask-all takes two-announcers, announcer-and-publisher or late-announcer')
+      }
+      if (options.relay !== 'own' || direction.publisherInBrowser || direction.subscriberInBrowser) {
+        throw new Error('--ask-all needs --relay own and --direction rust-to-rust')
+      }
+      const asksOfTheRelay = async wanted => {
+        const deadline = Date.now() + 10_000
+        while (relay.count(/^OPEN_REQUEST /) < wanted) {
+          if (Date.now() > deadline) throw new Error(`the relay did not open ${wanted} request(s)`)
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+      }
+      const announcer = (label, firstGroup) => spawnRustClient(label, 'own', 'publish-namespace', [
+        '--payload-hex', payloadHex, '--first-group', firstGroup,
+      ])
+      const subscribe = () => spawnRustClient('rust-sub', 'own', 'subscribe', ['--objects', '2'])
+      // `first` sends Group 0 and `second` Group 1.
+      let first
+      let second
+      let subscriber
+      if (scenario === 'two-announcers') {
+        first = announcer('rust-pub', '0')
+        await first.waitForLine(/^NAMESPACE_PUBLISHED/)
+        second = announcer('rust-pub2', '1')
+        await second.waitForLine(/^NAMESPACE_PUBLISHED/)
+        subscriber = subscribe()
+        await asksOfTheRelay(2)
+      } else {
+        first = spawnRustClient('rust-pub', 'own', 'publish', ['--payload-hex', payloadHex])
+        await first.waitForLine(/^PUBLISHED /)
+        if (scenario === 'announcer-and-publisher') {
+          second = announcer('rust-pub2', '1')
+          await second.waitForLine(/^NAMESPACE_PUBLISHED/)
+          subscriber = subscribe()
+        } else {
+          subscriber = subscribe()
+          await subscriber.waitForLine(/^SUBSCRIBED /)
+          second = announcer('rust-pub2', '1')
+          await second.waitForLine(/^NAMESPACE_PUBLISHED/)
+        }
+        await asksOfTheRelay(1)
+      }
+      await subscriber.waitForLine(/^SUBSCRIBED /)
+      // Each publisher that only announced was asked and has accepted.
+      if (scenario === 'two-announcers') await first.waitForLine(/^SERVING /)
+      await second.waitForLine(/^SERVING /)
+      first.child.stdin.write('send\n')
+      await first.waitForLine(/^SENT group=0 /)
+      await subscriber.waitForLine(/^OBJECT group=0 /)
+      second.child.stdin.write('send\n')
+      await second.waitForLine(/^SENT group=1 /)
+      await subscriber.waitForLine(/^OBJECT group=1 /)
+      result = {
+        scenario: `ask-all ${scenario}`,
+        asksOfTheRelay: relay.count(/^OPEN_REQUEST /),
+        group0: subscriber.count(/^OBJECT group=0 /),
+        group1: subscriber.count(/^OBJECT group=1 /),
+        relayVersion,
+      }
+      result.match = result.asksOfTheRelay === (scenario === 'two-announcers' ? 2 : 1) &&
+        result.group0 === 1 && result.group1 === 1
+      log('driver', `RESULT ${JSON.stringify(result)}`)
+      if (!result.match) throw new Error('not every publisher was asked, or a Group did not arrive once')
       return
     }
     const byNamespace = options['publish-namespace']

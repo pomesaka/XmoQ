@@ -1,7 +1,7 @@
 # The relay takes the PUBLISH of a publisher whose earlier subscription still drains
 
 - Date: 2026-10-10
-- Commit SHA: the jj change `xwnqyqkx`, whose commit ID changes when it is amended. Compared with `main` at `eff75aaafcb4`
+- Commit SHA: `065753f3eb3ce5b76e8830a32ff288856a8b8ad2`. Compared with `main` at `eff75aaafcb4`
 - Roadmap item: Phase 0b, take one track from several publishers. The fifth of the steps
 
 ## Objective

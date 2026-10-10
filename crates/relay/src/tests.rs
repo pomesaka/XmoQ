@@ -499,6 +499,7 @@ const NOTHING: Held = Held {
         out_streams: 0,
         sources: 0,
         asks: 0,
+        declined: 0,
         early_streams: 0,
         remembered_subgroups: 0,
         namespaces: 0,

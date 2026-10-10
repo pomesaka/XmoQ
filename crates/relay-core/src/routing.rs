@@ -1,17 +1,14 @@
 //! Routing by namespace (§9.5): a SUBSCRIBE for a track nobody sent a PUBLISH
-//! for is passed on to a publisher that announced a matching namespace with
-//! `PUBLISH_NAMESPACE`, and answered when that publisher has answered.
+//! for is passed on to the publishers that announced a matching namespace
+//! with `PUBLISH_NAMESPACE`, and answered when the first of them has
+//! accepted or the last of them has not.
 //!
-//! FIXME: send the SUBSCRIBE to every matching publisher (§9.5: "Relays MUST
-//! send SUBSCRIBE messages to all matching publishers"). Only the publisher
-//! whose namespace was announced first is asked, and what it answers is the
-//! answer. The same goes for a `PUBLISH_NAMESPACE` that arrives while a track
-//! is subscribed to elsewhere (§9.5: "it MUST send a SUBSCRIBE to the
-//! publisher that sent the `PUBLISH_NAMESPACE` for each matching
-//! subscription"). A track does take Objects from several sources (§9.3):
-//! publishers that send PUBLISH for it, and the one publisher the relay
-//! asked, when its answer comes after a PUBLISH of another gave the track
-//! its first source. `docs/roadmap.md`, Phase 0b, has the item.
+//! A subscriber's SUBSCRIBE goes to every publisher of a matching namespace
+//! that the track has room for, also when the track has a source already
+//! ([`Relay::ask_the_publishers`]).
+//!
+//! A publisher whose `PUBLISH_NAMESPACE` arrives while tracks of the
+//! namespace are subscribed to is asked for each of them then.
 //!
 //! Two words for the side the Objects come from. A *publisher* is a peer: the
 //! session that announced a namespace, or that sent PUBLISH. *Upstream* is the
@@ -25,7 +22,7 @@
 //! or a SUBSCRIBE of the relay that a publisher accepted. An *ask* is a
 //! SUBSCRIBE of the relay that is not a source yet.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{ControlMessage, ReasonPhrase, RequestError, request_error_code};
@@ -35,8 +32,8 @@ use xmoq_moqt::session::{PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
 use crate::{
-    Action, OwnRequestEnd, OwnRequestKey, Relay, RequestSlot, SessionKey, Source, StreamKey,
-    Subscriber, TrackEnd, TrackSource, internal_error, largest_object,
+    Action, MAX_SOURCES, OwnRequestEnd, OwnRequestKey, Relay, RequestSlot, SessionKey, Source,
+    StreamKey, Subscriber, TrackEnd, TrackSource, internal_error, largest_object,
 };
 
 /// Namespaces one session may have announced at once. One more is refused
@@ -48,8 +45,9 @@ pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
 pub const MAX_WAITING_SUBSCRIBERS: usize = 64;
 
 /// Requests the relay may have open on one session at once: its SUBSCRIBEs
-/// to a publisher. A subscriber whose SUBSCRIBE would need one more is
-/// refused with `EXCESSIVE_LOAD`. Provisional.
+/// to a publisher. A publisher that has as many is passed over, and a
+/// subscriber for whose SUBSCRIBE nobody else could be asked is refused
+/// with `EXCESSIVE_LOAD`. Provisional.
 ///
 /// A SUBSCRIBE that the publisher answered with `DUPLICATE_SUBSCRIPTION`
 /// counts until the PUBLISH it announced has come or the wait for it is over:
@@ -64,6 +62,11 @@ pub const MAX_WAITING_SUBSCRIBERS: usize = 64;
 /// has no message by which a peer tells how many requests it takes (none was
 /// found in the text), so the number is the relay's own.
 pub const MAX_OWN_REQUESTS_PER_SESSION: usize = 64;
+
+/// Publishers a track remembers as having been asked for it without
+/// becoming a source. Past that the one remembered longest is forgotten, and
+/// is asked again when the next subscriber comes. Provisional.
+pub const MAX_DECLINED_PUBLISHERS: usize = 16;
 
 /// Bytes of an upstream Error Reason that are passed on. Provisional.
 ///
@@ -156,11 +159,18 @@ struct OwnRequestView {
 /// a track can get a source while the publisher that was asked has not
 /// answered, from a PUBLISH of another publisher, and with several
 /// publishers asked for one track, one can have accepted while another has
-/// not answered. Today one publisher is asked, so a track has at most one.
+/// not answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ask {
     pub(crate) publisher: SessionKey,
     pub(crate) request: OwnRequestKey,
+}
+
+/// What [`Relay::ask_the_publishers`] did.
+pub(crate) struct Asked {
+    pub(crate) asks: Vec<Ask>,
+    /// The Error Code of the first publisher that could not be asked.
+    pub(crate) nobody_because: Option<u64>,
 }
 
 /// A track that has no source and that publishers were asked for. §9.4: no
@@ -172,6 +182,43 @@ pub(crate) struct PendingTrack {
     /// the track is forgotten.
     pub(crate) asks: Vec<Ask>,
     pub(crate) waiters: Vec<Waiter>,
+    /// As [`Track::declined`](crate::Track), for as long as the track waits;
+    /// it goes on to the track with a source.
+    pub(crate) declined: Declined,
+}
+
+/// The sessions that were asked for a track and did not become a source,
+/// the one that is remembered longest first; no more than
+/// [`MAX_DECLINED_PUBLISHERS`].
+///
+/// A session is in at most one of three places of a track: its sources,
+/// what is asked, and here. [`Tracks::decline`](crate::Tracks) puts one in,
+/// and only one that is no source; [`Tracks::add_source`](crate::Tracks)
+/// takes out the one that becomes a source; [`Relay::ask_the_publishers`]
+/// asks nobody who is in here.
+#[derive(Debug, Default)]
+pub(crate) struct Declined(VecDeque<SessionKey>);
+
+impl Declined {
+    pub(crate) fn remember(&mut self, session: SessionKey) {
+        self.forget(session);
+        self.0.push_back(session);
+        if self.0.len() > MAX_DECLINED_PUBLISHERS {
+            self.0.pop_front();
+        }
+    }
+
+    pub(crate) fn forget(&mut self, session: SessionKey) {
+        self.0.retain(|declined| *declined != session);
+    }
+
+    pub(crate) fn sessions(&self) -> impl Iterator<Item = SessionKey> + '_ {
+        self.0.iter().copied()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 /// What a request is refused with: the fields of a `REQUEST_ERROR`.
@@ -305,6 +352,10 @@ impl Relay {
         if announced >= MAX_NAMESPACES_PER_SESSION {
             return false;
         }
+        // A publisher that announces again may have the tracks now that it
+        // did not have when it was asked.
+        self.tracks
+            .forget_declined(session, |track| namespace.is_prefix_of(track.namespace()));
         self.namespaces.push(Announcement {
             session,
             stream,
@@ -362,19 +413,83 @@ impl Relay {
         Ok(())
     }
 
-    /// Sends the relay's SUBSCRIBE for a track to a publisher, with the first
-    /// subscriber that waits for the answer.
+    /// Sends the relay's SUBSCRIBE for a track to every publisher that
+    /// announced a namespace of it and can become one more source, in the
+    /// order they announced (§9.5: "Relays MUST send SUBSCRIBE messages to
+    /// all matching publishers"). What was asked is put with the track, and
+    /// returned for a name that has no track yet: making one is the caller's.
+    ///
+    /// Left out are the sessions that are a source of the track, that are
+    /// asked for it, and that were asked and did not become a source
+    /// ([`MAX_DECLINED_PUBLISHERS`]).
+    ///
+    /// WHY no more than the track has room for, against that MUST: a
+    /// publisher that accepts would be cancelled at once when the track is
+    /// full, having started to send. §9.3 lets a relay turn an additional
+    /// publisher away "due to implementation constraints". The ones left out
+    /// are asked when a subscriber comes, or a namespace of the track is
+    /// announced, and there is room.
+    ///
+    /// `first` is the session that announced a namespace just now, when that
+    /// is why the publishers are asked: it comes before the ones that
+    /// announced earlier and were left out, since §9.5 has the SUBSCRIBE go
+    /// "to the publisher that sent the `PUBLISH_NAMESPACE`".
+    pub(crate) fn ask_the_publishers(
+        &mut self,
+        track: &FullTrackName,
+        first: Option<SessionKey>,
+        actions: &mut Vec<Action>,
+    ) -> Asked {
+        let mut taken: Vec<SessionKey> = self.tracks.live(track).map_or(Vec::new(), |live| {
+            live.sources()
+                .map(|source| source.session_and_alias().0)
+                .collect()
+        });
+        let sources = taken.len();
+        let asks = self.tracks.asks(track);
+        taken.extend(asks.iter().map(|ask| ask.publisher));
+        taken.extend(self.tracks.declined(track));
+        let room = MAX_SOURCES.saturating_sub(sources + asks.len());
+        // A session that announced two namespaces of the track is one
+        // publisher.
+        let mut publishers: Vec<SessionKey> = Vec::new();
+        for publisher in first.into_iter().chain(self.matching_publishers(track)) {
+            if !taken.contains(&publisher) && !publishers.contains(&publisher) {
+                publishers.push(publisher);
+            }
+        }
+        let mut asked = Asked {
+            asks: Vec::new(),
+            nobody_because: None,
+        };
+        for publisher in publishers {
+            if asked.asks.len() >= room {
+                break;
+            }
+            match self.ask(publisher, track, actions) {
+                Ok(ask) => asked.asks.push(ask),
+                Err(error_code) => {
+                    asked.nobody_because.get_or_insert(error_code);
+                }
+            }
+        }
+        if let Some(asks) = self.tracks.asks_mut(track) {
+            asks.extend(asked.asks.iter().copied());
+        }
+        asked
+    }
+
+    /// Sends the relay's SUBSCRIBE for a track to a publisher.
     ///
     /// # Errors
     ///
-    /// The Error Code to refuse the subscriber with.
-    pub(crate) fn ask(
+    /// The Error Code for a subscriber that nobody else could be asked for.
+    fn ask(
         &mut self,
         publisher: SessionKey,
         track: &FullTrackName,
-        waiter: Waiter,
         actions: &mut Vec<Action>,
-    ) -> Result<(), u64> {
+    ) -> Result<Ask, u64> {
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
@@ -411,16 +526,6 @@ impl Relay {
                 awaits_publish: false,
             },
         );
-        self.tracks.insert_pending(
-            track.clone(),
-            PendingTrack {
-                asks: vec![Ask {
-                    publisher,
-                    request: own,
-                }],
-                waiters: vec![waiter],
-            },
-        );
         actions.push(Action::OpenRequest {
             session: publisher,
             request: own,
@@ -430,7 +535,10 @@ impl Relay {
             session: publisher,
             request: own,
         });
-        Ok(())
+        Ok(Ask {
+            publisher,
+            request: own,
+        })
     }
 
     /// Looks up a request of the relay, and how far its track has come with
@@ -697,6 +805,13 @@ impl Relay {
         if let Some(asks) = self.tracks.asks_mut(track_name) {
             asks.retain(|other| *other != ask);
         }
+        // WHY remembered: the track goes on, with the sources it has or
+        // with what is still asked, and without this the publisher would get
+        // a SUBSCRIBE for it with every subscriber that comes, in the place
+        // of one that was left out for want of room. A track without a
+        // source is over when its last ask is, and what it remembered with
+        // it: the next subscriber starts anew.
+        self.tracks.decline(track_name, ask.publisher);
         let hopeless = self
             .tracks
             .pending(track_name)
@@ -901,6 +1016,9 @@ impl Relay {
         for track in waited {
             self.waiters_left(&track, |waiter| waiter.session == session, actions);
         }
+        // WHY last: what was asked of the session ended above, which is
+        // remembered like any ask that ends without a source.
+        self.tracks.forget_declined(session, |_| true);
     }
 
     /// Answers every subscriber that waited for `track_name` with the same
