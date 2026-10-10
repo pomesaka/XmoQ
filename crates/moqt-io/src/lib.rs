@@ -1,0 +1,188 @@
+//! The I/O side of `MoQ` Transport: moves messages and Objects between the
+//! decoders of `xmoq-moqt` and the streams of a connection.
+//!
+//! The `XmoQ` client and relay both use this crate, so the handling of resets,
+//! limits and deadlines exists once. The connection is a trait,
+//! [`Connection`], with two implementations: [`wt`] over `wtransport`, and
+//! [`memory`], a pair of in-process endpoints that the tests of this crate and
+//! of its users run on.
+//!
+//! # What a connection has to do
+//!
+//! The traits below are the whole interface to the transport library. Their
+//! documentation is a contract: the stream handling of this crate and the
+//! relay rely on every sentence of it, and [`memory`] keeps to it, so that a
+//! test that passes there says something about a real connection. An
+//! implementation over another library has to keep to it as well.
+//!
+//! FIXME: read datagrams. Nothing here does, so an `OBJECT_DATAGRAM` is lost and
+//! an unknown datagram type does not close the session, which §11 of
+//! `draft-ietf-moq-transport-18` requires.
+
+pub mod codes;
+#[cfg(test)]
+mod contract;
+pub mod memory;
+mod streams;
+#[cfg(test)]
+mod tests;
+#[cfg(feature = "wtransport")]
+pub mod wt;
+
+use std::future::Future;
+
+pub use streams::{
+    Direction, IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestStreamEvent, QueueFull,
+    RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendError, SendLimits,
+    StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, read_request_streams, read_uni_streams,
+    send_message,
+};
+
+/// Why reading from a stream stopped short of a FIN.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadError {
+    /// The peer reset the stream. The code is its Stream Reset Error Code, or
+    /// `None` when what arrived is not an application error code.
+    Reset(Option<u32>),
+    /// The connection is gone.
+    Lost(String),
+}
+
+/// Why writing to a stream failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteError {
+    /// The peer sent `STOP_SENDING`. The code is as in [`ReadError::Reset`].
+    Stopped(Option<u32>),
+    /// The connection is gone.
+    Lost(String),
+}
+
+/// The connection is gone; nothing more can be opened or accepted on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionLost(pub String);
+
+impl std::fmt::Display for ConnectionLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "connection lost: {}", self.0)
+    }
+}
+
+impl std::error::Error for ConnectionLost {}
+
+/// The receiving half of a stream.
+///
+/// A half that is done with has to be ended by [`Self::stop`] unless it was
+/// read to its FIN or to an error. What the peer sees when a half is merely
+/// dropped is up to the implementation, and nothing in this crate relies on it.
+pub trait RecvStream: Send + 'static {
+    /// Reads into `buffer`. Returns the number of bytes, at least one, or `None`
+    /// at a FIN.
+    ///
+    /// * Bytes arrive in the order they were written, and the FIN after all of
+    ///   them.
+    /// * Dropping the future loses nothing: bytes are taken only when it
+    ///   completes.
+    /// * Once the peer has reset the stream, the call fails with
+    ///   [`ReadError::Reset`]; bytes that were not read yet are gone.
+    /// * Once the connection is gone, bytes and a FIN that had arrived before
+    ///   are still read, and then the call fails with [`ReadError::Lost`].
+    ///   Whether something had arrived is a matter of timing, unless the
+    ///   sender waited for it with [`SendStream::finish_and_wait`]. Checked
+    ///   against quinn 0.11.12 under wtransport 0.7.2 by the tests in
+    ///   `contract.rs`.
+    fn read(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> impl Future<Output = Result<Option<usize>, ReadError>> + Send;
+
+    /// Tells the peer to stop sending (`STOP_SENDING`) with a Stream Reset
+    /// Error Code. Does not wait for the peer.
+    fn stop(self, code: u32);
+}
+
+/// The sending half of a stream.
+///
+/// A half that is done with has to be ended by [`Self::finish`] or
+/// [`Self::reset`]. What the peer sees when a half is merely dropped is up to
+/// the implementation, and nothing in this crate relies on it.
+pub trait SendStream: Send + 'static {
+    /// Writes all of `bytes`.
+    ///
+    /// * Completes when the transport has taken the bytes, not when the peer
+    ///   has read them. It waits while the peer's flow control window is full,
+    ///   which is how a receiver that does not read holds its sender back.
+    /// * Fails with [`WriteError::Stopped`] once the peer sent `STOP_SENDING`.
+    /// * Dropping the future may leave a prefix of `bytes` written.
+    fn write_all(&mut self, bytes: &[u8]) -> impl Future<Output = Result<(), WriteError>> + Send;
+
+    /// Ends the stream with a FIN after what was written. Does not wait: the
+    /// transport delivers what is left and the FIN on its own, as long as the
+    /// connection lives. What was written is not lost when the half is gone
+    /// after this call.
+    ///
+    /// Closing the connection is another matter: [`Connection::close`] drops
+    /// what the transport has not delivered yet. Whoever closes a connection
+    /// right after the last write uses [`Self::finish_and_wait`] first.
+    fn finish(self);
+
+    /// Like [`Self::finish`], and completes when everything written and the
+    /// FIN have reached the peer's transport, so that closing the connection
+    /// afterwards does not take them back. It does not wait for the peer to
+    /// read them.
+    ///
+    /// Fails with [`WriteError::Stopped`] when the peer sent `STOP_SENDING`
+    /// first, and with [`WriteError::Lost`] when the connection went first.
+    /// The caller bounds the wait: a peer that does not read may never let
+    /// everything through.
+    fn finish_and_wait(self) -> impl Future<Output = Result<(), WriteError>> + Send;
+
+    /// Resets the stream with a Stream Reset Error Code. Does not wait. What
+    /// was written and not yet delivered may be lost.
+    fn reset(self, code: u32);
+
+    /// Completes when the peer sent `STOP_SENDING`, with
+    /// [`WriteError::Stopped`], or when the connection is gone, with
+    /// [`WriteError::Lost`]. Dropping the future loses nothing.
+    fn stopped(&mut self) -> impl Future<Output = WriteError> + Send;
+}
+
+/// One session-carrying connection.
+pub trait Connection: Send + Sync + 'static {
+    /// The sending half of its streams.
+    type Send: SendStream;
+    /// The receiving half of its streams.
+    type Recv: RecvStream;
+
+    /// Opens a unidirectional stream. Waits while the peer's limit on streams
+    /// is reached, which is how a peer that does not read holds this endpoint
+    /// back. Fails once the connection is gone.
+    fn open_uni(&self) -> impl Future<Output = Result<Self::Send, ConnectionLost>> + Send;
+
+    /// Opens a bidirectional stream, like [`Self::open_uni`].
+    fn open_bi(
+        &self,
+    ) -> impl Future<Output = Result<(Self::Send, Self::Recv), ConnectionLost>> + Send;
+
+    /// The next unidirectional stream the peer opened. Once the connection is
+    /// gone, the streams that had arrived before are still accepted, and then
+    /// the call fails.
+    fn accept_uni(&self) -> impl Future<Output = Result<Self::Recv, ConnectionLost>> + Send;
+
+    /// The next bidirectional stream the peer opened, like
+    /// [`Self::accept_uni`].
+    fn accept_bi(
+        &self,
+    ) -> impl Future<Output = Result<(Self::Send, Self::Recv), ConnectionLost>> + Send;
+
+    /// Closes the session with a Session Termination Error Code and a reason.
+    /// Does not wait. Every stream of the connection is gone with it, and with
+    /// them what was written and had not reached the peer yet: see
+    /// [`SendStream::finish_and_wait`].
+    ///
+    /// Whether the peer learns the code and the reason depends on the
+    /// implementation; see [`wt`].
+    fn close(&self, code: u32, reason: &[u8]);
+
+    /// Completes when the connection is gone, whoever closed it.
+    fn closed(&self) -> impl Future<Output = ()> + Send;
+}

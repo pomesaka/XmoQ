@@ -10,7 +10,11 @@ MoQ is a media Object distribution protocol, not a replacement for the entire We
 
 XmoQ implements the MoQ Transport layer itself, in Rust (relay and client) and in TypeScript (browser), pinned to `draft-ietf-moq-transport-18` (WebTransport subprotocol `moqt-18`). QUIC and WebTransport are not reimplemented: Rust uses existing crates and the browser uses its native `WebTransport`.
 
-What exists is listed in the [roadmap](roadmap.md), Phase 0b. The Rust side uses `wtransport` 0.7.2 for WebTransport, the crate the `moqtail` relay is built on. `wtransport` 0.7.2 does not map WebTransport error codes and does not send CLOSE_WEBTRANSPORT_SESSION (read in its source on 2026-10-10), which has not mattered against the `moqtail` relay and has to be checked against a browser before the own relay depends on it.
+What exists is listed in the [roadmap](roadmap.md), Phase 0b.
+
+The relay accepts WebTransport only, not native QUIC. Browsers can use nothing else, the Rust CLI can use WebTransport as well, and one path means one implementation and one set of interop runs.
+
+The Rust side uses `wtransport` 0.7.2 for WebTransport, the crate the `moqtail` relay is built on. Everything that touches it is in one file of `crates/moqt-io`, behind a `Connection` trait whose contract is checked by the same tests on an in-memory connection and on a real loopback connection. `wtransport` 0.7.2 does not map WebTransport error codes and cannot send CLOSE_WEBTRANSPORT_SESSION. The stream codes are mapped in `crates/moqt-io`; a session's close code and reason do not reach a browser (checked against Chromium 156). Whether to change the library is an [open question](open-questions.md), with a [comparison](experiments/2026-10-10-webtransport-library-comparison.md) as its basis.
 
 Where draft 18 is silent or contradicts itself, both implementations follow [MoQ Transport implementation notes](moqt-implementation-notes.md).
 

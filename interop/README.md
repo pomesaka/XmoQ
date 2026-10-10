@@ -1,6 +1,6 @@
 # Interop
 
-Moves one MOQT draft 18 Object through a [moqtail](https://github.com/moqtail/moqtail) relay between two clients, at least one of which is an own client, and checks that the received payload equals the sent one. The own clients are the browser client on [`@xmoq/moqt`](../packages/moqt/) and the Rust client [`xmoq-moqt-client`](../crates/moqt-client/). The browser clients run in a real Chromium. Results go to [`docs/experiments/`](../docs/experiments/).
+Moves one MOQT draft 18 Object through a relay between two clients, at least one of which is an own client, and checks that the received payload equals the sent one. The own clients are the browser client on [`@xmoq/moqt`](../packages/moqt/) and the Rust client [`xmoq-moqt-client`](../crates/moqt-client/). The relay is the [moqtail](https://github.com/moqtail/moqtail) relay or the own relay [`xmoq-relay`](../crates/relay/). The browser clients run in a real Chromium. Results go to [`docs/experiments/`](../docs/experiments/).
 
 This is the one entry point for interop runs. `spikes/moqtail/browser/run.mjs` is kept only to reproduce the Phase 0 records.
 
@@ -27,7 +27,7 @@ It runs `scripts/ci/interop.sh`, which does these steps and skips what is alread
 ```sh
 cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --locked --root interop/peers/moqtail/.tools relay
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
-cargo build --locked -p xmoq-moqt-client
+cargo build --locked -p xmoq-moqt-client -p xmoq-relay
 bun install --frozen-lockfile
 bun run --cwd interop playwright-core install --no-shell chromium
 bun interop/matrix.ts
@@ -51,18 +51,19 @@ Every pairing, from `interop/`:
 bun matrix.ts
 ```
 
-`matrix.ts` starts `run.ts` once per pairing, one after the other and each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`.
+`matrix.ts` starts `run.ts` once per pairing and relay, one after the other and each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`.
 
-| Pairings | What is expected |
+| Pairings, through each relay | What is expected |
 |---|---|
 | Every publisher with every subscriber, except moqtail with moqtail (12) | The received payload equals the sent one. Where the subscriber is an own client, the publisher then leaves and the subscriber has to see PUBLISH_DONE |
+| One publisher with three subscribers: `own-rust` to `own-browser`, `moqtail-browser` to `own-rust` (2) | Every subscriber receives the payload and then sees PUBLISH_DONE |
 | `own-browser` and `own-rust` subscribing to a track nobody published (2) | The run fails, and its log shows REQUEST_ERROR `0x10` |
 
 | Option of `matrix.ts` | Values (default first) |
 |---|---|
-| `--relay` | `moqtail` |
+| `--relay` | `moqtail` and `own`. Give it once to run through one relay only |
 | `--base-port` | `44400`. The first of the UDP ports used, one per pairing |
-| `--only` | Empty. Runs the pairings whose name contains the text, such as `--only own-rust` |
+| `--only` | Empty. Runs the pairings whose name contains the text, such as `--only own-rust` or `--only "own relay"` |
 | `--pairing-timeout-seconds` | `120` (provisional). A pairing that takes longer is stopped and counted as failed |
 
 A SIGINT or SIGTERM to `matrix.ts` stops the pairing that is running, which stops its relay, browser and clients, and starts no further one.
@@ -79,11 +80,12 @@ bun run.ts --publisher own-browser --subscriber own-rust --await-publish-done
 |---|---|
 | `--publisher` | `own-browser`, `own-rust`, `moqtail-browser`, `moqtail-rust` |
 | `--subscriber` | `moqtail-rust`, `own-browser`, `own-rust`, `moqtail-browser` |
-| `--relay` | `moqtail`. The table `RELAYS` in `run.ts` is where another relay is added |
+| `--relay` | `moqtail`, `own` |
+| `--subscribers` | `1`. How many subscribers of the kind `--subscriber` take part; each has to receive the Object |
 | `--port` | `44330`. UDP port of the relay |
 | `--subscribe-track` | `object`. Any other name makes the relay answer REQUEST_ERROR, and the run fails by design |
 | `--await-publish-done` | off. After the transfer, makes the publisher leave and waits until the subscriber reports that PUBLISH_DONE ended its subscription. The subscriber has to be an own client |
-| `--verbose` | off. Sets `RUST_LOG=debug` for the relay and makes `own-rust` print the bytes of every stream |
+| `--verbose` | off. Sets `RUST_LOG=debug` for the moqtail relay and makes `own-rust` print the bytes of every stream |
 
 One side has to be an own client: a run between two moqtail peers checks nothing of this repository.
 
@@ -116,6 +118,6 @@ None of these is tracked.
 | `.cert/` | Certificate and key |
 | `.logs/` | Relay log files, and in `.logs/matrix/` the output of each pairing |
 | `.dist/` | Bundled pages |
-| `peers/moqtail/.tools/` | Relay binary |
+| `peers/moqtail/.tools/` | Binary of the moqtail relay. The own relay is built into `target/` of the repository root |
 | `peers/moqtail/rust-client/target/` | Build of the moqtail Rust client. The own Rust client is built into `target/` of the repository root |
 | `node_modules/` | Links into the `node_modules/` of the repository root |

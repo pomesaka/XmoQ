@@ -8,13 +8,13 @@ mod hex;
 mod io;
 mod report;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::Instant;
-use wtransport::Connection;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
@@ -28,7 +28,13 @@ use xmoq_moqt::session::{
     RequestEvent, RequestId, RequestState, Role, Session, SubscribedAlias, Transport,
 };
 
-use crate::io::{DataEvent, ObjectInbox, RequestStream, RequestStreamEvent, Trace};
+use xmoq_moqt::stream_reset_code;
+use xmoq_moqt_io::wt::{self, WtConnection};
+use xmoq_moqt_io::{
+    Connection, Direction, RequestStreamEvent, SendStream, StreamEnd, StreamStops, Trace, UniEvent,
+};
+
+use crate::io::{DataInbox, RequestStream};
 
 /// Track Alias this client announces in PUBLISH. It publishes one track per
 /// session, so any value is unique (§11.1).
@@ -36,6 +42,13 @@ const PUBLISH_TRACK_ALIAS: u64 = 1;
 
 /// How long the peer gets to acknowledge the close before the process exits.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// How long the peer gets to take what was written to a stream before this
+/// client goes on, which in the end means closing the session. Provisional.
+///
+/// WHY wait at all: closing the session drops what the transport has not
+/// delivered yet, and this client closes right after its last write.
+const DELIVERY_WAIT: Duration = Duration::from_secs(5);
 
 /// How long the last Objects of a subscription are waited for after
 /// `PUBLISH_DONE`, when fewer data streams ended than it counted (§10.11).
@@ -134,7 +147,11 @@ fn parse_args() -> Result<Args> {
         namespace: namespace.context("--namespace is required")?,
         track_name: track_name.context("--track is required")?,
         timeout_secs,
-        trace: Trace::new(trace),
+        trace: if trace {
+            Trace::new(report::trace)
+        } else {
+            Trace::default()
+        },
     })
 }
 
@@ -171,9 +188,13 @@ async fn sleep_until(deadline: Option<Instant>) {
 
 /// One session and what the two modes need to use it.
 struct Client<'a> {
-    connection: &'a Connection,
+    connection: &'a WtConnection,
     session: Session,
-    objects: ObjectInbox,
+    objects: DataInbox,
+    /// Stops the readers of subgroup streams this client no longer wants.
+    stops: StreamStops,
+    /// The Track Alias of every subgroup stream that is being read.
+    open_streams: HashMap<u64, u64>,
     args: &'a Args,
 }
 
@@ -187,7 +208,7 @@ impl Client<'_> {
         message: &ControlMessage,
         label: &str,
     ) -> Result<(RequestStream, RequestEvent)> {
-        let mut stream = match RequestStream::open(self.connection, self.args.trace, label).await {
+        let mut stream = match RequestStream::open(self.connection, &self.args.trace, label).await {
             Ok(stream) => stream,
             Err(error) => {
                 self.session.cancel(request_id);
@@ -235,7 +256,7 @@ impl Client<'_> {
                 // §2.5.1: the session already ended the request; the stream is
                 // cancelled to tell the publisher, and so are the subgroup
                 // streams it may have opened already.
-                self.objects.stop_track(track_alias);
+                self.stop_streams_of(track_alias);
                 stream.cancel();
                 bail!("the track needs property {property_type:#x}, which this client lacks");
             }
@@ -268,30 +289,44 @@ impl Client<'_> {
         while received < wanted {
             tokio::select! {
                 event = self.objects.next_event() => match event? {
-                    DataEvent::Object(header, object) => {
+                    UniEvent::SubgroupOpened { stream, header } => {
+                        if self.belongs_to(header.track_alias, track_alias) {
+                            self.open_streams.insert(stream, header.track_alias);
+                        } else {
+                            // §11.1, §11.4.2: a stream of an ended subscription,
+                            // or of none, is not wanted.
+                            report::ignored(header.track_alias);
+                            self.stops.stop(stream, stream_reset_code::CANCELLED);
+                        }
+                    }
+                    UniEvent::Object { header, object, .. } => {
                         if self.belongs_to(header.track_alias, track_alias) {
                             report::object(&header, &object);
                             received += 1;
-                        } else {
-                            report::ignored(header.track_alias);
                         }
                     }
-                    DataEvent::StreamClosed { track_alias } => {
-                        self.session.on_data_stream_closed(track_alias);
+                    UniEvent::SubgroupClosed { stream, header, end } => {
+                        self.open_streams.remove(&stream);
+                        self.session.on_data_stream_closed(header.track_alias);
+                        if let StreamEnd::Aborted(code) = end {
+                            report::stream_aborted(stream, code);
+                        }
                     }
-                    DataEvent::TrackMalformed { track_alias: malformed, error } => {
+                    UniEvent::TrackMalformed { header, error, .. } => {
+                        let malformed = header.track_alias;
                         report::track_malformed(malformed, &error);
                         if malformed == track_alias {
                             // §2.4.2: the subscription is cancelled. The session
                             // is not at fault and is closed without an error.
                             self.session.cancel(request_id);
-                            self.objects.stop_track(track_alias);
+                            self.stop_streams_of(track_alias);
                             if let Some(stream) = stream.take() {
                                 stream.cancel();
                             }
                             return Err(error.into());
                         }
                     }
+                    other => bail!("misrouted event {other:?}"),
                 },
                 event = next_request_event(&mut stream) => match event? {
                     RequestStreamEvent::Message(message) => {
@@ -307,7 +342,7 @@ impl Client<'_> {
                         let closed = stream.take();
                         if self.session.request_state(request_id) != Some(RequestState::Terminated) {
                             self.session.cancel(request_id);
-                            self.objects.stop_track(track_alias);
+                            self.stop_streams_of(track_alias);
                             if let Some(closed) = closed {
                                 closed.cancel();
                             }
@@ -332,7 +367,7 @@ impl Client<'_> {
                 } else {
                     "PUBLISH_DONE, all streams closed"
                 };
-                self.objects.stop_track(track_alias);
+                self.stop_streams_of(track_alias);
                 report::subscription_ended(why, received, wanted);
                 return Ok(());
             }
@@ -341,11 +376,23 @@ impl Client<'_> {
         // Enough Objects: the subscription is no longer wanted. Nothing happens
         // in the session when PUBLISH_DONE already ended the request.
         self.session.cancel(request_id);
-        self.objects.stop_track(track_alias);
+        self.stop_streams_of(track_alias);
         if let Some(stream) = stream {
             stream.cancel();
         }
         Ok(())
+    }
+
+    /// Sends `STOP_SENDING` on the open subgroup streams of a subscription that
+    /// is over (§10.11: "SHOULD send `STOP_SENDING` on all streams related to the
+    /// subscription when it deletes subscription state").
+    fn stop_streams_of(&mut self, track_alias: u64) {
+        self.open_streams.retain(|stream, alias| {
+            if *alias == track_alias {
+                self.stops.stop(*stream, stream_reset_code::CANCELLED);
+            }
+            *alias != track_alias
+        });
     }
 
     fn belongs_to(&self, track_alias: u64, subscribed: u64) -> bool {
@@ -397,11 +444,11 @@ impl Client<'_> {
         Ok((namespace_stream, publish_request, publish_stream))
     }
 
-    /// Sends one Object as Group 0, Object 0 on a new subgroup stream.
-    async fn send_object(&self, payload: &[u8]) -> Result<()> {
+    /// Sends one Object as Object 0 of a new Group, on a new subgroup stream.
+    async fn send_object(&self, group_id: u64, payload: &[u8]) -> Result<()> {
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
             track_alias: PUBLISH_TRACK_ALIAS,
-            group_id: 0,
+            group_id,
             subgroup_id: SubgroupId::Zero,
             publisher_priority: Some(0),
             properties: false,
@@ -416,36 +463,49 @@ impl Client<'_> {
             status: ObjectStatus::Normal,
             payload: payload.to_vec(),
         })?;
-        let mut data = self.connection.open_uni().await?.await?;
-        data.write_all(&encoder.take_bytes()).await?;
+        let mut data = self.connection.open_uni().await?;
+        let bytes = encoder.take_bytes();
+        self.args
+            .trace
+            .bytes(Direction::Send, &format!("data#{group_id}"), &bytes);
+        let failed = |error| anyhow!("could not write the subgroup stream: {error:?}");
+        data.write_all(&bytes).await.map_err(failed)?;
         // §11.4.3: every Object of the Subgroup was written, so the stream ends
         // with a FIN.
-        data.finish().await?;
-        report::sent(payload.len());
+        match tokio::time::timeout(DELIVERY_WAIT, data.finish_and_wait()).await {
+            // A peer that does not want the stream (§11.4.1) has what it wants.
+            Ok(Ok(()) | Err(xmoq_moqt_io::WriteError::Stopped(_))) => {}
+            Ok(Err(error)) => return Err(failed(error)),
+            Err(_) => bail!("the peer did not take the subgroup stream in time"),
+        }
+        report::sent(group_id, payload.len());
         Ok(())
     }
 
     async fn publish(&mut self, payload: &[u8]) -> Result<()> {
         let (_namespace_stream, publish_request, mut publish_stream) = self.offer_track().await?;
 
-        // The driver writes one line once the subscriber is ready, and closes
-        // stdin once it has read the Object; the session has to stay open in
-        // between. The request stream is read all the while: the subscriber
+        // The driver writes a line for every Object it wants sent, once the
+        // subscribers are ready, and closes stdin when it is done; the session
+        // has to stay open in between. The request stream is read all the while: the subscriber
         // may update the subscription on it, or cancel by closing it.
         let mut stdin = BufReader::new(tokio::io::stdin()).lines();
         let mut stream_count = 0;
         let status_code = loop {
             tokio::select! {
                 line = stdin.next_line() => match line? {
-                    Some(_) if stream_count == 0 => {
-                        self.send_object(payload).await?;
-                        stream_count = 1;
+                    Some(_) => {
+                        // Each Object is a Group of its own, numbered from 0.
+                        self.send_object(stream_count, payload).await?;
+                        stream_count += 1;
                     }
-                    Some(_) => {}
                     None if stream_count == 0 => bail!("stdin closed before the send trigger"),
                     None => break publish_done_status::TRACK_ENDED,
                 },
-                event = publish_stream.next_event() => match event? {
+                // This client has no subgroup stream open between Objects, so a
+                // subscriber that ends the subscription leaves none to reset
+                // (§5.1.1).
+                event = publish_stream.next_event_or_stopped() => match event? {
                     RequestStreamEvent::Message(message) => {
                         match self.session.on_request_message(publish_request, message)? {
                             // §10.9.1: a refused update also ends the
@@ -468,8 +528,8 @@ impl Client<'_> {
         };
 
         // §10.11: PUBLISH_DONE goes out after the data streams are closed, and
-        // the request stream is closed right after it. `send_object` closes the
-        // one data stream before it returns.
+        // the request stream is closed right after it. `send_object` closes its
+        // data stream before it returns.
         let done = self.session.publish_done(
             publish_request,
             status_code,
@@ -477,7 +537,9 @@ impl Client<'_> {
             ReasonPhrase::default(),
         )?;
         publish_stream.send(&done).await?;
-        publish_stream.finish().await
+        tokio::time::timeout(DELIVERY_WAIT, publish_stream.finish_and_wait())
+            .await
+            .map_err(|_| anyhow!("the peer did not take PUBLISH_DONE in time"))?
     }
 
     async fn run_mode(&mut self) -> Result<()> {
@@ -488,19 +550,29 @@ impl Client<'_> {
     }
 }
 
-async fn run_session(connection: &Arc<Connection>, args: &Args) -> Result<()> {
+/// Runs the session until its mode is done. `control` receives this endpoint's
+/// control stream, which the caller keeps open until the session is closed.
+async fn run_session(
+    connection: &Arc<WtConnection>,
+    control: &mut Option<<WtConnection as Connection>::Send>,
+    args: &Args,
+) -> Result<()> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
-    let (mut session_inbox, objects, _readers) = io::start_readers(connection.clone(), args.trace);
+    let stops = StreamStops::default();
+    let (mut session_inbox, objects, _readers) =
+        io::start_readers(Arc::clone(connection), args.trace.clone(), stops.clone());
 
     // §3.3: each peer opens one control stream that begins with SETUP and stays
-    // open for the whole session, so `control` lives until this function returns.
-    let mut control = connection.open_uni().await?.await?;
+    // open for the whole session. It is kept by the caller: dropping it here
+    // would end it with a FIN before the session is closed, which the peer has
+    // to answer with PROTOCOL_VIOLATION.
+    let control = control.insert(connection.open_uni().await?);
     let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
     let setup = session.setup(vec![KeyValuePair::bytes(
         setup_option::MOQT_IMPLEMENTATION,
         implementation.as_bytes().to_vec(),
     )?])?;
-    io::send_message(&mut control, &setup, args.trace, "control").await?;
+    xmoq_moqt_io::send_message(control, &setup, &args.trace, "control").await?;
 
     let peer_setup = session.on_control_message(session_inbox.next_control_message().await?)?;
     report::setup_ok(&peer_setup);
@@ -509,6 +581,8 @@ async fn run_session(connection: &Arc<Connection>, args: &Args) -> Result<()> {
         connection,
         session,
         objects,
+        stops,
+        open_streams: HashMap::new(),
         args,
     };
     // The session inbox is watched for the rest of the session: it reports a
@@ -546,19 +620,23 @@ async fn run(args: &Args) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(args.timeout_secs);
     let timed_out = || anyhow!("timed out after {}s", args.timeout_secs);
 
-    let connection = tokio::time::timeout_at(deadline, io::connect(&args.url, args.cert_sha256))
+    let connection = tokio::time::timeout_at(deadline, wt::connect(&args.url, args.cert_sha256))
         .await
         .map_err(|_| timed_out())??;
+    let connection = Arc::new(connection);
     report::connected(&args.url);
 
     // WHY the timeout sits here and not around `run`: the close below has to
     // happen on every path, a timeout included.
-    let result = match tokio::time::timeout_at(deadline, run_session(&connection, args)).await {
+    let mut control = None;
+    let session = run_session(&connection, &mut control, args);
+    let result = match tokio::time::timeout_at(deadline, session).await {
         Ok(result) => result,
         Err(_) => Err(timed_out()),
     };
-    connection.close(termination_code(&result).into(), b"");
+    connection.close(termination_code(&result), b"");
     let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
+    drop(control);
     result
 }
 

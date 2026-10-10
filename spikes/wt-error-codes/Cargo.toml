@@ -1,0 +1,12 @@
+[package]
+name = "xmoq-wt-error-codes-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "time"] }
+wtransport = "=0.7.2"

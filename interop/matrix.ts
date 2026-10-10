@@ -1,9 +1,11 @@
 // Runs every pairing of `run.ts` in which at least one client is an own one,
 // one after the other, and prints a table of the outcomes.
 //
-// Usage: bun matrix.ts [--relay moqtail] [--base-port N] [--only TEXT]
-//                      [--pairing-timeout-seconds N]
-//   --only: runs the pairings whose name contains TEXT.
+// Usage: bun matrix.ts [--relay moqtail] [--relay own] [--base-port N]
+//                      [--only TEXT] [--pairing-timeout-seconds N]
+//   --relay: the relays to run the pairings through (default: both).
+//   --only: runs the pairings whose name contains TEXT. The name begins with
+//     the relay, as in "own relay: own-rust to own-browser".
 //   --pairing-timeout-seconds: how long one pairing may take before it is
 //     stopped and counted as failed.
 //
@@ -28,6 +30,7 @@ const isOwn = (client: Client): boolean => client.startsWith("own-");
 
 interface Pairing {
 	name: string;
+	/** The arguments of `run.ts`, without the relay and the port. */
 	args: string[];
 	/**
 	 * Absent when the Object has to arrive. Otherwise the run has to fail, and
@@ -59,6 +62,37 @@ function transfers(): Pairing[] {
 	return pairings;
 }
 
+/**
+ * One publisher and three subscribers: every subscriber has to get the Object
+ * and then see PUBLISH_DONE. One row per own client as the subscribers.
+ */
+const ONE_TO_MANY: Pairing[] = [
+	{
+		name: "own-rust to 3 own-browser, then PUBLISH_DONE",
+		args: [
+			"--publisher",
+			"own-rust",
+			"--subscriber",
+			"own-browser",
+			"--subscribers",
+			"3",
+			"--await-publish-done",
+		],
+	},
+	{
+		name: "moqtail-browser to 3 own-rust, then PUBLISH_DONE",
+		args: [
+			"--publisher",
+			"moqtail-browser",
+			"--subscriber",
+			"own-rust",
+			"--subscribers",
+			"3",
+			"--await-publish-done",
+		],
+	},
+];
+
 /** A SUBSCRIBE for a track nobody published: the relay answers REQUEST_ERROR DOES_NOT_EXIST (0x10). */
 const REFUSALS: Pairing[] = [
 	{
@@ -89,7 +123,7 @@ const REFUSALS: Pairing[] = [
 
 const { values: options } = parseArgs({
 	options: {
-		relay: { type: "string", default: "moqtail" },
+		relay: { type: "string", multiple: true, default: ["moqtail", "own"] },
 		// WHY one port per pairing: a pairing that is killed at its time limit
 		// can leave its relay running, and that relay must not hold the port of
 		// the pairings after it.
@@ -118,8 +152,13 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	});
 }
 
+/** A pairing and the relay it runs through; the name begins with the relay. */
+interface RelayPairing extends Pairing {
+	relay: string;
+}
+
 interface Outcome {
-	pairing: Pairing;
+	pairing: RelayPairing;
 	ok: boolean;
 	detail: string;
 	seconds: number;
@@ -135,7 +174,7 @@ function lastDriverLine(log: string): string {
 }
 
 async function runPairing(
-	pairing: Pairing,
+	pairing: RelayPairing,
 	port: number,
 	timeoutMs: number,
 ): Promise<Outcome> {
@@ -144,13 +183,14 @@ async function runPairing(
 		logDir,
 		`${pairing.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.log`,
 	);
+	const relay = pairing.relay;
 	const child = Bun.spawn(
 		[
 			process.execPath,
 			join(here, "run.ts"),
 			...pairing.args,
 			"--relay",
-			options.relay,
+			relay,
 			"--port",
 			String(port),
 		],
@@ -209,9 +249,15 @@ async function runPairing(
 }
 
 async function main(): Promise<void> {
-	const pairings = [...transfers(), ...REFUSALS].filter((pairing) =>
-		pairing.name.includes(options.only),
-	);
+	const pairings: RelayPairing[] = options.relay
+		.flatMap((relay) =>
+			[...transfers(), ...ONE_TO_MANY, ...REFUSALS].map((pairing) => ({
+				...pairing,
+				name: `${relay} relay: ${pairing.name}`,
+				relay,
+			})),
+		)
+		.filter((pairing) => pairing.name.includes(options.only));
 	if (pairings.length === 0) {
 		throw new Error(`no pairing contains "${options.only}"`);
 	}
@@ -263,7 +309,7 @@ async function main(): Promise<void> {
 	const failed = outcomes.filter((outcome) => !outcome.ok);
 	const total = ((performance.now() - started) / 1000).toFixed(1);
 	const table = [
-		`| Pairing (relay: ${options.relay}) | Result | Seconds |`,
+		"| Pairing | Result | Seconds |",
 		"|---|---|---|",
 		...outcomes.map(
 			(outcome) =>

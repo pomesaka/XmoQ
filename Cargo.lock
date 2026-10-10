@@ -1303,7 +1303,34 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "tokio",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
+]
+
+[[package]]
+name = "xmoq-moqt-io"
+version = "0.0.0"
+dependencies = [
+ "tokio",
  "wtransport",
+ "xmoq-moqt",
+]
+
+[[package]]
+name = "xmoq-relay"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
+ "xmoq-relay-core",
+]
+
+[[package]]
+name = "xmoq-relay-core"
+version = "0.0.0"
+dependencies = [
  "xmoq-moqt",
 ]
 

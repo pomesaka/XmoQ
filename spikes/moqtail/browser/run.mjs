@@ -3,6 +3,7 @@
 // payload with the sent one.
 //
 // Usage: node run.mjs [--direction browser-to-rust|rust-to-browser|browser-to-browser|rust-to-rust]
+//                     [--relay moqtail|own] [--subscribers N]
 //                     [--rust-publisher moqtail|own] [--rust-subscriber moqtail|own]
 //                     [--browser chromium|headless-shell|chrome]
 //                     [--cert-trust hash|spki-flag|none] [--port N] [--verbose] [--trace]
@@ -31,6 +32,25 @@ const certDir = join(spikeRoot, 'cert')
 const certFile = join(certDir, 'cert.pem')
 const keyFile = join(certDir, 'key.pem')
 
+// Relay per --relay value: its binary, its arguments, and the line that says it
+// is listening, whose first group names the implementation. `moqtail` is the
+// moqtail relay; `own` is XmoQ's relay in `crates/relay`.
+const RELAYS = {
+  moqtail: {
+    bin: relayBin,
+    args: port => [
+      '--port', port, '--host', '127.0.0.1', '--cert-file', certFile, '--key-file', keyFile,
+      '--log-folder', join(spikeRoot, '.logs'),
+    ],
+    ready: /(moqtail\/\S+) is running on/,
+  },
+  own: {
+    bin: join(spikeRoot, '..', '..', 'target', 'debug', 'xmoq-relay'),
+    args: port => ['--port', port, '--cert-file', certFile, '--key-file', keyFile],
+    ready: /^LISTENING (\S+) port=/,
+  },
+}
+
 const NAMESPACE = 'xmoq/phase0'
 const TRACK = 'object'
 const STEP_TIMEOUT_MS = 20_000
@@ -57,6 +77,10 @@ const CERT_TRUST_MODES = ['hash', 'spki-flag', 'none']
 const { values: options } = parseArgs({
   options: {
     direction: { type: 'string', default: 'browser-to-rust' },
+    relay: { type: 'string', default: 'moqtail' },
+    // How many subscribers of the kind --direction names. All have to receive
+    // the Object.
+    subscribers: { type: 'string', default: '1' },
     'rust-publisher': { type: 'string', default: 'moqtail' },
     'rust-subscriber': { type: 'string', default: 'moqtail' },
     // Makes the `own` client print the raw bytes of every stream.
@@ -214,7 +238,11 @@ async function main() {
       throw new Error(`unknown Rust client ${implementation}`)
     }
   }
-  const binaries = [relayBin, ...[rustPublisher, rustSubscriber].filter(Boolean).map(name => RUST_CLIENTS[name])]
+  const relayKind = RELAYS[options.relay]
+  if (!relayKind) throw new Error(`unknown --relay ${options.relay}`)
+  const subscriberCount = Number.parseInt(options.subscribers, 10)
+  if (!(subscriberCount >= 1)) throw new Error(`--subscribers must be at least 1`)
+  const binaries = [relayKind.bin, ...[rustPublisher, rustSubscriber].filter(Boolean).map(name => RUST_CLIENTS[name])]
   for (const binary of binaries) {
     if (!existsSync(binary)) throw new Error(`${binary} is missing; see README.md for the build steps`)
   }
@@ -247,18 +275,15 @@ async function main() {
   try {
     const relay = spawnLogged(
       'relay',
-      relayBin,
-      [
-        '--port', options.port, '--host', '127.0.0.1', '--cert-file', certFile, '--key-file', keyFile,
-        '--log-folder', join(spikeRoot, '.logs'),
-      ],
+      relayKind.bin,
+      relayKind.args(options.port),
       options.verbose ? { RUST_LOG: 'debug' } : {},
     )
     cleanups.push(async () => {
       relay.child.kill('SIGINT')
       await relay.exited
     })
-    const [, relayVersion] = await relay.waitForLine(/(moqtail\/\S+) is running on/)
+    const [, relayVersion] = await relay.waitForLine(relayKind.ready)
 
     // rust-to-rust needs no page, so the browser is started on first use.
     let browserSession
@@ -325,43 +350,50 @@ async function main() {
       endPublisher = () => client.child.stdin.end()
     }
 
-    // The subscriber is live before the Object is sent: the subscription uses the
-    // LatestObject filter, which does not replay what was published earlier.
-    let receiveHex
-    let awaitSubscriptionEnd
-    if (direction.subscriberInBrowser) {
-      const page = await openConnectedPage('browser-sub')
-      await withTimeout(
-        page.evaluate(([ns, track]) => window.xmoq.subscribe(ns, track), [NAMESPACE, TRACK]),
-        'browser-sub to subscribe',
-      )
-      receiveHex = async () => {
-        const object = await withTimeout(page.evaluate(() => window.xmoq.firstObject()), 'browser-sub to receive')
-        return object.payloadHex
-      }
-    } else {
-      // Asking for a second Object keeps the subscriber waiting after the first,
-      // so it is still there when the publisher ends the track.
-      const client = spawnRustClient('rust-sub', rustSubscriber, 'subscribe', awaitPublishDone ? ['--objects', '2'] : [])
-      await client.waitForLine(/^SUBSCRIBED /)
-      awaitSubscriptionEnd = () => client.waitForLine(/^SUBSCRIPTION_ENDED (.*)$/)
-      receiveHex = async () => {
-        const [, hex] = await client.waitForLine(/^OBJECT .*payload_hex=([0-9a-f]*)$/)
-        return hex
+    // The subscribers are live before the Object is sent: the subscription uses
+    // the LatestObject filter, which does not replay what was published earlier.
+    const receivers = []
+    const subscriptionEnds = []
+    for (let index = 0; index < subscriberCount; index++) {
+      const label = subscriberCount === 1 ? '' : `-${index + 1}`
+      if (direction.subscriberInBrowser) {
+        const page = await openConnectedPage(`browser-sub${label}`)
+        await withTimeout(
+          page.evaluate(([ns, track]) => window.xmoq.subscribe(ns, track), [NAMESPACE, TRACK]),
+          'browser-sub to subscribe',
+        )
+        receivers.push(async () => {
+          const object = await withTimeout(page.evaluate(() => window.xmoq.firstObject()), 'browser-sub to receive')
+          return object.payloadHex
+        })
+      } else {
+        // Asking for a second Object keeps the subscriber waiting after the first,
+        // so it is still there when the publisher ends the track.
+        const client = spawnRustClient(`rust-sub${label}`, rustSubscriber, 'subscribe', awaitPublishDone ? ['--objects', '2'] : [])
+        await client.waitForLine(/^SUBSCRIBED /)
+        subscriptionEnds.push(() => client.waitForLine(/^SUBSCRIPTION_ENDED (.*)$/))
+        receivers.push(async () => {
+          const [, hex] = await client.waitForLine(/^OBJECT .*payload_hex=([0-9a-f]*)$/)
+          return hex
+        })
       }
     }
 
     await sendObject()
-    const receivedHex = await receiveHex()
+    const receivedHexes = await Promise.all(receivers.map(receive => receive()))
+    const receivedHex = receivedHexes[0]
     let subscriptionEnd = null
     if (awaitPublishDone) {
       endPublisher()
-      ;[, subscriptionEnd] = await awaitSubscriptionEnd()
+      const ends = await Promise.all(subscriptionEnds.map(wait => wait()))
+      subscriptionEnd = ends.map(([, end]) => end).join(' | ')
     }
 
     result = {
       direction: options.direction,
-      match: receivedHex === payloadHex,
+      match: receivedHexes.every(hex => hex === payloadHex),
+      relay: options.relay,
+      subscribers: subscriberCount,
       sentText: payload.toString(),
       receivedText: Buffer.from(receivedHex, 'hex').toString(),
       sentHex: payloadHex,

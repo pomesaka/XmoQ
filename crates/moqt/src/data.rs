@@ -286,6 +286,14 @@ impl SubgroupStreamDecoder {
         }
     }
 
+    /// Bytes pushed and not yet returned as events: what this decoder holds in
+    /// memory. A caller that reads many streams can add these up to bound them
+    /// together.
+    #[must_use]
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.unread().len()
+    }
+
     /// The Subgroup Header, once [`Self::next_event`] has returned it.
     #[must_use]
     pub fn header(&self) -> Option<&SubgroupHeader> {
@@ -547,7 +555,7 @@ impl SubgroupStreamEncoder {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_util::fixture;
 
@@ -732,6 +740,14 @@ mod tests {
     }
 
     /// Streams received from the moqtail relay 0.15.0, see `fixtures/moqt-18/README.md`.
+    /// The fixture files this module reads.
+    pub(crate) fn fixture_names() -> Vec<&'static str> {
+        moqtail_streams()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     fn moqtail_streams() -> Vec<(&'static str, Stream)> {
         // Header type 0x5D with priority 128, as moqtail's test client sends it.
         let test_client_header = |group_id| SubgroupHeader {

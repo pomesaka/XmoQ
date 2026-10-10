@@ -26,25 +26,21 @@ const PUBLISH: u64 = 0x1d;
 /// Types Table 5 defines and this crate does not decode. Receiving one ends the
 /// session with `INTERNAL_ERROR`, although the peer did nothing wrong.
 ///
-/// FIXME: once the responder side exists, a FETCH, `TRACK_STATUS`,
-/// `SUBSCRIBE_NAMESPACE` or `SUBSCRIBE_TRACKS` that a peer opens is to be answered
-/// with `REQUEST_ERROR` `NOT_SUPPORTED` (0x3, §10.6.2) and the session left open.
-///
 /// FIXME: decode GOAWAY and hand it to the caller. A relay may send it at any
 /// time (§10.4) and it does not touch the state of any request, so ending the
 /// session over it is the worst of these.
 const UNSUPPORTED: &[u64] = &[
     NAMESPACE,
-    TRACK_STATUS,
     NAMESPACE_DONE,
     PUBLISH_BLOCKED,
     GOAWAY,
-    FETCH,
     FETCH_OK,
     PUBLISH_OK,
-    SUBSCRIBE_NAMESPACE,
-    SUBSCRIBE_TRACKS,
 ];
+/// Requests the draft defines and this crate does not implement. Only their
+/// Request ID is read, so that the request can be answered with `REQUEST_ERROR`
+/// `NOT_SUPPORTED` instead of ending the session.
+const UNSUPPORTED_REQUESTS: &[u64] = &[TRACK_STATUS, FETCH, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS];
 const NAMESPACE: u64 = 0x08;
 const TRACK_STATUS: u64 = 0x0d;
 const NAMESPACE_DONE: u64 = 0x0e;
@@ -63,6 +59,19 @@ const SUBSCRIBE_TRACKS: u64 = 0x51;
 pub mod request_error_code {
     /// `NOT_SUPPORTED`: the endpoint does not support the type of request.
     pub const NOT_SUPPORTED: u64 = 0x3;
+    /// `EXCESSIVE_LOAD`: the responder cannot process the request now.
+    pub const EXCESSIVE_LOAD: u64 = 0x9;
+    /// `DOES_NOT_EXIST`: the track or namespace is not available at the publisher.
+    pub const DOES_NOT_EXIST: u64 = 0x10;
+    /// `DUPLICATE_SUBSCRIPTION`: the request would create a second subscription
+    /// to a track in the same role (§5.1).
+    pub const DUPLICATE_SUBSCRIPTION: u64 = 0x19;
+    /// `UNINTERESTED`: the subscriber is not interested in the track or
+    /// namespace.
+    pub const UNINTERESTED: u64 = 0x20;
+    /// `UNSUPPORTED_EXTENSION`: the track has a Mandatory Track Property the
+    /// endpoint does not understand (§2.5.1).
+    pub const UNSUPPORTED_EXTENSION: u64 = 0x33;
     /// REDIRECT: the one code that carries a Redirect.
     pub const REDIRECT: u64 = 0x34;
 }
@@ -86,6 +95,12 @@ pub mod setup_option {
 pub mod publish_done_status {
     /// `TRACK_ENDED`: the track is no longer being published.
     pub const TRACK_ENDED: u64 = 0x2;
+    /// `TOO_FAR_BEHIND`: the publisher's queue for this subscriber exceeded its
+    /// limit.
+    pub const TOO_FAR_BEHIND: u64 = 0x5;
+    /// `MALFORMED_TRACK`: a relay publisher detected that the track was
+    /// malformed (§2.4.2).
+    pub const MALFORMED_TRACK: u64 = 0x12;
     /// `UPDATE_FAILED`: a `REQUEST_UPDATE` failed on this subscription (§10.9.1).
     pub const UPDATE_FAILED: u64 = 0x8;
 }
@@ -299,6 +314,16 @@ pub enum ControlMessage {
     RequestError(RequestError),
     /// `PUBLISH_DONE`, type 0xB.
     PublishDone(PublishDone),
+    /// A request this crate does not implement: `TRACK_STATUS` (0xD), FETCH
+    /// (0x16), `SUBSCRIBE_NAMESPACE` (0x50) or `SUBSCRIBE_TRACKS` (0x51). Only
+    /// the Request ID, their first field, is decoded; the rest of the payload
+    /// is skipped unchecked. It cannot be encoded.
+    UnsupportedRequest {
+        /// The Message Type.
+        message_type: u64,
+        /// Request ID (§10.1).
+        request_id: u64,
+    },
 }
 
 impl ControlMessage {
@@ -407,6 +432,11 @@ impl ControlMessage {
                 }
                 REQUEST_ERROR
             }
+            Self::UnsupportedRequest { .. } => {
+                return Err(UsageError(
+                    "this crate does not send requests it does not implement",
+                ));
+            }
             Self::PublishDone(message) => {
                 varint::encode(message.status_code, out);
                 varint::encode(message.stream_count, out);
@@ -428,6 +458,7 @@ fn check_type(ty: u64) -> Result<(), Error> {
     match ty {
         SETUP | REQUEST_UPDATE | SUBSCRIBE | SUBSCRIBE_OK | REQUEST_ERROR | PUBLISH_NAMESPACE
         | REQUEST_OK | PUBLISH_DONE | PUBLISH => Ok(()),
+        ty if UNSUPPORTED_REQUESTS.contains(&ty) => Ok(()),
         ty if UNSUPPORTED.contains(&ty) => Err(Error::UnsupportedMessageType(ty)),
         // Includes the types Table 5 marks RESERVED (0x01, 0x20, 0x21, 0x40,
         // 0x41): they are setup messages of older drafts, not messages of this one.
@@ -537,6 +568,14 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
             stream_count: reader.varint()?,
             error_reason: ReasonPhrase::decode(reader)?,
         }),
+        ty if UNSUPPORTED_REQUESTS.contains(&ty) => {
+            let request_id = reader.varint()?;
+            reader.skip_rest();
+            ControlMessage::UnsupportedRequest {
+                message_type: ty,
+                request_id,
+            }
+        }
         // `check_type` runs first and lets only the types above through.
         ty => return Err(Error::UnknownMessageType(ty).into()),
     })
@@ -611,7 +650,7 @@ impl MessageDecoder {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::kvp::KeyValuePair;
     use crate::name::Location;
@@ -628,6 +667,14 @@ mod tests {
 
     /// Every control message captured from moqtail, with the value it stands for.
     /// In two functions only because one would be longer than clippy accepts.
+    /// The fixture files this module reads.
+    pub(crate) fn fixture_names() -> Vec<&'static str> {
+        moqtail_messages()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     fn moqtail_messages() -> Vec<(&'static str, ControlMessage)> {
         let mut messages = moqtail_publish_side();
         messages.extend(moqtail_subscribe_side());
@@ -983,6 +1030,36 @@ mod tests {
         };
         assert_eq!(publish.track_namespace(), &xmoq_namespace());
         assert_eq!(publish.track_name(), b"object");
+    }
+
+    #[test]
+    fn requests_this_crate_does_not_implement_yield_their_request_id() {
+        // (bytes, message type, Request ID). Only the Request ID is decoded;
+        // the rest of the payload (0x01, 0x02) is skipped.
+        let cases: [(&[u8], u64, u64); 4] = [
+            (&[0x0d, 0x00, 0x03, 0x06, 0x01, 0x02], 0x0d, 6),
+            (&[0x16, 0x00, 0x03, 0x06, 0x01, 0x02], 0x16, 6),
+            (&[0x50, 0x00, 0x03, 0x06, 0x01, 0x02], 0x50, 6),
+            (&[0x51, 0x00, 0x03, 0x06, 0x01, 0x02], 0x51, 6),
+        ];
+        for (bytes, message_type, request_id) in cases {
+            let message = ControlMessage::UnsupportedRequest {
+                message_type,
+                request_id,
+            };
+            assert_eq!(
+                ControlMessage::decode(bytes),
+                Ok(Some((message.clone(), bytes.len()))),
+                "{bytes:02x?}"
+            );
+            assert_eq!(
+                message.encode(&mut Vec::new()),
+                Err(UsageError(
+                    "this crate does not send requests it does not implement"
+                )),
+                "{bytes:02x?}"
+            );
+        }
     }
 
     #[test]

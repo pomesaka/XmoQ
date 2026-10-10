@@ -95,6 +95,11 @@ impl SubscribedAliases {
 
     /// `PUBLISH_DONE` arrived: the alias goes on until `stream_count` data
     /// streams have ended, which may already be the case.
+    ///
+    /// More ended streams than the count are not an error. §10.11 lets a
+    /// subscriber close the session for them (MAY); the count seen here can
+    /// include a late stream of an earlier use of the alias, so that would cut
+    /// off a publisher that did nothing wrong.
     pub(crate) fn drain(&mut self, alias: u64, stream_count: u64) {
         let Some(track) = self.tracks.get_mut(&alias) else {
             return;
@@ -295,7 +300,9 @@ mod tests {
         // (how the first subscription ended)
         type Ending = fn(&mut SubscribedAliases);
         let endings: [(&str, Ending); 2] = [
-            ("draining", |aliases| aliases.drain(ALIAS, 1)),
+            ("draining", |aliases| {
+                aliases.drain(ALIAS, 1);
+            }),
             ("retired", |aliases| aliases.retire(ALIAS)),
         ];
         for (name, end) in endings {

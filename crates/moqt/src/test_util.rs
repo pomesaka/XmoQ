@@ -18,3 +18,27 @@ pub(crate) fn fixture(name: &str) -> Vec<u8> {
         })
         .collect()
 }
+
+#[test]
+fn every_fixture_file_is_read_by_a_test() {
+    // WHY: the tests name the files they read. A capture that is added to the
+    // directory and to no test would look covered and check nothing.
+    let directory = format!("{}/../../fixtures/moqt-18", env!("CARGO_MANIFEST_DIR"));
+    let mut on_disk: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap_or_else(|e| panic!("{directory}: {e}"))
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            name.strip_suffix(".hex").map(str::to_string)
+        })
+        .collect();
+    on_disk.sort();
+
+    let mut read: Vec<String> = crate::message::tests::fixture_names()
+        .into_iter()
+        .chain(crate::data::tests::fixture_names())
+        .map(str::to_string)
+        .collect();
+    read.sort();
+
+    assert_eq!(on_disk, read);
+}

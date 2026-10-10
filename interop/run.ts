@@ -2,17 +2,20 @@
 // at least one of which is an own client, and compares the received payload
 // with the sent one. `matrix.ts` runs every pairing with it.
 //
-// Usage: bun run.ts --publisher <client> --subscriber <client> [--relay moqtail]
-//                   [--port N] [--subscribe-track NAME] [--await-publish-done]
-//                   [--verbose]
+// Usage: bun run.ts --publisher <client> --subscriber <client> [--relay moqtail|own]
+//                   [--subscribers N] [--port N] [--subscribe-track NAME]
+//                   [--await-publish-done] [--verbose]
 //   <client>: own-browser | own-rust | moqtail-browser | moqtail-rust
+//   --subscribers: how many subscribers of that kind subscribe; each has to get
+//     the Object.
 //   --subscribe-track: track the subscriber asks for (default: the published one).
 //     Another name makes the relay answer REQUEST_ERROR, and the run fails by design.
 //   --await-publish-done: after the transfer, ends the publisher and waits until
 //     the subscriber, which has to be an own client, has seen PUBLISH_DONE.
 //
-// The relay and the moqtail clients live under peers/moqtail, the own Rust
-// client in crates/moqt-client; build them with the steps in README.md.
+// The moqtail relay and clients live under peers/moqtail, the own relay in
+// crates/relay and the own Rust client in crates/moqt-client; build them with
+// the steps in README.md.
 
 import {
 	type ChildProcessWithoutNullStreams,
@@ -95,9 +98,6 @@ interface Relay {
 	verboseEnv: Record<string, string>;
 }
 
-// WHY a table with one row: an own relay is being written (docs/roadmap.md,
-// Phase 0b). It becomes a second row here, and every pairing can then run
-// against it with `--relay`.
 const RELAYS: Record<string, Relay> = {
 	moqtail: {
 		binary: join(moqtailRoot, ".tools", "bin", "relay"),
@@ -115,6 +115,20 @@ const RELAYS: Record<string, Relay> = {
 		],
 		ready: /(moqtail\/\S+) is running on/,
 		verboseEnv: { RUST_LOG: "debug" },
+	},
+	own: {
+		binary: join(here, "..", "target", "debug", "xmoq-relay"),
+		args: (port) => [
+			"--port",
+			port,
+			"--cert-file",
+			certFile,
+			"--key-file",
+			keyFile,
+		],
+		ready: /^LISTENING (\S+) port=/,
+		// It always prints one line for each thing it does.
+		verboseEnv: {},
 	},
 };
 
@@ -147,6 +161,7 @@ const { values: options } = parseArgs({
 		publisher: { type: "string", default: "own-browser" },
 		subscriber: { type: "string", default: "moqtail-rust" },
 		relay: { type: "string", default: "moqtail" },
+		subscribers: { type: "string", default: "1" },
 		port: { type: "string", default: "44330" },
 		"await-publish-done": { type: "boolean", default: false },
 		"subscribe-track": { type: "string", default: TRACK },
@@ -561,10 +576,10 @@ async function startPublisher(
 /** Connects a subscriber and subscribes to `track`. */
 async function startSubscriber(
 	kind: Client,
+	label: string,
 	context: RunContext,
 	track: string,
 ): Promise<Subscriber> {
-	const label = `sub:${kind}`;
 	if (isBrowserClient(kind)) {
 		const page = await openConnectedPage(context, label, kind);
 		await withTimeout(
@@ -630,13 +645,17 @@ async function startSubscriber(
 interface RunResult {
 	publisher: Client;
 	subscriber: Client;
+	/** How many subscribers of that kind took part. */
+	subscribers: number;
+	/** Whether every subscriber received the sent payload. */
 	match: boolean;
 	sentText: string;
 	receivedText: string;
 	sentHex: string;
+	/** What the first subscriber that differs received, or the sent payload. */
 	receivedHex: string;
-	/** What the subscriber reported about the PUBLISH_DONE, with --await-publish-done. */
-	subscriptionEnd: string | null;
+	/** What each subscriber reported about the PUBLISH_DONE, with --await-publish-done. */
+	subscriptionEnd: string[] | null;
 	relay: string;
 	relayVersion: string;
 	/** Null in a run between two Rust clients. */
@@ -666,6 +685,7 @@ async function startBrowser(
 async function transferOneObject(
 	publisher: Client,
 	subscriber: Client,
+	subscriberCount: number,
 	subscribeTrack: string,
 ): Promise<RunResult> {
 	const certificate = ensureCertificate();
@@ -696,24 +716,35 @@ async function transferOneObject(
 	// The publisher offers the track first: the relay rejects a SUBSCRIBE for
 	// a track nobody has published.
 	const publishing = await startPublisher(publisher, context, payloadHex);
-	// The subscriber is live before the Object is sent: the Largest Object
+	// The subscribers are live before the Object is sent: the Largest Object
 	// filter does not replay what was published earlier.
-	const subscribing = await startSubscriber(
-		subscriber,
-		context,
-		subscribeTrack,
-	);
+	const subscribing: Subscriber[] = [];
+	for (let index = 0; index < subscriberCount; index++) {
+		const label =
+			subscriberCount === 1
+				? `sub:${subscriber}`
+				: `sub${index + 1}:${subscriber}`;
+		subscribing.push(
+			await startSubscriber(subscriber, label, context, subscribeTrack),
+		);
+	}
 	await withTimeout(publishing.sendObject(), "the publisher to send");
-	const receivedHex = await subscribing.receiveHex();
-	let subscriptionEnd: string | null = null;
+	const received = await Promise.all(
+		subscribing.map((each) => each.receiveHex()),
+	);
+	const receivedHex = received.find((hex) => hex !== payloadHex) ?? payloadHex;
+	let subscriptionEnd: string[] | null = null;
 	if (options["await-publish-done"]) {
 		await publishing.end();
-		subscriptionEnd = await subscribing.publishDone();
+		subscriptionEnd = await Promise.all(
+			subscribing.map((each) => each.publishDone()),
+		);
 	}
 
 	return {
 		publisher,
 		subscriber,
+		subscribers: subscriberCount,
 		match: receivedHex === payloadHex,
 		sentText: payload.toString(),
 		receivedText: Buffer.from(receivedHex, "hex").toString(),
@@ -734,6 +765,11 @@ async function main(): Promise<void> {
 			"one side has to be an own client; a moqtail pair checks nothing of this repository",
 		);
 	}
+	// WHY the digits are checked: `Number("")` is 0.
+	if (!/^[1-9][0-9]?$/.test(options.subscribers)) {
+		throw new Error(`--subscribers "${options.subscribers}" is not 1 to 99`);
+	}
+	const subscriberCount = Number(options.subscribers);
 	const rustBinaries = [publisher, subscriber]
 		.filter(isRustClient)
 		.map((client) => RUST_CLIENT_BINARIES[client]);
@@ -750,6 +786,7 @@ async function main(): Promise<void> {
 		result = await transferOneObject(
 			publisher,
 			subscriber,
+			subscriberCount,
 			options["subscribe-track"],
 		);
 	} finally {

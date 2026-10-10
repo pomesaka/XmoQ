@@ -13,12 +13,14 @@ Each step replaces one `moqtail` component with an own one, so that one side of 
 
 - [x] Rust wire codec and session for SETUP, PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE and subgroup streams, with byte fixtures captured from `moqtail`. The session covers the side that opens requests; answering a peer's requests comes with the relay. See [`fixtures/moqt-18/`](../fixtures/moqt-18/README.md).
 - [x] Own Rust client against the `moqtail` relay and the `moqtail` browser client. See the [record](experiments/2026-10-10-own-rust-client-vs-moqtail.md).
-- [ ] Own Rust relay against the `moqtail` browser client and the own Rust client.
+- [x] Own Rust relay against the `moqtail` browser client and the own Rust client. See the [record](experiments/2026-10-10-own-relay-vs-moqtail-peers.md). The relay is the minimal one: no cache, WebTransport only, no authorization. What the draft requires of a relay and is not implemented is listed in [implementation notes](moqt-implementation-notes.md).
 - [x] Own TypeScript browser client against the `moqtail` relay. See the [record](experiments/2026-10-10-own-ts-client-vs-moqtail.md). Done ahead of the relay, because it needs only `moqtail` peers.
-- [ ] Own TypeScript browser client against the own relay.
-- [x] One interop runner for every pairing (`interop/`), including the own Rust client, and a CI job that runs it. See the [record](experiments/2026-10-10-own-rust-and-ts-through-moqtail-relay.md). The pairings use the `moqtail` relay; the own relay is added to the same runner when it exists.
+- [x] Own TypeScript browser client against the own relay. It runs in the interop matrix below; neither side needed a change.
+- [x] One interop runner for every pairing (`interop/`), including the own Rust client, and a CI job that runs it. See the [record](experiments/2026-10-10-own-rust-and-ts-through-moqtail-relay.md). Every pairing runs through the `moqtail` relay and through the own relay, with one-to-many pairings on the own relay.
+- [ ] Route by namespace in the relay: a SUBSCRIBE for a track that was announced with PUBLISH_NAMESPACE and not yet published (§9.5 of the draft, a MUST for relays).
+- [ ] Put the runs in which a publisher or a subscriber disconnects mid-transfer into the interop matrix, so that CI runs them. They exist as a script under `spikes/`.
 
-**Exit:** one Object between browser and Rust through the own relay with own clients, and the same Object exchange against `moqtail` peers.
+**Exit:** one Object between browser and Rust through the own relay with own clients, and the same Object exchange against `moqtail` peers. Reached on 2026-10-10. The two open items above are known gaps of the relay, not part of the exit.
 
 ## Phase 1 — Video
 - [ ] Browser WebCodecs publisher.

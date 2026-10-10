@@ -35,6 +35,8 @@ A run that names `own` for a Rust side also needs XmoQ's client, built with `car
 | Option | Values (default first) |
 |---|---|
 | `--direction` | `browser-to-rust`, `rust-to-browser`, `browser-to-browser`, `rust-to-rust` |
+| `--relay` | `moqtail` (the relay built above), `own` (XmoQ's `xmoq-relay`, built with `cargo build --workspace --locked`) |
+| `--subscribers` | `1`. The number of subscribers of the kind `--direction` names; all have to receive the Object |
 | `--rust-publisher`, `--rust-subscriber` | `moqtail` (the client in `rust-client/`), `own` (XmoQ's `xmoq-moqt-client`). Ignored for a side that `--direction` puts in the browser |
 | `--trace` | off. Makes the `own` client print the raw bytes of every stream |
 | `--await-publish-done` | off. After the transfer, ends the Rust publisher and waits until the `own` subscriber reports that PUBLISH_DONE ended its subscription. Needs `--direction rust-to-rust --rust-subscriber own` |
@@ -42,6 +44,12 @@ A run that names `own` for a Rust side also needs XmoQ's client, built with `car
 | `--cert-trust` | `hash`, `spki-flag`, `none` |
 | `--port` | `44318` |
 | `--verbose` | off. Sets `RUST_LOG=debug` for the relay |
+
+`browser/relay-scenarios.mjs` runs what the one-Object transfer does not reach, against XmoQ's own relay with XmoQ's own client on both sides: a publisher that disconnects first, a subscriber that disconnects first, and a subscription to a track nobody published. It needs the certificate that `run.mjs` creates, so run that once before. Results are in [the own relay record](../../docs/experiments/2026-10-10-own-relay-vs-moqtail-peers.md).
+
+```sh
+node spikes/moqtail/browser/relay-scenarios.mjs
+```
 
 ## Certificate
 

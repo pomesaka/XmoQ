@@ -6,7 +6,11 @@ MoQ/WebTransportを使った1対多ライブ配信の実験プロジェクト。
 
 Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。検証用のコードは`spikes/`にあり、アプリ本体の構成ではない。
 
-いまの課題は`docs/roadmap.md`のPhase 0bで、MoQ Transportの層をRustとTypeScriptで自前実装する。版はdraft 18に固定する。理由と範囲は`docs/protocols.md`にある。これを通るまで映像などの機能を作らない。どこまでできているかは`docs/roadmap.md`のチェックで見る。
+Phase 0b（MoQ Transportの層をRustとTypeScriptで自前実装する）の終了条件にも、2026-10-10に届いた。自前のブラウザクライアント、Rustクライアント、Rustリレーのあいだで、Objectが1つ通る。版はdraft 18に固定している。理由と範囲は`docs/protocols.md`にある。映像はまだ流していない。
+
+いまの課題は、`docs/roadmap.md`のPhase 0bに残っている2項目（リレーの名前空間での経路決定、切断の場面を照合に入れる）と、その後のPhase 1。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーは最小限で、キャッシュと認可が無く、WebTransportだけを受ける。
+
+Rustのcrateは次のように分かれている。`xmoq-moqt`（符号化とセッションの状態）、`xmoq-relay-core`（リレーの経路と配信の論理）は入出力に依存しない。`xmoq-moqt-io`が`Connection`トレイトの上でストリームを読み書きし、WebTransportのライブラリに触るのはこのcrateの1ファイルだけ。`xmoq-relay`と`xmoq-moqt-client`がそれらをつなぐ。`Connection`の契約は、メモリ上の接続と実際のループバックの接続の両方に同じテストを当てて確かめる。テスト用の接続だけで通る挙動を前提にしない。
 
 draftが黙っている箇所と矛盾している箇所で2つの実装がどう動くかは、`docs/moqt-implementation-notes.md`に表がある。片方の実装だけを変えない。表に行を足すときと裁定を出すときは、該当の節を本文で読んでから書く。
 
@@ -33,7 +37,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 
 `interop/`は、自前の部品を`moqtail`の相手とつないで確かめるスクリプトの置き場で、lintと型検査の対象にする。`interop/peers/`は`moqtail`のコードの写しなので、整形もlintもしない（元との差分を読めるようにするため）。`interop/`は`packages/`に依存してよいが、逆は禁止する。
 
-照合は`mise run interop`で走らせる。自前と`moqtail`のクライアントの全部の組み合わせで、`moqtail`のリレーを通してObjectを1つ運び、実物のChromiumで確かめる。`mise run check`には入っていない。CIでは`interop`ジョブが同じタスクを呼び、照合が依存するパスに触れていないPRでは、skipと表示して終わる。`crates/`、`packages/`、`interop/`、`fixtures/`を変えたら、報告の前に`mise run interop`も走らせる。
+照合は`mise run interop`で走らせる。自前と`moqtail`のクライアントの全部の組み合わせで、`moqtail`のリレーと自前のリレーのそれぞれを通してObjectを1つ運び、実物のChromiumで確かめる。`mise run check`には入っていない。CIでは`interop`ジョブが同じタスクを呼び、照合が依存するパスに触れていないPRでは、skipと表示して終わる。`crates/`、`packages/`、`interop/`、`fixtures/`を変えたら、報告の前に`mise run interop`も走らせる。
 
 1. 実装する。終わったと報告する前に`mise run check`を実際に走らせ、その出力を報告に含める。通っていない状態で終わったと報告しない
 2. 実装者とは別のレビュアーがコードを読む（`/review-team-xmoq`）。レビュアーには実装者の報告を渡さず、差分だけを渡す

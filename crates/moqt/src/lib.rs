@@ -26,7 +26,7 @@ pub mod session;
 mod test_util;
 pub mod varint;
 
-pub use error::{Error, ErrorScope, TerminationCode, UsageError, stream_reset_code};
+pub use error::{Error, ErrorScope, RequestFault, TerminationCode, UsageError, stream_reset_code};
 
 /// Version identifier offered in `WT-Available-Protocols` and as the QUIC ALPN (§3.1).
 pub const PROTOCOL: &str = "moqt-18";
