@@ -8,7 +8,8 @@
 	"plugins": ["typescript"],
 	// WHY listed here: oxlint 1.87.0 linted packages/*/node_modules when the repository had no
 	// root .gitignore, so this does not rely on one existing.
-	"ignorePatterns": ["**/node_modules/**"],
+	// WHY interop/peers/: copies of code written for moqtail, kept as they came (see biome.jsonc).
+	"ignorePatterns": ["**/node_modules/**", "interop/peers/**"],
 	"categories": {
 		"correctness": "off"
 	},

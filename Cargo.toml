@@ -1,9 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# Phase 0 spikes pin their own dependency sets and are built on their own.
-# Without this, spikes/moqtail/rust-client no longer builds.
-exclude = ["spikes"]
+# Phase 0 spikes and the moqtail peers of the interop runs pin their own dependency sets and
+# are built on their own. Without this, spikes/moqtail/rust-client and
+# interop/peers/moqtail/rust-client no longer build.
+exclude = ["spikes", "interop"]
 
 [workspace.package]
 edition = "2024"

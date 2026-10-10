@@ -29,8 +29,8 @@ check_rust() {
 	members="$(jq -r '.packages[].manifest_path' <<<"${metadata}")"
 
 	while IFS= read -r manifest; do
-		if [[ "${manifest}" == "${REPO_ROOT}/spikes/"* ]]; then
-			report "${manifest} is a workspace member; spikes/ must stay outside the workspace"
+		if [[ "${manifest}" == "${REPO_ROOT}/spikes/"* || "${manifest}" == "${REPO_ROOT}/interop/"* ]]; then
+			report "${manifest} is a workspace member; spikes/ and interop/ must stay outside the workspace"
 		fi
 		# WHY: [workspace.lints] only applies to crates that opt in. A crate without this
 		# line compiles with no project lints and clippy still reports success.
@@ -55,15 +55,19 @@ check_rust() {
 
 	# WHY: a crate under the workspace root that is neither a member nor excluded cannot be
 	# built at all ("current package believes it's in a workspace when it's not"), which would
-	# break the spikes that the experiment records tell readers to run.
-	local spike_root
+	# break the spikes that the experiment records tell readers to run, and the moqtail peers
+	# under interop/ that the own components are checked against.
+	local outside_root outside_dirs=(spikes)
+	if [[ -d interop ]]; then
+		outside_dirs+=(interop)
+	fi
 	while IFS= read -r manifest; do
-		if ! spike_root="$(cargo metadata --format-version 1 --no-deps --manifest-path "${manifest}" 2>/dev/null | jq -r '.workspace_root')"; then
-			report "${manifest} no longer resolves; the root Cargo.toml needs exclude = [\"spikes\"]"
-		elif [[ "${spike_root}" == "${REPO_ROOT}" ]]; then
-			report "${manifest} resolves into the root workspace; spikes/ must stay outside it"
+		if ! outside_root="$(cargo metadata --format-version 1 --no-deps --manifest-path "${manifest}" 2>/dev/null | jq -r '.workspace_root')"; then
+			report "${manifest} no longer resolves; the root Cargo.toml needs exclude = [\"spikes\", \"interop\"]"
+		elif [[ "${outside_root}" == "${REPO_ROOT}" ]]; then
+			report "${manifest} resolves into the root workspace; spikes/ and interop/ must stay outside it"
 		fi
-	done < <(find spikes -name Cargo.toml -not -path '*/target/*')
+	done < <(find "${outside_dirs[@]}" -name Cargo.toml -not -path '*/target/*' -not -path '*/.tools/*' -not -path '*/node_modules/*')
 
 	local spike_deps
 	spike_deps="$(jq -r --arg spikes "${REPO_ROOT}/spikes/" \
@@ -101,14 +105,34 @@ check_rust() {
 	done
 }
 
+# Dependencies of a package.json as "name: version" lines.
+package_deps() {
+	jq -r \
+		'[.dependencies, .devDependencies, .peerDependencies, .optionalDependencies] | map(select(. != null) | to_entries[]) | .[] | "\(.key): \(.value)"' \
+		"$1"
+}
+
+check_spike_deps() {
+	local manifest="$1" spike_deps
+	spike_deps="$(package_deps "${manifest}" | grep -F 'spikes/' || true)"
+	if [[ -n "${spike_deps}" ]]; then
+		report "${manifest} depends on spikes/: ${spike_deps}"
+	fi
+}
+
 check_packages() {
-	local manifest spike_deps
+	local manifest interop_deps interop_name
+	interop_name=""
+	if [[ -f interop/package.json ]]; then
+		interop_name="$(jq -r '.name' interop/package.json)"
+	fi
 	for manifest in "$@"; do
-		spike_deps="$(jq -r \
-			'[.dependencies, .devDependencies, .peerDependencies, .optionalDependencies] | map(select(. != null) | to_entries[]) | .[] | select(.value | test("spikes/")) | "\(.key): \(.value)"' \
-			"${manifest}")"
-		if [[ -n "${spike_deps}" ]]; then
-			report "${manifest} depends on spikes/: ${spike_deps}"
+		check_spike_deps "${manifest}"
+		# WHY by name as well as by path: in the Bun workspace a package would reach interop/
+		# as "<name>: workspace:*", with no path in it.
+		interop_deps="$(package_deps "${manifest}" | grep -E "interop/|^${interop_name:-<none>}: " || true)"
+		if [[ -n "${interop_deps}" ]]; then
+			report "${manifest} depends on interop/, which checks packages and is not part of them: ${interop_deps}"
 		fi
 	done
 }
@@ -127,11 +151,17 @@ shopt -s nullglob
 package_manifests=(packages/*/package.json)
 shopt -u nullglob
 if [[ ${#package_manifests[@]} -gt 0 ]]; then
-	# Imports from spikes/ are caught by noRestrictedImports in biome.jsonc; this covers package.json.
+	# Imports from spikes/ and interop/ are caught by noRestrictedImports in biome.jsonc; this
+	# covers package.json.
 	check_packages "${package_manifests[@]}"
 	checked=1
 else
 	skip "package.json layer checks" "no packages/*/package.json yet"
+fi
+# interop/ may depend on packages/ and must not depend on spikes/ either.
+if [[ -f interop/package.json ]]; then
+	check_spike_deps interop/package.json
+	checked=1
 fi
 
 if [[ ${errors} -gt 0 ]]; then

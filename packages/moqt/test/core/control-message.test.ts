@@ -1,0 +1,388 @@
+import { describe, expect, test } from "bun:test";
+import {
+	type ControlMessage,
+	decodeControlMessage,
+	decodeRequestStart,
+	encodeControlMessage,
+} from "../../src/core/control-message.ts";
+import { hex, toHex, utf8 } from "../helpers.ts";
+
+// Bytes in this file are derived by hand from the message formats of draft 18.
+// Bytes captured from another implementation are in moqtail-fixtures.test.ts.
+
+const HAND_ENCODED: { name: string; bytes: string; message: ControlMessage }[] =
+	[
+		{
+			name: "REQUEST_ERROR DOES_NOT_EXIST (§10.6.2)",
+			bytes: "05 00 05 10 00 02 6e 6f",
+			message: {
+				type: "REQUEST_ERROR",
+				errorCode: 16n,
+				retryInterval: 0n,
+				errorReason: "no",
+			},
+		},
+		{
+			name: "REQUEST_ERROR REDIRECT with a Redirect structure (§10.6.1)",
+			bytes: "05 00 0e 34 01 00 05 68 3a 2f 2f 61 01 01 62 01 63",
+			message: {
+				type: "REQUEST_ERROR",
+				errorCode: 52n,
+				retryInterval: 1n,
+				errorReason: "",
+				redirect: {
+					connectUri: "h://a",
+					trackNamespace: [utf8("b")],
+					trackName: utf8("c"),
+				},
+			},
+		},
+		{
+			name: "PUBLISH_DONE TRACK_ENDED (§10.11)",
+			bytes: "0b 00 06 02 01 03 65 6e 64",
+			message: {
+				type: "PUBLISH_DONE",
+				statusCode: 2n,
+				streamCount: 1n,
+				errorReason: "end",
+			},
+		},
+		{
+			name: "SUBSCRIBE_OK with EXPIRES, LARGEST_OBJECT and a Track Property (§10.8)",
+			bytes: "04 00 0a 07 02 08 0a 01 03 05 02 80 80",
+			message: {
+				type: "SUBSCRIBE_OK",
+				trackAlias: 7n,
+				parameters: { expires: 10n, largestObject: { group: 3n, object: 5n } },
+				trackProperties: [{ type: 2n, value: 128n }],
+			},
+		},
+		{
+			name: "SUBSCRIBE with timeouts, an AbsoluteRange filter and NEW_GROUP_REQUEST (§10.2)",
+			bytes:
+				"03 00 13 04 00 01 74 05 02 05 04 06 1b 04 04 02 03 01 01 02 10 00",
+			message: {
+				type: "SUBSCRIBE",
+				requestId: 4n,
+				trackNamespace: [],
+				trackName: utf8("t"),
+				parameters: {
+					objectDeliveryTimeout: 5n,
+					subgroupDeliveryTimeout: 6n,
+					subscriptionFilter: {
+						filterType: "AbsoluteRange",
+						startLocation: { group: 2n, object: 3n },
+						endGroupDelta: 1n,
+					},
+					groupOrder: "Descending",
+					newGroupRequest: 0n,
+				},
+			},
+		},
+		{
+			name: "SUBSCRIBE with two AUTHORIZATION_TOKENs and RENDEZVOUS_TIMEOUT (§10.2.2, §10.2.6)",
+			bytes: "03 00 0e 00 00 01 74 03 03 02 aa bb 00 01 cc 01 05",
+			message: {
+				type: "SUBSCRIBE",
+				requestId: 0n,
+				trackNamespace: [],
+				trackName: utf8("t"),
+				parameters: {
+					authorizationToken: [hex("aa bb"), hex("cc")],
+					rendezvousTimeout: 5n,
+				},
+			},
+		},
+		{
+			name: "REQUEST_UPDATE with FORWARD (§10.9)",
+			bytes: "02 00 04 01 01 10 01",
+			message: {
+				type: "REQUEST_UPDATE",
+				requestId: 1n,
+				parameters: { forward: true },
+			},
+		},
+	];
+
+describe("control messages encoded by hand from the draft", () => {
+	test.each(HAND_ENCODED)("decodes $name", ({ bytes, message }) => {
+		const input = hex(bytes);
+		expect(decodeControlMessage(input)).toEqual({
+			status: "ok",
+			value: message,
+			bytesRead: input.length,
+		});
+	});
+
+	test.each(HAND_ENCODED)("encodes $name", ({ bytes, message }) => {
+		expect(toHex(encodeControlMessage(message))).toBe(bytes);
+	});
+});
+
+describe("decodeControlMessage", () => {
+	test.each([
+		{ name: "empty input", bytes: "" },
+		{ name: "Message Type only", bytes: "04" },
+		{ name: "half of Message Length", bytes: "04 00" },
+		{ name: "payload one byte short", bytes: "04 00 02 00" },
+	])("waits for more bytes: $name", ({ bytes }) => {
+		expect(decodeControlMessage(hex(bytes))).toEqual({ status: "incomplete" });
+	});
+
+	test("reads only the first message and reports its length", () => {
+		expect(decodeControlMessage(hex("07 00 01 00 04 00 02 00 00"))).toEqual({
+			status: "ok",
+			value: { type: "REQUEST_OK", parameters: {}, trackProperties: [] },
+			bytesRead: 4,
+		});
+	});
+
+	// `code` is the Session termination error code of §3.5.
+	test.each([
+		{ name: "unknown Message Type 0x3f", bytes: "3f 00 00", code: 3 },
+		{ name: "reserved Message Type 0x01", bytes: "01 00 00", code: 3 },
+		{ name: "reserved Message Type 0x20", bytes: "20 00 00", code: 3 },
+		{ name: "reserved Message Type 0x21", bytes: "21 00 00", code: 3 },
+		{ name: "reserved Message Type 0x40", bytes: "40 00 00", code: 3 },
+		{ name: "reserved Message Type 0x41", bytes: "41 00 00", code: 3 },
+		{
+			name: "TRACK_NAMESPACE_PREFIX in the REQUEST_UPDATE of a subscription (§10.2.1)",
+			bytes: "02 00 03 01 01 34",
+			code: 3,
+		},
+		{
+			name: "EXPIRES in REQUEST_UPDATE (§10.2.1)",
+			bytes: "02 00 04 01 01 08 00",
+			code: 3,
+		},
+		{
+			name: "0x1E PUBLISH_OK, in Table 5 without a format",
+			bytes: "1e 00 01 00",
+			code: 1,
+		},
+		{ name: "GOAWAY, not implemented", bytes: "10 00 02 00 00", code: 1 },
+		{
+			name: "REQUEST_OK whose Track Properties end inside a pair",
+			bytes: "07 00 02 00 01",
+			code: 3,
+		},
+		{
+			name: "PUBLISH_DONE with a byte of its Message Length left over",
+			bytes: "0b 00 04 02 01 00 00",
+			code: 3,
+		},
+		{
+			name: "Message Length shorter than the payload",
+			bytes: "04 00 01 00",
+			code: 3,
+		},
+		{
+			name: "unknown Message Parameter 0x01",
+			bytes: "07 00 03 01 01 00",
+			code: 3,
+		},
+		{ name: "duplicate FORWARD", bytes: "07 00 05 02 10 01 00 01", code: 3 },
+		{ name: "FORWARD value 2", bytes: "07 00 03 01 10 02", code: 3 },
+		{ name: "GROUP_ORDER value 3", bytes: "07 00 03 01 22 03", code: 3 },
+		{
+			name: "AUTHORIZATION_TOKEN in REQUEST_OK (§10.2.1)",
+			bytes: "07 00 04 01 03 01 00",
+			code: 3,
+		},
+		{
+			name: "RENDEZVOUS_TIMEOUT in PUBLISH (§10.2.1)",
+			bytes: "1d 00 07 00 00 00 00 01 04 05",
+			code: 3,
+		},
+		{
+			name: "FILL_TIMEOUT in SUBSCRIBE (§10.2.1)",
+			bytes: "03 00 06 00 00 00 01 0a 00",
+			code: 3,
+		},
+		{
+			name: "unknown Filter Type 5",
+			bytes: "03 00 07 00 00 00 01 21 01 05",
+			code: 3,
+		},
+		{
+			name: "SUBSCRIPTION_FILTER longer than LargestObject needs",
+			bytes: "03 00 08 00 00 00 01 21 02 02 00",
+			code: 3,
+		},
+		{
+			name: "EXPIRES in SUBSCRIBE (§10.2.1)",
+			bytes: "03 00 06 00 00 00 01 08 00",
+			code: 3,
+		},
+		{
+			name: "FORWARD in SUBSCRIBE_OK (§10.2.1)",
+			bytes: "04 00 04 00 01 10 01",
+			code: 3,
+		},
+		{
+			name: "FORWARD in PUBLISH_NAMESPACE (§10.2.1)",
+			bytes: "06 00 05 00 00 01 10 01",
+			code: 3,
+		},
+		{
+			name: "Track Namespace Field of length 0",
+			bytes: "06 00 04 00 01 00 00",
+			code: 3,
+		},
+		{ name: "33 Track Namespace Fields", bytes: "06 00 03 00 21 00", code: 3 },
+		{
+			name: "Reason Phrase Length 1025",
+			bytes: "05 00 04 00 00 84 01",
+			code: 3,
+		},
+		{
+			name: "Key-Value-Pair Length 65536",
+			bytes: "af 00 00 05 01 c1 00 00 00",
+			code: 3,
+		},
+		{ name: "Setup Option cut short", bytes: "af 00 00 02 07 05", code: 3 },
+	])("rejects $name", ({ bytes, code }) => {
+		const result = decodeControlMessage(hex(bytes));
+		expect(result.status).toBe("error");
+		if (result.status === "error") expect(result.error.code).toBe(code);
+	});
+});
+
+describe("local limits of decodeControlMessage", () => {
+	// `pairs` Setup Options of Type 2, 4, 6, ... with value 0: "02 00" each.
+	test.each([
+		{ pairs: 64, status: "ok" },
+		{ pairs: 65, status: "error" },
+	])("a SETUP with $pairs Setup Options: $status", ({ pairs, status }) => {
+		const payload = "02 00 ".repeat(pairs);
+		const length = (pairs * 2).toString(16).padStart(4, "0");
+		const result = decodeControlMessage(
+			hex(`af 00 ${length.slice(0, 2)} ${length.slice(2)} ${payload}`),
+		);
+		expect(result.status).toBe(status);
+		// The peer broke no rule: INTERNAL_ERROR, not PROTOCOL_VIOLATION.
+		if (result.status === "error") expect(result.error.code).toBe(1);
+	});
+});
+
+describe("the limit on Message Parameters", () => {
+	// A SUBSCRIBE with `tokens` AUTHORIZATION_TOKEN parameters, each "aa":
+	// "03 01 aa" for the first, "00 01 aa" for the rest.
+	test.each([
+		{ tokens: 64, status: "ok" },
+		{ tokens: 65, status: "error" },
+	])(
+		"a SUBSCRIBE with $tokens AUTHORIZATION_TOKENs: $status",
+		({ tokens, status }) => {
+			const payload = `00 00 00 ${tokens.toString(16)} 03 01 aa ${"00 01 aa ".repeat(tokens - 1)}`;
+			const length = (4 + tokens * 3).toString(16).padStart(4, "0");
+			const result = decodeControlMessage(
+				hex(`03 ${length.slice(0, 2)} ${length.slice(2)} ${payload}`),
+			);
+			expect(result.status).toBe(status);
+			if (result.status === "error") expect(result.error.code).toBe(1);
+		},
+	);
+});
+
+describe("a Number of Parameters the message is too short for", () => {
+	// A SUBSCRIBE that ends after its Number of Parameters. `code` is the
+	// Session termination error code.
+	test.each([
+		{ name: "64, within the limit", count: "40", code: 3 },
+		{ name: "65, over the limit as well", count: "41", code: 1 },
+	])("$name: closes with code $code", ({ count, code }) => {
+		const result = decodeControlMessage(hex(`03 00 04 00 00 00 ${count}`));
+		expect(result).toMatchObject({ status: "error", error: { code } });
+	});
+});
+
+describe("decodeRequestStart", () => {
+	test.each([
+		{
+			name: "SUBSCRIBE with one byte of its payload",
+			bytes: "03 00 1f 01",
+			messageType: 3n,
+			requestId: 1n,
+		},
+		{
+			name: "FETCH, which is not implemented",
+			bytes: "16 00 02 05 00",
+			messageType: 22n,
+			requestId: 5n,
+		},
+	])(
+		"reads Message Type and Request ID: $name",
+		({ bytes, messageType, requestId }) => {
+			expect(decodeRequestStart(hex(bytes))).toMatchObject({
+				status: "ok",
+				value: { messageType, requestId },
+			});
+		},
+	);
+
+	test.each([
+		{ name: "Message Type only", bytes: "03" },
+		{ name: "no payload byte yet", bytes: "03 00 1f" },
+		{ name: "half of a 2-byte Request ID", bytes: "03 00 1f 80" },
+	])("waits for more bytes: $name", ({ bytes }) => {
+		expect(decodeRequestStart(hex(bytes))).toEqual({ status: "incomplete" });
+	});
+
+	// §3.3: a request stream begins with one of seven message types.
+	test.each([
+		{ name: "SUBSCRIBE_OK", bytes: "04 00 02 00 00" },
+		{ name: "an unknown Message Type", bytes: "3f 00 00" },
+		{ name: "a SUBSCRIBE with an empty payload", bytes: "03 00 00" },
+		{
+			name: "a Message Length that ends inside the Request ID",
+			bytes: "03 00 01 80",
+		},
+	])("reports a PROTOCOL_VIOLATION for $name", ({ bytes }) => {
+		const result = decodeRequestStart(hex(bytes));
+		expect(result.status).toBe("error");
+		if (result.status === "error") expect(result.error.code).toBe(3);
+	});
+});
+
+describe("encodeControlMessage", () => {
+	test.each([
+		{
+			name: "a parameter outside its scope",
+			message: {
+				type: "SUBSCRIBE_OK",
+				trackAlias: 0n,
+				parameters: { forward: true },
+				trackProperties: [],
+			},
+		},
+		{
+			name: "an empty Track Namespace Field",
+			message: {
+				type: "PUBLISH_NAMESPACE",
+				requestId: 0n,
+				trackNamespace: [new Uint8Array(0)],
+				parameters: {},
+			},
+		},
+		{
+			name: "a Redirect without the REDIRECT code",
+			message: {
+				type: "REQUEST_ERROR",
+				errorCode: 0n,
+				retryInterval: 0n,
+				errorReason: "",
+				redirect: {
+					connectUri: "",
+					trackNamespace: [],
+					trackName: new Uint8Array(0),
+				},
+			},
+		},
+	] satisfies { name: string; message: ControlMessage }[])(
+		"refuses $name",
+		({ message }) => {
+			expect(() => encodeControlMessage(message)).toThrow();
+		},
+	);
+});
