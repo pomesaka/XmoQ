@@ -12,7 +12,8 @@ workspace = true
 default = ["quic"]
 # The connection over WebTransport (`wt`). Without it the crate has the stream
 # handling and the in-memory connection only, and pulls in no QUIC stack.
-quic = ["dep:web-transport-quinn", "dep:url"]
+# `tokio/net` resolves the host name of the server.
+quic = ["dep:web-transport-quinn", "dep:url", "tokio/net"]
 
 [dependencies]
 xmoq-moqt = { path = "../moqt" }
