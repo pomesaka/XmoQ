@@ -63,6 +63,13 @@ const STOP_TIMER: Action = Action::StopUpstreamTimer {
     session: PUBLISHER,
     request: OWN,
 };
+/// The wait for the publisher's fetch stream after its `FETCH_OK`: 5 seconds
+/// for a FETCH without `FILL_TIMEOUT`.
+const AWAIT_STREAM: Action = Action::StartFetchStreamTimer {
+    session: PUBLISHER,
+    request: OWN,
+    wait_ms: 5_000,
+};
 const START_TIMER: Action = Action::StartUpstreamTimer {
     session: PUBLISHER,
     request: OWN,
@@ -342,7 +349,7 @@ fn fetches_that_come_to_their_end() -> Vec<Case> {
             "the answer, then the stream: the wait goes on for the stream",
             true,
             vec![
-                (Ok, vec![START_TIMER, fetch_ok_to_alice()]),
+                (Ok, vec![AWAIT_STREAM, fetch_ok_to_alice()]),
                 (Stream, vec![STOP_TIMER, PIPE]),
                 (
                     PipeEnded(FetchPipeEnd::Finished),
@@ -376,7 +383,7 @@ fn fetches_that_come_to_their_end() -> Vec<Case> {
             "the answer comes and no stream: UNKNOWN_OBJECT_STATUS (0x6) on the request stream",
             true,
             vec![
-                (Ok, vec![START_TIMER, fetch_ok_to_alice()]),
+                (Ok, vec![AWAIT_STREAM, fetch_ok_to_alice()]),
                 (TimedOut, vec![CANCEL_UPSTREAM, reset(0x6)]),
             ],
         ),
@@ -440,7 +447,7 @@ fn fetches_that_the_publisher_cuts_short() -> Vec<Case> {
             "the publisher resets its stream after it answered",
             true,
             vec![
-                (Ok, vec![START_TIMER, fetch_ok_to_alice()]),
+                (Ok, vec![AWAIT_STREAM, fetch_ok_to_alice()]),
                 (Stream, vec![STOP_TIMER, PIPE]),
                 (
                     PipeEnded(FetchPipeEnd::UpstreamAborted(Some(0x6))),
@@ -525,7 +532,12 @@ fn fetches_with_updates() -> Vec<Case> {
                 (Update(4), vec![]),
                 (
                     Ok,
-                    vec![START_TIMER, fetch_ok_to_alice(), request_ok(), request_ok()],
+                    vec![
+                        AWAIT_STREAM,
+                        fetch_ok_to_alice(),
+                        request_ok(),
+                        request_ok(),
+                    ],
                 ),
                 (Update(6), vec![request_ok()]),
             ],
@@ -888,9 +900,41 @@ fn a_track_found_malformed_takes_its_fetches_with_it() {
             stream: StreamKey(8),
         },
     ];
-    assert!(actions.ends_with(&expected), "{actions:?}");
+    assert!(actions.starts_with(&expected), "{actions:?}");
     // The FETCH for the other track is still asked.
     assert_eq!(relay.counts().fetches, 1);
+}
+
+#[test]
+fn a_joining_fetch_of_a_track_found_malformed_is_refused_as_that() {
+    // Alice's Joining FETCH for the track "b" is asked of the publisher.
+    let mut relay = relay_with_a_subscription(true);
+    assert_eq!(
+        relay.step(joining(true, 0, vec![])),
+        asks_for(at(5, 0), at(5, 3))
+    );
+    relay.step(Event::DataStreamOpened {
+        session: PUBLISHER,
+        stream: StreamKey(20),
+        header: header(41),
+    });
+    let actions = relay.step(Event::TrackMalformed {
+        session: PUBLISHER,
+        stream: StreamKey(20),
+    });
+    // MALFORMED_TRACK (0x12), and not what a FETCH gets whose subscription
+    // ended (0x7), though the subscription ends in the same step.
+    let expected = [
+        Action::CancelOwnRequest {
+            session: PUBLISHER,
+            request: OWN,
+            code: 0x1,
+        },
+        send(FETCH_STREAM, request_error(0x12)),
+        FINISH,
+    ];
+    assert!(actions.starts_with(&expected), "{actions:?}");
+    assert_eq!(relay.counts().fetches, 0);
 }
 
 #[test]
@@ -946,26 +990,592 @@ fn a_fetch_waits_for_only_so_many_updates() {
     assert_eq!(relay.counts().fetches, 0);
 }
 
-#[test]
-fn a_joining_fetch_is_not_served() {
+/// A Joining FETCH of Alice on [`FETCH_STREAM`], Request ID 2, that names
+/// her SUBSCRIBE with Request ID 0.
+fn joining(relative: bool, joining_start: u64, parameters: Vec<Parameter>) -> Event {
+    let range = if relative {
+        FetchRange::RelativeJoining {
+            joining_request_id: 0,
+            joining_start,
+        }
+    } else {
+        FetchRange::AbsoluteJoining {
+            joining_request_id: 0,
+            joining_start,
+        }
+    };
+    Event::RequestOpened {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        first: ControlMessage::Fetch(Fetch {
+            request_id: 2,
+            range,
+            parameters,
+        }),
+    }
+}
+
+/// A relay in which the publisher offers the track "b" with the largest
+/// Location {5, 2}, and Alice has subscribed to it on her stream 0 with the
+/// Request ID 0 and this Forward State: her Joining Location is {5, 2}.
+fn relay_with_a_subscription(forward: bool) -> Relay {
     let mut relay = relay_with_track();
-    subscribe_to_track(&mut relay, ALICE);
-    // NOT_SUPPORTED (0x3).
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: ControlMessage::Publish(Publish {
+            request_id: 2,
+            full_track_name: track(b"b"),
+            track_alias: 41,
+            parameters: vec![Parameter::LargestObject(at(5, 2))],
+            track_properties: vec![],
+        }),
+    });
+    let actions = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            full_track_name: track(b"b"),
+            parameters: vec![Parameter::Forward(forward)],
+        }),
+    });
     assert_eq!(
-        relay.step(Event::RequestOpened {
+        actions,
+        [send(
+            StreamKey(0),
+            ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: 0,
+                parameters: vec![Parameter::LargestObject(at(5, 2))],
+                track_properties: vec![],
+            })
+        )]
+    );
+    relay
+}
+
+/// The relay's FETCH to the publisher for a range of the track "b".
+fn asks_for(start: Location, end: Location) -> Vec<Action> {
+    vec![
+        Action::OpenRequest {
+            session: PUBLISHER,
+            request: OWN,
+            message: standalone(1, b"b", (start, end), vec![]),
+        },
+        START_TIMER,
+    ]
+}
+
+#[test]
+fn a_joining_fetch_becomes_a_range_counted_from_the_joining_location() {
+    let refused = |error_code| vec![send(FETCH_STREAM, request_error(error_code)), FINISH];
+    // The Joining Location is {5, 2}: the range ends with it, End Location
+    // {5, 3} (§10.12.2.1).
+    //
+    // (Relative or Absolute; Joining Start; what the relay does)
+    let cases = [
+        // Relative: so many Groups before the one of the Joining Location.
+        (true, 0, asks_for(at(5, 0), at(5, 3))),
+        (true, 2, asks_for(at(3, 0), at(5, 3))),
+        (true, 5, asks_for(at(0, 0), at(5, 3))),
+        // More Groups back than there are: from Group 0.
+        (true, 9, asks_for(at(0, 0), at(5, 3))),
+        // Absolute: from that Group.
+        (false, 1, asks_for(at(1, 0), at(5, 3))),
+        (false, 5, asks_for(at(5, 0), at(5, 3))),
+        // A Group after the Joining Location: INVALID_RANGE (0x11).
+        (false, 6, refused(0x11)),
+    ];
+    for (relative, joining_start, expected) in cases {
+        let mut relay = relay_with_a_subscription(true);
+        assert_eq!(
+            relay.step(joining(relative, joining_start, vec![])),
+            expected,
+            "relative: {relative}, Joining Start {joining_start}"
+        );
+    }
+}
+
+#[test]
+fn a_joining_fetch_needs_a_subscription_that_forwards_and_has_a_joining_location() {
+    // Without Objects when the SUBSCRIBE_OK was sent, the subscription has
+    // no Joining Location.
+    let without_objects = || {
+        let mut relay = relay_with_track();
+        assert_eq!(
+            subscribe_to_track(&mut relay, ALICE),
+            [subscribe_ok(ALICE, None)]
+        );
+        relay
+    };
+    // (the relay and Alice's subscription; the error code)
+    let cases = [
+        // Forward State 0 (§10.12.2): INVALID_RANGE (0x11).
+        (relay_with_a_subscription(false), 0x11),
+        (without_objects(), 0x11),
+    ];
+    for (mut relay, error_code) in cases {
+        assert_eq!(
+            relay.step(joining(true, 0, vec![])),
+            [send(FETCH_STREAM, request_error(error_code)), FINISH]
+        );
+    }
+}
+
+#[test]
+fn a_joining_fetch_that_waits_for_nothing_is_answered_up_to_the_joining_location() {
+    let mut relay = relay_with_a_subscription(true);
+    // FETCH_OK with End Location {5, 3}, and End of Unknown Range at {5, 2}.
+    assert_eq!(
+        relay.step(joining(true, 1, vec![Parameter::FillTimeout(0)])),
+        [
+            send(
+                FETCH_STREAM,
+                ControlMessage::FetchOk(FetchOk {
+                    end_of_track: false,
+                    end_location: at(5, 3),
+                    parameters: vec![],
+                    track_properties: vec![],
+                })
+            ),
+            Action::WriteFetchStream {
+                session: ALICE,
+                stream: FETCH_STREAM,
+                request_id: 2,
+                body: vec![0x81, 0x0c, 0x05, 0x02],
+                wait_ms: 10_000,
+            },
+        ]
+    );
+}
+
+/// A relay in which Bob announced the namespace, Alice has subscribed to the
+/// track "c" in it with this Forward State, and the relay's SUBSCRIBE to Bob
+/// (its request 0, Request ID 1) has no answer yet: Alice's SUBSCRIBE is
+/// Pending.
+fn relay_with_a_pending_subscription(forward: bool) -> Relay {
+    let mut relay = relay_with_track();
+    relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: StreamKey(0),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 0,
+            track_namespace: namespace(),
+            parameters: vec![],
+        }),
+    });
+    let actions = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            full_track_name: track(b"c"),
+            parameters: vec![Parameter::Forward(forward)],
+        }),
+    });
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [
+                Action::OpenRequest {
+                    session: BOB,
+                    request: OwnRequestKey(0),
+                    ..
+                },
+                _
+            ]
+        ),
+        "{actions:?}"
+    );
+    relay
+}
+
+fn bob_answers(relay: &mut Relay, message: ControlMessage) -> Vec<Action> {
+    relay.step(Event::OwnRequestMessage {
+        session: BOB,
+        request: OwnRequestKey(0),
+        message,
+    })
+}
+
+#[test]
+fn a_joining_fetch_for_a_pending_subscribe_waits_for_its_answer() {
+    let subscribe_ok_from_bob = ControlMessage::SubscribeOk(SubscribeOk {
+        track_alias: UPSTREAM_ALIAS,
+        parameters: vec![Parameter::LargestObject(at(7, 1))],
+        track_properties: vec![],
+    });
+    let answer = |message| Event::OwnRequestMessage {
+        session: BOB,
+        request: OwnRequestKey(0),
+        message,
+    };
+    // The FETCH is asked of Bob for {7, 0} to {7, 2}, with the relay's next
+    // request (1, Request ID 3): Alice's SUBSCRIBE_OK had LARGEST_OBJECT
+    // {7, 1}.
+    let asked = vec![
+        Action::OpenRequest {
+            session: BOB,
+            request: OwnRequestKey(1),
+            message: standalone(3, b"c", (at(7, 0), at(7, 2)), vec![]),
+        },
+        Action::StartUpstreamTimer {
+            session: BOB,
+            request: OwnRequestKey(1),
+        },
+    ];
+    // FETCH_OK with End Location {7, 2}, and End of Unknown Range at {7, 1}.
+    let answered_at_once = vec![
+        send(
+            FETCH_STREAM,
+            ControlMessage::FetchOk(FetchOk {
+                end_of_track: false,
+                end_location: at(7, 2),
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+        ),
+        Action::WriteFetchStream {
             session: ALICE,
             stream: FETCH_STREAM,
+            request_id: 2,
+            body: vec![0x81, 0x0c, 0x07, 0x01],
+            wait_ms: 10_000,
+        },
+    ];
+    let refused = |error_code| vec![send(FETCH_STREAM, request_error(error_code)), FINISH];
+    // (the Forward State of the SUBSCRIBE; the parameters of the FETCH; what
+    //  becomes of the SUBSCRIBE; the end of what the relay does; Alice's
+    //  FETCH requests after it)
+    let cases = [
+        (
+            true,
+            vec![],
+            answer(subscribe_ok_from_bob.clone()),
+            asked,
+            1,
+        ),
+        (
+            true,
+            vec![Parameter::FillTimeout(0)],
+            answer(subscribe_ok_from_bob.clone()),
+            answered_at_once,
+            1,
+        ),
+        // Forward State 0: INVALID_RANGE (0x11), when the SUBSCRIBE is
+        // accepted and not before.
+        (
+            false,
+            vec![],
+            answer(subscribe_ok_from_bob.clone()),
+            refused(0x11),
+            0,
+        ),
+        // The SUBSCRIBE is refused, or not answered in time:
+        // INVALID_JOINING_REQUEST_ID (0x32).
+        (true, vec![], answer(request_error(0x10)), refused(0x32), 0),
+        (
+            true,
+            vec![],
+            Event::UpstreamTimeout {
+                session: BOB,
+                request: OwnRequestKey(0),
+            },
+            refused(0x32),
+            0,
+        ),
+    ];
+    for (forward, parameters, becomes, expected, fetches) in cases {
+        let mut relay = relay_with_a_pending_subscription(forward);
+        assert_eq!(relay.step(joining(true, 0, parameters)), [], "{becomes:?}");
+        assert_eq!(relay.counts().fetches, 1, "{becomes:?}");
+        let actions = relay.step(becomes.clone());
+        assert!(actions.ends_with(&expected), "{becomes:?}: {actions:?}");
+        assert_eq!(relay.counts().fetches, fetches, "{becomes:?}");
+    }
+}
+
+#[test]
+fn a_joining_fetch_that_is_given_up_while_it_waits_is_not_asked_for() {
+    let mut relay = relay_with_a_pending_subscription(true);
+    relay.step(joining(true, 0, vec![]));
+    // CANCELLED (0x1) on its request stream.
+    assert_eq!(
+        happen(&mut relay, &Happens::Cancelled),
+        [Action::ResetRequest {
+            session: ALICE,
+            stream: FETCH_STREAM,
+            code: 0x1,
+        }]
+    );
+    assert_eq!(relay.counts().fetches, 0);
+    let actions = bob_answers(
+        &mut relay,
+        ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: UPSTREAM_ALIAS,
+            parameters: vec![Parameter::LargestObject(at(7, 1))],
+            track_properties: vec![],
+        }),
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::OpenRequest { .. })),
+        "{actions:?}"
+    );
+}
+
+#[test]
+fn a_joining_fetch_that_is_read_before_its_subscribe_is_refused() {
+    // No SUBSCRIBE with the Request ID 0 has come from Alice: the session
+    // knows no such request. INVALID_JOINING_REQUEST_ID (0x32), and the
+    // session stays.
+    let mut relay = relay_with_track();
+    assert_eq!(
+        relay.step(joining(true, 0, vec![])),
+        [send(FETCH_STREAM, request_error(0x32)), FINISH]
+    );
+    assert_eq!(relay.counts().fetches, 0);
+}
+
+#[test]
+fn a_joining_fetch_that_waits_counts_as_one_of_the_sessions_fetches() {
+    let mut relay = relay_with_a_pending_subscription(true);
+    for index in 0..16u64 {
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(index + 1),
             first: ControlMessage::Fetch(Fetch {
-                request_id: 2,
+                request_id: (index + 1) * 2,
                 range: FetchRange::RelativeJoining {
                     joining_request_id: 0,
-                    joining_start: 1,
+                    joining_start: 0,
                 },
                 parameters: vec![],
             }),
+        });
+        assert_eq!(actions, [], "{index}");
+    }
+    assert_eq!(relay.counts().fetches, 16);
+    // EXCESSIVE_LOAD (0x9) for the seventeenth.
+    assert_eq!(
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(17),
+            first: standalone(34, b"a", (at(0, 0), at(2, 0)), vec![]),
         }),
-        [send(FETCH_STREAM, request_error(0x3)), FINISH]
+        [
+            send(StreamKey(17), request_error(0x9)),
+            Action::FinishRequest {
+                session: ALICE,
+                stream: StreamKey(17),
+            },
+        ]
     );
+}
+
+/// What ends Alice's subscription to the track "b" (her request stream 0).
+#[derive(Debug, Clone, Copy)]
+enum Ending {
+    /// Alice resets the SUBSCRIBE's stream.
+    Cancelled,
+    /// The publisher ends the track: `PUBLISH_DONE` on its PUBLISH.
+    TrackEnded,
+    /// A subgroup stream of the track that the relay cannot write to Alice
+    /// any more: `TOO_FAR_BEHIND`.
+    TooFarBehind,
+    /// A `REQUEST_UPDATE` for the subscription, which the relay refuses and
+    /// ends the subscription for: `UPDATE_FAILED`.
+    UpdateRefused,
+}
+
+/// (the ending; whether Alice finished her direction of the SUBSCRIBE's
+///  stream before, which ends nothing by itself)
+///
+/// WHY not after a FIN for the two that Alice's own stream brings about: a
+/// stream that is reset was not finished, and one that is finished carries
+/// no `REQUEST_UPDATE`.
+const ENDINGS: [(Ending, bool); 6] = [
+    (Ending::Cancelled, false),
+    (Ending::TrackEnded, false),
+    (Ending::TrackEnded, true),
+    (Ending::TooFarBehind, false),
+    (Ending::TooFarBehind, true),
+    (Ending::UpdateRefused, false),
+];
+
+impl Ending {
+    /// The events that bring it about.
+    fn events(self, after_a_fin: bool) -> Vec<Event> {
+        let alice_finishes = Event::RequestClosed {
+            session: ALICE,
+            stream: StreamKey(0),
+            how: RequestEnd::Fin,
+        };
+        let ending = match self {
+            Self::Cancelled => vec![Event::RequestClosed {
+                session: ALICE,
+                stream: StreamKey(0),
+                how: RequestEnd::Aborted,
+            }],
+            Self::TrackEnded => vec![Event::RequestMessage {
+                session: PUBLISHER,
+                stream: StreamKey(1),
+                message: publish_done(0x2, 0),
+            }],
+            // The relay opens the stream to Alice as its out stream 0.
+            Self::TooFarBehind => vec![
+                Event::DataStreamOpened {
+                    session: PUBLISHER,
+                    stream: StreamKey(20),
+                    header: header(41),
+                },
+                Event::SendQueueFull {
+                    out_stream: OutStreamKey(0),
+                },
+            ],
+            Self::UpdateRefused => vec![Event::RequestMessage {
+                session: ALICE,
+                stream: StreamKey(0),
+                message: ControlMessage::RequestUpdate(RequestUpdate {
+                    request_id: 4,
+                    parameters: vec![],
+                }),
+            }],
+        };
+        after_a_fin
+            .then_some(alice_finishes)
+            .into_iter()
+            .chain(ending)
+            .collect()
+    }
+}
+
+#[test]
+fn a_joining_fetch_without_its_answer_ends_with_its_subscription() {
+    let stream_opens = Event::FetchStreamOpened {
+        session: PUBLISHER,
+        stream: UPSTREAM_STREAM,
+        request_id: 1,
+    };
+    // INVALID_JOINING_REQUEST_ID (0x32), and the relay's FETCH is cancelled.
+    let refused = vec![
+        CANCEL_UPSTREAM,
+        send(FETCH_STREAM, request_error(0x32)),
+        FINISH,
+    ];
+    // Where the publisher's fetch stream came ahead of its FETCH_OK and is
+    // passed on, that is cut as well, with CANCELLED (0x1): without the
+    // subscription the FETCH_OK cannot be made when it comes.
+    let cut = vec![
+        abort_pipe(0x1),
+        CANCEL_UPSTREAM,
+        send(FETCH_STREAM, request_error(0x32)),
+        FINISH,
+    ];
+    // (whether the fetch stream has come; what the relay does about the
+    //  FETCH)
+    for (stream_came, expected) in [(false, refused), (true, cut)] {
+        for (ending, after_a_fin) in ENDINGS {
+            let name = format!("{ending:?}, after a FIN: {after_a_fin}, stream: {stream_came}");
+            let mut relay = relay_with_a_subscription(true);
+            relay.step(joining(true, 0, vec![]));
+            if stream_came {
+                relay.step(stream_opens.clone());
+            }
+            assert_eq!(relay.counts().subscriptions, 1, "{name}");
+            let mut actions = Vec::new();
+            for event in ending.events(after_a_fin) {
+                actions.extend(relay.step(event));
+            }
+            let about_the_fetch: Vec<Action> = actions
+                .iter()
+                .filter(|action| expected.contains(action))
+                .cloned()
+                .collect();
+            assert_eq!(about_the_fetch, expected, "{name}: {actions:?}");
+            let counts = relay.counts();
+            assert_eq!(
+                (counts.subscriptions, counts.fetches, counts.own_requests),
+                (0, 0, 0),
+                "{name}"
+            );
+            // The publisher's answer to the FETCH that was cancelled does
+            // nothing; Alice's session is not closed for it.
+            let late = relay.step(Event::OwnRequestMessage {
+                session: PUBLISHER,
+                request: OWN,
+                message: fetch_ok(at(5, 3)),
+            });
+            assert_eq!(late, [], "{name}");
+        }
+    }
+}
+
+#[test]
+fn a_joining_fetch_that_has_its_answer_goes_on_when_its_subscription_ends() {
+    for (ending, after_a_fin) in ENDINGS {
+        let name = format!("{ending:?}, after a FIN: {after_a_fin}");
+        let mut relay = relay_with_a_subscription(true);
+        relay.step(joining(true, 0, vec![]));
+        relay.step(Event::OwnRequestMessage {
+            session: PUBLISHER,
+            request: OWN,
+            message: fetch_ok(at(5, 3)),
+        });
+        relay.step(Event::FetchStreamOpened {
+            session: PUBLISHER,
+            stream: UPSTREAM_STREAM,
+            request_id: 1,
+        });
+        let mut actions = Vec::new();
+        for event in ending.events(after_a_fin) {
+            actions.extend(relay.step(event));
+        }
+        // The subscription is over, and nothing is done about the FETCH or
+        // its stream.
+        let about_the_fetch = |action: &Action| match action {
+            Action::AbortFetchPipe { .. } | Action::CancelOwnRequest { .. } => true,
+            Action::SendRequest { stream, .. }
+            | Action::FinishRequest { stream, .. }
+            | Action::ResetRequest { stream, .. } => *stream == FETCH_STREAM,
+            _ => false,
+        };
+        assert!(!actions.iter().any(about_the_fetch), "{name}: {actions:?}");
+        let counts = relay.counts();
+        assert_eq!((counts.subscriptions, counts.fetches), (0, 1), "{name}");
+        // It comes to its end as any other.
+        assert_eq!(
+            relay.step(Event::FetchPipeEnded {
+                session: ALICE,
+                stream: FETCH_STREAM,
+                how: FetchPipeEnd::Finished,
+            }),
+            [FINISH_UPSTREAM, FINISH],
+            "{name}"
+        );
+        assert_eq!(relay.counts().fetches, 0, "{name}");
+    }
+}
+
+#[test]
+fn a_standalone_fetch_goes_on_when_a_subscription_to_its_track_ends() {
+    let mut relay = relay_with_a_subscription(true);
+    let actions = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        first: standalone(2, b"b", (at(0, 0), at(2, 0)), vec![]),
+    });
+    assert!(
+        matches!(actions.as_slice(), [Action::OpenRequest { .. }, _]),
+        "{actions:?}"
+    );
+    relay.step(Event::RequestClosed {
+        session: ALICE,
+        stream: StreamKey(0),
+        how: RequestEnd::Aborted,
+    });
+    assert_eq!(relay.counts().fetches, 1);
 }
 
 #[test]
@@ -990,7 +1600,6 @@ fn a_fetch_that_waits_for_nothing_is_answered_from_what_the_relay_knows() {
                 body: marker,
                 wait_ms: 10_000,
             },
-            FINISH,
         ]
     };
     let refused = |error_code| vec![send(FETCH_STREAM, request_error(error_code)), FINISH];
@@ -1079,10 +1688,351 @@ fn a_fetch_that_waits_for_nothing_is_answered_from_what_the_relay_knows() {
             (usize::from(writes), 0),
             "{name:?}"
         );
-        relay.step(Event::FetchStreamWritten {
-            session: ALICE,
-            stream: FETCH_STREAM,
-        });
+        // The request stream is finished when the stream is written, and not
+        // before; where nothing was written, it was finished with the answer.
+        let expected = if writes { vec![FINISH] } else { vec![] };
+        assert_eq!(relay.step(written(None)), expected, "{name:?}");
         assert_eq!(relay.counts().fetches, 0, "{name:?}");
     }
+}
+
+/// The I/O side is done with the fetch stream the relay wrote for Alice.
+fn written(given_up: Option<u32>) -> Event {
+    Event::FetchStreamWritten {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        given_up,
+    }
+}
+
+#[test]
+fn a_fetch_stream_the_relay_could_not_write_resets_the_request_stream() {
+    let mut relay = relay_with_a_subscription(true);
+    let actions = relay.step(joining(true, 1, vec![Parameter::FillTimeout(0)]));
+    assert!(
+        matches!(actions.last(), Some(Action::WriteFetchStream { .. })),
+        "{actions:?}"
+    );
+    // TOO_FAR_BEHIND (0x5), as the I/O side says for a subscriber that gave
+    // it no stream to write on: FETCH_OK was sent, and no stream comes.
+    assert_eq!(relay.step(written(Some(0x5))), [reset(0x5)]);
+    assert_eq!(relay.counts().fetches, 0);
+    // Said once.
+    assert_eq!(relay.step(written(Some(0x5))), []);
+}
+
+#[test]
+fn the_wait_for_the_stream_after_the_answer_is_the_fill_timeout() {
+    // (FILL_TIMEOUT of the subscriber's FETCH; the wait in milliseconds)
+    let cases = [
+        (None, 5_000),
+        // A second at least.
+        (Some(1), 1_000),
+        (Some(999), 1_000),
+        (Some(1_001), 1_001),
+        (Some(20_000), 20_000),
+        // 30 seconds at most.
+        (Some(60_000), 30_000),
+    ];
+    for (fill_timeout, wait_ms) in cases {
+        let mut relay = relay_with_track();
+        let parameters: Vec<Parameter> = fill_timeout
+            .map(Parameter::FillTimeout)
+            .into_iter()
+            .collect();
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: FETCH_STREAM,
+            first: standalone(0, b"a", (at(0, 0), at(2, 0)), parameters),
+        });
+        let actions = happen(&mut relay, &Happens::Ok);
+        assert_eq!(
+            actions.first(),
+            Some(&Action::StartFetchStreamTimer {
+                session: PUBLISHER,
+                request: OWN,
+                wait_ms,
+            }),
+            "{fill_timeout:?}"
+        );
+    }
+}
+
+#[test]
+fn a_joining_fetch_that_waited_is_held_to_what_a_publisher_is_asked_for() {
+    // Alice's Joining FETCH waits for her SUBSCRIBE, which Bob has not
+    // answered. Meanwhile Bob is asked for 16 FETCH requests: 15 of Alice,
+    // which with the one that waits are all she may have, and one of the
+    // other session.
+    let mut relay = relay_with_a_pending_subscription(true);
+    assert_eq!(relay.step(joining(true, 0, vec![])), []);
+    let asked =
+        |actions: &[Action]| matches!(actions, [Action::OpenRequest { session: BOB, .. }, _]);
+    for index in 0..15u64 {
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(100 + index),
+            first: standalone(4 + index * 2, b"c", (at(0, 0), at(2, 0)), vec![]),
+        });
+        assert!(asked(&actions), "{index}: {actions:?}");
+    }
+    let actions = relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(50),
+        first: standalone(2, b"c", (at(0, 0), at(2, 0)), vec![]),
+    });
+    assert!(asked(&actions), "{actions:?}");
+    // Bob accepts the SUBSCRIBE: the FETCH that waited would be the 17th,
+    // and is refused with EXCESSIVE_LOAD (0x9).
+    let actions = bob_answers(
+        &mut relay,
+        ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: UPSTREAM_ALIAS,
+            parameters: vec![Parameter::LargestObject(at(7, 1))],
+            track_properties: vec![],
+        }),
+    );
+    let refused = [send(FETCH_STREAM, request_error(0x9)), FINISH];
+    assert!(actions.ends_with(&refused), "{actions:?}");
+    assert_eq!(relay.counts().fetches, 16);
+}
+
+#[test]
+fn a_joining_fetch_that_waits_goes_with_its_subscribe_and_with_its_session() {
+    let refused = [send(FETCH_STREAM, request_error(0x32)), FINISH];
+    // (what happens; the end of what the relay does)
+    let cases = [
+        // Alice cancels the SUBSCRIBE that the publisher has not answered:
+        // INVALID_JOINING_REQUEST_ID (0x32) for the FETCH that named it.
+        (
+            Event::RequestClosed {
+                session: ALICE,
+                stream: StreamKey(0),
+                how: RequestEnd::Aborted,
+            },
+            refused.to_vec(),
+        ),
+        // Alice's session is gone: nobody is left to tell.
+        (Event::SessionClosed { session: ALICE }, vec![]),
+    ];
+    for (happens, expected) in cases {
+        let mut relay = relay_with_a_pending_subscription(true);
+        assert_eq!(relay.step(joining(true, 0, vec![])), []);
+        assert_eq!(relay.counts().fetches, 1);
+        let actions = relay.step(happens.clone());
+        // The FETCH hears of it where the slot of the SUBSCRIBE goes, before
+        // what the relay does about the subscription itself.
+        assert!(actions.starts_with(&expected), "{happens:?}: {actions:?}");
+        assert!(
+            !expected.is_empty() || !actions.contains(&FINISH),
+            "{happens:?}: {actions:?}"
+        );
+        assert_eq!(relay.counts().fetches, 0, "{happens:?}");
+    }
+}
+
+#[test]
+fn the_updates_of_a_joining_fetch_that_waits_are_answered_after_its_fetch_ok() {
+    let update = |request_id| Event::RequestMessage {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        message: ControlMessage::RequestUpdate(RequestUpdate {
+            request_id,
+            parameters: vec![],
+        }),
+    };
+    let subscribe_ok_from_bob = ControlMessage::SubscribeOk(SubscribeOk {
+        track_alias: UPSTREAM_ALIAS,
+        parameters: vec![Parameter::LargestObject(at(7, 1))],
+        track_properties: vec![],
+    });
+    // Two updates while the FETCH waits for its SUBSCRIBE, and one while it
+    // waits for the publisher: three REQUEST_OK after the FETCH_OK.
+    let mut relay = relay_with_a_pending_subscription(true);
+    assert_eq!(relay.step(joining(true, 0, vec![])), []);
+    assert_eq!(relay.step(update(4)), []);
+    assert_eq!(relay.step(update(6)), []);
+    bob_answers(&mut relay, subscribe_ok_from_bob.clone());
+    assert_eq!(relay.step(update(8)), []);
+    let actions = relay.step(Event::OwnRequestMessage {
+        session: BOB,
+        request: OwnRequestKey(1),
+        message: fetch_ok(at(7, 2)),
+    });
+    assert_eq!(
+        actions,
+        [
+            Action::StartFetchStreamTimer {
+                session: BOB,
+                request: OwnRequestKey(1),
+                wait_ms: 5_000,
+            },
+            send(FETCH_STREAM, fetch_ok(at(7, 2))),
+            request_ok(),
+            request_ok(),
+            request_ok(),
+        ]
+    );
+
+    // A FETCH that waits for its SUBSCRIBE takes 64 updates; the next one
+    // costs it the FETCH, EXCESSIVE_LOAD (0x9), and none is answered.
+    let mut relay = relay_with_a_pending_subscription(true);
+    assert_eq!(relay.step(joining(true, 0, vec![])), []);
+    for index in 0..64u64 {
+        assert_eq!(relay.step(update(4 + index * 2)), [], "{index}");
+    }
+    assert_eq!(
+        relay.step(update(132)),
+        [send(FETCH_STREAM, request_error(0x9)), FINISH]
+    );
+    assert_eq!(relay.counts().fetches, 0);
+
+    // The 64 are counted on when the FETCH is asked of the publisher: the
+    // next update after that costs the FETCH as well, and the relay's FETCH
+    // to Bob is cancelled.
+    let mut relay = relay_with_a_pending_subscription(true);
+    assert_eq!(relay.step(joining(true, 0, vec![])), []);
+    for index in 0..64u64 {
+        assert_eq!(relay.step(update(4 + index * 2)), [], "{index}");
+    }
+    bob_answers(&mut relay, subscribe_ok_from_bob.clone());
+    assert_eq!(
+        relay.step(update(132)),
+        [
+            Action::CancelOwnRequest {
+                session: BOB,
+                request: OwnRequestKey(1),
+                code: 0x1,
+            },
+            send(FETCH_STREAM, request_error(0x9)),
+            FINISH
+        ]
+    );
+}
+
+#[test]
+fn a_joining_fetch_asks_the_first_source_for_a_range_counted_from_the_largest_of_all() {
+    // Two sources of the track "b": the publisher, whose PUBLISH has the
+    // largest Location {5, 2}, and Bob, whose has {9, 0}.
+    let publish = |request_id, largest| {
+        ControlMessage::Publish(Publish {
+            request_id,
+            full_track_name: track(b"b"),
+            track_alias: 41,
+            parameters: vec![Parameter::LargestObject(largest)],
+            track_properties: vec![],
+        })
+    };
+    let mut relay = relay_with_track();
+    for (session, request_id, largest) in [(PUBLISHER, 2, at(5, 2)), (BOB, 0, at(9, 0))] {
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(1),
+            first: publish(request_id, largest),
+        });
+    }
+    // Alice's Joining Location is the largest the relay knows of: {9, 0}.
+    let actions = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: subscribe(0, b"b"),
+    });
+    assert_eq!(
+        actions,
+        [send(
+            StreamKey(0),
+            ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: 0,
+                parameters: vec![Parameter::LargestObject(at(9, 0))],
+                track_properties: vec![],
+            })
+        )]
+    );
+    // The FETCH for {9, 0} to {9, 1} goes to the publisher, which said that
+    // it has nothing after {5, 2}. What it answers is what Alice gets
+    // (known gaps).
+    assert_eq!(
+        relay.step(joining(true, 0, vec![])),
+        asks_for(at(9, 0), at(9, 1))
+    );
+}
+
+#[test]
+fn a_joining_location_at_the_last_object_id_ends_the_range_with_the_whole_group() {
+    // The track "b" with the largest Location {5, 2^64 - 1}: the Object after
+    // it has no number, and the End Location {5, 0} asks for the whole Group
+    // (§10.12.1), which ends with the same Object.
+    let last = at(5, u64::MAX);
+    let mut relay = relay_with_track();
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: ControlMessage::Publish(Publish {
+            request_id: 2,
+            full_track_name: track(b"b"),
+            track_alias: 41,
+            parameters: vec![Parameter::LargestObject(last)],
+            track_properties: vec![],
+        }),
+    });
+    relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: subscribe(0, b"b"),
+    });
+    assert_eq!(
+        relay.step(joining(true, 0, vec![])),
+        asks_for(at(5, 0), at(5, 0))
+    );
+}
+
+#[test]
+fn a_fetch_that_is_refused_after_its_subscriber_finished_the_stream_leaves_nothing() {
+    let mut relay = relay_with_track();
+    let before = relay.counts();
+    // One more than the 256 requests a session may have open in its session
+    // state: Alice sends a FETCH, finishes
+    // her direction of its request stream, and the publisher refuses the
+    // relay's FETCH; the relay refuses hers.
+    for index in 0..257u64 {
+        let stream = StreamKey(index);
+        let asked = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream,
+            first: standalone(index * 2, b"a", (at(0, 0), at(2, 0)), vec![]),
+        });
+        assert!(
+            matches!(asked.as_slice(), [Action::OpenRequest { .. }, _]),
+            "{index}: {asked:?}"
+        );
+        relay.step(Event::RequestClosed {
+            session: ALICE,
+            stream,
+            how: RequestEnd::Fin,
+        });
+        let refused = relay.step(Event::OwnRequestMessage {
+            session: PUBLISHER,
+            request: OwnRequestKey(index),
+            message: request_error(0x10),
+        });
+        assert!(
+            refused.contains(&send(stream, request_error(0x10))),
+            "{index}: {refused:?}"
+        );
+        relay.step(Event::OwnRequestClosed {
+            session: PUBLISHER,
+            request: OwnRequestKey(index),
+            how: OwnRequestEnd::Fin,
+        });
+    }
+    let after = relay.counts();
+    assert_eq!(
+        (
+            after.requests,
+            after.request_streams,
+            after.fetches,
+            after.own_requests
+        ),
+        (before.requests, before.request_streams, 0, 0)
+    );
 }

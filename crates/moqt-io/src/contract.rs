@@ -95,7 +95,7 @@ pub(crate) async fn a_fetch_stream_writer_that_is_dropped_resets_its_stream<C: C
     b: C,
 ) {
     let header = xmoq_moqt::fetch::FetchHeader { request_id: 2 };
-    let mut writer = crate::open_fetch_stream(&a, header, &crate::Trace::default(), "fetch")
+    let mut writer = crate::open_fetch_stream(&a, header, &crate::Trace::default(), "fetch", 0x5)
         .await
         .expect("open");
     writer.write(b"abc").await.expect("write");
@@ -110,7 +110,7 @@ pub(crate) async fn a_fetch_stream_writer_that_is_dropped_resets_its_stream<C: C
 
     // One that is finished ends with a FIN after its bytes: the header
     // (0x05, Request ID 2) and what was written.
-    let mut writer = crate::open_fetch_stream(&a, header, &crate::Trace::default(), "fetch")
+    let mut writer = crate::open_fetch_stream(&a, header, &crate::Trace::default(), "fetch", 0x5)
         .await
         .expect("open");
     writer.write(b"abc").await.expect("write");
@@ -123,6 +123,37 @@ pub(crate) async fn a_fetch_stream_writer_that_is_dropped_resets_its_stream<C: C
         read_to_end(&mut recv).await,
         (vec![0x05, 0x02, b'a', b'b', b'c'], Ok(()))
     );
+}
+
+/// A fetch stream that its writer gives up while the peer takes nothing,
+/// with more written than the peer's windows hold, ends for the peer with
+/// the code of the reset and not with a FIN: what a relay does for a
+/// subscriber that does not read its FETCH.
+pub(crate) async fn a_fetch_stream_given_up_while_a_write_waits_is_reset_with_that_code<
+    C: Connection,
+>(
+    a: C,
+    b: C,
+) {
+    let header = xmoq_moqt::fetch::FetchHeader { request_id: 2 };
+    let mut writer = crate::open_fetch_stream(&a, header, &crate::Trace::default(), "fetch", 0x1)
+        .await
+        .expect("open");
+    // 4 MiB: more than either connection of these tests lets through
+    // unread.
+    let body = vec![0x5a; 4 * 1024 * 1024];
+    assert!(
+        timeout(A_WHILE, writer.write(&body)).await.is_err(),
+        "the write waits for the reader"
+    );
+    writer.reset(0x5);
+    let mut recv = timeout(A_WHILE, b.accept_uni())
+        .await
+        .expect("the stream arrives")
+        .expect("accept");
+    let (received, end) = read_to_end(&mut recv).await;
+    assert_eq!(end, Err(ReadError::Reset(Some(0x5))));
+    assert!(received.len() < 2 + body.len(), "{}", received.len());
 }
 
 /// `Lost` says that the connection is gone and nothing else. A stream whose
@@ -429,6 +460,7 @@ macro_rules! contract_tests {
                 a_stream_that_ends_alone_is_not_read_as_a_lost_connection,
                 dropping_a_read_loses_nothing,
                 a_fetch_stream_writer_that_is_dropped_resets_its_stream,
+                a_fetch_stream_given_up_while_a_write_waits_is_reset_with_that_code,
                 stopped_waits_until_the_peer_stops,
                 what_arrived_outlives_the_connection,
                 a_stream_that_was_not_accepted_may_go_with_the_connection,

@@ -77,6 +77,8 @@ impl Shared {
 /// The sending half of an in-memory stream.
 pub struct MemorySend {
     shared: Arc<Shared>,
+    /// Bytes the stream holds unread before a write waits.
+    window: usize,
     closed: watch::Receiver<bool>,
     /// `finish` or `reset` was called.
     ended: bool,
@@ -90,7 +92,7 @@ pub struct MemoryRecv {
     ended: bool,
 }
 
-fn pipe(closed: &watch::Receiver<bool>) -> (MemorySend, MemoryRecv) {
+fn pipe(closed: &watch::Receiver<bool>, window: usize) -> (MemorySend, MemoryRecv) {
     let shared = Arc::new(Shared {
         pipe: Mutex::new(Pipe::default()),
         changed: Notify::new(),
@@ -98,6 +100,7 @@ fn pipe(closed: &watch::Receiver<bool>) -> (MemorySend, MemoryRecv) {
     (
         MemorySend {
             shared: Arc::clone(&shared),
+            window,
             closed: closed.clone(),
             ended: false,
         },
@@ -124,7 +127,7 @@ impl SendStream for MemorySend {
                 if let Some(Aborted(code)) = pipe.stopped {
                     return Err(WriteError::Stopped(code));
                 }
-                let room = STREAM_WINDOW.saturating_sub(pipe.bytes.len());
+                let room = self.window.saturating_sub(pipe.bytes.len());
                 let (now, later) = rest.split_at(room.min(rest.len()));
                 if !now.is_empty() {
                     pipe.bytes.extend(now);
@@ -307,6 +310,8 @@ pub struct MemoryConnection {
     to_peer_uni: mpsc::Sender<MemoryRecv>,
     to_peer_bi: mpsc::Sender<(MemorySend, MemoryRecv)>,
     incoming: Incoming,
+    /// The window of the streams this end opens.
+    window: usize,
     closed_sender: Arc<watch::Sender<bool>>,
     closed: watch::Receiver<bool>,
     close: Arc<Mutex<Option<Close>>>,
@@ -317,6 +322,15 @@ pub struct MemoryConnection {
 /// Two connected ends.
 #[must_use]
 pub fn pair() -> (MemoryConnection, MemoryConnection) {
+    pair_with_window(STREAM_WINDOW)
+}
+
+/// Two connected ends whose streams hold `window` bytes unread before a
+/// write waits, where [`pair`] has [`STREAM_WINDOW`]. WHY: a write of a few
+/// bytes that waits for its reader is something a real connection does when
+/// its windows are used up, and [`pair`] never does.
+#[must_use]
+pub fn pair_with_window(window: usize) -> (MemoryConnection, MemoryConnection) {
     let (a_uni, b_incoming_uni) = mpsc::channel(ACCEPT_QUEUE);
     let (b_uni, a_incoming_uni) = mpsc::channel(ACCEPT_QUEUE);
     let (a_bi, b_incoming_bi) = mpsc::channel(ACCEPT_QUEUE);
@@ -332,6 +346,7 @@ pub fn pair() -> (MemoryConnection, MemoryConnection) {
             uni: tokio::sync::Mutex::new(uni),
             bi: tokio::sync::Mutex::new(bi),
         },
+        window,
         closed_sender: Arc::clone(&closed_sender),
         closed: closed.clone(),
         close: Arc::clone(&close),
@@ -368,7 +383,7 @@ impl Connection for MemoryConnection {
     type Recv = MemoryRecv;
 
     async fn open_uni(&self) -> Result<MemorySend, ConnectionLost> {
-        let (send, recv) = pipe(&self.closed);
+        let (send, recv) = pipe(&self.closed, self.window);
         tokio::select! {
             biased;
             () = self.until_closed() => return Err(Self::lost()),
@@ -378,8 +393,8 @@ impl Connection for MemoryConnection {
     }
 
     async fn open_bi(&self) -> Result<(MemorySend, MemoryRecv), ConnectionLost> {
-        let (send, peer_recv) = pipe(&self.closed);
-        let (peer_send, recv) = pipe(&self.closed);
+        let (send, peer_recv) = pipe(&self.closed, self.window);
+        let (peer_send, recv) = pipe(&self.closed, self.window);
         tokio::select! {
             biased;
             () = self.until_closed() => return Err(Self::lost()),

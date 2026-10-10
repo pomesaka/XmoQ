@@ -1084,9 +1084,10 @@ impl Relay {
             refusal.retry_interval,
             refusal.reason.clone(),
         );
-        state.finish_slot(stream);
         self.respond(session, stream, response, actions);
         actions.push(Action::FinishRequest { session, stream });
+        // A SUBSCRIBE that is refused takes its Joining FETCHes with it.
+        self.finish_slot(session, stream, actions);
     }
 
     /// Answers a subscriber that waited with `SUBSCRIBE_OK`, now that the
@@ -1103,11 +1104,15 @@ impl Relay {
             request,
             forward,
         } = *waiter;
-        if let Some(subscriber) =
+        if let Some((subscriber, slot)) =
             self.accept_subscriber(track_name, session, stream, request, forward, actions)
             && let Some(track) = self.tracks.live_mut(track_name)
         {
             track.subscribers.push(subscriber);
+            // After the subscriber is in the track: a Joining FETCH that
+            // waited is let go by the slot, and reads its Joining Location
+            // there.
+            self.put_slot(session, stream, slot, actions);
         }
     }
 
@@ -1121,15 +1126,12 @@ impl Relay {
         request: PeerRequestId,
         forward: bool,
         actions: &mut Vec<Action>,
-    ) -> Option<Subscriber> {
+    ) -> Option<(Subscriber, RequestSlot)> {
         let track = self.tracks.live(track_name)?;
         let state = self.sessions.get_mut(&session)?;
         // §10.2.11: LARGEST_OBJECT is present once Objects were published.
-        let parameters = track
-            .largest
-            .map(Parameter::LargestObject)
-            .into_iter()
-            .collect();
+        let joining = track.largest;
+        let parameters = joining.map(Parameter::LargestObject).into_iter().collect();
         match state
             .moqt
             .accept_subscribe(request, parameters, track.properties.clone())
@@ -1138,20 +1140,17 @@ impl Relay {
                 // A subscriber that finished its direction while it waited
                 // has still finished it.
                 let peer_finished = state.peer_finished(stream);
-                state.requests.insert(
-                    stream,
-                    RequestSlot::Subscribe {
-                        request,
-                        track: track_name.clone(),
-                        peer_finished,
-                    },
-                );
+                let slot = RequestSlot::Subscribe {
+                    request,
+                    track: track_name.clone(),
+                    peer_finished,
+                };
                 actions.push(Action::SendRequest {
                     session,
                     stream,
                     message,
                 });
-                Some(Subscriber {
+                let subscriber = Subscriber {
                     session,
                     stream,
                     request,
@@ -1160,11 +1159,16 @@ impl Relay {
                     // State is 0". REQUEST_UPDATE is refused, so a subscriber
                     // that asks for 0 stays there.
                     forward,
+                    joining,
                     streams_started: 0,
                     count_unknown: false,
                     outs: BTreeSet::new(),
-                })
+                };
+                Some((subscriber, slot))
             }
+            // The session is closed for it. A Joining FETCH that waited for
+            // this SUBSCRIBE goes when the session does
+            // (`Relay::drop_fetches_of`).
             Err(error) => {
                 actions.push(internal_error(session, &error));
                 None

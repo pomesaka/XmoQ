@@ -47,8 +47,8 @@ The requests of 3, 4 and 6 to 9 were written by hand; they are the ones of [the 
 
 | Run | On the request stream | On the fetch stream | Relay log |
 |---|---|---|---|
-| 1 | `18 00 04 00 01 02 00`: FETCH_OK, End Location {1, 2}; then a FIN | `05 00`, then 46 bytes, then a FIN | `OPEN_REQUEST session=0 own=0 FETCH`, `SEND session=1 stream=1 FETCH_OK`, `PIPE_FETCH session=1 stream=1 request_id=0 from_session=0 from_stream=8`, `FETCH_PIPE_ENDED session=1 stream=1 finished` |
-| 2 | the same | read by the readers of `xmoq-moqt-io`: Request ID 0, the same 46 bytes, a FIN | the same |
+| 1 | `18 00 04 00 01 02 00`: FETCH_OK, End Location {1, 2}; then a FIN | `05 00`, then 45 bytes, then a FIN | `OPEN_REQUEST session=0 own=0 FETCH`, `SEND session=1 stream=1 FETCH_OK`, `PIPE_FETCH session=1 stream=1 request_id=0 from_session=0 from_stream=8`, `FETCH_PIPE_ENDED session=1 stream=1 finished` |
+| 2 | the same | read by the readers of `xmoq-moqt-io`: Request ID 0, the same 45 bytes, a FIN | the same |
 | 3 | `18 00 04 00 02 00 00`: FETCH_OK, End Location {2, 0}; then a FIN | `05 00 81 0c 02 ff ff ff ff ff ff ff ff ff`: End of Unknown Range at {2, 2^64 - 1}, then a FIN | `SEND session=1 stream=1 FETCH_OK`, `WRITE_FETCH_STREAM session=1 request_id=0 bytes=12`; no `OPEN_REQUEST` |
 | 4 | `05 00 03 10 00 00`: REQUEST_ERROR `DOES_NOT_EXIST`; then a FIN | none | `SEND session=1 stream=1 REQUEST_ERROR error_code=0x10` |
 | 5 | SUBSCRIBE_OK with LARGEST_OBJECT {5, 2} on the first stream; `05 00 03 03 00 00`, REQUEST_ERROR `NOT_SUPPORTED`, on the second | none | `SEND session=1 stream=2 REQUEST_ERROR error_code=0x3` |
@@ -71,7 +71,7 @@ What it sent for them is the publisher's own: nothing of Group 2 for an End Loca
 
 In both runs the subscriber's tool, when it began to read after 13 seconds, was not handed the fetch stream at all: the stream had been reset before it was accepted. The reset code of the fetch stream itself was therefore not seen in these runs.
 
-The 46 bytes of runs 1 and 2 are `1c 00 01 80 08 P 00 08 P 0e 00 00 08 P 01 08 P` with P = `4d 3b c3 24 4c 84 57 2d`: the Objects {0, 1}, {0, 2}, {1, 0}, {1, 1}, the four of the range. They are what moqtail's test client wrote as the publisher. Its Subgroup IDs are 0 for Group 0 and 1 for Group 1 (written as "the prior one plus one"), where the moqtail relay's answer to the same FETCH has Subgroup 1 throughout (`fetch-stream-from-moqtail-relay`); the Objects and payloads are the same. Run 3 was answered with the End Location that was asked for: the publisher had sent Objects beyond Group 2 by then, so the relay knew a larger Location.
+The 45 bytes of runs 1 and 2 (counted again in a later run of 1; this record first had 46) are `1c 00 01 80 08 P 00 08 P 0e 00 00 08 P 01 08 P` with P = `4d 3b c3 24 4c 84 57 2d`: the Objects {0, 1}, {0, 2}, {1, 0}, {1, 1}, the four of the range. They are what moqtail's test client wrote as the publisher. Its Subgroup IDs are 0 for Group 0 and 1 for Group 1 (written as "the prior one plus one"), where the moqtail relay's answer to the same FETCH has Subgroup 1 throughout (`fetch-stream-from-moqtail-relay`); the Objects and payloads are the same. Run 3 was answered with the End Location that was asked for: the publisher had sent Objects beyond Group 2 by then, so the relay knew a larger Location.
 
 **The relay core treats what has no FETCH as the revision before did.** `spikes/relay-core-diff`, `7f264197` (the revision before the relay served a FETCH) against the working copy, 20,000 random sequences of 80 events in each of five worlds:
 
