@@ -24,15 +24,23 @@ Each step replaces one `moqtail` component with an own one, so that one side of 
 **Exit:** one Object between browser and Rust through the own relay with own clients, and the same Object exchange against `moqtail` peers. Reached on 2026-10-10. The open item above is a known gap of the relay, not part of the exit.
 
 ## Phase 1 — Video
+
+The browser Phase 1 is built for and judged in is Chromium (Chrome, Edge) on desktop; decided on 2026-10-10. WHY NOT Firefox as well: its Playwright build connected to the own relay and exchanged video with Chromium in every codec tried, but one build on one machine is all that was measured, and a second engine doubles what each step of Phase 1 has to be checked in. WHY NOT Safari: nothing could be run in it ([record of browser support](experiments/2026-10-10-browser-support-webtransport-webcodecs.md)). Which browsers are supported beyond Phase 1 stays an [open decision](open-questions.md).
+
+Media is packaged as LOC says and tracks are described by an MSF catalog, in full; decided on 2026-10-10 (`draft-ietf-moq-msf-01`; which revision of LOC is an [open decision](open-questions.md)). That puts FETCH into Phase 1: MSF has "Subscribers accessing the catalog MUST use SUBSCRIBE with a Joining FETCH (offset = 0)", and the own implementation has no FETCH. It settles how Groups are numbered: a publisher that restarts "MUST ensure the new starting Group ID is greater than any previously published Group ID for that track" (MSF §6.1), for which MSF suggests the wall clock time. WHY NOT only the shape of LOC and MSF with a fixed track name and no catalog: it would start sooner, and would leave the players of other MoQ implementations unable to find the tracks. What following these drafts takes, and which peers speak them, is in the [survey](experiments/2026-10-10-loc-msf-fetch-survey.md). Two things it leaves [open](open-questions.md): whether a relay cache is built in Phase 1, which neither MSF nor draft 18 asks for, and whether every Object goes onto a stream of its own, which MSF §6 asks for and the nearest peer does not do.
+
+- [ ] FETCH and Joining FETCH in the Rust and the TypeScript session, against peers.
+- [ ] The relay answers a FETCH, from the publisher or from a cache.
+- [ ] MSF catalog track: published by the browser publisher, read by the viewers.
 - [ ] Browser WebCodecs publisher.
 - [ ] Rust relay fan-out to browser viewers.
 - [ ] Decode and render video.
 - [ ] Test late join, keyframes, reconnect, cancellation and slow subscribers.
 
-**Exit:** reproducible one-publisher/multiple-viewer video demo.
+**Exit:** reproducible one-publisher/multiple-viewer video demo, on loopback. A run over real links waits for the hosting decision.
 
 ## Phase 2 — Audio and quality
-- [ ] Choose audio codec and pipeline.
+- [ ] Build the audio pipeline. The codec is Opus, decided on 2026-10-10: it is the one audio codec Chromium, Firefox and Safari all encode and decode ([record of browser support](experiments/2026-10-10-browser-support-webtransport-webcodecs.md)). Audio is not part of Phase 1. WHY NOT earlier: a second track brings the question of what a slow viewer's limit is counted by ([open decision](open-questions.md)) into Phase 1, where one video track does not raise it.
 - [ ] Add playback buffers and A/V synchronization.
 - [ ] Measure latency, drops, stalls and recovery under loss.
 
