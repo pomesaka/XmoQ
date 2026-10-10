@@ -180,6 +180,33 @@ Run: two own-rust publishers, an own-rust and an own-browser subscriber. A spike
 
 Not run: a PUBLISH from the same session that was asked, where the relay's SUBSCRIBE gives way; the relay's tests cover it.
 
+### A publisher that publishes its track anew on the same session
+
+Added on 2026-10-11, on `main` at `07322d4c`, for a change to the relay merged in between (a PUBLISH from a session that has said PUBLISH_DONE for the track is accepted while its first subscription drains). Scenario `publish-anew` of `disconnect.ts`, without and with `--same-alias`. The expectations were written from the notes' row "PUBLISH for a track the relay knows already" before the runs and not changed after.
+
+The own Rust client sends a Group, then PUBLISH_DONE with Stream Count 2^62 - 1 and a PUBLISH for the same track at once, then another Group. WHY that Stream Count: every stream of this client has ended when its PUBLISH_DONE goes out, so with the exact number the relay would be done with the first subscription before the PUBLISH; the value of a publisher that cannot count keeps the relay waiting, which is the state the row is about.
+
+| Requirement, from the row | Checked by |
+|---|---|
+| "its PUBLISH for the track is accepted, also while the relay still waits for the streams the first subscription counted" | the client prints PUBLISHED for the new PUBLISH, under Track Alias 2, or 1 with `--same-alias` |
+| "the PUBLISH is accepted for the track as it is, and the subscribers stay" | no PUBLISH_DONE towards a subscriber when the new PUBLISH is established; Group 0 and Group 1 arrive within one subscription, one Object each |
+| Another alias: "the first drains as it would have" | the relay ends the first PUBLISH stream by a reset, and not before its wait of 2 seconds is nearly over |
+| The same alias: "the first one is over at once: the relay stops waiting for what the first counted and resets its PUBLISH stream (`CANCELLED`)" | the reset has code `0x1` and comes at once |
+| The track ends with its last source | when the publisher leaves, the own subscribers see PUBLISH_DONE `TRACK_ENDED`, Stream Count 2, no stream without a FIN; the relay prints one PUBLISH_DONE a subscriber; the track is served again afterwards |
+
+That the reset after the wait has the code `0x1` under another alias as well was not derived beforehand; it was seen, and the scenario asks for a reset there and for the code under the same alias only.
+
+| Run | Result |
+|---|---|
+| Another alias, once, as first written | passed: the first PUBLISH stream ended by "reset, code 0x1" after 2.0 seconds |
+| The same alias, once, as first written | passed: "reset, code 0x1" after 0.0 seconds |
+| Temporary change to the client, taken back: the PUBLISH_DONE has the exact Stream Count, 1 | both fail: "the relay ended the subscription of sub1:own-rust when pub:own-rust had published the track anew". That is the other side of the race the row names: the source is over at once, the track ends, and the PUBLISH makes a new track |
+
+| `mise run check`, `mise run interop` | passed; 66 of 66 pairings in 40.3 seconds |
+| The 26 leaving scenarios, 20 rounds | **not completed as a clean run.** 16 rounds passed, 17.0 to 28.4 seconds each. The other 4 each lost pairings to "stopped after the limit of 120s" after a few seconds of running, and each ended at a moment the machine came back from sleep (01:15, 01:31, 01:49 and 02:06 in the power log; it slept for about 15 minutes each time). A second attempt with `caffeinate -i` slept all the same and was stopped after 3 rounds. To be repeated on a machine that stays awake |
+
+Subscribers were own-rust and own-browser. Not run: a stream of the first subscription that is still open when the track is published anew (the client finishes every stream it opens), and a publisher that counts from 0 again.
+
 ## Limitations and blockers
 
 - **The relay change was under review when the runs were made.** The last runs are on `a44c8854`; if it changes again, they have to be made again.

@@ -44,7 +44,7 @@ const { values: options } = parseArgs({
 		port: { type: "string", default: "44330" },
 		"await-publish-done": { type: "boolean", default: false },
 		// The Object carries Object Properties, and every subscriber has to
-		// get them as they were sent. Between two own-browser clients only.
+		// get them as they were sent. Between own clients only.
 		"object-properties": { type: "boolean", default: false },
 		"subscribe-track": { type: "string", default: TRACK },
 		verbose: { type: "boolean", default: false },
@@ -127,12 +127,9 @@ async function transferOneObject(
 
 	const run = { context, payloadHex };
 	const withProperties = options["object-properties"];
-	if (
-		withProperties &&
-		(publisher !== "own-browser" || subscriber !== "own-browser")
-	) {
+	if (withProperties && !(isOwnClient(publisher) && isOwnClient(subscriber))) {
 		throw new Error(
-			`--object-properties needs own-browser on both sides, the one client that sends and reports them, not ${publisher} and ${subscriber}`,
+			`--object-properties needs own clients on both sides, the ones that send properties with content and report the ones they get, not ${publisher} and ${subscriber}`,
 		);
 	}
 	const awaitsPublishDone = options["await-publish-done"];

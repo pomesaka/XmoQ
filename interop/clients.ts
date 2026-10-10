@@ -89,9 +89,9 @@ export interface PublisherPlan {
 	 */
 	servesWhenAskedAfterMs?: number;
 	/**
-	 * own-browser: the Object Properties every Object it sends carries
+	 * The own clients: the Object Properties every Object it sends carries
 	 * (§11.2.1.2), in ascending order of type as they go onto the wire. None
-	 * when left out. The other clients cannot send any.
+	 * when left out. The moqtail clients cannot send any.
 	 */
 	properties?: PageProperty[];
 }
@@ -107,6 +107,19 @@ export interface Publisher {
 	send(): Promise<number>;
 	/** Sends `count` Objects like `send`, one after the other, and resolves with their Groups. */
 	sendBatch(count: number): Promise<number[]>;
+	/**
+	 * own-rust: ends its subscription with PUBLISH_DONE and publishes the
+	 * track anew on the same session at once, under the same Track Alias or
+	 * the next. The PUBLISH_DONE has the Stream Count of a publisher that
+	 * cannot count (2^62 - 1), so that the relay is still waiting for streams
+	 * of the first subscription when the PUBLISH comes. Resolves when the
+	 * client is ready to send again, with the alias of the new PUBLISH and
+	 * how, and how long after the request, the relay ended its direction of
+	 * the first PUBLISH stream.
+	 */
+	publishAnew(
+		sameAlias: boolean,
+	): Promise<{ trackAlias: number; peerEnd: string; peerEndAfterMs: number }>;
 	/** Like `send`, and leaves the stream open. Only own-browser can. */
 	sendUnfinished(): Promise<number>;
 	/**
@@ -165,9 +178,9 @@ async function startRustPublisher(
 	run: ClientRun,
 	plan: PublisherPlan,
 ): Promise<Publisher> {
-	if (plan.properties !== undefined) {
+	if (plan.properties !== undefined && kind !== "own-rust") {
 		throw new Error(
-			`${label} cannot send Object Properties: only own-browser can`,
+			`${label} cannot send Object Properties: only the own clients can`,
 		);
 	}
 	const firstGroup = plan.firstGroup ?? 0;
@@ -196,6 +209,10 @@ async function startRustPublisher(
 			...(servesAfterMs === undefined
 				? []
 				: ["--serve-delay-ms", String(servesAfterMs)]),
+			...(plan.properties ?? []).flatMap((property) => [
+				"--object-property",
+				rustPropertyText(property, "="),
+			]),
 			"--timeout-secs",
 			RUST_CLIENT_TIMEOUT_SECS,
 		],
@@ -238,6 +255,36 @@ async function startRustPublisher(
 			Promise.resolve(
 				client.matches(/^PUBLISH_DONE_PEER_ENDED how=(.*)$/).at(-1)?.[1],
 			),
+		async publishAnew(sameAlias) {
+			const PUBLISHED = /^PUBLISHED track_alias=(\d+) /;
+			const PEER_ENDED = /^PUBLISH_DONE_PEER_ENDED how=(.*)$/;
+			const before = {
+				published: client.matches(PUBLISHED).length,
+				peerEnded: client.matches(PEER_ENDED).length,
+			};
+			const started = performance.now();
+			client.child.stdin.write(
+				sameAlias ? "republish-same-alias\n" : "republish\n",
+			);
+			// The client prints the line of the first subscription's end last,
+			// and reads its next line after that.
+			const peerEnded = await nextMatch(
+				client,
+				PEER_ENDED,
+				before.peerEnded,
+				`${label} to say how the relay ended the first PUBLISH stream`,
+			);
+			const peerEndAfterMs = Math.round(performance.now() - started);
+			const published = client.matches(PUBLISHED)[before.published];
+			if (published === undefined) {
+				throw new Error(`${label} did not print PUBLISHED for its new PUBLISH`);
+			}
+			return {
+				trackAlias: Number(captureGroup(published, 1)),
+				peerEnd: captureGroup(peerEnded, 1),
+				peerEndAfterMs,
+			};
+		},
 		isServing: () =>
 			servesAfterMs === undefined || client.matches(SERVING).length > 0,
 		async serving() {
@@ -277,7 +324,7 @@ async function startBrowserPublisher(
 	if (kind === "moqtail-browser") {
 		if (plan.properties !== undefined) {
 			throw new Error(
-				`${label} cannot send Object Properties: only own-browser can`,
+				`${label} cannot send Object Properties: only the own clients can`,
 			);
 		}
 		if ((plan.firstGroup ?? 0) !== 0) {
@@ -311,6 +358,8 @@ async function startBrowserPublisher(
 				return "page closed";
 			},
 			peerEndAfterPublishDone: () => Promise.resolve(undefined),
+			publishAnew: () =>
+				Promise.reject(new Error(`${kind} cannot publish its track anew`)),
 			isServing: () => true,
 			serving: () => Promise.resolve(),
 			kill,
@@ -376,6 +425,8 @@ async function startBrowserPublisher(
 				page.evaluate(() => window.xmoqOwn.publishEnd()),
 			);
 		},
+		publishAnew: () =>
+			Promise.reject(new Error(`${kind} cannot publish its track anew`)),
 		isServing: () => true,
 		serving: () => Promise.resolve(),
 		async peerEndAfterPublishDone() {
@@ -513,12 +564,12 @@ export interface Subscriber {
 	payloads(group: number): Promise<string[]>;
 	/**
 	 * The Object Properties of Object 0 of the Group once it arrived, in the
-	 * order they were on the wire. Only own-browser can tell.
+	 * order they were on the wire. Only the own clients can tell.
 	 */
 	properties(group: number): Promise<PageProperty[]>;
 	/**
 	 * What the client can say when an Object does not come: whether its
-	 * session is open, and how many Objects it has. Only own-browser can tell.
+	 * session is open, and how many Objects it has. Only the own clients can tell.
 	 */
 	state(): Promise<string>;
 	/** Resolves once the subscription has ended. Only the own clients can tell. */
@@ -538,6 +589,58 @@ function isPageProperty(value: unknown): value is PageProperty {
 		("varint" in value && typeof value.varint === "string") ||
 		("bytesHex" in value && typeof value.bytesHex === "string")
 	);
+}
+
+/**
+ * The match of the pattern after the first `already` ones, once the process
+ * printed it. WHY not `waitForLine`: that takes the first match there is,
+ * and here the same line comes a second time.
+ */
+async function nextMatch(
+	client: LoggedProcess,
+	pattern: RegExp,
+	already: number,
+	what: string,
+): Promise<RegExpMatchArray> {
+	const poll = async (): Promise<RegExpMatchArray> => {
+		for (;;) {
+			const found = client.matches(pattern)[already];
+			if (found !== undefined) return found;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	};
+	return withTimeout(poll(), what);
+}
+
+/**
+ * A property as the own Rust client takes it in `--object-property` (with
+ * "=") and prints it in its `OBJECT` line (with ":"): the type in decimal,
+ * the value of an even type in decimal and that of an odd type in hexadecimal.
+ */
+function rustPropertyText(property: PageProperty, separator: string): string {
+	return `${property.type}${separator}${"varint" in property ? property.varint : property.bytesHex}`;
+}
+
+/** The `properties=` field of the own Rust client's `OBJECT` line. */
+function parseRustProperties(printed: string, label: string): PageProperty[] {
+	if (printed === "none") return [];
+	return printed.split(",").map((text): PageProperty => {
+		const [type, value, ...rest] = text.split(":");
+		if (
+			type === undefined ||
+			value === undefined ||
+			rest.length > 0 ||
+			!/^\d+$/.test(type)
+		) {
+			throw new Error(
+				`${label} printed a property that cannot be read: ${text}`,
+			);
+		}
+		// §1.4.3: an even type has one integer, an odd type bytes.
+		return BigInt(type) % 2n === 0n
+			? { type, varint: value }
+			: { type, bytesHex: value };
+	});
 }
 
 function cannotTell(
@@ -619,8 +722,16 @@ function startRustSubscriber(
 		subscribed: client.waitForLine(/^SUBSCRIBED /),
 		object: (group) =>
 			objectOf(new RegExp(`^OBJECT group=${group} .*payload_hex=([0-9a-f]*)$`)),
-		properties: cannotTell(kind, "Object Properties"),
-		state: cannotTell(kind, "its state"),
+		async properties(group) {
+			const printed = await objectOf(
+				new RegExp(`^OBJECT group=${group} .* properties=(\\S+) payload_len=`),
+			);
+			return parseRustProperties(printed, label);
+		},
+		state: () =>
+			Promise.resolve(
+				`${client.matches(/^OBJECT /).length} OBJECT lines, ${client.matches(/^STREAM_ABORTED /).length} STREAM_ABORTED, last line: ${client.matches(/^.*$/).at(-1)?.[0] ?? "none"}`,
+			),
 		payloads: (group) =>
 			Promise.resolve(
 				client

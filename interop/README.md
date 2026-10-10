@@ -51,18 +51,18 @@ Every pairing, from `interop/`:
 bun matrix.ts
 ```
 
-`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except six that mostly wait, four for the relay to give up on a client that vanished (6 to 9 seconds each), one for a publisher that answers the relay 3 seconds late, and one for a page to give up on late streams (5 seconds): those start together after the pairings that move one Object, and go on beside the ones that follow.
+`matrix.ts` starts a driver once per pairing and relay, each on its own port, prints a table, and exits 0 only if every pairing ended as expected. The log of each pairing is in `.logs/matrix/`. The pairings run one after the other, except seven that mostly wait, four for the relay to give up on a client that vanished (6 to 9 seconds each), one for a publisher that answers the relay 3 seconds late, one for a source that drains for 2 seconds, and one for a page to give up on late streams (5 seconds): those start together after the pairings that move one Object, and go on beside the ones that follow.
 
 | Pairings, through each relay | What is expected |
 |---|---|
 | Every publisher with every subscriber, except moqtail with moqtail (12) | The received payload equals the sent one. Where the subscriber is an own client, the publisher then leaves and the subscriber has to see PUBLISH_DONE |
 | One publisher with three subscribers: `own-rust` to `own-browser`, `moqtail-browser` to `own-rust` (2) | Every subscriber receives the payload and then sees PUBLISH_DONE |
-| `own-browser` to `own-browser`, with two Object Properties on the Object that no relay knows: an odd type with bytes and an even type with an integer (1) | The subscriber gets the payload and the two properties, with the types, values and order that were sent (draft 18 §2.5: a relay forwards a property it does not support unchanged), and then sees PUBLISH_DONE. The run tells apart an Object that came without properties, one that came with others, and one that did not come |
+| Each own client to each own client, with two Object Properties on the Object that no relay knows: an odd type with bytes and an even type with an integer (4) | The subscriber gets the payload and the two properties, with the types, values and order that were sent (draft 18 §2.5: a relay forwards a property it does not support unchanged), and then sees PUBLISH_DONE. The run tells apart an Object that came without properties, one that came with others, and one that did not come |
 | `own-browser` and `own-rust` subscribing to a track nobody published (2) | The run fails, and its log shows REQUEST_ERROR `0x10` |
 
 The runs in which a client leaves go through the own relay only, because the driver waits for lines only that relay prints. Their names begin with `leaving:`. What each has to show, and why, is in the [record](../docs/experiments/2026-10-10-disconnects-through-own-relay.md).
 
-| Runs with a client that leaves, or with two publishers of the track (24) | What is expected |
+| Runs with a client that leaves, or with two publishers of the track (26) | What is expected |
 |---|---|
 | The publisher is killed, or its page closed, after its Objects arrived (3) | Every own subscriber sees PUBLISH_DONE `TRACK_ENDED` with the Stream Count of the streams it got, and a stream the publisher left open ends with a reset with CANCELLED. A killed publisher has to be noticed within 10.5 seconds, and a killed subscriber within 7.5 |
 | The publisher sends one Object and closes its session at once (4) | With PUBLISH_DONE before the close (`own-browser`, `own-rust`): every subscriber receives the Object, and every own subscriber then sees PUBLISH_DONE. Without it (`own-browser`, `moqtail-rust`): the Object reaches every subscriber or none, since nothing tells such a publisher that the relay read its last stream, and every own subscriber sees PUBLISH_DONE either way. The summary of the run says which it was; a lost Object was seen once in CI and in 1 of 200 runs on a loaded machine |
@@ -76,6 +76,7 @@ The runs in which a client leaves go through the own relay only, because the dri
 | The first of two `own-rust` publishers sends ten Groups and leaves with PUBLISH_DONE; the second then sends the same ten again, and after them the next (1) | No subscriber is told when the first leaves. All ten streams the second sends again are stopped (`STOP_DATA … code=0x1`), the two for Groups the relay no longer remembers a source for among them, and none is opened towards the subscriber a second time. The next Group arrives from the second. At the end: PUBLISH_DONE `TRACK_ENDED` with eleven Groups |
 | A second publisher joins a track whose subscribers already have an Object, and sends the next Group (1) | The PUBLISH is accepted, the Group arrives with the second publisher's payload, and the subscriptions end when both have left |
 | An `own-rust` publisher announces the namespace and answers the relay's SUBSCRIBE 3 seconds late; another sends PUBLISH for the track meanwhile (1) | The subscribers get no SUBSCRIBE_OK while only the first publisher is there. The PUBLISH answers them, before the first publisher has answered the relay. They get Group 0 from the one that sent PUBLISH and, when the other has answered, Group 1 from that one. The track ends when both have left |
+| An `own-rust` publisher sends a Group, says PUBLISH_DONE with the Stream Count of a publisher that cannot count, publishes the track anew on the same session at once, under the next Track Alias or the same, and sends another Group (2) | The PUBLISH is accepted and the subscribers stay: they get no PUBLISH_DONE then, and both Groups within one subscription. The relay resets the first PUBLISH stream with CANCELLED, at once under the same alias and after its 2 seconds of waiting under another. When the publisher leaves, the subscribers see PUBLISH_DONE with Stream Count 2 |
 
 Each of these runs ends by moving one more Object over the same track with a fresh publisher and two fresh subscribers, and by having that publisher leave. One subscriber stays and has to see PUBLISH_DONE: a relay that still held a source of the run would take the fresh publisher as one more source and pass the Object, but it could not end the track when that publisher leaves.
 
@@ -105,7 +106,7 @@ bun run.ts --publisher own-browser --subscriber own-rust --await-publish-done
 | `--port` | `44330`. UDP port of the relay |
 | `--subscribe-track` | `object`. Any other name makes the relay answer REQUEST_ERROR, and the run fails by design |
 | `--await-publish-done` | off. After the transfer, makes the publisher leave and waits until the subscriber reports that PUBLISH_DONE ended its subscription. The subscriber has to be an own client |
-| `--object-properties` | off. The Object carries the two Object Properties, and the subscriber has to report the same. Both clients have to be `own-browser`, the one client that sends properties and reports the ones it gets |
+| `--object-properties` | off. The Object carries the two Object Properties, and the subscriber has to report the same. Both clients have to be own clients, the ones that send properties with content and report the ones they get |
 | `--verbose` | off. Sets `RUST_LOG=debug` for the moqtail relay and makes `own-rust` print the bytes of every stream |
 
 One side has to be an own client: a run between two moqtail peers checks nothing of this repository.
@@ -122,12 +123,13 @@ bun disconnect.ts --scenario subscriber-leaves --publisher own-browser --leaver 
 
 | Option of `disconnect.ts` | Values |
 |---|---|
-| `--scenario` | `publisher-killed`, `last-object-then-close`, `subscriber-leaves`, `slow-subscriber`, `same-group-twice`, `second-source`, `publish-while-asked` |
+| `--scenario` | `publisher-killed`, `last-object-then-close`, `subscriber-leaves`, `slow-subscriber`, `same-group-twice`, `second-source`, `publish-while-asked`, `publish-anew` |
 | `--publisher` | A client, `own-rust` by default. `same-group-twice`, `second-source` and `publish-while-asked` take it twice, the first publisher and the second (in `publish-while-asked` the first is the one that is asked and has to be `own-rust`); the other scenarios take one and refuse more |
 | `--subscriber` | A client; give it once per subscriber. Used by every scenario but `subscriber-leaves` |
 | `--leaver` | `subscriber-leaves` only, once per subscriber that leaves: `<client>:cancel` (the subscription ends, the session stays), `<client>:close` (the client closes its session in order) or `<client>:kill` (the process is killed, or the page closed) |
 | `--stayer` | `subscriber-leaves` only: a client, once per subscriber that stays |
 | `--with-publish-done` | `last-object-then-close` only: the publisher sends PUBLISH_DONE before it closes. `own-rust` always does and needs the flag; the moqtail clients cannot |
+| `--same-alias` | `publish-anew` only: the new PUBLISH has the Track Alias of the first. Without it, the next one |
 | `--slow` | `slow-subscriber` only: `stopped-own-rust` (default), an own-rust client whose process is stopped, or `unread-own-browser`, a page that subscribes and never reads |
 | `--first-sends` | `same-group-twice` and `second-source`: how many Groups the first publisher sends before the second sends; 1 by default. In `same-group-twice`, above 1 the two publishers send different payloads |
 | `--second-resends` | `second-source` only: the second publisher starts at Group 0 and sends every Group of the first again before it sends the next one |
