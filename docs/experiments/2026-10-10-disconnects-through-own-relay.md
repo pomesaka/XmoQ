@@ -220,6 +220,41 @@ Added on 2026-10-11. The scenario in which the own-browser page writes its Objec
 
 The moqtail-rust publisher of this scenario stands on the same premise and runs through the same code now. Its close is not sent at all in a third of the runs, so its Object has seconds to arrive, and it arrived in every run so far.
 
+#### Who can drop the Object: what the sources say
+
+Added on 2026-10-11, by reading; no code was changed and nothing was run. The versions are those of `Cargo.lock` on `main` at `5ad87c6f`, read in the registry sources.
+
+**The relay's side can drop it, and the browser's side may. Neither is against what it is written to.**
+
+| Where | What it does | Read in |
+|---|---|---|
+| `web-transport-quinn` 0.13.2 | A task reads capsules from the CONNECT stream. **When CLOSE_WEBTRANSPORT_SESSION arrives it closes the QUIC connection at once** (`conn.close(...)`), without a look at the session's other streams | `src/session.rs`, `run_recv`, lines 183 to 209 |
+| `quinn-proto` 0.11.19 | A connection that was closed locally is in the state `Closed`. **For every packet that comes then, it looks for a CONNECTION_CLOSE frame and for nothing else**: a STREAM frame in it is counted in the statistics and dropped. What the stack had received before stays in the streams' buffers; the close stops the timers and does not clear them | `src/connection/mod.rs`, lines 2446 to 2466 (the packets), 1273 to 1281 and 3487 to 3492 (the close) |
+| `quinn` 0.11.12 | A read gives the data a stream has first, and the connection's error only when there is none | `src/recv_stream.rs`, `poll_read_generic`, from line 348 (pointed out by another session, read again here) |
+| The own relay | When the connection has ended it waits for the readers of that session to finish, for at most 1 second (`closed_read_timeout`), and only then treats the session as closed. A reader finishes when its stream gives the connection's error | `crates/relay/src/hub.rs`, `watch_session` |
+
+- **The own code does what the implementation notes say** ("What had arrived on streams the relay already accepted is read first"). No disagreement between the notes and the code was found.
+- **"Had arrived" ends earlier than the notes' wording suggests**: at the moment the library read the capsule and closed the connection, and not when the peer's last packet came in. The capsule travels on the CONNECT stream and the Object on its own stream; QUIC keeps no order between streams. Bytes of the Object that reach the relay in a packet after the one with the capsule, or that the browser sends after it, are dropped by the QUIC stack before any own code sees them.
+- The order in the CI log fits that. `CONNECTION_ENDED` is printed when the connection reports its end. The reader of the publisher's stream then gets what was buffered, which was the header it had read already, and the connection's error after it. With the readers finished the session is treated as closed, and `STOP_DATA session=0 stream=3` and the resets towards the subscribers are part of that. It is not the relay giving up on a stream that still had bytes.
+
+**The browser's side**, from the texts:
+
+- `draft-ietf-webtrans-http3-14` §6: "Upon learning that the session has been terminated, the endpoint MUST reset the send side and abort reading on the receive side of all unidirectional and bidirectional streams associated with the session", and a session is terminated when the capsule "is either sent or received". So the endpoint that sends the capsule resets its own streams, and the one that receives it stops reading: **the protocol itself gives up what is under way on both sides.**
+- W3C WebTransport (Candidate Recommendation Snapshot, 30 July 2026): closing a send stream resolves after "Send FIN [...] and wait for the operation to complete" and "Wait for stream.[[InternalStream]] to enter the "all data committed" state", which in QUIC is data handed to the transport, not data acknowledged. The text before it says so for a chunk: "To make sure that the chunk arrives at the server, the server needs to send an application-level acknowledgment message." `close()` of the session runs "terminate session" in parallel.
+- So a page that awaited `write()` and `close()` of its stream knows the bytes were given to QUIC, and nothing more. Chromium's source was not read: whether it sends a RESET_STREAM for a stream whose FIN is out and not acknowledged, or puts the capsule ahead of stream data that waits, is not known.
+
+**Which of the two it was in the CI run cannot be told by reading.** Three things would tell:
+
+| What to take | What it would show |
+|---|---|
+| The frame counts `quinn` keeps for a connection (`stats().frame_rx`, which has `stream` and `reset_stream`), printed by the relay for one run when a connection has ended and again a moment later. `quinn-proto` counts frames also in the state `Closed` | STREAM frames after the close: the Object reached the relay and was dropped there. A RESET_STREAM and no further STREAM frame: the browser took it back. Neither: it never left the browser |
+| A packet capture on loopback with the session's keys (`SSLKEYLOGFILE`) | the same, with the order of the capsule and the stream's frames on the wire |
+| Chromium's net log of the page | what the browser sent, and whether it reset the stream |
+
+The first is a temporary change of a few lines in `crates/moqt-io` and `crates/relay`. The loss takes about 200 runs on a loaded machine to show once.
+
+**Nothing is changed, and none of the three is taken.** WHY: the Object of a publisher that closes without PUBLISH_DONE may be dropped by either side as the protocols have it, so which side it was in the CI run would not change what is done. PUBLISH_DONE and the wait for the relay's FIN are what a publisher has against it, and this run is of a publisher without them. WHY NOT a change in `web-transport-quinn`, which could go on reading the session's streams for a moment before it closes the connection: it would narrow a loss the protocol allows and the other side may cause as well. The own relay cannot do that from outside the library: the connection is closed before `closed()` reports.
+
 ### Subscribers that leave
 
 | Publisher | Who left, and how | Who stayed | Result |
