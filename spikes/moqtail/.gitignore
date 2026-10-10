@@ -1,0 +1,9 @@
+# Built relay binary (cargo install --root .tools)
+.tools/
+# Generated self-signed certificate and key
+cert/
+# Relay log files
+.logs/
+target/
+node_modules/
+dist/
