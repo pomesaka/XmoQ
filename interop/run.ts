@@ -126,7 +126,7 @@ async function transferOneObject(
 			subscribing.map(async (each) => {
 				// WHY the longer wait: moqtail-rust exits right after it closes
 				// its session, and where the close was not sent the relay ended
-				// the track 12 seconds later (seen once for this pairing).
+				// the track by its idle timeout only (seen once for this pairing).
 				const outcome = await each.outcome(DISCONNECT_TIMEOUT_MS);
 				if (outcome.type !== "publish-done") {
 					throw new Error(

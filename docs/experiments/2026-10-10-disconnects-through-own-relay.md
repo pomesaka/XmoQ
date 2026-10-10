@@ -21,23 +21,23 @@ Listed before the scenarios were written, from `draft-ietf-moq-transport-18` (§
 | 3 | PUBLISH_DONE is sent only after every stream of the subscription is closed, and its Stream Count is the number of streams opened, or 2^62 - 1 | §10.11 (MUST NOT, MUST), §5.1.1 | The count: every scenario, where both own subscribers compare it with the streams they got, and the stopped subscriber, which has to get 2^62 - 1. The order is not checked: a subscriber cannot tell it. own-rust reports only that the counted streams had ended before its wait of 2 seconds was over. Covered by the relay's tests |
 | 4 | A subgroup stream that got all its Objects ends with a FIN; one that did not ends with a reset | §11.4.3 (MUST) | publisher killed, where own-browser and moqtail-browser leave a stream open; own-rust reports every stream that ended without a FIN |
 | 5 | A stream the publisher had finished is delivered whole to the subscribers when the publisher's connection goes right after | Implementation notes, "A publisher whose connection goes" | last Object then close |
-| 6 | The relay notices a peer that vanished without closing, within its idle timeout (9 seconds, provisional) | Table of limits in the implementation notes | **Does not hold as written** for a killed publisher: 12.0 seconds in every run. It holds for a killed subscriber (9.0 seconds). The scenarios fail above 13 seconds, which holds the relay to what it does now, with a `FIXME:` to bring the bound down |
+| 6 | The relay notices a peer that vanished without closing, within its idle timeout and one keep-alive interval (6 and 3 seconds, provisional) | Table of limits in the implementation notes | publisher killed (own-rust); subscribers killed. The scenarios fail above 10.5 seconds for a publisher and 7.5 for a subscriber. Measured: 9.0 seconds for a killed publisher, 6.0 to 6.1 for a killed subscriber. While the idle timeout was 9 seconds, a killed publisher was noticed after 12.0, later than the row said then |
 | 7 | After a publisher is gone, the relay holds nothing of it: the track can be published again | Clean-up of a long-running server; the relay refuses a second PUBLISH for a track | every scenario ends with a fresh publisher and subscriber on the same track |
 | 8 | When a subscriber leaves, the publisher and the other subscribers are not affected | §9.4, §11.4.1; architecture | subscribers leave |
 | 9 | The relay does not wait for a subscriber it cannot reach: what is sent right after a subscriber was killed arrives at the others before the relay knows | Architecture: "The publisher is not made to wait" | subscribers killed: an Object is sent at once, and when the others have it the relay must not have dropped the session of the killed process yet. Another Object is sent after it has |
 | 10 | Ending a request stream ends the subscription, not the session | §11.4.1 | subscribers leave in order, and the scenario with the one Object of moqtail-rust: after moqtail-browser cancelled, the relay opens no stream towards it for the Groups sent later, and has not dropped its session |
 | 11 | A subscriber that takes nothing loses its subscription with PUBLISH_DONE `TOO_FAR_BEHIND` (`0x5`); its session, the other subscribers and the publisher go on | §8 (MAY), §10.11; architecture; decided for XmoQ | stopped subscriber |
 | 12 | A subscriber takes the Objects that arrive after PUBLISH_DONE | §10.11 (SHOULD set a timer) | not checked: no run makes an Object arrive after PUBLISH_DONE, and the order of arrival is not looked at |
-| 13 | A subscriber cancels by STOP_SENDING or a reset on the request stream, and the session stays | §5.1, §3.3.2 | not shown for an own client in these runs. own-browser cancels: **fails**, see the defect below. own-rust closes its session right after it cancels, and what it sent on the request stream is not looked at. moqtail-browser cancels with a FIN and a STOP_SENDING as read in its code; no frame was captured, and the relay's log shows only that it ended the request (row 10) |
-| 14 | The publisher resets the open streams of a subscription that was cancelled | §5.1.1 (MUST) | not checked: no client reports a reset after it cancelled. own-rust leaves right after it cancels, and own-browser cannot cancel yet. Covered by the relay's tests on the in-memory connection |
+| 13 | A subscriber cancels by STOP_SENDING or a reset on the request stream, and the session stays | §5.1, §3.3.2 | not shown for an own client in these runs. own-browser cancels: **fails**, see the defect below. own-rust closes its session right after it cancels, and what it sent on the request stream is not looked at. moqtail-browser cancels with a FIN and a STOP_SENDING as read in its code; no frame was captured, and the relay's log shows only that it ended the request (row 10). Since the defect is fixed and the relay prints the STOP_SENDING it gets: own-browser cancels and the run passes. The relay ends the request, opens no stream for what is sent later and keeps the session; where it printed the STOP_SENDING, the code has to be CANCELLED (`0x1`), and for moqtail-browser the line has to be there with `0x0` |
+| 14 | The publisher resets the open streams of a subscription that was cancelled | §5.1.1 (MUST) | not checked: no client reports a reset after it cancelled. own-rust leaves right after it cancels, and own-browser cannot cancel yet (it can since the defect below is fixed; its page does not report a reset after it cancelled, so this is still not checked). Covered by the relay's tests on the in-memory connection |
 | 15 | The streams of a subscription that fell behind are reset with `TOO_FAR_BEHIND` (`0x5`) | §3.3.3 (SHOULD); implementation notes | not observed: the stopped subscriber saw no reset, because the streams the relay reset were the ones it had not been able to open. Covered by the relay's tests |
 | 16 | The relay closes the request stream with a FIN right after PUBLISH_DONE | §10.11 (SHOULD) | not checked: neither own client reports how the stream closed after PUBLISH_DONE |
 | 17 | Ending one data stream early does not affect the subscription | §11.4.1 | not checked: no scenario stops a single data stream |
 | 18 | A message or Object for which a session was closed is not passed on to another session | §9.5 (MUST NOT) | not checked: no client here can send an invalid message |
-| 19 | A subscriber sends STOP_SENDING on the streams of a subscription when it drops the subscription's state | §10.11 (SHOULD) | not checked. own-browser cannot send one in Chromium (the defect below) |
+| 19 | A subscriber sends STOP_SENDING on the streams of a subscription when it drops the subscription's state | §10.11 (SHOULD) | not checked. own-browser cannot send one in Chromium (the defect below; it can since that is fixed, and no run has looked at a STOP_SENDING on a data stream) |
 | 20 | A control stream is not closed while the session lasts | §3.3 (MUST NOT) | every scenario fails if the relay has printed that it closed a session itself, looked at once, at the end of the run. The relay does so for a client that stops its control stream, unless the client is gone within 200 ms, which the relay takes for leaving; own-rust did so on `wtransport`. Nothing in the runs makes the relay print that line, so a change of its form would go unnoticed |
 | 21 | A session is closed with CLOSE_WEBTRANSPORT_SESSION, with a relevant code | §3.5 (the capsule is how a WebTransport session is closed; SHOULD for the code) | not checked: what a client that closes sent is not looked at. The relay printed `ClosedByPeer { code: 0 }` for them |
-| 22 | The reset of a stream whose publisher went has a relevant code | §3.3.3 (SHOULD) | publisher killed: own-rust has to see CANCELLED (`0x1`) or INTERNAL_ERROR (`0x0`). The relay gives either, see below; the notes have CANCELLED for it |
+| 22 | The reset of a stream whose publisher went has a relevant code | §3.3.3 (SHOULD) | publisher killed: own-rust has to see CANCELLED (`0x1`), the code of the notes. While the relay gave either `0x0` or `0x1`, both were accepted |
 | 23 | A subscription for which no stream was opened ends with Stream Count 0 | §10.11 (MUST) | not checked: no run ends a subscription that got no Object |
 | 24 | A stream reset with RESET_STREAM_AT keeps its header reliable, so that the subscriber can count it | §11.4.3 (SHOULD) | not checked. Whether the relay uses RESET_STREAM_AT was not looked at |
 
@@ -95,9 +95,9 @@ bun disconnect.ts --scenario publisher-killed --publisher own-rust --subscriber 
 | own-browser cancels its subscription; own-rust publishes on | failed as expected (Failed to construct 'WebTransportError') | 0.6 |
 | a stopped own-rust subscriber is cut off (TOO_FAR_BEHIND); own-browser and own-rust get everything | the stopped subscriber was cut off with TOO_FAR_BEHIND after 385 Objects; the others received all 386 | 3.2 |
 
-Three of them wait 9 to 13 seconds for the relay to give up on a client that vanished. They start together, after the 32 pairings, and go on beside the ten others. With everything built, `mise run interop` took 30.0 to 44.6 seconds for the 45 pairings in four runs; it took 17.7 seconds for the 32 before this change. The longer runs are those in which moqtail-rust left without the relay hearing of it (below), which adds 13 seconds to a pairing.
+Three of them wait for the relay to give up on a client that vanished: 9 to 13 seconds when this table was made, 6 to 9 since the relay's idle timeout is 6 seconds. They start together, after the 32 pairings, and go on beside the ten others. With everything built, `mise run interop` took 30.0 to 44.6 seconds for the 45 pairings in four runs; it took 17.7 seconds for the 32 before this change. The longer runs are those in which moqtail-rust left without the relay hearing of it (below), which adds 13 seconds to a pairing.
 
-The 13 scenarios were run 20 times in a row with `bun matrix.ts --relay own --only "leaving: "`, nine times over:
+The 13 scenarios were run 20 times in a row with `bun matrix.ts --relay own --only "leaving: "`, twelve times over:
 
 | Set of 20 rounds | Library of the relay and own-rust | Driver | Rounds in which all 13 ended as expected | Seconds a round |
 |---|---|---|---|---|
@@ -106,10 +106,13 @@ The 13 scenarios were run 20 times in a row with `bun matrix.ts --relay own --on
 | 3 | `wtransport` 0.7.2 | Before the checks for rows 9, 10 and 20 and the bound of row 6 | 19 | 13.3 to 20.3 |
 | 4 | `web-transport-quinn` 0.13.2 | The same | 19 | 13.3 to 31.4 |
 | 5 | `web-transport-quinn` 0.13.2 | The same | 20 | 13.3 to 13.7 |
-| 6 | `web-transport-quinn` 0.13.2 | With those checks, and a bound of 13 seconds where it is 15 now | 19 | 13.1 to 21.1 |
+| 6 | `web-transport-quinn` 0.13.2 | With those checks, and a bound of 13 seconds, which later sets widened to 15 | 19 | 13.1 to 21.1 |
 | 7 | `web-transport-quinn` 0.13.2 | As committed | 20 | 13.1 to 13.5 |
 | 8 | The same, and own-rust binds an IPv4 socket for an IPv4 server (`7f98929`) | As committed | 18 | 13.1 to 24.7 |
 | 9 | The same | As committed | 20 | 13.1 to 14.9 |
+| 10 | The relay with an idle timeout of 6 seconds and CANCELLED for every stream it cuts short (`main` after pull request 17) | With a bound of 12 seconds and CANCELLED alone accepted, and a wait for the relay to print the STOP_SENDING of a page that cancels | 18 | 12.4 to 33.6 |
+| 11 | The same | The STOP_SENDING is looked at where it was printed | 20 | 12.3 to 24.3 |
+| 12 | The same | As committed: bounds of 10.5 seconds for a killed publisher and 7.5 for a killed subscriber, and the STOP_SENDING of moqtail-browser has to be printed | 20 | 12.5 to 21.4 |
 
 **Three runs failed, one of 780 before the change of library and two of 780 after it, all because an own-rust client could not connect to the relay.** Nothing of the scenario itself had started in the first, and the scenario was over in the two others.
 
@@ -124,6 +127,28 @@ No client failed to connect in sets 7 to 9. Seven of the 13 scenarios connect a 
 Up to four other relays and their clients were running on the machine each time. A cause was found afterwards, in [its own record](2026-10-10-client-handshake-timeout.md): the client binds a socket for IPv4 and IPv6, and when the kernel gives it a port that another process holds with an IPv4 socket, the relay's answers go to that process. It reproduced with one relay and no load, twice in 38,000 connections. That these three runs failed for it is not shown, as their ports were not recorded. The relay went on accepting connections. Until the client binds differently, the same can fail the CI job.
 
 Every scenario ends with a fresh own-rust publisher and subscriber moving one Object over the same track. Where they connected, it passed in every run: the relay had let go of the publisher that left (row 7).
+
+### What the relay's shorter idle timeout changed
+
+Sets 10 and 11, 40 rounds, on `main` after the relay's idle timeout went from 9 to 6 seconds and it began to print the STOP_SENDING it receives.
+
+| Measured | Before | Now |
+|---|---|---|
+| Time from killing an own-rust publisher to PUBLISH_DONE at the subscribers | 12.0 seconds | 9.0 seconds in 40 of 40 |
+| Time from killing an own-rust subscriber to the relay dropping its session | 9.0 to 9.1 seconds | 6.0 to 6.1 seconds |
+| Reset code own-rust sees on a stream its publisher left open | `0x0` and `0x1`, about half each | `0x1` on 240 of 240 streams |
+| The relay learns that moqtail-rust closed its session by its idle timeout only | 13 of 40 runs, 12 seconds later | 13 of 40 runs, 9 seconds later |
+| A client that could not connect; a relay that could not start; a session the relay closed itself | 3 of 1560; 2 of 520; none since `web-transport-quinn` | none in 520 runs |
+
+**The code of a STOP_SENDING sent from a browser reaches the relay.** When the own page cancelled its subscription, the relay printed `STOP_SENDING_RECEIVED session=1 stream=1 code=0x1` in 37 of the 40 rounds: CANCELLED, the code `@xmoq/moqt` puts into the `WebTransportError` it cancels the reader with. In the other 3 it printed nothing for that stream. It prints the line only where it sees the STOP_SENDING before the reset of the other direction, which a client that cancels sends as well; in those rounds it had ended the request for the reset. The two failed rounds of set 10 are those: the driver waited for the line. It now compares the code where the line is there, and no other code than `0x1` was printed. For moqtail-browser, which cancels its reader without a reason, the relay printed `code=0x0` in 20 of 20 rounds.
+
+Set 12, 20 more rounds, with the bounds for a killed client put between what is measured now and what was measured with the idle timeout of 9 seconds (10.5 seconds for a publisher, where 9.0 and 12.0 were measured; 7.5 for a subscriber, where 6.0 to 6.1 and 9.0 to 9.1 were): 9.0 seconds in 20 of 20 and 6.0 to 6.1 seconds, no round failed. The 12 seconds of sets 10 and 11 would have let the old timeout pass. The own page's STOP_SENDING was printed in 16 of these 20 rounds, 53 of 60 in all. The line of moqtail-browser was printed with `code=0x0` in both runs in which it cancels, 40 of 40, and the driver now fails without it: that client ends its direction with a FIN and sends no reset, so nothing overtakes its STOP_SENDING.
+
+**A reset with another code than CANCELLED is possible and was not seen.** The relay gives CANCELLED to the streams of a publisher whose session ended. Where the publisher resets a stream itself, the relay hands on the publisher's code (`0x0` if there is none). A browser that reset its streams before it closed the session of a page that is closed would get another code to the subscribers, and the runs would fail. In the 20 rounds of set 12 the relay printed the end of the publisher's session before every one of the 111 resets it sent for a closed page (71 for own-browser, 40 for moqtail-browser), all with `0x1`. Whether Chromium can send the resets first was not found out.
+
+That is for a request stream. A STOP_SENDING on a data stream was not looked at here: the relay notices one only at its next write to that stream, and no scenario has a subscriber stop a stream the relay is still writing.
+
+The three runs that wait for the idle timeout wait 6 to 9 seconds now. They run beside the others, whose ten runs take about 12 seconds together, so what the shorter timeout took off the 13 scenarios is small: the fastest round went from 13.1 to 12.3 seconds. A still shorter timeout, set with the relay's `--idle-timeout-ms`, would take off nothing more, and the scenarios run with the relay's default.
 
 ### What the change of library changed
 
@@ -186,6 +211,8 @@ Three things the clients did when they left, found here:
 
 ### A browser subscriber that cancels: fails
 
+Fixed since, in [the record of the stream errors](2026-10-10-webtransport-error-in-chromium.md): the run passes and is no longer listed as failing. What follows is what was found then.
+
 `Subscription.cancel()` of `@xmoq/moqt` rejected in Chromium 156 with `TypeError: Failed to construct 'WebTransportError': The provided value is not of type 'WebTransportErrorInit'`, and the relay then dropped the session. `packages/moqt/src/webtransport/connect.ts` builds the error for every reset and every STOP_SENDING as `new WebTransportError(message, { streamErrorCode })`. In Chromium 156 the constructor takes one dictionary:
 
 | Call, in a page of Chromium 156.0.8078.4 | Result |
@@ -235,7 +262,7 @@ Two things are behind it. Chromium takes a short stream off the connection wheth
 - **Not run on GitHub.** The runs were made on macOS only. The time the CI job takes with them is not measured.
 - **Three runs of 1560 failed because a client could not connect to the relay** (above), all with an own-rust client that bound a socket for IPv4 and IPv6. own-rust binds differently since `7f98929`; moqtail-rust does not, so the same can still fail the CI job.
 - **Two runs of 520 after that failed because the relay's port was in use**, for a reason that is not known (above).
-- **One run is expected to fail**, the browser subscriber that cancels, until `@xmoq/moqt` builds `WebTransportError` the way Chromium takes it. Until then rows 13 and 14 are not shown for the browser client.
+- Fixed since, see the section on the defect; kept as it was written. **One run is expected to fail**, the browser subscriber that cancels, until `@xmoq/moqt` builds `WebTransportError` the way Chromium takes it. Until then rows 13 and 14 are not shown for the browser client.
 - **The slow subscriber is a stopped process, not a slow reader.** It takes nothing at all and acknowledges nothing. A reader that is merely slower than the publisher is not covered, and neither is a browser.
 - **Three runs depend on the relay's idle timeout** and so on a provisional value. They run beside the others to keep the matrix short, which puts up to four Chromium instances on the machine at its start.
 - **The driver reads six kinds of lines of the own relay's log**: `SESSION_OPENED`, `SESSION_CLOSED`, `FINISH_REQUEST` or `RESET_REQUEST`, `OPEN_DATA`, the `SEND` of a PUBLISH_DONE with status `0x5`, and `CLOSE_SESSION`. A killed client says nothing and a stopped one reads nothing, so there is no other place to wait. A change to the form of the first five fails the runs, because each is waited for at least once in every run. A change to `CLOSE_SESSION` does not: that line only has to be absent.
@@ -248,6 +275,6 @@ Two things are behind it. Chromium takes a short stream off the connection wheth
 
 ## Open questions raised
 
-- Which Stream Reset Error Code should the relay give a subscriber's stream when the publisher vanishes: CANCELLED, INTERNAL_ERROR as passed on now in some runs, or SESSION_CLOSED? It gives two different ones for the same event today.
-- Is 12 seconds to notice a killed publisher acceptable for a live broadcast, where every viewer waits that long for the end? The value follows from the provisional idle timeout and keep-alive.
+- Settled since: the relay gives CANCELLED. The question was: Which Stream Reset Error Code should the relay give a subscriber's stream when the publisher vanishes: CANCELLED, INTERNAL_ERROR as passed on now in some runs, or SESSION_CLOSED? It gives two different ones for the same event today.
+- It is 9 seconds now. The question stands for that value: Is 12 seconds to notice a killed publisher acceptable for a live broadcast, where every viewer waits that long for the end? The value follows from the provisional idle timeout and keep-alive.
 - How should a slow browser viewer be bounded, when Chromium accepts short streams without the page reading them? The relay's limit does not see such a viewer; the queue in `@xmoq/moqt` is the only place left.
