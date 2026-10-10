@@ -24,7 +24,72 @@ export interface ConnectOptions extends SessionConnectOptions {
 	serverCertificateHashes?: WebTransportHash[];
 }
 
-function adapt(webTransport: WebTransport): MoqtTransport {
+/** What the connection reads of a `WebTransportError`. */
+interface StreamError {
+	readonly source: string;
+	readonly streamErrorCode: number | null;
+}
+
+type StreamErrorConstructor = new (...args: never[]) => StreamError;
+
+/**
+ * The error that resets a stream, or stops its sender, with `code`: the
+ * browser takes the code from a `WebTransportError` given to `abort()` or
+ * `cancel()` and uses 0 for anything else (W3C WebTransport, "abort a
+ * WebTransportSendStream" and "cancel a WebTransportReceiveStream").
+ *
+ * WHY two forms: the specification has `new WebTransportError(message,
+ * options)` (§12, Candidate Recommendation Snapshot of 30 July 2026 and
+ * Editor's Draft of 6 October 2026). Chromium 156.0.8078.4 takes one
+ * dictionary, `{ message, streamErrorCode }`, and throws a TypeError when the
+ * first argument is a string (checked in a page on 2026-10-10).
+ * WHY the form of the specification first: a browser that follows it reads a
+ * dictionary given first as the message and builds an error without a code,
+ * which is why the code of what was built is compared as well.
+ * WHY `Reflect.construct`: `WebTransportError` in lib.dom.d.ts of TypeScript
+ * 6.0.3 declares the form of the specification only.
+ *
+ * Throws when neither form gives an error with `code`. That is the case in
+ * Chromium 156 for a code above 255, which it clamps to 255
+ * (`MAX_STREAM_ERROR_CODE` in connection.ts keeps callers below it).
+ */
+export function createStreamError(
+	errorConstructor: StreamErrorConstructor,
+	code: number,
+	message: string,
+): StreamError {
+	const forms: unknown[][] = [
+		[message, { streamErrorCode: code }],
+		[{ message, streamErrorCode: code }],
+	];
+	for (const form of forms) {
+		let built: unknown;
+		try {
+			built = Reflect.construct(errorConstructor, form);
+		} catch (error) {
+			if (error instanceof TypeError) continue;
+			throw error;
+		}
+		if (built instanceof errorConstructor && built.streamErrorCode === code) {
+			return built;
+		}
+	}
+	throw new Error(
+		`WebTransportError could not be built with stream error code ${code} in either of its two forms`,
+	);
+}
+
+/** The members of the browser's `WebTransport` that the connection uses. */
+type BrowserTransport = Omit<
+	MoqtTransport,
+	"streamError" | "isStreamError" | "streamErrorCode"
+>;
+
+/** `errorConstructor` is the browser's `WebTransportError`; tests give their own. */
+export function adaptWebTransport(
+	webTransport: BrowserTransport,
+	errorConstructor: StreamErrorConstructor,
+): MoqtTransport {
 	return {
 		closed: webTransport.closed,
 		incomingUnidirectionalStreams: webTransport.incomingUnidirectionalStreams,
@@ -33,13 +98,13 @@ function adapt(webTransport: WebTransport): MoqtTransport {
 		createBidirectionalStream: () => webTransport.createBidirectionalStream(),
 		close: (info) => webTransport.close(info),
 		streamError: (code, message) =>
-			new WebTransportError(message, { streamErrorCode: code }),
+			createStreamError(errorConstructor, code, message),
 		// A WebTransportError says in `source` whether a stream or the session
 		// failed.
 		isStreamError: (error) =>
-			error instanceof WebTransportError && error.source === "stream",
+			error instanceof errorConstructor && error.source === "stream",
 		streamErrorCode: (error) =>
-			error instanceof WebTransportError
+			error instanceof errorConstructor
 				? (error.streamErrorCode ?? undefined)
 				: undefined,
 	};
@@ -89,5 +154,8 @@ export async function connect(
 		});
 		throw new Error(refusal);
 	}
-	return connectOver(adapt(webTransport), options);
+	return connectOver(
+		adaptWebTransport(webTransport, WebTransportError),
+		options,
+	);
 }

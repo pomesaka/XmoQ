@@ -308,11 +308,6 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
-		// FIXME: this has to pass. `Subscription.cancel()` of @xmoq/moqt throws in
-		// Chromium 156, whose `WebTransportError` constructor takes one
-		// dictionary and not a message first (packages/moqt/src/webtransport/
-		// connect.ts builds the error of every reset and STOP_SENDING that
-		// way). Drop `expectedFailure` once the package is fixed.
 		name: "own-browser cancels its subscription; own-rust publishes on",
 		script: "disconnect.ts",
 		args: [
@@ -323,7 +318,6 @@ const DISCONNECTS: Pairing[] = [
 			...each("leaver", ["own-browser:cancel"]),
 			...each("stayer", ["own-rust"]),
 		],
-		expectedFailure: /Failed to construct 'WebTransportError'/,
 	},
 	{
 		// WHY own-browser publishes: own-rust waits for the acknowledgement of

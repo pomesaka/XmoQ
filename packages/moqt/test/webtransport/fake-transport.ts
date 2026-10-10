@@ -1,16 +1,54 @@
+import { adaptWebTransport } from "../../src/webtransport/connect.ts";
 import type {
 	MoqtBidirectionalStream,
 	MoqtTransport,
 } from "../../src/webtransport/transport.ts";
 
-/** What a stream is reset or stopped with in the fake transport. */
-export class FakeStreamError extends Error {
-	readonly code: number;
+/**
+ * `WebTransportError` as Chromium 156.0.8078.4 has it (checked in a page on
+ * 2026-10-10 with spikes/wt-error-form/constructor.ts): built from one
+ * dictionary, a TypeError for anything else in its place, the code clamped to
+ * 0 to 255, and no way for a page to set `source`. The fake is as strict as
+ * the browser on purpose. A call in the form of the specification, `(message,
+ * options)`, passed a more lenient fake and failed in the browser.
+ */
+export class FakeWebTransportError extends Error {
+	readonly streamErrorCode: number | null;
+	#source: "stream" | "session" = "stream";
 
-	constructor(code: number, message: string) {
-		super(`stream error ${code}: ${message}`);
-		this.code = code;
+	constructor(init: unknown = {}) {
+		if (typeof init !== "object" || init === null) {
+			throw new TypeError(
+				"Failed to construct 'WebTransportError': The provided value is not of type 'WebTransportErrorInit'.",
+			);
+		}
+		const message = "message" in init ? String(init.message) : "";
+		super(message);
+		const code = "streamErrorCode" in init ? init.streamErrorCode : null;
+		this.streamErrorCode =
+			typeof code === "number"
+				? Math.min(255, Math.max(0, Math.trunc(code)))
+				: null;
 	}
+
+	get source(): "stream" | "session" {
+		return this.#source;
+	}
+
+	/** What the browser fails every stream with when the session ends. */
+	static sessionEnded(): FakeWebTransportError {
+		const error = new FakeWebTransportError({ message: "the session ended" });
+		error.#source = "session";
+		return error;
+	}
+}
+
+/** What the peer resets a stream or stops its sender with. */
+export function fakeStreamError(
+	code: number,
+	message: string,
+): FakeWebTransportError {
+	return new FakeWebTransportError({ message, streamErrorCode: code });
 }
 
 /** Items handed over in order to whoever asks next. */
@@ -90,7 +128,7 @@ export function createFakePeer(): FakePeer {
 	// which the connection can see the end of a session, and the one it must
 	// not take for resets and STOP_SENDINGs of the peer.
 	const endStreams = (): void => {
-		const error = new Error("the session ended");
+		const error = FakeWebTransportError.sessionEnded();
 		for (const end of streamEnders) end(error);
 	};
 	let closeInfo: CloseInfo | undefined;
@@ -101,36 +139,37 @@ export function createFakePeer(): FakePeer {
 		rejectClosed = reject;
 	});
 
-	const transport: MoqtTransport = {
-		closed,
-		incomingUnidirectionalStreams: incomingUni.readable,
-		incomingBidirectionalStreams: incomingBidi.readable,
-		createUnidirectionalStream() {
-			const stream = pipe();
-			clientUnis.put(stream.readable.getReader());
-			return Promise.resolve(stream.writable);
+	// WHY through the adapter of the browser: what it does to errors is then
+	// part of every test of the connection.
+	const transport = adaptWebTransport(
+		{
+			closed,
+			incomingUnidirectionalStreams: incomingUni.readable,
+			incomingBidirectionalStreams: incomingBidi.readable,
+			createUnidirectionalStream() {
+				const stream = pipe();
+				clientUnis.put(stream.readable.getReader());
+				return Promise.resolve(stream.writable);
+			},
+			createBidirectionalStream() {
+				const fromClient = pipe();
+				const toClient = pipe();
+				clientBidis.put({
+					sent: fromClient.readable.getReader(),
+					reply: toClient.writable.getWriter(),
+				});
+				return Promise.resolve({
+					readable: toClient.readable,
+					writable: fromClient.writable,
+				});
+			},
+			close(info) {
+				closeInfo = info;
+				resolveClosed(info);
+			},
 		},
-		createBidirectionalStream() {
-			const fromClient = pipe();
-			const toClient = pipe();
-			clientBidis.put({
-				sent: fromClient.readable.getReader(),
-				reply: toClient.writable.getWriter(),
-			});
-			return Promise.resolve({
-				readable: toClient.readable,
-				writable: fromClient.writable,
-			});
-		},
-		close(info) {
-			closeInfo = info;
-			resolveClosed(info);
-		},
-		streamError: (code, message) => new FakeStreamError(code, message),
-		isStreamError: (error) => error instanceof FakeStreamError,
-		streamErrorCode: (error) =>
-			error instanceof FakeStreamError ? error.code : undefined,
-	};
+		FakeWebTransportError,
+	);
 
 	return {
 		transport,

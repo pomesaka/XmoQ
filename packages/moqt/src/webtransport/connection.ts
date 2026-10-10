@@ -38,6 +38,18 @@ import type { MoqtTransport } from "./transport.ts";
 
 /** Provisional defaults; the project has not chosen any of them. */
 const DEFAULT_SUBSCRIPTION_HIGH_WATER_MARK = 16;
+/**
+ * The largest code an application may reset a stream with.
+ *
+ * WHY 255 and not the 2^32 - 1 of W3C WebTransport (`[Clamp] unsigned long?
+ * streamErrorCode`): Chromium 156.0.8078.4 clamps the code of a
+ * `WebTransportError` to 255 (checked in a page on 2026-10-10: 256, 65535 and
+ * 2^32 - 1 all gave 255), so a larger one cannot be sent from it. Every Stream
+ * Reset Error Code of draft 18 (§3.3.3) is 0x12 or less.
+ * FIXME: raise this when browsers take the 32 bits of the specification. The
+ * Rust implementation sends any 32-bit code.
+ */
+const MAX_STREAM_ERROR_CODE = 255;
 const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
 /**
  * §10.11 asks for at least the larger of the two delivery timeouts. Neither
@@ -90,7 +102,9 @@ export interface SubgroupWriter {
 	close(): Promise<void>;
 	/**
 	 * The subgroup is incomplete: reset the stream (§11.4.3). Does nothing on
-	 * a stream that is already closed.
+	 * a stream that is already closed. `code` is a Stream Reset Error Code
+	 * (§3.3.3), CANCELLED when left out; a value that is not a whole number
+	 * from 0 to 255 rejects with a `RangeError` and leaves the stream as it is.
 	 */
 	reset(code?: number): Promise<void>;
 }
@@ -424,10 +438,20 @@ export async function connectOver(
 			onPublish(publish, () => applyVoid((s) => s.writeObject(stream, object))),
 		close: () =>
 			onPublishIfOpen(publish, () => applyVoid((s) => s.closeSubgroup(stream))),
-		reset: (code = StreamResetErrorCode.CANCELLED) =>
-			onPublishIfOpen(publish, () =>
+		reset: (code = StreamResetErrorCode.CANCELLED) => {
+			// Before anything is done to the stream: a code the browser cannot
+			// send must not leave the stream half reset.
+			if (!Number.isInteger(code) || code < 0 || code > MAX_STREAM_ERROR_CODE) {
+				return Promise.reject(
+					new RangeError(
+						`a stream is reset with a whole number from 0 to ${MAX_STREAM_ERROR_CODE}, not ${code}`,
+					),
+				);
+			}
+			return onPublishIfOpen(publish, () =>
 				applyVoid((s) => s.resetSubgroup(stream, code)),
-			),
+			);
+		},
 	});
 
 	const publishedTrackFrom = (
