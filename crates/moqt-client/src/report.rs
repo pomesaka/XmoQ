@@ -86,6 +86,36 @@ pub fn publish_done_peer_ended(how: Option<RequestClose>) {
     }
 }
 
+/// The same for a subscription the peer asked for with SUBSCRIBE, where this
+/// client reads the peer's stream through its request readers and learns only
+/// whether the stream ended with a FIN.
+pub fn publish_done_peer_ended_on_its_stream(fin: Option<bool>) {
+    let how = match fin {
+        Some(true) => "FIN",
+        Some(false) => "reset or stopped",
+        None => "nothing in time",
+    };
+    println!("PUBLISH_DONE_PEER_ENDED how={how}");
+}
+
+/// The subscriber of this client's PUBLISH finished its direction of the
+/// request stream before this client sent `PUBLISH_DONE`. The subscription
+/// goes on (§5.1).
+pub fn subscriber_finished_its_direction() {
+    println!("PUBLISH_PEER_FINISHED_ITS_DIRECTION");
+}
+
+/// The peer subscribed to the track this client announced the namespace of.
+pub fn serving(track_alias: u64) {
+    println!("SERVING track_alias={track_alias}");
+}
+
+/// The subscriber ended that subscription (§5.1: `STOP_SENDING`, or a reset of
+/// its own direction).
+pub fn subscription_cancelled() {
+    println!("SUBSCRIPTION_CANCELLED");
+}
+
 pub fn sent(group_id: u64, payload_len: usize) {
     println!("SENT group={group_id} object=0 payload_len={payload_len}");
 }

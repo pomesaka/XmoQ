@@ -57,6 +57,10 @@ const SUBSCRIBE_TRACKS: u64 = 0x51;
 
 /// `REQUEST_ERROR` Error Codes (§15.10.2).
 pub mod request_error_code {
+    /// `TIMEOUT`: "The subscription could not be completed before an
+    /// implementation specific timeout. For example, a relay could not
+    /// establish an upstream subscription within the timeout."
+    pub const TIMEOUT: u64 = 0x2;
     /// `NOT_SUPPORTED`: the endpoint does not support the type of request.
     pub const NOT_SUPPORTED: u64 = 0x3;
     /// `EXCESSIVE_LOAD`: the responder cannot process the request now.

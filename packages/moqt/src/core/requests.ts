@@ -727,6 +727,13 @@ export function createRequests(options: RequestsOptions): Requests {
 			if (request.inbound.length > 0) {
 				throw protocolViolation("FIN inside a control message");
 			}
+			// §5.1: the subscriber of a subscription made with PUBLISH ends it with
+			// STOP_SENDING. A subscriber that only finishes its direction can send
+			// no REQUEST_UPDATE any more, and has asked for nothing to end.
+			// WHY the stream stays known: STOP_SENDING for it can still come.
+			if (request.kind === "PUBLISH" && request.state === "Established") {
+				return;
+			}
 			requestStreams.delete(stream);
 			if (request.state === "Terminated") return;
 			// After PUBLISH_DONE the FIN is expected (§10.11) and the subscription

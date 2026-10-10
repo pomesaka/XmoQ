@@ -472,7 +472,7 @@ async fn a_disconnect_ends_open_streams_as_aborted() {
 enum Seen {
     Opened(u64, ControlMessage),
     Message(u64, ControlMessage),
-    Closed(u64),
+    Closed(u64, bool),
     Failed(Error),
     ReaderPanicked,
 }
@@ -522,7 +522,7 @@ impl Requests {
                 Seen::Opened(stream, first)
             }
             PeerRequestStreamEvent::Message { stream, message } => Seen::Message(stream, message),
-            PeerRequestStreamEvent::Closed { stream } => Seen::Closed(stream),
+            PeerRequestStreamEvent::Closed { stream, fin } => Seen::Closed(stream, fin),
             PeerRequestStreamEvent::Failed(error) => Seen::Failed(error),
             PeerRequestStreamEvent::ReaderPanicked => Seen::ReaderPanicked,
         }
@@ -557,7 +557,12 @@ async fn request_streams_report_their_messages_and_their_end() {
             Some(code) => send.reset(code),
             None => send.finish(),
         }
-        assert_eq!(requests.next().await, Seen::Closed(stream), "{name}");
+        // Only a FIN is reported as one: a reset cancels the request.
+        assert_eq!(
+            requests.next().await,
+            Seen::Closed(stream, reset.is_none()),
+            "{name}"
+        );
         assert!(requests.stops.is_empty(), "{name}");
     }
 }
@@ -571,7 +576,7 @@ async fn a_request_stream_is_stopped_on_request() {
         panic!("not opened");
     };
     requests.stops.stop(stream, 0x12);
-    assert_eq!(requests.next().await, Seen::Closed(stream));
+    assert_eq!(requests.next().await, Seen::Closed(stream, false));
     assert_eq!(
         send.write_all(&[0]).await,
         Err(WriteError::Stopped(Some(0x12)))

@@ -22,6 +22,41 @@ pub struct StreamKey(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OutStreamKey(pub u64);
 
+/// Names a request stream the relay opens, across all sessions. The relay
+/// never reuses one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OwnRequestKey(pub u64);
+
+/// What ended on a request stream the relay opened. "Own" is the relay's
+/// word for the requests it opens, next to the requests a peer opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnRequestEnd {
+    /// The stream could not be opened, or the request could not be written:
+    /// the request never reached the peer.
+    Unsent,
+    /// The peer finished its direction.
+    Fin,
+    /// The peer reset its direction.
+    Reset,
+    /// The peer sent `STOP_SENDING` for the relay's direction. The peer's own
+    /// direction is still open, and may still carry an answer.
+    Stopped,
+}
+
+/// How a peer ended a request stream it opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestEnd {
+    /// It finished its direction and did nothing else. That is not a
+    /// cancellation: §5.1 has a subscriber end a subscription with
+    /// `STOP_SENDING`, and §3.3.2 names a reset and `STOP_SENDING` for
+    /// cancelling a request.
+    Fin,
+    /// It reset its direction or sent `STOP_SENDING` for the relay's, which
+    /// cancels the request (§3.3.2), or nothing more can be read because this
+    /// side stopped the stream.
+    Aborted,
+}
+
 /// How a subgroup stream of a peer ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEnd {
@@ -68,13 +103,43 @@ pub enum Event {
         /// The message.
         message: ControlMessage,
     },
-    /// The peer ended a request stream it opened: it finished or reset its
-    /// direction, or sent `STOP_SENDING` for the relay's (§3.3.2, §5.1).
+    /// The peer ended a request stream it opened, in the way `how` says.
     RequestClosed {
         /// The session.
         session: SessionKey,
         /// The stream.
         stream: StreamKey,
+        /// How.
+        how: RequestEnd,
+    },
+    /// A message arrived on a request stream the relay opened
+    /// ([`Action::OpenRequest`]).
+    OwnRequestMessage {
+        /// The session.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
+        /// The message.
+        message: ControlMessage,
+    },
+    /// Something ended on a request stream the relay opened, or the stream
+    /// never came about. What that means for the request is for the relay to
+    /// say; the I/O side reports what it saw.
+    OwnRequestClosed {
+        /// The session.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
+        /// What happened.
+        how: OwnRequestEnd,
+    },
+    /// The time a publisher gets to answer a SUBSCRIBE of the relay is over.
+    /// Answers [`Action::StartUpstreamTimer`].
+    UpstreamTimeout {
+        /// The session of the publisher.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
     },
     /// The Subgroup Header of a unidirectional stream of the peer arrived.
     DataStreamOpened {
@@ -276,6 +341,51 @@ pub enum Action {
         stream: StreamKey,
         /// The code.
         code: u32,
+    },
+    /// Open a bidirectional stream to the peer and send `message`, a request
+    /// of the relay's own, on it. What arrives on the stream is reported with
+    /// [`Event::OwnRequestMessage`] and [`Event::OwnRequestClosed`].
+    OpenRequest {
+        /// The session.
+        session: SessionKey,
+        /// The name the relay gives the request.
+        request: OwnRequestKey,
+        /// The request.
+        message: ControlMessage,
+    },
+    /// Finish the relay's direction of a request stream it opened, and stop
+    /// reading the peer's.
+    FinishOwnRequest {
+        /// The session.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
+    },
+    /// Cancel a request the relay opened: reset its direction and send
+    /// `STOP_SENDING` for the peer's, with a Stream Reset Error Code
+    /// (§3.3.2).
+    CancelOwnRequest {
+        /// The session.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
+        /// The code.
+        code: u32,
+    },
+    /// Report [`Event::UpstreamTimeout`] after the time a publisher gets to
+    /// answer a SUBSCRIBE of the relay. The timer is of no use once a message
+    /// arrived on the request, or the request was finished or cancelled, and
+    /// the I/O side may drop it then.
+    ///
+    /// For this and every other timer: an I/O side that cannot start one
+    /// reports its event at once. A wait that is cut short costs the peer
+    /// what it waited for; a wait that never ends costs the relay what it
+    /// holds.
+    StartUpstreamTimer {
+        /// The session of the publisher.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
     },
     /// Close the session.
     CloseSession {

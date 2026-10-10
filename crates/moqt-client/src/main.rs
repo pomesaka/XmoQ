@@ -20,18 +20,21 @@ use xmoq_moqt::data::{
 };
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, ReasonPhrase, RequestError, publish_done_status, setup_option,
+    ControlMessage, ReasonPhrase, RequestError, publish_done_status, request_error_code,
+    setup_option,
 };
 use xmoq_moqt::name::{FullTrackName, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
 use xmoq_moqt::session::{
-    RequestEvent, RequestId, RequestState, Role, Session, SubscribedAlias, Transport,
+    PeerRequest, PeerRequestEvent, PeerRequestId, PeerRequestOpened, RequestEvent, RequestId,
+    RequestState, Role, Session, SubscribedAlias, Transport,
 };
 
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, Direction, RequestStreamEvent, SendStream, StreamEnd, StreamStops, Trace, UniEvent,
+    Connection, Direction, PeerRequestStreamEvent, RequestClose, RequestStreamEvent, SendStream,
+    StreamEnd, StreamStops, Trace, UniEvent,
 };
 
 use crate::io::{DataInbox, RequestStream};
@@ -73,6 +76,10 @@ enum Mode {
     Subscribe { objects: u64 },
     /// Publishes one Object carrying this payload.
     Publish { payload: Vec<u8> },
+    /// Announces the namespace with `PUBLISH_NAMESPACE` and sends no PUBLISH:
+    /// the track is published to whoever sends SUBSCRIBE for it, which is how
+    /// a relay asks for a track of an announced namespace (§9.5).
+    PublishNamespace { payload: Vec<u8> },
 }
 
 struct Args {
@@ -82,6 +89,17 @@ struct Args {
     namespace: String,
     track_name: String,
     timeout_secs: u64,
+    /// How long the publisher waits between the answer to its
+    /// `PUBLISH_NAMESPACE` and its PUBLISH.
+    publish_delay: Duration,
+    /// How long a request of the peer waits for its refusal.
+    ///
+    /// WHY the two delays: on a real link, a SUBSCRIBE the relay sends after
+    /// it accepted the namespace is answered a round trip later, and the
+    /// PUBLISH is already under way by then (§5.1 has the SUBSCRIBE give way).
+    /// On loopback that window is too short to hit on purpose; the delays
+    /// widen it.
+    answer_delay: Duration,
     trace: Trace,
 }
 
@@ -116,6 +134,8 @@ fn parse_args() -> Result<Args> {
     let mut namespace = None;
     let mut track_name = None;
     let mut timeout_secs = 20;
+    let mut publish_delay_ms = 0;
+    let mut answer_delay_ms = 0;
     let mut trace = false;
 
     let mut args = std::env::args().skip(1);
@@ -136,6 +156,12 @@ fn parse_args() -> Result<Args> {
             "--namespace" => namespace = Some(value),
             "--track" => track_name = Some(value),
             "--timeout-secs" => timeout_secs = value.parse().context("--timeout-secs")?,
+            "--publish-delay-ms" => {
+                publish_delay_ms = value.parse().context("--publish-delay-ms")?;
+            }
+            "--answer-delay-ms" => {
+                answer_delay_ms = value.parse().context("--answer-delay-ms")?;
+            }
             other => bail!("unknown flag {other}"),
         }
     }
@@ -143,6 +169,9 @@ fn parse_args() -> Result<Args> {
     let mode = match mode.context("--mode is required")?.as_str() {
         "subscribe" => Mode::Subscribe { objects },
         "publish" => Mode::Publish {
+            payload: hex::decode(&payload_hex.context("--payload-hex is required to publish")?)?,
+        },
+        "publish-namespace" => Mode::PublishNamespace {
             payload: hex::decode(&payload_hex.context("--payload-hex is required to publish")?)?,
         },
         other => bail!("unknown --mode {other}"),
@@ -158,6 +187,8 @@ fn parse_args() -> Result<Args> {
         namespace: namespace.context("--namespace is required")?,
         track_name: track_name.context("--track is required")?,
         timeout_secs,
+        publish_delay: Duration::from_millis(publish_delay_ms),
+        answer_delay: Duration::from_millis(answer_delay_ms),
         trace: if trace {
             Trace::new(report::trace)
         } else {
@@ -206,7 +237,34 @@ struct Client<'a> {
     stops: StreamStops,
     /// The Track Alias of every subgroup stream that is being read.
     open_streams: HashMap<u64, u64>,
+    /// The requests the peer opens, in the mode that serves them.
+    peer_requests: Option<io::PeerRequests>,
     args: &'a Args,
+}
+
+/// A SUBSCRIBE of the peer this client accepted.
+struct Serving {
+    request: PeerRequestId,
+    /// The peer's request stream, as the readers name it.
+    stream: u64,
+    send: <WtConnection as Connection>::Send,
+    track_alias: u64,
+    /// Subgroup streams opened for the subscription, for `PUBLISH_DONE`.
+    streams: u64,
+}
+
+/// Completes when the subscriber sent `STOP_SENDING` on the stream of the
+/// subscription that is being served; never, when none is.
+async fn stopped(serving: &mut Option<Serving>) {
+    match serving {
+        Some(serving) => {
+            if let xmoq_moqt_io::WriteError::Lost(_) = serving.send.stopped().await {
+                // A lost connection is reported where the session is watched.
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending().await,
+    }
 }
 
 impl Client<'_> {
@@ -435,6 +493,7 @@ impl Client<'_> {
                 return Err(refused("PUBLISH_NAMESPACE", other));
             }
         }
+        tokio::time::sleep(self.args.publish_delay).await;
 
         let (publish_request, message) = self.session.publish(
             self.args.full_track_name()?,
@@ -456,9 +515,9 @@ impl Client<'_> {
     }
 
     /// Sends one Object as Object 0 of a new Group, on a new subgroup stream.
-    async fn send_object(&self, group_id: u64, payload: &[u8]) -> Result<()> {
+    async fn send_object(&self, track_alias: u64, group_id: u64, payload: &[u8]) -> Result<()> {
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
-            track_alias: PUBLISH_TRACK_ALIAS,
+            track_alias,
             group_id,
             subgroup_id: SubgroupId::Zero,
             publisher_priority: Some(0),
@@ -507,7 +566,8 @@ impl Client<'_> {
                 line = stdin.next_line() => match line? {
                     Some(_) => {
                         // Each Object is a Group of its own, numbered from 0.
-                        self.send_object(stream_count, payload).await?;
+                        self.send_object(PUBLISH_TRACK_ALIAS, stream_count, payload)
+                            .await?;
                         stream_count += 1;
                     }
                     None if stream_count == 0 => bail!("stdin closed before the send trigger"),
@@ -528,6 +588,12 @@ impl Client<'_> {
                             }
                             other => bail!("unexpected message on the publish stream: {other:?}"),
                         }
+                    }
+                    // §5.1: the subscriber ends the subscription with
+                    // STOP_SENDING. One that only finishes its direction can
+                    // send no REQUEST_UPDATE any more and has ended nothing.
+                    RequestStreamEvent::Closed(RequestClose::Fin) => {
+                        report::subscriber_finished_its_direction();
                     }
                     RequestStreamEvent::Closed(how) => {
                         self.session.cancel(publish_request);
@@ -557,10 +623,204 @@ impl Client<'_> {
         Ok(())
     }
 
+    /// Announces the namespace and publishes the track to the peer when it
+    /// subscribes. One Object goes out for every line on stdin, as in
+    /// [`Self::publish`]; a line that comes while nobody is subscribed is an
+    /// error of the driver, which is to wait for `SERVING`.
+    async fn serve(&mut self, payload: &[u8]) -> Result<()> {
+        let (namespace_request, message) = self
+            .session
+            .publish_namespace(self.args.track_namespace()?, vec![])?;
+        let (namespace_stream, event) = self
+            .request(namespace_request, &message, "publish-namespace")
+            .await?;
+        match event {
+            RequestEvent::PublishNamespaceEstablished => report::namespace_published(),
+            other => {
+                namespace_stream.cancel();
+                return Err(refused("PUBLISH_NAMESPACE", other));
+            }
+        }
+        let mut peer_requests = self
+            .peer_requests
+            .take()
+            .context("the readers were not started to serve requests")?;
+        let track = self.args.full_track_name()?;
+        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+        let mut serving: Option<Serving> = None;
+        // Each Object is a Group of its own, numbered from 0 across
+        // subscriptions.
+        let mut group_id = 0;
+        loop {
+            tokio::select! {
+                line = stdin.next_line() => match line? {
+                    Some(_) => {
+                        let Some(serving) = &mut serving else {
+                            bail!("asked to send while nobody is subscribed");
+                        };
+                        self.send_object(serving.track_alias, group_id, payload).await?;
+                        group_id += 1;
+                        serving.streams += 1;
+                    }
+                    None => break,
+                },
+                event = peer_requests.next_event() => {
+                    self.on_peer_request_event(event?, &track, &mut serving).await?;
+                }
+                // §5.1: the subscriber ends the subscription with STOP_SENDING.
+                // This client has no subgroup stream open between Objects, so
+                // there is none to reset (§5.1.1).
+                () = stopped(&mut serving) => {
+                    if let Some(ended) = serving.take() {
+                        self.session.on_peer_request_closed(ended.request);
+                        ended.send.reset(stream_reset_code::CANCELLED);
+                        report::subscription_cancelled();
+                    }
+                }
+            }
+        }
+
+        // The driver is done. §10.11: PUBLISH_DONE after the data streams are
+        // closed, then a FIN; `send_object` closes its stream before it
+        // returns.
+        let Some(mut ended) = serving else {
+            return Ok(());
+        };
+        let done = self.session.subscribe_done(
+            ended.request,
+            publish_done_status::TRACK_ENDED,
+            ended.streams,
+            ReasonPhrase::default(),
+        )?;
+        xmoq_moqt_io::send_message(&mut ended.send, &done, &self.args.trace, "served").await?;
+        ended.send.finish();
+        // The same wait as after a PUBLISH: see `PUBLISH_DONE_ANSWER_WAIT`.
+        let peer_ended = async {
+            loop {
+                if let PeerRequestStreamEvent::Closed { stream, fin } =
+                    peer_requests.next_event().await?
+                    && stream == ended.stream
+                {
+                    return Ok::<_, anyhow::Error>(fin);
+                }
+            }
+        };
+        let fin = match tokio::time::timeout(PUBLISH_DONE_ANSWER_WAIT, peer_ended).await {
+            Ok(fin) => Some(fin?),
+            Err(_) => None,
+        };
+        self.session.on_peer_request_closed(ended.request);
+        report::publish_done_peer_ended_on_its_stream(fin);
+        Ok(())
+    }
+
+    /// One event of a request stream the peer opened, in the serving mode.
+    async fn on_peer_request_event(
+        &mut self,
+        event: PeerRequestStreamEvent<<WtConnection as Connection>::Send>,
+        track: &FullTrackName,
+        serving: &mut Option<Serving>,
+    ) -> Result<()> {
+        let wire = &self.args.trace;
+        match event {
+            PeerRequestStreamEvent::Opened {
+                stream,
+                mut send,
+                first,
+            } => {
+                let label = format!("bi#{stream}");
+                let (request, peer_request) = match self.session.on_peer_request_opened(first)? {
+                    PeerRequestOpened::Request(request, peer_request) => (request, peer_request),
+                    PeerRequestOpened::Refused { response } => {
+                        xmoq_moqt_io::send_message(&mut send, &response, wire, &label).await?;
+                        send.finish();
+                        return Ok(());
+                    }
+                };
+                let wanted = matches!(
+                    &peer_request,
+                    PeerRequest::Subscribe(subscribe) if subscribe.full_track_name == *track
+                );
+                if wanted && serving.is_none() {
+                    let (track_alias, ok) =
+                        self.session.accept_subscribe(request, vec![], vec![])?;
+                    xmoq_moqt_io::send_message(&mut send, &ok, wire, &label).await?;
+                    report::serving(track_alias);
+                    *serving = Some(Serving {
+                        request,
+                        stream,
+                        send,
+                        track_alias,
+                        streams: 0,
+                    });
+                    return Ok(());
+                }
+                // Another track, or a kind of request this client does not
+                // serve. A second SUBSCRIBE for the track while one is served
+                // does not get here: the session refuses it itself
+                // (DUPLICATE_SUBSCRIPTION, §5.1).
+                let error_code = match peer_request {
+                    PeerRequest::Subscribe(_) => request_error_code::DOES_NOT_EXIST,
+                    PeerRequest::Publish(_) | PeerRequest::PublishNamespace(_) => {
+                        request_error_code::UNINTERESTED
+                    }
+                };
+                let response =
+                    self.session
+                        .reject(request, error_code, 0, ReasonPhrase::default())?;
+                xmoq_moqt_io::send_message(&mut send, &response, wire, &label).await?;
+                send.finish();
+            }
+            PeerRequestStreamEvent::Message { stream, message } => {
+                let Some(served) = serving.as_mut().filter(|served| served.stream == stream) else {
+                    return Ok(());
+                };
+                let event = self
+                    .session
+                    .on_peer_request_message(served.request, message)?;
+                // §10.9: this client applies no update, answers the first one
+                // with REQUEST_ERROR, and then ends the subscription
+                // (§10.9.1).
+                if let PeerRequestEvent::UpdateRefused { response, .. } = event {
+                    xmoq_moqt_io::send_message(&mut served.send, &response, wire, "served").await?;
+                    report::update_refused();
+                    if let Some(mut ended) = serving.take() {
+                        let done = self.session.subscribe_done(
+                            ended.request,
+                            publish_done_status::UPDATE_FAILED,
+                            ended.streams,
+                            ReasonPhrase::default(),
+                        )?;
+                        xmoq_moqt_io::send_message(&mut ended.send, &done, wire, "served").await?;
+                        ended.send.finish();
+                    }
+                }
+            }
+            PeerRequestStreamEvent::Closed { stream, fin } => {
+                // A subscriber that only finishes its direction has not ended
+                // the subscription (§5.1); a reset has (§3.3.2).
+                if !fin
+                    && serving
+                        .as_ref()
+                        .is_some_and(|served| served.stream == stream)
+                    && let Some(ended) = serving.take()
+                {
+                    self.session.on_peer_request_closed(ended.request);
+                    ended.send.reset(stream_reset_code::CANCELLED);
+                    report::subscription_cancelled();
+                }
+            }
+            PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
+            PeerRequestStreamEvent::ReaderPanicked => bail!("a stream reader failed"),
+        }
+        Ok(())
+    }
+
     async fn run_mode(&mut self) -> Result<()> {
         match &self.args.mode {
             Mode::Subscribe { objects } => self.subscribe(*objects).await,
             Mode::Publish { payload } => self.publish(payload).await,
+            Mode::PublishNamespace { payload } => self.serve(payload).await,
         }
     }
 }
@@ -588,8 +848,14 @@ async fn run_session(
 ) -> Result<()> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
-    let (mut session_inbox, objects, readers) =
-        io::start_readers(Arc::clone(connection), args.trace.clone(), stops.clone());
+    let serve = matches!(args.mode, Mode::PublishNamespace { .. });
+    let (mut session_inbox, objects, peer_requests, readers) = io::start_readers(
+        Arc::clone(connection),
+        args.trace.clone(),
+        stops.clone(),
+        serve,
+        args.answer_delay,
+    );
     kept.readers = Some(readers);
 
     // §3.3: each peer opens one control stream that begins with SETUP.
@@ -610,6 +876,7 @@ async fn run_session(
         objects,
         stops,
         open_streams: HashMap::new(),
+        peer_requests,
         args,
     };
     // The session inbox is watched for the rest of the session: it reports a

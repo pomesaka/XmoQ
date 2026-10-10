@@ -17,7 +17,7 @@ This sequence is conceptual. Connection setup, session authentication, MoQ draft
 
   A slow subscriber has its own subscription ended (`TOO_FAR_BEHIND`), and the application can subscribe again and resume at the next key frame. The publisher is not made to wait, because one viewer that does not read would stall the broadcast for everyone. Queued Objects are not dropped one by one, because a missing delta frame makes H.264 and VP8 decoders show corrupt pictures without an error (see the [WebCodecs record](experiments/2026-10-10-webcodecs-loopback.md)).
 
-  The relay is four crates. `xmoq-moqt` holds encoding and session state. `xmoq-relay-core` decides which Object goes to which subscriber and what a disconnect ends; it takes events and returns actions and does no I/O, so it is tested without sockets. `xmoq-moqt-io` reads and writes MoQ streams over a `Connection` trait. `xmoq-relay` accepts sessions and connects the other three.
+  The relay is four crates. `xmoq-moqt` holds encoding and session state. `xmoq-relay-core` decides which Object goes to which subscriber, which publisher a SUBSCRIBE is passed on to, and what a disconnect ends; it takes events and returns actions and does no I/O, so it is tested without sockets. `xmoq-moqt-io` reads and writes MoQ streams over a `Connection` trait. `xmoq-relay` accepts sessions and connects the other three.
 - **Rust CLI:** media subscription, video decoding, Ghostty Kitty Graphics rendering, native audio and chat. Backends and compatibility require testing.
 - **Durable Objects:** proposed room/application state and chat persistence. Relay integration is not decided; direct WebTransport termination at DO is not assumed.
 

@@ -9,7 +9,12 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 
-use super::{Action, Event, OutStreamKey, Relay, Role, SessionKey, StreamEnd, StreamKey};
+mod routing;
+
+use super::{
+    Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SessionKey,
+    StreamEnd, StreamKey,
+};
 
 const PUBLISHER: SessionKey = SessionKey(1);
 const ALICE: SessionKey = SessionKey(2);
@@ -311,6 +316,7 @@ fn publish_done_reaches_the_subscribers_once_the_streams_ended() {
         relay.step(Event::RequestClosed {
             session: PUBLISHER,
             stream: StreamKey(0),
+            how: RequestEnd::Aborted,
         }),
         []
     );
@@ -538,6 +544,7 @@ fn a_subscriber_that_leaves_does_not_disturb_the_others() {
             Event::RequestClosed {
                 session: ALICE,
                 stream: StreamKey(0),
+                how: RequestEnd::Aborted,
             },
             vec![
                 Action::FinishRequest {
@@ -587,6 +594,7 @@ fn a_publisher_that_leaves_ends_the_track_for_every_subscriber() {
             Event::RequestClosed {
                 session: PUBLISHER,
                 stream: StreamKey(0),
+                how: RequestEnd::Aborted,
             },
             // The publisher is still there: the relay ends its direction of
             // the request stream, and the data stream is stopped (§10.11).
@@ -841,6 +849,7 @@ fn a_late_stream_of_an_ended_track_is_stopped() {
     relay.step(Event::RequestClosed {
         session: PUBLISHER,
         stream: StreamKey(0),
+        how: RequestEnd::Aborted,
     });
     assert_eq!(
         data_stream_opened(&mut relay, 7),
@@ -993,6 +1002,7 @@ fn events_for_what_the_relay_let_go_are_ignored() {
         Event::RequestClosed {
             session: PUBLISHER,
             stream: StreamKey(0),
+            how: RequestEnd::Aborted,
         },
         Event::DataStreamOpened {
             session: PUBLISHER,
@@ -1055,10 +1065,12 @@ fn a_relay_that_ended_subscriptions_holds_nothing_of_them() {
         relay.step(Event::RequestClosed {
             session: PUBLISHER,
             stream: StreamKey(round),
+            how: RequestEnd::Aborted,
         });
         relay.step(Event::RequestClosed {
             session: ALICE,
             stream,
+            how: RequestEnd::Aborted,
         });
         // The publisher offers the track again, on a new stream.
         relay.step(Event::RequestOpened {
@@ -1079,6 +1091,7 @@ fn what_a_subscriber_sends_after_publish_done_is_ignored_but_counted() {
     relay.step(Event::RequestClosed {
         session: PUBLISHER,
         stream: StreamKey(0),
+        how: RequestEnd::Aborted,
     });
     let update = |request_id| Event::RequestMessage {
         session: ALICE,
@@ -1379,6 +1392,7 @@ fn a_request_the_peer_does_not_close_after_publish_done_is_let_go() {
     relay.step(Event::RequestClosed {
         session: PUBLISHER,
         stream: StreamKey(0),
+        how: RequestEnd::Aborted,
     });
     // Alice got PUBLISH_DONE and keeps her direction of the stream open: the
     // request still counts.
@@ -1404,6 +1418,7 @@ fn a_request_the_peer_does_not_close_after_publish_done_is_let_go() {
         relay.step(Event::RequestClosed {
             session: ALICE,
             stream: StreamKey(0),
+            how: RequestEnd::Aborted,
         }),
         []
     );

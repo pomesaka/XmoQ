@@ -622,6 +622,31 @@ describe("Session", () => {
 		]);
 	});
 
+	test("a FIN of the subscriber on the request stream of an Established PUBLISH does not end the subscription (§5.1)", () => {
+		const session = withRequests();
+		session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
+		session.openSubgroup(2n, SUBGROUP);
+		// The FIN alone: nothing ends, and Objects can still be written.
+		expect(session.receiveRequestStreamData(2, hex(""), true)).toEqual([]);
+		expect(
+			session.writeObject(3, { objectId: 0n, payload: utf8("a") }),
+		).toEqual([{ type: "send", stream: 3, data: hex("00 01 61") }]);
+		// STOP_SENDING after it still ends the subscription.
+		expect(session.localStreamStopped(2, 7)).toEqual([
+			{ type: "reset", stream: 3, code: 1 },
+			{
+				type: "event",
+				event: {
+					type: "request-closed",
+					requestId: 2n,
+					reason: "peer-reset",
+					resetCode: 7,
+				},
+			},
+			{ type: "reset", stream: 2, code: 1 },
+		]);
+	});
+
 	// STOP_SENDING closes only the direction this endpoint sends in.
 	test.each([
 		{ name: "a Pending SUBSCRIBE", stream: 1 },

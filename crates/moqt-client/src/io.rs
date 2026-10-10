@@ -37,6 +37,8 @@ const EVENT_QUEUE: usize = 16;
 pub struct RequestStream {
     send: Send,
     reader: RequestReader<Recv>,
+    /// The peer finished its direction; nothing more is read from it.
+    peer_finished: bool,
     trace: Trace,
     label: String,
 }
@@ -47,6 +49,7 @@ impl RequestStream {
         Ok(Self {
             send,
             reader: RequestReader::new(recv, trace, label),
+            peer_finished: false,
             trace: trace.clone(),
             label: label.to_string(),
         })
@@ -70,6 +73,9 @@ impl RequestStream {
     /// lost when the connection closes (`xmoq_moqt_io::Connection::accept_uni`).
     pub async fn finish_and_await_close(mut self, wait: Duration) -> Result<Option<RequestClose>> {
         self.send.finish();
+        if self.peer_finished {
+            return Ok(Some(RequestClose::Fin));
+        }
         let closed = async {
             loop {
                 // Whatever the peer still says on the stream changes nothing.
@@ -103,7 +109,13 @@ impl RequestStream {
     /// changes nothing; the request ends when the peer's own direction does.
     pub async fn next_event_or_stopped(&mut self) -> Result<RequestStreamEvent> {
         tokio::select! {
-            event = self.reader.next_event() => Ok(event?),
+            event = self.reader.next_event(), if !self.peer_finished => {
+                let event = event?;
+                if event == RequestStreamEvent::Closed(RequestClose::Fin) {
+                    self.peer_finished = true;
+                }
+                Ok(event)
+            }
             stopped = self.send.stopped() => match stopped {
                 WriteError::Stopped(code) => {
                     Ok(RequestStreamEvent::Closed(RequestClose::Stopped(code)))
@@ -156,28 +168,46 @@ impl DataInbox {
     }
 }
 
+/// The requests the peer opens, for a client that serves them.
+pub struct PeerRequests {
+    events: mpsc::Receiver<PeerRequestStreamEvent<Send>>,
+}
+
+impl PeerRequests {
+    pub async fn next_event(&mut self) -> Result<PeerRequestStreamEvent<Send>> {
+        self.events
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("connection closed"))
+    }
+}
+
 /// Stops the stream readers when dropped.
 pub struct Readers {
     _streams: IncomingStreams,
     _requests: IncomingStreams,
     router: JoinHandle<()>,
-    refuser: JoinHandle<()>,
+    /// Absent when the client serves the peer's requests itself.
+    refuser: Option<JoinHandle<()>>,
 }
 
 impl Drop for Readers {
     fn drop(&mut self) {
         self.router.abort();
-        self.refuser.abort();
+        if let Some(refuser) = &self.refuser {
+            refuser.abort();
+        }
     }
 }
 
 /// Answers every request the peer opens with `REQUEST_ERROR` `NOT_SUPPORTED`
-/// and a FIN (§3.3.2): this client serves no requests, and leaving one
-/// unanswered would keep the peer waiting.
+/// and a FIN (§3.3.2), after `delay`: this client serves no requests, and
+/// leaving one unanswered would keep the peer waiting.
 fn refuse_requests(
     connection: Arc<WtConnection>,
     config: StreamConfig,
     stops: StreamStops,
+    delay: Duration,
 ) -> (IncomingStreams, JoinHandle<()>) {
     let (queue, mut requests) = mpsc::channel(EVENT_QUEUE);
     let trace = config.trace.clone();
@@ -198,6 +228,7 @@ fn refuse_requests(
             } = event
             {
                 let label = format!("bi#{stream}");
+                tokio::time::sleep(delay).await;
                 // An error means the peer is gone or stopped the stream.
                 let _ = send_message(&mut send, &not_supported, &trace, &label).await;
                 send.finish();
@@ -207,7 +238,9 @@ fn refuse_requests(
     (streams, refuser)
 }
 
-/// Starts reading the peer's unidirectional streams.
+/// Starts reading the peer's streams. With `serve`, the requests the peer
+/// opens are handed to the caller; without, each is answered with
+/// `NOT_SUPPORTED` after `answer_delay`.
 ///
 /// §3.3 lets Objects arrive before the control stream; they wait in the data
 /// queue until asked for.
@@ -215,7 +248,9 @@ pub fn start_readers(
     connection: Arc<WtConnection>,
     trace: Trace,
     stops: StreamStops,
-) -> (SessionInbox, DataInbox, Readers) {
+    serve: bool,
+    answer_delay: Duration,
+) -> (SessionInbox, DataInbox, Option<PeerRequests>, Readers) {
     let (all, mut incoming) = mpsc::channel(EVENT_QUEUE);
     let (session, session_events) = mpsc::channel(EVENT_QUEUE);
     let (data, data_events) = mpsc::channel(EVENT_QUEUE);
@@ -223,8 +258,25 @@ pub fn start_readers(
         trace,
         ..StreamConfig::default()
     };
-    let (requests, refuser) =
-        refuse_requests(Arc::clone(&connection), config.clone(), stops.clone());
+    let (requests, refuser, peer_requests) = if serve {
+        let (queue, events) = mpsc::channel(EVENT_QUEUE);
+        let streams = read_request_streams(
+            Arc::clone(&connection),
+            config.clone(),
+            stops.clone(),
+            queue,
+            |event| event,
+        );
+        (streams, None, Some(PeerRequests { events }))
+    } else {
+        let (streams, refuser) = refuse_requests(
+            Arc::clone(&connection),
+            config.clone(),
+            stops.clone(),
+            answer_delay,
+        );
+        (streams, Some(refuser), None)
+    };
     let streams = read_uni_streams(connection, config, stops, all, |event| event);
     // WHY two queues: the client waits for a control message and for data in
     // different places, and neither wait may swallow what the other needs.
@@ -249,6 +301,7 @@ pub fn start_readers(
         DataInbox {
             events: data_events,
         },
+        peer_requests,
         Readers {
             _streams: streams,
             _requests: requests,
