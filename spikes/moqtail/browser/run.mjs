@@ -46,7 +46,8 @@ const RELAYS = {
     ready: /(moqtail\/\S+) is running on/,
   },
   own: {
-    bin: join(spikeRoot, '..', '..', 'target', 'debug', 'xmoq-relay'),
+    // XMOQ_RELAY_BIN: another build of the own relay, as spikes/relay-core-diff makes one.
+    bin: process.env.XMOQ_RELAY_BIN ?? join(spikeRoot, '..', '..', 'target', 'debug', 'xmoq-relay'),
     args: port => ['--port', port, '--cert-file', certFile, '--key-file', keyFile],
     ready: /^LISTENING (\S+) port=/,
   },

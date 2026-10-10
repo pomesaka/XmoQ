@@ -43,7 +43,7 @@ pub use events::{
     Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, RequestEnd, SessionKey, StreamEnd,
     StreamKey,
 };
-use routing::{Announcement, OwnRequest, PendingTrack};
+use routing::{Announcement, Ask, OwnRequest, PendingTrack, Refusal, Waiter};
 pub use routing::{
     MAX_NAMESPACES_PER_SESSION, MAX_OWN_REQUESTS_PER_SESSION, MAX_PASSED_ON_REASON_LEN,
     MAX_WAITING_SUBSCRIBERS,
@@ -86,29 +86,64 @@ pub const MAX_EARLY_BYTES: usize = 1024 * 1024;
 const STREAM_COUNT_UNKNOWN: u64 = (1 << 62) - 1;
 
 /// What a request stream of a peer is for.
+///
+/// `peer_finished`: the peer finished its direction of the stream while the
+/// request goes on, and nothing more is read from it. The requests that can
+/// go on that way are the ones that carry the mark; a PUBLISH is over with
+/// its publisher's FIN.
 #[derive(Debug)]
 enum RequestSlot {
     Subscribe {
         request: PeerRequestId,
         track: FullTrackName,
+        peer_finished: bool,
     },
     Publish {
         request: PeerRequestId,
         track: FullTrackName,
     },
     /// The namespace is in the relay's list of announced namespaces.
-    PublishNamespace { request: PeerRequestId },
+    PublishNamespace {
+        request: PeerRequestId,
+        peer_finished: bool,
+    },
     /// A SUBSCRIBE that waits for the relay's own SUBSCRIBE to a publisher to
     /// be answered (§9.4).
     Waiting {
         request: PeerRequestId,
         track: FullTrackName,
+        peer_finished: bool,
     },
     /// The relay has said its last on the stream. The request is given when the
     /// session still holds state for it: what the peer sends until the stream
     /// closes still goes to the session, which ignores it and keeps count of
     /// the Request IDs it uses up.
     Finished(Option<PeerRequestId>),
+}
+
+impl RequestSlot {
+    fn peer_finished(&self) -> bool {
+        match self {
+            Self::Subscribe { peer_finished, .. }
+            | Self::PublishNamespace { peer_finished, .. }
+            | Self::Waiting { peer_finished, .. } => *peer_finished,
+            Self::Publish { .. } | Self::Finished(_) => false,
+        }
+    }
+
+    /// Notes that the peer finished its direction. `false` for a request
+    /// that does not go on after that.
+    fn note_peer_finished(&mut self) -> bool {
+        match self {
+            Self::Subscribe { peer_finished, .. }
+            | Self::PublishNamespace { peer_finished, .. }
+            | Self::Waiting { peer_finished, .. } => {
+                *peer_finished = true;
+                true
+            }
+            Self::Publish { .. } | Self::Finished(_) => false,
+        }
+    }
 }
 
 /// A subgroup stream that arrived before the PUBLISH that names its alias.
@@ -129,9 +164,6 @@ struct SessionState {
     early: VecDeque<EarlyStream>,
     /// Requests the relay opened on this session.
     own: HashMap<OwnRequestKey, OwnRequest>,
-    /// Request streams of the peer whose direction the peer finished while
-    /// the request goes on. Nothing more is read from them.
-    half_closed: HashSet<StreamKey>,
 }
 
 impl SessionState {
@@ -147,11 +179,19 @@ impl SessionState {
     /// mark; a FIN on a PUBLISH ends it there and then. A new place that
     /// answers a request later than it was opened belongs here.
     fn finish_slot(&mut self, stream: StreamKey) {
-        if self.half_closed.remove(&stream) {
+        if self.peer_finished(stream) {
             self.requests.remove(&stream);
         } else {
             self.requests.insert(stream, RequestSlot::Finished(None));
         }
+    }
+
+    /// Whether the peer finished its direction of a request stream while the
+    /// request goes on.
+    fn peer_finished(&self, stream: StreamKey) -> bool {
+        self.requests
+            .get(&stream)
+            .is_some_and(RequestSlot::peer_finished)
     }
 
     /// Lets go of the early streams that carry `track_alias`, when the PUBLISH
@@ -286,19 +326,238 @@ impl TrackSource {
     }
 }
 
+/// One Established source of a track, and how far it has come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Source {
+    from: TrackSource,
+    /// The source said `PUBLISH_DONE`; it is over when its last streams are.
+    draining: bool,
+}
+
+impl Source {
+    fn is_publish(self, session: SessionKey, stream: StreamKey) -> bool {
+        self.from.is_publish(session, stream)
+    }
+
+    fn is_subscription(self, session: SessionKey, request: OwnRequestKey) -> bool {
+        self.from.is_subscription(session, request)
+    }
+
+    fn session_and_alias(self) -> (SessionKey, u64) {
+        self.from.session_and_alias()
+    }
+}
+
+/// A track with a source: an Established upstream subscription (§9.4), or
+/// one whose last source drains.
 #[derive(Debug)]
 struct Track {
-    source: TrackSource,
+    /// FIXME: several of them; see the top of `routing.rs`. What is asked of
+    /// "the sources" below is written so that it holds for several.
+    source: Source,
+    /// What is still asked of other publishers. Empty today: one publisher
+    /// is asked, and its answer is what gave the track its source.
+    asks: Vec<Ask>,
     /// Track Properties of the source; §9.6 has the relay pass them on.
     properties: Vec<KeyValuePair>,
     /// The largest Location known for the track (§10.2.11): what the source
     /// said, or a larger one seen since.
     largest: Option<Location>,
     subscribers: Vec<Subscriber>,
-    in_streams: HashMap<StreamKey, InStream>,
-    /// The source said `PUBLISH_DONE`; the track ends when its last streams
-    /// have.
-    ending: bool,
+    /// By the session and the stream they arrive on: stream numbers repeat
+    /// from session to session.
+    in_streams: HashMap<(SessionKey, StreamKey), InStream>,
+}
+
+impl Track {
+    /// The one place a track with a source is made.
+    fn established(
+        from: TrackSource,
+        properties: Vec<KeyValuePair>,
+        largest: Option<Location>,
+    ) -> Self {
+        Self {
+            source: Source {
+                from,
+                draining: false,
+            },
+            asks: Vec::new(),
+            properties,
+            largest,
+            subscribers: Vec::new(),
+            in_streams: HashMap::new(),
+        }
+    }
+
+    fn sources(&self) -> impl Iterator<Item = &Source> {
+        std::iter::once(&self.source)
+    }
+
+    fn sources_mut(&mut self) -> impl Iterator<Item = &mut Source> {
+        std::iter::once(&mut self.source)
+    }
+
+    /// WHY every source: a track goes on for as long as one of its sources
+    /// does, and ends when the last of them has drained. A track never has
+    /// no source; one that did would not be draining but gone.
+    fn is_draining(&self) -> bool {
+        let mut sources = self.sources().peekable();
+        sources.peek().is_some() && sources.all(|source| source.draining)
+    }
+
+    /// Whether the source that is this request of the relay on that session
+    /// said `PUBLISH_DONE`; `None` when the track has no such source.
+    fn subscription_is_draining(
+        &self,
+        session: SessionKey,
+        request: OwnRequestKey,
+    ) -> Option<bool> {
+        self.sources()
+            .find(|source| source.is_subscription(session, request))
+            .map(|source| source.draining)
+    }
+}
+
+/// Where a track the relay knows is: the three states a SUBSCRIBE for it can
+/// meet. A fourth case is a track the relay does not know, which is no
+/// `TrackPhase` at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackPhase {
+    /// It has no source, and publishers were asked for it; subscribers wait.
+    Pending,
+    /// It has an Established upstream subscription (§9.4).
+    Established,
+    /// Its sources said `PUBLISH_DONE` and their last streams are awaited.
+    Draining,
+}
+
+/// How a track is kept: without a source and with one. What is asked of
+/// publishers ([`Ask`]) is kept in both.
+#[derive(Debug)]
+enum TrackEntry {
+    Pending(PendingTrack),
+    Live(Track),
+}
+
+/// Every track the relay knows, by name.
+///
+/// WHY one map for the tracks that wait for a publisher's answer and the ones
+/// that have a source: a name is in one of the states or in none, and two
+/// maps would leave that to every place that writes to them.
+#[derive(Debug, Default)]
+struct Tracks(HashMap<FullTrackName, TrackEntry>);
+
+impl Tracks {
+    fn phase(&self, name: &FullTrackName) -> Option<TrackPhase> {
+        Some(match self.0.get(name)? {
+            TrackEntry::Pending(_) => TrackPhase::Pending,
+            TrackEntry::Live(track) if track.is_draining() => TrackPhase::Draining,
+            TrackEntry::Live(_) => TrackPhase::Established,
+        })
+    }
+
+    fn live(&self, name: &FullTrackName) -> Option<&Track> {
+        match self.0.get(name)? {
+            TrackEntry::Live(track) => Some(track),
+            TrackEntry::Pending(_) => None,
+        }
+    }
+
+    fn live_mut(&mut self, name: &FullTrackName) -> Option<&mut Track> {
+        match self.0.get_mut(name)? {
+            TrackEntry::Live(track) => Some(track),
+            TrackEntry::Pending(_) => None,
+        }
+    }
+
+    fn pending(&self, name: &FullTrackName) -> Option<&PendingTrack> {
+        match self.0.get(name)? {
+            TrackEntry::Pending(pending) => Some(pending),
+            TrackEntry::Live(_) => None,
+        }
+    }
+
+    fn pending_mut(&mut self, name: &FullTrackName) -> Option<&mut PendingTrack> {
+        match self.0.get_mut(name)? {
+            TrackEntry::Pending(pending) => Some(pending),
+            TrackEntry::Live(_) => None,
+        }
+    }
+
+    /// What is asked of publishers for the track, with or without a source.
+    fn asks(&self, name: &FullTrackName) -> &[Ask] {
+        match self.0.get(name) {
+            Some(TrackEntry::Pending(pending)) => &pending.asks,
+            Some(TrackEntry::Live(track)) => &track.asks,
+            None => &[],
+        }
+    }
+
+    fn asks_mut(&mut self, name: &FullTrackName) -> Option<&mut Vec<Ask>> {
+        Some(match self.0.get_mut(name)? {
+            TrackEntry::Pending(pending) => &mut pending.asks,
+            TrackEntry::Live(track) => &mut track.asks,
+        })
+    }
+
+    fn all_asks(&self) -> impl Iterator<Item = (&FullTrackName, &Ask)> {
+        self.0.iter().flat_map(|(name, entry)| {
+            let asks = match entry {
+                TrackEntry::Pending(pending) => &pending.asks,
+                TrackEntry::Live(track) => &track.asks,
+            };
+            asks.iter().map(move |ask| (name, ask))
+        })
+    }
+
+    /// Puts a track with a source under a name that has no entry.
+    ///
+    /// WHY "no entry": a pending track of the name holds subscribers that
+    /// wait and requests that are open, and replacing it would drop both
+    /// without a word. Whoever gives a pending track its source takes it out
+    /// first ([`Self::take_pending`]) and hands on what it held.
+    fn insert_live(&mut self, name: FullTrackName, track: Track) {
+        let replaced = self.0.insert(name, TrackEntry::Live(track));
+        debug_assert!(replaced.is_none(), "a track was replaced: {replaced:?}");
+    }
+
+    /// Puts a track without a source under a name that has no entry.
+    fn insert_pending(&mut self, name: FullTrackName, pending: PendingTrack) {
+        let replaced = self.0.insert(name, TrackEntry::Pending(pending));
+        debug_assert!(replaced.is_none(), "a track was replaced: {replaced:?}");
+    }
+
+    /// Removes the track if it has a source.
+    fn take_live(&mut self, name: &FullTrackName) -> Option<Track> {
+        self.live(name)?;
+        match self.0.remove(name)? {
+            TrackEntry::Live(track) => Some(track),
+            TrackEntry::Pending(_) => None,
+        }
+    }
+
+    /// Removes the track if it waits for a publisher's answer.
+    fn take_pending(&mut self, name: &FullTrackName) -> Option<PendingTrack> {
+        self.pending(name)?;
+        match self.0.remove(name)? {
+            TrackEntry::Pending(pending) => Some(pending),
+            TrackEntry::Live(_) => None,
+        }
+    }
+
+    fn all_live(&self) -> impl Iterator<Item = (&FullTrackName, &Track)> {
+        self.0.iter().filter_map(|(name, entry)| match entry {
+            TrackEntry::Live(track) => Some((name, track)),
+            TrackEntry::Pending(_) => None,
+        })
+    }
+
+    fn all_pending(&self) -> impl Iterator<Item = (&FullTrackName, &PendingTrack)> {
+        self.0.iter().filter_map(|(name, entry)| match entry {
+            TrackEntry::Pending(pending) => Some((name, pending)),
+            TrackEntry::Live(_) => None,
+        })
+    }
 }
 
 /// What a relay holds, for tests and logs.
@@ -342,12 +601,11 @@ pub struct Counts {
 pub struct Relay {
     implementation: String,
     sessions: HashMap<SessionKey, SessionState>,
-    tracks: HashMap<FullTrackName, Track>,
+    tracks: Tracks,
     out_streams: HashMap<OutStreamKey, OutStream>,
     next_out_stream: u64,
     /// In the order they were announced.
     namespaces: Vec<Announcement>,
-    pending: HashMap<FullTrackName, PendingTrack>,
     next_own_request: u64,
 }
 
@@ -359,11 +617,10 @@ impl Relay {
         Self {
             implementation: implementation.to_string(),
             sessions: HashMap::new(),
-            tracks: HashMap::new(),
+            tracks: Tracks::default(),
             out_streams: HashMap::new(),
             next_out_stream: 0,
             namespaces: Vec::new(),
-            pending: HashMap::new(),
             next_own_request: 0,
         }
     }
@@ -577,7 +834,6 @@ impl Relay {
                 in_streams: HashMap::new(),
                 early: VecDeque::new(),
                 own: HashMap::new(),
-                half_closed: HashSet::new(),
             },
         );
     }
@@ -627,22 +883,21 @@ impl Relay {
             }
             PeerRequest::PublishNamespace(publish_namespace) => {
                 if !self.add_namespace(session, stream, publish_namespace.track_namespace) {
-                    self.refuse(
-                        session,
-                        stream,
-                        request,
-                        request_error_code::EXCESSIVE_LOAD,
-                        actions,
-                    );
+                    let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
+                    self.refuse(session, stream, request, &too_many, actions);
                     return;
                 }
                 let Some(state) = self.sessions.get_mut(&session) else {
                     return;
                 };
                 let response = state.moqt.accept_publish_namespace(request);
-                state
-                    .requests
-                    .insert(stream, RequestSlot::PublishNamespace { request });
+                state.requests.insert(
+                    stream,
+                    RequestSlot::PublishNamespace {
+                        request,
+                        peer_finished: false,
+                    },
+                );
                 self.respond(session, stream, response, actions);
             }
         }
@@ -657,70 +912,61 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let track_name = &subscribe.full_track_name;
-        match self.tracks.get(track_name).map(|track| track.ending) {
+        let forward = params::forward(&subscribe.parameters);
+        let waiter = Waiter::new(session, stream, request, forward);
+        let waits = match self.tracks.phase(track_name) {
             // §9.5: "When a Relay receives an authorized SUBSCRIBE for a Track
             // with one or more Established upstream subscriptions, it MUST
             // reply with SUBSCRIBE_OK."
-            Some(false) => {
-                let forward = params::forward(&subscribe.parameters);
-                let accepted =
-                    self.accept_subscriber(track_name, session, stream, request, forward, actions);
-                if let (Some(subscriber), Some(track)) = (accepted, self.tracks.get_mut(track_name))
-                {
-                    track.subscribers.push(subscriber);
-                }
+            Some(TrackPhase::Established) => {
+                self.establish(track_name, &waiter, actions);
+                return;
             }
             // The source said PUBLISH_DONE and the track still drains: it has
             // no Established upstream subscription (§9.4), and the publisher
             // cannot be asked again while the old alias drains.
-            Some(true) => self.refuse(
-                session,
-                stream,
-                request,
-                request_error_code::DOES_NOT_EXIST,
-                actions,
-            ),
+            Some(TrackPhase::Draining) => Err(request_error_code::DOES_NOT_EXIST),
+            Some(TrackPhase::Pending) => self.wait_with_the_others(track_name, waiter),
             // §9.5: "If there are no Established upstream subscriptions for
             // the requested Track, the Relay MUST send a SUBSCRIBE request to
             // each publisher that has published the subscription's namespace
-            // or prefix thereof."
+            // or prefix thereof." The first of them by the order of
+            // announcing; see the FIXME at the top of `routing.rs` for the
+            // others.
             None => {
-                match self.subscribe_through_namespace(session, stream, request, subscribe, actions)
-                {
-                    Ok(slot) => {
-                        if let Some(state) = self.sessions.get_mut(&session) {
-                            state.requests.insert(stream, slot);
-                        }
-                    }
-                    Err(error_code) => self.refuse(session, stream, request, error_code, actions),
+                let first = self.matching_publishers(track_name).next();
+                match first {
+                    Some(publisher) => self.ask(publisher, track_name, waiter, actions),
+                    // §10.2.6: without RENDEZVOUS_TIMEOUT, or with 0, "MUST
+                    // immediately return REQUEST_ERROR with error code
+                    // DOES_NOT_EXIST if no publisher is available".
+                    None => Err(request_error_code::DOES_NOT_EXIST),
                 }
             }
-        }
-    }
-
-    /// Answers a request with `REQUEST_ERROR` and a FIN (§3.3.2).
-    fn refuse(
-        &mut self,
-        session: SessionKey,
-        stream: StreamKey,
-        request: PeerRequestId,
-        error_code: u64,
-        actions: &mut Vec<Action>,
-    ) {
-        let Some(state) = self.sessions.get_mut(&session) else {
-            return;
         };
-        let response = state.moqt.reject(
-            request,
-            error_code,
-            // FIXME: a Retry Interval. A publisher may appear later, and
-            // §10.6.2 reads 0 as "do not retry".
-            0,
-            ReasonPhrase::default(),
-        );
-        state.requests.insert(stream, RequestSlot::Finished(None));
-        self.respond(session, stream, response, actions);
-        actions.push(Action::FinishRequest { session, stream });
+        match waits {
+            Ok(()) => {
+                if let Some(state) = self.sessions.get_mut(&session) {
+                    state.requests.insert(
+                        stream,
+                        RequestSlot::Waiting {
+                            request,
+                            track: track_name.clone(),
+                            peer_finished: false,
+                        },
+                    );
+                }
+            }
+            Err(error_code) => {
+                self.refuse(
+                    session,
+                    stream,
+                    request,
+                    &Refusal::code(error_code),
+                    actions,
+                );
+            }
+        }
     }
 
     fn on_publish(
@@ -742,30 +988,27 @@ impl Relay {
         // the SUBSCRIBE went to. With another session the relay has no pending
         // subscription, and its PUBLISH is a second publisher of the track.
         let asked_here = self.is_asked_of(&publish.full_track_name, session);
+        // A track the relay has asked another publisher for counts as taken.
+        let taken = match self.tracks.phase(&publish.full_track_name) {
+            Some(TrackPhase::Established | TrackPhase::Draining) => true,
+            Some(TrackPhase::Pending) => !asked_here,
+            None => false,
+        };
+        if taken {
+            if let Some(state) = self.sessions.get_mut(&session) {
+                state.drop_early_streams(session, publish.track_alias, actions);
+            }
+            // WHY UNINTERESTED: it is the code §10.6.2 gives a subscriber for
+            // declining a PUBLISH, and the relay is the subscriber here. §9.3
+            // lets a relay refuse a publisher it cannot take. The PUBLISH
+            // would be accepted once the other publisher is gone.
+            let uninterested = Refusal::code(request_error_code::UNINTERESTED);
+            self.refuse(session, stream, request, &uninterested, actions);
+            return;
+        }
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        // A track the relay has asked another publisher for counts as taken.
-        if self.tracks.contains_key(&publish.full_track_name)
-            || (self.pending.contains_key(&publish.full_track_name) && !asked_here)
-        {
-            // WHY UNINTERESTED: it is the code §10.6.2 gives a subscriber for
-            // declining a PUBLISH, and the relay is the subscriber here. §9.3
-            // lets a relay refuse a publisher it cannot take.
-            let response = state.moqt.reject(
-                request,
-                request_error_code::UNINTERESTED,
-                // FIXME: a Retry Interval. The PUBLISH would be accepted once
-                // the other publisher is gone.
-                0,
-                ReasonPhrase::default(),
-            );
-            state.requests.insert(stream, RequestSlot::Finished(None));
-            state.drop_early_streams(session, publish.track_alias, actions);
-            self.respond(session, stream, response, actions);
-            actions.push(Action::FinishRequest { session, stream });
-            return;
-        }
         // WHY Forward State 1 from the start: §9.5 allows 0 until a subscriber
         // comes, which would need a REQUEST_UPDATE towards the publisher later.
         // Objects that arrive while nobody subscribes are dropped instead.
@@ -790,27 +1033,24 @@ impl Relay {
                 _ => None,
             });
         let track_name = publish.full_track_name;
-        self.tracks.insert(
-            track_name.clone(),
-            Track {
-                source: TrackSource::Publisher {
-                    session,
-                    stream,
-                    track_alias: publish.track_alias,
-                },
-                properties: publish.track_properties,
-                largest,
-                subscribers: Vec::new(),
-                in_streams: HashMap::new(),
-                ending: false,
-            },
-        );
-        // Before the PUBLISH_OK, as §5.1 has it.
+        let published = TrackSource::Publisher {
+            session,
+            stream,
+            track_alias: publish.track_alias,
+        };
+        let mut track = Track::established(published, publish.track_properties, largest);
+        // Before the PUBLISH_OK, as §5.1 has it. And before the track gets
+        // its entry: the pending track of the name is taken out with its
+        // waiters, and what it had asked of other publishers goes on under
+        // the new one.
         let waiters = if asked_here {
-            self.give_way_to_publish(&track_name, actions)
+            let (waiters, still_asked) = self.give_way_to_publish(&track_name, session, actions);
+            track.asks = still_asked;
+            waiters
         } else {
             Vec::new()
         };
+        self.tracks.insert_live(track_name.clone(), track);
         self.respond(session, stream, response, actions);
         // §9.4: the track has an Established upstream subscription now.
         for waiter in &waiters {
@@ -856,12 +1096,13 @@ impl Relay {
         };
         let (request, track) = match state.requests.get(&stream) {
             Some(
-                RequestSlot::Subscribe { request, track }
+                RequestSlot::Subscribe { request, track, .. }
                 | RequestSlot::Publish { request, track }
-                | RequestSlot::Waiting { request, track },
+                | RequestSlot::Waiting { request, track, .. },
             ) => (*request, Some(track.clone())),
             Some(
-                RequestSlot::PublishNamespace { request } | RequestSlot::Finished(Some(request)),
+                RequestSlot::PublishNamespace { request, .. }
+                | RequestSlot::Finished(Some(request)),
             ) => (*request, None),
             Some(RequestSlot::Finished(None)) | None => return,
         };
@@ -884,15 +1125,13 @@ impl Relay {
                 let Some(track_name) = track else {
                     return;
                 };
-                if let Some(track) = self.tracks.get_mut(&track_name) {
-                    track.ending = true;
-                }
-                if !self.end_track_if_drained(&track_name, actions) {
-                    actions.push(Action::StartDrainTimer {
-                        session,
-                        track_alias,
-                    });
-                }
+                self.source_done(
+                    &track_name,
+                    |source| source.is_publish(session, stream),
+                    session,
+                    track_alias,
+                    actions,
+                );
             }
             PeerRequestEvent::UpdateRefused { response, then } => {
                 actions.push(Action::SendRequest {
@@ -927,6 +1166,32 @@ impl Relay {
         }
     }
 
+    /// A source of a track said `PUBLISH_DONE`, on the request stream of its
+    /// PUBLISH or of the relay's SUBSCRIBE: it drains from here on, and the
+    /// track ends once nothing more can arrive for it (§10.11). `said_by`
+    /// picks the source; `session` and `track_alias` are where its streams
+    /// arrive.
+    fn source_done(
+        &mut self,
+        track_name: &FullTrackName,
+        said_by: impl Fn(&Source) -> bool,
+        session: SessionKey,
+        track_alias: u64,
+        actions: &mut Vec<Action>,
+    ) {
+        if let Some(track) = self.tracks.live_mut(track_name) {
+            for source in track.sources_mut().filter(|source| said_by(source)) {
+                source.draining = true;
+            }
+        }
+        if !self.end_track_if_drained(track_name, actions) {
+            actions.push(Action::StartDrainTimer {
+                session,
+                track_alias,
+            });
+        }
+    }
+
     /// Lets go of what a request stream stood for. With `finish`, the relay's
     /// direction of the stream is finished if the relay has not ended it yet:
     /// the peer ended its own, and nothing more will be said.
@@ -946,7 +1211,6 @@ impl Relay {
             return;
         };
         let slot = state.requests.remove(&stream);
-        state.half_closed.remove(&stream);
         if finish
             && matches!(
                 slot,
@@ -961,7 +1225,7 @@ impl Relay {
             actions.push(Action::FinishRequest { session, stream });
         }
         match slot {
-            Some(RequestSlot::Subscribe { request, track }) => {
+            Some(RequestSlot::Subscribe { request, track, .. }) => {
                 state.moqt.on_peer_request_closed(request);
                 // The subscriber cancelled (§3.3.2, §5.1.1 "MUST reset any open
                 // streams associated with the SUBSCRIBE"). No PUBLISH_DONE can
@@ -970,19 +1234,20 @@ impl Relay {
             }
             Some(RequestSlot::Publish { request, track }) => {
                 state.moqt.on_peer_request_closed(request);
-                let cancelled = self
-                    .tracks
-                    .get(&track)
-                    .is_some_and(|track| track.source.is_publish(session, stream) && !track.ending);
+                let cancelled = self.tracks.live(&track).is_some_and(|track| {
+                    track
+                        .sources()
+                        .any(|source| source.is_publish(session, stream) && !source.draining)
+                });
                 if cancelled {
                     self.end_track(&track, TrackEnd::SourceGone, actions);
                 }
             }
-            Some(RequestSlot::Waiting { request, track }) => {
+            Some(RequestSlot::Waiting { request, track, .. }) => {
                 state.moqt.on_peer_request_closed(request);
-                self.waiter_left(&track, session, stream, actions);
+                self.waiters_left(&track, |waiter| waiter.is_on(session, stream), actions);
             }
-            Some(RequestSlot::PublishNamespace { request }) => {
+            Some(RequestSlot::PublishNamespace { request, .. }) => {
                 state.moqt.on_peer_request_closed(request);
                 // §9.5: cancelling the request withdraws the namespace.
                 self.withdraw_namespace(session, stream);
@@ -1015,17 +1280,12 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        match state.requests.get(&stream) {
-            Some(
-                RequestSlot::Subscribe { .. }
-                | RequestSlot::Waiting { .. }
-                | RequestSlot::PublishNamespace { .. },
-            ) => {
-                state.half_closed.insert(stream);
-            }
-            Some(RequestSlot::Publish { .. } | RequestSlot::Finished(_)) | None => {
-                self.on_request_closed(session, stream, true, actions);
-            }
+        let goes_on = state
+            .requests
+            .get_mut(&stream)
+            .is_some_and(RequestSlot::note_peer_finished);
+        if !goes_on {
+            self.on_request_closed(session, stream, true, actions);
         }
     }
 
@@ -1071,7 +1331,7 @@ impl Relay {
                 return;
             }
         };
-        let Some(track) = self.tracks.get_mut(&track_name) else {
+        let Some(track) = self.tracks.live_mut(&track_name) else {
             // The alias still drains and the track is gone, as after a
             // malformed track: nothing of it is wanted.
             actions.push(Action::StopDataStream {
@@ -1103,7 +1363,7 @@ impl Relay {
             };
             out.open(&track_name, subscriber, &mut in_stream, header, actions);
         }
-        track.in_streams.insert(stream, in_stream);
+        track.in_streams.insert((session, stream), in_stream);
     }
 
     fn on_object(
@@ -1120,10 +1380,10 @@ impl Relay {
             hold_early_object(state, session, stream, object, actions);
             return;
         };
-        let Some(track) = self.tracks.get_mut(track_name) else {
+        let Some(track) = self.tracks.live_mut(track_name) else {
             return;
         };
-        let Some(in_stream) = track.in_streams.get_mut(&stream) else {
+        let Some(in_stream) = track.in_streams.get_mut(&(session, stream)) else {
             return;
         };
         let location = Location {
@@ -1192,12 +1452,12 @@ impl Relay {
             }
             return;
         };
-        let Some(track) = self.tracks.get_mut(&track_name) else {
+        let Some(track) = self.tracks.live_mut(&track_name) else {
             return;
         };
         let (_, track_alias) = track.source.session_and_alias();
         state.moqt.on_data_stream_closed(track_alias);
-        if let Some(in_stream) = track.in_streams.remove(&stream) {
+        if let Some(in_stream) = track.in_streams.remove(&(session, stream)) {
             for subscriber in &mut track.subscribers {
                 let Some(out_stream) = in_stream.outs.get(&subscriber.session).copied() else {
                     continue;
@@ -1243,7 +1503,7 @@ impl Relay {
         let Some(out) = self.out_streams.remove(&out_stream) else {
             return;
         };
-        let Some(track) = self.tracks.get_mut(&out.track) else {
+        let Some(track) = self.tracks.live_mut(&out.track) else {
             return;
         };
         if let Some(subscriber) = track
@@ -1270,10 +1530,10 @@ impl Relay {
         track_name: &FullTrackName,
         actions: &mut Vec<Action>,
     ) -> bool {
-        let Some(track) = self.tracks.get(track_name) else {
+        let Some(track) = self.tracks.live(track_name) else {
             return true;
         };
-        if !track.ending {
+        if !track.is_draining() {
             return false;
         }
         let (source, track_alias) = track.source.session_and_alias();
@@ -1288,7 +1548,7 @@ impl Relay {
 
     /// Removes a track and ends every subscription to it.
     fn end_track(&mut self, track_name: &FullTrackName, end: TrackEnd, actions: &mut Vec<Action>) {
-        let Some(mut track) = self.tracks.remove(track_name) else {
+        let Some(mut track) = self.tracks.take_live(track_name) else {
             return;
         };
         let (status_code, reset_code) = match end {
@@ -1301,7 +1561,14 @@ impl Relay {
                 stream_reset_code::MALFORMED_TRACK,
             ),
         };
-        self.release_source(&track, end, reset_code, actions);
+        for source in track.sources() {
+            self.release_source(&track, *source, end, reset_code, actions);
+        }
+        // What was still asked of other publishers is of no use to a track
+        // that is over.
+        for ask in &track.asks {
+            self.cancel_own_request(ask.publisher, ask.request, actions);
+        }
 
         // Towards the subscribers. §10.11: PUBLISH_DONE goes out after every
         // stream of the subscription is closed, so the resets come first.
@@ -1344,15 +1611,16 @@ impl Relay {
     fn release_source(
         &mut self,
         track: &Track,
+        source: Source,
         end: TrackEnd,
         reset_code: u32,
         actions: &mut Vec<Action>,
     ) {
-        let (session, _) = track.source.session_and_alias();
+        let (session, _) = source.session_and_alias();
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        for stream in track.in_streams.keys() {
+        for (_, stream) in track.in_streams.keys().filter(|(from, _)| *from == session) {
             state.in_streams.remove(stream);
             actions.push(Action::StopDataStream {
                 session,
@@ -1360,66 +1628,100 @@ impl Relay {
                 code: reset_code,
             });
         }
-        // WHY answer a PUBLISH_DONE on the request stream: the publisher may
-        // want to close its session next, and a stream that arrived and was
-        // not accepted yet can be lost with the connection. A FIN says that
-        // every stream the Stream Count named has ended here; a reset says the
-        // relay stopped waiting for them. The draft gives the subscriber's
-        // direction no meaning after PUBLISH_DONE (§10.11, §5.1.1), so a peer
-        // that knows nothing of this sees an ordinary end of the stream.
-        match track.source {
+        match source.from {
             TrackSource::Publisher {
                 stream: publish_stream,
                 ..
-            } => match end {
-                TrackEnd::Done => actions.push(Action::FinishRequest {
-                    session,
-                    stream: publish_stream,
-                }),
-                TrackEnd::TimedOut => actions.push(Action::ResetRequest {
-                    session,
-                    stream: publish_stream,
-                    code: stream_reset_code::CANCELLED,
-                }),
-                TrackEnd::Malformed => {
-                    // §2.4.2: the receiver of a malformed track cancels the
-                    // subscription.
-                    if let Some(RequestSlot::Publish { request, .. }) =
-                        state.requests.remove(&publish_stream)
-                    {
-                        state.moqt.on_peer_request_closed(request);
-                    }
-                    state
-                        .requests
-                        .insert(publish_stream, RequestSlot::Finished(None));
-                    actions.push(Action::ResetRequest {
-                        session,
-                        stream: publish_stream,
-                        code: reset_code,
-                    });
-                }
-                TrackEnd::SourceGone | TrackEnd::Unwanted => {}
-            },
+            } => self.release_publish(session, publish_stream, end, reset_code, actions),
             TrackSource::Subscription { request, .. } => {
-                let own = state.own.remove(&request);
-                match end {
-                    TrackEnd::Done => actions.push(Action::FinishOwnRequest { session, request }),
-                    // §3.3.2: the relay cancels its own request. For a
-                    // malformed track §2.4.2 asks for exactly that.
-                    TrackEnd::TimedOut
-                    | TrackEnd::Malformed
-                    | TrackEnd::SourceGone
-                    | TrackEnd::Unwanted => {
-                        if let Some(own) = own {
-                            state.moqt.cancel(own.id);
-                        }
-                        actions.push(Action::CancelOwnRequest {
-                            session,
-                            request,
-                            code: reset_code,
-                        });
-                    }
+                self.release_subscription(session, request, end, reset_code, actions);
+            }
+        }
+    }
+
+    /// What the publisher of a PUBLISH is told when its track is over.
+    ///
+    /// WHY answer a `PUBLISH_DONE` on the request stream: the publisher may
+    /// want to close its session next, and a stream that arrived and was not
+    /// accepted yet can be lost with the connection. A FIN says that every
+    /// stream the Stream Count named has ended here; a reset says the relay
+    /// stopped waiting for them. The draft gives the subscriber's direction no
+    /// meaning after `PUBLISH_DONE` (§10.11, §5.1.1), so a peer that knows
+    /// nothing of this sees an ordinary end of the stream.
+    fn release_publish(
+        &mut self,
+        session: SessionKey,
+        publish_stream: StreamKey,
+        end: TrackEnd,
+        reset_code: u32,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        match end {
+            TrackEnd::Done => actions.push(Action::FinishRequest {
+                session,
+                stream: publish_stream,
+            }),
+            TrackEnd::TimedOut => actions.push(Action::ResetRequest {
+                session,
+                stream: publish_stream,
+                code: stream_reset_code::CANCELLED,
+            }),
+            TrackEnd::Malformed => {
+                // §2.4.2: the receiver of a malformed track cancels the
+                // subscription.
+                if let Some(RequestSlot::Publish { request, .. }) =
+                    state.requests.remove(&publish_stream)
+                {
+                    state.moqt.on_peer_request_closed(request);
                 }
+                state
+                    .requests
+                    .insert(publish_stream, RequestSlot::Finished(None));
+                actions.push(Action::ResetRequest {
+                    session,
+                    stream: publish_stream,
+                    code: reset_code,
+                });
+            }
+            // The publisher ended the request itself, or is gone. A track
+            // that came with PUBLISH is never unwanted: its publisher sends
+            // unasked.
+            TrackEnd::SourceGone | TrackEnd::Unwanted => {}
+        }
+    }
+
+    /// What becomes of the relay's own SUBSCRIBE when its track is over.
+    fn release_subscription(
+        &mut self,
+        session: SessionKey,
+        request: OwnRequestKey,
+        end: TrackEnd,
+        reset_code: u32,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        let own = state.own.remove(&request);
+        match end {
+            TrackEnd::Done => actions.push(Action::FinishOwnRequest { session, request }),
+            // §3.3.2: the relay cancels its own request. For a malformed
+            // track §2.4.2 asks for exactly that.
+            TrackEnd::TimedOut
+            | TrackEnd::Malformed
+            | TrackEnd::SourceGone
+            | TrackEnd::Unwanted => {
+                if let Some(own) = own {
+                    state.moqt.cancel(own.id);
+                }
+                actions.push(Action::CancelOwnRequest {
+                    session,
+                    request,
+                    code: reset_code,
+                });
             }
         }
     }
@@ -1447,7 +1749,7 @@ impl Relay {
         reset_code: u32,
         actions: &mut Vec<Action>,
     ) -> Option<Subscriber> {
-        let track = self.tracks.get_mut(track_name)?;
+        let track = self.tracks.live_mut(track_name)?;
         let position = track
             .subscribers
             .iter()
@@ -1472,8 +1774,8 @@ impl Relay {
         // draft leaves the lifetime of an aggregated upstream subscription to
         // the relay (§9.4).
         let unwanted = track.subscribers.is_empty()
-            && !track.ending
-            && matches!(track.source, TrackSource::Subscription { .. });
+            && !track.is_draining()
+            && matches!(track.source.from, TrackSource::Subscription { .. });
         if unwanted {
             self.end_track(track_name, TrackEnd::Unwanted, actions);
         }
@@ -1501,7 +1803,7 @@ impl Relay {
             stream_count,
             ReasonPhrase::default(),
         );
-        if state.half_closed.remove(&subscriber.stream) {
+        if state.peer_finished(subscriber.stream) {
             // The subscriber finished its direction earlier: nothing more
             // comes from it, and with the relay's FIN below the stream is
             // over.
@@ -1593,8 +1895,12 @@ impl Relay {
             .collect();
         let sourced: Vec<FullTrackName> = self
             .tracks
-            .iter()
-            .filter(|(_, track)| track.source.session_and_alias().0 == session)
+            .all_live()
+            .filter(|(_, track)| {
+                track
+                    .sources()
+                    .any(|source| source.session_and_alias().0 == session)
+            })
             .map(|(name, _)| name.clone())
             .collect();
         for track in sourced {
@@ -1603,7 +1909,7 @@ impl Relay {
         self.drop_routing_of(session, actions);
         let subscribed: Vec<FullTrackName> = self
             .tracks
-            .iter()
+            .all_live()
             .filter(|(_, track)| track.subscribers.iter().any(|s| s.session == session))
             .map(|(name, _)| name.clone())
             .collect();
@@ -1625,8 +1931,12 @@ impl Relay {
     pub fn counts(&self) -> Counts {
         Counts {
             sessions: self.sessions.len(),
-            tracks: self.tracks.len(),
-            subscriptions: self.tracks.values().map(|t| t.subscribers.len()).sum(),
+            tracks: self.tracks.all_live().count(),
+            subscriptions: self
+                .tracks
+                .all_live()
+                .map(|(_, track)| track.subscribers.len())
+                .sum(),
             requests: self
                 .sessions
                 .values()
@@ -1640,13 +1950,20 @@ impl Relay {
             half_closed_streams: self
                 .sessions
                 .values()
-                .map(|state| state.half_closed.len())
+                .map(|state| {
+                    let finished = |slot: &&RequestSlot| slot.peer_finished();
+                    state.requests.values().filter(finished).count()
+                })
                 .sum(),
-            in_streams: self.tracks.values().map(|t| t.in_streams.len()).sum(),
+            in_streams: self
+                .tracks
+                .all_live()
+                .map(|(_, track)| track.in_streams.len())
+                .sum(),
             out_streams: self.out_streams.len(),
             early_streams: self.sessions.values().map(|state| state.early.len()).sum(),
             namespaces: self.namespaces.len(),
-            pending_tracks: self.pending.len(),
+            pending_tracks: self.tracks.all_pending().count(),
             own_requests: self.sessions.values().map(|state| state.own.len()).sum(),
         }
     }
