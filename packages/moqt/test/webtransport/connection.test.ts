@@ -23,7 +23,7 @@ import { hex, MOQTAIL_RELAY_SETUP, toHex, utf8 } from "../helpers.ts";
 import {
 	createFakePeer,
 	type FakePeer,
-	FakeStreamError,
+	fakeStreamError,
 	type PeerBidiStream,
 } from "./fake-transport.ts";
 
@@ -259,7 +259,7 @@ describe("connectOver", () => {
 		},
 		{
 			name: "a reset with code 5",
-			act: (request) => request.reply.abort(new FakeStreamError(5, "reset")),
+			act: (request) => request.reply.abort(fakeStreamError(5, "reset")),
 			abort: { type: "peer-reset", code: 5 },
 		},
 		{
@@ -361,7 +361,7 @@ describe("connectOver", () => {
 		},
 		{
 			name: "a reset with code 5",
-			act: (request) => request.reply.abort(new FakeStreamError(5, "reset")),
+			act: (request) => request.reply.abort(fakeStreamError(5, "reset")),
 			end: { type: "peer-reset", code: 5 },
 			objects: "fails",
 		},
@@ -401,8 +401,7 @@ describe("connectOver", () => {
 		},
 		{
 			name: "a reset of the request stream",
-			act: ({ request }) =>
-				request.reply.abort(new FakeStreamError(5, "reset")),
+			act: ({ request }) => request.reply.abort(fakeStreamError(5, "reset")),
 			left: 2,
 			outcome: "fails",
 		},
@@ -482,12 +481,12 @@ describe("connectOver", () => {
 	test.each([
 		{
 			name: "a reset with code 1",
-			act: (request) => request.reply.abort(new FakeStreamError(1, "reset")),
+			act: (request) => request.reply.abort(fakeStreamError(1, "reset")),
 			end: { type: "peer-reset", code: 1 },
 		},
 		{
 			name: "STOP_SENDING with code 7 and nothing else (§5.1)",
-			act: (request) => request.sent.cancel(new FakeStreamError(7, "stop")),
+			act: (request) => request.sent.cancel(fakeStreamError(7, "stop")),
 			end: { type: "peer-reset", code: 7 },
 		},
 		{
@@ -515,14 +514,14 @@ describe("connectOver", () => {
 		const subgroup = await track.openSubgroup(SUBGROUP);
 		await subgroup.write({ objectId: 0n, payload: utf8("a") });
 		// STOP_SENDING after the FIN still ends it.
-		await request.sent.cancel(new FakeStreamError(7, "stop"));
+		await request.sent.cancel(fakeStreamError(7, "stop"));
 		expect(await track.ended).toEqual({ type: "peer-reset", code: 7 });
 	});
 
 	test("after its Track ended, a SubgroupWriter fails writes with PublishEndedError and lets close and reset pass", async () => {
 		const { request, track } = await published();
 		const subgroup = await track.openSubgroup(SUBGROUP);
-		await request.reply.abort(new FakeStreamError(1, "reset"));
+		await request.reply.abort(fakeStreamError(1, "reset"));
 		const end = await track.ended;
 
 		for (const call of [
@@ -538,11 +537,52 @@ describe("connectOver", () => {
 		await subgroup.reset();
 	});
 
+	// The code goes to the peer in a `WebTransportError`, which Chromium 156
+	// clamps to 255: a code outside 0 to 255 is refused before the stream is
+	// touched, and the stream can still be written and reset.
+	test.each([
+		{
+			code: 256,
+			message: "a stream is reset with a whole number from 0 to 255, not 256",
+		},
+		{
+			code: -1,
+			message: "a stream is reset with a whole number from 0 to 255, not -1",
+		},
+		{
+			code: 1.5,
+			message: "a stream is reset with a whole number from 0 to 255, not 1.5",
+		},
+		{
+			code: Number.NaN,
+			message: "a stream is reset with a whole number from 0 to 255, not NaN",
+		},
+	])(
+		"reset($code) rejects with a RangeError and leaves the stream open",
+		async ({ code, message }) => {
+			const { peer, track } = await published();
+			const subgroup = await track.openSubgroup(SUBGROUP);
+			const stream = await peer.clientUni();
+			await stream.read();
+
+			const error = await rejection(subgroup.reset(code));
+			expect(error).toBeInstanceOf(RangeError);
+			expect(error).toMatchObject({ message });
+
+			await subgroup.write({ objectId: 0n, payload: utf8("a") });
+			expect((await stream.read()).done).toBe(false);
+			await subgroup.reset(255);
+			await expect(stream.read()).rejects.toMatchObject({
+				streamErrorCode: 255,
+			});
+		},
+	);
+
 	test("a write that races the end of its Track fails with PublishEndedError too", async () => {
 		const { request, track } = await published();
 		const subgroup = await track.openSubgroup(SUBGROUP);
 		// The reset is on its way while the application still writes.
-		void request.reply.abort(new FakeStreamError(1, "reset"));
+		void request.reply.abort(fakeStreamError(1, "reset"));
 		await track.ended;
 		const error = await rejection(
 			subgroup.write({ objectId: 0n, payload: utf8("a") }),
@@ -569,7 +609,7 @@ describe("connectOver", () => {
 		const stream = await peer.clientUni();
 		await stream.read();
 
-		await stream.cancel(new FakeStreamError(5, "stop"));
+		await stream.cancel(fakeStreamError(5, "stop"));
 		await settle();
 		expect(
 			await rejection(subgroup.write({ objectId: 0n, payload: utf8("a") })),
@@ -581,7 +621,7 @@ describe("connectOver", () => {
 		const { peer, request, subscription } = await subscribed();
 		// Stream Count 1: one subgroup stream is still to come.
 		await request.reply.write(hex("0b 00 03 02 01 00"));
-		await request.sent.cancel(new FakeStreamError(7, "stop"));
+		await request.sent.cancel(fakeStreamError(7, "stop"));
 		await settle();
 
 		const stream = peer.openUni();
@@ -598,7 +638,7 @@ describe("connectOver", () => {
 		const subscribing = connection.subscribe(TRACK);
 		const request = await peer.clientBidi();
 		await request.sent.read();
-		await request.sent.cancel(new FakeStreamError(7, "stop"));
+		await request.sent.cancel(fakeStreamError(7, "stop"));
 		await settle();
 		await request.reply.write(hex("05 00 05 10 00 02 6e 6f"));
 		await request.reply.close();
@@ -621,7 +661,9 @@ describe("connectOver", () => {
 	test("cancel() resets the request stream and ends the subscription as cancelled", async () => {
 		const { request, subscription } = await subscribed();
 		await subscription.cancel();
-		await expect(request.sent.read()).rejects.toThrow("stream error 1");
+		await expect(request.sent.read()).rejects.toMatchObject({
+			streamErrorCode: 1,
+		});
 		expect(await subscription.ended).toEqual({ type: "cancelled" });
 		expect(await subscription.objects.getReader().read()).toEqual(
 			END_OF_STREAM,
@@ -638,7 +680,9 @@ describe("connectOver", () => {
 		const error = await rejection(subscription.objects.getReader().read());
 		expect(error).toBeInstanceOf(SubscriptionEndedError);
 		expect(error).toMatchObject({ end });
-		await expect(request.sent.read()).rejects.toThrow("stream error 18");
+		await expect(request.sent.read()).rejects.toMatchObject({
+			streamErrorCode: 18,
+		});
 	});
 
 	test("answers a request from the peer with REQUEST_ERROR NOT_SUPPORTED and stays open", async () => {
