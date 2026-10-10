@@ -452,7 +452,12 @@ impl Session {
             //
             // WHY NOT check that what crossed would have been legal: the
             // subscription is over on this side and nothing depends on it.
+            // The Request ID of an update is another matter: §10.1 has it
+            // consume one, whatever becomes of the update.
             if self.ended_by_publish_done.contains(&request.0) {
+                if let ControlMessage::RequestUpdate(update) = &message {
+                    self.peer.take_id(update.request_id)?;
+                }
                 return Ok(RequestEvent::LateMessage);
             }
             return Err(Error::ProtocolViolation("message after the request ended"));
@@ -498,11 +503,14 @@ impl Session {
             // On any other request of this endpoint the peer is not the one
             // who may send an update, which the last arm rejects.
             //
-            // FIXME: check the Request ID the update consumes (§10.1), together
-            // with the other Request IDs of the peer.
-            (Request::Publish { state, .. }, ControlMessage::RequestUpdate(_))
+            // §10.1: "Each SUBSCRIBE, PUBLISH, FETCH, SUBSCRIBE_NAMESPACE,
+            // SUBSCRIBE_TRACKS, PUBLISH_NAMESPACE, REQUEST_UPDATE, and
+            // TRACK_STATUS message consumes a Request ID", so the update's is
+            // checked with the IDs of the requests the peer opens.
+            (Request::Publish { state, .. }, ControlMessage::RequestUpdate(update))
                 if *state == PublishState::Established =>
             {
+                self.peer.take_id(update.request_id)?;
                 *state = PublishState::UpdateRefused;
                 Ok(RequestEvent::UpdateRefused {
                     response: ControlMessage::RequestError(RequestError {
@@ -519,8 +527,12 @@ impl Session {
                     state: PublishState::UpdateRefused,
                     ..
                 },
-                ControlMessage::RequestUpdate(_),
-            ) => Ok(RequestEvent::UpdateAlreadyRefused),
+                ControlMessage::RequestUpdate(update),
+            ) => {
+                // It gets no answer, and its Request ID is used up all the same.
+                self.peer.take_id(update.request_id)?;
+                Ok(RequestEvent::UpdateAlreadyRefused)
+            }
             (Request::PublishNamespace { established }, ControlMessage::RequestOk(ok))
                 if !*established =>
             {
@@ -1563,17 +1575,18 @@ mod tests {
 
     #[test]
     fn messages_that_cross_a_publish_done_are_ignored() {
-        let update = || {
+        // Every update has a Request ID of its own (§10.1).
+        let update = |request_id| {
             ControlMessage::RequestUpdate(RequestUpdate {
-                request_id: 1,
+                request_id,
                 parameters: vec![],
             })
         };
         // (whether the PUBLISH was accepted before PUBLISH_DONE, what arrives after)
         let cases = [
-            (false, vec![request_ok(vec![]), update(), update()]),
+            (false, vec![request_ok(vec![]), update(1), update(3)]),
             (false, vec![ControlMessage::RequestError(request_error())]),
-            (true, vec![update(), request_ok(vec![])]),
+            (true, vec![update(1), request_ok(vec![])]),
         ];
         for (accepted, late) in cases {
             let mut session = client();
@@ -1594,7 +1607,7 @@ mod tests {
             // Once the stream is reported gone, the request is forgotten.
             session.cancel(request);
             assert_eq!(
-                session.feed(request, update()),
+                session.feed(request, update(5)),
                 Err(ENDED),
                 "accepted {accepted}"
             );
@@ -1602,10 +1615,120 @@ mod tests {
     }
 
     #[test]
-    fn a_request_update_is_refused_where_the_peer_may_send_one() {
-        let update = || {
+    fn a_request_update_uses_up_a_request_id_of_the_peer() {
+        #[derive(Debug, Clone, Copy)]
+        enum Before {
+            /// The PUBLISH is Established.
+            Established,
+            /// An update with Request ID 1 was refused.
+            UpdateRefused,
+            /// This endpoint sent `PUBLISH_DONE`.
+            PublishDone,
+            /// This endpoint sent `PUBLISH_DONE`, and an update with Request
+            /// ID 1 crossed it.
+            UpdateAfterPublishDone,
+            /// The peer opened a request with Request ID 1.
+            PeerRequest,
+        }
+        let update = |request_id| {
             ControlMessage::RequestUpdate(RequestUpdate {
-                request_id: 1,
+                request_id,
+                parameters: vec![],
+            })
+        };
+        let refused = || RequestEvent::UpdateRefused {
+            response: ControlMessage::RequestError(RequestError {
+                error_code: 0x3,
+                retry_interval: 0,
+                error_reason: ReasonPhrase::default(),
+                redirect: None,
+            }),
+        };
+        // This endpoint is the client, so the peer's Request IDs are odd.
+        // (what came before; the Request ID of the update; what the update
+        //  leads to)
+        let cases = [
+            (Before::Established, 1, Ok(refused())),
+            (Before::Established, 5, Ok(refused())),
+            (Before::Established, 0, Err(Error::InvalidRequestId(0))),
+            (Before::UpdateRefused, 1, Err(Error::InvalidRequestId(1))),
+            (
+                Before::UpdateRefused,
+                3,
+                Ok(RequestEvent::UpdateAlreadyRefused),
+            ),
+            (Before::PublishDone, 1, Ok(RequestEvent::LateMessage)),
+            (Before::PublishDone, 2, Err(Error::InvalidRequestId(2))),
+            (
+                Before::UpdateAfterPublishDone,
+                1,
+                Err(Error::InvalidRequestId(1)),
+            ),
+            (
+                Before::UpdateAfterPublishDone,
+                3,
+                Ok(RequestEvent::LateMessage),
+            ),
+            (Before::PeerRequest, 1, Err(Error::InvalidRequestId(1))),
+            (Before::PeerRequest, 3, Ok(refused())),
+        ];
+        let subscribe = |request_id, name: &[u8]| {
+            ControlMessage::Subscribe(Subscribe {
+                request_id,
+                full_track_name: track(name),
+                parameters: vec![],
+            })
+        };
+        for (before, request_id, expected) in cases {
+            let mut session = client();
+            let (publish, _) = session.publish(track(b"a"), 1, vec![], vec![]).unwrap();
+            session.feed(publish, request_ok(vec![])).unwrap();
+            match before {
+                Before::Established => {}
+                Before::UpdateRefused => {
+                    session.feed(publish, update(1)).unwrap();
+                }
+                Before::PublishDone | Before::UpdateAfterPublishDone => {
+                    session
+                        .publish_done(publish, 2, 0, ReasonPhrase::default())
+                        .unwrap();
+                    if matches!(before, Before::UpdateAfterPublishDone) {
+                        session.feed(publish, update(1)).unwrap();
+                    }
+                }
+                Before::PeerRequest => {
+                    session.on_peer_request_opened(subscribe(1, b"b")).unwrap();
+                }
+            }
+            assert_eq!(
+                session.feed(publish, update(request_id)),
+                expected,
+                "{before:?} {request_id}"
+            );
+            // Whatever became of the update, a request of the peer cannot
+            // have its Request ID: it was used up, or it never was one of
+            // the peer's.
+            assert_eq!(
+                session
+                    .on_peer_request_opened(subscribe(request_id, b"c"))
+                    .err(),
+                Some(Error::InvalidRequestId(request_id)),
+                "{before:?} {request_id}"
+            );
+            // And the session goes on taking Request IDs that are new.
+            assert!(
+                session.on_peer_request_opened(subscribe(99, b"c")).is_ok(),
+                "{before:?} {request_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_update_is_refused_where_the_peer_may_send_one() {
+        // Every update has a Request ID of its own (§10.1).
+        let update = |request_id| {
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id,
                 parameters: vec![Parameter::Forward(false)],
             })
         };
@@ -1621,16 +1744,18 @@ mod tests {
         let mut session = client();
         let (publish, _) = session.publish(track(b"a"), 1, vec![], vec![]).unwrap();
         // Before PUBLISH_OK there is no subscription to update.
-        assert_eq!(session.feed(publish, update()), Err(NOT_ALLOWED));
+        assert_eq!(session.feed(publish, update(1)), Err(NOT_ALLOWED));
         session.feed(publish, request_ok(vec![])).unwrap();
-        assert_eq!(session.feed(publish, update()), Ok(refused));
+        // The update that was not allowed did not use up its Request ID: the
+        // session is to be closed for it anyway.
+        assert_eq!(session.feed(publish, update(1)), Ok(refused));
         assert_eq!(
             session.request_state(publish),
             Some(RequestState::Established)
         );
         // Further updates get no second answer, and nothing else is taken.
         assert_eq!(
-            session.feed(publish, update()),
+            session.feed(publish, update(3)),
             Ok(RequestEvent::UpdateAlreadyRefused)
         );
         assert_eq!(session.feed(publish, request_ok(vec![])), Err(NOT_ALLOWED));
@@ -1657,7 +1782,7 @@ mod tests {
         // The publisher of a track this endpoint subscribed to may not update.
         let (subscribe, _) = session.subscribe(track(b"b"), vec![]).unwrap();
         session.feed(subscribe, subscribe_ok(7, vec![])).unwrap();
-        assert_eq!(session.feed(subscribe, update()), Err(NOT_ALLOWED));
+        assert_eq!(session.feed(subscribe, update(5)), Err(NOT_ALLOWED));
     }
 
     #[test]

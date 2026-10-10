@@ -183,7 +183,7 @@ impl PeerRequests {
 
     /// §10.1: an ID of the wrong parity or a repeated one closes the session
     /// with `INVALID_REQUEST_ID`.
-    fn take_id(&mut self, id: u64) -> Result<(), Error> {
+    pub(super) fn take_id(&mut self, id: u64) -> Result<(), Error> {
         let duplicate = id < self.lowest_unseen
             || self.seen_ahead.contains(&id)
             // A request that is still open was certainly seen, also when its ID

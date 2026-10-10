@@ -1621,3 +1621,35 @@ fn the_tracks_of_a_publisher_that_goes_end_in_the_order_of_their_names() {
         .collect();
     assert_eq!(done_on, [0, 1, 2, 3, 4]);
 }
+
+#[test]
+fn a_drain_timer_of_a_track_that_is_gone_does_not_end_the_next_one_of_its_name() {
+    let mut relay = relay_with_track();
+    data_stream_opened(&mut relay, 7);
+    // The publisher counts two streams, and then its track turns out to be
+    // malformed: the track ends while the alias still waits for a stream.
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 2),
+    });
+    relay.step(Event::TrackMalformed {
+        session: PUBLISHER,
+        stream: StreamKey(7),
+    });
+    assert_eq!(relay.counts().tracks, 0);
+    // Alice publishes a track of the same name.
+    relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: publish(0, b"a"),
+    });
+    assert_eq!(relay.counts().tracks, 1);
+    // The timer of the first track is for the publisher's alias, which is no
+    // source of Alice's track.
+    relay.step(Event::DrainTimeout {
+        session: PUBLISHER,
+        track_alias: UPSTREAM_ALIAS,
+    });
+    assert_eq!(relay.counts().tracks, 1);
+}

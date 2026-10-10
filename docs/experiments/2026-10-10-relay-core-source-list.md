@@ -43,7 +43,9 @@ The 12 scenarios with real peers against a relay that holds both versions: no di
 
 `--same`, world `full`: `c231e5c9a6f705f8` in three runs, the digest the version before had.
 
-No expectation of a test was changed, and no test was added. `mise run check` ended with `OK` for all four parts (81 tests of the core), `mise run interop` with `46 of 46 pairings ended as expected`.
+**One difference was found afterwards, by reading, and none of the runs above reaches it.** A timer for the streams a source counted in PUBLISH_DONE used to end the track of that name, whichever track that was. When the track had ended in another way while the timer ran (it was malformed), and another publisher had published a track of the same name since, the timer ended that publisher's track. It now ends a track only when the session and Track Alias it was started for are a source of it. A test added with the next change (`a_drain_timer_of_a_track_that_is_gone_does_not_end_the_next_one_of_its_name`) pins this; run against the core before this step, the comparison reports it as a difference in content (the older core resets the second publisher's PUBLISH).
+
+No expectation of a test was changed, and no test was added in this step. `mise run check` ended with `OK` for all four parts (81 tests of the core), `mise run interop` with `46 of 46 pairings ended as expected`.
 
 ## Limitations and blockers
 
