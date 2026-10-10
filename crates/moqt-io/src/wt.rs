@@ -29,19 +29,25 @@
 //!
 //! One session takes one QUIC connection; the library does not pool.
 
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use web_transport_quinn::generic::poll::SendStream as _;
 use web_transport_quinn::http::StatusCode;
 use web_transport_quinn::proto::{ConnectRequest, ConnectResponse};
-use web_transport_quinn::quinn::crypto::rustls::QuicServerConfig;
+use web_transport_quinn::quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use web_transport_quinn::quinn::rustls;
+use web_transport_quinn::quinn::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use web_transport_quinn::quinn::rustls::crypto::CryptoProvider;
 use web_transport_quinn::quinn::rustls::pki_types::pem::PemObject;
-use web_transport_quinn::quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use web_transport_quinn::quinn::rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, ServerName, UnixTime,
+};
 use web_transport_quinn::quinn::{self, ConnectionError};
-use web_transport_quinn::{ClientBuilder, Request, Session, SessionError, WebTransportError};
+use web_transport_quinn::{Request, Session, SessionError, WebTransportError};
 
 use crate::{
     Connection, ConnectionEnd, ConnectionLost, ReadError, RecvStream, SendStream, WriteError,
@@ -221,7 +227,7 @@ impl RecvStream for WtRecv {
 pub struct WtConnection {
     session: Session,
     /// The endpoint of a session this side opened, which has to outlive it.
-    _client: Option<web_transport_quinn::Client>,
+    _client: Option<quinn::Endpoint>,
 }
 
 fn lost(error: &dyn std::fmt::Display) -> ConnectionLost {
@@ -311,33 +317,202 @@ impl Connection for WtConnection {
     }
 }
 
+/// How long a client waits for its session, from the first packet to the
+/// answer to its CONNECT request. Provisional; the same 10 seconds a server
+/// gives a handshake.
+///
+/// WHY a limit of its own: quinn gives up on a handshake that gets no answer
+/// only after its idle timeout, 30 seconds by default, and says "timed out"
+/// without the addresses. A client that cannot connect should say so sooner
+/// and say where it was sending from.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Accepts the server certificate whose SHA-256 is the pinned one.
+///
+/// WHY written here and not taken from the library: `ClientBuilder` of
+/// web-transport-quinn 0.13.2 has the same verifier, but builds its endpoint
+/// on `[::]:0` in the same call and hands out neither the endpoint nor the
+/// configuration (`src/client.rs`, `ClientBuilder::build`, read 2026-10-10);
+/// see [`local_address_for`] for why that socket will not do. What the
+/// builder sets is repeated in [`client_config`]: TLS 1.3 only, the ALPN
+/// `h3`, no client certificate, and quinn's default transport settings.
+#[derive(Debug)]
+struct PinnedCertificate {
+    provider: Arc<CryptoProvider>,
+    sha256: [u8; 32],
+}
+
+impl ServerCertVerifier for PinnedCertificate {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let hash = web_transport_quinn::crypto::sha256(&self.provider, end_entity);
+        if hash.as_ref() == self.sha256 {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        }
+    }
+
+    // The two below keep verification on: the server still has to prove that
+    // it holds the key of the pinned certificate.
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// The QUIC and TLS settings of a client that pins the server certificate.
+///
+/// The QUIC settings are the defaults of quinn, without a keep-alive: a
+/// client talks to the one server it chose, and the server's keep-alive keeps
+/// the connection up.
+fn client_config(cert_sha256: [u8; 32]) -> Result<quinn::ClientConfig, ConnectionLost> {
+    // WHY `ring`, named here: see `WtServer::with_certificate`.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    // WHY pin the hash: test relays run on a self-signed certificate that no
+    // root store trusts. Pinning keeps verification on: the hash is compared
+    // and the handshake signature is still checked.
+    let verifier = Arc::new(PinnedCertificate {
+        provider: Arc::clone(&provider),
+        sha256: cert_sha256,
+    });
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| lost(&error))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
+    let crypto = QuicClientConfig::try_from(tls).map_err(|error| lost(&error))?;
+    Ok(quinn::ClientConfig::new(Arc::new(crypto)))
+}
+
+/// The address a client binds its UDP socket to, for a server at `remote`: any
+/// port, on the wildcard address of the same family.
+///
+/// WHY not `[::]:0` for every server, which takes IPv4 and IPv6 at once: on
+/// macOS the kernel can give such a socket a port that an IPv4 socket of
+/// another process already holds, and then delivers what comes from an IPv4
+/// server to that other socket. The server's answers never arrive and the
+/// handshake does not end (`docs/experiments/2026-10-10-client-socket-family.md`).
+/// An IPv4 socket cannot get a port another IPv4 socket holds.
+fn local_address_for(remote: SocketAddr) -> SocketAddr {
+    let wildcard = match remote {
+        SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    SocketAddr::new(wildcard, 0)
+}
+
+/// The name the server certificate is checked against, and the address to
+/// send to.
+///
+/// WHY the first address of a host name and no other: the resolver orders
+/// its answers by the system's policy (RFC 6724), which is the order the
+/// library takes too. Trying the next one after a failure would multiply the
+/// time a failed connect takes, and a relay that is reachable over one family
+/// only is a setup to fix, not to work around here.
+async fn resolve(url: &url::Url) -> Result<(String, SocketAddr), ConnectionLost> {
+    let port = url.port().unwrap_or(443);
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => Ok((address.to_string(), (address, port).into())),
+        Some(url::Host::Ipv6(address)) => Ok((address.to_string(), (address, port).into())),
+        Some(url::Host::Domain(domain)) => {
+            let remote = tokio::net::lookup_host((domain, port))
+                .await
+                .map_err(|error| lost(&error))?
+                .next()
+                .ok_or_else(|| ConnectionLost(format!("{domain} has no address")))?;
+            Ok((domain.to_string(), remote))
+        }
+        None => Err(ConnectionLost("the URL has no host".to_string())),
+    }
+}
+
 /// Connects to a `MoQ` Transport endpoint at an `https` URL, offering the
 /// subprotocol of this crate's draft.
 ///
 /// The server certificate is accepted when its SHA-256 equals `cert_sha256`.
 ///
-/// The QUIC settings are the defaults of quinn, without a keep-alive: a
-/// client talks to the one server it chose, and the library has no way to set
-/// them together with a pinned certificate hash short of a certificate
-/// verifier written here. The server's keep-alive keeps the connection up.
-///
 /// # Errors
 ///
 /// Fails when the URL is not one, when the connection or the WebTransport
-/// handshake fails, and when the server does not select the subprotocol.
+/// handshake fails or takes more than 10 seconds, and when the server does
+/// not select the subprotocol.
 pub async fn connect(url: &str, cert_sha256: [u8; 32]) -> Result<WtConnection, ConnectionLost> {
+    connect_within(url, cert_sha256, CONNECT_TIMEOUT, None).await
+}
+
+/// [`connect`] with the time limit and the local address of the caller's
+/// choice; `None` is [`local_address_for`] the server.
+async fn connect_within(
+    url: &str,
+    cert_sha256: [u8; 32],
+    limit: Duration,
+    local: Option<SocketAddr>,
+) -> Result<WtConnection, ConnectionLost> {
     let url: url::Url = url.parse().map_err(|error| lost(&error))?;
-    // WHY pin the hash: test relays run on a self-signed certificate that no
-    // root store trusts. Pinning keeps verification on: the library compares
-    // the hash and still checks the handshake signature.
-    let client = ClientBuilder::new()
-        .with_server_certificate_hashes(vec![cert_sha256.to_vec()])
-        .map_err(|error| lost(&error))?;
+    let (server_name, remote) = resolve(&url).await?;
+    let local = local.unwrap_or_else(|| local_address_for(remote));
+    let endpoint = quinn::Endpoint::client(local).map_err(|error| lost(&error))?;
+    let config = client_config(cert_sha256)?;
     let request = ConnectRequest::new(url).with_protocol(xmoq_moqt::PROTOCOL);
-    let session = client
-        .connect(request)
-        .await
-        .map_err(|error| lost(&error))?;
+    let establish = async {
+        let connection = endpoint
+            .connect_with(config, remote, &server_name)
+            .map_err(|error| lost(&error))?
+            .await
+            .map_err(|error| lost(&error))?;
+        Session::connect(connection, request)
+            .await
+            .map_err(|error| lost(&error))
+    };
+    let Ok(session) = tokio::time::timeout(limit, establish).await else {
+        let from = endpoint
+            .local_addr()
+            .map_or_else(|error| error.to_string(), |address| address.to_string());
+        return Err(ConnectionLost(format!(
+            "no session with {remote} within {limit:?}, sending from {from}"
+        )));
+    };
+    let session = session?;
     // The library fails the connect when the server selects a protocol that
     // was not offered; a server that selects none is refused here.
     if session.protocol() != Some(xmoq_moqt::PROTOCOL) {
@@ -349,7 +524,7 @@ pub async fn connect(url: &str, cert_sha256: [u8; 32]) -> Result<WtConnection, C
     }
     Ok(WtConnection {
         session,
-        _client: Some(client),
+        _client: Some(endpoint),
     })
 }
 
@@ -472,10 +647,10 @@ pub async fn accept(incoming: Incoming) -> Result<(WtConnection, SessionRequest)
     ))
 }
 
-/// A client and a server session connected over the loopback interface, with
-/// the server that has to outlive them. For the tests of the contract.
+/// A server on the loopback interface, with the URL and the certificate hash
+/// a client needs to reach it.
 #[cfg(test)]
-pub(crate) async fn loopback(limits: QuicLimits) -> (WtConnection, WtConnection, WtServer) {
+fn loopback_server(limits: QuicLimits) -> (WtServer, String, [u8; 32]) {
     use web_transport_quinn::quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 
     let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
@@ -492,7 +667,14 @@ pub(crate) async fn loopback(limits: QuicLimits) -> (WtConnection, WtConnection,
     let server =
         WtServer::with_certificate(0, vec![certificate], key, limits).expect("a free port");
     let port = server.0.local_addr().expect("a bound socket").port();
-    let url = format!("https://127.0.0.1:{port}/");
+    (server, format!("https://127.0.0.1:{port}/"), hash)
+}
+
+/// A client and a server session connected over the loopback interface, with
+/// the server that has to outlive them. For the tests of the contract.
+#[cfg(test)]
+pub(crate) async fn loopback(limits: QuicLimits) -> (WtConnection, WtConnection, WtServer) {
+    let (server, url, hash) = loopback_server(limits);
     let (client, accepted) = tokio::join!(connect(&url, hash), async {
         accept(server.incoming().await.expect("an attempt")).await
     });
@@ -532,5 +714,95 @@ mod tests {
                 "{code:#x}"
             );
         }
+    }
+
+    #[test]
+    fn a_client_binds_a_socket_of_the_servers_address_family() {
+        // (the server, the local address)
+        let cases = [
+            ("127.0.0.1:4433", "0.0.0.0:0"),
+            ("203.0.113.7:443", "0.0.0.0:0"),
+            ("[::1]:4433", "[::]:0"),
+            ("[2001:db8::7]:443", "[::]:0"),
+        ];
+        for (remote, local) in cases {
+            let remote: SocketAddr = remote.parse().unwrap();
+            assert_eq!(local_address_for(remote).to_string(), local, "{remote}");
+        }
+    }
+
+    const TEST_LIMITS: QuicLimits = QuicLimits {
+        max_uni_streams: 8,
+        max_bi_streams: 8,
+        stream_receive_window: 65_536,
+        receive_window: 262_144,
+        send_window: 262_144,
+    };
+
+    /// Runs the handshakes of every attempt that reaches the server.
+    fn accept_all(server: WtServer) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(incoming) = server.incoming().await {
+                tokio::spawn(async move {
+                    // The sessions end with the test.
+                    if let Ok((connection, _)) = accept(incoming).await {
+                        connection.closed().await;
+                    }
+                });
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_port_that_an_ipv4_socket_of_someone_else_holds_does_not_stop_a_client() {
+        let (server, url, hash) = loopback_server(TEST_LIMITS);
+        let accepting = accept_all(server);
+        // Someone else's IPv4 socket, on a port the kernel chose.
+        let held = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+
+        // A socket for both families on that port is what used to be bound.
+        // macOS allows it, and gives the server's answers to the IPv4 socket:
+        // the client hears nothing, and now says so when its time is up. Other
+        // systems may refuse the bind, which is an error at once.
+        let both_families = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        let limit = Duration::from_millis(1500);
+        let Err(ConnectionLost(failure)) =
+            connect_within(&url, hash, limit, Some(both_families)).await
+        else {
+            panic!("connected through a port whose IPv4 traffic goes elsewhere");
+        };
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            failure,
+            format!(
+                "no session with {} within 1.5s, sending from [::]:{port}",
+                url.trim_start_matches("https://").trim_end_matches('/')
+            )
+        );
+        // WHY not the same text: where the bind is refused the client never
+        // gets as far as waiting. A stall here would mean this system hands
+        // the port out like macOS does, which is worth a failing test.
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            !failure.starts_with("no session with"),
+            "the bind was expected to fail, but the client waited: {failure}"
+        );
+
+        // The socket a client binds for an IPv4 server cannot get that port,
+        // and the client connects while the other socket is still there.
+        let client = connect(&url, hash).await.expect("the client connects");
+        let WtConnection {
+            _client: Some(endpoint),
+            ..
+        } = &client
+        else {
+            panic!("a client keeps its endpoint");
+        };
+        let local = endpoint.local_addr().expect("a bound socket");
+        assert!(local.is_ipv4(), "{local}");
+        assert_ne!(local.port(), port);
+        drop(held);
+        accepting.abort();
     }
 }

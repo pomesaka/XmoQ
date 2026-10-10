@@ -108,6 +108,7 @@ Choices of the relay where the draft leaves one. The limits are **provisional**.
 | Events waiting for the relay | 1024 |
 | Wait for late Objects after PUBLISH_DONE | 2 seconds |
 | A stream that does not say what it is; the WebTransport handshake | 10 seconds each |
+| A Rust client's wait for its session, from its first packet to the answer to CONNECT | 10 seconds; then the client gives up and names the server's address and its own |
 | A request stream the peer leaves open after the relay's PUBLISH_DONE | 2 seconds, then STOP_SENDING |
 | Reading what had arrived on a connection that is gone | 1 second |
 | After a STOP_SENDING on the relay's control stream, the time in which the peer's connection may end for the stop to count as the peer leaving | 200 milliseconds |
