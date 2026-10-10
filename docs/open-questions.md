@@ -3,7 +3,13 @@
 Do not infer answers.
 
 - When to move the MoQ implementation from draft 18 to a newer draft: **undecided**
-- Codec/profile, Track/Object packaging, audio pipeline: **undecided**
+- Codec/profile, Track/Object packaging, audio pipeline: **undecided**. Facts for the decision are in the [WebCodecs loopback record](experiments/2026-10-10-webcodecs-loopback.md). The parts to decide:
+  - Video codec, and for H.264 or HEVC the bitstream format (`avc`/`hevc` with a `description`, or `annexb`)
+  - How a late joiner gets the current `decoderConfig`, which WebCodecs emits only once
+  - Key frame interval, and whether a receiver can ask for a key frame
+  - What a receiver does when a chunk is missing (H.264 and VP8 decoders show corrupt pictures without an error)
+  - `latencyMode` and `optimizeForLatency`; whether `duration` travels; whether resolution may change during a broadcast
+  - Whether the Opus `description` is passed to the decoder
 - Latency goal, room size, expected concurrent rooms: **undecided**
 - Supported browsers, operating systems, Ghostty versions: **undecided**
 - CLI decoder/audio backend: **undecided**
