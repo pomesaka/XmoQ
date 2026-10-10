@@ -124,6 +124,11 @@ export type SessionEvent =
 			trackAlias: bigint | undefined;
 			reason: string;
 	  }
+	/**
+	 * A stream of the peer did not say what it is in the time the I/O layer
+	 * gives it, and was stopped. The session stays open.
+	 */
+	| { type: "peer-stream-timed-out"; kind: PeerStreamKind; peerStream: number }
 	/** A request the peer opened was answered with REQUEST_ERROR, with this code. */
 	| {
 			type: "peer-request-rejected";
@@ -131,6 +136,9 @@ export type SessionEvent =
 			requestId: bigint;
 			errorCode: bigint;
 	  };
+
+/** The two kinds of streams the peer opens. A `peerStream` number names one stream of either kind. */
+export type PeerStreamKind = "uni" | "bidi";
 
 /**
  * What the I/O layer has to do, in order. `stream` numbers name streams this
@@ -148,6 +156,20 @@ export type SessionOutput =
 	/** Write `data` to the peer-opened bidirectional stream, then FIN. */
 	| { type: "respond"; peerStream: number; data: Bytes }
 	| { type: "stop-sending"; peerStream: number; code: number }
+	/**
+	 * A stream of the peer has said what it is, so the time it had for that
+	 * is over. A unidirectional stream: its type, with the whole Subgroup
+	 * Header or FETCH_HEADER where it has one (§3.4). A bidirectional one:
+	 * its first message, whole. The same points as in the Rust
+	 * implementation (`first_bytes_timeout` in crates/moqt-io).
+	 */
+	| { type: "peer-stream-identified"; kind: PeerStreamKind; peerStream: number }
+	/**
+	 * Give up a bidirectional stream the peer opened, in both directions:
+	 * STOP_SENDING for the peer's, and a reset of this endpoint's where it was
+	 * not used yet.
+	 */
+	| { type: "abandon-peer-request"; peerStream: number; code: number }
 	/** Send STOP_SENDING for the peer's direction of a bidirectional stream this endpoint opened. Its own direction is left as it is. */
 	| { type: "stop-peer-direction"; stream: number; code: number }
 	| { type: "close-session"; code: number; reason: string }

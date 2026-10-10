@@ -4,7 +4,7 @@ import {
 	createPeerControlStream,
 	SETUP_OPTION_MOQT_IMPLEMENTATION,
 } from "./control-stream.ts";
-import { MoqtError, protocolViolation } from "./error.ts";
+import { MoqtError, protocolViolation, StreamResetErrorCode } from "./error.ts";
 import { FETCH_HEADER_STREAM_TYPE } from "./fetch.ts";
 import type { KeyValuePair } from "./key-value-pair.ts";
 import { resolveLimits, type SessionLimits } from "./limits.ts";
@@ -17,7 +17,11 @@ import {
 	type PublishRequest,
 	type SubscribeRequest,
 } from "./requests.ts";
-import type { SessionOutput, SessionResult } from "./session-output.ts";
+import type {
+	PeerStreamKind,
+	SessionOutput,
+	SessionResult,
+} from "./session-output.ts";
 import { isSubgroupHeaderType } from "./subgroup.ts";
 
 export interface SessionOptions {
@@ -118,6 +122,24 @@ export interface Session {
 	): SessionOutput[];
 	/** The peer reset a bidirectional stream it opened. */
 	peerBidiStreamReset(peerStream: number): SessionOutput[];
+	/**
+	 * The peer opened a stream, and nothing of it was reported yet. Without
+	 * this the session does not know a stream that has sent no byte, and
+	 * `peerStreamTimedOut` does nothing for a stream it does not know.
+	 */
+	peerStreamOpened(kind: PeerStreamKind, peerStream: number): void;
+	/**
+	 * The time a stream of the peer has to say what it is ran out. If it has
+	 * not said it, the outputs stop it, and what the session held of it is
+	 * dropped, as for a stream that is reset before it said what it is
+	 * (§11.4.1); the session stays open.
+	 *
+	 * Does nothing for a stream that has said it, which the caller may not
+	 * have learned yet; for a stream that has ended, or was stopped by an
+	 * earlier call; and for a stream the session was never told of. So a
+	 * caller that reports the time late, or twice, does no harm.
+	 */
+	peerStreamTimedOut(kind: PeerStreamKind, peerStream: number): SessionOutput[];
 	/** The transport session ended. Drops all state; no further output is produced. */
 	transportClosed(): void;
 }
@@ -131,7 +153,10 @@ type PeerUniStream =
 	| { kind: "fetch-header"; buffer: Uint8Array }
 	/** The fetch stream of the open FETCH `requestId`, after its FETCH_HEADER. */
 	| { kind: "fetch"; requestId: bigint }
-	/** Padding: bytes are dropped (§11.5.1). */
+	/**
+	 * Bytes are dropped: padding (§11.5.1), a fetch stream of a request that
+	 * is over, and a stream that was stopped for not saying what it is.
+	 */
 	| { kind: "discard" };
 
 /**
@@ -164,9 +189,16 @@ export function createSession(options: SessionOptions = {}): Session {
 	/** The stream this endpoint sent its SETUP on. */
 	let controlStreamNumber: number | undefined;
 
+	const identifiedUni = (peerStream: number): SessionOutput => ({
+		type: "peer-stream-identified",
+		kind: "uni",
+		peerStream,
+	});
+
 	const classifyPeerUniStream = (
 		peerStream: number,
 		buffer: Uint8Array,
+		out: SessionOutput[],
 	): PeerUniStream => {
 		let streamType: bigint;
 		try {
@@ -181,13 +213,17 @@ export function createSession(options: SessionOptions = {}): Session {
 				throw protocolViolation("the peer opened a second control stream");
 			}
 			peerControlStream = peerStream;
+			out.push(identifiedUni(peerStream));
 			return { kind: "control" };
 		}
 		if (isSubgroupHeaderType(streamType)) {
 			requests.incoming.open(peerStream);
 			return { kind: "subgroup" };
 		}
-		if (streamType === STREAM_TYPE_PADDING) return { kind: "discard" };
+		if (streamType === STREAM_TYPE_PADDING) {
+			out.push(identifiedUni(peerStream));
+			return { kind: "discard" };
+		}
 		if (streamType === FETCH_HEADER_STREAM_TYPE) {
 			return { kind: "fetch-header", buffer };
 		}
@@ -219,19 +255,16 @@ export function createSession(options: SessionOptions = {}): Session {
 			// draft allows. A reset is another matter (§11.4.1) and does not
 			// come here.
 			//
-			// FIXME: a stream whose peer sent the type and stops holds its place
-			// among the streams read at once for as long as the session lasts,
-			// also when its FETCH is cancelled: the stream is not known to be
-			// that FETCH's before its Request ID is read. The Rust
-			// implementation stops it after 10 seconds. This goes, with the
-			// FIXME at `bidiSlots` in `webtransport/stream-io.ts`, when a stream
-			// gets a time by which it has to say what it is.
+			// A stream that sends its type and stops is stopped by the I/O
+			// layer when its time to say what it is runs out
+			// (`peerStreamTimedOut`).
 			if (fin)
 				throw protocolViolation("fetch stream ended in its FETCH_HEADER");
 			return { stream: { kind: "fetch-header", buffer }, rest: EMPTY };
 		}
 		const rest = buffer.subarray(reader.offset);
 		const opened = requests.fetchStreamOpened(requestId, peerStream, out);
+		out.push(identifiedUni(peerStream));
 		// A stream that was stopped: what still arrives on it is dropped.
 		if (opened === "ended") return { stream: { kind: "discard" }, rest: EMPTY };
 		return { stream: { kind: "fetch", requestId }, rest };
@@ -358,7 +391,7 @@ export function createSession(options: SessionOptions = {}): Session {
 				let input = data;
 				if (stream.kind === "unknown") {
 					input = concatBytes([stream.buffer, data]);
-					stream = classifyPeerUniStream(peerStream, input);
+					stream = classifyPeerUniStream(peerStream, input, out);
 				} else if (stream.kind === "fetch-header") {
 					input = concatBytes([stream.buffer, data]);
 				}
@@ -375,8 +408,15 @@ export function createSession(options: SessionOptions = {}): Session {
 
 				switch (stream.kind) {
 					case "unknown":
-					// The draft has no rule for a stream that ends inside its type;
-					// it carried nothing, so it is dropped.
+						// The draft has no rule for a stream that ends inside its
+						// type. It is read like a stream that ends inside an Object
+						// (§11.4), as the Rust implementation does, and like a
+						// request stream that ends inside its first message. A stream
+						// that ends without a byte carried nothing.
+						if (fin && input.length > 0) {
+							throw protocolViolation("stream ended inside its type");
+						}
+						break;
 					case "fetch-header":
 					case "discard":
 						break;
@@ -421,6 +461,62 @@ export function createSession(options: SessionOptions = {}): Session {
 			guard((out) => peerRequests.receive(peerStream, data, fin, out)),
 		peerBidiStreamReset: (peerStream) =>
 			guard(() => peerRequests.reset(peerStream)),
+
+		peerStreamOpened(kind, peerStream) {
+			if (closed) return;
+			if (kind === "bidi") {
+				peerRequests.open(peerStream);
+			} else if (!peerUniStreams.has(peerStream)) {
+				peerUniStreams.set(peerStream, {
+					kind: "unknown",
+					buffer: new Uint8Array(0),
+				});
+			}
+		},
+
+		peerStreamTimedOut(kind, peerStream) {
+			return guard((out) => {
+				if (kind === "bidi") {
+					if (!peerRequests.giveUpUnidentified(peerStream)) return;
+					// A stream that never sent its request is cancelled (§3.3.2).
+					out.push({
+						type: "abandon-peer-request",
+						peerStream,
+						code: StreamResetErrorCode.CANCELLED,
+					});
+				} else {
+					const stream = peerUniStreams.get(peerStream);
+					// The stream has not said what it is while its type, or the
+					// header its type comes with, is not whole. For a subgroup
+					// stream that is asked where its header is read, and what was
+					// held of it is dropped with the answer, as for one reset
+					// before its header (§11.4.1, §10.11).
+					const silent =
+						stream?.kind === "unknown" ||
+						stream?.kind === "fetch-header" ||
+						(stream?.kind === "subgroup" &&
+							requests.incoming.dropBeforeHeader(peerStream));
+					if (!silent) return;
+					// WHY the stream is kept, as one whose bytes are dropped: what
+					// the peer sent before it saw the stop can still arrive, and is
+					// no fault of the peer. Forgotten here, those bytes would be
+					// read as a stream from its type on, and close the session. It
+					// goes when the stream ends, like every other.
+					peerUniStreams.set(peerStream, { kind: "discard" });
+					// No code of §3.3.3 is for this; the Rust implementation sends
+					// the same.
+					out.push({
+						type: "stop-sending",
+						peerStream,
+						code: StreamResetErrorCode.INTERNAL_ERROR,
+					});
+				}
+				out.push({
+					type: "event",
+					event: { type: "peer-stream-timed-out", kind, peerStream },
+				});
+			});
+		},
 
 		transportClosed: shutdown,
 	};

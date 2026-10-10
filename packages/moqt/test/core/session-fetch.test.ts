@@ -54,7 +54,18 @@ const REQUEST_ERROR = encodeControlMessage({
 	errorReason: "",
 });
 
-/** One output in a few words, so that a row of a table can say what it expects. */
+/**
+ * The outputs in a few words each, so that a row of a table can say what it
+ * expects. That a stream has said what it is (`peer-stream-identified`) is
+ * left out here; `session-first-bytes.test.ts` has when it is reported.
+ */
+function briefly(outputs: SessionOutput[]): string[] {
+	return outputs
+		.filter((output) => output.type !== "peer-stream-identified")
+		.map(brief);
+}
+
+/** One output in a few words. */
 function brief(output: SessionOutput): string {
 	switch (output.type) {
 		case "event": {
@@ -413,7 +424,7 @@ describe("a FETCH this endpoint sends", () => {
 	])("$name", ({ steps }) => {
 		const session = fetching();
 		for (const [index, [step, expected]] of steps.entries()) {
-			expect([index, step, run(session, step).map(brief)]).toEqual([
+			expect([index, step, briefly(run(session, step))]).toEqual([
 				index,
 				step,
 				expected,
@@ -474,7 +485,7 @@ describe("a FETCH this endpoint sends", () => {
 			session.subscribe(TRACK);
 			session.fetch({ range });
 			expect(
-				session.receiveRequestStreamData(2, fetchOk(end), false).map(brief),
+				briefly(session.receiveRequestStreamData(2, fetchOk(end), false)),
 			).toEqual(
 				taken
 					? ["fetch-ok"]
@@ -485,7 +496,7 @@ describe("a FETCH this endpoint sends", () => {
 
 	test("a FETCH_OK with a Mandatory Track Property ends the FETCH and leaves the session open (§2.5.1)", () => {
 		const session = fetching();
-		expect(run(session, "stream")).toEqual([]);
+		expect(briefly(run(session, "stream"))).toEqual([]);
 		// 0x4000 is in the range of Mandatory Track Properties.
 		expect(
 			session
@@ -539,7 +550,7 @@ describe("a FETCH this endpoint sends", () => {
 			session.fetch({ range: standalone(at(0n, 0n), at(1n, 0n)) }).value,
 		);
 		expect(
-			session.receivePeerUniStreamData(7, hex(header), false).map(brief),
+			briefly(session.receivePeerUniStreamData(7, hex(header), false)),
 		).toEqual(expected);
 	});
 
@@ -555,7 +566,7 @@ describe("a FETCH this endpoint sends", () => {
 			name: "a fetch stream with its Request ID is stopped, and the session stays",
 			expected: ["stop peer-uni 7 code 1"],
 			act: (session) =>
-				session.receivePeerUniStreamData(7, hex("05 00"), false).map(brief),
+				briefly(session.receivePeerUniStreamData(7, hex("05 00"), false)),
 		},
 		{
 			name: "a Joining FETCH for it is not sent",
@@ -613,7 +624,7 @@ describe("a FETCH this endpoint sends", () => {
 			[
 				session.receivePeerUniStreamData(7, hex("05 00"), false),
 				session.receivePeerUniStreamData(8, hex("05 87 ce"), false),
-			].map((outputs) => outputs.map(brief)),
+			].map(briefly),
 		).toEqual([["stop peer-uni 7 code 1"], ["stop peer-uni 8 code 1"]]);
 	});
 
@@ -672,13 +683,13 @@ describe("a FETCH this endpoint sends", () => {
 		const session = fetching();
 		expect(
 			chunks.map((chunk, index) =>
-				session
-					.receivePeerUniStreamData(
+				briefly(
+					session.receivePeerUniStreamData(
 						7,
 						hex(chunk),
 						fin && index === chunks.length - 1,
-					)
-					.map(brief),
+					),
+				),
 			),
 		).toEqual(expected);
 	});
@@ -688,7 +699,7 @@ describe("a FETCH this endpoint sends", () => {
 		expect(session.receivePeerUniStreamData(7, hex("05"), false)).toEqual([]);
 		expect(session.peerUniStreamReset(7, 1)).toEqual([]);
 		// The FETCH has seen no stream: one that comes is its stream.
-		expect(run(session, "second stream")).toEqual([]);
+		expect(briefly(run(session, "second stream"))).toEqual([]);
 		expect(session.closed).toBe(false);
 	});
 

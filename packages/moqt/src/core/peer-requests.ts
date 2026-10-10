@@ -24,6 +24,15 @@ export interface PeerRequests {
 		out: SessionOutput[],
 	): void;
 	reset(peerStream: number): void;
+	/** The peer opened the stream; nothing of it has arrived yet. */
+	open(peerStream: number): void;
+	/**
+	 * Gives up a stream that is known here, has not ended, and has not sent
+	 * its first message whole, and says whether there was such a stream.
+	 * What still arrives on it is dropped: the peer sent it before it saw
+	 * that the stream was given up.
+	 */
+	giveUpUnidentified(peerStream: number): boolean;
 	clear(): void;
 }
 
@@ -35,6 +44,13 @@ type PeerRequestStream =
 	 * many bytes of its first message have not arrived yet.
 	 */
 	| { answered: true; missing: number };
+
+/** The first message of the request is whole: the stream has said what it is. */
+const identified = (peerStream: number): SessionOutput => ({
+	type: "peer-stream-identified",
+	kind: "bidi",
+	peerStream,
+});
 
 /**
  * Request IDs remembered above the lowest one not seen yet, while requests
@@ -149,8 +165,12 @@ export function createPeerRequests(): PeerRequests {
 					"a request stream ended inside its first message",
 				);
 			if (stream.answered) {
+				const wasMissing = stream.missing;
 				stream.missing = Math.max(0, stream.missing - data.length);
 				if (fin && stream.missing > 0) throw endedInside();
+				if (wasMissing > 0 && stream.missing === 0) {
+					out.push(identified(peerStream));
+				}
 				return;
 			}
 
@@ -198,6 +218,10 @@ export function createPeerRequests(): PeerRequests {
 				}
 			}
 			checkRequestId(requestId);
+			// WHY only when the message is whole, where the request is refused
+			// on its Request ID: a stream that sent the start of a request and
+			// stops has not said what it is, as in the Rust implementation.
+			if (missing === 0) out.push(identified(peerStream));
 			// §3.3.2: reject without application processing by REQUEST_ERROR and FIN.
 			out.push({
 				type: "respond",
@@ -222,6 +246,22 @@ export function createPeerRequests(): PeerRequests {
 		},
 		reset(peerStream) {
 			streams.delete(peerStream);
+		},
+		open(peerStream) {
+			if (streams.has(peerStream)) return;
+			streams.set(peerStream, { answered: false, buffer: new Uint8Array(0) });
+		},
+		giveUpUnidentified(peerStream) {
+			const stream = streams.get(peerStream);
+			if (stream === undefined) return false;
+			if (stream.answered && stream.missing === 0) return false;
+			// WHY kept, in the state of a request that was answered and is
+			// whole: the rest of the stream is then dropped, and its end is no
+			// end inside a message. Forgotten here, what still arrives would be
+			// read as the start of a request, and close the session. It goes
+			// when the stream ends, like every other.
+			streams.set(peerStream, { answered: true, missing: 0 });
+			return true;
 		},
 		clear() {
 			streams.clear();

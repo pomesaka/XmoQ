@@ -509,6 +509,26 @@ describe("connectOver", () => {
 				"peerStreamEndTimeoutMs is a whole number from 0 to 2147483647, not Infinity",
 		},
 		{
+			options: { firstBytesTimeoutMs: 2147483648 },
+			message:
+				"firstBytesTimeoutMs is a whole number from 0 to 2147483647, not 2147483648",
+		},
+		{
+			options: { firstBytesTimeoutMs: -1 },
+			message:
+				"firstBytesTimeoutMs is a whole number from 0 to 2147483647, not -1",
+		},
+		{
+			options: { firstBytesTimeoutMs: 2.5 },
+			message:
+				"firstBytesTimeoutMs is a whole number from 0 to 2147483647, not 2.5",
+		},
+		{
+			options: { firstBytesTimeoutMs: Number.NaN },
+			message:
+				"firstBytesTimeoutMs is a whole number from 0 to 2147483647, not NaN",
+		},
+		{
 			options: { publishDoneTimeoutMs: 2147483648 },
 			message:
 				"publishDoneTimeoutMs is a whole number from 0 to 2147483647, not 2147483648",

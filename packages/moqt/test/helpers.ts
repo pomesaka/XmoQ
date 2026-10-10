@@ -165,3 +165,55 @@ export function closeReasonFixtures(): CloseReasonFixture[] {
 	if (rows.length === 0) throw new Error(`${path} has no rows`);
 	return rows;
 }
+
+/** One row of `fixtures/first-bytes/said.tsv`. */
+export interface FirstBytesFixture {
+	name: string;
+	kind: "uni" | "bidi";
+	/** Every byte the stream has sent when its time runs out, in the form `hex` reads. */
+	sentHex: string;
+	/** Whether the stream has said what it is with those bytes. */
+	said: boolean;
+}
+
+/**
+ * The rows of `fixtures/first-bytes/said.tsv`: what a stream of the peer has
+ * sent when its time runs out, and whether it has said what it is. The file
+ * is shared with the Rust implementation; its README has what the rows hold
+ * a reader to and what a test has to set up.
+ */
+export function firstBytesFixtures(): FirstBytesFixture[] {
+	const path = join(FIXTURES, "first-bytes", "said.tsv");
+	const table = readFileSync(path, "utf8");
+	if (!table.endsWith("\n")) {
+		throw new Error(`${path}: the last row does not end with a line feed`);
+	}
+	const rows = table
+		.slice(0, -1)
+		.split("\n")
+		.map((line): FirstBytesFixture => {
+			const refuse = (what: string): never => {
+				throw new Error(`a row of the first bytes fixture ${what}: ${line}`);
+			};
+			const columns = line.split("\t");
+			const [name, kind, sent, said] = columns;
+			if (columns.length !== 4 || name === undefined || sent === undefined) {
+				return refuse("does not have four columns");
+			}
+			if (name === "") return refuse("has no name");
+			if (kind !== "uni" && kind !== "bidi") {
+				return refuse("has a kind that is neither uni nor bidi");
+			}
+			if (!HEX_BYTES.test(sent)) {
+				return refuse("has bytes that are not whole bytes in hexadecimal");
+			}
+			if (said !== "said" && said !== "not-yet") {
+				return refuse("says neither said nor not-yet");
+			}
+			return { name, kind, sentHex: spaced(sent), said: said === "said" };
+		});
+	// WHY: `test.each` passes with no rows, so an emptied file would look
+	// like a fixture that holds.
+	if (rows.length === 0) throw new Error(`${path} has no rows`);
+	return rows;
+}
