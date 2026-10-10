@@ -92,6 +92,14 @@ export interface Session {
 	 * its error code when the transport reports one.
 	 */
 	localStreamStopped(stream: number, code?: number): SessionOutput[];
+	/**
+	 * The transport ended this endpoint's sending on a stream it opened and
+	 * did not say why, in a way that is read as a STOP_SENDING of the peer
+	 * with an unknown code. Like `localStreamStopped` without a code, but for
+	 * the control stream, where it does nothing and closes nothing: that
+	 * reading is not certain, and it must not make a violation of the peer.
+	 */
+	localStreamAborted(stream: number): SessionOutput[];
 	/** Bytes the peer sent on a request stream this endpoint opened. */
 	receiveRequestStreamData(
 		stream: number,
@@ -270,6 +278,18 @@ export function createSession(options: SessionOptions = {}): Session {
 		return { stream: { kind: "fetch", requestId }, rest };
 	};
 
+	/** The peer stopped a stream of this endpoint that is not the control stream. */
+	const localStreamStopped = (
+		stream: number,
+		code: number | undefined,
+		out: SessionOutput[],
+	): void => {
+		requests.streamStopped(stream, code, out);
+		// §11.4.3: "A publisher that receives a STOP_SENDING on a Subgroup
+		// stream ... SHOULD respond with a reset."
+		requests.outgoing.stopped(stream, out);
+	};
+
 	/** Clears everything. Used when the session ends, whoever ended it. */
 	const shutdown = (): void => {
 		closed = true;
@@ -370,11 +390,18 @@ export function createSession(options: SessionOptions = {}): Session {
 						"the peer stopped this endpoint's control stream",
 					);
 				}
-				requests.streamStopped(stream, code, out);
-				// §11.4.3: "A publisher that receives a STOP_SENDING on a Subgroup
-				// stream ... SHOULD respond with a reset."
-				requests.outgoing.stopped(stream, out);
+				localStreamStopped(stream, code, out);
 			}),
+		// WHY nothing here names the control stream, where
+		// `localStreamStopped` above makes a violation of its stop: this
+		// reading of the transport's error is not certain, and it must close
+		// no session. It cannot: what follows only looks the stream up among
+		// the requests and the subgroup streams, where the control stream is
+		// not, so for that stream nothing happens. A test holds that
+		// (`a stop without a code on the control stream`), and fails when the
+		// control stream is ever given something a stop acts on.
+		localStreamAborted: (stream) =>
+			guard((out) => localStreamStopped(stream, undefined, out)),
 
 		// WHY Objects and responses are processed before the peer's SETUP: §3.3
 		// says data that arrives before the control streams SHOULD be buffered

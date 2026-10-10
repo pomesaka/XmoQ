@@ -7,6 +7,8 @@ Spike, outside lint and review. It is the measurement of [the record](../../docs
 | `src/main.rs` | A WebTransport server on `web-transport-quinn` 0.13.2 that stops streams, closes the session, or holds everything |
 | `run.ts` | Starts the server and Chromium, runs the samples on raw `WebTransport`, and prints how often each outcome was seen |
 | `out/rounds-60.txt` | What the run of the record printed |
+| `own-reset.ts` | The same server and browser: what a writer and a write under way fail with when the page aborts the writer itself |
+| `out/own-reset-20.txt` | What that printed |
 
 ```sh
 (cd spikes/wt-write-abort && cargo build --locked)

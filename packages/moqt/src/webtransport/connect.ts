@@ -82,7 +82,11 @@ export function createStreamError(
 /** The members of the browser's `WebTransport` that the connection uses. */
 type BrowserTransport = Omit<
 	MoqtTransport,
-	"streamError" | "isStreamError" | "streamErrorCode"
+	| "streamError"
+	| "isStreamError"
+	| "isStopWithoutCode"
+	| "isSessionError"
+	| "streamErrorCode"
 >;
 
 /** `errorConstructor` is the browser's `WebTransportError`; tests give their own. */
@@ -103,6 +107,22 @@ export function adaptWebTransport(
 		// failed.
 		isStreamError: (error) =>
 			error instanceof errorConstructor && error.source === "stream",
+		// WHY a NetworkError is a stop: Chromium rejects a writer with it, and
+		// not with a WebTransportError, when the data pipe of the stream closes
+		// before the STOP_SENDING is reported, which happens while a write is
+		// under way (`OutgoingStream::HandlePipeClosed`). In Chromium 156, 56
+		// of 720 writers of a stream that was stopped got it, and none of 1080
+		// writers of a session that ended or was lost, which all got a
+		// WebTransportError with `source` "session"
+		// (docs/experiments/2026-10-11-write-abort-in-chromium.md). The code
+		// of the stop does not reach the page then.
+		// WHY the control stream is left out where this is used: "none in
+		// 1080" is not "cannot", and a stop of that stream is a violation of
+		// the peer.
+		isStopWithoutCode: (error) =>
+			error instanceof DOMException && error.name === "NetworkError",
+		isSessionError: (error) =>
+			error instanceof errorConstructor && error.source === "session",
 		streamErrorCode: (error) =>
 			error instanceof errorConstructor
 				? (error.streamErrorCode ?? undefined)

@@ -28,6 +28,15 @@ export interface MoqtTransport {
 	 */
 	isStreamError(error: unknown): boolean;
 	/**
+	 * Whether a writer failed with `error` because the peer stopped that one
+	 * stream and the transport did not pass the reason on: a stop whose code
+	 * is not known. False for the end of the session. It is asked about a
+	 * writer only: what a reader fails with was not looked at.
+	 */
+	isStopWithoutCode(error: unknown): boolean;
+	/** Whether a stream failed with `error` because the whole session ended. */
+	isSessionError(error: unknown): boolean;
+	/**
 	 * The error code the peer reset or stopped a stream with, from the value
 	 * the stream failed with. Undefined when the value carries none.
 	 */

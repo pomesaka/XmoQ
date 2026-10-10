@@ -255,11 +255,18 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 			// The end of the session rejects `closed` too, and can do so before
 			// `transport.closed` settles. Taken for a STOP_SENDING, it would turn
 			// the peer's close into a stopped control stream.
-			if (!transport.isStreamError(error)) return;
+			const stopped = transport.isStreamError(error);
+			// A stop the browser did not pass the code of. Without this the
+			// session would count the stream as open for good, and a publisher
+			// could not send PUBLISH_DONE.
+			const withoutCode = !stopped && transport.isStopWithoutCode(error);
+			if (!stopped && !withoutCode) return;
 			// A reset by this endpoint has removed the stream by then.
 			if (localStreams.get(stream)?.writer !== writer) return;
 			void input((session) =>
-				session.localStreamStopped(stream, transport.streamErrorCode(error)),
+				stopped
+					? session.localStreamStopped(stream, transport.streamErrorCode(error))
+					: session.localStreamAborted(stream),
 			);
 		});
 	};

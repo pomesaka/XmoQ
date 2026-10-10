@@ -228,9 +228,13 @@ export interface SubgroupWriter {
 	/**
 	 * Resolves when the transport accepted the Object, which is where
 	 * backpressure shows. Rejects with `PublishEndedError` when the
-	 * subscription is over, with `SubgroupClosedError` when only this stream is
-	 * (it was closed, reset, or stopped by the peer), and with the transport's
-	 * error when the write itself fails. In each case `reset()` is safe to call.
+	 * subscription is over, with `SessionClosedError` when the session is,
+	 * and with `SubgroupClosedError` when only this stream is: it was closed
+	 * or reset, or the subscriber stopped it, which the error says with
+	 * `metStop` where this write met the stop. The stream is reset then
+	 * (§11.4.3) and counts as ended, so PUBLISH_DONE is not kept back. Another
+	 * failure of the write is passed on as the transport gave it. In each
+	 * case `reset()` is safe to call.
 	 */
 	write(object: OutgoingObject): Promise<void>;
 	/**
@@ -781,23 +785,70 @@ export async function connectOver(
 	/**
 	 * Runs a call on a published Track. Once the Track has ended the call
 	 * fails with `PublishEndedError`, and a stream that is closed while the
-	 * Track goes on fails with `SubgroupClosedError`.
+	 * Track goes on fails with `SubgroupClosedError`. A write the transport
+	 * rejected is given one of these, or `SessionClosedError`, where the
+	 * transport says which it was, so that the caller can tell by the class.
 	 */
 	const onPublish = async <T>(
 		publish: ActivePublish,
 		call: () => Promise<T>,
+		/** Whether this endpoint has reset the stream the call is on. */
+		resetHere: () => boolean = () => false,
 	): Promise<T> => {
 		if (publish.end !== undefined) throw new PublishEndedError(publish.end);
 		try {
 			return await call();
 		} catch (error) {
-			if (!(error instanceof InactiveError)) throw error;
-			// The session had already ended the subscription or the stream, and the
-			// event that says so may still be in the queue. Once the queue is
-			// through, `publish.end` tells which of the two it was.
+			if (transport.isSessionError(error) && sessionClose === undefined) {
+				// The session is ending, and `closed` of the transport settles
+				// with this error, at most 0.1 ms apart and in either order
+				// (Chromium 156, 1080 samples). One turn of the timers is given
+				// for it, so that the error can say how the session ended.
+				// WHY not until it settles: nothing promises that it does, and a
+				// write would then never be answered.
+				await Promise.race([
+					closed.promise,
+					new Promise((resolve) => setTimeout(resolve, 0)),
+				]);
+				throw new SessionClosedError(
+					sessionClose ?? { type: "error", error: toError(error) },
+				);
+			}
+			// WHY before the error is looked at for a stop: a failure to open a
+			// stream is a NetworkError in Chromium as well, and ends the
+			// session here. It must not be read as a stream the peer stopped.
+			if (sessionClose !== undefined) {
+				throw new SessionClosedError(sessionClose);
+			}
+			// WHY before the stop as well: `reset()` aborts the writer with a
+			// stream error that carries this endpoint's own code, and Chromium
+			// rejects a write that was under way with that very error (seen in
+			// 40 of 40, spikes/wt-write-abort/out/own-reset-20.txt). It looks
+			// like a stop of the peer and is none.
+			const stopped =
+				!resetHere() &&
+				(transport.isStreamError(error) || transport.isStopWithoutCode(error));
+			const closedHere = resetHere() && transport.isStreamError(error);
+			if (!stopped && !closedHere && !(error instanceof InactiveError)) {
+				throw error;
+			}
+			// The session had already ended the subscription or the stream, or
+			// is told so by the stop that failed this write, and the event that
+			// says so may still be in the queue. Once the queue is through,
+			// `publish.end` tells whether the subscription went with it.
 			await queue;
 			if (publish.end !== undefined) throw new PublishEndedError(publish.end);
-			throw new SubgroupClosedError(error.message);
+			if (stopped) {
+				throw new SubgroupClosedError(
+					"the subscriber stopped the stream (STOP_SENDING)",
+					{ code: transport.streamErrorCode(error) },
+				);
+			}
+			throw new SubgroupClosedError(
+				closedHere
+					? "the stream was reset by this endpoint"
+					: toError(error).message,
+			);
 		}
 	};
 
@@ -817,26 +868,41 @@ export async function connectOver(
 	const subgroupWriter = (
 		publish: ActivePublish,
 		stream: number,
-	): SubgroupWriter => ({
-		write: (object) =>
-			onPublish(publish, () => applyVoid((s) => s.writeObject(stream, object))),
-		close: () =>
-			onPublishIfOpen(publish, () => applyVoid((s) => s.closeSubgroup(stream))),
-		reset: (code = StreamResetErrorCode.CANCELLED) => {
-			// Before anything is done to the stream: a code the browser cannot
-			// send must not leave the stream half reset.
-			if (!Number.isInteger(code) || code < 0 || code > MAX_STREAM_ERROR_CODE) {
-				return Promise.reject(
-					new RangeError(
-						`a stream is reset with a whole number from 0 to ${MAX_STREAM_ERROR_CODE}, not ${String(code)}`,
-					),
+	): SubgroupWriter => {
+		/** `reset()` was called: a write that fails from then on was not stopped by the peer. */
+		let resetHere = false;
+		return {
+			write: (object) =>
+				onPublish(
+					publish,
+					() => applyVoid((s) => s.writeObject(stream, object)),
+					() => resetHere,
+				),
+			close: () =>
+				onPublishIfOpen(publish, () =>
+					applyVoid((s) => s.closeSubgroup(stream)),
+				),
+			reset: (code = StreamResetErrorCode.CANCELLED) => {
+				// Before anything is done to the stream: a code the browser cannot
+				// send must not leave the stream half reset.
+				if (
+					!Number.isInteger(code) ||
+					code < 0 ||
+					code > MAX_STREAM_ERROR_CODE
+				) {
+					return Promise.reject(
+						new RangeError(
+							`a stream is reset with a whole number from 0 to ${MAX_STREAM_ERROR_CODE}, not ${String(code)}`,
+						),
+					);
+				}
+				resetHere = true;
+				return onPublishIfOpen(publish, () =>
+					applyVoid((s) => s.resetSubgroup(stream, code)),
 				);
-			}
-			return onPublishIfOpen(publish, () =>
-				applyVoid((s) => s.resetSubgroup(stream, code)),
-			);
-		},
-	});
+			},
+		};
+	};
 
 	const publishedTrackFrom = (
 		event: EventOf<"publish-ok">,

@@ -1,0 +1,5 @@
+browser=156.0.8078.4
+20 x bidi | idle | writer.closed: WebTransportError source=stream code=5 "reset by the page" | the write under way: none | a later write: WebTransportError source=stream code=5 "reset by the page"
+20 x bidi | waiting | writer.closed: WebTransportError source=stream code=5 "reset by the page" | the write under way: WebTransportError source=stream code=5 "reset by the page" | a later write: WebTransportError source=stream code=5 "reset by the page"
+20 x uni | idle | writer.closed: WebTransportError source=stream code=5 "reset by the page" | the write under way: none | a later write: WebTransportError source=stream code=5 "reset by the page"
+20 x uni | waiting | writer.closed: WebTransportError source=stream code=5 "reset by the page" | the write under way: WebTransportError source=stream code=5 "reset by the page" | a later write: WebTransportError source=stream code=5 "reset by the page"
