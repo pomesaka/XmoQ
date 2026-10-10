@@ -43,6 +43,10 @@
 //! publisher drains, so that none can publish anew while it does.
 //! `compare.py` calls the two `split-steady` and `shared-steady`.
 //!
+//! With `XMOQ_FUZZ_NO_ANNOUNCE` set, nobody announces a namespace, so that
+//! the relay has no publisher to ask. `compare.py` calls `full` with it
+//! `no-announce`.
+//!
 //! `XMOQ_FUZZ_TOUCH` chooses which events count as the ones a change is
 //! about: `subgroups` (the default; a stream that leaves the Subgroup ID to
 //! its first Object, or a second stream for a Subgroup) or `publishers` (a
@@ -513,6 +517,38 @@ fn without_a_publish_done_of_session_3(event: Event) -> Event {
     }
 }
 
+/// The event, unless it announces a namespace: then one that does nothing
+/// (`XMOQ_FUZZ_NO_ANNOUNCE`).
+fn without_an_announcement(event: Event) -> Event {
+    match event {
+        Event::RequestOpened { session, stream, first: ControlMessage::PublishNamespace(_) } => {
+            Event::RequestTimeout { session, stream }
+        }
+        other => other,
+    }
+}
+
+/// Whether an event comes when the relay can have more than one publisher
+/// to ask for a track, or one to ask for a track that has a source: a
+/// session has announced a namespace, and another has announced one or sent
+/// PUBLISH. With one session that announces, and no other that publishes,
+/// the relay asks whom it asked before. `seen` has a session and no track
+/// for a namespace it announced, and a session and the track of its PUBLISH.
+fn several_can_be_asked(event: &Event, seen: &mut Vec<(u64, Option<FullTrackName>)>) -> bool {
+    match event {
+        Event::RequestOpened { session, first: ControlMessage::PublishNamespace(_), .. } => {
+            seen.push((session.0, None));
+        }
+        Event::RequestOpened { session, first: ControlMessage::Publish(publish), .. } => {
+            seen.push((session.0, Some(publish.full_track_name.clone())));
+        }
+        _ => {}
+    }
+    seen.iter()
+        .filter(|(_, track)| track.is_none())
+        .any(|(announcer, _)| seen.iter().any(|(other, _)| other != announcer))
+}
+
 /// Whether an event is a PUBLISH that can meet a track that waits for a
 /// publisher's answer or whose sources drain: one that comes after another
 /// session announced a namespace, or after a `PUBLISH_DONE` from anyone.
@@ -583,6 +619,7 @@ fn the_two_cores_answer_random_events_alike() {
     let world = World::from_env();
     let touch = std::env::var("XMOQ_FUZZ_TOUCH").unwrap_or_else(|_| "subgroups".to_string());
     let steady = std::env::var_os("XMOQ_FUZZ_STEADY").is_some();
+    let no_announce = std::env::var_os("XMOQ_FUZZ_NO_ANNOUNCE").is_some();
     let mut events = 0u64;
     let (mut touching, mut differing, mut differing_before_touching) = (0u64, 0u64, 0u64);
     let (mut opened_downstream, mut objects_sent, mut with_an_object) = (0u64, 0u64, 0u64);
@@ -644,11 +681,13 @@ fn the_two_cores_answer_random_events_alike() {
                 other => other,
             };
             let event = if steady { without_a_publish_done_of_session_3(event) } else { event };
+            let event = if no_announce { without_an_announcement(event) } else { event };
             let touches = match touch.as_str() {
                 "subgroups" => touches_subgroup_selection(&event, &mut opened),
                 "publishers" => touches_the_publishers(&event, &mut published),
                 "republish" => publishes_again(&event, &mut published),
                 "waiting-or-draining" => publishes_to_a_waiting_or_draining_track(&event, &mut published),
+                "asks" => several_can_be_asked(&event, &mut published),
                 other => panic!("XMOQ_FUZZ_TOUCH={other}: not a kind of event fuzz.rs knows"),
             };
             if world == World::Shared {

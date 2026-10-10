@@ -165,110 +165,111 @@ enum Step {
     PublishOther(SessionKey),
 }
 
-/// What happened before, the namespace Alice subscribes in, and the session
-/// that gets the SUBSCRIBE; `None`: `REQUEST_ERROR` `DOES_NOT_EXIST`.
+/// What happened before, the namespace Alice subscribes in, and the sessions
+/// that get the SUBSCRIBE, in that order; none: `REQUEST_ERROR`
+/// `DOES_NOT_EXIST`.
 type RoutingCase = (
     &'static str,
     Vec<Step>,
     &'static [&'static [u8]],
-    Option<SessionKey>,
+    Vec<SessionKey>,
 );
 
 fn routing_cases() -> [RoutingCase; 14] {
     use Step::{Announce, Fin, Leave, PublishOther, Withdraw};
     [
-        ("nobody announced anything", vec![], &[b"xmoq"], None),
+        ("nobody announced anything", vec![], &[b"xmoq"], vec![]),
         (
             "the same namespace",
             vec![Announce(PUBLISHER, 0, &[b"xmoq"])],
             &[b"xmoq"],
-            Some(PUBLISHER),
+            vec![PUBLISHER],
         ),
         (
             "a prefix of the track's namespace (§9.5: fewer fields match)",
             vec![Announce(PUBLISHER, 0, &[b"xmoq"])],
             &[b"xmoq", b"live"],
-            Some(PUBLISHER),
+            vec![PUBLISHER],
         ),
         (
             "a namespace without fields is a prefix of every other (§2.4.1, §9.5)",
             vec![Announce(PUBLISHER, 0, &[])],
             &[b"xmoq"],
-            Some(PUBLISHER),
+            vec![PUBLISHER],
         ),
         (
             "a namespace longer than the track's does not match",
             vec![Announce(PUBLISHER, 0, &[b"xmoq", b"live"])],
             &[b"xmoq"],
-            None,
+            vec![],
         ),
         (
             "a field is matched whole (§9.5: (foobar) is not (foo, bar))",
             vec![Announce(PUBLISHER, 0, &[b"xmo"])],
             &[b"xmoq"],
-            None,
+            vec![],
         ),
         (
             "another second field",
             vec![Announce(PUBLISHER, 0, &[b"xmoq", b"vod"])],
             &[b"xmoq", b"live"],
-            None,
+            vec![],
         ),
         (
-            "two publishers of the namespace: the one that announced first",
+            "two publishers of the namespace: both, in the order they announced",
             vec![
                 Announce(BOB, 0, &[b"xmoq"]),
                 Announce(PUBLISHER, 0, &[b"xmoq"]),
             ],
             &[b"xmoq"],
-            Some(BOB),
+            vec![BOB, PUBLISHER],
         ),
         (
-            "the order of announcing decides, not the longer match",
+            "the order of announcing decides the order, not the longer match",
             vec![
                 Announce(PUBLISHER, 0, &[b"xmoq"]),
                 Announce(BOB, 0, &[b"xmoq", b"live"]),
             ],
             &[b"xmoq", b"live"],
-            Some(PUBLISHER),
+            vec![PUBLISHER, BOB],
         ),
         (
-            "the first one withdrew: the next",
+            "one withdrew: the other",
             vec![
                 Announce(BOB, 0, &[b"xmoq"]),
                 Announce(PUBLISHER, 0, &[b"xmoq"]),
                 Withdraw(BOB, 0),
             ],
             &[b"xmoq"],
-            Some(PUBLISHER),
+            vec![PUBLISHER],
         ),
         (
             "a FIN of the announcing stream does not withdraw (§6.2, §3.3.2)",
             vec![Announce(PUBLISHER, 0, &[b"xmoq"]), Fin(PUBLISHER, 0)],
             &[b"xmoq"],
-            Some(PUBLISHER),
+            vec![PUBLISHER],
         ),
         (
-            "the first one left: the next",
+            "one left: the other",
             vec![
                 Announce(BOB, 0, &[b"xmoq"]),
                 Announce(PUBLISHER, 0, &[b"xmoq"]),
                 Leave(BOB),
             ],
             &[b"xmoq"],
-            Some(PUBLISHER),
+            vec![PUBLISHER],
         ),
         (
             "a PUBLISH of another track announces nothing (§9.5)",
             vec![PublishOther(PUBLISHER)],
             &[b"xmoq"],
-            None,
+            vec![],
         ),
         (
             "the subscriber's own namespace (§5.1: relays handle a self-subscription)",
             vec![Announce(ALICE, 1, &[b"xmoq"])],
             &[b"xmoq"],
-            Some(ALICE),
+            vec![ALICE],
         ),
     ]
 }
@@ -306,19 +307,25 @@ fn apply(relay: &mut Relay, step: &Step) {
 }
 
 #[test]
-fn a_subscribe_goes_to_the_first_publisher_of_a_matching_namespace() {
-    for (name, before, fields, publisher) in routing_cases() {
+fn a_subscribe_goes_to_every_publisher_of_a_matching_namespace() {
+    for (name, before, fields, publishers) in routing_cases() {
         let mut relay = relay();
         for step in &before {
             apply(&mut relay, step);
         }
         let actions = subscribe_to(&mut relay, ALICE, 0, fields);
-        let expected = match publisher {
-            Some(publisher) => asked(publisher, 0, 1, fields).to_vec(),
+        // The relay's requests are numbered in the order it opens them, and
+        // each is its first on that session (Request ID 1).
+        let mut expected: Vec<Action> = (0..)
+            .zip(&publishers)
+            .flat_map(|(own, publisher)| asked(*publisher, own, 1, fields))
+            .collect();
+        if publishers.is_empty() {
             // DOES_NOT_EXIST (0x10), at once (§10.2.6).
-            None => refused(ALICE, 0, error(0x10)).to_vec(),
-        };
+            expected = refused(ALICE, 0, error(0x10)).to_vec();
+        }
         assert_eq!(actions, expected, "{name}");
+        assert_eq!(relay.counts().asks, publishers.len(), "{name}");
     }
 }
 
@@ -2036,4 +2043,606 @@ fn a_subscriber_that_finished_its_direction_while_it_waited_has_still_finished_i
             "{name}"
         );
     }
+}
+
+/// `session` sends PUBLISH for `(xmoq)/a` under the alias 77, on `stream`.
+fn publish_the_track(relay: &mut Relay, session: SessionKey, stream: u64) -> Vec<Action> {
+    relay.step(Event::RequestOpened {
+        session,
+        stream: StreamKey(stream),
+        first: ControlMessage::Publish(Publish {
+            request_id: stream * 2,
+            full_track_name: track_in(&[b"xmoq"]),
+            track_alias: 77,
+            parameters: vec![],
+            track_properties: vec![],
+        }),
+    })
+}
+
+/// The `SUBSCRIBE_OK` a subscriber of a track without Objects and Track
+/// Properties gets on its stream 0. It is the first subscription on its
+/// session, so the alias is 0.
+fn subscribed(session: SessionKey) -> Action {
+    Action::SendRequest {
+        session,
+        stream: StreamKey(0),
+        message: ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: 0,
+            parameters: vec![],
+            track_properties: vec![],
+        }),
+    }
+}
+
+fn accepts(alias: u64) -> ControlMessage {
+    ControlMessage::SubscribeOk(SubscribeOk {
+        track_alias: alias,
+        parameters: vec![],
+        track_properties: vec![],
+    })
+}
+
+fn refuses(error_code: u64) -> ControlMessage {
+    ControlMessage::RequestError(error(error_code))
+}
+
+fn open_sessions(relay: &mut Relay, sessions: std::ops::Range<u64>) {
+    for session in sessions.map(SessionKey) {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+    }
+}
+
+#[test]
+fn a_session_that_announced_two_namespaces_of_the_track_is_asked_once() {
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    announce(&mut relay, BOB, 0, &[b"xmoq"]);
+    announce(&mut relay, PUBLISHER, 1, &[]);
+    let mut expected = asked(PUBLISHER, 0, 1, &[b"xmoq"]).to_vec();
+    expected.extend(asked(BOB, 1, 1, &[b"xmoq"]));
+    assert_eq!(subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]), expected);
+}
+
+#[test]
+fn the_first_publisher_that_accepts_answers_the_subscriber_and_the_next_is_one_more_source() {
+    let mut relay = relay();
+    announce(&mut relay, BOB, 0, &[b"xmoq"]);
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // The one that was asked second answers first.
+    assert_eq!(
+        relay.step(upstream(PUBLISHER, 1, accepts(5))),
+        [
+            Action::StopUpstreamTimer {
+                session: PUBLISHER,
+                request: OwnRequestKey(1),
+            },
+            subscribed(ALICE),
+        ]
+    );
+    assert_eq!(
+        relay.step(upstream(BOB, 0, accepts(6))),
+        [Action::StopUpstreamTimer {
+            session: BOB,
+            request: OwnRequestKey(0),
+        }]
+    );
+    let counts = relay.counts();
+    assert_eq!((counts.tracks, counts.sources, counts.asks), (1, 2, 0));
+}
+
+#[test]
+fn the_subscriber_is_refused_when_the_last_publisher_has_refused() {
+    let mut relay = relay();
+    announce(&mut relay, BOB, 0, &[b"xmoq"]);
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // UNAUTHORIZED (0x1) from the first: the other may still have the track.
+    assert_eq!(
+        relay.step(upstream(BOB, 0, refuses(0x1))),
+        [Action::FinishOwnRequest {
+            session: BOB,
+            request: OwnRequestKey(0),
+        }]
+    );
+    // DOES_NOT_EXIST (0x10) from the last: that is what Alice is told, the
+    // code of whichever publisher was the last to say no.
+    let mut expected = vec![Action::FinishOwnRequest {
+        session: PUBLISHER,
+        request: OwnRequestKey(1),
+    }];
+    expected.extend(refused(ALICE, 0, error(0x10)));
+    assert_eq!(relay.step(upstream(PUBLISHER, 1, refuses(0x10))), expected);
+    let counts = relay.counts();
+    assert_eq!((counts.pending_tracks, counts.own_requests), (0, 0));
+}
+
+#[test]
+fn a_publisher_that_announces_a_namespace_is_asked_for_the_tracks_that_are_subscribed_to() {
+    let track = |name: &[u8]| FullTrackName::new(namespace_of(&[b"xmoq"]), name.to_vec()).unwrap();
+    let subscribe = |relay: &mut Relay, session, name: &[u8]| {
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(0),
+            first: ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: track(name),
+                parameters: vec![],
+            }),
+        })
+    };
+    let publish = |relay: &mut Relay, stream: u64, name: &[u8]| {
+        relay.step(Event::RequestOpened {
+            session: CAROL,
+            stream: StreamKey(stream),
+            first: ControlMessage::Publish(Publish {
+                request_id: stream * 2,
+                full_track_name: track(name),
+                track_alias: 70 + stream,
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+        })
+    };
+    let mut relay = relay();
+    open_sessions(&mut relay, 9..10);
+    // "b": Alice waits for the answer of the publisher. "a": a source, from
+    // a PUBLISH of Carol, and a subscriber. "c": a source and nobody
+    // subscribed. "d": in another namespace.
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    subscribe(&mut relay, ALICE, b"b");
+    publish(&mut relay, 0, b"a");
+    subscribe(&mut relay, SessionKey(9), b"a");
+    relay.step(upstream(PUBLISHER, 1, refuses(0x10)));
+    publish(&mut relay, 1, b"c");
+    relay.step(Event::RequestOpened {
+        session: CAROL,
+        stream: StreamKey(2),
+        first: ControlMessage::Publish(Publish {
+            request_id: 4,
+            full_track_name: FullTrackName::new(namespace_of(&[b"other"]), b"d".to_vec()).unwrap(),
+            track_alias: 72,
+            parameters: vec![],
+            track_properties: vec![],
+        }),
+    });
+    // Bob announces the namespace: PUBLISH_NAMESPACE_OK, and a SUBSCRIBE
+    // for each of the two tracks somebody wants, by name (§9.5).
+    let ask_bob = |own, request_id, name: &[u8]| {
+        [
+            Action::OpenRequest {
+                session: BOB,
+                request: OwnRequestKey(own),
+                message: ControlMessage::Subscribe(Subscribe {
+                    request_id,
+                    full_track_name: track(name),
+                    parameters: vec![],
+                }),
+            },
+            Action::StartUpstreamTimer {
+                session: BOB,
+                request: OwnRequestKey(own),
+            },
+        ]
+    };
+    let mut expected = vec![Action::SendRequest {
+        session: BOB,
+        stream: StreamKey(0),
+        message: ControlMessage::RequestOk(RequestOk {
+            parameters: vec![],
+            track_properties: vec![],
+        }),
+    }];
+    expected.extend(ask_bob(2, 1, b"a"));
+    expected.extend(ask_bob(3, 3, b"b"));
+    assert_eq!(announce(&mut relay, BOB, 0, &[b"xmoq"]), expected);
+    // Bob has "a": he is one more source of it.
+    relay.step(upstream(BOB, 2, accepts(5)));
+    assert_eq!(relay.counts().sources, 4);
+    // A subscriber that comes has nobody new to ask.
+    assert_eq!(subscribe_to(&mut relay, CAROL, 3, &[b"xmoq"]), {
+        let mut ok = subscribed(CAROL);
+        if let Action::SendRequest { stream, .. } = &mut ok {
+            *stream = StreamKey(3);
+        }
+        [ok]
+    });
+}
+
+#[test]
+fn a_session_that_is_a_source_of_a_track_is_not_asked_for_it_when_it_announces() {
+    let mut relay = relay();
+    publish_the_track(&mut relay, PUBLISHER, 0);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // The publisher is the source of the track; a SUBSCRIBE to it would be
+    // a second subscription to the track on its session (§5.1).
+    assert_eq!(
+        announce(&mut relay, PUBLISHER, 1, &[b"xmoq"]),
+        [Action::SendRequest {
+            session: PUBLISHER,
+            stream: StreamKey(1),
+            message: ControlMessage::RequestOk(RequestOk {
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+        }]
+    );
+    let counts = relay.counts();
+    assert_eq!(
+        (counts.sources, counts.asks, counts.own_requests),
+        (1, 0, 0)
+    );
+}
+
+#[test]
+fn a_publisher_that_did_not_become_a_source_is_not_asked_again() {
+    let mut relay = relay();
+    open_sessions(&mut relay, 9..11);
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    // The track has a source, from a PUBLISH of Carol. A subscriber is
+    // answered, and the publisher of the namespace is asked as well (§9.5).
+    publish_the_track(&mut relay, CAROL, 0);
+    let mut expected = vec![subscribed(ALICE)];
+    expected.extend(asked(PUBLISHER, 0, 1, &[b"xmoq"]));
+    assert_eq!(subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]), expected);
+    relay.step(upstream(PUBLISHER, 0, refuses(0x10)));
+    assert_eq!(relay.counts().declined, 1);
+    // The next subscriber does not have it asked again.
+    assert_eq!(
+        subscribe_to(&mut relay, BOB, 0, &[b"xmoq"]),
+        [subscribed(BOB)]
+    );
+    // It announces a namespace of the track again, and may have it now. The
+    // relay's second request on the session has the Request ID 3.
+    let mut expected = vec![Action::SendRequest {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        message: ControlMessage::RequestOk(RequestOk {
+            parameters: vec![],
+            track_properties: vec![],
+        }),
+    }];
+    expected.extend(asked(PUBLISHER, 1, 3, &[b"xmoq"]));
+    assert_eq!(announce(&mut relay, PUBLISHER, 1, &[b"xmoq"]), expected);
+    assert_eq!(relay.counts().declined, 0);
+    assert_eq!(
+        subscribe_to(&mut relay, SessionKey(9), 0, &[b"xmoq"]),
+        [subscribed(SessionKey(9))]
+    );
+    // No answer in time counts the same.
+    relay.step(Event::UpstreamTimeout {
+        session: PUBLISHER,
+        request: OwnRequestKey(1),
+    });
+    assert_eq!(relay.counts().declined, 1);
+    assert_eq!(
+        subscribe_to(&mut relay, SessionKey(10), 0, &[b"xmoq"]),
+        [subscribed(SessionKey(10))]
+    );
+    // A session that goes is forgotten.
+    relay.step(Event::SessionClosed { session: PUBLISHER });
+    assert_eq!(relay.counts().declined, 0);
+}
+
+#[test]
+fn a_request_the_relay_cancels_itself_is_not_held_against_the_publisher() {
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    publish_the_track(&mut relay, CAROL, 0);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // The last subscriber goes: nobody wants the answer.
+    assert_eq!(
+        relay.step(Event::RequestClosed {
+            session: ALICE,
+            stream: StreamKey(0),
+            how: RequestEnd::Aborted,
+        }),
+        [
+            Action::FinishRequest {
+                session: ALICE,
+                stream: StreamKey(0),
+            },
+            Action::CancelOwnRequest {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+                code: 0x1,
+            },
+        ]
+    );
+    assert_eq!(relay.counts().declined, 0);
+    // It is asked again for the next subscriber, and sends PUBLISH itself:
+    // the relay's SUBSCRIBE gives way (§5.1).
+    let mut expected = vec![subscribed(BOB)];
+    expected.extend(asked(PUBLISHER, 1, 3, &[b"xmoq"]));
+    assert_eq!(subscribe_to(&mut relay, BOB, 0, &[b"xmoq"]), expected);
+    publish_the_track(&mut relay, PUBLISHER, 1);
+    let counts = relay.counts();
+    assert_eq!((counts.sources, counts.asks, counts.declined), (2, 0, 0));
+}
+
+#[test]
+fn no_more_publishers_are_asked_than_the_track_has_room_for() {
+    assert_eq!(crate::MAX_SOURCES, 4);
+    // (sessions that sent PUBLISH for the track before; sessions that
+    //  announced its namespace, in that order; the ones that are asked when
+    //  Alice subscribes).
+    let cases: [(&[u64], &[u64], &[u64]); 4] = [
+        (&[], &[20, 21, 22, 23, 24], &[20, 21, 22, 23]),
+        (&[30, 31, 32], &[20, 21], &[20]),
+        (&[30, 31, 32, 33], &[20], &[]),
+        // A session that is a source already is not asked.
+        (&[30], &[30, 20], &[20]),
+    ];
+    for (publishers, announcers, asked_sessions) in cases {
+        let mut relay = relay();
+        open_sessions(&mut relay, 20..34);
+        for session in publishers {
+            publish_the_track(&mut relay, SessionKey(*session), 0);
+        }
+        for session in announcers {
+            announce(&mut relay, SessionKey(*session), 1, &[b"xmoq"]);
+        }
+        let mut expected = if publishers.is_empty() {
+            vec![]
+        } else {
+            vec![subscribed(ALICE)]
+        };
+        for (own, session) in (0..).zip(asked_sessions) {
+            expected.extend(asked(SessionKey(*session), own, 1, &[b"xmoq"]));
+        }
+        assert_eq!(
+            subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]),
+            expected,
+            "{publishers:?} {announcers:?}"
+        );
+    }
+}
+
+#[test]
+fn a_publisher_left_out_for_want_of_room_is_asked_when_there_is_room() {
+    let mut relay = relay();
+    open_sessions(&mut relay, 20..25);
+    for session in (20..25).map(SessionKey) {
+        announce(&mut relay, session, 0, &[b"xmoq"]);
+    }
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // One of the four refuses, and the track still waits for the others.
+    relay.step(upstream(SessionKey(20), 0, refuses(0x10)));
+    // The fifth is asked when the next subscriber comes. The one that
+    // refused is remembered while the track waits, and is not.
+    assert_eq!(
+        subscribe_to(&mut relay, BOB, 0, &[b"xmoq"]),
+        asked(SessionKey(24), 4, 1, &[b"xmoq"])
+    );
+    assert_eq!(relay.counts().declined, 1);
+    // Everybody refuses: the track is over, and with it what it remembered.
+    for (session, own) in [(21, 1), (22, 2), (23, 3), (24, 4)] {
+        relay.step(upstream(SessionKey(session), own, refuses(0x10)));
+    }
+    let counts = relay.counts();
+    assert_eq!((counts.pending_tracks, counts.declined), (0, 0));
+}
+
+#[test]
+fn a_publisher_the_relay_has_too_many_requests_on_is_passed_over() {
+    assert_eq!(crate::routing::MAX_OWN_REQUESTS_PER_SESSION, 64);
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    announce(&mut relay, BOB, 0, &[b"xmoq", b"live"]);
+    let subscribe = |relay: &mut Relay, stream: u64, track: FullTrackName| {
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(stream),
+            first: ControlMessage::Subscribe(Subscribe {
+                request_id: stream * 2,
+                full_track_name: track,
+                parameters: vec![],
+            }),
+        })
+    };
+    for n in 0..64 {
+        let name = format!("t{n}").into_bytes();
+        let track = FullTrackName::new(namespace_of(&[b"xmoq"]), name).unwrap();
+        subscribe(&mut relay, n, track);
+    }
+    assert_eq!(relay.counts().own_requests, 64);
+    // A track both announced: the one that has room is asked.
+    assert_eq!(
+        subscribe(&mut relay, 64, track_in(&[b"xmoq", b"live"])),
+        asked(BOB, 64, 1, &[b"xmoq", b"live"])
+    );
+    // A track only the full one announced: EXCESSIVE_LOAD (0x9).
+    assert_eq!(
+        subscribe(&mut relay, 65, track_in(&[b"xmoq"])),
+        refused(ALICE, 65, error(0x9))
+    );
+}
+
+#[test]
+fn a_track_remembers_a_bounded_number_of_publishers_that_declined() {
+    assert_eq!(crate::routing::MAX_DECLINED_PUBLISHERS, 16);
+    let mut relay = relay();
+    // 17 publishers of the namespace, and 7 subscribers.
+    open_sessions(&mut relay, 20..37);
+    open_sessions(&mut relay, 40..47);
+    for session in (20..37).map(SessionKey) {
+        announce(&mut relay, session, 0, &[b"xmoq"]);
+    }
+    publish_the_track(&mut relay, CAROL, 0);
+    // The track has one source, so three are asked for each subscriber that
+    // comes; all of them refuse.
+    let mut own = 0;
+    for subscriber in 40..46 {
+        subscribe_to(&mut relay, SessionKey(subscriber), 0, &[b"xmoq"]);
+        let asks = relay.counts().asks;
+        for publisher in 0..asks {
+            let session = SessionKey(20 + own + u64::try_from(publisher).unwrap());
+            relay.step(upstream(
+                session,
+                own + u64::try_from(publisher).unwrap(),
+                refuses(0x10),
+            ));
+        }
+        own += u64::try_from(asks).unwrap();
+    }
+    assert_eq!((own, relay.counts().declined), (17, 16));
+    // The one that declined first was forgotten, and is asked again; its
+    // second request has the Request ID 3.
+    let mut expected = vec![subscribed(SessionKey(46))];
+    expected.extend(asked(SessionKey(20), 17, 3, &[b"xmoq"]));
+    assert_eq!(
+        subscribe_to(&mut relay, SessionKey(46), 0, &[b"xmoq"]),
+        expected
+    );
+}
+
+#[test]
+fn a_session_is_a_source_of_a_track_or_asked_for_it_or_remembered_and_never_two_of_them() {
+    #[derive(Debug, Clone, Copy)]
+    enum Then {
+        /// Bob, who refused, sends PUBLISH for the track.
+        BobPublishes,
+        /// The publisher, which is still asked, goes.
+        ThePublisherGoes,
+        /// Bob, who refused, goes.
+        BobGoes,
+    }
+    // Bob and the publisher announced the namespace, Alice subscribed, and
+    // Bob refused: the track waits for the publisher and remembers Bob.
+    // (what happens then; the sources, the asks and the remembered sessions
+    //  of all tracks after it; the tracks that wait).
+    let cases = [
+        // Bob is the source, and no longer one that declined.
+        (Then::BobPublishes, (1, 1, 0), 0),
+        // Nobody is left to answer: the track is over.
+        (Then::ThePublisherGoes, (0, 0, 0), 0),
+        (Then::BobGoes, (0, 1, 0), 1),
+    ];
+    for (then, expected, pending_tracks) in cases {
+        let mut relay = relay();
+        announce(&mut relay, BOB, 0, &[b"xmoq"]);
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+        relay.step(upstream(BOB, 0, refuses(0x1)));
+        let counts = relay.counts();
+        assert_eq!((counts.sources, counts.asks, counts.declined), (0, 1, 1));
+        match then {
+            Then::BobPublishes => {
+                publish_the_track(&mut relay, BOB, 1);
+            }
+            Then::ThePublisherGoes => {
+                relay.step(Event::SessionClosed { session: PUBLISHER });
+            }
+            Then::BobGoes => {
+                relay.step(Event::SessionClosed { session: BOB });
+            }
+        }
+        let counts = relay.counts();
+        assert_eq!(
+            (counts.sources, counts.asks, counts.declined),
+            expected,
+            "{then:?}"
+        );
+        assert_eq!(counts.pending_tracks, pending_tracks, "{then:?}");
+    }
+}
+
+#[test]
+fn a_session_that_goes_while_it_is_asked_is_not_remembered() {
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    publish_the_track(&mut relay, CAROL, 0);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    assert_eq!(relay.counts().asks, 1);
+    // The track goes on with Carol. What was asked of the publisher is over
+    // with its session, and nothing of the session is kept.
+    relay.step(Event::SessionClosed { session: PUBLISHER });
+    let counts = relay.counts();
+    assert_eq!(
+        (
+            counts.sources,
+            counts.asks,
+            counts.declined,
+            counts.own_requests
+        ),
+        (1, 0, 0, 0)
+    );
+}
+
+/// What `session` gets for a `PUBLISH_NAMESPACE` on its stream 0.
+fn namespace_ok(session: SessionKey) -> Action {
+    Action::SendRequest {
+        session,
+        stream: StreamKey(0),
+        message: ControlMessage::RequestOk(RequestOk {
+            parameters: vec![],
+            track_properties: vec![],
+        }),
+    }
+}
+
+#[test]
+fn the_publisher_that_announces_is_asked_before_one_that_was_left_out_earlier() {
+    assert_eq!(crate::MAX_SOURCES, 4);
+    let mut relay = relay();
+    open_sessions(&mut relay, 20..25);
+    publish_the_track(&mut relay, CAROL, 0);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // Three announce and are asked, which fills the track; a fourth is left
+    // out for want of room.
+    for session in (20..23).map(SessionKey) {
+        announce(&mut relay, session, 0, &[b"xmoq"]);
+    }
+    assert_eq!(
+        announce(&mut relay, SessionKey(23), 0, &[b"xmoq"]),
+        [namespace_ok(SessionKey(23))]
+    );
+    // One of the three refuses: there is room for one.
+    relay.step(upstream(SessionKey(22), 2, refuses(0x10)));
+    // Bob announces. §9.5 has the SUBSCRIBE go to "the publisher that sent
+    // the PUBLISH_NAMESPACE", so it is Bob who is asked, and not the one
+    // that announced before him and still waits for room.
+    let mut expected = vec![namespace_ok(BOB)];
+    expected.extend(asked(BOB, 3, 1, &[b"xmoq"]));
+    assert_eq!(announce(&mut relay, BOB, 0, &[b"xmoq"]), expected);
+    // No room: the next one to announce is not asked either.
+    assert_eq!(
+        announce(&mut relay, SessionKey(24), 0, &[b"xmoq"]),
+        [namespace_ok(SessionKey(24))]
+    );
+    let counts = relay.counts();
+    assert_eq!((counts.sources, counts.asks, counts.declined), (1, 3, 1));
+}
+
+#[test]
+fn sessions_that_announce_are_asked_and_go_leave_nothing_with_the_track() {
+    let mut relay = relay();
+    publish_the_track(&mut relay, CAROL, 0);
+    subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+    // More of them than a track remembers of publishers that declined.
+    for (own, session) in (0..).zip((20..60).map(SessionKey)) {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+        let mut expected = vec![namespace_ok(session)];
+        expected.extend(asked(session, own, 1, &[b"xmoq"]));
+        assert_eq!(announce(&mut relay, session, 0, &[b"xmoq"]), expected);
+        relay.step(Event::SessionClosed { session });
+    }
+    let counts = relay.counts();
+    assert_eq!(
+        (
+            counts.sources,
+            counts.asks,
+            counts.declined,
+            counts.own_requests,
+            counts.namespaces
+        ),
+        (1, 0, 0, 0, 0)
+    );
 }

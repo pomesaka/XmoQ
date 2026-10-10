@@ -7,8 +7,9 @@
 Add `--world v1|distinct|full|split|one-publisher|split-one|shared` to either
 for what the random events are made of; `fuzz.rs` describes them.
 `split-steady` and `shared-steady` are `split-one` and `shared` in which the
-publisher of the second half never says PUBLISH_DONE. The default
-is `v1`. `--touch subgroups|publishers|republish|waiting-or-draining` says which events `--touching` takes
+publisher of the second half never says PUBLISH_DONE, and `no-announce` is
+`full` in which nobody announces a namespace. The default
+is `v1`. `--touch subgroups|publishers|republish|waiting-or-draining|asks` says which events `--touching` takes
 for the ones a change is about; the default is `subgroups`.
 
 `--touching` is for a change that is meant to alter what the relay does with
@@ -74,6 +75,11 @@ For every event it compares, in this order, and counts the first that differs:
 
 It exits with 1 when any event differed in content, state or sequence, when a
 test failed, or when the random events did not run in the number asked for.
+With `--random-only` it exits with 1 when a random sequence differed in
+content, state or sequence, when a bystander was treated differently, or
+when the sequences were not counted; the tests of the crate are run and
+reported, and do not decide. That is the strict comparison for a change that
+adds or changes tests, which then differ between the versions by design.
 With `--touching` it exits with 1 when a sequence differed before its first
 such event, when a bystander was treated differently, or when the sequences
 were not counted.
@@ -109,10 +115,13 @@ SPIKES = [
 ]
 
 
-TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining")
-WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared", "split-steady", "shared-steady")
-# Worlds of `fuzz.rs` in which, on top, session 3 never says PUBLISH_DONE.
-STEADY = {"split-steady": "split-one", "shared-steady": "shared"}
+TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks")
+WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared", "split-steady", "shared-steady",
+          "no-announce")
+# Worlds of `fuzz.rs` with something taken out on top: the world, and the
+# variable that tells `fuzz.rs` what.
+VARIANTS = {"split-steady": ("split-one", "XMOQ_FUZZ_STEADY"), "shared-steady": ("shared", "XMOQ_FUZZ_STEADY"),
+            "no-announce": ("full", "XMOQ_FUZZ_NO_ANNOUNCE")}
 
 
 def jj(*args):
@@ -571,7 +580,8 @@ def report(name, output, totals, random_events=False):
         print(f"    sequences: {touch.group(1)}; with an event the change is about: {touch.group(2)}; "
               f"in which the versions differ: {touch.group(3)}; differ before such an event: {touch.group(4)}")
         totals["before_touching"] += int(touch.group(4))
-    elif random_events and "--touching" in sys.argv:
+        totals["differing_sequences"] += int(touch.group(3))
+    elif random_events and ("--touching" in sys.argv or "--random-only" in sys.argv):
         # WHY checked: without the line nothing was counted, and 0 would read as a pass.
         print("    THE SEQUENCES WERE NOT COUNTED: no FUZZ_TOUCH line")
         totals["not_counted"] += 1
@@ -596,6 +606,7 @@ def report(name, output, totals, random_events=False):
         if not fuzz or (int(fuzz.group(1)), int(fuzz.group(2))) != (runs, runs * length):
             print(f"    THE RANDOM EVENTS DID NOT RUN: expected runs={runs} events={runs * length}")
             totals["failed"] += 1
+            totals["not_counted"] += 1
     if not results and "error" in output and not lines and "RESULT" not in output:
         print(output[-3000:])
         totals["failed"] += 1
@@ -610,10 +621,10 @@ def main():
         del sys.argv[at:at + 2]
     world = os.environ.get("XMOQ_FUZZ_WORLD", "v1")
     print(f"world: {world}")
-    if world in STEADY:
-        world = STEADY[world]
+    if world in VARIANTS:
+        world, variable = VARIANTS[world]
         os.environ["XMOQ_FUZZ_WORLD"] = world
-        os.environ["XMOQ_FUZZ_STEADY"] = "1"
+        os.environ[variable] = "1"
     # The sessions of the half of the world the change is kept out of. In
     # `shared`, session 4 is one of them for one of its subscriptions only,
     # which `fuzz.rs` names.
@@ -676,6 +687,13 @@ def main():
         print(f"TOUCHING differing_before_touching={totals['before_touching']} bystander={totals['bystander']} "
               f"not_counted={totals['not_counted']}")
         sys.exit(1 if totals["before_touching"] or totals["bystander"] or totals["not_counted"] else 0)
+    if "--random-only" in sys.argv:
+        # For a change that comes with tests of its own: those differ between
+        # the versions, as they are meant to, and say nothing about whether
+        # anything else changed. The random sequences do.
+        print(f"RANDOM ONLY differing_sequences={totals['differing_sequences']} bystander={totals['bystander']} "
+              f"not_counted={totals['not_counted']}")
+        sys.exit(1 if totals["differing_sequences"] or totals["bystander"] or totals["not_counted"] else 0)
     wrong = totals["content"] or totals["state"] or totals["sequence"] or totals["bystander"] or totals["failed"]
     sys.exit(1 if wrong else 0)
 

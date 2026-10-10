@@ -1053,6 +1053,7 @@ fn nothing_is_left_when_everyone_has_gone() {
             out_streams: 0,
             sources: 0,
             asks: 0,
+            declined: 0,
             early_streams: 0,
             remembered_subgroups: 0,
             namespaces: 0,

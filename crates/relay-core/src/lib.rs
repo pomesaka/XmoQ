@@ -11,9 +11,11 @@
 //! What this first relay does not do, each a rule of the draft it does not meet:
 //!
 //! Several publishers of one track (§9.3, §9.5) are handled in part: a
-//! [`Track`] takes several sources ([`TrackSource`]) that come with PUBLISH,
-//! and the relay still asks one publisher only; see the FIXME at the top of
-//! `routing.rs`.
+//! [`Track`] takes several sources ([`TrackSource`]), and the publishers of
+//! its namespace are asked for it, but no more of them than the track has
+//! room for ([`Relay::ask_the_publishers`]), and a SUBSCRIBE for a track
+//! whose sources all drain is refused where the draft has those publishers
+//! asked.
 //!
 //! FIXME: apply the Subscription Filter of a SUBSCRIBE (§5.1.2). Every
 //! subscriber gets the Objects that arrive after its subscription, which is what
@@ -44,7 +46,7 @@ pub use events::{
     Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, RequestEnd, SessionKey, StreamEnd,
     StreamKey,
 };
-use routing::{Announcement, Ask, OwnRequest, PendingTrack, Refusal, Waiter};
+use routing::{Announcement, Ask, Declined, OwnRequest, PendingTrack, Refusal, Waiter};
 pub use routing::{
     MAX_NAMESPACES_PER_SESSION, MAX_OWN_REQUESTS_PER_SESSION, MAX_PASSED_ON_REASON_LEN,
     MAX_WAITING_SUBSCRIBERS,
@@ -55,7 +57,7 @@ use xmoq_moqt::message::{
     ControlMessage, Publish, ReasonPhrase, Subscribe, publish_done_status, request_error_code,
     setup_option,
 };
-use xmoq_moqt::name::{FullTrackName, Location};
+use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{self, Parameter};
 pub use xmoq_moqt::session::Role;
 use xmoq_moqt::session::{
@@ -605,11 +607,16 @@ struct Track {
     /// are there for. Which Groups those are is not known once they are older
     /// than what the relay remembers.
     had_several_sources: bool,
-    /// What is asked of a publisher and not answered yet. A track has one
-    /// when it got its source from a PUBLISH of another publisher while the
-    /// relay waited for this answer; it ends with the answer, with its time,
-    /// with the publisher, with the last subscriber and with the track.
+    /// What is asked of publishers and not answered yet: of the ones that
+    /// were asked with the publisher that became the first source, and of
+    /// the ones asked since. Each ends with the answer, with its time, with
+    /// the publisher, with the last subscriber and with the track.
     asks: Vec<Ask>,
+    /// The sessions that were asked for the track and did not become a
+    /// source: they refused, did not answer in time, or closed the request.
+    /// They are not asked again until they announce a namespace of the track
+    /// anew or become a source.
+    declined: Declined,
     /// Track Properties, as the source that came last gave them; §9.6 has
     /// the relay pass them on. §2.5: "the most recent set SHOULD replace any
     /// cached values" and "Relays MUST NOT attempt to merge sets of unknown
@@ -641,6 +648,7 @@ impl Track {
             }],
             had_several_sources: false,
             asks: Vec::new(),
+            declined: Declined::default(),
             properties,
             largest,
             subscribers: Vec::new(),
@@ -933,6 +941,7 @@ impl Tracks {
                 track.sources.push(new);
                 None
             };
+            track.declined.forget(session);
             track.properties = properties;
             track.largest = track.largest.max(largest);
             return Ok(Added {
@@ -944,6 +953,8 @@ impl Tracks {
         let waiters = match self.0.remove(name) {
             Some(TrackEntry::Pending(pending)) => {
                 track.asks = pending.asks;
+                track.declined = pending.declined;
+                track.declined.forget(from.session_and_alias().0);
                 pending.waiters
             }
             // Not a track with a source: that was the case above.
@@ -982,6 +993,70 @@ impl Tracks {
         match self.0.remove(name)? {
             TrackEntry::Pending(pending) => Some(pending),
             TrackEntry::Live(_) => None,
+        }
+    }
+
+    /// The sessions that were asked for the track and did not become a
+    /// source.
+    fn declined(&self, name: &FullTrackName) -> impl Iterator<Item = SessionKey> + '_ {
+        let declined = match self.0.get(name) {
+            Some(TrackEntry::Pending(pending)) => Some(&pending.declined),
+            Some(TrackEntry::Live(track)) => Some(&track.declined),
+            None => None,
+        };
+        declined.into_iter().flat_map(Declined::sessions)
+    }
+
+    /// Remembers that a session was asked for the track and did not become
+    /// a source. The one place that does; see [`Declined`].
+    ///
+    /// WHY not a session that is a source: it became one another way, with
+    /// a PUBLISH, and is not asked while it is one in any case.
+    fn decline(&mut self, name: &FullTrackName, session: SessionKey) {
+        match self.0.get_mut(name) {
+            Some(TrackEntry::Pending(pending)) => pending.declined.remember(session),
+            Some(TrackEntry::Live(track)) => {
+                let is_a_source = track
+                    .sources()
+                    .any(|source| source.session_and_alias().0 == session);
+                if !is_a_source {
+                    track.declined.remember(session);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// The tracks in a namespace that somebody is subscribed to or waits
+    /// for, in an order that does not depend on the map.
+    ///
+    /// WHY not a track that has a source and no subscriber: the relay holds
+    /// it for a publisher that sent PUBLISH, and nobody wants more of it.
+    fn subscribed_in(&self, namespace: &TrackNamespace) -> BTreeSet<FullTrackName> {
+        let subscribed = |entry: &TrackEntry| match entry {
+            TrackEntry::Pending(_) => true,
+            TrackEntry::Live(track) => !track.subscribers.is_empty(),
+        };
+        self.0
+            .iter()
+            .filter(|(name, entry)| namespace.is_prefix_of(name.namespace()) && subscribed(entry))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Lets a session be asked again for the tracks `of` picks. Every track
+    /// is looked at, for each namespace that is announced and each session
+    /// that goes; see [`Relay::alias_was_taken_over`] for when that is to be
+    /// looked up another way.
+    fn forget_declined(&mut self, session: SessionKey, of: impl Fn(&FullTrackName) -> bool) {
+        for (name, entry) in &mut self.0 {
+            let declined = match entry {
+                TrackEntry::Pending(pending) => &mut pending.declined,
+                TrackEntry::Live(track) => &mut track.declined,
+            };
+            if of(name) {
+                declined.forget(session);
+            }
         }
     }
 
@@ -1048,6 +1123,9 @@ pub struct Counts {
     /// What is asked of publishers and not answered, over all tracks, with a
     /// source and without.
     pub asks: usize,
+    /// Publishers remembered as asked for a track without becoming a source,
+    /// over all tracks, with a source and without.
+    pub declined: usize,
     /// Subgroup streams held for a Track Alias that is not known yet.
     pub early_streams: usize,
     /// Subgroups the tracks remember the stream of, over all tracks
@@ -1393,7 +1471,8 @@ impl Relay {
                 self.on_publish(session, stream, request, publish, actions);
             }
             PeerRequest::PublishNamespace(publish_namespace) => {
-                if !self.add_namespace(session, stream, publish_namespace.track_namespace) {
+                let namespace = publish_namespace.track_namespace;
+                if !self.add_namespace(session, stream, namespace.clone()) {
                     let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
                     self.refuse(session, stream, request, &too_many, actions);
                     return;
@@ -1410,6 +1489,14 @@ impl Relay {
                     },
                 );
                 self.respond(session, stream, response, actions);
+                // §9.5: "When a relay receives an authorized
+                // PUBLISH_NAMESPACE for a namespace that matches one or more
+                // existing subscriptions to other upstream sessions, it MUST
+                // send a SUBSCRIBE to the publisher that sent the
+                // PUBLISH_NAMESPACE for each matching subscription."
+                for track in self.tracks.subscribed_in(&namespace) {
+                    self.ask_the_publishers(&track, Some(session), actions);
+                }
             }
         }
     }
@@ -1429,29 +1516,58 @@ impl Relay {
             // §9.5: "When a Relay receives an authorized SUBSCRIBE for a Track
             // with one or more Established upstream subscriptions, it MUST
             // reply with SUBSCRIBE_OK."
+            // §9.5 has the SUBSCRIBE go to the publishers of the namespace
+            // as well: "Relays MUST send SUBSCRIBE messages to all matching
+            // publishers. This includes matching both Established
+            // subscriptions on the Full Track Name and Namespace Prefix
+            // Matching against published Namespaces". WHY read so, though the
+            // next paragraph gives sending only for a track without an
+            // Established upstream subscription: a PUBLISH_NAMESPACE that
+            // comes later is asked for the track in any case, and whether a
+            // publisher is asked must not depend on that order.
             Some(TrackPhase::Established) => {
                 self.establish(track_name, &waiter, actions);
+                self.ask_the_publishers(track_name, None, actions);
                 return;
             }
-            // The source said PUBLISH_DONE and the track still drains: it has
-            // no Established upstream subscription (§9.4), and the publisher
-            // cannot be asked again while the old alias drains.
+            // Every source said PUBLISH_DONE and the track still drains: it
+            // has no Established upstream subscription (§9.4). §9.5 has the
+            // publishers of the namespace asked then; the subscriber is
+            // refused, because a track with a source has no place for one
+            // that waits (known gap). WHY a PUBLISH_NAMESPACE that arrives
+            // now does have its publisher asked: the track has subscribers,
+            // who are there already and stay if that publisher accepts.
             Some(TrackPhase::Draining) => Err(request_error_code::DOES_NOT_EXIST),
-            Some(TrackPhase::Pending) => self.wait_with_the_others(track_name, waiter),
+            Some(TrackPhase::Pending) => {
+                let waits = self.wait_with_the_others(track_name, waiter);
+                if waits.is_ok() {
+                    self.ask_the_publishers(track_name, None, actions);
+                }
+                waits
+            }
             // §9.5: "If there are no Established upstream subscriptions for
             // the requested Track, the Relay MUST send a SUBSCRIBE request to
             // each publisher that has published the subscription's namespace
-            // or prefix thereof." The first of them by the order of
-            // announcing; see the FIXME at the top of `routing.rs` for the
-            // others.
+            // or prefix thereof."
             None => {
-                let first = self.matching_publishers(track_name).next();
-                match first {
-                    Some(publisher) => self.ask(publisher, track_name, waiter, actions),
+                let asked = self.ask_the_publishers(track_name, None, actions);
+                if asked.asks.is_empty() {
                     // §10.2.6: without RENDEZVOUS_TIMEOUT, or with 0, "MUST
                     // immediately return REQUEST_ERROR with error code
-                    // DOES_NOT_EXIST if no publisher is available".
-                    None => Err(request_error_code::DOES_NOT_EXIST),
+                    // DOES_NOT_EXIST if no publisher is available". Where
+                    // one is there and could not be asked, the code says
+                    // why.
+                    Err(asked
+                        .nobody_because
+                        .unwrap_or(request_error_code::DOES_NOT_EXIST))
+                } else {
+                    let pending = PendingTrack {
+                        asks: asked.asks,
+                        waiters: vec![waiter],
+                        declined: Declined::default(),
+                    };
+                    self.tracks.insert_pending(track_name.clone(), pending);
+                    Ok(())
                 }
             }
         };
@@ -2698,6 +2814,15 @@ impl Relay {
                 .map(|(_, track)| track.sources.len())
                 .sum(),
             asks: self.tracks.all_asks().count(),
+            declined: self
+                .tracks
+                .0
+                .values()
+                .map(|entry| match entry {
+                    TrackEntry::Pending(pending) => pending.declined.len(),
+                    TrackEntry::Live(track) => track.declined.len(),
+                })
+                .sum(),
             early_streams: self.sessions.values().map(|state| state.early.len()).sum(),
             remembered_subgroups: self
                 .tracks
