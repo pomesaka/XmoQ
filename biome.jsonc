@@ -1,0 +1,30 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+	"files": {
+		// WHY a list of what is covered, not "everything except spikes": spikes/ holds throwaway
+		// code that reproduces one experiment with pinned library versions and is not kept to the
+		// standard of packages/. Listing packages/ also keeps Biome out of target/ and fixtures/.
+		"includes": ["packages/**"]
+	},
+	"linter": {
+		"rules": {
+			"preset": "recommended",
+			"style": {
+				// WHY: `x!` is a type assertion in another spelling; the `as` ban in
+				// .oxlintrc.jsonc would otherwise be sidestepped with it.
+				"noNonNullAssertion": "error",
+				"noRestrictedImports": {
+					"level": "error",
+					"options": {
+						"patterns": [
+							{
+								"group": ["**/spikes/**"],
+								"message": "spikes/ is throwaway validation code; packages must not depend on it."
+							}
+						]
+					}
+				}
+			}
+		}
+	}
+}

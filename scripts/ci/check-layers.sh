@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck source=scripts/ci/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+cd "${REPO_ROOT}"
+
+# Crates that must stay free of I/O, as "package name:directory".
+SANS_IO_CRATES=("xmoq-moqt:crates/moqt")
+
+# WHY the socket-layer crates and not only the transports: banning wtransport and quinn by name
+# would miss the next transport crate. mio, socket2, polling, async-io and quinn-udp sit under
+# the async runtimes, so a dependency that does network I/O through tokio, smol or async-std
+# brings one of them in. tokio itself is judged the same way: with tokio 1.49.0 the "net"
+# feature pulls in mio and socket2 and "sync" alone pulls in neither (checked with cargo tree).
+# This cannot see a crate that calls std::net or libc directly.
+# WHY NOT an allowlist of permitted dependencies: it would have to be edited for every harmless
+# crate (bytes, thiserror), and the review of that edit is the same judgement this list encodes.
+IO_CRATES=(mio socket2 polling async-io quinn-udp wtransport quinn)
+
+errors=0
+report() {
+	echo "FAIL: $*" >&2
+	errors=$((errors + 1))
+}
+
+check_rust() {
+	local metadata members manifest
+	metadata="$(cargo metadata --format-version 1 --no-deps --locked)"
+	members="$(jq -r '.packages[].manifest_path' <<<"${metadata}")"
+
+	while IFS= read -r manifest; do
+		if [[ "${manifest}" == "${REPO_ROOT}/spikes/"* ]]; then
+			report "${manifest} is a workspace member; spikes/ must stay outside the workspace"
+		fi
+		# WHY: [workspace.lints] only applies to crates that opt in. A crate without this
+		# line compiles with no project lints and clippy still reports success.
+		if ! awk '
+			/^\[/ { section = $0 }
+			section == "[lints]" && /^workspace[ \t]*=[ \t]*true/ { found = 1 }
+			/^lints\.workspace[ \t]*=[ \t]*true/ { found = 1 }
+			END { exit !found }
+		' "${manifest}"; then
+			report "${manifest} does not inherit the workspace lints; add [lints] workspace = true"
+		fi
+	done <<<"${members}"
+
+	shopt -s nullglob
+	local crate_manifests=(crates/*/Cargo.toml)
+	shopt -u nullglob
+	for manifest in "${crate_manifests[@]}"; do
+		if ! grep -Fxq "${REPO_ROOT}/${manifest}" <<<"${members}"; then
+			report "${manifest} is not a workspace member, so fmt, clippy and test skip it"
+		fi
+	done
+
+	# WHY: a crate under the workspace root that is neither a member nor excluded cannot be
+	# built at all ("current package believes it's in a workspace when it's not"), which would
+	# break the spikes that the experiment records tell readers to run.
+	local spike_root
+	while IFS= read -r manifest; do
+		if ! spike_root="$(cargo metadata --format-version 1 --no-deps --manifest-path "${manifest}" 2>/dev/null | jq -r '.workspace_root')"; then
+			report "${manifest} no longer resolves; the root Cargo.toml needs exclude = [\"spikes\"]"
+		elif [[ "${spike_root}" == "${REPO_ROOT}" ]]; then
+			report "${manifest} resolves into the root workspace; spikes/ must stay outside it"
+		fi
+	done < <(find spikes -name Cargo.toml -not -path '*/target/*')
+
+	local spike_deps
+	spike_deps="$(jq -r --arg spikes "${REPO_ROOT}/spikes/" \
+		'.packages[] | .name as $pkg | .dependencies[] | select(.path != null and (.path | startswith($spikes))) | "\($pkg) -> \(.path)"' \
+		<<<"${metadata}")"
+	if [[ -n "${spike_deps}" ]]; then
+		report "workspace crates depend on spikes/: ${spike_deps}"
+	fi
+
+	local entry name dir tree banned before
+	for entry in "${SANS_IO_CRATES[@]}"; do
+		name="${entry%%:*}"
+		dir="${entry#*:}"
+		if ! jq -e --arg name "${name}" '.packages[] | select(.name == $name)' <<<"${metadata}" >/dev/null; then
+			if [[ -e "${dir}" ]]; then
+				report "${dir} exists but the workspace has no package named ${name}; update SANS_IO_CRATES in this script"
+			else
+				skip "I/O-free check for ${name}" "${dir} does not exist yet"
+			fi
+			continue
+		fi
+		# WHY normal and build edges only: tests may drive the crate with real sockets or a
+		# runtime; the rule is about what users of the crate are forced to link.
+		# WHY --all-features: an optional I/O dependency is still an I/O dependency.
+		tree="$(cargo tree --package "${name}" --edges normal,build --all-features --prefix none --format '{p}' --locked | awk '{print $1}' | sort -u)"
+		before=${errors}
+		for banned in "${IO_CRATES[@]}"; do
+			if grep -Fxq "${banned}" <<<"${tree}"; then
+				report "${name} must not perform I/O but depends on ${banned}; see the path with 'cargo tree --edges normal,build --all-features --invert ${banned}'"
+			fi
+		done
+		if [[ ${errors} -eq ${before} ]]; then
+			ran "I/O-free check for ${name}"
+		fi
+	done
+}
+
+check_packages() {
+	local manifest spike_deps
+	for manifest in "$@"; do
+		spike_deps="$(jq -r \
+			'[.dependencies, .devDependencies, .peerDependencies, .optionalDependencies] | map(select(. != null) | to_entries[]) | .[] | select(.value | test("spikes/")) | "\(.key): \(.value)"' \
+			"${manifest}")"
+		if [[ -n "${spike_deps}" ]]; then
+			report "${manifest} depends on spikes/: ${spike_deps}"
+		fi
+	done
+}
+
+checked=0
+if [[ -f Cargo.toml ]]; then
+	check_rust
+	checked=1
+elif compgen -G "crates/*/Cargo.toml" >/dev/null; then
+	report "crates/ contains crates but there is no root Cargo.toml"
+else
+	skip "Rust layer checks" "no root Cargo.toml yet"
+fi
+
+shopt -s nullglob
+package_manifests=(packages/*/package.json)
+shopt -u nullglob
+if [[ ${#package_manifests[@]} -gt 0 ]]; then
+	# Imports from spikes/ are caught by noRestrictedImports in biome.jsonc; this covers package.json.
+	check_packages "${package_manifests[@]}"
+	checked=1
+else
+	skip "package.json layer checks" "no packages/*/package.json yet"
+fi
+
+if [[ ${errors} -gt 0 ]]; then
+	fail "${errors} layer violation(s)"
+fi
+if [[ ${checked} -eq 1 ]]; then
+	ran "Layer checks"
+fi

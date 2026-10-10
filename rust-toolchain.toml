@@ -1,0 +1,6 @@
+# WHY an exact version: clippy gains lints with every release. With "stable", a pull request
+# could fail on code it did not touch, on the day a new Rust is released.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

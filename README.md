@@ -28,4 +28,19 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Experiment records](docs/experiments/README.md)
 - [Agent guide](docs/agent-guide.md)
 
+## Checks
+
+Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise install` once, then:
+
+| Command | What it runs |
+|---|---|
+| `mise run check` | Everything CI runs |
+| `mise run check:rust` | `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` |
+| `mise run check:ts` | Biome (format and lint), oxlint (`as` assertions), `typecheck` and `bun test` per package |
+| `mise run check:layers` | Dependency rules: `xmoq-moqt` stays free of I/O crates, nothing depends on `spikes/` |
+| `mise run check:workflows` | `actionlint` and `shellcheck` |
+| `mise run fmt` | Apply formatting and safe fixes |
+
+CI (`.github/workflows/ci.yml`) runs the same tasks. A task whose target does not exist yet prints `SKIP` and succeeds; `spikes/` is outside every check.
+
 License, deployment, supported platforms, codec profiles, authentication, and performance targets are undecided.
