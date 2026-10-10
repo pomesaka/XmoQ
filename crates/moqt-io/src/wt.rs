@@ -264,8 +264,27 @@ pub struct WtConnection {
     _client: Option<quinn::Endpoint>,
 }
 
-fn lost(error: &dyn std::fmt::Display) -> ConnectionLost {
-    ConnectionLost(error.to_string())
+/// The error as text, with the causes behind it.
+///
+/// WHY the causes: the library's errors do not all print theirs. A CONNECT
+/// request the server could not take is "failed to exchange h3 connect", and
+/// what was wrong with it (the `:protocol` of a newer WebTransport draft, when
+/// this was added) is two causes down.
+///
+/// WHY a cause is left out when the text has it already: other errors of the
+/// library do print their cause, and it would be there twice.
+fn lost(error: &dyn std::error::Error) -> ConnectionLost {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(inner) = cause {
+        let inner_text = inner.to_string();
+        if !text.contains(&inner_text) {
+            text.push_str(": ");
+            text.push_str(&inner_text);
+        }
+        cause = inner.source();
+    }
+    ConnectionLost(text)
 }
 
 /// The smallest application error code an HTTP/3 stack uses for itself
@@ -785,6 +804,64 @@ mod tests {
     use web_transport_quinn::quinn::{ApplicationClose, VarInt};
 
     use super::*;
+
+    /// An error with a cause, which its own text names or leaves out.
+    #[derive(Debug)]
+    struct Layer {
+        text: &'static str,
+        cause: Option<Box<Layer>>,
+    }
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.text)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            let cause: &(dyn std::error::Error + 'static) = self.cause.as_deref()?;
+            Some(cause)
+        }
+    }
+
+    fn layers(texts: &[&'static str]) -> Layer {
+        let mut built: Option<Box<Layer>> = None;
+        for text in texts.iter().rev() {
+            built = Some(Box::new(Layer { text, cause: built }));
+        }
+        *built.expect("at least one layer")
+    }
+
+    #[test]
+    fn a_lost_connection_names_the_causes_its_error_does_not_print() {
+        let cases: [(&[&'static str], &str); 4] = [
+            (&["refused"], "refused"),
+            // The shape of the library's error for a CONNECT request it could
+            // not take: neither of the two outer texts has its cause.
+            (
+                &[
+                    "failed to exchange h3 connect",
+                    "protocol error",
+                    "expected webtransport",
+                ],
+                "failed to exchange h3 connect: protocol error: expected webtransport",
+            ),
+            // An error that prints its cause does not get it a second time.
+            (
+                &["handshake failed: bad certificate", "bad certificate"],
+                "handshake failed: bad certificate",
+            ),
+            // The cause below one that was printed is still added.
+            (
+                &["handshake failed: alert", "alert", "error 48"],
+                "handshake failed: alert: error 48",
+            ),
+        ];
+        for (texts, expected) in cases {
+            assert_eq!(lost(&layers(texts)).0, expected, "{texts:?}");
+        }
+    }
 
     #[test]
     fn a_quic_close_without_a_capsule_is_read_as_a_session_close() {

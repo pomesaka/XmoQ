@@ -156,7 +156,7 @@ A client of another implementation (`mlmsub` of moqlivemock v0.16.1, [record](20
 - **Accepting `webtransport-h3` in the relay would not make it a -15 server.** A browser that moves to -15 and keeps -07 goes on connecting as now. One that drops -07 would not get as far as the CONNECT request: the relay does not announce SETTINGS_WT_ENABLED. What -15 changed beside the token (the settings, flow control of a session, the capsules) was not compared for this record.
 - Chromium's sources show no start of that move.
 
-**The relay's log does not say why a handshake failed.** `crates/moqt-io/src/wt.rs` turns the library's error into text with `to_string()`, and the library's `ServerError::ConnectError` prints "failed to exchange h3 connect" without its cause. The cause above was seen with a temporary change that printed the error with `{:?}`. Nothing in `interop/` reads the `HANDSHAKE_FAILED` line.
+**The relay's log did not say why a handshake failed, and does since.** `crates/moqt-io/src/wt.rs` turned the library's error into text with `to_string()`, and the library's `ServerError::ConnectError` prints "failed to exchange h3 connect" without its cause; the cause above was first seen with a temporary change. `lost()` in that file now adds the causes an error does not print itself. With `mlmsub` as released the relay prints `HANDSHAKE_FAILED connection lost: failed to exchange h3 connect: protocol error: expected webtransport, got: Some("webtransport-h3")`. Errors that print their cause read as before, for example a client with a wrong certificate hash: `aborted by peer: the cryptographic handshake failed: error 48: invalid peer certificate: UnknownIssuer`. Nothing in `interop/` reads the `HANDSHAKE_FAILED` line.
 
 ## Limitations and blockers
 
