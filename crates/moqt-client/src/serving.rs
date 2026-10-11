@@ -19,18 +19,23 @@ use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::session::PeerRequestId;
 use xmoq_moqt::stream_reset_code;
-use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    PeerRequestClose, SendStream, Trace, WriteError, open_fetch_stream, send_message,
+    Connection, PeerRequestClose, SendStream, Trace, WriteError, open_fetch_stream, send_message,
 };
 
 use crate::published::Piece;
 use crate::report;
 
 /// FETCH requests of the peer that are answered at once; one more is
-/// refused with `EXCESSIVE_LOAD`. As many as the relay asks one publisher
-/// for, and as `@xmoq/moqt` answers. Provisional.
-pub const MAX_ANSWERED_AT_ONCE: usize = 16;
+/// refused with `EXCESSIVE_LOAD`. As many as `@xmoq/moqt` answers.
+/// Provisional.
+///
+/// WHY twice what the relay asks one publisher for (16): the relay stops
+/// counting a FETCH when it cancels it or has its end, and this client when
+/// it has taken the note of the task that wrote it, or read the reset. The
+/// relay's next FETCH comes on a stream of its own and can be read first;
+/// with 16 here it would be the 17th.
+pub const MAX_ANSWERED_AT_ONCE: usize = 32;
 
 /// Notes of the tasks that are not taken yet. When it is full the tasks
 /// wait.
@@ -43,7 +48,7 @@ const SAY_QUEUE: usize = 16;
 
 /// How this client answers a FETCH, from its flags: a publisher that is
 /// slow in each of the places a relay waits for it.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Pace {
     /// How long `FETCH_OK` waits.
     pub answer_after: Duration,
@@ -173,6 +178,17 @@ pub struct Over {
     pub reset: Option<u32>,
 }
 
+/// WHY: a client that leaves by an error does not go through
+/// [`Answers::leave`], and a task that writes a fetch stream would go on
+/// until the connection is closed.
+impl Drop for Answers {
+    fn drop(&mut self) {
+        for answered in self.open.values() {
+            answered.body.abort();
+        }
+    }
+}
+
 /// What a FETCH that is accepted is answered with.
 pub struct Answer {
     /// `FETCH_OK`, and the `REQUEST_OK` of every `REQUEST_UPDATE` that
@@ -215,15 +231,18 @@ impl Answers {
 
     /// Takes over the request stream of a FETCH the session accepted, and
     /// answers it.
-    pub fn start<S: SendStream + Send + 'static>(
+    pub fn start<S, C>(
         &mut self,
         stream: u64,
         request: PeerRequestId,
         send: S,
         answer: Answer,
-        connection: &Arc<WtConnection>,
+        connection: &Arc<C>,
         trace: &Trace,
-    ) {
+    ) where
+        S: SendStream + Send + 'static,
+        C: Connection + Send + Sync + 'static,
+    {
         let (says, said) = mpsc::channel(SAY_QUEUE);
         let (end, ended) = oneshot::channel();
         let printed = Arc::new(Mutex::new(Printed::default()));
@@ -376,7 +395,22 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
         tokio::select! {
             end = &mut ended => {
                 match end {
-                    Ok(RequestEnd::Finish) => send.finish(),
+                    // WHY what waits is sent first: §5.2 has "The publisher
+                    // MUST send exactly one FETCH_OK or REQUEST_ERROR in
+                    // response to a FETCH", and the fetch stream can be
+                    // written to its end at the very moment the answer is
+                    // due, or before this task ran once. A `REQUEST_OK`
+                    // that was handed over and not taken yet goes with it.
+                    Ok(RequestEnd::Finish) => {
+                        while let Ok(message) = said.try_recv() {
+                            waiting.push(message);
+                        }
+                        for message in waiting.drain(..) {
+                            let _ = send_message(&mut send, &message, &trace, &label).await;
+                        }
+                        send.finish();
+                    }
+                    // A FETCH that is given up is owed no answer.
                     Ok(RequestEnd::Reset(code)) => send.reset(code),
                     Err(_) => send.reset(stream_reset_code::CANCELLED),
                 }
@@ -406,8 +440,8 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
 }
 
 /// What the task of a fetch stream needs.
-struct Body {
-    connection: Arc<WtConnection>,
+struct Body<C> {
+    connection: Arc<C>,
     header: FetchHeader,
     group_order: GroupOrder,
     pieces: Vec<Piece>,
@@ -416,8 +450,10 @@ struct Body {
     trace: Trace,
 }
 
-impl Body {
-    /// Opens the fetch stream, writes every piece and finishes it.
+impl<C: Connection> Body<C> {
+    /// Opens the fetch stream, writes every piece and finishes it. A
+    /// `STOP_SENDING` of the subscriber ends it also while it waits between
+    /// two pieces.
     async fn write(self) -> Result<(), WriteError> {
         tokio::time::sleep(self.pace.answer_after + self.pace.stream_after).await;
         let label = format!("fetch#{}", self.header.request_id);
@@ -438,6 +474,9 @@ impl Body {
                     // An Object the encoder refuses is one this client made
                     // wrongly; the stream cannot go on without it.
                     if encoder.object(object).is_err() {
+                        // The code the request stream is reset with for it
+                        // (`step`).
+                        writer.reset(stream_reset_code::INTERNAL_ERROR);
                         return Err(WriteError::Lost("an Object that cannot be encoded".into()));
                     }
                 }
@@ -450,7 +489,12 @@ impl Body {
                     lines.objects += 1;
                 }
             }
-            tokio::time::sleep(self.pace.write_every).await;
+            if !self.pace.write_every.is_zero() {
+                tokio::select! {
+                    () = tokio::time::sleep(self.pace.write_every) => {}
+                    stopped = writer.stopped() => return Err(stopped),
+                }
+            }
         }
         writer.finish();
         Ok(())
@@ -459,9 +503,12 @@ impl Body {
 
 #[cfg(test)]
 mod tests {
+    use xmoq_moqt::fetch::{FetchEvent, FetchObject, FetchStreamDecoder, RangeEnd};
     use xmoq_moqt::message::{ControlMessage, Fetch, FetchRange};
     use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
     use xmoq_moqt::session::{PeerRequest, PeerRequestOpened, Role, Session, Transport};
+    use xmoq_moqt_io::RecvStream;
+    use xmoq_moqt_io::memory::{self, MemoryConnection};
 
     use super::*;
 
@@ -519,16 +566,231 @@ mod tests {
         (answers, ends)
     }
 
+    /// What a request stream was made to do, in order.
+    #[derive(Clone, Default)]
+    struct Done(Arc<Mutex<Vec<String>>>);
+
+    struct Recorded(Done);
+
+    impl SendStream for Recorded {
+        fn write_all(&mut self, bytes: &[u8]) -> impl Future<Output = Result<(), WriteError>> {
+            // The type of the message that begins there.
+            let first = bytes.first().copied().unwrap_or(0);
+            self.0.0.lock().unwrap().push(format!("write {first:#x}"));
+            std::future::ready(Ok(()))
+        }
+
+        fn finish(self) {
+            self.0.0.lock().unwrap().push("finish".to_string());
+        }
+
+        fn finish_and_wait(self) -> impl Future<Output = Result<(), WriteError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn reset(self, code: u32) {
+            self.0.0.lock().unwrap().push(format!("reset {code:#x}"));
+        }
+
+        async fn stopped(&mut self) -> WriteError {
+            std::future::pending().await
+        }
+    }
+
+    /// Runs [`speak`] with `FETCH_OK` to send after `answer_after`. After
+    /// `end_after` the client hands over `said` messages and ends the stream.
+    async fn spoken(
+        answer_after: Duration,
+        end_after: Duration,
+        said: usize,
+        end: RequestEnd,
+    ) -> Vec<String> {
+        let done = Done::default();
+        let (says, taken) = mpsc::channel(SAY_QUEUE);
+        let (ends, ended) = oneshot::channel();
+        let (notes, _notes) = mpsc::channel(NOTE_QUEUE);
+        let fetch_ok = ControlMessage::FetchOk(xmoq_moqt::message::FetchOk {
+            end_of_track: false,
+            end_location: Location {
+                group: 1,
+                object: 0,
+            },
+            parameters: vec![],
+            track_properties: vec![],
+        });
+        let task = tokio::spawn(speak(Speaker {
+            stream: 0,
+            send: Recorded(done.clone()),
+            first: vec![fetch_ok],
+            after: answer_after,
+            said: taken,
+            ended,
+            notes,
+            trace: Trace::default(),
+        }));
+        tokio::time::sleep(end_after).await;
+        for _ in 0..said {
+            let request_ok = xmoq_moqt::message::RequestOk::default();
+            says.try_send(ControlMessage::RequestOk(request_ok))
+                .unwrap();
+        }
+        ends.send(end).unwrap();
+        task.await.unwrap();
+        done.0.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn the_answer_is_sent_before_the_request_stream_is_finished_whenever_the_end_comes() {
+        let ms = Duration::from_millis;
+        // FETCH_OK is 0x18, REQUEST_OK 0x7.
+        let answered = vec!["write 0x18", "finish"];
+        let with_an_update = vec!["write 0x18", "write 0x7", "finish"];
+        // (when the answer is due; when the stream is ended; REQUEST_OK
+        //  messages handed over just before; how many times; what the
+        //  stream was made to do)
+        let cases = [
+            // The end comes at the moment the answer is due, and before the
+            // task ran once: which of the two the task sees first is drawn,
+            // so many times.
+            (ms(2), ms(2), 0, 200, &answered),
+            (ms(0), ms(0), 0, 200, &answered),
+            (ms(2), ms(2), 1, 200, &with_an_update),
+            // Before the answer is due, and after it.
+            (ms(40), ms(2), 0, 3, &answered),
+            (ms(2), ms(40), 0, 3, &answered),
+            (ms(2), ms(40), 1, 3, &with_an_update),
+        ];
+        for (answer_after, end_after, said, runs, expected) in cases {
+            for run in 0..runs {
+                assert_eq!(
+                    &spoken(answer_after, end_after, said, RequestEnd::Finish).await,
+                    expected,
+                    "{answer_after:?} {end_after:?} {said}, run {run}"
+                );
+            }
+        }
+        // A FETCH that is given up before its answer is owed none: CANCELLED
+        // (0x1).
+        assert_eq!(
+            spoken(ms(40), ms(2), 0, RequestEnd::Reset(0x1)).await,
+            ["reset 0x1"]
+        );
+    }
+
+    fn fetch_object(group_id: u64) -> FetchObject {
+        FetchObject {
+            group_id,
+            subgroup_id: Some(0),
+            object_id: 0,
+            publisher_priority: 128,
+            properties: vec![],
+            payload: vec![0x61, 0x62],
+        }
+    }
+
+    /// A body that writes `pieces` on `connection`, waiting `write_every`
+    /// after each; what it counts; and the connection, which is closed
+    /// when the last holder lets go of it.
+    fn body(
+        connection: MemoryConnection,
+        pieces: Vec<Piece>,
+        write_every: Duration,
+    ) -> (
+        Body<MemoryConnection>,
+        Arc<Mutex<Printed>>,
+        Arc<MemoryConnection>,
+    ) {
+        let counted = Arc::new(Mutex::new(Printed::default()));
+        let connection = Arc::new(connection);
+        let body = Body {
+            connection: Arc::clone(&connection),
+            header: FetchHeader { request_id: 3 },
+            group_order: GroupOrder::Ascending,
+            pieces,
+            pace: Pace {
+                write_every,
+                ..Pace::default()
+            },
+            printed: Arc::clone(&counted),
+            trace: Trace::default(),
+        };
+        (body, counted, connection)
+    }
+
+    #[tokio::test]
+    async fn a_fetch_stream_carries_its_header_and_what_the_answer_has_in_order() {
+        let (publisher, subscriber) = memory::pair();
+        let unknown = Location {
+            group: 1,
+            object: 0,
+        };
+        let pieces = vec![
+            Piece::EndOfRange(RangeEnd::Unknown, unknown),
+            Piece::Object(fetch_object(2)),
+            Piece::Object(fetch_object(3)),
+        ];
+        let (body, counted, _open) = body(publisher, pieces, Duration::ZERO);
+        assert_eq!(body.write().await, Ok(()));
+        // The two Objects, and not the indicator.
+        assert_eq!(printed(&counted).objects, 2);
+
+        let mut stream = subscriber.accept_uni().await.unwrap();
+        let mut decoder = FetchStreamDecoder::new(1024, GroupOrder::Ascending);
+        let mut events = Vec::new();
+        let mut buffer = [0u8; 64];
+        while let Some(read) = stream.read(&mut buffer).await.unwrap() {
+            decoder.push(&buffer[..read]).unwrap();
+            while let Some(event) = decoder.next_event().unwrap() {
+                events.push(event);
+            }
+        }
+        decoder.finish().unwrap();
+        assert_eq!(
+            events,
+            [
+                FetchEvent::Header(FetchHeader { request_id: 3 }),
+                FetchEvent::EndOfRange {
+                    kind: RangeEnd::Unknown,
+                    location: unknown,
+                },
+                FetchEvent::Object(fetch_object(2)),
+                FetchEvent::Object(fetch_object(3)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fetch_stream_that_is_stopped_while_the_writer_waits_ends_there() {
+        let (publisher, subscriber) = memory::pair();
+        // One Object, and a wait after it that outlasts the test: without
+        // an eye on the stream the wait would end and the stream finish.
+        let (body, counted, _open) = body(
+            publisher,
+            vec![Piece::Object(fetch_object(2))],
+            Duration::from_secs(600),
+        );
+        let writing = tokio::spawn(body.write());
+        let stream = subscriber.accept_uni().await.unwrap();
+        // CANCELLED (0x1).
+        stream.stop(0x1);
+        let ended = tokio::time::timeout(Duration::from_secs(5), writing).await;
+        assert_eq!(
+            ended.expect("in time").expect("no panic"),
+            Err(WriteError::Stopped(Some(0x1)))
+        );
+        assert_eq!(printed(&counted).objects, 1);
+    }
+
     #[tokio::test]
     async fn only_so_many_fetch_requests_are_answered_at_once() {
-        // The expectations below are spelled out for a limit of 16.
-        assert_eq!(MAX_ANSWERED_AT_ONCE, 16);
+        // The expectations below are spelled out for a limit of 32.
+        assert_eq!(MAX_ANSWERED_AT_ONCE, 32);
         // (FETCH requests that are answered; whether one more is taken)
-        for (open, room) in [(0, true), (15, true), (16, false)] {
+        for (open, room) in [(0, true), (31, true), (32, false)] {
             assert_eq!(answering(open).0.has_room(), room, "{open}");
         }
         // One that is over makes room for the next.
-        let (mut answers, _ends) = answering(16);
+        let (mut answers, _ends) = answering(32);
         assert!(answers.happened(3, Happened::Written).is_some());
         assert!(answers.has_room());
     }
@@ -568,6 +830,15 @@ mod tests {
                 Happened::Left,
                 RequestEnd::Reset(0x1),
                 false,
+                cancelled,
+            ),
+            // This client stopped the subscriber's direction, or the
+            // connection is gone: nothing is left of the stream.
+            (
+                None,
+                Happened::PeerClosed(PeerRequestClose::Abandoned),
+                RequestEnd::Reset(0x1),
+                true,
                 cancelled,
             ),
         ];

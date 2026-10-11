@@ -686,6 +686,17 @@ struct Client<'a> {
     args: &'a Args,
 }
 
+/// The FETCH among the requests of the peer that a client with
+/// `--answer-fetch` answers from what it published. Without the flag none:
+/// every FETCH is refused with `NOT_SUPPORTED` ([`refusal_code`]), which
+/// drivers count on.
+fn fetch_to_answer(answering: Option<Pace>, request: &PeerRequest) -> Option<&Fetch> {
+    match request {
+        PeerRequest::Fetch(fetch) if answering.is_some() => Some(fetch),
+        _ => None,
+    }
+}
+
 /// The code a client that publishes refuses a request of the peer with,
 /// where it serves none of that kind. `serves`: the mode that serves a
 /// SUBSCRIBE for its track, for which this is asked about any other.
@@ -1631,21 +1642,17 @@ impl Client<'_> {
             tokio::select! {
                 line = stdin.next_line() => match line? {
                     Some(_) => {
-                        let Some((served, track_alias)) = serving
-                            .as_ref()
-                            .map(|serving| (serving.request, serving.track_alias))
-                        else {
+                        let Some(served) = &mut serving else {
                             bail!("asked to send while nobody is subscribed");
                         };
-                        let object = (track_alias, group_id, payload);
+                        // Counted when it is begun: a PUBLISH_DONE that the
+                        // subscription gets while the stream is under way
+                        // (an update that is refused) counts it.
+                        served.streams += 1;
+                        let object = (served.track_alias, group_id, payload);
                         self.send_attending(&mut peer_requests, &mut serving, Some(&mut stdin), object)
                             .await?;
                         group_id += 1;
-                        // The subscriber may have ended the subscription
-                        // meanwhile, and another may have begun.
-                        if let Some(serving) = serving.as_mut().filter(|now| now.request == served) {
-                            serving.streams += 1;
-                        }
                     }
                     None => break,
                 },
@@ -1767,9 +1774,18 @@ impl Client<'_> {
         }
     }
 
-    /// Sends an Object (its Track Alias, its Group and its payload) with
-    /// [`Self::send_object`], answering the peer while it is under way, and
-    /// notes it as sent.
+    /// Notes an Object (its Track Alias, its Group and its payload) as
+    /// published and sends it with [`Self::send_object`], answering the peer
+    /// while it is under way.
+    ///
+    /// WHY noted before it is sent: §5.1.2 has "Largest Object updates when
+    /// the first byte of an Object with a Location larger than the previous
+    /// value is published", and the relay takes the Object for the largest
+    /// when it has read it. A FETCH or a SUBSCRIBE that this client answers
+    /// while the Object is under way would otherwise be answered as if the
+    /// Object did not exist: a Joining FETCH would end before it, and the
+    /// subscription begin after it. An Object that could not be written
+    /// ends the mode, and the session with it.
     async fn send_attending(
         &mut self,
         peer_requests: &mut io::PeerRequests,
@@ -1777,10 +1793,10 @@ impl Client<'_> {
         stdin: Option<&mut DriverLines>,
         (track_alias, group_id, payload): (u64, u64, &[u8]),
     ) -> Result<()> {
+        self.sent(group_id, payload);
         let sending = Self::send_object(self.connection, self.args, track_alias, group_id, payload);
         self.attending(peer_requests, serving, stdin, sending)
             .await??;
-        self.sent(group_id, payload);
         Ok(())
     }
 
@@ -2061,14 +2077,12 @@ impl Client<'_> {
         // does not get here: the session refuses it itself
         // (DUPLICATE_SUBSCRIPTION, §5.1).
         let serves = matches!(self.args.mode, Mode::PublishNamespace { .. });
-        let error_code = match &peer_request {
-            PeerRequest::Fetch(fetch) if self.args.fetch.answering.is_some() => {
-                match self.plan_fetch(request, fetch, track) {
-                    Ok(plan) => return self.start_fetch(stream, request, send, plan),
-                    Err(code) => code,
-                }
-            }
-            other => refusal_code(serves, other),
+        let error_code = match fetch_to_answer(self.args.fetch.answering, &peer_request) {
+            Some(fetch) => match self.plan_fetch(request, fetch, track) {
+                Ok(plan) => return self.start_fetch(stream, request, send, plan),
+                Err(code) => code,
+            },
+            None => refusal_code(serves, &peer_request),
         };
         let response = self
             .session
@@ -2500,6 +2514,21 @@ mod tests {
                 "2",
                 flags(|f| f.cancel_after_objects = Some(2)),
             ),
+            (
+                "--fetch-answer-delay-ms",
+                "6000",
+                flags(|f| f.answer_delay_ms = 6_000),
+            ),
+            (
+                "--fetch-stream-delay-ms",
+                "12000",
+                flags(|f| f.stream_delay_ms = 12_000),
+            ),
+            (
+                "--fetch-write-every-ms",
+                "500",
+                flags(|f| f.write_every_ms = 500),
+            ),
         ];
         for (flag, value, expected) in cases {
             let mut read = FetchFlags::default();
@@ -2548,6 +2577,16 @@ mod tests {
             ),
             ("publish", flags(|_| ())),
             ("publish-namespace", flags(|_| ())),
+            ("publish", flags(|f| f.answer = true)),
+            ("publish-namespace", flags(|f| f.answer = true)),
+            (
+                "publish",
+                flags(|f| (f.answer, f.answer_delay_ms) = (true, 6_000)),
+            ),
+            (
+                "publish-namespace",
+                flags(|f| (f.answer, f.stream_delay_ms, f.write_every_ms) = (true, 1, 1)),
+            ),
             // The same Group, to its end or to a later Object.
             (
                 "fetch",
@@ -2568,6 +2607,8 @@ mod tests {
         const RANGE: &str = "--fetch-start, --fetch-end and --fetch-count belong to --mode fetch";
         const ANY: &str =
             "the flags of a FETCH belong to --mode fetch and to --mode subscribe with --join";
+        const ANSWERS: &str = "--answer-fetch belongs to the modes that publish";
+        const PACE: &str = "--fetch-answer-delay-ms, --fetch-stream-delay-ms and --fetch-write-every-ms need --answer-fetch";
         let range = |f: &mut FetchFlags| (f.start, f.end) = (Some(at(0, 0)), Some(at(2, 0)));
         // (mode; flags; why they are refused)
         let cases = [
@@ -2611,10 +2652,77 @@ mod tests {
                 flags(|f| (range(f), f.cancel_after_objects = Some(0)).1),
                 "--fetch-cancel-after-objects 0 is never reached",
             ),
+            ("subscribe", flags(|f| f.answer = true), ANSWERS),
+            ("fetch", flags(|f| (range(f), f.answer = true).1), ANSWERS),
+            ("publish", flags(|f| f.answer_delay_ms = 1), PACE),
+            ("publish", flags(|f| f.stream_delay_ms = 1), PACE),
+            ("publish-namespace", flags(|f| f.write_every_ms = 1), PACE),
         ];
         for (mode, flags, why) in cases {
             assert_eq!(flags.misuse(mode), Some(why), "{mode} {flags:?}");
         }
+    }
+
+    #[test]
+    fn a_fetch_is_answered_with_the_flag_and_at_the_pace_of_the_flags() {
+        let ms = Duration::from_millis;
+        // Without `--answer-fetch`: no FETCH is answered.
+        assert_eq!(flags(|_| ()).args().answering, None);
+        // With it, at once, or as slowly as the other three say.
+        assert_eq!(
+            flags(|f| f.answer = true).args().answering,
+            Some(Pace::default())
+        );
+        let slow = flags(|f| {
+            f.answer = true;
+            (f.answer_delay_ms, f.stream_delay_ms, f.write_every_ms) = (6_000, 12_000, 500);
+        });
+        assert_eq!(
+            slow.args().answering,
+            Some(Pace {
+                answer_after: ms(6_000),
+                stream_after: ms(12_000),
+                write_every: ms(500),
+            })
+        );
+
+        let fetch = PeerRequest::Fetch(Fetch {
+            request_id: 1,
+            range: FetchRange::RelativeJoining {
+                joining_request_id: 0,
+                joining_start: 0,
+            },
+            parameters: vec![],
+        });
+        let subscribe = PeerRequest::Subscribe(Subscribe {
+            request_id: 1,
+            full_track_name: FullTrackName::new(
+                TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+                b"a".to_vec(),
+            )
+            .unwrap(),
+            parameters: vec![],
+        });
+        // (whether the client has the flag; the request; whether it is one
+        //  the client plans an answer for)
+        let cases = [
+            (None, &fetch, false),
+            (Some(Pace::default()), &fetch, true),
+            (Some(Pace::default()), &subscribe, false),
+            (None, &subscribe, false),
+        ];
+        for (answering, request, answered) in cases {
+            assert_eq!(
+                fetch_to_answer(answering, request).is_some(),
+                answered,
+                "{answering:?} {request:?}"
+            );
+        }
+        // And what is not answered gets NOT_SUPPORTED (0x3), in either mode.
+        assert_eq!(
+            (refusal_code(false, &fetch), refusal_code(true, &fetch)),
+            (0x3, 0x3)
+        );
     }
 
     #[test]

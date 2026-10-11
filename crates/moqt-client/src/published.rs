@@ -32,12 +32,18 @@ pub struct Answer {
 
 /// The Objects this client published, oldest first, within
 /// [`MAX_KEPT_OBJECTS`] and [`MAX_KEPT_BYTES`].
+///
+/// The client publishes Object 0 of one Group after the other, without a
+/// gap; [`Self::answer`] counts on both.
 #[derive(Debug, Default)]
 pub struct Published {
     kept: VecDeque<FetchObject>,
     bytes: usize,
+    /// The first Group that was published.
+    first_group: Option<u64>,
     /// The largest Location of an Object that was let go of for the limits.
-    /// Everything up to it was published and is not here any more.
+    /// The Objects from the first Group to it were published and are not
+    /// here any more.
     let_go_through: Option<Location>,
 }
 
@@ -62,6 +68,7 @@ impl Published {
     /// the Locations, so the newest is the largest.
     pub fn push(&mut self, object: FetchObject) {
         self.bytes = self.bytes.saturating_add(object.payload.len());
+        self.first_group.get_or_insert(object.group_id);
         self.kept.push_back(object);
         while self.kept.len() > MAX_KEPT_OBJECTS || self.bytes > MAX_KEPT_BYTES {
             // The newest stays, however large: it is the Largest Object.
@@ -92,11 +99,19 @@ impl Published {
     /// something false, and so would End of Non-Existent Range; what this
     /// client can still say of them is that it does not know (§11.4.4.2).
     ///
-    /// WHERE the indicator stands in Descending order, the draft does not
-    /// say: it has an indicator cover what lies "between the last
-    /// serialized Object, if any, and this Location". Here it follows the
-    /// Objects and names the Start Location, the far end of what is not
-    /// known.
+    /// The indicator names Object 0 of a Group that was let go of: the last
+    /// such Group of the range in Ascending order, where it stands before
+    /// the Objects, and the first in Descending order, where it follows
+    /// them. WHERE it stands in Descending order the draft does not say: it
+    /// has an indicator cover what lies "between the last serialized
+    /// Object, if any, and this Location". None is written where no Object
+    /// that was let go of lies in the range.
+    ///
+    /// WHAT the Ascending indicator covers that was never published: it has
+    /// no near end, so the Groups of the range before the first one this
+    /// client published read as unknown too. That is not false, and to say
+    /// more would take a second indicator before it, whose far end the
+    /// first would cover again.
     ///
     /// # Errors
     ///
@@ -119,18 +134,14 @@ impl Published {
         let (last, end_location) = if last_of(end) > largest {
             let after = Location {
                 group: largest.group,
-                // Not reached for an Object ID that has none after it: then
-                // `last_of(end)` is not beyond it.
+                // This client's Objects are Object 0, which has one after
+                // it.
                 object: largest.object.saturating_add(1),
             };
             (largest, after)
         } else {
             (last_of(end), end)
         };
-        let unknown_through = self
-            .let_go_through
-            .filter(|gone| *gone >= start)
-            .map(|gone| gone.min(last));
         let mut objects: Vec<Piece> = self
             .kept
             .iter()
@@ -138,20 +149,19 @@ impl Published {
             .cloned()
             .map(Piece::Object)
             .collect();
-        let pieces = match (group_order, unknown_through) {
+        let unknown = |group| Piece::EndOfRange(RangeEnd::Unknown, Location { group, object: 0 });
+        let pieces = match (group_order, self.let_go_in(start, last)) {
             (GroupOrder::Ascending, None) => objects,
-            (GroupOrder::Ascending, Some(through)) => {
-                let mut pieces = vec![Piece::EndOfRange(RangeEnd::Unknown, through)];
+            (GroupOrder::Ascending, Some((_, to))) => {
+                let mut pieces = vec![unknown(to)];
                 pieces.append(&mut objects);
                 pieces
             }
             // One Object a Group, so the order of the Groups is the order of
             // the Objects.
-            (GroupOrder::Descending, unknown) => {
+            (GroupOrder::Descending, let_go) => {
                 objects.reverse();
-                if unknown.is_some() {
-                    objects.push(Piece::EndOfRange(RangeEnd::Unknown, start));
-                }
+                objects.extend(let_go.map(|(from, _)| unknown(from)));
                 objects
             }
         };
@@ -160,10 +170,27 @@ impl Published {
             pieces,
         })
     }
+
+    /// The first and the last Group whose Object was let go of and lies in
+    /// the range from `start` to `last`.
+    fn let_go_in(&self, start: Location, last: Location) -> Option<(u64, u64)> {
+        let gone = self.let_go_through?;
+        // The first Group whose Object 0 is not before `start`.
+        let from_start = if start.object == 0 {
+            start.group
+        } else {
+            start.group.checked_add(1)?
+        };
+        let from = from_start.max(self.first_group?);
+        let to = gone.group.min(last.group);
+        (from <= to).then_some((from, to))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use xmoq_moqt::fetch::{FetchEvent, FetchHeader, FetchStreamDecoder, FetchStreamEncoder};
+
     use super::*;
 
     fn at(group: u64, object: u64) -> Location {
@@ -192,20 +219,40 @@ mod tests {
 
     /// The Groups of the Objects of an answer, and `u` for an End of Unknown
     /// Range indicator with its Location.
-    fn shown(answer: &Answer) -> Vec<String> {
-        answer
-            .pieces
-            .iter()
-            .map(|piece| match piece {
-                Piece::Object(object) => object.group_id.to_string(),
-                Piece::EndOfRange(RangeEnd::Unknown, location) => {
-                    format!("u{},{}", location.group, location.object)
+    /// What `answer` has, read back from the bytes of the fetch stream that
+    /// carries it in `order`: the Group of an Object, and `u` or `n` with
+    /// the Location of an indicator.
+    ///
+    /// WHY through the bytes: the encoder refuses what a fetch stream cannot
+    /// say (an Object out of the order of the stream), and an answer it
+    /// refuses would only be found by a subscriber.
+    fn shown(answer: &Answer, order: GroupOrder) -> Vec<String> {
+        let header = FetchHeader { request_id: 0 };
+        let mut encoder = FetchStreamEncoder::new(header, order);
+        for piece in &answer.pieces {
+            match piece {
+                Piece::Object(object) => encoder.object(object).unwrap(),
+                Piece::EndOfRange(kind, location) => encoder.end_of_range(*kind, *location),
+            }
+        }
+        let mut decoder = FetchStreamDecoder::new(8 * 1024 * 1024, order);
+        decoder.push(&encoder.take_bytes()).unwrap();
+        let mut shown = Vec::new();
+        while let Some(event) = decoder.next_event().unwrap() {
+            match event {
+                FetchEvent::Header(read) => assert_eq!(read, header),
+                FetchEvent::Object(object) => shown.push(object.group_id.to_string()),
+                FetchEvent::EndOfRange { kind, location } => {
+                    let kind = match kind {
+                        RangeEnd::Unknown => "u",
+                        RangeEnd::NonExistent => "n",
+                    };
+                    shown.push(format!("{kind}{},{}", location.group, location.object));
                 }
-                Piece::EndOfRange(RangeEnd::NonExistent, location) => {
-                    format!("n{},{}", location.group, location.object)
-                }
-            })
-            .collect()
+            }
+        }
+        decoder.finish().unwrap();
+        shown
     }
 
     #[test]
@@ -214,7 +261,7 @@ mod tests {
         let descending = GroupOrder::Descending;
         // (Start Location; End Location; Group Order; the End Location of
         //  FETCH_OK; what the stream carries)
-        let cases: [(_, _, _, _, &[&str]); 9] = [
+        let cases: [(_, _, _, _, &[&str]); 11] = [
             // Whole Groups: an End Location with Object 0.
             (at(3, 0), at(5, 0), ascending, at(5, 0), &["3", "4", "5"]),
             (at(3, 0), at(5, 0), descending, at(5, 0), &["5", "4", "3"]),
@@ -230,11 +277,16 @@ mod tests {
             (at(6, 0), at(9, 4), descending, at(7, 1), &["7", "6"]),
             // Nothing exists in the range: a stream without Objects.
             (at(3, 1), at(3, 5), ascending, at(3, 5), &[]),
+            // The whole of the last Group: beyond the Largest Object too.
+            (at(6, 0), at(7, 0), ascending, at(7, 1), &["6", "7"]),
+            // A range of one Location that is none, which the session
+            // takes: nothing.
+            (at(4, 3), at(4, 3), ascending, at(4, 3), &[]),
         ];
         for (start, end, order, end_location, pieces) in cases {
             let answer = groups_3_to_7().answer(start, end, order).unwrap();
             assert_eq!(
-                (answer.end_location, shown(&answer)),
+                (answer.end_location, shown(&answer, order)),
                 (
                     end_location,
                     pieces.iter().map(ToString::to_string).collect()
@@ -263,7 +315,7 @@ mod tests {
         let answer = groups_3_to_7()
             .answer(at(7, 0), at(9, 0), GroupOrder::Ascending)
             .unwrap();
-        assert_eq!(shown(&answer), ["7"]);
+        assert_eq!(shown(&answer, GroupOrder::Ascending), ["7"]);
     }
 
     #[test]
@@ -278,30 +330,36 @@ mod tests {
         assert_eq!(published.largest(), Some(at(5, 0)));
         // (Start Location; End Location; Group Order; what the stream
         //  carries)
-        let cases: [(_, _, _, &[&str]); 5] = [
-            (
-                at(0, 0),
-                at(4, 0),
-                GroupOrder::Ascending,
-                &["u1,0", "2", "3", "4"],
-            ),
-            // The indicator ends where the range does: Object 0 of Group 0.
-            (at(0, 0), at(0, 1), GroupOrder::Ascending, &["u0,0"]),
+        let (ascending, descending) = (GroupOrder::Ascending, GroupOrder::Descending);
+        let cases: [(_, _, _, &[&str]); 11] = [
+            (at(0, 0), at(4, 0), ascending, &["u1,0", "2", "3", "4"]),
+            // From the last Group that was let go of.
+            (at(1, 0), at(4, 0), ascending, &["u1,0", "2", "3", "4"]),
+            // The indicator ends where the range does, at Object 0 of a
+            // Group also where the whole Group was asked for.
+            (at(0, 0), at(0, 1), ascending, &["u0,0"]),
+            (at(0, 0), at(0, 0), ascending, &["u0,0"]),
+            (at(0, 0), at(1, 0), ascending, &["u1,0"]),
             // Nothing of the range was let go of.
-            (at(2, 0), at(4, 0), GroupOrder::Ascending, &["2", "3", "4"]),
-            (at(1, 1), at(4, 0), GroupOrder::Ascending, &["2", "3", "4"]),
-            // Descending: after the Objects, at the Start Location.
-            (
-                at(0, 0),
-                at(3, 0),
-                GroupOrder::Descending,
-                &["3", "2", "u0,0"],
-            ),
+            (at(2, 0), at(4, 0), ascending, &["2", "3", "4"]),
+            (at(1, 1), at(4, 0), ascending, &["2", "3", "4"]),
+            // No Object that was let go of lies in it: Object 3 of Group 1
+            // never was.
+            (at(1, 3), at(1, 3), ascending, &[]),
+            (at(0, 1), at(0, 0), ascending, &[]),
+            // Descending: after the Objects, at the first Group that was
+            // let go of and is in the range.
+            (at(0, 0), at(3, 0), descending, &["3", "2", "u0,0"]),
+            (at(0, 1), at(3, 0), descending, &["3", "2", "u1,0"]),
         ];
         for (start, end, order, pieces) in cases {
             let answer = published.answer(start, end, order).unwrap();
             let expected: Vec<String> = pieces.iter().map(ToString::to_string).collect();
-            assert_eq!(shown(&answer), expected, "{start:?} {end:?} {order:?}");
+            assert_eq!(
+                shown(&answer, order),
+                expected,
+                "{start:?} {end:?} {order:?}"
+            );
         }
         // One Object over the limit alone is kept: it is the Largest Object.
         let mut published = Published::default();
@@ -316,6 +374,22 @@ mod tests {
         let answer = published
             .answer(at(0, 0), at(8, 0), GroupOrder::Ascending)
             .unwrap();
-        assert_eq!(shown(&answer), ["u5,0", "6", "7", "8"]);
+        assert_eq!(
+            shown(&answer, GroupOrder::Ascending),
+            ["u5,0", "6", "7", "8"]
+        );
+
+        // A client that began at Group 10: in Descending order the
+        // indicator does not go below what it published.
+        let mut published = Published::default();
+        for group in 10..=15 {
+            published.push(object(group, 1024 * 1024));
+        }
+        let answer = |order| {
+            let answer = published.answer(at(5, 0), at(13, 0), order).unwrap();
+            shown(&answer, order)
+        };
+        assert_eq!(answer(GroupOrder::Ascending), ["u11,0", "12", "13"]);
+        assert_eq!(answer(GroupOrder::Descending), ["13", "12", "u10,0"]);
     }
 }
