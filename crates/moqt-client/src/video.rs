@@ -3,11 +3,137 @@
 
 use std::fs::File;
 use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use xmoq_loc::draft_04 as loc;
-use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupObject};
-use xmoq_moqt::kvp::Value;
+use xmoq_moqt::data::{
+    ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
+};
+use xmoq_moqt::kvp::{KeyValuePair, Value};
+use xmoq_moqt_io::{Connection, SendStream};
+
+/// The frames of an H.264 byte stream, as Groups that each begin with a key
+/// frame: a frame is the NAL units up to and with a slice.
+pub type Groups = Vec<Vec<Vec<u8>>>;
+
+/// The flags about a video track.
+#[derive(Debug, Default)]
+pub struct VideoFlags {
+    /// `--annex-b-out`: where `--mode subscribe` writes the frames of a LOC
+    /// video track, as an H.264 byte stream.
+    pub annex_b_out: Option<String>,
+    /// `--viewers N`: `--mode subscribe` runs N sessions at once, each
+    /// with a subscription of its own, and each says how late the frames
+    /// of the LOC video track came (`VIDEO_STATS`) in place of the lines of
+    /// its Objects. 0 without the flag. An experiment's: for measuring a
+    /// relay with many subscribers of one track.
+    pub viewers: usize,
+    /// `--video-in <file>`: a publisher sends, for every `send`, the next
+    /// Group of this H.264 byte stream on one stream, a frame every 40
+    /// milliseconds, each with the wall-clock time as its Timestamp of LOC;
+    /// after the last Group comes the first again. An experiment's as well.
+    pub video_in: Option<Groups>,
+}
+
+impl VideoFlags {
+    /// Reads a flag that takes a value. Whether it was one of these.
+    pub fn read(&mut self, flag: &str, value: &str) -> Result<bool> {
+        match flag {
+            "--annex-b-out" => self.annex_b_out = Some(value.to_string()),
+            "--viewers" => self.viewers = value.parse().context("--viewers")?,
+            "--video-in" => {
+                let bytes = std::fs::read(value).with_context(|| format!("--video-in {value}"))?;
+                let groups = groups_of(&bytes);
+                anyhow::ensure!(!groups.is_empty(), "--video-in {value}: no key frame");
+                self.video_in = Some(groups);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+}
+
+/// Cuts a byte stream with start codes of 4 bytes into frames, and the
+/// frames into Groups at every key frame. What comes before the first key
+/// frame is left out.
+fn groups_of(annex_b: &[u8]) -> Groups {
+    let starts: Vec<usize> = annex_b
+        .windows(4)
+        .enumerate()
+        .filter(|(_, window)| *window == [0, 0, 0, 1])
+        .map(|(at, _)| at)
+        .collect();
+    let mut groups: Groups = Vec::new();
+    let mut frame: Vec<u8> = Vec::new();
+    for (index, start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(annex_b.len());
+        let Some(nal) = annex_b.get(*start..end) else {
+            continue;
+        };
+        frame.extend_from_slice(nal);
+        let ty = nal.get(4).map_or(0, |first| first & 0x1f);
+        // A slice ends the frame it is of: 5 of an IDR picture, 1 of another.
+        if ty == IDR_SLICE {
+            groups.push(vec![std::mem::take(&mut frame)]);
+        } else if ty == 1 {
+            let whole = std::mem::take(&mut frame);
+            if let Some(group) = groups.last_mut() {
+                group.push(whole);
+            }
+        }
+    }
+    groups
+}
+
+/// `--video-in`: sends one Group on one stream, at the pace of 25 frames a
+/// second.
+pub async fn send_group<C: Connection>(
+    connection: &C,
+    track_alias: u64,
+    group_id: u64,
+    groups: &Groups,
+) -> Result<()> {
+    let index = usize::try_from(group_id).unwrap_or(0) % groups.len().max(1);
+    let frames = groups.get(index).map_or(&[][..], Vec::as_slice);
+    let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
+        track_alias,
+        group_id,
+        subgroup_id: SubgroupId::Zero,
+        publisher_priority: Some(128),
+        properties: true,
+        end_of_group: true,
+        first_object: true,
+    });
+    let mut data = connection.open_uni().await?;
+    let mut bytes = 0;
+    let mut next = tokio::time::Instant::now();
+    for (object_id, frame) in (0u64..).zip(frames) {
+        tokio::time::sleep_until(next).await;
+        next += std::time::Duration::from_millis(40);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let now = u64::try_from(now.as_micros()).unwrap_or(u64::MAX);
+        encoder.object(&SubgroupObject {
+            object_id,
+            // The Timestamp of LOC-04 (0x10), without a Timescale.
+            properties: vec![KeyValuePair::varint(0x10, now)?],
+            status: ObjectStatus::Normal,
+            payload: frame.clone(),
+        })?;
+        bytes += frame.len();
+        if let Err(error) = data.write_all(&encoder.take_bytes()).await {
+            anyhow::bail!("could not write the subgroup stream: {error:?}");
+        }
+    }
+    data.finish();
+    println!(
+        "SENT group={group_id} objects={} payload_len={bytes}",
+        frames.len()
+    );
+    Ok(())
+}
 
 /// The NAL unit type of a slice of an IDR picture, in H.264.
 const IDR_SLICE: u8 = 5;
@@ -21,13 +147,22 @@ const IDR_SLICE: u8 = 5;
 /// frame that depends on one that did not come cannot be decoded, and the
 /// next Group begins anew. Whatever else comes is counted as skipped.
 pub struct AnnexBWriter {
-    file: File,
+    /// Where the frames go; with `--viewers` nowhere, and how late each
+    /// came is kept instead.
+    file: Option<File>,
     path: String,
+    /// `--viewers`: for every frame, the microseconds from its Timestamp
+    /// to the clock of this machine when it came. A Timestamp of LOC
+    /// without a Timescale is wall-clock time.
+    late: Vec<u64>,
     /// The Group that is written, and the Object ID that comes next in it.
     at: Option<(u64, u64)>,
     frames: u64,
     groups: u64,
     skipped: u64,
+    /// Objects that came before the first key frame: a subscriber that
+    /// comes in the middle of a Group has to wait for the next.
+    before: u64,
     bytes: usize,
 }
 
@@ -37,14 +172,31 @@ impl AnnexBWriter {
         path.map(Self::create).transpose()
     }
 
-    fn create(path: &str) -> Result<Self> {
-        Ok(Self {
-            file: File::create(path).with_context(|| format!("--annex-b-out {path}"))?,
-            path: path.to_string(),
+    /// The writer of `--viewers`: it writes nothing, and counts.
+    pub fn counting() -> Self {
+        Self {
+            file: None,
+            path: "none".to_string(),
+            late: Vec::new(),
             at: None,
             frames: 0,
             groups: 0,
             skipped: 0,
+            before: 0,
+            bytes: 0,
+        }
+    }
+
+    fn create(path: &str) -> Result<Self> {
+        Ok(Self {
+            file: Some(File::create(path).with_context(|| format!("--annex-b-out {path}"))?),
+            path: path.to_string(),
+            late: Vec::new(),
+            at: None,
+            frames: 0,
+            groups: 0,
+            skipped: 0,
+            before: 0,
             bytes: 0,
         })
     }
@@ -62,7 +214,11 @@ impl AnnexBWriter {
             && self.at.is_none_or(|(group, _)| group_id > group);
         let comes_next = self.at == Some((group_id, object.object_id));
         if !begins_a_group && !comes_next {
-            self.skipped += 1;
+            if self.at.is_none() {
+                self.before += 1;
+            } else {
+                self.skipped += 1;
+            }
             return Ok(());
         }
         let timing = loc::read_timing(object.properties.iter().map(|pair| {
@@ -73,13 +229,24 @@ impl AnnexBWriter {
             (pair.ty(), value)
         }))
         .with_context(|| format!("the properties of {group_id}/{}", object.object_id))?;
-        self.file
-            .write_all(&frame)
-            .with_context(|| format!("writing {}", self.path))?;
+        if let Some(file) = &mut self.file {
+            file.write_all(&frame)
+                .with_context(|| format!("writing {}", self.path))?;
+        }
         self.at = Some((group_id, object.object_id + 1));
         self.frames += 1;
         self.groups += u64::from(begins_a_group);
         self.bytes += frame.len();
+        if self.file.is_none() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let now = u64::try_from(now.as_micros()).unwrap_or(u64::MAX);
+            if let Some(timing) = timing {
+                self.late.push(now.saturating_sub(timing.timestamp));
+            }
+            return Ok(());
+        }
         let nal: Vec<String> = types.iter().map(u8::to_string).collect();
         println!(
             "VIDEO_FRAME group={group_id} object={} timestamp={} nal={} bytes={}",
@@ -97,9 +264,34 @@ impl AnnexBWriter {
 /// line for each.
 impl Drop for AnnexBWriter {
     fn drop(&mut self) {
+        if self.file.is_none() {
+            self.late.sort_unstable();
+            // The value below which `percent` of the frames were.
+            let at = |percent: usize| {
+                let index =
+                    (self.late.len() * percent / 100).min(self.late.len().saturating_sub(1));
+                self.late.get(index).copied().unwrap_or(0)
+            };
+            println!(
+                "VIDEO_STATS frames={} groups={} before_the_first_key_frame={} skipped={} bytes={} late_us_p50={} late_us_p99={} late_us_max={}",
+                self.frames,
+                self.groups,
+                self.before,
+                self.skipped,
+                self.bytes,
+                at(50),
+                at(99),
+                self.late.last().copied().unwrap_or(0),
+            );
+            return;
+        }
         println!(
             "VIDEO_WRITTEN file={} frames={} groups={} skipped={} bytes={}",
-            self.path, self.frames, self.groups, self.skipped, self.bytes
+            self.path,
+            self.frames,
+            self.groups,
+            self.skipped + self.before,
+            self.bytes
         );
     }
 }
