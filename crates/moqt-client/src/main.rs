@@ -10,6 +10,7 @@ mod io;
 mod published;
 mod report;
 mod serving;
+mod video;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -102,6 +103,9 @@ struct Args {
     cert_sha256: [u8; 32],
     namespace: String,
     track_name: String,
+    /// `--annex-b-out`: where `--mode subscribe` writes the frames of a LOC
+    /// video track, as an H.264 byte stream.
+    annex_b_out: Option<String>,
     timeout_secs: u64,
     /// How long the publisher waits between the answer to its
     /// `PUBLISH_NAMESPACE` and its PUBLISH.
@@ -578,10 +582,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let mut mode = None;
     let mut payload_hex = None;
     let mut objects = 1;
-    let mut url = None;
-    let mut cert_sha256 = None;
+    let (mut url, mut cert_sha256) = (None, None);
     let mut namespace = None;
-    let mut track_name = None;
+    let (mut track_name, mut annex_b_out) = (None, None);
     let mut timeout_secs = 20;
     let mut publish_delay_ms = 0;
     let mut subgroup_id = SubgroupId::Zero;
@@ -621,6 +624,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--cert-sha256" => cert_sha256 = Some(value),
             "--namespace" => namespace = Some(value),
             "--track" => track_name = Some(value),
+            "--annex-b-out" => annex_b_out = Some(value),
             "--timeout-secs" => timeout_secs = value.parse().context("--timeout-secs")?,
             "--subgroup-id" => {
                 subgroup_id = match value.as_str() {
@@ -659,6 +663,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         cert_sha256: read_cert_sha256(cert_sha256)?,
         namespace: namespace.context("--namespace is required")?,
         track_name: track_name.context("--track is required")?,
+        annex_b_out,
         timeout_secs,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
@@ -1147,6 +1152,7 @@ impl Client<'_> {
         let mut drain_deadline = None;
         let mut drain_timed_out = false;
         let mut received = 0;
+        let mut video = video::AnnexBWriter::for_flag(self.args.annex_b_out.as_deref())?;
 
         // A Joining FETCH is seen to its end as well.
         while received < wanted || !fetches.all_over() {
@@ -1168,7 +1174,7 @@ impl Client<'_> {
                     }
                     UniEvent::Object { header, object, .. } => {
                         if self.belongs_to(header.track_alias, track_alias) {
-                            report::object(&header, &object);
+                            video::take_or_print(&mut video, &header, &object)?;
                             received += 1;
                         }
                     }
