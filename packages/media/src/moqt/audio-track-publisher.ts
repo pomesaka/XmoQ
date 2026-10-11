@@ -29,6 +29,25 @@ export interface AudioChunk {
 	readonly data: Uint8Array;
 }
 
+/**
+ * Ten chunks of audio (200 ms of Opus at 20 ms a chunk) share a Group and a
+ * stream. Decided by the owner on 2026-10-11.
+ *
+ * WHY 10: with a stream a chunk, 50 short streams a second, Chromium hands the
+ * streams to the page later and later once packets are lost and never catches
+ * up (at 10% loss 332 of about 490 chunks came too late to be played; a Rust
+ * and a Firefox receiver do not fall behind). With 10 a Group none came too
+ * late at 5% and at 10% loss, and a viewer that comes late hears its first
+ * chunk as soon as with 1. One machine, one run of 10 s each:
+ * docs/experiments/2026-10-11-demo-over-a-lossy-link.md.
+ *
+ * WHY NOT 1: it is the example of LOC-04 §4.1, and what the measurement
+ * above is about. WHY NOT 5: one chunk of 490 came too late at 10% loss, and
+ * the arrival was 113 ms late in the median. WHY NOT 25: no gain over 10 was
+ * measured, and a loss holds back up to 500 ms of one stream.
+ */
+export const DEFAULT_AUDIO_CHUNKS_PER_GROUP = 10;
+
 export interface AudioTrackPublisherOptions {
 	trackNamespace: readonly Uint8Array[];
 	trackName: Uint8Array;
@@ -39,12 +58,11 @@ export interface AudioTrackPublisherOptions {
 	/** `DEFAULT_MAX_PENDING_AUDIO_CHUNKS` when left out. */
 	maxPendingChunks?: number;
 	/**
-	 * How many chunks share a Group, and so a stream: 1 when left out, the
-	 * example of LOC-04 §4.1. **For trying out.** With more, the
-	 * subscriber of this publisher (a relay) begins at a Group's first
-	 * chunk; a relay's own subscribers begin where they come, where the
-	 * relay starts a stream in the middle of a Subgroup, as the one here
-	 * does.
+	 * How many chunks share a Group, and so a stream:
+	 * `DEFAULT_AUDIO_CHUNKS_PER_GROUP` when left out. The subscriber of
+	 * this publisher (a relay) begins at a Group's first chunk; a relay's
+	 * own subscribers begin where they come, where the relay starts a
+	 * stream in the middle of a Subgroup, as the one here does.
 	 */
 	chunksPerGroup?: number;
 }
@@ -86,7 +104,10 @@ export function createAudioTrackPublisher(
 	let nextGroup = options.firstGroup;
 	let pending = 0;
 	let queue: Promise<void> = Promise.resolve();
-	const chunksPerGroup = Math.max(1, Math.floor(options.chunksPerGroup ?? 1));
+	const chunksPerGroup = Math.max(
+		1,
+		Math.floor(options.chunksPerGroup ?? DEFAULT_AUDIO_CHUNKS_PER_GROUP),
+	);
 	/** The chunk's place in its Group, and the stream of the Group that is open. */
 	let nextObject = 0;
 	let open: { to: PublishedTrack; stream: SubgroupWriter } | undefined;
