@@ -40,6 +40,14 @@ export interface CatalogTrack {
 	height?: number;
 	/** §5.2.20, in frames per second. */
 	framerate?: number;
+	/**
+	 * §5.2.38: the Objects of the track are encrypted with this scheme.
+	 * §4.3.1: "subscribers MUST decrypt the object payload using the
+	 * specified scheme before processing." Nothing here decrypts, so a track
+	 * that has this cannot be played; it is read so that it can be told
+	 * apart, and a catalog that has it is not written.
+	 */
+	encryptionScheme?: string;
 }
 
 /** An independent catalog (§5.1): one that needs no earlier catalog Object to be read. */
@@ -149,6 +157,13 @@ function checkTrack(value: unknown, where: string): CatalogTrack {
 		width: optional(value, where, "width", isNumber, "number"),
 		height: optional(value, where, "height", isNumber, "number"),
 		framerate: optional(value, where, "framerate", isNumber, "number"),
+		encryptionScheme: optional(
+			value,
+			where,
+			"encryptionScheme",
+			isString,
+			"string",
+		),
 	};
 	if (fields.namespace !== undefined) track.namespace = fields.namespace;
 	if (fields.role !== undefined) track.role = fields.role;
@@ -157,6 +172,9 @@ function checkTrack(value: unknown, where: string): CatalogTrack {
 	if (fields.width !== undefined) track.width = fields.width;
 	if (fields.height !== undefined) track.height = fields.height;
 	if (fields.framerate !== undefined) track.framerate = fields.framerate;
+	if (fields.encryptionScheme !== undefined) {
+		track.encryptionScheme = fields.encryptionScheme;
+	}
 	return track;
 }
 
@@ -292,9 +310,24 @@ const utf8Encoder = new TextEncoder();
 export const DEFAULT_MAX_CATALOG_LENGTH = 1024 * 1024;
 
 /**
- * Reads the payload of a catalog Object. Never throws: a payload that is no
- * catalog comes from the peer. One of more than `maxLength` bytes is
- * `invalid`, and not parsed.
+ * Throws a `RangeError` for a number that is no length to read at most: one
+ * that is not an integer, or below 0. WHY not taken as it is: every length is
+ * "not more than" NaN and Infinity, which would be no limit at all, and the
+ * number is the caller's, not the peer's.
+ */
+export function checkMaxLength(maxLength: number): void {
+	if (!Number.isSafeInteger(maxLength) || maxLength < 0) {
+		throw new RangeError(
+			`the most bytes of a catalog to read is ${maxLength}, which is no length`,
+		);
+	}
+}
+
+/**
+ * Reads the payload of a catalog Object. Never throws for a payload: one
+ * that is no catalog comes from the peer. One of more than `maxLength` bytes
+ * is `invalid`, and not parsed. Throws a `RangeError` for a `maxLength` that
+ * is no length (`checkMaxLength`).
  *
  * `null` is a value of another type in every field, and never "absent". A
  * key that comes twice is not noticed: `JSON.parse` keeps the later one.
@@ -307,10 +340,22 @@ export function readCatalog(
 	payload: Uint8Array,
 	maxLength: number = DEFAULT_MAX_CATALOG_LENGTH,
 ): CatalogRead {
+	checkMaxLength(maxLength);
 	if (payload.length > maxLength) {
 		return {
 			type: "invalid",
 			reason: `the payload has ${payload.length} bytes, more than the ${maxLength} that are read`,
+		};
+	}
+	// RFC 1952 §2.3.1: a GZIP member begins with 1f 8b. No JSON text does,
+	// so this is only another reason for the same outcome: whether a payload
+	// is compressed is said by a property (§12.1) whose number the draft
+	// does not give, and is not known here.
+	if (payload[0] === 0x1f && payload[1] === 0x8b) {
+		return {
+			type: "invalid",
+			reason:
+				"the payload begins like a GZIP stream; compressed catalogs are not read",
 		};
 	}
 	let value: unknown;
@@ -337,10 +382,21 @@ export function encodeCatalog(catalog: Catalog): Uint8Array {
 	const text = JSON.stringify(catalog);
 	const read = check(JSON.parse(text));
 	switch (read.type) {
-		case "catalog":
+		case "catalog": {
+			// §5.2.39 asks for a cipher suite with an encryption scheme, and
+			// the keys have fields of their own; none of it is implemented.
+			const encrypted = read.catalog.tracks.find(
+				(track) => track.encryptionScheme !== undefined,
+			);
+			if (encrypted !== undefined) {
+				throw new RangeError(
+					`the track "${encrypted.name}" has an encryption scheme, which is not written`,
+				);
+			}
 			// What was checked is written, and nothing else: a field of the
 			// argument that this package does not read is not passed on.
 			return utf8Encoder.encode(JSON.stringify(read.catalog));
+		}
 		case "invalid":
 			throw new RangeError(read.reason);
 		case "unsupported-version":

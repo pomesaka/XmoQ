@@ -623,6 +623,74 @@ export async function startRun(setup: {
 	};
 }
 
+const moqlivemockRoot = join(here, "peers", "moqlivemock", ".tools");
+
+/** `mlmpub` serves the fingerprint of its certificate on its port plus this. */
+export const MOQLIVEMOCK_SIDE_PORT_OFFSET = 1000;
+
+/**
+ * Starts `mlmpub`, the publisher of moqlivemock, which is a server: clients
+ * connect to it, and no relay is in between. The context has it where a run
+ * through a relay has the relay, so that a page is opened and connected in
+ * the same way. Everything started is stopped by `runCleanups`.
+ *
+ * `mlmpub` makes its own certificate when it is given none, and serves the
+ * SHA-256 of it at `/fingerprint` of a second port
+ * (`MOQLIVEMOCK_SIDE_PORT_OFFSET`).
+ */
+export async function startMoqlivemockPublisher(setup: {
+	port: string;
+	verbose: boolean;
+}): Promise<RunContext> {
+	const binary = join(moqlivemockRoot, "bin", "mlmpub");
+	if (!existsSync(binary)) {
+		throw new Error(
+			`${binary} is missing; see ${join(here, "peers", "moqlivemock", "README.md")} for the build steps`,
+		);
+	}
+	const sidePort = String(Number(setup.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET);
+	if (Number(sidePort) > 65535) {
+		throw new Error(
+			`mlmpub on port ${setup.port} needs the port ${sidePort} as well, which is none`,
+		);
+	}
+	const publisher = spawnLogged("mlmpub", binary, [
+		"-addr",
+		`127.0.0.1:${setup.port}`,
+		"-sideport",
+		sidePort,
+		// The media it serves; its default is a path relative to its source.
+		"-asset",
+		join(moqlivemockRoot, "assets", "test10s"),
+		// It always writes a qlog, by default into the directory it runs in.
+		"-qlog",
+		join(logDir, `mlmpub-${setup.port}.qlog`),
+		...(setup.verbose ? ["-loglevel", "debug"] : []),
+	]);
+	defer(() => stopProcess(publisher, "SIGINT"));
+	await publisher.waitForLine(/Starting MoQ server/);
+	const fingerprint = await withTimeout(
+		fetch(`http://127.0.0.1:${sidePort}/fingerprint`),
+		"mlmpub to serve the fingerprint of the certificate it made",
+	);
+	const certSha256Hex = (await fingerprint.text()).trim();
+	if (!fingerprint.ok || !/^[0-9a-f]{64}$/.test(certSha256Hex)) {
+		throw new Error(
+			`mlmpub served no SHA-256 at /fingerprint: ${fingerprint.status} ${certSha256Hex.slice(0, 80)}`,
+		);
+	}
+	log("driver", `certificate of mlmpub sha256=${certSha256Hex}`);
+	const pages = await startBrowser(["own-browser"]);
+	return {
+		relayUrl: `https://127.0.0.1:${setup.port}/moq`,
+		relay: publisher,
+		relayVersion: "moqlivemock/v0.16.1",
+		certSha256Hex,
+		pages,
+		verbose: setup.verbose,
+	};
+}
+
 export async function openConnectedPage(
 	context: RunContext,
 	label: string,

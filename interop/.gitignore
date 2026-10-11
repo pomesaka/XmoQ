@@ -6,3 +6,5 @@ node_modules/
 # Built relay binary (cargo install --root peers/moqtail/.tools)
 peers/moqtail/.tools/
 peers/moqtail/rust-client/target/
+# Built from a tag of moqlivemock by scripts/ci/interop.sh
+peers/moqlivemock/.tools/

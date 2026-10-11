@@ -18,7 +18,9 @@ import {
 	type Subscription,
 } from "@xmoq/moqt";
 import type { Diagnostics } from "@xmoq/moqt/diagnostics";
+import { followCatalog, namespaceTuple } from "@xmoq/msf";
 import type {
+	PageCatalogReport,
 	PageFetch,
 	PageFetchReport,
 	PageFetchServing,
@@ -567,6 +569,50 @@ async function endWithPublishDone(): Promise<void> {
 }
 
 window.xmoqOwn = {
+	followCatalog: withPlainErrors(
+		async (namespace: string, settleMs: number) => {
+			const follower = await followCatalog(connected(), {
+				namespace: namespaceTuple(namespace),
+			});
+			const reader = follower.states.getReader();
+			const states: PageCatalogReport["states"] = [];
+			// Never settles before the first state: the driver bounds that wait.
+			let settled = new Promise<"settled">(() => {});
+			for (;;) {
+				const next = await Promise.race([reader.read(), settled]);
+				if (next === "settled" || next.done) break;
+				if (states.length === 0) {
+					settled = new Promise((resolve) =>
+						setTimeout(() => resolve("settled"), settleMs),
+					);
+				}
+				const { current, outdated } = next.value;
+				states.push({
+					catalog: current?.catalog ?? null,
+					at:
+						current === undefined
+							? null
+							: [current.at.group.toString(), current.at.object.toString()],
+					outdated:
+						outdated === undefined
+							? null
+							: `${outdated.because} at {${outdated.at.group}, ${outdated.at.object}}: ${outdated.detail}`,
+				});
+			}
+			const fetched = await follower.joiningFetch;
+			void reader.cancel().catch(() => {});
+			return {
+				states,
+				joiningFetch:
+					fetched.type === "not-sent"
+						? "not-sent"
+						: fetched.type === "served"
+							? `served ${fetched.objects}`
+							: `failed ${fetched.objects}: ${errorText(fetched.error)}`,
+			};
+		},
+	),
+
 	announceNamespace: withPlainErrors(async (namespace: string) => {
 		await connected().publishNamespace(namespaceFromPath(namespace));
 		console.log(`namespace announced: ${namespace}`);

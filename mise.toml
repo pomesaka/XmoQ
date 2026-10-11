@@ -9,6 +9,9 @@ biome = "2.5.15"
 # 30050, read on 2026-10-11); see
 # docs/experiments/2026-10-11-bun-test-each-loses-its-table.md.
 bun = "1.3.14"
+# The interop run builds moqlivemock, a publisher written in Go, from a tag (scripts/ci/interop.sh);
+# its go.mod asks for this version.
+go = "1.26.0"
 jq = "1.7.1"
 # oxlint is installed from npm (it has shipped no standalone binary since 1.17.0), so it needs node.
 node = "24.21.0"
