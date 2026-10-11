@@ -1008,9 +1008,27 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		{
 			name: "no relay: catalog: own-browser reads the MSF catalog of moqlivemock's publisher with a Joining FETCH",
 			script: "catalog.ts",
-			args: [],
+			args: ["--catalog", "from-mlmpub"],
 			relay: "none",
 		},
+		// The other two runs with a catalog go through the own relay, and
+		// `catalog.ts` starts it itself.
+		...(relays.includes("own")
+			? [
+					{
+						name: "own relay: catalog: an own page publishes an MSF catalog and replaces it; another reads both",
+						script: "catalog.ts" as const,
+						args: ["--catalog", "own"],
+						relay: "own",
+					},
+					{
+						name: "own relay: catalog: an own page publishes an MSF catalog, which moqlivemock's subscriber reads with a Joining FETCH",
+						script: "catalog.ts" as const,
+						args: ["--catalog", "to-mlmsub"],
+						relay: "own",
+					},
+				]
+			: []),
 		// "leaving: " lets `--only` pick these runs alone.
 		...(relays.includes("own")
 			? DISCONNECTS.map((pairing) =>

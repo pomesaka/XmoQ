@@ -106,6 +106,8 @@ function fake(options: {
 	subscribeAfter?: Promise<void>;
 	/** `Subscription.cancel` rejects, as when the reset cannot be written. */
 	cancelFails?: boolean;
+	/** The SUBSCRIBE is refused. */
+	subscribeFails?: boolean;
 }): Fake {
 	const objects = hand<ReceivedObject>();
 	const cancelled = { subscription: 0, fetch: 0 };
@@ -136,6 +138,7 @@ function fake(options: {
 		subscribe: async (request) => {
 			subscribed.push(request);
 			await options.subscribeAfter;
+			if (options.subscribeFails === true) throw new Error("REQUEST_ERROR");
 			return subscription;
 		},
 		fetch: async (request, fetchOptions) => {
@@ -538,6 +541,84 @@ describe("followCatalog", () => {
 		const follower = await following;
 		expect(peer.cancelled.subscription).toBe(1);
 		expect(await follower.ended).toEqual({ type: "cancelled" });
+	});
+
+	/** How many listeners for "abort" the signal has: the ones added and not removed. */
+	function listening(signal: AbortSignal): () => number {
+		let count = 0;
+		const add = signal.addEventListener.bind(signal);
+		const remove = signal.removeEventListener.bind(signal);
+		signal.addEventListener = (
+			...args: Parameters<AbortSignal["addEventListener"]>
+		) => {
+			if (args[0] === "abort") count += 1;
+			add(...args);
+		};
+		signal.removeEventListener = (
+			...args: Parameters<AbortSignal["removeEventListener"]>
+		) => {
+			if (args[0] === "abort") count -= 1;
+			remove(...args);
+		};
+		return () => count;
+	}
+
+	test("the caller's signal is not listened to any more once the subscription has ended", async () => {
+		const peer = fake({});
+		const aborting = new AbortController();
+		const listeners = listening(aborting.signal);
+		const follower = await followCatalog(peer.connection, {
+			namespace: NAMESPACE,
+			signal: aborting.signal,
+		});
+		expect(listeners()).toBe(1);
+		peer.end({ type: "publish-done", statusCode: 2n, errorReason: "" });
+		await follower.ended;
+		await settle();
+		expect(listeners()).toBe(0);
+	});
+
+	test("the caller's signal is not listened to any more when the SUBSCRIBE was refused", async () => {
+		const peer = fake({ subscribeFails: true });
+		const aborting = new AbortController();
+		const listeners = listening(aborting.signal);
+		const outcome = await followCatalog(peer.connection, {
+			namespace: NAMESPACE,
+			signal: aborting.signal,
+		}).then(
+			() => "resolved",
+			(error: unknown) => String(error),
+		);
+		expect(outcome).toBe("Error: REQUEST_ERROR");
+		expect(listeners()).toBe(0);
+	});
+
+	test("the FETCH is given up with the reason the caller's signal aborted with", async () => {
+		const peer = fake({ largest: { group: 5n, object: 0n }, fetch: "silent" });
+		const aborting = new AbortController();
+		await followCatalog(peer.connection, {
+			namespace: NAMESPACE,
+			signal: aborting.signal,
+		});
+		await settle();
+		const reason = new Error("the viewer left");
+		aborting.abort(reason);
+		expect(peer.fetchSignal()?.reason).toBe(reason);
+	});
+
+	test("a track that ends while its catalog is being fetched closes the states without one, and the FETCH is said to have failed", async () => {
+		const peer = fake({ largest: { group: 5n, object: 0n }, fetch: "held" });
+		const follower = await followCatalog(peer.connection, {
+			namespace: NAMESPACE,
+		});
+		await settle();
+		const reader = follower.states.getReader();
+		peer.end({ type: "publish-done", statusCode: 2n, errorReason: "" });
+		// What the FETCH still brings is not delivered.
+		peer.fetchBody.put(fetchObject(5, 0, whole("a")));
+		peer.fetchBody.fail(new Error("the FETCH was given up"));
+		expect(await reader.read()).toEqual({ done: true, value: undefined });
+		expect((await follower.joiningFetch).type).toBe("failed");
 	});
 
 	test("a cancel that fails is nobody's unhandled rejection", async () => {

@@ -1,0 +1,12 @@
+diff --git a/cmd/mlmsub/handler.go b/cmd/mlmsub/handler.go
+index 6b49a64..36bc6fa 100644
+--- a/cmd/mlmsub/handler.go
++++ b/cmd/mlmsub/handler.go
+@@ -81,6 +81,7 @@ func dialWebTransport(ctx context.Context, addr string, alpn string) (moqtranspo
+ 		// quinn doesn't implement the QUIC RESET_STREAM_AT extension that
+ 		// draft-ietf-webtrans-http3-16 requires, so don't insist the peer has it.
+ 		AllowPeerWithoutPartialDelivery: true,
++		LegacyConnectProtocol:           true,
+ 		ApplicationProtocols:            []string{alpn},
+ 	}
+ 	_, session, err := dialer.Dial(ctx, ensureURLPort(addr, "443"), nil)

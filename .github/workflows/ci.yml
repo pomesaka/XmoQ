@@ -130,7 +130,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: interop/peers/moqlivemock/.tools
-          key: moqlivemock-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/interop.sh', 'mise.toml') }}
+          key: moqlivemock-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/interop.sh', 'mise.toml', 'interop/peers/moqlivemock/*.patch') }}
       # bun.lock pins playwright-core, and with it the Chromium build that is downloaded.
       - name: Cache the Chromium that Playwright downloads
         if: steps.scope.outputs.run != 'false'

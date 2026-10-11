@@ -8,7 +8,7 @@ import {
 	spawn,
 } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type Browser, chromium, type Page } from "playwright-core";
 import type { XmoqPage } from "./xmoq-page.ts";
@@ -689,6 +689,43 @@ export async function startMoqlivemockPublisher(setup: {
 		pages,
 		verbose: setup.verbose,
 	};
+}
+
+/**
+ * Starts `mlmsub`, the subscriber of moqlivemock, against the relay of the
+ * run, to read the catalog track of `namespace`. It writes the catalog it
+ * read to `catalogOut`, and is stopped by `runCleanups`: it stays until its
+ * `-duration` is over, also when it finds nothing to play.
+ */
+export function spawnMlmsub(
+	context: RunContext,
+	namespace: string,
+): { process: LoggedProcess; catalogOut: string } {
+	const binary = join(moqlivemockRoot, "bin", "mlmsub");
+	if (!existsSync(binary)) {
+		throw new Error(
+			`${binary} is missing; see ${join(here, "peers", "moqlivemock", "README.md")} for the build steps`,
+		);
+	}
+	// One file a run: the port is the run's own.
+	const port = new URL(context.relayUrl).port;
+	const catalogOut = join(logDir, `mlmsub-${port}.catalog.json`);
+	rmSync(catalogOut, { force: true });
+	const spawned = spawnLogged("mlmsub", binary, [
+		"-addr",
+		context.relayUrl,
+		"-namespace",
+		namespace,
+		"-catalogout",
+		catalogOut,
+		// Longer than the run; the driver stops it.
+		"-duration",
+		"60",
+		"-qlog",
+		join(logDir, `mlmsub-${port}.qlog`),
+	]);
+	defer(() => stopProcess(spawned, "SIGINT"));
+	return { process: spawned, catalogOut };
 }
 
 export async function openConnectedPage(

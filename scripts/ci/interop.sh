@@ -38,7 +38,13 @@ fi
 MOQLIVEMOCK_TAG="v0.16.1"
 MOQLIVEMOCK_COMMIT="91d903e9933a452f8baaa860f9fcd20cf195e077"
 moqlivemock_root="interop/peers/moqlivemock/.tools"
-moqlivemock_stamp="${moqlivemock_root}/.${MOQLIVEMOCK_COMMIT}"
+# WHY a patch: mlmsub sends the CONNECT of WebTransport with the token of a later draft, which
+# neither relay here accepts, and has no flag for the other one. The patch is one line and
+# changes nothing of MoQ Transport or MSF (interop/peers/moqlivemock/README.md). mlmpub is
+# built as it is.
+moqlivemock_patch="interop/peers/moqlivemock/mlmsub-legacy-connect-protocol.patch"
+# The patch is part of what is built, so a change to it is a new build.
+moqlivemock_stamp="${moqlivemock_root}/.${MOQLIVEMOCK_COMMIT}-$(git hash-object "${moqlivemock_patch}")"
 if [[ ! -x "${moqlivemock_root}/bin/mlmpub" || ! -f "${moqlivemock_stamp}" ]]; then
 	moqlivemock_source="$(mktemp -d)"
 	# The clone goes also when a step below fails.
@@ -51,7 +57,10 @@ if [[ ! -x "${moqlivemock_root}/bin/mlmpub" || ! -f "${moqlivemock_stamp}" ]]; t
 	fi
 	rm -rf "${moqlivemock_root}"
 	mkdir -p "${moqlivemock_root}/bin" "${moqlivemock_root}/assets"
-	(cd "${moqlivemock_source}" && go build -o "${REPO_ROOT}/${moqlivemock_root}/bin/" ./cmd/mlmpub ./cmd/mlmsub)
+	(cd "${moqlivemock_source}" && go build -o "${REPO_ROOT}/${moqlivemock_root}/bin/" ./cmd/mlmpub)
+	# Fails when the patch no longer fits the source.
+	git -C "${moqlivemock_source}" apply "${REPO_ROOT}/${moqlivemock_patch}"
+	(cd "${moqlivemock_source}" && go build -o "${REPO_ROOT}/${moqlivemock_root}/bin/" ./cmd/mlmsub)
 	cp -R "${moqlivemock_source}/assets/test10s" "${moqlivemock_root}/assets/test10s"
 	rm -rf "${moqlivemock_source}"
 	trap - EXIT

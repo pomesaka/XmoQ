@@ -12,7 +12,7 @@ This is the one entry point for interop runs. `spikes/moqtail/browser/run.mjs` i
 | Rust client (`moqtail-rust`, "moqtail Rust client" in the records) | `moqtail` 0.15.0, `wtransport` 0.7.2 | crates.io, `peers/moqtail/rust-client/Cargo.lock` |
 | Test client (`moqtail-test`, "moqtail's test client" in the records) | `client` 0.15.0 | the same repository and tag as the relay. It is the publisher of the FETCH runs: the one client here that answers a FETCH. It publishes by itself and takes no commands |
 | Browser client (`moqtail-browser`, "moqtail-ts client" in the records) | `moqtail` 0.13.0 | npm, the root `bun.lock` |
-| Publisher with an MSF catalog (`mlmpub`) | `moqlivemock` v0.16.1 | `Eyevinn/moqlivemock`, built from the tag with the Go of `mise.toml`. A server: a client connects to it without a relay. See [`peers/moqlivemock/`](peers/moqlivemock/README.md) |
+| Publisher and subscriber with an MSF catalog (`mlmpub`, `mlmsub`) | `moqlivemock` v0.16.1 | `Eyevinn/moqlivemock`, built from the tag with the Go of `mise.toml`. `mlmpub` is a server: a client connects to it without a relay. `mlmsub` is built with a patch of one line, without which it connects to no relay here. See [`peers/moqlivemock/`](peers/moqlivemock/README.md) |
 | Browser driver | `playwright-core` 1.64.0 | npm, the root `bun.lock` |
 | Wire | MOQT draft 18, WebTransport subprotocol `moqt-18` | |
 
@@ -29,7 +29,7 @@ It runs `scripts/ci/interop.sh`, which does these steps and skips what is alread
 ```sh
 cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --locked --root interop/peers/moqtail/.tools relay
 cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --locked --root interop/peers/moqtail/.tools client
-# moqlivemock v0.16.1: a clone of the tag, `go build` of mlmpub and mlmsub, and its asset (peers/moqlivemock/README.md)
+# moqlivemock v0.16.1: a clone of the tag, `go build` of mlmpub, a patch of one line and `go build` of mlmsub, and its asset (peers/moqlivemock/README.md)
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
 cargo build --locked -p xmoq-moqt-client -p xmoq-relay
 bun install --frozen-lockfile
@@ -65,7 +65,7 @@ bun matrix.ts
 | An `own-browser` page that only announces the namespace, with `moqtail-rust` and with `own-rust` as the subscriber (2) | The relay asks the page for the track with a SUBSCRIBE of its own, the page accepts it (`serve` of `@xmoq/moqt`), and the subscriber gets the Object the page sends on that subscription. Both relays ask a publisher that only announced |
 | `own-browser` and `own-rust` subscribing to a track nobody published (2) | The run fails, and its log shows REQUEST_ERROR `0x10` |
 
-One run goes through no relay, and its name begins with `no relay: catalog:`: an own page connects to `mlmpub`, the publisher of moqlivemock, and reads its MSF catalog with `followCatalog` of `@xmoq/msf`, a SUBSCRIBE and a Joining FETCH with offset 0. It has to have the catalog once, the same one that was captured from this publisher (`fixtures/msf-01/`); the page has to say that its Joining FETCH was served with one Object, and `mlmpub` that it served one. `mlmpub` takes a second port, its own plus 1000: two working copies that run at once need base ports further apart than that. The [record](../docs/experiments/2026-10-11-a-page-reads-a-catalog.md) has what the runs showed.
+Three runs are about an MSF catalog, and their names have `catalog:` in them; what each has to show is at the top of `catalog.ts`. In one, an own page connects to `mlmpub`, the publisher of moqlivemock, without a relay, and reads its catalog with `followCatalog` of `@xmoq/msf`, a SUBSCRIBE and a Joining FETCH with offset 0: it has to have the catalog once, the same one that was captured from this publisher (`fixtures/msf-01/`), the page has to say that its Joining FETCH was served with one Object, and `mlmpub` that it served one. In the other two an own page publishes a catalog with `createCatalogPublisher` through the own relay: another page reads it and then the catalog that replaces it, and `mlmsub`, the subscriber of moqlivemock, reads it and writes it out. `mlmpub` takes a second port, its own plus 1000: two working copies that run at once need base ports further apart than that. The records: [reading](../docs/experiments/2026-10-11-a-page-reads-a-catalog.md), [publishing](../docs/experiments/2026-10-11-a-page-publishes-a-catalog.md).
 
 The runs in which an own page sends a FETCH have names that begin with `fetch:`. What each has to show is written, with where it comes from, at `EXPECTED` in `fetch.ts`, before the runs; the [record](../docs/experiments/2026-10-11-fetch-from-a-page.md) has what the runs showed. The page reads the fetch stream with `decodeFetchBody` of `@xmoq/moqt`. The runs in which the own Rust client sends the FETCH, a Standalone one or a Joining one for its own subscription, are in the same group; theirs is `EXPECTED` in `fetch-rust.ts`, and the [record](../docs/experiments/2026-10-11-fetch-from-the-rust-client-through-the-matrix.md) has what they showed.
 
@@ -180,7 +180,7 @@ Not every client can leave in every way. `own-rust` and `moqtail-rust` close the
 | `disconnect.ts` | The driver for the runs in which a client leaves |
 | `fetch.ts` | The driver for the runs in which an own page sends a FETCH; each case of `--fetch` has its publisher, and the cases that begin with `page-` an own page that answers the FETCH. `--report-only` prints what the page saw and compares it with nothing |
 | `fetch-rust.ts` | The driver for the runs in which the own Rust client sends a FETCH (`--mode fetch`, or `--mode subscribe` with `--join`). In `page-join-at-once` the run does not choose which of the two streams the relay reads first; where the relay held the FETCH (`HOLD_REQUEST … FETCH`), the run wants the FETCH_OK on that stream |
-| `catalog.ts` | The driver for the run in which an own page reads the MSF catalog of `mlmpub`, moqlivemock's publisher, with `followCatalog` of `@xmoq/msf`. No relay is in between. What has to be seen is at the top of the file |
+| `catalog.ts` | The driver for the three runs with an MSF catalog (`--catalog from-mlmpub`, `own`, `to-mlmsub`). What has to be seen is at the top of the file |
 | `fetch-publishers.ts` | The two publishers both FETCH drivers start: an own page that answers a FETCH, and `moqtail`'s test client |
 | `matrix.ts` | The list of pairings, and the table |
 | `page.ts`, `xmoq-page.ts` | The own page, and the contract between the drivers and both pages |

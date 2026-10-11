@@ -139,15 +139,41 @@ export type OwnPageExtras = {
 	 */
 	state(): Promise<string>;
 	/**
-	 * Reads the catalog track of the namespace with `followCatalog` of
-	 * `@xmoq/msf`: a SUBSCRIBE and a Joining FETCH. Resolves `settleMs`
-	 * after the first state came, with every state that came until then and
-	 * with what became of the FETCH.
+	 * Starts reading the catalog track of the namespace with `followCatalog`
+	 * of `@xmoq/msf`: a SUBSCRIBE and a Joining FETCH. Resolves when the
+	 * SUBSCRIBE was accepted.
 	 */
-	followCatalog(
+	followCatalog(namespace: string): Promise<void>;
+	/**
+	 * What the reading started with `followCatalog` has given so far.
+	 * Resolves once it has `states` states at least and the Joining FETCH is
+	 * over.
+	 */
+	catalogReport(states: number): Promise<PageCatalogReport>;
+	/**
+	 * Announces the namespace and publishes its catalog track with
+	 * `createCatalogPublisher` of `@xmoq/msf`: the page answers the SUBSCRIBE
+	 * and the FETCH of the peer for that track, and refuses every other
+	 * request with DOES_NOT_EXIST. Resolves with the Location of the catalog,
+	 * as [group, object] in decimal.
+	 */
+	publishCatalog(
 		namespace: string,
-		settleMs: number,
-	): Promise<PageCatalogReport>;
+		catalog: Catalog,
+	): Promise<[string, string]>;
+	/** Publishes a catalog that replaces the one before; resolves with its Location. */
+	updateCatalog(catalog: Catalog): Promise<[string, string]>;
+	/**
+	 * Publishes a last catalog and ends the catalog track right after, with
+	 * nothing awaited between. Resolves with the Location of that catalog
+	 * once the subscriptions were told of the end.
+	 */
+	endCatalog(catalog: Catalog): Promise<[string, string]>;
+	/**
+	 * Resolves once the subscription started with `followCatalog` has ended:
+	 * "publish-done <status code>", or the type of another end.
+	 */
+	catalogEnded(): Promise<string>;
 	/** Cancels the subscription and keeps the session. */
 	cancelSubscription(): Promise<void>;
 	/** Resolves once the subscription has ended and its Objects were read; JSON of `SubscriptionReport`. */
