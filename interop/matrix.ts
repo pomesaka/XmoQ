@@ -39,7 +39,8 @@ interface Pairing {
 		| "fetch.ts"
 		| "fetch-rust.ts"
 		| "catalog.ts"
-		| "video.ts";
+		| "video.ts"
+		| "video-rust.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -1051,6 +1052,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			script: "video.ts",
 			args: ["--video", "from-mlmpub"],
 			relay: "none",
+		},
+		{
+			name: "own relay: video: an own page encodes and publishes video, and own-rust writes it as an H.264 byte stream",
+			script: "video-rust.ts",
+			args: [],
+			relay: "own",
 		},
 		// A page encodes and publishes video, and another plays it: through
 		// each relay, with each way of putting Objects onto streams.

@@ -10,7 +10,7 @@ Phase 0b（MoQ Transportの層をRustとTypeScriptで自前実装する）の終
 
 Phase 0bの項目は全部終わっている。いまの課題はPhase 1（映像）。FETCH、MSFのカタログ、LOCの詰め方、映像の受け手と送り手の中核、映像のトラックを出す部品、ブラウザのエンコーダとデコーダにつなぐ部品、リレーのキャッシュ（トラックごとに最新のGroup）が入っていて、ページが符号化した映像を別のページがリレーを通して再生するところまで、照合で通っている。絵を画面に描く所と再生のバッファは、まだ無い。映像はGroupを1本のストリームで送り、LOCはLOC-04の番号をdraft 18の上で使う。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーは、認可が無く、WebTransportだけを受ける。キャッシュは、配信元がいるあいだだけ持つ。draftに届いていない所は`docs/moqt-implementation-notes.md`の既知の不足にある。
 
-Rustのcrateは次のように分かれている。`xmoq-moqt`（符号化とセッションの状態）、`xmoq-relay-core`（リレーの経路と配信の論理）は入出力に依存しない。`xmoq-moqt-io`が`Connection`トレイトの上でストリームを読み書きし、WebTransportのライブラリに触るのはこのcrateの1ファイルだけ。`xmoq-relay`と`xmoq-moqt-client`がそれらをつなぐ。`Connection`の契約は、メモリ上の接続と実際のループバックの接続の両方に同じテストを当てて確かめる。テスト用の接続だけで通る挙動を前提にしない。
+Rustのcrateは次のように分かれている。`xmoq-moqt`（符号化とセッションの状態）、`xmoq-relay-core`（リレーの経路と配信の論理）は入出力に依存しない。`xmoq-moqt-io`が`Connection`トレイトの上でストリームを読み書きし、WebTransportのライブラリに触るのはこのcrateの1ファイルだけ。`xmoq-relay`と`xmoq-moqt-client`がそれらをつなぐ。`xmoq-loc`（LOCの読み取り。入出力に依存せず、版に依る部分はTypeScriptと同じく版の名前のモジュール`draft_04`に置く）を、クライアントが映像のトラックをAnnex Bのファイルに書き出すのに使う（`--annex-b-out`）。`Connection`の契約は、メモリ上の接続と実際のループバックの接続の両方に同じテストを当てて確かめる。テスト用の接続だけで通る挙動を前提にしない。
 
 TypeScriptのパッケージは層になっている。`@xmoq/moqt`（MoQ Transport）と`@xmoq/loc`（LOCの詰め方）が層0、`@xmoq/msf`（MSFのカタログ）が層1、`@xmoq/media`（映像のトラックの送り受け）が層2で、自分より下の層にだけ依存できる。層の表は`scripts/ci/check-layers.sh`の`package_layer`にあり、表に無いパッケージは検査で落ちる。各パッケージの中核（`src/core`）は入出力に依存しない。LOCは、版に依る部分（プロパティの番号、ペイロードの決まり）を版の名前のフォルダ（`packages/loc/src/draft-04/`）に置き、切り替えを`packages/loc/src/index.ts`の1行にしてある。版に依る値を、そのフォルダの外に書かない。
 
