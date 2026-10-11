@@ -480,6 +480,12 @@ impl Timers {
     fn len(&self) -> usize {
         self.pending.len()
     }
+
+    /// The timers that are remembered so that they can be dropped early.
+    #[cfg(test)]
+    fn remembered(&self) -> usize {
+        self.upstream.len() + self.request_close.len()
+    }
 }
 
 impl<C: Connection> Hub<C> {
@@ -779,7 +785,11 @@ impl<C: Connection> Hub<C> {
                 if let Some(handle) = self.sessions.get_mut(&session) {
                     handle.requests.remove(&stream);
                 }
-                self.set_timer(&action, pending);
+                // Nothing to wait for where the peer ended its direction
+                // before: the relay has let go of the stream then.
+                if self.relay.has_request_stream(session, stream) {
+                    self.set_timer(&action, pending);
+                }
             }
             Action::ResetRequest {
                 session,
@@ -2055,13 +2065,19 @@ mod timer_tests {
             timers.take_due(),
             [timeout(1, 0), timeout(1, 2), timeout(1, 3)]
         );
-        // One that fired is not counted down a second time.
+        // One that fired is not counted down a second time, and is not
+        // remembered any longer.
+        assert_eq!(timers.remembered(), 0);
         timers.stop_request_close(SessionKey(1), StreamKey(0));
         assert!(
             timers
                 .start(SessionKey(1), 1, wait, timeout(1, 4))
                 .is_none()
         );
+        // Nor is one of a session that is gone.
+        assert_eq!(timers.remembered(), 1);
+        timers.forget_session(SessionKey(1));
+        assert_eq!((timers.len(), timers.remembered()), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]

@@ -2969,6 +2969,21 @@ impl Relay {
         self.out_streams.retain(|_, out| out.session != session);
     }
 
+    /// Whether the relay keeps an entry for a request stream of a peer: it
+    /// does until the peer's direction of the stream is reported gone, and
+    /// lets go at once of one it has said its last on when the peer had
+    /// finished its direction before.
+    ///
+    /// For the I/O side, which gives a peer a time to end its direction
+    /// after [`Action::FinishRequest`] and has nothing to wait for where
+    /// the peer already did.
+    #[must_use]
+    pub fn has_request_stream(&self, session: SessionKey, stream: StreamKey) -> bool {
+        self.sessions
+            .get(&session)
+            .is_some_and(|state| state.requests.get(stream).is_some())
+    }
+
     /// What the relay holds.
     #[must_use]
     pub fn counts(&self) -> Counts {

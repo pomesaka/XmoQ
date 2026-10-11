@@ -857,6 +857,43 @@ async fn a_peer_that_keeps_the_stream_of_a_refused_request_open_is_stopped() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_ended_its_direction_before_the_relay_did_is_not_timed() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let (request, _) = subscriber.subscribe().await;
+    let OpenRequest {
+        send, mut reader, ..
+    } = request;
+    // The subscriber finishes its direction, which ends nothing (§5.1).
+    send.finish();
+    tokio::time::sleep(SOON).await;
+    // The publisher's PUBLISH, and the SUBSCRIBE.
+    assert_eq!(hub.held().await.relay.requests, 2);
+
+    // The track ends: PUBLISH_DONE and the relay's FIN. Nothing is left to
+    // wait for on that stream, and no timer runs for it.
+    publisher.connection.close(0, b"");
+    let done = timeout(SOON, reader.next_event()).await;
+    assert!(
+        matches!(
+            done,
+            Ok(Ok(RequestStreamEvent::Message(
+                ControlMessage::PublishDone(_)
+            )))
+        ),
+        "{done:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let held = hub.held().await;
+    assert_eq!(
+        (held.relay.requests, held.relay.request_streams, held.timers),
+        (0, 0, 0)
+    );
+}
+
 /// The lines the relay has logged so far.
 fn logged(lines: &mut mpsc::Receiver<String>) -> Vec<String> {
     let mut logged = Vec::new();

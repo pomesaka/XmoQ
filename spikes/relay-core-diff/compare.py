@@ -318,8 +318,7 @@ impl OutNames {
             Action::SendRequest { session, stream, .. }
             | Action::FinishRequest { session, stream, .. }
             | Action::ResetRequest { session, stream, .. }
-            | Action::StopRequest { session, stream, .. }
-            | Action::StartRequestTimer { session, stream, .. } => streams.contains(&(session.0, stream.0)),
+            | Action::StopRequest { session, stream, .. } => streams.contains(&(session.0, stream.0)),
             Action::OpenDataStream { session, header, .. } => {
                 self.watched_aliases.contains(&(session.0, header.track_alias))
             }
