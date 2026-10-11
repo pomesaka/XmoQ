@@ -84,6 +84,9 @@ struct Args {
     /// run wants another number than the relay's own
     /// ([`HubConfig::max_sessions`]). For measuring.
     max_sessions: Option<usize>,
+    /// `--slow-open-ms`: [`HubConfig::slow_open`], for a run that looks at
+    /// how long streams take to open; 0 logs every stream.
+    slow_open: Option<Duration>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -92,6 +95,7 @@ fn parse_args() -> Result<Args> {
     let mut key_file = None;
     let mut idle_timeout = xmoq_moqt_io::wt::IDLE_TIMEOUT;
     let mut max_sessions = None;
+    let mut slow_open = None;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -109,6 +113,11 @@ fn parse_args() -> Result<Args> {
                 idle_timeout = Duration::from_millis(millis);
             }
             "--max-sessions" => max_sessions = Some(value.parse().context("--max-sessions")?),
+            "--slow-open-ms" => {
+                slow_open = Some(Duration::from_millis(
+                    value.parse().context("--slow-open-ms")?,
+                ));
+            }
             other => bail!("unknown flag {other}"),
         }
     }
@@ -118,6 +127,7 @@ fn parse_args() -> Result<Args> {
         key_file: key_file.context("--key-file is required")?,
         idle_timeout,
         max_sessions,
+        slow_open,
     })
 }
 
@@ -131,6 +141,9 @@ async fn main() -> Result<()> {
     };
     if let Some(max_sessions) = args.max_sessions {
         config.max_sessions = max_sessions;
+    }
+    if let Some(slow_open) = args.slow_open {
+        config.slow_open = slow_open;
     }
     let limits = quic_limits(&config.streams, args.idle_timeout);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;

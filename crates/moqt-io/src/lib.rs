@@ -238,4 +238,24 @@ pub trait Connection: Send + Sync + 'static {
 
     /// Completes when the connection is gone, and says how it ended.
     fn closed(&self) -> impl Future<Output = ConnectionEnd> + Send;
+
+    /// How the path to the peer stands now, for a log. `None` from a
+    /// connection that has no congestion control to speak of.
+    fn path(&self) -> Option<PathNow> {
+        None
+    }
+}
+
+/// What a transport says of its path to the peer at one moment
+/// ([`Connection::path`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathNow {
+    /// The congestion window, in bytes.
+    pub cwnd: u64,
+    /// The round-trip time the transport reckons with.
+    pub rtt: std::time::Duration,
+    /// Packets counted as lost so far.
+    pub lost_packets: u64,
+    /// Times the congestion control was told of congestion so far.
+    pub congestion_events: u64,
 }
