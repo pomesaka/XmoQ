@@ -28,11 +28,18 @@ import {
 	through,
 	why,
 	trackName,
+	every,
+	perSecond,
 } from "./shared.ts";
 
 const query = new URLSearchParams(location.search);
 /** **Provisional, not chosen by measurement**: enough for a frame of 33 ms and the pieces of audio of 20 ms to be there before their turn, on one machine. */
 const BUFFER_MS = Number(query.get("buffer") ?? 150);
+
+/** How many decoded frames may wait to be drawn: a second of them. */
+const MAX_WAITING_FRAMES = 30;
+/** What the first line says about the buffer, for somebody who wants less delay. */
+const HINT = "add ?buffer=50 or ?buffer=0 to the address for less delay";
 
 /** The last 200 values of something measured, for its median and its largest. */
 function measured(): { add(value: number): void; text(): string; values: number[] } {
@@ -94,6 +101,8 @@ async function main(): Promise<void> {
 	let firstFrameAfterMs: number | undefined;
 	let frames: { frame: VideoFrame; due: number; mark: boolean }[] = [];
 	let markShown = false;
+	const framesDecoded = perSecond();
+	const framesShown = perSecond();
 	/** When a frame was last drawn, how many were, and when the picture stood still, by this page's clock in milliseconds. */
 	let lastShown: number | undefined;
 	let shown = 0;
@@ -119,6 +128,12 @@ async function main(): Promise<void> {
 				1,
 			);
 			const [red] = probe.getImageData(0, 0, 1, 1).data;
+			framesDecoded.count();
+			// WHY a limit: a tab in the background is not repainted, and the
+			// frames it decodes would wait without end, each with its
+			// picture. The oldest go; the picture catches up at once when
+			// the tab is looked at again.
+			while (frames.length >= MAX_WAITING_FRAMES) frames.shift()?.frame.close();
 			frames.push({
 				frame,
 				due: dueAt(frame.timestamp),
@@ -149,6 +164,7 @@ async function main(): Promise<void> {
 				canvas.height = show.frame.displayHeight;
 			}
 			context.drawImage(show.frame, 0, 0);
+			framesShown.count();
 			played.video.add(now - show.frame.timestamp / 1000);
 			show.frame.close();
 			// A picture that stood still for more than 100 ms.
@@ -174,10 +190,38 @@ async function main(): Promise<void> {
 	/** When a piece of audio was last in time to be sounded, by this page's clock. */
 	let lastHeard: number | undefined;
 	let markHeard = false;
+	// Everything that sounds goes through `output`, where it is listened to
+	// (`listener`) on its way to the loudspeaker: what is said under the
+	// picture about the sound is what leaves here, not what was decoded.
+	let output: GainNode | undefined;
+	let listener: AnalyserNode | undefined;
+	let sounded = 0;
+	const piecesSounded = perSecond();
+	const piecesTooLate = perSecond();
 	document.getElementById("sound")?.addEventListener("click", () => {
-		sound ??= new AudioContext({ sampleRate: SAMPLE_RATE });
+		if (sound === undefined) {
+			sound = new AudioContext({ sampleRate: SAMPLE_RATE });
+			output = sound.createGain();
+			listener = sound.createAnalyser();
+			listener.fftSize = 2048;
+			output.connect(listener);
+			listener.connect(sound.destination);
+		}
 		void sound.resume();
 	});
+	/** The largest sample of the last 43 ms on its way out, of 1, and the pitch that is loudest in it, in Hz. */
+	const leaving = (): { peak: number; hz: number } | undefined => {
+		if (listener === undefined || sound === undefined) return undefined;
+		const samples = new Float32Array(listener.fftSize);
+		listener.getFloatTimeDomainData(samples);
+		const pitches = new Uint8Array(listener.frequencyBinCount);
+		listener.getByteFrequencyData(pitches);
+		const loudest = pitches.indexOf(Math.max(...pitches));
+		return {
+			peak: samples.reduce((most, each) => Math.max(most, Math.abs(each)), 0),
+			hz: Math.round((loudest * sound.sampleRate) / listener.fftSize),
+		};
+	};
 	const audioOptions = {
 		trackName: audioTrackName(),
 		codec: "opus",
@@ -200,22 +244,31 @@ async function main(): Promise<void> {
 			if (due < now) {
 				// Its time is over: it is not sounded.
 				tooLate += 1;
+				piecesTooLate.count();
 				return;
 			}
 			played.audio.add(due - timeMs);
 			firstSoundAfterMs ??= Math.round(performance.now() - audioSince);
-			if (sound === undefined || sound.state !== "running") return;
+			if (
+				sound === undefined ||
+				output === undefined ||
+				sound.state !== "running"
+			) {
+				return;
+			}
 			const buffer = sound.createBuffer(1, samples.length, SAMPLE_RATE);
 			buffer.copyToChannel(samples, 0);
 			const source = sound.createBufferSource();
 			source.buffer = buffer;
-			source.connect(sound.destination);
+			source.connect(output);
 			source.start(sound.currentTime + (due - now) / 1000);
+			sounded += 1;
+			piecesSounded.count();
 			lastHeard = now;
 		},
 	};
 
-	setInterval(() => {
+	every(500, () => {
 		const stats = playback?.stats() ?? {
 			decoded: 0,
 			dropped: {},
@@ -235,9 +288,14 @@ async function main(): Promise<void> {
 		const lastMark = together.at(-1);
 		say(
 			[
-				`${link} · buffer ${BUFFER_MS} ms`,
+				`${link} · ${framesShown.rate()} frames a second shown, ${framesDecoded.rate()} decoded${document.visibilityState === "hidden" ? " (this tab is in the background: nothing is drawn)" : ""} · buffer ${BUFFER_MS} ms (${HINT})`,
 				`video: ${stats.decoded} frames, first after ${firstFrameAfterMs ?? "?"} ms; came ${arrived.video.text()} after it was made, shown ${played.video.text()} after; dropped ${JSON.stringify(stats.dropped)}; joining FETCH ${stats.joiningFetch}`,
-				`audio: ${heard === undefined ? "none" : `${heard.decoded} pieces; came ${arrived.audio.text()} after it was made, sounded ${played.audio.text()} after; ${tooLate} too late; dropped ${JSON.stringify(heard.dropped)}${sound?.state === "running" ? "" : " — click “sound” to hear it"}`}`,
+				`audio: ${heard === undefined ? "none" : `${heard.decoded} pieces; came ${arrived.audio.text()} after it was made, sounded ${played.audio.text()} after; ${tooLate} too late; dropped ${JSON.stringify(heard.dropped)}`}`,
+				`sound: ${
+					sound === undefined
+						? "off — click “sound” to hear it"
+						: `${sound.state}; ${piecesSounded.rate()} pieces a second go to the loudspeaker, ${piecesTooLate.rate()} a second come too late for it; leaving now at ${(leaving()?.peak ?? 0).toFixed(2)} of full scale, ${leaving()?.hz ?? 0} Hz${(leaving()?.peak ?? 0) < 0.01 ? " — SILENT" : ""}`
+				}`,
 				`picture and sound: ${together.length} marks; the last one: the picture ${lastMark === undefined ? "?" : Math.round(lastMark.played)} ms after the sound (${lastMark === undefined ? "?" : Math.round(lastMark.sent)} ms as they were sent)`,
 			].join("\n"),
 		);
@@ -248,9 +306,19 @@ async function main(): Promise<void> {
 			audioPieces: heard?.decoded ?? 0,
 			tooLate,
 			shown,
+			waiting: frames.length,
+			shownASecond: framesShown.rate(),
+			decodedASecond: framesDecoded.rate(),
 			stalls,
 			lastShown: lastShown ?? null,
 			lastHeard: lastHeard ?? null,
+			sound: {
+				state: sound?.state ?? "not started",
+				sounded,
+				soundedASecond: piecesSounded.rate(),
+				tooLateASecond: piecesTooLate.rate(),
+				leaving: leaving() ?? null,
+			},
 			firstAudioAfterMs: firstAudioAfterMs ?? null,
 			firstSoundAfterMs: firstSoundAfterMs ?? null,
 			...(query.get("diag") === null
@@ -270,7 +338,7 @@ async function main(): Promise<void> {
 			played: { video: played.video.text(), audio: played.audio.text() },
 			together,
 		});
-	}, 500);
+	});
 	// One session after the other: when the session ends, or the tracks do
 	// (their publisher went), the page says so and connects again after two
 	// seconds, asking the room anew where the broadcast is.

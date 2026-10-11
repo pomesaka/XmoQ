@@ -27,6 +27,8 @@ import {
 	why,
 	trackName,
 	WIDTH,
+	every,
+	perSecond,
 } from "./shared.ts";
 
 const FRAMES_A_SECOND = 30;
@@ -38,7 +40,7 @@ declare class MediaStreamTrackProcessor {
 }
 
 /**
- * A quiet tone whose pitch goes up and down, and a loud beep while the mark
+ * A tone whose pitch goes up and down, and a louder beep while the mark
  * is on (`marked`), 20 ms at a time, without an `AudioContext`: that needs
  * a click, and this page is to send from the start.
  *
@@ -52,7 +54,7 @@ function tone(onData: (data: AudioData) => void): void {
 	const began = Date.now();
 	let piece = 0;
 	let phase = 0;
-	setInterval(() => {
+	every(10, () => {
 		while (piece * 20 <= Date.now() - began) {
 			const loud = marked(began + piece * 20);
 			const samples = new Float32Array(frames);
@@ -60,7 +62,8 @@ function tone(onData: (data: AudioData) => void): void {
 				const seconds = (piece * frames + index) / SAMPLE_RATE;
 				const pitch = loud ? 1000 : 440 + 220 * Math.sin(Math.PI * seconds);
 				phase += (2 * Math.PI * pitch) / SAMPLE_RATE;
-				samples[index] = (loud ? 0.6 : 0.1) * Math.sin(phase);
+				// Loud enough to be heard on the loudspeaker of a laptop.
+				samples[index] = (loud ? 0.6 : 0.25) * Math.sin(phase);
 			}
 			onData(
 				new AudioData({
@@ -74,7 +77,7 @@ function tone(onData: (data: AudioData) => void): void {
 			);
 			piece += 1;
 		}
-	}, 10);
+	});
 }
 
 /** Calls `onData` with the audio of the microphone. */
@@ -129,7 +132,7 @@ async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	const began = performance.now();
 	let painted = 0;
-	setInterval(() => {
+	every(1000 / FRAMES_A_SECOND, () => {
 		if (context === null || context === undefined) return;
 		const elapsed = performance.now() - began;
 		context.fillStyle = "#10202c";
@@ -149,7 +152,7 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 				timestamp: Math.round(elapsed * 1000),
 			}),
 		);
-	}, 1000 / FRAMES_A_SECOND);
+	});
 }
 
 async function main(): Promise<void> {
@@ -243,7 +246,9 @@ async function main(): Promise<void> {
 			await new Promise((resolve) => setTimeout(resolve, 2000));
 		}
 	})();
+	const framesIn = perSecond();
 	const onFrame = (frame: VideoFrame): void => {
+		framesIn.count();
 		encoder.encode(frame);
 	};
 	if (new URLSearchParams(location.search).get("source") === "camera") {
@@ -253,13 +258,13 @@ async function main(): Promise<void> {
 	} else {
 		fromACanvas(onFrame);
 	}
-	setInterval(() => {
+	every(500, () => {
 		const stats = encoder.stats();
 		const sent = encoder.publisher.stats();
 		say(
-			`${link}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
+			`${link} · ${framesIn.rate()} frames a second${document.visibilityState === "hidden" ? " (this tab is in the background)" : ""}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
 		);
-	}, 500);
+	});
 	void encoder.failed.then((error) => say(`the encoder failed: ${String(error)}`));
 }
 
