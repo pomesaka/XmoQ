@@ -2,17 +2,21 @@
 // are connected. A spike: run locally with Miniflare (run.mjs), never
 // deployed.
 //
-//   PUT /rooms/<room>/broadcast   {relayUrl, namespace, certSha256Hex}:
-//                                 the publisher says where it publishes
-//   DELETE /rooms/<room>/broadcast
 //   GET /rooms/<room>             {broadcast, connected}
 //   GET /rooms/<room>/ws?name=N   a WebSocket: the chat and the count
+//
+// **A broadcast is registered on the WebSocket, and lasts as long as that
+// WebSocket**: the publisher sends {type: "broadcast", broadcast:
+// {relayUrl, namespace, certSha256Hex}}, and when its socket closes the
+// room has no broadcast any more. Provisional: nothing is stored that could
+// outlive a publisher that vanished.
 //
 // On the WebSocket the room sends {type: "hello", history, connected,
 // broadcast} first, then {type: "chat", seq, from, text, at} for every
 // message of anybody, {type: "connected", connected} when the count
 // changes, and {type: "broadcast", broadcast} when the publisher registers
-// or leaves. A client sends {type: "chat", text}.
+// or leaves. A client sends {type: "chat", text}, and a publisher the
+// message above.
 
 /** How many chat messages a room keeps for those who come later. */
 const HISTORY = 50;
@@ -55,7 +59,8 @@ export class Room {
 			const pair = new WebSocketPair();
 			// WHY the hibernation API: the object can be put to sleep between
 			// messages with its sockets open, and is not billed for waiting.
-			// The name is kept with the socket, since nothing in memory is.
+			// The name, and the broadcast of a publisher, are kept with the
+			// socket, since nothing in memory is.
 			this.ctx.acceptWebSocket(pair[1]);
 			pair[1].serializeAttachment({ name: (url.searchParams.get("name") ?? "anonymous").slice(0, 32) });
 			pair[1].send(
@@ -63,36 +68,29 @@ export class Room {
 					type: "hello",
 					history: (await this.ctx.storage.get("history")) ?? [],
 					connected: this.ctx.getWebSockets().length,
-					broadcast: (await this.ctx.storage.get("broadcast")) ?? null,
+					broadcast: this.broadcast(),
 				}),
 			);
 			this.tellAll({ type: "connected", connected: this.ctx.getWebSockets().length });
 			return new Response(null, { status: 101, webSocket: pair[0] });
 		}
-		if (rest === "/broadcast" && request.method === "PUT") {
-			const said = await request.json();
-			const broadcast = {
-				relayUrl: String(said.relayUrl),
-				namespace: Array.isArray(said.namespace) ? said.namespace.map(String) : [],
-				certSha256Hex: said.certSha256Hex == null ? null : String(said.certSha256Hex),
-				since: Date.now(),
-			};
-			await this.ctx.storage.put("broadcast", broadcast);
-			this.tellAll({ type: "broadcast", broadcast });
-			return json({ broadcast });
-		}
-		if (rest === "/broadcast" && request.method === "DELETE") {
-			await this.ctx.storage.delete("broadcast");
-			this.tellAll({ type: "broadcast", broadcast: null });
-			return json({ broadcast: null });
-		}
 		if (rest === "" && request.method === "GET") {
 			return json({
-				broadcast: (await this.ctx.storage.get("broadcast")) ?? null,
+				broadcast: this.broadcast(),
 				connected: this.ctx.getWebSockets().length,
 			});
 		}
 		return json({ error: "no such path" }, 404);
+	}
+
+	/** The broadcast of the publisher that is connected, the latest where there are several; null without one. */
+	broadcast(except) {
+		const all = this.ctx
+			.getWebSockets()
+			.filter((socket) => socket !== except)
+			.map((socket) => socket.deserializeAttachment()?.broadcast)
+			.filter((broadcast) => broadcast != null);
+		return all.sort((a, b) => b.since - a.since)[0] ?? null;
 	}
 
 	async webSocketMessage(socket, message) {
@@ -100,6 +98,17 @@ export class Room {
 		try {
 			said = JSON.parse(typeof message === "string" ? message : "");
 		} catch {
+			return;
+		}
+		if (said?.type === "broadcast" && said.broadcast != null) {
+			const broadcast = {
+				relayUrl: String(said.broadcast.relayUrl),
+				namespace: Array.isArray(said.broadcast.namespace) ? said.broadcast.namespace.map(String) : [],
+				certSha256Hex: String(said.broadcast.certSha256Hex),
+				since: Date.now(),
+			};
+			socket.serializeAttachment({ ...socket.deserializeAttachment(), broadcast });
+			this.tellAll({ type: "broadcast", broadcast: this.broadcast() });
 			return;
 		}
 		if (said?.type !== "chat" || typeof said.text !== "string") return;
@@ -124,6 +133,10 @@ export class Room {
 		// The socket that closes is still among them here.
 		const connected = this.ctx.getWebSockets().filter((each) => each !== socket).length;
 		this.tellAll({ type: "connected", connected }, socket);
+		// A publisher that goes takes its broadcast with it.
+		if (socket.deserializeAttachment()?.broadcast != null) {
+			this.tellAll({ type: "broadcast", broadcast: this.broadcast(socket) }, socket);
+		}
 	}
 
 	webSocketError(socket) {

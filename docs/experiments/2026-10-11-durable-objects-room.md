@@ -38,11 +38,17 @@ One Durable Object for a room name (`idFromName`). `PUT /rooms/<room>/broadcast`
 - **The count**: 1, 2, 3 as clients came; 2 after one left, told to the others and given by `GET`.
 - One thing met: in `webSocketClose` the socket that closes is still among `getWebSockets()`; the count has to leave it out.
 
+## Afterwards: the registration lives with the publisher's WebSocket, and the demo has the room
+
+Provisional, while the way the relay and the room meet is open: a publisher says where it publishes on its WebSocket to the room, and the room has that broadcast as long as that socket is open (`PUT` and `DELETE` are gone; nothing is stored). `check.mjs`: the broadcast is there after the message and gone, with the count at 0, after the socket closed.
+
+`mise run demo` starts the rooms beside the relay (Miniflare, where the spike is installed), and both pages show the chat and the count. Headless, one publisher and three viewers: a viewer before the publisher is told that nobody publishes; all pages show "4 connected" and the same two chat lines in the same order; a viewer that came later got the two lines; a viewer after the publisher's page closed is told that nobody publishes.
+
 ## Limitations and blockers
 
 - **Local only.** Limits, prices, how long an object sleeps and wakes, and regions were not seen. That a Worker cannot take a WebTransport or QUIC connection, so that media cannot end at a Durable Object, is what `docs/architecture.md` assumes; it was not tried.
 - **No authentication**: anybody can register a broadcast for any room, and name itself anything in the chat.
-- **A registration outlives its publisher**: a page that closes leaves the room saying it publishes. Nothing here expires it.
+- A registration outlived its publisher in the first form; see "Afterwards".
 - The relay knows nothing of rooms. No chat in the pages of the demo: the chat was run by a script.
 - One run each.
 

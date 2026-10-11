@@ -36,22 +36,92 @@ export interface Broadcast {
 	namespace: string[];
 }
 
-/** The relay, as `serve.ts` wrote it into the page. */
-declare const XMOQ_DEMO: { relayUrl: string; certSha256Hex: string };
+/** The relay, and the rooms where they run, as `serve.ts` wrote them into the page. */
+declare const XMOQ_DEMO: {
+	relayUrl: string;
+	certSha256Hex: string;
+	roomsUrl: string | null;
+};
 /** The broadcast of the demo where no room says otherwise. */
-export const HERE: Broadcast = { ...XMOQ_DEMO, namespace: NAMESPACE };
+export const HERE: Broadcast = {
+	relayUrl: XMOQ_DEMO.relayUrl,
+	certSha256Hex: XMOQ_DEMO.certSha256Hex,
+	namespace: NAMESPACE,
+};
+
+/** What a room says on its WebSocket (`spikes/durable-objects-room/worker.js`). */
+type RoomMessage =
+	| { type: "hello"; history: Chat[]; connected: number; broadcast: Broadcast | null }
+	| ({ type: "chat" } & Chat)
+	| { type: "connected"; connected: number }
+	| { type: "broadcast"; broadcast: Broadcast | null };
+interface Chat {
+	seq: number;
+	from: string;
+	text: string;
+}
+
+export interface Room {
+	/** Resolves with the broadcast the room has when this page comes, or null. */
+	readonly broadcast: Promise<Broadcast | null>;
+	/** Says where this page publishes; holds as long as this page is connected to the room. */
+	publish(broadcast: Broadcast): void;
+}
 
 /**
- * `?room=NAME`: a room of the spike in `spikes/durable-objects-room`, which
- * says where the broadcast is. `?rooms=URL` is where the rooms are served,
- * http://127.0.0.1:8787 when left out. Undefined without `?room`.
+ * Joins the room `?room=NAME` ("demo" when left out) of the rooms `serve.ts`
+ * started, and shows its chat and how many are connected. Undefined where
+ * no rooms run: the demo then works without one.
  */
-export function roomUrl(): string | undefined {
-	const query = new URLSearchParams(location.search);
-	const room = query.get("room");
-	if (room === null) return undefined;
-	const rooms = query.get("rooms") ?? "http://127.0.0.1:8787";
-	return `${rooms.replace(/\/$/, "")}/rooms/${encodeURIComponent(room)}`;
+export function joinRoom(as: string): Room | undefined {
+	if (XMOQ_DEMO.roomsUrl === null) return undefined;
+	const name = new URLSearchParams(location.search).get("room") ?? "demo";
+	const socket = new WebSocket(
+		`${XMOQ_DEMO.roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(name)}/ws?name=${encodeURIComponent(as)}`,
+	);
+	const log = document.getElementById("chat");
+	const count = document.getElementById("connected");
+	const show = (chat: Chat): void => {
+		if (log === null) return;
+		const line = document.createElement("div");
+		line.textContent = `${chat.seq} ${chat.from}: ${chat.text}`;
+		log.append(line);
+		log.scrollTop = log.scrollHeight;
+	};
+	let first: (broadcast: Broadcast | null) => void = () => {};
+	const broadcast = new Promise<Broadcast | null>((resolve) => {
+		first = resolve;
+	});
+	socket.addEventListener("message", (event) => {
+		const message: RoomMessage = JSON.parse(String(event.data));
+		if (message.type === "hello") {
+			message.history.forEach(show);
+			first(message.broadcast);
+		}
+		if (message.type === "chat") show(message);
+		if ((message.type === "hello" || message.type === "connected") && count !== null) {
+			count.textContent = `room “${name}”: ${message.connected} connected`;
+			document.body.dataset.connected = String(message.connected);
+		}
+	});
+	socket.addEventListener("error", () => first(null));
+	const form = document.querySelector("form");
+	form?.addEventListener("submit", (event) => {
+		event.preventDefault();
+		const input = form.querySelector("input");
+		if (input === null || input.value === "") return;
+		socket.send(JSON.stringify({ type: "chat", text: input.value }));
+		input.value = "";
+	});
+	return {
+		broadcast,
+		publish(where) {
+			const tell = (): void =>
+				socket.send(JSON.stringify({ type: "broadcast", broadcast: where }));
+			if (socket.readyState === WebSocket.OPEN) tell();
+			else socket.addEventListener("open", tell, { once: true });
+		},
+	};
 }
 
 /** Connects to the relay of a broadcast. */

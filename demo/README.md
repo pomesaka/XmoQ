@@ -17,4 +17,6 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 **Picture and sound are played together, by the times their Objects carry.** The watching page holds each frame and each piece of audio for 150 ms, counted from the fastest one that came (`/watch?buffer=N` for another time, in milliseconds; 0 plays each as it comes, and then most of the audio is too late to be sounded). Every 2 seconds the publishing page shows a white square and sounds a beep at the same moment, for 200 ms; the lines under the picture say how far apart the two came out, and how long a frame and a piece took from the publisher's clock to this page.
 
+**A room** comes with it: the spike in `spikes/durable-objects-room`, a Durable Object run locally with Miniflare (`mise run demo` installs it there the first time). Under the picture are a chat and how many are connected, and the watching page learns from the room where the broadcast is; `?room=NAME` on both pages is another room. The broadcast is known to the room as long as the publishing page is open.
+
 No catalog. The times are compared on one machine, where the two pages have the same clock.
