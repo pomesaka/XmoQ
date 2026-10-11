@@ -1345,9 +1345,9 @@ pub struct Relay {
     fetch_ends: BTreeSet<(SessionKey, StreamKey)>,
     next_drain_wait: u64,
     next_own_request: u64,
-    /// Says whether a request is allowed ([`Self::set_authorize`]). None:
-    /// every request is.
-    authorize: Option<Authorize>,
+    /// Says whether a session and a request are allowed
+    /// ([`Self::set_authorizer`]). None: all of them are.
+    authorizer: Option<Authorization>,
 }
 
 /// What a request asks to be allowed to do with a namespace.
@@ -1355,32 +1355,54 @@ pub struct Relay {
 pub enum Operation {
     /// PUBLISH and `PUBLISH_NAMESPACE`.
     Publish,
-    /// SUBSCRIBE and a Standalone FETCH.
+    /// SUBSCRIBE and FETCH.
     Subscribe,
 }
 
-/// Decides whether a request is allowed, from what it asks, the namespace
-/// it asks it of and its parameters, among them its AUTHORIZATION TOKENs
-/// (§10.2.2). `Err` has the code of the `REQUEST_ERROR` to refuse it with.
+/// Why something is not allowed, and what ends for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denied {
+    /// The request is refused, with this code of `REQUEST_ERROR` (§10.6).
+    Request(u64),
+    /// The session is closed, with this code (§3.5).
+    Session(TerminationCode),
+}
+
+/// Decides whether a session and its requests are allowed, from the
+/// AUTHORIZATION TOKENs they carry (§10.2.2, §10.3.1.4).
 ///
-/// WHY a function that is handed in: checking a token takes a key and a
-/// clock, and this crate has neither.
-pub struct Authorize(Box<AuthorizeFn>);
+/// WHY handed in: checking a token takes a key and a clock, and this crate
+/// has neither.
+pub trait Authorizer: Send {
+    /// A request: what it asks, the namespace it asks it of, and its
+    /// parameters. A Joining FETCH names no namespace, and has `None`: it
+    /// is for a SUBSCRIBE of its session, which was asked about with one.
+    ///
+    /// # Errors
+    ///
+    /// [`Denied`], with what ends for it.
+    fn request(
+        &self,
+        operation: Operation,
+        namespace: Option<&TrackNamespace>,
+        parameters: &[Parameter],
+    ) -> Result<(), Denied>;
 
-type AuthorizeFn = dyn Fn(Operation, &TrackNamespace, &[Parameter]) -> Result<(), u64> + Send;
-
-impl Authorize {
-    /// Wraps the function.
-    pub fn new(
-        decide: impl Fn(Operation, &TrackNamespace, &[Parameter]) -> Result<(), u64> + Send + 'static,
-    ) -> Self {
-        Self(Box::new(decide))
+    /// The Setup Options of a peer's SETUP.
+    ///
+    /// # Errors
+    ///
+    /// The code the session is closed with.
+    fn setup(&self, _setup_options: &[KeyValuePair]) -> Result<(), TerminationCode> {
+        Ok(())
     }
 }
 
-impl std::fmt::Debug for Authorize {
+struct Authorization(Box<dyn Authorizer>);
+
+impl std::fmt::Debug for Authorization {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Authorize")
+        f.write_str("Authorization")
     }
 }
 
@@ -1401,7 +1423,7 @@ impl Relay {
             fetch_ends: BTreeSet::new(),
             next_drain_wait: 0,
             next_own_request: 0,
-            authorize: None,
+            authorizer: None,
         }
     }
 
@@ -1438,12 +1460,7 @@ impl Relay {
                 self.open_session(session, role, &mut actions);
             }
             Event::ControlMessage { session, message } => {
-                let Some(state) = self.sessions.get_mut(&session) else {
-                    return actions;
-                };
-                if let Err(error) = state.moqt.on_control_message(message) {
-                    self.fail_session(session, &error, &mut actions);
-                }
+                self.on_control_message(session, message, &mut actions);
             }
             Event::RequestOpened {
                 session,
@@ -1701,52 +1718,92 @@ impl Relay {
         );
     }
 
-    /// From now on a request is asked of `authorize` before it is taken. An
-    /// experiment: without it the relay allows everything, as before.
-    pub fn set_authorize(&mut self, authorize: Authorize) {
-        self.authorize = Some(authorize);
+    /// From now on a session and a request are asked of `authorizer`
+    /// before they are taken. An experiment: without it the relay allows
+    /// everything, as before.
+    pub fn set_authorizer(&mut self, authorizer: impl Authorizer + 'static) {
+        self.authorizer = Some(Authorization(Box::new(authorizer)));
     }
 
     /// Whether the relay's authorization, where it has one, allows a
     /// request.
-    ///
-    /// WHY a Joining FETCH is not asked about: it names no namespace, and
-    /// is for a SUBSCRIBE of the same session, which was asked about.
-    fn allowed(&self, request: &PeerRequest) -> Result<(), u64> {
-        let Some(authorize) = &self.authorize else {
+    fn allowed(&self, request: &PeerRequest) -> Result<(), Denied> {
+        let Some(Authorization(authorizer)) = &self.authorizer else {
             return Ok(());
         };
         let (operation, namespace, parameters) = match request {
             PeerRequest::Subscribe(subscribe) => (
                 Operation::Subscribe,
-                subscribe.full_track_name.namespace(),
+                Some(subscribe.full_track_name.namespace()),
                 &subscribe.parameters,
             ),
             PeerRequest::Publish(publish) => (
                 Operation::Publish,
-                publish.full_track_name.namespace(),
+                Some(publish.full_track_name.namespace()),
                 &publish.parameters,
             ),
             PeerRequest::PublishNamespace(publish_namespace) => (
                 Operation::Publish,
-                &publish_namespace.track_namespace,
+                Some(&publish_namespace.track_namespace),
                 &publish_namespace.parameters,
             ),
-            PeerRequest::Fetch(fetch) => match &fetch.range {
-                xmoq_moqt::message::FetchRange::Standalone {
-                    full_track_name, ..
-                } => (
-                    Operation::Subscribe,
-                    full_track_name.namespace(),
-                    &fetch.parameters,
-                ),
-                xmoq_moqt::message::FetchRange::RelativeJoining { .. }
-                | xmoq_moqt::message::FetchRange::AbsoluteJoining { .. } => {
-                    return Ok(());
-                }
-            },
+            PeerRequest::Fetch(fetch) => {
+                let namespace = match &fetch.range {
+                    xmoq_moqt::message::FetchRange::Standalone {
+                        full_track_name, ..
+                    } => Some(full_track_name.namespace()),
+                    xmoq_moqt::message::FetchRange::RelativeJoining { .. }
+                    | xmoq_moqt::message::FetchRange::AbsoluteJoining { .. } => None,
+                };
+                (Operation::Subscribe, namespace, &fetch.parameters)
+            }
         };
-        (authorize.0)(operation, namespace, parameters)
+        authorizer.request(operation, namespace, parameters)
+    }
+
+    /// A message on the control stream of a session. The Setup Options of
+    /// the peer's SETUP are shown to the relay's authorization once the
+    /// session has taken the message.
+    fn on_control_message(
+        &mut self,
+        session: SessionKey,
+        message: ControlMessage,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        let setup_options = match &message {
+            ControlMessage::Setup(setup) => Some(setup.setup_options.clone()),
+            _ => None,
+        };
+        if let Err(error) = state.moqt.on_control_message(message) {
+            self.fail_session(session, &error, actions);
+        } else if let (Some(options), Some(Authorization(authorizer))) =
+            (setup_options, &self.authorizer)
+            && let Err(code) = authorizer.setup(&options)
+        {
+            self.close_unauthorized(session, code, actions);
+        }
+    }
+
+    /// Closes a session the relay's authorization does not allow, or one
+    /// whose token asks for it (§10.2.2).
+    fn close_unauthorized(
+        &mut self,
+        session: SessionKey,
+        code: TerminationCode,
+        actions: &mut Vec<Action>,
+    ) {
+        if !self.sessions.contains_key(&session) {
+            return;
+        }
+        actions.push(Action::CloseSession {
+            session,
+            code: code.code(),
+            reason: "authorization".to_string(),
+        });
+        self.drop_session(session, actions);
     }
 
     fn on_request_opened(
@@ -1785,14 +1842,18 @@ impl Relay {
                 return;
             }
         };
-        if let Err(code) = self.allowed(&peer_request) {
-            if let Some(track_alias) = offered_alias
-                && let Some(state) = self.sessions.get_mut(&session)
-            {
-                state.drop_early_streams(session, track_alias, actions);
+        match self.allowed(&peer_request) {
+            Ok(()) => {}
+            Err(Denied::Session(code)) => return self.close_unauthorized(session, code, actions),
+            Err(Denied::Request(code)) => {
+                if let Some(track_alias) = offered_alias
+                    && let Some(state) = self.sessions.get_mut(&session)
+                {
+                    state.drop_early_streams(session, track_alias, actions);
+                }
+                self.refuse(session, stream, request, &Refusal::code(code), actions);
+                return;
             }
-            self.refuse(session, stream, request, &Refusal::code(code), actions);
-            return;
         }
         match peer_request {
             PeerRequest::Fetch(fetch) => self.on_fetch(session, stream, request, &fetch, actions),

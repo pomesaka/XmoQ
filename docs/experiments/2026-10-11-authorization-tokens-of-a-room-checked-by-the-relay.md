@@ -53,12 +53,29 @@ One run, the relay with the key.
 
 Without `--auth-key-hex` the relay is as it was: the matrix of `interop/` ran against it unchanged.
 
+### After the decision: the Alias Types as §10.2.2 has them, a Joining FETCH, and SETUP
+
+The project's owner chose the form: a token on every request, made with a key the relay shares with the room; the SETUP after that; aliases later. Added then, one run with and one without `--auth-setup on`, a publisher with a good token, and subscribers whose `--auth-token-hex` the Rust client now puts into its SETUP and into every request, a Joining FETCH among them:
+
+| The subscriber's token | The relay with a key | With `--auth-setup on` as well |
+|---|---|---|
+| none | SUBSCRIBE refused, 0x1 | the session closed, 0x2 |
+| good | SUBSCRIBE_OK, an Object | the same |
+| good, and a Joining FETCH | FETCH_OK, 1 Object by the FETCH, then an Object | the same |
+| `USE_ALIAS` 1 | the session closed | the session closed, 0x3 |
+| `DELETE` 1 | the session closed | the session closed, 0x3 |
+| `REGISTER` 1 with the good token | the session closed | SETUP taken, then the session closed, 0x13 |
+| bytes that are no Token structure | the session closed | the session closed, 0x6 |
+| expired | SUBSCRIBE refused, 0x5 | the session closed, 0x18 |
+
+The codes of the right column are from the relay's log (`CLOSE_SESSION ... code=`). For the middle column the log of that run was not kept; what the codes are there is a test of `crates/relay/src/auth.rs` (0x17 for `USE_ALIAS` and `DELETE`, 0x13 for `REGISTER`, 0x6). The client says of a session that was closed whatever it met first: "connection lost", a request stream that ended, or its control stream closed.
+
 ## Limitations and blockers
 
 - **No browser.** `@xmoq/moqt` reads and writes the parameter (`core/parameters.ts`) and has no way to give a token to a request. What it would take: an option for the token on `subscribe`, `publish`, `publishNamespace` and `fetch`; `@xmoq/msf` and `@xmoq/media` passing it on to the requests they send; the room making tokens (HMAC with WebCrypto in its worker) and handing one to each page with the broadcast; the pages of the demo carrying it. None of it was written.
 - **A token is checked when a request comes, and never again.** A subscription that was allowed goes on after its token has expired.
-- **No aliases, and nothing in SETUP**: a parameter with `REGISTER`, `USE_ALIAS` or `DELETE` is refused as malformed, which is not what §10.2.2 has for them, and a token in SETUP is not looked at.
-- A Joining FETCH is not asked about: it names no namespace and belongs to a SUBSCRIBE of its session, which was.
+- No aliases are kept: the Alias Types are treated as §10.2.2 has them for a receiver that keeps none (above).
+- A Joining FETCH without a token is allowed.
 - The relay's own SUBSCRIBE and FETCH to a publisher carry no token.
 - One shared key: whoever has it can make any token. The namespace has to match whole; there are no prefixes.
 

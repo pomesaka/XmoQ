@@ -24,6 +24,7 @@ pub mod params;
 pub mod session;
 #[cfg(test)]
 mod test_util;
+pub mod token;
 pub mod varint;
 
 pub use error::{Error, ErrorScope, RequestFault, TerminationCode, UsageError, stream_reset_code};

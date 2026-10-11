@@ -91,6 +91,8 @@ struct Args {
     /// `--auth-key-hex`: the key requests are authorized with
     /// ([`HubConfig::auth_key`]). An experiment.
     auth_key: Option<Vec<u8>>,
+    /// `--auth-setup on`: [`HubConfig::auth_setup`].
+    auth_setup: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -101,6 +103,7 @@ fn parse_args() -> Result<Args> {
     let mut max_sessions = None;
     let mut slow_open = None;
     let mut auth_key = None;
+    let mut auth_setup = false;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -126,6 +129,7 @@ fn parse_args() -> Result<Args> {
             "--auth-key-hex" => {
                 auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
             }
+            "--auth-setup" => auth_setup = value == "on",
             other => bail!("unknown flag {other}"),
         }
     }
@@ -137,6 +141,7 @@ fn parse_args() -> Result<Args> {
         max_sessions,
         slow_open,
         auth_key,
+        auth_setup,
     })
 }
 
@@ -155,6 +160,7 @@ async fn main() -> Result<()> {
         config.slow_open = slow_open;
     }
     config.auth_key = args.auth_key;
+    config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config.streams, args.idle_timeout);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);

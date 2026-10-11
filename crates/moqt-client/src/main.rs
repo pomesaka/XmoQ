@@ -2395,10 +2395,14 @@ async fn run_session(
     // §3.3: each peer opens one control stream that begins with SETUP.
     let control = kept.control.insert(connection.open_uni().await?);
     let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-    let setup = session.setup(vec![KeyValuePair::bytes(
+    // In ascending order of their types: the token (0x03), where the client
+    // was given one, and the implementation (0x07).
+    let mut setup_options = args.auth.setup_options()?;
+    setup_options.push(KeyValuePair::bytes(
         setup_option::MOQT_IMPLEMENTATION,
         implementation.as_bytes().to_vec(),
-    )?])?;
+    )?);
+    let setup = session.setup(setup_options)?;
     xmoq_moqt_io::send_message(control, &setup, &args.trace, "control").await?;
 
     let peer_setup = session.on_control_message(session_inbox.next_control_message().await?)?;

@@ -16,6 +16,19 @@ pub enum TerminationCode {
     InvalidPath,
     /// `INVALID_AUTHORITY` (§10.3.1.1).
     InvalidAuthority,
+    /// UNAUTHORIZED: "The client is not authorized to establish a session."
+    Unauthorized,
+    /// `KEY_VALUE_FORMATTING_ERROR`: a Token structure that cannot be
+    /// decoded, among others (§10.2.2).
+    KeyValueFormattingError,
+    /// `AUTH_TOKEN_CACHE_OVERFLOW` (§10.2.2, §10.3.1.3).
+    AuthTokenCacheOverflow,
+    /// `MALFORMED_AUTH_TOKEN` (§10.2.2).
+    MalformedAuthToken,
+    /// `UNKNOWN_AUTH_TOKEN_ALIAS` (§10.2.2).
+    UnknownAuthTokenAlias,
+    /// `EXPIRED_AUTH_TOKEN` (§10.2.2).
+    ExpiredAuthToken,
 }
 
 impl TerminationCode {
@@ -29,6 +42,12 @@ impl TerminationCode {
             Self::DuplicateTrackAlias => 0x5,
             Self::InvalidPath => 0x8,
             Self::InvalidAuthority => 0x19,
+            Self::Unauthorized => 0x2,
+            Self::KeyValueFormattingError => 0x6,
+            Self::AuthTokenCacheOverflow => 0x13,
+            Self::MalformedAuthToken => 0x16,
+            Self::UnknownAuthTokenAlias => 0x17,
+            Self::ExpiredAuthToken => 0x18,
         }
     }
 }
