@@ -211,7 +211,11 @@ async function main(): Promise<void> {
 		for (let session = 1; ; session++) {
 			try {
 				link = "connecting";
-				const connection = await connectToRelay(through(HERE));
+				// Where the rooms give tokens, the connection carries one.
+				const connection = await connectToRelay(
+					through(HERE),
+					await room?.token("pub", HERE.namespace),
+				);
 				connection.serve({
 					subscribe(request) {
 						if (encoder.publisher.subscribe(request)) return;
@@ -224,12 +228,7 @@ async function main(): Promise<void> {
 						request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
 					},
 				});
-				// Where the rooms give tokens, the announcement carries one.
-				const token = await room?.token("pub", HERE.namespace);
-				await connection.publishNamespace(
-					namespace(),
-					token === undefined ? undefined : { authorizationToken: [token] },
-				);
+				await connection.publishNamespace(namespace());
 				// The room is told where this broadcast is, for viewers to
 				// find it; that holds as long as this page is connected to
 				// the room.

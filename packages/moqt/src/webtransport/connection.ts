@@ -147,6 +147,21 @@ function streamLimit(name: string, value: number, least: number): number {
 export interface SessionConnectOptions {
 	/** Value of the MOQT_IMPLEMENTATION Setup Option. */
 	implementation?: string;
+	/**
+	 * An AUTHORIZATION TOKEN for the whole connection: the Token structure as
+	 * bytes (§10.2.2). **It is put into every request this connection sends
+	 * that can carry one**: PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE and FETCH,
+	 * which are the ones of §10.2.2 ("It MAY appear in a PUBLISH, SUBSCRIBE,
+	 * REQUEST_UPDATE, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS,
+	 * PUBLISH_NAMESPACE, TRACK_STATUS or FETCH message") that this library
+	 * sends. It goes before the tokens a request has of its own
+	 * (`parameters.authorizationToken`). Nothing is added when left out.
+	 *
+	 * Not sent in SETUP (§10.3.1.4), and not registered under an alias: the
+	 * whole token travels with every request. Decided on 2026-10-11 as the
+	 * first step; what it carries and who checks it is the application's.
+	 */
+	authorizationToken?: Uint8Array;
 	/** Limits to use in place of the defaults; the ones left out keep their default. */
 	limits?: Partial<SessionLimits>;
 	/**
@@ -2008,6 +2023,20 @@ export async function connectOver(
 		clearTimeout(setupTimer);
 	}
 
+	/** The parameters of a request with the connection's token before its own, where the connection has one. */
+	const authorized = (
+		parameters: MessageParameters | undefined,
+	): MessageParameters | undefined =>
+		options.authorizationToken === undefined
+			? parameters
+			: {
+					...parameters,
+					authorizationToken: [
+						options.authorizationToken,
+						...(parameters?.authorizationToken ?? []),
+					],
+				};
+
 	return {
 		serve(handlers) {
 			serveHandlers = handlers;
@@ -2016,20 +2045,33 @@ export async function connectOver(
 		closed: closed.promise,
 		publishNamespace(trackNamespace, parameters) {
 			return request(pendingNamespaces, (s) =>
-				s.publishNamespace({ trackNamespace, parameters }),
+				s.publishNamespace({
+					trackNamespace,
+					parameters: authorized(parameters),
+				}),
 			);
 		},
-		publish(publishRequest) {
+		publish(asked) {
+			const publishRequest = {
+				...asked,
+				parameters: authorized(asked.parameters),
+			};
 			return request(pendingPublishes, (s) => {
 				const result = s.publish(publishRequest);
 				pendingPublishAliases.set(result.value, publishRequest.trackAlias);
 				return result;
 			});
 		},
-		subscribe(subscribeRequest) {
-			return request(pendingSubscribes, (s) => s.subscribe(subscribeRequest));
+		subscribe(asked) {
+			return request(pendingSubscribes, (s) =>
+				s.subscribe({ ...asked, parameters: authorized(asked.parameters) }),
+			);
 		},
-		async fetch(fetchRequest, fetchOptions = {}) {
+		async fetch(asked, fetchOptions = {}) {
+			const fetchRequest = {
+				...asked,
+				parameters: authorized(asked.parameters),
+			};
 			const { signal } = fetchOptions;
 			signal?.throwIfAborted();
 			const handle = await apply((s) => {

@@ -50,13 +50,6 @@ export interface PlayVideoTrackOptions {
 	/** Aborting it ends the playing: the subscription is cancelled. */
 	signal?: AbortSignal;
 	/**
-	 * An AUTHORIZATION TOKEN for the requests this sends (transport draft 18
-	 * §10.2.2): the Token structure as bytes, as `MessageParameters` of
-	 * `@xmoq/moqt` carries it. None is sent when left out. **An experiment**:
-	 * how a relay authorizes is undecided.
-	 */
-	authorizationToken?: Uint8Array;
-	/**
 	 * Whether the Group the viewer comes into is fetched from its start (a
 	 * Relative Joining FETCH with Joining Start 0, transport §10.12.2), so
 	 * that the picture begins at once and not with the next key frame.
@@ -318,16 +311,11 @@ export async function playVideoTrack(
 		}
 	};
 
-	const parameters =
-		options.authorizationToken === undefined
-			? undefined
-			: { authorizationToken: [options.authorizationToken] };
 	let subscription: Awaited<ReturnType<MoqtConnection["subscribe"]>>;
 	try {
 		subscription = await connection.subscribe({
 			trackNamespace: options.trackNamespace,
 			trackName: options.trackName,
-			...(parameters === undefined ? {} : { parameters }),
 		});
 	} catch (error) {
 		decoder.close();
@@ -357,7 +345,6 @@ export async function playVideoTrack(
 					joiningRequestId: subscription.requestId,
 					joiningStart: 0n,
 				},
-				...(parameters === undefined ? {} : { parameters }),
 			});
 			cancelJoiningFetch = () => {
 				fetch.cancel().catch(() => {});

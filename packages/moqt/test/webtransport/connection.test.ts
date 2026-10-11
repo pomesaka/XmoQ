@@ -121,6 +121,78 @@ function objectWith(payloadByte: number): Uint8Array {
 	return Uint8Array.of(0x00, 0x01, payloadByte);
 }
 
+describe("the connection's AUTHORIZATION TOKEN (§10.2.2)", () => {
+	const TOKEN = Uint8Array.of(0x03, 0x00, 0x61, 0x62);
+	const OWN = Uint8Array.of(0x03, 0x00, 0x7a);
+	/** The tokens of the first message a request stream carries, in hex. */
+	const tokensOf = (bytes: Uint8Array): string[] => {
+		const decoded = decodeControlMessage(bytes);
+		if (decoded.status !== "ok") return [`not a message: ${decoded.status}`];
+		const message = decoded.value;
+		return "parameters" in message
+			? (message.parameters.authorizationToken ?? []).map((token) =>
+					toHex(token),
+				)
+			: [`a ${message.type} has no parameters`];
+	};
+
+	test.each<{
+		name: string;
+		options: SessionConnectOptions;
+		tokens: string[];
+		withItsOwn: string[];
+	}>([
+		{
+			name: "a connection with a token puts it into every request, before the request's own",
+			options: { authorizationToken: TOKEN },
+			tokens: ["03 00 61 62"],
+			withItsOwn: ["03 00 61 62", "03 00 7a"],
+		},
+		{
+			name: "a connection without one adds nothing",
+			options: {},
+			tokens: [],
+			withItsOwn: ["03 00 7a"],
+		},
+	])("$name", async ({ options, tokens, withItsOwn }) => {
+		const { peer, connection } = await connected(options);
+		await peer.clientUni();
+		const sent: Record<string, string[]> = {};
+		// The requests are not answered: what was sent is all that is looked at.
+		connection.publishNamespace(TRACK.trackNamespace).catch(() => {});
+		sent.PUBLISH_NAMESPACE = tokensOf(
+			await sentBytes((await peer.clientBidi()).sent),
+		);
+		connection.publish({ ...TRACK, trackAlias: 1n }).catch(() => {});
+		sent.PUBLISH = tokensOf(await sentBytes((await peer.clientBidi()).sent));
+		connection.subscribe(TRACK).catch(() => {});
+		sent.SUBSCRIBE = tokensOf(await sentBytes((await peer.clientBidi()).sent));
+		await connection.fetch({
+			range: {
+				fetchType: "Standalone",
+				...TRACK,
+				startLocation: { group: 0n, object: 0n },
+				endLocation: { group: 1n, object: 0n },
+			},
+		});
+		sent.FETCH = tokensOf(await sentBytes((await peer.clientBidi()).sent));
+		connection
+			.subscribe({ ...TRACK, parameters: { authorizationToken: [OWN] } })
+			.catch(() => {});
+		sent["SUBSCRIBE with its own"] = tokensOf(
+			await sentBytes((await peer.clientBidi()).sent),
+		);
+		expect(sent).toEqual({
+			PUBLISH_NAMESPACE: tokens,
+			PUBLISH: tokens,
+			SUBSCRIBE: tokens,
+			FETCH: tokens,
+			"SUBSCRIBE with its own": withItsOwn,
+		});
+		connection.close();
+	});
+});
+
 describe("connectOver", () => {
 	test("sends SETUP on a new control stream and resolves with the peer's Setup Options", async () => {
 		const peer = createFakePeer();
