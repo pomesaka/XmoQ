@@ -254,8 +254,19 @@ export interface Requests {
 		kind: RangeEnd,
 		location: Location,
 	): SessionOutput[];
-	/** The fetch stream is whole: both streams of the FETCH are finished, and the FETCH is over. */
+	/**
+	 * The fetch stream is whole: it is finished, and the FETCH is over. This
+	 * endpoint's direction of the request stream is finished with it where
+	 * the subscriber has ended its own, and else when the subscriber does, or
+	 * with `finishServedFetchSend`.
+	 */
 	finishFetch(requestId: bigint): SessionOutput[];
+	/**
+	 * The caller's wait for the subscriber of a FETCH that was served to end
+	 * its direction of the request stream ran out: this endpoint finishes its
+	 * own. Does nothing when that is done.
+	 */
+	finishServedFetchSend(requestId: bigint, out: SessionOutput[]): void;
 	/** Gives an accepted FETCH up: both of its streams are reset (§5.2). */
 	resetFetch(requestId: bigint, code: number): SessionOutput[];
 	/** Whether the Request ID names a SUBSCRIBE of the peer that waits for its answer or was accepted, and is not over (§10.12.2). */
@@ -572,10 +583,25 @@ export function createRequests(options: RequestsOptions): Requests {
 	};
 
 	/**
+	 * A FETCH that was served kept this endpoint's direction of the request
+	 * stream open for the subscriber to end its own first (`finishFetch`):
+	 * finishes it now.
+	 */
+	const finishServedSend = (
+		request: RequestEntry,
+		out: SessionOutput[],
+	): void => {
+		if (request.kind === "PEER_FETCH" && request.served) {
+			finishSend(request, out);
+		}
+	};
+
+	/**
 	 * This endpoint has said the last thing it says on the request stream and
-	 * finished its direction: PUBLISH_DONE for its PUBLISH (the application's
-	 * or the UPDATE_FAILED of a refused REQUEST_UPDATE), the end of a FETCH
-	 * it served, or REQUEST_ERROR for a request of the peer. How the peer
+	 * finished its direction, or, after a FETCH it served, will: PUBLISH_DONE
+	 * for its PUBLISH (the application's or the UPDATE_FAILED of a refused
+	 * REQUEST_UPDATE), the end of a FETCH it served, or REQUEST_ERROR for a
+	 * request of the peer. How the peer
 	 * then ends its direction is reported, and the caller's wait for it ends
 	 * with `peerEndExpired`, so that a peer that does not end its direction
 	 * does not hold the stream, and its place among the requests, for good.
@@ -1545,7 +1571,26 @@ export function createRequests(options: RequestsOptions): Requests {
 			}
 			request.endedLocally = true;
 			request.served = true;
-			endRequest(request, out, () => finishSend(request, out));
+			// WHY this endpoint's direction of the request stream stays open
+			// while the subscriber's is: the two streams of a FETCH arrive
+			// apart, and a subscriber can take a FIN of the request stream
+			// that it sees before the end of the fetch stream for a FETCH
+			// that failed (moqtransport 0.14.0 does, about one time in eight
+			// on loopback). That is a reading of §11.4.1, "Termination of a
+			// bidi request stream terminates the ... Fetch ... request", with a
+			// FIN counted as a termination; this endpoint reads it so for a
+			// peer's FIN on other requests as well. §5.2 has the data stream's
+			// FIN end the FETCH and asks nothing of the request stream; a
+			// subscriber ends it when it has what it asked for.
+			// WHY NOT finish it at once, which frees the stream sooner and
+			// which §5.2 does not forbid: a subscriber of that library would
+			// lose FETCHes that were answered whole, and nothing is gained
+			// for a subscriber that ends its own direction, as both own ones
+			// do. The cost is a subscriber that never ends it: the stream is
+			// held for the caller's two waits, and not for one.
+			endRequest(request, out, () => {
+				if (request.peerFinished) finishSend(request, out);
+			});
 			// The subscriber had finished its direction already; nothing more
 			// comes on the stream.
 			if (request.peerFinished) {
@@ -1697,6 +1742,10 @@ export function createRequests(options: RequestsOptions): Requests {
 				if (request.requestId !== requestId || !awaitsPeerEnd(request)) {
 					continue;
 				}
+				// A FETCH that was served may still have this endpoint's
+				// direction open, where the caller did not end its first wait
+				// with `finishServedFetchSend`: the stream is not left half open.
+				finishServedSend(request, out);
 				// What the peer sends on the stream from here on is not read.
 				requestStreams.delete(stream);
 				out.push({
@@ -1705,6 +1754,12 @@ export function createRequests(options: RequestsOptions): Requests {
 					code: StreamResetErrorCode.CANCELLED,
 				});
 				return;
+			}
+		},
+
+		finishServedFetchSend(requestId, out) {
+			for (const request of requestStreams.values()) {
+				if (request.requestId === requestId) finishServedSend(request, out);
 			}
 		},
 
@@ -1770,6 +1825,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			// (§5.2).
 			if (request.kind === "FETCH" && request.state === "Established") return;
 			if (request.state === "Terminated") {
+				finishServedSend(request, out);
 				reportPeerEnd(request, "fin", undefined, out);
 				return;
 			}
@@ -1791,6 +1847,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			// that late Objects still arrive (§10.11).
 			if (request.state === "Terminated" || isDraining(request)) {
 				requestStreams.delete(stream);
+				finishServedSend(request, out);
 				reportPeerEnd(request, "reset", code, out);
 				return;
 			}
@@ -1810,6 +1867,30 @@ export function createRequests(options: RequestsOptions): Requests {
 			}
 			const request = requestStreams.get(stream);
 			if (request === undefined) return;
+			// A FETCH that was served, whose subscriber stops this endpoint's
+			// direction while it is still open for the subscriber to end its
+			// own first (`finishFetch`). §5.2: "The Publisher can destroy fetch
+			// state as soon as it has received a STOP_SENDING. It MUST reset
+			// the bidi request stream". The subscriber wants nothing more on
+			// the stream, so its own direction is stopped as well and the
+			// stream forgotten, as the relay does: nothing waits any longer.
+			// WHY NOT only mark the direction as closed, and wait for the
+			// subscriber's: the stream and its place among the requests of
+			// the peer would be held for the whole of both waits.
+			if (
+				request.kind === "PEER_FETCH" &&
+				request.served &&
+				!request.sendClosed
+			) {
+				resetRequestStream(request, StreamResetErrorCode.CANCELLED, out);
+				out.push({
+					type: "stop-peer-direction",
+					stream,
+					code: StreamResetErrorCode.CANCELLED,
+				});
+				reportPeerEnd(request, "reset", code, out);
+				return;
+			}
 			request.sendClosed = true;
 			// §5.1: STOP_SENDING is how the subscriber ends a subscription made
 			// with PUBLISH.

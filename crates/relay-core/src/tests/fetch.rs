@@ -59,6 +59,13 @@ const FINISH: Action = Action::FinishRequest {
     session: ALICE,
     stream: FETCH_STREAM,
 };
+/// The wait for Alice to end her direction of the request stream of a FETCH
+/// that was served: 3 seconds.
+const AWAIT_PEER: Action = Action::StartFetchEndTimer {
+    session: ALICE,
+    stream: FETCH_STREAM,
+    wait_ms: 3_000,
+};
 const CANCEL_UPSTREAM: Action = Action::CancelOwnRequest {
     session: PUBLISHER,
     request: OWN,
@@ -346,7 +353,7 @@ fn fetches_that_come_to_their_end() -> Vec<Case> {
                 (Ok, vec![STOP_TIMER, fetch_ok_to_alice()]),
                 (
                     PipeEnded(FetchPipeEnd::Finished),
-                    vec![FINISH_UPSTREAM, FINISH],
+                    vec![FINISH_UPSTREAM, AWAIT_PEER],
                 ),
             ],
         ),
@@ -358,7 +365,7 @@ fn fetches_that_come_to_their_end() -> Vec<Case> {
                 (Stream, vec![STOP_TIMER, PIPE]),
                 (
                     PipeEnded(FetchPipeEnd::Finished),
-                    vec![FINISH_UPSTREAM, FINISH],
+                    vec![FINISH_UPSTREAM, AWAIT_PEER],
                 ),
             ],
         ),
@@ -370,7 +377,7 @@ fn fetches_that_come_to_their_end() -> Vec<Case> {
                 (PipeEnded(FetchPipeEnd::Finished), vec![START_TIMER]),
                 (
                     Ok,
-                    vec![STOP_TIMER, fetch_ok_to_alice(), FINISH_UPSTREAM, FINISH],
+                    vec![STOP_TIMER, fetch_ok_to_alice(), FINISH_UPSTREAM, AWAIT_PEER],
                 ),
             ],
         ),
@@ -1290,7 +1297,9 @@ fn a_fetch_the_relay_answered_itself_ends_when_its_stream_is_written_or_given_up
     // (what happens after the FETCH was answered, and what the relay does
     //  at each step)
     let cases: Vec<(&str, Vec<Step>)> = vec![
-        ("written", vec![(written(None), vec![FINISH])]),
+        // Written to its end: the relay waits for the subscriber to end
+        // its direction first.
+        ("written", vec![(written(None), vec![AWAIT_PEER])]),
         // The subscriber did not take the stream: TOO_FAR_BEHIND (0x5).
         ("not taken", vec![(written(Some(0x5)), vec![reset(0x5)])]),
         // The subscriber cancels its FETCH (§5.2): the fetch stream is
@@ -1322,6 +1331,102 @@ fn a_fetch_the_relay_answered_itself_ends_when_its_stream_is_written_or_given_up
         // What comes late for it does nothing.
         assert_eq!(relay.step(written(None)), [], "{name}");
     }
+}
+
+#[test]
+fn the_request_stream_of_a_fetch_that_was_served_is_finished_after_the_subscribers() {
+    let closes = |how| Event::RequestClosed {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        how,
+    };
+    let time_is_over = Event::FetchEndTimeout {
+        session: ALICE,
+        stream: FETCH_STREAM,
+    };
+    // The time Alice has to end her direction after the relay finished its
+    // own (`Relay::on_request_timeout`).
+    let late = Event::RequestTimeout {
+        session: ALICE,
+        stream: FETCH_STREAM,
+    };
+    let stop = Action::StopRequest {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        code: 0x1,
+    };
+    let update = || Event::RequestMessage {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        message: ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: 4,
+            parameters: vec![],
+        }),
+    };
+    // (what happens after the fetch stream was written to its end, and
+    //  what the relay does at each step)
+    let cases: Vec<(&str, Vec<Step>)> = vec![
+        // The subscriber ends its direction: the relay finishes its own,
+        // and the time that ran for it ends nothing.
+        (
+            "the subscriber finishes",
+            vec![
+                (closes(RequestEnd::Fin), vec![FINISH]),
+                (time_is_over.clone(), vec![]),
+                (late.clone(), vec![]),
+            ],
+        ),
+        (
+            "the subscriber resets or stops",
+            vec![
+                (closes(RequestEnd::Aborted), vec![FINISH]),
+                (time_is_over.clone(), vec![]),
+            ],
+        ),
+        // It does not: the relay finishes its direction when the 3 seconds
+        // are over, and stops the subscriber's when the time for that is
+        // over as well.
+        (
+            "the subscriber does nothing",
+            vec![
+                (time_is_over.clone(), vec![FINISH]),
+                (time_is_over.clone(), vec![]),
+                (late, vec![stop]),
+            ],
+        ),
+        // While the relay waits, a REQUEST_UPDATE gets no answer: the
+        // answer of the FETCH has ended.
+        (
+            "an update while the relay waits",
+            vec![(update(), vec![]), (closes(RequestEnd::Fin), vec![FINISH])],
+        ),
+    ];
+    for (name, steps) in cases {
+        let mut relay = relay_that_writes_a_fetch_stream();
+        let written = Event::FetchStreamWritten {
+            session: ALICE,
+            stream: FETCH_STREAM,
+            given_up: None,
+        };
+        assert_eq!(relay.step(written), [AWAIT_PEER], "{name}");
+        // Not one of the session's FETCH requests any more, while the
+        // relay waits.
+        let counts = relay.counts();
+        assert_eq!((counts.fetches, counts.fetch_ends), (0, 1), "{name}");
+        for (event, expected) in steps {
+            assert_eq!(relay.step(event), expected, "{name}");
+        }
+        assert_eq!(relay.counts().fetch_ends, 0, "{name}");
+    }
+    // A session that goes takes what waited with it.
+    let mut relay = relay_that_writes_a_fetch_stream();
+    relay.step(Event::FetchStreamWritten {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        given_up: None,
+    });
+    relay.step(Event::SessionClosed { session: ALICE });
+    assert_eq!(relay.counts().fetch_ends, 0);
 }
 
 #[test]
@@ -2137,7 +2242,7 @@ fn a_joining_fetch_that_has_its_answer_goes_on_when_its_subscription_ends() {
                 stream: FETCH_STREAM,
                 how: FetchPipeEnd::Finished,
             }),
-            [FINISH_UPSTREAM, FINISH],
+            [FINISH_UPSTREAM, AWAIT_PEER],
             "{name}"
         );
         assert_eq!(relay.counts().fetches, 0, "{name}");
@@ -2269,9 +2374,10 @@ fn a_fetch_that_waits_for_nothing_is_answered_from_what_the_relay_knows() {
             (usize::from(writes), 0),
             "{name:?}"
         );
-        // The request stream is finished when the stream is written, and not
-        // before; where nothing was written, it was finished with the answer.
-        let expected = if writes { vec![FINISH] } else { vec![] };
+        // The request stream is left to the subscriber when the stream is
+        // written, and not before; where nothing was written, it was
+        // finished with the answer.
+        let expected = if writes { vec![AWAIT_PEER] } else { vec![] };
         assert_eq!(relay.step(written(None)), expected, "{name:?}");
         assert_eq!(relay.counts().fetches, 0, "{name:?}");
     }
@@ -2676,6 +2782,7 @@ fn a_fetch_the_relay_answers_itself_after_its_subscriber_finished_the_stream_lea
         matches!(actions.last(), Some(Action::WriteFetchStream { .. })),
         "{actions:?}"
     );
+    // The subscriber's direction is over: nothing is waited for.
     assert_eq!(relay.step(written(None)), [FINISH]);
     // The request and its stream are gone from the session; the SUBSCRIBE
     // is still there.

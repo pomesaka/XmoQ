@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use xmoq_moqt::data::SubgroupHeader;
+use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
 use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::params::GroupOrder;
@@ -517,7 +517,10 @@ struct Timers {
     /// it can be dropped when the answer came.
     upstream: HashMap<(SessionKey, OwnRequestKey), (Instant, u64)>,
     /// Where the timer for a peer to end its half of a request stream is,
-    /// so that it can be dropped when the peer did.
+    /// so that it can be dropped when the peer did: the one that runs
+    /// while the relay keeps its own half of a served FETCH open for it,
+    /// and the one after the relay finished its half. A stream has one of
+    /// the two at a time.
     request_close: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
     next: u64,
 }
@@ -547,7 +550,8 @@ impl Timers {
             Event::UpstreamTimeout { session, request } => {
                 self.upstream.insert((session, request), at);
             }
-            Event::RequestTimeout { session, stream } => {
+            Event::RequestTimeout { session, stream }
+            | Event::FetchEndTimeout { session, stream } => {
                 self.request_close.insert((session, stream), at);
             }
             _ => {}
@@ -569,7 +573,8 @@ impl Timers {
         }
     }
 
-    /// Drops the timer for a peer to end its half of a request stream.
+    /// Drops the timer for a peer to end its half of a request stream,
+    /// whichever of the two it is.
     ///
     /// WHY dropped and not left to run out: every request the relay refuses
     /// or serves to its end starts one, and a peer that ends its streams as
@@ -609,7 +614,8 @@ impl Timers {
                 Event::UpstreamTimeout { session, request } => {
                     self.upstream.remove(&(session, request));
                 }
-                Event::RequestTimeout { session, stream } => {
+                Event::RequestTimeout { session, stream }
+                | Event::FetchEndTimeout { session, stream } => {
                     self.request_close.remove(&(session, stream));
                 }
                 _ => {}
@@ -904,6 +910,22 @@ impl<C: Connection> Hub<C> {
         }
     }
 
+    /// Queues an Object for a subgroup stream to a subscriber.
+    fn send_object(
+        &mut self,
+        out_stream: OutStreamKey,
+        object: Arc<SubgroupObject>,
+        pending: &mut VecDeque<Event>,
+    ) {
+        let full = self
+            .out_streams
+            .get(&out_stream)
+            .is_some_and(|(_, writer)| writer.send(object).is_err());
+        if full {
+            pending.push_back(Event::SendQueueFull { out_stream });
+        }
+    }
+
     fn execute(&mut self, action: Action, pending: &mut VecDeque<Event>) {
         self.log_action(&action);
         let Some(action) = self.execute_upstream(action, pending) else {
@@ -959,13 +981,7 @@ impl<C: Connection> Hub<C> {
                 header,
             } => self.open_data_stream(session, out_stream, header, pending),
             Action::SendObject { out_stream, object } => {
-                let full = self
-                    .out_streams
-                    .get(&out_stream)
-                    .is_some_and(|(_, writer)| writer.send(object).is_err());
-                if full {
-                    pending.push_back(Event::SendQueueFull { out_stream });
-                }
+                self.send_object(out_stream, object, pending);
             }
             // The writer stays in the table until it reports that it is done,
             // so that it can still be reset.
@@ -997,6 +1013,7 @@ impl<C: Connection> Hub<C> {
             Action::StartDrainTimer { .. }
             | Action::StartEarlyTimer { .. }
             | Action::StartJoiningFetchTimer { .. }
+            | Action::StartFetchEndTimer { .. }
             | Action::StartUpstreamTimer { .. }
             | Action::StartFetchStreamTimer { .. }
             | Action::StopUpstreamTimer { .. } => self.set_timer(&action, pending),
@@ -1293,6 +1310,15 @@ impl<C: Connection> Hub<C> {
                 session,
                 self.config.streams.first_bytes_timeout,
                 Event::JoiningFetchTimeout { session, stream },
+            ),
+            Action::StartFetchEndTimer {
+                session,
+                stream,
+                wait_ms,
+            } => (
+                session,
+                Duration::from_millis(wait_ms),
+                Event::FetchEndTimeout { session, stream },
             ),
             Action::StartUpstreamTimer { session, request } => (
                 session,
@@ -2043,6 +2069,7 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartFetchStreamTimer { .. }
         | Action::StopUpstreamTimer { .. }
         | Action::SendObject { .. }
+        | Action::StartFetchEndTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
         // The relay read a Joining FETCH before the SUBSCRIBE it names, and
         // holds it until that comes. The same word as for a SUBSCRIBE that
@@ -2232,6 +2259,42 @@ mod timer_tests {
         // Nor is one of a session that is gone.
         assert_eq!(timers.remembered(), 1);
         timers.forget_session(SessionKey(1));
+        assert_eq!((timers.len(), timers.remembered()), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_for_a_subscriber_to_end_a_served_fetch_is_dropped_when_it_does() {
+        // The expectations below are spelled out for a limit of 1024.
+        let served = |stream| Event::FetchEndTimeout {
+            session: SessionKey(1),
+            stream: StreamKey(stream),
+        };
+        let mut timers = Timers::default();
+        let wait = Duration::from_secs(3);
+        // A subscriber that ends its direction of every FETCH it was
+        // served holds no timer, however many it fetches in the 3 seconds.
+        for stream in 0..2048 {
+            assert!(
+                timers
+                    .start(SessionKey(1), 1024, wait, served(stream))
+                    .is_none(),
+                "{stream}"
+            );
+            timers.stop_request_close(SessionKey(1), StreamKey(stream));
+        }
+        assert_eq!((timers.len(), timers.remembered()), (0, 0));
+        // One that does not is found when the time is over, and the timer
+        // that follows for the same stream is one of its own.
+        assert!(timers.start(SessionKey(1), 1024, wait, served(7)).is_none());
+        tokio::time::sleep(wait).await;
+        assert_eq!(timers.take_due(), [served(7)]);
+        assert_eq!((timers.len(), timers.remembered()), (0, 0));
+        assert!(
+            timers
+                .start(SessionKey(1), 1024, wait, timeout(1, 7))
+                .is_none()
+        );
+        timers.stop_request_close(SessionKey(1), StreamKey(7));
         assert_eq!((timers.len(), timers.remembered()), (0, 0));
     }
 

@@ -150,6 +150,14 @@ export interface Session {
 	 * (`peer-direction-ended`).
 	 */
 	expirePeerEnd(requestId: bigint): SessionOutput[];
+	/**
+	 * The wait for the subscriber of a FETCH that was served with
+	 * `finishFetch` to end its direction of the request stream first is
+	 * over: this endpoint finishes its own. The timer belongs to the caller,
+	 * and the wait of `expirePeerEnd` begins after it. Does nothing when the
+	 * direction is finished.
+	 */
+	finishServedFetchSend(requestId: bigint): SessionOutput[];
 	/** Opens a subgroup stream with its SUBGROUP_HEADER (§11.4.2). Returns the stream number. */
 	openSubgroup(
 		requestId: bigint,
@@ -496,6 +504,8 @@ export function createSession(options: SessionOptions = {}): Session {
 			closed ? [] : requests.cancelRequest(requestId),
 		expireSubscription: (requestId) =>
 			guard((out) => requests.subscriptionExpired(requestId, out)),
+		finishServedFetchSend: (requestId) =>
+			guard((out) => requests.finishServedFetchSend(requestId, out)),
 		expirePeerEnd: (requestId) =>
 			guard((out) => {
 				requests.peerEndExpired(requestId, out);

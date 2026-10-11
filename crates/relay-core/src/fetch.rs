@@ -62,6 +62,22 @@ pub(crate) const MIN_FETCH_STREAM_WAIT_MS: u64 = 1_000;
 /// stops passing it on. Provisional.
 pub(crate) const FETCH_DOWNSTREAM_WAIT_MS: u64 = 10_000;
 
+/// How long the relay's direction of the request stream of a FETCH stays
+/// open after its fetch stream was passed on or written to its FIN, for
+/// the subscriber to end its own direction first. Provisional; the Rust
+/// client and `@xmoq/moqt` wait as long where they answer a FETCH.
+///
+/// WHY wait at all: §5.2 has a subscriber's FETCH end with the FIN or the
+/// reset of the fetch stream, with a `REQUEST_ERROR`, or with its own
+/// cancelling, and a publisher "destroy all FETCH state after closing the
+/// data stream with a FIN"; neither is told to finish the request stream.
+/// The two streams arrive apart, and `moqtransport` v0.14.0 fails a FETCH
+/// whose request stream is finished before it has read the fetch stream to
+/// its end. A subscriber that has read it ends the request stream itself.
+/// WHY NOT leave the direction open for good: one that never does would
+/// keep the stream, and the request in the session.
+pub(crate) const FETCH_PEER_END_WAIT_MS: u64 = 3_000;
+
 /// `REQUEST_UPDATE`s for a FETCH that may wait for the answer to the FETCH,
 /// each of which is owed a `REQUEST_OK` after it. One more and the FETCH is
 /// refused with `EXCESSIVE_LOAD`, after which none of them gets an answer.
@@ -286,6 +302,20 @@ struct AskedRange {
     joins: Option<StreamKey>,
 }
 
+/// How the answer to a FETCH that has its `FETCH_OK` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnswerEnd {
+    /// The fetch stream was passed on or written to its FIN.
+    Served,
+    /// The fetch stream was reset, or none came: the reset, or the lack of
+    /// a stream, has said what happened, and the request stream is finished
+    /// at once.
+    Cut,
+    /// The relay gave up a fetch stream it wrote itself: the request stream
+    /// is reset with this code.
+    GivenUp(u32),
+}
+
 /// The relay's FETCH to a publisher, as the publisher's session holds it.
 #[derive(Debug)]
 pub(crate) struct OwnFetch {
@@ -392,6 +422,9 @@ impl Relay {
         match event {
             Event::JoiningFetchTimeout { session, stream } => {
                 self.settle_early_fetches(session, Some(stream), actions);
+            }
+            Event::FetchEndTimeout { session, stream } => {
+                self.on_fetch_end_timeout(session, stream, actions);
             }
             Event::FetchStreamOpened {
                 session,
@@ -1068,7 +1101,11 @@ impl Relay {
         if !self.fetches.finish_written(&(session, stream)) {
             return;
         }
-        self.end_answered_fetch(session, stream, given_up, actions);
+        let how = match given_up {
+            None => AnswerEnd::Served,
+            Some(code) => AnswerEnd::GivenUp(code),
+        };
+        self.end_answered_fetch(session, stream, how, actions);
     }
 
     /// Ends the relay's direction of the request stream of a FETCH that has
@@ -1096,26 +1133,59 @@ impl Relay {
         &mut self,
         session: SessionKey,
         stream: StreamKey,
-        given_up: Option<u32>,
+        how: AnswerEnd,
         actions: &mut Vec<Action>,
     ) {
-        // The slot is gone where the subscriber had finished its direction:
-        // the session was told that the stream is gone, then.
+        // The slot is gone where the subscriber has ended its direction: the
+        // session was told that the stream is gone, then.
+        let mut peer_is_there = false;
         if let Some(state) = self.sessions.get_mut(&session)
             && let Some(RequestSlot::Finished(Some(request))) = state.requests.get(stream)
         {
             let request = *request;
+            // From here on a `REQUEST_UPDATE` gets no answer, also while
+            // the relay's direction stays open below: the answer of the
+            // FETCH has ended.
             state.moqt.on_fetch_answer_ended(request);
+            peer_is_there = true;
         }
-        actions.push(match given_up {
-            None => Action::FinishRequest { session, stream },
+        actions.push(match how {
+            // The relay's direction stays open with the subscriber's, for a
+            // time ([`FETCH_PEER_END_WAIT_MS`]).
+            AnswerEnd::Served if peer_is_there => {
+                self.fetch_ends.insert((session, stream));
+                Action::StartFetchEndTimer {
+                    session,
+                    stream,
+                    wait_ms: FETCH_PEER_END_WAIT_MS,
+                }
+            }
+            AnswerEnd::Served | AnswerEnd::Cut => Action::FinishRequest { session, stream },
             // The I/O side stops the subscriber's direction with the reset.
-            Some(code) => Action::ResetRequest {
+            AnswerEnd::GivenUp(code) => Action::ResetRequest {
                 session,
                 stream,
                 code,
             },
         });
+    }
+
+    /// The subscriber of a FETCH that was served has not ended its
+    /// direction of the request stream in time: the relay finishes its own,
+    /// and the subscriber's is stopped when the time for that is over as
+    /// well (`Relay::on_request_timeout`).
+    fn on_fetch_end_timeout(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        actions: &mut Vec<Action>,
+    ) {
+        // Not there when the subscriber ended its direction meanwhile, and
+        // when the session is gone.
+        if !self.fetch_ends.remove(&(session, stream)) {
+            return;
+        }
+        actions.push(Action::FinishRequest { session, stream });
     }
 
     /// The track was found malformed, by what a subscription to it brought
@@ -1224,7 +1294,7 @@ impl Relay {
             // The reset of the fetch stream says what happened; nothing more
             // is to be said on the request stream.
             (true, Pipe::Running | Pipe::Done) => {
-                self.finish_fetch_request(session, stream, fetch.request, actions);
+                self.finish_fetch_request(session, stream, fetch.request, AnswerEnd::Cut, actions);
             }
         }
     }
@@ -1235,10 +1305,11 @@ impl Relay {
         session: SessionKey,
         stream: StreamKey,
         request: PeerRequestId,
+        how: AnswerEnd,
         actions: &mut Vec<Action>,
     ) {
         self.finish_slot(session, stream, Some(request), actions);
-        self.end_answered_fetch(session, stream, None, actions);
+        self.end_answered_fetch(session, stream, how, actions);
     }
 
     /// The FETCH is served when the subscriber has its `FETCH_OK` and the
@@ -1263,7 +1334,8 @@ impl Relay {
                 request: fetch.own,
             });
         }
-        self.finish_fetch_request(subscriber.0, subscriber.1, fetch.request, actions);
+        let served = AnswerEnd::Served;
+        self.finish_fetch_request(subscriber.0, subscriber.1, fetch.request, served, actions);
     }
 
     /// A message on the request stream of the relay's FETCH.
@@ -1698,6 +1770,7 @@ impl Relay {
     /// What a session that is gone leaves of relayed FETCH requests.
     pub(crate) fn drop_fetches_of(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
         self.fetches.forget_idle_of(session);
+        self.fetch_ends.retain(|(of, _)| *of != session);
         // By key, so that the same events lead to the same actions.
         let mut as_subscriber: Vec<(SessionKey, StreamKey)> = self
             .fetches

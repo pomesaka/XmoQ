@@ -526,6 +526,7 @@ const NOTHING: Held = Held {
         pending_tracks: 0,
         own_requests: 0,
         fetches: 0,
+        fetch_ends: 0,
     },
 };
 

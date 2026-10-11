@@ -39,6 +39,8 @@ bun interop/matrix.ts
 
 The Chromium is the build that the pinned `playwright-core` drives; it goes to Playwright's cache directory, outside the repository.
 
+**`mlmsub` is rebuilt whenever the patch changes or is not there**, and `interop/peers/moqlivemock/.tools` is not part of a working copy: moving a working copy to a revision without the patch and running the script there leaves a `mlmsub` that connects to no relay here (`expected webtransport, got: Some("webtransport-h3")`), also after moving back. `scripts/ci/interop.sh` builds it again; a driver that is run by itself (`bun catalog.ts`) does not.
+
 `interop` and `packages/*` are one Bun workspace with one `bun.lock` in the repository root, so `@xmoq/moqt` and `@xmoq/msf` here are the working copies of `packages/moqt` and `packages/msf`.
 
 ## Checks

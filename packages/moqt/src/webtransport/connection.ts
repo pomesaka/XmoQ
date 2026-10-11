@@ -599,13 +599,17 @@ export interface FetchWriter {
 	 */
 	endOfRange(kind: RangeEnd, location: Location): Promise<void>;
 	/**
-	 * Everything was written: finishes the fetch stream and the request
-	 * stream, and the FETCH is over; `ended` resolves with `served`. Does
-	 * nothing on a FETCH that is over.
+	 * Everything was written: finishes the fetch stream, and the FETCH is
+	 * over; `ended` resolves with `served`. Does nothing on a FETCH that is
+	 * over.
 	 *
-	 * The subscriber then has `peerStreamEndTimeoutMs` (3 seconds) to end its
-	 * direction of the request stream, after which it is stopped, as after
-	 * `PublishedTrack.done()`. Nothing of that is reported here.
+	 * **This endpoint's direction of the request stream is not finished at
+	 * once**: the subscriber has `peerStreamEndTimeoutMs` (3 seconds) to end
+	 * its own first, which a subscriber does when it has read the fetch
+	 * stream, and this endpoint finishes its direction when it does, or when
+	 * that time is over. After that the subscriber has the same time again
+	 * before its direction is stopped, as after `PublishedTrack.done()`.
+	 * Nothing of that is reported here.
 	 */
 	close(): Promise<void>;
 	/**
@@ -987,6 +991,24 @@ export async function connectOver(
 		wait.timer = setTimeout(() => {
 			endPeerStreamWait(requestId, { type: "nothing-in-time" });
 			void applyInput((s) => s.expirePeerEnd(requestId));
+		}, peerStreamEndTimeoutMs);
+	};
+
+	/**
+	 * A FETCH of the peer was served and its fetch stream finished: the
+	 * subscriber gets the time of `startPeerStreamTimer` to end its direction
+	 * of the request stream first. When that is over this endpoint finishes
+	 * its own, and the wait of `startPeerStreamTimer` begins.
+	 */
+	const startServedFetchWait = (
+		requestId: bigint,
+		wait: PeerStreamWait,
+	): void => {
+		wait.timer = setTimeout(() => {
+			void applyInput((s) => s.finishServedFetchSend(requestId));
+			if (peerStreamWaits.get(requestId) === wait) {
+				startPeerStreamTimer(requestId, wait);
+			}
 		}, peerStreamEndTimeoutMs);
 	};
 
@@ -1546,7 +1568,9 @@ export async function connectOver(
 				// call, so that nothing was sent, and when the subscriber ended
 				// its direction meanwhile.
 				if (peerStreamWaits.get(requestId) === wait) {
-					startPeerStreamTimer(requestId, wait);
+					// The subscriber's turn first; the session finishes this
+					// endpoint's direction when the subscriber ends its own.
+					startServedFetchWait(requestId, wait);
 				}
 			},
 			reset(code = StreamResetErrorCode.CANCELLED) {

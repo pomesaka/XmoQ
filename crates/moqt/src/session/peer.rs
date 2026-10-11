@@ -907,15 +907,19 @@ impl Session {
         request.session == self.tag && self.peer.yet_to_come(request_id, request.id)
     }
 
-    /// Records that this endpoint ended its direction of the request stream
-    /// of a FETCH it answered with `FETCH_OK`, by a FIN or by a reset. From
-    /// here on a message of the peer on that stream gets no answer, and a
-    /// `REQUEST_UPDATE` among them uses up its Request ID (§10.1). Does
-    /// nothing for any other request.
+    /// Records that the answer to a FETCH this endpoint accepted with
+    /// `FETCH_OK` has ended: its fetch stream was finished or reset, or none
+    /// comes. From here on a message of the peer on the request stream gets
+    /// no answer, and a `REQUEST_UPDATE` among them uses up its Request ID
+    /// (§10.1). Does nothing for any other request.
+    ///
+    /// The endpoint may keep its direction of the request stream open for a
+    /// while after that, for the peer to end its own first; nothing is
+    /// answered on it all the same.
     ///
     /// WHY the caller has to say so: the streams are the caller's, and a
     /// `REQUEST_UPDATE` for a FETCH that is answered gets a `REQUEST_OK`
-    /// only while there is a direction to send it on. WHY no parameter of
+    /// only while the FETCH is being answered. WHY no parameter of
     /// such a late `REQUEST_UPDATE` closes the session, where one does
     /// while the FETCH is served: the peer sent it before it saw the end,
     /// and after a rejection the same message is not looked at either.

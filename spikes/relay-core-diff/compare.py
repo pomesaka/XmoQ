@@ -394,6 +394,8 @@ impl OutNames {
             | Action::PipeFetch { session, stream, .. }
             | Action::AbortFetchPipe { session, stream, .. }
             | Action::WriteFetchStream { session, stream, .. }
+            | Action::AbortFetchWrite { session, stream, .. }
+            | Action::StartFetchEndTimer { session, stream, .. }
             | Action::StartJoiningFetchTimer { session, stream } => streams.contains(&(session.0, stream.0)),
             Action::OpenDataStream { session, header, .. } => {
                 self.watched_aliases.contains(&(session.0, header.track_alias))
