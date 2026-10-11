@@ -24,6 +24,7 @@ import type {
 	PageFetchReport,
 	PageFetchServing,
 	PageProperty,
+	PageReceivedObject,
 	SubscriptionReport,
 	XmoqPage,
 } from "./xmoq-page.ts";
@@ -147,6 +148,26 @@ export interface Publisher {
 	send(): Promise<number>;
 	/** Sends `count` Objects like `send`, one after the other, and resolves with their Groups. */
 	sendBatch(count: number): Promise<number[]>;
+	/**
+	 * own-browser: sends the next Group as `objects` Objects of `bytes` bytes
+	 * each, on one stream, and resolves with the Group.
+	 */
+	sendLargeGroup?(objects: number, bytes: number): Promise<number>;
+	/**
+	 * own-browser: the Group `writeToSubgroup` writes to next, which is the
+	 * next Group; taken once for all the Objects of it.
+	 */
+	takeGroup?(): number;
+	/** own-browser: writes one Object to a subgroup stream that is opened at its first Object and left open. */
+	writeToSubgroup?(
+		group: number,
+		to: { subgroup: number; publisherPriority: number },
+		object: number,
+		payloadHex: string,
+		properties: PageProperty[],
+	): Promise<void>;
+	/** own-browser: finishes the streams `writeToSubgroup` opened for the Group. */
+	closeSubgroups?(group: number): Promise<void>;
 	/**
 	 * own-rust: ends its subscription with PUBLISH_DONE and publishes the
 	 * track anew on the same session, under the same Track Alias or the next.
@@ -613,6 +634,50 @@ async function startBrowserPublisher(
 			}
 			return groups;
 		},
+		async sendLargeGroup(objects, bytes) {
+			const group = nextGroup;
+			nextGroup += 1;
+			await onPage(
+				label,
+				`send a Group of ${objects} Objects`,
+				page.evaluate(
+					([groupId, count, length]) =>
+						window.xmoqOwn.sendLargeGroup(groupId, count, length),
+					[String(group), objects, bytes] satisfies [string, number, number],
+				),
+			);
+			return group;
+		},
+		takeGroup() {
+			const group = nextGroup;
+			nextGroup += 1;
+			return group;
+		},
+		writeToSubgroup: (group, to, object, hex, properties) =>
+			onPage(
+				label,
+				`write Object ${object} to Subgroup ${to.subgroup}`,
+				page.evaluate(
+					([g, s, priority, o, payload, with_]) =>
+						window.xmoqOwn.writeToSubgroup(g, s, priority, o, payload, with_),
+					[
+						String(group),
+						String(to.subgroup),
+						to.publisherPriority,
+						String(object),
+						hex,
+						properties,
+					] satisfies [string, string, number, string, string, PageProperty[]],
+				),
+			),
+		closeSubgroups: (group) =>
+			onPage(
+				label,
+				"finish the subgroup streams",
+				page.evaluate(([g]) => window.xmoqOwn.closeSubgroups(g), [
+					String(group),
+				] satisfies [string]),
+			),
 		sendUnfinished: () => sendIn(false),
 		streamsLeftOpen: () => leftOpen,
 		async end() {
@@ -809,6 +874,19 @@ export interface Subscriber {
 	 * page saw of it. The FETCH is cancelled after `timeoutMs`.
 	 */
 	fetch(fetch: PageFetch, timeoutMs: number): Promise<PageFetchReport>;
+	/** own-browser: how many Objects of the Group its subscription has delivered so far. */
+	objectsOfGroup?(group: number): Promise<number>;
+	/** own-browser: the Objects of the Group its subscription has delivered so far, in the order they came. */
+	receivedOfGroup?(group: number): Promise<PageReceivedObject[]>;
+	/**
+	 * own-browser: sends the FETCH, reads nothing of its fetch stream, and
+	 * gives it up after `cancelAfterMs`. Resolves with the End Location of
+	 * the FETCH_OK and how the FETCH ended.
+	 */
+	fetchAndLeaveUnread?(
+		fetch: PageFetch,
+		cancelAfterMs: number,
+	): Promise<{ endLocation: [string, string]; ended: string }>;
 	/** Resolves once the subscription has ended. Only the own clients can tell. */
 	outcome(timeoutMs?: number): Promise<SubscriptionOutcome>;
 	leave(way: LeaveWay): Promise<void>;
@@ -1096,6 +1174,36 @@ async function startBrowserSubscriber(
 				label,
 				"report its state",
 				page.evaluate(() => window.xmoqOwn.state()),
+			),
+		objectsOfGroup: (group) =>
+			onPage(
+				label,
+				"count the Objects of a Group",
+				page.evaluate(([groupId]) => window.xmoqOwn.objectsOfGroup(groupId), [
+					String(group),
+				] satisfies [string]),
+			),
+		async receivedOfGroup(group) {
+			const received: PageReceivedObject[] = JSON.parse(
+				await onPage(
+					label,
+					"list the Objects of a Group",
+					page.evaluate(([g]) => window.xmoqOwn.receivedOfGroup(g), [
+						String(group),
+					] satisfies [string]),
+				),
+			);
+			return received;
+		},
+		fetchAndLeaveUnread: (fetch, cancelAfterMs) =>
+			onPage(
+				label,
+				`send a ${fetch.type} FETCH, leave it unread and give it up`,
+				page.evaluate(
+					([asked, after]) => window.xmoqOwn.fetchAndLeaveUnread(asked, after),
+					[fetch, cancelAfterMs] satisfies [PageFetch, number],
+				),
+				cancelAfterMs + STEP_TIMEOUT_MS,
 			),
 		async fetch(fetch, timeoutMs) {
 			const reported: PageFetchReport = JSON.parse(

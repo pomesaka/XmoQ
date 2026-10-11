@@ -9,6 +9,8 @@ use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::name::Location;
 use xmoq_moqt::session::Role;
 
+use crate::cache::CachedObject;
+
 /// Names one MOQT session. The I/O side picks the numbers and never reuses one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionKey(pub u64);
@@ -31,8 +33,10 @@ pub struct OwnRequestKey(pub u64);
 
 /// What a fetch stream the relay writes itself carries after its header, in
 /// the order of the stream ([`Action::WriteFetchStream`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchPiece {
+    /// An Object from the cache of its track.
+    Object(CachedObject),
     /// An End of Range indicator with this Location (§11.4.4.2).
     EndOfRange(RangeEnd, Location),
 }
@@ -439,6 +443,9 @@ pub enum Action {
     /// `request_id` and then `pieces`, one after the other, and end the
     /// stream with a FIN. The end is reported with
     /// [`Event::FetchStreamWritten`].
+    ///
+    /// The pieces are of one Group or indicators alone, so they are encoded
+    /// alike in either Group Order.
     WriteFetchStream {
         /// The session.
         session: SessionKey,
@@ -447,7 +454,8 @@ pub enum Action {
         stream: StreamKey,
         /// The Request ID of the FETCH the stream answers.
         request_id: u64,
-        /// What follows the header.
+        /// What follows the header. The Objects are shared with the cache
+        /// and with the subgroup streams they went out on.
         pieces: Vec<FetchPiece>,
         /// How long the subscriber may take nothing, in milliseconds, before
         /// the stream is reset with `TOO_FAR_BEHIND`: for the stream to be

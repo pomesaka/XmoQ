@@ -220,15 +220,21 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		relays: ["own"],
 	},
 	{
-		name: "own-browser gives its FETCH up while moqtail-rust does not answer; the relay cancels its own",
+		name: "own-browser gives its FETCH for a Group the relay no longer holds up while moqtail-rust does not answer; the relay cancels its own",
 		script: "fetch.ts",
 		args: ["--fetch", "cancelled"],
 		relays: ["own"],
 	},
 	{
-		name: "own-browser fetches from own-rust, which refuses a FETCH",
+		name: "own-browser fetches a Group the relay no longer holds from own-rust, which refuses a FETCH",
 		script: "fetch.ts",
 		args: ["--fetch", "publisher-refuses"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser fetches the latest Group of own-rust, which answers no FETCH; the relay answers",
+		script: "fetch.ts",
+		args: ["--fetch", "latest-group"],
 		relays: ["moqtail", "own"],
 	},
 	{
@@ -268,6 +274,18 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		name: "own-browser gives its FETCH up while the own page serves it; the page sees it cancelled",
 		script: "fetch.ts",
 		args: ["--fetch", "page-cancelled"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser asks for a Group of 7.2 MB the relay holds, reads nothing and gives up; the relay gives the FETCH up",
+		script: "fetch.ts",
+		args: ["--fetch", "page-large-group-cancelled"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser fetches a Group on two subgroup streams from the relay's cache, with a Joining FETCH in its middle and whole",
+		script: "fetch.ts",
+		args: ["--fetch", "page-subgroups"],
 		relays: ["own"],
 	},
 	{

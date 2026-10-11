@@ -9,6 +9,7 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 
+mod cache;
 mod fetch;
 mod filters;
 mod routing;

@@ -9,12 +9,12 @@ use tokio::time::timeout;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
-use xmoq_moqt::fetch::FetchHeader;
+use xmoq_moqt::fetch::{FetchEvent, FetchHeader, FetchObject, FetchStreamDecoder};
 use xmoq_moqt::message::{
     ControlMessage, FetchRange, PublishDone, ReasonPhrase, RequestError, Subscribe,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
-use xmoq_moqt::params::Parameter;
+use xmoq_moqt::params::{GroupOrder, Parameter};
 use xmoq_moqt::session::{
     PeerRequest, PeerRequestId, PeerRequestOpened, RequestEvent, RequestId, Role, Session,
     Transport,
@@ -521,6 +521,7 @@ const NOTHING: Held = Held {
         asks: 0,
         declined: 0,
         early_streams: 0,
+        cached_bytes: 0,
         remembered_subgroups: 0,
         namespaces: 0,
         pending_tracks: 0,
@@ -2357,6 +2358,128 @@ async fn held_when(hub: &HubHandle<MemoryConnection>, there: impl Fn(&Held) -> b
     .expect("in time")
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_fetch_for_the_latest_group_is_answered_from_the_relays_cache() {
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, _task) = hub::spawn(HubConfig {
+        log: Some(log),
+        ..HubConfig::default()
+    });
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    // Three Objects of Group 0, with nobody subscribed: 30 bytes cached.
+    let objects: Vec<_> = (0..3).map(|id| object(id, 10)).collect();
+    let data = publisher.send_objects(&objects).await;
+    data.finish();
+    held_when(&hub, |held| held.relay.cached_bytes == 30).await;
+
+    // {0, 0} to the end of Group 2: up to the Largest Object {0, 2}.
+    let mut alice = Peer::connect(&hub, true).await;
+    let mut request = alice.start_fetching(vec![]).await;
+    let RequestEvent::FetchEstablished { end_location, .. } = alice.answer(&mut request).await
+    else {
+        panic!("no FETCH_OK");
+    };
+    assert_eq!(end_location, at(0, 3));
+    let mut body = alice.fetch_body(&request).await;
+    let (bytes, end) = read_fetch(&mut body).await;
+    assert_eq!(end, FetchChunk::End(StreamEnd::Fin));
+    // What follows the header, as `crates/moqt` reads it.
+    let mut decoder = FetchStreamDecoder::new(1024, GroupOrder::Ascending);
+    decoder.push(&[0x05, 0x00]).unwrap();
+    decoder.push(&bytes).unwrap();
+    let mut fetched = Vec::new();
+    while let Some(event) = decoder.next_event().unwrap() {
+        fetched.push(event);
+    }
+    let expected: Vec<FetchEvent> = std::iter::once(FetchEvent::Header(FetchHeader {
+        request_id: request.id.value(),
+    }))
+    .chain((0..3).map(|object_id| {
+        FetchEvent::Object(FetchObject {
+            group_id: 0,
+            subgroup_id: Some(0),
+            object_id,
+            publisher_priority: 0,
+            properties: vec![],
+            payload: vec![0x61; 10],
+        })
+    }))
+    .collect();
+    assert_eq!(fetched, expected);
+    // The publisher was asked nothing.
+    assert!(
+        timeout(Duration::from_millis(50), publisher.connection.accept_bi())
+            .await
+            .is_err()
+    );
+    // Alice ends her direction, and the relay its own after her.
+    request.send.finish();
+    assert_eq!(
+        request_end(&mut request.reader).await,
+        RequestStreamEvent::Closed(RequestClose::Fin)
+    );
+    let held = held_when(&hub, |held| held.relay.fetch_ends == 0).await;
+    assert_eq!(held.relay.fetches, 0);
+    // The log says what was written, and how the writing ended.
+    let lines = logged(&mut lines);
+    for line in [
+        "WRITE_FETCH_STREAM session=1 request_id=0 pieces=3",
+        "FETCH_WRITE_ENDED session=1 stream=1 finished pieces=3",
+    ] {
+        assert!(lines.contains(&line.to_string()), "{line}: {lines:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_the_relay_writes_from_its_cache_stops_when_its_subscriber_cancels() {
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, _task) = hub::spawn(HubConfig {
+        log: Some(log),
+        ..HubConfig::default()
+    });
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    // Far more than a stream's window lets wait.
+    let size = 4 * STREAM_WINDOW;
+    let objects: Vec<_> = (0..12).map(|id| object(id, size)).collect();
+    let data = publisher.send_objects(&objects).await;
+    data.finish();
+    held_when(&hub, |held| held.relay.cached_bytes == 12 * size).await;
+
+    let mut alice = Peer::connect(&hub, true).await;
+    let mut request = alice.start_fetching(vec![]).await;
+    assert!(matches!(
+        alice.answer(&mut request).await,
+        RequestEvent::FetchEstablished { .. }
+    ));
+    // Alice has the stream and takes nothing of it: the relay waits in a
+    // write. Then she cancels her FETCH by resetting the request stream
+    // (§5.2), with CANCELLED (0x1).
+    let mut body = alice.fetch_body(&request).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    request.send.reset(0x1);
+    // The fetch stream is reset, with less than everything on it.
+    let (bytes, end) = read_fetch(&mut body).await;
+    assert_eq!(end, FetchChunk::End(StreamEnd::Aborted(Some(0x1))));
+    assert!(bytes.len() < 12 * size, "{} bytes", bytes.len());
+    let held = held_when(&hub, |held| held.relay.fetches == 0).await;
+    assert_eq!(held.relay.fetch_ends, 0);
+    let lines = logged(&mut lines);
+    assert!(
+        lines.contains(&"ABORT_FETCH_WRITE session=1 stream=1 code=0x1".to_string()),
+        "{lines:?}"
+    );
+    // And how the writing ended: some of the 12 pieces, cut by the order.
+    let ended = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("FETCH_WRITE_ENDED session=1 stream=1 aborted pieces="))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    let (pieces, code) = ended.split_once(' ').unwrap();
+    assert!(pieces.parse::<usize>().unwrap() < 12, "{ended}");
+    assert_eq!(code, "code=0x1");
+}
+
 /// The next thing on a request stream has to be its end; a message would be
 /// an answer to something that gets none.
 async fn end_within(
@@ -2514,4 +2637,94 @@ async fn the_request_stream_of_a_fetch_that_was_served_ends_as_the_shared_table_
     }
     // A table that lost rows would pass.
     assert_eq!(rows, 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_object_from_the_cache_keeps_its_subgroup_its_priority_and_its_properties() {
+    use xmoq_moqt::kvp::KeyValuePair;
+
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    // Group 0 on two streams: Subgroup 2 with the Publisher Priority 200
+    // has the Objects 0 and 3, Subgroup 5 with the priority 7 the Objects 1
+    // and 2. Three of them have an Object Property: a number (0x10) or
+    // bytes (0x0D).
+    let with = |object_id, properties, payload: &[u8]| SubgroupObject {
+        object_id,
+        properties,
+        status: ObjectStatus::Normal,
+        payload: payload.to_vec(),
+    };
+    let number = |value| vec![KeyValuePair::varint(0x10, value).unwrap()];
+    let bytes = || vec![KeyValuePair::bytes(0x0d, vec![9, 9]).unwrap()];
+    let streams = [
+        (
+            (2, 200),
+            vec![with(0, number(111), &[1, 2, 3]), with(3, bytes(), &[])],
+        ),
+        (
+            (5, 7),
+            vec![with(1, vec![], &[4]), with(2, number(222), &[5, 6])],
+        ),
+    ];
+    // Kept open: a stream that is dropped is not one that was finished.
+    let mut streams_kept = Vec::new();
+    for ((subgroup_id, priority), objects) in streams {
+        let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
+            track_alias: PUBLISHER_ALIAS,
+            group_id: 0,
+            subgroup_id: SubgroupId::Explicit(subgroup_id),
+            publisher_priority: Some(priority),
+            properties: true,
+            end_of_group: false,
+            first_object: true,
+        });
+        for object in &objects {
+            encoder.object(object).unwrap();
+        }
+        let mut send = publisher.connection.open_uni().await.unwrap();
+        send.write_all(&encoder.take_bytes()).await.unwrap();
+        streams_kept.push(send);
+    }
+    // Six bytes of payload, two numbers of eight bytes and two bytes.
+    held_when(&hub, |held| held.relay.cached_bytes == 24).await;
+
+    let mut alice = Peer::connect(&hub, true).await;
+    let mut request = alice.start_fetching(vec![]).await;
+    assert!(matches!(
+        alice.answer(&mut request).await,
+        RequestEvent::FetchEstablished { .. }
+    ));
+    let mut body = alice.fetch_body(&request).await;
+    let (written, end) = read_fetch(&mut body).await;
+    assert_eq!(end, FetchChunk::End(StreamEnd::Fin));
+    let mut decoder = FetchStreamDecoder::new(1024, GroupOrder::Ascending);
+    decoder.push(&[0x05, 0x00]).unwrap();
+    decoder.push(&written).unwrap();
+    let mut fetched = Vec::new();
+    while let Some(event) = decoder.next_event().unwrap() {
+        fetched.push(event);
+    }
+    // In the order of the Object IDs, each as it came.
+    let object = |object_id, subgroup_id, publisher_priority, properties, payload: &[u8]| {
+        FetchEvent::Object(FetchObject {
+            group_id: 0,
+            subgroup_id: Some(subgroup_id),
+            object_id,
+            publisher_priority,
+            properties,
+            payload: payload.to_vec(),
+        })
+    };
+    assert_eq!(
+        fetched,
+        [
+            FetchEvent::Header(FetchHeader { request_id: 0 }),
+            object(0, 2, 200, number(111), &[1, 2, 3]),
+            object(1, 5, 7, vec![], &[4]),
+            object(2, 5, 7, number(222), &[5, 6]),
+            object(3, 2, 200, bytes(), &[]),
+        ]
+    );
 }
