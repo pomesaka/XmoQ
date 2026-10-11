@@ -80,6 +80,10 @@ struct Args {
     /// as lost. A run that waits for the relay to notice a vanished peer
     /// sets it lower than the default.
     idle_timeout: Duration,
+    /// `--max-sessions`: how many sessions the relay takes at once, where a
+    /// run wants another number than the relay's own
+    /// ([`HubConfig::max_sessions`]). For measuring.
+    max_sessions: Option<usize>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -87,6 +91,7 @@ fn parse_args() -> Result<Args> {
     let mut cert_file = None;
     let mut key_file = None;
     let mut idle_timeout = xmoq_moqt_io::wt::IDLE_TIMEOUT;
+    let mut max_sessions = None;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -103,6 +108,7 @@ fn parse_args() -> Result<Args> {
                 }
                 idle_timeout = Duration::from_millis(millis);
             }
+            "--max-sessions" => max_sessions = Some(value.parse().context("--max-sessions")?),
             other => bail!("unknown flag {other}"),
         }
     }
@@ -111,6 +117,7 @@ fn parse_args() -> Result<Args> {
         cert_file: cert_file.context("--cert-file is required")?,
         key_file: key_file.context("--key-file is required")?,
         idle_timeout,
+        max_sessions,
     })
 }
 
@@ -118,10 +125,13 @@ fn parse_args() -> Result<Args> {
 async fn main() -> Result<()> {
     let args = parse_args()?;
     let log = Log::stdout();
-    let config = HubConfig {
+    let mut config = HubConfig {
         log: Some(log.clone()),
         ..HubConfig::default()
     };
+    if let Some(max_sessions) = args.max_sessions {
+        config.max_sessions = max_sessions;
+    }
     let limits = quic_limits(&config.streams, args.idle_timeout);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
