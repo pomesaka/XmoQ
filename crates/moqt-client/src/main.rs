@@ -662,13 +662,14 @@ async fn sleep_until(deadline: Option<Instant>) {
 }
 
 /// The Largest Object of the track a client publishes (§10.2.11): the
-/// Location of the last Object it sent. Each Object is Object 0 of a Group
-/// of its own, and the Groups go up.
+/// Location of the last Object it began to send (§5.1.2 counts an Object
+/// from its first byte). Each Object is Object 0 of a Group of its own, and
+/// the Groups go up.
 #[derive(Debug, Default)]
 struct Largest(Option<Location>);
 
 impl Largest {
-    /// Notes that the Object of the Group `group_id` was sent.
+    /// Notes that the Object of the Group `group_id` is being sent.
     fn sent(&mut self, group_id: u64) {
         self.0 = Some(Location {
             group: group_id,

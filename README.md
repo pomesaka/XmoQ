@@ -28,6 +28,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [What becomes of a SUBSCRIBE the peer sends](fixtures/peer-subscribe/README.md)
 - [What becomes of a FETCH the peer sends](fixtures/peer-fetch/README.md)
 - [Whether the SUBSCRIBE of a Joining FETCH is yet to come](fixtures/joining-request-id/README.md)
+- [What a publisher answers a FETCH range with, from what it published](fixtures/published-fetch/README.md)
 - [Catalogs of MSF, from another implementation and written by hand](fixtures/msf-01/README.md)
 - [A LOC video stream of another implementation](fixtures/loc-04/README.md)
 - [Browser client library `@xmoq/moqt`](packages/moqt/README.md)
