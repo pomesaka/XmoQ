@@ -7,10 +7,14 @@
 //               (150 when left out; 0 plays each as it comes)
 //   ?join=no    waits for the next key frame, as without the Joining FETCH
 
-import { playAudioTrack, playVideoTrack } from "@xmoq/media";
+import {
+	type AudioPlayback,
+	playAudioTrack,
+	playVideoTrack,
+	type VideoPlayback,
+} from "@xmoq/media";
 import {
 	audioTrackName,
-	type Broadcast,
 	connectToRelay,
 	DECODER_CODEC,
 	HERE,
@@ -19,6 +23,7 @@ import {
 	joinRoom,
 	SAMPLE_RATE,
 	say,
+	through,
 	trackName,
 } from "./shared.ts";
 
@@ -56,29 +61,10 @@ async function main(): Promise<void> {
 	// Where rooms run, the room says where the broadcast is; else it is the
 	// relay this page was served with.
 	const room = joinRoom(`viewer-${Math.floor(Math.random() * 1000)}`);
-	let broadcast: Broadcast = HERE;
-	if (room !== undefined) {
-		say("asking the room where the broadcast is");
-		const found = await room.broadcast;
-		if (found === null) {
-			throw new Error(
-				"nobody publishes in this room: open /publish, and load this page again",
-			);
-		}
-		broadcast = found;
-	}
-	// `?via=PORT`: the relay through another port of this machine, where
-	// something stands in between (`spikes/lossy-link`).
-	const via = query.get("via");
-	if (via !== null) {
-		const url = new URL(broadcast.relayUrl);
-		url.port = via;
-		broadcast = { ...broadcast, relayUrl: url.href };
-	}
-	document.body.dataset.broadcast = JSON.stringify(broadcast);
-	say("connecting");
-	const connection = await connectToRelay(broadcast);
-	say("subscribing");
+	if (room !== undefined) await room.broadcast;
+	/** What the first line under the picture says of the session. */
+	let link = "connecting";
+	let sessions = 0;
 
 	// The time of a frame or a piece is the publisher's clock, in
 	// microseconds. WHY the smallest difference to this page's clock is taken
@@ -109,12 +95,13 @@ async function main(): Promise<void> {
 	let lastShown: number | undefined;
 	let shown = 0;
 	const stalls: { from: number; to: number }[] = [];
-	const playback = await playVideoTrack(connection, {
-		trackNamespace: namespace(broadcast.namespace),
+	let playback: VideoPlayback | undefined;
+	let audio: AudioPlayback | undefined;
+	const videoOptions = {
 		trackName: trackName(),
 		codec: DECODER_CODEC,
 		joiningFetch: query.get("join") !== "no",
-		onFrame(frame) {
+		onFrame(frame: VideoFrame) {
 			firstFrameAfterMs ??= Math.round(performance.now() - began);
 			arrived.video.add(Date.now() - frame.timestamp / 1000);
 			probe.drawImage(
@@ -135,7 +122,7 @@ async function main(): Promise<void> {
 				mark: (red ?? 0) > 128,
 			});
 		},
-	});
+	};
 	const repaint = (): void => {
 		const now = Date.now();
 		const due = frames.filter((each) => each.due <= now);
@@ -177,18 +164,19 @@ async function main(): Promise<void> {
 	// only after a click); the times are measured either way.
 	let sound: AudioContext | undefined;
 	let tooLate = 0;
+	/** When a piece of audio was last in time to be sounded, by this page's clock. */
+	let lastHeard: number | undefined;
 	let markHeard = false;
 	document.getElementById("sound")?.addEventListener("click", () => {
 		sound ??= new AudioContext({ sampleRate: SAMPLE_RATE });
 		void sound.resume();
 	});
-	const audio = await playAudioTrack(connection, {
-		trackNamespace: namespace(broadcast.namespace),
+	const audioOptions = {
 		trackName: audioTrackName(),
 		codec: "opus",
 		sampleRate: SAMPLE_RATE,
 		numberOfChannels: 1,
-		onData(data) {
+		onData(data: AudioData) {
 			const samples = new Float32Array(data.numberOfFrames);
 			data.copyTo(samples, { planeIndex: 0, format: "f32-planar" });
 			const timeMs = data.timestamp / 1000;
@@ -212,14 +200,16 @@ async function main(): Promise<void> {
 			source.buffer = buffer;
 			source.connect(sound.destination);
 			source.start(sound.currentTime + (due - now) / 1000);
+			lastHeard = now;
 		},
-	}).catch((error: unknown) => {
-		console.log(`no audio: ${String(error)}`);
-		return undefined;
-	});
+	};
 
 	setInterval(() => {
-		const stats = playback.stats();
+		const stats = playback?.stats() ?? {
+			decoded: 0,
+			dropped: {},
+			joiningFetch: "not-sent",
+		};
 		const heard = audio?.stats();
 		// The marks of the two tracks that belong together: the same moment
 		// of the publisher's clock, within half the time between two marks.
@@ -234,7 +224,7 @@ async function main(): Promise<void> {
 		const lastMark = together.at(-1);
 		say(
 			[
-				`buffer ${BUFFER_MS} ms`,
+				`${link} · buffer ${BUFFER_MS} ms`,
 				`video: ${stats.decoded} frames, first after ${firstFrameAfterMs ?? "?"} ms; came ${arrived.video.text()} after it was made, shown ${played.video.text()} after; dropped ${JSON.stringify(stats.dropped)}; joining FETCH ${stats.joiningFetch}`,
 				`audio: ${heard === undefined ? "none" : `${heard.decoded} pieces; came ${arrived.audio.text()} after it was made, sounded ${played.audio.text()} after; ${tooLate} too late; dropped ${JSON.stringify(heard.dropped)}${sound?.state === "running" ? "" : " — click “sound” to hear it"}`}`,
 				`picture and sound: ${together.length} marks; the last one: the picture ${lastMark === undefined ? "?" : Math.round(lastMark.played)} ms after the sound (${lastMark === undefined ? "?" : Math.round(lastMark.sent)} ms as they were sent)`,
@@ -249,14 +239,55 @@ async function main(): Promise<void> {
 			shown,
 			stalls,
 			lastShown: lastShown ?? null,
+			lastHeard: lastHeard ?? null,
+			sessions,
+			link,
 			dropped: { video: stats.dropped, audio: heard?.dropped ?? {} },
 			arrived: { video: arrived.video.text(), audio: arrived.audio.text() },
 			played: { video: played.video.text(), audio: played.audio.text() },
 			together,
 		});
 	}, 500);
-	const end = await playback.ended;
-	say(`the playing ended: ${end.type}`);
+	// One session after the other: when the session ends, or the tracks do
+	// (their publisher went), the page says so and connects again after two
+	// seconds, asking the room anew where the broadcast is.
+	for (;;) {
+		const found = room === undefined ? HERE : room.current();
+		if (found === null) {
+			link = "nobody publishes in this room; asking again every 2 s";
+		} else {
+			const broadcast = through(found);
+			document.body.dataset.broadcast = JSON.stringify(broadcast);
+			try {
+				link = "connecting";
+				const connection = await connectToRelay(broadcast);
+				const trackNamespace = namespace(broadcast.namespace);
+				const video = await playVideoTrack(connection, {
+					...videoOptions,
+					trackNamespace,
+				});
+				playback = video;
+				audio = await playAudioTrack(connection, {
+					...audioOptions,
+					trackNamespace,
+				}).catch((error: unknown) => {
+					console.log(`no audio: ${String(error)}`);
+					return undefined;
+				});
+				sessions += 1;
+				link = `playing (session ${sessions})`;
+				const how = await Promise.race([
+					connection.closed.then((close) => `the session ended (${close.type})`),
+					video.ended.then((end) => `the video track ended (${end.type})`),
+				]);
+				connection.close();
+				link = `${how} at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
+			} catch (error) {
+				link = `could not play (${String(error).slice(0, 120)}); trying again every 2 s`;
+			}
+		}
+		await new Promise((resolve) => setTimeout(resolve, 2000));
+	}
 }
 
 main().catch((error: unknown) => {

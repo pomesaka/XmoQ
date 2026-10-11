@@ -19,4 +19,6 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 **A room** comes with it: the spike in `spikes/durable-objects-room`, a Durable Object run locally with Miniflare (`mise run demo` installs it there the first time). Under the picture are a chat and how many are connected, and the watching page learns from the room where the broadcast is; `?room=NAME` on both pages is another room. The broadcast is known to the room as long as the publishing page is open.
 
+**A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again every 2 seconds.
+
 No catalog. The times are compared on one machine, where the two pages have the same clock.

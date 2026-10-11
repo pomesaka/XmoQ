@@ -21,6 +21,8 @@ export interface AudioTrackEncoderOptions {
 	numberOfChannels: number;
 	/** Bits a second; the encoder's own choice when left out. */
 	bitrate?: number;
+	/** `AudioTrackPublisherOptions.chunksPerGroup`. */
+	chunksPerGroup?: number;
 }
 
 export interface AudioTrackEncoderStats {
@@ -85,6 +87,9 @@ export async function createAudioTrackEncoder(
 		trackName: options.trackName,
 		firstGroup: options.firstGroup,
 		epoch,
+		...(options.chunksPerGroup === undefined
+			? {}
+			: { chunksPerGroup: options.chunksPerGroup }),
 	});
 	const stats: AudioTrackEncoderStats = {
 		submitted: 0,
@@ -180,8 +185,8 @@ export interface AudioPlayback {
 
 /**
  * Subscribes to an audio track and decodes it. **Objects are decoded in the
- * order they come**; one whose Group is not after the last one decoded is
- * dropped (`late`). Nothing waits for an Object that does not come: the
+ * order they come**; one that is not after the last one decoded, by its
+ * Group and its Object ID, is dropped (`late`). Nothing waits for an Object that does not come: the
  * decoder gets what there is.
  */
 export async function playAudioTrack(
@@ -247,7 +252,7 @@ export async function playAudioTrack(
 	if (options.signal?.aborted) stop();
 	const ended = (async (): Promise<SubscriptionEnd> => {
 		const reader = subscription.objects.getReader();
-		let last: bigint | undefined;
+		let last: { group: bigint; object: bigint } | undefined;
 		for (;;) {
 			let next: Awaited<ReturnType<typeof reader.read>>;
 			try {
@@ -262,7 +267,11 @@ export async function playAudioTrack(
 				drop("empty");
 				continue;
 			}
-			if (last !== undefined && groupId <= last) {
+			if (
+				last !== undefined &&
+				(groupId < last.group ||
+					(groupId === last.group && object.objectId <= last.object))
+			) {
 				drop("late");
 				continue;
 			}
@@ -271,7 +280,7 @@ export async function playAudioTrack(
 				drop("no-time");
 				continue;
 			}
-			last = groupId;
+			last = { group: groupId, object: object.objectId };
 			if (decoder.state !== "configured") continue;
 			decoder.decode(
 				new EncodedAudioChunk({

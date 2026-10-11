@@ -23,6 +23,7 @@ import {
 	namespace,
 	joinRoom,
 	say,
+	through,
 	trackName,
 	WIDTH,
 } from "./shared.ts";
@@ -151,8 +152,6 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 }
 
 async function main(): Promise<void> {
-	say("connecting");
-	const connection = await connectToRelay();
 	const encoder = await createVideoTrackEncoder({
 		trackNamespace: namespace(),
 		trackName: trackName(),
@@ -183,6 +182,10 @@ async function main(): Promise<void> {
 			codec: "opus",
 			sampleRate: SAMPLE_RATE,
 			numberOfChannels: 1,
+			// `?audioGroup=N` puts N chunks of audio into a Group, on one stream.
+			chunksPerGroup: Number(
+				new URLSearchParams(location.search).get("audioGroup") ?? 1,
+			),
 		});
 		const sound = audio;
 		if (audioSource === "mic") {
@@ -193,22 +196,43 @@ async function main(): Promise<void> {
 			tone((data) => sound.encode(data));
 		}
 	}
-	connection.serve({
-		subscribe(request) {
-			if (encoder.publisher.subscribe(request)) return;
-			if (audio?.publisher.subscribe(request)) return;
-			request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-		},
-		fetch(request) {
-			if (encoder.publisher.fetch(request)) return;
-			if (audio?.publisher.fetch(request)) return;
-			request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-		},
-	});
-	await connection.publishNamespace(namespace());
-	// The room is told where this broadcast is, for viewers to find it;
-	// that holds as long as this page is connected to the room.
-	joinRoom("publisher")?.publish(HERE);
+	/** What the line under the picture says of the session. */
+	let link = "connecting";
+	// One session after the other: the encoders go on, and when the session
+	// ends the page connects again after two seconds and announces anew.
+	const room = joinRoom("publisher");
+	void (async () => {
+		for (let session = 1; ; session++) {
+			try {
+				link = "connecting";
+				const connection = await connectToRelay(through(HERE));
+				connection.serve({
+					subscribe(request) {
+						if (encoder.publisher.subscribe(request)) return;
+						if (audio?.publisher.subscribe(request)) return;
+						request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
+					},
+					fetch(request) {
+						if (encoder.publisher.fetch(request)) return;
+						if (audio?.publisher.fetch(request)) return;
+						request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
+					},
+				});
+				await connection.publishNamespace(namespace());
+				// The room is told where this broadcast is, for viewers to
+				// find it; that holds as long as this page is connected to
+				// the room.
+				room?.publish(HERE);
+				link = `publishing (session ${session})`;
+				const close = await connection.closed;
+				link = `the session ended (${close.type}) at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
+			} catch (error) {
+				link = `could not publish (${String(error).slice(0, 120)}); trying again every 2 s`;
+			}
+			document.body.dataset.link = link;
+			await new Promise((resolve) => setTimeout(resolve, 2000));
+		}
+	})();
 	const onFrame = (frame: VideoFrame): void => {
 		encoder.encode(frame);
 	};
@@ -223,11 +247,10 @@ async function main(): Promise<void> {
 		const stats = encoder.stats();
 		const sent = encoder.publisher.stats();
 		say(
-			`video: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
+			`${link}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
 		);
 	}, 500);
 	void encoder.failed.then((error) => say(`the encoder failed: ${String(error)}`));
-	void connection.closed.then((close) => say(`the session ended: ${close.type}`));
 }
 
 main().catch((error: unknown) => {
