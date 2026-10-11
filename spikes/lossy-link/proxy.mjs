@@ -11,6 +11,12 @@
 // `jitter` are milliseconds: a datagram is held for `delay` plus up to
 // `jitter`, each way, so datagrams can pass each other. `/stats` says how
 // many passed and how many were dropped.
+//
+// A link with no more than so much room: `rate` (kbit/s of UDP payload, each
+// way on its own, shared by every client; 0 for no limit) and `queue` (how
+// many milliseconds of datagrams may wait for the link; one that would wait
+// longer is dropped, and counted as `overflowed`). `delay` comes after the wait.
+//   curl 'http://127.0.0.1:45387/set?rate=3000&queue=100&delay=50'
 import { createSocket } from "node:dgram";
 import { createServer } from "node:http";
 
@@ -24,8 +30,20 @@ const control = argument("control", listen + 1);
 
 // `up` and `down` are loss for one way alone, on top of `loss`: from the
 // client to the relay, and from the relay to the client.
-const link = { loss: 0, delay: 0, jitter: 0, up: 0, down: 0 };
-const stats = { passed: 0, dropped: 0 };
+const link = { loss: 0, delay: 0, jitter: 0, up: 0, down: 0, rate: 0, queue: 100 };
+const stats = { passed: 0, dropped: 0, overflowed: 0 };
+// When the link of each way has sent what is waiting for it. No queue is
+// kept: a datagram's turn is counted when it comes, and a timer sends it then.
+const free = { up: 0, down: 0 };
+// How long the datagram waits for the link, or undefined if the queue is full.
+const waitForLink = (way, length) => {
+	if (link.rate <= 0) return 0;
+	const now = performance.now();
+	const begins = Math.max(now, free[way]);
+	if (begins - now > link.queue) return undefined;
+	free[way] = begins + (length * 8) / link.rate;
+	return free[way] - now;
+};
 // Every datagram of the last while: when, which way, how long, and whether
 // it was dropped. `/log` gives them and begins anew.
 let log = [];
@@ -36,8 +54,14 @@ const pass = (send, way, length) => {
 		stats.dropped += 1;
 		return;
 	}
+	const queued = waitForLink(way, length);
+	if (queued === undefined) {
+		stats.overflowed += 1;
+		if (log.length > 0) log[log.length - 1][3] = 2;
+		return;
+	}
 	stats.passed += 1;
-	const wait = link.delay + Math.random() * link.jitter;
+	const wait = queued + link.delay + Math.random() * link.jitter;
 	if (wait <= 0) send();
 	else setTimeout(send, wait);
 };
@@ -64,7 +88,7 @@ front.bind(listen, "127.0.0.1");
 createServer((request, response) => {
 	const url = new URL(request.url ?? "/", "http://127.0.0.1");
 	if (url.pathname === "/set") {
-		for (const name of ["loss", "delay", "jitter", "up", "down"]) {
+		for (const name of ["loss", "delay", "jitter", "up", "down", "rate", "queue"]) {
 			const value = url.searchParams.get(name);
 			if (value !== null) link[name] = Number(value);
 		}

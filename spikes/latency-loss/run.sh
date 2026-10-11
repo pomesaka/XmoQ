@@ -37,7 +37,9 @@ relay=$!
 proxy=$!
 trap 'kill "${publisher:-}" "$proxy" "$relay" 2>/dev/null || true' EXIT
 sleep 1
-curl -s "http://127.0.0.1:$control/set?loss=0&up=0&down=$loss&delay=$delay&jitter=0" > /dev/null
+# RATE (kbit/s, 0 for no limit) and QUEUE (ms of datagrams that may wait): a link that has no
+# more room than that, each way, shared by the viewers. What does not fit in the queue is dropped.
+curl -s "http://127.0.0.1:$control/set?loss=0&up=0&down=$loss&delay=$delay&jitter=0&rate=${RATE:-0}&queue=${QUEUE:-100}" > /dev/null
 # FRAME_MS and GROUP_SECONDS: for a file that is no video of 25 frames a second with a Group a
 # second (20 and 0.2 for the shape of audio: 50 Objects a second, 10 to a Group).
 frame_ms=${FRAME_MS:-40}
