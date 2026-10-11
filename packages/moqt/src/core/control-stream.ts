@@ -5,6 +5,8 @@ import type { SessionOutput } from "./session-output.ts";
 /** Setup Option types of §10.3.1. A client must not receive the first two. */
 const SETUP_OPTION_PATH = 0x01n;
 const SETUP_OPTION_AUTHORITY = 0x05n;
+/** §10.3.1.4: "The AUTHORIZATION TOKEN Setup Option (Option Type 0x03)". */
+export const SETUP_OPTION_AUTHORIZATION_TOKEN = 0x03n;
 export const SETUP_OPTION_MOQT_IMPLEMENTATION = 0x07n;
 
 export interface PeerControlStream {

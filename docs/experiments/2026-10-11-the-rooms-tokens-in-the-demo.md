@@ -55,6 +55,20 @@ Decided on 2026-10-11: a token is given to a connection of `@xmoq/moqt` once (`a
 
 `bun demo/serve.ts --auth` again, the pages giving the token to their connection: a publisher with a token publishes; a viewer with one has 120 frames and 200 pieces in 4 seconds; each without is refused and says so. The same four results.
 
+## Afterwards: the token in SETUP
+
+A connection of `@xmoq/moqt` that was given a token now sends it in SETUP too, as Setup Option 0x03 (§10.3.1.4: "functionally equivalent to the AUTHORIZATION TOKEN message parameter"), before MOQT_IMPLEMENTATION; one without sends SETUP as before (a test has the bytes of both). The relay that looks at it was not in this tree: it was built from the change that adds it (`tptrowxp`), copied out of the repository, and run with `--auth-setup on` (`bun demo/serve.ts --auth --auth-setup --relay-binary …`).
+
+| The page | Seen |
+|---|---|
+| publishes, with a token | "publishing (session 1)" |
+| watches, with a token | 120 frames and 189 pieces of audio in 4 seconds |
+| publishes or watches, `?token=no` | The session is closed, again at every try. **What the page is told differs from try to try**: "the peer closed the session: code=2 reason=authorization"; or "the session failed: the peer stopped this endpoint's control stream"; or "the peer closed its control stream"; or "NetworkError: The stream was aborted by the remote server"; and with the sound alone the page had its SUBSCRIBE under way and saw "the session ended (peer)". The relay closes the session and its streams, and which of them the browser reports first is a race |
+
+- **A tab crashed once** ("Target crashed"): the watching page without a token, 4 seconds in, while another page watched and one published. It did not come again in four more pages of 12 seconds each, with and without a publisher. Not looked into.
+- The pages say "the relay closed the session: not authorized" where the code is there (2, 22 or 24); the other three forms are shown as they come.
+- **Run again with the relay of this tree**, once it had the change (`bun demo/serve.ts --auth --auth-setup`, without `--relay-binary`): the same results.
+
 ## Limitations and blockers
 
 - **The room gives a token to anybody who asks**, for any namespace and either role. It shows that the two ends fit, and decides nothing about who may publish or watch.
