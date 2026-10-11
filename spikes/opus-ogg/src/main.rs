@@ -69,7 +69,8 @@ fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("the file to write");
     let channels: u8 = args.next().map_or(2, |text| text.parse().expect("channels"));
-    let mut out = std::fs::File::create(&path)?;
+    // `-` is stdout, for a player that reads the file as it grows.
+    let mut out = std::fs::File::create(if path == "-" { "/dev/stdout" } else { path.as_str() })?;
     let mut head = b"OpusHead\x01".to_vec();
     head.push(channels);
     head.extend_from_slice(&312u16.to_le_bytes());
