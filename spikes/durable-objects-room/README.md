@@ -10,4 +10,6 @@ node check.mjs         # the broadcast, the chat and the count, against it
 
 `mise run demo` in the repository root starts these rooms with the relay and the pages: the publishing page tells the room where it publishes, over its WebSocket, and the watching page learns it there; both show the chat and the count. `?room=NAME` on both pages is another room.
 
+With `AUTH_KEY_HEX` in the environment of `run.mjs`, the room gives out tokens the relay checks (`token-for` on the WebSocket). To anybody who asks: who may publish and who may watch is not decided here.
+
 `worker.js` has the paths and the messages at its top.

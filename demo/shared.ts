@@ -54,6 +54,7 @@ type RoomMessage =
 	| { type: "hello"; history: Chat[]; connected: number; broadcast: Broadcast | null }
 	| ({ type: "chat" } & Chat)
 	| { type: "connected"; connected: number }
+	| { type: "token"; role: string; namespace: string[]; token: string | null }
 	| { type: "broadcast"; broadcast: Broadcast | null };
 interface Chat {
 	seq: number;
@@ -68,6 +69,13 @@ export interface Room {
 	current(): Broadcast | null;
 	/** Says where this page publishes; holds as long as this page is connected to the room. */
 	publish(broadcast: Broadcast): void;
+	/**
+	 * Asks the room for a token for the relay (an experiment in
+	 * authorization): the Token structure as `@xmoq/moqt` carries it, or
+	 * undefined where the rooms give none. `?token=no` asks for none, to see
+	 * the relay refuse.
+	 */
+	token(role: "pub" | "sub", namespace: string[]): Promise<Uint8Array | undefined>;
 }
 
 /**
@@ -91,6 +99,12 @@ export function joinRoom(as: string): Room | undefined {
 		log.scrollTop = log.scrollHeight;
 	};
 	let latest: Broadcast | null = null;
+	/** Who waits for a token, in the order they asked: the room answers in that order. */
+	const tokens: ((token: string | null) => void)[] = [];
+	const whenOpen = (send: () => void): void => {
+		if (socket.readyState === WebSocket.OPEN) send();
+		else socket.addEventListener("open", send, { once: true });
+	};
 	let first: (broadcast: Broadcast | null) => void = () => {};
 	const broadcast = new Promise<Broadcast | null>((resolve) => {
 		first = resolve;
@@ -105,6 +119,10 @@ export function joinRoom(as: string): Room | undefined {
 			latest = message.broadcast;
 		}
 		if (message.type === "chat") show(message);
+		if (message.type === "token") {
+			const waiting = tokens.shift();
+			waiting?.(message.token);
+		}
 		if ((message.type === "hello" || message.type === "connected") && count !== null) {
 			count.textContent = `room “${name}”: ${message.connected} connected`;
 			document.body.dataset.connected = String(message.connected);
@@ -123,10 +141,23 @@ export function joinRoom(as: string): Room | undefined {
 		broadcast,
 		current: () => latest,
 		publish(where) {
-			const tell = (): void =>
-				socket.send(JSON.stringify({ type: "broadcast", broadcast: where }));
-			if (socket.readyState === WebSocket.OPEN) tell();
-			else socket.addEventListener("open", tell, { once: true });
+			whenOpen(() =>
+				socket.send(JSON.stringify({ type: "broadcast", broadcast: where })),
+			);
+		},
+		async token(role, namespace) {
+			if (new URLSearchParams(location.search).get("token") === "no") {
+				return undefined;
+			}
+			const text = await new Promise<string | null>((resolve) => {
+				tokens.push(resolve);
+				whenOpen(() =>
+					socket.send(JSON.stringify({ type: "token-for", role, namespace })),
+				);
+			});
+			if (text === null) return undefined;
+			// §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value.
+			return new Uint8Array([0x03, 0x00, ...new TextEncoder().encode(text)]);
 		},
 	};
 }
@@ -181,6 +212,12 @@ export function connectToRelay(to: Broadcast = HERE): Promise<MoqtConnection> {
 				}),
 	});
 }
+
+/** What went wrong, for the line under the picture: a refusal for want of a token is said as that. */
+export const why = (error: unknown): string =>
+	/REQUEST_ERROR 0x1:/.test(String(error))
+		? "the relay refused: not authorized (no token of the room, or one it does not take)"
+		: String(error).slice(0, 120);
 
 export const say = (text: string): void => {
 	const status = document.getElementById("status");

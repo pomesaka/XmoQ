@@ -1,6 +1,11 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth]
+//
+// `--auth` (an experiment; how the relay authorizes is undecided): a key
+// is made for this run and given to the relay and to the rooms. The relay
+// then refuses a request without a token of the rooms, and the pages ask
+// the room for one; `?token=no` on a page asks for none.
 //
 // The rooms (a chat, a count, and where the broadcast is) are the spike in
 // spikes/durable-objects-room, run locally with Miniflare. They start when
@@ -20,12 +25,22 @@ const { values: options } = parseArgs({
 	options: {
 		"relay-port": { type: "string", default: "4443" },
 		"rooms-port": { type: "string", default: "8787" },
+		auth: { type: "boolean", default: false },
+		// Another relay than the one of this tree, for trying one out.
+		"relay-binary": { type: "string" },
 		port: { type: "string", default: "8080" },
 	},
 });
 
 const here = import.meta.dir;
-const relayBinary = join(here, "..", "target", "debug", "xmoq-relay");
+const relayBinary =
+	options["relay-binary"] ?? join(here, "..", "target", "debug", "xmoq-relay");
+/** The key of this run, where it is one with authorization: 32 random bytes. */
+const authKeyHex = options.auth
+	? Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) =>
+			byte.toString(16).padStart(2, "0"),
+		).join("")
+	: undefined;
 if (!existsSync(relayBinary)) {
 	throw new Error(`${relayBinary} is missing: cargo build -p xmoq-relay`);
 }
@@ -83,6 +98,7 @@ const relay = spawn(
 		certFile,
 		"--key-file",
 		keyFile,
+		...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
 	],
 	// Its lines, one for each thing it does, are not shown.
 	{ stdio: ["ignore", "ignore", "inherit"] },
@@ -97,6 +113,7 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 	? spawn("node", ["run.mjs", "--port", options["rooms-port"]], {
 			cwd: roomsDir,
 			stdio: ["ignore", "ignore", "inherit"],
+			env: { ...process.env, AUTH_KEY_HEX: authKeyHex ?? "" },
 		})
 	: undefined;
 const roomsUrl =
@@ -186,3 +203,10 @@ const server = Bun.serve({
 console.log(`publish: http://localhost:${server.port}/publish`);
 console.log(`watch:   http://localhost:${server.port}/watch`);
 console.log(roomsUrl === null ? "rooms:   none" : `rooms:   ${roomsUrl}`);
+if (authKeyHex !== undefined) {
+	console.log(
+		rooms === undefined
+			? "auth:    the relay asks for tokens, and no rooms run to give them"
+			: "auth:    the relay asks for tokens, and the rooms give them",
+	);
+}

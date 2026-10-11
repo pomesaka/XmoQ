@@ -24,6 +24,7 @@ import {
 	joinRoom,
 	say,
 	through,
+	why,
 	trackName,
 	WIDTH,
 } from "./shared.ts";
@@ -223,7 +224,12 @@ async function main(): Promise<void> {
 						request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
 					},
 				});
-				await connection.publishNamespace(namespace());
+				// Where the rooms give tokens, the announcement carries one.
+				const token = await room?.token("pub", HERE.namespace);
+				await connection.publishNamespace(
+					namespace(),
+					token === undefined ? undefined : { authorizationToken: [token] },
+				);
 				// The room is told where this broadcast is, for viewers to
 				// find it; that holds as long as this page is connected to
 				// the room.
@@ -232,7 +238,7 @@ async function main(): Promise<void> {
 				const close = await connection.closed;
 				link = `the session ended (${close.type}) at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
 			} catch (error) {
-				link = `could not publish (${String(error).slice(0, 120)}); trying again every 2 s`;
+				link = `could not publish (${why(error)}); trying again every 2 s`;
 			}
 			document.body.dataset.link = link;
 			await new Promise((resolve) => setTimeout(resolve, 2000));
