@@ -23,8 +23,8 @@
 //! sources all drain is refused.
 //!
 //! A subscriber gets the Objects from the Start Location of its Subscription
-//! Filter on (§5.1.2); the End Group of an `AbsoluteRange` filter is not
-//! looked at (`routing::filter_start`).
+//! Filter on, and of an `AbsoluteRange` filter those up to its End Group
+//! (§5.1.2; `routing::filter_start`, `routing::filter_end_group`).
 //!
 //! FIXME: pass a `NEW_GROUP_REQUEST` of a subscriber on to the publisher
 //! (§10.2.13, MUST for a relay). It is ignored.
@@ -296,6 +296,15 @@ struct Subscriber {
     /// nothing passes. "A publisher MUST NOT send objects from outside the
     /// requested range."
     start: Option<Location>,
+    /// The last Group the subscription passes, of an `AbsoluteRange` filter;
+    /// `None` for a subscription that is open ended.
+    ///
+    /// WHY the subscription goes on after it: §9.4 has "A subscription with
+    /// a filter can reach a state where all possible Objects matching the
+    /// filter have been delivered to the subscriber. Since tracking this
+    /// can be prohibitively expensive, Relays are not required or expected
+    /// to do so". A Group at or before the End Group can still come late.
+    end_group: Option<u64>,
     /// Subgroup streams the relay started for the subscription.
     streams_started: u64,
     /// Whether one of them may never have been opened, so that the number
@@ -310,6 +319,7 @@ impl Subscriber {
     /// Whether the subscription passes the Object at `location` (§5.1.2).
     fn passes(&self, location: Location) -> bool {
         self.start.is_some_and(|start| location >= start)
+            && self.end_group.is_none_or(|end| location.group <= end)
     }
 
     /// Whether it passes every Object the Group can have.
