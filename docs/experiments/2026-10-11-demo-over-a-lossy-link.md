@@ -81,7 +81,7 @@ Both pages of the demo now say when their session has ended and connect again ev
 
 - **With a stream for every chunk the sound falls behind and stays behind**: a piece came 171 to 397 ms after its time at the median, where the picture came within a few. With 25 chunks a stream it came 12 to 14 ms after, under the same loss. **Why a new stream every 20 ms costs this much under loss was not looked into** (what a stream needs before it can be opened, and what happens when that is lost, would be the place to look).
 - A longer buffer hides it at 5% and not at 10%.
-- **What several chunks in a Group cost was not measured**: a viewer that comes waits for the next Group's first chunk (up to 500 ms with 25), and a lost packet holds back what follows it on its stream. `chunksPerGroup` is an option for trying; without it the publisher does as before.
+- What several chunks in a Group cost was not measured here; it was afterwards ("What several chunks of audio in a Group cost", below), and a viewer that comes does **not** wait for the next Group, as this had it. `chunksPerGroup` is an option for trying; without it the publisher does as before.
 
 ## Where the sound waits, and what a viewer is told when its publisher goes
 
@@ -120,6 +120,24 @@ The relay now prints `DATA_OPENED … after_ms=… opening=… cwnd=… lost_pac
 - What Chromium does between a datagram and handing the stream to the page was not looked into. It looks as if it gave the page one new stream for each that comes in, and a stream that comes late is never made up for.
 
 **What could be done, none of it tried beyond what is above**: fewer streams (25 chunks of audio on one: no lag, measured above); the audio as datagrams, which neither implementation has; one long stream for the audio of a viewer. Nothing in the relay: it sends on time.
+
+### What several chunks of audio in a Group cost
+
+`spikes/lossy-link/grouping.ts`, the Chromium page as the viewer. A viewer that comes while another watches, five of them for each row, without loss: from its SUBSCRIBE for the audio being accepted to its first piece of audio decoded. Then loss from the relay, 10 seconds, one run each: pieces too late to sound, of about 490, and how long after its time a piece came.
+
+| Chunks a Group | A late viewer's first audio after | Loss 5%: too late; came (median, most) | Loss 10%: too late; came |
+|---|---|---|---|
+| 1 (as it is) | 12, 15, 1, 2, 1 ms | 278; 233, 294 ms | 332; 332, 421 ms |
+| 5 (100 ms) | 6, 15, 4, 1, 8 ms | 0; -7, 34 ms | 1; 113, 152 ms |
+| 10 (200 ms) | 2, 8, 17, 2, 10 ms | 0; -8, 32 ms | 0; -7, 32 ms |
+| 25 (500 ms) | 11, 9, 7, 8, 14 ms | 0; -7, 35 ms | 0; 11, 61 ms |
+| 25, with a Joining FETCH for the audio | 2, 1, 1, 1, 1 ms | | |
+
+- **A viewer that comes late does not wait for the next Group**, which had been expected and written above: with 25 chunks a Group its first audio was there 7 to 14 ms after its SUBSCRIBE, as with one. The relay gives a subscriber that comes in the middle of a Subgroup a stream of its own with the Objects from there on, and a chunk of Opus needs none before it. A Joining FETCH brings older audio a few milliseconds sooner; it changes nothing that is heard.
+- **From 10 chunks a Group on, nothing was too late at 5% or at 10%.** With 5, the sound was 113 ms behind at 10% and still in time for a buffer of 150 ms.
+- **A lost packet holding back what follows it on its stream does not show**: a piece came 32 to 61 ms after its time at most with 10 and 25 chunks a Group, under 10% loss.
+- **The video with a stream for every Object, 30 a second, does not fall behind** under 10% loss from the relay: a frame came 3 ms after its time at the median and 37 at most, as with a Group on a stream (3 and 67), nothing dropped (one run each, without audio). So it is not every stream a frame or a chunk; what is different about 50 short streams a second was not looked into.
+- One run for each cell, and the numbers move: one chunk a Group at 5% gave 143 and 172 too late before, and 278 here.
 
 ### A publisher that goes
 

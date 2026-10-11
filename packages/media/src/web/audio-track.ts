@@ -4,7 +4,11 @@
 // sync with video, no reordering.
 
 import { microsecondsOf, readLocTiming } from "@xmoq/loc";
-import type { MoqtConnection, SubscriptionEnd } from "@xmoq/moqt";
+import {
+	decodeFetchBody,
+	type MoqtConnection,
+	type SubscriptionEnd,
+} from "@xmoq/moqt";
 import {
 	type AudioTrackPublisher,
 	createAudioTrackPublisher,
@@ -164,6 +168,13 @@ export interface PlayAudioTrackOptions {
 	numberOfChannels: number;
 	/** Called with each decoded piece of audio; **the callee closes it**. */
 	onData(data: AudioData): void;
+	/**
+	 * Whether the Group the listener comes into is fetched from its start (a
+	 * Relative Joining FETCH with Joining Start 0). **False when left out;
+	 * for trying**: it matters where a Group has several chunks, and what
+	 * it brings is older than what the subscription brings.
+	 */
+	joiningFetch?: boolean;
 	signal?: AbortSignal;
 }
 
@@ -250,9 +261,67 @@ export async function playAudioTrack(
 	};
 	options.signal?.addEventListener("abort", stop, { once: true });
 	if (options.signal?.aborted) stop();
+	let last: { group: bigint; object: bigint } | undefined;
+	/** Decodes an Object that is after the last one, and drops any other. */
+	const take = (
+		groupId: bigint,
+		object: {
+			objectId: bigint;
+			properties: Parameters<typeof readLocTiming>[0];
+			payload: Uint8Array;
+		},
+	): void => {
+		stats.received += 1;
+		if (object.payload.length === 0) {
+			drop("empty");
+			return;
+		}
+		if (
+			last !== undefined &&
+			(groupId < last.group ||
+				(groupId === last.group && object.objectId <= last.object))
+		) {
+			drop("late");
+			return;
+		}
+		const read = readLocTiming(object.properties);
+		if (read.type !== "ok" || read.timing === undefined) {
+			drop("no-time");
+			return;
+		}
+		last = { group: groupId, object: object.objectId };
+		if (decoder.state !== "configured") return;
+		decoder.decode(
+			new EncodedAudioChunk({
+				type: "key",
+				timestamp: Number(microsecondsOf(read.timing)),
+				data: object.payload,
+			}),
+		);
+	};
+	if (options.joiningFetch === true) {
+		// What it brings comes before what the subscription brings only
+		// where it is there first; what comes after is dropped as late.
+		void (async () => {
+			const fetch = await connection.fetch({
+				range: {
+					fetchType: "RelativeJoining",
+					joiningRequestId: subscription.requestId,
+					joiningStart: 0n,
+				},
+			});
+			fetch.response.catch(() => {});
+			const reader = decodeFetchBody(connection, fetch).getReader();
+			for (;;) {
+				const next = await reader.read();
+				if (next.done) return;
+				if (next.value.type !== "object") continue;
+				take(next.value.object.groupId, next.value.object);
+			}
+		})().catch(() => {});
+	}
 	const ended = (async (): Promise<SubscriptionEnd> => {
 		const reader = subscription.objects.getReader();
-		let last: { group: bigint; object: bigint } | undefined;
 		for (;;) {
 			let next: Awaited<ReturnType<typeof reader.read>>;
 			try {
@@ -261,34 +330,7 @@ export async function playAudioTrack(
 				break;
 			}
 			if (next.done) break;
-			stats.received += 1;
-			const { groupId, object } = next.value;
-			if (object.payload.length === 0) {
-				drop("empty");
-				continue;
-			}
-			if (
-				last !== undefined &&
-				(groupId < last.group ||
-					(groupId === last.group && object.objectId <= last.object))
-			) {
-				drop("late");
-				continue;
-			}
-			const read = readLocTiming(object.properties);
-			if (read.type !== "ok" || read.timing === undefined) {
-				drop("no-time");
-				continue;
-			}
-			last = { group: groupId, object: object.objectId };
-			if (decoder.state !== "configured") continue;
-			decoder.decode(
-				new EncodedAudioChunk({
-					type: "key",
-					timestamp: Number(microsecondsOf(read.timing)),
-					data: object.payload,
-				}),
-			);
+			take(next.value.groupId, next.value.object);
 		}
 		options.signal?.removeEventListener("abort", stop);
 		const end = await subscription.ended;
