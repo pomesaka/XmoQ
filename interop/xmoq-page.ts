@@ -231,6 +231,8 @@ export type OwnPageExtras = {
 		codec: string,
 		/** Reads the number `publishVideo` paints into every frame. */
 		readNumbers?: boolean,
+		/** Sends the Joining FETCH of `playVideoTrack`; none when left out. */
+		joiningFetch?: boolean,
 	): Promise<void>;
 	/**
 	 * Publishes a catalog with one video track and the track itself, with
@@ -359,6 +361,8 @@ export type PageVideoReport = {
 		decoderFailures: number;
 		lastDecoderError: string | null;
 		endOfTrack: boolean;
+		/** `VideoPlaybackStats.joiningFetch`. */
+		joiningFetch: string;
 	};
 	/** How the playing ended, or null while it goes on: "subscription-ended <type>", "decoder-failed <error>" or "failed <error>". */
 	ended: string | null;

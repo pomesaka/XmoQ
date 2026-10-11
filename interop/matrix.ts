@@ -1090,6 +1090,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 						relay: "own",
 					},
 					{
+						name: "own relay: video: a viewer that comes in the middle of a Group fetches its start from the relay and has a picture at once",
+						script: "video.ts" as const,
+						args: ["--video", "late-viewer"],
+						relay: "own",
+					},
+					{
 						name: "own relay: video: an own page whose key frames are all over what it sends is told so",
 						script: "video.ts" as const,
 						args: ["--video", "key-frames-too-large"],

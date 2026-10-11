@@ -4,10 +4,11 @@
 // what the decoder makes necessary; which frame comes when is the
 // receiver's (`src/core/video-receiver.ts`).
 
-import type {
-	MoqtConnection,
-	ReceivedObject,
-	SubscriptionEnd,
+import {
+	decodeFetchBody,
+	type MoqtConnection,
+	type ReceivedObject,
+	type SubscriptionEnd,
 } from "@xmoq/moqt";
 import {
 	createVideoReceiver,
@@ -48,6 +49,15 @@ export interface PlayVideoTrackOptions {
 	onFrame(frame: VideoFrame): void;
 	/** Aborting it ends the playing: the subscription is cancelled. */
 	signal?: AbortSignal;
+	/**
+	 * Whether the Group the viewer comes into is fetched from its start (a
+	 * Relative Joining FETCH with Joining Start 0, transport §10.12.2), so
+	 * that the picture begins at once and not with the next key frame.
+	 * **True when left out; provisional.** A relay that keeps the latest
+	 * Group answers it; where nobody does, the FETCH is refused and the
+	 * playing goes on as without it.
+	 */
+	joiningFetch?: boolean;
 	/** `DEFAULT_MAX_DECODE_QUEUE` when left out. */
 	maxDecodeQueue?: number;
 	/** `DEFAULT_MAX_DECODER_FAILURES` when left out. */
@@ -77,6 +87,12 @@ export interface VideoPlaybackStats {
 	lastDecoderError: string | undefined;
 	/** Whether the publisher said that the track has ended. */
 	endOfTrack: boolean;
+	/**
+	 * What became of the Joining FETCH: "not-sent", "pending", "served"
+	 * with how many Objects it brought, or "failed" with them and the
+	 * reason.
+	 */
+	joiningFetch: string;
 }
 
 export interface VideoPlayback {
@@ -111,6 +127,15 @@ export interface VideoPlayback {
  *   the key frame of a later Group.
  * - An `end-of-track` of the receiver is counted, and the subscription goes
  *   on: it ends when the publisher ends it, or the caller.
+ * - **The Group the viewer comes into is fetched** (`joiningFetch`): its
+ *   Objects up to where the subscription begins come on a fetch stream and
+ *   go through the same receiver, which puts them before the ones of the
+ *   subscription and drops what comes twice (`late`). **While they come,
+ *   and until the decoder has caught up once, a decoder with more than
+ *   `maxDecodeQueue` chunks waiting is not taken to be behind**: the start
+ *   of a Group comes all at once, and is what the picture begins with.
+ *   These frames are older than the ones after them by up to a Group; they
+ *   are handed on as fast as the decoder gives them.
  */
 export async function playVideoTrack(
 	connection: MoqtConnection,
@@ -157,7 +182,10 @@ export async function playVideoTrack(
 		decoderFailures: 0,
 		lastDecoderError: undefined,
 		endOfTrack: false,
+		joiningFetch: "not-sent",
 	};
+	/** The Objects of the Joining FETCH are coming, or the decoder has not caught up with them. */
+	let catchingUp = false;
 	const drop = (because: VideoDropReason): void => {
 		stats.dropped[because] = (stats.dropped[because] ?? 0) + 1;
 	};
@@ -249,7 +277,11 @@ export async function playVideoTrack(
 				drop(givenUp.because);
 				continue;
 			}
-			if (decoder.decodeQueueSize > maxDecodeQueue) {
+			if (catchingUp && stats.joiningFetch !== "pending") {
+				// The FETCH is over: caught up when the decoder has room.
+				catchingUp = decoder.decodeQueueSize > maxDecodeQueue;
+			}
+			if (!catchingUp && decoder.decodeQueueSize > maxDecodeQueue) {
 				// This frame, and what the receiver held of its Group.
 				drop("decoder-behind");
 				count(receiver.abandonGroup("decoder-behind"));
@@ -300,6 +332,47 @@ export async function playVideoTrack(
 	options.signal?.addEventListener("abort", stopBySignal, { once: true });
 	if (options.signal?.aborted) stopBySignal();
 
+	/** Cancels the Joining FETCH; does nothing where there is none, or it is over. */
+	let cancelJoiningFetch: () => void = () => {};
+	if (options.joiningFetch !== false && !stopped) {
+		stats.joiningFetch = "pending";
+		catchingUp = true;
+		let objects = 0;
+		void (async () => {
+			const fetch = await connection.fetch({
+				range: {
+					fetchType: "RelativeJoining",
+					joiningRequestId: subscription.requestId,
+					joiningStart: 0n,
+				},
+			});
+			cancelJoiningFetch = () => {
+				fetch.cancel().catch(() => {});
+			};
+			// A refusal is told by the body as well, below.
+			fetch.response.catch(() => {});
+			if (stopped || gaveUp !== undefined) cancelJoiningFetch();
+			const reader = decodeFetchBody(connection, fetch).getReader();
+			for (;;) {
+				const next = await reader.read();
+				if (next.done) break;
+				if (next.value.type !== "object") continue;
+				objects += 1;
+				const { groupId, objectId, properties, payload } = next.value.object;
+				count(
+					receiver.push({
+						groupId,
+						object: { objectId, properties, status: "Normal", payload },
+					}),
+				);
+			}
+			stats.joiningFetch = `served ${objects}`;
+		})().catch((error: unknown) => {
+			// Refused, cut off, or cancelled: the subscription has the rest.
+			stats.joiningFetch = `failed ${objects}: ${error instanceof Error ? error.message : String(error)}`;
+		});
+	}
+
 	const ended = (async (): Promise<VideoPlaybackEnd> => {
 		let reader: ReadableStreamDefaultReader<ReceivedObject> | undefined;
 		try {
@@ -325,6 +398,7 @@ export async function playVideoTrack(
 			options.signal?.removeEventListener("abort", stopBySignal);
 			// Does nothing for a subscription that has ended.
 			cancel();
+			cancelJoiningFetch();
 		}
 		const end = await subscription.ended;
 		if (gaveUp === undefined && !stopped && decoder.state === "configured") {

@@ -117,6 +117,21 @@ The first two chunks of the encoder are in `fixtures/loc-04/` (its README has ho
 - **With `-videoout`, `mlmsub` cannot take this video, and one expectation was wrong.** Its `LOCVideoWriter` takes a payload to have a length of 4 bytes before every NAL unit. It read the start code of the first Object as a length of 1 and the next four bytes as a length: `failed to write LOC sample error="LOC AVC: NALU length 1107299721 exceeds remaining data 237"`, which had been worked out from the source. **What had not been read is the `return` after that line**: `mlmsub` reads the track no further, so the three Groups that were expected all the same did not come. The run is without `-videoout`.
 - So the two implementations agree on the transport, the catalog and the Timestamp, and **not on the form of the payload**: `moqlivemock` sends and reads lengths, the sender here writes start codes, and the receiver here reads both.
 
+## A viewer that comes late: a Joining FETCH
+
+`playVideoTrack` now sends a Relative Joining FETCH with Joining Start 0 for its subscription, and gives what it brings to the same receiver. While it comes, and until the decoder has caught up, more than 8 chunks may wait in the decoder.
+
+- `--video late-viewer` (own relay with its cache, bars, a second viewer while a first watches). Expected, written before the first run, and seen in 3 runs of 3: the FETCH served with 19 Objects; the first frame from 739 to 741 ms before the viewer came; 30 frames in order; nothing dropped.
+- The demo (`mise run demo`), headless, a viewer every 2 seconds while another watches, by the page's own count from the accepted SUBSCRIBE to the first frame:
+
+  | | First frame after | Dropped | Joining FETCH |
+  |---|---|---|---|
+  | `/watch` | 3, 4, 4, 3 ms | nothing | served 10, 23, 3, 14 |
+  | `/watch?join=no` | 500, 114, 804, 181 ms | `no-key-frame` 14, 3, 23, 5 | not sent |
+
+- The other runs of `video.ts` play without the FETCH, as before.
+- Not looked at: a first viewer (nobody answers the FETCH: the relay has nothing yet); a Group longer than the receiver holds; the moqtail relay; what the burst of old frames looks like.
+
 ## Limitations and blockers
 
 - **Not run**: a viewer that comes later than the relay's subscription (it waits for the next key frame; a Joining FETCH is not sent); frames of a real picture; a viewer that does not read, with a stream for every Object, which is where the relay's limit of 256 streams would be met; a subscriber that is behind and a write that fails, with a browser; `moqlivemock`'s subscriber as the viewer; Linux.

@@ -887,6 +887,7 @@ window.xmoqOwn = {
 			trackName: string,
 			codec: string,
 			readNumbers = false,
+			joiningFetch = false,
 		) => {
 			const reading = readNumbers
 				? new OffscreenCanvas(1, 1).getContext("2d", {
@@ -898,6 +899,7 @@ window.xmoqOwn = {
 				trackNamespace: namespaceTuple(namespace),
 				trackName: utf8.encode(trackName),
 				codec,
+				joiningFetch,
 				onFrame(frame) {
 					frames.push({
 						timestamp: frame.timestamp,
@@ -950,6 +952,7 @@ window.xmoqOwn = {
 						decoderFailures: stats.decoderFailures,
 						lastDecoderError: stats.lastDecoderError ?? null,
 						endOfTrack: stats.endOfTrack,
+						joiningFetch: stats.joiningFetch,
 					},
 					ended: playing.ended ?? null,
 				};

@@ -173,6 +173,23 @@
 //       worked out) `mlmsub` reads the track no further. So the run is
 //       without `-videoout`, and the failure is in the record.
 //
+//   late-viewer   The bars through the own relay, a Group on a stream. One
+//                 page watches, so the relay is subscribed; a second page
+//                 comes later, in the middle of a Group, and plays with the
+//                 Joining FETCH of `playVideoTrack`. Written before the
+//                 first run:
+//
+//     - **The Joining FETCH is served** by the relay, from the latest Group
+//       it keeps, with one Object or more.
+//     - **The second viewer's first frame was made before it came**: its
+//       time is before the moment the driver started that viewer. Without
+//       the FETCH the first frame is the next key frame, made after.
+//     - It dropped nothing as `no-key-frame`: only what came twice, on the
+//       fetch stream and on the subscription (`late`), or for a decoder
+//       that was behind.
+//     - 30 frames or more, each with a later number than the one before it
+//       and that many times 40,000 microseconds after it.
+//
 import { parseArgs } from "node:util";
 import {
 	captureGroup,
@@ -762,7 +779,105 @@ async function toMlmsub(): Promise<string> {
 	return `mlmsub took the video of a page through the own relay: Groups ${first.group} to ${third.group} began a second apart, Objects 1 to 24 of the first 40 ms apart, with wall-clock Timestamps`;
 }
 
+async function lateViewer(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser"],
+		verbose: options.verbose,
+	});
+	const publisher = await openConnectedPage(
+		context,
+		"publisher",
+		"own-browser",
+	);
+	await withTimeout(
+		publisher.evaluate(
+			([namespace, setup]) => window.xmoqOwn.publishVideo(namespace, setup),
+			[PAGE_NAMESPACE, { ...BARS, mapping: "stream-per-group" }] satisfies [
+				string,
+				PageVideoSetup,
+			],
+		),
+		"the page to publish its video",
+	);
+	const play = (
+		page: Awaited<ReturnType<typeof openConnectedPage>>,
+		joiningFetch: boolean,
+		frames: number,
+	): Promise<PageVideoReport> =>
+		withTimeout(
+			page.evaluate(
+				async ([namespace, name, codec, join, count, timeoutMs]) => {
+					await window.xmoqOwn.playVideo(namespace, name, codec, true, join);
+					return window.xmoqOwn.videoReport(count, timeoutMs);
+				},
+				[
+					PAGE_NAMESPACE,
+					BARS.trackName,
+					BARS.catalogCodec,
+					joiningFetch,
+					frames,
+					PLAY_TIMEOUT_MS,
+				] satisfies [string, string, string, boolean, number, number],
+			),
+			"a viewer to report on its playing",
+			PLAY_TIMEOUT_MS + 5_000,
+		);
+	// The first viewer has frames: the relay is subscribed, and has Objects.
+	const first = await openConnectedPage(context, "viewer-1", "own-browser");
+	await play(first, false, 40);
+	const late = await openConnectedPage(context, "viewer-2", "own-browser");
+	const before = Date.now() * 1000;
+	const report = await play(late, true, 30);
+	const seen = JSON.stringify({ ...report, frames: report.frames.slice(0, 3) });
+	log("driver", `REPORT ${seen}`);
+	const { frames, stats } = report;
+	const served = /^served (\d+)$/.exec(stats.joiningFetch);
+	if (served === null || Number(served[1]) < 1) {
+		throw new Error(
+			`the Joining FETCH was to be served with one Object or more: ${seen}`,
+		);
+	}
+	const [firstFrame] = frames;
+	if (frames.length < 30 || firstFrame === undefined) {
+		throw new Error(`${frames.length} frames were decoded, not 30: ${seen}`);
+	}
+	if (firstFrame.timestamp >= before) {
+		throw new Error(
+			`the first frame was to be one made before the viewer came (${before}); it has the time ${firstFrame.timestamp}: ${seen}`,
+		);
+	}
+	const others = Object.keys(stats.dropped).filter(
+		(reason) => reason !== "late" && reason !== "decoder-behind",
+	);
+	if (others.length > 0 || stats.decoderFailures !== 0) {
+		throw new Error(
+			`the viewer was to drop nothing but what came twice or for a decoder that was behind, and its decoder was not to fail: ${seen}`,
+		);
+	}
+	frames.forEach((frame, index) => {
+		const prior = frames[index - 1];
+		if (prior === undefined) return;
+		const later =
+			typeof prior.number === "number" && typeof frame.number === "number"
+				? (frame.number - prior.number + 256) % 256
+				: 0;
+		if (later < 1 || frame.timestamp - prior.timestamp !== later * 40_000) {
+			throw new Error(
+				`frame ${index} (${JSON.stringify(frame)}) is to show a later number than the frame before it, ${prior.number}, and be 40000 microseconds after it for each: ${seen}`,
+			);
+		}
+	});
+	await withTimeout(
+		publisher.evaluate(() => window.xmoqOwn.stopVideo()),
+		"the publisher to end its track",
+	);
+	return `a viewer that came in the middle of a Group fetched ${served[1]} Objects of it from the relay and had its first frame from ${Math.round((before - firstFrame.timestamp) / 1000)} ms before it came; ${frames.length} frames in order, dropped ${JSON.stringify(stats.dropped)}`;
+}
+
 const CASES: Record<string, () => Promise<string>> = {
+	"late-viewer": lateViewer,
 	"to-mlmsub": toMlmsub,
 	"from-mlmpub": fromMlmpub,
 	"key-frames-too-large": keyFramesTooLarge,
