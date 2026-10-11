@@ -4,7 +4,11 @@
 // swap one for the other.
 
 import {
+	type AudioPlayback,
+	type AudioTrackEncoder,
+	createAudioTrackEncoder,
 	createVideoTrackEncoder,
+	playAudioTrack,
 	playVideoTrack,
 	type VideoPlayback,
 	type VideoTrackEncoder,
@@ -34,6 +38,7 @@ import {
 	namespaceTuple,
 } from "@xmoq/msf";
 import type {
+	PageAudioReport,
 	PageCatalogReport,
 	PageFetch,
 	PageFetchReport,
@@ -619,6 +624,19 @@ interface VideoPlaying {
 }
 let videoPlaying: VideoPlaying | undefined;
 
+/** What `publishAudio` started. */
+let audioPublishing:
+	| {
+			encoder: AudioTrackEncoder;
+			made: number;
+			timer: ReturnType<typeof setInterval>;
+	  }
+	| undefined;
+/** What `playAudio` has so far. */
+let audioPlaying:
+	| { playback: AudioPlayback; pieces: PageAudioReport["pieces"] }
+	| undefined;
+
 /** What `publishVideo` started. */
 interface VideoPublishing {
 	encoder: VideoTrackEncoder;
@@ -743,6 +761,136 @@ window.xmoqOwn = {
 		})().catch((error: unknown) => {
 			console.log(`the catalog could not be read on: ${errorText(error)}`);
 		});
+	}),
+
+	publishAudio: withPlainErrors(
+		async (namespace: string, trackName: string) => {
+			const moq = connected();
+			const trackNamespace = namespaceTuple(namespace);
+			const sampleRate = 48_000;
+			const frames = 960;
+			const encoder = await createAudioTrackEncoder({
+				trackNamespace,
+				trackName: utf8.encode(trackName),
+				firstGroup: BigInt(Date.now()),
+				codec: "opus",
+				sampleRate,
+				numberOfChannels: 1,
+			});
+			moq.serve({
+				subscribe(request) {
+					if (encoder.publisher.subscribe(request)) return;
+					request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
+				},
+				fetch(request) {
+					if (encoder.publisher.fetch(request)) return;
+					request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
+				},
+			});
+			const publishing = {
+				encoder,
+				made: 0,
+				timer: setInterval(() => {
+					const piece = publishing.made;
+					publishing.made += 1;
+					const samples = new Float32Array(frames);
+					for (let index = 0; index < frames; index++) {
+						// The phase goes on from piece to piece.
+						samples[index] =
+							0.5 *
+							Math.sin(
+								(2 * Math.PI * 440 * (piece * frames + index)) / sampleRate,
+							);
+					}
+					encoder.encode(
+						new AudioData({
+							format: "f32",
+							sampleRate,
+							numberOfFrames: frames,
+							numberOfChannels: 1,
+							timestamp: 7_000_000 + piece * 20_000,
+							data: samples,
+						}),
+					);
+				}, 20),
+			};
+			audioPublishing = publishing;
+			await moq.publishNamespace(trackNamespace);
+			console.log(`audio published: ${trackName}`);
+		},
+	),
+
+	audioPublishReport: withPlainErrors(async () => {
+		if (audioPublishing === undefined) {
+			throw new Error("publishAudio() has not completed");
+		}
+		const stats = audioPublishing.encoder.stats();
+		const sent = audioPublishing.encoder.publisher.stats();
+		return {
+			made: audioPublishing.made,
+			submitted: stats.submitted,
+			encoded: stats.encoded,
+			encodedBytes: stats.encodedBytes,
+			descriptionLength: stats.descriptionLength ?? null,
+			encoderError: stats.encoderError ?? null,
+			written: sent.written,
+			skipped: { ...sent.skipped },
+		};
+	}),
+
+	stopAudio: withPlainErrors(async () => {
+		if (audioPublishing === undefined) {
+			throw new Error("publishAudio() has not completed");
+		}
+		clearInterval(audioPublishing.timer);
+		await audioPublishing.encoder.end();
+	}),
+
+	playAudio: withPlainErrors(async (namespace: string, trackName: string) => {
+		const pieces: PageAudioReport["pieces"] = [];
+		const playback = await playAudioTrack(connected(), {
+			trackNamespace: namespaceTuple(namespace),
+			trackName: utf8.encode(trackName),
+			codec: "opus",
+			sampleRate: 48_000,
+			numberOfChannels: 1,
+			onData(data) {
+				const samples = new Float32Array(data.numberOfFrames);
+				data.copyTo(samples, { planeIndex: 0, format: "f32-planar" });
+				pieces.push({
+					timestamp: data.timestamp,
+					frames: data.numberOfFrames,
+					sampleRate: data.sampleRate,
+					channels: data.numberOfChannels,
+					peak: samples.reduce(
+						(peak, sample) => Math.max(peak, Math.abs(sample)),
+						0,
+					),
+				});
+				data.close();
+			},
+		});
+		audioPlaying = { playback, pieces };
+	}),
+
+	audioReport: withPlainErrors(async (pieces: number, timeoutMs: number) => {
+		const until = performance.now() + timeoutMs;
+		for (;;) {
+			const playing = audioPlaying;
+			if (
+				playing !== undefined &&
+				(playing.pieces.length >= pieces || performance.now() >= until)
+			) {
+				const stats = playing.playback.stats();
+				return {
+					pieces: [...playing.pieces],
+					received: stats.received,
+					dropped: { ...stats.dropped },
+					decoderError: stats.decoderError ?? null,
+				};
+			}
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
 	}),
 
 	publishVideo: withPlainErrors(

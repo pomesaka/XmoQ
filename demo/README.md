@@ -13,4 +13,8 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 
 Ctrl-C stops the web server and the relay. `bun demo/serve.ts --port N --relay-port M` chooses other ports.
 
-No catalog, no audio, no buffer: a frame is drawn when it is decoded. The line under the picture has what was counted.
+The publishing page sends a second track with sound, Opus: a quiet tone that goes up and down (`?audio=mic` takes the microphone, `?audio=none` sends none). On the watching page, click "sound" to hear it: a browser lets a page make sound only after a click.
+
+**Picture and sound are played together, by the times their Objects carry.** The watching page holds each frame and each piece of audio for 150 ms, counted from the fastest one that came (`/watch?buffer=N` for another time, in milliseconds; 0 plays each as it comes, and then most of the audio is too late to be sounded). Every 2 seconds the publishing page shows a white square and sounds a beep at the same moment, for 200 ms; the lines under the picture say how far apart the two came out, and how long a frame and a piece took from the publisher's clock to this page.
+
+No catalog. The times are compared on one machine, where the two pages have the same clock.
