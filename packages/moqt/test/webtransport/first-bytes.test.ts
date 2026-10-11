@@ -12,7 +12,7 @@ import {
 } from "./fake-transport.ts";
 
 // The clock of these tests stands still and is moved by hand
-// (`jest.useFakeTimers` of bun:test 1.3.12 drives `setTimeout`), so that
+// (`jest.useFakeTimers` of bun:test drives `setTimeout`), so that
 // "not yet" and "now" are a millisecond apart and no test waits.
 
 /** Lets what is queued run: the streams here move with promises alone. */
