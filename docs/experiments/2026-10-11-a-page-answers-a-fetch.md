@@ -88,6 +88,20 @@ Changed, with a test each, on Bun 1.3.14:
 
 `mise run check`: 961 tests of `@xmoq/moqt`. Each of 14 temporary changes that take one of these back makes between 1 and 4 tests fail.
 
+### Later the same day: the page that has Objects it never sent goes on after them
+
+In the run "Objects the page has and never sent", the page said in its SUBSCRIBE_OK that its Largest Object is {102, 0} and then sent Groups 0, 1 and 2. That passes only through a relay that does not look at the Subscription Filter: both subscribers of the run ask with Largest Object, and draft 18 §5.1.2 has such a subscription begin after the Largest Object. The page now sends Groups 103 and on, so the three Objects are ones it published before the relay subscribed. The range of the FETCH and what comes back are as before.
+
+| Relay | Run | Seen |
+|---|---|---|
+| own, `main` at `c212d503` | as it is now | passes: FETCH_OK with End Location {102, 1} and the three Objects |
+| `moqtail` 0.15.0 | as it is now | passes. **One expectation changed, from the draft and not from the run**: the page's FETCH_OK to the relay has {102, 0}, the End Location the relay asked with (the whole of Group 102), where it had {102, 1}. The page has sent later Groups, so that end is no longer beyond its Largest Object (§10.13). The first run with the old expectation failed on exactly that line |
+| own, **built from the change that makes the relay keep to the filter** (`fb0e72e1`, not in `main`), its binary put in place of the relay's for the run | as it is now | passes: both subscribers get Group 106 |
+| the same relay | as it was (the page sends from Group 0) | **fails**: the subscriber the relay asks the page for waits for Group 0, which the relay does not send it |
+
+- The relay's binary was put back after the two runs and has the checksum it had before.
+- `mise run check` passed. `mise run interop -- --base-port 45300`: 102 of 102 pairings in the second run. In the first, one pairing that has no part in this (subscribers that are killed) stood still from the start of its relay to the limit of 120 seconds, while another working copy ran its own interop on the machine; it was not looked into further.
+
 ## Limitations and blockers
 
 - Chromium only, loopback only, Objects of some bytes, one Object a Group, Ascending order. A fetch stream larger than a window, a subscriber that reads slowly, and Descending order were run against the fake transport and the session alone.

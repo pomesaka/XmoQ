@@ -626,7 +626,8 @@ window.xmoqOwn = {
 			unsentPayloadHex: string,
 		) => {
 			if (fetches === "serve-unsent") {
-				// Object 0 of three Groups far ahead, which no relay has seen.
+				// Object 0 of three Groups it published before anyone subscribed,
+				// which no relay has seen. What it sends comes after them.
 				for (const group of [100n, 101n, 102n]) {
 					keep(group, fromHex(unsentPayloadHex));
 				}
