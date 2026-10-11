@@ -2,7 +2,7 @@
 
 - Date: 2026-10-11
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 1, validation over a link that loses packets. **Open: the cause is not found.**
+- Roadmap item: Phase 1, validation over a link that loses packets. **The cause was found afterwards, and it is not the link: see "The cause" at the end.**
 
 ## Objective
 
@@ -48,6 +48,43 @@ How long after it was made the sound came, in milliseconds, at seconds 1, 4, 8, 
 - **The relay opens every stream at once** (`after_ms=0` on every `DATA_OPENED`, all runs).
 - The relay's congestion window, as its lines say: with the sound alone it went 12,000, 5,880, 4,116, 2,904 bytes in 16 seconds (7 packets lost) and did not grow again; with the picture as well it stayed near 10,000 (13 lost); with loss and no delay it went to 5,723 (20 lost), and nothing was late. Round trip 103 ms. A window of 2,904 bytes in 103 ms is about 225 kbit/s, above the 69 the sound needs.
 - **Not found: where the pieces wait.** They are sent at the rate they are made, and come at that rate, a constant time behind. Whether they wait in the relay's sender or in the browser is not told apart by these numbers; a viewer that is not Chromium through the same link would tell.
+
+**The steps and the lost packets, from the lines that were kept** (no new run). The second run of B, the sound alone: the relay's count of lost packets went up at the streams 7, 12, 32, 55 (by two), 63 and 68, each stream 200 ms of sound: about 1.4, 2.4, 6.4, 11, 12.6 and 13.6 seconds after the SUBSCRIBE. The sound came 20 ms later at about 3.8, 7.8 and 13.8 seconds.
+
+- **Not one step for each lost packet**: 7 packets lost towards the viewer, 3 steps. Each step comes within about 1.5 seconds after a loss; 4 losses have no step.
+- **A step is not the round trip** (103 ms) nor a wait for a packet to be sent again: here each was 20 ms, the length of one piece; in the other runs 20, 60 and 200 ms were seen, all of them whole pieces.
+- How coarse this is: the lateness is the median of 25 pieces, read once a second, and the packets lost towards the relay (the viewer's acknowledgements) are not counted in the relay's number. A reading for each piece, and the time of every packet the link dropped, were not kept.
+
+## The cause: the decoder's times, not the link
+
+**The sound was never late. The times that Chromium's `AudioDecoder` gives its pieces were early.**
+
+With a probe in the page (taken out again), one run of 20 seconds with the sound alone, 50 ms and 1 %:
+
+| Where | How long after it was made |
+|---|---|
+| The Object is given to the player (`playAudioTrack`), 971 Objects | 24 ms at least, median 30, at most 155: no step in 20 seconds |
+| The piece comes out of the decoder, by its `timestamp` | 26 ms at first, 370 ms at the end |
+
+- 17 of the 971 Objects were dropped by the player as late (an Object of a Group that came after the next Group had begun), and 17 pieces of 20 ms are 340 ms: the difference.
+- **Chromium 156 numbers the decoder's output from the time of the first chunk, by the samples it has given**, and does not look at the times of the chunks after it. Each chunk that does not go into the decoder leaves everything after it 20 ms early, for good. The demo plays by the time, took the pieces for late, and sounded none.
+- That is why a step is a whole number of pieces, why not every lost packet makes one, and why it needs delay and loss together: only then does the rest of a Group come after the next Group has begun.
+- **Changed in `@xmoq/media`**: `playAudioTrack` keeps the times of the chunks it gives the decoder, and gives each piece the time of its chunk (a copy with that time, where the decoder's differs by a millisecond or more).
+
+After the change, the same link, 16 seconds each, one run:
+
+| Run | Link | Sound came, ms after it was made, at seconds 1, 8, 16 | Sounded | Dropped as late |
+|---|---|---|---|---|
+| A | 50 ms, 1 %; picture and sound | 33, 33, 34 | all | not read |
+| B | 50 ms, 1 %; the sound alone | 43, 41, 40 | all | not read |
+| F | 50 ms, 5 %; picture and sound | 42, 87, 58 | all but 6 | **190 of about 780** |
+| G | 5 %, no delay; the sound alone, one piece a stream | -8, -7, -8 | all | 30 |
+| G, the change taken out for the run | the same | 88, 391, 770 | none after second 2 | 39 (39 pieces are 780 ms) |
+| H | 50 ms, 1 %; the sound alone, one piece a stream | 42, 43, 42 | all | 11 |
+
+- **This takes back a finding of the day** (docs/experiments/2026-10-11-demo-over-a-lossy-link.md and what followed it): "with loss the sound comes late, and it is inside Chromium that streams are handed to the page late". Run G is that case, and it is the same thing: the pieces were on time, their times were not. That Firefox and the Rust viewer showed no lateness fits: neither goes by Chromium's decoder. "10 pieces in a Group keep it away" held because fewer Objects are dropped as late that way, not because streams came sooner.
+- **What is left, and real**: an Object that comes after a later one is dropped, and with loss that is many (190 of about 780 at 50 ms and 5 %): gaps in the sound. Putting them back in order within the buffer is not done.
+- No test holds the change: there is no `AudioDecoder` outside a browser. Firefox was not run again.
 
 ## Limitations and blockers
 

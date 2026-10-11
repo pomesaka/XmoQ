@@ -200,6 +200,37 @@ export interface AudioPlayback {
  * Group and its Object ID, is dropped (`late`). Nothing waits for an Object that does not come: the
  * decoder gets what there is.
  */
+/**
+ * `data` with the time `timestamp`, in microseconds: itself where it has
+ * that time already (within a millisecond: a decoder rounds), and a copy
+ * with that time else; `data` is then closed.
+ */
+function withTime(data: AudioData, timestamp: number | undefined): AudioData {
+	if (timestamp === undefined || Math.abs(data.timestamp - timestamp) < 1000) {
+		return data;
+	}
+	const samples = new Float32Array(data.numberOfFrames * data.numberOfChannels);
+	for (let channel = 0; channel < data.numberOfChannels; channel++) {
+		data.copyTo(
+			samples.subarray(
+				channel * data.numberOfFrames,
+				(channel + 1) * data.numberOfFrames,
+			),
+			{ planeIndex: channel, format: "f32-planar" },
+		);
+	}
+	const copy = new AudioData({
+		format: "f32-planar",
+		sampleRate: data.sampleRate,
+		numberOfFrames: data.numberOfFrames,
+		numberOfChannels: data.numberOfChannels,
+		timestamp,
+		data: samples,
+	});
+	data.close();
+	return copy;
+}
+
 export async function playAudioTrack(
 	connection: MoqtConnection,
 	options: PlayAudioTrackOptions,
@@ -231,9 +262,24 @@ export async function playAudioTrack(
 	const drop = (because: keyof AudioPlaybackStats["dropped"]): void => {
 		stats.dropped[because] = (stats.dropped[because] ?? 0) + 1;
 	};
+	/**
+	 * The times of the chunks that are in the decoder, in the order they
+	 * went in: a decoder of Opus gives one piece for each chunk.
+	 *
+	 * WHY the time is not taken from what the decoder gives: Chromium's
+	 * decoder numbers its output from the time of the first chunk, by the
+	 * samples it has given, and does not look at the times of the chunks
+	 * after it (Chromium 156). Each chunk that never went in (one dropped
+	 * as late, one that was lost) then leaves everything after it 20 ms
+	 * early for good: with 17 of 971 dropped, the pieces said they were
+	 * made 340 ms before they were, and a player that goes by the time
+	 * took all of them for late.
+	 */
+	const timesIn: number[] = [];
 	const decoder = new AudioDecoder({
-		output: (data) => {
+		output: (decoded) => {
 			stats.decoded += 1;
+			const data = withTime(decoded, timesIn.shift());
 			try {
 				options.onData(data);
 			} catch (error) {
@@ -291,10 +337,12 @@ export async function playAudioTrack(
 		}
 		last = { group: groupId, object: object.objectId };
 		if (decoder.state !== "configured") return;
+		const timestamp = Number(microsecondsOf(read.timing));
+		timesIn.push(timestamp);
 		decoder.decode(
 			new EncodedAudioChunk({
 				type: "key",
-				timestamp: Number(microsecondsOf(read.timing)),
+				timestamp,
 				data: object.payload,
 			}),
 		);
