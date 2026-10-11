@@ -277,7 +277,7 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		relays: ["own"],
 	},
 	{
-		name: "own-browser asks for a Group of 7.2 MB the relay holds, reads nothing and gives up; the relay gives the FETCH up",
+		name: "own-browser asks for a Group of 8.3 MB the relay holds, reads nothing and gives up; the relay gives the FETCH up",
 		script: "fetch.ts",
 		args: ["--fetch", "page-large-group-cancelled"],
 		relays: ["own"],
@@ -312,6 +312,12 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		name: "own-rust subscribes and sends an Absolute Joining FETCH; the relay asks the own page for the range",
 		script: "fetch-rust.ts",
 		args: ["--fetch", "page-join-absolute"],
+		relays: ["own"],
+	},
+	{
+		name: "own-rust asks for a Group of 7.2 MB the relay holds, reads nothing and gives up on the request stream alone; the relay stops writing by its own order",
+		script: "fetch-rust.ts",
+		args: ["--fetch", "page-large-request-only"],
 		relays: ["own"],
 	},
 	{

@@ -41,6 +41,21 @@ pub struct Reading {
     pub every: Duration,
     /// Give the FETCH up after this many Objects.
     pub cancel_after_objects: Option<u64>,
+    /// Give the FETCH up this long after it was sent, whatever came of it.
+    pub cancel_after: Option<Duration>,
+    /// `--fetch-cancel-request-only`: a FETCH that is given up is cancelled
+    /// on its request stream alone. Its fetch stream is not stopped, and
+    /// not read any further.
+    ///
+    /// WHY a client that does so: §5.2 has "If the data stream is already
+    /// open, the subscriber wishing to cancel the FETCH MAY send
+    /// `STOP_SENDING` for the data stream as well as the bidi request
+    /// stream. It MUST send `STOP_SENDING` for the bidi request stream", and
+    /// of the publisher then, "It MUST reset the bidi request stream and
+    /// unidirectional data stream associated with the FETCH". A subscriber
+    /// that stops both streams itself never lets a publisher show that it
+    /// resets the second.
+    pub cancel_request_only: bool,
 }
 
 /// How the reading of a fetch stream ended.
@@ -69,6 +84,8 @@ pub enum Note {
     RequestBroken(Error),
     /// The reading of the fetch stream is over.
     Body(usize, BodyEnd),
+    /// The time of `--fetch-cancel-after-ms` is over for this FETCH.
+    CancelDue(usize),
 }
 
 /// How the fetch stream of a FETCH ended.
@@ -273,6 +290,9 @@ pub struct OwnFetch {
     /// (§3.3.2); dropped, this client's direction is finished.
     request: Option<oneshot::Sender<()>>,
     body: Option<JoinHandle<()>>,
+    /// Tells the task of the fetch stream to read no more and to keep the
+    /// stream as it is (`Reading::cancel_request_only`).
+    hold: Arc<tokio::sync::Notify>,
 }
 
 /// What was printed for a FETCH.
@@ -327,6 +347,14 @@ impl Fetches {
         let index = self.sent.len();
         let (request, cancelled) = oneshot::channel();
         tokio::spawn(watch_request(index, stream, cancelled, self.queue.clone()));
+        if let Some(after) = self.reading.cancel_after {
+            let notes = self.queue.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                // The client is gone when this fails.
+                let _ = notes.send(Note::CancelDue(index)).await;
+            });
+        }
         self.sent.push(OwnFetch {
             id,
             group_order,
@@ -334,6 +362,7 @@ impl Fetches {
             printed: Arc::new(Mutex::new(Printed::default())),
             request: Some(request),
             body: None,
+            hold: Arc::new(tokio::sync::Notify::new()),
         });
     }
 
@@ -373,13 +402,29 @@ impl Fetches {
             printed: Arc::clone(&fetch.printed),
             notes: self.queue.clone(),
         };
-        fetch.body = Some(tokio::spawn(task.read(body)));
+        let hold = Arc::clone(&fetch.hold);
+        fetch.body = Some(tokio::spawn(async move {
+            let mut body = body;
+            tokio::select! {
+                () = task.read(&mut body) => {}
+                // Told to read no more: the stream is kept, unread and not
+                // stopped, until this task ends with the client.
+                () = hold.notified() => std::future::pending().await,
+            }
+        }));
     }
 
     /// Lets go of the streams of a FETCH that is over: the request stream
     /// is reset (§3.3.2) or finished, and a fetch stream that is still
-    /// read is stopped.
-    pub fn end(&mut self, index: usize, cancel: bool) {
+    /// read is stopped. With `--fetch-cancel-request-only` the fetch stream
+    /// of a FETCH this client gave up itself (`gave_up`) is kept instead,
+    /// and read no further.
+    ///
+    /// WHY not of every FETCH that is cancelled: a FETCH whose request
+    /// stream the peer reset, or whose fetch stream ended in a way the
+    /// client does not take, is cancelled as well, and the flag is for the
+    /// cancellation the client was told to make.
+    pub fn end(&mut self, index: usize, cancel: bool, gave_up: bool) {
         let Some(fetch) = self.sent.get_mut(index) else {
             return;
         };
@@ -390,6 +435,15 @@ impl Fetches {
             }
             // Dropped: the task finishes this client's direction.
             Some(_) | None => {}
+        }
+        if gave_up && self.reading.cancel_request_only {
+            // Only a fetch stream that is open by now is kept. One that
+            // opens after this belongs to a FETCH that is over: it is
+            // dropped where it is handed over, which stops it, and once
+            // every FETCH is over nobody takes streams from the session any
+            // more, so that it stays there untaken until the client leaves.
+            fetch.hold.notify_one();
+            return;
         }
         // The body goes with its task, which stops the stream (`FetchBody`).
         if let Some(body) = fetch.body.take() {
@@ -470,12 +524,12 @@ struct BodyTask {
 impl BodyTask {
     /// Reads one fetch stream at the pace the flags ask for, and prints what
     /// it carries.
-    async fn read(self, mut body: FetchBody) {
+    ///
+    /// The caller drops the body when this is done: a stream that is not at
+    /// its end is stopped then.
+    async fn read(self, body: &mut FetchBody) {
         tokio::time::sleep(self.reading.after).await;
-        let end = self.decode(&mut body).await;
-        // The body is dropped here: a stream that is not at its end is
-        // stopped.
-        drop(body);
+        let end = self.decode(body).await;
         let _ = self.notes.send(Note::Body(self.index, end)).await;
     }
 
