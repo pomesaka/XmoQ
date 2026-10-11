@@ -17,4 +17,4 @@ tokio = { version = "=1.49.0", features = ["io-std", "io-util", "macros", "rt-mu
 [dev-dependencies]
 # WHY test-util: the waits of a served FETCH are seconds, which the tests run
 # on tokio's paused clock.
-tokio = { version = "=1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time", "test-util"] }
+tokio = { version = "=1.49.0", features = ["test-util"] }

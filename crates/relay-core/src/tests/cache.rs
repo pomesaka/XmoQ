@@ -210,6 +210,16 @@ fn a_fetch_the_cache_answered_ends_when_its_stream_is_written() {
                 (written(Some(0x1)), vec![reset(0x1)]),
             ],
         ),
+        // The I/O side reports the reset and the stop of the request
+        // stream as two ends: the stream is given up once.
+        (
+            "cancelled, and reported twice",
+            vec![
+                (closes(RequestEnd::Aborted), vec![abort(0x1)]),
+                (closes(RequestEnd::Aborted), vec![]),
+                (written(Some(0x1)), vec![reset(0x1)]),
+            ],
+        ),
         // A subscriber that only finishes its direction has given nothing
         // up.
         (
@@ -265,6 +275,165 @@ fn a_track_found_malformed_resets_the_stream_the_relay_writes_from_its_cache() {
             code: 0x12,
         }]
     );
+}
+
+#[test]
+fn a_stream_the_relay_writes_is_told_to_stop_once_whatever_comes_after() {
+    let cancel = || Event::RequestClosed {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        how: RequestEnd::Aborted,
+    };
+    let malformed = || Event::TrackMalformed {
+        session: PUBLISHER,
+        stream: StreamKey(7),
+    };
+    // (what happens first, and the code the stream is given up with; what
+    //  happens then). CANCELLED is 0x1, MALFORMED_TRACK 0x12.
+    let cases = [
+        (cancel(), 0x1, malformed()),
+        (malformed(), 0x12, cancel()),
+        (malformed(), 0x12, malformed()),
+    ];
+    for (first, code, then) in cases {
+        let mut relay = relay_with_three_objects();
+        relay.step(fetch(b"a", at(3, 0), at(3, 0)));
+        let aborts = |actions: &[Action]| -> Vec<Action> {
+            actions
+                .iter()
+                .filter(|action| matches!(action, Action::AbortFetchWrite { .. }))
+                .cloned()
+                .collect()
+        };
+        let what = format!("{first:?} {then:?}");
+        assert_eq!(
+            aborts(&relay.step(first)),
+            [Action::AbortFetchWrite {
+                session: ALICE,
+                stream: FETCH_STREAM,
+                code,
+            }],
+            "{what}"
+        );
+        assert_eq!(aborts(&relay.step(then)), [], "{what}");
+    }
+}
+
+#[test]
+fn a_subgroup_sent_again_from_its_middle_without_its_id_does_not_end_the_track() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    // §11.4.2: the Subgroup ID is "the Object ID of the first Object
+    // transmitted in this Subgroup". Stream 7 has that Object (FIRST_OBJECT)
+    // and the Objects 4 and 5, and is cut short; stream 8 sends the Subgroup
+    // again from Object 5, and is not its start.
+    let of_the_first_object = |first_object| SubgroupHeader {
+        subgroup_id: SubgroupId::FirstObjectId,
+        first_object,
+        ..header(UPSTREAM_ALIAS)
+    };
+    relay.step(Event::DataStreamOpened {
+        session: PUBLISHER,
+        stream: StreamKey(7),
+        header: of_the_first_object(true),
+    });
+    object_arrived(&mut relay, 7, 4);
+    object_arrived(&mut relay, 7, 5);
+    data_stream_closed(&mut relay, 7, StreamEnd::Aborted(Some(5)));
+    relay.step(Event::DataStreamOpened {
+        session: PUBLISHER,
+        stream: StreamKey(8),
+        header: of_the_first_object(false),
+    });
+    for object_id in [5, 6] {
+        let actions = object_arrived(&mut relay, 8, object_id);
+        let sent_on = actions
+            .iter()
+            .any(|action| matches!(action, Action::SendObject { .. }));
+        assert!(sent_on, "{object_id}: {actions:?}");
+    }
+    assert_eq!(relay.counts().tracks, 1);
+    // Object 6 is of a Subgroup the relay cannot name: the Group is asked
+    // of the publisher.
+    let actions = relay.step(fetch(b"a", at(3, 6), at(3, 6)));
+    assert!(asked_the_publisher(&actions), "{actions:?}");
+}
+
+#[test]
+fn a_group_with_a_subgroup_the_relay_cannot_name_is_asked_of_the_publisher() {
+    // Group 3 from its start, on a stream that leaves the Subgroup ID to
+    // its first Object (§11.4.2).
+    // (whether the stream says that its first Object is the first of the
+    //  Subgroup; whether a FETCH for the Group is answered from the cache)
+    for (first_object, from_the_cache) in [(true, true), (false, false)] {
+        let mut relay = relay_with_track();
+        relay.step(Event::DataStreamOpened {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            header: SubgroupHeader {
+                subgroup_id: SubgroupId::FirstObjectId,
+                first_object,
+                ..header(UPSTREAM_ALIAS)
+            },
+        });
+        object_arrived(&mut relay, 7, 0);
+        object_arrived(&mut relay, 7, 1);
+        let actions = relay.step(fetch(b"a", at(3, 0), at(3, 1)));
+        let written = matches!(actions.last(), Some(Action::WriteFetchStream { .. }));
+        assert_eq!(
+            (written, asked_the_publisher(&actions)),
+            (from_the_cache, !from_the_cache),
+            "{first_object}: {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn a_status_after_the_end_of_a_group_does_not_end_the_track() {
+    let status = |object_id, status| SubgroupObject {
+        status,
+        payload: vec![],
+        ..object(object_id)
+    };
+    // Object 0 and End of Group at 1 on stream 7; then, on stream 8 of
+    // another Subgroup of the Group:
+    let cases = [
+        status(2, ObjectStatus::EndOfTrack),
+        status(2, ObjectStatus::EndOfGroup),
+    ];
+    for last in cases {
+        let mut relay = relay_with_track();
+        subscribe_to_track(&mut relay, ALICE);
+        data_stream_opened(&mut relay, 7);
+        object_arrived(&mut relay, 7, 0);
+        relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            object: status(1, ObjectStatus::EndOfGroup),
+        });
+        relay.step(Event::DataStreamOpened {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            header: SubgroupHeader {
+                subgroup_id: SubgroupId::Explicit(1),
+                ..header(UPSTREAM_ALIAS)
+            },
+        });
+        let actions = relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            object: last.clone(),
+        });
+        let sent_on = actions
+            .iter()
+            .any(|action| matches!(action, Action::SendObject { object, .. } if **object == last));
+        assert!(sent_on, "{last:?}: {actions:?}");
+        assert_eq!(
+            (relay.counts().tracks, relay.counts().cached_bytes),
+            (1, 0),
+            "{last:?}"
+        );
+    }
 }
 
 #[test]
@@ -429,6 +598,179 @@ fn what_was_cached_is_not_used_once_a_publisher_says_the_track_is_not_to_be_cach
     // It goes with the next Object that is passed on.
     object_arrived(&mut relay, 9, 2);
     assert_eq!(relay.counts().cached_bytes, 0);
+}
+
+#[test]
+fn an_object_is_cached_with_the_subgroup_its_stream_turned_out_to_be_of() {
+    let mut relay = relay_with_track();
+    // Group 3 on two streams: Subgroup 0 with Object 0, and a stream whose
+    // Subgroup ID is the Object ID of its first Object (§11.4.2), which is
+    // 1, with the Objects 1 and 2.
+    data_stream_opened(&mut relay, 7);
+    object_arrived(&mut relay, 7, 0);
+    relay.step(Event::DataStreamOpened {
+        session: PUBLISHER,
+        stream: StreamKey(8),
+        header: SubgroupHeader {
+            subgroup_id: SubgroupId::FirstObjectId,
+            publisher_priority: Some(200),
+            ..header(UPSTREAM_ALIAS)
+        },
+    });
+    object_arrived(&mut relay, 8, 1);
+    object_arrived(&mut relay, 8, 2);
+    let actions = relay.step(fetch(b"a", at(3, 0), at(3, 0)));
+    let Some(Action::WriteFetchStream { pieces, .. }) = actions.last() else {
+        panic!("{actions:?}");
+    };
+    let carried: Vec<(u64, u64, u8)> = pieces
+        .iter()
+        .map(|piece| match piece {
+            FetchPiece::Object(cached) => (
+                cached.object.object_id,
+                cached.subgroup_id,
+                cached.publisher_priority,
+            ),
+            FetchPiece::EndOfRange(..) => panic!("{piece:?}"),
+        })
+        .collect();
+    // (Object ID; Subgroup ID; Publisher Priority)
+    assert_eq!(carried, [(0, 0, 9), (1, 1, 200), (2, 1, 200)]);
+}
+
+#[test]
+fn an_object_that_comes_again_with_another_payload_ends_the_track_as_malformed() {
+    // The publisher sends Object 0 of Subgroup 0 of Group 3 on stream 7,
+    // payload 0x61, and then the Subgroup again on stream 8: while the
+    // first stream is open, which the second takes the place of, or after
+    // the first was cut short, which the draft lets a publisher do (§2.2).
+    //
+    // (whether the first stream was cut short; the payload of Object 0 on
+    //  the second; whether the track is malformed for it)
+    let cases: [(bool, &[u8], bool); 5] = [
+        (false, &[0x61], false),
+        (true, &[0x61], false),
+        // §9.1: "An endpoint that receives a duplicate Object with a
+        // different ... Payload MUST treat the track as Malformed."
+        (false, &[0x62], true),
+        (true, &[0x62], true),
+        (true, &[], true),
+    ];
+    for (cut_short, payload, malformed) in cases {
+        let mut relay = relay_with_track();
+        subscribe_to_track(&mut relay, ALICE);
+        data_stream_opened(&mut relay, 7);
+        object_arrived(&mut relay, 7, 0);
+        if cut_short {
+            data_stream_closed(&mut relay, 7, StreamEnd::Aborted(Some(5)));
+        }
+        relay.step(Event::DataStreamOpened {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            header: header(UPSTREAM_ALIAS),
+        });
+        let actions = relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            object: SubgroupObject {
+                payload: payload.to_vec(),
+                ..object(0)
+            },
+        });
+        let what = format!("{cut_short} {payload:?}: {actions:?}");
+        let sent_on = actions
+            .iter()
+            .any(|action| matches!(action, Action::SendObject { .. }));
+        // MALFORMED_TRACK (0x12): Alice's subscription ends with it, the
+        // stream that brought the Object is stopped with it, and the Object
+        // is not sent on.
+        let ended = actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::SendRequest {
+                    session: ALICE,
+                    message: ControlMessage::PublishDone(PublishDone {
+                        status_code: 0x12,
+                        ..
+                    }),
+                    ..
+                }
+            )
+        });
+        let stopped = actions.contains(&Action::StopDataStream {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            code: 0x12,
+        });
+        assert_eq!(
+            (ended, stopped, sent_on),
+            (malformed, malformed, !malformed),
+            "{what}"
+        );
+        let counts = relay.counts();
+        assert_eq!(
+            (counts.tracks, counts.cached_bytes),
+            if malformed { (0, 0) } else { (1, 1) },
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn a_group_that_takes_an_object_back_goes_on_and_is_not_answered_from_the_cache() {
+    let end_of_group = |object_id| SubgroupObject {
+        status: ObjectStatus::EndOfGroup,
+        payload: vec![],
+        ..object(object_id)
+    };
+    // Group 3 on stream 7; a second Subgroup of it, 1, on stream 8.
+    // (what comes on stream 7 after Object 0; what comes on stream 8)
+    let cases = [
+        // An Object at the very Object ID of an End of Group (§2.1: "not a
+        // protocol error and the Track is not malformed").
+        (end_of_group(1), object(1)),
+        // An End of Group where an Object is, and below one that came
+        // (§9.1: an Object "can transition from existing to not existing").
+        (object(1), end_of_group(1)),
+        (object(2), end_of_group(1)),
+    ];
+    for (first, second) in cases {
+        let mut relay = relay_with_track();
+        subscribe_to_track(&mut relay, ALICE);
+        data_stream_opened(&mut relay, 7);
+        object_arrived(&mut relay, 7, 0);
+        relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            object: first.clone(),
+        });
+        relay.step(Event::DataStreamOpened {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            header: SubgroupHeader {
+                subgroup_id: SubgroupId::Explicit(1),
+                ..header(UPSTREAM_ALIAS)
+            },
+        });
+        let actions = relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            object: second.clone(),
+        });
+        let what = format!("{first:?} {second:?}: {actions:?}");
+        // It is sent on as it came (§9.4: "A relay MUST NOT reorder or drop
+        // objects received on a multi-object stream when forwarding"), and
+        // the track goes on.
+        let sent_on = actions.iter().any(
+            |action| matches!(action, Action::SendObject { object, .. } if **object == second),
+        );
+        assert!(sent_on, "{what}");
+        assert_eq!(relay.counts().tracks, 1, "{what}");
+        // What the relay holds of the Group answers nothing any more.
+        assert_eq!(relay.counts().cached_bytes, 0, "{what}");
+        let actions = relay.step(fetch(b"a", at(3, 0), at(3, 1)));
+        assert!(asked_the_publisher(&actions), "{what}: {actions:?}");
+    }
 }
 
 #[test]

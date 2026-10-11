@@ -754,6 +754,44 @@ struct Track {
     never_cached: bool,
 }
 
+/// Puts an Object of `in_stream` that the relay is about to pass on into the
+/// cache of its track, unless the track has none (`never_cached`), and says
+/// what the Object shows of the track there.
+///
+/// WHY the fields of the track and not the track: `in_stream` is one of
+/// its fields as well.
+fn keep(
+    cache: &mut cache::Cache,
+    never_cached: bool,
+    in_stream: &InStream,
+    subgroup_id: u64,
+    object: &Arc<SubgroupObject>,
+    cached_bytes: &mut usize,
+) -> cache::Verdict {
+    let group_id = in_stream.header.group_id;
+    if never_cached {
+        cache.clear(cached_bytes);
+        return cache::Verdict::Fine;
+    }
+    let Some(publisher_priority) = in_stream.priority else {
+        // A stream whose default priority the relay cannot tell (see
+        // `Relay::on_data_stream_opened`) has no priority a fetch stream
+        // could give.
+        cache.leave_out(group_id, cached_bytes);
+        return cache::Verdict::Fine;
+    };
+    let cached = CachedObject {
+        group_id,
+        subgroup_id,
+        publisher_priority,
+        object: Arc::clone(object),
+    };
+    // §11.4.2: see `Cache::insert`.
+    let sure_of_subgroup =
+        in_stream.header.subgroup_id != SubgroupId::FirstObjectId || in_stream.header.first_object;
+    cache.insert(cached, sure_of_subgroup, cached_bytes)
+}
+
 impl Track {
     /// A track with its first source; [`Tracks::add_source`] is the one
     /// place that makes one.
@@ -2442,12 +2480,28 @@ impl Relay {
             group: in_stream.header.group_id,
             object: object.object_id,
         };
-        if track.largest.is_none_or(|largest| location > largest) {
-            track.largest = Some(location);
-        }
         // §11.4.2, mode 0b01: the Subgroup ID is the Object ID of the first
         // Object of the Subgroup.
         let subgroup_id = *in_stream.subgroup_id.get_or_insert(object.object_id);
+        let object = Arc::new(object);
+        // WHY before anything is done with the Object: one that shows the
+        // track to be malformed is not counted as its largest and not sent
+        // on, as an Object whose stream does (above).
+        let verdict = keep(
+            &mut track.cache,
+            track.never_cached,
+            in_stream,
+            subgroup_id,
+            &object,
+            &mut self.cached_bytes,
+        );
+        if verdict == cache::Verdict::Malformed {
+            self.on_track_malformed(session, stream, actions);
+            return;
+        }
+        if track.largest.is_none_or(|largest| location > largest) {
+            track.largest = Some(location);
+        }
 
         // A subscriber that came after the stream started gets a stream of its
         // own from here on. Its header must not repeat two things that are
@@ -2477,25 +2531,6 @@ impl Relay {
         // §9.7: the Object goes out as it came in. §9.4: in the order it came.
         // In the order the subscribers came, so that the same events always
         // lead to the same actions.
-        let object = Arc::new(object);
-        if track.never_cached {
-            track.cache.clear(&mut self.cached_bytes);
-        } else if let Some(publisher_priority) = in_stream.priority {
-            let cached = CachedObject {
-                group_id: location.group,
-                subgroup_id,
-                publisher_priority,
-                object: Arc::clone(&object),
-            };
-            track.cache.insert(cached, &mut self.cached_bytes);
-        } else {
-            // A stream whose default priority the relay cannot tell (see
-            // `Self::on_data_stream_opened`) has no priority a fetch stream
-            // could give.
-            track
-                .cache
-                .leave_out(location.group, &mut self.cached_bytes);
-        }
         for subscriber in &track.subscribers {
             if let Some(out_stream) = in_stream.outs.get(&subscriber.session) {
                 actions.push(Action::SendObject {
