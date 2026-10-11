@@ -2,12 +2,22 @@
 // encoded and published as one video track.
 //
 // `?source=camera` takes the camera; without it the page paints a clock.
+// The sound is a tone that goes up and down, made by the page;
+// `?audio=mic` takes the microphone, `?audio=none` sends no audio track.
 
-import { createVideoTrackEncoder } from "@xmoq/media";
+import {
+	type AudioTrackEncoder,
+	createAudioTrackEncoder,
+	createVideoTrackEncoder,
+} from "@xmoq/media";
 import { RequestErrorCode } from "@xmoq/moqt";
 import {
+	audioTrackName,
 	connectToRelay,
 	ENCODER_CODEC,
+	MARK,
+	marked,
+	SAMPLE_RATE,
 	HEIGHT,
 	namespace,
 	say,
@@ -20,7 +30,63 @@ const FRAMES_A_SECOND = 30;
 /** Not in the DOM library of TypeScript yet: a track of a `MediaStream` as a stream of frames (Chromium has it). */
 declare class MediaStreamTrackProcessor {
 	constructor(init: { track: MediaStreamTrack });
-	readonly readable: ReadableStream<VideoFrame>;
+	readonly readable: ReadableStream<VideoFrame | AudioData>;
+}
+
+/**
+ * A quiet tone whose pitch goes up and down, and a loud beep while the mark
+ * is on (`marked`), 20 ms at a time, without an `AudioContext`: that needs
+ * a click, and this page is to send from the start.
+ *
+ * WHY by the clock and not one piece a tick: a timer of a page is late now
+ * and then, and the sound would fall behind the picture by every tick that
+ * was. Piece `n` is the 20 ms that begin `n * 20` ms after the first, and
+ * as many are made as the clock has passed.
+ */
+function tone(onData: (data: AudioData) => void): void {
+	const frames = SAMPLE_RATE / 50;
+	const began = Date.now();
+	let piece = 0;
+	let phase = 0;
+	setInterval(() => {
+		while (piece * 20 <= Date.now() - began) {
+			const loud = marked(began + piece * 20);
+			const samples = new Float32Array(frames);
+			for (let index = 0; index < frames; index++) {
+				const seconds = (piece * frames + index) / SAMPLE_RATE;
+				const pitch = loud ? 1000 : 440 + 220 * Math.sin(Math.PI * seconds);
+				phase += (2 * Math.PI * pitch) / SAMPLE_RATE;
+				samples[index] = (loud ? 0.6 : 0.1) * Math.sin(phase);
+			}
+			onData(
+				new AudioData({
+					format: "f32",
+					sampleRate: SAMPLE_RATE,
+					numberOfFrames: frames,
+					numberOfChannels: 1,
+					timestamp: piece * 20_000,
+					data: samples,
+				}),
+			);
+			piece += 1;
+		}
+	}, 10);
+}
+
+/** Calls `onData` with the audio of the microphone. */
+async function fromMicrophone(onData: (data: AudioData) => void): Promise<void> {
+	const media = await navigator.mediaDevices.getUserMedia({
+		audio: { sampleRate: SAMPLE_RATE, channelCount: 1 },
+	});
+	const [track] = media.getAudioTracks();
+	if (track === undefined) throw new Error("the microphone gave no track");
+	const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+	for (;;) {
+		const next = await reader.read();
+		if (next.done) return;
+		if (next.value instanceof AudioData) onData(next.value);
+		else next.value.close();
+	}
 }
 
 const preview = document.querySelector("canvas");
@@ -42,6 +108,10 @@ async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 	for (;;) {
 		const next = await reader.read();
 		if (next.done) return;
+		if (next.value instanceof AudioData) {
+			next.value.close();
+			continue;
+		}
 		// The preview shows what is sent; the encoder is fixed to one size,
 		// so the frame is drawn to that size and taken from the canvas.
 		context?.drawImage(next.value, 0, 0, WIDTH, HEIGHT);
@@ -62,6 +132,8 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 		context.fillRect(0, 0, WIDTH, HEIGHT);
 		context.fillStyle = "#f2c14e";
 		context.fillRect(((elapsed / 10) % (WIDTH + 80)) - 80, HEIGHT - 60, 80, 30);
+		context.fillStyle = marked(Date.now()) ? "#ffffff" : "#000000";
+		context.fillRect(MARK.x, MARK.y, MARK.size, MARK.size);
 		context.fillStyle = "#ffffff";
 		context.font = "48px monospace";
 		context.fillText(new Date().toISOString().slice(11, 23), 40, 120);
@@ -94,13 +166,35 @@ async function main(): Promise<void> {
 			say(`key frames are not sent: ${JSON.stringify(event)}`);
 		},
 	});
+	const audioSource = new URLSearchParams(location.search).get("audio");
+	let audio: AudioTrackEncoder | undefined;
+	if (audioSource !== "none") {
+		audio = await createAudioTrackEncoder({
+			trackNamespace: namespace(),
+			trackName: audioTrackName(),
+			firstGroup: BigInt(Date.now()),
+			codec: "opus",
+			sampleRate: SAMPLE_RATE,
+			numberOfChannels: 1,
+		});
+		const sound = audio;
+		if (audioSource === "mic") {
+			void fromMicrophone((data) => sound.encode(data)).catch(
+				(error: unknown) => say(`the microphone failed: ${String(error)}`),
+			);
+		} else {
+			tone((data) => sound.encode(data));
+		}
+	}
 	connection.serve({
 		subscribe(request) {
 			if (encoder.publisher.subscribe(request)) return;
+			if (audio?.publisher.subscribe(request)) return;
 			request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
 		},
 		fetch(request) {
 			if (encoder.publisher.fetch(request)) return;
+			if (audio?.publisher.fetch(request)) return;
 			request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
 		},
 	});
@@ -119,7 +213,7 @@ async function main(): Promise<void> {
 		const stats = encoder.stats();
 		const sent = encoder.publisher.stats();
 		say(
-			`encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)}`,
+			`video: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
 		);
 	}, 500);
 	void encoder.failed.then((error) => say(`the encoder failed: ${String(error)}`));

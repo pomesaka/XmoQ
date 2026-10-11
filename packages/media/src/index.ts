@@ -20,6 +20,14 @@ export {
 	type VideoStreamMapping,
 } from "./core/video-sender.ts";
 export {
+	type AudioChunk,
+	type AudioTrackPublisher,
+	type AudioTrackPublisherOptions,
+	type AudioTrackPublisherStats,
+	createAudioTrackPublisher,
+	DEFAULT_MAX_PENDING_AUDIO_CHUNKS,
+} from "./moqt/audio-track-publisher.ts";
+export {
 	createVideoTrackPublisher,
 	DEFAULT_MAX_PENDING_BYTES,
 	DEFAULT_MAX_PENDING_OBJECTS,
@@ -29,6 +37,16 @@ export {
 	type VideoTrackPublisherOptions,
 	type VideoTrackPublisherStats,
 } from "./moqt/video-track-publisher.ts";
+export {
+	type AudioPlayback,
+	type AudioPlaybackStats,
+	type AudioTrackEncoder,
+	type AudioTrackEncoderOptions,
+	type AudioTrackEncoderStats,
+	createAudioTrackEncoder,
+	type PlayAudioTrackOptions,
+	playAudioTrack,
+} from "./web/audio-track.ts";
 export {
 	createVideoTrackEncoder,
 	DEFAULT_MAX_ENCODE_QUEUE,

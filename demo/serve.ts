@@ -131,7 +131,8 @@ const html = (path: string): string => `<!doctype html>
 	<body>
 		<p>XmoQ demo, ${path.slice(1)} · <a href="/publish">publish (a clock)</a> · <a href="/publish?source=camera">publish (camera)</a> · <a href="/watch">watch</a></p>
 		<canvas width="640" height="360"></canvas>
-		<p id="status">loading</p>
+		${path === "/watch" ? '<p><button id="sound">sound</button></p>' : ""}
+		<pre id="status">loading</pre>
 		<script type="module" src="${path}.js"></script>
 	</body>
 </html>

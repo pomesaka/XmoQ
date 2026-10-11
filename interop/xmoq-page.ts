@@ -248,6 +248,22 @@ export type OwnPageExtras = {
 	 * Resolves when the namespace is announced.
 	 */
 	publishVideo(namespace: string, setup: PageVideoSetup): Promise<void>;
+	/**
+	 * Publishes an Opus audio track (48,000 Hz, mono) with
+	 * `createAudioTrackEncoder` of `@xmoq/media`, and announces the
+	 * namespace. From then on the page makes 20 ms of a 440 Hz tone, half of
+	 * full scale, every 20 ms, and encodes it; piece `n` has the time
+	 * `7000000 + n * 20000` microseconds.
+	 */
+	publishAudio(namespace: string, trackName: string): Promise<void>;
+	/** What the encoder and the publisher started with `publishAudio` have counted so far. */
+	audioPublishReport(): Promise<PageAudioPublishReport>;
+	/** Stops the tone and ends the audio track. */
+	stopAudio(): Promise<void>;
+	/** Plays the audio track with `playAudioTrack` of `@xmoq/media`; nothing is sounded: what the decoder gives is noted and closed. */
+	playAudio(namespace: string, trackName: string): Promise<void>;
+	/** What `playAudio` has so far, once it has `pieces` pieces or `timeoutMs` are over. */
+	audioReport(pieces: number, timeoutMs: number): Promise<PageAudioReport>;
 	/** What the encoder and the publisher started with `publishVideo` have counted so far. */
 	videoPublishReport(): Promise<PageVideoPublishReport>;
 	/** Stops painting and ends the video track (`VideoTrackEncoder.end`). */
@@ -366,6 +382,34 @@ export type PageVideoReport = {
 	};
 	/** How the playing ended, or null while it goes on: "subscription-ended <type>", "decoder-failed <error>" or "failed <error>". */
 	ended: string | null;
+};
+
+/** What `createAudioTrackEncoder` of `@xmoq/media` counted on a page. */
+export type PageAudioPublishReport = {
+	made: number;
+	submitted: number;
+	encoded: number;
+	encodedBytes: number;
+	/** The length of the `description` the encoder gave with its first chunk, or null where it gave none. */
+	descriptionLength: number | null;
+	encoderError: string | null;
+	written: number;
+	skipped: Record<string, number>;
+};
+
+/** What `playAudioTrack` of `@xmoq/media` gave a page. */
+export type PageAudioReport = {
+	/** Every piece the decoder gave: its time in microseconds, its frames, and the largest sample in it, of 1. */
+	pieces: {
+		timestamp: number;
+		frames: number;
+		sampleRate: number;
+		channels: number;
+		peak: number;
+	}[];
+	received: number;
+	dropped: Record<string, number>;
+	decoderError: string | null;
 };
 
 /** What `publishVideo` is started with. */

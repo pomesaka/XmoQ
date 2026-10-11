@@ -190,6 +190,34 @@
 //     - 30 frames or more, each with a later number than the one before it
 //       and that many times 40,000 microseconds after it.
 //
+//   audio         A page makes a 440 Hz tone, half of full scale, encodes it
+//                 as Opus (48,000 Hz, mono) and publishes it with
+//                 `createAudioTrackEncoder` of `@xmoq/media`, a Group and a
+//                 stream for every chunk; another page plays it with
+//                 `playAudioTrack` through the own relay. Nothing is
+//                 sounded: what the decoder gives is looked at. Written
+//                 before the first run:
+//
+//     - **100 pieces of audio or more are decoded**, 2 seconds, each
+//       48,000 Hz and mono.
+//     - **Each piece begins where the one before it ends**: its time is
+//       the time of the one before plus that one's frames, in
+//       microseconds. **Corrected after the first run**: the time of piece
+//       13 was 1 microsecond before that, though the Objects carry whole
+//       multiples of 20,000 after the first; the decoder counts the times
+//       of what it gives by itself. The run takes a piece within 2
+//       microseconds of 20,000 times its place after the first, and says
+//       the furthest it saw.
+//     - The time of the first piece is wall-clock time, within a minute of
+//       the driver's clock.
+//     - **It is not silence**: 9 of 10 pieces have a sample over 0.1 of
+//       full scale.
+//     - The viewer dropped nothing and its decoder did not fail; the
+//       publisher's encoder did not fail and left nothing unsent but for
+//       want of a subscriber.
+//     - Whether the encoder gave a `description` is said, and not judged:
+//       none is sent, and whether one is to be is undecided.
+//
 import { parseArgs } from "node:util";
 import {
 	captureGroup,
@@ -876,7 +904,105 @@ async function lateViewer(): Promise<string> {
 	return `a viewer that came in the middle of a Group fetched ${served[1]} Objects of it from the relay and had its first frame from ${Math.round((before - firstFrame.timestamp) / 1000)} ms before it came; ${frames.length} frames in order, dropped ${JSON.stringify(stats.dropped)}`;
 }
 
+async function audio(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser"],
+		verbose: options.verbose,
+	});
+	const publisher = await openConnectedPage(
+		context,
+		"publisher",
+		"own-browser",
+	);
+	await withTimeout(
+		publisher.evaluate(
+			([namespace]) => window.xmoqOwn.publishAudio(namespace, "audio"),
+			[PAGE_NAMESPACE] satisfies [string],
+		),
+		"the page to publish its audio",
+	);
+	const viewer = await openConnectedPage(context, "viewer", "own-browser");
+	const before = Date.now() * 1000;
+	const report = await withTimeout(
+		viewer.evaluate(
+			async ([namespace, timeoutMs]) => {
+				await window.xmoqOwn.playAudio(namespace, "audio");
+				return window.xmoqOwn.audioReport(100, timeoutMs);
+			},
+			[PAGE_NAMESPACE, PLAY_TIMEOUT_MS] satisfies [string, number],
+		),
+		"the viewer to report on its audio",
+		PLAY_TIMEOUT_MS + 5_000,
+	);
+	const sent = await publisher.evaluate(() =>
+		window.xmoqOwn.audioPublishReport(),
+	);
+	const seen = JSON.stringify({
+		...report,
+		pieces: report.pieces.slice(0, 4),
+		publisher: sent,
+	});
+	log("driver", `REPORT ${seen}`);
+	const { pieces } = report;
+	if (pieces.length < 100) {
+		throw new Error(`${pieces.length} pieces were decoded, not 100: ${seen}`);
+	}
+	/** The furthest a piece is from 20 ms times its place after the first, in microseconds. */
+	let offBy = 0;
+	pieces.forEach((piece, index) => {
+		const what = `piece ${index} (${JSON.stringify(piece)})`;
+		if (piece.sampleRate !== 48_000 || piece.channels !== 1) {
+			throw new Error(`${what} is not 48000 Hz and mono: ${seen}`);
+		}
+		const start = pieces[0];
+		if (start === undefined || piece.frames !== 960) {
+			throw new Error(`${what} has not 960 frames, 20 ms: ${seen}`);
+		}
+		const expected = start.timestamp + index * 20_000;
+		offBy = Math.max(offBy, Math.abs(piece.timestamp - expected));
+		if (Math.abs(piece.timestamp - expected) > 2) {
+			throw new Error(
+				`${what} does not begin where the one before it ends, at ${expected}: ${seen}`,
+			);
+		}
+	});
+	const [first] = pieces;
+	if (first === undefined || Math.abs(first.timestamp - before) > 60_000_000) {
+		throw new Error(
+			`the first piece has the time ${first?.timestamp}, which is not within a minute of the clock (${before}): ${seen}`,
+		);
+	}
+	const loud = pieces.filter((piece) => piece.peak > 0.1).length;
+	if (loud * 10 < pieces.length * 9) {
+		throw new Error(
+			`${loud} of ${pieces.length} pieces have a sample over 0.1: ${seen}`,
+		);
+	}
+	const unsent = Object.keys(sent.skipped).filter(
+		(reason) => reason !== "no-subscriber",
+	);
+	if (
+		Object.keys(report.dropped).length > 0 ||
+		report.decoderError !== null ||
+		sent.encoderError !== null ||
+		unsent.length > 0
+	) {
+		throw new Error(
+			`the viewer was to drop nothing, no decoder or encoder to fail, and nothing to be left unsent but for want of a subscriber: ${seen}`,
+		);
+	}
+	await withTimeout(
+		publisher.evaluate(() => window.xmoqOwn.stopAudio()),
+		"the publisher to end its track",
+	);
+	const peak = Math.max(...pieces.map((piece) => piece.peak));
+	return `${pieces.length} pieces of Opus audio of a page decoded by another through the own relay, ${first.frames} frames each at 48000 Hz, one after the other (within ${offBy} microseconds), the largest sample ${peak.toFixed(2)} of 1; ${Math.round(sent.encodedBytes / sent.encoded)} bytes a chunk; the encoder gave ${sent.descriptionLength === null ? "no description" : `a description of ${sent.descriptionLength} bytes, which is not sent`}`;
+}
+
 const CASES: Record<string, () => Promise<string>> = {
+	audio,
 	"late-viewer": lateViewer,
 	"to-mlmsub": toMlmsub,
 	"from-mlmpub": fromMlmpub,

@@ -1096,6 +1096,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 						relay: "own",
 					},
 					{
+						name: "own relay: audio: an own page encodes a tone as Opus and publishes it, and another decodes it",
+						script: "video.ts" as const,
+						args: ["--video", "audio"],
+						relay: "own",
+					},
+					{
 						name: "own relay: video: an own page whose key frames are all over what it sends is told so",
 						script: "video.ts" as const,
 						args: ["--video", "key-frames-too-large"],

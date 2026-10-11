@@ -4,6 +4,19 @@ import { connect, type MoqtConnection } from "@xmoq/moqt";
 
 export const NAMESPACE = ["xmoq", "demo"];
 export const TRACK = "video";
+export const AUDIO_TRACK = "audio";
+export const SAMPLE_RATE = 48_000;
+
+/**
+ * The mark both tracks carry at the same moment of the publisher's clock,
+ * for a viewer to measure by: for the first 200 ms of every 2 seconds the
+ * picture has a white square in its upper right corner, and the sound is a
+ * loud beep.
+ */
+export const marked = (wallClockMs: number): boolean =>
+	wallClockMs % 2000 < 200;
+/** Where the square is. */
+export const MARK = { x: 540, y: 20, size: 80 };
 export const WIDTH = 640;
 export const HEIGHT = 360;
 /** What the encoder is configured with, and what the decoder is told: the same profile and level, with the parameter sets in the key frames (`avc3`). */
@@ -14,6 +27,7 @@ const utf8 = new TextEncoder();
 export const namespace = (): Uint8Array[] =>
 	NAMESPACE.map((field) => utf8.encode(field));
 export const trackName = (): Uint8Array => utf8.encode(TRACK);
+export const audioTrackName = (): Uint8Array => utf8.encode(AUDIO_TRACK);
 
 /** The relay, as `serve.ts` wrote it into the page. */
 declare const XMOQ_DEMO: { relayUrl: string; certSha256Hex: string };
