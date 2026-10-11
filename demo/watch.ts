@@ -34,21 +34,46 @@ import {
 
 const query = new URLSearchParams(location.search);
 /** **Provisional, not chosen by measurement**: enough for a frame of 33 ms and the pieces of audio of 20 ms to be there before their turn, on one machine. */
-const BUFFER_MS = Number(query.get("buffer") ?? 150);
+const DEFAULT_BUFFER_MS = 150;
+/**
+ * `?buffer=auto` (**a trial, not the default**): the buffer follows how
+ * late things come. It is what 99 of 100 of the last AUTO_WINDOW_MS came
+ * within, after the fastest, and AUTO_MARGIN_MS more. It grows at once and
+ * shrinks AUTO_STEP_MS at a time, twice a second.
+ */
+const AUTO_WINDOW_MS = 10_000;
+const AUTO_MARGIN_MS = 10;
+const AUTO_STEP_MS = 10;
+/**
+ * How far the automatic buffer goes, and which share of what came it
+ * covers: `?autoMax=` and `?autoShare=`. WHY a limit: with loss, a few of
+ * 100 come seconds late (measured: 0.8 s at 1 %, 5 s at 5 %), and a
+ * buffer that waits for those is not live any more.
+ */
+const AUTO_MAX_MS = Number(query.get("autoMax") ?? 400);
+const AUTO_SHARE = Number(query.get("autoShare") ?? 0.99);
 
 /** How many decoded frames may wait to be drawn: a second of them. */
 const MAX_WAITING_FRAMES = 30;
-/** What the first line says about the buffer, for somebody who wants less delay. */
-const HINT = "add ?buffer=50 or ?buffer=0 to the address for less delay";
 
 /** The last 200 values of something measured, for its median and its largest. */
-function measured(): { add(value: number): void; text(): string; values: number[] } {
+function measured(): {
+	add(value: number): void;
+	median(): number;
+	text(): string;
+	values: number[];
+} {
 	const values: number[] = [];
 	return {
 		values,
 		add(value) {
 			values.push(value);
 			if (values.length > 200) values.shift();
+		},
+		median() {
+			if (values.length === 0) return Number.NaN;
+			const sorted = [...values].sort((a, b) => a - b);
+			return Math.round(sorted[Math.floor(sorted.length / 2)] ?? 0);
 		},
 		text() {
 			if (values.length === 0) return "?";
@@ -79,13 +104,77 @@ async function main(): Promise<void> {
 	// The time of a frame or a piece is the publisher's clock, in
 	// microseconds. WHY the smallest difference to this page's clock is taken
 	// as "no delay": the two clocks need not agree, and the one that came
-	// fastest took at least no time. Everything is played `BUFFER_MS` after
+	// fastest took at least no time. Everything is played `bufferMs` after
 	// that, so that picture and sound with the same time come out together.
 	let fastestMs = Number.POSITIVE_INFINITY;
-	const dueAt = (timestampUs: number): number => {
-		fastestMs = Math.min(fastestMs, Date.now() - timestampUs / 1000);
-		return timestampUs / 1000 + fastestMs + BUFFER_MS;
+	let bufferMs =
+		query.get("buffer") === "auto"
+			? DEFAULT_BUFFER_MS
+			: Number(query.get("buffer") ?? DEFAULT_BUFFER_MS);
+	let auto = query.get("buffer") === "auto";
+	/** How long after the fastest each frame and piece of the last AUTO_WINDOW_MS came, and when. */
+	let lateness: { at: number; ms: number }[] = [];
+	/** What 99 of 100 of them came within. */
+	const lateness99 = (): number => {
+		const sorted = lateness.map((each) => each.ms).sort((a, b) => a - b);
+		return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * AUTO_SHARE))] ?? 0;
 	};
+	/** When something with this time would be played with no buffer: its time, on this page's clock. */
+	const baseOf = (timestampUs: number): number => {
+		const now = Date.now();
+		fastestMs = Math.min(fastestMs, now - timestampUs / 1000);
+		const base = timestampUs / 1000 + fastestMs;
+		lateness.push({ at: now, ms: now - base });
+		return base;
+	};
+
+	// The buffer can be set while watching.
+	const controls = document.createElement("span");
+	const slider = document.createElement("input");
+	slider.type = "range";
+	slider.min = "0";
+	slider.max = "500";
+	slider.step = "10";
+	slider.id = "buffer";
+	const setBuffer = (ms: number, byAuto = false): void => {
+		bufferMs = ms;
+		if (!byAuto) auto = false;
+		slider.value = String(ms);
+	};
+	controls.append(" buffer: ");
+	for (const ms of [0, 50, 150]) {
+		const button = document.createElement("button");
+		button.textContent = `${ms} ms`;
+		button.id = `buffer-${ms}`;
+		button.addEventListener("click", () => setBuffer(ms));
+		controls.append(button, " ");
+	}
+	const autoButton = document.createElement("button");
+	autoButton.textContent = "auto (a trial)";
+	autoButton.id = "buffer-auto";
+	autoButton.addEventListener("click", () => {
+		auto = true;
+	});
+	slider.addEventListener("input", () => setBuffer(Number(slider.value)));
+	controls.append(autoButton, " ", slider);
+	document.getElementById("sound")?.after(controls);
+	setBuffer(bufferMs, auto);
+	every(500, () => {
+		const since = Date.now() - AUTO_WINDOW_MS;
+		lateness = lateness.filter((each) => each.at > since);
+		if (!auto || lateness.length < 50) return;
+		const wanted = Math.min(
+			AUTO_MAX_MS,
+			Math.ceil((lateness99() + AUTO_MARGIN_MS) / AUTO_STEP_MS) * AUTO_STEP_MS,
+		);
+		if (wanted > bufferMs) setBuffer(wanted, true);
+		else if (wanted < bufferMs) setBuffer(bufferMs - AUTO_STEP_MS, true);
+	});
+
+	/** Of the frames that were drawn: how long each took to get here, waited for its turn, and waited for the repaint. */
+	const delay = { arrive: measured(), buffer: measured(), paint: measured() };
+	/** Frames that came after their turn, and were drawn late. */
+	let framesLate = 0;
 
 	const arrived = { video: measured(), audio: measured() };
 	const played = { video: measured(), audio: measured() };
@@ -99,7 +188,13 @@ async function main(): Promise<void> {
 	// one that is due is drawn at the next repaint.
 	const began = performance.now();
 	let firstFrameAfterMs: number | undefined;
-	let frames: { frame: VideoFrame; due: number; mark: boolean }[] = [];
+	let frames: {
+		frame: VideoFrame;
+		/** When it would be drawn with no buffer, and when it was decoded, by this page's clock. */
+		base: number;
+		came: number;
+		mark: boolean;
+	}[] = [];
 	let markShown = false;
 	const framesDecoded = perSecond();
 	const framesShown = perSecond();
@@ -136,14 +231,18 @@ async function main(): Promise<void> {
 			while (frames.length >= MAX_WAITING_FRAMES) frames.shift()?.frame.close();
 			frames.push({
 				frame,
-				due: dueAt(frame.timestamp),
+				base: baseOf(frame.timestamp),
+				came: Date.now(),
 				mark: (red ?? 0) > 128,
 			});
 		},
 	};
 	const repaint = (): void => {
 		const now = Date.now();
-		const due = frames.filter((each) => each.due <= now);
+		// WHY the buffer is added here and not when the frame came: the
+		// buffer can be moved while watching, and the frames that wait
+		// follow it at once.
+		const due = frames.filter((each) => each.base + bufferMs <= now);
 		const show = due.at(-1);
 		for (const each of due) {
 			// A mark that comes on is noted with the frame that shows it,
@@ -154,7 +253,7 @@ async function main(): Promise<void> {
 			markShown = each.mark;
 			if (each !== show) each.frame.close();
 		}
-		frames = frames.filter((each) => each.due > now);
+		frames = frames.filter((each) => each.base + bufferMs > now);
 		if (show !== undefined) {
 			if (
 				canvas.width !== show.frame.displayWidth ||
@@ -166,6 +265,11 @@ async function main(): Promise<void> {
 			context.drawImage(show.frame, 0, 0);
 			framesShown.count();
 			played.video.add(now - show.frame.timestamp / 1000);
+			const turn = show.base + bufferMs;
+			delay.arrive.add(show.came - show.frame.timestamp / 1000);
+			delay.buffer.add(Math.max(0, turn - show.came));
+			delay.paint.add(now - Math.max(turn, show.came));
+			if (show.came > turn) framesLate += 1;
 			show.frame.close();
 			// A picture that stood still for more than 100 ms.
 			if (lastShown !== undefined && now - lastShown > 100) {
@@ -266,7 +370,7 @@ async function main(): Promise<void> {
 			data.close();
 			const now = Date.now();
 			arrived.audio.add(now - timeMs);
-			const due = dueAt(data.timestamp);
+			const due = baseOf(data.timestamp) + bufferMs;
 			const loud = samples.some((sample) => Math.abs(sample) > 0.3);
 			if (loud && !markHeard) marks.audio.push({ time: timeMs, played: due });
 			markHeard = loud;
@@ -344,7 +448,8 @@ async function main(): Promise<void> {
 		const lastMark = together.at(-1);
 		say(
 			[
-				`${link} · ${framesShown.rate()} frames a second shown, ${framesDecoded.rate()} decoded${document.visibilityState === "hidden" ? " (this tab is in the background: nothing is drawn)" : ""} · buffer ${BUFFER_MS} ms (${HINT})`,
+				`${link} · ${framesShown.rate()} frames a second shown, ${framesDecoded.rate()} decoded${document.visibilityState === "hidden" ? " (this tab is in the background: nothing is drawn)" : ""} · buffer ${bufferMs} ms${auto ? ` (auto, ${AUTO_MAX_MS} ms at most: ${Math.round(AUTO_SHARE * 100)} of 100 came within ${Math.round(lateness99())} ms of the fastest in the last ${AUTO_WINDOW_MS / 1000} s, and ${AUTO_MARGIN_MS} more)` : ""}`,
+				`delay of the picture: ${played.video.median()} ms = ${delay.arrive.median()} to get here (encoder, link, relay, decoder) + ${delay.buffer.median()} waiting in the buffer + ${delay.paint.median()} for the next repaint (medians of the last 200 frames; ${framesLate} frames came after their turn). Not in it: from the camera to the encoder, and from the repaint to the screen`,
 				`video: ${stats.decoded} frames, first after ${firstFrameAfterMs ?? "?"} ms; came ${arrived.video.text()} after it was made, shown ${played.video.text()} after; dropped ${JSON.stringify(stats.dropped)}; joining FETCH ${stats.joiningFetch}`,
 				`audio: ${heard === undefined ? "none" : `${heard.decoded} pieces; came ${arrived.audio.text()} after it was made, sounded ${played.audio.text()} after; ${tooLate} too late; dropped ${JSON.stringify(heard.dropped)}`}`,
 				`sound: ${
@@ -357,7 +462,16 @@ async function main(): Promise<void> {
 		);
 		// For a script that looks at the page.
 		document.body.dataset.report = JSON.stringify({
-			bufferMs: BUFFER_MS,
+			bufferMs,
+			auto,
+			lateness99: Math.round(lateness99()),
+			delay: {
+				total: played.video.median(),
+				arrive: delay.arrive.median(),
+				buffer: delay.buffer.median(),
+				paint: delay.paint.median(),
+			},
+			framesLate,
 			videoFrames: stats.decoded,
 			audioPieces: heard?.decoded ?? 0,
 			tooLate,
