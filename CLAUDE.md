@@ -8,7 +8,7 @@ Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。
 
 Phase 0b（MoQ Transportの層をRustとTypeScriptで自前実装する）の終了条件にも、2026-10-10に届いた。自前のブラウザクライアント、Rustクライアント、Rustリレーのあいだで、Objectが1つ通る。版はdraft 18に固定している。理由と範囲は`docs/protocols.md`にある。映像はまだ流していない。
 
-Phase 0bの項目は全部終わっている。いまの課題はPhase 1（映像）。FETCH、MSFのカタログ、LOCの詰め方、映像の受け手と送り手の中核が入っていて、ブラウザのエンコーダとデコーダにつなぐ所と、リレーのキャッシュが作業中。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーは、認可が無く、WebTransportだけを受ける。draftに届いていない所は`docs/moqt-implementation-notes.md`の既知の不足にある。
+Phase 0bの項目は全部終わっている。いまの課題はPhase 1（映像）。FETCH、MSFのカタログ、LOCの詰め方、映像の受け手と送り手の中核、リレーのキャッシュ（トラックごとに最新のGroup）が入っていて、ブラウザのエンコーダとデコーダにつなぐ所が作業中。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーは、認可が無く、WebTransportだけを受ける。キャッシュは、配信元がいるあいだだけ持つ。draftに届いていない所は`docs/moqt-implementation-notes.md`の既知の不足にある。
 
 Rustのcrateは次のように分かれている。`xmoq-moqt`（符号化とセッションの状態）、`xmoq-relay-core`（リレーの経路と配信の論理）は入出力に依存しない。`xmoq-moqt-io`が`Connection`トレイトの上でストリームを読み書きし、WebTransportのライブラリに触るのはこのcrateの1ファイルだけ。`xmoq-relay`と`xmoq-moqt-client`がそれらをつなぐ。`Connection`の契約は、メモリ上の接続と実際のループバックの接続の両方に同じテストを当てて確かめる。テスト用の接続だけで通る挙動を前提にしない。
 

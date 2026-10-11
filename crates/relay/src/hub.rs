@@ -16,17 +16,17 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
-use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder};
+use xmoq_moqt::fetch::{FetchHeader, FetchObject, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::session::MAX_PEER_REQUESTS;
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
-    Connection, FetchBody, FetchChunk, IncomingStreams, OutgoingEvent, OutgoingSubgroup,
-    PeerRequestClose, PeerRequestStreamEvent, RecvStream, RequestClose, RequestReadError,
-    RequestReader, RequestStreamEvent, SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd,
-    StreamStops, Trace, UniEvent, WriteError, open_fetch_stream, read_request_streams,
-    read_uni_streams, send_message,
+    Connection, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, OutgoingEvent,
+    OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent, RecvStream, RequestClose,
+    RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendLimits, SendStream,
+    StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError, open_fetch_stream,
+    open_fetch_stream_without_header, read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
     Action, Event, FetchPiece, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay,
@@ -291,109 +291,206 @@ impl<C: Connection> FetchWrite<C> {
     /// or of one piece, is told so with the code of a fetch stream that is
     /// passed on and not taken; one that stops the stream, or is gone, with
     /// `CANCELLED`; and what comes on `aborted` ends the stream with the
-    /// code that came, whenever it comes before the stream is finished. A
-    /// stream that cannot be opened within `patience` has nothing to reset
-    /// with the code of an order; the order's code is still what is
-    /// returned.
+    /// code that came, whenever it comes before the stream is finished.
     ///
-    /// WHY piece by piece, and the wait anew for each: a subscriber that
-    /// takes the stream slowly is not one that takes nothing. As for a fetch
-    /// stream that is passed on, nothing bounds the whole of it.
-    async fn run(self, mut aborted: oneshot::Receiver<u32>) -> Option<u32> {
-        let not_taken = stream_reset_code::TOO_FAR_BEHIND;
-        // Whether an order to stop can still come.
-        let mut abortable = true;
-        // The order that came while the stream was being opened.
-        let mut ordered = None;
-        let opened = {
-            let opening = open_fetch_stream(
-                &*self.connection,
-                self.header,
-                &self.trace,
-                &self.label,
-                not_taken,
-            );
-            tokio::pin!(opening);
-            // WHY the opening goes on after an order to stop: what ends the
-            // call resets the stream with a code that is chosen before, and
-            // an order brings its own. The order is kept, and the stream
-            // reset with its code once it is open.
-            let opening = async {
-                loop {
-                    tokio::select! {
-                        biased;
-                        order = &mut aborted, if abortable && ordered.is_none() => match order {
-                            Ok(code) => ordered = Some(code),
-                            // Nobody is left to order it.
-                            Err(_) => abortable = false,
-                        },
-                        opened = &mut opening => break opened,
-                    }
-                }
-            };
-            tokio::time::timeout(self.patience, opening).await
+    /// WHY piece by piece, and the wait anew for each: the pieces are the
+    /// Objects of a Group, megabytes together, and a subscriber that takes
+    /// them slowly is not one that takes nothing. As for a fetch stream that
+    /// is passed on, nothing bounds the whole of it.
+    ///
+    /// WHY an Object is copied to be encoded, one at a time: the cache
+    /// shares it with the subgroup streams, and a fetch stream encodes it
+    /// with other fields before it (§11.4.4.1).
+    async fn run(self, mut aborted: oneshot::Receiver<u32>) -> Written {
+        let ended = |how, pieces| Written { how, pieces };
+        let mut orders = Orders {
+            aborted: &mut aborted,
+            open: true,
+        };
+        // The stream itself. WHY it is opened without its header: an order
+        // to stop that comes while the header waits to be written has to
+        // reset the stream with its own code, and a call that opens and
+        // writes in one resets with a code that is chosen before.
+        let opening = open_fetch_stream_without_header(&*self.connection, &self.trace, &self.label);
+        let opened = tokio::select! {
+            biased;
+            code = orders.next() => return ended(WriteEnd::Aborted(code), 0),
+            opened = tokio::time::timeout(self.patience, opening) => opened,
         };
         let mut writer = match opened {
             Ok(Ok(writer)) => writer,
-            // An order that came is what the stream is given up for, also
-            // where it could not be opened and reset with that code.
-            Ok(Err(_)) => return Some(ordered.unwrap_or(stream_reset_code::CANCELLED)),
-            Err(_) => return Some(ordered.unwrap_or(not_taken)),
+            // Nothing is there to reset.
+            Ok(Err(_)) => return ended(WriteEnd::Stopped, 0),
+            Err(_) => return ended(WriteEnd::NotTaken, 0),
         };
-        if let Some(code) = ordered {
-            writer.reset(code);
-            return Some(code);
-        }
-        // An indicator is encoded alike in either Group Order.
+        // Objects of one Group, or indicators alone: the same bytes in
+        // either Group Order.
         let mut encoder = FetchStreamEncoder::new(self.header, GroupOrder::Ascending);
-        // The header, which `open_fetch_stream` has written.
-        encoder.take_bytes();
-        for piece in &self.pieces {
+        let header = encoder.take_bytes();
+        if let Some(how) = self.write(&mut writer, &header, &mut orders).await {
+            writer.reset(how.code());
+            return ended(how, 0);
+        }
+        for (written, piece) in self.pieces.iter().enumerate() {
             match piece {
+                FetchPiece::Object(cached) => {
+                    let object = FetchObject {
+                        group_id: cached.group_id,
+                        subgroup_id: Some(cached.subgroup_id),
+                        object_id: cached.object.object_id,
+                        publisher_priority: cached.publisher_priority,
+                        properties: cached.object.properties.clone(),
+                        payload: cached.object.payload.clone(),
+                    };
+                    // One the encoder refuses is one the relay put together
+                    // wrongly; the stream cannot go on without it.
+                    if encoder.object(&object).is_err() {
+                        writer.reset(WriteEnd::Failed.code());
+                        return ended(WriteEnd::Failed, written);
+                    }
+                }
                 FetchPiece::EndOfRange(kind, location) => encoder.end_of_range(*kind, *location),
             }
             let bytes = encoder.take_bytes();
-            let given_up = {
-                // WHY one write that is polled again, and not a write anew
-                // after an order that was none: a write that is dropped may
-                // have written a part of the piece, and a second one would
-                // write that part again.
-                let write = tokio::time::timeout(self.patience, writer.write(&bytes));
-                tokio::pin!(write);
-                loop {
-                    tokio::select! {
-                        // WHY the order first: a write that can complete at
-                        // once would otherwise be taken as often as an order
-                        // that is there already, and the stream be finished
-                        // where §5.2 and §2.4.2 have it reset.
-                        biased;
-                        order = &mut aborted, if abortable => match order {
-                            Ok(code) => break Some(code),
-                            Err(_) => abortable = false,
-                        },
-                        written = &mut write => {
-                            break match written {
-                                Ok(Ok(())) => None,
-                                Ok(Err(_)) => Some(stream_reset_code::CANCELLED),
-                                Err(_) => Some(not_taken),
-                            };
-                        }
-                    }
-                }
-            };
-            if let Some(code) = given_up {
-                writer.reset(code);
-                return Some(code);
+            if let Some(how) = self.write(&mut writer, &bytes, &mut orders).await {
+                writer.reset(how.code());
+                return ended(how, written);
             }
         }
-        // An order that came with the last piece, or for a stream without
-        // any.
-        if abortable && let Ok(code) = aborted.try_recv() {
+        // An order that came with the last write.
+        if let Some(code) = orders.there() {
             writer.reset(code);
-            return Some(code);
+            return ended(WriteEnd::Aborted(code), self.pieces.len());
         }
         writer.finish();
-        None
+        ended(WriteEnd::Finished, self.pieces.len())
+    }
+
+    /// Writes one piece, or the header. `None` when it is written; else why
+    /// the stream is given up.
+    async fn write(
+        &self,
+        writer: &mut FetchStreamWriter<C::Send>,
+        bytes: &[u8],
+        orders: &mut Orders<'_>,
+    ) -> Option<WriteEnd> {
+        // WHY one write that is polled again, and not a write anew after an
+        // order that was none: a write that is dropped may have written a
+        // part of the piece, and a second one would write that part again.
+        let write = tokio::time::timeout(self.patience, writer.write(bytes));
+        tokio::pin!(write);
+        tokio::select! {
+            // WHY the order first: a write that can complete at once would
+            // otherwise be taken as often as an order that is there
+            // already.
+            biased;
+            code = orders.next() => Some(WriteEnd::Aborted(code)),
+            written = &mut write => match written {
+                Ok(Ok(())) => None,
+                Ok(Err(_)) => Some(WriteEnd::Stopped),
+                Err(_) => Some(WriteEnd::NotTaken),
+            },
+        }
+    }
+}
+
+/// How the writing of a fetch stream of the relay's own ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteEnd {
+    /// Everything was written, and the stream finished.
+    Finished,
+    /// The subscriber took nothing for the time it had.
+    NotTaken,
+    /// The subscriber stopped the stream, or the connection is gone.
+    Stopped,
+    /// The relay ordered it stopped, with this code
+    /// ([`Action::AbortFetchWrite`]).
+    Aborted(u32),
+    /// The relay put something together that a fetch stream cannot carry,
+    /// or the task that wrote failed.
+    Failed,
+}
+
+impl WriteEnd {
+    /// The Stream Reset Error Code the stream is reset with, and its
+    /// request stream after it. Not asked of a stream that was finished.
+    fn code(self) -> u32 {
+        match self {
+            Self::Finished | Self::Stopped => stream_reset_code::CANCELLED,
+            Self::NotTaken => stream_reset_code::TOO_FAR_BEHIND,
+            Self::Aborted(code) => code,
+            Self::Failed => stream_reset_code::INTERNAL_ERROR,
+        }
+    }
+}
+
+/// What became of a fetch stream the relay wrote itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Written {
+    how: WriteEnd,
+    /// The pieces that were written whole.
+    pieces: usize,
+}
+
+impl Written {
+    /// `None` for a stream that was written and finished; else the code it
+    /// was given up with ([`Event::FetchStreamWritten`]).
+    fn given_up(self) -> Option<u32> {
+        (self.how != WriteEnd::Finished).then(|| self.how.code())
+    }
+
+    /// The line of the log: how the writing ended, how many pieces were
+    /// written whole, and the code of the reset.
+    fn line(self, session: SessionKey, stream: StreamKey) -> String {
+        let how = match self.how {
+            WriteEnd::Finished => "finished",
+            WriteEnd::NotTaken => "not_taken",
+            WriteEnd::Stopped => "stopped",
+            WriteEnd::Aborted(_) => "aborted",
+            WriteEnd::Failed => "failed",
+        };
+        let code = self
+            .given_up()
+            .map_or(String::new(), |code| format!(" code={code:#x}"));
+        format!(
+            "FETCH_WRITE_ENDED session={} stream={} {how} pieces={}{code}",
+            session.0, stream.0, self.pieces
+        )
+    }
+}
+
+/// The orders to stop a fetch stream the relay writes
+/// ([`Action::AbortFetchWrite`]): one at most.
+struct Orders<'a> {
+    aborted: &'a mut oneshot::Receiver<u32>,
+    /// Whether one can still come. WHY kept: a receiver that has completed
+    /// is not asked again.
+    open: bool,
+}
+
+impl Orders<'_> {
+    /// The order, with its Stream Reset Error Code. Never completes when
+    /// none comes any more.
+    async fn next(&mut self) -> u32 {
+        if self.open {
+            // Dropped while it waits, the call has taken nothing.
+            let order = (&mut *self.aborted).await;
+            self.open = false;
+            if let Ok(code) = order {
+                return code;
+            }
+        }
+        std::future::pending().await
+    }
+
+    /// The order that is there already.
+    fn there(&mut self) -> Option<u32> {
+        if !self.open {
+            return None;
+        }
+        let order = self.aborted.try_recv().ok();
+        self.open = order.is_none();
+        order
     }
 }
 
@@ -1146,14 +1243,21 @@ impl<C: Connection> Hub<C> {
             label: format!("session#{} fetch#{request_id}", session.0),
         };
         let events = self.events.clone();
+        let log = self.config.log.clone();
         handle.fetch_writes.push(tokio::spawn(async move {
             // Told whatever became of the write. A panic: the writer that
             // went with it reset the stream.
-            let given_up = in_a_task_that_ends_with_this_call(writing.run(aborted))
+            let ended = in_a_task_that_ends_with_this_call(writing.run(aborted))
                 .await
-                .unwrap_or(Some(stream_reset_code::INTERNAL_ERROR));
+                .unwrap_or(Written {
+                    how: WriteEnd::Failed,
+                    pieces: 0,
+                });
+            if let Some(log) = &log {
+                log.print(ended.line(session, stream));
+            }
             // The hub is gone when this fails, and the relay with it.
-            let _ = events.send(Envelope::Core(written(given_up))).await;
+            let _ = events.send(Envelope::Core(written(ended.given_up()))).await;
         }));
     }
 
@@ -2375,8 +2479,10 @@ mod timer_tests {
 
 #[cfg(test)]
 mod fetch_write_tests {
+    use std::sync::atomic::Ordering as Ordering_;
     use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, RangeEnd};
     use xmoq_moqt::name::Location;
+
     use xmoq_moqt_io::ReadError;
     use xmoq_moqt_io::memory::{MemoryConnection, pair, pair_with_window};
 
@@ -2396,8 +2502,17 @@ mod fetch_write_tests {
 
     /// The same as a fetch stream gives it.
     fn read(piece: FetchPiece) -> FetchEvent {
-        let FetchPiece::EndOfRange(kind, location) = piece;
-        FetchEvent::EndOfRange { kind, location }
+        match piece {
+            FetchPiece::EndOfRange(kind, location) => FetchEvent::EndOfRange { kind, location },
+            FetchPiece::Object(cached) => FetchEvent::Object(FetchObject {
+                group_id: cached.group_id,
+                subgroup_id: Some(cached.subgroup_id),
+                object_id: cached.object.object_id,
+                publisher_priority: cached.publisher_priority,
+                properties: cached.object.properties.clone(),
+                payload: cached.object.payload.clone(),
+            }),
+        }
     }
 
     /// A write of `pieces`, and the connection, which the hub holds for as
@@ -2466,7 +2581,7 @@ mod fetch_write_tests {
         let mut expected = vec![FetchEvent::Header(FetchHeader { request_id: 4 })];
         expected.extend(pieces.into_iter().map(read));
         assert_eq!((events, end), (expected, None));
-        assert_eq!(in_time(writing).await.unwrap(), None);
+        assert_eq!(in_time(writing).await.unwrap().given_up(), None);
     }
 
     #[tokio::test]
@@ -2485,7 +2600,7 @@ mod fetch_write_tests {
         let mut expected = vec![FetchEvent::Header(FetchHeader { request_id: 4 })];
         expected.extend(pieces.into_iter().map(read));
         assert_eq!((events, end), (expected, None));
-        assert_eq!(in_time(writing).await.unwrap(), None);
+        assert_eq!(in_time(writing).await.unwrap().given_up(), None);
         assert!(started.elapsed() > patience, "{:?}", started.elapsed());
     }
 
@@ -2506,7 +2621,7 @@ mod fetch_write_tests {
             let mut expected = vec![FetchEvent::Header(FetchHeader { request_id: 4 })];
             expected.extend(pieces.into_iter().map(read));
             assert_eq!((events, end), (expected, None), "run {run}");
-            assert_eq!(in_time(writing).await.unwrap(), None);
+            assert_eq!(in_time(writing).await.unwrap().given_up(), None);
         }
     }
 
@@ -2547,7 +2662,11 @@ mod fetch_write_tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 orders.send(with).unwrap();
             }
-            assert_eq!(in_time(writing).await.unwrap(), Some(code), "{order:?}");
+            assert_eq!(
+                in_time(writing).await.unwrap().given_up(),
+                Some(code),
+                "{order:?}"
+            );
             // What was written and not read is gone with the reset.
             assert_eq!(
                 end_of(stream).await,
@@ -2558,30 +2677,42 @@ mod fetch_write_tests {
     }
 
     #[tokio::test]
-    async fn an_order_to_stop_that_is_there_before_a_write_is_always_kept() {
-        // (how many pieces; the window)
-        // A piece that the window takes at once, and no piece at all: the
-        // write, or the end of the stream, is as ready as the order is.
-        for (pieces, window) in [(1, 1_024), (0, 1_024), (3, 8)] {
-            // Many times: which of two things that are ready is taken was
-            // drawn once, and an order was lost every other time.
-            for run in 0..50 {
-                let (relay, subscriber) = pair_with_window(window);
-                let pieces = (0..pieces).map(indicator).collect();
-                let (write, _session) = write(relay, pieces, IN_TIME);
-                let (orders, ordered) = oneshot::channel();
-                // MALFORMED_TRACK (0x12), before the task has run once.
-                orders.send(0x12).unwrap();
-                let writing = tokio::spawn(write.run(ordered));
-                assert_eq!(in_time(writing).await.unwrap(), Some(0x12), "run {run}");
-                let stream = in_time(subscriber.accept_uni()).await.unwrap();
-                assert_eq!(
-                    end_of(stream).await,
-                    Some(ReadError::Reset(Some(0x12))),
-                    "run {run}"
-                );
-            }
+    async fn an_order_to_stop_that_is_there_before_the_stream_is_opened_leaves_none() {
+        // The order and the stream that can be opened at once are both
+        // ready: which of two such things is taken is drawn, unless one is
+        // looked at first. Many times.
+        for run in 0..50 {
+            let (relay, subscriber) = pair();
+            let (write, _session) = write(relay, vec![indicator(0)], IN_TIME);
+            let (orders, ordered) = oneshot::channel();
+            // MALFORMED_TRACK (0x12), before the task has run once.
+            orders.send(0x12).unwrap();
+            assert_eq!(
+                in_time(write.run(ordered)).await.given_up(),
+                Some(0x12),
+                "run {run}"
+            );
+            // No stream was opened: nothing is there to reset.
+            let opened = tokio::time::timeout(Duration::from_millis(20), subscriber.accept_uni());
+            assert!(opened.await.is_err(), "run {run}");
         }
+    }
+
+    #[tokio::test]
+    async fn an_order_to_stop_that_comes_while_the_header_waits_resets_with_its_code() {
+        // The window lets one byte wait, and the header is two: the stream
+        // is open, and its header is not written.
+        let (relay, subscriber) = pair_with_window(1);
+        let (write, _session) = write(relay, vec![indicator(0)], IN_TIME);
+        let (orders, ordered) = oneshot::channel();
+        let writing = tokio::spawn(write.run(ordered));
+        let stream = in_time(subscriber.accept_uni()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // MALFORMED_TRACK (0x12): the code on the wire, and the one that is
+        // reported.
+        orders.send(0x12).unwrap();
+        assert_eq!(in_time(writing).await.unwrap().given_up(), Some(0x12));
+        assert_eq!(end_of(stream).await, Some(ReadError::Reset(Some(0x12))));
     }
 
     #[tokio::test]
@@ -2605,12 +2736,134 @@ mod fetch_write_tests {
             // Now the write can complete, and the order is there as well,
             // before the writer runs again: CANCELLED (0x1).
             orders.send(0x1).unwrap();
-            assert_eq!(in_time(writing).await.unwrap(), Some(0x1), "run {run}");
+            assert_eq!(
+                in_time(writing).await.unwrap().given_up(),
+                Some(0x1),
+                "run {run}"
+            );
             assert_eq!(
                 end_of(stream).await,
                 Some(ReadError::Reset(Some(0x1))),
                 "run {run}"
             );
+        }
+    }
+
+    /// What sends an order to stop when a stream has taken its write
+    /// number `after`, before the writer runs on.
+    #[derive(Clone)]
+    struct OrderAfter {
+        after: usize,
+        written: Arc<std::sync::atomic::AtomicUsize>,
+        order: Arc<std::sync::Mutex<Option<oneshot::Sender<u32>>>>,
+    }
+
+    /// A sending half that orders its own stream stopped ([`OrderAfter`]).
+    struct Ordering(<MemoryConnection as Connection>::Send, OrderAfter);
+
+    impl SendStream for Ordering {
+        async fn write_all(&mut self, bytes: &[u8]) -> Result<(), WriteError> {
+            let written = self.0.write_all(bytes).await;
+            let count = self.1.written.fetch_add(1, Ordering_::SeqCst) + 1;
+            if count == self.1.after
+                && let Some(order) = self.1.order.lock().unwrap().take()
+            {
+                // MALFORMED_TRACK (0x12).
+                order.send(0x12).unwrap();
+            }
+            written
+        }
+
+        fn finish(self) {
+            self.0.finish();
+        }
+
+        async fn finish_and_wait(self) -> Result<(), WriteError> {
+            self.0.finish_and_wait().await
+        }
+
+        fn reset(self, code: u32) {
+            self.0.reset(code);
+        }
+
+        async fn stopped(&mut self) -> WriteError {
+            self.0.stopped().await
+        }
+    }
+
+    /// A connection whose streams are [`Ordering`].
+    struct Orderly(MemoryConnection, OrderAfter);
+
+    impl Connection for Orderly {
+        type Send = Ordering;
+        type Recv = <MemoryConnection as Connection>::Recv;
+
+        async fn open_uni(&self) -> Result<Self::Send, xmoq_moqt_io::ConnectionLost> {
+            Ok(Ordering(self.0.open_uni().await?, self.1.clone()))
+        }
+
+        async fn open_bi(&self) -> Result<(Self::Send, Self::Recv), xmoq_moqt_io::ConnectionLost> {
+            let (send, recv) = self.0.open_bi().await?;
+            Ok((Ordering(send, self.1.clone()), recv))
+        }
+
+        async fn accept_uni(&self) -> Result<Self::Recv, xmoq_moqt_io::ConnectionLost> {
+            self.0.accept_uni().await
+        }
+
+        async fn accept_bi(
+            &self,
+        ) -> Result<(Self::Send, Self::Recv), xmoq_moqt_io::ConnectionLost> {
+            let (send, recv) = self.0.accept_bi().await?;
+            Ok((Ordering(send, self.1.clone()), recv))
+        }
+
+        fn close(&self, code: u32, reason: &[u8]) {
+            self.0.close(code, reason);
+        }
+
+        async fn closed(&self) -> xmoq_moqt_io::ConnectionEnd {
+            self.0.closed().await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_order_to_stop_that_comes_between_two_writes_or_after_the_last_is_kept() {
+        // A stream of a header and two pieces is three writes.
+        // (the write after which the order comes; what the subscriber gets
+        //  before the reset: the header and so many pieces)
+        for (after, pieces_read) in [(1, 0), (2, 1), (3, 2)] {
+            let (relay, subscriber) = pair();
+            let (orders, ordered) = oneshot::channel();
+            let hook = OrderAfter {
+                after,
+                written: Arc::default(),
+                order: Arc::new(std::sync::Mutex::new(Some(orders))),
+            };
+            let connection = Arc::new(Orderly(relay, hook));
+            let write = FetchWrite {
+                connection: Arc::clone(&connection),
+                header: FetchHeader { request_id: 4 },
+                pieces: vec![indicator(0), indicator(1)],
+                patience: IN_TIME,
+                trace: Trace::default(),
+                label: "test".to_string(),
+            };
+            // The order is there when the write has completed: also after
+            // the last one, where only the end of the stream is left.
+            // The pieces that were written whole before the order came:
+            // none after the header, and all of them after the last.
+            let ended = in_time(write.run(ordered)).await;
+            assert_eq!(
+                (ended.how, ended.pieces),
+                (WriteEnd::Aborted(0x12), pieces_read),
+                "{after}"
+            );
+            let stream = in_time(subscriber.accept_uni()).await.unwrap();
+            let (events, end) = in_time(read_all(stream, Duration::ZERO)).await;
+            // What was written and not read may be gone with the reset.
+            assert!(events.len() <= 1 + pieces_read, "{after}: {events:?}");
+            assert_eq!(end, Some(ReadError::Reset(Some(0x12))), "{after}");
         }
     }
 
@@ -2622,13 +2875,16 @@ mod fetch_write_tests {
         let (stopped, _session) = write(relay, (0..50).map(indicator).collect(), IN_TIME);
         let writing = tokio::spawn(stopped.run(oneshot::channel().1));
         in_time(subscriber.accept_uni()).await.unwrap().stop(0x77);
-        assert_eq!(in_time(writing).await.unwrap(), Some(0x1));
+        assert_eq!(in_time(writing).await.unwrap().given_up(), Some(0x1));
 
         // The connection is gone before the stream is opened.
         let (relay, subscriber) = pair();
         subscriber.close(0, b"gone");
         let (unopened, _session) = write(relay, vec![indicator(0)], IN_TIME);
-        assert_eq!(in_time(unopened.run(oneshot::channel().1)).await, Some(0x1));
+        assert_eq!(
+            in_time(unopened.run(oneshot::channel().1)).await.given_up(),
+            Some(0x1)
+        );
     }
 
     #[tokio::test]
@@ -2663,7 +2919,10 @@ mod fetch_write_tests {
             trace: Trace::default(),
             label: "test".to_string(),
         };
-        assert_eq!(in_time(write.run(oneshot::channel().1)).await, None);
+        assert_eq!(
+            in_time(write.run(oneshot::channel().1)).await.given_up(),
+            None
+        );
         let mut stream = in_time(subscriber.accept_uni()).await.unwrap();
         let mut written = Vec::new();
         let mut buffer = [0u8; 64];
@@ -2671,6 +2930,46 @@ mod fetch_write_tests {
             written.extend_from_slice(&buffer[..read]);
         }
         assert_eq!(written, fixture[..6]);
+    }
+
+    #[test]
+    fn the_end_of_a_write_is_logged_with_what_was_written_and_the_code_of_the_reset() {
+        // (how the writing ended; the pieces written whole; the line)
+        let cases = [
+            (
+                WriteEnd::Finished,
+                8,
+                "FETCH_WRITE_ENDED session=2 stream=5 finished pieces=8",
+            ),
+            // TOO_FAR_BEHIND (0x5).
+            (
+                WriteEnd::NotTaken,
+                0,
+                "FETCH_WRITE_ENDED session=2 stream=5 not_taken pieces=0 code=0x5",
+            ),
+            // CANCELLED (0x1), for a subscriber that stopped the stream.
+            (
+                WriteEnd::Stopped,
+                3,
+                "FETCH_WRITE_ENDED session=2 stream=5 stopped pieces=3 code=0x1",
+            ),
+            // The code of the order: MALFORMED_TRACK (0x12).
+            (
+                WriteEnd::Aborted(0x12),
+                3,
+                "FETCH_WRITE_ENDED session=2 stream=5 aborted pieces=3 code=0x12",
+            ),
+            // INTERNAL_ERROR (0x0).
+            (
+                WriteEnd::Failed,
+                1,
+                "FETCH_WRITE_ENDED session=2 stream=5 failed pieces=1 code=0x0",
+            ),
+        ];
+        for (how, pieces, line) in cases {
+            let written = Written { how, pieces };
+            assert_eq!(written.line(SessionKey(2), StreamKey(5)), line);
+        }
     }
 
     #[tokio::test]

@@ -22,6 +22,10 @@ export type PageReceivedObject = {
 	payloadHex: string;
 	/** Absent on the moqtail page, which does not report them. */
 	properties?: PageProperty[];
+	/** The Subgroup ID of the stream it came on. Absent on the moqtail page. */
+	subgroup?: string;
+	/** The Publisher Priority of its Subgroup Header, or null where that left it out. Absent on the moqtail page. */
+	publisherPriority?: number | null;
 };
 
 export type XmoqPage = {
@@ -82,6 +86,42 @@ export type OwnPageExtras = {
 		/** The Publisher Priority in the Subgroup Header; null leaves it out (§11.4.2). */
 		publisherPriority: number | null,
 	): Promise<void>;
+	/**
+	 * Sends a Group of `objects` Objects, Object 0 on, each with `bytes`
+	 * bytes of payload, on one subgroup stream that is finished after them
+	 * and marked as the end of its Group. Resolves when the stream is
+	 * finished.
+	 */
+	sendLargeGroup(group: string, objects: number, bytes: number): Promise<void>;
+	/** How many Objects of the Group the subscription of this page has delivered so far. */
+	objectsOfGroup(group: string): Promise<number>;
+	/** The Objects of the Group the subscription of this page has delivered so far, as JSON of `PageReceivedObject[]`, in the order they came. */
+	receivedOfGroup(group: string): Promise<string>;
+	/**
+	 * Writes one Object to the subgroup stream of the Group and Subgroup,
+	 * which is opened with the Publisher Priority at its first Object and
+	 * left open. Every Object of a stream is to have properties, or none.
+	 */
+	writeToSubgroup(
+		group: string,
+		subgroup: string,
+		publisherPriority: number,
+		object: string,
+		payloadHex: string,
+		properties: PageProperty[],
+	): Promise<void>;
+	/** Finishes the streams `writeToSubgroup` opened for the Group. */
+	closeSubgroups(group: string): Promise<void>;
+	/**
+	 * Sends a FETCH, waits for its FETCH_OK, **reads nothing of the fetch
+	 * stream**, and gives the FETCH up after `cancelAfterMs`. Resolves with
+	 * the End Location of the FETCH_OK as [group, object] in decimal and with
+	 * how the FETCH ended; rejects when the FETCH is refused.
+	 */
+	fetchAndLeaveUnread(
+		fetch: PageFetch,
+		cancelAfterMs: number,
+	): Promise<{ endLocation: [string, string]; ended: string }>;
 	/**
 	 * Sends one Object like `sendObjectIn` with `finish`, on a stream the
 	 * subscriber may stop before the Object is written. Resolves with "sent",
@@ -219,7 +259,16 @@ export type PageFetchReport = {
 		| { error: string; errorCode?: string };
 	/** What the fetch stream decoded to, in order. */
 	items: (
-		| { type: "object"; group: string; object: string; payloadHex: string }
+		| {
+				type: "object";
+				group: string;
+				object: string;
+				payloadHex: string;
+				/** Null for an Object without a Subgroup ID (§11.4.4.1). */
+				subgroup: string | null;
+				publisherPriority: number;
+				properties: PageProperty[];
+		  }
 		| { type: "end-of-range"; kind: string; group: string; object: string }
 	)[];
 	/** How reading the fetch stream ended: "closed", or the error it failed with. */

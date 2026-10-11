@@ -16,6 +16,7 @@ import {
 	RequestErrorCode,
 	RequestFailedError,
 	SubgroupClosedError,
+	type SubgroupWriter,
 	type Subscription,
 } from "@xmoq/moqt";
 import type { Diagnostics } from "@xmoq/moqt/diagnostics";
@@ -167,6 +168,8 @@ async function answerFetch(request: PeerFetch): Promise<void> {
 let subscribed: Subscription | undefined;
 /** Absent while nothing is subscribed, and for a subscription that is not read. */
 let reading: Reading | undefined;
+/** The streams `writeToSubgroup` left open, by "group/subgroup". */
+const openSubgroups = new Map<string, SubgroupWriter>();
 /** Stream Count of the PUBLISH_DONE the subscription received. */
 let publishDoneStreamCount: bigint | undefined;
 
@@ -236,13 +239,15 @@ function readAll(subscription: Subscription): Reading {
 		for (;;) {
 			const result = await reader.read();
 			if (result.done) return "closed";
-			const { groupId, object } = result.value;
+			const { groupId, subgroupId, publisherPriority, object } = result.value;
 			if (object.payload.length === 0) continue;
 			started.objects.push({
 				group: groupId.toString(),
 				object: object.objectId.toString(),
 				payloadHex: toHex(object.payload, ""),
 				properties: object.properties.map(toPageProperty),
+				subgroup: subgroupId.toString(),
+				publisherPriority: publisherPriority ?? null,
 			});
 			notify();
 		}
@@ -449,6 +454,9 @@ async function fetchRange(
 							group: item.object.groupId.toString(),
 							object: item.object.objectId.toString(),
 							payloadHex: toHex(item.object.payload, ""),
+							subgroup: item.object.subgroupId?.toString() ?? null,
+							publisherPriority: item.object.publisherPriority,
+							properties: item.object.properties.map(toPageProperty),
 						}
 					: {
 							type: "end-of-range",
@@ -909,6 +917,110 @@ window.xmoqOwn = {
 		await currentSubscription().cancel();
 		console.log("subscription cancelled");
 	}),
+
+	sendLargeGroup: withPlainErrors(
+		async (group: string, objects: number, bytes: number) => {
+			const subgroup = await publishedTrack().openSubgroup({
+				groupId: BigInt(group),
+				subgroupId: { mode: "Explicit", value: 0n },
+				publisherPriority: 0,
+				properties: false,
+				endOfGroup: true,
+			});
+			for (let object = 0; object < objects; object++) {
+				// The payload of each Object is its own.
+				await subgroup.write({
+					objectId: BigInt(object),
+					payload: new Uint8Array(bytes).fill(object + 1),
+				});
+			}
+			await subgroup.close();
+			console.log(
+				`large group sent: group=${group} objects=${objects} payload_len=${bytes}`,
+			);
+		},
+	),
+
+	objectsOfGroup: withPlainErrors(
+		async (group: string) =>
+			reading?.objects.filter((object) => object.group === group).length ?? 0,
+	),
+
+	receivedOfGroup: withPlainErrors(async (group: string) =>
+		JSON.stringify(
+			reading?.objects.filter((object) => object.group === group) ?? [],
+		),
+	),
+
+	writeToSubgroup: withPlainErrors(
+		async (
+			group: string,
+			subgroup: string,
+			publisherPriority: number,
+			object: string,
+			payloadHex: string,
+			properties: PageProperty[],
+		) => {
+			const key = `${group}/${subgroup}`;
+			let writer = openSubgroups.get(key);
+			if (writer === undefined) {
+				writer = await publishedTrack().openSubgroup({
+					groupId: BigInt(group),
+					subgroupId: { mode: "Explicit", value: BigInt(subgroup) },
+					publisherPriority,
+					// §11.4.2: the bit is of the stream.
+					properties: properties.length > 0,
+					endOfGroup: false,
+				});
+				openSubgroups.set(key, writer);
+			}
+			await writer.write({
+				objectId: BigInt(object),
+				payload: fromHex(payloadHex),
+				properties: properties.map(toKeyValuePair),
+			});
+			console.log(
+				`object sent: group=${group} subgroup=${subgroup} object=${object} priority=${publisherPriority} properties=${properties.length}`,
+			);
+		},
+	),
+
+	closeSubgroups: withPlainErrors(async (group: string) => {
+		for (const [key, writer] of openSubgroups) {
+			if (!key.startsWith(`${group}/`)) continue;
+			openSubgroups.delete(key);
+			await writer.close();
+		}
+		console.log(`subgroups closed: group=${group}`);
+	}),
+
+	fetchAndLeaveUnread: withPlainErrors(
+		async (asked: PageFetch, cancelAfterMs: number) => {
+			const fetch = await connected().fetch({
+				range: fetchRangeOf(asked),
+				parameters: { subscriberPriority: 128 },
+			});
+			console.log(
+				`fetch sent: request_id=${fetch.requestId} type=${asked.type}`,
+			);
+			const ok = await fetch.response;
+			// `fetch.body` is not read: the library takes from the transport
+			// only as fast as it is read, so the publisher's writes stand
+			// still when the windows are full.
+			await new Promise((resolve) => setTimeout(resolve, cancelAfterMs));
+			await fetch.cancel();
+			const end = await fetch.ended;
+			const reported: { endLocation: [string, string]; ended: string } = {
+				endLocation: [
+					ok.endLocation.group.toString(),
+					ok.endLocation.object.toString(),
+				],
+				ended: end.type,
+			};
+			console.log(`fetch left unread: ${JSON.stringify(reported)}`);
+			return reported;
+		},
+	),
 
 	fetchRange: withPlainErrors(async (asked: PageFetch, timeoutMs: number) =>
 		JSON.stringify(await fetchRange(asked, timeoutMs)),

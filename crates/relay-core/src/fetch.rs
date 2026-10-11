@@ -2,11 +2,14 @@
 //! subscriber is asked of one publisher, and the publisher's fetch stream is
 //! passed on as it is.
 //!
-//! The relay has no cache, so it holds no Object a FETCH could be answered
-//! with, and it does not look into a fetch stream. What it decides is whom
-//! to ask, what the subscriber is told on its request stream, and when the
-//! whole thing is cut short; moving the bytes is the I/O side's
-//! ([`Action::PipeFetch`]).
+//! A FETCH whose range lies wholly in what the relay has cached of the
+//! track, its latest Group, is answered from there (`crate::cache`), and
+//! the relay writes the fetch stream itself ([`Action::WriteFetchStream`]).
+//! Every other FETCH is a publisher's to answer: the relay does not look
+//! into a fetch stream it passes on, and caches nothing of it. What it
+//! decides then is whom to ask, what the subscriber is told on its request
+//! stream, and when the whole thing is cut short; moving the bytes is the
+//! I/O side's ([`Action::PipeFetch`]).
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -19,6 +22,7 @@ use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{FetchStreamOpened, PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
+use crate::cache;
 use crate::events::{Event, FetchPiece, FetchPipeEnd};
 use crate::requests::{Joinable, Subscribed};
 use crate::routing::{MAX_OWN_REQUESTS_PER_SESSION, OwnRequestKind, Refusal};
@@ -401,6 +405,21 @@ fn joining_range(range: &FetchRange, joining: Location) -> Option<(Location, Loc
     Some((start, end))
 }
 
+/// The End Location of `FETCH_OK` for a FETCH that asked for `end`, where
+/// the Largest Object is `largest` (§10.13: "If the requested FETCH End
+/// Location was beyond the Largest known (possibly final) Object, End
+/// Location is {Largest.Group, Largest.Object + 1}").
+fn end_location(end: Location, largest: Location) -> Location {
+    if last_location(end) > largest {
+        Location {
+            group: largest.group,
+            object: largest.object.saturating_add(1),
+        }
+    } else {
+        end
+    }
+}
+
 /// The last Location an End Location covers: an End Location names the last
 /// Object plus 1, and with Object 0 the whole Group (§10.12.1).
 fn last_location(end: Location) -> Location {
@@ -701,6 +720,11 @@ impl Relay {
                 actions,
             );
         }
+        if let Some((end, objects)) = self.cached(asked) {
+            let pieces = objects.into_iter().map(FetchPiece::Object).collect();
+            let answer = (end, pieces);
+            return self.write_answer(session, stream, request, &asked.track, answer, actions);
+        }
         let Some(publisher) = self.whom_to_ask(&asked.track, session) else {
             return refuse(self, request_error_code::DOES_NOT_EXIST, actions);
         };
@@ -939,8 +963,11 @@ impl Relay {
 
     /// A FETCH with `FILL_TIMEOUT` 0 (§10.2.5): "the relay MUST NOT wait for
     /// upstream delivery and MUST report any unavailable Objects as Unknown
-    /// gaps". Without a cache every Object of the range is unavailable, so
-    /// the answer is a fetch stream with one End of Unknown Range indicator.
+    /// gaps". The answer is a fetch stream with one End of Unknown Range
+    /// indicator for the whole range.
+    ///
+    /// FIXME: give the Objects the cache holds of the range, and the
+    /// indicator for the rest.
     ///
     /// The `FETCH_OK` needs an End Location, which the relay knows only for
     /// a track it has a source of, from the largest Location it has seen.
@@ -989,17 +1016,7 @@ impl Relay {
             );
             return;
         };
-        // §10.13: "If the requested FETCH End Location was beyond the Largest
-        // known (possibly final) Object, End Location is {Largest.Group,
-        // Largest.Object + 1}".
-        let end = if last_location(end) > largest {
-            Location {
-                group: largest.group,
-                object: largest.object.saturating_add(1),
-            }
-        } else {
-            end
-        };
+        let end = end_location(end, largest);
         // An indicator is a Location, written the same in either Group
         // Order. WHY the last Location of the range also for a Descending
         // FETCH, which begins there: §11.4.4.2 has an indicator cover what
@@ -1016,6 +1033,28 @@ impl Relay {
             (end, vec![unknown]),
             actions,
         );
+    }
+
+    /// What the cache of the track has for the range of a FETCH: the End
+    /// Location of `FETCH_OK` and the Objects. `None` where the FETCH is a
+    /// publisher's to answer ([`cache::Cache::answer`]).
+    ///
+    /// The End Location is the one §10.13 has, counted from the Largest
+    /// Object the relay tells subscribers. WHY that matters to the cache:
+    /// what lies "between the last object in the stream and the Largest
+    /// Group/Object indicated in `FETCH_OK`" reads as not existing (§10.12.3),
+    /// so the cache has to answer for every Location up to there, also where
+    /// a publisher said that the track is further than the Objects the relay
+    /// received.
+    fn cached(&self, asked: &AskedRange) -> Option<(Location, Vec<cache::CachedObject>)> {
+        let live = self.tracks.live(&asked.track)?;
+        let largest = live.largest?;
+        if live.never_cached {
+            return None;
+        }
+        let end = end_location(asked.end, largest);
+        let objects = live.cache.answer(asked.start, last_location(end))?;
+        Some((end, objects))
     }
 
     /// Answers a FETCH with `FETCH_OK` and a fetch stream the relay writes
@@ -1217,9 +1256,9 @@ impl Relay {
                 actions,
             );
         }
-        // The ones the relay answers itself have their `FETCH_OK`; their
-        // streams are reset, the request stream when the I/O side reports
-        // the fetch stream given up.
+        // The ones the relay answers from its cache have their `FETCH_OK`;
+        // their streams are reset, the request stream when the I/O side
+        // reports the fetch stream given up.
         for (session, stream) in self.fetches.written_for(track) {
             actions.push(Action::AbortFetchWrite {
                 session,

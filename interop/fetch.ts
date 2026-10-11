@@ -9,9 +9,17 @@
 //                     asks for {0, 1} to {1, 2} of the track it publishes.
 //   fill-timeout-0    The same publisher, the range {0, 0} to {2, 0}, with
 //                     FILL_TIMEOUT 0. Own relay only.
-//   cancelled         The moqtail-rust client, which answers no FETCH. The
-//                     page gives the FETCH up after a second. Own relay only.
-//   publisher-refuses The own Rust client, which refuses a FETCH.
+//   cancelled         The moqtail-rust client, which answers no FETCH, sends
+//                     Group 0, and a second publisher, own-rust, Group 1. The
+//                     page asks for Group 0, which the relay no longer holds
+//                     and asks the first publisher for, and gives the FETCH
+//                     up after a second. Own relay only.
+//   publisher-refuses The own Rust client, which refuses a FETCH, sends
+//                     Groups 0 and 1. The page asks for Group 0, which the
+//                     relay asks the publisher for. Own relay only.
+//   latest-group      The own Rust client sends Group 0. The page asks for
+//                     {0, 0} to {1, 0}: the latest Group, which a relay
+//                     that keeps it answers itself.
 //   absent-track      A Standalone FETCH for a track nobody published.
 //
 // The cases that begin with `page-` have an own page as the publisher,
@@ -32,6 +40,52 @@
 //   page-cancelled    The publisher accepts and writes nothing; the page
 //                     that fetches gives the FETCH up after a second.
 //   page-refuses      The publisher refuses with DOES_NOT_EXIST.
+//   page-large-group-cancelled
+//                     The publisher sends one more Group, of 8 Objects of
+//                     900,000 bytes each, which the relay then holds as the
+//                     latest. The page asks for that Group, reads nothing
+//                     of the fetch stream, and gives the FETCH up after a
+//                     second. Written before the first run, from the notes
+//                     ("The relay's cache", "The subscriber gives its FETCH
+//                     up"): the relay answers itself, FETCH_OK with End
+//                     Location {3, 8} and `WRITE_FETCH_STREAM … pieces=8`,
+//                     and sends no FETCH to the publisher; the 7.2 MB do not
+//                     fit into what a subscriber that reads nothing takes,
+//                     so the relay is still writing when the page gives up.
+//                     A page that gives a FETCH up stops the fetch stream as
+//                     well as the request stream (`cancel` of `@xmoq/moqt`),
+//                     so the relay's writer meets the stop of its own
+//                     stream: `FETCH_WRITE_ENDED … stopped pieces=K
+//                     code=0x1` with K below 8. A write that was whole says
+//                     `finished pieces=8`, and the run fails for it. (The
+//                     first expectation, `ABORT_FETCH_WRITE`, was wrong, 7
+//                     runs of 7: that is the relay's own order to stop, for
+//                     a subscriber that leaves the fetch stream alone.)
+//   page-subgroups    The publisher sends one more Group, 3, on two subgroup
+//                     streams: Subgroup 0 with Publisher Priority 10 and one
+//                     property of an odd type on every Object, Subgroup 1
+//                     with Publisher Priority 200 and one of an even type.
+//                     Objects 0, 2, 4 go to Subgroup 0 and 1, 3, 5 to
+//                     Subgroup 1, each with a payload of its own. Written
+//                     before the first run, from the notes ("The relay's
+//                     cache", "A Joining FETCH in the relay", "The
+//                     Subscription Filter of a SUBSCRIBE"):
+//                     1. After Objects 0 to 2, with both streams open, a
+//                        page subscribes and sends a Relative Joining FETCH
+//                        with Joining Start 0. The relay answers itself:
+//                        FETCH_OK with End Location {3, 3}, and Objects 0,
+//                        1, 2 in that order, each with its Subgroup ID, the
+//                        Publisher Priority of its Subgroup, its property
+//                        and its payload. `WRITE_FETCH_STREAM … pieces=3`
+//                        and `FETCH_WRITE_ENDED … finished pieces=3`.
+//                     2. The publisher sends Objects 3 to 5 and finishes
+//                        the streams. The subscription of that page has
+//                        exactly these three of the Group, with the same
+//                        fields.
+//                     3. The page asks for {3, 0} to {4, 0}: FETCH_OK with
+//                        End Location {3, 6} and all six in the order of
+//                        their Object IDs, `pieces=6` twice.
+//                     The relay sends no FETCH to the publisher.
 //
 // What is expected is in `EXPECTED`, written before the runs from the notes
 // (docs/moqt-implementation-notes.md) for the own relay, and from the records
@@ -50,6 +104,7 @@ import {
 	pollFor,
 	type RunContext,
 	runCleanups,
+	STEP_TIMEOUT_MS,
 	startRun,
 	stopEverythingOnExit,
 	TRACK,
@@ -59,6 +114,7 @@ import type {
 	PageFetch,
 	PageFetchReport,
 	PageFetchServing,
+	PageProperty,
 } from "./xmoq-page.ts";
 
 const { values: options } = parseArgs({
@@ -84,6 +140,7 @@ const CASES = [
 	"fill-timeout-0",
 	"cancelled",
 	"publisher-refuses",
+	"latest-group",
 	"absent-track",
 	"page-standalone",
 	"page-joining",
@@ -100,6 +157,7 @@ const PUBLISHERS: Record<Case, Client | "moqtail-test"> = {
 	"fill-timeout-0": "moqtail-test",
 	cancelled: "moqtail-rust",
 	"publisher-refuses": "own-rust",
+	"latest-group": "own-rust",
 	"absent-track": "own-rust",
 	"page-standalone": "own-browser",
 	"page-joining": "own-browser",
@@ -143,6 +201,13 @@ const FETCHES: Record<Case, PageFetch> = {
 		end: ["1", "0"],
 	},
 	"publisher-refuses": {
+		type: "Standalone",
+		namespace: NAMESPACE,
+		trackName: TRACK,
+		start: ["0", "0"],
+		end: ["1", "0"],
+	},
+	"latest-group": {
 		type: "Standalone",
 		namespace: NAMESPACE,
 		trackName: TRACK,
@@ -308,6 +373,58 @@ const LAST_OBJECT = "18446744073709551615";
  * passes on as it is (the same row: "with the publisher's code where the
  * code means the same one hop on").
  */
+/**
+ * Who answers the FETCH of a case through the own relay, where the case is
+ * about that: the relay from its cache of the latest Group, or the
+ * publisher. The relay's log has `WRITE_FETCH_STREAM … pieces=N` for a
+ * fetch stream it writes itself, and `OPEN_REQUEST … FETCH` for a FETCH it
+ * sends a publisher (docs/moqt-implementation-notes.md, "The relay's cache:
+ * what it holds, and which FETCH it answers").
+ *
+ * WHY written down: a case that is to show what a publisher's answer
+ * becomes shows nothing when the relay answers in its place, and passes
+ * all the same where the two answers are alike.
+ */
+const ANSWERED_BY: Partial<Record<Case, "relay" | "publisher">> = {
+	// Group 0 is not the latest once Group 1 has come.
+	cancelled: "publisher",
+	"publisher-refuses": "publisher",
+	// The one Group there is, whole: Object 0, and the range ends beyond it.
+	"latest-group": "relay",
+	"page-standalone": "publisher",
+	"page-joining": "publisher",
+	"page-nothing-there": "publisher",
+	"page-unsent": "publisher",
+	"page-cancelled": "publisher",
+	"page-refuses": "publisher",
+};
+
+/** How many Groups the publisher of a case sends before the FETCH, where it is more than one. */
+const GROUPS_BEFORE: Partial<Record<Case, number>> = {
+	"publisher-refuses": 2,
+};
+
+/** Throws unless the own relay's log says that the one who is to answer the FETCH of the case did. */
+async function expectAnsweredBy(
+	context: RunContext,
+	who: "relay" | "publisher",
+): Promise<void> {
+	const ASKED = /^OPEN_REQUEST session=\d+ own=\d+ FETCH/;
+	if (who === "publisher") {
+		// A FETCH the relay sent on is one it did not answer itself.
+		await context.relay.waitForLine(ASKED);
+		return;
+	}
+	const WRITTEN = /^WRITE_FETCH_STREAM session=\d+ request_id=\d+ pieces=\d+$/;
+	await context.relay.waitForLine(WRITTEN);
+	const asked = await context.relay.linesBefore({ line: WRITTEN }, ASKED);
+	if (asked.length > 0) {
+		throw new Error(
+			`the relay was to answer the FETCH itself, and sent one to a publisher: ${asked.map((match) => match[0]).join("; ")}`,
+		);
+	}
+}
+
 const EXPECTED: Record<string, Partial<Record<Case, Expected>>> = {
 	own: {
 		standalone: {
@@ -322,6 +439,11 @@ const EXPECTED: Record<string, Partial<Record<Case, Expected>>> = {
 		},
 		cancelled: { answer: "cancelled" },
 		"publisher-refuses": { answer: "REQUEST_ERROR", errorCode: "16" },
+		"latest-group": {
+			answer: "FETCH_OK",
+			endLocation: ["0", "1"],
+			items: ["{0, 0}"],
+		},
 		"absent-track": { answer: "REQUEST_ERROR", errorCode: "16" },
 		"page-standalone": {
 			answer: "FETCH_OK",
@@ -355,7 +477,7 @@ const EXPECTED: Record<string, Partial<Record<Case, Expected>>> = {
 			endLocation: ["1", "2"],
 			items: ["{0, 1}", "{0, 2}", "{1, 0}", "{1, 1}"],
 		},
-		"publisher-refuses": {
+		"latest-group": {
 			answer: "FETCH_OK",
 			endLocation: ["0", "1"],
 			items: ["{0, 0}"],
@@ -592,7 +714,362 @@ async function expectServedToTheMoqtailRelay(
 	}
 }
 
+/** The Objects of the large Group, and the bytes of each: 7.2 MB, under the 8 MiB the relay keeps of a track, each Object under the 1 MiB it takes. */
+const LARGE_GROUP = { objects: 8, bytes: 900_000 };
+
+/** `page-large-group-cancelled`, which has a report of its own: nothing of the fetch stream is read. */
+async function largeGroupCancelled(): Promise<string> {
+	const sentHex = Buffer.from("xmoq-fetch large").toString("hex");
+	const context = await startRun({
+		relay: options.relay,
+		port: options.port,
+		clients: ["own-browser", "own-browser", "own-rust"],
+		verbose: options.verbose,
+	});
+	const publisher = await publishFromAPage("serve", context, sentHex);
+	const page = await startSubscriber(
+		"own-browser",
+		"fetcher:own-browser",
+		{ context, payloadHex: sentHex },
+		{},
+	);
+	if (
+		publisher.sendLargeGroup === undefined ||
+		page.objectsOfGroup === undefined ||
+		page.fetchAndLeaveUnread === undefined
+	) {
+		throw new Error("the run needs own pages on both sides");
+	}
+	const { objects, bytes } = LARGE_GROUP;
+	const group = await withTimeout(
+		publisher.sendLargeGroup(objects, bytes),
+		"the publisher to send the large Group",
+	);
+	// The relay has passed all of them on, so it holds all of them.
+	const countObjects = page.objectsOfGroup;
+	await pollFor(
+		async () => ((await countObjects(group)) === objects ? true : undefined),
+		`the page to have the ${objects} Objects of Group ${group} by its subscription`,
+	);
+	const report = await page.fetchAndLeaveUnread(
+		{
+			type: "Standalone",
+			namespace: NAMESPACE,
+			trackName: TRACK,
+			start: [String(group), "0"],
+			end: [String(group + 1), "0"],
+		},
+		CANCEL_AFTER_MS,
+	);
+	log("driver", `REPORT ${JSON.stringify(report)}`);
+	if (
+		report.endLocation.join(",") !== `${group},${objects}` ||
+		report.ended !== "cancelled"
+	) {
+		throw new Error(
+			`the FETCH was not accepted with End Location {${group}, ${objects}} and then given up: ${JSON.stringify(report)}`,
+		);
+	}
+	const WRITTEN =
+		/^WRITE_FETCH_STREAM session=(\d+) request_id=\d+ pieces=(\d+)$/;
+	const written = await context.relay.waitForLine(WRITTEN);
+	if (captureGroup(written, 2) !== String(objects)) {
+		throw new Error(
+			`the relay wrote ${captureGroup(written, 2)} pieces, not the ${objects} Objects of the Group: ${written[0]}`,
+		);
+	}
+	const session = captureGroup(written, 1);
+	// How the relay's writing ended, and how many Objects it had written
+	// whole by then.
+	const ENDED = new RegExp(
+		`^FETCH_WRITE_ENDED session=${session} stream=\\d+ (\\S+) pieces=(\\d+)(?: code=(\\S+))?$`,
+	);
+	const ended = await context.relay.waitForLine(ENDED);
+	const [how, pieces, code] = [1, 2, 3].map((index) => ended[index]);
+	if (how !== "stopped" || code !== "0x1" || Number(pieces) >= objects) {
+		throw new Error(
+			`the relay's writing was to end as stopped with CANCELLED (0x1), before all ${objects} Objects were written: ${ended[0]}`,
+		);
+	}
+	const asked = await context.relay.linesBefore(
+		{ line: ENDED },
+		/^OPEN_REQUEST session=\d+ own=\d+ FETCH/,
+	);
+	if (asked.length > 0) {
+		throw new Error(
+			`the relay was to answer the FETCH itself, and sent one to a publisher: ${asked.map((match) => match[0]).join("; ")}`,
+		);
+	}
+	return `the relay answered with FETCH_OK for {${group}, ${objects}} and began to write ${objects} Objects of ${bytes} bytes; the page read none and gave up, and the relay's writing ended there, ${pieces} Objects written (${ended[0]})`;
+}
+
+/** The two subgroup streams of `page-subgroups`, and what every Object on each has. */
+const SUBGROUPS: {
+	subgroup: number;
+	publisherPriority: number;
+	properties: PageProperty[];
+}[] = [
+	{
+		subgroup: 0,
+		publisherPriority: 10,
+		// Odd type: a length and bytes. Types no draft defines, so the relay
+		// has to pass them on unchanged (§2.5).
+		properties: [{ type: "13", bytesHex: "0142e01fffe1" }],
+	},
+	{
+		subgroup: 1,
+		publisherPriority: 200,
+		// Even type: one variable-length integer.
+		properties: [{ type: "16", varint: "1760140800123456" }],
+	},
+];
+
+/** What Object `object` of `page-subgroups` is, as a FETCH and a subscription report it. */
+function subgroupObject(group: number, object: number): string {
+	// Objects 0, 2, 4 on the first stream and 1, 3, 5 on the second.
+	const stream = SUBGROUPS[object % 2];
+	if (stream === undefined) throw new Error("no such stream");
+	return JSON.stringify({
+		group: String(group),
+		object: String(object),
+		subgroup: String(stream.subgroup),
+		publisherPriority: stream.publisherPriority,
+		properties: stream.properties,
+		payloadHex: Buffer.from(`xmoq-subgroups ${object}`).toString("hex"),
+	});
+}
+
+/** The Objects in the fields `subgroupObject` has, in the order given. */
+const asSubgroupObjects = (
+	objects: {
+		group: string;
+		object: string;
+		subgroup?: string | null;
+		publisherPriority?: number | null;
+		properties?: PageProperty[];
+		payloadHex: string;
+	}[],
+): string[] =>
+	objects.map(
+		({ group, object, subgroup, publisherPriority, properties, payloadHex }) =>
+			JSON.stringify({
+				group,
+				object,
+				subgroup,
+				publisherPriority,
+				properties,
+				payloadHex,
+			}),
+	);
+
+/** Throws unless the FETCH was answered with the End Location and exactly these Objects of the Group, in this order, on a stream that was finished. */
+function expectSubgroupObjects(
+	what: string,
+	report: PageFetchReport,
+	group: number,
+	objects: number[],
+	endObject: number,
+): void {
+	const seen = JSON.stringify(report);
+	if (
+		!("endLocation" in report.response) ||
+		report.response.endLocation.join(",") !== `${group},${endObject}`
+	) {
+		throw new Error(
+			`${what}: no FETCH_OK with End Location {${group}, ${endObject}}: ${seen}`,
+		);
+	}
+	const items = asSubgroupObjects(
+		report.items.flatMap((item) => (item.type === "object" ? [item] : [])),
+	);
+	const expected = objects.map((object) => subgroupObject(group, object));
+	if (
+		items.length !== report.items.length ||
+		items.join("\n") !== expected.join("\n")
+	) {
+		throw new Error(
+			`${what}: the fetch stream was to have the Objects ${objects.join(", ")} of Group ${group} in that order, each with its Subgroup ID, Publisher Priority, property and payload, and had: ${seen}`,
+		);
+	}
+	if (report.bodyEnd !== "closed" || report.end.type !== "served") {
+		throw new Error(
+			`${what}: the FETCH did not end with its answer and a finished fetch stream: ${seen}`,
+		);
+	}
+}
+
+/** `page-subgroups`: a Group on two subgroup streams, fetched from the relay's cache in its middle and when it is whole. */
+async function subgroupsFromTheCache(): Promise<string> {
+	const sentHex = Buffer.from("xmoq-fetch subgroups").toString("hex");
+	const context = await startRun({
+		relay: options.relay,
+		port: options.port,
+		clients: ["own-browser", "own-browser", "own-browser", "own-rust"],
+		verbose: options.verbose,
+	});
+	const run = { context, payloadHex: sentHex };
+	const publisher = await publishFromAPage("serve", context, sentHex);
+	// Says when the relay has passed an Object on, and so holds it.
+	const watcher = await startSubscriber(
+		"own-browser",
+		"watcher:own-browser",
+		run,
+		{},
+	);
+	const { takeGroup, writeToSubgroup, closeSubgroups } = publisher;
+	const watched = watcher.objectsOfGroup;
+	if (
+		takeGroup === undefined ||
+		writeToSubgroup === undefined ||
+		closeSubgroups === undefined ||
+		watched === undefined
+	) {
+		throw new Error("the run needs own pages on both sides");
+	}
+	const group = takeGroup.call(publisher);
+	const send = async (objects: number[]): Promise<void> => {
+		for (const object of objects) {
+			const stream = SUBGROUPS[object % 2];
+			if (stream === undefined) throw new Error("no such stream");
+			await withTimeout(
+				writeToSubgroup(
+					group,
+					stream,
+					object,
+					Buffer.from(`xmoq-subgroups ${object}`).toString("hex"),
+					stream.properties,
+				),
+				`the publisher to write Object ${object}`,
+			);
+		}
+	};
+	const relayHas = (count: number): Promise<true> =>
+		pollFor(
+			async () => ((await watched(group)) === count ? true : undefined),
+			`the watching page to have ${count} Objects of Group ${group} by its subscription`,
+		);
+
+	// Not in the order of the Object IDs: the relay puts them in order.
+	await send([1, 0, 2]);
+	await relayHas(3);
+	const page = await startSubscriber(
+		"own-browser",
+		"fetcher:own-browser",
+		run,
+		{},
+	);
+	const received = page.receivedOfGroup;
+	if (received === undefined) throw new Error("the run needs an own page");
+	const joining = await page.fetch(
+		{ type: "RelativeJoining", joiningStart: "0" },
+		STEP_TIMEOUT_MS,
+	);
+	log("driver", `REPORT joining ${JSON.stringify(joining)}`);
+	expectSubgroupObjects("the Joining FETCH", joining, group, [0, 1, 2], 3);
+
+	await send([4, 3, 5]);
+	await withTimeout(
+		closeSubgroups(group),
+		"the publisher to finish the streams",
+	);
+	await relayHas(6);
+	const bySubscription = await pollFor(async () => {
+		const objects = await received(group);
+		return objects.length >= 3 ? objects : undefined;
+	}, `the page to have the rest of Group ${group} by its subscription`);
+	const rest = asSubgroupObjects(bySubscription).sort();
+	const expectedRest = [3, 4, 5].map((object) => subgroupObject(group, object));
+	if (rest.join("\n") !== expectedRest.join("\n")) {
+		throw new Error(
+			`the subscription was to bring Objects 3, 4, 5 of Group ${group} and no other of it, each with its Subgroup ID, Publisher Priority, property and payload, and brought: ${JSON.stringify(bySubscription)}`,
+		);
+	}
+
+	const whole = await page.fetch(
+		{
+			type: "Standalone",
+			namespace: NAMESPACE,
+			trackName: TRACK,
+			start: [String(group), "0"],
+			end: [String(group + 1), "0"],
+		},
+		STEP_TIMEOUT_MS,
+	);
+	log("driver", `REPORT whole ${JSON.stringify(whole)}`);
+	expectSubgroupObjects(
+		"the FETCH of the whole Group",
+		whole,
+		group,
+		[0, 1, 2, 3, 4, 5],
+		6,
+	);
+
+	const ENDED =
+		/^FETCH_WRITE_ENDED session=\d+ stream=\d+ (\S+) pieces=(\d+)(?: code=\S+)?$/;
+	const ends = await context.relay.waitForLines(ENDED, 2);
+	const written = await context.relay.linesBefore(
+		{ line: ENDED, nth: 2 },
+		/^WRITE_FETCH_STREAM session=\d+ request_id=\d+ pieces=(\d+)$/,
+	);
+	const wrote = written.map((line) => `pieces=${line[1]}`).join(", ");
+	const ended = ends.map((line) => `${line[1]} pieces=${line[2]}`).join(", ");
+	if (
+		wrote !== "pieces=3, pieces=6" ||
+		ended !== "finished pieces=3, finished pieces=6"
+	) {
+		throw new Error(
+			`the relay was to write two fetch streams itself, of 3 and of 6 Objects, to their ends; it began [${wrote}] and ended [${ended}]`,
+		);
+	}
+	const asked = await context.relay.linesBefore(
+		{ line: ENDED, nth: 2 },
+		/^OPEN_REQUEST session=\d+ own=\d+ FETCH/,
+	);
+	if (asked.length > 0) {
+		throw new Error(
+			`the relay was to answer both FETCHes itself, and sent one to a publisher: ${asked.map((match) => match[0]).join("; ")}`,
+		);
+	}
+	return `Group ${group} on Subgroups 0 and 1: the relay answered a Joining FETCH in its middle with Objects 0 to 2, the subscription brought 3 to 5, and the relay answered a FETCH of the whole Group with all six in the order of their Object IDs, each with its Subgroup ID, Publisher Priority, property and payload`;
+}
+
 async function main(): Promise<void> {
+	if (options.fetch === "page-subgroups") {
+		if (options.relay !== "own") {
+			throw new Error("--fetch page-subgroups runs through the own relay");
+		}
+		let summary: string;
+		try {
+			summary = await subgroupsFromTheCache();
+		} finally {
+			await runCleanups();
+		}
+		log(
+			"driver",
+			`RESULT ${JSON.stringify({ fetch: options.fetch, relay: options.relay })}`,
+		);
+		log("driver", `SUMMARY ${summary}`);
+		return;
+	}
+	if (options.fetch === "page-large-group-cancelled") {
+		if (options.relay !== "own") {
+			throw new Error(
+				"--fetch page-large-group-cancelled runs through the own relay",
+			);
+		}
+		let summary: string;
+		try {
+			summary = await largeGroupCancelled();
+		} finally {
+			await runCleanups();
+		}
+		log(
+			"driver",
+			`RESULT ${JSON.stringify({ fetch: options.fetch, relay: options.relay })}`,
+		);
+		log("driver", `SUMMARY ${summary}`);
+		return;
+	}
 	const which = CASES.find((each) => each === options.fetch);
 	if (which === undefined) {
 		throw new Error(
@@ -623,7 +1100,9 @@ async function main(): Promise<void> {
 					: [
 							kind,
 							"own-browser",
-							...(served === undefined ? [] : ["own-rust" as const]),
+							...(served === undefined && which !== "cancelled"
+								? []
+								: ["own-rust" as const]),
 						],
 			verbose: options.verbose,
 		});
@@ -644,6 +1123,25 @@ async function main(): Promise<void> {
 		// The page has an Object by its subscription, so the relay has the
 		// track, and the payload of the publisher's Objects is known.
 		const payloadHex = await page.object(group);
+		if (publisher.told !== undefined) {
+			for (let sent = 1; sent < (GROUPS_BEFORE[which] ?? 1); sent++) {
+				await page.object(
+					await withTimeout(publisher.told.send(), "the publisher to send"),
+				);
+			}
+		}
+		if (which === "cancelled") {
+			// A later Group from a second publisher: Group 0, which the first
+			// one sent and answers no FETCH for, is not the latest any more.
+			const second = await startPublisher(
+				"own-rust",
+				{ context, payloadHex: sentHex },
+				{ label: "pub2:own-rust", firstGroup: 1 },
+			);
+			await page.object(
+				await withTimeout(second.send(), "the second publisher to send"),
+			);
+		}
 		report = await page.fetch(
 			FETCHES[which],
 			which === "cancelled" || which === "page-cancelled"
@@ -652,6 +1150,10 @@ async function main(): Promise<void> {
 		);
 		log("driver", `REPORT ${JSON.stringify(report)}`);
 		if (!reportOnly) compare(report, expected, payloadHex);
+		const answeredBy = ANSWERED_BY[which];
+		if (!reportOnly && options.relay === "own" && answeredBy !== undefined) {
+			await expectAnsweredBy(context, answeredBy);
+		}
 		if (which === "cancelled" && !reportOnly) {
 			await expectUpstreamCancelled(context);
 		}

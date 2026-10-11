@@ -39,6 +39,7 @@
 //! FIXME: share one encoding of an Object between subscribers. Each subscriber
 //! gets its own copy of the payload today.
 
+mod cache;
 mod events;
 mod fetch;
 mod requests;
@@ -49,6 +50,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+pub use cache::CachedObject;
 pub use events::{
     Action, Event, FetchPiece, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey,
     RequestEnd, SessionKey, StreamEnd, StreamKey,
@@ -738,6 +740,18 @@ struct Track {
     /// from session to session.
     in_streams: HashMap<InStreamKey, InStream>,
     subgroups: Subgroups,
+    /// The Objects of the latest Group, to answer a FETCH with.
+    cache: cache::Cache,
+    /// A source of the track, now or earlier, gave Track Properties with
+    /// which its Objects may not be cached (`cache::may_be_cached`).
+    ///
+    /// WHY of the track, and never taken back: §12.3 has the limit for the
+    /// Objects "received through this subscription", and `properties` above
+    /// are those of the source that came last. To tell the Objects of one
+    /// source from those of another the cache would have to know where each
+    /// came from; keeping nothing of a track that had such a source keeps
+    /// the MUST NOT without that.
+    never_cached: bool,
 }
 
 impl Track {
@@ -758,11 +772,13 @@ impl Track {
             had_several_sources: false,
             asks: Vec::new(),
             declined: Declined::default(),
+            never_cached: !cache::may_be_cached(&properties),
             properties,
             largest,
             subscribers: Vec::new(),
             in_streams: HashMap::new(),
             subgroups: Subgroups::default(),
+            cache: cache::Cache::default(),
         }
     }
 
@@ -1055,6 +1071,7 @@ impl Tracks {
                 None
             };
             track.declined.forget(session);
+            track.never_cached |= !cache::may_be_cached(&properties);
             track.properties = properties;
             track.largest = track.largest.max(largest);
             return Ok(Added {
@@ -1244,6 +1261,8 @@ pub struct Counts {
     pub declined: usize,
     /// Subgroup streams held for a Track Alias that is not known yet.
     pub early_streams: usize,
+    /// Bytes the caches of the tracks hold, over all tracks.
+    pub cached_bytes: usize,
     /// Subgroups the tracks remember the stream of, over all tracks
     /// ([`MAX_REMEMBERED_SUBGROUPS`] bounds them for each).
     pub remembered_subgroups: usize,
@@ -1280,6 +1299,8 @@ pub struct Relay {
     namespaces: Vec<Announcement>,
     /// FETCH requests of subscribers.
     fetches: fetch::Fetches,
+    /// Bytes the caches of all tracks hold ([`cache::MAX_CACHED_BYTES`]).
+    cached_bytes: usize,
     /// The request streams of FETCH requests that were served to the end of
     /// their fetch stream, and that the relay finishes when the subscriber
     /// has ended its direction, or in time (`Relay::end_answered_fetch`).
@@ -1301,6 +1322,7 @@ impl Relay {
             next_out_stream: 0,
             namespaces: Vec::new(),
             fetches: fetch::Fetches::default(),
+            cached_bytes: 0,
             fetch_ends: BTreeSet::new(),
             next_drain_wait: 0,
             next_own_request: 0,
@@ -2456,6 +2478,24 @@ impl Relay {
         // In the order the subscribers came, so that the same events always
         // lead to the same actions.
         let object = Arc::new(object);
+        if track.never_cached {
+            track.cache.clear(&mut self.cached_bytes);
+        } else if let Some(publisher_priority) = in_stream.priority {
+            let cached = CachedObject {
+                group_id: location.group,
+                subgroup_id,
+                publisher_priority,
+                object: Arc::clone(&object),
+            };
+            track.cache.insert(cached, &mut self.cached_bytes);
+        } else {
+            // A stream whose default priority the relay cannot tell (see
+            // `Self::on_data_stream_opened`) has no priority a fetch stream
+            // could give.
+            track
+                .cache
+                .leave_out(location.group, &mut self.cached_bytes);
+        }
         for subscriber in &track.subscribers {
             if let Some(out_stream) = in_stream.outs.get(&subscriber.session) {
                 actions.push(Action::SendObject {
@@ -2621,6 +2661,7 @@ impl Relay {
         let Some(mut track) = self.tracks.take_live(track_name) else {
             return;
         };
+        track.cache.clear(&mut self.cached_bytes);
         let (status_code, reset_code) = end.codes();
         for source in track.sources() {
             // §2.4.2: "it MUST cancel any corresponding subscription or
@@ -3095,6 +3136,7 @@ impl Relay {
                 })
                 .sum(),
             early_streams: self.sessions.values().map(|state| state.early.len()).sum(),
+            cached_bytes: self.cached_bytes,
             remembered_subgroups: self
                 .tracks
                 .all_live()

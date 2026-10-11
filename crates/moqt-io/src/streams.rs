@@ -222,6 +222,33 @@ impl<S: SendStream> Drop for FetchStreamWriter<S> {
     }
 }
 
+/// Opens a unidirectional stream for a fetch stream and writes nothing on
+/// it: the caller writes the `FETCH_HEADER` first (§11.4.4). For a caller
+/// that has to end the stream with a code it learns while the header waits
+/// to be written, which [`open_fetch_stream`] cannot take. Dropping the call
+/// leaves no stream behind; a writer that is dropped resets with
+/// `CANCELLED`.
+///
+/// # Errors
+///
+/// Fails when the connection is gone.
+pub async fn open_fetch_stream_without_header<C: Connection>(
+    connection: &C,
+    trace: &Trace,
+    label: &str,
+) -> Result<FetchStreamWriter<C::Send>, WriteError> {
+    let send = connection
+        .open_uni()
+        .await
+        .map_err(|lost| WriteError::Lost(lost.0))?;
+    Ok(FetchStreamWriter {
+        send: Some(send),
+        dropped_with: stream_reset_code::CANCELLED,
+        trace: trace.clone(),
+        label: label.to_string(),
+    })
+}
+
 /// Opens a unidirectional stream and writes the `FETCH_HEADER` that begins a
 /// fetch stream (§11.4.4). Dropping the call while it waits resets what it
 /// had opened, with `given_up`: the caller knows why it stopped waiting, as
@@ -239,16 +266,8 @@ pub async fn open_fetch_stream<C: Connection>(
     label: &str,
     given_up: u32,
 ) -> Result<FetchStreamWriter<C::Send>, WriteError> {
-    let send = connection
-        .open_uni()
-        .await
-        .map_err(|lost| WriteError::Lost(lost.0))?;
-    let mut writer = FetchStreamWriter {
-        send: Some(send),
-        dropped_with: given_up,
-        trace: trace.clone(),
-        label: label.to_string(),
-    };
+    let mut writer = open_fetch_stream_without_header(connection, trace, label).await?;
+    writer.dropped_with = given_up;
     // The Group Order has no part in the header.
     let bytes = FetchStreamEncoder::new(header, GroupOrder::Ascending).take_bytes();
     writer.write(&bytes).await?;
