@@ -110,6 +110,9 @@ preview.width = WIDTH;
 preview.height = HEIGHT;
 
 /** Calls `onFrame` with the frames of the camera, each of which the callee closes. */
+/** How long the last 200 frames of the camera took from the camera to here, in milliseconds. */
+const cameraToEncoderMs: number[] = [];
+
 async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 	const media = await navigator.mediaDevices.getUserMedia({
 		video: { width: WIDTH, height: HEIGHT, frameRate: FRAMES_A_SECOND },
@@ -128,6 +131,14 @@ async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 		// so the frame is drawn to that size and taken from the canvas.
 		context?.drawImage(next.value, 0, 0, WIDTH, HEIGHT);
 		const { timestamp } = next.value;
+		// When the camera took the frame, on this page's clock, where the
+		// browser says (Chromium does, `captureTime`): how long the frame
+		// took to get to the encoder. The viewer cannot see this part.
+		const taken: unknown = Reflect.get(next.value.metadata(), "captureTime");
+		if (typeof taken === "number") {
+			cameraToEncoderMs.push(performance.now() - taken);
+			if (cameraToEncoderMs.length > 200) cameraToEncoderMs.shift();
+		}
 		next.value.close();
 		onFrame(new VideoFrame(preview as HTMLCanvasElement, { timestamp }));
 	}
@@ -267,7 +278,13 @@ async function main(): Promise<void> {
 		const stats = encoder.stats();
 		const sent = encoder.publisher.stats();
 		say(
-			`${link} · ${framesIn.rate()} frames a second${document.visibilityState === "hidden" ? " (this tab is in the background)" : ""}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
+			`${link} · ${framesIn.rate()} frames a second${document.visibilityState === "hidden" ? " (this tab is in the background)" : ""}${
+				new URLSearchParams(location.search).get("source") !== "camera"
+					? ""
+					: cameraToEncoderMs.length === 0
+						? " · from the camera to the encoder: the browser does not say"
+						: ` · from the camera to the encoder: median ${Math.round([...cameraToEncoderMs].sort((a, b) => a - b)[Math.floor(cameraToEncoderMs.length / 2)] ?? 0)} ms (not in the viewer's numbers)`
+			}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
 		);
 	});
 	void encoder.failed.then((error) => say(`the encoder failed: ${String(error)}`));

@@ -13,6 +13,8 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 
 **The publishing page may be a tab in the background**: its clock runs in a worker, which a browser does not slow down as it does the timers of a page nobody looks at. (Before, a publisher in a background tab sent one frame a second, and no sound that was in time.) The first line under each picture has the frames a second, and the watching page a line on the sound: what goes to the loudspeaker, and how loud.
 
+**Where the delay comes from** is the second line under the watching page's picture: how long a frame took to get there (encoder, link, relay, decoder), how long it waited in the buffer, and how long for the next repaint. On one machine nearly all of it is the buffer. The buffer is set with the buttons and the slider beside "sound" while watching (or `?buffer=50`); "auto" (`?buffer=auto`, a trial, not the default) lets it follow how late things come, 400 ms at most. With no buffer the picture plays and the sound does not: its pieces come after their time. With a camera, the publishing page says how long a frame took from the camera to the encoder where the browser tells; that part is not in the viewer's numbers.
+
 `bun demo/check.ts` checks a running demo in headless Chromium: the frames a second, and that sound leaves the watching page.
 
 Ctrl-C stops the web server and the relay. `bun demo/serve.ts --port N --relay-port M` chooses other ports.
