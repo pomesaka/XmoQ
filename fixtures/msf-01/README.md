@@ -1,6 +1,6 @@
 # Catalogs of draft-ietf-moq-msf-01
 
-What `@xmoq/msf` reads a catalog as. No Rust code reads a catalog yet; one that does reads these files.
+What `@xmoq/msf` reads a catalog as. `crates/msf` reads `catalog-moqlivemock.json` as well, for the fields a viewer chooses a track by; it does not read `catalogs.tsv` yet, and turns down less than `@xmoq/msf` does.
 
 ## `catalog-moqlivemock.json`: what another implementation sent
 

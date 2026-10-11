@@ -112,6 +112,8 @@ pub fn take_or_print(
     header: &SubgroupHeader,
     object: &SubgroupObject,
 ) -> Result<()> {
+    // With `--catalog-video`, the Object of a catalog track.
+    crate::catalog::offer(&object.payload);
     if let Some(video) = video {
         return video.take(header.group_id, object);
     }

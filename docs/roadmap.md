@@ -52,7 +52,7 @@ The relay gets a cache of the latest Group of each track in Phase 1; decided on 
 **Exit:** documented A/V demo and limitations.
 
 ## Phase 3 — Ghostty CLI
-- [ ] Rust MoQ subscriber. Done so far: the Rust client subscribes to a LOC video track and writes its frames as an H.264 byte stream that `ffprobe` reads, from `mlmpub` directly and from a page that encodes video, through the own relay ([record](experiments/2026-10-11-rust-subscriber-writes-loc-video-as-annex-b.md)). Open: a catalog.
+- [ ] Rust MoQ subscriber. Done so far: the Rust client subscribes to a LOC video track and writes its frames as an H.264 byte stream that `ffprobe` reads, from `mlmpub` directly and from a page that encodes video, through the own relay ([record](experiments/2026-10-11-rust-subscriber-writes-loc-video-as-annex-b.md)). With `--catalog-video` it finds the track in the MSF catalog, which it reads with a SUBSCRIBE and a Joining FETCH.
 - [ ] Video decoding and Kitty Graphics experiment.
 - [ ] Native audio output and terminal controls.
 - [ ] Measure FPS, CPU and memory.

@@ -5,9 +5,11 @@ edition = "2024"
 publish = false
 
 # A spike: outside the workspace (the root Cargo.toml excludes spikes/), its lints and its
-# review. No dependencies.
+# review.
 
 [dependencies]
+# For --h264: Cisco's OpenH264, built from source. An experiment, and no choice of a decoder.
+openh264 = "=0.9.8"
 
 [profile.release]
 debug = false

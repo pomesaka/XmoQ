@@ -2,6 +2,13 @@
 //!
 //!   kitty-frames --pattern 320x180 --frames 250 --fps 25
 //!   ffmpeg ... -f rawvideo -pix_fmt rgb24 pipe:1 | kitty-frames --raw 320x180
+//!   kitty-frames --h264 < video.h264        # or a FIFO a client writes into
+//!
+//! `--h264` reads an H.264 byte stream (Annex B) and decodes it with the
+//! `openh264` crate, a NAL unit at a time, as it comes. A NAL unit is known
+//! to be whole when the start code of the next one has come, so a frame is
+//! drawn when the one after it begins to arrive. `--max WxH` makes a frame
+//! that is larger smaller before it is sent, by leaving pixels out.
 //!
 //! `--medium direct` (the default) sends the pixels in the escape codes,
 //! base64 in chunks of 4096; `--medium file` writes them to a temporary file
@@ -11,6 +18,9 @@
 //! pixels; the terminal scales). Numbers of the run go to stderr at the end.
 
 use std::io::{self, Read, Write};
+
+use openh264::decoder::Decoder;
+use openh264::formats::YUVSource;
 use std::time::{Duration, Instant};
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -109,6 +119,29 @@ fn pattern(n: usize, width: usize, height: usize, rgb: &mut [u8]) {
     }
 }
 
+/// The frame made smaller to fit `max`, by a whole factor and by leaving
+/// pixels out; as it is where it fits.
+fn shrink(rgb: &[u8], (width, height): (usize, usize), max: (usize, usize)) -> (Vec<u8>, (usize, usize)) {
+    let by = width.div_ceil(max.0).max(height.div_ceil(max.1)).max(1);
+    if by == 1 {
+        return (rgb.to_vec(), (width, height));
+    }
+    let (w, h) = (width / by, height / by);
+    let mut out = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let at = (y * by * width + x * by) * 3;
+            out.extend_from_slice(&rgb[at..at + 3]);
+        }
+    }
+    (out, (w, h))
+}
+
+/// Where a start code (00 00 01) begins in `bytes`, from `from` on.
+fn start_code(bytes: &[u8], from: usize) -> Option<usize> {
+    bytes.get(from..)?.windows(3).position(|w| w == [0, 0, 1]).map(|at| at + from)
+}
+
 fn size(text: &str) -> (usize, usize) {
     let (w, h) = text.split_once('x').expect("a size is <width>x<height>");
     (w.parse().expect("width"), h.parse().expect("height"))
@@ -117,6 +150,7 @@ fn size(text: &str) -> (usize, usize) {
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let (mut raw, mut frames, mut fps, mut medium, mut scale) = (false, 250usize, 25u64, Medium::Direct, 0usize);
+    let (mut h264, mut max) = (false, (usize::MAX, usize::MAX));
     let (mut width, mut height) = (320, 180);
     // Width and height of a cell in pixels, for --scale: what Ghostty has
     // with its default font here is not known to this program.
@@ -129,6 +163,8 @@ fn main() -> io::Result<()> {
                 raw = true;
                 (width, height) = size(&value());
             }
+            "--h264" => h264 = true,
+            "--max" => max = size(&value()),
             "--frames" => frames = value().parse().expect("--frames"),
             "--fps" => fps = value().parse().expect("--fps"),
             "--scale" => scale = value().parse().expect("--scale"),
@@ -143,37 +179,93 @@ fn main() -> io::Result<()> {
             other => panic!("{other}: not a flag of kitty-frames"),
         }
     }
-    let cells = if scale == 0 {
-        (0, 0)
-    } else {
-        ((width * scale).div_ceil(cell.0), (height * scale).div_ceil(cell.1))
-    };
-    let mut screen =
-        Screen { width, height, medium, cells, encoded: Vec::new(), out: Vec::new(), drawn: 0, bytes: 0 };
-    let mut rgb = vec![0u8; width * height * 3];
     let stdout = io::stdout();
     let mut to = stdout.lock();
-    // Room for the picture below the cursor, then the cursor is saved at
-    // its top left corner.
-    let rows = if cells.1 == 0 { height.div_ceil(cell.1) } else { cells.1 };
-    to.write_all("\n".repeat(rows).as_bytes())?;
-    to.write_all(format!("\x1b[{rows}A\x1b7").as_bytes())?;
+    let mut screen: Option<Screen> = None;
+    let mut rows = 0;
+    // The first frame says how large the picture is: room for it below the
+    // cursor, and the cursor saved at its top left corner.
+    let mut draw = |rgb: &[u8], (width, height): (usize, usize), to: &mut io::StdoutLock| -> io::Result<()> {
+        if screen.is_none() {
+            let cells = if scale == 0 {
+                (0, 0)
+            } else {
+                ((width * scale).div_ceil(cell.0), (height * scale).div_ceil(cell.1))
+            };
+            rows = if cells.1 == 0 { height.div_ceil(cell.1) } else { cells.1 };
+            to.write_all("\n".repeat(rows).as_bytes())?;
+            to.write_all(format!("\x1b[{rows}A\x1b7").as_bytes())?;
+            screen = Some(Screen { width, height, medium, cells, encoded: Vec::new(), out: Vec::new(), drawn: 0, bytes: 0 });
+        }
+        let screen = screen.as_mut().expect("made above");
+        // A stream that changes its size is not followed.
+        if (screen.width, screen.height) == (width, height) {
+            screen.draw(rgb, to)?;
+        }
+        Ok(())
+    };
     let started = Instant::now();
     let mut spent = Duration::ZERO;
-    if raw {
+    let mut decoding = Duration::ZERO;
+    if h264 {
+        let mut decoder = Decoder::new().expect("the decoder of openh264");
+        let stdin = io::stdin();
+        let mut from = stdin.lock();
+        let (mut buffer, mut chunk) = (Vec::new(), vec![0u8; 64 * 1024]);
+        let mut rgb = Vec::new();
+        let mut decode = |nal: &[u8], to: &mut io::StdoutLock, spent: &mut Duration, decoding: &mut Duration| -> io::Result<()> {
+            let before = Instant::now();
+            let decoded = decoder.decode(nal);
+            match decoded {
+                Ok(Some(yuv)) => {
+                    let (width, height) = yuv.dimensions();
+                    rgb.resize(width * height * 3, 0);
+                    yuv.write_rgb8(&mut rgb);
+                    *decoding += before.elapsed();
+                    let (small, size) = shrink(&rgb, (width, height), max);
+                    let before = Instant::now();
+                    draw(&small, size, to)?;
+                    *spent += before.elapsed();
+                }
+                Ok(None) => *decoding += before.elapsed(),
+                Err(error) => eprintln!("openh264: {error}"),
+            }
+            Ok(())
+        };
+        loop {
+            let read = from.read(&mut chunk)?;
+            buffer.extend_from_slice(&chunk[..read]);
+            // Every NAL unit that has the start code of the next after it.
+            while let Some(first) = start_code(&buffer, 0) {
+                let Some(next) = start_code(&buffer, first + 3) else { break };
+                // A start code of 4 bytes has a 0 before the 00 00 01.
+                let end = if buffer[next - 1] == 0 { next - 1 } else { next };
+                decode(&buffer[first..end], &mut to, &mut spent, &mut decoding)?;
+                buffer.drain(..end);
+            }
+            if read == 0 {
+                if let Some(first) = start_code(&buffer, 0) {
+                    decode(&buffer[first..], &mut to, &mut spent, &mut decoding)?;
+                }
+                break;
+            }
+        }
+    } else if raw {
+        let mut rgb = vec![0u8; width * height * 3];
         let stdin = io::stdin();
         let mut from = stdin.lock();
         // Until the input ends: a frame that is cut is not drawn.
         while from.read_exact(&mut rgb).is_ok() {
             let before = Instant::now();
-            screen.draw(&rgb, &mut to)?;
+            draw(&rgb, (width, height), &mut to)?;
             spent += before.elapsed();
         }
     } else {
+        let mut rgb = vec![0u8; width * height * 3];
         for n in 0..frames {
             pattern(n, width, height, &mut rgb);
             let before = Instant::now();
-            screen.draw(&rgb, &mut to)?;
+            draw(&rgb, (width, height), &mut to)?;
             spent += before.elapsed();
             // The time frame n + 1 is due at, from the start.
             let due = Duration::from_micros((n as u64 + 1) * 1_000_000 / fps.max(1));
@@ -183,17 +275,24 @@ fn main() -> io::Result<()> {
         }
     }
     let elapsed = started.elapsed();
+    let Some(screen) = screen else {
+        eprintln!("KITTY_FRAMES frames=0");
+        return Ok(());
+    };
     // Below the picture.
     to.write_all(format!("\x1b8\x1b[{rows}B\n").as_bytes())?;
     to.flush()?;
     eprintln!(
-        "KITTY_FRAMES size={width}x{height} medium={} frames={} seconds={:.2} fps={:.1} bytes_a_frame={} ms_a_frame_to_encode_and_write={:.2}",
+        "KITTY_FRAMES size={}x{} medium={} frames={} seconds={:.2} fps={:.1} bytes_a_frame={} ms_a_frame_to_encode_and_write={:.2} ms_a_frame_to_decode={:.2}",
+        screen.width,
+        screen.height,
         if medium == Medium::Direct { "direct" } else { "file" },
         screen.drawn,
         elapsed.as_secs_f64(),
         screen.drawn as f64 / elapsed.as_secs_f64(),
         screen.bytes / screen.drawn.max(1),
         spent.as_secs_f64() * 1000.0 / screen.drawn.max(1) as f64,
+        decoding.as_secs_f64() * 1000.0 / screen.drawn.max(1) as f64,
     );
     Ok(())
 }

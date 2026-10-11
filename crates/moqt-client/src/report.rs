@@ -24,6 +24,18 @@ pub fn setup_ok(peer_setup: &Setup) {
     println!("SETUP_OK server_setup={peer_setup:?}");
 }
 
+/// The track `--catalog-video` chose.
+pub fn catalog_track(track: &xmoq_msf::CatalogTrack) {
+    let size = |n: Option<u64>| n.map_or("none".to_string(), |n| n.to_string());
+    println!(
+        "CATALOG_TRACK name={} codec={} width={} height={}",
+        track.name,
+        track.codec.as_deref().unwrap_or("none"),
+        size(track.width),
+        size(track.height),
+    );
+}
+
 pub fn subscribed(track_alias: u64) {
     println!("SUBSCRIBED track_alias={track_alias}");
 }
