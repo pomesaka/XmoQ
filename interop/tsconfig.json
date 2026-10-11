@@ -16,11 +16,11 @@
 		"noEmit": true,
 		"skipLibCheck": true
 	},
-	"include": [
-		"harness.ts",
-		"clients.ts",
-		"run.ts",
-		"disconnect.ts",
-		"matrix.ts"
-	]
+	// WHY a pattern and not the names: a driver that was added and not named
+	// here was not type-checked at all, and nothing said so (fetch.ts and
+	// fetch-rust.ts, with five errors between them). peers/ is not matched:
+	// the pattern has no directory in it.
+	"include": ["*.ts"],
+	// The page runs in a browser; tsconfig.page.json checks it.
+	"exclude": ["page.ts"]
 }

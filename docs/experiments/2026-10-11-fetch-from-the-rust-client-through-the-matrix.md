@@ -54,6 +54,7 @@ What is expected was written before the runs, at `EXPECTED` in `interop/fetch-ru
 - Where the relay printed `HOLD_REQUEST session=2 stream=2 FETCH`, it printed `SEND session=2 stream=1 SUBSCRIBE_OK` next and `SEND session=2 stream=2 FETCH_OK` after it, and the client got Object 0 of Groups 1 and 2, as in the run that sends the FETCH after its SUBSCRIBE_OK.
 - The run checks that a FETCH that was held got its FETCH_OK on that stream. With the check looking for another line, the run fails in the first round in which the FETCH was held.
 - The run went into the matrix together with the change that holds a Joining FETCH: through the relay of `main` it failed in 3 of the 50 runs above.
+- **The counts of held FETCHes in the table may be too low.** The run looked for the relay's `HOLD_REQUEST` line among the lines that had arrived when the client was done, and the relay's lines and a client's reach the driver in no fixed order; a line still on its way was not counted, and the run then passed without looking at that FETCH. The run now waits for the last line the relay prints for the FETCH (`FETCH_PIPE_ENDED … finished`) and looks at what came before it. Of 40 runs after that change, 3 had the FETCH held and none failed.
 
 ## Limitations and blockers
 
