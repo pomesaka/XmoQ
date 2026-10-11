@@ -8,7 +8,7 @@
 | One-to-many live broadcast | Discussed. The relay fans one Object out to several subscribers; no media has been sent |
 | Browser publishing and viewing | Decided for Phase 1: Chromium (Chrome, Edge) on desktop, video only, shown on loopback. Other browsers are undecided |
 | WebCodecs and MoQ/WebTransport | Discussed; validation required |
-| Media packaged as LOC, tracks described by an MSF catalog (`draft-ietf-moq-msf-01`), with the FETCH that needs | Decided. Which revision of LOC, whether every Object gets a stream of its own, and whether the relay caches are undecided ([open decisions](open-questions.md)) |
+| Media packaged as LOC, tracks described by an MSF catalog (`draft-ietf-moq-msf-01`), with the FETCH that needs | Decided, with a relay cache of the latest Group of a track in Phase 1. Which revision of LOC, whether every Object gets a stream of its own, and what bounds the cache are undecided ([open decisions](open-questions.md)). No cache is implemented |
 | Audio | Decided: Opus, from Phase 2 |
 | Rust relay and Rust CLI | Discussed |
 | Ghostty video, audio, chat | Desired; validation required |
