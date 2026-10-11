@@ -1262,6 +1262,10 @@ pub struct Counts {
     /// waiting for the SUBSCRIBE they join, or answered by the relay with a
     /// fetch stream that is not reported written.
     pub fetches: usize,
+    /// Request streams of FETCH requests that were served, which the relay
+    /// keeps its direction of open until the subscriber has ended its own,
+    /// or the time for that is over.
+    pub fetch_ends: usize,
 }
 
 /// All sessions and tracks of one relay.
@@ -1276,6 +1280,10 @@ pub struct Relay {
     namespaces: Vec<Announcement>,
     /// FETCH requests of subscribers.
     fetches: fetch::Fetches,
+    /// The request streams of FETCH requests that were served to the end of
+    /// their fetch stream, and that the relay finishes when the subscriber
+    /// has ended its direction, or in time (`Relay::end_answered_fetch`).
+    fetch_ends: BTreeSet<(SessionKey, StreamKey)>,
     next_drain_wait: u64,
     next_own_request: u64,
 }
@@ -1293,6 +1301,7 @@ impl Relay {
             next_out_stream: 0,
             namespaces: Vec::new(),
             fetches: fetch::Fetches::default(),
+            fetch_ends: BTreeSet::new(),
             next_drain_wait: 0,
             next_own_request: 0,
         }
@@ -1381,6 +1390,7 @@ impl Relay {
             Event::FetchStreamOpened { .. }
             | Event::FetchPipeEnded { .. }
             | Event::JoiningFetchTimeout { .. }
+            | Event::FetchEndTimeout { .. }
             | Event::FetchStreamWritten { .. } => {}
             Event::DataStreamOpened {
                 session,
@@ -2178,6 +2188,11 @@ impl Relay {
             Some(RequestSlot::Finished(Some(request))) => {
                 if stream_gone {
                     state.moqt.on_peer_request_closed(request);
+                }
+                // A FETCH that was served: the subscriber has ended its
+                // direction, which the relay waited for with its own.
+                if self.fetch_ends.remove(&(session, stream)) {
+                    actions.push(Action::FinishRequest { session, stream });
                 }
             }
             Some(RequestSlot::Finished(None) | RequestSlot::Stopped) | None => {}
@@ -3089,6 +3104,7 @@ impl Relay {
             pending_tracks: self.tracks.all_pending().count(),
             own_requests: self.sessions.values().map(SessionState::own_requests).sum(),
             fetches: self.fetch_count(),
+            fetch_ends: self.fetch_ends.len(),
         }
     }
 }
@@ -3290,6 +3306,7 @@ impl Action {
             | Self::StartDrainTimer { session, .. }
             | Self::StartEarlyTimer { session, .. }
             | Self::StartJoiningFetchTimer { session, .. }
+            | Self::StartFetchEndTimer { session, .. }
             | Self::StopRequest { session, .. }
             | Self::OpenRequest { session, .. }
             | Self::FinishOwnRequest { session, .. }

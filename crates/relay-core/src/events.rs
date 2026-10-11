@@ -286,6 +286,15 @@ pub enum Event {
         /// The stream.
         stream: StreamKey,
     },
+    /// The time a subscriber had to end its direction of the request stream
+    /// of a FETCH that was served is over. Answers
+    /// [`Action::StartFetchEndTimer`].
+    FetchEndTimeout {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH.
+        stream: StreamKey,
+    },
     /// The time for the SUBSCRIBE of a Joining FETCH to come is over. Answers
     /// [`Action::StartJoiningFetchTimer`].
     JoiningFetchTimeout {
@@ -483,6 +492,18 @@ pub enum Action {
         session: SessionKey,
         /// The stream.
         stream: StreamKey,
+    },
+    /// Report [`Event::FetchEndTimeout`] after `wait_ms`: a FETCH was served
+    /// to the end of its fetch stream, and the relay's direction of its
+    /// request stream stays open that long for the subscriber to end its
+    /// own first.
+    StartFetchEndTimer {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH.
+        stream: StreamKey,
+        /// The wait, in milliseconds.
+        wait_ms: u64,
     },
     /// Report [`Event::JoiningFetchTimeout`] after the time a stream of the
     /// peer gets to say what it is: the relay holds a Joining FETCH whose

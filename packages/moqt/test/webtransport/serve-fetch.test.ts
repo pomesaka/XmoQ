@@ -237,17 +237,51 @@ describe("serve: a Standalone FETCH of the peer", () => {
 		]);
 		await writer.close();
 		expect(await data.read()).toEqual(END);
-		expect(await stream.sent.read()).toEqual(END);
 		expect(await writer.ended).toEqual({ type: "served" });
+		// This endpoint's direction of the request stream stays open until
+		// the subscriber has ended its own.
+		const finished = stream.sent.read();
+		expect(await Promise.race([finished, settle()])).toBeUndefined();
+		await stream.reply.close();
+		expect(await finished).toEqual(END);
 	});
 
-	test("served, has the subscriber's direction stopped when it does not end it", async () => {
+	test("served, finishes its direction of the request stream when the subscriber does not end its own in time, and has the subscriber's stopped after that time again", async () => {
 		const { stream, writer } = await serving();
-		await writer.close();
-		await new Promise((resolve) => setTimeout(resolve, 40));
-		expect(
-			await rejection(stream.reply.write(new Uint8Array(1))),
-		).toMatchObject({ streamErrorCode: 1 });
+		jest.useFakeTimers();
+		try {
+			await writer.close();
+			const finished = stream.sent.read();
+			const turns = async (): Promise<void> => {
+				for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			};
+			await turns();
+			jest.advanceTimersByTime(19);
+			await turns();
+			expect(await Promise.race([finished, Promise.resolve("open")])).toBe(
+				"open",
+			);
+			jest.advanceTimersByTime(1);
+			await turns();
+			// WHY not awaited alone: the clock stands still here, and a read
+			// that never comes would hold the test for good.
+			expect(await Promise.race([finished, Promise.resolve("open")])).toEqual(
+				END,
+			);
+			// The subscriber's direction is still its own.
+			await stream.reply.write(new Uint8Array(0));
+			jest.advanceTimersByTime(19);
+			await turns();
+			expect(jest.getTimerCount()).toBe(1);
+			jest.advanceTimersByTime(1);
+			await turns();
+			expect(
+				await rejection(stream.reply.write(new Uint8Array(1))),
+			).toMatchObject({ streamErrorCode: 1 });
+			expect(jest.getTimerCount()).toBe(0);
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	test("rejected, gets REQUEST_ERROR with the code and the reason, and a FIN", async () => {
@@ -738,6 +772,39 @@ describe("serve: the wait after `close()`", () => {
 			await writer.close();
 			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
 			expect(jest.getTimerCount()).toBe(0);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	test("a subscriber that ends its direction while it is waited for leaves no timer behind, and this endpoint's direction is finished", async () => {
+		const { stream, writer } = await serving();
+		jest.useFakeTimers();
+		try {
+			await writer.close();
+			await stream.reply.close();
+			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			expect(jest.getTimerCount()).toBe(0);
+			expect(
+				await Promise.race([stream.sent.read(), Promise.resolve("open")]),
+			).toEqual(END);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	test("a subscriber that stops this endpoint's direction while it is waited for: both directions end at once, with CANCELLED, and no timer is left", async () => {
+		const { stream, writer } = await serving();
+		jest.useFakeTimers();
+		try {
+			await writer.close();
+			// STOP_SENDING for this endpoint's direction of the request stream.
+			void stream.sent.cancel(fakeStreamError(7, "stop"));
+			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			expect(jest.getTimerCount()).toBe(0);
+			expect(
+				await rejection(stream.reply.write(new Uint8Array(1))),
+			).toMatchObject({ streamErrorCode: 1 });
 		} finally {
 			jest.useRealTimers();
 		}

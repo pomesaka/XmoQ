@@ -37,6 +37,20 @@ use crate::report;
 /// with 16 here it would be the 17th.
 pub const MAX_ANSWERED_AT_ONCE: usize = 32;
 
+/// How long this client's direction of the request stream of a FETCH stays
+/// open after the fetch stream was written to its end, for the subscriber
+/// to end its own direction first. Provisional; the relay and `@xmoq/moqt`
+/// wait as long.
+///
+/// WHY wait at all: §5.2 has a subscriber's FETCH end with the FIN or the
+/// reset of the fetch stream, with a `REQUEST_ERROR` or with its own
+/// cancelling, and says nothing of a FIN on the request stream. The two
+/// streams arrive apart, and `moqtransport` v0.14.0 fails a FETCH whose
+/// request stream is finished before it has read the fetch stream to its
+/// end. WHY NOT leave it open for good: a subscriber that never ends its
+/// direction would keep the stream.
+pub const PEER_END_WAIT: Duration = Duration::from_secs(3);
+
 /// Notes of the tasks that are not taken yet. When it is full the tasks
 /// wait.
 const NOTE_QUEUE: usize = 16;
@@ -164,6 +178,9 @@ struct Answered {
     /// Whether the subscriber has finished its direction of the request
     /// stream.
     peer_finished: bool,
+    /// Dropped when the subscriber's direction of the request stream is
+    /// over: the task of the stream waits for that before it finishes.
+    peer_ends: oneshot::Sender<()>,
 }
 
 /// A FETCH that is over, for the client to tell its session.
@@ -203,6 +220,11 @@ pub struct Answer {
 /// request streams, and the queue of their notes.
 pub struct Answers {
     open: HashMap<u64, Answered>,
+    /// The request streams of FETCH requests that are over, whose task
+    /// waits for the subscriber's direction to end ([`PEER_END_WAIT`]):
+    /// what is dropped when it has. An entry whose task gave up waiting is
+    /// taken out when the next one is put in.
+    lingering: HashMap<u64, (PeerRequestId, oneshot::Sender<()>)>,
     notes: mpsc::Receiver<Note>,
     queue: mpsc::Sender<Note>,
     pace: Pace,
@@ -213,6 +235,7 @@ impl Answers {
         let (queue, notes) = mpsc::channel(NOTE_QUEUE);
         Self {
             open: HashMap::new(),
+            lingering: HashMap::new(),
             notes,
             queue,
             pace,
@@ -245,6 +268,7 @@ impl Answers {
     {
         let (says, said) = mpsc::channel(SAY_QUEUE);
         let (end, ended) = oneshot::channel();
+        let (peer_ends, peer_ended) = oneshot::channel();
         let printed = Arc::new(Mutex::new(Printed::default()));
         tokio::spawn(speak(Speaker {
             stream,
@@ -253,6 +277,8 @@ impl Answers {
             after: self.pace.answer_after,
             said,
             ended,
+            peer_ended,
+            end_wait: PEER_END_WAIT,
             notes: self.queue.clone(),
             trace: trace.clone(),
         }));
@@ -284,6 +310,7 @@ impl Answers {
                 body,
                 printed,
                 peer_finished: false,
+                peer_ends,
             },
         );
     }
@@ -310,7 +337,29 @@ impl Answers {
     /// prints `FETCH_SERVED` where [`step`] says so, once for every FETCH.
     /// Does nothing for a stream that has no FETCH that is answered.
     pub fn happened(&mut self, stream: u64, happened: Happened) -> Option<Over> {
-        let answered = self.open.get_mut(&stream)?;
+        let Some(answered) = self.open.get_mut(&stream) else {
+            return match happened {
+                // The subscriber's direction of a FETCH that is over has
+                // ended: the task of the stream finishes this client's.
+                Happened::PeerClosed(_) => {
+                    self.lingering.remove(&stream);
+                    None
+                }
+                // The subscriber stopped this client's direction while it
+                // was kept open for it: the task has reset it, and the
+                // subscriber's direction is stopped as well, as for a FETCH
+                // that is cancelled while it is answered.
+                Happened::RequestStopped(_) => {
+                    let (request, _) = self.lingering.remove(&stream)?;
+                    Some(Over {
+                        request,
+                        peer_gone: false,
+                        reset: Some(stream_reset_code::CANCELLED),
+                    })
+                }
+                _ => None,
+            };
+        };
         let Some(ended) = step(happened) else {
             answered.peer_finished = true;
             return None;
@@ -331,17 +380,24 @@ impl Answers {
         answered.body.abort();
         // The task is gone when this fails, and its stream with it.
         let _ = answered.end.send(ended.request);
+        let peer_gone = answered.peer_finished
+            || matches!(
+                happened,
+                Happened::PeerClosed(PeerRequestClose::Reset(_) | PeerRequestClose::Abandoned)
+            );
+        if !peer_gone && ended.request == RequestEnd::Finish {
+            self.lingering
+                .retain(|_, (_, peer_ends)| !peer_ends.is_closed());
+            self.lingering
+                .insert(stream, (answered.request, answered.peer_ends));
+        }
         Some(Over {
             request: answered.request,
             reset: match ended.request {
                 RequestEnd::Finish => None,
                 RequestEnd::Reset(code) => Some(code),
             },
-            peer_gone: answered.peer_finished
-                || matches!(
-                    happened,
-                    Happened::PeerClosed(PeerRequestClose::Reset(_) | PeerRequestClose::Abandoned)
-                ),
+            peer_gone,
         })
     }
 
@@ -365,6 +421,12 @@ struct Speaker<S> {
     after: Duration,
     said: mpsc::Receiver<ControlMessage>,
     ended: oneshot::Receiver<RequestEnd>,
+    /// Completes when the subscriber's direction of the stream is over, or
+    /// nobody is left to say so.
+    peer_ended: oneshot::Receiver<()>,
+    /// How long a direction that is to be finished waits for that
+    /// ([`PEER_END_WAIT`]).
+    end_wait: Duration,
     notes: mpsc::Sender<Note>,
     trace: Trace,
 }
@@ -380,6 +442,8 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
         after,
         mut said,
         mut ended,
+        peer_ended,
+        end_wait,
         notes,
         trace,
     } = speaker;
@@ -413,7 +477,29 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
                         for message in waiting.drain(..) {
                             let _ = send_message(&mut send, &message, &trace, &label).await;
                         }
-                        send.finish();
+                        // The subscriber ends its direction first, if it
+                        // does so in time ([`PEER_END_WAIT`]). WHY a
+                        // `STOP_SENDING` meanwhile resets this direction,
+                        // where the FETCH is over: §5.2 has "The Publisher
+                        // can destroy fetch state as soon as it has
+                        // received a STOP_SENDING. It MUST reset the bidi
+                        // request stream", and the relay does so.
+                        let stopped = tokio::select! {
+                            _ = tokio::time::timeout(end_wait, peer_ended) => None,
+                            stopped = send.stopped(), if watched => match stopped {
+                                WriteError::Stopped(code) => Some(code),
+                                // The connection is gone, and the stream.
+                                WriteError::Lost(_) => return,
+                            },
+                        };
+                        match stopped {
+                            Some(code) => {
+                                let stopped = Note(stream, Happened::RequestStopped(code));
+                                let _ = notes.send(stopped).await;
+                                send.reset(stream_reset_code::CANCELLED);
+                            }
+                            None => send.finish(),
+                        }
                     }
                     // A FETCH that is given up is owed no answer.
                     Ok(RequestEnd::Reset(code)) => send.reset(code),
@@ -546,16 +632,21 @@ mod tests {
         }
     }
 
+    /// What the task of a request stream is told: how its direction ends,
+    /// and when the subscriber's has.
+    type Told = (oneshot::Receiver<RequestEnd>, oneshot::Receiver<()>);
+
     /// Answers that hold the FETCH requests on the streams `0..count`, with
     /// tasks that do nothing.
-    fn answering(count: u64) -> (Answers, Vec<oneshot::Receiver<RequestEnd>>) {
+    fn answering(count: u64) -> (Answers, Vec<Told>) {
         let mut session = Session::new(Role::Client, Transport::WebTransport);
         let mut answers = Answers::new(Pace::default());
         let mut ends = Vec::new();
         for stream in 0..count {
             let (says, _said) = mpsc::channel(1);
             let (end, ended) = oneshot::channel();
-            ends.push(ended);
+            let (peer_ends, peer_ended) = oneshot::channel();
+            ends.push((ended, peer_ended));
             answers.open.insert(
                 stream,
                 Answered {
@@ -565,6 +656,7 @@ mod tests {
                     body: tokio::spawn(std::future::pending()),
                     printed: Arc::new(Mutex::new(Printed::default())),
                     peer_finished: false,
+                    peer_ends,
                 },
             );
         }
@@ -637,7 +729,10 @@ mod tests {
         said: usize,
         end: RequestEnd,
     ) -> Vec<String> {
-        spoken_on(Recorded, answer_after, end_after, said, end).await
+        // The subscriber's direction is over: nothing is waited for.
+        let (_, peer_ended) = oneshot::channel();
+        let wait = (peer_ended, Duration::ZERO);
+        spoken_on(Recorded, answer_after, end_after, said, end, wait).await
     }
 
     /// The same on the request stream `stream_of` makes.
@@ -647,6 +742,7 @@ mod tests {
         end_after: Duration,
         said: usize,
         end: RequestEnd,
+        (peer_ended, end_wait): (oneshot::Receiver<()>, Duration),
     ) -> Vec<String> {
         let done = Done::default();
         let (says, taken) = mpsc::channel(SAY_QUEUE);
@@ -668,6 +764,8 @@ mod tests {
             after: answer_after,
             said: taken,
             ended,
+            peer_ended,
+            end_wait,
             notes,
             trace: Trace::default(),
         }));
@@ -718,6 +816,197 @@ mod tests {
             spoken(ms(40), ms(2), 0, RequestEnd::Reset(0x1)).await,
             ["reset 0x1"]
         );
+    }
+
+    #[tokio::test]
+    async fn the_request_stream_is_finished_when_the_subscribers_direction_has_ended_or_in_time() {
+        let ms = Duration::from_millis;
+        let finished = vec!["write 0x18", "finish"];
+        // (when the subscriber's direction ends, `None` for never; how long
+        //  the task waits for that; how its own direction ends; what the
+        //  stream was made to do; the least and the most time that takes)
+        let cases = [
+            // The subscriber ends first: finished right after.
+            (
+                Some(ms(100)),
+                ms(5_000),
+                RequestEnd::Finish,
+                &finished,
+                ms(100),
+                ms(2_000),
+            ),
+            // It never does: finished when the time is over.
+            (
+                None,
+                ms(300),
+                RequestEnd::Finish,
+                &finished,
+                ms(300),
+                ms(2_000),
+            ),
+            // A direction that is reset waits for nothing.
+            (
+                None,
+                ms(5_000),
+                RequestEnd::Reset(0x1),
+                &vec!["reset 0x1"],
+                ms(0),
+                ms(2_000),
+            ),
+        ];
+        for (peer_ends_after, end_wait, end, expected, least, most) in cases {
+            let (peer_ends, peer_ended) = oneshot::channel();
+            let subscriber = tokio::spawn(async move {
+                match peer_ends_after {
+                    Some(after) => tokio::time::sleep(after).await,
+                    None => std::future::pending().await,
+                }
+                drop(peer_ends);
+            });
+            let started = tokio::time::Instant::now();
+            let wait = (peer_ended, end_wait);
+            // WHY the answer is due later for a direction that is reset: one
+            // that is due at once is written or not as the task happens to
+            // run, and this case is about what the reset waits for.
+            let answer_after = match end {
+                RequestEnd::Finish => ms(0),
+                RequestEnd::Reset(_) => ms(1_000),
+            };
+            let log = spoken_on(Recorded, answer_after, ms(0), 0, end, wait).await;
+            let took = started.elapsed();
+            subscriber.abort();
+            assert_eq!(&log, expected, "{peer_ends_after:?} {end_wait:?}");
+            assert!(
+                least <= took && took < most,
+                "{peer_ends_after:?} {end_wait:?}: {took:?}"
+            );
+        }
+    }
+
+    /// A request stream whose subscriber sends `STOP_SENDING` with the code
+    /// 0x77 after 100 ms.
+    struct StoppedLater(Done);
+
+    impl SendStream for StoppedLater {
+        fn write_all(&mut self, bytes: &[u8]) -> impl Future<Output = Result<(), WriteError>> {
+            let first = bytes.first().copied().unwrap_or(0);
+            self.0.0.lock().unwrap().push(format!("write {first:#x}"));
+            std::future::ready(Ok(()))
+        }
+
+        fn finish(self) {
+            self.0.0.lock().unwrap().push("finish".to_string());
+        }
+
+        fn finish_and_wait(self) -> impl Future<Output = Result<(), WriteError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn reset(self, code: u32) {
+            self.0.0.lock().unwrap().push(format!("reset {code:#x}"));
+        }
+
+        async fn stopped(&mut self) -> WriteError {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            WriteError::Stopped(Some(0x77))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_sending_while_the_request_stream_waits_for_the_subscriber_resets_it() {
+        let ms = Duration::from_millis;
+        // The subscriber never ends its direction, and the task would wait
+        // 5 seconds for it. The stop comes after 100 ms: this client's
+        // direction is reset with CANCELLED (0x1), and not finished.
+        let (_peer_ends, peer_ended) = oneshot::channel();
+        let started = tokio::time::Instant::now();
+        let wait = (peer_ended, ms(5_000));
+        let log = spoken_on(StoppedLater, ms(0), ms(0), 0, RequestEnd::Finish, wait).await;
+        assert_eq!(log, ["write 0x18", "reset 0x1"]);
+        assert!(started.elapsed() < ms(2_000), "{:?}", started.elapsed());
+
+        // The client is told, and stops the subscriber's direction as for a
+        // FETCH that is cancelled while it is answered.
+        let (mut answers, _told) = answering(1);
+        let over = answers.happened(0, Happened::Written).unwrap();
+        assert_eq!((over.peer_gone, over.reset), (false, None));
+        let stopped = answers.happened(0, Happened::RequestStopped(Some(0x77)));
+        assert_eq!(
+            stopped,
+            Some(Over {
+                request: over.request,
+                peer_gone: false,
+                reset: Some(0x1),
+            })
+        );
+        // Once: nothing waits for the stream any more.
+        assert_eq!(answers.lingering.len(), 0);
+        assert_eq!(
+            answers.happened(0, Happened::RequestStopped(Some(0x77))),
+            None
+        );
+        // And a stop for a stream that is none of them is nothing.
+        assert_eq!(answers.happened(9, Happened::RequestStopped(None)), None);
+    }
+
+    #[tokio::test]
+    async fn the_task_of_a_request_stream_is_told_when_the_subscribers_direction_has_ended() {
+        let closed = |how| Happened::PeerClosed(how);
+        // (what happens to the FETCH on stream 0, in order; whether the
+        //  task is told that the subscriber's direction has ended, after
+        //  each)
+        let cases: Vec<(&str, Vec<(Happened, bool)>)> = vec![
+            (
+                "written first",
+                vec![
+                    (Happened::Written, false),
+                    (closed(PeerRequestClose::Fin), true),
+                ],
+            ),
+            (
+                "written, and then reset by the subscriber",
+                vec![
+                    (Happened::Written, false),
+                    (closed(PeerRequestClose::Reset(Some(0x1))), true),
+                ],
+            ),
+            (
+                "the subscriber finished first",
+                vec![
+                    (closed(PeerRequestClose::Fin), false),
+                    (Happened::Written, true),
+                ],
+            ),
+            (
+                "cancelled",
+                vec![(closed(PeerRequestClose::Reset(None)), true)],
+            ),
+            ("never", vec![(Happened::Written, false)]),
+        ];
+        for (name, steps) in cases {
+            let (mut answers, mut told) = answering(1);
+            let (_ended, mut peer_ended) = told.remove(0);
+            for (happened, ended) in steps {
+                answers.happened(0, happened);
+                // Told by what it waits for being dropped.
+                assert_eq!(
+                    peer_ended
+                        .try_recv()
+                        .is_err_and(|error| error == oneshot::error::TryRecvError::Closed),
+                    ended,
+                    "{name} {happened:?}"
+                );
+            }
+        }
+        // What waits is let go of when the next FETCH is over, where the
+        // task has given up waiting.
+        let (mut answers, told) = answering(3);
+        answers.happened(0, Happened::Written);
+        answers.happened(1, Happened::Written);
+        assert_eq!(answers.lingering.len(), 2);
+        drop(told);
+        answers.happened(2, Happened::Written);
+        assert_eq!(answers.lingering.len(), 1);
     }
 
     fn fetch_object(group_id: u64) -> FetchObject {
@@ -832,7 +1121,15 @@ mod tests {
         // stream is finished: for the transport that is nothing more to do.
         for (answer_after, end_after) in [(ms(2), ms(40)), (ms(0), ms(0))] {
             assert_eq!(
-                spoken_on(Stopped, answer_after, end_after, 0, RequestEnd::Finish).await,
+                spoken_on(
+                    Stopped,
+                    answer_after,
+                    end_after,
+                    0,
+                    RequestEnd::Finish,
+                    (oneshot::channel().1, Duration::ZERO)
+                )
+                .await,
                 ["write fails", "finish"],
                 "{answer_after:?} {end_after:?}"
             );
@@ -986,7 +1283,7 @@ mod tests {
                 }),
                 "{before:?} {happened:?}"
             );
-            assert_eq!(ends[0].try_recv(), Ok(request), "{before:?} {happened:?}");
+            assert_eq!(ends[0].0.try_recv(), Ok(request), "{before:?} {happened:?}");
             // Over: whatever comes after finds no FETCH.
             assert_eq!(answers.happened(0, Happened::Left), None);
             assert_eq!(answers.request_on(0), None);

@@ -232,7 +232,9 @@ describe("a Standalone FETCH of the peer", () => {
 			"NonExistent to {4, 9}",
 			"{5, 0} c",
 		]);
-		expect(briefly(session.finishFetch(1n))).toEqual(["finish 2", "finish 1"]);
+		// The fetch stream alone: this endpoint's direction of the request
+		// stream waits for the subscriber's.
+		expect(briefly(session.finishFetch(1n))).toEqual(["finish 2"]);
 	});
 
 	test("an Object that goes back is refused, and the stream goes on as it was", () => {
@@ -438,6 +440,7 @@ describe("a Standalone FETCH of the peer", () => {
 	test("served, waits for the subscriber to end its direction, and stops it when the wait is over", () => {
 		const session = serving();
 		session.finishFetch(1n);
+		session.finishServedFetchSend(1n);
 		expect(briefly(session.expirePeerEnd(1n))).toEqual([
 			"stop peer direction 1 code 1",
 		]);
@@ -448,7 +451,125 @@ describe("a Standalone FETCH of the peer", () => {
 		session.finishFetch(1n);
 		expect(
 			briefly(session.receivePeerBidiStreamData(0, new Uint8Array(0), true)),
-		).toEqual(["event peer-ended 1 fin"]);
+		).toEqual(["finish 1", "event peer-ended 1 fin"]);
+	});
+
+	// After the fetch stream is finished, this endpoint's direction of the
+	// request stream (stream 1) is finished when the subscriber has ended
+	// its own (peer stream 0), or when the caller's wait for that is over.
+	test.each<{
+		name: string;
+		steps: ((session: Session) => SessionOutput[])[];
+		outputs: string[][];
+	}>([
+		{
+			name: "the subscriber finishes its direction: this endpoint's is finished then",
+			steps: [
+				(session) => session.finishFetch(1n),
+				(session) =>
+					session.receivePeerBidiStreamData(0, new Uint8Array(0), true),
+				(session) => session.finishServedFetchSend(1n),
+			],
+			outputs: [["finish 2"], ["finish 1", "event peer-ended 1 fin"], []],
+		},
+		{
+			name: "the subscriber had finished its direction before: both streams are finished at once",
+			steps: [
+				(session) =>
+					session.receivePeerBidiStreamData(0, new Uint8Array(0), true),
+				(session) => session.finishFetch(1n),
+				(session) => session.finishServedFetchSend(1n),
+			],
+			outputs: [[], ["finish 2", "finish 1", "event peer-ended 1 fin"], []],
+		},
+		{
+			name: "the subscriber resets its direction: this endpoint's is finished then",
+			steps: [
+				(session) => session.finishFetch(1n),
+				(session) => session.peerBidiStreamReset(0, 1),
+				(session) => session.finishServedFetchSend(1n),
+			],
+			outputs: [["finish 2"], ["finish 1", "event peer-ended 1 reset"], []],
+		},
+		{
+			name: "the wait is over: this endpoint finishes its direction, once, and the subscriber's is stopped when the next wait is over",
+			steps: [
+				(session) => session.finishFetch(1n),
+				(session) => session.finishServedFetchSend(1n),
+				(session) => session.finishServedFetchSend(1n),
+				(session) => session.expirePeerEnd(1n),
+			],
+			outputs: [
+				["finish 2"],
+				["finish 1"],
+				[],
+				["stop peer direction 1 code 1"],
+			],
+		},
+		{
+			name: "the second wait is over without the first having been ended: this endpoint's direction is finished with the stop, once",
+			steps: [
+				(session) => session.finishFetch(1n),
+				(session) => session.expirePeerEnd(1n),
+				(session) => session.finishServedFetchSend(1n),
+			],
+			outputs: [["finish 2"], ["finish 1", "stop peer direction 1 code 1"], []],
+		},
+		{
+			name: "the subscriber finishes after this endpoint did: nothing is finished twice",
+			steps: [
+				(session) => session.finishFetch(1n),
+				(session) => session.finishServedFetchSend(1n),
+				(session) =>
+					session.receivePeerBidiStreamData(0, new Uint8Array(0), true),
+			],
+			outputs: [["finish 2"], ["finish 1"], ["event peer-ended 1 fin"]],
+		},
+		{
+			name: "the subscriber stops this endpoint's direction during the wait: it is reset, the subscriber's is stopped, and the stream is forgotten",
+			steps: [
+				(session) => session.finishFetch(1n),
+				(session) => session.localStreamStopped(1, 7),
+				(session) => session.finishServedFetchSend(1n),
+				(session) => session.expirePeerEnd(1n),
+				(session) =>
+					session.receivePeerBidiStreamData(0, new Uint8Array(0), true),
+			],
+			outputs: [
+				["finish 2"],
+				[
+					"reset 1 code 1",
+					"stop peer direction 1 code 1",
+					"event peer-ended 1 reset",
+				],
+				[],
+				[],
+				[],
+			],
+		},
+		{
+			name: "the subscriber stops this endpoint's direction after it was finished: nothing more is done for it, and its own direction is waited for as before",
+			steps: [
+				(session) => session.finishFetch(1n),
+				(session) => session.finishServedFetchSend(1n),
+				(session) => session.localStreamStopped(1, 7),
+				(session) => session.expirePeerEnd(1n),
+			],
+			outputs: [
+				["finish 2"],
+				["finish 1"],
+				[],
+				["stop peer direction 1 code 1"],
+			],
+		},
+		{
+			name: "a FETCH that is still being served is not finished by the wait",
+			steps: [(session) => session.finishServedFetchSend(1n)],
+			outputs: [[]],
+		},
+	])("served, $name", ({ steps, outputs }) => {
+		const session = serving();
+		expect(steps.map((step) => briefly(step(session)))).toEqual(outputs);
 	});
 
 	test.each([
