@@ -158,6 +158,15 @@ export function connectToRelay(to: Broadcast = HERE): Promise<MoqtConnection> {
 		serverCertificateHashes: [{ algorithm: "sha-256", value: hash }],
 		// What the README of @xmoq/media asks of a viewer.
 		limits: { maxObjectPayloadLength: 1024 * 1024 },
+		// `?uni=N`: how many streams of the peer are read at once, for
+		// looking into where something waits; the library's when left out.
+		...(new URLSearchParams(location.search).get("uni") === null
+			? {}
+			: {
+					maxPeerUniStreams: Number(
+						new URLSearchParams(location.search).get("uni"),
+					),
+				}),
 		// `?diag=1`: when the first bytes of every stream of the peer came,
 		// for looking into where something waits.
 		...(new URLSearchParams(location.search).get("diag") === null

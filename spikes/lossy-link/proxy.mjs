@@ -26,8 +26,13 @@ const control = argument("control", listen + 1);
 // client to the relay, and from the relay to the client.
 const link = { loss: 0, delay: 0, jitter: 0, up: 0, down: 0 };
 const stats = { passed: 0, dropped: 0 };
-const pass = (send, way) => {
-	if (Math.random() < link.loss || Math.random() < link[way]) {
+// Every datagram of the last while: when, which way, how long, and whether
+// it was dropped. `/log` gives them and begins anew.
+let log = [];
+const pass = (send, way, length) => {
+	const dropped = Math.random() < link.loss || Math.random() < link[way];
+	if (log.length < 200_000) log.push([Date.now(), way, length, dropped ? 1 : 0]);
+	if (dropped) {
 		stats.dropped += 1;
 		return;
 	}
@@ -47,12 +52,12 @@ front.on("message", (data, from) => {
 	if (back === undefined) {
 		back = createSocket("udp4");
 		back.on("message", (answer) =>
-			pass(() => front.send(answer, from.port, from.address), "down"),
+			pass(() => front.send(answer, from.port, from.address), "down", answer.length),
 		);
 		clients.set(key, back);
 	}
 	const upstream = back;
-	pass(() => upstream.send(data, to, "127.0.0.1"), "up");
+	pass(() => upstream.send(data, to, "127.0.0.1"), "up", data.length);
 });
 front.bind(listen, "127.0.0.1");
 
@@ -65,6 +70,11 @@ createServer((request, response) => {
 		}
 	}
 	response.setHeader("content-type", "application/json");
+	if (url.pathname === "/log") {
+		response.end(JSON.stringify(log));
+		log = [];
+		return;
+	}
 	response.end(JSON.stringify({ link, stats }));
 }).listen(control, "127.0.0.1", () => {
 	console.log(`link: udp 127.0.0.1:${listen} -> 127.0.0.1:${to}; control http://127.0.0.1:${control}`);
