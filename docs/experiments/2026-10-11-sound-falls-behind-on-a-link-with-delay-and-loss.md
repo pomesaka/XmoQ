@@ -86,6 +86,24 @@ After the change, the same link, 16 seconds each, one run:
 - **What is left, and real**: an Object that comes after a later one is dropped, and with loss that is many (190 of about 780 at 50 ms and 5 %): gaps in the sound. Putting them back in order within the buffer is not done.
 - No test holds the change: there is no `AudioDecoder` outside a browser. Firefox was not run again.
 
+## Afterwards: Objects that come late are put in order
+
+`playAudioTrack` got `holdForOrderMs`: an Object after a gap waits that long for the ones before it, by the times, and is then decoded without them (`packages/media/src/core/in-order.ts`). The demo gives it its buffer less 20 ms (provisional); `?order=no` is as before. The sound alone through the link, about 17 seconds (about 840 pieces made), one run each:
+
+| Link | Buffer | Objects | Decoded | Dropped as late | Too late to sound | Breaks in what leaves |
+|---|---|---|---|---|---|---|
+| 50 ms, 5 % | 150 ms | put in order | 822 | **0** | 10 | 5 |
+| 50 ms, 5 % | 150 ms | as they come | 750 | 46 | 2 | 30 |
+| 50 ms, 5 % | 300 ms | put in order | 797 | 0 | 5 | 3 |
+| 50 ms, 5 % | 300 ms | as they come | 724 | 57 | 0 | 23 |
+| 50 ms, 1 % | 150 ms | put in order | 796 | 0 | 0 | 1 |
+| 50 ms, 1 % | 150 ms | as they come | 772 | 13 | 0 | 13 |
+
+- Nothing is dropped as late any more, and the breaks go from 30 to 5 at 5 %. A few pieces now come out of the wait too late to sound (10 of 822): they waited the whole hold.
+- The pieces that are missing from "decoded" in every row did not come within the run (the link held them), or the page began later; not looked at one by one.
+- **The decoder is not told of a gap**: WebCodecs has no way to say that a chunk is missing. What Opus makes of the chunk after a gap was not listened to.
+- With the demo's default buffer of 50 ms the hold is 30 ms, less than it takes to send a lost packet again over 50 ms each way: there it helps little. Not measured.
+
 ## Limitations and blockers
 
 - One or two runs each, 16 seconds, one machine. The two runs of B differ much (522 ms and 102 ms behind): how fast it falls behind follows which packets were lost.

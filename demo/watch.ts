@@ -43,6 +43,8 @@ const DEFAULT_BUFFER_MS = 50;
  * 30 and 40 ms with which no piece was too late on one machine.
  */
 const AUDIO_MIN_MS = Number(query.get("audioMin") ?? 30);
+/** What the buffer keeps for itself when a piece of audio waits for the ones before it (**provisional**). `?order=no`: nothing waits. */
+const ORDER_MARGIN_MS = 20;
 /**
  * `?buffer=auto` (**a trial, not the default**): the buffer follows how
  * late things come. It is what 99 of 100 of the last AUTO_WINDOW_MS came
@@ -550,6 +552,15 @@ async function main(): Promise<void> {
 				playback = video;
 				audio = await playAudioTrack(connection, {
 					...audioOptions,
+					// An Object that comes before its turn waits for the ones
+					// before it as long as the buffer leaves, less what the
+					// decoder and the loudspeaker need.
+					...(query.get("order") === "no"
+						? {}
+						: {
+								holdForOrderMs: () =>
+									Math.max(0, Math.max(bufferMs, AUDIO_MIN_MS) - ORDER_MARGIN_MS),
+							}),
 					trackNamespace,
 				})
 					.then((playing) => {
