@@ -97,6 +97,79 @@ One run each.
 - **With both, it depends on the bit rate against the window**, as above: 2.5 Mbit/s falls behind at 25 ms and 1%; 513 kbit/s holds at 25 ms up to 5% (a buffer of 150 ms has 98% of the frames), and falls behind at 50 ms with 5% and at 100 ms with 2%.
 - An episode, where the video holds, is one to three frames at 25 ms and up to a few at 50 ms: the frames behind a lost packet on the stream of their Group wait for it.
 
+### A frame on a stream of its own, against a Group on one stream
+
+Added afterwards (`--video-streams object`). With Cubic, the same delays and losses; "late" is, as above, until the frame can be shown, which needs the frames of its Group before it.
+
+| Video | Delay, one way | Loss | A Group on one stream: median / 99% / highest, ms | In 150 ms | A frame on its own stream: median / 99% / highest, ms | In 150 ms | Frames that came, of 2,000 | Frames that could not be shown for one before them that did not come |
+|---|---|---|---|---|---|---|---|---|
+| 1280x720, 2.5 Mbit/s | 0 ms | 0% | 1 / 5 / 8 | 100.0% | 1 / 5 / 12 | 100.0% | 1905 | 0 |
+| 1280x720, 2.5 Mbit/s | 0 ms | 1% | 1 / 29 / 37 | 100.0% | 1 / 7 / 32 | 100.0% | 1928 | 0 |
+| 1280x720, 2.5 Mbit/s | 0 ms | 2% | 1 / 30 / 42 | 100.0% | 1 / 30 / 42 | 100.0% | 1905 | 0 |
+| 1280x720, 2.5 Mbit/s | 0 ms | 5% | 1 / 32 / 43 | 100.0% | 1 / 33 / 44 | 100.0% | 1952 | 0 |
+| 1280x720, 2.5 Mbit/s | 25 ms | 0% | 27 / 37 / 48 | 100.0% | 28 / 38 / 52 | 100.0% | 1921 | 0 |
+| 1280x720, 2.5 Mbit/s | 25 ms | 1% | 228 / 3035 / 3735 | 47.3% | 654 / 6113 / 6633 | 31.2% | 1781 | 0 |
+| 1280x720, 2.5 Mbit/s | 25 ms | 2% | 3432 / 13687 / 17438 | 2.4% | 9648 / 19909 / 21500 | 1.0% | 1107 | 432 |
+| 1280x720, 2.5 Mbit/s | 25 ms | 5% | 8595 / 28425 / 31641 | 0.4% | 15865 / 18443 / 18563 | 1.2% | 336 | 341 |
+| 1280x720, 2.5 Mbit/s | 50 ms | 0% | 53 / 74 / 83 | 100.0% | 53 / 79 / 105 | 100.0% | 1939 | 0 |
+| 1280x720, 2.5 Mbit/s | 50 ms | 1% | 5006 / 22396 / 25757 | 6.0% | 12139 / 22519 / 22759 | 20.1% | 661 | 545 |
+| 1280x720, 2.5 Mbit/s | 50 ms | 2% | 9125 / 29018 / 33494 | 2.1% | 16183 / 18783 / 18863 | 16.0% | 257 | 40 |
+| 1280x720, 2.5 Mbit/s | 50 ms | 5% | 11254 / 33868 / 35817 | 1.5% | 3567 / 11873 / 11873 | 24.0% | 25 | 0 |
+| 1280x720, 2.5 Mbit/s | 100 ms | 0% | 103 / 429 / 493 | 97.4% | 103 / 624 / 823 | 97.1% | 1975 | 0 |
+| 1280x720, 2.5 Mbit/s | 100 ms | 1% | 11107 / 31756 / 36118 | 1.5% | 18599 / 19766 / 19791 | 2.4% | 164 | 32 |
+| 1280x720, 2.5 Mbit/s | 100 ms | 2% | 8671 / 32050 / 36167 | 3.2% | 1507 / 5562 / 5562 | 9.3% | 75 | 0 |
+| 1280x720, 2.5 Mbit/s | 100 ms | 5% | 16157 / 30534 / 32589 | 0.6% | no frame | - | 0 | - |
+| 320x180, 513 kbit/s | 0 ms | 0% | 1 / 3 / 7 | 100.0% | 1 / 4 / 6 | 100.0% | 1904 | 0 |
+| 320x180, 513 kbit/s | 0 ms | 1% | 1 / 5 / 36 | 100.0% | 2 / 30 / 37 | 100.0% | 1905 | 0 |
+| 320x180, 513 kbit/s | 0 ms | 2% | 1 / 32 / 43 | 100.0% | 2 / 34 / 39 | 100.0% | 1904 | 0 |
+| 320x180, 513 kbit/s | 0 ms | 5% | 1 / 33 / 75 | 100.0% | 2 / 38 / 85 | 100.0% | 1928 | 0 |
+| 320x180, 513 kbit/s | 25 ms | 0% | 28 / 30 / 31 | 100.0% | 28 / 30 / 33 | 100.0% | 1922 | 0 |
+| 320x180, 513 kbit/s | 25 ms | 1% | 28 / 92 / 131 | 100.0% | 28 / 95 / 134 | 100.0% | 1922 | 0 |
+| 320x180, 513 kbit/s | 25 ms | 2% | 28 / 122 / 202 | 99.9% | 28 / 160 / 454 | 99.1% | 1922 | 0 |
+| 320x180, 513 kbit/s | 25 ms | 5% | 28 / 208 / 357 | 97.7% | 28 / 465 / 696 | 95.5% | 1925 | 2 |
+| 320x180, 513 kbit/s | 50 ms | 0% | 53 / 55 / 70 | 100.0% | 53 / 55 / 71 | 100.0% | 1940 | 0 |
+| 320x180, 513 kbit/s | 50 ms | 1% | 53 / 196 / 292 | 99.2% | 53 / 312 / 452 | 97.6% | 1939 | 0 |
+| 320x180, 513 kbit/s | 50 ms | 2% | 53 / 1151 / 1565 | 88.7% | 53 / 1205 / 1765 | 88.2% | 1934 | 4 |
+| 320x180, 513 kbit/s | 50 ms | 5% | 383 / 2359 / 2966 | 29.8% | 795 / 8522 / 8922 | 27.4% | 1839 | 18 |
+| 320x180, 513 kbit/s | 100 ms | 0% | 102 / 104 / 133 | 100.0% | 103 / 105 / 139 | 100.0% | 1975 | 0 |
+| 320x180, 513 kbit/s | 100 ms | 1% | 104 / 1968 / 2717 | 69.6% | 548 / 12012 / 12692 | 37.2% | 1748 | 20 |
+| 320x180, 513 kbit/s | 100 ms | 2% | 508 / 5243 / 6029 | 27.5% | 5646 / 10631 / 11151 | 12.0% | 1581 | 18 |
+| 320x180, 513 kbit/s | 100 ms | 5% | 5588 / 23902 / 26978 | 2.6% | 13339 / 23779 / 24099 | 1.2% | 864 | 740 |
+
+With BBR, one way 50 ms; "came" is how late the frame itself came, whatever came before it:
+
+| Video | Loss | Streams | Late (can be shown): median / 95% / 99% / highest, ms | Came: median / 99%, ms | In 150 ms |
+|---|---|---|---|---|---|
+| 320x180, 513 kbit/s | 1% | group | 52 / 92 / 194 / 325 | 52 / 194 | 99.6% |
+| 320x180, 513 kbit/s | 1% | object | 53 / 119 / 194 / 202 | 53 / 194 | 99.9% |
+| 320x180, 513 kbit/s | 5% | group | 53 / 196 / 246 / 327 | 53 / 245 | 98.5% |
+| 320x180, 513 kbit/s | 5% | object | 53 / 193 / 201 / 328 | 53 / 199 | 98.9% |
+| 1280x720, 2.5 Mbit/s | 1% | group | 53 / 158 / 195 / 290 | 53 / 195 | 99.7% |
+| 1280x720, 2.5 Mbit/s | 1% | object | 53 / 157 / 196 / 279 | 52 / 194 | 99.7% |
+| 1280x720, 2.5 Mbit/s | 5% | group | 130 / 235 / 278 / 411 | 130 / 278 | 93.5% |
+| 1280x720, 2.5 Mbit/s | 5% | object | 119 / 198 / 276 / 411 | 53 / 276 | 95.2% |
+
+- **A stream for every frame does not make the video come sooner.** Where the congestion window is what holds it back (Cubic with delay and loss) it is no better and mostly worse: fewer frames came in the 20 seconds, and frames were left without the ones before them. Where the window is no limit (BBR) the two are the same within what one run shows.
+- **The frame itself does come without waiting**: at 5% of loss and 2.5 Mbit/s with BBR, half of the frames came within 53 ms on streams of their own, and within 130 ms on the stream of their Group, where a frame waits behind a lost packet of the one before it. It can be shown no sooner for that (119 against 130 ms), since it needs the frames before it. What a stream for every frame would buy is for frames that do not depend on each other, or for a viewer that drops what is late.
+- Seven of the runs with Cubic (the rows of 1280x720 from 0 ms and 2% to 50 ms and 2%) ran while `mise run check` and the matrix of `interop/` ran on the same machine.
+
+### The shape of a track of audio
+
+Added afterwards, for a question from the browser's side: a page fell behind with sound alone, 69 kbit/s, on such a link. The same shape from the Rust publisher (`--video-frame-ms 20` and a file of Groups of 10 Objects of 160 bytes: 50 Objects a second, a Group on one stream every 200 ms, 64 kbit/s), 4 Rust viewers, 1,000 Objects each, one way 50 ms:
+
+| Loss | Congestion control | Late: median / 95% / 99% / highest, ms | The median of each quarter, ms | Congestion window: median / least, bytes | In 150 ms |
+|---|---|---|---|---|---|
+| 0% | Cubic | 52 / 53 / 54 / 58 | 52 / 52 / 52 / 52 | 12000 / 12000 | 100.0% |
+| 1% | Cubic | 52 / 75 / 174 / 304 | 52 / 52 / 52 / 52 | 2904 / 2904 | 99.8% |
+| 5% | Cubic | 52 / 172 / 225 / 317 | 52 / 52 / 52 / 52 | 2904 / 2904 | 98.8% |
+| 0% | BBR | 52 / 53 / 54 / 58 | 52 / 52 / 52 / 52 | 350726 / 244584 | 100.0% |
+| 1% | BBR | 52 / 75 / 172 / 184 | 52 / 52 / 52 / 52 | 349273 / 244584 | 100.0% |
+| 5% | BBR | 52 / 173 / 213 / 425 | 52 / 52 / 52 / 52 | 349882 / 244584 | 98.9% |
+
+- **A Rust viewer does not fall behind with this shape**, with either control, at 5% as well: the median stays the delay of the path through the 20 seconds, and an Object behind a lost packet is 120 to 170 ms late, once. A window of two packets is enough for 64 kbit/s.
+- So a page that falls behind with sound alone does so for another reason than the relay's congestion control.
+- The Objects are no Opus: bytes of the size of a piece of it, with the Timestamp of LOC.
+
 ## Limitations and blockers
 
 - **The loss is random, and the path is not full.** A path that loses because it is full is another matter: there BBR, which does not back off for loss, may fill what there is and push others out. Not measured.
@@ -105,7 +178,7 @@ One run each.
 - One run each. The loss is drawn anew in every run, so two runs differ.
 - 78 kbit/s is video, not sound: a frame every 40 ms on the stream of its Group.
 - `CubicConfig::initial_window` and the like were not tried: a window that is cut at every loss does not stay where it began.
-- A frame on a stream of its own (`--video-streams object`) is not in this record yet.
+- Whether the relay cut a viewer off, or held a stream back for the viewer's limit of streams, in the runs with a frame on a stream of its own that lost frames, was not looked at.
 
 ## Decision or next action
 
