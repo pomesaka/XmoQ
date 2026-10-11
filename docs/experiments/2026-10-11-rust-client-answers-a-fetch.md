@@ -48,7 +48,7 @@ Runs 1 to 6 were made with the publisher in each of the two modes. Runs 7 to 9 a
 
 ## Observed results
 
-One run each, but for run 16. Runs 1, 7 and 15 were made again after the client was changed to stop the subscriber's direction of a request stream it resets, and to tell its session when its answer has ended; they came out the same, but for which of the relay's reset and STOP_SENDING the publisher saw first.
+One run each, but for runs 16 and 17. Runs 1, 7 and 15 were made again after the client was changed to stop the subscriber's direction of a request stream it resets, and to tell its session when its answer has ended; they came out the same, but for which of the relay's reset and STOP_SENDING the publisher saw first.
 
 **Runs 1 to 6: the client got the Objects of its range, from a publisher in either mode.** The publisher had sent Object 0 of the Groups 0 to 3.
 
@@ -78,7 +78,7 @@ Whether the publisher sees the relay's reset of the request stream or its STOP_S
 
 **Run 13: 16 FETCH requests at once were all answered.** 16 lines `FETCH_SERVED ... how=fin code=none objects=4`.
 
-**Run 14: Objects the publisher had let go of were said to be unknown.** 50 Objects of 100 KiB are 5 MiB, more than the 4 MiB the client keeps; it had let go of the Groups 0 to 9. The client printed `FETCH_OK ... end_group=49 end_object=1`, `FETCH_RANGE_END ... kind=unknown group=9 object=0`, then the Objects of the Groups 10 to 49, `FETCH_ENDED ... how=fin code=none objects=40`.
+**Run 14: Objects the publisher had let go of were said to be unknown.** 50 Objects of 100 KiB are about 4.9 MiB, more than the 4 MiB the client keeps; it had let go of the Groups 0 to 9. The client printed `FETCH_OK ... end_group=49 end_object=1`, `FETCH_RANGE_END ... kind=unknown group=9 object=0`, then the Objects of the Groups 10 to 49, `FETCH_ENDED ... how=fin code=none objects=40`.
 
 **Run 15: a subscriber that did not read cost the publisher nothing but that FETCH.** The relay cut the subscriber 10.0 s after it began to pass the stream on (`FETCH_PIPE_ENDED ... downstream_stalled`, `RESET_REQUEST ... code=0x5`); the publisher printed `FETCH_SERVED ... how=request_stopped code=0x1 objects=15` at that moment: 15 of the 40 Objects had been taken, by the relay and the transport, before the stream stood still. The publisher had sent its 40 Objects on the subscription before the FETCH came.
 
@@ -86,10 +86,14 @@ With four Objects of 200 KiB the same subscriber cut nothing: the relay and the 
 
 **Run 16: none of 30 Joining FETCH requests sent together with their SUBSCRIBE was refused.** All 30 clients printed `FETCH_ENDED ... how=fin code=none objects=2`. In 7 of the 30 the relay's log has `HOLD_REQUEST session=N stream=S FETCH`: it read the FETCH first and held it.
 
+**Run 17, after the review: an answer that is late still comes whole.** The publisher with `--fetch-answer-delay-ms 1000`, three times in each mode: the client got FETCH_OK 1.0 s after its FETCH, four Objects and `FETCH_ENDED ... how=fin code=none objects=4` in all six. Before, the task of the request stream could finish the stream without the FETCH_OK when the fetch stream was written at the moment the answer was due (found in review with a test of that task; no run here had an answer that was late and came).
+
+**After the review as well: a Joining FETCH while Objects go out.** The publisher sent an Object of 100 KiB every 100 ms; a subscriber came with `--join relative:2`. The publisher printed `FETCH_ASKED ... start_group=16 start_object=0 end_group=18 end_object=1` and `objects=3`; the client got Groups 16, 17 and 18 on the fetch stream and 19, 20 and 21 on the subscription.
+
 ## Limitations and blockers
 
 - **One run each, on one machine**, but for run 16.
-- **The limit of 16 FETCH requests a publisher answers at once was not reached.** The own relay asks one publisher for 16 at most, so no run through it can send a 17th. The client's check is a test of `serving::Answers`.
+- **The limit of FETCH requests a publisher answers at once was not reached.** It was 16 in these runs and is 32 now. The own relay counts 16 it has asked one publisher for, and stops counting one before the client has heard of its end, so a 17th could reach the client; with 16 that was a refusal waiting to happen, and none was seen. The client's check is a test of `serving::Answers`.
 - **A fetch stream that is stopped while the request stream stays open was not seen.** The relay ends both when a subscriber gives up, and which of the two the publisher sees first is a race (`how=request_reset`, `how=request_stopped`); `how=stream_stopped` appeared in no run. What the client decides for it is a row of the table test of `serving::step`.
 - A REQUEST_UPDATE for a FETCH the publisher answers was not sent: no client here sends one.
 - A Descending FETCH over Objects that were let go of was not run. Where the indicator stands then is a decision the draft does not make (implementation notes, row on an End of Range indicator in a Descending fetch); it is a test of `published::Published::answer`.
