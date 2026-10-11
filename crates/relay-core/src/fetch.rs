@@ -439,7 +439,9 @@ fn end_location(end: Location, largest: Location) -> Location {
     if last_location(end) > largest {
         Location {
             group: largest.group,
-            object: largest.object.saturating_add(1),
+            // The last Object ID there is: "or 0 to indicate the entire
+            // Group" (§10.13).
+            object: largest.object.checked_add(1).unwrap_or(0),
         }
     } else {
         end
@@ -1943,5 +1945,35 @@ pub fn fetch_reset_passed_on(code: Option<u32>) -> u32 {
         // TOO_FAR_BEHIND and EXPIRED_AUTH_TOKEN are about the relay as the
         // publisher's subscriber.
         _ => reset::INTERNAL_ERROR,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Location, end_location};
+
+    fn at(group: u64, object: u64) -> Location {
+        Location { group, object }
+    }
+
+    #[test]
+    fn the_end_location_of_fetch_ok_ends_at_the_largest_object() {
+        // (the End Location that was asked for; the Largest Object; the End
+        //  Location of FETCH_OK)
+        let cases = [
+            (at(3, 2), at(3, 5), at(3, 2)),
+            (at(3, 6), at(3, 5), at(3, 6)),
+            // Beyond the largest: the Largest Object plus 1 (§10.13).
+            (at(3, 7), at(3, 5), at(3, 6)),
+            (at(3, 0), at(3, 5), at(3, 6)),
+            (at(4, 1), at(3, 5), at(3, 6)),
+            // The largest is the last Object ID there is: the whole Group,
+            // which is 0.
+            (at(4, 0), at(3, u64::MAX), at(3, 0)),
+            (at(3, 0), at(3, u64::MAX), at(3, 0)),
+        ];
+        for (asked, largest, end) in cases {
+            assert_eq!(end_location(asked, largest), end, "{asked:?} {largest:?}");
+        }
     }
 }

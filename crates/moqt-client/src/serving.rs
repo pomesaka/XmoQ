@@ -9,6 +9,8 @@
 //! `--fetch-stream-delay-ms`, `--fetch-write-every-ms`).
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -36,6 +38,13 @@ use crate::report;
 /// relay's next FETCH comes on a stream of its own and can be read first;
 /// with 16 here it would be the 17th.
 pub const MAX_ANSWERED_AT_ONCE: usize = 32;
+
+/// FETCH requests that are over whose request streams the client still
+/// waits on ([`PEER_END_WAIT`]). WHY a bound of its own: they are no longer
+/// among the ones [`MAX_ANSWERED_AT_ONCE`] counts, and a subscriber that
+/// sends short FETCH requests one after the other and never ends a stream
+/// would have the client keep one for each, for 3 seconds.
+const MAX_LINGERING: usize = 64;
 
 /// How long this client's direction of the request stream of a FETCH stays
 /// open after the fetch stream was written to its end, for the subscriber
@@ -388,8 +397,13 @@ impl Answers {
         if !peer_gone && ended.request == RequestEnd::Finish {
             self.lingering
                 .retain(|_, (_, peer_ends)| !peer_ends.is_closed());
-            self.lingering
-                .insert(stream, (answered.request, answered.peer_ends));
+            // Beyond the bound `peer_ends` is dropped here, which the task
+            // takes for the end of the subscriber's direction: it finishes
+            // without the wait.
+            if self.lingering.len() < MAX_LINGERING {
+                self.lingering
+                    .insert(stream, (answered.request, answered.peer_ends));
+            }
         }
         Some(Over {
             request: answered.request,
@@ -542,6 +556,7 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
                 watched = false;
                 if let WriteError::Stopped(code) = stopped {
                     stop_seen = true;
+                    // The client is gone when this fails.
                     let _ = notes.send(Note(stream, Happened::RequestStopped(code))).await;
                 }
             }
@@ -1075,6 +1090,13 @@ mod tests {
         drop(told);
         answers.happened(2, Happened::Written);
         assert_eq!(answers.lingering.len(), 1);
+        // No more than 64 wait at once: the 65th and the 66th are over
+        // without it.
+        let (mut answers, _told) = answering(66);
+        for stream in 0..66 {
+            answers.happened(stream, Happened::Written);
+        }
+        assert_eq!(answers.lingering.len(), 64);
     }
 
     /// A request stream whose subscriber sends `STOP_SENDING` with the code
@@ -1156,12 +1178,18 @@ mod tests {
         let table = include_str!("../../../fixtures/peer-fetch/served-end.tsv");
         let ms = Duration::from_millis;
         let closed = |how| Happened::PeerClosed(how);
+        // The README of the table: "ends with one line feed", and the names
+        // are unique.
+        assert!(table.ends_with('\n') && !table.ends_with("\n\n"));
+        let mut names = HashSet::new();
         let mut rows = 0;
         for row in table.lines() {
             let columns: Vec<&str> = row.split('\t').collect();
             let [name, before, after, own, peer, update] = columns[..] else {
                 panic!("a row of 6 columns: {row}");
             };
+            assert!(names.insert(name), "{name}: twice");
+            assert!(matches!(update, "-" | "no"), "{name}: update {update}");
             let (publisher, _subscriber) = memory::pair();
             let publisher = Arc::new(publisher);
             let mut session = Session::new(Role::Client, Transport::WebTransport);
@@ -1224,9 +1252,16 @@ mod tests {
                         }
                     }
                     // A REQUEST_UPDATE: the client has nothing to answer it
-                    // with, and hands it to its session alone.
+                    // with, and hands it to its session alone. An answer
+                    // that was handed over for the stream all the same is
+                    // not written.
                     "update" => {
                         assert_eq!(answers.request_on(0), None, "{name}");
+                        let written = done.0.lock().unwrap().len();
+                        let request_ok = xmoq_moqt::message::RequestOk::default();
+                        answers.say(0, ControlMessage::RequestOk(request_ok));
+                        tokio::time::sleep(ms(100)).await;
+                        assert_eq!(done.0.lock().unwrap().len(), written, "{name}");
                         asked_again = true;
                     }
                     other => panic!("{name}: after {other}"),

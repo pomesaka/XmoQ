@@ -134,6 +134,7 @@ pub(crate) async fn a_fetch_stream_opened_without_its_header_has_only_what_is_wr
 >(
     a: C,
     b: C,
+    more_than_a_window: usize,
 ) {
     let trace = crate::Trace::default();
     let mut writer = crate::open_fetch_stream_without_header(&a, &trace, "fetch")
@@ -152,12 +153,12 @@ pub(crate) async fn a_fetch_stream_opened_without_its_header_has_only_what_is_wr
         (vec![0x05, 0x02, b'a', b'b', b'c'], Ok(()))
     );
 
-    // Reset while what it wrote first waits for the peer: 4 MiB, more than
-    // either connection of these tests lets through unread.
+    // Reset while what it wrote first waits for the peer: more than the
+    // connection lets through unread.
     let mut writer = crate::open_fetch_stream_without_header(&a, &trace, "fetch")
         .await
         .expect("open");
-    let body = vec![0x5a; 4 * 1024 * 1024];
+    let body = vec![0x5a; more_than_a_window];
     assert!(
         timeout(A_WHILE, writer.write(&body)).await.is_err(),
         "the write waits for the reader"
@@ -195,14 +196,14 @@ pub(crate) async fn a_fetch_stream_given_up_while_a_write_waits_is_reset_with_th
 >(
     a: C,
     b: C,
+    more_than_a_window: usize,
 ) {
     let header = xmoq_moqt::fetch::FetchHeader { request_id: 2 };
     let mut writer = crate::open_fetch_stream(&a, header, &crate::Trace::default(), "fetch", 0x1)
         .await
         .expect("open");
-    // 4 MiB: more than either connection of these tests lets through
-    // unread.
-    let body = vec![0x5a; 4 * 1024 * 1024];
+    // More than the connection lets through unread.
+    let body = vec![0x5a; more_than_a_window];
     assert!(
         timeout(A_WHILE, writer.write(&body)).await.is_err(),
         "the write waits for the reader"
@@ -525,8 +526,6 @@ macro_rules! contract_tests {
                 a_stream_that_ends_alone_is_not_read_as_a_lost_connection,
                 dropping_a_read_loses_nothing,
                 a_fetch_stream_writer_that_is_dropped_resets_its_stream,
-                a_fetch_stream_given_up_while_a_write_waits_is_reset_with_that_code,
-                a_fetch_stream_opened_without_its_header_has_only_what_is_written,
                 stopped_waits_until_the_peer_stops,
                 what_arrived_outlives_the_connection,
                 a_stream_that_was_not_accepted_may_go_with_the_connection,
@@ -552,6 +551,24 @@ macro_rules! contract_tests {
             async fn writing_waits_while_the_peer_does_not_read() {
                 let (a, b, _keep) = $pair.await;
                 super::writing_waits_while_the_peer_does_not_read(a, b, $window).await;
+            }
+
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn a_fetch_stream_given_up_while_a_write_waits_is_reset_with_that_code() {
+                let (a, b, _keep) = $pair.await;
+                super::a_fetch_stream_given_up_while_a_write_waits_is_reset_with_that_code(
+                    a, b, $window,
+                )
+                .await;
+            }
+
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn a_fetch_stream_opened_without_its_header_has_only_what_is_written() {
+                let (a, b, _keep) = $pair.await;
+                super::a_fetch_stream_opened_without_its_header_has_only_what_is_written(
+                    a, b, $window,
+                )
+                .await;
             }
         }
     };

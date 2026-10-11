@@ -2569,6 +2569,50 @@ fn a_subgroup_that_was_cut_short_is_sent_again_across_a_new_default_priority() {
 }
 
 #[test]
+fn an_object_of_a_stream_whose_priority_the_relay_cannot_tell_leaves_its_group_uncached() {
+    let object_on = |relay: &mut Relay, stream| {
+        relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(stream),
+            object: object(0),
+        })
+    };
+    // Object 0 of Group 1, on a stream with a priority in its header: 1
+    // byte in the cache.
+    let mut relay = relay_with_default_priorities(Some(10), None);
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, Some(200)),
+    );
+    object_on(&mut relay, 7);
+    assert_eq!(relay.counts().cached_bytes, 1);
+    closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Aborted(Some(0x2)));
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 3),
+    });
+    // The Subgroup again, without a priority, while the source drains: the
+    // relay cannot tell which default the stream has. Its Object goes to
+    // the subscriber, and the Group answers no FETCH any more.
+    opens(
+        &mut relay,
+        PUBLISHER,
+        9,
+        with_priority(UPSTREAM_ALIAS, 1, None),
+    );
+    let actions = object_on(&mut relay, 9);
+    let sent_on = actions
+        .iter()
+        .any(|action| matches!(action, Action::SendObject { .. }));
+    assert!(sent_on, "{actions:?}");
+    assert_eq!((relay.counts().tracks, relay.counts().cached_bytes), (1, 0));
+}
+
+#[test]
 fn a_stream_without_a_priority_under_an_alias_that_drains_is_not_compared() {
     // Subgroup 0 of Group 1 came with 200 in its header, on a subscription
     // with a default of 10, and was cut short.
