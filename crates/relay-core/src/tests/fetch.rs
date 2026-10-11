@@ -4,7 +4,12 @@ use xmoq_moqt::message::FetchOk;
 use xmoq_moqt::params::GroupOrder;
 
 use super::*;
-use crate::FetchPipeEnd;
+use crate::{FetchPiece, FetchPipeEnd};
+
+/// An End of Unknown Range indicator with the Location {`group`, `object`}.
+fn unknown_through(group: u64, object: u64) -> FetchPiece {
+    FetchPiece::EndOfRange(xmoq_moqt::fetch::RangeEnd::Unknown, at(group, object))
+}
 
 const OWN: OwnRequestKey = OwnRequestKey(0);
 /// The request stream of Alice's FETCH.
@@ -1242,11 +1247,148 @@ fn a_joining_fetch_that_waits_for_nothing_is_answered_up_to_the_joining_location
                 session: ALICE,
                 stream: FETCH_STREAM,
                 request_id: 2,
-                body: vec![0x81, 0x0c, 0x05, 0x02],
+                pieces: vec![unknown_through(5, 2)],
                 wait_ms: 10_000,
             },
         ]
     );
+}
+
+/// What happens, and what the relay does about it.
+type Step = (Event, Vec<Action>);
+
+/// A relay that answered a Joining FETCH of Alice for the track "b" itself
+/// (`FILL_TIMEOUT` 0) and has its fetch stream to write.
+fn relay_that_writes_a_fetch_stream() -> Relay {
+    let mut relay = relay_with_a_subscription(true);
+    let actions = relay.step(joining(true, 0, vec![Parameter::FillTimeout(0)]));
+    assert!(
+        matches!(actions.last(), Some(Action::WriteFetchStream { .. })),
+        "{actions:?}"
+    );
+    assert_eq!(relay.counts().fetches, 1);
+    relay
+}
+
+#[test]
+fn a_fetch_the_relay_answered_itself_ends_when_its_stream_is_written_or_given_up() {
+    let written = |given_up| Event::FetchStreamWritten {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        given_up,
+    };
+    let abort = |code| Action::AbortFetchWrite {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        code,
+    };
+    let closes = |how| Event::RequestClosed {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        how,
+    };
+    // (what happens after the FETCH was answered, and what the relay does
+    //  at each step)
+    let cases: Vec<(&str, Vec<Step>)> = vec![
+        ("written", vec![(written(None), vec![FINISH])]),
+        // The subscriber did not take the stream: TOO_FAR_BEHIND (0x5).
+        ("not taken", vec![(written(Some(0x5)), vec![reset(0x5)])]),
+        // The subscriber cancels its FETCH (§5.2): the fetch stream is
+        // reset with CANCELLED (0x1), and the relay's direction of the
+        // request stream when that is reported.
+        (
+            "cancelled",
+            vec![
+                (closes(RequestEnd::Aborted), vec![abort(0x1)]),
+                (written(Some(0x1)), vec![reset(0x1)]),
+            ],
+        ),
+        // A subscriber that only finishes its direction has given nothing
+        // up.
+        (
+            "the subscriber finished",
+            vec![
+                (closes(RequestEnd::Fin), vec![]),
+                (written(None), vec![FINISH]),
+            ],
+        ),
+    ];
+    for (name, steps) in cases {
+        let mut relay = relay_that_writes_a_fetch_stream();
+        for (event, expected) in steps {
+            assert_eq!(relay.step(event), expected, "{name}");
+        }
+        assert_eq!(relay.counts().fetches, 0, "{name}");
+        // What comes late for it does nothing.
+        assert_eq!(relay.step(written(None)), [], "{name}");
+    }
+}
+
+#[test]
+fn a_track_found_malformed_resets_the_fetch_stream_the_relay_writes() {
+    let mut relay = relay_that_writes_a_fetch_stream();
+    // A second FETCH for the track that the relay answers itself, and one
+    // for the track "a", which goes on.
+    for (stream, name, request_id, range) in [
+        (9, &b"b"[..], 4, (at(5, 0), at(5, 3))),
+        (11, b"a", 6, (at(0, 0), at(1, 0))),
+    ] {
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(stream),
+            first: standalone(request_id, name, range, vec![Parameter::FillTimeout(0)]),
+        });
+    }
+    assert_eq!(relay.counts().fetches, 2);
+    // A subgroup stream of the track "b" breaks the object model.
+    relay.step(Event::DataStreamOpened {
+        session: PUBLISHER,
+        stream: StreamKey(20),
+        header: header_of_group(41, 6),
+    });
+    let actions = relay.step(Event::TrackMalformed {
+        session: PUBLISHER,
+        stream: StreamKey(20),
+    });
+    // §2.4.2: "reset any fetch streams with Status Code MALFORMED_TRACK"
+    // (0x12): both of the track, in the order of their request streams,
+    // before the subscription the first FETCH joins is ended.
+    let abort = |stream| Action::AbortFetchWrite {
+        session: ALICE,
+        stream,
+        code: 0x12,
+    };
+    assert_eq!(
+        actions[..2],
+        [abort(FETCH_STREAM), abort(StreamKey(9))],
+        "{actions:?}"
+    );
+    let aborts = actions
+        .iter()
+        .filter(|action| matches!(action, Action::AbortFetchWrite { .. }))
+        .count();
+    assert_eq!(aborts, 2, "{actions:?}");
+    assert_eq!(
+        relay.step(Event::FetchStreamWritten {
+            session: ALICE,
+            stream: FETCH_STREAM,
+            given_up: Some(0x12),
+        }),
+        [reset(0x12)]
+    );
+    assert_eq!(relay.counts().fetches, 1);
+}
+
+#[test]
+fn a_fetch_stream_the_relay_writes_goes_on_when_its_track_ends() {
+    let mut relay = relay_that_writes_a_fetch_stream();
+    // The publisher goes: what was handed over to be written is written.
+    let actions = relay.step(Event::SessionClosed { session: PUBLISHER });
+    let aborted = actions
+        .iter()
+        .any(|action| matches!(action, Action::AbortFetchWrite { .. }));
+    assert!(!aborted, "{actions:?}");
+    assert_eq!(relay.counts().fetches, 1);
 }
 
 /// A relay in which Bob announced the namespace, Alice has subscribed to the
@@ -1339,7 +1481,7 @@ fn a_joining_fetch_for_a_pending_subscribe_waits_for_its_answer() {
             session: ALICE,
             stream: FETCH_STREAM,
             request_id: 2,
-            body: vec![0x81, 0x0c, 0x07, 0x01],
+            pieces: vec![unknown_through(7, 1)],
             wait_ms: 10_000,
         },
     ];
@@ -2025,7 +2167,7 @@ fn a_standalone_fetch_goes_on_when_a_subscription_to_its_track_ends() {
 #[test]
 fn a_fetch_that_waits_for_nothing_is_answered_from_what_the_relay_knows() {
     let fill_timeout_0 = || vec![Parameter::FillTimeout(0)];
-    let answered = |end: Location, marker: Vec<u8>| {
+    let answered = |end: Location, marker: FetchPiece| {
         vec![
             send(
                 FETCH_STREAM,
@@ -2041,7 +2183,7 @@ fn a_fetch_that_waits_for_nothing_is_answered_from_what_the_relay_knows() {
                 session: ALICE,
                 stream: FETCH_STREAM,
                 request_id: 0,
-                body: marker,
+                pieces: vec![marker],
                 wait_ms: 10_000,
             },
         ]
@@ -2060,31 +2202,26 @@ fn a_fetch_that_waits_for_nothing_is_answered_from_what_the_relay_knows() {
         (
             &b"b"[..],
             (at(0, 0), at(9, 0)),
-            answered(at(5, 3), vec![0x81, 0x0c, 0x05, 0x02]),
+            answered(at(5, 3), unknown_through(5, 2)),
         ),
         // The whole of Group 3: the last Location is {3, 2^64 - 1}, whose
         // Object ID is the nine bytes of §1.4.1: 0xff and eight more.
         (
             b"b",
             (at(0, 0), at(3, 0)),
-            answered(
-                at(3, 0),
-                vec![
-                    0x81, 0x0c, 0x03, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                ],
-            ),
+            answered(at(3, 0), unknown_through(3, u64::MAX)),
         ),
         // Up to {4, 1}.
         (
             b"b",
             (at(1, 0), at(4, 2)),
-            answered(at(4, 2), vec![0x81, 0x0c, 0x04, 0x01]),
+            answered(at(4, 2), unknown_through(4, 1)),
         ),
         // The largest itself.
         (
             b"b",
             (at(5, 2), at(5, 3)),
-            answered(at(5, 3), vec![0x81, 0x0c, 0x05, 0x02]),
+            answered(at(5, 3), unknown_through(5, 2)),
         ),
         // Starts after the largest: INVALID_RANGE (0x11).
         (b"b", (at(5, 3), at(9, 0)), refused(0x11)),

@@ -222,6 +222,12 @@ def add_old_core(before):
             continue
         for sibling in ("routing", "requests"):
             text = text.replace(f"use crate::{sibling}::", f"use super::{sibling}::")
+        # A core from before a fetch stream the relay writes was handed over
+        # as pieces: it handed over the bytes of one End of Unknown Range
+        # indicator, which is the piece it is made to hand over here.
+        text = text.replace(
+            "            body: encoder.take_bytes(),\n",
+            "            pieces: vec![crate::FetchPiece::EndOfRange(RangeEnd::Unknown, last_location(end))],\n")
         (old / f"{module}.rs").write_text(once(text, "use crate::{", "use super::{", "use crate::{"))
     (old / "fuzz.rs").write_text("#![allow(clippy::all, clippy::pedantic)]\n" + (HERE / "fuzz.rs").read_text())
 
