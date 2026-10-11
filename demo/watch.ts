@@ -316,6 +316,12 @@ async function main(): Promise<void> {
 	let soundUntil: number | undefined;
 	/** How far from its own time a piece may begin so as to follow the one before it without a seam, in seconds: less than half a piece of 20 ms. */
 	const SEAM = 0.008;
+	/** How much slower or faster a piece is played to get back to its own time (**provisional**): 20 ms of sound make up 1 ms. */
+	const STRETCH = 0.05;
+	/** How far from its own time the sound is brought back by speed alone, in seconds (**provisional**). */
+	const ABSORB = 0.3;
+	/** Pieces that were played slower or faster. */
+	let stretched = 0;
 	const piecesSounded = perSecond();
 	const piecesTooLate = perSecond();
 	document.getElementById("sound")?.addEventListener("click", () => {
@@ -414,7 +420,21 @@ async function main(): Promise<void> {
 			// for a reason (a piece that did not come, a clock that was set),
 			// and the piece begins at its own time.
 			const wanted = context.currentTime + (due - now) / 1000;
-			const follows = soundUntil !== undefined && Math.abs(wanted - soundUntil) <= SEAM;
+			//
+			// Where the two are further apart, but the one before still
+			// sounds, the piece follows it all the same and is played a
+			// little slower or faster (STRETCH at most), piece after piece,
+			// until the sound is at its own time again. WHY: a buffer that
+			// moves (the automatic one, the slider) moves the time of every
+			// piece, and a piece that jumps there leaves a gap or sounds
+			// over the one before: a click each time. A changed speed is a
+			// changed pitch for a moment, and no click. Beyond ABSORB the
+			// piece begins at its own time: that is a pause, not a drift.
+			const ahead =
+				soundUntil !== undefined && soundUntil >= context.currentTime
+					? wanted - soundUntil
+					: undefined;
+			const follows = ahead !== undefined && Math.abs(ahead) <= ABSORB;
 			const begin = follows && soundUntil !== undefined ? soundUntil : wanted;
 			if (begin < context.currentTime) {
 				// Its time is over: it is not sounded.
@@ -429,9 +449,16 @@ async function main(): Promise<void> {
 			const source = context.createBufferSource();
 			source.buffer = buffer;
 			source.connect(output);
+			// How much longer (or shorter) this piece sounds than it is.
+			const stretch =
+				!follows || ahead === undefined || Math.abs(ahead) <= SEAM
+					? 0
+					: Math.max(-STRETCH, Math.min(STRETCH, ahead / buffer.duration));
+			source.playbackRate.value = 1 / (1 + stretch);
 			source.start(begin);
 			if (!follows) apart += 1;
-			soundUntil = begin + buffer.duration;
+			if (stretch !== 0) stretched += 1;
+			soundUntil = begin + buffer.duration * (1 + stretch);
 			sounded += 1;
 			piecesSounded.count();
 			lastHeard = now;
@@ -465,7 +492,7 @@ async function main(): Promise<void> {
 				`sound: ${
 					sound === undefined
 						? "off — click “sound” to hear it"
-						: `${sound.state}; ${piecesSounded.rate()} pieces a second go to the loudspeaker, ${piecesTooLate.rate()} a second come too late for it; ${breaksNow.rate()} breaks a second in it (${breaks} in all, ${apart} pieces apart from the one before); leaving now at ${(leaving()?.peak ?? 0).toFixed(2)} of full scale, ${leaving()?.hz ?? 0} Hz${(leaving()?.peak ?? 0) < 0.01 ? " — SILENT" : ""}`
+						: `${sound.state}; ${piecesSounded.rate()} pieces a second go to the loudspeaker, ${piecesTooLate.rate()} a second come too late for it; ${breaksNow.rate()} breaks a second in it (${breaks} in all, ${apart} pieces apart from the one before, ${stretched} played slower or faster); leaving now at ${(leaving()?.peak ?? 0).toFixed(2)} of full scale, ${leaving()?.hz ?? 0} Hz${(leaving()?.peak ?? 0) < 0.01 ? " — SILENT" : ""}`
 				}`,
 				`picture and sound: ${together.length} marks; the last one: the picture ${lastMark === undefined ? "?" : Math.round(lastMark.played)} ms after the sound (${lastMark === undefined ? "?" : Math.round(lastMark.sent)} ms as they were sent)`,
 			].join("\n"),
@@ -498,6 +525,7 @@ async function main(): Promise<void> {
 				soundedASecond: piecesSounded.rate(),
 				breaks,
 				apart,
+				stretched,
 				breaksASecond: breaksNow.rate(),
 				tooLateASecond: piecesTooLate.rate(),
 				leaving: leaving() ?? null,

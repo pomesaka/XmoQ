@@ -66,6 +66,21 @@ mise run check
 
 **The camera**: `VideoFrame.metadata().captureTime` would say when the camera took a frame. With Chromium's fake camera it is not there, and the publishing page says "the browser does not say". A real camera was not tried.
 
+## Afterwards: a buffer that moves does not click
+
+Each change of the buffer of more than 8 ms was a break in the sound: the next piece jumped to its new time. Now a piece follows the one before it and is played up to 5 % slower or faster until the sound is at its time again (20 ms of sound make up 1 ms; beyond 300 ms it jumps as before). The relay with BBR, 50 ms each way, the clock's picture, 20 seconds (about 1,000 pieces), the sound put in order:
+
+| Loss | Buffer | Shown after, median | Frames shown of 600 | Pieces too late | Breaks | Pieces played slower or faster |
+|---|---|---|---|---|---|---|
+| 0 | auto, settled at 40 ms | **79** | 620 | 4 | **0** | 175 |
+| 0 | fixed 150 | 196 | 603 | 0 | 1 | 12 |
+| 1 % | auto, about 110 to 140 ms | 162 to 175 (three runs) | 599 | 20, 7, 7 | 10, 6, 8 | 163, 148, 81 |
+| 1 % | fixed 150 | 197 | 601 | 0 | 1 | 12 |
+
+- **Without loss the buffer moves from 50 to 40 ms and no break is left.**
+- **With 1 % the breaks that are left are not the buffer moving**: each comes with a piece that was too late (read every 5 seconds through two runs, they come one at a time through the run). The automatic buffer covers what 99 of 100 came within, and the hundredth is late: with the buffer fixed at 150 ms nothing was. That is the price of 25 to 35 ms less delay there.
+- What a piece played 5 % slower sounds like was not listened to.
+
 ## Limitations and blockers
 
 - One machine, one run for each row, headless. The clocks of publisher and viewer are the same clock here; between two machines "to get here" holds the difference of the clocks, and only the buffer and the repaint are right.
