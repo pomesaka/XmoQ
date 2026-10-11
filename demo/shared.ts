@@ -143,6 +143,9 @@ export function through(broadcast: Broadcast): Broadcast {
 	return { ...broadcast, relayUrl: url.href };
 }
 
+/** With `?diag=1`: when the first bytes of each stream of the peer came, by this page's clock, and how many they were. */
+export const firstBytes = new Map<string, { at: number; length: number }>();
+
 /** Connects to the relay of a broadcast. */
 export function connectToRelay(to: Broadcast = HERE): Promise<MoqtConnection> {
 	const hash = Uint8Array.from(to.certSha256Hex.match(/../g) ?? [], (byte) =>
@@ -155,6 +158,18 @@ export function connectToRelay(to: Broadcast = HERE): Promise<MoqtConnection> {
 		serverCertificateHashes: [{ algorithm: "sha-256", value: hash }],
 		// What the README of @xmoq/media asks of a viewer.
 		limits: { maxObjectPayloadLength: 1024 * 1024 },
+		// `?diag=1`: when the first bytes of every stream of the peer came,
+		// for looking into where something waits.
+		...(new URLSearchParams(location.search).get("diag") === null
+			? {}
+			: {
+					diagnostics: {
+						onBytes(direction: string, stream: string, data: Uint8Array) {
+							if (direction !== "received" || firstBytes.has(stream)) return;
+							firstBytes.set(stream, { at: Date.now(), length: data.length });
+						},
+					},
+				}),
 	});
 }
 

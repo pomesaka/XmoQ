@@ -6,7 +6,8 @@
 //
 // The link is changed while it runs:
 //   curl 'http://127.0.0.1:45387/set?loss=0.05&delay=50&jitter=10'
-// `loss` is the share of datagrams that are dropped, each way; `delay` and
+// `loss` is the share of datagrams that are dropped, each way (`up` and
+// `down` the same for one way alone: towards the relay, and from it); `delay` and
 // `jitter` are milliseconds: a datagram is held for `delay` plus up to
 // `jitter`, each way, so datagrams can pass each other. `/stats` says how
 // many passed and how many were dropped.
@@ -21,10 +22,12 @@ const listen = argument("listen", 45386);
 const to = argument("to", 4443);
 const control = argument("control", listen + 1);
 
-const link = { loss: 0, delay: 0, jitter: 0 };
+// `up` and `down` are loss for one way alone, on top of `loss`: from the
+// client to the relay, and from the relay to the client.
+const link = { loss: 0, delay: 0, jitter: 0, up: 0, down: 0 };
 const stats = { passed: 0, dropped: 0 };
-const pass = (send) => {
-	if (Math.random() < link.loss) {
+const pass = (send, way) => {
+	if (Math.random() < link.loss || Math.random() < link[way]) {
 		stats.dropped += 1;
 		return;
 	}
@@ -44,19 +47,19 @@ front.on("message", (data, from) => {
 	if (back === undefined) {
 		back = createSocket("udp4");
 		back.on("message", (answer) =>
-			pass(() => front.send(answer, from.port, from.address)),
+			pass(() => front.send(answer, from.port, from.address), "down"),
 		);
 		clients.set(key, back);
 	}
 	const upstream = back;
-	pass(() => upstream.send(data, to, "127.0.0.1"));
+	pass(() => upstream.send(data, to, "127.0.0.1"), "up");
 });
 front.bind(listen, "127.0.0.1");
 
 createServer((request, response) => {
 	const url = new URL(request.url ?? "/", "http://127.0.0.1");
 	if (url.pathname === "/set") {
-		for (const name of ["loss", "delay", "jitter"]) {
+		for (const name of ["loss", "delay", "jitter", "up", "down"]) {
 			const value = url.searchParams.get(name);
 			if (value !== null) link[name] = Number(value);
 		}
