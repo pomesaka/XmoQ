@@ -9,6 +9,7 @@ import {
 	type MoqtConnection,
 	type SubscriptionEnd,
 } from "@xmoq/moqt";
+import { createInOrder } from "../core/in-order.ts";
 import {
 	type AudioTrackPublisher,
 	createAudioTrackPublisher,
@@ -175,6 +176,15 @@ export interface PlayAudioTrackOptions {
 	 * it brings is older than what the subscription brings.
 	 */
 	joiningFetch?: boolean;
+	/**
+	 * How long an Object that comes after a gap waits for the ones before
+	 * it, in milliseconds, before it is decoded without them; asked each
+	 * time. **Nothing waits when left out**: Objects are decoded as they
+	 * come. With loss, the rest of a Group comes after the next Group has
+	 * begun (each Group is a stream, and a lost packet holds back its
+	 * stream alone); a player with a buffer can wait that long for it.
+	 */
+	holdForOrderMs?: () => number;
 	signal?: AbortSignal;
 }
 
@@ -183,7 +193,7 @@ export interface AudioPlaybackStats {
 	received: number;
 	/** Pieces of audio the decoder gave. */
 	decoded: number;
-	/** Objects that were not decoded: "late" (its Group was passed), "no-time", "empty". */
+	/** Objects that were not decoded: "late" (one with a later time was decoded already), "no-time", "empty". */
 	dropped: Partial<Record<"late" | "no-time" | "empty", number>>;
 	decoderError: string | undefined;
 }
@@ -196,9 +206,10 @@ export interface AudioPlayback {
 
 /**
  * Subscribes to an audio track and decodes it. **Objects are decoded in the
- * order they come**; one that is not after the last one decoded, by its
- * Group and its Object ID, is dropped (`late`). Nothing waits for an Object that does not come: the
- * decoder gets what there is.
+ * order of their times**; one whose time is not after the last one decoded
+ * is dropped (`late`). An Object after a gap waits `holdForOrderMs` for
+ * the ones before it (not at all when that is left out), and is then
+ * decoded without them: the decoder is not told of what is missing.
  */
 /**
  * `data` with the time `timestamp`, in microseconds: itself where it has
@@ -307,10 +318,28 @@ export async function playAudioTrack(
 	};
 	options.signal?.addEventListener("abort", stop, { once: true });
 	if (options.signal?.aborted) stop();
-	let last: { group: bigint; object: bigint } | undefined;
-	/** Decodes an Object that is after the last one, and drops any other. */
+	const decode = (chunk: { timestamp: number; data: Uint8Array }): void => {
+		if (decoder.state !== "configured") return;
+		timesIn.push(chunk.timestamp);
+		decoder.decode(new EncodedAudioChunk({ type: "key", ...chunk }));
+	};
+	const order = createInOrder<{ timestamp: number; data: Uint8Array }>({
+		holdMs: options.holdForOrderMs ?? (() => 0),
+		next: decode,
+		late: () => drop("late"),
+	});
+	let release: ReturnType<typeof setTimeout> | undefined;
+	/** Lets on what waited long enough, and comes back when the next has. */
+	const releaseInTime = (): void => {
+		clearTimeout(release);
+		order.release(performance.now());
+		const at = order.nextRelease();
+		if (at === undefined) return;
+		release = setTimeout(releaseInTime, Math.max(0, at - performance.now()));
+	};
+	/** Decodes the Objects in the order of their times. */
 	const take = (
-		groupId: bigint,
+		_groupId: bigint,
 		object: {
 			objectId: bigint;
 			properties: Parameters<typeof readLocTiming>[0];
@@ -322,30 +351,18 @@ export async function playAudioTrack(
 			drop("empty");
 			return;
 		}
-		if (
-			last !== undefined &&
-			(groupId < last.group ||
-				(groupId === last.group && object.objectId <= last.object))
-		) {
-			drop("late");
-			return;
-		}
 		const read = readLocTiming(object.properties);
 		if (read.type !== "ok" || read.timing === undefined) {
 			drop("no-time");
 			return;
 		}
-		last = { group: groupId, object: object.objectId };
-		if (decoder.state !== "configured") return;
 		const timestamp = Number(microsecondsOf(read.timing));
-		timesIn.push(timestamp);
-		decoder.decode(
-			new EncodedAudioChunk({
-				type: "key",
-				timestamp,
-				data: object.payload,
-			}),
+		order.push(
+			timestamp,
+			{ timestamp, data: object.payload },
+			performance.now(),
 		);
+		releaseInTime();
 	};
 	if (options.joiningFetch === true) {
 		// What it brings comes before what the subscription brings only
@@ -381,6 +398,7 @@ export async function playAudioTrack(
 			take(next.value.groupId, next.value.object);
 		}
 		options.signal?.removeEventListener("abort", stop);
+		clearTimeout(release);
 		const end = await subscription.ended;
 		if (decoder.state === "configured") await decoder.flush().catch(() => {});
 		if (decoder.state !== "closed") decoder.close();

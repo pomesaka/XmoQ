@@ -33,18 +33,25 @@ export interface AudioChunk {
  * Ten chunks of audio (200 ms of Opus at 20 ms a chunk) share a Group and a
  * stream. Decided by the owner on 2026-10-11.
  *
- * WHY 10: with a stream a chunk, 50 short streams a second, Chromium hands the
- * streams to the page later and later once packets are lost and never catches
- * up (at 10% loss 332 of about 490 chunks came too late to be played; a Rust
- * and a Firefox receiver do not fall behind). With 10 a Group none came too
- * late at 5% and at 10% loss, and a viewer that comes late hears its first
- * chunk as soon as with 1. One machine, one run of 10 s each:
- * docs/experiments/2026-10-11-demo-over-a-lossy-link.md.
+ * WHY 10: the owner's decision. **What it was decided on did not hold**:
+ * the measurement said that with a stream a chunk Chromium falls behind
+ * for good once packets are lost. The chunks were on time; the times that
+ * Chromium's decoder gave its output were early, by 20 ms for each chunk
+ * that the player had dropped
+ * (docs/experiments/2026-10-11-sound-falls-behind-on-a-link-with-delay-and-loss.md).
+ * The number was not decided again.
  *
- * WHY NOT 1: it is the example of LOC-04 §4.1, and what the measurement
- * above is about. WHY NOT 5: one chunk of 490 came too late at 10% loss, and
- * the arrival was 113 ms late in the median. WHY NOT 25: no gain over 10 was
- * measured, and a loss holds back up to 500 ms of one stream.
+ * What is known now, with the player giving each piece the time of its
+ * chunk, one run of 16 s each: neither 1 nor 10 falls behind (1: 5% loss,
+ * and 50 ms each way with 1%; 10: 50 ms with 1% and with 5%). 1 is 50
+ * streams a second and 10 is 5. Dropped by the player because a later one
+ * had come first, of about 780 chunks: with 1, 30 at 5% loss and 11 at
+ * 50 ms with 1%; with 10, about 14 at 50 ms with 1% (17 of 971) and 190 at
+ * 50 ms with 5%. The links differ, so this does not say which drops fewer.
+ * A loss holds back the rest of its stream: up to 200 ms with 10.
+ *
+ * WHY NOT 1: it is the example of LOC-04 §4.1. Nothing measured stands
+ * against it any more.
  */
 export const DEFAULT_AUDIO_CHUNKS_PER_GROUP = 10;
 

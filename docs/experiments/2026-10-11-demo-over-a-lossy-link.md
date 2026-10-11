@@ -70,6 +70,8 @@ Both pages of the demo now say when their session has ended and connect again ev
 
 ### The sound under loss
 
+> **Taken back on 2026-10-11.** The sound was not late, and Chromium did not hand streams to the page late: the times that Chromium's `AudioDecoder` gave its output were early, by 20 ms for each chunk the player had dropped. What is said below about lateness, and about where the sound waits, is read from those times and does not hold; the counts of what was sent and received do. See [the record of the cause](2026-10-11-sound-falls-behind-on-a-link-with-delay-and-loss.md).
+
 `spikes/lossy-link/audio-under-loss.ts`: the viewer's link with loss, 10 seconds, two runs each. Pieces of audio that came after their time, of about 480:
 
 | | Loss 5% | Loss 10% |
@@ -89,6 +91,8 @@ Looked into without changing the relay: the relay run by hand with the clock put
 
 ### The sound under loss: what is known
 
+> **Taken back on 2026-10-11.** The sound was not late, and Chromium did not hand streams to the page late: the times that Chromium's `AudioDecoder` gave its output were early, by 20 ms for each chunk the player had dropped. What is said below about lateness, and about where the sound waits, is read from those times and does not hold; the counts of what was sent and received do. See [the record of the cause](2026-10-11-sound-falls-behind-on-a-link-with-delay-and-loss.md).
+
 | What was done | Seen |
 |---|---|
 | The relay's lines, loss 10% both ways on the viewer's link | **The relay orders a stream for every chunk on time**, 20 ms apart (`OPEN_DATA`, `FINISH_DATA`), while the page gets the sound 591 ms late (median). The publisher's side is not it |
@@ -103,6 +107,8 @@ Looked into without changing the relay: the relay run by hand with the clock put
 - **What would tell**: the relay's time between ordering a stream and having it open (the hub has that event, `OutStreamOpened`, and prints no line for it). With it, (a) shows as a wait there and (b) as none.
 
 ### With the relay's line for a stream that opened: neither of the two
+
+> **Taken back on 2026-10-11.** The sound was not late, and Chromium did not hand streams to the page late: the times that Chromium's `AudioDecoder` gave its output were early, by 20 ms for each chunk the player had dropped. What is said below about lateness, and about where the sound waits, is read from those times and does not hold; the counts of what was sent and received do. See [the record of the cause](2026-10-11-sound-falls-behind-on-a-link-with-delay-and-loss.md).
 
 The relay now prints `DATA_OPENED … after_ms=… opening=… cwnd=… lost_packets=… congestion_events=…` (run with `--slow-open-ms 0`, for every stream). The sound alone (`?video=no`), loss 10% from the relay, 8 seconds:
 
@@ -122,6 +128,8 @@ The relay now prints `DATA_OPENED … after_ms=… opening=… cwnd=… lost_pac
 **What could be done, none of it tried beyond what is above**: fewer streams (25 chunks of audio on one: no lag, measured above); the audio as datagrams, which neither implementation has; one long stream for the audio of a viewer. Nothing in the relay: it sends on time.
 
 ### What several chunks of audio in a Group cost
+
+> **Taken back on 2026-10-11.** The sound was not late, and Chromium did not hand streams to the page late: the times that Chromium's `AudioDecoder` gave its output were early, by 20 ms for each chunk the player had dropped. What is said below about lateness, and about where the sound waits, is read from those times and does not hold; the counts of what was sent and received do. See [the record of the cause](2026-10-11-sound-falls-behind-on-a-link-with-delay-and-loss.md).
 
 `spikes/lossy-link/grouping.ts`, the Chromium page as the viewer. A viewer that comes while another watches, five of them for each row, without loss: from its SUBSCRIBE for the audio being accepted to its first piece of audio decoded. Then loss from the relay, 10 seconds, one run each: pieces too late to sound, of about 490, and how long after its time a piece came.
 
