@@ -24,21 +24,42 @@ export const ENCODER_CODEC = "avc1.42E01F";
 export const DECODER_CODEC = "avc3.42E01F";
 
 const utf8 = new TextEncoder();
-export const namespace = (): Uint8Array[] =>
-	NAMESPACE.map((field) => utf8.encode(field));
+export const namespace = (fields: string[] = NAMESPACE): Uint8Array[] =>
+	fields.map((field) => utf8.encode(field));
 export const trackName = (): Uint8Array => utf8.encode(TRACK);
 export const audioTrackName = (): Uint8Array => utf8.encode(AUDIO_TRACK);
 
+/** Where a broadcast is: what a viewer needs to connect to it. */
+export interface Broadcast {
+	relayUrl: string;
+	certSha256Hex: string;
+	namespace: string[];
+}
+
 /** The relay, as `serve.ts` wrote it into the page. */
 declare const XMOQ_DEMO: { relayUrl: string; certSha256Hex: string };
+/** The broadcast of the demo where no room says otherwise. */
+export const HERE: Broadcast = { ...XMOQ_DEMO, namespace: NAMESPACE };
 
-/** Connects to the relay of the demo. */
-export function connectToRelay(): Promise<MoqtConnection> {
-	const hash = Uint8Array.from(
-		XMOQ_DEMO.certSha256Hex.match(/../g) ?? [],
-		(byte) => Number.parseInt(byte, 16),
+/**
+ * `?room=NAME`: a room of the spike in `spikes/durable-objects-room`, which
+ * says where the broadcast is. `?rooms=URL` is where the rooms are served,
+ * http://127.0.0.1:8787 when left out. Undefined without `?room`.
+ */
+export function roomUrl(): string | undefined {
+	const query = new URLSearchParams(location.search);
+	const room = query.get("room");
+	if (room === null) return undefined;
+	const rooms = query.get("rooms") ?? "http://127.0.0.1:8787";
+	return `${rooms.replace(/\/$/, "")}/rooms/${encodeURIComponent(room)}`;
+}
+
+/** Connects to the relay of a broadcast. */
+export function connectToRelay(to: Broadcast = HERE): Promise<MoqtConnection> {
+	const hash = Uint8Array.from(to.certSha256Hex.match(/../g) ?? [], (byte) =>
+		Number.parseInt(byte, 16),
 	);
-	return connect(XMOQ_DEMO.relayUrl, {
+	return connect(to.relayUrl, {
 		implementation: "xmoq-demo/0.0.0",
 		// WHY: the relay's certificate is self-signed. Chromium takes it when
 		// its hash is given, and it is valid for less than two weeks.

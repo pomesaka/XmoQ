@@ -10,10 +10,13 @@
 import { playAudioTrack, playVideoTrack } from "@xmoq/media";
 import {
 	audioTrackName,
+	type Broadcast,
 	connectToRelay,
 	DECODER_CODEC,
+	HERE,
 	MARK,
 	namespace,
+	roomUrl,
 	SAMPLE_RATE,
 	say,
 	trackName,
@@ -50,8 +53,23 @@ async function main(): Promise<void> {
 		throw new Error("no canvas");
 	}
 	if (probe === null) throw new Error("no canvas to read a pixel with");
+	// With `?room=NAME` the room says where the broadcast is; without, it
+	// is the relay this page was served with.
+	const room = roomUrl();
+	let broadcast: Broadcast = HERE;
+	if (room !== undefined) {
+		say("asking the room where the broadcast is");
+		const found: { broadcast: Broadcast | null } = await (
+			await fetch(room)
+		).json();
+		if (found.broadcast === null) {
+			throw new Error("nobody publishes in this room");
+		}
+		broadcast = found.broadcast;
+	}
+	document.body.dataset.broadcast = JSON.stringify(broadcast);
 	say("connecting");
-	const connection = await connectToRelay();
+	const connection = await connectToRelay(broadcast);
 	say("subscribing");
 
 	// The time of a frame or a piece is the publisher's clock, in
@@ -80,7 +98,7 @@ async function main(): Promise<void> {
 	let frames: { frame: VideoFrame; due: number; mark: boolean }[] = [];
 	let markShown = false;
 	const playback = await playVideoTrack(connection, {
-		trackNamespace: namespace(),
+		trackNamespace: namespace(broadcast.namespace),
 		trackName: trackName(),
 		codec: DECODER_CODEC,
 		joiningFetch: query.get("join") !== "no",
@@ -147,7 +165,7 @@ async function main(): Promise<void> {
 		void sound.resume();
 	});
 	const audio = await playAudioTrack(connection, {
-		trackNamespace: namespace(),
+		trackNamespace: namespace(broadcast.namespace),
 		trackName: audioTrackName(),
 		codec: "opus",
 		sampleRate: SAMPLE_RATE,

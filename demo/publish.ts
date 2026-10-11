@@ -15,11 +15,13 @@ import {
 	audioTrackName,
 	connectToRelay,
 	ENCODER_CODEC,
+	HERE,
 	MARK,
 	marked,
 	SAMPLE_RATE,
 	HEIGHT,
 	namespace,
+	roomUrl,
 	say,
 	trackName,
 	WIDTH,
@@ -199,6 +201,15 @@ async function main(): Promise<void> {
 		},
 	});
 	await connection.publishNamespace(namespace());
+	const room = roomUrl();
+	if (room !== undefined) {
+		// The room is told where this broadcast is, for viewers to find it.
+		await fetch(`${room}/broadcast`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(HERE),
+		});
+	}
 	const onFrame = (frame: VideoFrame): void => {
 		encoder.encode(frame);
 	};
