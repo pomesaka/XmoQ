@@ -141,16 +141,21 @@ SPIKES = [
 ]
 
 
-TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks", "priority", "fetch", "filters")
+TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks", "priority", "fetch", "filters",
+           "contradictions")
 WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared", "split-steady", "shared-steady",
-          "no-announce", "fetch", "split-fetch", "shared-fetch", "filters", "split-filters", "shared-filters")
+          "no-announce", "fetch", "split-fetch", "shared-fetch", "filters", "split-filters", "shared-filters",
+          "contradictions", "split-contradictions", "shared-contradictions")
 # Worlds of `fuzz.rs` with something taken out on top: the world, and the
 # variable that tells `fuzz.rs` what.
 VARIANTS = {"split-steady": ("split-one", "XMOQ_FUZZ_STEADY"), "shared-steady": ("shared", "XMOQ_FUZZ_STEADY"),
             "no-announce": ("full", "XMOQ_FUZZ_NO_ANNOUNCE"), "fetch": ("full", "XMOQ_FUZZ_FETCH"),
             "split-fetch": ("split-one", "XMOQ_FUZZ_FETCH"), "shared-fetch": ("shared", "XMOQ_FUZZ_FETCH"),
             "filters": ("full", "XMOQ_FUZZ_FILTERS"), "split-filters": ("split-one", "XMOQ_FUZZ_FILTERS"),
-            "shared-filters": ("shared", "XMOQ_FUZZ_FILTERS")}
+            "shared-filters": ("shared", "XMOQ_FUZZ_FILTERS"),
+            "contradictions": ("full", "XMOQ_FUZZ_CONTRADICTIONS"),
+            "split-contradictions": ("split-one", "XMOQ_FUZZ_CONTRADICTIONS"),
+            "shared-contradictions": ("shared", "XMOQ_FUZZ_CONTRADICTIONS")}
 
 
 def jj(*args):
@@ -165,18 +170,24 @@ def once(text, old, new, what):
 
 
 def export(after):
-    shutil.rmtree(WORK / "crates", ignore_errors=True)
+    # `fixtures`: tests of the crates read tables and bytes from there.
+    for directory in ("crates", "fixtures"):
+        shutil.rmtree(WORK / directory, ignore_errors=True)
     WORK.mkdir(exist_ok=True)
     if after == "disk":
-        shutil.copytree(REPO / "crates", WORK / "crates")
+        for directory in ("crates", "fixtures"):
+            shutil.copytree(REPO / directory, WORK / directory)
         for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
             shutil.copy(REPO / name, WORK / name)
         return
-    files = jj("file", "list", "-r", after, "crates", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml").split()
-    for path in files:
+    files = jj("file", "list", "-r", after, "crates", "fixtures", "Cargo.toml", "Cargo.lock",
+               "rust-toolchain.toml").split("\n")
+    for path in filter(None, files):
         target = WORK / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(jj("file", "show", "-r", after, path))
+        # As bytes: some of the fixtures are no text.
+        target.write_bytes(subprocess.run(["jj", "--ignore-working-copy", "file", "show", "-r", after, path],
+                                          cwd=REPO, check=True, capture_output=True).stdout)
 
 
 def add_old_core(before):
@@ -229,7 +240,37 @@ def add_old_core(before):
             "            body: encoder.take_bytes(),\n",
             "            pieces: vec![crate::FetchPiece::EndOfRange(RangeEnd::Unknown, last_location(end))],\n")
         (old / f"{module}.rs").write_text(once(text, "use crate::{", "use super::{", "use crate::{"))
+    add_old_cache(before, old)
     (old / "fuzz.rs").write_text("#![allow(clippy::all, clippy::pedantic)]\n" + (HERE / "fuzz.rs").read_text())
+
+
+def add_old_cache(before, old):
+    """The cache of <before>, when it has one, over the `CachedObject` of <after>.
+
+    WHY the type is not taken along: it is in the actions, which the two
+    cores share. What <before> did with an Object by methods of the type is
+    kept, as a trait of the old module under other names.
+    """
+    try:
+        text = jj("file", "show", "-r", before, f"{CORE}/cache.rs")
+    except subprocess.CalledProcessError:
+        return
+    text, cut = re.subn(r"#\[derive\(Debug, Clone, PartialEq, Eq\)\]\npub struct CachedObject \{.*?\n\}\n",
+                        "pub use crate::cache::CachedObject;\n", text, count=1, flags=re.S)
+    text, made = re.subn(r"\nimpl CachedObject \{\n",
+                         "\ntrait Kept {\n    fn old_size(&self) -> usize;\n    fn old_prior_gap(&self) -> u64;\n}\n\n"
+                         "impl Kept for CachedObject {\n", text, count=1)
+    if (cut, made) != (1, 1):
+        sys.exit(f"cannot patch: the old cache's CachedObject (type {cut}, methods {made})")
+    text = re.sub(r"\b(size|prior_gap)\(", r"old_\1(", text)
+    tests = text.find("#[cfg(test)]\nmod tests {")
+    if tests != -1:
+        text = text[:tests]
+    (old / "cache.rs").write_text(text)
+    for module in ("fetch", "requests"):
+        path = old / f"{module}.rs"
+        if path.exists():
+            path.write_text(path.read_text().replace("use crate::cache;", "use super::cache;"))
 
 
 def patch_new_core():
@@ -760,6 +801,12 @@ def report(name, output, totals, random_events=False):
         print(f"    the SUBSCRIBEs of the random events, by their Subscription Filter: {filtered.group(1)}")
     elif random_events and os.environ.get("XMOQ_FUZZ_FILTERS"):
         print("    THE SUBSCRIBES WERE NOT COUNTED BY THEIR FILTER: no FUZZ_FILTERED line")
+        totals["not_counted"] += 1
+    contradicted = re.search(r"FUZZ_CONTRADICTED (.*)", output)
+    if contradicted:
+        print(f"    the Objects of the random events, by what they say: {contradicted.group(1)}")
+    elif random_events and os.environ.get("XMOQ_FUZZ_CONTRADICTIONS"):
+        print("    THE OBJECTS WERE NOT COUNTED BY WHAT THEY SAY: no FUZZ_CONTRADICTED line")
         totals["not_counted"] += 1
     fetched = re.search(r"FUZZ_FETCHED (.*)", output)
     if fetched:

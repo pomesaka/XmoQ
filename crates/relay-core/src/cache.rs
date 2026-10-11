@@ -11,11 +11,10 @@
 //! Which of several sources a Subgroup is taken from is therefore decided
 //! where it was (`Subgroups`), and not here.
 //!
-//! FIXME: an Object that comes again with another payload, priority or
-//! Subgroup ID makes the track malformed (§9.1, MUST). The one that came
-//! first is kept, and the two are not compared.
+//! An Object that goes in is compared with what is kept of its Group, and
+//! can show the track to be malformed ([`Cache::insert`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
@@ -115,6 +114,14 @@ impl CachedObject {
     }
 }
 
+/// What an Object that was to be cached shows of its track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Fine,
+    /// The track is malformed (§2.4.2), by this Object.
+    Malformed,
+}
+
 /// The Group a cache keeps.
 #[derive(Debug)]
 struct Group {
@@ -122,6 +129,9 @@ struct Group {
     /// By Object ID. Empty once the Group is given up.
     objects: BTreeMap<u64, CachedObject>,
     bytes: usize,
+    /// The Object IDs of the Objects whose Subgroup ID the relay is not
+    /// sure of (see [`Cache::insert`]).
+    unsure_of_subgroup: BTreeSet<u64>,
     /// The Group does not fit the limits, or has something the cache does
     /// not answer for: no FETCH is answered from it. The next Group starts
     /// anew.
@@ -132,6 +142,7 @@ impl Group {
     fn give_up(&mut self, in_use: &mut usize) {
         *in_use = in_use.saturating_sub(self.bytes);
         self.objects.clear();
+        self.unsure_of_subgroup.clear();
         self.bytes = 0;
         self.given_up = true;
     }
@@ -145,13 +156,61 @@ impl Group {
 pub(crate) struct Cache(Option<Box<Group>>);
 
 impl Cache {
-    /// Takes an Object the relay passes on. `in_use` is the number of bytes
-    /// all caches of the relay hold, which this keeps.
+    /// Takes an Object the relay passes on, and says whether it shows the
+    /// track to be malformed. `in_use` is the number of bytes all caches of
+    /// the relay hold, which this keeps.
     ///
     /// An Object of a Group before the one that is kept is not taken; one of
-    /// a later Group replaces what is kept. An Object ID that is there
-    /// already keeps the Object that came first (§9.1: "Relays MAY ignore
-    /// subsequently received Objects").
+    /// a later Group replaces what is kept.
+    ///
+    /// **Against what is kept of its Group, the Object is one of these:**
+    ///
+    /// * The Object that is there under its Object ID, again. With another
+    ///   Subgroup ID, Publisher Priority or payload the track is malformed
+    ///   (§9.1: "An endpoint that receives a duplicate Object with a
+    ///   different Forwarding Preference, Subgroup ID, Priority or Payload
+    ///   MUST treat the track as Malformed"). With other Object Properties
+    ///   it is not ("Object Properties can be added, removed or updated"),
+    ///   and the one that came first stays ("Relays MAY ignore subsequently
+    ///   received Objects").
+    /// * An Object after the End of Group (§2.4.2: "An Object is received in
+    ///   a Group whose Object ID is larger than the final Object in the
+    ///   Group"), an Object, and not a status, inside a gap that a later
+    ///   Object announced, or
+    ///   one whose own gap covers an Object that came (§12.9: "an Object ID
+    ///   within a previously communicated gap", "a Prior Object ID Gap
+    ///   covering an Object it previously received"): malformed.
+    /// * A status where an Object is, or an End of Group below Objects that
+    ///   came: not malformed, since an Object "can transition from existing
+    ///   to not existing" (§9.1, §2.1) and the publisher may have taken it
+    ///   back. The cache does not say which of the two it is: the Group is
+    ///   given up, and answers no FETCH.
+    /// * An Object at the very Object ID of an End of Group: "an endpoint
+    ///   can receive an Object after it has already recorded that the Object
+    ///   does not exist ... This is not a protocol error and the Track is
+    ///   not malformed" (§2.1), and "A caching relay SHOULD NOT cache or
+    ///   forward the Object in this case" (§9.1). It is not kept, and the
+    ///   Group is given up.
+    ///
+    /// `sure_of_subgroup` is false for an Object of a stream that leaves
+    /// its Subgroup ID to its first Object and does not say that this
+    /// Object is the first of the Subgroup: "the Subgroup ID is the Object
+    /// ID of the first Object transmitted in this Subgroup" (§11.4.2), not
+    /// in this stream, and `FIRST_OBJECT` says whether "the first object in
+    /// this subgroup stream is the first object published in the
+    /// subgroup". A Subgroup sent again from its middle on such a stream
+    /// has the Subgroup ID it had, which the relay cannot read off it. Such
+    /// a Subgroup ID is not held against the track, and a Group that has
+    /// one answers no FETCH, since a fetch stream would have to state it.
+    ///
+    /// WHY the gap is malformed where the End of Group below Objects is
+    /// not, though both say of an Object that came that it does not exist:
+    /// §12.9 names the one, and nothing names the other.
+    ///
+    /// WHY only against what is kept: an earlier Group, a Group that was
+    /// given up and a track that is not cached have nothing to compare
+    /// with. An Object the track is malformed for is not kept (§2.4.2:
+    /// "Object(s) triggering Malformed Track status MUST NOT be cached").
     ///
     /// WHY a Group that does not fit is given up as a whole, and Objects
     /// are not dropped from its start: a Group that lacks its first Objects
@@ -160,25 +219,96 @@ impl Cache {
     ///
     /// WHY a Group with an End of Track is given up: what a `FETCH_OK` has to
     /// say of the end of a track (§10.13) is left to the publisher.
-    pub(crate) fn insert(&mut self, cached: CachedObject, in_use: &mut usize) {
+    pub(crate) fn insert(
+        &mut self,
+        cached: CachedObject,
+        sure_of_subgroup: bool,
+        in_use: &mut usize,
+    ) -> Verdict {
         let Some(group) = self.group_of(cached.group_id, in_use) else {
-            return;
+            return Verdict::Fine;
         };
+        if group.given_up {
+            return Verdict::Fine;
+        }
         let object_id = cached.object.object_id;
-        if group.given_up || group.objects.contains_key(&object_id) {
-            return;
+        let status = cached.object.status;
+        // Its own gap covers an Object that came.
+        let gap_from = object_id.saturating_sub(cached.prior_gap());
+        if group.objects.range(gap_from..object_id).next().is_some() {
+            return Verdict::Malformed;
+        }
+        if let Some(there) = group.objects.get(&object_id) {
+            let both_objects =
+                status == ObjectStatus::Normal && there.object.status == ObjectStatus::Normal;
+            if both_objects {
+                let subgroups_compare =
+                    sure_of_subgroup && !group.unsure_of_subgroup.contains(&object_id);
+                let same = (!subgroups_compare || there.subgroup_id == cached.subgroup_id)
+                    && there.publisher_priority == cached.publisher_priority
+                    && there.object.payload == cached.object.payload;
+                return if same {
+                    Verdict::Fine
+                } else {
+                    Verdict::Malformed
+                };
+            }
+            // A status where an Object is, an Object where an End of Group
+            // is, or the same status again.
+            if status != there.object.status {
+                group.give_up(in_use);
+            }
+            return Verdict::Fine;
+        }
+        let ended_at = group
+            .objects
+            .iter()
+            .find(|(_, there)| there.object.status == ObjectStatus::EndOfGroup)
+            .map(|(id, _)| *id);
+        if ended_at.is_some_and(|end| object_id > end) {
+            // A status up there says nothing the End of Group did not say
+            // (§11.2.1.1: no Objects exist from it on, in the Group or in
+            // the track), and a publisher may end its track that way.
+            if status == ObjectStatus::Normal {
+                return Verdict::Malformed;
+            }
+            group.give_up(in_use);
+            return Verdict::Fine;
+        }
+        // Inside a gap that an Object after it announced.
+        let in_a_gap = group
+            .objects
+            .range(object_id..)
+            .any(|(id, there)| id.saturating_sub(there.prior_gap()) <= object_id);
+        if in_a_gap {
+            // WHY a status is not held against the track, though §12.9 has
+            // "an Object with an Object ID within a previously communicated
+            // gap" and a status has an Object ID: the gap says that no
+            // Object is there, and the status that none is from there on.
+            if status == ObjectStatus::Normal {
+                return Verdict::Malformed;
+            }
+            group.give_up(in_use);
+            return Verdict::Fine;
         }
         let size = cached.size();
         let fits = group.objects.len() < MAX_CACHED_OBJECTS_OF_A_TRACK
             && group.bytes.saturating_add(size) <= MAX_CACHED_BYTES_OF_A_TRACK
             && in_use.saturating_add(size) <= MAX_CACHED_BYTES;
-        if !fits || cached.object.status == ObjectStatus::EndOfTrack {
+        // An End of Group below Objects that came: taken back, or not.
+        let below =
+            status == ObjectStatus::EndOfGroup && group.objects.range(object_id..).next().is_some();
+        if !fits || below || status == ObjectStatus::EndOfTrack {
             group.give_up(in_use);
-            return;
+            return Verdict::Fine;
         }
         group.bytes = group.bytes.saturating_add(size);
         *in_use = in_use.saturating_add(size);
         group.objects.insert(object_id, cached);
+        if !sure_of_subgroup {
+            group.unsure_of_subgroup.insert(object_id);
+        }
+        Verdict::Fine
     }
 
     /// An Object of the Group `group_id` was passed on and cannot be kept:
@@ -198,6 +328,7 @@ impl Cache {
             self.0 = Some(Box::new(Group {
                 id: group_id,
                 objects: BTreeMap::new(),
+                unsure_of_subgroup: BTreeSet::new(),
                 bytes: 0,
                 given_up: false,
             }));
@@ -246,6 +377,10 @@ impl Cache {
     /// below the ones it carries.
     pub(crate) fn answer(&self, start: Location, last: Location) -> Option<Vec<CachedObject>> {
         let group = self.0.as_deref().filter(|group| !group.given_up)?;
+        // A fetch stream gives every Object its Subgroup ID.
+        if !group.unsure_of_subgroup.is_empty() {
+            return None;
+        }
         if start.group != group.id || last.group != group.id || start > last {
             return None;
         }
@@ -337,7 +472,7 @@ mod tests {
         let mut cache = Cache::default();
         let mut in_use = 0;
         for object in objects {
-            cache.insert(object, &mut in_use);
+            cache.insert(object, true, &mut in_use);
         }
         (cache, in_use)
     }
@@ -484,17 +619,17 @@ mod tests {
         // the next Group starts anew.
         let (mut cache, mut in_use) = cache_of(vec![object(5, 0, 0)]);
         cache.leave_out(5, &mut in_use);
-        cache.insert(object(5, 1, 0), &mut in_use);
+        cache.insert(object(5, 1, 0), true, &mut in_use);
         assert_eq!((ids(&cache, at(5, 0), at(5, 0)), in_use), (None, 0));
         // One of a Group before it changes nothing.
-        cache.insert(object(6, 0, 0), &mut in_use);
+        cache.insert(object(6, 0, 0), true, &mut in_use);
         cache.leave_out(5, &mut in_use);
         assert_eq!(ids(&cache, at(6, 0), at(6, 0)), Some(vec![0]));
         // And one of a Group after it takes the place of what is kept.
         cache.leave_out(7, &mut in_use);
         assert_eq!((ids(&cache, at(6, 0), at(6, 0)), in_use), (None, 0));
 
-        cache.insert(object(8, 0, 0), &mut in_use);
+        cache.insert(object(8, 0, 0), true, &mut in_use);
         assert_eq!(in_use, 2);
         cache.clear(&mut in_use);
         assert_eq!((ids(&cache, at(8, 0), at(8, 0)), in_use), (None, 0));
@@ -517,19 +652,19 @@ mod tests {
         let mut cache = Cache::default();
         let mut in_use = 0;
         for id in 0..8 {
-            cache.insert(sized(5, id, 0, MIB), &mut in_use);
+            cache.insert(sized(5, id, 0, MIB), true, &mut in_use);
         }
         assert_eq!(in_use, 8 * MIB);
         assert_eq!(
             ids(&cache, at(5, 0), at(5, 7)).map(|ids| ids.len()),
             Some(8)
         );
-        cache.insert(sized(5, 8, 0, 1), &mut in_use);
+        cache.insert(sized(5, 8, 0, 1), true, &mut in_use);
         assert_eq!((ids(&cache, at(5, 0), at(5, 7)), in_use), (None, 0));
         // What comes of that Group afterwards is not kept either.
-        cache.insert(sized(5, 9, 0, 1), &mut in_use);
+        cache.insert(sized(5, 9, 0, 1), true, &mut in_use);
         assert_eq!(in_use, 0);
-        cache.insert(sized(6, 0, 0, 1), &mut in_use);
+        cache.insert(sized(6, 0, 0, 1), true, &mut in_use);
         assert_eq!(
             (ids(&cache, at(6, 0), at(6, 0)), in_use),
             (Some(vec![0]), 1)
@@ -539,27 +674,263 @@ mod tests {
         let mut cache = Cache::default();
         let mut in_use = 0;
         for id in 0..4_096 {
-            cache.insert(sized(5, id, 0, 1), &mut in_use);
+            cache.insert(sized(5, id, 0, 1), true, &mut in_use);
         }
         assert_eq!(in_use, 4_096);
         assert!(cache.answer(at(5, 0), at(5, 4_095)).is_some());
-        cache.insert(sized(5, 4_096, 0, 1), &mut in_use);
+        cache.insert(sized(5, 4_096, 0, 1), true, &mut in_use);
         assert_eq!((ids(&cache, at(5, 0), at(5, 0)), in_use), (None, 0));
 
         // What the other tracks hold counts: with one byte left for all of
         // them, an Object of two bytes does not fit.
         let mut cache = Cache::default();
         let mut in_use = 256 * MIB - 1;
-        cache.insert(sized(5, 0, 0, 1), &mut in_use);
+        cache.insert(sized(5, 0, 0, 1), true, &mut in_use);
         assert_eq!(in_use, 256 * MIB);
-        cache.insert(sized(5, 1, 0, 1), &mut in_use);
+        cache.insert(sized(5, 1, 0, 1), true, &mut in_use);
         // The Group is given up, and what it held is free again.
         assert_eq!(in_use, 256 * MIB - 1);
         assert_eq!(ids(&cache, at(5, 0), at(5, 0)), None);
 
-        // Object Properties count: a number as 8 bytes.
+        // Object Properties count: a number as 8 bytes, and bytes as what
+        // they are long.
         let (_, in_use) = cache_of(vec![object(5, 1, 1)]);
         assert_eq!(in_use, 10);
+        let with_bytes = CachedObject {
+            group_id: 5,
+            subgroup_id: 0,
+            publisher_priority: 128,
+            object: Arc::new(SubgroupObject {
+                object_id: 0,
+                properties: vec![
+                    KeyValuePair::bytes(0x0d, vec![7; 5]).unwrap(),
+                    KeyValuePair::varint(0x10, 1).unwrap(),
+                ],
+                status: ObjectStatus::Normal,
+                payload: vec![0x61; 3],
+            }),
+        };
+        let (_, in_use) = cache_of(vec![with_bytes]);
+        assert_eq!(in_use, 3 + 5 + 8);
+    }
+
+    /// What a test says of an Object: (Object ID; Prior Object ID Gap;
+    /// the length of its payload, or `None` for an End of Group).
+    type Said = (u64, u64, Option<usize>);
+
+    fn said(group_id: u64, (object_id, gap, payload): Said) -> CachedObject {
+        match payload {
+            Some(len) => sized(group_id, object_id, gap, len),
+            None => status(group_id, object_id, ObjectStatus::EndOfGroup),
+        }
+    }
+
+    #[test]
+    fn an_object_is_compared_with_what_is_kept_of_its_group() {
+        use Verdict::{Fine, Malformed};
+        const END: Option<usize> = None;
+        let two = Some(2);
+        // (the Objects of Group 5 that are kept; the Object that comes; what
+        //  it shows of the track; whether the Group still answers a FETCH
+        //  for its first Object)
+        let cases: [(&[Said], Said, Verdict, bool); 24] = [
+            // The same Object again.
+            (&[(0, 0, two), (1, 0, two)], (1, 0, two), Fine, true),
+            // With another payload: of another length, and of none.
+            (
+                &[(0, 0, two), (1, 0, two)],
+                (1, 0, Some(3)),
+                Malformed,
+                true,
+            ),
+            (
+                &[(0, 0, two), (1, 0, two)],
+                (1, 0, Some(0)),
+                Malformed,
+                true,
+            ),
+            // With another Object Property and nothing else: not malformed,
+            // and the one that came first stays.
+            (&[(0, 0, two), (2, 1, two)], (2, 0, two), Fine, true),
+            // A new Object after the ones that are kept, and before them.
+            (&[(0, 0, two), (1, 0, two)], (2, 0, two), Fine, true),
+            (&[(0, 0, two), (2, 0, two)], (1, 0, two), Fine, true),
+            // After an End of Group: malformed. Below it: an Object like
+            // any other.
+            (&[(0, 0, two), (2, 0, END)], (3, 0, two), Malformed, true),
+            (&[(0, 0, two), (2, 0, END)], (9, 0, two), Malformed, true),
+            (&[(0, 0, two), (2, 0, END)], (1, 0, two), Fine, true),
+            // At the very Object ID of the End of Group: not malformed, not
+            // kept, and the Group answers nothing any more.
+            (&[(0, 0, two), (2, 0, END)], (2, 0, two), Fine, false),
+            // The End of Group again.
+            (&[(0, 0, two), (2, 0, END)], (2, 0, END), Fine, true),
+            // An End of Group where an Object is, and below Objects that
+            // came: taken back, perhaps. Not malformed, and not answered.
+            (&[(0, 0, two), (1, 0, two)], (1, 0, END), Fine, false),
+            (&[(0, 0, two), (2, 0, two)], (1, 0, END), Fine, false),
+            // After them it is the end of the Group.
+            (&[(0, 0, two), (1, 0, two)], (2, 0, END), Fine, true),
+            // A second End of Group after the first says nothing the first
+            // did not: not malformed, and not answered.
+            (&[(0, 0, two), (2, 0, END)], (4, 0, END), Fine, false),
+            (&[(0, 0, two), (2, 0, END)], (3, 0, END), Fine, false),
+            // Inside a gap that a later Object announced: Object 3 said
+            // that 1 and 2 do not exist.
+            (&[(0, 0, two), (3, 2, two)], (1, 0, two), Malformed, true),
+            (&[(0, 0, two), (3, 2, two)], (2, 0, two), Malformed, true),
+            // A status there says nothing the gap did not: not malformed,
+            // and not answered.
+            (&[(0, 0, two), (3, 2, two)], (2, 0, END), Fine, false),
+            // Before the gap, and after the Object that has it.
+            (&[(1, 0, two), (4, 2, two)], (0, 0, two), Fine, true),
+            (&[(0, 0, two), (3, 2, two)], (4, 0, two), Fine, true),
+            // A gap that covers an Object that came.
+            (&[(0, 0, two), (1, 0, two)], (3, 2, two), Malformed, true),
+            // Also on an Object that comes again, now with a gap.
+            (
+                &[(0, 0, two), (1, 0, two), (3, 0, two)],
+                (3, 2, two),
+                Malformed,
+                true,
+            ),
+            // One that ends right after it.
+            (&[(0, 0, two), (1, 0, two)], (3, 1, two), Fine, true),
+        ];
+        for (kept, comes, verdict, answers) in cases {
+            let objects = kept.iter().map(|object| said(5, *object)).collect();
+            let (mut cache, mut in_use) = cache_of(objects);
+            let before = in_use;
+            assert_eq!(
+                cache.insert(said(5, comes), true, &mut in_use),
+                verdict,
+                "{kept:?} {comes:?}"
+            );
+            assert_eq!(
+                cache.answer(at(5, 0), at(5, 0)).is_some(),
+                answers,
+                "{kept:?} {comes:?}"
+            );
+            // An Object the track is malformed for is not kept: it counts
+            // for nothing, and is not there to be the same when it comes
+            // again.
+            if verdict == Malformed {
+                assert_eq!(in_use, before, "{kept:?} {comes:?}");
+                assert_eq!(
+                    cache.insert(said(5, comes), true, &mut in_use),
+                    Malformed,
+                    "{kept:?} {comes:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_end_of_track_after_the_end_of_a_group_is_not_held_against_the_track() {
+        // Object 0 and End of Group at 1; then End of Track at 2 (§11.2.1.1:
+        // each of the two says that nothing exists from it on).
+        let (mut cache, mut in_use) = cache_of(vec![
+            object(5, 0, 0),
+            status(5, 1, ObjectStatus::EndOfGroup),
+        ]);
+        let end_of_track = status(5, 2, ObjectStatus::EndOfTrack);
+        assert_eq!(cache.insert(end_of_track, true, &mut in_use), Verdict::Fine);
+        assert_eq!((cache.answer(at(5, 0), at(5, 0)), in_use), (None, 0));
+    }
+
+    #[test]
+    fn a_subgroup_id_the_relay_is_not_sure_of_is_not_held_against_the_track() {
+        let first = || object(5, 1, 0);
+        let of_subgroup_9 = || CachedObject {
+            subgroup_id: 9,
+            ..first()
+        };
+        let with_another_payload = || sized(5, 1, 0, 9);
+        // (whether the relay is sure of the Subgroup ID of the Object that
+        //  came first; the Object that comes again; whether it is sure of
+        //  that one's; what it shows of the track)
+        let cases = [
+            (true, of_subgroup_9(), true, Verdict::Malformed),
+            (true, of_subgroup_9(), false, Verdict::Fine),
+            (false, of_subgroup_9(), true, Verdict::Fine),
+            (false, of_subgroup_9(), false, Verdict::Fine),
+            // The payload is compared all the same.
+            (false, with_another_payload(), false, Verdict::Malformed),
+            (true, with_another_payload(), false, Verdict::Malformed),
+        ];
+        for (sure_of_first, comes, sure, verdict) in cases {
+            let (mut cache, mut in_use) = cache_of(vec![object(5, 0, 0)]);
+            cache.insert(first(), sure_of_first, &mut in_use);
+            let what = format!("{sure_of_first} {comes:?} {sure}");
+            assert_eq!(cache.insert(comes, sure, &mut in_use), verdict, "{what}");
+            // A Group with a Subgroup ID the relay is not sure of answers
+            // no FETCH: a fetch stream states the Subgroup ID.
+            assert_eq!(
+                cache.answer(at(5, 0), at(5, 0)).is_some(),
+                sure_of_first,
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_object_that_comes_again_is_the_same_by_its_subgroup_its_priority_and_its_payload() {
+        let first = || object(5, 1, 0);
+        let other = |change: fn(&mut CachedObject)| {
+            let mut object = first();
+            change(&mut object);
+            object
+        };
+        // (the Object that comes after `first`; what it shows of the track)
+        let cases = [
+            (first(), Verdict::Fine),
+            (other(|object| object.subgroup_id = 9), Verdict::Malformed),
+            (
+                other(|object| object.publisher_priority = 7),
+                Verdict::Malformed,
+            ),
+            // The same length, and another byte.
+            (
+                other(|object| {
+                    let mut changed = (*object.object).clone();
+                    changed.payload = vec![0x61, 0x62];
+                    object.object = Arc::new(changed);
+                }),
+                Verdict::Malformed,
+            ),
+            // Object Properties alone.
+            (
+                other(|object| {
+                    let mut changed = (*object.object).clone();
+                    changed.properties = vec![KeyValuePair::varint(0x10, 7).unwrap()];
+                    object.object = Arc::new(changed);
+                }),
+                Verdict::Fine,
+            ),
+        ];
+        for (comes, verdict) in cases {
+            let (mut cache, mut in_use) = cache_of(vec![object(5, 0, 0), first()]);
+            assert_eq!(
+                cache.insert(comes.clone(), true, &mut in_use),
+                verdict,
+                "{comes:?}"
+            );
+            // The one that came first is the one that is kept.
+            let kept = cache.answer(at(5, 1), at(5, 1)).unwrap();
+            assert_eq!(kept, [first()], "{comes:?}");
+        }
+        // Nothing is compared with a Group that is not kept: an earlier
+        // one, and one that was given up.
+        let (mut cache, mut in_use) = cache_of(vec![object(5, 0, 0), object(6, 0, 0)]);
+        assert_eq!(
+            cache.insert(sized(5, 0, 0, 9), true, &mut in_use),
+            Verdict::Fine
+        );
+        cache.leave_out(6, &mut in_use);
+        assert_eq!(
+            cache.insert(sized(6, 0, 0, 9), true, &mut in_use),
+            Verdict::Fine
+        );
     }
 
     #[test]

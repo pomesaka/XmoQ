@@ -86,6 +86,16 @@
 //! `shared-filters`; in the two with halves only sessions 1 and 2 send a
 //! filter. `FUZZ_FILTERED` counts the SUBSCRIBEs sent by their filter.
 //!
+//! With `XMOQ_FUZZ_CONTRADICTIONS` set, the Objects are not all alike: one
+//! in four has another payload, one in six is an End of Group, and one in
+//! five of the rest says with a Prior Object ID Gap (§12.9) that Objects
+//! before it do not exist. With four Object IDs and three Groups, the same
+//! Location comes again and again, so that a publisher says two things of
+//! it. `compare.py` calls `full`, `split-one` and `shared` with it
+//! `contradictions`, `split-contradictions` and `shared-contradictions`;
+//! in the two with halves only the Objects of sessions 1 and 2 vary.
+//! `FUZZ_CONTRADICTED` counts the Objects by what they are.
+//!
 //! `XMOQ_FUZZ_TOUCH` chooses which events count as the ones a change is
 //! about: `subgroups` (the default; a stream that leaves the Subgroup ID to
 //! its first Object, or a second stream for a Subgroup) or `publishers` (a
@@ -705,6 +715,77 @@ fn touches_subgroup_selection(event: &Event, opened: &mut Vec<(u64, u64, u64, u6
     again
 }
 
+/// An Object as `XMOQ_FUZZ_CONTRADICTIONS` has it, and which of the four it
+/// is: as it was, with another payload, an End of Group, with a gap.
+fn with_a_contradiction(event: Event, rng: &mut Rng, world: World) -> (Event, Option<usize>) {
+    let Event::Object { session, stream, mut object } = event else {
+        return (event, None);
+    };
+    if world.is_split() && session.0 > 2 {
+        return (Event::Object { session, stream, object }, None);
+    }
+    let kind = if rng.next(6) == 0 {
+        object.status = ObjectStatus::EndOfGroup;
+        object.payload = vec![];
+        2
+    } else if object.object_id > 0 && rng.next(5) == 0 {
+        // A gap larger than the Object ID is malformed where it is decoded,
+        // and does not get to the relay core.
+        let gap = 1 + rng.next(object.object_id);
+        object.properties = vec![KeyValuePair::varint(0x3e, gap).unwrap()];
+        3
+    } else if rng.next(4) == 0 {
+        object.payload = vec![8; 3];
+        1
+    } else {
+        0
+    };
+    (Event::Object { session, stream, object }, Some(kind))
+}
+
+/// Whether an event is an Object at a Location (Group and Object ID, of any
+/// track) of which something was said before in the sequence: an Object that
+/// came there, a status, a gap over it, or an End of Group at or below it.
+/// An Object that says such a thing itself, of other Locations, counts too.
+#[derive(Default)]
+struct Said {
+    /// (session; stream) and a Group a header of that stream named. WHY
+    /// all of them, and not the last: the relay keeps the header a stream
+    /// came with first when the number comes again while it is open, and
+    /// the one of the stream that came after when it is not.
+    streams: Vec<((u64, u64), u64)>,
+    /// (Group; Object ID) that came.
+    came: Vec<(u64, u64)>,
+    /// Groups of which an Object said that others do not exist.
+    with_a_statement: Vec<u64>,
+}
+
+impl Said {
+    fn touches(&mut self, event: &Event) -> bool {
+        match event {
+            Event::DataStreamOpened { session, stream, header } => {
+                self.streams.push(((session.0, stream.0), header.group_id));
+                false
+            }
+            Event::Object { session, stream, object } => {
+                let says = object.status != ObjectStatus::Normal || !object.properties.is_empty();
+                let mut touches = false;
+                let groups: Vec<u64> =
+                    self.streams.iter().filter(|(key, _)| *key == (session.0, stream.0)).map(|(_, group)| *group).collect();
+                for group in groups {
+                    touches |= says || self.came.contains(&(group, object.object_id)) || self.with_a_statement.contains(&group);
+                    self.came.push((group, object.object_id));
+                    if says {
+                        self.with_a_statement.push(group);
+                    }
+                }
+                touches
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Whether an event is a PUBLISH for a track that another session published
 /// before in the sequence, or that comes after another session announced a
 /// namespace. `published` has a session and its track, or no track for a
@@ -924,6 +1005,9 @@ fn the_two_cores_answer_random_events_alike() {
     let mut fetch_counts = [0u64; 5];
     let mut with_a_fetch_passed_on = 0u64;
     let filters = std::env::var_os("XMOQ_FUZZ_FILTERS").is_some();
+    let contradictions = std::env::var_os("XMOQ_FUZZ_CONTRADICTIONS").is_some();
+    // Objects: as they were, with another payload, End of Group, with a gap.
+    let mut contradicted = [0u64; 4];
     // SUBSCRIBEs by their filter: none, Largest Object, Next Group Start,
     // AbsoluteStart, AbsoluteRange.
     let mut subscribes = [0u64; 5];
@@ -951,6 +1035,7 @@ fn the_two_cores_answer_random_events_alike() {
         };
         watch(&watched);
         let mut published = Vec::new();
+        let mut said = Said::default();
         let mut priorities_of_groups = Vec::new();
         match world {
             World::V1 => {}
@@ -999,6 +1084,15 @@ fn the_two_cores_answer_random_events_alike() {
             let event = if steady { without_a_publish_done_of_session_3(event) } else { event };
             let event = if no_announce { without_an_announcement(event) } else { event };
             let event = if priorities { with_a_priority_of_three(event, world) } else { event };
+            let event = if contradictions {
+                let (event, kind) = with_a_contradiction(event, &mut rng, world);
+                if let Some(kind) = kind {
+                    contradicted[kind] += 1;
+                }
+                event
+            } else {
+                event
+            };
             let touches = match touch.as_str() {
                 "subgroups" => touches_subgroup_selection(&event, &mut opened),
                 "publishers" => touches_the_publishers(&event, &mut published),
@@ -1007,6 +1101,7 @@ fn the_two_cores_answer_random_events_alike() {
                 "asks" => several_can_be_asked(&event, &mut published),
                 "priority" => opens_a_group_with_another_priority(&event, &mut priorities_of_groups),
                 "fetch" => is_about_a_fetch,
+                "contradictions" => said.touches(&event),
                 "filters" => matches!(
                     &event,
                     Event::RequestOpened { first: ControlMessage::Subscribe(subscribe), .. }
@@ -1096,6 +1191,12 @@ fn the_two_cores_answer_random_events_alike() {
         let [none, largest, next_group, absolute_start, absolute_range] = subscribes;
         println!(
             "FUZZ_FILTERED subscribes_without_a_filter={none} largest_object={largest} next_group_start={next_group} absolute_start={absolute_start} absolute_range={absolute_range}"
+        );
+    }
+    if contradictions {
+        let [plain, other_payload, end_of_group, with_a_gap] = contradicted;
+        println!(
+            "FUZZ_CONTRADICTED objects_as_they_were={plain} with_another_payload={other_payload} end_of_group={end_of_group} with_a_gap={with_a_gap}"
         );
     }
     println!(

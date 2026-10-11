@@ -125,6 +125,67 @@ pub(crate) async fn a_fetch_stream_writer_that_is_dropped_resets_its_stream<C: C
     );
 }
 
+/// A fetch stream that is opened without its header carries what its
+/// writer writes and nothing before it, and is reset with the writer's code
+/// while the first bytes wait: what a relay does that is told to stop a
+/// stream whose header it has not got through yet.
+pub(crate) async fn a_fetch_stream_opened_without_its_header_has_only_what_is_written<
+    C: Connection,
+>(
+    a: C,
+    b: C,
+) {
+    let trace = crate::Trace::default();
+    let mut writer = crate::open_fetch_stream_without_header(&a, &trace, "fetch")
+        .await
+        .expect("open");
+    // The header is the caller's to write: 0x05, Request ID 2.
+    writer.write(&[0x05, 0x02]).await.expect("write");
+    writer.write(b"abc").await.expect("write");
+    writer.finish();
+    let mut recv = timeout(A_WHILE, b.accept_uni())
+        .await
+        .expect("the stream arrives")
+        .expect("accept");
+    assert_eq!(
+        read_to_end(&mut recv).await,
+        (vec![0x05, 0x02, b'a', b'b', b'c'], Ok(()))
+    );
+
+    // Reset while what it wrote first waits for the peer: 4 MiB, more than
+    // either connection of these tests lets through unread.
+    let mut writer = crate::open_fetch_stream_without_header(&a, &trace, "fetch")
+        .await
+        .expect("open");
+    let body = vec![0x5a; 4 * 1024 * 1024];
+    assert!(
+        timeout(A_WHILE, writer.write(&body)).await.is_err(),
+        "the write waits for the reader"
+    );
+    let mut recv = timeout(A_WHILE, b.accept_uni())
+        .await
+        .expect("the stream arrives")
+        .expect("accept");
+    // MALFORMED_TRACK (0x12).
+    writer.reset(0x12);
+    let (received, end) = read_to_end(&mut recv).await;
+    assert_eq!(end, Err(ReadError::Reset(Some(0x12))));
+    assert!(received.len() < body.len(), "{}", received.len());
+
+    // One that is dropped is reset with CANCELLED (0x1).
+    let mut writer = crate::open_fetch_stream_without_header(&a, &trace, "fetch")
+        .await
+        .expect("open");
+    writer.write(b"abc").await.expect("write");
+    let mut recv = timeout(A_WHILE, b.accept_uni())
+        .await
+        .expect("the stream arrives")
+        .expect("accept");
+    drop(writer);
+    let (_, end) = read_to_end(&mut recv).await;
+    assert_eq!(end, Err(ReadError::Reset(Some(0x1))));
+}
+
 /// A fetch stream that its writer gives up while the peer takes nothing,
 /// with more written than the peer's windows hold, ends for the peer with
 /// the code of the reset and not with a FIN: what a relay does for a
@@ -465,6 +526,7 @@ macro_rules! contract_tests {
                 dropping_a_read_loses_nothing,
                 a_fetch_stream_writer_that_is_dropped_resets_its_stream,
                 a_fetch_stream_given_up_while_a_write_waits_is_reset_with_that_code,
+                a_fetch_stream_opened_without_its_header_has_only_what_is_written,
                 stopped_waits_until_the_peer_stops,
                 what_arrived_outlives_the_connection,
                 a_stream_that_was_not_accepted_may_go_with_the_connection,

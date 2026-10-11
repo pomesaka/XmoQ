@@ -151,7 +151,12 @@ enum Standing {
     Relayed(RelayedFetch),
     /// Answered by the relay itself, for this track; the I/O side has not
     /// reported its fetch stream written yet.
-    Written(FullTrackName),
+    Written {
+        track: FullTrackName,
+        /// The I/O side was told to give the stream up
+        /// ([`Action::AbortFetchWrite`]).
+        told_to_stop: bool,
+    },
 }
 
 /// The FETCH requests of subscribers that the relay has not let go of, by
@@ -195,12 +200,33 @@ impl Fetches {
     }
 
     fn write(&mut self, subscriber: (SessionKey, StreamKey), track: FullTrackName) {
-        self.0.insert(subscriber, Standing::Written(track));
+        self.0.insert(
+            subscriber,
+            Standing::Written {
+                track,
+                told_to_stop: false,
+            },
+        );
     }
 
     /// Whether the relay is writing the answer to a FETCH itself.
     fn is_written(&self, subscriber: &(SessionKey, StreamKey)) -> bool {
-        matches!(self.0.get(subscriber), Some(Standing::Written(_)))
+        matches!(self.0.get(subscriber), Some(Standing::Written { .. }))
+    }
+
+    /// Notes that the I/O side is told to give up the fetch stream of a
+    /// FETCH the relay is writing the answer of. Whether it is to be told:
+    /// not when there is no such FETCH, and not a second time.
+    ///
+    /// WHY once: a subscriber that cancels resets its request stream and
+    /// stops it, which the I/O side may report as two ends, and a track can
+    /// be found malformed after either. The first code is the one the
+    /// stream is reset with.
+    fn tell_to_stop(&mut self, subscriber: &(SessionKey, StreamKey)) -> bool {
+        match self.0.get_mut(subscriber) {
+            Some(Standing::Written { told_to_stop, .. }) => !std::mem::replace(told_to_stop, true),
+            _ => false,
+        }
     }
 
     /// The FETCH requests for `track` the relay is writing the answer of,
@@ -208,7 +234,7 @@ impl Fetches {
     fn written_for(&self, track: &FullTrackName) -> Vec<(SessionKey, StreamKey)> {
         self.0
             .iter()
-            .filter(|(_, standing)| matches!(standing, Standing::Written(of) if of == track))
+            .filter(|(_, standing)| matches!(standing, Standing::Written { track: of, .. } if of == track))
             .map(|(subscriber, _)| *subscriber)
             .collect()
     }
@@ -216,21 +242,21 @@ impl Fetches {
     fn relayed(&self, subscriber: &(SessionKey, StreamKey)) -> Option<&RelayedFetch> {
         match self.0.get(subscriber)? {
             Standing::Relayed(fetch) => Some(fetch),
-            Standing::Held(_) | Standing::Written(_) => None,
+            Standing::Held(_) | Standing::Written { .. } => None,
         }
     }
 
     fn relayed_mut(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<&mut RelayedFetch> {
         match self.0.get_mut(subscriber)? {
             Standing::Relayed(fetch) => Some(fetch),
-            Standing::Held(_) | Standing::Written(_) => None,
+            Standing::Held(_) | Standing::Written { .. } => None,
         }
     }
 
     fn held_mut(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<&mut HeldFetch> {
         match self.0.get_mut(subscriber)? {
             Standing::Held(held) => Some(held),
-            Standing::Relayed(_) | Standing::Written(_) => None,
+            Standing::Relayed(_) | Standing::Written { .. } => None,
         }
     }
 
@@ -240,7 +266,7 @@ impl Fetches {
             Entry::Occupied(entry) if matches!(entry.get(), Standing::Relayed(_)) => {
                 match entry.remove() {
                     Standing::Relayed(fetch) => Some(fetch),
-                    Standing::Held(_) | Standing::Written(_) => None,
+                    Standing::Held(_) | Standing::Written { .. } => None,
                 }
             }
             Entry::Occupied(_) | Entry::Vacant(_) => None,
@@ -253,7 +279,7 @@ impl Fetches {
             Entry::Occupied(entry) if matches!(entry.get(), Standing::Held(_)) => {
                 match entry.remove() {
                     Standing::Held(held) => Some(held),
-                    Standing::Relayed(_) | Standing::Written(_) => None,
+                    Standing::Relayed(_) | Standing::Written { .. } => None,
                 }
             }
             Entry::Occupied(_) | Entry::Vacant(_) => None,
@@ -274,7 +300,7 @@ impl Fetches {
             .iter()
             .filter_map(|(subscriber, standing)| match standing {
                 Standing::Relayed(fetch) => Some((subscriber, fetch)),
-                Standing::Held(_) | Standing::Written(_) => None,
+                Standing::Held(_) | Standing::Written { .. } => None,
             })
     }
 
@@ -292,7 +318,7 @@ impl Fetches {
         self.of(session)
             .filter_map(|(stream, standing)| match standing {
                 Standing::Held(held) => Some((stream, held)),
-                Standing::Relayed(_) | Standing::Written(_) => None,
+                Standing::Relayed(_) | Standing::Written { .. } => None,
             })
     }
 }
@@ -1109,12 +1135,12 @@ impl Relay {
     /// stream associated with the FETCH"). The I/O side reports the stream
     /// given up, which lets go of the FETCH.
     pub(crate) fn cancel_written_fetch(
-        &self,
+        &mut self,
         session: SessionKey,
         stream: StreamKey,
         actions: &mut Vec<Action>,
     ) {
-        if self.fetches.is_written(&(session, stream)) {
+        if self.fetches.tell_to_stop(&(session, stream)) {
             actions.push(Action::AbortFetchWrite {
                 session,
                 stream,
@@ -1260,6 +1286,9 @@ impl Relay {
         // their streams are reset, the request stream when the I/O side
         // reports the fetch stream given up.
         for (session, stream) in self.fetches.written_for(track) {
+            if !self.fetches.tell_to_stop(&(session, stream)) {
+                continue;
+            }
             actions.push(Action::AbortFetchWrite {
                 session,
                 stream,
