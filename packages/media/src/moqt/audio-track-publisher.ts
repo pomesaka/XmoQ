@@ -40,9 +40,11 @@ export interface AudioTrackPublisherOptions {
 	maxPendingChunks?: number;
 	/**
 	 * How many chunks share a Group, and so a stream: 1 when left out, the
-	 * example of LOC-04 §4.1. **For trying out**: with more, a subscriber
-	 * can only begin at a Group's first chunk, and a chunk that is lost
-	 * holds the ones after it on its stream back.
+	 * example of LOC-04 §4.1. **For trying out.** With more, the
+	 * subscriber of this publisher (a relay) begins at a Group's first
+	 * chunk; a relay's own subscribers begin where they come, where the
+	 * relay starts a stream in the middle of a Subgroup, as the one here
+	 * does.
 	 */
 	chunksPerGroup?: number;
 }

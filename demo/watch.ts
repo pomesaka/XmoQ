@@ -166,6 +166,10 @@ async function main(): Promise<void> {
 	// only after a click); the times are measured either way.
 	let sound: AudioContext | undefined;
 	let tooLate = 0;
+	/** From the SUBSCRIBE of the audio being accepted to the first piece decoded, and to the first that was in time to sound. */
+	let audioSince = performance.now();
+	let firstAudioAfterMs: number | undefined;
+	let firstSoundAfterMs: number | undefined;
 	/** When a piece of audio was last in time to be sounded, by this page's clock. */
 	let lastHeard: number | undefined;
 	let markHeard = false;
@@ -178,7 +182,10 @@ async function main(): Promise<void> {
 		codec: "opus",
 		sampleRate: SAMPLE_RATE,
 		numberOfChannels: 1,
+		// `?audioJoin=1` fetches the Group of audio the page comes into.
+		joiningFetch: query.get("audioJoin") !== null,
 		onData(data: AudioData) {
+			firstAudioAfterMs ??= Math.round(performance.now() - audioSince);
 			const samples = new Float32Array(data.numberOfFrames);
 			data.copyTo(samples, { planeIndex: 0, format: "f32-planar" });
 			const timeMs = data.timestamp / 1000;
@@ -195,6 +202,7 @@ async function main(): Promise<void> {
 				return;
 			}
 			played.audio.add(due - timeMs);
+			firstSoundAfterMs ??= Math.round(performance.now() - audioSince);
 			if (sound === undefined || sound.state !== "running") return;
 			const buffer = sound.createBuffer(1, samples.length, SAMPLE_RATE);
 			buffer.copyToChannel(samples, 0);
@@ -242,6 +250,8 @@ async function main(): Promise<void> {
 			stalls,
 			lastShown: lastShown ?? null,
 			lastHeard: lastHeard ?? null,
+			firstAudioAfterMs: firstAudioAfterMs ?? null,
+			firstSoundAfterMs: firstSoundAfterMs ?? null,
 			...(query.get("diag") === null
 				? {}
 				: {
@@ -287,7 +297,12 @@ async function main(): Promise<void> {
 				audio = await playAudioTrack(connection, {
 					...audioOptions,
 					trackNamespace,
-				}).catch((error: unknown) => {
+				})
+					.then((playing) => {
+						audioSince = performance.now();
+						return playing;
+					})
+					.catch((error: unknown) => {
 					console.log(`no audio: ${String(error)}`);
 					return undefined;
 				});

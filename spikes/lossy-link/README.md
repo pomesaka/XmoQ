@@ -8,7 +8,7 @@ node spikes/lossy-link/proxy.mjs --listen 45386 --to 45382 --control 45387
 bun spikes/lossy-link/measure.ts http://localhost:45381 45386 http://127.0.0.1:45387 "$PWD/interop"
 ```
 
-`reconnect.ts` (a cut of 8 seconds, for the viewer and for the publisher) and `audio-under-loss.ts` (the sound with a longer buffer and with several chunks in a Group) take the same four arguments.
+`reconnect.ts` (a cut of 8 seconds, for the viewer and for the publisher) and `audio-under-loss.ts` (the sound with a longer buffer and with several chunks in a Group) take the same four arguments, and so does `grouping.ts` (several chunks of audio in a Group: a late viewer's first sound, and the sound under loss).
 
 `/log` gives every datagram since it was last asked: when, which way, how long, and whether it was dropped. The link takes loss for one way alone as well: `/set?up=0.1` (towards the relay) and `/set?down=0.1` (from it).
 
