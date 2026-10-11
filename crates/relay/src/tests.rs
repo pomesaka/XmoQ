@@ -2341,3 +2341,177 @@ async fn a_joining_fetch_whose_subscribe_never_comes_is_refused_after_the_time_f
     let held = hub.held().await;
     assert_eq!((held.relay.fetches, held.timers), (0, 0));
 }
+
+/// Waits until the hub holds what `there` asks for.
+async fn held_when(hub: &HubHandle<MemoryConnection>, there: impl Fn(&Held) -> bool) -> Held {
+    timeout(SOON, async {
+        loop {
+            let held = hub.held().await;
+            if there(&held) {
+                return held;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("in time")
+}
+
+/// The next thing on a request stream has to be its end; a message would be
+/// an answer to something that gets none.
+async fn end_within(
+    reader: &mut RequestReader<MemoryRecv>,
+    time: Duration,
+    name: &str,
+) -> Option<RequestClose> {
+    match timeout(time, reader.next_event()).await {
+        Err(_) => None,
+        Ok(Ok(RequestStreamEvent::Closed(how))) => Some(how),
+        Ok(other) => panic!("{name}: {other:?}"),
+    }
+}
+
+/// The relay's FIN that comes when the wait for the subscriber is over
+/// ([`PEER_END_WAIT`]), and not before: nothing for `quiet`, then the FIN
+/// within a second.
+async fn the_late_fin(reader: &mut RequestReader<MemoryRecv>, quiet: Duration, name: &str) {
+    assert_eq!(end_within(reader, quiet, name).await, None, "{name}");
+    let late = Duration::from_secs(1);
+    assert_eq!(
+        end_within(reader, late, name).await,
+        Some(RequestClose::Fin),
+        "{name}"
+    );
+}
+
+/// A FETCH of a new peer that the relay answers itself (`FILL_TIMEOUT` 0)
+/// and has served to the end of its fetch stream. `finished`: the peer
+/// finished its direction of the request stream right after the FETCH.
+/// Returns the peer, the Request ID, and the two halves of the request
+/// stream, without the one that was finished.
+async fn served_fetch(
+    hub: &HubHandle<MemoryConnection>,
+    finished: bool,
+    name: &str,
+) -> (
+    Peer,
+    RequestId,
+    Option<MemorySend>,
+    RequestReader<MemoryRecv>,
+) {
+    let mut alice = Peer::connect(hub, true).await;
+    let request = alice.start_fetching(vec![Parameter::FillTimeout(0)]).await;
+    let (id, mut reader) = (request.id, request.reader);
+    let mut send = Some(request.send);
+    if finished {
+        send.take().unwrap().finish();
+    }
+    let answered = reader.next_event().await.unwrap();
+    let RequestStreamEvent::Message(fetch_ok) = answered else {
+        panic!("{name}: {answered:?}");
+    };
+    alice.session.on_request_message(id, fetch_ok).unwrap();
+    let UniEvent::FetchOpened { stream, header } = alice.next_data().await else {
+        panic!("{name}: no fetch stream");
+    };
+    alice.session.on_fetch_stream(header.request_id).unwrap();
+    let mut body = alice.stops.take_fetch_body(stream).expect("the body");
+    assert_eq!(
+        read_fetch(&mut body).await.1,
+        FetchChunk::End(StreamEnd::Fin),
+        "{name}"
+    );
+    (alice, id, send, reader)
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_request_stream_of_a_fetch_that_was_served_ends_as_the_shared_table_says() {
+    // `fixtures/peer-fetch/served-end.tsv`, which the Rust client and
+    // `@xmoq/moqt` read as well: a publisher that served a FETCH to the end
+    // of its fetch stream, and what becomes of the request stream.
+    let table = include_str!("../../../fixtures/peer-fetch/served-end.tsv");
+    let ms = Duration::from_millis;
+    let mut rows = 0;
+    for row in table.lines() {
+        let columns: Vec<&str> = row.split('\t').collect();
+        let [name, before, after, own, peer, update] = columns[..] else {
+            panic!("a row of 6 columns: {row}");
+        };
+        let (hub, _task) = hub::spawn(HubConfig::default());
+        let mut publisher = Peer::connect(&hub, true).await;
+        let largest = vec![Parameter::LargestObject(at(1, 4))];
+        let (publish, message) = publisher
+            .session
+            .publish(track(), PUBLISHER_ALIAS, largest, vec![])
+            .unwrap();
+        let _publication = publisher.request(publish, message).await;
+        assert!(matches!(before, "-" | "fin"), "{name}: before {before}");
+        let (_alice, id, mut send, reader) = served_fetch(&hub, before == "fin", name).await;
+        let mut reader = Some(reader);
+
+        // What the relay did with its direction, where it was seen.
+        let mut seen = None;
+        let mut asked_again = false;
+        for step in after.split(',') {
+            match step {
+                "nothing" => {}
+                // 3 seconds: quiet for 2.5 of them.
+                "wait" => {
+                    the_late_fin(reader.as_mut().unwrap(), ms(2_500), name).await;
+                    seen = Some("wait>fin");
+                }
+                "fin" => send.take().unwrap().finish(),
+                // CANCELLED (0x1).
+                "reset" => send.take().unwrap().reset(0x1),
+                "stop-sending" => reader.take().unwrap().stop(0x1),
+                "update" => {
+                    let update = ControlMessage::RequestUpdate(xmoq_moqt::message::RequestUpdate {
+                        request_id: id.value() + 2,
+                        parameters: vec![],
+                    });
+                    let send = send.as_mut().unwrap();
+                    send_message(send, &update, &Trace::default(), "request")
+                        .await
+                        .unwrap();
+                    asked_again = true;
+                }
+                other => panic!("{name}: after {other}"),
+            }
+        }
+        // An update got no answer: the end is the next thing on the stream
+        // wherever it is read here (`end_within`).
+        assert_eq!(asked_again, update == "no", "{name}");
+        match (seen, reader.as_mut()) {
+            (Some(seen), _) => assert_eq!(seen, own, "{name}"),
+            // Within a second, or when the 3 seconds are over.
+            (None, Some(reader)) => {
+                if let Some(end) = end_within(reader, ms(1_000), name).await {
+                    assert_eq!((end, own), (RequestClose::Fin, "fin"), "{name}");
+                } else {
+                    the_late_fin(reader, ms(1_500), name).await;
+                    assert_eq!(own, "wait>fin", "{name}");
+                }
+            }
+            // WHY not read: a subscriber that stopped the relay's direction
+            // cannot read what the relay did with it. The row is checked by
+            // the other column.
+            (None, None) => assert_eq!(own, "reset:0x1", "{name}"),
+        }
+        // The subscriber's direction, where it is still open: stopped at
+        // once, or left alone for now.
+        let stopped = match send.as_mut() {
+            Some(send) => match timeout(ms(500), send.stopped()).await {
+                Ok(WriteError::Stopped(Some(code))) => format!("stop:{code:#x}"),
+                Ok(other) => panic!("{name}: {other:?}"),
+                Err(_) => "-".to_string(),
+            },
+            None => "-".to_string(),
+        };
+        assert_eq!(stopped, peer, "{name}");
+        // Nothing waits for this FETCH any more.
+        held_when(&hub, |held| held.relay.fetch_ends == 0).await;
+        rows += 1;
+    }
+    // A table that lost rows would pass.
+    assert_eq!(rows, 10);
+}

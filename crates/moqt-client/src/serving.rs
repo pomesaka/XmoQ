@@ -455,6 +455,10 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
     // A `STOP_SENDING` is noted once; after it, and after the connection is
     // gone, the stream is not asked again.
     let mut watched = true;
+    // Whether the subscriber sent `STOP_SENDING` for this direction.
+    let mut stop_seen = false;
+    // Whether the client can still hand over a message.
+    let mut said_more = true;
     loop {
         tokio::select! {
             end = &mut ended => {
@@ -484,21 +488,35 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
                         // can destroy fetch state as soon as it has
                         // received a STOP_SENDING. It MUST reset the bidi
                         // request stream", and the relay does so.
-                        let stopped = tokio::select! {
-                            _ = tokio::time::timeout(end_wait, peer_ended) => None,
-                            stopped = send.stopped(), if watched => match stopped {
-                                WriteError::Stopped(code) => Some(code),
-                                // The connection is gone, and the stream.
-                                WriteError::Lost(_) => return,
-                            },
-                        };
-                        match stopped {
-                            Some(code) => {
-                                let stopped = Note(stream, Happened::RequestStopped(code));
-                                let _ = notes.send(stopped).await;
-                                send.reset(stream_reset_code::CANCELLED);
+                        //
+                        // WHY also a stop that was noted before the end was
+                        // heard: the fetch stream can be written to its end
+                        // at the moment the subscriber stops this
+                        // direction.
+                        if !stop_seen {
+                            tokio::select! {
+                                // WHY the stop first: one that is there
+                                // already is not passed over for a wait
+                                // that is over as well.
+                                biased;
+                                stopped = send.stopped(), if watched => match stopped {
+                                    WriteError::Stopped(code) => {
+                                        stop_seen = true;
+                                        let stopped = Happened::RequestStopped(code);
+                                        // The client is gone when this fails.
+                                        let _ = notes.send(Note(stream, stopped)).await;
+                                    }
+                                    // The connection is gone, and the stream.
+                                    WriteError::Lost(_) => return,
+                                },
+                                // Ended, nobody left to say so, or time.
+                                _ = tokio::time::timeout(end_wait, peer_ended) => {}
                             }
-                            None => send.finish(),
+                        }
+                        if stop_seen {
+                            send.reset(stream_reset_code::CANCELLED);
+                        } else {
+                            send.finish();
                         }
                     }
                     // A FETCH that is given up is owed no answer.
@@ -508,14 +526,22 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
                 return;
             }
             () = &mut answer, if !answered => answered = true,
-            message = said.recv(), if answered && waiting.is_empty() => match message {
-                Some(message) => waiting.push(message),
-                // The client let go of the FETCH; `ended` says how.
-                None => std::future::pending().await,
-            },
+            message = said.recv(), if answered && waiting.is_empty() && said_more => {
+                match message {
+                    Some(message) => waiting.push(message),
+                    // The client let go of the FETCH; `ended` says how.
+                    // WHY the queue is not asked again, and nothing is
+                    // waited for here: the client lets go of the queue and
+                    // says how the stream ends in one step, and this arm
+                    // can be taken before the other. A wait in it would
+                    // keep the task from ever hearing the end.
+                    None => said_more = false,
+                }
+            }
             stopped = send.stopped(), if watched => {
                 watched = false;
                 if let WriteError::Stopped(code) = stopped {
+                    stop_seen = true;
                     let _ = notes.send(Note(stream, Happened::RequestStopped(code))).await;
                 }
             }
@@ -819,6 +845,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_end_is_heard_when_the_client_lets_go_of_the_queue_in_the_same_step() {
+        // The client says how the stream ends and lets go of the queue of
+        // messages at once (`Answers::happened`): the task sees both
+        // together, and which of two such things it takes first is drawn.
+        // Many times, after the answer was sent.
+        for run in 0..100 {
+            let done = Done::default();
+            let (says, said) = mpsc::channel(SAY_QUEUE);
+            let (ends, ended) = oneshot::channel();
+            let (_, peer_ended) = oneshot::channel();
+            let (notes, _notes) = mpsc::channel(NOTE_QUEUE);
+            let task = tokio::spawn(speak(Speaker {
+                stream: 0,
+                send: Recorded(done.clone()),
+                first: vec![ControlMessage::RequestOk(
+                    xmoq_moqt::message::RequestOk::default(),
+                )],
+                after: Duration::ZERO,
+                said,
+                ended,
+                peer_ended,
+                end_wait: Duration::ZERO,
+                notes,
+                trace: Trace::default(),
+            }));
+            // The answer is sent, and the task waits.
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            ends.send(RequestEnd::Finish).unwrap();
+            drop(says);
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap_or_else(|_| panic!("run {run}: the task never ended"))
+                .unwrap();
+            assert_eq!(
+                done.0.lock().unwrap().clone(),
+                ["write 0x7", "finish"],
+                "run {run}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn the_request_stream_is_finished_when_the_subscribers_direction_has_ended_or_in_time() {
         let ms = Duration::from_millis;
         let finished = vec!["write 0x18", "finish"];
@@ -1009,6 +1077,184 @@ mod tests {
         assert_eq!(answers.lingering.len(), 1);
     }
 
+    /// A request stream whose subscriber sends `STOP_SENDING` with the code
+    /// `CANCELLED` (0x1) when the test says so.
+    struct Stoppable(Done, Arc<tokio::sync::Notify>);
+
+    impl SendStream for Stoppable {
+        fn write_all(&mut self, bytes: &[u8]) -> impl Future<Output = Result<(), WriteError>> {
+            let first = bytes.first().copied().unwrap_or(0);
+            self.0.0.lock().unwrap().push(format!("write {first:#x}"));
+            std::future::ready(Ok(()))
+        }
+
+        fn finish(self) {
+            self.0.0.lock().unwrap().push("fin".to_string());
+        }
+
+        fn finish_and_wait(self) -> impl Future<Output = Result<(), WriteError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn reset(self, code: u32) {
+            self.0.0.lock().unwrap().push(format!("reset:{code:#x}"));
+        }
+
+        async fn stopped(&mut self) -> WriteError {
+            self.1.notified().await;
+            WriteError::Stopped(Some(0x1))
+        }
+    }
+
+    /// What this client's direction of the request stream was ended with,
+    /// `None` while it is open.
+    fn ended_with(done: &Done) -> Option<String> {
+        let log = done.0.lock().unwrap();
+        log.iter()
+            .find(|entry| !entry.starts_with("write"))
+            .cloned()
+    }
+
+    /// How this client's direction ended: within a second, or `wait>fin`
+    /// for a FIN that came when the 3 seconds of [`PEER_END_WAIT`] were
+    /// over and not before.
+    async fn ended_soon_or_late(done: &Done, name: &str) -> String {
+        let ms = Duration::from_millis;
+        tokio::time::sleep(ms(1_000)).await;
+        if let Some(end) = ended_with(done) {
+            return end;
+        }
+        tokio::time::sleep(ms(1_500)).await;
+        assert_eq!(ended_with(done), None, "{name}");
+        tokio::time::sleep(ms(1_000)).await;
+        assert_eq!(ended_with(done).as_deref(), Some("fin"), "{name}");
+        "wait>fin".to_string()
+    }
+
+    /// `FETCH_OK` and a fetch stream that carries nothing.
+    fn empty_answer() -> Answer {
+        Answer {
+            messages: vec![ControlMessage::FetchOk(xmoq_moqt::message::FetchOk {
+                end_of_track: false,
+                end_location: Location {
+                    group: 1,
+                    object: 0,
+                },
+                parameters: vec![],
+                track_properties: vec![],
+            })],
+            header: FetchHeader { request_id: 1 },
+            group_order: GroupOrder::Ascending,
+            pieces: vec![],
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_request_stream_of_a_fetch_that_was_served_ends_as_the_shared_table_says() {
+        // `fixtures/peer-fetch/served-end.tsv`, which the relay and
+        // `@xmoq/moqt` read as well.
+        let table = include_str!("../../../fixtures/peer-fetch/served-end.tsv");
+        let ms = Duration::from_millis;
+        let closed = |how| Happened::PeerClosed(how);
+        let mut rows = 0;
+        for row in table.lines() {
+            let columns: Vec<&str> = row.split('\t').collect();
+            let [name, before, after, own, peer, update] = columns[..] else {
+                panic!("a row of 6 columns: {row}");
+            };
+            let (publisher, _subscriber) = memory::pair();
+            let publisher = Arc::new(publisher);
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            let mut answers = Answers::new(Pace::default());
+            let (done, stop) = (Done::default(), Arc::new(tokio::sync::Notify::new()));
+            let answer = empty_answer();
+            let request_stream = Stoppable(done.clone(), Arc::clone(&stop));
+            let request = asked(&mut session, 1);
+            answers.start(
+                0,
+                request,
+                request_stream,
+                answer,
+                &publisher,
+                &Trace::default(),
+            );
+            match before {
+                "-" => {}
+                "fin" => assert_eq!(answers.happened(0, closed(PeerRequestClose::Fin)), None),
+                other => panic!("{name}: before {other}"),
+            }
+            // The fetch stream is written to its end.
+            let Note(stream, written) = answers.next_note().await;
+            assert_eq!((stream, written), (0, Happened::Written), "{name}");
+            let over = answers.happened(0, written).expect("the FETCH is over");
+            // What the client does to the subscriber's direction: it stops
+            // it with the code its own was reset with (`fetch_over` in
+            // `main.rs`).
+            let mut stops_peer = over.reset;
+
+            let mut seen = None;
+            let mut asked_again = false;
+            for step in after.split(',') {
+                match step {
+                    "nothing" => {}
+                    // 3 seconds: open for 2.5 of them, finished a second
+                    // later.
+                    "wait" => {
+                        tokio::time::sleep(ms(2_500)).await;
+                        assert_eq!(ended_with(&done), None, "{name}");
+                        tokio::time::sleep(ms(1_000)).await;
+                        assert_eq!(ended_with(&done).as_deref(), Some("fin"), "{name}");
+                        seen = Some("wait>fin".to_string());
+                    }
+                    "fin" => {
+                        answers.happened(0, closed(PeerRequestClose::Fin));
+                    }
+                    "reset" => {
+                        answers.happened(0, closed(PeerRequestClose::Reset(Some(0x1))));
+                    }
+                    "stop-sending" => {
+                        stop.notify_one();
+                        // The task of the stream tells the client, where it
+                        // still has the stream.
+                        let told = tokio::time::timeout(ms(500), answers.next_note()).await;
+                        if let Ok(Note(stream, stopped)) = told
+                            && let Some(over) = answers.happened(stream, stopped)
+                        {
+                            stops_peer = over.reset;
+                        }
+                    }
+                    // A REQUEST_UPDATE: the client has nothing to answer it
+                    // with, and hands it to its session alone.
+                    "update" => {
+                        assert_eq!(answers.request_on(0), None, "{name}");
+                        asked_again = true;
+                    }
+                    other => panic!("{name}: after {other}"),
+                }
+            }
+            assert_eq!(asked_again, update == "no", "{name}");
+            let seen = match seen {
+                Some(seen) => seen,
+                None => ended_soon_or_late(&done, name).await,
+            };
+            assert_eq!(seen, own, "{name}");
+            let stopped = stops_peer.map_or("-".to_string(), |code| format!("stop:{code:#x}"));
+            assert_eq!(stopped, peer, "{name}");
+            // Ended once: nothing is put on the direction after its FIN or
+            // its reset, whatever comes later.
+            tokio::time::sleep(ms(4_000)).await;
+            let ends = done.0.lock().unwrap().clone();
+            let ends: Vec<&String> = ends
+                .iter()
+                .filter(|end| !end.starts_with("write"))
+                .collect();
+            assert_eq!(ends.len(), 1, "{name}: {ends:?}");
+            rows += 1;
+        }
+        // A table that lost rows would pass.
+        assert_eq!(rows, 10);
+    }
+
     fn fetch_object(group_id: u64) -> FetchObject {
         FetchObject {
             group_id,
@@ -1118,7 +1364,8 @@ mod tests {
         let ms = Duration::from_millis;
         // The subscriber stopped the client's direction. The answer is
         // tried once, whether the end comes with it or after it, and the
-        // stream is finished: for the transport that is nothing more to do.
+        // direction is reset with CANCELLED (0x1), as §5.2 has it for a
+        // publisher that received STOP_SENDING, and not finished.
         for (answer_after, end_after) in [(ms(2), ms(40)), (ms(0), ms(0))] {
             assert_eq!(
                 spoken_on(
@@ -1130,7 +1377,7 @@ mod tests {
                     (oneshot::channel().1, Duration::ZERO)
                 )
                 .await,
-                ["write fails", "finish"],
+                ["write fails", "reset 0x1"],
                 "{answer_after:?} {end_after:?}"
             );
         }

@@ -49,3 +49,26 @@ Every FETCH is `../moqt-18/fetch-standalone-moqtail-rs.hex` or `../moqt-18/fetch
 - How many REQUEST_UPDATEs may wait for the answer to a FETCH: 64, and one more refuses the FETCH with `EXCESSIVE_LOAD`. The Rust session counts them and leaves the limit to its caller; the relay and `@xmoq/moqt` have it, with a test each.
 - How many FETCHes of the peer may be open at once, and `EXCESSIVE_LOAD` for one more: 32 in `@xmoq/moqt` (`limits.maxPeerFetches`); the Rust session counts every request of the peer together, 256.
 - What ends a FETCH that was accepted: the streams are not the session's in the Rust implementation.
+
+## `served-end.tsv`
+
+What becomes of the request stream of a FETCH that a publisher served to its end: it sent FETCH_OK, and wrote the fetch stream and finished it. Three implementations read the rows: the relay (for a fetch stream it wrote itself; one it passed on ends the same way), the Rust client with `--answer-fetch`, and `@xmoq/moqt`. The row "The request stream of a FETCH that was served to its end, at a publisher" of [the implementation notes](../../docs/moqt-implementation-notes.md) has the reasons.
+
+One row a line, six fields separated by tabs, no header. Every row ends with one line feed; there are no empty rows.
+
+| Field | Meaning |
+|---|---|
+| name | What the row is about; unique |
+| before | What the subscriber did with its direction of the request stream before the fetch stream was finished: `-` for nothing, `fin` |
+| after | What the subscriber does afterwards, in order and separated by commas. `nothing`. `fin`, `reset`: it ends its direction, the reset with `CANCELLED` (`0x1`). `stop-sending`: it sends STOP_SENDING for the publisher's direction, with `CANCELLED`. `update`: it sends a REQUEST_UPDATE with a Request ID it has not used and no parameters. `wait`: it does nothing until the publisher has ended its own direction for want of anything from the subscriber, which the row then says with `wait>fin` |
+| own | What the publisher puts on its direction of the request stream, once: `fin` at once, which for a row with `fin` or `reset` in `after` is right after that; `reset:0x1`, a reset with `CANCELLED`, at once; `wait>fin`, a FIN when the time it waits for the subscriber is over, and not before |
+| peer | What the publisher does to the subscriber's direction at once: `-` for nothing, `stop:0x1` for STOP_SENDING with `CANCELLED` |
+| update | `no`: the REQUEST_UPDATE of the row gets no answer, whichever comes after it, and its Request ID counts as used. `-` in a row without one |
+
+**The times are not in the table**, and differ: how long the publisher waits for the subscriber before its FIN is 3 seconds in all three (provisional). What follows that FIN for a subscriber that still does not end its direction is not a row either: the relay stops it after 2 more seconds, `@xmoq/moqt` after 3 more, and the Rust client leaves it open, a tool that ends its sessions. The `peer` field says only what is done at once.
+
+**What a test can see differs too.** A subscriber that stopped the publisher's direction cannot read what the publisher did with it: the relay's test, which is a peer of the relay over an in-memory connection, checks that row by the `peer` field and by what the relay still holds, and not by `own`. The Rust client's test has the stream itself, and sees the reset.
+
+**Not in the table:** a FETCH that was refused, and one whose fetch stream was reset or never came. There the three do not do the same, each for a reason of its own: the relay passes a publisher's reset on and finishes the request stream at once, and the Rust client resets a request stream whose fetch stream it could not write.
+
+The outcomes were written from the rule before any test read them. The relay's test (`crates/relay/src/tests.rs`, over the hub and in-memory connections) had all ten rows as written. The Rust client's test (`crates/moqt-client/src/serving.rs`) did not: it found the client's task of a request stream waiting for ever where the client let go of its queue of messages and ended the stream in one step, and finishing a direction the subscriber had stopped at the moment the fetch stream was written. Both were mistakes of the client, and were put right; no row changed.
