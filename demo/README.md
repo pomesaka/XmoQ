@@ -11,6 +11,10 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 1. Open <http://localhost:8080/publish>. It paints a clock and publishes it; <http://localhost:8080/publish?source=camera> publishes the camera.
 2. Open <http://localhost:8080/watch> in one or more other tabs. A viewer that comes while another watches fetches the Group so far from the relay and has a picture at once; <http://localhost:8080/watch?join=no> waits for the next key frame instead, a second at most.
 
+**The publishing page may be a tab in the background**: its clock runs in a worker, which a browser does not slow down as it does the timers of a page nobody looks at. (Before, a publisher in a background tab sent one frame a second, and no sound that was in time.) The first line under each picture has the frames a second, and the watching page a line on the sound: what goes to the loudspeaker, and how loud.
+
+`bun demo/check.ts` checks a running demo in headless Chromium: the frames a second, and that sound leaves the watching page.
+
 Ctrl-C stops the web server and the relay. `bun demo/serve.ts --port N --relay-port M` chooses other ports.
 
 The publishing page sends a second track with sound, Opus: a quiet tone that goes up and down (`?audio=mic` takes the microphone, `?audio=none` sends none). On the watching page, click "sound" to hear it: a browser lets a page make sound only after a click.
