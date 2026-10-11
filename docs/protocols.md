@@ -39,6 +39,7 @@ Tracks are described by a catalog of `draft-ietf-moq-msf-01` (MSF), and media Ob
 - **The layer above MoQ Transport, in a package of its own.** `@xmoq/msf` may use `@xmoq/moqt`, never the other way round, and the part that reads and checks a catalog uses neither a connection nor `@xmoq/moqt`. A relay does not read a catalog (MSF-01 §5: "The payload of the Catalog object is opaque to Relays"), so the Rust side has nothing of MSF yet.
 - **Which revision of LOC** is an [open decision](open-questions.md): MSF-01 cites LOC-02, whose property numbers collide with transport draft 18. The catalog names the packaging with the string `"loc"` and carries no property number, so it does not wait for that decision.
 - Where MSF-01 leaves a choice or contradicts itself, what `@xmoq/msf` does is in [its README](../packages/msf/README.md), "How the draft is read".
+- **LOC is in a package of its own, `@xmoq/loc`, which depends on neither `@xmoq/moqt` nor `@xmoq/msf`**: it makes and reads the Object Properties of a frame as types and values, and turns a video payload with lengths into one with start codes. **Provisionally** it uses the numbers of LOC-04, none of which transport draft 18 defines, and which `moqlivemock`'s publisher sends on draft 18 (which revision of LOC is an [open question](open-questions.md)); [its README](../packages/loc/README.md) has the two tables side by side, and what else is read into the draft.
 
 ## Discussed
 

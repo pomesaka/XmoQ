@@ -43,6 +43,51 @@
 	},
 	"overrides": [
 		{
+			// WHY: LOC is the format of a media Object, bytes and numbers. @xmoq/loc knows
+			// neither the transport nor the streaming format, so that it can be read without
+			// either; scripts/ci/check-layers.sh sees a dependency package.json declares, and
+			// this a relative path, which declares nothing.
+			// An override replaces the options of the rule, so the two patterns above are
+			// repeated here.
+			"includes": ["packages/loc/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["**/spikes/**"],
+										"message": "spikes/ is throwaway validation code; packages must not depend on it."
+									},
+									{
+										"group": [
+											"**/interop/**",
+											"@xmoq/interop",
+											"@xmoq/interop/**"
+										],
+										"message": "interop/ checks the packages against other implementations; a package must not depend on it."
+									},
+									{
+										"group": [
+											"@xmoq/moqt",
+											"@xmoq/moqt/**",
+											"**/moqt/**",
+											"@xmoq/msf",
+											"@xmoq/msf/**",
+											"**/msf/**"
+										],
+										"message": "@xmoq/loc is the format of a media Object alone: it depends on no other package of this repository."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
 			// WHY: the catalog is JSON and bytes. The part of @xmoq/msf that reads and
 			// checks it must not know a connection, nor the transport package at all;
 			// tsconfig.core.json keeps the I/O globals out, and this the imports.
@@ -106,8 +151,15 @@
 										"message": "interop/ checks the packages against other implementations; a package must not depend on it."
 									},
 									{
-										"group": ["@xmoq/msf", "@xmoq/msf/**", "**/msf/**"],
-										"message": "MoQ Transport is the layer below the streaming format: @xmoq/msf may use @xmoq/moqt, not the other way round."
+										"group": [
+											"@xmoq/msf",
+											"@xmoq/msf/**",
+											"**/msf/**",
+											"@xmoq/loc",
+											"@xmoq/loc/**",
+											"**/loc/**"
+										],
+										"message": "MoQ Transport depends on no other package of this repository: the streaming format is built on it, and LOC knows nothing of it."
 									}
 								]
 							}
@@ -147,8 +199,15 @@
 										"message": "src/core has no I/O; src/webtransport depends on it, not the other way round."
 									},
 									{
-										"group": ["@xmoq/msf", "@xmoq/msf/**", "**/msf/**"],
-										"message": "MoQ Transport is the layer below the streaming format: @xmoq/msf may use @xmoq/moqt, not the other way round."
+										"group": [
+											"@xmoq/msf",
+											"@xmoq/msf/**",
+											"**/msf/**",
+											"@xmoq/loc",
+											"@xmoq/loc/**",
+											"**/loc/**"
+										],
+										"message": "MoQ Transport depends on no other package of this repository: the streaming format is built on it, and LOC knows nothing of it."
 									}
 								]
 							}

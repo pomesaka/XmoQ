@@ -19,6 +19,14 @@
         "typescript": "6.0.3",
       },
     },
+    "packages/loc": {
+      "name": "@xmoq/loc",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "typescript": "6.0.3",
+      },
+    },
     "packages/moqt": {
       "name": "@xmoq/moqt",
       "version": "0.0.0",
@@ -45,6 +53,8 @@
     "@types/node": ["@types/node@26.6.5", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg=="],
 
     "@xmoq/interop": ["@xmoq/interop@workspace:interop"],
+
+    "@xmoq/loc": ["@xmoq/loc@workspace:packages/loc"],
 
     "@xmoq/moqt": ["@xmoq/moqt@workspace:packages/moqt"],
 
