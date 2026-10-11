@@ -11,6 +11,18 @@
 //!
 //! Nothing is read from a stream, so a large write of the client stays
 //! pending.
+//!
+//! The paths that begin with `/peer-` are about a bidirectional stream the
+//! server opens, as a relay opens one for a SUBSCRIBE of its own. The server
+//! writes one byte on it, so that the client sees the stream, and then:
+//!
+//! - `/peer-stop`: sends `STOP_SENDING` (code 7) for the client's direction
+//!   after 100 ms; `/peer-stop-now`: at once
+//! - `/peer-cancel`: after 100 ms resets its own direction (code 5) and
+//!   sends `STOP_SENDING` (code 7), as a relay does that cancels a request;
+//!   `/peer-cancel-now`: at once
+//! - `/peer-close`: closes the session (code 9) after 400 ms
+//! - `/peer-hold`: does nothing
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +37,7 @@ use web_transport_quinn::quinn::{self, Endpoint};
 use web_transport_quinn::{RecvStream, Request, Server, Session};
 
 const STOP_CODE: u32 = 7;
+const RESET_CODE: u32 = 5;
 const SESSION_CODE: u32 = 9;
 
 #[tokio::main]
@@ -95,6 +108,35 @@ async fn handle(request: Request) -> Result<()> {
             }
             session.close(SESSION_CODE, b"bye from the server");
             session.closed().await;
+        }
+        "/peer-stop" | "/peer-stop-now" | "/peer-cancel" | "/peer-cancel-now" => {
+            let wait = if path.ends_with("-now") { 0 } else { 100 };
+            let cancel = path.starts_with("/peer-cancel");
+            let (mut send, mut recv) = session.open_bi().await?;
+            send.write_all(&[1]).await?;
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+            if cancel {
+                let _ = send.reset(RESET_CODE);
+            }
+            let _ = recv.stop(STOP_CODE);
+            // Kept, so that nothing else reaches the client.
+            let ended = session.closed().await;
+            println!("ENDED {path} {ended:?}");
+            drop((send, recv));
+        }
+        "/peer-close" => {
+            let (mut send, recv) = session.open_bi().await?;
+            send.write_all(&[1]).await?;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            session.close(SESSION_CODE, b"bye from the server");
+            session.closed().await;
+            drop((send, recv));
+        }
+        "/peer-hold" => {
+            let (mut send, recv) = session.open_bi().await?;
+            send.write_all(&[1]).await?;
+            session.closed().await;
+            drop((send, recv));
         }
         "/hold" => {
             while let Ok(stream) = next_stream(&session).await {
