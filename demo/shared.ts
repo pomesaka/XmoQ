@@ -177,13 +177,20 @@ export function through(broadcast: Broadcast): Broadcast {
 /** With `?diag=1`: when the first bytes of each stream of the peer came, by this page's clock, and how many they were. */
 export const firstBytes = new Map<string, { at: number; length: number }>();
 
-/** Connects to the relay of a broadcast. */
-export function connectToRelay(to: Broadcast = HERE): Promise<MoqtConnection> {
+/**
+ * Connects to the relay of a broadcast. With a token, every request of the
+ * connection carries it (`authorizationToken` of `connect`).
+ */
+export function connectToRelay(
+	to: Broadcast = HERE,
+	token?: Uint8Array,
+): Promise<MoqtConnection> {
 	const hash = Uint8Array.from(to.certSha256Hex.match(/../g) ?? [], (byte) =>
 		Number.parseInt(byte, 16),
 	);
 	return connect(to.relayUrl, {
 		implementation: "xmoq-demo/0.0.0",
+		...(token === undefined ? {} : { authorizationToken: token }),
 		// WHY: the relay's certificate is self-signed. Chromium takes it when
 		// its hash is given, and it is valid for less than two weeks.
 		serverCertificateHashes: [{ algorithm: "sha-256", value: hash }],

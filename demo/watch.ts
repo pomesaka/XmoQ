@@ -284,25 +284,23 @@ async function main(): Promise<void> {
 			let connection: MoqtConnection | undefined;
 			try {
 				link = "connecting";
-				connection = await connectToRelay(broadcast);
+				// Where the rooms give tokens, the connection carries one.
+				connection = await connectToRelay(
+					broadcast,
+					await room?.token("sub", broadcast.namespace),
+				);
 				const trackNamespace = namespace(broadcast.namespace);
-				// Where the rooms give tokens, the requests carry one.
-				const token = await room?.token("sub", broadcast.namespace);
-				const authorization =
-					token === undefined ? {} : { authorizationToken: token };
 				// `?video=no` plays the sound alone, for looking into it.
 				const video =
 					query.get("video") === "no"
 						? undefined
 						: await playVideoTrack(connection, {
 								...videoOptions,
-								...authorization,
 								trackNamespace,
 							});
 				playback = video;
 				audio = await playAudioTrack(connection, {
 					...audioOptions,
-					...authorization,
 					trackNamespace,
 				})
 					.then((playing) => {

@@ -49,6 +49,12 @@ mise run interop -- --base-port 45300
 - A token of the room has the form the relay takes: `v1|xmoq/demo|sub|1791721868|<mac>` (`check.mjs`).
 - The Joining FETCH of the watching page carries the token as well; the relay does not check a Joining FETCH (its record), so that says nothing.
 
+## Afterwards: the token is given to the connection, once
+
+Decided on 2026-10-11: a token is given to a connection of `@xmoq/moqt` once (`authorizationToken` of `connect`), and the library puts it into every request it sends that can carry one: PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE and FETCH, of the eight messages §10.2.2 names. The option of `playVideoTrack`, `playAudioTrack` and `followCatalog` is gone again; what uses a connection does not know of tokens. Not in SETUP, and no alias: those are later steps.
+
+`bun demo/serve.ts --auth` again, the pages giving the token to their connection: a publisher with a token publishes; a viewer with one has 120 frames and 200 pieces in 4 seconds; each without is refused and says so. The same four results.
+
 ## Limitations and blockers
 
 - **The room gives a token to anybody who asks**, for any namespace and either role. It shows that the two ends fit, and decides nothing about who may publish or watch.

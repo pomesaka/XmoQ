@@ -35,13 +35,6 @@ export interface FollowCatalogOptions {
 	/** The namespace of the catalog track: the one the broadcast is in. */
 	namespace: TrackNamespace;
 	/**
-	 * An AUTHORIZATION TOKEN for the SUBSCRIBE and the Joining FETCH
-	 * (transport draft 18 §10.2.2): the Token structure as bytes. None is
-	 * sent when left out. **An experiment**: how a relay authorizes is
-	 * undecided.
-	 */
-	authorizationToken?: Uint8Array;
-	/**
 	 * Ends the reading when it aborts: the subscription is cancelled, and
 	 * the FETCH with it. With a signal that has aborted already nothing is
 	 * sent, and `followCatalog` rejects with its reason.
@@ -122,10 +115,6 @@ export async function followCatalog(
 	options: FollowCatalogOptions,
 ): Promise<CatalogFollower> {
 	const { signal } = options;
-	const parameters =
-		options.authorizationToken === undefined
-			? undefined
-			: { authorizationToken: [options.authorizationToken] };
 	// WHY here: `readCatalog` would throw it for the first Object, where
 	// nobody is left to catch it.
 	if (options.maxLength !== undefined) checkMaxLength(options.maxLength);
@@ -141,7 +130,6 @@ export async function followCatalog(
 		subscription = await connection.subscribe({
 			trackNamespace: options.namespace,
 			trackName: CATALOG_TRACK_NAME,
-			...(parameters === undefined ? {} : { parameters }),
 		});
 	} catch (error) {
 		signal?.removeEventListener("abort", stopBySignal);
@@ -189,7 +177,6 @@ export async function followCatalog(
 					joiningRequestId: subscription.requestId,
 					joiningStart: 0n,
 				},
-				...(parameters === undefined ? {} : { parameters }),
 			},
 			{ signal: AbortSignal.any([stop.signal, timeout]) },
 		);
