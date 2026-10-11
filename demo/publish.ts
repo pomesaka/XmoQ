@@ -145,6 +145,9 @@ async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 }
 
 /** Paints a clock and a bar that moves, and calls `onFrame` with each picture. */
+/** `?picture=busy`: the clock's picture with blocks that change in every frame, for a picture that fills the bitrate it asks for. */
+const BUSY = new URLSearchParams(location.search).get("picture") === "busy";
+
 function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	const began = performance.now();
 	let painted = 0;
@@ -153,6 +156,18 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 		const elapsed = performance.now() - began;
 		context.fillStyle = "#10202c";
 		context.fillRect(0, 0, WIDTH, HEIGHT);
+		if (BUSY) {
+			// A picture that costs bits: 300 blocks, new in every frame.
+			for (let block = 0; block < 300; block++) {
+				context.fillStyle = `hsl(${Math.random() * 360} 70% ${20 + Math.random() * 50}%)`;
+				context.fillRect(
+					Math.random() * WIDTH,
+					200 + Math.random() * (HEIGHT - 280),
+					24,
+					24,
+				);
+			}
+		}
 		context.fillStyle = "#f2c14e";
 		context.fillRect(((elapsed / 10) % (WIDTH + 80)) - 80, HEIGHT - 60, 80, 30);
 		context.fillStyle = marked(Date.now()) ? "#ffffff" : "#000000";

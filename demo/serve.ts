@@ -1,6 +1,6 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr]
 //
 // `--auth` (an experiment; how the relay authorizes is undecided): a key
 // is made for this run and given to the relay and to the rooms. The relay
@@ -30,6 +30,8 @@ const { values: options } = parseArgs({
 		auth: { type: "boolean", default: false },
 		// Another relay than the one of this tree, for trying one out.
 		"relay-binary": { type: "string" },
+		// The relay's congestion control: cubic (its default), newreno or bbr.
+		congestion: { type: "string" },
 		// A file for the relay's lines, for looking into a run.
 		"relay-log": { type: "string" },
 		port: { type: "string", default: "8080" },
@@ -104,6 +106,9 @@ const relay = spawn(
 		keyFile,
 		...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
 		...(options["relay-log"] === undefined ? [] : ["--slow-open-ms", "0"]),
+		...(options.congestion === undefined
+			? []
+			: ["--congestion", options.congestion]),
 	],
 	// Its lines, one for each thing it does, are not shown; `--relay-log`
 	// writes them to a file, with how long every stream took to open.
