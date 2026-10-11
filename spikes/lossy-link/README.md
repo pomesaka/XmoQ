@@ -10,4 +10,6 @@ bun spikes/lossy-link/measure.ts http://localhost:45381 45386 http://127.0.0.1:4
 
 `reconnect.ts` (a cut of 8 seconds, for the viewer and for the publisher) and `audio-under-loss.ts` (the sound with a longer buffer and with several chunks in a Group) take the same four arguments.
 
+The link takes loss for one way alone as well: `/set?up=0.1` (towards the relay) and `/set?down=0.1` (from it).
+
 By hand: open `/publish`, then `/watch?via=45386`, and change the link with `curl 'http://127.0.0.1:45387/set?loss=0.05&delay=50&jitter=10'`.

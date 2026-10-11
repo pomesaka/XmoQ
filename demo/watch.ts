@@ -7,6 +7,7 @@
 //               (150 when left out; 0 plays each as it comes)
 //   ?join=no    waits for the next key frame, as without the Joining FETCH
 
+import type { MoqtConnection } from "@xmoq/moqt";
 import {
 	type AudioPlayback,
 	playAudioTrack,
@@ -17,6 +18,7 @@ import {
 	audioTrackName,
 	connectToRelay,
 	DECODER_CODEC,
+	firstBytes,
 	HERE,
 	MARK,
 	namespace,
@@ -240,6 +242,16 @@ async function main(): Promise<void> {
 			stalls,
 			lastShown: lastShown ?? null,
 			lastHeard: lastHeard ?? null,
+			...(query.get("diag") === null
+				? {}
+				: {
+						audioCame: arrived.audio.values,
+						firstBytes: [...firstBytes].map(([stream, first]) => [
+							stream,
+							first.at,
+							first.length,
+						]),
+					}),
 			sessions,
 			link,
 			dropped: { video: stats.dropped, audio: heard?.dropped ?? {} },
@@ -258,14 +270,19 @@ async function main(): Promise<void> {
 		} else {
 			const broadcast = through(found);
 			document.body.dataset.broadcast = JSON.stringify(broadcast);
+			let connection: MoqtConnection | undefined;
 			try {
 				link = "connecting";
-				const connection = await connectToRelay(broadcast);
+				connection = await connectToRelay(broadcast);
 				const trackNamespace = namespace(broadcast.namespace);
-				const video = await playVideoTrack(connection, {
-					...videoOptions,
-					trackNamespace,
-				});
+				// `?video=no` plays the sound alone, for looking into it.
+				const video =
+					query.get("video") === "no"
+						? undefined
+						: await playVideoTrack(connection, {
+								...videoOptions,
+								trackNamespace,
+							});
 				playback = video;
 				audio = await playAudioTrack(connection, {
 					...audioOptions,
@@ -278,12 +295,20 @@ async function main(): Promise<void> {
 				link = `playing (session ${sessions})`;
 				const how = await Promise.race([
 					connection.closed.then((close) => `the session ended (${close.type})`),
-					video.ended.then((end) => `the video track ended (${end.type})`),
+					...(video === undefined
+						? []
+						: [
+								video.ended.then(
+									(end) => `the video track ended (${end.type})`,
+								),
+							]),
 				]);
-				connection.close();
 				link = `${how} at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
 			} catch (error) {
 				link = `could not play (${String(error).slice(0, 120)}); trying again every 2 s`;
+			} finally {
+				// Also a session in which nothing could be played is not left open.
+				connection?.close();
 			}
 		}
 		await new Promise((resolve) => setTimeout(resolve, 2000));

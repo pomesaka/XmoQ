@@ -83,6 +83,40 @@ Both pages of the demo now say when their session has ended and connect again ev
 - A longer buffer hides it at 5% and not at 10%.
 - **What several chunks in a Group cost was not measured**: a viewer that comes waits for the next Group's first chunk (up to 500 ms with 25), and a lost packet holds back what follows it on its stream. `chunksPerGroup` is an option for trying; without it the publisher does as before.
 
+## Where the sound waits, and what a viewer is told when its publisher goes
+
+Looked into without changing the relay: the relay run by hand with the clock put before each of its lines, loss for one way alone in the link (`up`, `down`), the own Rust client as the viewer, and the watching page with `?diag=1` (when the first bytes of each stream came) and `?video=no`.
+
+### The sound under loss: what is known
+
+| What was done | Seen |
+|---|---|
+| The relay's lines, loss 10% both ways on the viewer's link | **The relay orders a stream for every chunk on time**, 20 ms apart (`OPEN_DATA`, `FINISH_DATA`), while the page gets the sound 591 ms late (median). The publisher's side is not it |
+| Loss towards the relay alone, 10% and 30% (the viewer's acknowledgements and its credit for streams) | **No delay**: 0 pieces too late, the sound 8 ms early as without loss. 3 runs |
+| Loss from the relay alone, 5% and 10% (the data) | **The delay**: 174 ms at 5%, 273 and 332 ms at 10% (median), 191 to 318 pieces too late. 3 runs |
+| **The own Rust client (quinn) as the viewer**, the audio track, loss 10% from the relay | **No delay**: an Object was there 1 ms after the relay ordered its stream (median), 54 and 61 ms at most, 450 Objects. 2 runs; 20 ms at most without loss |
+| The page, loss 10% from the relay, `?diag=1` | **The delay only grows**, in steps of about 20 ms: the last 40 pieces came 210 to 273 ms late, in rising order. The first bytes of one audio stream and the next are 16 to 30 ms apart for most (245 of 353), 0 ms apart for 20: **what is late is not made up for**. 354 streams in 8 seconds, where there are 406 without loss |
+| The same with the sound alone (`?video=no`) | The same: 412 to 475, and 431 to 572 ms late at the end of 8 seconds. The video is not part of it |
+
+- So the sound waits **between the relay's order to open a stream and the page having its bytes, and only where Chromium receives**: with quinn at both ends of the same link it does not. And it waits as if one stream could pass every 20 ms and no faster, so that every loss puts everything after it one step back for good.
+- **Not found: which of the two it is.** (a) The relay waits to open the stream, for the credit Chromium gives for streams: credit that comes back only as streams are done would let one stream through for each one that ends, which is the rate they are made at and no more. (b) The relay has the stream and its QUIC holds the bytes back after a loss (the congestion window), with Chromium acknowledging late when little is sent. Loss towards the relay did nothing, which speaks against credit that is lost, and not against credit that comes late.
+- **What would tell**: the relay's time between ordering a stream and having it open (the hub has that event, `OutStreamOpened`, and prints no line for it). With it, (a) shows as a wait there and (b) as none.
+
+### A publisher that goes
+
+The publisher's link cut and left cut, the viewer's untouched; the relay's lines with the clock, and what the page said:
+
+| After the cut | |
+|---|---|
+| 124 ms | The last frame the viewer showed |
+| 9,032 ms | The relay: `CONNECTION_ENDED … Lost("connection error: timed out")` for the publisher, and at once `PUBLISH_DONE status_code=0x2` to the viewer for each of its two subscriptions |
+| 9,542 ms | The page: "the video track ended (subscription-ended)" (it looks every 500 ms) |
+| 11,526 ms and every 2 s | The page connects again and is refused, `REQUEST_ERROR 0x10`: nobody publishes |
+
+- **The relay tells the viewer, and at once; what takes 9 seconds is the relay noticing**: its idle timeout of 6 seconds, from the last packet it got, with the keep-alive every 3 ([open questions](../open-questions.md), "Idle timeout of the relay"). The page showed nothing wrong.
+- In the run with a cut of 8 seconds above, the link was back before the relay had noticed.
+- Found on the way and mended in the demo: a session of the watching page in which nothing could be played was left open.
+
 ## Limitations and blockers
 
 - **One run for each row**, 10 seconds, on loopback: the numbers move from run to run, and a difference of a few frames means nothing.
