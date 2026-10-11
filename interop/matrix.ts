@@ -232,6 +232,45 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		args: ["--fetch", "absent-track"],
 		relays: ["moqtail", "own"],
 	},
+	// The publisher is an own page that only announced: it serves the track
+	// when the relay asks, and answers a FETCH from what it has sent (`serve`
+	// of `@xmoq/moqt`).
+	{
+		name: "own-browser fetches {0, 0} to {2, 1} from an own page that answers a FETCH",
+		script: "fetch.ts",
+		args: ["--fetch", "page-standalone"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser subscribes and sends a Joining FETCH; the relay asks the own page for the range, which answers",
+		script: "fetch.ts",
+		args: ["--fetch", "page-joining"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser fetches where the own page has nothing, and gets its End of Range indicator",
+		script: "fetch.ts",
+		args: ["--fetch", "page-nothing-there"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser fetches Objects the own page has and never sent; the relay asks the page",
+		script: "fetch.ts",
+		args: ["--fetch", "page-unsent"],
+		relays: ["moqtail", "own"],
+	},
+	{
+		name: "own-browser gives its FETCH up while the own page serves it; the page sees it cancelled",
+		script: "fetch.ts",
+		args: ["--fetch", "page-cancelled"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser fetches from an own page that refuses with DOES_NOT_EXIST",
+		script: "fetch.ts",
+		args: ["--fetch", "page-refuses"],
+		relays: ["own"],
+	},
 ];
 
 /** The arguments that name clients in one role, as in `--subscriber a --subscriber b`. */

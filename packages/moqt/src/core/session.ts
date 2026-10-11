@@ -5,13 +5,19 @@ import {
 	SETUP_OPTION_MOQT_IMPLEMENTATION,
 } from "./control-stream.ts";
 import { MoqtError, protocolViolation, StreamResetErrorCode } from "./error.ts";
-import { FETCH_HEADER_STREAM_TYPE } from "./fetch.ts";
+import {
+	FETCH_HEADER_STREAM_TYPE,
+	type FetchObject,
+	type RangeEnd,
+} from "./fetch.ts";
 import type { KeyValuePair } from "./key-value-pair.ts";
 import { resolveLimits, type SessionLimits } from "./limits.ts";
 import type { OutgoingObject, SubgroupOptions } from "./outgoing-subgroups.ts";
+import type { Location } from "./parameters.ts";
 import { createPeerRequests } from "./peer-requests.ts";
 import {
 	createRequests,
+	type FetchAnswer,
 	type FetchRequest,
 	type PublishNamespaceRequest,
 	type PublishRequest,
@@ -84,6 +90,40 @@ export interface Session {
 		errorCode: bigint,
 		errorReason: string,
 	): SessionOutput[];
+	/**
+	 * Accepts a Standalone FETCH of the peer that the event `peer-fetch`
+	 * reported: sends FETCH_OK, a REQUEST_OK for each REQUEST_UPDATE that
+	 * came before, and opens the fetch stream with its FETCH_HEADER. The
+	 * Objects are then written with `writeFetchObject` and
+	 * `writeFetchRangeEnd`, and `finishFetch` ends the FETCH.
+	 *
+	 * Throws an `InactiveError` for a request that does not wait for its
+	 * answer, and a `RangeError`, with the FETCH still waiting, for an End
+	 * Location before the Start Location of the FETCH (§10.13).
+	 */
+	acceptFetch(requestId: bigint, answer: FetchAnswer): SessionOutput[];
+	/**
+	 * Writes the next Object to the fetch stream of an accepted FETCH. Throws
+	 * a `RangeError`, with nothing written and the stream as it was, for an
+	 * Object that does not follow the one before it by the Group Order of
+	 * the FETCH.
+	 */
+	writeFetchObject(requestId: bigint, object: FetchObject): SessionOutput[];
+	/** Writes an End of Range indicator to that stream (§11.4.4.2). */
+	writeFetchRangeEnd(
+		requestId: bigint,
+		kind: RangeEnd,
+		location: Location,
+	): SessionOutput[];
+	/**
+	 * Finishes the fetch stream and the request stream: the FETCH is served.
+	 * How the peer then ends its direction of the request stream is reported
+	 * as after PUBLISH_DONE (`publish-done-peer-ended`), and
+	 * `expirePublishDonePeerEnd` ends the wait for it.
+	 */
+	finishFetch(requestId: bigint): SessionOutput[];
+	/** Gives an accepted FETCH up: resets both of its streams with `code` (§5.2). */
+	resetFetch(requestId: bigint, code: number): SessionOutput[];
 	/**
 	 * Ends a subscription this endpoint is the publisher of: sends
 	 * PUBLISH_DONE and a FIN (§10.11). Every subgroup stream of the
@@ -237,6 +277,8 @@ export function createSession(options: SessionOptions = {}): Session {
 	const peerRequests = createPeerRequests({
 		subscribe: (message, peerStream, out) =>
 			requests.peerSubscribeOpened(message, peerStream, out),
+		fetch: (message, peerStream, out) =>
+			requests.peerFetchOpened(message, peerStream, out),
 		isOpenSubscribe: (requestId) => requests.isOpenPeerSubscribe(requestId),
 	});
 	const requests: Requests = createRequests({
@@ -419,6 +461,16 @@ export function createSession(options: SessionOptions = {}): Session {
 			whileOpen(() =>
 				requests.rejectPeerRequest(requestId, errorCode, errorReason),
 			),
+		acceptFetch: (requestId, answer) =>
+			whileOpen(() => requests.acceptFetch(requestId, answer)),
+		writeFetchObject: (requestId, object) =>
+			whileOpen(() => requests.writeFetchObject(requestId, object)),
+		writeFetchRangeEnd: (requestId, kind, location) =>
+			whileOpen(() => requests.writeFetchRangeEnd(requestId, kind, location)),
+		finishFetch: (requestId) =>
+			whileOpen(() => requests.finishFetch(requestId)),
+		resetFetch: (requestId, code) =>
+			whileOpen(() => requests.resetFetch(requestId, code)),
 		publishDone: (requestId, statusCode, errorReason) =>
 			whileOpen(() => requests.publishDone(requestId, statusCode, errorReason)),
 		openSubgroup: (requestId, subgroupOptions) =>

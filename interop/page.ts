@@ -9,6 +9,7 @@ import {
 	type FetchRange,
 	type KeyValuePair,
 	type MoqtConnection,
+	type PeerFetch,
 	type PeerStreamEnd,
 	PublishEndedError,
 	type PublishedTrack,
@@ -20,6 +21,7 @@ import type { Diagnostics } from "@xmoq/moqt/diagnostics";
 import type {
 	PageFetch,
 	PageFetchReport,
+	PageFetchServing,
 	PageProperty,
 	PageReceivedObject,
 	SubscriptionReport,
@@ -75,6 +77,84 @@ let connection: MoqtConnection | undefined;
 let published: PublishedTrack | undefined;
 /** The subscription `serveTrack` accepted, once it has. */
 let served: Promise<PublishedTrack> | undefined;
+/**
+ * Every Object this page has, in ascending order: the ones it sent, and
+ * with "serve-unsent" three that it never sent. It answers a FETCH from
+ * these. The library keeps none, so this is the application's part.
+ */
+const sentObjects: { group: bigint; object: bigint; payload: Uint8Array }[] =
+	[];
+
+/** Takes an Object into `sentObjects`, at its place. */
+function keep(group: bigint, payload: Uint8Array): void {
+	sentObjects.push({ group, object: 0n, payload });
+	sentObjects.sort((a, b) => (before(a, b) ? -1 : before(b, a) ? 1 : 0));
+}
+/** How each FETCH this page accepted ended, in the order they ended. */
+const servedFetchEnds: string[] = [];
+
+/** Whether `a` comes before `b`. */
+const before = (
+	a: { group: bigint; object: bigint },
+	b: { group: bigint; object: bigint },
+): boolean => a.group < b.group || (a.group === b.group && a.object < b.object);
+
+/** 2^64 - 1: the Object ID of the last Location a Group has. */
+const LAST_OBJECT = 2n ** 64n - 1n;
+
+/**
+ * Answers a Standalone FETCH from `sentObjects`, in ascending order.
+ *
+ * FETCH_OK has the End Location that was asked for, or the Location after
+ * the last Object this page has where the range goes beyond it. The fetch
+ * stream has the Objects of the range, and, where the range ends at or
+ * before the last Object this page has and its tail holds no Object, one
+ * End of Range indicator that says so: the page is where the Track comes
+ * from, so what it does not have does not exist.
+ */
+async function answerFetch(request: PeerFetch): Promise<void> {
+	const largest = sentObjects.at(-1);
+	if (largest === undefined || before(largest, request.startLocation)) {
+		// INVALID_RANGE: the range starts after everything there is.
+		await request.reject(0x11n, "nothing of the Track is that far");
+		return;
+	}
+	const asked = request.endLocation;
+	// The last Location of what was asked for: Object 0 names the whole Group.
+	const last =
+		asked.object === 0n
+			? { group: asked.group, object: LAST_OBJECT }
+			: { group: asked.group, object: asked.object - 1n };
+	const beyond = before({ group: largest.group, object: largest.object }, last);
+	const writer = await request.accept({
+		endLocation: beyond
+			? { group: largest.group, object: largest.object + 1n }
+			: asked,
+	});
+	void writer.ended.then((end) => {
+		servedFetchEnds.push(describe(end));
+		console.log(
+			`fetch served: request_id=${request.requestId} ${describe(end)}`,
+		);
+	});
+	let written: { group: bigint; object: bigint } | undefined;
+	for (const each of sentObjects) {
+		if (before(each, request.startLocation) || before(last, each)) continue;
+		await writer.write({
+			groupId: each.group,
+			subgroupId: 0n,
+			objectId: each.object,
+			publisherPriority: 0,
+			properties: [],
+			payload: each.payload,
+		});
+		written = each;
+	}
+	if (!beyond && (written === undefined || before(written, last))) {
+		await writer.endOfRange("NonExistent", last);
+	}
+	await writer.close();
+}
 let subscribed: Subscription | undefined;
 /** Absent while nothing is subscribed, and for a subscription that is not read. */
 let reading: Reading | undefined;
@@ -234,11 +314,13 @@ async function sendIn(
 		// largest. A stream left open says nothing about what follows.
 		endOfGroup: finish,
 	});
+	const payload = fromHex(payloadHex);
 	await subgroup.write({
 		objectId: 0n,
-		payload: fromHex(payloadHex),
+		payload,
 		properties: properties.map(toKeyValuePair),
 	});
+	keep(group, payload);
 	if (finish) await subgroup.close();
 	console.log(
 		`object sent: group=${group} object=0 payload_len=${payloadHex.length / 2} properties=${properties.length} finished=${finish}`,
@@ -490,40 +572,97 @@ window.xmoqOwn = {
 		console.log(`namespace announced: ${namespace}`);
 	}),
 
-	serveTrack: withPlainErrors(async (namespace: string, trackName: string) => {
-		const moq = connected();
-		const wanted = utf8.encode(trackName);
-		const sameName = (name: Uint8Array): boolean =>
-			name.length === wanted.length &&
-			name.every((byte, index) => byte === wanted[index]);
-		let asked = false;
-		served = new Promise((resolve, reject) => {
-			// Before the namespace is announced: a relay asks as soon as it has
-			// a subscriber.
-			moq.serve({
-				subscribe(request) {
-					console.log(
-						`asked: request_id=${request.requestId} track=${utf8Decoder.decode(request.trackName)}`,
-					);
-					if (asked || !sameName(request.trackName)) {
-						// DOES_NOT_EXIST. A request that went meanwhile needs none.
-						request.reject(0x10n, "not a track of this page").catch(() => {});
-						return;
-					}
-					asked = true;
-					request.accept().then((track) => {
-						published = track;
-						console.log(`serving: alias=${track.trackAlias}`);
-						resolve(track);
-					}, reject);
-				},
+	serveTrack: withPlainErrors(
+		async (
+			namespace: string,
+			trackName: string,
+			fetches: PageFetchServing,
+			unsentPayloadHex: string,
+		) => {
+			if (fetches === "serve-unsent") {
+				// Object 0 of three Groups far ahead, which no relay has seen.
+				for (const group of [100n, 101n, 102n]) {
+					keep(group, fromHex(unsentPayloadHex));
+				}
+			}
+			const moq = connected();
+			const wanted = utf8.encode(trackName);
+			const sameName = (name: Uint8Array): boolean =>
+				name.length === wanted.length &&
+				name.every((byte, index) => byte === wanted[index]);
+			let asked = false;
+			served = new Promise((resolve, reject) => {
+				// Before the namespace is announced: a relay asks as soon as it has
+				// a subscriber.
+				moq.serve({
+					subscribe(request) {
+						console.log(
+							`asked: request_id=${request.requestId} track=${utf8Decoder.decode(request.trackName)}`,
+						);
+						if (asked || !sameName(request.trackName)) {
+							// DOES_NOT_EXIST. A request that went meanwhile needs none.
+							request.reject(0x10n, "not a track of this page").catch(() => {});
+							return;
+						}
+						asked = true;
+						// §10.2.11: a publisher that has published Objects of the
+						// Track says how far it is.
+						const largest = sentObjects.at(-1);
+						request
+							.accept(
+								largest === undefined
+									? {}
+									: {
+											parameters: {
+												largestObject: {
+													group: largest.group,
+													object: largest.object,
+												},
+											},
+										},
+							)
+							.then((track) => {
+								published = track;
+								console.log(`serving: alias=${track.trackAlias}`);
+								resolve(track);
+							}, reject);
+					},
+					fetch(request) {
+						console.log(
+							`fetch asked: request_id=${request.requestId} start={${request.startLocation.group}, ${request.startLocation.object}} end={${request.endLocation.group}, ${request.endLocation.object}}`,
+						);
+						if (!sameName(request.trackName) || fetches === "refuse") {
+							// DOES_NOT_EXIST.
+							request.reject(0x10n, "not a track of this page").catch(() => {});
+							return;
+						}
+						if (fetches === "stall") {
+							// Accepted, and then nothing: for a subscriber that gives
+							// its FETCH up.
+							void request.accept({ endLocation: request.endLocation }).then(
+								(writer) =>
+									writer.ended.then((end) => {
+										servedFetchEnds.push(describe(end));
+										console.log(
+											`fetch served: request_id=${request.requestId} ${describe(end)}`,
+										);
+									}),
+								() => {},
+							);
+							return;
+						}
+						return answerFetch(request);
+					},
+				});
 			});
-		});
-		// Observed here already: a failure is reported by `servingTrack`.
-		served.catch(() => {});
-		await moq.publishNamespace(namespaceFromPath(namespace));
-		console.log(`namespace announced: ${namespace}`);
-	}),
+			// Observed here already: a failure is reported by `servingTrack`.
+			served.catch(() => {});
+			await moq.publishNamespace(namespaceFromPath(namespace));
+			console.log(`namespace announced: ${namespace}`);
+		},
+	),
+
+	servedFetchEnds: withPlainErrors(async () => [...servedFetchEnds]),
 
 	servingTrack: withPlainErrors(async () => {
 		if (served === undefined) throw new Error("serveTrack() was not called");

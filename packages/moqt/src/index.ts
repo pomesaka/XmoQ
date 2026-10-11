@@ -20,6 +20,7 @@ export type {
 	SubscriptionFilter,
 } from "./core/parameters.ts";
 export type {
+	FetchAnswer,
 	FetchRequest,
 	PublishRequest,
 	SubscribeAnswer,
@@ -37,7 +38,9 @@ export type {
 	Fetch,
 	FetchCallOptions,
 	FetchResponse,
+	FetchWriter,
 	MoqtConnection,
+	PeerFetch,
 	PeerSubscribe,
 	PublishedTrack,
 	ReceivedObject,
@@ -51,6 +54,7 @@ export type {
 	PeerStreamEnd,
 	PublishEnd,
 	RequestAbort,
+	ServedFetchEnd,
 	SessionClose,
 	SubscriptionEnd,
 } from "./webtransport/endings.ts";
@@ -60,6 +64,7 @@ export {
 	PublishEndedError,
 	RequestAbortedError,
 	RequestFailedError,
+	ServedFetchEndedError,
 	SessionClosedError,
 	SubgroupClosedError,
 	SubscriptionEndedError,

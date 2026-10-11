@@ -968,6 +968,7 @@ mod tests {
     use crate::name::TrackNamespace;
     use crate::session::RequestState;
     use crate::session::Transport;
+    use crate::test_util::fixture;
 
     fn server() -> Session {
         Session::new(Role::Server, Transport::WebTransport)
@@ -1150,6 +1151,22 @@ mod tests {
         outcome: String,
     }
 
+    /// The bytes a field of a shared table has in lower-case hexadecimal.
+    fn hex_bytes(hex: &str) -> Result<Vec<u8>, String> {
+        if !hex.len().is_multiple_of(2)
+            || hex
+                .bytes()
+                .any(|digit| !b"0123456789abcdef".contains(&digit))
+        {
+            return Err(format!("not lower-case hexadecimal bytes: {hex:?}"));
+        }
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|error| format!("{hex:?}: {error}"))
+    }
+
     fn opened_rows(table: &str) -> Result<Vec<OpenedRow>, String> {
         let Some(body) = table.strip_suffix('\n') else {
             return Err("the last row does not end with a line feed".to_string());
@@ -1160,18 +1177,7 @@ mod tests {
             let [name, before, hex, outcome] = columns.as_slice() else {
                 return Err(format!("not four fields: {line:?}"));
             };
-            if hex.len() % 2 != 0
-                || hex
-                    .bytes()
-                    .any(|digit| !b"0123456789abcdef".contains(&digit))
-            {
-                return Err(format!("not lower-case hexadecimal bytes: {hex:?}"));
-            }
-            let sent = (0..hex.len())
-                .step_by(2)
-                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
-                .collect::<Result<Vec<u8>, _>>()
-                .map_err(|error| format!("{hex:?}: {error}"))?;
+            let sent = hex_bytes(hex)?;
             if rows.iter().any(|row: &OpenedRow| row.name == *name) {
                 return Err(format!("twice: {name:?}"));
             }
@@ -1277,6 +1283,193 @@ mod tests {
                 other => panic!("{row:?}: {other:?}"),
             };
             assert_eq!(outcome, row.outcome, "{row:?}");
+        }
+    }
+
+    /// The rows of a shared table: its lines, each split at the tabs into
+    /// `N` fields. The first field is the name of the row.
+    fn table_rows<const N: usize>(path: &str) -> Vec<[String; N]> {
+        let path = format!("{}/../../fixtures/{path}", env!("CARGO_MANIFEST_DIR"));
+        let table = std::fs::read_to_string(&path).expect("the fixture is there");
+        let body = table
+            .strip_suffix('\n')
+            .unwrap_or_else(|| panic!("{path}: the last row does not end with a line feed"));
+        let mut rows: Vec<[String; N]> = Vec::new();
+        for line in body.split('\n') {
+            let fields: Vec<String> = line.split('\t').map(str::to_string).collect();
+            let row: [String; N] = fields
+                .try_into()
+                .unwrap_or_else(|_| panic!("{path}: not {N} fields: {line:?}"));
+            assert!(
+                rows.iter().all(|other| other[0] != row[0]),
+                "{path}: twice: {:?}",
+                row[0]
+            );
+            rows.push(row);
+        }
+        rows
+    }
+
+    /// What the session does for an error that closes it, as the shared
+    /// tables write it.
+    fn closed(error: &Error) -> String {
+        match error.termination_code() {
+            Some(code) => format!("closed {:#x}", code.code()),
+            None => panic!("an error that closes no session: {error:?}"),
+        }
+    }
+
+    /// The SUBSCRIBE that `fixtures/peer-subscribe/opened.tsv` begins with,
+    /// which the column `before` of both tables means.
+    fn first_subscribe_of_the_shared_table() -> ControlMessage {
+        let rows = table_rows::<4>("peer-subscribe/opened.tsv");
+        let [name, before, sent, _] = rows.first().expect("rows");
+        assert_eq!(
+            (name.as_str(), before.as_str()),
+            ("first-request", "nothing")
+        );
+        whole_message(&hex_bytes(sent).unwrap())
+    }
+
+    /// The contract `fixtures/peer-fetch/opened.tsv` pins for both
+    /// implementations: what the session makes of a FETCH the peer sends,
+    /// before the caller sees it.
+    #[test]
+    fn a_fetch_of_the_peer_is_handed_on_refused_or_fatal_where_the_shared_table_says() {
+        let rows = table_rows::<5>("peer-fetch/opened.tsv");
+        // As many as the README has.
+        assert_eq!(rows.len(), 22);
+        let subscribe = first_subscribe_of_the_shared_table();
+        for [name, before, kind, sent, outcome] in &rows {
+            let mut session = session_before(before, &subscribe);
+            let sent = hex_bytes(sent).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let (is, becomes) = match ControlMessage::decode(&sent) {
+                // Bytes that are no message close the session before it
+                // sees a request, and what kind of FETCH they were meant to
+                // be is not known here.
+                Err(error) => (kind.as_str(), closed(&error)),
+                Ok(Some((message, used))) if used == sent.len() => {
+                    let is = match &message {
+                        ControlMessage::Fetch(Fetch {
+                            range: FetchRange::Standalone { .. },
+                            ..
+                        }) => "standalone",
+                        ControlMessage::Fetch(_) => "joining",
+                        other => panic!("{name}: no FETCH: {other:?}"),
+                    };
+                    let becomes = match session.on_peer_request_opened(message) {
+                        // WHERE the two implementations part, by design: a
+                        // Joining FETCH that this session hands on is one
+                        // `@xmoq/moqt` refuses itself (the README).
+                        Ok(PeerRequestOpened::Request(_, PeerRequest::Fetch(_))) => {
+                            "handed".to_string()
+                        }
+                        Ok(PeerRequestOpened::Refused {
+                            response: ControlMessage::RequestError(error),
+                            ..
+                        }) => format!("refused {:#x}", error.error_code),
+                        Err(error) => closed(&error),
+                        other => panic!("{name}: {other:?}"),
+                    };
+                    (is, becomes)
+                }
+                other => panic!("{name}: not one whole message: {other:?}"),
+            };
+            assert_eq!((is, &becomes), (kind.as_str(), outcome), "{name}");
+        }
+    }
+
+    /// The contract `fixtures/peer-fetch/updates.tsv` pins for both
+    /// implementations: what is sent for each thing that happens to a
+    /// Standalone FETCH of the peer.
+    #[test]
+    fn a_fetch_of_the_peer_is_answered_step_by_step_as_the_shared_table_says() {
+        let rows = table_rows::<3>("peer-fetch/updates.tsv");
+        // As many as the README has.
+        assert_eq!(rows.len(), 13);
+        // The FETCH of the README: the capture, with the Request ID 1, the
+        // Start Location {3, 4} and the End Location {5, 1}.
+        let ControlMessage::Fetch(mut fetch) =
+            whole_message(&fixture("fetch-standalone-moqtail-rs"))
+        else {
+            panic!("the capture is a FETCH");
+        };
+        fetch.request_id = 1;
+        let FetchRange::Standalone { start, end, .. } = &mut fetch.range else {
+            panic!("the capture is a Standalone FETCH");
+        };
+        (*start, *end) = (at(3, 4), at(5, 1));
+        let named = |message: &ControlMessage| match message {
+            ControlMessage::FetchOk(_) => "FETCH_OK",
+            ControlMessage::RequestOk(_) => "REQUEST_OK",
+            ControlMessage::RequestError(_) => "REQUEST_ERROR",
+            other => panic!("not an answer: {other:?}"),
+        };
+        for [name, steps, sent] in &rows {
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            session.setup(vec![]).unwrap();
+            let request = match session.on_peer_request_opened(ControlMessage::Fetch(fetch.clone()))
+            {
+                Ok(PeerRequestOpened::Request(request, PeerRequest::Fetch(_))) => request,
+                other => panic!("{name}: {other:?}"),
+            };
+            // The peer's next Request ID: 3, then 5.
+            let mut next = 3;
+            let mut done = Vec::new();
+            for step in steps.split(' ') {
+                let mut updated = |session: &mut Session, parameters| {
+                    // Through the codec, as an endpoint reads it.
+                    let mut bytes = Vec::new();
+                    ControlMessage::RequestUpdate(RequestUpdate {
+                        request_id: next,
+                        parameters,
+                    })
+                    .encode(&mut bytes)
+                    .unwrap();
+                    next += 2;
+                    match session.on_peer_request_message(request, whole_message(&bytes)) {
+                        Ok(PeerRequestEvent::UpdateAccepted { response }) => {
+                            named(&response).to_string()
+                        }
+                        Ok(
+                            PeerRequestEvent::UpdateHeld
+                            | PeerRequestEvent::LateMessage
+                            | PeerRequestEvent::UpdateAlreadyRefused,
+                        ) => "-".to_string(),
+                        Err(RequestFault::Peer(error)) => closed(&error),
+                        other => panic!("{name}: {step}: {other:?}"),
+                    }
+                };
+                let accepted = |session: &mut Session, end| match session.accept_fetch(
+                    request,
+                    false,
+                    end,
+                    vec![],
+                ) {
+                    Ok((ok, owed)) => {
+                        let mut all = vec![named(&ok)];
+                        all.extend((0..owed).map(|_| "REQUEST_OK"));
+                        all.join(" ")
+                    }
+                    Err(_) => "usage-error".to_string(),
+                };
+                done.push(match step {
+                    "update" => updated(&mut session, vec![]),
+                    "update-priority" => {
+                        updated(&mut session, vec![Parameter::SubscriberPriority(200)])
+                    }
+                    "update-forward" => updated(&mut session, vec![Parameter::Forward(true)]),
+                    "accept" => accepted(&mut session, at(5, 1)),
+                    "accept-before-start" => accepted(&mut session, at(3, 3)),
+                    "accept-beyond-end" => accepted(&mut session, at(9, 0)),
+                    "reject" => match session.reject(request, 0x10, 0, ReasonPhrase::default()) {
+                        Ok(response) => named(&response).to_string(),
+                        Err(_) => "usage-error".to_string(),
+                    },
+                    other => panic!("{name}: a step the test does not know: {other}"),
+                });
+            }
+            assert_eq!(&done.join(" | "), sent, "{name}");
         }
     }
 

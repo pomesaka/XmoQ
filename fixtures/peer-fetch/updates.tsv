@@ -1,0 +1,13 @@
+accepted	accept	FETCH_OK
+update-then-accepted	update accept	- | FETCH_OK REQUEST_OK
+two-updates-then-accepted	update update-priority accept	- | - | FETCH_OK REQUEST_OK REQUEST_OK
+accepted-then-update	accept update update-priority	FETCH_OK | REQUEST_OK | REQUEST_OK
+update-then-rejected	update reject	- | REQUEST_ERROR
+rejected-then-update	reject update	REQUEST_ERROR | -
+update-with-forward	update-forward	closed 0x3
+accepted-then-update-with-forward	accept update-forward	FETCH_OK | closed 0x3
+rejected-then-update-with-forward	reject update-forward	REQUEST_ERROR | -
+accepted-twice	accept accept	FETCH_OK | usage-error
+rejected-then-accepted	reject accept	REQUEST_ERROR | usage-error
+end-before-the-start-then-accepted	accept-before-start accept	usage-error | FETCH_OK
+end-beyond-what-was-asked	accept-beyond-end	FETCH_OK

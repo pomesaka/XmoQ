@@ -116,6 +116,7 @@ function describeClose(close: SessionClose): string {
  * | `SubgroupClosedError` | The subgroup stream is closed while its Track goes on; `metStop` says whether this call met the subscriber's STOP_SENDING, and `code` has its code where the browser passed it on | Open another subgroup |
  * | `FetchEndedError` | The FETCH ended before its fetch stream did | See `end` |
  * | `FetchStreamResetError` | The publisher reset the fetch stream | What was read before it is good; see `code` |
+ * | `ServedFetchEndedError` | The FETCH of the peer that this endpoint was answering is over | Stop writing; see `end` |
  */
 export class RequestFailedError extends Error {
 	override readonly name = "RequestFailedError";
@@ -153,9 +154,11 @@ export type RequestAbort =
 	/** This endpoint cancelled the request before it was answered. Only a FETCH is handed out before its answer. */
 	| { type: "cancelled" }
 	/**
-	 * For a request of the peer: it sent a REQUEST_UPDATE before this
-	 * endpoint had answered. Updates are not implemented, so the update was
-	 * refused, and the request ended with that (§10.9).
+	 * For a request of the peer, before this endpoint had answered. A
+	 * SUBSCRIBE: the peer sent a REQUEST_UPDATE; updates are not implemented,
+	 * so it was refused, and the request ended with that (§10.9). A FETCH:
+	 * the peer sent more REQUEST_UPDATEs than may wait for the answer (64),
+	 * and the FETCH was refused with `EXCESSIVE_LOAD`.
 	 */
 	| { type: "update-failed" };
 
@@ -235,6 +238,37 @@ export class SubgroupClosedError extends Error {
 		super(message);
 		this.metStop = stop !== undefined;
 		this.code = stop?.code;
+	}
+}
+
+/** How a FETCH of the peer that this endpoint accepted ended. */
+export type ServedFetchEnd =
+	/** This endpoint finished the fetch stream: `FetchWriter.close()`. */
+	| { type: "served" }
+	/** This endpoint gave the FETCH up: `FetchWriter.reset()`. */
+	| { type: "reset" }
+	/**
+	 * The subscriber gave it up: it reset or stopped the request stream, or
+	 * stopped the fetch stream. `code` is a Stream Reset Error Code (§3.3.3),
+	 * when the browser gave one: a relay that cancels resets and stops
+	 * several directions at once, and the code is that of the one seen first,
+	 * or none where the browser passed none for it.
+	 */
+	| { type: "peer-cancelled"; code: number | undefined }
+	| { type: "session-closed"; close: SessionClose };
+
+/** A call on a `FetchWriter` fails with this once its FETCH is over; `end` is what `FetchWriter.ended` resolves with. */
+export class ServedFetchEndedError extends Error {
+	override readonly name = "ServedFetchEndedError";
+	readonly end: ServedFetchEnd;
+
+	constructor(end: ServedFetchEnd) {
+		super(
+			end.type === "session-closed"
+				? describeClose(end.close)
+				: `the FETCH this endpoint served ended: ${end.type}`,
+		);
+		this.end = end;
 	}
 }
 

@@ -4,6 +4,7 @@ import {
 	decodeRequestStart,
 	encodeControlMessage,
 	FETCH_MESSAGE_TYPE,
+	type Fetch,
 	type FetchRange,
 	SUBSCRIBE_MESSAGE_TYPE,
 	type Subscribe,
@@ -20,6 +21,16 @@ export interface PeerRequestsOptions {
 	 */
 	subscribe(
 		message: Subscribe,
+		peerStream: number,
+		out: SessionOutput[],
+	): PeerSubscribeOpened;
+	/**
+	 * A Standalone FETCH of the peer, whole, with its Request ID checked and
+	 * a range that does not end before it starts. Says whether it is
+	 * refused, or taken over with its stream.
+	 */
+	fetch(
+		message: Fetch,
 		peerStream: number,
 		out: SessionOutput[],
 	): PeerSubscribeOpened;
@@ -99,15 +110,16 @@ const NOT_SUPPORTED = {
 };
 
 /**
- * What a FETCH of the peer is refused with, and why. No FETCH is served, so
- * every one is refused; the first two are what the session of the Rust
- * implementation answers by itself for the same FETCH, so that the same
- * bytes get the same code from both.
+ * What a FETCH of the peer is refused with before anyone is asked, and why;
+ * `undefined` for a Standalone FETCH that is handed on. The first two are
+ * what the session of the Rust implementation answers by itself for the
+ * same FETCH, so that the same bytes get the same code from both
+ * (`fixtures/peer-fetch/`).
  */
 function fetchRefusal(
 	range: FetchRange,
 	isOpenSubscribe: (requestId: bigint) => boolean,
-): { code: bigint; reason: string } {
+): { code: bigint; reason: string } | undefined {
 	switch (range.fetchType) {
 		case "Standalone":
 			// §10.12.3: "End Location MUST specify the same or a larger Location
@@ -120,7 +132,7 @@ function fetchRefusal(
 					reason: "the range ends before it starts",
 				};
 			}
-			break;
+			return undefined;
 		case "RelativeJoining":
 		case "AbsoluteJoining":
 			// §10.12.2: the Joining Request ID has to name "a subscription in
@@ -129,16 +141,21 @@ function fetchRefusal(
 			// INVALID_JOINING_REQUEST_ID". A SUBSCRIBE of the peer is such a
 			// subscription until it is over; a PUBLISH of this endpoint is not
 			// taken as one (the notes, known gaps), as in the Rust session.
-			// A Joining FETCH that names one is not served, like every FETCH.
 			if (!isOpenSubscribe(range.joiningRequestId)) {
 				return {
 					code: RequestErrorCode.INVALID_JOINING_REQUEST_ID,
 					reason: "the Joining Request ID names no subscription",
 				};
 			}
-			break;
+			// WHY a Joining FETCH is not handed on, where the Rust session
+			// hands it to its caller: a relay turns a viewer's Joining FETCH
+			// into a Standalone one before it asks a publisher, so a publisher
+			// behind a relay gets none. The Rust client refuses it the same.
+			return {
+				code: RequestErrorCode.NOT_SUPPORTED,
+				reason: "a Joining FETCH is not served",
+			};
 	}
-	return NOT_SUPPORTED;
 }
 
 /** Why the session itself refuses a SUBSCRIBE of the peer. */
@@ -265,7 +282,9 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// a request that is wrong in both ways ends the session with the
 			// same code in both.
 			let refusal = NOT_SUPPORTED;
-			let subscribe: { message: Subscribe; bytesRead: number } | undefined;
+			let handedOn:
+				| { message: Subscribe | Fetch; bytesRead: number }
+				| undefined;
 			if (
 				messageType === FETCH_MESSAGE_TYPE ||
 				messageType === SUBSCRIBE_MESSAGE_TYPE
@@ -284,10 +303,15 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 					return undefined;
 				}
 				if (whole.value.type === "FETCH") {
-					refusal = fetchRefusal(whole.value.range, options.isOpenSubscribe);
+					const refused = fetchRefusal(
+						whole.value.range,
+						options.isOpenSubscribe,
+					);
+					if (refused !== undefined) refusal = refused;
+					else handedOn = { message: whole.value, bytesRead: whole.bytesRead };
 				}
 				if (whole.value.type === "SUBSCRIBE") {
-					subscribe = { message: whole.value, bytesRead: whole.bytesRead };
+					handedOn = { message: whole.value, bytesRead: whole.bytesRead };
 				}
 			}
 			checkRequestId(requestId);
@@ -295,13 +319,16 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// on its Request ID: a stream that sent the start of a request and
 			// stops has not said what it is, as in the Rust implementation.
 			if (missing === 0) out.push(identified(peerStream));
-			if (subscribe !== undefined) {
-				const opened = options.subscribe(subscribe.message, peerStream, out);
+			if (handedOn !== undefined) {
+				const opened =
+					handedOn.message.type === "FETCH"
+						? options.fetch(handedOn.message, peerStream, out)
+						: options.subscribe(handedOn.message, peerStream, out);
 				if ("stream" in opened) {
 					streams.delete(peerStream);
 					return {
 						stream: opened.stream,
-						rest: buffer.subarray(subscribe.bytesRead),
+						rest: buffer.subarray(handedOn.bytesRead),
 					};
 				}
 				refusal = {

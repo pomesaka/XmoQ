@@ -53,7 +53,15 @@ export type OwnPageExtras = {
 	 * track is refused with DOES_NOT_EXIST. The page then sends on that
 	 * subscription as it does on one made with `publishTrack`.
 	 */
-	serveTrack(namespace: string, trackName: string): Promise<void>;
+	serveTrack(
+		namespace: string,
+		trackName: string,
+		fetches: PageFetchServing,
+		/** With "serve-unsent": what the three Objects the page never sent carry. */
+		unsentPayloadHex: string,
+	): Promise<void>;
+	/** How each FETCH the page accepted ended: the library's `ServedFetchEnd` as JSON, in the order they ended. */
+	servedFetchEnds(): Promise<string[]>;
 	/** Resolves with the Track Alias once the SUBSCRIBE was accepted. To be called after `serveTrack`. */
 	servingTrack(): Promise<string>;
 	/** Ends the published Track with PUBLISH_DONE, Status Code TRACK_ENDED. */
@@ -138,6 +146,15 @@ export type OwnPageExtras = {
 	 */
 	fetchRange(fetch: PageFetch, timeoutMs: number): Promise<string>;
 };
+
+/**
+ * What a page that serves a track does with a Standalone FETCH for it:
+ * "serve", it answers from the Objects it has sent; "serve-unsent", the
+ * same, and it has Object 0 of Groups 100, 101 and 102 as well, which it
+ * never sent, so that no relay has them; "stall", it accepts and writes
+ * nothing; "refuse", DOES_NOT_EXIST.
+ */
+export type PageFetchServing = "serve" | "serve-unsent" | "stall" | "refuse";
 
 /** A FETCH for an own page to send (draft 18 §10.12). Numbers are decimal strings. */
 export type PageFetch =

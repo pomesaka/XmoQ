@@ -15,6 +15,7 @@ const SMALL_LIMITS: SessionLimits = {
 	maxObjectPayloadLength: 16,
 	maxObjectPropertiesLength: 16,
 	maxPeerRequests: 64,
+	maxPeerFetches: 16,
 	maxHeldSubgroupBytes: 64,
 };
 
@@ -824,32 +825,17 @@ describe("Session", () => {
 		});
 	});
 
-	// A FETCH is not served yet, like any request of the peer, and is refused.
-	// Unlike the others it is decoded whole first, so that one the draft has
-	// close the session does (§10.12, §10.2.1), and so that the two refusals
-	// the session of the Rust implementation makes by itself are made here
-	// with the same codes: INVALID_RANGE (0x11) and
-	// INVALID_JOINING_REQUEST_ID (0x32). Every SUBSCRIBE of the peer is
-	// refused here, so no Joining Request ID names a subscription.
+	// What the session refuses of a FETCH by itself. A FETCH is decoded whole
+	// first, so that one the draft has close the session does (§10.12,
+	// §10.2.1), and the refusals are the ones the session of the Rust
+	// implementation makes for the same bytes: INVALID_RANGE (0x11) and
+	// INVALID_JOINING_REQUEST_ID (0x32). A Standalone FETCH with a range that
+	// is in order is handed to the application
+	// (session-peer-fetch.test.ts, and the table of fixtures/peer-fetch/).
 	// The Standalone ones are for the track ["a"] "b", with Request ID 1.
 	test.each([
 		{
-			name: "a Standalone FETCH from {1, 0} to {3, 0}: NOT_SUPPORTED",
-			bytes: "16 00 0c 01 01 01 01 61 01 62 01 00 03 00 00",
-			errorCode: 3n,
-		},
-		{
-			name: "one from {1, 5} to {1, 0}, the whole of Group 1: NOT_SUPPORTED",
-			bytes: "16 00 0c 01 01 01 01 61 01 62 01 05 01 00 00",
-			errorCode: 3n,
-		},
-		{
-			name: "one from {1, 5} to {1, 5}: NOT_SUPPORTED",
-			bytes: "16 00 0c 01 01 01 01 61 01 62 01 05 01 05 00",
-			errorCode: 3n,
-		},
-		{
-			name: "one from {1, 5} to {1, 4}: INVALID_RANGE",
+			name: "a Standalone FETCH from {1, 5} to {1, 4}: INVALID_RANGE",
 			bytes: "16 00 0c 01 01 01 01 61 01 62 01 05 01 04 00",
 			errorCode: 0x11n,
 		},

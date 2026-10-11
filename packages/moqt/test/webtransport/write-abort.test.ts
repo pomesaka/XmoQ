@@ -164,6 +164,27 @@ describe("a stream this endpoint writes is stopped by the peer", () => {
 		});
 	});
 
+	test("16 writes of a subgroup stream can be under way; one more is refused, and the stream is as it was", async () => {
+		let stalled = false;
+		const { track } = await published({ stallWrites: () => stalled });
+		const subgroup = await track.openSubgroup(SUBGROUP);
+		// The transport takes no write from here on, as for a subscriber that
+		// reads nothing.
+		stalled = true;
+		const underWay = Array.from({ length: 16 }, () => subgroup.write(OBJECT));
+		for (const each of underWay) each.catch(() => {});
+		const refused = await rejection(subgroup.write(OBJECT));
+		expect(refused).toBeInstanceOf(RangeError);
+		expect(refused).toMatchObject({
+			message:
+				"16 writes of the stream are under way: wait for a write before the next",
+		});
+		// The stream is not ended by the refusal: it can be reset, and the
+		// subscription goes on.
+		await subgroup.reset();
+		expect(await Promise.race([track.ended, settle()])).toBeUndefined();
+	});
+
 	// `reset()` aborts the writer with a stream error that has this
 	// endpoint's own code, and a write that is under way is rejected with
 	// that very error (Chromium 156, spikes/wt-write-abort/out/own-reset-20.txt).

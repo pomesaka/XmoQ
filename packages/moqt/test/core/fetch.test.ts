@@ -471,6 +471,75 @@ describe("what createFetchStreamEncoder refuses leaves it as it was", () => {
 		},
 	);
 
+	// After Object {5, 3}. An indicator that goes back would take the
+	// encoder back with it, and an Object that goes back would then be
+	// written.
+	test.each([
+		{ order: "Ascending", name: "the Object before it", group: 5n, object: 3n },
+		{
+			order: "Ascending",
+			name: "an earlier Object of its Group",
+			group: 5n,
+			object: 1n,
+		},
+		{ order: "Ascending", name: "an earlier Group", group: 4n, object: 9n },
+		{
+			order: "Descending",
+			name: "an earlier Object of its Group",
+			group: 5n,
+			object: 1n,
+		},
+		{
+			order: "Descending",
+			name: "a Group against the order",
+			group: 6n,
+			object: 0n,
+		},
+	] as const)(
+		"an End of Range indicator at $name is refused ($order), and the encoder goes on as it was",
+		({ order, group, object }) => {
+			const encoder = createFetchStreamEncoder({ requestId: 0n }, order);
+			encoder.object(at(5n, 3n));
+			expect(() =>
+				encoder.endOfRange("NonExistent", { group, object }),
+			).toThrow(RangeError);
+			// What a refused indicator must not have let through.
+			expect(() => encoder.object(at(5n, 2n))).toThrow(RangeError);
+			// The next Object in order: no field but the payload length.
+			expect(toHex(encoder.object(at(5n, 4n)))).toBe("00 00");
+		},
+	);
+
+	test.each([
+		{
+			order: "Ascending",
+			name: "a later Object of its Group",
+			group: 5n,
+			object: 9n,
+		},
+		{
+			order: "Ascending",
+			name: "a later Group, at any Object",
+			group: 7n,
+			object: 0n,
+		},
+		{
+			order: "Descending",
+			name: "a Group that follows by the order, at any Object",
+			group: 3n,
+			object: 0n,
+		},
+	] as const)(
+		"an End of Range indicator at $name is taken ($order)",
+		({ order, group, object }) => {
+			const encoder = createFetchStreamEncoder({ requestId: 0n }, order);
+			encoder.object(at(5n, 3n));
+			expect(
+				encoder.endOfRange("NonExistent", { group, object }).length,
+			).toBeGreaterThan(0);
+		},
+	);
+
 	test("an End of Range indicator at a Location past 2^64 - 1", () => {
 		const encoder = createFetchStreamEncoder({ requestId: 0n }, "Ascending");
 		encoder.object(at(2n, 3n));

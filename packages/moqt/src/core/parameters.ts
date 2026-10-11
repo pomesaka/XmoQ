@@ -94,6 +94,12 @@ export type ParameterScope =
 	| "REQUEST_OK"
 	/** REQUEST_UPDATE for a subscription (§10.9.1). */
 	| "REQUEST_UPDATE"
+	/**
+	 * REQUEST_UPDATE for a FETCH. The codec does not know what a
+	 * REQUEST_UPDATE updates and decodes every one as that of a
+	 * subscription; the session checks an update of a FETCH against this.
+	 */
+	| "REQUEST_UPDATE_OF_FETCH"
 	| "FETCH"
 	/** No parameter of the draft lists FETCH_OK. */
 	| "FETCH_OK";
@@ -227,7 +233,12 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 	{
 		name: "OBJECT_DELIVERY_TIMEOUT",
 		type: 0x02n,
-		scopes: ["PUBLISH_OK", "SUBSCRIBE", "REQUEST_UPDATE"],
+		scopes: [
+			"PUBLISH_OK",
+			"SUBSCRIBE",
+			"REQUEST_UPDATE",
+			"REQUEST_UPDATE_OF_FETCH",
+		],
 		repeatable: false,
 		read: (reader, parameters) => {
 			parameters.objectDeliveryTimeout = reader.varint();
@@ -248,6 +259,7 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 			"PUBLISH_NAMESPACE",
 			"REQUEST_UPDATE",
 			"FETCH",
+			"REQUEST_UPDATE_OF_FETCH",
 		],
 		repeatable: true,
 		read: (reader, parameters) => {
@@ -286,7 +298,12 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 	{
 		name: "SUBGROUP_DELIVERY_TIMEOUT",
 		type: 0x06n,
-		scopes: ["PUBLISH_OK", "SUBSCRIBE", "REQUEST_UPDATE"],
+		scopes: [
+			"PUBLISH_OK",
+			"SUBSCRIBE",
+			"REQUEST_UPDATE",
+			"REQUEST_UPDATE_OF_FETCH",
+		],
 		repeatable: false,
 		read: (reader, parameters) => {
 			parameters.subgroupDeliveryTimeout = reader.varint();
@@ -347,7 +364,13 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 		// here is the one to a subscription.
 		name: "SUBSCRIBER_PRIORITY",
 		type: 0x20n,
-		scopes: ["SUBSCRIBE", "PUBLISH_OK", "REQUEST_UPDATE", "FETCH"],
+		scopes: [
+			"SUBSCRIBE",
+			"PUBLISH_OK",
+			"REQUEST_UPDATE",
+			"FETCH",
+			"REQUEST_UPDATE_OF_FETCH",
+		],
 		repeatable: false,
 		read: (reader, parameters) => {
 			parameters.subscriberPriority = reader.uint8();
