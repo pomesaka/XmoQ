@@ -98,6 +98,18 @@ impl RequestStream {
         }
     }
 
+    /// Ends this endpoint's half of the stream with a FIN and hands over
+    /// the peer's: for a caller that waits for the peer to end it as
+    /// [`Self::finish_and_await_close`] does, with other things to do
+    /// meanwhile.
+    pub fn finish_own(self) -> PeerHalf {
+        self.send.finish();
+        PeerHalf {
+            reader: self.reader,
+            finished: self.peer_finished,
+        }
+    }
+
     /// Ends this endpoint's half of the stream with a FIN and reads no more
     /// of the peer's.
     pub fn finish(self) {
@@ -144,6 +156,26 @@ impl RequestStream {
     /// An error is a protocol error in the bytes, or a lost connection.
     pub async fn next_event(&mut self) -> Result<RequestStreamEvent> {
         Ok(self.reader.next_event().await?)
+    }
+}
+
+/// The peer's half of a request stream whose other half this endpoint has
+/// finished.
+pub struct PeerHalf {
+    reader: RequestReader<Recv>,
+    /// The peer had finished it before; nothing more is read from it.
+    pub finished: bool,
+}
+
+impl PeerHalf {
+    /// As [`RequestStream::next_event`].
+    pub async fn next_event(&mut self) -> Result<RequestStreamEvent> {
+        Ok(self.reader.next_event().await?)
+    }
+
+    /// Stops the half, which the peer did not end in time, with CANCELLED.
+    pub fn stop(self) {
+        self.reader.stop(stream_reset_code::CANCELLED);
     }
 }
 
