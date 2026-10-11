@@ -48,7 +48,7 @@ const { values: options } = parseArgs({
 	options: {
 		fetch: { type: "string", default: "page-standalone" },
 		relay: { type: "string", default: "own" },
-		port: { type: "string", default: "44370" },
+		port: { type: "string", default: "24370" },
 		verbose: { type: "boolean", default: false },
 	},
 });

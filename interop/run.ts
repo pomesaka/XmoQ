@@ -41,7 +41,7 @@ const { values: options } = parseArgs({
 		subscriber: { type: "string", default: "moqtail-rust" },
 		relay: { type: "string", default: "moqtail" },
 		subscribers: { type: "string", default: "1" },
-		port: { type: "string", default: "44330" },
+		port: { type: "string", default: "24330" },
 		"await-publish-done": { type: "boolean", default: false },
 		// The Object carries Object Properties, and every subscriber has to
 		// get them as they were sent. Between own clients only.

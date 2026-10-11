@@ -7,6 +7,14 @@ cd "${REPO_ROOT}"
 # Builds what the interop run needs and runs every pairing (interop/matrix.ts). Arguments are
 # passed on to matrix.ts, for example `--only own-rust`.
 
+# The ports the kernel gives to outgoing sockets. The relays of the run listen on fixed ports,
+# which have to lie outside of them (interop/matrix.ts, `base-port`); printed so that a log of
+# the run shows it.
+if [[ -r /proc/sys/net/ipv4/ip_local_port_range ]]; then
+	read -r ephemeral_first ephemeral_last </proc/sys/net/ipv4/ip_local_port_range
+	echo "ip_local_port_range: ${ephemeral_first} to ${ephemeral_last}"
+fi
+
 # The version is part of the path so that a new tag is a new build, here and in the CI cache.
 RELAY_TAG="relay@0.15.0"
 relay_root="interop/peers/moqtail/.tools"

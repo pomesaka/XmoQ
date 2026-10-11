@@ -832,7 +832,14 @@ const { values: options } = parseArgs({
 		// WHY one port per pairing: some pairings run at the same time, and a
 		// pairing that is killed at its time limit can leave its relay running,
 		// which must not hold the port of the pairings after it.
-		"base-port": { type: "string", default: "44400" },
+		//
+		// WHY below 32768: from there to 60999 Linux takes the source ports of
+		// outgoing sockets (`net.ipv4.ip_local_port_range`, as scripts/ci/interop.sh
+		// prints it), and a client of a pairing that is running could be given
+		// the port a later pairing's relay is to listen on. One pairing of a CI
+		// run failed at the start of its relay with "Address already in use";
+		// that this is why was not shown. macOS takes them from 49152 on.
+		"base-port": { type: "string", default: "24400" },
 		only: { type: "string", default: "" },
 		// Provisional. A pairing takes about a second; `run.ts` gives each of
 		// its own steps 20 seconds.

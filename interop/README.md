@@ -110,7 +110,7 @@ Each of these runs ends by moving one more Object over the same track with a fre
 | Option of `matrix.ts` | Values (default first) |
 |---|---|
 | `--relay` | `moqtail` and `own`. Give it once to run through one relay only |
-| `--base-port` | `44400`. The first of the UDP ports used, one per pairing |
+| `--base-port` | `24400`. The first of the UDP ports used, one per pairing; the run with `mlmpub` takes the port 1000 above its own as well. Below 32768, where Linux begins to hand out the source ports of outgoing sockets |
 | `--only` | Empty. Runs the pairings whose name contains the text, such as `--only own-rust`, `--only "own relay"`, `--only "leaving: "` or `--only "fetch: "` |
 | `--pairing-timeout-seconds` | `120` (provisional). A pairing that takes longer is stopped and counted as failed |
 
@@ -130,7 +130,7 @@ bun run.ts --publisher own-browser --subscriber own-rust --await-publish-done
 | `--subscriber` | `moqtail-rust`, `own-browser`, `own-rust`, `moqtail-browser` |
 | `--relay` | `moqtail`, `own` |
 | `--subscribers` | `1`. How many subscribers of the kind `--subscriber` take part; each has to receive the Object |
-| `--port` | `44330`. UDP port of the relay |
+| `--port` | `24330`. UDP port of the relay |
 | `--subscribe-track` | `object`. Any other name makes the relay answer REQUEST_ERROR, and the run fails by design |
 | `--await-publish-done` | off. After the transfer, makes the publisher leave and waits until the subscriber reports that PUBLISH_DONE ended its subscription. The subscriber has to be an own client |
 | `--announce-only` | off. The publisher, which has to be `own-browser`, announces the namespace and sends no PUBLISH: it accepts the SUBSCRIBE the relay sends it for the track, and sends on that subscription |
@@ -167,7 +167,7 @@ What a scenario counts in the relay's log, or expects not to be there, it counts
 | `--second-resends` | `second-source` only: the second publisher starts at Group 0 and sends every Group of the first again before it sends the next one |
 | `--first` | `second-source` only, what the first publisher does before the second sends: `done` (default; PUBLISH_DONE), `kill`, `kill-with-open-stream` (own-browser: it sends one more Group on a stream it leaves open, and its page is closed) or `stays` |
 | `--second-joins` | `second-source` only: `before` (default) or `after` the subscribers have their first Object |
-| `--port` | `44340`. UDP port of the relay |
+| `--port` | `24340`. UDP port of the relay |
 | `--verbose` | off. Makes `own-rust` print the bytes of every stream |
 
 Not every client can leave in every way. `own-rust` and `moqtail-rust` close their session only by having the Objects they were started for; `moqtail-browser` cancels by its `disconnect()`, which leaves its session open; only `own-browser` can cancel and keep going. A client that is asked for what it cannot do fails the run with a message that says so.

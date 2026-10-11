@@ -65,7 +65,7 @@ const { values: options } = parseArgs({
 	options: {
 		fetch: { type: "string", default: "standalone" },
 		relay: { type: "string", default: "own" },
-		port: { type: "string", default: "44360" },
+		port: { type: "string", default: "24360" },
 		verbose: { type: "boolean", default: false },
 		// Prints what the page saw and compares it with nothing: for looking
 		// at what a relay does with a case that has no expectation for it.
