@@ -21,6 +21,19 @@ const TEST_PUBLISHER_GROUPS = 40;
 export const PAGE_GROUPS_BEFORE = 3;
 
 /**
+ * The first Group a page with "serve-unsent" sends: the one after the three
+ * it has and never sent, {100, 0} to {102, 0}.
+ *
+ * WHY not Group 0, as every other page: the page says in its SUBSCRIBE_OK
+ * that its Largest Object is {102, 0}, and a subscriber with the Largest
+ * Object filter, which both subscribers of the run have, is sent nothing
+ * that is not after that (draft 18 §5.1.2). Sending Groups below what it
+ * said was its largest is also nothing a publisher does. So the three are
+ * Objects the page published before the relay subscribed.
+ */
+const FIRST_GROUP_AFTER_UNSENT = 103;
+
+/**
  * Starts moqtail's test client, which publishes by itself, and waits until
  * it is past Group 2: the ranges of the runs are behind it then.
  */
@@ -52,6 +65,9 @@ export async function publishFromAPage(
 	const publisher = await startPublisher("own-browser", run, {
 		servesWhenAsked: "at-once",
 		servesFetches,
+		...(servesFetches === "serve-unsent"
+			? { firstGroup: FIRST_GROUP_AFTER_UNSENT }
+			: {}),
 	});
 	const feeder = await startSubscriber("own-rust", "feeder:own-rust", run, {});
 	await withTimeout(

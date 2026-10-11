@@ -164,7 +164,8 @@ export type OwnPageExtras = {
  * What a page that serves a track does with a Standalone FETCH for it:
  * "serve", it answers from the Objects it has sent; "serve-unsent", the
  * same, and it has Object 0 of Groups 100, 101 and 102 as well, which it
- * never sent, so that no relay has them; "stall", it accepts and writes
+ * never sent, so that no relay has them, and the driver has it send from
+ * Group 103 on; "stall", it accepts and writes
  * nothing; "refuse", DOES_NOT_EXIST.
  */
 export type PageFetchServing = "serve" | "serve-unsent" | "stall" | "refuse";

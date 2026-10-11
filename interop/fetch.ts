@@ -27,6 +27,7 @@
 //                     nothing: one End of Range indicator.
 //   page-unsent       {100, 0} to {102, 1}: Objects the page has and never
 //                     sent, so that a relay has to ask the page for them.
+//                     The page sends Groups 103, 104 and 105 here.
 //                     Through the moqtail relay as well.
 //   page-cancelled    The publisher accepts and writes nothing; the page
 //                     that fetches gives the FETCH up after a second.
@@ -207,10 +208,16 @@ type Expected =
 	| { answer: "cancelled-after-FETCH_OK"; endLocation: [string, string] }
 	/**
 	 * What the page that fetches saw is not looked at beyond its FETCH_OK:
-	 * the relay has to say that the publisher accepted its FETCH with this
-	 * End Location, and the publishing page that it served one FETCH whole.
+	 * the relay has to say that the publisher accepted its FETCH with
+	 * `publisherEndLocation`, and the publishing page that it served one
+	 * FETCH whole. `endLocation` is the one of the FETCH_OK the relay sends
+	 * the page that fetches, before the publisher has answered.
 	 */
-	| { answer: "served-to-the-relay"; endLocation: [string, string] };
+	| {
+			answer: "served-to-the-relay";
+			endLocation: [string, string];
+			publisherEndLocation: [string, string];
+	  };
 
 /** 2^64 - 1, the Object ID of the last Location of a Group. */
 const LAST_OBJECT = "18446744073709551615";
@@ -280,7 +287,10 @@ const LAST_OBJECT = "18446744073709551615";
  * what that relay does (docs/experiments/2026-10-11-a-page-answers-a-fetch.md).
  * It asks the publisher, with the whole of Group 102 as the end and
  * GROUP_ORDER Ascending, takes the page's FETCH_OK and its fetch stream,
- * and answers the page that fetches with FETCH_OK for {102, 1}. **It then
+ * and answers the page that fetches with FETCH_OK for {102, 1}. The page's
+ * own FETCH_OK has {102, 0}, the End Location the relay asked with: the
+ * page has sent Groups 103 and on, so the end of Group 102 is not beyond
+ * its Largest Object (§10.13). **It then
  * sends that page a fetch stream whose FETCH_HEADER has the Request ID of
  * the relay's own FETCH**, not of the page's, which `@xmoq/moqt` closes the
  * session for (the notes, "A fetch stream whose Request ID is no open FETCH
@@ -354,6 +364,10 @@ const EXPECTED: Record<string, Partial<Record<Case, Expected>>> = {
 		"page-unsent": {
 			answer: "served-to-the-relay",
 			endLocation: ["102", "1"],
+			// The whole of Group 102, as the relay asks: the page has sent
+			// Groups after it, so that is not beyond its Largest Object, and
+			// the End Location that was asked for is the answer (§10.13).
+			publisherEndLocation: ["102", "0"],
 		},
 	},
 };
@@ -655,7 +669,7 @@ async function main(): Promise<void> {
 			await expectServedToTheMoqtailRelay(
 				context,
 				publisher.told,
-				expected.endLocation,
+				expected.publisherEndLocation,
 			);
 		}
 	} finally {
