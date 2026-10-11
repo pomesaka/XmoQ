@@ -292,6 +292,51 @@ const publisherOf = (...first: string[]) =>
 		endTimeoutMs: 20,
 	});
 
+/**
+ * `end()` of the publisher, with a time: a fault that keeps it from
+ * resolving fails the test where it would stand still. For the real clock.
+ */
+async function ended(publisher: { end(): Promise<void> }): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const late = new Promise<never>((_, reject) => {
+		timer = setTimeout(
+			() => reject(new Error("`end` has not resolved after 2 seconds")),
+			2000,
+		);
+	});
+	try {
+		await Promise.race([publisher.end(), late]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** Lets what is ready run, without the clock. */
+async function turns(): Promise<void> {
+	for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+}
+
+/**
+ * Under a clock that is moved by hand: calls `end()`, moves the clock by
+ * each of `steps` milliseconds in turn, and says whether `end()` has
+ * resolved by then. Never waits for it.
+ */
+async function endedWithin(
+	publisher: { end(): Promise<void> },
+	steps: number[],
+): Promise<boolean> {
+	let resolved = false;
+	void publisher.end().then(() => {
+		resolved = true;
+	});
+	await turns();
+	for (const step of steps) {
+		jest.advanceTimersByTime(step);
+		await turns();
+	}
+	return resolved;
+}
+
 /** Runs `act` and gives what was reported with `reportError` meanwhile. */
 async function reported(act: () => Promise<void>): Promise<unknown[]> {
 	const errors: unknown[] = [];
@@ -462,7 +507,7 @@ describe("createCatalogPublisher", () => {
 		await settle();
 		expect(asked.answers).toEqual(["SUBSCRIBE_OK largest {100, 0}"]);
 		expect(asked.accepted.log).toEqual([]);
-		await publisher.end();
+		await ended(publisher);
 		expect(asked.accepted.log).toEqual(["PUBLISH_DONE 2"]);
 	});
 
@@ -477,7 +522,7 @@ describe("createCatalogPublisher", () => {
 		await settle();
 		expect(asked.accepted.log).toEqual([]);
 		// It is not kept: the end of the track is not told to it either.
-		await publisher.end();
+		await ended(publisher);
 		expect(asked.accepted.log).toEqual([]);
 	});
 
@@ -584,7 +629,7 @@ describe("createCatalogPublisher", () => {
 
 	test("after `end`, a request for the track is refused with DOES_NOT_EXIST, and an update is a RangeError", async () => {
 		const publisher = publisherOf("a");
-		await publisher.end();
+		await ended(publisher);
 		const subscribe = fakeSubscribe("catalog");
 		const fetch = fakeFetch([100n, 0n], [100n, 1n]);
 		expect(publisher.subscribe(subscribe.request)).toBe(true);
@@ -602,7 +647,7 @@ describe("createCatalogPublisher", () => {
 		await settle();
 		// The last catalog of a broadcast, and the end, with nothing between.
 		publisher.update({ version: "draft-01", isComplete: true, tracks: [] });
-		await publisher.end();
+		await ended(publisher);
 		expect(asked.accepted.log).toEqual([
 			"group 101 subgroup 0 end-of-group: object 0 ",
 			"group 101 subgroup 0 end-of-group: closed",
@@ -645,7 +690,7 @@ describe("createCatalogPublisher", () => {
 		await settle();
 		stuck.accepted.holdWrites(new Promise(() => {}));
 		publisher.update(catalogOf("a", "b"));
-		const errors = await reported(() => publisher.end());
+		const errors = await reported(() => ended(publisher));
 		expect(stuck.accepted.log).toEqual([
 			"group 101 subgroup 0 end-of-group: reset",
 			"PUBLISH_DONE 2",
@@ -665,7 +710,7 @@ describe("createCatalogPublisher", () => {
 		publisher.subscribe(asked.request);
 		await settle();
 		await Promise.all([publisher.end(), publisher.end()]);
-		await publisher.end();
+		await ended(publisher);
 		expect(asked.accepted.log).toEqual(["PUBLISH_DONE 2"]);
 	});
 
@@ -678,7 +723,7 @@ describe("createCatalogPublisher", () => {
 			}),
 		});
 		publisher.subscribe(asked.request);
-		await publisher.end();
+		await ended(publisher);
 		answer();
 		await settle();
 		expect(asked.answers).toEqual(["SUBSCRIBE_OK largest {100, 0}"]);
@@ -692,7 +737,7 @@ describe("createCatalogPublisher", () => {
 		await settle();
 		asked.accepted.end({ type: "peer-reset", code: 1 });
 		await settle();
-		await publisher.end();
+		await ended(publisher);
 		expect(asked.accepted.log).toEqual([]);
 	});
 
@@ -787,7 +832,7 @@ describe("createCatalogPublisher", () => {
 				publisher.update(catalogOf("a", "b"));
 				await settle();
 				publisher.update(catalogOf("a", "b", "c"));
-				await publisher.end();
+				await ended(publisher);
 			});
 			expect(asked.accepted.log).toEqual([
 				"group 101 subgroup 0 end-of-group: reset",
@@ -852,7 +897,7 @@ describe("createCatalogPublisher", () => {
 			}),
 		);
 		publisher.update(catalogOf("a", "b"));
-		const errors = await reported(() => publisher.end());
+		const errors = await reported(() => ended(publisher));
 		expect(errors).toEqual([
 			new Error(
 				"a subscription of the catalog track could not be told of its end in time: its stream does not open",
@@ -875,7 +920,7 @@ describe("createCatalogPublisher", () => {
 		// Three times the time `end` gives a subscriber for a catalog.
 		asked.accepted.holdDone(new Promise((resolve) => setTimeout(resolve, 60)));
 		publisher.update(catalogOf("a", "b"));
-		const errors = await reported(() => publisher.end());
+		const errors = await reported(() => ended(publisher));
 		expect(errors).toEqual([]);
 		expect(asked.accepted.log).toEqual([
 			"group 101 subgroup 0 end-of-group: object 0 a,b",
@@ -894,7 +939,7 @@ describe("createCatalogPublisher", () => {
 		});
 		publisher.subscribe(asked.request);
 		publisher.update(catalogOf("a", "b"));
-		await publisher.end();
+		await ended(publisher);
 		answer();
 		await settle();
 		expect(asked.answers).toEqual(["SUBSCRIBE_OK largest {100, 0}"]);
@@ -916,7 +961,7 @@ describe("createCatalogPublisher", () => {
 		});
 		publisher.subscribe(asked.request);
 		publisher.update(catalogOf("a", "b"));
-		await publisher.end();
+		await ended(publisher);
 		answer();
 		await settle();
 		expect(asked.accepted.log).toEqual(["PUBLISH_DONE 2"]);
@@ -999,9 +1044,7 @@ describe("createCatalogPublisher", () => {
 		await settle();
 		jest.useFakeTimers();
 		try {
-			const ending = publisher.end();
-			jest.advanceTimersByTime(20);
-			await ending;
+			expect(await endedWithin(publisher, [20])).toBe(true);
 			expect(jest.getTimerCount()).toBe(0);
 		} finally {
 			jest.useRealTimers();
@@ -1010,6 +1053,55 @@ describe("createCatalogPublisher", () => {
 			"group 101 subgroup 0 end-of-group: reset",
 			"PUBLISH_DONE 2",
 		]);
+	});
+
+	test("after `end` left a subscriber whose stream does not open, no timer is left", async () => {
+		const publisher = publisherOf("a");
+		const asked = fakeSubscribe("catalog");
+		publisher.subscribe(asked.request);
+		await settle();
+		asked.accepted.holdOpens(new Promise(() => {}));
+		publisher.update(catalogOf("a", "b"));
+		await settle();
+		jest.useFakeTimers();
+		try {
+			const errors = await reported(async () => {
+				// The first time, and not yet the second.
+				expect(await endedWithin(publisher, [20, 19])).toBe(false);
+				expect(await endedWithin(publisher, [1])).toBe(true);
+			});
+			expect(errors.length).toBe(1);
+			expect(jest.getTimerCount()).toBe(0);
+		} finally {
+			jest.useRealTimers();
+		}
+		expect(asked.accepted.log).toEqual([]);
+	});
+
+	test("a SUBSCRIBE that is answered after `end` leaves no timer when it was told", async () => {
+		const publisher = publisherOf("a");
+		let answer: () => void = () => {};
+		const asked = fakeSubscribe("catalog", {
+			acceptAfter: new Promise((resolve) => {
+				answer = resolve;
+			}),
+		});
+		publisher.subscribe(asked.request);
+		publisher.update(catalogOf("a", "b"));
+		jest.useFakeTimers();
+		try {
+			expect(await endedWithin(publisher, [])).toBe(true);
+			answer();
+			await turns();
+			expect(asked.accepted.log).toEqual([
+				"group 101 subgroup 0 end-of-group: object 0 a,b",
+				"group 101 subgroup 0 end-of-group: closed",
+				"PUBLISH_DONE 2",
+			]);
+			expect(jest.getTimerCount()).toBe(0);
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	test("a subscription that ended is written to no more", async () => {
@@ -1022,7 +1114,7 @@ describe("createCatalogPublisher", () => {
 		const errors = await reported(async () => {
 			publisher.update(catalogOf("a", "b"));
 			await settle();
-			await publisher.end();
+			await ended(publisher);
 		});
 		expect(asked.accepted.log).toEqual([]);
 		expect(errors).toEqual([]);

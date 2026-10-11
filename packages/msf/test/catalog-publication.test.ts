@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Catalog } from "../src/core/catalog.ts";
 import {
 	answerCatalogFetch,
@@ -300,189 +302,109 @@ describe("answerCatalogFetch: what a FETCH gets from a publisher that keeps the 
 		return `end {${answer.endLocation.group}, ${answer.endLocation.object}}: ${pieces.join(" ")}`;
 	}
 
-	// `first` and `newest` are the Groups of the first and the newest catalog.
-	test.each<{
-		name: string;
-		first: bigint;
-		newest: bigint;
-		start: [bigint, bigint];
-		end: [bigint, bigint];
-		order: "Ascending" | "Descending";
-		answer: string;
-	}>([
-		{
-			name: "the range a Joining FETCH with offset 0 makes: the newest Group, up to its one Object",
-			first: 5n,
-			newest: 5n,
-			start: [5n, 0n],
-			end: [5n, 1n],
-			order: "Ascending",
-			answer: "end {5, 1}: catalog",
-		},
-		{
-			name: "the whole newest Group: the End Location is the Largest Object plus 1",
-			first: 5n,
-			newest: 5n,
-			start: [5n, 0n],
-			end: [5n, 0n],
-			order: "Ascending",
-			answer: "end {5, 1}: catalog",
-		},
-		{
-			name: "a range that goes on beyond the newest Group",
-			first: 5n,
-			newest: 5n,
-			start: [5n, 0n],
-			end: [9n, 0n],
-			order: "Ascending",
-			answer: "end {5, 1}: catalog",
-		},
-		{
-			name: "a range that starts before the first Group: nothing was published there, and nothing is said of it",
-			first: 5n,
-			newest: 5n,
-			start: [0n, 0n],
-			end: [5n, 1n],
-			order: "Ascending",
-			answer: "end {5, 1}: catalog",
-		},
-		{
-			name: "a range that ends before the first Group: an answer with nothing on the stream",
-			first: 5n,
-			newest: 5n,
-			start: [0n, 0n],
-			end: [3n, 0n],
-			order: "Ascending",
-			answer: "end {3, 0}: ",
-		},
-		{
-			name: "a range that starts after the catalog Object",
-			first: 5n,
-			newest: 5n,
-			start: [5n, 1n],
-			end: [6n, 0n],
-			order: "Ascending",
-			answer: "INVALID_RANGE",
-		},
-		{
-			name: "a range that starts in a later Group",
-			first: 5n,
-			newest: 5n,
-			start: [6n, 0n],
-			end: [7n, 0n],
-			order: "Ascending",
-			answer: "INVALID_RANGE",
-		},
-		{
-			name: "Ascending, a range that starts before the first Group: the indicator covers that as well",
-			first: 5n,
-			newest: 8n,
-			start: [0n, 0n],
-			end: [8n, 1n],
-			order: "Ascending",
-			answer: "end {8, 1}: u7,0 catalog",
-		},
-		{
-			name: "catalogs that were replaced are unknown: the indicator stands before the catalog, at Object 0 of the last of them",
-			first: 5n,
-			newest: 8n,
-			start: [5n, 0n],
-			end: [8n, 1n],
-			order: "Ascending",
-			answer: "end {8, 1}: u7,0 catalog",
-		},
-		{
-			name: "a range within what was replaced: the indicator ends where the range does",
-			first: 5n,
-			newest: 8n,
-			start: [5n, 0n],
-			end: [5n, 1n],
-			order: "Ascending",
-			answer: "end {5, 1}: u5,0",
-		},
-		{
-			name: "a whole Group of what was replaced",
-			first: 5n,
-			newest: 8n,
-			start: [6n, 0n],
-			end: [6n, 0n],
-			order: "Ascending",
-			// Object 0 of the Group, also where the whole Group was asked for.
-			answer: "end {6, 0}: u6,0",
-		},
-		{
-			name: "a range among the Groups that were replaced that has none of their Objects: no indicator",
-			first: 5n,
-			newest: 8n,
-			start: [6n, 3n],
-			end: [6n, 4n],
-			order: "Ascending",
-			answer: "end {6, 4}: ",
-		},
-		{
-			name: "a range that ends before the first Group, with catalogs replaced: no indicator",
-			first: 5n,
-			newest: 8n,
-			start: [0n, 0n],
-			end: [3n, 0n],
-			order: "Ascending",
-			answer: "end {3, 0}: ",
-		},
-		{
-			name: "a range that starts after the last catalog that was replaced",
-			first: 5n,
-			newest: 8n,
-			start: [7n, 1n],
-			end: [8n, 1n],
-			order: "Ascending",
-			answer: "end {8, 1}: catalog",
-		},
-		{
-			name: "Descending: the catalog first, and the indicator after it, at Object 0 of the first Group that was replaced",
-			first: 5n,
-			newest: 8n,
-			start: [5n, 0n],
-			end: [8n, 1n],
-			order: "Descending",
-			answer: "end {8, 1}: catalog u5,0",
-		},
-		{
-			name: "Descending, from within the first Group: the indicator names the next one",
-			first: 5n,
-			newest: 8n,
-			start: [5n, 1n],
-			end: [8n, 1n],
-			order: "Descending",
-			answer: "end {8, 1}: catalog u6,0",
-		},
-		{
-			name: "Descending, a range that starts before the first Group: the indicator does not go below it",
-			first: 5n,
-			newest: 8n,
-			start: [0n, 0n],
-			end: [8n, 1n],
-			order: "Descending",
-			answer: "end {8, 1}: catalog u5,0",
-		},
-		{
-			name: "Descending, with nothing replaced",
-			first: 5n,
-			newest: 5n,
-			start: [0n, 0n],
-			end: [5n, 1n],
-			order: "Descending",
-			answer: "end {5, 1}: catalog",
-		},
-		{
-			name: "Descending, within what was replaced",
-			first: 5n,
-			newest: 8n,
-			start: [5n, 0n],
-			end: [6n, 0n],
-			order: "Descending",
-			answer: "end {6, 0}: u5,0",
-		},
-	])("$name", ({ first, newest, start, end, order, answer }) => {
-		expect(line(first, newest, start, end, order)).toBe(answer);
+	// The rows are fixtures/published-fetch/answers.tsv, which the Rust client
+	// reads too: the README there has the columns. Of its rows, a publisher
+	// of a catalog can be the ones that keep the newest Group alone.
+	const rows = readFileSync(
+		join(
+			import.meta.dir,
+			"..",
+			"..",
+			"..",
+			"fixtures",
+			"published-fetch",
+			"answers.tsv",
+		),
+		"utf8",
+	)
+		.split("\n")
+		.filter((row) => row !== "")
+		.map((row) => {
+			const [
+				name,
+				first,
+				newest,
+				firstKept,
+				start,
+				end,
+				order,
+				answer,
+				endLocation,
+				pieces,
+			] = row.split("\t");
+			if (
+				name === undefined ||
+				first === undefined ||
+				newest === undefined ||
+				firstKept === undefined ||
+				start === undefined ||
+				end === undefined ||
+				order === undefined ||
+				answer === undefined ||
+				endLocation === undefined ||
+				pieces === undefined
+			) {
+				throw new Error(`a row without ten columns: ${row}`);
+			}
+			return {
+				name,
+				first,
+				newest,
+				firstKept,
+				start,
+				end,
+				order,
+				answer,
+				endLocation,
+				pieces,
+			};
+		});
+	const ofACatalog = rows.filter((row) => row.firstKept === row.newest);
+
+	/** "group,object" of the table as two numbers. */
+	const location = (text: string): [bigint, bigint] => {
+		const [group, object] = text.split(",");
+		if (group === undefined || object === undefined) {
+			throw new Error(`no Location: ${text}`);
+		}
+		return [BigInt(group), BigInt(object)];
+	};
+
+	test("the table has 47 rows, of which a publisher of a catalog can be 19", () => {
+		// WHY counted: a table that is read differently, or a condition that
+		// selects nothing, would leave the rows below passing for none.
+		expect(rows.length).toBe(47);
+		expect(ofACatalog.length).toBe(19);
+		expect(ofACatalog.every((row) => row.name.startsWith("catalog-"))).toBe(
+			true,
+		);
+	});
+
+	test.each(ofACatalog)("$name", (row) => {
+		if (row.order !== "ascending" && row.order !== "descending") {
+			throw new Error(`no Group Order: ${row.order}`);
+		}
+		// In the table an Object is the number of its Group; the one Object a
+		// publisher of a catalog has is the catalog, in the newest Group.
+		const expected =
+			row.answer === "invalid_range"
+				? "INVALID_RANGE"
+				: `end {${location(row.endLocation).join(", ")}}: ${
+						row.pieces === "-"
+							? ""
+							: row.pieces
+									.split(" ")
+									.map((piece) => (piece === row.newest ? "catalog" : piece))
+									.join(" ")
+					}`;
+		expect(
+			line(
+				BigInt(row.first),
+				BigInt(row.newest),
+				location(row.start),
+				location(row.end),
+				row.order === "ascending" ? "Ascending" : "Descending",
+			),
+		).toBe(expected);
 	});
 });
