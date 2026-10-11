@@ -120,6 +120,15 @@ check_spike_deps() {
 	fi
 }
 
+# The layer of a package under packages/, a number; empty for a name that is none of them.
+package_layer() {
+	case "$1" in
+	@xmoq/moqt | @xmoq/loc) echo 0 ;;
+	@xmoq/msf) echo 1 ;;
+	*) echo "" ;;
+	esac
+}
+
 check_packages() {
 	local manifest interop_deps interop_name
 	interop_name=""
@@ -135,15 +144,39 @@ check_packages() {
 			report "${manifest} depends on interop/, which checks packages and is not part of them: ${interop_deps}"
 		fi
 	done
-	# WHY: MoQ Transport is the lower layer. @xmoq/msf may use @xmoq/moqt; a transport that
-	# knew the streaming format on top of it could no longer carry another one.
-	if [[ -f packages/moqt/package.json ]]; then
-		local format_deps
-		format_deps="$(package_deps packages/moqt/package.json | grep -E '^@xmoq/msf: |packages/msf' || true)"
-		if [[ -n "${format_deps}" ]]; then
-			report "packages/moqt/package.json depends on @xmoq/msf, which is the layer above it: ${format_deps}"
+	# The packages are layers: one may depend on the packages of a lower layer, and on none of
+	# its own or a higher one. MoQ Transport and LOC, the format of a media Object, know nothing
+	# of each other; the streaming format is built on the transport; what encodes and plays
+	# media is built on all of them.
+	# WHY a package that is not listed fails: a new one would otherwise depend on anything.
+	# WHY the value of a dependency is read as well as its name: a package is reached under any
+	# name by "file:../moqt", "workspace:packages/moqt" or "npm:@xmoq/moqt@*".
+	local name layer dependency other other_name other_directory other_layer
+	for manifest in "$@"; do
+		name="$(jq -r '.name' "${manifest}")"
+		layer="$(package_layer "${name}")"
+		if [[ -z "${layer}" ]]; then
+			report "${manifest}: ${name} has no layer; add it to package_layer in scripts/ci/check-layers.sh"
+			continue
 		fi
-	fi
+		while IFS= read -r dependency; do
+			for other in "$@"; do
+				[[ "${other}" != "${manifest}" ]] || continue
+				other_name="$(jq -r '.name' "${other}")"
+				other_directory="$(basename "$(dirname "${other}")")"
+				# The name, as the key or within the value, or the directory at the end of a path.
+				if ! grep -Eq "(^|[:@ ])${other_name}([:@ ]|\$)|(^|[:/ ])(\.\./|packages/)${other_directory}(/|\$)" <<<"${dependency}"; then
+					continue
+				fi
+				other_layer="$(package_layer "${other_name}")"
+				# One without a layer is reported for itself.
+				[[ -n "${other_layer}" ]] || continue
+				if [[ "${other_layer}" -ge "${layer}" ]]; then
+					report "${manifest}: ${name} (layer ${layer}) depends on ${other_name} (layer ${other_layer}), which is not a layer below it: ${dependency}"
+				fi
+			done
+		done < <(package_deps "${manifest}")
+	done
 }
 
 checked=0
