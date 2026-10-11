@@ -10,7 +10,9 @@ use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
 use xmoq_moqt::fetch::FetchHeader;
-use xmoq_moqt::message::{ControlMessage, FetchRange, PublishDone, ReasonPhrase, RequestError};
+use xmoq_moqt::message::{
+    ControlMessage, FetchRange, PublishDone, ReasonPhrase, RequestError, Subscribe,
+};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{
@@ -24,7 +26,7 @@ use xmoq_moqt_io::{
     StreamEnd, StreamStops, Trace, UniEvent, WriteError, open_fetch_stream, read_uni_streams,
     send_message,
 };
-use xmoq_relay_core::Counts;
+use xmoq_relay_core::{Counts, Event, FetchPipeEnd, SessionKey, StreamKey};
 
 use crate::hub::{self, Held, HubConfig, HubHandle};
 
@@ -2070,4 +2072,178 @@ async fn a_subscriber_that_takes_no_stream_is_told_that_none_comes() {
     let reset = || RequestStreamEvent::Closed(RequestClose::Reset(Some(0x5)));
     assert_eq!(ends, [fin(), fin(), fin(), reset(), reset(), reset()]);
     assert_eq!(hub.held().await.relay.fetches, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscribe_that_waits_for_a_publisher_is_logged_as_held() {
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, _task) = hub::spawn(HubConfig {
+        log: Some(log),
+        ..HubConfig::default()
+    });
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    // The publisher announced the namespace and has not answered for the
+    // track: the subscriber's SUBSCRIBE waits.
+    let mut waiting = Peer::connect(&hub, true).await;
+    let _request = waiting.start_subscribing().await;
+    let _upstream = publisher.relay_subscribe().await;
+    let lines = logged(&mut lines);
+    assert!(
+        lines.contains(&"HOLD_REQUEST session=1 stream=1 SUBSCRIBE".to_string()),
+        "{lines:?}"
+    );
+
+    // A SUBSCRIBE that is answered in the step that reads it is not.
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, _task) = hub::spawn(HubConfig {
+        log: Some(log),
+        ..HubConfig::default()
+    });
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let _subscription = subscriber.subscribe().await;
+    let lines = logged(&mut lines);
+    assert!(
+        !lines.iter().any(|line| line.starts_with("HOLD_REQUEST")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscribe_that_closes_its_session_is_not_logged_as_held() {
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, _task) = hub::spawn(HubConfig {
+        log: Some(log),
+        ..HubConfig::default()
+    });
+    let _client = Peer::connect(&hub, true).await;
+    // A SUBSCRIBE with a Request ID of the relay's parity, 1: the session
+    // is closed with INVALID_REQUEST_ID, and nothing waits.
+    hub.inject(Event::RequestOpened {
+        session: SessionKey(0),
+        stream: StreamKey(0),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: 1,
+            full_track_name: track(),
+            parameters: vec![],
+        }),
+    })
+    .await;
+    assert_eq!(hub.held().await.relay.sessions, 0);
+    let lines = logged(&mut lines);
+    assert!(
+        !lines.iter().any(|line| line.starts_with("HOLD_REQUEST")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_end_of_a_fetch_that_is_not_passed_on_is_dropped() {
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, _task) = hub::spawn(HubConfig {
+        log: Some(log),
+        ..HubConfig::default()
+    });
+    let _client = Peer::connect(&hub, true).await;
+    // What a task reports that ended while the relay ordered it stopped:
+    // the hub has let go of the FETCH by then.
+    hub.inject(Event::FetchPipeEnded {
+        session: SessionKey(0),
+        stream: StreamKey(0),
+        how: FetchPipeEnd::UpstreamLost,
+    })
+    .await;
+    let held = hub.held().await;
+    assert_eq!((held.relay.sessions, held.fetch_pipes), (1, 0));
+    let lines = logged(&mut lines);
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("FETCH_PIPE_ENDED")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_whose_stream_cannot_be_passed_on_ends_for_the_subscriber() {
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, mut publisher, mut alice, mut request, mut upstream) =
+        fetching(Some(log), true).await;
+    publisher.accept_relay_fetch(&mut upstream).await;
+    assert!(matches!(
+        alice.answer(&mut request).await,
+        RequestEvent::FetchEstablished { .. }
+    ));
+    // The header of the publisher's fetch stream is reported for a stream
+    // the hub has no bytes of: there is nothing to pass on, and the relay
+    // has to hear that, or it holds the FETCH for good.
+    hub.inject(Event::FetchStreamOpened {
+        session: SessionKey(0),
+        stream: StreamKey(999),
+        request_id: upstream.id.value(),
+    })
+    .await;
+    let end = request_end(&mut request.reader).await;
+    assert_eq!(end, RequestStreamEvent::Closed(RequestClose::Fin));
+    let held = hub.held().await;
+    assert_eq!((held.relay.fetches, held.fetch_pipes), (0, 0));
+    let lines = logged(&mut lines);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "FETCH_PIPE_ENDED session=1 stream=1 upstream_lost"),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_joining_fetch_whose_subscribe_never_comes_is_refused_after_the_time_for_first_bytes() {
+    assert_eq!(
+        HubConfig::default().streams.first_bytes_timeout,
+        Duration::from_secs(10)
+    );
+    let (log, mut lines) = hub::Log::collect();
+    let (hub, _task) = hub::spawn(HubConfig {
+        log: Some(log),
+        ..HubConfig::default()
+    });
+    let mut alice = Peer::connect(&hub, false).await;
+    // Alice makes a SUBSCRIBE, Request ID 0, and does not send it; her
+    // Joining FETCH names it.
+    let (subscribe, _unsent) = alice.session.subscribe(track(), vec![]).unwrap();
+    let range = FetchRange::RelativeJoining {
+        joining_request_id: subscribe.value(),
+        joining_start: 0,
+    };
+    let (id, message) = alice.session.fetch(range, vec![]).unwrap();
+    let (mut send, recv) = alice.connection.open_bi().await.unwrap();
+    send_message(&mut send, &message, &Trace::default(), "request")
+        .await
+        .unwrap();
+    let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    // Nothing for 9 seconds: the relay holds the FETCH.
+    assert!(
+        timeout(Duration::from_secs(9), reader.next_event())
+            .await
+            .is_err()
+    );
+    assert_eq!(hub.held().await.relay.fetches, 1);
+    let lines = logged(&mut lines);
+    assert!(
+        lines.contains(&"HOLD_REQUEST session=0 stream=1 FETCH".to_string()),
+        "{lines:?}"
+    );
+    // Then INVALID_JOINING_REQUEST_ID (0x32).
+    let RequestStreamEvent::Message(response) = request_end(&mut reader).await else {
+        panic!("no answer");
+    };
+    let answer = alice.session.on_request_message(id, response);
+    assert!(
+        matches!(&answer, Ok(RequestEvent::Rejected(error)) if error.error_code == 0x32),
+        "{answer:?}"
+    );
+    let held = hub.held().await;
+    assert_eq!((held.relay.fetches, held.timers), (0, 0));
 }

@@ -748,3 +748,185 @@ describe("fixtures/peer-fetch: what becomes of a FETCH of the peer", () => {
 		expect(got.join(" | ")).toBe(sent);
 	});
 });
+
+// The table both implementations read (fixtures/joining-request-id/README.md):
+// whether the request a Joining FETCH names is yet to come. The Rust session
+// hands a FETCH that is "held" to its caller; `@xmoq/moqt` serves no Joining
+// FETCH and refuses it at once with NOT_SUPPORTED, as the Rust client does.
+describe("fixtures/joining-request-id: whether the SUBSCRIBE of a Joining FETCH is yet to come", () => {
+	const text = readFileSync(
+		join(FIXTURES, "joining-request-id", "held.tsv"),
+		"utf8",
+	);
+	// As the Rust test reads it: every line ends with a newline, none is
+	// empty (an empty one fails below), and no name comes twice.
+	if (!text.endsWith("\n")) {
+		throw new Error("held.tsv does not end with a newline");
+	}
+	const all = text
+		.slice(0, -1)
+		.split("\n")
+		.map((line) => {
+			const [name, sender, used, fetchId, joiningId, outcome, ...more] =
+				line.split("\t");
+			if (
+				name === undefined ||
+				(sender !== "client" && sender !== "server") ||
+				used === undefined ||
+				fetchId === undefined ||
+				joiningId === undefined ||
+				(outcome !== "held" && outcome !== "refused") ||
+				more.length > 0
+			) {
+				throw new Error(
+					`a row of held.tsv is not what its README has: ${line}`,
+				);
+			}
+			return { name, sender, used, fetchId, joiningId, outcome };
+		});
+	const names = new Set(all.map((row) => row.name));
+	if (names.size !== all.length) {
+		throw new Error("a name comes twice in held.tsv");
+	}
+	// This endpoint is a client: the requests it receives are a server's.
+	const rows = all.filter((row) => row.sender === "server");
+
+	/** One byte of a varint: every Request ID of the server's rows fits. */
+	const byte = (id: string): string => {
+		const value = Number(id);
+		if (!/^\d+$/.test(id) || value > 63) {
+			throw new Error(`Request ID ${id} does not fit a varint of one byte`);
+		}
+		return value.toString(16).padStart(2, "0");
+	};
+	/** The captured PUBLISH_NAMESPACE with a Request ID: a request that is no subscription. */
+	const publishNamespace = (id: string): Uint8Array => {
+		const pairs = fixture("publish-namespace-moqtail-ts").split(" ");
+		pairs[3] = byte(id);
+		return hex(pairs.join(" "));
+	};
+	/** The captured Relative Joining FETCH with its Request ID and the one it names; Joining Start 0. */
+	const joiningFetch = (id: string, joins: string): Uint8Array => {
+		const pairs = fixture("fetch-relative-joining-moqtail-rs").split(" ");
+		pairs[3] = byte(id);
+		pairs[5] = byte(joins);
+		return hex(pairs.join(" "));
+	};
+
+	// 10 of the 30 rows of the table have `server` as the sender.
+	test("the table has 10 rows for a server's requests", () => {
+		expect(rows.length).toBe(10);
+	});
+
+	test.each(rows)(
+		"$name: used $used, FETCH $fetchId names $joiningId: $outcome",
+		({ used, fetchId, joiningId, outcome }) => {
+			const session = started();
+			let peerStream = 0;
+			for (const each of used === "-" ? [] : used.split(",")) {
+				// `N:gone`: the request with that ID was over, its stream reset,
+				// before the FETCH came. This endpoint refuses a
+				// PUBLISH_NAMESPACE by itself, so nothing of it is open either
+				// way; the reset is reported as it would be. A row with `:gone`
+				// therefore goes the way of the same row without it here.
+				const [id, gone, ...more] = each.split(":");
+				if (
+					id === undefined ||
+					more.length > 0 ||
+					(gone ?? "gone") !== "gone"
+				) {
+					throw new Error(`not a Request ID of held.tsv: ${each}`);
+				}
+				session.receivePeerBidiStreamData(
+					peerStream,
+					publishNamespace(id),
+					false,
+				);
+				if (gone !== undefined) session.peerBidiStreamReset(peerStream, 1);
+				peerStream += 1;
+			}
+			const outputs = session.receivePeerBidiStreamData(
+				peerStream,
+				joiningFetch(fetchId, joiningId),
+				false,
+			);
+			const answers = outputs.flatMap((output) => {
+				if (output.type === "close-session") return [`closed ${output.code}`];
+				if (output.type !== "respond") return [];
+				const decoded = decodeControlMessage(output.data);
+				return decoded.status === "ok" && decoded.value.type === "REQUEST_ERROR"
+					? [`REQUEST_ERROR ${decoded.value.errorCode}`]
+					: ["?"];
+			});
+			// "held": NOT_SUPPORTED (3). "refused": INVALID_JOINING_REQUEST_ID (50).
+			expect(answers).toEqual([
+				outcome === "held" ? "REQUEST_ERROR 3" : "REQUEST_ERROR 50",
+			]);
+			expect(session.closed).toBe(false);
+		},
+	);
+
+	// At the edge of what is remembered (1,024 Request IDs above a gap; the
+	// table stops at 63). The FETCH is the ID that makes them 1,025, so the
+	// lowest is pushed out before the one the FETCH names is looked at, and
+	// then reads as yet to come. The Rust session, which takes the ID of the
+	// FETCH first, hands both to its caller.
+	test.each([
+		{
+			name: "3 to 2049 were used, 1 was not; FETCH 2051 names 3, which its own ID pushes out",
+			lastUsed: 2049,
+			fetchId: 2051,
+			joiningId: 3,
+		},
+		{
+			name: "3 to 2051 were used, which pushed 3 out; FETCH 2053 names 5, which its own ID pushes out",
+			lastUsed: 2051,
+			fetchId: 2053,
+			joiningId: 5,
+		},
+	])("$name: held", ({ lastUsed, fetchId, joiningId }) => {
+		/** A Request ID as a varint of 9 bytes. */
+		const nine = (id: number): string[] => [
+			"ff",
+			...(id.toString(16).padStart(16, "0").match(/../g) ?? []),
+		];
+		const session = started();
+		let peerStream = 0;
+		for (let id = 3; id <= lastUsed; id += 2) {
+			// The start of a TRACK_STATUS, whole: refused, and its stream over.
+			session.receivePeerBidiStreamData(
+				peerStream,
+				hex(["0d", "00", "09", ...nine(id)].join(" ")),
+				true,
+			);
+			peerStream += 1;
+		}
+		expect(session.closed).toBe(false);
+		const pairs = fixture("fetch-relative-joining-moqtail-rs").split(" ");
+		// The Request ID of 1 byte becomes one of 9: the Message Length
+		// grows by 8.
+		const length = Number.parseInt(`${pairs[1]}${pairs[2]}`, 16) + 8;
+		pairs[5] = joiningId.toString(16).padStart(2, "0");
+		pairs.splice(3, 1, ...nine(fetchId));
+		pairs.splice(
+			1,
+			2,
+			...(length.toString(16).padStart(4, "0").match(/../g) ?? []),
+		);
+		const outputs = session.receivePeerBidiStreamData(
+			peerStream,
+			hex(pairs.join(" ")),
+			false,
+		);
+		const answers = outputs.flatMap((output) => {
+			if (output.type === "close-session") return [`closed ${output.code}`];
+			if (output.type !== "respond") return [];
+			const decoded = decodeControlMessage(output.data);
+			return decoded.status === "ok" && decoded.value.type === "REQUEST_ERROR"
+				? [`REQUEST_ERROR ${decoded.value.errorCode}`]
+				: ["?"];
+		});
+		// NOT_SUPPORTED, the answer to a Joining FETCH that would be held.
+		expect(answers).toEqual(["REQUEST_ERROR 3"]);
+	});
+});

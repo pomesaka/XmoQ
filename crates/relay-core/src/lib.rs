@@ -1269,6 +1269,23 @@ impl Relay {
     /// the I/O side reports what it read, and some of that is read after the
     /// relay let go.
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
+        // A request of the peer and a message on one use a Request ID of the
+        // peer (§10.1, a REQUEST_UPDATE as well): a Joining FETCH that waits
+        // for the SUBSCRIBE with that ID to come has its answer then.
+        let used_a_request_id = match &event {
+            Event::RequestOpened { session, .. } | Event::RequestMessage { session, .. } => {
+                Some(*session)
+            }
+            _ => None,
+        };
+        let mut actions = self.handle_event(event);
+        if let Some(session) = used_a_request_id {
+            self.settle_early_fetches(session, None, &mut actions);
+        }
+        actions
+    }
+
+    fn handle_event(&mut self, event: Event) -> Vec<Action> {
         let mut actions = Vec::new();
         // What has to do with a FETCH the relay passes on goes its own way.
         let Some(event) = self.on_fetch_event(event, &mut actions) else {
@@ -1320,6 +1337,7 @@ impl Relay {
             // Taken by `on_fetch_event` above.
             Event::FetchStreamOpened { .. }
             | Event::FetchPipeEnded { .. }
+            | Event::JoiningFetchTimeout { .. }
             | Event::FetchStreamWritten { .. } => {}
             Event::DataStreamOpened {
                 session,
@@ -3186,6 +3204,7 @@ impl Action {
             | Self::StartDrainTimer { session, .. }
             | Self::StartEarlyTimer { session, .. }
             | Self::StartRequestTimer { session, .. }
+            | Self::StartJoiningFetchTimer { session, .. }
             | Self::StopRequest { session, .. }
             | Self::OpenRequest { session, .. }
             | Self::FinishOwnRequest { session, .. }

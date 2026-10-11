@@ -65,8 +65,10 @@ pub enum PeerRequest {
     /// The peer announces a namespace.
     PublishNamespace(PublishNamespace),
     /// The peer asks for a range of a track. A Joining FETCH names a
-    /// SUBSCRIBE of the peer that is open in this session; the session has
-    /// checked that.
+    /// SUBSCRIBE of the peer that is open in this session, or a Request ID
+    /// whose request is yet to come: which of the two,
+    /// [`Session::peer_request_yet_to_come`] says, and a caller that holds
+    /// no FETCH for a SUBSCRIBE to come refuses the second.
     Fetch(Fetch),
 }
 
@@ -256,9 +258,29 @@ impl PeerRequests {
         })
     }
 
-    /// The Start Location of a FETCH of the peer, where the FETCH gives one,
-    /// or the code to refuse the FETCH with.
-    fn start_of(&self, range: &FetchRange) -> Result<Option<Location>, u64> {
+    /// Whether the peer has yet to send the request with the ID `id`, as far
+    /// as the request with the ID `before` shows: `id` is one of the peer's,
+    /// smaller than `before`, and has not been used.
+    ///
+    /// WHY smaller: an endpoint gives its requests IDs that only grow
+    /// (§10.1), so a request that names another was made after it. WHY this
+    /// can be asked at all: requests travel on streams of their own and are
+    /// read in no order, so a request can be read before one it names.
+    ///
+    /// An ID the peer used so long ago that this endpoint forgot it
+    /// ([`REQUEST_IDS_AHEAD_LIMIT`] newer ones while a lower one was still
+    /// to come) reads as one that is yet to come.
+    fn yet_to_come(&self, id: u64, before: u64) -> bool {
+        id % 2 == self.parity
+            && id < before
+            && id >= self.lowest_unseen
+            && !self.seen_ahead.contains(&id)
+            && !self.live.contains_key(&id)
+    }
+
+    /// The Start Location of the FETCH of the peer with the ID `request_id`,
+    /// where the FETCH gives one, or the code to refuse the FETCH with.
+    fn start_of(&self, request_id: u64, range: &FetchRange) -> Result<Option<Location>, u64> {
         match range {
             // §10.12.3: "End Location MUST specify the same or a
             // larger Location than Start Location". WHY a
@@ -289,7 +311,15 @@ impl PeerRequests {
                 joining_request_id,
                 joining_start,
             } => {
-                if !self.is_open_subscribe(*joining_request_id) {
+                // WHY a SUBSCRIBE that is yet to come is taken as well:
+                // the two travel on streams of their own, and a peer that
+                // sends them together cannot tell which is read first. The
+                // caller holds such a FETCH until the SUBSCRIBE comes or a
+                // time runs out, and rejects it then
+                // (`Session::peer_request_yet_to_come`).
+                if !self.is_open_subscribe(*joining_request_id)
+                    && !self.yet_to_come(*joining_request_id, request_id)
+                {
                     return Err(request_error_code::INVALID_JOINING_REQUEST_ID);
                 }
                 // §10.12.2.1: {Joining Start, 0} for an Absolute
@@ -446,7 +476,7 @@ impl Session {
                 PeerRequest::PublishNamespace(message),
             ),
             ControlMessage::Fetch(message) => {
-                let start = match self.peer.start_of(&message.range) {
+                let start = match self.peer.start_of(request_id, &message.range) {
                     Ok(start) => start,
                     Err(error_code) => return refused(error_code),
                 };
@@ -813,6 +843,21 @@ impl Session {
             stream_count,
             error_reason,
         }))
+    }
+
+    /// Whether the peer has yet to send the request with the Request ID
+    /// `request_id`, which a request it sent later names: `request` is that
+    /// later request, a Joining FETCH whose Joining Request ID this is.
+    ///
+    /// `true` for an ID of the peer's that is smaller than the one of
+    /// `request` and has not been used. The caller holds the FETCH then, for
+    /// as long as it gives a stream of the peer to say what it is, and
+    /// rejects it with `INVALID_JOINING_REQUEST_ID` when the ID has been
+    /// used by something that is no SUBSCRIBE, or not at all in that time.
+    /// The contract is the table `fixtures/joining-request-id/`.
+    #[must_use]
+    pub fn peer_request_yet_to_come(&self, request_id: u64, request: PeerRequestId) -> bool {
+        request.session == self.tag && self.peer.yet_to_come(request_id, request.id)
     }
 
     /// Records that a request stream of the peer is gone: finished, reset,
@@ -1471,6 +1516,140 @@ mod tests {
             }
             assert_eq!(&done.join(" | "), sent, "{name}");
         }
+    }
+
+    /// One row of `fixtures/joining-request-id/held.tsv`; see its README.
+    #[derive(Debug)]
+    struct JoiningRow {
+        name: String,
+        /// The role of the peer: the client uses even Request IDs.
+        peer: Role,
+        /// The Request IDs the peer used before, in the order they came, and
+        /// whether the request of each was gone again before the FETCH.
+        used: Vec<(u64, bool)>,
+        fetch: u64,
+        joining: u64,
+        /// `held`, and not `refused`.
+        held: bool,
+    }
+
+    fn joining_rows(table: &str) -> Result<Vec<JoiningRow>, String> {
+        let Some(body) = table.strip_suffix('\n') else {
+            return Err("the last row does not end with a line feed".to_string());
+        };
+        let number = |text: &str| {
+            text.parse::<u64>()
+                .map_err(|error| format!("{text:?}: {error}"))
+        };
+        let mut rows = Vec::new();
+        for line in body.split('\n') {
+            let columns: Vec<&str> = line.split('\t').collect();
+            let [name, peer, used, fetch, joining, held] = columns.as_slice() else {
+                return Err(format!("not six columns: {line:?}"));
+            };
+            let peer = match *peer {
+                "client" => Role::Client,
+                "server" => Role::Server,
+                other => return Err(format!("neither client nor server: {other:?}")),
+            };
+            let used = match *used {
+                "-" => Vec::new(),
+                ids => ids
+                    .split(',')
+                    .map(|id| match id.strip_suffix(":gone") {
+                        Some(id) => number(id).map(|id| (id, true)),
+                        None => number(id).map(|id| (id, false)),
+                    })
+                    .collect::<Result<_, _>>()?,
+            };
+            let held = match *held {
+                "held" => true,
+                "refused" => false,
+                other => return Err(format!("neither held nor refused: {other:?}")),
+            };
+            if rows.iter().any(|row: &JoiningRow| row.name == *name) {
+                return Err(format!("twice: {name:?}"));
+            }
+            rows.push(JoiningRow {
+                name: (*name).to_string(),
+                peer,
+                used,
+                fetch: number(fetch)?,
+                joining: number(joining)?,
+                held,
+            });
+        }
+        Ok(rows)
+    }
+
+    /// The contract `fixtures/joining-request-id/` pins for both
+    /// implementations: which Joining Request ID is one whose SUBSCRIBE is
+    /// yet to come.
+    #[test]
+    fn a_joining_request_id_is_yet_to_come_where_the_shared_table_says() {
+        let path = format!(
+            "{}/../../fixtures/joining-request-id/held.tsv",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let table = std::fs::read_to_string(&path).expect("the fixture is there");
+        let rows = joining_rows(&table).unwrap_or_else(|error| panic!("{path}: {error}"));
+        // As many as the table has: a row that is added there and not
+        // read here is counted.
+        assert_eq!(rows.len(), 30, "{path}");
+        for row in &rows {
+            let own = match row.peer {
+                Role::Client => Role::Server,
+                Role::Server => Role::Client,
+            };
+            let mut session = Session::new(own, Transport::WebTransport);
+            // What the peer used before is no subscription: here it is a
+            // PUBLISH_NAMESPACE, which this session hands to its caller and
+            // keeps open. One that is gone is one whose stream the peer
+            // reset before it was answered.
+            for (id, gone) in &row.used {
+                let opened = session
+                    .on_peer_request_opened(publish_namespace(*id))
+                    .unwrap_or_else(|error| panic!("{row:?}: {id}: {error:?}"));
+                let PeerRequestOpened::Request(request, _) = opened else {
+                    panic!("{row:?}: {id}: {opened:?}");
+                };
+                if *gone {
+                    session.on_peer_request_closed(request);
+                }
+            }
+            let opened = session.on_peer_request_opened(joining(row.fetch, row.joining));
+            match opened {
+                Ok(PeerRequestOpened::Request(request, PeerRequest::Fetch(_))) => {
+                    assert!(row.held, "{row:?}: taken");
+                    assert!(
+                        session.peer_request_yet_to_come(row.joining, request),
+                        "{row:?}"
+                    );
+                }
+                // INVALID_JOINING_REQUEST_ID (0x32), and the session stays.
+                other => {
+                    assert_eq!(other, Ok(refusal(0x32)), "{row:?}");
+                    assert!(!row.held, "{row:?}: refused");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_request_of_another_session_names_nothing_that_is_yet_to_come() {
+        let mut session = server();
+        let mut other = server();
+        let held = |session: &mut Session| {
+            let PeerRequestOpened::Request(request, _) =
+                session.on_peer_request_opened(joining(2, 0)).unwrap()
+            else {
+                panic!("the FETCH is taken");
+            };
+            request
+        };
+        let (own, others) = (held(&mut session), held(&mut other));
+        assert!(session.peer_request_yet_to_come(0, own));
+        assert!(!session.peer_request_yet_to_come(0, others));
     }
 
     #[test]

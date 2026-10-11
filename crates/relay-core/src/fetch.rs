@@ -8,8 +8,8 @@
 //! whole thing is cut short; moving the bytes is the I/O side's
 //! ([`Action::PipeFetch`]).
 
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder, RangeEnd};
 use xmoq_moqt::kvp::KeyValuePair;
@@ -97,12 +97,25 @@ pub(crate) struct RelayedFetch {
     joins: Option<StreamKey>,
 }
 
-/// A Joining FETCH that waits for its SUBSCRIBE to be answered.
+/// What a Joining FETCH that is held waits for. WHY two kinds and not one
+/// key: the SUBSCRIBE a FETCH names is known by its Request ID until it has
+/// come, and by its request stream from then on, and neither stands for the
+/// other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Awaited {
+    /// The SUBSCRIBE on this request stream, which has come and has no
+    /// answer yet.
+    Answer(StreamKey),
+    /// The SUBSCRIBE with this Request ID, which has not come yet: the two
+    /// travel on streams of their own, and this FETCH was read first.
+    Subscribe(u64),
+}
+
+/// A Joining FETCH that waits for its SUBSCRIBE: to come, or to be answered.
 #[derive(Debug)]
 pub(crate) struct HeldFetch {
     request: PeerRequestId,
-    /// The request stream of the SUBSCRIBE it names.
-    joins: StreamKey,
+    joins: Awaited,
     fetch: Fetch,
     /// `REQUEST_UPDATE`s that wait for the answer.
     held_updates: u32,
@@ -111,7 +124,8 @@ pub(crate) struct HeldFetch {
 /// Where a FETCH of a subscriber stands.
 #[derive(Debug)]
 enum Standing {
-    /// A Joining FETCH that waits for its SUBSCRIBE to be answered.
+    /// A Joining FETCH that waits for its SUBSCRIBE to come, or to be
+    /// answered.
     Held(HeldFetch),
     /// Asked of a publisher.
     Relayed(RelayedFetch),
@@ -126,8 +140,13 @@ enum Standing {
 /// WHY one map for the three ways a FETCH can stand: a FETCH is in one of
 /// them at a time, and what is said of all of them (how many a session has
 /// open, what a session that is gone leaves) is then said in one place.
+///
+/// WHY in the order of the sessions: what is asked on every request and
+/// message of a peer ([`Relay::settle_early_fetches`]) then looks at the
+/// FETCH requests of that peer's session, 16 at most, and not at those of
+/// every session of the relay.
 #[derive(Debug, Default)]
-pub(crate) struct Fetches(HashMap<(SessionKey, StreamKey), Standing>);
+pub(crate) struct Fetches(BTreeMap<(SessionKey, StreamKey), Standing>);
 
 impl Fetches {
     fn len(&self) -> usize {
@@ -136,10 +155,7 @@ impl Fetches {
 
     /// How many FETCH requests of `session` are open.
     fn open_of(&self, session: SessionKey) -> usize {
-        self.0
-            .keys()
-            .filter(|(subscriber, _)| *subscriber == session)
-            .count()
+        self.of(session).count()
     }
 
     /// Forgets what `session` has that nothing was asked of a publisher
@@ -227,11 +243,20 @@ impl Fetches {
             })
     }
 
-    fn all_held(&self) -> impl Iterator<Item = (&(SessionKey, StreamKey), &HeldFetch)> {
+    /// The FETCH requests of `session`, in the order of their request
+    /// streams.
+    fn of(&self, session: SessionKey) -> impl Iterator<Item = (StreamKey, &Standing)> {
         self.0
-            .iter()
-            .filter_map(|(subscriber, standing)| match standing {
-                Standing::Held(held) => Some((subscriber, held)),
+            .range((session, StreamKey(0))..=(session, StreamKey(u64::MAX)))
+            .map(|((_, stream), standing)| (*stream, standing))
+    }
+
+    /// Those of `session` that wait for their SUBSCRIBE, in the order of
+    /// their request streams.
+    fn held_of(&self, session: SessionKey) -> impl Iterator<Item = (StreamKey, &HeldFetch)> {
+        self.of(session)
+            .filter_map(|(stream, standing)| match standing {
+                Standing::Held(held) => Some((stream, held)),
                 Standing::Relayed(_) | Standing::Written => None,
             })
     }
@@ -350,6 +375,9 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) -> Option<Event> {
         match event {
+            Event::JoiningFetchTimeout { session, stream } => {
+                self.settle_early_fetches(session, Some(stream), actions);
+            }
             Event::FetchStreamOpened {
                 session,
                 stream,
@@ -398,7 +426,11 @@ impl Relay {
     ) {
         match change {
             Joinable::Unchanged => {}
-            Joinable::Established => self.release_held_fetches(session, subscribe, actions),
+            Joinable::Arrived => self.subscribe_has_come(session, subscribe),
+            Joinable::Established => {
+                self.subscribe_has_come(session, subscribe);
+                self.release_held_fetches(session, subscribe, actions);
+            }
             Joinable::Over => self.subscribe_is_over(session, subscribe, actions),
         }
     }
@@ -452,7 +484,8 @@ impl Relay {
     }
 
     /// A Joining FETCH (§10.12.2). The session has seen to it that it names
-    /// a SUBSCRIBE of the same session that is Pending or Established.
+    /// a SUBSCRIBE of the same session that is Pending or Established, or a
+    /// Request ID whose request is yet to come.
     fn on_joining_fetch(
         &mut self,
         session: SessionKey,
@@ -489,13 +522,39 @@ impl Relay {
                     (session, stream),
                     HeldFetch {
                         request,
-                        joins: subscribe,
+                        joins: Awaited::Answer(subscribe),
                         fetch: fetch.clone(),
                         held_updates: 0,
                     },
                 );
             }
-            // The relay has let go of the subscription in the step before.
+            // No SUBSCRIBE with that Request ID is here. One that is yet to
+            // come is waited for: the two travel on streams of their own,
+            // and a subscriber that sends them together cannot tell which
+            // the relay reads first (§10.12.2 says nothing of it).
+            //
+            // WHY not put the request streams in the order of their Request
+            // IDs before the relay sees them: every request would wait for
+            // one that is late, also the many that name no other.
+            None if self.sessions.get(&session).is_some_and(|state| {
+                state
+                    .moqt
+                    .peer_request_yet_to_come(joining_request_id, request)
+            }) =>
+            {
+                self.fetches.hold(
+                    (session, stream),
+                    HeldFetch {
+                        request,
+                        joins: Awaited::Subscribe(joining_request_id),
+                        fetch: fetch.clone(),
+                        held_updates: 0,
+                    },
+                );
+                actions.push(Action::StartJoiningFetchTimer { session, stream });
+            }
+            // The ID was used by something that is no subscription now: a
+            // SUBSCRIBE that is over, or another kind of request.
             None => {
                 let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
                 self.refuse_fetch(session, stream, request, &gone, actions);
@@ -653,6 +712,72 @@ impl Relay {
         );
     }
 
+    /// The SUBSCRIBE on `subscribe` has come: the Joining FETCH requests that
+    /// were read before it wait for its answer from here on.
+    fn subscribe_has_come(&mut self, session: SessionKey, subscribe: StreamKey) {
+        let request_id = self
+            .sessions
+            .get(&session)
+            .and_then(|state| state.requests.get(subscribe))
+            .and_then(RequestSlot::subscription)
+            .map(|(request, _)| request.value());
+        let Some(request_id) = request_id else {
+            return;
+        };
+        let early: Vec<StreamKey> = self
+            .fetches
+            .held_of(session)
+            .filter(|(_, held)| held.joins == Awaited::Subscribe(request_id))
+            .map(|(stream, _)| stream)
+            .collect();
+        for stream in early {
+            if let Some(held) = self.fetches.held_mut(&(session, stream)) {
+                held.joins = Awaited::Answer(subscribe);
+            }
+        }
+    }
+
+    /// The peer used a Request ID, or the time for a SUBSCRIBE to come ran
+    /// out (`timed_out` names the FETCH): the Joining FETCH requests of
+    /// `session` that still wait for a SUBSCRIBE to come, and whose
+    /// SUBSCRIBE cannot come any more, are refused with
+    /// `INVALID_JOINING_REQUEST_ID`.
+    ///
+    /// Called after every request and message of the peer. A SUBSCRIBE that
+    /// came has taken its FETCH requests along before this is reached
+    /// ([`Self::subscribe_has_come`]), so what is left with a Request ID
+    /// that was used names something that is no subscription.
+    pub(crate) fn settle_early_fetches(
+        &mut self,
+        session: SessionKey,
+        timed_out: Option<StreamKey>,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = self.sessions.get(&session) else {
+            return;
+        };
+        let missed: Vec<StreamKey> = self
+            .fetches
+            .held_of(session)
+            .filter(|(stream, held)| {
+                let Awaited::Subscribe(request_id) = held.joins else {
+                    return false;
+                };
+                timed_out == Some(*stream)
+                    || !state
+                        .moqt
+                        .peer_request_yet_to_come(request_id, held.request)
+            })
+            .map(|(stream, _)| stream)
+            .collect();
+        let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
+        for stream in missed {
+            if let Some(held) = self.fetches.take_held(&(session, stream)) {
+                self.refuse_fetch(session, stream, held.request, &gone, actions);
+            }
+        }
+    }
+
     /// The SUBSCRIBE on `subscribe` was accepted: the Joining FETCH requests that
     /// waited for it are asked of a publisher.
     fn release_held_fetches(
@@ -730,13 +855,12 @@ impl Relay {
         session: SessionKey,
         subscribe: StreamKey,
     ) -> Vec<(StreamKey, HeldFetch)> {
-        let mut streams: Vec<StreamKey> = self
+        let streams: Vec<StreamKey> = self
             .fetches
-            .all_held()
-            .filter(|((subscriber, _), held)| *subscriber == session && held.joins == subscribe)
-            .map(|((_, stream), _)| *stream)
+            .held_of(session)
+            .filter(|(_, held)| held.joins == Awaited::Answer(subscribe))
+            .map(|(stream, _)| stream)
             .collect();
-        streams.sort_unstable_by_key(|stream| stream.0);
         streams
             .into_iter()
             .filter_map(|stream| Some((stream, self.fetches.take_held(&(session, stream))?)))

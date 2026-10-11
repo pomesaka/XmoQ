@@ -292,6 +292,14 @@ impl<C: Connection> HubHandle<C> {
         held.await.expect("the hub answers")
     }
 
+    /// Hands the hub an event as an I/O task of its own would: what the
+    /// peers of a test cannot be made to bring about.
+    #[cfg(test)]
+    pub async fn inject(&self, event: Event) {
+        let sent = self.events.send(Envelope::Core(event)).await;
+        assert!(sent.is_ok(), "the hub is running");
+    }
+
     /// Hands a connection whose handshake is done to the relay.
     pub async fn add_session(&self, connection: C) {
         // Relaxed: the numbers only have to differ.
@@ -640,14 +648,29 @@ impl<C: Connection> Hub<C> {
                     )
                 });
             }
+            // A SUBSCRIBE of a peer, for the line below.
+            let subscribe = match &event {
+                Event::RequestOpened {
+                    session,
+                    stream,
+                    first: ControlMessage::Subscribe(_),
+                } => Some((*session, *stream)),
+                _ => None,
+            };
             if let Event::FetchPipeEnded {
                 session,
                 stream,
                 how,
             } = &event
             {
-                // The task is done; nothing is left to cut short.
-                self.fetch_pipes.remove(&(*session, *stream));
+                // The task is done; nothing is left to cut short. WHY an end
+                // for a FETCH that is not passed on any more is dropped: the
+                // relay ordered the passing on stopped (`AbortFetchPipe`)
+                // while the task was ending by itself, and is told of no end
+                // after that order (`Event::FetchPipeEnded`).
+                if self.fetch_pipes.remove(&(*session, *stream)).is_none() {
+                    continue;
+                }
                 self.log(|| {
                     format!(
                         "FETCH_PIPE_ENDED session={} stream={} {}",
@@ -657,7 +680,30 @@ impl<C: Connection> Hub<C> {
                     )
                 });
             }
-            for action in self.relay.handle(event) {
+            let actions = self.relay.handle(event);
+            // A SUBSCRIBE that got no answer in the step that read it waits
+            // for a publisher's: the one thing the relay does with a request
+            // that none of its other lines shows. One that closed its
+            // session got no answer either, and is not held.
+            if let Some((session, stream)) = subscribe
+                && !actions.iter().any(|action| match action {
+                    Action::SendRequest {
+                        session: to,
+                        stream: on,
+                        ..
+                    } => (*to, *on) == (session, stream),
+                    Action::CloseSession { session: of, .. } => *of == session,
+                    _ => false,
+                })
+            {
+                self.log(|| {
+                    format!(
+                        "HOLD_REQUEST session={} stream={} SUBSCRIBE",
+                        session.0, stream.0
+                    )
+                });
+            }
+            for action in actions {
                 self.execute(action, &mut pending);
             }
             if let Some(session) = closed {
@@ -760,6 +806,7 @@ impl<C: Connection> Hub<C> {
             Action::StartDrainTimer { .. }
             | Action::StartEarlyTimer { .. }
             | Action::StartRequestTimer { .. }
+            | Action::StartJoiningFetchTimer { .. }
             | Action::StartUpstreamTimer { .. }
             | Action::StartFetchStreamTimer { .. }
             | Action::StopUpstreamTimer { .. } => self.set_timer(&action, pending),
@@ -923,6 +970,10 @@ impl<C: Connection> Hub<C> {
             stream,
             how,
         };
+        // Before anything can end it: an end that is reported for a FETCH
+        // without this entry is one the relay does not wait for (`feed`).
+        let (abort, aborted) = oneshot::channel();
+        self.fetch_pipes.insert(subscriber, abort);
         let Some(publisher) = self.sessions.get(&from) else {
             pending.push_back(ended(FetchPipeEnd::UpstreamLost));
             return;
@@ -938,8 +989,6 @@ impl<C: Connection> Hub<C> {
             pending.push_back(ended(FetchPipeEnd::DownstreamLost));
             return;
         };
-        let (abort, aborted) = oneshot::channel();
-        self.fetch_pipes.insert(subscriber, abort);
         let pipe = FetchPipe {
             connection: Arc::clone(&handle.connection),
             header,
@@ -1049,6 +1098,14 @@ impl<C: Connection> Hub<C> {
                 session,
                 self.config.request_close_timeout,
                 Event::RequestTimeout { session, stream },
+            ),
+            // WHY the time a stream gets for its first bytes: what is waited
+            // for is the first message of a stream the peer has opened, or
+            // is about to.
+            Action::StartJoiningFetchTimer { session, stream } => (
+                session,
+                self.config.streams.first_bytes_timeout,
+                Event::JoiningFetchTimeout { session, stream },
             ),
             Action::StartUpstreamTimer { session, request } => (
                 session,
@@ -1800,6 +1857,13 @@ fn describe(action: &Action) -> Option<String> {
         | Action::SendObject { .. }
         | Action::StartEarlyTimer { .. }
         | Action::StartRequestTimer { .. } => return None,
+        // The relay read a Joining FETCH before the SUBSCRIBE it names, and
+        // holds it until that comes. The same word as for a SUBSCRIBE that
+        // waits for a publisher (`Hub::feed`).
+        Action::StartJoiningFetchTimer { session, stream } => format!(
+            "HOLD_REQUEST session={} stream={} FETCH",
+            session.0, stream.0
+        ),
     })
 }
 
