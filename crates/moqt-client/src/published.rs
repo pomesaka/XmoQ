@@ -87,6 +87,32 @@ impl Published {
         self.kept.back().map(location)
     }
 
+    /// A publisher that published Object 0 of every Group from
+    /// `first_group` to `newest_group` and keeps those from
+    /// `first_kept_group` on, whatever limit made it let go of the others:
+    /// the three numbers a row of `fixtures/published-fetch/` has.
+    #[cfg(test)]
+    fn having(first_group: u64, newest_group: u64, first_kept_group: u64) -> Self {
+        let kept: VecDeque<FetchObject> = (first_kept_group..=newest_group)
+            .map(|group_id| FetchObject {
+                group_id,
+                subgroup_id: Some(0),
+                object_id: 0,
+                publisher_priority: 128,
+                properties: vec![],
+                payload: vec![0x61, 0x62],
+            })
+            .collect();
+        Self {
+            bytes: kept.len() * 2,
+            kept,
+            first_group: Some(first_group),
+            let_go_through: first_kept_group
+                .checked_sub(1)
+                .and_then(|group| (group >= first_group).then_some(Location { group, object: 0 })),
+        }
+    }
+
     /// What a Standalone FETCH for `start` to the End Location `end` gets
     /// (§10.12.3).
     ///
@@ -208,17 +234,6 @@ mod tests {
         }
     }
 
-    /// The Groups 3 to 7, one Object of 2 bytes each.
-    fn groups_3_to_7() -> Published {
-        let mut published = Published::default();
-        for group in 3..=7 {
-            published.push(object(group, 2));
-        }
-        published
-    }
-
-    /// The Groups of the Objects of an answer, and `u` for an End of Unknown
-    /// Range indicator with its Location.
     /// What `answer` has, read back from the bytes of the fetch stream that
     /// carries it in `order`: the Group of an Object, and `u` or `n` with
     /// the Location of an indicator.
@@ -255,72 +270,87 @@ mod tests {
         shown
     }
 
+    /// `group,object`.
+    fn location_of(text: &str) -> Location {
+        let (group, object) = text.split_once(',').unwrap();
+        at(group.parse().unwrap(), object.parse().unwrap())
+    }
+
+    /// The table `@xmoq/msf` reads as well for the publisher of a catalog:
+    /// the same range gets the same answer from both.
     #[test]
-    fn a_fetch_gets_the_objects_of_its_range_and_an_end_location() {
-        let ascending = GroupOrder::Ascending;
-        let descending = GroupOrder::Descending;
-        // (Start Location; End Location; Group Order; the End Location of
-        //  FETCH_OK; what the stream carries)
-        let cases: [(_, _, _, _, &[&str]); 11] = [
-            // Whole Groups: an End Location with Object 0.
-            (at(3, 0), at(5, 0), ascending, at(5, 0), &["3", "4", "5"]),
-            (at(3, 0), at(5, 0), descending, at(5, 0), &["5", "4", "3"]),
-            // To an Object: the last one is the Object before.
-            (at(3, 0), at(5, 1), ascending, at(5, 1), &["3", "4", "5"]),
-            (at(4, 0), at(4, 1), ascending, at(4, 1), &["4"]),
-            // Object 1 of a Group does not exist, and is left out.
-            (at(3, 1), at(5, 0), ascending, at(5, 0), &["4", "5"]),
-            // The Groups before the first do not exist either: no indicator.
-            (at(0, 0), at(4, 0), ascending, at(4, 0), &["3", "4"]),
-            // Beyond the Largest Object {7, 0}: the End Location is {7, 1}.
-            (at(6, 0), at(9, 0), ascending, at(7, 1), &["6", "7"]),
-            (at(6, 0), at(9, 4), descending, at(7, 1), &["7", "6"]),
-            // Nothing exists in the range: a stream without Objects.
-            (at(3, 1), at(3, 5), ascending, at(3, 5), &[]),
-            // The whole of the last Group: beyond the Largest Object too.
-            (at(6, 0), at(7, 0), ascending, at(7, 1), &["6", "7"]),
-            // A range of one Location that is none, which the session
-            // takes: nothing.
-            (at(4, 3), at(4, 3), ascending, at(4, 3), &[]),
-        ];
-        for (start, end, order, end_location, pieces) in cases {
-            let answer = groups_3_to_7().answer(start, end, order).unwrap();
-            assert_eq!(
-                (answer.end_location, shown(&answer, order)),
-                (
-                    end_location,
-                    pieces.iter().map(ToString::to_string).collect()
-                ),
-                "{start:?} {end:?} {order:?}"
-            );
+    fn a_fetch_gets_what_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/published-fetch/answers.tsv");
+        let mut rows = 0;
+        // Every row that differs, so that one run names them all.
+        let mut differing = Vec::new();
+        for row in table.lines() {
+            let columns: Vec<&str> = row.split('\t').collect();
+            let [
+                name,
+                first,
+                newest,
+                first_kept,
+                start,
+                end,
+                order,
+                answer,
+                end_location,
+                pieces,
+            ] = columns[..]
+            else {
+                panic!("a row of 10 columns: {row}");
+            };
+            let group = |text: &str| text.parse::<u64>().unwrap();
+            let published = Published::having(group(first), group(newest), group(first_kept));
+            let order = match order {
+                "ascending" => GroupOrder::Ascending,
+                "descending" => GroupOrder::Descending,
+                other => panic!("{name}: the order {other}"),
+            };
+            let got = match published.answer(location_of(start), location_of(end), order) {
+                // INVALID_RANGE (0x11).
+                Err(0x11) => ("invalid_range", "-".to_string(), "-".to_string()),
+                Err(code) => panic!("{name}: refused with {code:#x}"),
+                Ok(answer) => {
+                    let at = answer.end_location;
+                    let shown = shown(&answer, order);
+                    let pieces = if shown.is_empty() {
+                        "-".to_string()
+                    } else {
+                        shown.join(" ")
+                    };
+                    ("ok", format!("{},{}", at.group, at.object), pieces)
+                }
+            };
+            if got != (answer, end_location.to_string(), pieces.to_string()) {
+                differing.push(format!("{name}: {got:?}"));
+            }
+            rows += 1;
         }
+        assert_eq!(differing, Vec::<String>::new());
+        // A table that lost rows would pass.
+        assert_eq!(rows, 47);
     }
 
     #[test]
-    fn a_range_that_has_nothing_to_start_from_is_invalid() {
-        // Nothing was published: INVALID_RANGE (0x11).
+    fn nothing_published_has_no_range() {
+        // INVALID_RANGE (0x11).
         assert_eq!(
             Published::default().answer(at(0, 0), at(1, 0), GroupOrder::Ascending),
             Err(0x11)
         );
-        // After the Largest Object {7, 0}.
-        for start in [at(7, 1), at(8, 0)] {
-            assert_eq!(
-                groups_3_to_7().answer(start, at(9, 0), GroupOrder::Ascending),
-                Err(0x11),
-                "{start:?}"
-            );
-        }
-        // The Largest Object itself is a range.
-        let answer = groups_3_to_7()
-            .answer(at(7, 0), at(9, 0), GroupOrder::Ascending)
-            .unwrap();
-        assert_eq!(shown(&answer, GroupOrder::Ascending), ["7"]);
     }
 
     #[test]
-    fn what_was_let_go_of_is_said_to_be_unknown() {
+    fn what_is_over_the_limits_is_let_go_of_oldest_first() {
         assert_eq!((MAX_KEPT_OBJECTS, MAX_KEPT_BYTES), (1024, 4 * 1024 * 1024));
+        let shown_of = |published: &Published, end| {
+            let answer = published
+                .answer(at(0, 0), end, GroupOrder::Ascending)
+                .unwrap();
+            shown(&answer, GroupOrder::Ascending)
+        };
         // Groups 0 to 5, 1 MiB each: the two oldest are let go of for the 4
         // MiB, and the Largest Object stays what it is.
         let mut published = Published::default();
@@ -328,68 +358,19 @@ mod tests {
             published.push(object(group, 1024 * 1024));
         }
         assert_eq!(published.largest(), Some(at(5, 0)));
-        // (Start Location; End Location; Group Order; what the stream
-        //  carries)
-        let (ascending, descending) = (GroupOrder::Ascending, GroupOrder::Descending);
-        let cases: [(_, _, _, &[&str]); 11] = [
-            (at(0, 0), at(4, 0), ascending, &["u1,0", "2", "3", "4"]),
-            // From the last Group that was let go of.
-            (at(1, 0), at(4, 0), ascending, &["u1,0", "2", "3", "4"]),
-            // The indicator ends where the range does, at Object 0 of a
-            // Group also where the whole Group was asked for.
-            (at(0, 0), at(0, 1), ascending, &["u0,0"]),
-            (at(0, 0), at(0, 0), ascending, &["u0,0"]),
-            (at(0, 0), at(1, 0), ascending, &["u1,0"]),
-            // Nothing of the range was let go of.
-            (at(2, 0), at(4, 0), ascending, &["2", "3", "4"]),
-            (at(1, 1), at(4, 0), ascending, &["2", "3", "4"]),
-            // No Object that was let go of lies in it: Object 3 of Group 1
-            // never was.
-            (at(1, 3), at(1, 3), ascending, &[]),
-            (at(0, 1), at(0, 0), ascending, &[]),
-            // Descending: after the Objects, at the first Group that was
-            // let go of and is in the range.
-            (at(0, 0), at(3, 0), descending, &["3", "2", "u0,0"]),
-            (at(0, 1), at(3, 0), descending, &["3", "2", "u1,0"]),
-        ];
-        for (start, end, order, pieces) in cases {
-            let answer = published.answer(start, end, order).unwrap();
-            let expected: Vec<String> = pieces.iter().map(ToString::to_string).collect();
-            assert_eq!(
-                shown(&answer, order),
-                expected,
-                "{start:?} {end:?} {order:?}"
-            );
-        }
+        assert_eq!(shown_of(&published, at(4, 0)), ["u1,0", "2", "3", "4"]);
+
         // One Object over the limit alone is kept: it is the Largest Object.
         let mut published = Published::default();
         published.push(object(0, 5 * 1024 * 1024));
         assert_eq!(published.largest(), Some(at(0, 0)));
+        assert_eq!(shown_of(&published, at(0, 1)), ["0"]);
 
         // And 1024 Objects at most.
         let mut published = Published::default();
         for group in 0..1030 {
             published.push(object(group, 1));
         }
-        let answer = published
-            .answer(at(0, 0), at(8, 0), GroupOrder::Ascending)
-            .unwrap();
-        assert_eq!(
-            shown(&answer, GroupOrder::Ascending),
-            ["u5,0", "6", "7", "8"]
-        );
-
-        // A client that began at Group 10: in Descending order the
-        // indicator does not go below what it published.
-        let mut published = Published::default();
-        for group in 10..=15 {
-            published.push(object(group, 1024 * 1024));
-        }
-        let answer = |order| {
-            let answer = published.answer(at(5, 0), at(13, 0), order).unwrap();
-            shown(&answer, order)
-        };
-        assert_eq!(answer(GroupOrder::Ascending), ["u11,0", "12", "13"]);
-        assert_eq!(answer(GroupOrder::Descending), ["13", "12", "u10,0"]);
+        assert_eq!(shown_of(&published, at(8, 0)), ["u5,0", "6", "7", "8"]);
     }
 }

@@ -48,7 +48,7 @@ Runs 1 to 6 were made with the publisher in each of the two modes. Runs 7 to 9 a
 
 ## Observed results
 
-One run each, but for runs 16 and 17. Runs 1, 7 and 15 were made again after the client was changed to stop the subscriber's direction of a request stream it resets, and to tell its session when its answer has ended; they came out the same, but for which of the relay's reset and STOP_SENDING the publisher saw first.
+One run each, but for runs 16 and 17 (30 and 6). Runs 1, 7 and 15 were made again after the client was changed to stop the subscriber's direction of a request stream it resets, and to tell its session when its answer has ended; they came out the same, but for which of the relay's reset and STOP_SENDING the publisher saw first.
 
 **Runs 1 to 6: the client got the Objects of its range, from a publisher in either mode.** The publisher had sent Object 0 of the Groups 0 to 3.
 
@@ -88,11 +88,11 @@ With four Objects of 200 KiB the same subscriber cut nothing: the relay and the 
 
 **Run 17, after the review: an answer that is late still comes whole.** The publisher with `--fetch-answer-delay-ms 1000`, three times in each mode: the client got FETCH_OK 1.0 s after its FETCH, four Objects and `FETCH_ENDED ... how=fin code=none objects=4` in all six. Before, the task of the request stream could finish the stream without the FETCH_OK when the fetch stream was written at the moment the answer was due (found in review with a test of that task; no run here had an answer that was late and came).
 
-**After the review as well: a Joining FETCH while Objects go out.** The publisher sent an Object of 100 KiB every 100 ms; a subscriber came with `--join relative:2`. The publisher printed `FETCH_ASKED ... start_group=16 start_object=0 end_group=18 end_object=1` and `objects=3`; the client got Groups 16, 17 and 18 on the fetch stream and 19, 20 and 21 on the subscription.
+**Run 18, after the review as well: a Joining FETCH while Objects go out.** The publisher sent an Object of 100 KiB every 100 ms; a subscriber came with `--join relative:2`. The publisher printed `FETCH_ASKED ... start_group=16 start_object=0 end_group=18 end_object=1` and `objects=3`; the client got Groups 16, 17 and 18 on the fetch stream and 19, 20 and 21 on the subscription.
 
 ## Limitations and blockers
 
-- **One run each, on one machine**, but for run 16.
+- **One run each, on one machine**, but for runs 16 and 17.
 - **The limit of FETCH requests a publisher answers at once was not reached.** It was 16 in these runs and is 32 now. The own relay counts 16 it has asked one publisher for, and stops counting one before the client has heard of its end, so a 17th could reach the client; with 16 that was a refusal waiting to happen, and none was seen. The client's check is a test of `serving::Answers`.
 - **A fetch stream that is stopped while the request stream stays open was not seen.** The relay ends both when a subscriber gives up, and which of the two the publisher sees first is a race (`how=request_reset`, `how=request_stopped`); `how=stream_stopped` appeared in no run. What the client decides for it is a row of the table test of `serving::step`.
 - A REQUEST_UPDATE for a FETCH the publisher answers was not sent: no client here sends one.

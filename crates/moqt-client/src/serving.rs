@@ -401,6 +401,11 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
                     // written to its end at the very moment the answer is
                     // due, or before this task ran once. A `REQUEST_OK`
                     // that was handed over and not taken yet goes with it.
+                    //
+                    // WHY NOT a limit on these writes: they wait only while
+                    // the subscriber takes nothing on a stream that carries
+                    // a few bytes, and fail when the connection goes, which
+                    // the client's own timeout sees to.
                     Ok(RequestEnd::Finish) => {
                         while let Ok(message) = said.try_recv() {
                             waiting.push(message);
@@ -507,8 +512,8 @@ mod tests {
     use xmoq_moqt::message::{ControlMessage, Fetch, FetchRange};
     use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
     use xmoq_moqt::session::{PeerRequest, PeerRequestOpened, Role, Session, Transport};
-    use xmoq_moqt_io::RecvStream;
     use xmoq_moqt_io::memory::{self, MemoryConnection};
+    use xmoq_moqt_io::{ReadError, RecvStream};
 
     use super::*;
 
@@ -572,6 +577,33 @@ mod tests {
 
     struct Recorded(Done);
 
+    /// A request stream the subscriber stopped: every write fails.
+    struct Stopped(Done);
+
+    impl SendStream for Stopped {
+        fn write_all(&mut self, _: &[u8]) -> impl Future<Output = Result<(), WriteError>> {
+            self.0.0.lock().unwrap().push("write fails".to_string());
+            // CANCELLED.
+            std::future::ready(Err(WriteError::Stopped(Some(0x1))))
+        }
+
+        fn finish(self) {
+            self.0.0.lock().unwrap().push("finish".to_string());
+        }
+
+        fn finish_and_wait(self) -> impl Future<Output = Result<(), WriteError>> {
+            std::future::ready(Err(WriteError::Stopped(Some(0x1))))
+        }
+
+        fn reset(self, code: u32) {
+            self.0.0.lock().unwrap().push(format!("reset {code:#x}"));
+        }
+
+        fn stopped(&mut self) -> impl Future<Output = WriteError> {
+            std::future::ready(WriteError::Stopped(Some(0x1)))
+        }
+    }
+
     impl SendStream for Recorded {
         fn write_all(&mut self, bytes: &[u8]) -> impl Future<Output = Result<(), WriteError>> {
             // The type of the message that begins there.
@@ -605,6 +637,17 @@ mod tests {
         said: usize,
         end: RequestEnd,
     ) -> Vec<String> {
+        spoken_on(Recorded, answer_after, end_after, said, end).await
+    }
+
+    /// The same on the request stream `stream_of` makes.
+    async fn spoken_on<S: SendStream + Send + 'static>(
+        stream_of: fn(Done) -> S,
+        answer_after: Duration,
+        end_after: Duration,
+        said: usize,
+        end: RequestEnd,
+    ) -> Vec<String> {
         let done = Done::default();
         let (says, taken) = mpsc::channel(SAY_QUEUE);
         let (ends, ended) = oneshot::channel();
@@ -620,7 +663,7 @@ mod tests {
         });
         let task = tokio::spawn(speak(Speaker {
             stream: 0,
-            send: Recorded(done.clone()),
+            send: stream_of(done.clone()),
             first: vec![fetch_ok],
             after: answer_after,
             said: taken,
@@ -779,6 +822,91 @@ mod tests {
             Err(WriteError::Stopped(Some(0x1)))
         );
         assert_eq!(printed(&counted).objects, 1);
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_cannot_be_written_still_ends_the_request_stream_once() {
+        let ms = Duration::from_millis;
+        // The subscriber stopped the client's direction. The answer is
+        // tried once, whether the end comes with it or after it, and the
+        // stream is finished: for the transport that is nothing more to do.
+        for (answer_after, end_after) in [(ms(2), ms(40)), (ms(0), ms(0))] {
+            assert_eq!(
+                spoken_on(Stopped, answer_after, end_after, 0, RequestEnd::Finish).await,
+                ["write fails", "finish"],
+                "{answer_after:?} {end_after:?}"
+            );
+        }
+    }
+
+    /// Reads a stream to where it ends: `None` for a FIN.
+    async fn end_of(mut stream: impl RecvStream) -> Option<ReadError> {
+        let mut buffer = [0u8; 64];
+        let reading = async {
+            loop {
+                match stream.read(&mut buffer).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return None,
+                    Err(error) => return Some(error),
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), reading)
+            .await
+            .expect("in time")
+    }
+
+    #[tokio::test]
+    async fn a_fetch_stream_whose_object_cannot_be_encoded_is_reset() {
+        let (publisher, subscriber) = memory::pair();
+        // Group 3 and then Group 2, in Ascending order: the encoder refuses
+        // the second.
+        let pieces = vec![
+            Piece::Object(fetch_object(3)),
+            Piece::Object(fetch_object(2)),
+        ];
+        let (body, counted, _open) = body(publisher, pieces, Duration::ZERO);
+        assert!(matches!(body.write().await, Err(WriteError::Lost(_))));
+        assert_eq!(printed(&counted).objects, 1);
+        // INTERNAL_ERROR (0x0), the code the request stream gets for it.
+        let stream = subscriber.accept_uni().await.unwrap();
+        assert_eq!(end_of(stream).await, Some(ReadError::Reset(Some(0x0))));
+    }
+
+    #[tokio::test]
+    async fn the_fetch_streams_end_with_the_answers_that_are_let_go_of() {
+        let (publisher, subscriber) = memory::pair();
+        let publisher = Arc::new(publisher);
+        let mut session = Session::new(Role::Client, Transport::WebTransport);
+        // A wait after each Object that outlasts the test.
+        let mut answers = Answers::new(Pace {
+            write_every: Duration::from_secs(600),
+            ..Pace::default()
+        });
+        let answer = Answer {
+            messages: vec![],
+            header: FetchHeader { request_id: 1 },
+            group_order: GroupOrder::Ascending,
+            pieces: vec![
+                Piece::Object(fetch_object(2)),
+                Piece::Object(fetch_object(3)),
+            ],
+        };
+        let request = asked(&mut session, 1);
+        let request_stream = Recorded(Done::default());
+        answers.start(
+            0,
+            request,
+            request_stream,
+            answer,
+            &publisher,
+            &Trace::default(),
+        );
+        let stream = subscriber.accept_uni().await.unwrap();
+        // The client leaves by an error, without `leave`: the task that
+        // writes is stopped, and its stream reset with CANCELLED (0x1).
+        drop(answers);
+        assert_eq!(end_of(stream).await, Some(ReadError::Reset(Some(0x1))));
     }
 
     #[tokio::test]
