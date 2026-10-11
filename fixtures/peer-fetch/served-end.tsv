@@ -1,0 +1,10 @@
+the-subscriber-finished-first	fin	nothing	fin	-	-
+the-subscriber-finishes-while-it-is-waited-for	-	fin	fin	-	-
+the-subscriber-resets-while-it-is-waited-for	-	reset	fin	-	-
+the-subscriber-stops-the-publisher-while-it-is-waited-for	-	stop-sending	reset:0x1	stop:0x1	-
+the-subscriber-does-nothing	-	nothing	wait>fin	-	-
+an-update-and-then-a-fin	-	update,fin	fin	-	no
+an-update-and-nothing-more	-	update	wait>fin	-	no
+a-stop-sending-after-the-publishers-fin	-	wait,stop-sending	wait>fin	-	-
+a-reset-after-the-publishers-fin	-	wait,reset	wait>fin	-	-
+a-fin-after-the-publishers-fin	-	wait,fin	wait>fin	-	-

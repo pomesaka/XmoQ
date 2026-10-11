@@ -1108,13 +1108,17 @@ impl Relay {
         self.end_answered_fetch(session, stream, how, actions);
     }
 
-    /// Ends the relay's direction of the request stream of a FETCH that has
-    /// its `FETCH_OK`, while the session goes on holding the request: with a
-    /// FIN, or with a reset and the code `given_up`.
+    /// Ends the answer of a FETCH that has its `FETCH_OK`, and with it the
+    /// relay's direction of the request stream, while the session goes on
+    /// holding the request: with a FIN at once, with a FIN after the
+    /// subscriber has ended its own direction or
+    /// [`FETCH_PEER_END_WAIT_MS`] have passed, or with a reset
+    /// ([`AnswerEnd`]).
     ///
-    /// Every FIN of an answered FETCH goes through here (a stream that was
-    /// passed on to its end, and one the relay wrote), and the reset of a
-    /// stream the relay wrote and the subscriber did not take. The session
+    /// Every FIN of an answered FETCH goes through here or follows from
+    /// here (a stream that was passed on to its end, and one the relay
+    /// wrote), and the reset of a stream the relay wrote and the subscriber
+    /// did not take. The session
     /// has to hear of it (`Session::on_fetch_answer_ended`): until it has,
     /// it answers a `REQUEST_UPDATE` of the subscriber with a `REQUEST_OK`
     /// that the relay has no direction left to send on.
