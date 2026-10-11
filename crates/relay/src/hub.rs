@@ -84,6 +84,8 @@ pub struct HubConfig {
     /// The key of the experiment in authorization (`crate::auth`). None:
     /// every request is allowed.
     pub auth_key: Option<Vec<u8>>,
+    /// With a key: a client's SETUP has to carry a token as well.
+    pub auth_setup: bool,
     /// How long a stream is held for a Track Alias that is not known yet
     /// (§11.4.2: "buffer it for a brief period").
     pub early_stream_timeout: Duration,
@@ -125,6 +127,7 @@ impl Default for HubConfig {
             drain_timeout: Duration::from_secs(2),
             slow_open: Duration::from_millis(10),
             auth_key: None,
+            auth_setup: false,
             early_stream_timeout: Duration::from_secs(2),
             request_close_timeout: Duration::from_secs(2),
             closed_read_timeout: Duration::from_secs(1),
@@ -598,7 +601,7 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
     let (events, inbox) = mpsc::channel(config.event_queue_len);
     let mut relay = Relay::new(&config.implementation);
     if let Some(key) = &config.auth_key {
-        relay.set_authorize(crate::auth::authorizer(key));
+        relay.set_authorizer(crate::auth::RoomTokens::new(key, config.auth_setup));
     }
     let hub = Hub {
         relay,
