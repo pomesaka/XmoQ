@@ -79,10 +79,12 @@ interface RunResult {
 /**
  * What the Object of `--object-properties` carries: one property of each
  * form of a Key-Value-Pair (draft 18 §1.4.3), in ascending order of type,
- * which is the order on the wire. The types are the ones draft-ietf-moq-loc-04
- * §2.3 gives Video Config and Timestamp; neither is a property draft 18
+ * which is the order on the wire. Neither type is a property draft 18
  * defines, so a relay has to pass them unchanged (§2.5: "MUST NOT be
- * modified, MUST be forwarded"). The values are made up.
+ * modified, MUST be forwarded"). The values are made up. **Nothing here
+ * reads them as LOC**: the two numbers are ones a revision of LOC has used
+ * (Video Config and Timestamp in draft-ietf-moq-loc-04), and stay as they
+ * are whichever revision `@xmoq/loc` follows.
  */
 const OBJECT_PROPERTIES: PageProperty[] = [
 	// Odd type: a length and bytes.

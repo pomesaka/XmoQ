@@ -3,7 +3,12 @@
 // same shape as the moqtail-ts page in peers/moqtail/browser so the driver can
 // swap one for the other.
 
-import { playVideoTrack, type VideoPlayback } from "@xmoq/media";
+import {
+	createVideoTrackEncoder,
+	playVideoTrack,
+	type VideoPlayback,
+	type VideoTrackEncoder,
+} from "@xmoq/media";
 import {
 	connect,
 	decodeFetchBody,
@@ -36,6 +41,7 @@ import type {
 	PageProperty,
 	PageReceivedObject,
 	PageVideoReport,
+	PageVideoSetup,
 	SubscriptionReport,
 } from "./xmoq-page.ts";
 
@@ -508,9 +514,16 @@ function withPlainErrors<Args extends unknown[], Result>(
 
 window.xmoq = {
 	connect: withPlainErrors(
-		async (relayUrl: string, certSha256Hex: string | null) => {
+		async (
+			relayUrl: string,
+			certSha256Hex: string | null,
+			maxObjectPayloadLength?: number,
+		) => {
 			connection = await connect(relayUrl, {
 				implementation: "xmoq-moqt/0.0.0",
+				...(maxObjectPayloadLength === undefined
+					? {}
+					: { limits: { maxObjectPayloadLength } }),
 				// WHY serverCertificateHashes: the relay's certificate is self-signed and
 				// no root store trusts it. Pinning needs no browser flag and no system CA.
 				...(certSha256Hex === null
@@ -605,6 +618,80 @@ interface VideoPlaying {
 }
 let videoPlaying: VideoPlaying | undefined;
 
+/** What `publishVideo` started. */
+interface VideoPublishing {
+	encoder: VideoTrackEncoder;
+	painted: number;
+	timer: ReturnType<typeof setInterval>;
+}
+let videoPublishing: VideoPublishing | undefined;
+
+/** The bars a frame number is painted as, and read from. */
+const NUMBER_BITS = 8;
+
+/** Paints `number` modulo 256 as 8 bars, the highest bit first: white for a 1, black for a 0. */
+function paintNumber(
+	context: OffscreenCanvasRenderingContext2D,
+	width: number,
+	height: number,
+	number: number,
+): void {
+	const bar = width / NUMBER_BITS;
+	for (let bit = 0; bit < NUMBER_BITS; bit++) {
+		const one = ((number >> (NUMBER_BITS - 1 - bit)) & 1) === 1;
+		context.fillStyle = one ? "#ffffff" : "#000000";
+		context.fillRect(bit * bar, 0, bar, height);
+	}
+}
+
+/** Pictures of random pixels, made once: every frame gets another one than the frame before it. */
+function noiseTiles(width: number, height: number): OffscreenCanvas[] {
+	return Array.from({ length: 4 }, () => {
+		const tile = new OffscreenCanvas(width, height);
+		const context = tile.getContext("2d");
+		if (context === null) throw new Error("no 2d context");
+		const image = context.createImageData(width, height);
+		// `getRandomValues` fills 65,536 bytes at most in one call.
+		for (let at = 0; at < image.data.length; at += 65_536) {
+			crypto.getRandomValues(image.data.subarray(at, at + 65_536));
+		}
+		// Opaque: a transparent pixel would show the bars beneath.
+		for (let at = 3; at < image.data.length; at += 4) image.data[at] = 255;
+		context.putImageData(image, 0, 0);
+		return tile;
+	});
+}
+
+/**
+ * The number the bars of a frame say, or null where one is neither dark
+ * nor light. WHY black and white, read in the middle of a bar: the encoder
+ * changes every colour a little and blurs the edges; the two that are
+ * furthest apart, away from an edge, leave 64 of 255 on either side.
+ */
+function readNumber(
+	context: OffscreenCanvasRenderingContext2D,
+	frame: VideoFrame,
+): number | null {
+	const { displayWidth: width, displayHeight: height } = frame;
+	context.canvas.width = width;
+	context.canvas.height = height;
+	context.drawImage(frame, 0, 0);
+	const bar = width / NUMBER_BITS;
+	let number = 0;
+	for (let bit = 0; bit < NUMBER_BITS; bit++) {
+		const [red] = context.getImageData(
+			Math.floor(bit * bar + bar / 2),
+			// The upper half: the lower one can be noise (`publishVideo`).
+			Math.floor(height / 4),
+			1,
+			1,
+		).data;
+		if (red === undefined || (red >= 64 && red <= 192)) return null;
+		number = number * 2 + (red > 192 ? 1 : 0);
+	}
+	return number;
+}
+
 window.xmoqOwn = {
 	followCatalog: withPlainErrors(async (namespace: string) => {
 		const follower = await followCatalog(connected(), {
@@ -653,8 +740,139 @@ window.xmoqOwn = {
 		});
 	}),
 
+	publishVideo: withPlainErrors(
+		async (namespace: string, setup: PageVideoSetup) => {
+			const moq = connected();
+			const trackNamespace = namespaceTuple(namespace);
+			const encoder = await createVideoTrackEncoder({
+				trackNamespace,
+				trackName: utf8.encode(setup.trackName),
+				// MSF §6.1 has the time in milliseconds as one way to begin.
+				firstGroup: BigInt(Date.now()),
+				codec: setup.codec,
+				width: setup.width,
+				height: setup.height,
+				framerate: setup.framerate,
+				bitrate: setup.bitrate,
+				keyFrameIntervalMs: setup.keyFrameIntervalMs,
+				mapping: setup.mapping,
+			});
+			const catalog = createCatalogPublisher({
+				namespace: trackNamespace,
+				catalog: {
+					version: "draft-01",
+					tracks: [
+						{
+							name: setup.trackName,
+							packaging: "loc",
+							isLive: true,
+							role: "video",
+							codec: setup.catalogCodec,
+							bitrate: setup.bitrate,
+							width: setup.width,
+							height: setup.height,
+							framerate: setup.framerate,
+						},
+					],
+				},
+			});
+			moq.serve({
+				subscribe(request) {
+					console.log(
+						`asked: request_id=${request.requestId} track=${utf8Decoder.decode(request.trackName)}`,
+					);
+					if (catalog.subscribe(request)) return;
+					if (encoder.publisher.subscribe(request)) return;
+					request
+						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+						.catch(() => {});
+				},
+				fetch(request) {
+					if (catalog.fetch(request)) return;
+					if (encoder.publisher.fetch(request)) return;
+					request
+						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+						.catch(() => {});
+				},
+			});
+			const canvas = new OffscreenCanvas(setup.width, setup.height);
+			const context = canvas.getContext("2d");
+			if (context === null) throw new Error("no 2d context");
+			const noise = setup.noise
+				? noiseTiles(setup.width, Math.floor(setup.height / 2))
+				: [];
+			const publishing: VideoPublishing = {
+				encoder,
+				painted: 0,
+				timer: setInterval(() => {
+					const number = publishing.painted;
+					publishing.painted += 1;
+					paintNumber(context, setup.width, setup.height, number);
+					const tile = noise[number % Math.max(noise.length, 1)];
+					if (tile !== undefined) {
+						context.drawImage(tile, 0, setup.height - tile.height);
+					}
+					encoder.encode(
+						new VideoFrame(canvas, {
+							timestamp:
+								setup.firstTimestamp +
+								Math.round((number * 1_000_000) / setup.framerate),
+						}),
+					);
+				}, 1000 / setup.framerate),
+			};
+			videoPublishing = publishing;
+			void encoder.failed.then((error) => {
+				console.log(`video encoder failed: ${errorText(error)}`);
+			});
+			await moq.publishNamespace(trackNamespace);
+			console.log(`video published: ${setup.trackName} ${setup.mapping}`);
+		},
+	),
+
+	videoPublishReport: withPlainErrors(async () => {
+		if (videoPublishing === undefined) {
+			throw new Error("publishVideo() has not completed");
+		}
+		const stats = videoPublishing.encoder.stats();
+		const sent = videoPublishing.encoder.publisher.stats();
+		return {
+			painted: videoPublishing.painted,
+			submitted: stats.submitted,
+			encoded: stats.encoded,
+			keyChunks: stats.keyChunks,
+			notEncoded: { ...stats.notEncoded },
+			notSent: { ...stats.notSent },
+			keyFramesAskedFor: stats.keyFramesAskedFor,
+			encodedBytes: stats.encodedBytes,
+			largestChunk: stats.largestChunk,
+			encoderError: stats.encoderError ?? null,
+			written: sent.written,
+			writeFailures: sent.writeFailures,
+		};
+	}),
+
+	stopVideo: withPlainErrors(async () => {
+		if (videoPublishing === undefined) {
+			throw new Error("publishVideo() has not completed");
+		}
+		clearInterval(videoPublishing.timer);
+		await videoPublishing.encoder.end();
+		console.log("video stopped");
+	}),
+
 	playVideo: withPlainErrors(
-		async (namespace: string, trackName: string, codec: string) => {
+		async (
+			namespace: string,
+			trackName: string,
+			codec: string,
+			readNumbers = false,
+		) => {
+			const reading = readNumbers
+				? new OffscreenCanvas(1, 1).getContext("2d", {
+						willReadFrequently: true,
+					})
+				: null;
 			const frames: PageVideoReport["frames"] = [];
 			const playback = await playVideoTrack(connected(), {
 				trackNamespace: namespaceTuple(namespace),
@@ -665,6 +883,7 @@ window.xmoqOwn = {
 						timestamp: frame.timestamp,
 						width: frame.displayWidth,
 						height: frame.displayHeight,
+						...(reading === null ? {} : { number: readNumber(reading, frame) }),
 					});
 					// The frame is this page's from here on.
 					frame.close();

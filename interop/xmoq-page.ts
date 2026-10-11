@@ -34,7 +34,12 @@ export type XmoqPage = {
 	 * The driver always passes a hash; null and `disconnect` are part of the
 	 * contract because the moqtail page, copied as it was, has them.
 	 */
-	connect(relayUrl: string, certSha256Hex: string | null): Promise<void>;
+	connect(
+		relayUrl: string,
+		certSha256Hex: string | null,
+		/** Own page: the longest payload of an Object it takes (`limits.maxObjectPayloadLength` of `@xmoq/moqt`); the library's when left out. The moqtail page has no such limit to set. */
+		maxObjectPayloadLength?: number,
+	): Promise<void>;
 	publishTrack(namespace: string, trackName: string): Promise<string>;
 	sendObject(payloadHex: string): Promise<void> | void;
 	subscribe(namespace: string, trackName: string): Promise<string>;
@@ -220,7 +225,28 @@ export type OwnPageExtras = {
 	 * frames are not drawn: their time and size are noted, and each is
 	 * closed. Resolves when the SUBSCRIBE was accepted.
 	 */
-	playVideo(namespace: string, trackName: string, codec: string): Promise<void>;
+	playVideo(
+		namespace: string,
+		trackName: string,
+		codec: string,
+		/** Reads the number `publishVideo` paints into every frame. */
+		readNumbers?: boolean,
+	): Promise<void>;
+	/**
+	 * Publishes a catalog with one video track and the track itself, with
+	 * `createCatalogPublisher` of `@xmoq/msf` and `createVideoTrackEncoder`
+	 * of `@xmoq/media`, and announces the namespace. From then on the page
+	 * paints a frame every `1000 / framerate` milliseconds and encodes it:
+	 * frame `n` has the time `firstTimestamp + n * 1000000 / framerate`
+	 * microseconds and shows `n` modulo 256 as 8 bars from left to right,
+	 * the highest bit first, a white bar for a 1 and a black one for a 0.
+	 * Resolves when the namespace is announced.
+	 */
+	publishVideo(namespace: string, setup: PageVideoSetup): Promise<void>;
+	/** What the encoder and the publisher started with `publishVideo` have counted so far. */
+	videoPublishReport(): Promise<PageVideoPublishReport>;
+	/** Stops painting and ends the video track (`VideoTrackEncoder.end`). */
+	stopVideo(): Promise<void>;
 	/**
 	 * Whether the browser has a decoder for the codec, for Annex B without a
 	 * description: "supported", "not supported", or "no VideoDecoder".
@@ -310,8 +336,18 @@ export type SubscriptionReport = {
 
 /** What `playVideoTrack` of `@xmoq/media` gave a page, in values that survive `page.evaluate`. */
 export type PageVideoReport = {
-	/** The frames the decoder gave, in the order it gave them: the time in microseconds, and the size the frame is shown at. */
-	frames: { timestamp: number; width: number; height: number }[];
+	/**
+	 * The frames the decoder gave, in the order it gave them: the time in
+	 * microseconds, and the size the frame is shown at. With `readNumbers`,
+	 * `number` is what the 8 bars of the picture say, or null where a bar
+	 * is neither dark (below 64 of 255) nor light (above 192).
+	 */
+	frames: {
+		timestamp: number;
+		width: number;
+		height: number;
+		number?: number | null;
+	}[];
 	stats: {
 		decoded: number;
 		submitted: number;
@@ -323,6 +359,48 @@ export type PageVideoReport = {
 	};
 	/** How the playing ended, or null while it goes on: "subscription-ended <type>", "decoder-failed <error>" or "failed <error>". */
 	ended: string | null;
+};
+
+/** What `publishVideo` is started with. */
+export type PageVideoSetup = {
+	trackName: string;
+	/** What the encoder is configured with. */
+	codec: string;
+	/** What the catalog says of the track. */
+	catalogCodec: string;
+	width: number;
+	height: number;
+	framerate: number;
+	/** Bits a second: for the encoder, and in the catalog, which wants it of a video track. */
+	bitrate: number;
+	keyFrameIntervalMs: number;
+	mapping: "stream-per-group" | "stream-per-object";
+	/** The time of frame 0, in microseconds. */
+	firstTimestamp: number;
+	/**
+	 * Fills the lower half of every frame with random pixels, another set
+	 * for every frame: a picture an encoder cannot make small. The bars of
+	 * the number stay in the upper half.
+	 */
+	noise: boolean;
+};
+
+/** What `createVideoTrackEncoder` of `@xmoq/media` counted on a page. */
+export type PageVideoPublishReport = {
+	/** Frames the page painted. */
+	painted: number;
+	submitted: number;
+	encoded: number;
+	keyChunks: number;
+	notEncoded: Record<string, number>;
+	notSent: Record<string, number>;
+	keyFramesAskedFor: number;
+	encodedBytes: number;
+	largestChunk: number;
+	encoderError: string | null;
+	/** Of the publisher: Objects handed to the transport, and writes that failed. */
+	written: number;
+	writeFailures: number;
 };
 
 /** What `followCatalog` of `@xmoq/msf` gave a page, in values that survive `page.evaluate`. */

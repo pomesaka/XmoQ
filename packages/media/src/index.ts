@@ -30,6 +30,14 @@ export {
 	type VideoTrackPublisherStats,
 } from "./moqt/video-track-publisher.ts";
 export {
+	createVideoTrackEncoder,
+	DEFAULT_MAX_ENCODE_QUEUE,
+	type VideoEncodeSkipReason,
+	type VideoTrackEncoder,
+	type VideoTrackEncoderOptions,
+	type VideoTrackEncoderStats,
+} from "./web/encode-video-track.ts";
+export {
 	DEFAULT_MAX_DECODE_QUEUE,
 	DEFAULT_MAX_DECODER_FAILURES,
 	type PlayVideoTrackOptions,
