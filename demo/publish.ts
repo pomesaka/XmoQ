@@ -182,10 +182,15 @@ async function main(): Promise<void> {
 			codec: "opus",
 			sampleRate: SAMPLE_RATE,
 			numberOfChannels: 1,
-			// `?audioGroup=N` puts N chunks of audio into a Group, on one stream.
-			chunksPerGroup: Number(
-				new URLSearchParams(location.search).get("audioGroup") ?? 1,
-			),
+			// `?audioGroup=N` puts N chunks of audio into a Group, on one stream;
+			// without it, the default of `@xmoq/media`.
+			...(new URLSearchParams(location.search).has("audioGroup")
+				? {
+						chunksPerGroup: Number(
+							new URLSearchParams(location.search).get("audioGroup"),
+						),
+					}
+				: {}),
 		});
 		const sound = audio;
 		if (audioSource === "mic") {
