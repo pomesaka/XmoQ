@@ -217,6 +217,11 @@ export interface SessionConnectOptions {
 	 * How long `PublishedTrack.done()` waits for the subscriber to end its
 	 * direction of the request stream, 3000 when left out.
 	 *
+	 * The peer has the same time to end its direction after a FETCH that
+	 * was served and after a request of it that was refused, by the
+	 * application or by the session. When it is over, that direction is
+	 * stopped (CANCELLED) and the session stays open.
+	 *
 	 * With 0, `done()` does not wait: it resolves with `fin` for a subscriber
 	 * that had finished before, and with `nothing-in-time` otherwise, after
 	 * it has stopped the subscriber's direction as at the end of any wait. A
@@ -739,7 +744,12 @@ interface ActiveFetch {
 	streamEnd: EventOf<"fetch-stream-ended"> | undefined;
 }
 
-/** A `done()` that waits for the subscriber to end its direction of the request stream. */
+/**
+ * A wait for the peer to end its direction of a request stream on which
+ * this endpoint has finished its own: after `done()`, which hands on how it
+ * ended, after a FETCH that was served, and after a request of the peer
+ * that was refused.
+ */
 interface PeerStreamWait {
 	ended: Deferred<PeerStreamEnd>;
 	timer: ReturnType<typeof setTimeout> | undefined;
@@ -976,8 +986,31 @@ export async function connectOver(
 	): void => {
 		wait.timer = setTimeout(() => {
 			endPeerStreamWait(requestId, { type: "nothing-in-time" });
-			void applyInput((s) => s.expirePublishDonePeerEnd(requestId));
+			void applyInput((s) => s.expirePeerEnd(requestId));
 		}, peerStreamEndTimeoutMs);
+	};
+
+	/**
+	 * A request of the peer was refused, by the application or by the
+	 * session: REQUEST_ERROR and a FIN. Nobody asks how the peer ends its
+	 * direction of the stream, but the stream is not left open for it.
+	 *
+	 * WHY: the request is kept until its stream is gone, for what the peer
+	 * sent before it saw the refusal, and holds one of
+	 * `limits.maxPeerRequests` places and one of the peer's bidirectional
+	 * streams meanwhile. A peer that never ends its direction would hold
+	 * them for good.
+	 *
+	 * WHY the wait of `done()`, and no stop at once: §3.3.2 has a request
+	 * rejected with "a REQUEST_ERROR and FIN", and stopping a direction is
+	 * how it has a request cancelled. A peer that ends its direction when it
+	 * has read the answer, which both own implementations do, is never
+	 * stopped.
+	 */
+	const awaitPeerEndAfterRefusal = (requestId: bigint): void => {
+		const wait: PeerStreamWait = { ended: deferred(), timer: undefined };
+		peerStreamWaits.set(requestId, wait);
+		startPeerStreamTimer(requestId, wait);
 	};
 
 	/** A request of the peer went before the application answered it. */
@@ -1669,6 +1702,8 @@ export async function connectOver(
 						new RequestAbortedError({ type: "update-failed" }),
 					)
 				) {
+					// It was refused with a REQUEST_ERROR.
+					awaitPeerEndAfterRefusal(requestId);
 					return;
 				}
 				endPublish(requestId, { type: "update-failed" });
@@ -1768,7 +1803,7 @@ export async function connectOver(
 			case "request-closed":
 				onRequestClosed(event);
 				return undefined;
-			case "publish-done-peer-ended":
+			case "peer-direction-ended":
 				endPeerStreamWait(
 					event.requestId,
 					event.how === "fin"
@@ -1810,9 +1845,11 @@ export async function connectOver(
 			case "peer-fetch":
 				handOver(peerFetchFrom(event), serveHandlers.fetch, "FETCH");
 				return undefined;
+			case "peer-request-rejected":
+				awaitPeerEndAfterRefusal(event.requestId);
+				return undefined;
 			case "subgroup-abandoned":
 			case "peer-stream-timed-out":
-			case "peer-request-rejected":
 				// Reported through `options.diagnostics` only.
 				return undefined;
 		}

@@ -4,43 +4,13 @@ import {
 	type MoqtConnection,
 	type SessionConnectOptions,
 } from "../../src/webtransport/connection.ts";
-import { hex, MOQTAIL_RELAY_SETUP } from "../helpers.ts";
+import { fixture, hex, MOQTAIL_RELAY_SETUP } from "../helpers.ts";
+import { flush, pass, state } from "./clock.ts";
 import {
 	createFakePeer,
 	type FakePeer,
 	fakeStreamError,
 } from "./fake-transport.ts";
-
-// The clock of these tests stands still and is moved by hand
-// (`jest.useFakeTimers` of bun:test drives `setTimeout`), so that
-// "not yet" and "now" are a millisecond apart and no test waits.
-
-/** Lets what is queued run: the streams here move with promises alone. */
-async function flush(): Promise<void> {
-	for (let turn = 0; turn < 200; turn++) await Promise.resolve();
-}
-
-/** Moves the clock, and lets what that set off run. */
-async function pass(milliseconds: number): Promise<void> {
-	await flush();
-	jest.advanceTimersByTime(milliseconds);
-	await flush();
-}
-
-/** How a promise stands: "pending", "resolved", or what it rejected with. */
-async function state(promise: Promise<unknown>): Promise<unknown> {
-	let seen: unknown = "pending";
-	promise.then(
-		() => {
-			seen = "resolved";
-		},
-		(error: unknown) => {
-			seen = error;
-		},
-	);
-	await flush();
-	return seen;
-}
 
 async function connected(
 	options: SessionConnectOptions = {},
@@ -112,6 +82,8 @@ describe("a stream of the peer that does not say what it is", () => {
 		},
 	);
 
+	// The time is the one a peer has to end its direction after a refusal
+	// (3 seconds), which is over before the one for the first bytes.
 	test("a request that was refused on its Request ID and never comes whole is stopped, after its answer", async () => {
 		const { peer, connection } = await connected();
 		const request = peer.openBidi();
@@ -121,12 +93,14 @@ describe("a stream of the peer that does not say what it is", () => {
 		// REQUEST_ERROR, and the end of this endpoint's direction.
 		expect((await request.sent.read()).value?.[0]).toBe(0x05);
 		expect(await request.sent.read()).toEqual({ done: true, value: undefined });
-		await pass(9_999);
+		await pass(2_999);
 		expect(await state(request.reply.closed)).toBe("pending");
 		await pass(1);
 		expect(await state(request.reply.closed)).toMatchObject({
 			streamErrorCode: 1,
 		});
+		// The time for the first bytes finds nothing left to stop.
+		await pass(3_600_000);
 		expect(await open(connection)).toBe(true);
 	});
 
@@ -150,12 +124,16 @@ describe("a stream of the peer that does not say what it is", () => {
 		expect(await open(connection)).toBe(true);
 	});
 
-	test("a request that came whole keeps its stream, also where the peer does not end its direction", async () => {
+	test("a request that came whole and was refused keeps its stream for the time its peer has to end its direction, and no longer", async () => {
 		const { peer, connection } = await connected();
 		const request = peer.openBidi();
 		await request.reply.write(hex("0d 00 02 01 00"));
-		await pass(3_600_000);
+		await pass(2_999);
 		expect(await state(request.reply.closed)).toBe("pending");
+		await pass(1);
+		expect(await state(request.reply.closed)).toMatchObject({
+			streamErrorCode: 1,
+		});
 		expect(await open(connection)).toBe(true);
 	});
 
@@ -281,7 +259,7 @@ describe("a stream of the peer that does not say what it is", () => {
 	// session does nothing then, so only the count of timers shows it.
 	test.each<{
 		name: string;
-		act: (peer: FakePeer) => Promise<void>;
+		act: (peer: FakePeer, connection: MoqtConnection) => Promise<void>;
 	}>([
 		{
 			name: "a unidirectional stream has said what it is",
@@ -290,9 +268,44 @@ describe("a stream of the peer that does not say what it is", () => {
 			},
 		},
 		{
-			name: "a request has come whole",
+			name: "a request has come whole and its peer has ended its direction",
 			act: async (peer) => {
+				const request = peer.openBidi();
+				await request.reply.write(hex("0d 00 02 01 00"));
+				await flush();
+				await request.reply.close();
+			},
+		},
+		{
+			name: "a request was refused and its peer has reset its direction",
+			act: async (peer) => {
+				const request = peer.openBidi();
+				await request.reply.write(hex("0d 00 02 01 00"));
+				await flush();
+				await request.reply.abort(fakeStreamError(1, "reset"));
+			},
+		},
+		{
+			name: "a SUBSCRIBE was rejected by the application and its peer has ended its direction",
+			act: async (peer, connection) => {
+				connection.serve({
+					subscribe: (request) => void request.reject(0x10n),
+				});
+				const request = peer.openBidi();
+				// The captured SUBSCRIBE, with a Request ID of the server.
+				const pairs = fixture("subscribe-moqtail-rs").split(" ");
+				pairs[3] = "01";
+				await request.reply.write(hex(pairs.join(" ")));
+				await flush();
+				await request.reply.close();
+			},
+		},
+		{
+			name: "a request was refused and the session has ended",
+			act: async (peer, connection) => {
 				await peer.openBidi().reply.write(hex("0d 00 02 01 00"));
+				await flush();
+				connection.close();
 			},
 		},
 		{
@@ -322,10 +335,10 @@ describe("a stream of the peer that does not say what it is", () => {
 			},
 		},
 	])("no timer is left when $name", async ({ act }) => {
-		const { peer } = await connected();
+		const { peer, connection } = await connected();
 		await flush();
 		expect(jest.getTimerCount()).toBe(0);
-		await act(peer);
+		await act(peer, connection);
 		await flush();
 		expect(jest.getTimerCount()).toBe(0);
 	});

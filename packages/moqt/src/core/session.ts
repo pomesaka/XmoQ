@@ -118,8 +118,8 @@ export interface Session {
 	/**
 	 * Finishes the fetch stream and the request stream: the FETCH is served.
 	 * How the peer then ends its direction of the request stream is reported
-	 * as after PUBLISH_DONE (`publish-done-peer-ended`), and
-	 * `expirePublishDonePeerEnd` ends the wait for it.
+	 * as after PUBLISH_DONE (`peer-direction-ended`), and
+	 * `expirePeerEnd` ends the wait for it.
 	 */
 	finishFetch(requestId: bigint): SessionOutput[];
 	/** Gives an accepted FETCH up: resets both of its streams with `code` (§5.2). */
@@ -140,11 +140,16 @@ export interface Session {
 	 */
 	expireSubscription(requestId: bigint): SessionOutput[];
 	/**
-	 * The wait for the subscriber to end its direction of the request stream
-	 * after `publishDone` is over. The timer belongs to the caller. Stops
-	 * that direction (CANCELLED); does nothing when it has ended.
+	 * The wait for the peer to end its direction of a request stream is
+	 * over, on which this endpoint has finished its own: after `publishDone`,
+	 * after `finishFetch`, and after a request of the peer was refused, by
+	 * `rejectPeerRequest` or by the session itself (`peer-request-rejected`).
+	 * The timer belongs to the caller. Stops that direction (CANCELLED), and
+	 * a request of the peer that was kept until its stream is gone is kept
+	 * no longer; does nothing when the direction has ended
+	 * (`peer-direction-ended`).
 	 */
-	expirePublishDonePeerEnd(requestId: bigint): SessionOutput[];
+	expirePeerEnd(requestId: bigint): SessionOutput[];
 	/** Opens a subgroup stream with its SUBGROUP_HEADER (§11.4.2). Returns the stream number. */
 	openSubgroup(
 		requestId: bigint,
@@ -491,8 +496,11 @@ export function createSession(options: SessionOptions = {}): Session {
 			closed ? [] : requests.cancelRequest(requestId),
 		expireSubscription: (requestId) =>
 			guard((out) => requests.subscriptionExpired(requestId, out)),
-		expirePublishDonePeerEnd: (requestId) =>
-			guard((out) => requests.publishDonePeerEndExpired(requestId, out)),
+		expirePeerEnd: (requestId) =>
+			guard((out) => {
+				requests.peerEndExpired(requestId, out);
+				peerRequests.expire(requestId, out);
+			}),
 
 		receiveRequestStreamData: (stream, data, fin) =>
 			guard((out) => requests.receiveStreamData(stream, data, fin, out)),
@@ -617,7 +625,7 @@ export function createSession(options: SessionOptions = {}): Session {
 			guard((out) => {
 				const stream = adoptedPeerStreams.get(peerStream);
 				if (stream === undefined) {
-					peerRequests.reset(peerStream);
+					peerRequests.reset(peerStream, out);
 					return;
 				}
 				adoptedPeerStreams.delete(peerStream);

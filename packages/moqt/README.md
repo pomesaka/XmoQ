@@ -31,6 +31,8 @@ A stream the peer opens has `firstBytesTimeoutMs` (10 seconds) to say what it is
 
 `PublishedTrack.done()` sends PUBLISH_DONE and then waits for the subscriber to end its direction of the request stream, for at most `peerStreamEndTimeoutMs` (3 seconds) from the moment PUBLISH_DONE and the FIN were written. It resolves with what it saw, a `PeerStreamEnd`: `fin`, `reset` with its code, `nothing-in-time`, or `session-closed`. None of them is an error. Close the session after `done()` has settled: a session closed right after the last Object can lose it, and `close()` called without waiting for `done()` can end the session before PUBLISH_DONE has gone out. `fin` says that the subscriber finished its direction, not that everything arrived; it can be read so only when the peer is an XmoQ relay and did not finish before PUBLISH_DONE ([implementation notes](../../docs/moqt-implementation-notes.md), "A publisher that ended its PUBLISH with PUBLISH_DONE"). With `peerStreamEndTimeoutMs: 0`, `done()` does not wait and stops the subscriber's direction at once. A second `done()` rejects with `PublishEndedError`.
 
+The peer has the same time, `peerStreamEndTimeoutMs`, to end its direction after a request of it was refused, by the application or by the session, and after a FETCH that was served. When it is over, its direction of the stream is stopped with `CANCELLED`, and the session stays open. A peer that ends its direction in time is not stopped.
+
 ## Layout
 
 | Path | Content | May import |

@@ -296,7 +296,7 @@ export interface Requests {
 	 * after this endpoint's PUBLISH_DONE is over: that direction is stopped.
 	 * Does nothing when the subscriber has ended it.
 	 */
-	publishDonePeerEndExpired(requestId: bigint, out: SessionOutput[]): void;
+	peerEndExpired(requestId: bigint, out: SessionOutput[]): void;
 	receiveStreamData(
 		stream: number,
 		data: Uint8Array,
@@ -572,18 +572,18 @@ export function createRequests(options: RequestsOptions): Requests {
 	};
 
 	/**
-	 * This endpoint sent PUBLISH_DONE for its PUBLISH, the application's or
-	 * the UPDATE_FAILED of a refused REQUEST_UPDATE. How the subscriber then
-	 * ends its direction of the request stream is reported, and the caller's
-	 * wait for it ends with `publishDonePeerEndExpired`.
+	 * This endpoint has said the last thing it says on the request stream and
+	 * finished its direction: PUBLISH_DONE for its PUBLISH (the application's
+	 * or the UPDATE_FAILED of a refused REQUEST_UPDATE), the end of a FETCH
+	 * it served, or REQUEST_ERROR for a request of the peer. How the peer
+	 * then ends its direction is reported, and the caller's wait for it ends
+	 * with `peerEndExpired`, so that a peer that does not end its direction
+	 * does not hold the stream, and its place among the requests, for good.
 	 */
 	const awaitsPeerEnd = (request: RequestEntry): boolean =>
-		(request.kind === "PUBLISH" && request.endedLocally) ||
-		// A FETCH of the peer that was served: the same wait, so that a peer
-		// that does not end its direction does not hold the stream for good.
-		(request.kind === "PEER_FETCH" && request.served);
+		request.endedLocally;
 
-	const reportPeerEndAfterPublishDone = (
+	const reportPeerEnd = (
 		request: RequestEntry,
 		how: "fin" | "reset",
 		resetCode: number | undefined,
@@ -593,7 +593,7 @@ export function createRequests(options: RequestsOptions): Requests {
 		out.push({
 			type: "event",
 			event: {
-				type: "publish-done-peer-ended",
+				type: "peer-direction-ended",
 				requestId: request.requestId,
 				how,
 				resetCode,
@@ -1550,7 +1550,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			// comes on the stream.
 			if (request.peerFinished) {
 				requestStreams.delete(request.stream);
-				reportPeerEndAfterPublishDone(request, "fin", undefined, out);
+				reportPeerEnd(request, "fin", undefined, out);
 			}
 			return out;
 		},
@@ -1652,7 +1652,10 @@ export function createRequests(options: RequestsOptions): Requests {
 			});
 			// The subscriber had finished its direction already; nothing more
 			// comes on the stream.
-			if (request.peerFinished) requestStreams.delete(request.stream);
+			if (request.peerFinished) {
+				requestStreams.delete(request.stream);
+				reportPeerEnd(request, "fin", undefined, out);
+			}
 			return out;
 		},
 
@@ -1684,12 +1687,12 @@ export function createRequests(options: RequestsOptions): Requests {
 			// comes on the stream.
 			if (request.peerFinished) {
 				requestStreams.delete(request.stream);
-				reportPeerEndAfterPublishDone(request, "fin", undefined, out);
+				reportPeerEnd(request, "fin", undefined, out);
 			}
 			return out;
 		},
 
-		publishDonePeerEndExpired(requestId, out) {
+		peerEndExpired(requestId, out) {
 			for (const [stream, request] of requestStreams) {
 				if (request.requestId !== requestId || !awaitsPeerEnd(request)) {
 					continue;
@@ -1767,7 +1770,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			// (§5.2).
 			if (request.kind === "FETCH" && request.state === "Established") return;
 			if (request.state === "Terminated") {
-				reportPeerEndAfterPublishDone(request, "fin", undefined, out);
+				reportPeerEnd(request, "fin", undefined, out);
 				return;
 			}
 			// After PUBLISH_DONE the FIN is expected (§10.11) and the subscription
@@ -1788,7 +1791,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			// that late Objects still arrive (§10.11).
 			if (request.state === "Terminated" || isDraining(request)) {
 				requestStreams.delete(stream);
-				reportPeerEndAfterPublishDone(request, "reset", code, out);
+				reportPeerEnd(request, "reset", code, out);
 				return;
 			}
 			abandonRequest(request, "peer-reset", out, code);
