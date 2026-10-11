@@ -1087,7 +1087,7 @@ impl Relay {
         self.respond(session, stream, response, actions);
         actions.push(Action::FinishRequest { session, stream });
         // A SUBSCRIBE that is refused takes its Joining FETCHes with it.
-        self.finish_slot(session, stream, actions);
+        self.finish_slot(session, stream, Some(request), actions);
     }
 
     /// Answers a subscriber that waited with `SUBSCRIBE_OK`, now that the

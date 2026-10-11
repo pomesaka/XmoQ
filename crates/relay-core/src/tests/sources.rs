@@ -576,10 +576,6 @@ fn a_session_that_goes_takes_its_tracks_and_leaves_the_ones_it_shared() {
                 session: ALICE,
                 stream: StreamKey(1),
             },
-            Action::StartRequestTimer {
-                session: ALICE,
-                stream: StreamKey(1),
-            },
         ]
     );
     // Left are "a" with Bob as its source and Alice subscribed, and "c"

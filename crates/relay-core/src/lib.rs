@@ -168,6 +168,10 @@ enum RequestSlot {
     /// closes still goes to the session, which ignores it and keeps count of
     /// the Request IDs it uses up.
     Finished(Option<PeerRequestId>),
+    /// The relay has stopped the peer's direction, after the time the peer
+    /// had to end it. What was read before the stop took effect is dropped,
+    /// and nothing more is done about the stream.
+    Stopped,
 }
 
 impl RequestSlot {
@@ -179,7 +183,8 @@ impl RequestSlot {
             Self::PublishNamespace { .. }
             | Self::Fetch { .. }
             | Self::Publish { .. }
-            | Self::Finished(_) => None,
+            | Self::Finished(_)
+            | Self::Stopped => None,
         }
     }
 
@@ -193,7 +198,7 @@ impl RequestSlot {
             | Self::PublishNamespace { peer_finished, .. }
             | Self::Waiting { peer_finished, .. }
             | Self::Fetch { peer_finished, .. } => *peer_finished,
-            Self::Publish { .. } | Self::Finished(_) => false,
+            Self::Publish { .. } | Self::Finished(_) | Self::Stopped => false,
         }
     }
 
@@ -208,7 +213,7 @@ impl RequestSlot {
                 *peer_finished = true;
                 true
             }
-            Self::Publish { .. } | Self::Finished(_) => false,
+            Self::Publish { .. } | Self::Finished(_) | Self::Stopped => false,
         }
     }
 }
@@ -1190,7 +1195,10 @@ pub struct Counts {
     /// Requests of peers the sessions hold state for.
     pub requests: usize,
     /// Request streams of peers the relay keeps an entry for: the ones above,
-    /// and the ones it has answered and that are not reported closed.
+    /// and the ones it has answered and that are not reported closed. More
+    /// than `requests` by the streams whose request no session holds: one
+    /// refused because that many were held, one a session let go of when
+    /// the peer's time to end the stream was over.
     pub request_streams: usize,
     /// Of those, the ones whose peer finished its direction while the
     /// request goes on.
@@ -1467,8 +1475,10 @@ impl Relay {
         self.end_track(&track, end, actions);
     }
 
-    /// Lets go of a request the relay ended with `PUBLISH_DONE` and whose
-    /// stream the peer has not closed in time.
+    /// Lets go of a request the relay said its last on, with `PUBLISH_DONE`,
+    /// a refusal or the end of a FETCH, and whose stream the peer has not
+    /// closed in time: the peer's direction is stopped. Also for a request
+    /// the session never held (refused because that many were held).
     fn on_request_timeout(
         &mut self,
         session: SessionKey,
@@ -1478,15 +1488,18 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        let Some(RequestSlot::Finished(Some(request))) = state.requests.get(stream) else {
+        let Some(RequestSlot::Finished(request)) = state.requests.get(stream) else {
             return;
         };
-        state.moqt.on_peer_request_closed(*request);
-        // The slot stays until the stream really closes, so that what the peer
-        // still sends on it is ignored.
-        self.put_slot(session, stream, RequestSlot::Finished(None), actions);
-        // The relay's direction was finished with the PUBLISH_DONE; this ends
-        // the peer's.
+        if let Some(request) = *request {
+            state.moqt.on_peer_request_closed(request);
+        }
+        // The slot stays until the stream really closes: the stream counts
+        // as one of the peer's until then. A second timeout finds nothing to
+        // do.
+        self.put_slot(session, stream, RequestSlot::Stopped, actions);
+        // The relay's direction was finished when it said its last; this
+        // ends the peer's.
         actions.push(Action::StopRequest {
             session,
             stream,
@@ -1563,11 +1576,11 @@ impl Relay {
         };
         let (request, peer_request) = match state.moqt.on_peer_request_opened(first) {
             Ok(PeerRequestOpened::Request(request, peer_request)) => (request, peer_request),
-            Ok(PeerRequestOpened::Refused { response }) => {
+            Ok(PeerRequestOpened::Refused { response, request }) => {
                 if let Some(track_alias) = offered_alias {
                     state.drop_early_streams(session, track_alias, actions);
                 }
-                self.put_slot(session, stream, RequestSlot::Finished(None), actions);
+                self.finish_slot(session, stream, request, actions);
                 actions.push(Action::SendRequest {
                     session,
                     stream,
@@ -1937,7 +1950,7 @@ impl Relay {
                 | RequestSlot::Fetch { request, .. }
                 | RequestSlot::Finished(Some(request)),
             ) => (*request, None),
-            Some(RequestSlot::Finished(None)) | None => return,
+            Some(RequestSlot::Finished(None) | RequestSlot::Stopped) | None => return,
         };
         let event = match state.moqt.on_peer_request_message(request, message) {
             Ok(event) => event,
@@ -1984,12 +1997,12 @@ impl Relay {
                     ),
                     (AfterRefusal::CloseStream, _) => {
                         actions.push(Action::FinishRequest { session, stream });
-                        // The session has ended the request; what the request
-                        // held in the relay goes the way of a closed stream.
-                        // The slot stays until the stream really closes, so
-                        // that what the peer still sends on it is ignored.
-                        self.on_request_closed(session, stream, false, actions);
-                        self.put_slot(session, stream, RequestSlot::Finished(None), actions);
+                        // The session has rejected the request; what the
+                        // request held in the relay goes the way of a closed
+                        // stream. The session keeps the request until the
+                        // stream really closes, and so does the slot.
+                        self.request_is_over(session, stream, false, false, actions);
+                        self.finish_slot(session, stream, Some(request), actions);
                     }
                 }
             }
@@ -2059,6 +2072,21 @@ impl Relay {
         finish: bool,
         actions: &mut Vec<Action>,
     ) {
+        self.request_is_over(session, stream, finish, true, actions);
+    }
+
+    /// Lets go of what a request of the peer held in the relay. With
+    /// `stream_gone` the session is told that the stream is gone; without,
+    /// the request is over while its stream is still there, and the session
+    /// goes on holding it as rejected.
+    fn request_is_over(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        finish: bool,
+        stream_gone: bool,
+        actions: &mut Vec<Action>,
+    ) {
         let slot = self.take_slot(session, stream, actions);
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
@@ -2080,14 +2108,18 @@ impl Relay {
             // §5.2: the subscriber cancelled its FETCH.
             Some(RequestSlot::Fetch { .. }) => self.on_fetch_cancelled(session, stream, actions),
             Some(RequestSlot::Subscribe { request, track, .. }) => {
-                state.moqt.on_peer_request_closed(request);
+                if stream_gone {
+                    state.moqt.on_peer_request_closed(request);
+                }
                 // The subscriber cancelled (§3.3.2, §5.1.1 "MUST reset any open
                 // streams associated with the SUBSCRIBE"). No PUBLISH_DONE can
                 // follow on a stream that is gone.
                 self.remove_subscriber(&track, session, stream_reset_code::CANCELLED, actions);
             }
             Some(RequestSlot::Publish { request, track }) => {
-                state.moqt.on_peer_request_closed(request);
+                if stream_gone {
+                    state.moqt.on_peer_request_closed(request);
+                }
                 // After PUBLISH_DONE the stream may close, and the source
                 // goes on draining.
                 let cancelled =
@@ -2095,18 +2127,24 @@ impl Relay {
                 self.source_gone(&track, cancelled, TrackEnd::SourceGone, actions);
             }
             Some(RequestSlot::Waiting { request, track, .. }) => {
-                state.moqt.on_peer_request_closed(request);
+                if stream_gone {
+                    state.moqt.on_peer_request_closed(request);
+                }
                 self.waiters_left(&track, |waiter| waiter.is_on(session, stream), actions);
             }
             Some(RequestSlot::PublishNamespace { request, .. }) => {
-                state.moqt.on_peer_request_closed(request);
+                if stream_gone {
+                    state.moqt.on_peer_request_closed(request);
+                }
                 // §9.5: cancelling the request withdraws the namespace.
                 self.withdraw_namespace(session, stream);
             }
             Some(RequestSlot::Finished(Some(request))) => {
-                state.moqt.on_peer_request_closed(request);
+                if stream_gone {
+                    state.moqt.on_peer_request_closed(request);
+                }
             }
-            Some(RequestSlot::Finished(None)) | None => {}
+            Some(RequestSlot::Finished(None) | RequestSlot::Stopped) | None => {}
         }
     }
 
@@ -2828,13 +2866,6 @@ impl Relay {
             session: subscriber.session,
             stream: subscriber.stream,
         });
-        // WHY a timer: nothing in §10.11 or §5.1.1 makes the subscriber close
-        // its direction of the stream, and until it does the request counts
-        // against what the peer may have open.
-        actions.push(Action::StartRequestTimer {
-            session: subscriber.session,
-            stream: subscriber.stream,
-        });
         // The session keeps the request until the stream closes: what the
         // subscriber sent before it saw the PUBLISH_DONE still arrives. Put
         // last, as in the branch above: the Joining FETCHes of the
@@ -3203,7 +3234,6 @@ impl Action {
             | Self::StopDataStream { session, .. }
             | Self::StartDrainTimer { session, .. }
             | Self::StartEarlyTimer { session, .. }
-            | Self::StartRequestTimer { session, .. }
             | Self::StartJoiningFetchTimer { session, .. }
             | Self::StopRequest { session, .. }
             | Self::OpenRequest { session, .. }

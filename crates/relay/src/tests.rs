@@ -31,6 +31,17 @@ use xmoq_relay_core::{Counts, Event, FetchPipeEnd, SessionKey, StreamKey};
 use crate::hub::{self, Held, HubConfig, HubHandle};
 
 const SOON: Duration = Duration::from_secs(1);
+
+/// Lets the time pass that the relay gives a peer to end its half of a
+/// request stream the relay finished its own half of: 2 seconds. The peers
+/// of these tests keep theirs open.
+async fn request_close_time() {
+    assert_eq!(
+        HubConfig::default().request_close_timeout,
+        Duration::from_secs(2)
+    );
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+}
 /// The alias the publisher in these tests chooses.
 const PUBLISHER_ALIAS: u64 = 40;
 
@@ -805,6 +816,47 @@ async fn a_subscriber_that_keeps_its_stream_open_after_publish_done_is_stopped()
     assert_eq!(hub.held().await.relay.requests, 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_keeps_the_stream_of_a_refused_request_open_is_stopped() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut subscriber = Peer::connect(&hub, true).await;
+    // Nobody has the track: DOES_NOT_EXIST (0x10), and a FIN.
+    let mut kept_open = subscriber.start_subscribing().await;
+    let answer = subscriber.answer(&mut kept_open).await;
+    assert!(
+        matches!(&answer, RequestEvent::Rejected(error) if error.error_code == 0x10),
+        "{answer:?}"
+    );
+    let held = hub.held().await;
+    assert_eq!((held.relay.requests, held.timers), (1, 1));
+
+    // The subscriber does not end its direction. After two seconds the
+    // relay stops it with CANCELLED (0x1) and forgets the request.
+    assert!(
+        timeout(Duration::from_millis(1900), kept_open.send.stopped())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        timeout(SOON, kept_open.send.stopped()).await,
+        Ok(WriteError::Stopped(Some(0x1)))
+    );
+    let held = hub.held().await;
+    assert_eq!((held.relay.requests, held.timers), (0, 0));
+
+    // One that ends its direction in time is not waited for any longer.
+    let mut ended = subscriber.start_subscribing().await;
+    let answer = subscriber.answer(&mut ended).await;
+    assert!(matches!(&answer, RequestEvent::Rejected(_)), "{answer:?}");
+    ended.send.finish();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let held = hub.held().await;
+    assert_eq!(
+        (held.relay.requests, held.relay.request_streams, held.timers),
+        (0, 0, 0)
+    );
+}
+
 /// The lines the relay has logged so far.
 fn logged(lines: &mut mpsc::Receiver<String>) -> Vec<String> {
     let mut logged = Vec::new();
@@ -1189,6 +1241,7 @@ async fn a_publisher_that_answers_the_relay_wrongly_or_not_at_all() {
             violation.then_some(0x3),
             "{name}"
         );
+        request_close_time().await;
         let held = hub.held().await;
         assert_eq!(
             (held.own_requests, held.relay.own_requests, held.timers),
@@ -1301,6 +1354,7 @@ async fn a_second_message_after_duplicate_subscription_does_not_end_the_wait_for
         matches!(&event, RequestEvent::Rejected(error) if error.error_code == 0x2),
         "{event:?}"
     );
+    request_close_time().await;
     let held = hub.held().await;
     assert_eq!(
         (
@@ -1812,6 +1866,7 @@ async fn a_publisher_that_does_not_answer_a_fetch_costs_the_subscriber_a_timeout
     );
     drop(upstream);
     tokio::time::sleep(SOON).await;
+    request_close_time().await;
     let held = hub.held().await;
     assert_eq!(
         (held.relay.fetches, held.own_requests, held.timers),
@@ -2244,6 +2299,7 @@ async fn a_joining_fetch_whose_subscribe_never_comes_is_refused_after_the_time_f
         matches!(&answer, Ok(RequestEvent::Rejected(error)) if error.error_code == 0x32),
         "{answer:?}"
     );
+    request_close_time().await;
     let held = hub.held().await;
     assert_eq!((held.relay.fetches, held.timers), (0, 0));
 }

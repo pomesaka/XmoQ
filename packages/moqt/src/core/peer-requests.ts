@@ -2,6 +2,7 @@ import { concatBytes } from "./bytes.ts";
 import {
 	decodeControlMessage,
 	decodeRequestStart,
+	drainControlMessages,
 	encodeControlMessage,
 	FETCH_MESSAGE_TYPE,
 	type Fetch,
@@ -9,7 +10,12 @@ import {
 	SUBSCRIBE_MESSAGE_TYPE,
 	type Subscribe,
 } from "./control-message.ts";
-import { MoqtError, RequestErrorCode, SessionErrorCode } from "./error.ts";
+import {
+	MoqtError,
+	protocolViolation,
+	RequestErrorCode,
+	SessionErrorCode,
+} from "./error.ts";
 import { endsBefore } from "./parameters.ts";
 import type { PeerSubscribeOpened } from "./requests.ts";
 import type { SessionOutput } from "./session-output.ts";
@@ -40,6 +46,16 @@ export interface PeerRequestsOptions {
 	 * the peer that stays open here.
 	 */
 	isOpenSubscribe(requestId: bigint): boolean;
+	/**
+	 * Whether a request of the peer with this Request ID is kept where the
+	 * requests that were handed on are: open, or over with its stream not
+	 * yet gone.
+	 */
+	holdsRequestId(requestId: bigint): boolean;
+	/** How many requests of the peer are kept there. */
+	heldRequests(): number;
+	/** `limits.maxPeerRequests`: how many requests of the peer are kept in all. */
+	maxPeerRequests: number;
 }
 
 /** A stream that was taken over with its request: what it is named from here on, and the bytes that followed the request. */
@@ -77,6 +93,8 @@ export interface PeerRequests {
 	 * that the stream was given up.
 	 */
 	giveUpUnidentified(peerStream: number): boolean;
+	/** How many requests that were refused here are kept until their stream is gone. */
+	keptRequests(): number;
 	/** How many streams something is kept of. */
 	heldStreams(): number;
 	clear(): void;
@@ -86,10 +104,26 @@ type PeerRequestStream =
 	/** Message Type and Request ID have not fully arrived. */
 	| { answered: false; buffer: Uint8Array }
 	/**
-	 * The request was answered; the rest of it is dropped. `missing` is how
-	 * many bytes of its first message have not arrived yet.
+	 * The request was refused. `missing` is how many bytes of its first
+	 * message have not arrived yet; they are not looked at.
+	 *
+	 * `kept` is the request, kept as one that was rejected until its stream
+	 * is gone, with the bytes of an incomplete message that follows the
+	 * first. WHY kept: a REQUEST_UPDATE the peer sent before it saw the
+	 * refusal still arrives, and uses up a Request ID of the peer (§10.1),
+	 * whoever refused the request and whatever kind it was; the peer counts
+	 * on from there. As in the Rust session.
+	 *
+	 * `kept` is `undefined` where nothing is kept, and what follows is
+	 * dropped: a request refused while as many requests of the peer are kept
+	 * as may be (a request that was kept there would make the limit no
+	 * limit), and a stream that was given up for not saying what it is.
 	 */
-	| { answered: true; missing: number };
+	| {
+			answered: true;
+			missing: number;
+			kept: { requestId: bigint; inbound: Uint8Array } | undefined;
+	  };
 
 /** The first message of the request is whole: the stream has said what it is. */
 const identified = (peerStream: number): SessionOutput => ({
@@ -201,6 +235,24 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 	/** Request IDs seen above `lowestUnseen`, while lower ones are still to come. */
 	const seenAhead = new Set<bigint>();
 
+	/** The requests that were refused here and are kept until their stream is gone. */
+	const keptHere = (): number => {
+		let count = 0;
+		for (const stream of streams.values()) {
+			if (stream.answered && stream.kept !== undefined) count += 1;
+		}
+		return count;
+	};
+
+	/** Whether a request of the peer with this Request ID is kept, here or where the ones that were handed on are. */
+	const keeps = (requestId: bigint): boolean => {
+		if (options.holdsRequestId(requestId)) return true;
+		for (const stream of streams.values()) {
+			if (stream.answered && stream.kept?.requestId === requestId) return true;
+		}
+		return false;
+	};
+
 	/**
 	 * §10.1: wrong parity or a duplicate closes the session with
 	 * INVALID_REQUEST_ID. The draft asks nothing else of the receiver, so a gap
@@ -214,15 +266,15 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 				`Request ID ${requestId} from the server is even`,
 			);
 		}
-		// WHY the open requests are asked as well: the ID of one can have
-		// been pushed out of the memory below, and taking it for new would
-		// put a second request in the place of the first, which could then
-		// not be ended. The Rust session looks at its open requests in the
-		// same way (`take_id`).
+		// WHY the requests that are kept are asked as well: the ID of one can
+		// have been pushed out of the memory below, and taking it for new
+		// would put a second request in the place of the first, which could
+		// then not be ended. The Rust session looks at the requests it keeps
+		// in the same way (`take_id`).
 		if (
 			requestId < lowestUnseen ||
 			seenAhead.has(requestId) ||
-			options.isOpenSubscribe(requestId)
+			keeps(requestId)
 		) {
 			throw new MoqtError(
 				SessionErrorCode.INVALID_REQUEST_ID,
@@ -257,7 +309,33 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 		requestId % 2n === 1n &&
 		requestId < before &&
 		requestId >= lowestUnseen &&
-		!seenAhead.has(requestId);
+		!seenAhead.has(requestId) &&
+		// A request that is kept is no request that is yet to come, also when
+		// its ID was pushed out of what is remembered: the Rust session leaves
+		// out every request it keeps in the same way.
+		!keeps(requestId);
+
+	/**
+	 * What follows the first message of a refused request that is kept: a
+	 * message that does not decode closes the session, as on any request
+	 * stream; a REQUEST_UPDATE uses up its Request ID, and gets no answer;
+	 * any other message is ignored. A FIN inside a message is a
+	 * PROTOCOL_VIOLATION.
+	 */
+	const readAfterRefusal = (
+		kept: { inbound: Uint8Array },
+		data: Uint8Array,
+		fin: boolean,
+	): void => {
+		kept.inbound = drainControlMessages(kept.inbound, data, (message) => {
+			if (message.type === "REQUEST_UPDATE") {
+				checkRequestId(message.requestId);
+			}
+		});
+		if (fin && kept.inbound.length > 0) {
+			throw protocolViolation("FIN inside a control message");
+		}
+	};
 
 	return {
 		checkRequestId,
@@ -280,11 +358,15 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 				);
 			if (stream.answered) {
 				const wasMissing = stream.missing;
-				stream.missing = Math.max(0, stream.missing - data.length);
+				const ofTheFirst = Math.min(stream.missing, data.length);
+				stream.missing -= ofTheFirst;
 				if (fin && stream.missing > 0) throw endedInside();
 				if (wasMissing > 0 && stream.missing === 0) {
 					out.push(identified(peerStream));
 				}
+				const { kept } = stream;
+				if (kept === undefined) return undefined;
+				readAfterRefusal(kept, data.subarray(ofTheFirst), fin);
 				return undefined;
 			}
 
@@ -395,7 +477,22 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 					errorCode: refusal.code,
 				},
 			});
-			if (!fin) streams.set(peerStream, { answered: true, missing });
+			// The one refusal that keeps nothing: as many requests of the peer
+			// are kept as may be, whatever the request was refused with. (A
+			// request refused for that very reason finds no room here either.)
+			const room =
+				options.heldRequests() + keptHere() < options.maxPeerRequests;
+			const kept = room ? { requestId, inbound: new Uint8Array(0) } : undefined;
+			// WHY also with a FIN, where nothing of the stream stays: what
+			// came with the request in the same read is looked at like what
+			// comes in a later one. How the bytes of a stream are cut into
+			// reads is not the peer's doing, and must not change what becomes
+			// of them.
+			if (!fin) streams.set(peerStream, { answered: true, missing, kept });
+			if (kept !== undefined) {
+				const whole = Math.min(buffer.length, messageLength);
+				readAfterRefusal(kept, buffer.subarray(whole), fin);
+			}
 			return undefined;
 		},
 		reset(peerStream) {
@@ -414,9 +511,10 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// end inside a message. Forgotten here, what still arrives would be
 			// read as the start of a request, and close the session. It goes
 			// when the stream ends, like every other.
-			streams.set(peerStream, { answered: true, missing: 0 });
+			streams.set(peerStream, { answered: true, missing: 0, kept: undefined });
 			return true;
 		},
+		keptRequests: keptHere,
 		heldStreams: () => streams.size,
 		clear() {
 			streams.clear();

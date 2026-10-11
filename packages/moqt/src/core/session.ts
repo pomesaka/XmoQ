@@ -280,11 +280,15 @@ export function createSession(options: SessionOptions = {}): Session {
 		fetch: (message, peerStream, out) =>
 			requests.peerFetchOpened(message, peerStream, out),
 		isOpenSubscribe: (requestId) => requests.isOpenPeerSubscribe(requestId),
+		holdsRequestId: (requestId) => requests.holdsPeerRequestId(requestId),
+		heldRequests: () => requests.heldPeerRequests(),
+		maxPeerRequests: limits.maxPeerRequests,
 	});
 	const requests: Requests = createRequests({
 		limits,
 		allocateStream,
 		checkPeerRequestId: peerRequests.checkRequestId,
+		refusedPeerRequests: () => peerRequests.keptRequests(),
 	});
 	const controlStream = createPeerControlStream();
 	const peerUniStreams = new Map<number, PeerUniStream>();

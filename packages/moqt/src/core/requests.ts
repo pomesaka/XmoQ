@@ -127,6 +127,8 @@ export interface RequestsOptions {
 	allocateStream(): number;
 	/** §10.1: checks a Request ID the peer used, and throws the `MoqtError` when it is wrong. */
 	checkPeerRequestId(requestId: bigint): void;
+	/** How many requests of the peer that the session refused by itself are kept until their stream is gone. */
+	refusedPeerRequests(): number;
 }
 
 /**
@@ -258,6 +260,10 @@ export interface Requests {
 	resetFetch(requestId: bigint, code: number): SessionOutput[];
 	/** Whether the Request ID names a SUBSCRIBE of the peer that waits for its answer or was accepted, and is not over (§10.12.2). */
 	isOpenPeerSubscribe(requestId: bigint): boolean;
+	/** Whether a request of the peer with this Request ID is kept: open, or over with its stream not yet gone. */
+	holdsPeerRequestId(requestId: bigint): boolean;
+	/** How many requests of the peer are kept in that way. */
+	heldPeerRequests(): number;
 	/**
 	 * Accepts a SUBSCRIBE of the peer: sends SUBSCRIBE_OK. Returns the Track
 	 * Alias this endpoint chose. From here on the subscription is one this
@@ -503,20 +509,29 @@ export function createRequests(options: RequestsOptions): Requests {
 		return false;
 	};
 
-	/** Requests of the peer that are open: waiting for their answer, or accepted. */
-	const openPeerRequests = (): number => {
+	const openedByThePeer = (request: RequestEntry): boolean =>
+		request.kind === "PEER_SUBSCRIBE" ||
+		request.kind === "PEER_FETCH" ||
+		(request.kind === "PUBLISH" && request.openedBy === "peer");
+
+	/**
+	 * Requests of the peer that are kept here: the ones that wait for their
+	 * answer or were accepted, and the ones that are over while their stream
+	 * is not yet gone (rejected, served, or ended with PUBLISH_DONE). The
+	 * Rust session counts the same (`peer_request_count`).
+	 */
+	const heldPeerRequests = (): number => {
 		let count = 0;
-		for (const request of requests.values()) {
-			if (
-				request.kind === "PEER_SUBSCRIBE" ||
-				request.kind === "PEER_FETCH" ||
-				(request.kind === "PUBLISH" && request.openedBy === "peer")
-			) {
-				count += 1;
-			}
+		for (const request of requestStreams.values()) {
+			if (openedByThePeer(request)) count += 1;
 		}
 		return count;
 	};
+
+	/** Whether the requests of the peer that are kept, here and where the session refused them, are as many as may be. */
+	const peerRequestsAreFull = (): boolean =>
+		heldPeerRequests() + options.refusedPeerRequests() >=
+		options.limits.maxPeerRequests;
 
 	/** FETCHes of the peer that are open: waiting for their answer, or being served. */
 	const openPeerFetches = (): number => {
@@ -1395,7 +1410,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			if (isPublishing(message)) {
 				return { refused: RequestErrorCode.DUPLICATE_SUBSCRIPTION };
 			}
-			if (openPeerRequests() >= options.limits.maxPeerRequests) {
+			if (peerRequestsAreFull()) {
 				return { refused: RequestErrorCode.EXCESSIVE_LOAD };
 			}
 			const entry: PeerSubscribeEntry = {
@@ -1435,7 +1450,7 @@ export function createRequests(options: RequestsOptions): Requests {
 				throw new Error("only a Standalone FETCH is handed on");
 			}
 			if (
-				openPeerRequests() >= options.limits.maxPeerRequests ||
+				peerRequestsAreFull() ||
 				openPeerFetches() >= options.limits.maxPeerFetches
 			) {
 				return { refused: RequestErrorCode.EXCESSIVE_LOAD };
@@ -1551,6 +1566,17 @@ export function createRequests(options: RequestsOptions): Requests {
 			);
 			return out;
 		},
+
+		holdsPeerRequestId(requestId) {
+			for (const request of requestStreams.values()) {
+				if (request.requestId === requestId && openedByThePeer(request)) {
+					return true;
+				}
+			}
+			return false;
+		},
+
+		heldPeerRequests,
 
 		isOpenPeerSubscribe(requestId) {
 			const request = requests.get(requestId);

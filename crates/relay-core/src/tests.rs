@@ -229,7 +229,7 @@ fn data_stream_closed(relay: &mut Relay, stream: u64, end: StreamEnd) -> Vec<Act
 }
 
 /// What `PUBLISH_DONE` and the FIN after it look like for a subscriber.
-fn done_actions(session: SessionKey, status_code: u64, stream_count: u64) -> [Action; 3] {
+fn done_actions(session: SessionKey, status_code: u64, stream_count: u64) -> [Action; 2] {
     [
         Action::SendRequest {
             session,
@@ -237,10 +237,6 @@ fn done_actions(session: SessionKey, status_code: u64, stream_count: u64) -> [Ac
             message: publish_done(status_code, stream_count),
         },
         Action::FinishRequest {
-            session,
-            stream: StreamKey(0),
-        },
-        Action::StartRequestTimer {
             session,
             stream: StreamKey(0),
         },
@@ -1394,7 +1390,7 @@ fn a_subscriber_with_forward_state_0_gets_no_objects() {
     // Alice is still told when the track ends, with no streams to count.
     out_stream_closed(&mut relay, 0);
     let actions = relay.step(Event::SessionClosed { session: PUBLISHER });
-    assert_eq!(actions[..3], done_actions(ALICE, 0x2, 0));
+    assert_eq!(actions[..2], done_actions(ALICE, 0x2, 0));
 }
 
 #[test]

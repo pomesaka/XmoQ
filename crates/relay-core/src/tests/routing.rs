@@ -2646,3 +2646,324 @@ fn sessions_that_announce_are_asked_and_go_leave_nothing_with_the_track() {
         (1, 0, 0, 0, 0)
     );
 }
+
+/// A relay in which a request of Alice on her stream 0, Request ID 0, was
+/// refused: by the relay or by her session, as `how` says.
+fn relay_with_a_refused_request(how: &str) -> Relay {
+    let mut relay = relay_with_track();
+    let opens = |request_id, name: &[u8]| Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: subscribe(request_id, name),
+    };
+    let refused = match how {
+        // A track nobody has: DOES_NOT_EXIST (0x10).
+        "the relay refuses a SUBSCRIBE" => relay.step(opens(0, b"nobody")),
+        // A PUBLISH with a Mandatory Track Property the relay does not
+        // know: UNSUPPORTED_EXTENSION (0x33), from the session itself.
+        "the session refuses a PUBLISH" => relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first: ControlMessage::Publish(Publish {
+                request_id: 0,
+                full_track_name: track(b"mine"),
+                track_alias: 3,
+                parameters: vec![],
+                track_properties: vec![KeyValuePair::varint(0x4000, 1).unwrap()],
+            }),
+        }),
+        other => panic!("a way the test does not know: {other}"),
+    };
+    assert!(
+        matches!(
+            refused.as_slice(),
+            [
+                Action::SendRequest {
+                    message: ControlMessage::RequestError(_),
+                    ..
+                },
+                Action::FinishRequest { .. }
+            ]
+        ),
+        "{how}: {refused:?}"
+    );
+    relay
+}
+
+const REFUSED: [&str; 2] = [
+    "the relay refuses a SUBSCRIBE",
+    "the session refuses a PUBLISH",
+];
+
+#[test]
+fn a_request_update_on_a_refused_request_uses_up_its_request_id() {
+    let update = |request_id| Event::RequestMessage {
+        session: ALICE,
+        stream: StreamKey(0),
+        message: ControlMessage::RequestUpdate(RequestUpdate {
+            request_id,
+            parameters: vec![],
+        }),
+    };
+    for how in REFUSED {
+        // Alice sent a REQUEST_UPDATE with the Request ID 2 before she saw
+        // the refusal: it gets no answer.
+        let mut relay = relay_with_a_refused_request(how);
+        assert_eq!(relay.step(update(2)), [], "{how}");
+        // Her next request cannot have that ID: INVALID_REQUEST_ID (0x4)
+        // closes her session (§10.1).
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(1),
+            first: subscribe(2, b"a"),
+        });
+        assert!(
+            matches!(
+                actions.first(),
+                Some(Action::CloseSession {
+                    session: ALICE,
+                    code: 0x4,
+                    ..
+                })
+            ),
+            "{how}: {actions:?}"
+        );
+
+        // A REQUEST_UPDATE with an ID that is not hers to use closes the
+        // session as well.
+        let mut relay = relay_with_a_refused_request(how);
+        let actions = relay.step(update(3));
+        assert!(
+            matches!(
+                actions.first(),
+                Some(Action::CloseSession { code: 0x4, .. })
+            ),
+            "{how}: {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn what_follows_an_update_that_ended_its_request_is_ignored() {
+    // Alice announces a namespace, which the relay accepts, and then sends
+    // a REQUEST_UPDATE for it: refused with NOT_SUPPORTED (0x3), and the
+    // relay finishes the stream (§10.9.1).
+    let mut relay = relay_with_track();
+    let update = |request_id| Event::RequestMessage {
+        session: ALICE,
+        stream: StreamKey(0),
+        message: ControlMessage::RequestUpdate(RequestUpdate {
+            request_id,
+            parameters: vec![],
+        }),
+    };
+    let announced = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 0,
+            track_namespace: TrackNamespace::new(vec![b"alice".to_vec()]).unwrap(),
+            parameters: vec![],
+        }),
+    });
+    assert!(
+        matches!(
+            announced.as_slice(),
+            [Action::SendRequest {
+                message: ControlMessage::RequestOk(_),
+                ..
+            }]
+        ),
+        "{announced:?}"
+    );
+    let refused = relay.step(update(2));
+    assert!(
+        matches!(
+            refused.as_slice(),
+            [
+                Action::SendRequest {
+                    message: ControlMessage::RequestError(error),
+                    ..
+                },
+                Action::FinishRequest { .. }
+            ] if error.error_code == 0x3
+        ),
+        "{refused:?}"
+    );
+    // A second one, sent before she saw the first refused: nothing, and
+    // the session stays.
+    assert_eq!(relay.step(update(4)), []);
+    // Both used up their Request IDs: INVALID_REQUEST_ID (0x4).
+    let again = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(1),
+        first: subscribe(4, b"a"),
+    });
+    assert!(
+        matches!(
+            again.first(),
+            Some(Action::CloseSession {
+                session: ALICE,
+                code: 0x4,
+                ..
+            })
+        ),
+        "{again:?}"
+    );
+}
+
+#[test]
+fn a_refused_request_is_held_until_its_stream_is_gone_and_no_longer() {
+    for how in REFUSED {
+        let mut relay = relay_with_a_refused_request(how);
+        let held = relay.counts();
+        // Alice finishes her direction, which is all she has left to do.
+        assert_eq!(
+            relay.step(Event::RequestClosed {
+                session: ALICE,
+                stream: StreamKey(0),
+                how: RequestEnd::Fin,
+            }),
+            [],
+            "{how}"
+        );
+        let after = relay.counts();
+        assert_eq!(
+            (after.requests, after.request_streams),
+            (held.requests - 1, held.request_streams - 1),
+            "{how}"
+        );
+    }
+}
+
+#[test]
+fn a_peer_that_ends_no_stream_of_a_refused_request_is_stopped_after_a_time() {
+    let mut relay = relay_with_track();
+    let before = relay.counts();
+    // Alice sends 300 SUBSCRIBEs for a track nobody has, and ends her
+    // direction of none of the streams. DOES_NOT_EXIST (0x10) for the first
+    // 256, which the session holds; EXCESSIVE_LOAD (0x9) for the rest,
+    // which it does not: that many are held.
+    let refused = |code| {
+        ControlMessage::RequestError(RequestError {
+            error_code: code,
+            retry_interval: 0,
+            error_reason: ReasonPhrase::default(),
+            redirect: None,
+        })
+    };
+    for index in 0..300u64 {
+        let stream = StreamKey(index);
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream,
+            first: subscribe(index * 2, b"nobody"),
+        });
+        let code = if index < 256 { 0x10 } else { 0x9 };
+        let answer = Action::SendRequest {
+            session: ALICE,
+            stream,
+            message: refused(code),
+        };
+        assert!(actions.contains(&answer), "{index}: {actions:?}");
+        // The FIN that gives her the time to end her direction.
+        let finish = Action::FinishRequest {
+            session: ALICE,
+            stream,
+        };
+        assert!(actions.contains(&finish), "{index}: {actions:?}");
+    }
+    let full = relay.counts();
+    assert_eq!(
+        (full.requests, full.request_streams),
+        (before.requests + 256, before.request_streams + 300)
+    );
+    // The time is over for each: her direction is stopped with CANCELLED
+    // (0x1), whether the session held the request or not, and the session
+    // lets go of those it held.
+    for index in 0..300u64 {
+        let stream = StreamKey(index);
+        let timeout = Event::RequestTimeout {
+            session: ALICE,
+            stream,
+        };
+        assert_eq!(
+            relay.step(timeout.clone()),
+            [Action::StopRequest {
+                session: ALICE,
+                stream,
+                code: 0x1,
+            }],
+            "{index}"
+        );
+        // Said once.
+        assert_eq!(relay.step(timeout), [], "{index}");
+        // What was read before the stop took effect is dropped.
+        let late = relay.step(Event::RequestMessage {
+            session: ALICE,
+            stream,
+            message: ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: 1000,
+                parameters: vec![],
+            }),
+        });
+        assert_eq!(late, [], "{index}");
+    }
+    let stopped = relay.counts();
+    assert_eq!(
+        (stopped.requests, stopped.request_streams),
+        (before.requests, before.request_streams + 300)
+    );
+    // A request she sends now is taken: Bob, who publishes "a", has it.
+    let taken = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(300),
+        first: subscribe(600, b"a"),
+    });
+    assert!(
+        matches!(
+            taken.as_slice(),
+            [Action::SendRequest {
+                session: ALICE,
+                message: ControlMessage::SubscribeOk(_),
+                ..
+            }]
+        ),
+        "{taken:?}"
+    );
+    // The streams count until the I/O side reports them gone.
+    for index in 0..300u64 {
+        relay.step(Event::RequestClosed {
+            session: ALICE,
+            stream: StreamKey(index),
+            how: RequestEnd::Aborted,
+        });
+    }
+    assert_eq!(relay.counts().request_streams, before.request_streams + 1);
+}
+
+#[test]
+fn the_time_to_end_a_stream_is_nothing_to_a_request_that_goes_on() {
+    // Every FIN of the relay starts the time, and the stream may be gone or
+    // be another's by the time it is over: a request that is open is not
+    // touched.
+    let mut relay = relay_with_track();
+    let accepted = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: subscribe(0, b"a"),
+    });
+    assert!(
+        matches!(accepted.as_slice(), [Action::SendRequest { .. }]),
+        "{accepted:?}"
+    );
+    let before = relay.counts();
+    for stream in [StreamKey(0), StreamKey(7)] {
+        let timeout = Event::RequestTimeout {
+            session: ALICE,
+            stream,
+        };
+        assert_eq!(relay.step(timeout), [], "{stream:?}");
+    }
+    assert_eq!(relay.counts(), before);
+}

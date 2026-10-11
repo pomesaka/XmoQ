@@ -603,12 +603,14 @@ struct Client<'a> {
     open_streams: HashMap<u64, u64>,
     /// The requests the peer opens, in the mode that serves them.
     peer_requests: Option<io::PeerRequests>,
-    /// Subscriptions of the peer this client ended with `PUBLISH_DONE` while
-    /// their stream was still open, by that stream. WHY kept: what the peer
-    /// still says there has to reach the session (a `REQUEST_UPDATE` uses up
-    /// a Request ID, §10.1), and the session forgets the request only when
-    /// it is told that the stream is gone.
-    ended_by_publish_done: HashMap<u64, PeerRequestId>,
+    /// Requests of the peer this client has said its last on while their
+    /// stream was still open, by that stream: subscriptions it ended with
+    /// `PUBLISH_DONE`, and requests that were refused, by this client or by
+    /// its session. WHY kept: what the peer still says there has to reach
+    /// the session (a `REQUEST_UPDATE` uses up a Request ID, §10.1), and the
+    /// session forgets the request only when it is told that the stream is
+    /// gone.
+    said_the_last: HashMap<u64, PeerRequestId>,
     args: &'a Args,
 }
 
@@ -1531,9 +1533,12 @@ impl Client<'_> {
                 let label = format!("bi#{stream}");
                 let (request, peer_request) = match self.session.on_peer_request_opened(first)? {
                     PeerRequestOpened::Request(request, peer_request) => (request, peer_request),
-                    PeerRequestOpened::Refused { response } => {
+                    PeerRequestOpened::Refused { response, request } => {
                         xmoq_moqt_io::send_message(&mut send, &response, wire, &label).await?;
                         send.finish();
+                        if let Some(request) = request {
+                            self.said_the_last.insert(stream, request);
+                        }
                         return Ok(());
                     }
                 };
@@ -1573,16 +1578,17 @@ impl Client<'_> {
                         .reject(request, error_code, 0, ReasonPhrase::default())?;
                 xmoq_moqt_io::send_message(&mut send, &response, wire, &label).await?;
                 send.finish();
-                // What still arrives on the stream is not given to the
-                // session (below), so the session is told now that the
-                // request is gone. It holds a rejected FETCH until then.
-                self.session.on_peer_request_closed(request);
+                // The session keeps a request that was rejected until its
+                // stream is gone: what still arrives on it is given to the
+                // session (below).
+                self.said_the_last.insert(stream, request);
             }
             PeerRequestStreamEvent::Message { stream, message } => {
                 let Some(served) = serving.as_mut().filter(|served| served.stream == stream) else {
-                    // What crosses this client's PUBLISH_DONE is ignored by
-                    // the session, which still has to see it.
-                    if let Some(request) = self.ended_by_publish_done.get(&stream) {
+                    // What crosses this client's PUBLISH_DONE or its
+                    // REQUEST_ERROR is ignored by the session, which still
+                    // has to see it.
+                    if let Some(request) = self.said_the_last.get(&stream) {
                         self.session.on_peer_request_message(*request, message)?;
                     }
                     return Ok(());
@@ -1605,13 +1611,12 @@ impl Client<'_> {
                         )?;
                         xmoq_moqt_io::send_message(&mut ended.send, &done, wire, "served").await?;
                         ended.send.finish();
-                        self.ended_by_publish_done
-                            .insert(ended.stream, ended.request);
+                        self.said_the_last.insert(ended.stream, ended.request);
                     }
                 }
             }
             PeerRequestStreamEvent::Closed { stream, how } => {
-                if let Some(request) = self.ended_by_publish_done.remove(&stream) {
+                if let Some(request) = self.said_the_last.remove(&stream) {
                     self.session.on_peer_request_closed(request);
                 }
                 // A subscriber that only finishes its direction has not ended
@@ -1704,7 +1709,7 @@ async fn run_session(
         stops,
         open_streams: HashMap::new(),
         peer_requests,
-        ended_by_publish_done: HashMap::new(),
+        said_the_last: HashMap::new(),
         args,
     };
     // The session inbox is watched for the rest of the session: it reports a

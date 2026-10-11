@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use xmoq_moqt::session::PeerRequestId;
+
 use crate::{Action, Relay, RequestSlot, SessionKey, StreamKey};
 
 /// How far a SUBSCRIBE of the peer has come.
@@ -129,30 +131,37 @@ impl Relay {
     }
 
     /// Marks a request stream of the peer as one the relay has said its last
-    /// on, with no state left for it in the session.
+    /// on: it refused the request, or the session did, or a FETCH has its
+    /// `FETCH_OK`.
     ///
-    /// WHY the slot goes at once when the peer had finished its direction: a
-    /// slot is otherwise taken away when the stream is reported closed, and
-    /// that report came already. It would stay for the life of the session.
+    /// `request` is what the session still holds for the stream. It keeps a
+    /// request that was rejected until the stream is gone, for the
+    /// `REQUEST_UPDATE` that can still be on its way and uses up a Request
+    /// ID (§10.1); the slot hands such messages on, and tells the session
+    /// when the stream is gone. `None` where the session holds nothing.
     ///
-    /// WHY the other places put `Finished` in directly: they answer a request
-    /// in the step that opened it, or end a PUBLISH, and neither can have the
-    /// mark; a FIN on a PUBLISH ends it there and then. A new place that
-    /// answers a request later than it was opened belongs here.
+    /// WHY the slot goes at once when the peer had finished its direction:
+    /// nothing more comes then, and no report of the stream closing either.
+    /// A slot left there, and the request in the session, would stay for
+    /// the life of the session and count against what the peer may have
+    /// open.
     pub(crate) fn finish_slot(
         &mut self,
         session: SessionKey,
         stream: StreamKey,
+        request: Option<PeerRequestId>,
         actions: &mut Vec<Action>,
     ) {
-        let finished = self
-            .sessions
-            .get(&session)
-            .is_some_and(|state| state.requests.peer_finished(stream));
-        if finished {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        if state.requests.peer_finished(stream) {
+            if let Some(request) = request {
+                state.moqt.on_peer_request_closed(request);
+            }
             self.take_slot(session, stream, actions);
         } else {
-            self.put_slot(session, stream, RequestSlot::Finished(None), actions);
+            self.put_slot(session, stream, RequestSlot::Finished(request), actions);
         }
     }
 }

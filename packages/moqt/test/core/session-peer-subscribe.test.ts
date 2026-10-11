@@ -5,7 +5,7 @@ import { decodeControlMessage } from "../../src/core/control-message.ts";
 import { InactiveError } from "../../src/core/error.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
-import { fixture, hex, toHex, utf8 } from "../helpers.ts";
+import { byHand, fixture, hex, toHex, utf8 } from "../helpers.ts";
 
 /** The track of `subscribe-moqtail-rs`. */
 const TRACK = {
@@ -25,7 +25,7 @@ function subscribeBytes(requestId: number, lastLetter = "74"): Uint8Array {
  * REQUEST_UPDATE with Request ID 3 and no parameters. Written by hand: no
  * capture of one exists (moqtail's clients send none).
  */
-const REQUEST_UPDATE = hex("02 00 02 03 00");
+const REQUEST_UPDATE = hex(byHand("request-update-request-id-3"));
 
 /** The captured Relative Joining FETCH, as Request ID 3 of the server, naming its SUBSCRIBE with Request ID 1. */
 function joiningFetchBytes(): Uint8Array {
@@ -533,13 +533,21 @@ describe("what the session answers by itself", () => {
 			"respond peer 2: REQUEST_ERROR 9",
 			"event peer-request-rejected 5 code 9",
 		]);
-		// One of the two ends: there is room again.
+		// One of the two is rejected, and is kept until its stream is gone:
+		// there is no room yet.
 		session.rejectPeerRequest(3n, 0x10n, "");
 		expect(
 			briefly(
 				session.receivePeerBidiStreamData(3, subscribeBytes(7, "64"), false),
 			),
-		).toContain("event peer-subscribe 7");
+		).toContain("respond peer 3: REQUEST_ERROR 9");
+		// The peer ends its direction of that stream: there is room again.
+		session.receivePeerBidiStreamData(1, new Uint8Array(0), true);
+		expect(
+			briefly(
+				session.receivePeerBidiStreamData(4, subscribeBytes(9, "65"), false),
+			),
+		).toContain("event peer-subscribe 9");
 	});
 
 	test("the Request ID of an open SUBSCRIBE is a duplicate also when it is no longer remembered among the IDs (§10.1)", () => {
@@ -664,6 +672,21 @@ describe("fixtures/peer-subscribe: what becomes of a SUBSCRIBE of the peer", () 
 			earlier(session);
 			session.rejectPeerRequest(1n, 0x10n, "");
 		},
+		"subscribe-rejected-then-update": (session) => {
+			earlier(session);
+			session.rejectPeerRequest(1n, 0x10n, "");
+			session.receivePeerBidiStreamData(0, REQUEST_UPDATE, false);
+		},
+		"subscribe-refused-then-update": (session) => {
+			earlier(session);
+			// The row's own stream is 1; this one is the second SUBSCRIBE's.
+			session.receivePeerBidiStreamData(2, subscribeBytes(3), false);
+			session.receivePeerBidiStreamData(
+				2,
+				hex(byHand("request-update-request-id-5")),
+				false,
+			);
+		},
 	};
 
 	/** The outcome in the words of the table. */
@@ -685,8 +708,8 @@ describe("fixtures/peer-subscribe: what becomes of a SUBSCRIBE of the peer", () 
 		return "nothing";
 	};
 
-	test("the table has the ten rows of its README", () => {
-		expect(rows.length).toBe(10);
+	test("the table has the twelve rows of its README", () => {
+		expect(rows.length).toBe(12);
 	});
 
 	test.each(rows)(

@@ -25,10 +25,14 @@ The session is that of a client, after its own SETUP.
 | `subscribe-accepted` | As `subscribe`, and the application accepted it (SUBSCRIBE_OK) |
 | `subscribe-done` | As `subscribe-accepted`, and this endpoint ended the subscription with PUBLISH_DONE (`TRACK_ENDED`, `0x2`); the server has not ended its direction of that stream |
 | `subscribe-rejected` | As `subscribe`, and the application rejected it (REQUEST_ERROR `DOES_NOT_EXIST`, `0x10`); the server has not ended its direction of that stream |
+| `subscribe-rejected-then-update` | As `subscribe-rejected`, and the server then sent, on the stream of that SUBSCRIBE, a REQUEST_UPDATE with Request ID 3 and no parameters (`../moqt-18-by-hand/request-update-request-id-3.hex`) |
+| `subscribe-refused-then-update` | As `subscribe`, and the server then sent a second SUBSCRIBE for the track `"object"`, with Request ID 3, on a stream of its own, which the session refused by itself (`DUPLICATE_SUBSCRIPTION`); and after it, on that same stream, a REQUEST_UPDATE with Request ID 5 and no parameters (`../moqt-18-by-hand/request-update-request-id-5.hex`) |
+
+The last two states are about what still comes on the stream of a request that was refused: a REQUEST_UPDATE there gets no answer and uses up its Request ID (§10.1: "Each ... REQUEST_UPDATE ... message consumes a Request ID", with no condition), whether the application refused the request or the session did. The two REQUEST_UPDATE messages are written by hand: no capture of one exists; the Rust implementation has a test that reads the same bytes (`the_request_updates_named_for_the_shared_table_say_what_they_were_meant_to`).
 
 ## Where the bytes come from
 
-Every `sent` is `../moqt-18/subscribe-moqtail-rs.hex`, captured from the `moqtail` crate 0.15.0, with two changes: its Request ID, which is 0 there and has to be one of a server here (1 or 3; 2 for the row of the wrong parity), and for the rows of another track the last byte of its Track Name (`object` to `objecu`). `generate.ts` makes the table: `bun fixtures/peer-subscribe/generate.ts`.
+Every `sent` is `../moqt-18/subscribe-moqtail-rs.hex`, captured from the `moqtail` crate 0.15.0, with two changes: its Request ID, which is 0 there and has to be one of a server here (1, 3 or 5; 2 for the row of the wrong parity), and for the rows of another track the last byte of its Track Name (`object` to `objecu`). `generate.ts` makes the table: `bun fixtures/peer-subscribe/generate.ts`.
 
 ## Not in the table
 

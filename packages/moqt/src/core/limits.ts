@@ -14,9 +14,12 @@ export interface SessionLimits extends SubgroupStreamLimits {
 	 */
 	maxHeldSubgroupBytes: number;
 	/**
-	 * Requests of the peer that are open at once: the ones that wait for the
-	 * application's answer and the subscriptions it accepted. One more is
-	 * answered with REQUEST_ERROR `EXCESSIVE_LOAD`.
+	 * Requests of the peer that are kept at once: the ones that wait for the
+	 * application's answer, the subscriptions and FETCHes it accepted, and
+	 * the ones that are over (refused, served, ended with PUBLISH_DONE) for
+	 * as long as the peer has not ended its direction of their stream. With
+	 * that many kept, a SUBSCRIBE or a FETCH is answered with REQUEST_ERROR
+	 * `EXCESSIVE_LOAD`, and a request that is refused is not kept.
 	 *
 	 * WHY 64 where the Rust implementation has 256: an accepted subscription
 	 * keeps its request stream open, and the I/O layer reads 64 streams of
