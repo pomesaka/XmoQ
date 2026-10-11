@@ -27,12 +27,6 @@ export interface CatalogState {
 		readonly at: CatalogLocation;
 	};
 	/**
-	 * The largest Group an Object was seen of. What comes of a Group before
-	 * it is ignored (§5: "Any catalog updates that precede the first Object
-	 * of the latest Group MUST be ignored").
-	 */
-	readonly latestGroup?: bigint;
-	/**
 	 * Something came after `current`, or before any, that changes the
 	 * catalog and could not be used: `current` may no longer be what the
 	 * publisher offers. Gone when a whole catalog of a later Group is read.
@@ -80,7 +74,11 @@ export function catalogStateAfter(
 	payload: Uint8Array,
 	maxLength?: number,
 ): CatalogState {
-	const { latestGroup } = state;
+	// The largest Group an Object was seen of: `outdated`, where it is there,
+	// is about that Group or a later one than `current`. What comes of a
+	// Group before it is ignored (§5: "Any catalog updates that precede the
+	// first Object of the latest Group MUST be ignored").
+	const latestGroup = state.outdated?.at.group ?? state.current?.at.group;
 	if (latestGroup !== undefined && location.group < latestGroup) return state;
 	// A copy: the caller's object can change after the call.
 	const at: CatalogLocation = {
@@ -102,7 +100,6 @@ export function catalogStateAfter(
 		if (before?.group === at.group && at.object <= before.object) return state;
 		return {
 			...state,
-			latestGroup: at.group,
 			outdated: { at, because, detail },
 		};
 	};
@@ -126,7 +123,6 @@ export function catalogStateAfter(
 			state.outdated.at.object > 0n;
 		return {
 			current: { catalog: read.catalog, at },
-			latestGroup: at.group,
 			...(later ? { outdated: state.outdated } : {}),
 		};
 	}
@@ -167,10 +163,10 @@ export function namespaceTuple(namespace: string): Uint8Array[] {
  * and that of the catalog track otherwise (§5.2.2: "each track MUST inherit
  * the namespace of the catalog track").
  */
-export function trackNamespaceOf(
+export function trackNamespaceOf<Namespace extends readonly Uint8Array[]>(
 	track: Pick<CatalogTrack, "namespace">,
-	catalogNamespace: Uint8Array[],
-): Uint8Array[] {
+	catalogNamespace: Namespace,
+): Namespace | Uint8Array[] {
 	return track.namespace === undefined
 		? catalogNamespace
 		: namespaceTuple(track.namespace);

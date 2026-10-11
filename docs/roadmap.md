@@ -36,7 +36,7 @@ The relay gets a cache of the latest Group of each track in Phase 1; decided on 
 - [ ] FETCH and Joining FETCH in the Rust and the TypeScript session, against peers.
 - [ ] The relay answers a FETCH, from the publisher or from a cache. A Standalone FETCH is passed on to one publisher ([record](experiments/2026-10-11-standalone-fetch-through-own-relay.md)), and a Joining FETCH as a range the relay works out ([record](experiments/2026-10-11-joining-fetch-through-own-relay.md)). The cache is not built.
 - [ ] The relay keeps the latest Group of each track and answers a FETCH from it where it can.
-- [ ] MSF catalog track: published by the browser publisher, read by the viewers.
+- [x] MSF catalog track: published by the browser publisher, read by the viewers. `@xmoq/msf` reads and writes the catalog, follows a catalog track and publishes one; a page's catalog is read through the own relay by another page and by `moqlivemock`'s subscriber, and a page reads the catalog of `moqlivemock`'s publisher ([reading](experiments/2026-10-11-a-page-reads-a-catalog.md), [publishing](experiments/2026-10-11-a-page-publishes-a-catalog.md)). What is short of the draft is in [`packages/msf/README.md`](../packages/msf/README.md): delta updates are not applied, GZIP is not read, and while the relay has no cache a catalog cannot be had once its publisher is gone.
 - [ ] Browser WebCodecs publisher.
 - [ ] Rust relay fan-out to browser viewers.
 - [ ] Decode and render video.

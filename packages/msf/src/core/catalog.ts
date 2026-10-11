@@ -18,28 +18,28 @@ export const LOC_PACKAGING = "loc";
  */
 export interface CatalogTrack {
 	/** §5.2.3. Unique per namespace within a catalog. */
-	name: string;
+	readonly name: string;
 	/**
 	 * §5.2.2, as the string the catalog has. Left out, the track is in the
 	 * namespace of the catalog track.
 	 */
-	namespace?: string;
+	readonly namespace?: string;
 	/** §5.2.4. `LOC_PACKAGING` for audio and video. */
-	packaging: string;
+	readonly packaging: string;
 	/** §5.2.7: whether new Objects will be added to the track. */
-	isLive: boolean;
+	readonly isLive: boolean;
 	/** §5.2.6. */
-	role?: string;
+	readonly role?: string;
 	/** §5.2.18: a codec string of the WebCodecs registry. With LOC packaging it is there. */
-	codec?: string;
+	readonly codec?: string;
 	/** §5.2.22: the maximum bitrate, in bits per second. With LOC packaging it is there. */
-	bitrate?: number;
+	readonly bitrate?: number;
 	/** §5.2.26, in pixels. */
-	width?: number;
+	readonly width?: number;
 	/** §5.2.27, in pixels. */
-	height?: number;
+	readonly height?: number;
 	/** §5.2.20, in frames per second. */
-	framerate?: number;
+	readonly framerate?: number;
 	/**
 	 * §5.2.38: the Objects of the track are encrypted with this scheme.
 	 * §4.3.1: "subscribers MUST decrypt the object payload using the
@@ -47,20 +47,20 @@ export interface CatalogTrack {
 	 * that has this cannot be played; it is read so that it can be told
 	 * apart, and a catalog that has it is not written.
 	 */
-	encryptionScheme?: string;
+	readonly encryptionScheme?: string;
 }
 
 /** An independent catalog (§5.1): one that needs no earlier catalog Object to be read. */
 export interface Catalog {
-	version: typeof MSF_VERSION;
+	readonly version: typeof MSF_VERSION;
 	/** §5.1.2: when the catalog was made, in milliseconds since the Unix epoch. */
-	generatedAt?: number;
+	readonly generatedAt?: number;
 	/**
 	 * §5.1.3: the broadcast is complete. Only ever `true`: "This field MUST
 	 * NOT be included if it is FALSE."
 	 */
-	isComplete?: true;
-	tracks: CatalogTrack[];
+	readonly isComplete?: true;
+	readonly tracks: readonly CatalogTrack[];
 }
 
 /** What the payload of a catalog Object is. */
@@ -81,6 +81,9 @@ export type CatalogRead =
 	| { type: "unsupported-version"; version: string }
 	/** No catalog of this version: `reason` says what is wrong, for a log. */
 	| { type: "invalid"; reason: string };
+
+/** A value of the type while the check builds it. */
+type Building<T> = { -readonly [Key in keyof T]: T[Key] };
 
 /** Thrown inside the check, and turned into `invalid` at its one exit. */
 class Refused extends Error {}
@@ -134,7 +137,7 @@ function required<T>(
 
 function checkTrack(value: unknown, where: string): CatalogTrack {
 	if (!isObject(value)) throw new Refused(`${where} is not an object`);
-	const track: CatalogTrack = {
+	const track: Building<CatalogTrack> = {
 		name: required(value, where, "name", isString, "string"),
 		packaging: required(value, where, "packaging", isString, "string"),
 		isLive: required(value, where, "isLive", isBoolean, "boolean"),
@@ -229,7 +232,8 @@ function check(value: unknown): CatalogRead {
 		);
 		if (version !== MSF_VERSION)
 			return { type: "unsupported-version", version };
-		const catalog: Catalog = { version: MSF_VERSION, tracks: [] };
+		const read: CatalogTrack[] = [];
+		const catalog: Building<Catalog> = { version: MSF_VERSION, tracks: read };
 		const generatedAt = optional(
 			value,
 			"the catalog",
@@ -272,7 +276,7 @@ function check(value: unknown): CatalogRead {
 				);
 			}
 			names.add(key);
-			catalog.tracks.push(track);
+			read.push(track);
 		}
 		return { type: "catalog", catalog };
 	} catch (error) {

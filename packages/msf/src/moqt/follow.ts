@@ -80,6 +80,11 @@ export interface CatalogFollower {
 	 *
 	 * Closes when the subscription has ended, however it ended; `ended` says
 	 * how. Cancelling it cancels the subscription and the Joining FETCH.
+	 *
+	 * The end of the subscription gives the Joining FETCH up as well: what
+	 * of it was not read is not delivered. A track that ended while its
+	 * catalog was being fetched closes this without a state; `joiningFetch`
+	 * then says that the FETCH failed.
 	 */
 	readonly states: ReadableStream<CatalogState>;
 	/** Resolves once the subscription to the catalog track has ended, with how. Never rejects. */
@@ -160,7 +165,7 @@ export async function followCatalog(
 		woken();
 	};
 
-	/** Reads the Joining FETCH to its end, and gives how many Objects it had; `count` has them as they come. */
+	/** Reads the Joining FETCH to its end; `count` has how many Objects it had, as they come. */
 	const fetchBefore = async (count: { objects: number }): Promise<void> => {
 		const timeout = AbortSignal.timeout(
 			options.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS,
@@ -189,6 +194,9 @@ export async function followCatalog(
 		for (;;) {
 			const next = await reader.read();
 			if (next.done) return;
+			// The reading was given up while this was on its way: with the
+			// subscription over, what the FETCH still has is not delivered.
+			stop.signal.throwIfAborted();
 			// An End of Range indicator says what is not there; the Objects
 			// after it are read on.
 			if (next.value.type !== "object") continue;

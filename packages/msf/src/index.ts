@@ -21,3 +21,8 @@ export {
 	followCatalog,
 	type JoiningFetchOutcome,
 } from "./moqt/follow.ts";
+export {
+	type CatalogPublisher,
+	type CatalogPublisherOptions,
+	createCatalogPublisher,
+} from "./moqt/publish.ts";

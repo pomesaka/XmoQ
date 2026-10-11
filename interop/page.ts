@@ -13,12 +13,19 @@ import {
 	type PeerStreamEnd,
 	PublishEndedError,
 	type PublishedTrack,
+	RequestErrorCode,
 	RequestFailedError,
 	SubgroupClosedError,
 	type Subscription,
 } from "@xmoq/moqt";
 import type { Diagnostics } from "@xmoq/moqt/diagnostics";
-import { followCatalog, namespaceTuple } from "@xmoq/msf";
+import {
+	type Catalog,
+	type CatalogPublisher,
+	createCatalogPublisher,
+	followCatalog,
+	namespaceTuple,
+} from "@xmoq/msf";
 import type {
 	PageCatalogReport,
 	PageFetch,
@@ -568,26 +575,49 @@ async function endWithPublishDone(): Promise<void> {
 	console.log(`PUBLISH_DONE_PEER_ENDED how=${describe(peerStreamEnd)}`);
 }
 
+/** What `followCatalog` has given this page so far. */
+interface CatalogReading {
+	states: PageCatalogReport["states"];
+	/** Absent while the Joining FETCH is under way. */
+	joiningFetch: string | undefined;
+	/** How the subscription ended; absent while it is open. */
+	ended: string | undefined;
+}
+let catalogReading: CatalogReading | undefined;
+let catalogPublisher: CatalogPublisher | undefined;
+
 window.xmoqOwn = {
-	followCatalog: withPlainErrors(
-		async (namespace: string, settleMs: number) => {
-			const follower = await followCatalog(connected(), {
-				namespace: namespaceTuple(namespace),
-			});
+	followCatalog: withPlainErrors(async (namespace: string) => {
+		const follower = await followCatalog(connected(), {
+			namespace: namespaceTuple(namespace),
+		});
+		const reading: CatalogReading = {
+			states: [],
+			joiningFetch: undefined,
+			ended: undefined,
+		};
+		catalogReading = reading;
+		void follower.ended.then((end) => {
+			reading.ended =
+				end.type === "publish-done"
+					? `publish-done ${end.statusCode}`
+					: end.type;
+		});
+		void follower.joiningFetch.then((fetched) => {
+			reading.joiningFetch =
+				fetched.type === "not-sent"
+					? "not-sent"
+					: fetched.type === "served"
+						? `served ${fetched.objects}`
+						: `failed ${fetched.objects}: ${errorText(fetched.error)}`;
+		});
+		void (async () => {
 			const reader = follower.states.getReader();
-			const states: PageCatalogReport["states"] = [];
-			// Never settles before the first state: the driver bounds that wait.
-			let settled = new Promise<"settled">(() => {});
 			for (;;) {
-				const next = await Promise.race([reader.read(), settled]);
-				if (next === "settled" || next.done) break;
-				if (states.length === 0) {
-					settled = new Promise((resolve) =>
-						setTimeout(() => resolve("settled"), settleMs),
-					);
-				}
+				const next = await reader.read();
+				if (next.done) return;
 				const { current, outdated } = next.value;
-				states.push({
+				reading.states.push({
 					catalog: current?.catalog ?? null,
 					at:
 						current === undefined
@@ -599,19 +629,94 @@ window.xmoqOwn = {
 							: `${outdated.because} at {${outdated.at.group}, ${outdated.at.object}}: ${outdated.detail}`,
 				});
 			}
-			const fetched = await follower.joiningFetch;
-			void reader.cancel().catch(() => {});
-			return {
-				states,
-				joiningFetch:
-					fetched.type === "not-sent"
-						? "not-sent"
-						: fetched.type === "served"
-							? `served ${fetched.objects}`
-							: `failed ${fetched.objects}: ${errorText(fetched.error)}`,
-			};
+		})().catch((error: unknown) => {
+			console.log(`the catalog could not be read on: ${errorText(error)}`);
+		});
+	}),
+
+	catalogEnded: withPlainErrors(async () => {
+		for (;;) {
+			const ended = catalogReading?.ended;
+			if (ended !== undefined) return ended;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	}),
+
+	catalogReport: withPlainErrors(async (states: number) => {
+		for (;;) {
+			const reading = catalogReading;
+			if (
+				reading !== undefined &&
+				reading.joiningFetch !== undefined &&
+				reading.states.length >= states
+			) {
+				return {
+					states: [...reading.states],
+					joiningFetch: reading.joiningFetch,
+				};
+			}
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	}),
+
+	publishCatalog: withPlainErrors(
+		async (namespace: string, catalog: Catalog) => {
+			const moq = connected();
+			const trackNamespace = namespaceTuple(namespace);
+			const publisher = createCatalogPublisher({
+				namespace: trackNamespace,
+				catalog,
+			});
+			catalogPublisher = publisher;
+			// Before the namespace is announced: a relay asks as soon as it has
+			// a subscriber.
+			moq.serve({
+				subscribe(request) {
+					console.log(
+						`asked: request_id=${request.requestId} track=${utf8Decoder.decode(request.trackName)}`,
+					);
+					if (publisher.subscribe(request)) return;
+					request
+						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+						.catch(() => {});
+				},
+				fetch(request) {
+					console.log(
+						`fetch asked: request_id=${request.requestId} start={${request.startLocation.group}, ${request.startLocation.object}} end={${request.endLocation.group}, ${request.endLocation.object}}`,
+					);
+					if (publisher.fetch(request)) return;
+					request
+						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+						.catch(() => {});
+				},
+			});
+			await moq.publishNamespace(trackNamespace);
+			const { at } = publisher.current;
+			return [at.group.toString(), at.object.toString()];
 		},
 	),
+
+	updateCatalog: withPlainErrors(async (catalog: Catalog) => {
+		if (catalogPublisher === undefined) {
+			throw new Error("publishCatalog() has not completed");
+		}
+		catalogPublisher.update(catalog);
+		const { at } = catalogPublisher.current;
+		return [at.group.toString(), at.object.toString()];
+	}),
+
+	endCatalog: withPlainErrors(async (catalog: Catalog) => {
+		if (catalogPublisher === undefined) {
+			throw new Error("publishCatalog() has not completed");
+		}
+		// Nothing between the two: the last catalog is to reach a subscriber
+		// all the same.
+		catalogPublisher.update(catalog);
+		const ending = catalogPublisher.end();
+		const { at } = catalogPublisher.current;
+		await ending;
+		return [at.group.toString(), at.object.toString()];
+	}),
 
 	announceNamespace: withPlainErrors(async (namespace: string) => {
 		await connected().publishNamespace(namespaceFromPath(namespace));
