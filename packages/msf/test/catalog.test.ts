@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -98,9 +98,9 @@ describe("fixtures/msf-01/catalogs.tsv: what a payload is read as", () => {
 			return { name, outcome, json };
 		});
 
-	test("the table has 45 rows, each with a name of its own", () => {
-		expect(rows.length).toBe(45);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(45);
+	test("the table has 61 rows, each with a name of its own", () => {
+		expect(rows.length).toBe(61);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(61);
 	});
 
 	test.each(rows)("$name: $outcome", ({ outcome, json }) => {
@@ -140,7 +140,6 @@ describe("readCatalog", () => {
 		{ name: "bytes that are no UTF-8", bytes: [0x7b, 0xff, 0x7d] },
 		// The first bytes of a GZIP stream (RFC 1952): a compressed catalog
 		// (§12.1) is not read.
-		{ name: "a GZIP header", bytes: [0x1f, 0x8b, 0x08, 0x00] },
 		{ name: "nothing", bytes: [] },
 	])("$name is no catalog", ({ bytes }) => {
 		expect(readCatalog(new Uint8Array(bytes))).toEqual({
@@ -242,7 +241,38 @@ describe("readCatalog", () => {
 		expect<string>(readCatalog(SMALLEST, maxLength).type).toBe(type);
 	});
 
-	test("a payload that is too long is not parsed, and the reason has both numbers", () => {
+	test("a payload that is too long is refused before it is decoded or parsed", () => {
+		const decode = spyOn(TextDecoder.prototype, "decode");
+		const parse = spyOn(JSON, "parse");
+		try {
+			expect(readCatalog(SMALLEST, 10).type).toBe("invalid");
+			expect(decode).toHaveBeenCalledTimes(0);
+			expect(parse).toHaveBeenCalledTimes(0);
+			// The same payload within the length is.
+			expect(readCatalog(SMALLEST, 34).type).toBe("catalog");
+			expect(decode).toHaveBeenCalledTimes(1);
+		} finally {
+			decode.mockRestore();
+			parse.mockRestore();
+		}
+	});
+
+	test.each([
+		{ name: "NaN", maxLength: Number.NaN },
+		{ name: "Infinity", maxLength: Number.POSITIVE_INFINITY },
+		{ name: "a negative number", maxLength: -1 },
+		{ name: "a number that is no integer", maxLength: 1.5 },
+	])(
+		"$name is no length to read at most: a RangeError, whatever the payload",
+		({ maxLength }) => {
+			expect(() => readCatalog(SMALLEST, maxLength)).toThrow(RangeError);
+			expect(() => readCatalog(new Uint8Array(0), maxLength)).toThrow(
+				RangeError,
+			);
+		},
+	);
+
+	test("the reason for a payload that is too long has both numbers", () => {
 		expect(readCatalog(SMALLEST, 10)).toEqual({
 			type: "invalid",
 			reason: "the payload has 34 bytes, more than the 10 that are read",
@@ -263,6 +293,26 @@ describe("readCatalog", () => {
 			reason:
 				"the payload has 1048577 bytes, more than the 1048576 that are read",
 		});
+	});
+
+	// The first bytes of a GZIP stream (RFC 1952): a compressed catalog
+	// (§12.1) is not read, and the reason says what it looks like.
+	test("a payload that begins like a GZIP stream is no catalog, with a reason of its own", () => {
+		expect(readCatalog(new Uint8Array([0x1f, 0x8b, 0x08, 0x00]))).toEqual({
+			type: "invalid",
+			reason:
+				"the payload begins like a GZIP stream; compressed catalogs are not read",
+		});
+	});
+
+	test("a track keeps its encryption scheme, so that it can be told apart", () => {
+		const read = readCatalog(
+			utf8(
+				'{"version":"draft-01","tracks":[{"name":"v","packaging":"x","isLive":true,"encryptionScheme":"moq-secure-objects"}]}',
+			),
+		);
+		if (read.type !== "catalog") throw new Error(JSON.stringify(read));
+		expect(read.catalog.tracks[0]?.encryptionScheme).toBe("moq-secure-objects");
 	});
 
 	test("a track keeps a namespace it has", () => {
@@ -357,6 +407,22 @@ describe("encodeCatalog", () => {
 				],
 			},
 			reason: 'track 0: "bitrate" is not a number',
+		},
+		{
+			name: "a track with an encryption scheme",
+			catalog: {
+				version: "draft-01",
+				tracks: [
+					{
+						name: "video",
+						packaging: "x",
+						isLive: true,
+						encryptionScheme: "moq-secure-objects",
+					},
+				],
+			},
+			reason:
+				'the track "video" has an encryption scheme, which is not written',
 		},
 	])("refuses $name with a RangeError", ({ catalog, reason }) => {
 		expect(() => encodeCatalog(catalog)).toThrow(new RangeError(reason));

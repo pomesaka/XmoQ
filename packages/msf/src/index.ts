@@ -8,3 +8,16 @@ export {
 	MSF_VERSION,
 	readCatalog,
 } from "./core/catalog.ts";
+export {
+	type CatalogLocation,
+	type CatalogState,
+	catalogStateAfter,
+	namespaceTuple,
+	trackNamespaceOf,
+} from "./core/catalog-track.ts";
+export {
+	type CatalogFollower,
+	type FollowCatalogOptions,
+	followCatalog,
+	type JoiningFetchOutcome,
+} from "./moqt/follow.ts";

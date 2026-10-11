@@ -15,7 +15,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { ensureCertificate } from "./harness.ts";
+import { ensureCertificate, MOQLIVEMOCK_SIDE_PORT_OFFSET } from "./harness.ts";
 
 const here = import.meta.dir;
 const logDir = join(here, ".logs", "matrix");
@@ -33,7 +33,12 @@ const isOwn = (client: Client): boolean => client.startsWith("own-");
 interface Pairing {
 	name: string;
 	/** The driver that runs it. */
-	script: "run.ts" | "disconnect.ts" | "fetch.ts" | "fetch-rust.ts";
+	script:
+		| "run.ts"
+		| "disconnect.ts"
+		| "fetch.ts"
+		| "fetch-rust.ts"
+		| "catalog.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -906,8 +911,11 @@ async function runPairing(
 			process.execPath,
 			join(here, pairing.script),
 			...pairing.args,
-			// `disconnect.ts` runs through the own relay only and takes no relay.
-			...(pairing.script === "disconnect.ts" ? [] : ["--relay", pairing.relay]),
+			// `disconnect.ts` runs through the own relay only, and `catalog.ts`
+			// through none; neither takes a relay.
+			...(pairing.script === "disconnect.ts" || pairing.script === "catalog.ts"
+				? []
+				: ["--relay", pairing.relay]),
 			"--port",
 			String(port),
 		],
@@ -995,6 +1003,14 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 					named(relay, { ...pairing, name: `fetch: ${pairing.name}` }),
 			),
 		),
+		// A publisher that is a server: no relay is in between, so the run is
+		// there whichever relays were asked for.
+		{
+			name: "no relay: catalog: own-browser reads the MSF catalog of moqlivemock's publisher with a Joining FETCH",
+			script: "catalog.ts",
+			args: [],
+			relay: "none",
+		},
 		// "leaving: " lets `--only` pick these runs alone.
 		...(relays.includes("own")
 			? DISCONNECTS.map((pairing) =>
@@ -1016,7 +1032,14 @@ async function main(): Promise<void> {
 		throw new Error(`--base-port "${options["base-port"]}" is not a port`);
 	}
 	const basePort = Number(options["base-port"]);
-	const lastPort = basePort + pairings.length - 1;
+	// The run with `mlmpub` takes a second port, its own plus an offset.
+	const lastPort =
+		basePort +
+		pairings.length -
+		1 +
+		(pairings.some((pairing) => pairing.script === "catalog.ts")
+			? MOQLIVEMOCK_SIDE_PORT_OFFSET
+			: 0);
 	if (basePort < 1 || lastPort > 65535) {
 		throw new Error(
 			`--base-port ${basePort} with ${pairings.length} pairings needs the ports ${basePort} to ${lastPort}, outside 1 to 65535`,

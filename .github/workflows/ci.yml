@@ -122,6 +122,15 @@ jobs:
         with:
           path: interop/peers/moqtail/.tools
           key: moqtail-relay-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/interop.sh', 'rust-toolchain.toml') }}
+      # moqlivemock is built from a fixed tag as well, named in the same script. A cache of its
+      # own, so that a relay that is already cached is not built again for it.
+      - name: Restore moqlivemock
+        id: moqlivemock-cache
+        if: steps.scope.outputs.run != 'false'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: interop/peers/moqlivemock/.tools
+          key: moqlivemock-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/interop.sh', 'mise.toml') }}
       # bun.lock pins playwright-core, and with it the Chromium build that is downloaded.
       - name: Cache the Chromium that Playwright downloads
         if: steps.scope.outputs.run != 'false'
@@ -137,6 +146,12 @@ jobs:
         with:
           path: interop/peers/moqtail/.tools
           key: ${{ steps.relay-cache.outputs.cache-primary-key }}
+      - name: Save moqlivemock
+        if: always() && steps.moqlivemock-cache.outputs.cache-hit != 'true' && hashFiles('interop/peers/moqlivemock/.tools/bin/mlmpub') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: interop/peers/moqlivemock/.tools
+          key: ${{ steps.moqlivemock-cache.outputs.cache-primary-key }}
       - name: Keep the logs of every pairing
         if: always() && steps.scope.outputs.run != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

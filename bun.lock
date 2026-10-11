@@ -10,6 +10,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@xmoq/moqt": "workspace:*",
+        "@xmoq/msf": "workspace:*",
         "moqtail": "0.13.0",
         "playwright-core": "1.64.0",
       },
@@ -29,6 +30,9 @@
     "packages/msf": {
       "name": "@xmoq/msf",
       "version": "0.0.0",
+      "dependencies": {
+        "@xmoq/moqt": "workspace:*",
+      },
       "devDependencies": {
         "@types/bun": "1.4.2",
         "typescript": "6.0.3",

@@ -2,6 +2,9 @@
 // Each page assigns an implementation to `window.xmoq`, so the driver can swap
 // one client for another without knowing which library is behind it.
 
+// A type alone, of the part of the package that needs no browser.
+import type { Catalog } from "@xmoq/msf/catalog";
+
 /**
  * One Object Property (draft 18 §11.2.1.2), in strings that survive
  * `page.evaluate`. `type` is decimal. An even type has a variable-length
@@ -135,6 +138,16 @@ export type OwnPageExtras = {
 	 * null while it is open, how many Objects were read, and how reading ended.
 	 */
 	state(): Promise<string>;
+	/**
+	 * Reads the catalog track of the namespace with `followCatalog` of
+	 * `@xmoq/msf`: a SUBSCRIBE and a Joining FETCH. Resolves `settleMs`
+	 * after the first state came, with every state that came until then and
+	 * with what became of the FETCH.
+	 */
+	followCatalog(
+		namespace: string,
+		settleMs: number,
+	): Promise<PageCatalogReport>;
 	/** Cancels the subscription and keeps the session. */
 	cancelSubscription(): Promise<void>;
 	/** Resolves once the subscription has ended and its Objects were read; JSON of `SubscriptionReport`. */
@@ -198,6 +211,20 @@ export type SubscriptionReport = {
 	streamCount: string | null;
 	/** How reading the Objects ended: "closed", or the error `objects` failed with. */
 	objectsEnd: string;
+};
+
+/** What `followCatalog` of `@xmoq/msf` gave a page, in values that survive `page.evaluate`. */
+export type PageCatalogReport = {
+	states: {
+		/** The catalog that is held, or null. */
+		catalog: Catalog | null;
+		/** Where it was, as [group, object] in decimal, or null. */
+		at: [string, string] | null;
+		/** Why the catalog may be outdated, or null. */
+		outdated: string | null;
+	}[];
+	/** What became of the Joining FETCH: "not-sent", "served <objects>", or "failed <objects>: <error>". */
+	joiningFetch: string;
 };
 
 declare global {
