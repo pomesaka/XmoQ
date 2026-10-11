@@ -24,9 +24,13 @@ common="--url https://127.0.0.1:$port --cert-sha256 $sha --namespace xmoq/fanout
 # The viewers come 10 ms apart, and each takes its frames from then on.
 seconds=$((frames / 25 + viewers / 100 + 12))
 
+# MAX_SESSIONS: more than the 256 sessions the relay takes of itself. RELAY_PID_FILE: where
+# the PID of the relay is written, for a profiler.
+# shellcheck disable=SC2086
 target/release/xmoq-relay --port "$port" --cert-file "$cert" --key-file interop/.cert/key.pem \
-  > "$logs/relay.log" 2>&1 &
+  ${MAX_SESSIONS:+--max-sessions $MAX_SESSIONS} > "$logs/relay.log" 2>&1 &
 relay=$!
+echo "$relay" > "$logs/relay.pid"
 trap 'kill "${publisher:-}" "${sampler:-}" "$relay" 2>/dev/null || true' EXIT
 sleep 1
 # shellcheck disable=SC2086

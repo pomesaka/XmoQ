@@ -47,15 +47,39 @@ One run each.
 - The relay's processor time grows with the viewers and with the bit rate, about 0.35% of a core for a viewer of the small video and 0.7% to 0.9% for one of the large. It used more than one core from 250 viewers of the large one.
 - Lateness stays within a frame (40 ms) up to 100 viewers of either video and 250 of the small one; with 250 of the large one the worst viewer's 99th percentile is two frames.
 
+### More than 256 sessions
+
+Added afterwards, with `--max-sessions 2000` for the relay, a flag for measuring (`MAX_SESSIONS=2000 spikes/fanout/run.sh ...`); the relay's own limit stays 256. One run each.
+
+| Video | Viewers | Relay, processor (mean / highest) | Relay, memory (highest) | Lateness: median of the medians / worst 99th percentile / highest | Frames skipped after a viewer's first key frame | Viewers that failed |
+|---|---|---|---|---|---|---|
+| 320x180, 513 kbit/s | 500 | 79% / 112% | 91 MB | 5.1 / 28.1 / 38.1 ms | 0 | 0 |
+| | 1,000 | 102% / 184% | 145 MB | 7.8 / 46.7 / 56.3 ms | 0 | 0 |
+| 1280x720, 2.5 Mbit/s | 500 | 198% / 332% | 225 MB | 31.2 / 1,329.9 / 1,392.5 ms | 496 of 118,908 | 0 |
+| | 1,000 | 181% / 310% | 375 MB | 157.2 / 5,076.0 / 5,086.4 ms | 68,205 of 238,500 | 3 |
+
+- **The small video reached 1,000 viewers whole**, a frame late at worst.
+- **The large one did not keep up from 500 on.** With 500, frames came up to 1.4 seconds late, and 434 viewers skipped one or two frames: the first Object of a Group came before the last of the Group before it, on another stream, and the viewer of this tool does not go back. With 1,000, frames came 5 seconds late and viewers skipped 29% of them; 3 got no session within 10 seconds (`HANDSHAKE_FAILED` in the relay's log).
+- The relay cut nobody off for being behind in any run: its log has no reset with `TOO_FAR_BEHIND`, and every reset of a stream (`CANCELLED`) is one a viewer asked for by leaving or by stopping a stream.
+- **Which side was too slow is not shown**: the 1,000 viewers are one process on the same 11 cores, and the relay stayed near 3 cores where it had used 2.5 for 250.
+
+### Where the relay's processor time goes
+
+250 viewers of the large video, while they ran: `ps -M` for the threads, and `sample <pid> 5` of macOS for 5 seconds.
+
+- **Spread over the threads**: 11 threads, 16.5% to 18.6% of a core each. No thread is the one that limits.
+- **Sending UDP packets**: of the samples that were not a thread waiting (`__psynch_cvwait`, `kevent`), 18,419 of about 19,400 were in `sendmsg`, the system call that sends one packet; 461 in `recvmsg`. The next were the encryption of a packet (`aes_gcm_enc`, 63), copying memory (47) and building packets in `quinn-proto` (`poll_transmit` 46, and others under 20 each).
+- Nothing of the relay's own code (the core, the hub) is among the first 28.
+
 ## Limitations and blockers
 
 - One machine: the viewers and the relay share its cores, and loopback has no loss and no delay. The numbers say what the relay's own work costs here, not what a network does.
 - One run each, 10 seconds of video a viewer.
 - The lateness is from the publisher's clock when it wrote the frame to the viewer's when it had decoded the Object, on one machine.
 - Memory and processor time are of the whole relay process, read once a second.
-- More than 255 viewers were not measured: the limit of sessions was left as it is.
+- `sample` counts a thread inside a system call whether it runs or waits there; `sendmsg` on a socket that does not block was taken for running.
 - The videos are a test pattern, and of constant bit rate only as far as the encoder kept to it.
 
 ## Decision or next action
 
-None. The limit of 256 sessions is the first thing a larger run meets.
+None. The limit of 256 sessions is the first thing a larger run meets; behind it, the cost is one system call a packet.
