@@ -180,7 +180,10 @@ async function main(): Promise<void> {
 		codec: ENCODER_CODEC,
 		width: WIDTH,
 		height: HEIGHT,
-		bitrate: 1_500_000,
+		// `?bitrate=`: for seeing what a smaller picture does on a bad link.
+		bitrate: Number(
+			new URLSearchParams(location.search).get("bitrate") ?? 1_500_000,
+		),
 		framerate: FRAMES_A_SECOND,
 		keyFrameIntervalMs: 1000,
 		// `?mapping=stream-per-object` puts every Object on a stream of its own.

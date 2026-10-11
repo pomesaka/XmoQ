@@ -71,4 +71,4 @@ mise run check
 - One machine, one run for each row, headless. The clocks of publisher and viewer are the same clock here; between two machines "to get here" holds the difference of the clocks, and only the buffer and the repaint are right.
 - From the repaint to the screen is not measured, nor from the camera to the encoder.
 - The automatic buffer is a trial: its window, margin, share and limit are not chosen by measurement, and each change of the buffer of more than 8 ms is a break in the sound.
-- The buffer of 150 ms stays the demo's default; which default is right is the person's to say.
+- Afterwards the demo's default became 50 ms, and the sound waits 30 ms at least where the buffer is less. With no buffer, of about 490 pieces in 10 seconds too late were: 128 and 7 with a wait of 10 ms, 0 and 1 with 20 ms, 0 and 0 with 30 ms and with 40 ms (two runs).

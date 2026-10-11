@@ -33,8 +33,16 @@ import {
 } from "./shared.ts";
 
 const query = new URLSearchParams(location.search);
-/** **Provisional, not chosen by measurement**: enough for a frame of 33 ms and the pieces of audio of 20 ms to be there before their turn, on one machine. */
-const DEFAULT_BUFFER_MS = 150;
+/** **Provisional**: on one machine 99 of 100 frames and pieces came within 17 to 24 ms of the fastest, and with 50 ms none was late (docs/experiments/2026-10-11-where-the-delay-of-the-demo-comes-from.md). */
+const DEFAULT_BUFFER_MS = 50;
+/**
+ * The sound waits at least this long, also where the buffer is less
+ * (`?audioMin=`). WHY: a piece is given to the loudspeaker for a time, and
+ * with no buffer that time is over when the piece comes: nothing sounds.
+ * The picture is drawn as it comes. **Provisional**: the least of 10, 20,
+ * 30 and 40 ms with which no piece was too late on one machine.
+ */
+const AUDIO_MIN_MS = Number(query.get("audioMin") ?? 30);
 /**
  * `?buffer=auto` (**a trial, not the default**): the buffer follows how
  * late things come. It is what 99 of 100 of the last AUTO_WINDOW_MS came
@@ -370,7 +378,7 @@ async function main(): Promise<void> {
 			data.close();
 			const now = Date.now();
 			arrived.audio.add(now - timeMs);
-			const due = baseOf(data.timestamp) + bufferMs;
+			const due = baseOf(data.timestamp) + Math.max(bufferMs, AUDIO_MIN_MS);
 			const loud = samples.some((sample) => Math.abs(sample) > 0.3);
 			if (loud && !markHeard) marks.audio.push({ time: timeMs, played: due });
 			markHeard = loud;
@@ -448,7 +456,7 @@ async function main(): Promise<void> {
 		const lastMark = together.at(-1);
 		say(
 			[
-				`${link} · ${framesShown.rate()} frames a second shown, ${framesDecoded.rate()} decoded${document.visibilityState === "hidden" ? " (this tab is in the background: nothing is drawn)" : ""} · buffer ${bufferMs} ms${auto ? ` (auto, ${AUTO_MAX_MS} ms at most: ${Math.round(AUTO_SHARE * 100)} of 100 came within ${Math.round(lateness99())} ms of the fastest in the last ${AUTO_WINDOW_MS / 1000} s, and ${AUTO_MARGIN_MS} more)` : ""}`,
+				`${link} · ${framesShown.rate()} frames a second shown, ${framesDecoded.rate()} decoded${document.visibilityState === "hidden" ? " (this tab is in the background: nothing is drawn)" : ""} · buffer ${bufferMs} ms${bufferMs < AUDIO_MIN_MS ? ` (the sound waits ${AUDIO_MIN_MS} ms at least: it is ${AUDIO_MIN_MS - bufferMs} ms behind the picture)` : ""}${auto ? ` (auto, ${AUTO_MAX_MS} ms at most: ${Math.round(AUTO_SHARE * 100)} of 100 came within ${Math.round(lateness99())} ms of the fastest in the last ${AUTO_WINDOW_MS / 1000} s, and ${AUTO_MARGIN_MS} more)` : ""}`,
 				`delay of the picture: ${played.video.median()} ms = ${delay.arrive.median()} to get here (encoder, link, relay, decoder) + ${delay.buffer.median()} waiting in the buffer + ${delay.paint.median()} for the next repaint (medians of the last 200 frames; ${framesLate} frames came after their turn). Not in it: from the camera to the encoder, and from the repaint to the screen`,
 				`video: ${stats.decoded} frames, first after ${firstFrameAfterMs ?? "?"} ms; came ${arrived.video.text()} after it was made, shown ${played.video.text()} after; dropped ${JSON.stringify(stats.dropped)}; joining FETCH ${stats.joiningFetch}`,
 				`audio: ${heard === undefined ? "none" : `${heard.decoded} pieces; came ${arrived.audio.text()} after it was made, sounded ${played.audio.text()} after; ${tooLate} too late; dropped ${JSON.stringify(heard.dropped)}`}`,
