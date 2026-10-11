@@ -43,6 +43,80 @@
 	},
 	"overrides": [
 		{
+			// WHY: the catalog is JSON and bytes. The part of @xmoq/msf that reads and
+			// checks it must not know a connection, nor the transport package at all;
+			// tsconfig.core.json keeps the I/O globals out, and this the imports.
+			// An override replaces the options of the rule, so the two patterns above are
+			// repeated here.
+			"includes": ["packages/msf/src/core/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["**/spikes/**"],
+										"message": "spikes/ is throwaway validation code; packages must not depend on it."
+									},
+									{
+										"group": [
+											"**/interop/**",
+											"@xmoq/interop",
+											"@xmoq/interop/**"
+										],
+										"message": "interop/ checks the packages against other implementations; a package must not depend on it."
+									},
+									{
+										"group": ["@xmoq/moqt", "@xmoq/moqt/**", "**/moqt/**"],
+										"message": "src/core of @xmoq/msf reads and writes catalogs without MoQ Transport; what uses a connection belongs outside src/core."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			// WHY: scripts/ci/check-layers.sh sees a dependency that package.json declares.
+			// A file of @xmoq/moqt could still reach the other package by a relative path,
+			// which declares nothing.
+			// An override replaces the options of the rule, so the two patterns above are
+			// repeated here; the override for src/core below repeats this one in turn.
+			"includes": ["packages/moqt/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["**/spikes/**"],
+										"message": "spikes/ is throwaway validation code; packages must not depend on it."
+									},
+									{
+										"group": [
+											"**/interop/**",
+											"@xmoq/interop",
+											"@xmoq/interop/**"
+										],
+										"message": "interop/ checks the packages against other implementations; a package must not depend on it."
+									},
+									{
+										"group": ["@xmoq/msf", "@xmoq/msf/**", "**/msf/**"],
+										"message": "MoQ Transport is the layer below the streaming format: @xmoq/msf may use @xmoq/moqt, not the other way round."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
 			// WHY: tsconfig.core.json stops src/core from using I/O globals, but a file of
 			// src/webtransport that uses none of them could still be imported and would
 			// compile. The codec and the session must not know the connection at all.
@@ -71,6 +145,10 @@
 									{
 										"group": ["**/webtransport/**"],
 										"message": "src/core has no I/O; src/webtransport depends on it, not the other way round."
+									},
+									{
+										"group": ["@xmoq/msf", "@xmoq/msf/**", "**/msf/**"],
+										"message": "MoQ Transport is the layer below the streaming format: @xmoq/msf may use @xmoq/moqt, not the other way round."
 									}
 								]
 							}

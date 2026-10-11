@@ -26,6 +26,14 @@
         "typescript": "6.0.3",
       },
     },
+    "packages/msf": {
+      "name": "@xmoq/msf",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "typescript": "6.0.3",
+      },
+    },
   },
   "packages": {
     "@types/bun": ["@types/bun@1.4.2", "", { "dependencies": { "bun-types": "1.4.2" } }, "sha512-GimotNn7+ZV0uVArItBbriZsR1oNf0+WTzPkdcFrzShI7k2norL0uzEaJT8T33dWr7O/c9ZDuAFQrctKCi72oQ=="],
@@ -35,6 +43,8 @@
     "@xmoq/interop": ["@xmoq/interop@workspace:interop"],
 
     "@xmoq/moqt": ["@xmoq/moqt@workspace:packages/moqt"],
+
+    "@xmoq/msf": ["@xmoq/msf@workspace:packages/msf"],
 
     "bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
 
