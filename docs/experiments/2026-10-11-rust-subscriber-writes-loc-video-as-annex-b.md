@@ -32,7 +32,7 @@ xmoq-moqt-client --mode subscribe --objects 5 --namespace xmoq/video --track key
 ffprobe -v error -count_frames -show_entries stream=codec_name,profile,width,height,nb_read_frames <file>
 ```
 
-`--annex-b-out <file>` is new. With it `--mode subscribe` prints `VIDEO_FRAME group=... object=... timestamp=... nal=... bytes=...` for every frame it writes in place of `OBJECT`, and `VIDEO_WRITTEN file=... frames=... groups=... skipped=... bytes=...` when it stops.
+`--annex-b-out <file>` is new. With it `--mode subscribe` prints `VIDEO_FRAME group=... object=... timestamp=... nal=... bytes=...` for every frame it writes in place of `OBJECT`, and `VIDEO_WRITTEN file=... frames=... groups=... skipped=... bytes=...` when it stops. `skipped` has the Objects that came before the first key frame as well.
 
 ## Observed results
 

@@ -104,9 +104,8 @@ struct Args {
     cert_sha256: [u8; 32],
     namespace: String,
     track_name: String,
-    /// `--annex-b-out`: where `--mode subscribe` writes the frames of a LOC
-    /// video track, as an H.264 byte stream.
-    annex_b_out: Option<String>,
+    /// `--annex-b-out`, `--viewers` and `--video-in`.
+    video: video::VideoFlags,
     /// `--catalog-video`: `--track` names the catalog track of MSF, and
     /// `--mode subscribe` subscribes to the first H.264 video track of the
     /// catalog it reads there.
@@ -588,14 +587,12 @@ fn read_cert_sha256(text: Option<String>) -> Result<[u8; 32]> {
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
-    let mut mode = None;
-    let mut payload_hex = None;
-    let mut objects = 1;
+    let (mut mode, mut payload_hex) = (None, None);
+    let (mut objects, mut video) = (1, video::VideoFlags::default());
     let (mut url, mut cert_sha256) = (None, None);
     let mut namespace = None;
-    let (mut track_name, mut annex_b_out) = (None, None);
-    let mut timeout_secs = 20;
-    let mut publish_delay_ms = 0;
+    let mut track_name = None;
+    let (mut timeout_secs, mut publish_delay_ms) = (20, 0);
     let mut subgroup_id = SubgroupId::Zero;
     let mut first_group = 0;
     let mut publisher_priority = Some(0);
@@ -632,7 +629,6 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--cert-sha256" => cert_sha256 = Some(value),
             "--namespace" => namespace = Some(value),
             "--track" => track_name = Some(value),
-            "--annex-b-out" => annex_b_out = Some(value),
             "--timeout-secs" => timeout_secs = value.parse().context("--timeout-secs")?,
             "--subgroup-id" => {
                 subgroup_id = match value.as_str() {
@@ -656,7 +652,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             }
             "--subscription-filter" => subscription_filter = parse_subscription_filter(&value)?,
             other => {
-                if !fetch.read(other, &value)? {
+                if !fetch.read(other, &value)? && !video.read(other, &value)? {
                     bail!("unknown flag {other}");
                 }
             }
@@ -671,7 +667,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         cert_sha256: read_cert_sha256(cert_sha256)?,
         namespace: namespace.context("--namespace is required")?,
         track_name: track_name.context("--track is required")?,
-        annex_b_out,
+        video,
         catalog_video,
         timeout_secs,
         publish_delay: Duration::from_millis(publish_delay_ms),
@@ -1188,8 +1184,13 @@ impl Client<'_> {
     /// The writer of `--annex-b-out`. Not for the catalog track (`wanted`
     /// is `None`): its Objects are no frames.
     fn video_writer(&self, wanted: Option<u64>) -> Result<Option<video::AnnexBWriter>> {
-        let out = self.args.annex_b_out.as_deref();
-        video::AnnexBWriter::for_flag(out.filter(|_| wanted.is_some()))
+        if wanted.is_none() {
+            return Ok(None);
+        }
+        if self.args.video.viewers > 0 {
+            return Ok(Some(video::AnnexBWriter::counting()));
+        }
+        video::AnnexBWriter::for_flag(self.args.video.annex_b_out.as_deref())
     }
 
     /// Prints Objects of the subscription until `wanted` arrived or the
@@ -1434,6 +1435,9 @@ impl Client<'_> {
         group_id: u64,
         payload: &[u8],
     ) -> Result<()> {
+        if let Some(groups) = &args.video.video_in {
+            return video::send_group(connection, track_alias, group_id, groups).await;
+        }
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
             track_alias,
             group_id,
@@ -2469,7 +2473,36 @@ async fn run(args: &Args) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    run(&parse_args(std::env::args().skip(1))?).await
+    let args = Arc::new(parse_args(std::env::args().skip(1))?);
+    if args.video.viewers == 0 {
+        return run(&args).await;
+    }
+    // `--viewers`: every session is a client of its own, as if it were a
+    // process.
+    let mut sessions = tokio::task::JoinSet::new();
+    for _ in 0..args.video.viewers {
+        let args = Arc::clone(&args);
+        sessions.spawn(async move { run(&args).await });
+        // WHY not all at once: hundreds of handshakes in one instant are a
+        // load of their own, and not the one that is measured.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (mut ended, mut failed) = (0, 0);
+    while let Some(result) = sessions.join_next().await {
+        match result {
+            Ok(Ok(())) => ended += 1,
+            Ok(Err(error)) => {
+                failed += 1;
+                println!("VIEWER_FAILED {error:#}");
+            }
+            Err(error) => {
+                failed += 1;
+                println!("VIEWER_FAILED {error}");
+            }
+        }
+    }
+    println!("VIEWERS_ENDED ok={ended} failed={failed}");
+    Ok(())
 }
 
 #[cfg(test)]
