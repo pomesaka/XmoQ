@@ -19,11 +19,11 @@
 //! `PUBLISH_NAMESPACE`; `sub`: SUBSCRIBE and a Standalone FETCH) in exactly
 //! that namespace, until its expiry.
 //!
-//! With `--auth-setup on` the relay wants such a token in the SETUP of a
-//! client as well (the Setup Option of the same number, §10.3.1.4), and
-//! closes a session without one: there the namespace and the operation are
-//! not looked at, only whether the room made the token and it has not
-//! expired.
+//! The relay wants such a token in the SETUP of a client as well (the Setup
+//! Option of the same number, §10.3.1.4), and closes a session without
+//! one: there the namespace and the operation are not looked at, only
+//! whether the room made the token and it has not expired. `--auth-setup
+//! off` leaves the SETUP be.
 //!
 //! **The relay keeps no aliases**: it does not send
 //! `MAX_AUTH_TOKEN_CACHE_SIZE`, whose "default value is 0 which prohibits
@@ -51,7 +51,8 @@ const SETUP_AUTHORIZATION_TOKEN: u64 = 0x03;
 /// The relay's check of the tokens a room made with `key`.
 pub struct RoomTokens {
     key: hmac::Key,
-    /// `--auth-setup`: a client's SETUP has to carry a token as well.
+    /// A client's SETUP has to carry a token as well; not with
+    /// `--auth-setup off`.
     setup: bool,
     /// The clock, in seconds since 1970; a test sets its own.
     now: fn() -> u64,
@@ -105,9 +106,9 @@ impl RoomTokens {
 
 impl Authorizer for RoomTokens {
     /// One of the tokens among `parameters` has to allow the operation in
-    /// the namespace. A Joining FETCH (no namespace) is allowed without a
-    /// token, since its SUBSCRIBE was asked about; a token it has is
-    /// checked all the same, for its key and its expiry.
+    /// the namespace. A Joining FETCH names no namespace: its token is
+    /// checked for the key, the operation and the expiry, and it has to
+    /// have one, as every request of a connection that has a token does.
     ///
     /// The Alias Types, for a receiver that keeps none (§10.2.2):
     ///
@@ -166,17 +167,19 @@ impl Authorizer for RoomTokens {
                 (None, Err(error)) => Some(Err(error)),
             };
         }
-        match (verdict, namespace) {
-            (Some(Ok(())), _) | (None, None) => Ok(()),
-            (Some(Err(error)), _) => Err(Denied::Request(error)),
-            (None, Some(_)) => Err(Denied::Request(code::UNAUTHORIZED)),
+        match verdict {
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) => Err(Denied::Request(error)),
+            None => Err(Denied::Request(code::UNAUTHORIZED)),
         }
     }
 
-    /// With `--auth-setup`: one of the tokens of the SETUP has to be the
-    /// room's and not expired, or the session is closed, with
+    /// One of the tokens of the SETUP has to be the room's and not expired, or the session is closed, with
     /// `UNAUTHORIZED` ("The client is not authorized to establish a
     /// session", §3.5), `MALFORMED_AUTH_TOKEN` or `EXPIRED_AUTH_TOKEN`.
+    ///
+    /// With `--auth-setup off` no token is asked for; the Alias Types are
+    /// looked at all the same.
     ///
     /// The Alias Types in SETUP: "If a server receives Alias Type DELETE
     /// (0x0) or `USE_ALIAS` (0x2) in a SETUP message, it MUST close the
@@ -185,9 +188,6 @@ impl Authorizer for RoomTokens {
     /// session ... it MUST treat the option as Alias Type `USE_VALUE`"
     /// (§10.3.1.4).
     fn setup(&self, setup_options: &[KeyValuePair]) -> Result<(), TerminationCode> {
-        if !self.setup {
-            return Ok(());
-        }
         let mut verdict = Err(TerminationCode::Unauthorized);
         let mut seen = false;
         for option in setup_options {
@@ -215,15 +215,13 @@ impl Authorizer for RoomTokens {
                 Err(code::EXPIRED_AUTH_TOKEN) => Err(TerminationCode::ExpiredAuthToken),
                 Err(_) => Err(TerminationCode::Unauthorized),
             };
+            // One that is good is enough; else the first that was not.
             if this.is_ok() || !seen {
                 verdict = this;
             }
             seen = true;
-            if verdict.is_ok() {
-                break;
-            }
         }
-        verdict
+        if self.setup { verdict } else { Ok(()) }
     }
 }
 
@@ -409,9 +407,22 @@ mod tests {
                 true,
                 session(TerminationCode::UnknownAuthTokenAlias),
             ),
-            // A Joining FETCH: allowed without a token and with the one of
-            // its SUBSCRIBE; not with one that has expired.
-            (vec![], Subscribe, false, Ok(())),
+            // A Joining FETCH: with the token of its SUBSCRIBE, whatever
+            // namespace that names; not without one, with one for
+            // publishing, or with one that has expired.
+            (vec![], Subscribe, false, request(0x1)),
+            (
+                vec![token(KEY, "v1|rooms/red|sub|1800000060")],
+                Subscribe,
+                false,
+                Ok(()),
+            ),
+            (
+                vec![token(KEY, "v1|rooms/blue|pub|1800000060")],
+                Subscribe,
+                false,
+                request(0x1),
+            ),
             (vec![token(KEY, GOOD)], Subscribe, false, Ok(())),
             (
                 vec![token(KEY, "v1|rooms/blue|sub|1800000000")],
@@ -460,8 +471,15 @@ mod tests {
                 .collect();
             let verdict = room(true).setup(&options).err().map(TerminationCode::code);
             assert_eq!(verdict, closed, "{tokens:?}");
-            // Without the flag the SETUP is not looked at.
-            assert_eq!(room(false).setup(&options), Ok(()), "{tokens:?}");
+            // With `--auth-setup off` no token is asked for, and a
+            // structure that cannot be decoded or has an alias that is not
+            // for SETUP closes the session all the same.
+            let off = room(false).setup(&options).err().map(TerminationCode::code);
+            assert_eq!(
+                off,
+                closed.filter(|code| matches!(code, 0x3 | 0x6)),
+                "{tokens:?}"
+            );
         }
     }
 }
