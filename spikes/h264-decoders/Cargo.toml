@@ -1,0 +1,10 @@
+[package]
+name = "h264-decoders"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A spike: outside the workspace (the root Cargo.toml excludes spikes/), its lints and its
+# review. Whether the openh264 crate decodes the streams XmoQ has.
+[dependencies]
+openh264 = "=0.9.8"

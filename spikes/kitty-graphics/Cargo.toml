@@ -1,0 +1,13 @@
+[package]
+name = "kitty-frames"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A spike: outside the workspace (the root Cargo.toml excludes spikes/), its lints and its
+# review. No dependencies.
+
+[dependencies]
+
+[profile.release]
+debug = false
