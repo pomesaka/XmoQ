@@ -27,6 +27,18 @@
         "typescript": "6.0.3",
       },
     },
+    "packages/media": {
+      "name": "@xmoq/media",
+      "version": "0.0.0",
+      "dependencies": {
+        "@xmoq/loc": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "@xmoq/moqt": "workspace:*",
+        "typescript": "6.0.3",
+      },
+    },
     "packages/moqt": {
       "name": "@xmoq/moqt",
       "version": "0.0.0",
@@ -55,6 +67,8 @@
     "@xmoq/interop": ["@xmoq/interop@workspace:interop"],
 
     "@xmoq/loc": ["@xmoq/loc@workspace:packages/loc"],
+
+    "@xmoq/media": ["@xmoq/media@workspace:packages/media"],
 
     "@xmoq/moqt": ["@xmoq/moqt@workspace:packages/moqt"],
 

@@ -40,6 +40,7 @@ Tracks are described by a catalog of `draft-ietf-moq-msf-01` (MSF), and media Ob
 - **Which revision of LOC** is an [open decision](open-questions.md): MSF-01 cites LOC-02, whose property numbers collide with transport draft 18. The catalog names the packaging with the string `"loc"` and carries no property number, so it does not wait for that decision.
 - Where MSF-01 leaves a choice or contradicts itself, what `@xmoq/msf` does is in [its README](../packages/msf/README.md), "How the draft is read".
 - **LOC is in a package of its own, `@xmoq/loc`, which depends on neither `@xmoq/moqt` nor `@xmoq/msf`**: it makes and reads the Object Properties of a frame as types and values, and turns a video payload with lengths into one with start codes. **Provisionally** it uses the numbers of LOC-04, none of which transport draft 18 defines, and which `moqlivemock`'s publisher sends on draft 18 (which revision of LOC is an [open question](open-questions.md)); [its README](../packages/loc/README.md) has the two tables side by side, and what else is read into the draft.
+- **What orders the frames of a video track for a decoder is `@xmoq/media`**, the layer above the three. Its rules are its own where no draft has one (which frame a decoder begins with, when a frame counts as lost): [its README](../packages/media/README.md), "How the receiver decides". The two sides are there without an encoder, a decoder or a connection.
 
 ## Discussed
 

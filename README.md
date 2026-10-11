@@ -34,6 +34,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Browser client library `@xmoq/moqt`](packages/moqt/README.md)
 - [The Low Overhead Media Container in TypeScript, `@xmoq/loc`](packages/loc/README.md)
 - [The MOQT Streaming Format in TypeScript, `@xmoq/msf`](packages/msf/README.md)
+- [Between a video track and a decoder, `@xmoq/media`](packages/media/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
 - [MoQ library candidates](docs/moq-libraries.md)
 - [Roadmap](docs/roadmap.md)
