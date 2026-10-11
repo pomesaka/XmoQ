@@ -1345,6 +1345,43 @@ pub struct Relay {
     fetch_ends: BTreeSet<(SessionKey, StreamKey)>,
     next_drain_wait: u64,
     next_own_request: u64,
+    /// Says whether a request is allowed ([`Self::set_authorize`]). None:
+    /// every request is.
+    authorize: Option<Authorize>,
+}
+
+/// What a request asks to be allowed to do with a namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// PUBLISH and `PUBLISH_NAMESPACE`.
+    Publish,
+    /// SUBSCRIBE and a Standalone FETCH.
+    Subscribe,
+}
+
+/// Decides whether a request is allowed, from what it asks, the namespace
+/// it asks it of and its parameters, among them its AUTHORIZATION TOKENs
+/// (§10.2.2). `Err` has the code of the `REQUEST_ERROR` to refuse it with.
+///
+/// WHY a function that is handed in: checking a token takes a key and a
+/// clock, and this crate has neither.
+pub struct Authorize(Box<AuthorizeFn>);
+
+type AuthorizeFn = dyn Fn(Operation, &TrackNamespace, &[Parameter]) -> Result<(), u64> + Send;
+
+impl Authorize {
+    /// Wraps the function.
+    pub fn new(
+        decide: impl Fn(Operation, &TrackNamespace, &[Parameter]) -> Result<(), u64> + Send + 'static,
+    ) -> Self {
+        Self(Box::new(decide))
+    }
+}
+
+impl std::fmt::Debug for Authorize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Authorize")
+    }
 }
 
 impl Relay {
@@ -1364,6 +1401,7 @@ impl Relay {
             fetch_ends: BTreeSet::new(),
             next_drain_wait: 0,
             next_own_request: 0,
+            authorize: None,
         }
     }
 
@@ -1663,6 +1701,54 @@ impl Relay {
         );
     }
 
+    /// From now on a request is asked of `authorize` before it is taken. An
+    /// experiment: without it the relay allows everything, as before.
+    pub fn set_authorize(&mut self, authorize: Authorize) {
+        self.authorize = Some(authorize);
+    }
+
+    /// Whether the relay's authorization, where it has one, allows a
+    /// request.
+    ///
+    /// WHY a Joining FETCH is not asked about: it names no namespace, and
+    /// is for a SUBSCRIBE of the same session, which was asked about.
+    fn allowed(&self, request: &PeerRequest) -> Result<(), u64> {
+        let Some(authorize) = &self.authorize else {
+            return Ok(());
+        };
+        let (operation, namespace, parameters) = match request {
+            PeerRequest::Subscribe(subscribe) => (
+                Operation::Subscribe,
+                subscribe.full_track_name.namespace(),
+                &subscribe.parameters,
+            ),
+            PeerRequest::Publish(publish) => (
+                Operation::Publish,
+                publish.full_track_name.namespace(),
+                &publish.parameters,
+            ),
+            PeerRequest::PublishNamespace(publish_namespace) => (
+                Operation::Publish,
+                &publish_namespace.track_namespace,
+                &publish_namespace.parameters,
+            ),
+            PeerRequest::Fetch(fetch) => match &fetch.range {
+                xmoq_moqt::message::FetchRange::Standalone {
+                    full_track_name, ..
+                } => (
+                    Operation::Subscribe,
+                    full_track_name.namespace(),
+                    &fetch.parameters,
+                ),
+                xmoq_moqt::message::FetchRange::RelativeJoining { .. }
+                | xmoq_moqt::message::FetchRange::AbsoluteJoining { .. } => {
+                    return Ok(());
+                }
+            },
+        };
+        (authorize.0)(operation, namespace, parameters)
+    }
+
     fn on_request_opened(
         &mut self,
         session: SessionKey,
@@ -1699,6 +1785,15 @@ impl Relay {
                 return;
             }
         };
+        if let Err(code) = self.allowed(&peer_request) {
+            if let Some(track_alias) = offered_alias
+                && let Some(state) = self.sessions.get_mut(&session)
+            {
+                state.drop_early_streams(session, track_alias, actions);
+            }
+            self.refuse(session, stream, request, &Refusal::code(code), actions);
+            return;
+        }
         match peer_request {
             PeerRequest::Fetch(fetch) => self.on_fetch(session, stream, request, &fetch, actions),
             PeerRequest::Subscribe(subscribe) => {

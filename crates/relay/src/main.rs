@@ -12,6 +12,7 @@
 //! cut off, `xmoq-moqt-io` reads and writes the streams, and this crate
 //! connects the two.
 
+mod auth;
 mod hub;
 #[cfg(test)]
 mod tests;
@@ -87,6 +88,9 @@ struct Args {
     /// `--slow-open-ms`: [`HubConfig::slow_open`], for a run that looks at
     /// how long streams take to open; 0 logs every stream.
     slow_open: Option<Duration>,
+    /// `--auth-key-hex`: the key requests are authorized with
+    /// ([`HubConfig::auth_key`]). An experiment.
+    auth_key: Option<Vec<u8>>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -96,6 +100,7 @@ fn parse_args() -> Result<Args> {
     let mut idle_timeout = xmoq_moqt_io::wt::IDLE_TIMEOUT;
     let mut max_sessions = None;
     let mut slow_open = None;
+    let mut auth_key = None;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -118,6 +123,9 @@ fn parse_args() -> Result<Args> {
                     value.parse().context("--slow-open-ms")?,
                 ));
             }
+            "--auth-key-hex" => {
+                auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
+            }
             other => bail!("unknown flag {other}"),
         }
     }
@@ -128,6 +136,7 @@ fn parse_args() -> Result<Args> {
         idle_timeout,
         max_sessions,
         slow_open,
+        auth_key,
     })
 }
 
@@ -145,6 +154,7 @@ async fn main() -> Result<()> {
     if let Some(slow_open) = args.slow_open {
         config.slow_open = slow_open;
     }
+    config.auth_key = args.auth_key;
     let limits = quic_limits(&config.streams, args.idle_timeout);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
