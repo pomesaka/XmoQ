@@ -46,6 +46,21 @@ Nine seconds each, 286 frames (30 a second) and 474 pieces of audio.
 - **The audio "came" 8 ms before it was made.** The times of the tone are counted, 20 ms a piece from the first, and a piece is handed to the encoder at the start of its 20 ms; with a microphone the time would be the capture's. So the two tracks are about 8 ms apart by construction here, which is in the numbers above.
 - Without a buffer nearly every piece of audio is past its time when it is decoded, and is not sounded.
 
+## Afterwards: the camera and the microphone, with Chromium's fake devices
+
+`/publish?source=camera&audio=mic`, Chromium headless with `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` and the two permissions granted, beside the painted clock and the tone, 9 seconds of watching each, one run:
+
+| | Frames decoded | A frame came after its time | Shown after | Pieces of audio | A piece came after | Sounded after | Dropped, too late, stalls |
+|---|---|---|---|---|---|---|---|
+| A painted clock and a tone | 272 | median 2 ms, at most 22 | median 147, at most 155 | 449 | median -9, at most 2 | 138 | none |
+| The fake camera and microphone | 179 | median -1, at most 16 | median 163, at most 165 | 449 | median 9, at most 29 | 148 | none |
+
+- **Both ways of the demo that had not been run work**: the frames of the camera and the audio of the microphone are encoded, published and played, with nothing changed.
+- The fake camera gave about 20 frames a second, where 30 were asked for.
+- **The audio of the microphone comes after its time, 9 ms at the median, where the tone came before it**: its times are the capture's, as expected, and the tone's are counted.
+- **The time of a frame is still not when it was captured.** The first frame, and the first piece of audio, are given the clock of the moment they reach the encoder, each track by itself; what a capture takes before that is not in the numbers, and the two tracks are set against the clock apart from each other. Picture and sound came out 15 ms apart by these numbers (163 and 148); no mark is in a camera's picture to measure it by.
+- A real camera and a real microphone were not run.
+
 ## Limitations and blockers
 
 - **Nobody saw or heard it.** The numbers are the page's own: when it drew, and for when it scheduled. What the screen and the loudspeaker add (`AudioContext.outputLatency`, the display) is not in them.

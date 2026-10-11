@@ -99,8 +99,27 @@ Looked into without changing the relay: the relay run by hand with the clock put
 | The same with the sound alone (`?video=no`) | The same: 412 to 475, and 431 to 572 ms late at the end of 8 seconds. The video is not part of it |
 
 - So the sound waits **between the relay's order to open a stream and the page having its bytes, and only where Chromium receives**: with quinn at both ends of the same link it does not. And it waits as if one stream could pass every 20 ms and no faster, so that every loss puts everything after it one step back for good.
-- **Not found: which of the two it is.** (a) The relay waits to open the stream, for the credit Chromium gives for streams: credit that comes back only as streams are done would let one stream through for each one that ends, which is the rate they are made at and no more. (b) The relay has the stream and its QUIC holds the bytes back after a loss (the congestion window), with Chromium acknowledging late when little is sent. Loss towards the relay did nothing, which speaks against credit that is lost, and not against credit that comes late.
+- **Not found here: which of the two it is** (it is neither: the next section). (a) The relay waits to open the stream, for the credit Chromium gives for streams: credit that comes back only as streams are done would let one stream through for each one that ends, which is the rate they are made at and no more. (b) The relay has the stream and its QUIC holds the bytes back after a loss (the congestion window), with Chromium acknowledging late when little is sent. Loss towards the relay did nothing, which speaks against credit that is lost, and not against credit that comes late.
 - **What would tell**: the relay's time between ordering a stream and having it open (the hub has that event, `OutStreamOpened`, and prints no line for it). With it, (a) shows as a wait there and (b) as none.
+
+### With the relay's line for a stream that opened: neither of the two
+
+The relay now prints `DATA_OPENED … after_ms=… opening=… cwnd=… lost_packets=… congestion_events=…` (run with `--slow-open-ms 0`, for every stream). The sound alone (`?video=no`), loss 10% from the relay, 8 seconds:
+
+| | The Chromium page as the viewer | The own Rust client as the viewer (2 runs) |
+|---|---|---|
+| The sound at the viewer | 532 ms late at the median, 721 at most, rising | 1 ms after the relay's order, 51 and 58 at most |
+| `after_ms`, of about 400 streams | **0 for every one**; `opening` 0 | 0 for every one; `opening` 0 |
+| `cwnd`, least and median | 2,904 bytes | 2,904 bytes |
+| `lost_packets`, `congestion_events` at the end | 90, 84 | 99 and 112, 94 and 100 |
+
+- **Not (a)**: the relay has every stream open at once. It does not wait for credit.
+- **Not (b) either**: the relay's congestion window is at its least with both viewers, and only one of them gets the sound late. And the link itself was counted (it now keeps every datagram's time and length, `/log`): by the second, the streams the relay had ordered and the datagrams of an audio stream's length that had reached the viewer were 2 to 5 apart with Chromium (51/47, 100/98, 150/148, 201/197, 250/248, 300/298, 350/345, 400/395) and 0 to 3 with the Rust client. **The bytes reach the viewer's machine on time.** Half a second of lag would be 25 streams apart.
+- **So the sound waits inside the browser.** With one line put into `@xmoq/moqt` for the measurement and taken out again (the time at which the browser hands an incoming stream to the page): from there to the stream's first bytes is 0 ms (40 at most), and the streams are handed over 16 to 30 ms apart, 611 ms late at the end of 8 seconds. **The page's library is not it**: with 4, 64 or 4,096 streams read at once the lag is the same (475, 472, 354 ms at the median).
+- **Firefox as the viewer does not have it**: loss 10% from the relay, the sound 6 ms before its time at the median and 24 ms after at most, none too late (one run; Playwright's Firefox 157.0).
+- What Chromium does between a datagram and handing the stream to the page was not looked into. It looks as if it gave the page one new stream for each that comes in, and a stream that comes late is never made up for.
+
+**What could be done, none of it tried beyond what is above**: fewer streams (25 chunks of audio on one: no lag, measured above); the audio as datagrams, which neither implementation has; one long stream for the audio of a viewer. Nothing in the relay: it sends on time.
 
 ### A publisher that goes
 
