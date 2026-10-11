@@ -27,7 +27,7 @@ use std::collections::{BTreeSet, VecDeque};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{ControlMessage, ReasonPhrase, RequestError, request_error_code};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
-use xmoq_moqt::params::Parameter;
+use xmoq_moqt::params::{Parameter, SubscriptionFilter};
 use xmoq_moqt::session::{PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
@@ -96,6 +96,62 @@ pub(crate) struct OwnRequest {
     pub(crate) awaits_publish: bool,
 }
 
+/// The first Location a subscription passes (§5.1.2), for a SUBSCRIBE that is
+/// accepted while `largest` is the Largest Object of its track. `None`:
+/// nothing passes, which is so only where the filter starts after a Location
+/// that has none after it.
+///
+/// Without a filter: {0, 0}, "Subscriptions without a filter pass all
+/// Objects published or received via upstream subscriptions". Largest
+/// Object: "{Largest Object.Group, Largest Object.Object + 1}"; Next Group
+/// Start: "{Largest Object.Group + 1, 0}"; for both, "If no content has been
+/// delivered yet, the filter Start Location is {0, 0}". `AbsoluteStart` and
+/// `AbsoluteRange`: the Start Location they give, which "MAY be less than the
+/// Largest Object observed at the publisher".
+///
+/// FIXME: the End Group of an `AbsoluteRange` filter (§5.1.2). Its Start
+/// Location is kept; what comes after its End Group is sent as well.
+pub(crate) fn filter_start(
+    filter: Option<SubscriptionFilter>,
+    largest: Option<Location>,
+) -> Option<Location> {
+    let first = Location {
+        group: 0,
+        object: 0,
+    };
+    match (filter, largest) {
+        (None, _)
+        | (Some(SubscriptionFilter::LargestObject | SubscriptionFilter::NextGroupStart), None) => {
+            Some(first)
+        }
+        (Some(SubscriptionFilter::LargestObject), Some(largest)) => {
+            match largest.object.checked_add(1) {
+                Some(object) => Some(Location {
+                    group: largest.group,
+                    object,
+                }),
+                // The Group has no Object after its last possible one.
+                None => next_group(largest),
+            }
+        }
+        (Some(SubscriptionFilter::NextGroupStart), Some(largest)) => next_group(largest),
+        (
+            Some(
+                SubscriptionFilter::AbsoluteStart { start }
+                | SubscriptionFilter::AbsoluteRange { start, .. },
+            ),
+            _,
+        ) => Some(start),
+    }
+}
+
+fn next_group(largest: Location) -> Option<Location> {
+    Some(Location {
+        group: largest.group.checked_add(1)?,
+        object: 0,
+    })
+}
+
 /// A downstream SUBSCRIBE that waits for the upstream one to be answered.
 #[derive(Debug)]
 pub(crate) struct Waiter {
@@ -103,6 +159,10 @@ pub(crate) struct Waiter {
     stream: StreamKey,
     request: PeerRequestId,
     forward: bool,
+    /// The Subscription Filter of the SUBSCRIBE (§5.1.2). Its Start Location
+    /// is worked out when the SUBSCRIBE is accepted, from the Largest Object
+    /// of that moment.
+    filter: Option<SubscriptionFilter>,
 }
 
 impl Waiter {
@@ -116,12 +176,14 @@ impl Waiter {
         stream: StreamKey,
         request: PeerRequestId,
         forward: bool,
+        filter: Option<SubscriptionFilter>,
     ) -> Self {
         Self {
             session,
             stream,
             request,
             forward,
+            filter,
         }
     }
 }
@@ -1103,10 +1165,15 @@ impl Relay {
             stream,
             request,
             forward,
+            filter,
         } = *waiter;
-        if let Some((subscriber, slot)) =
-            self.accept_subscriber(track_name, session, stream, request, forward, actions)
-            && let Some(track) = self.tracks.live_mut(track_name)
+        if let Some((subscriber, slot)) = self.accept_subscriber(
+            track_name,
+            (session, stream, request),
+            forward,
+            filter,
+            actions,
+        ) && let Some(track) = self.tracks.live_mut(track_name)
         {
             track.subscribers.push(subscriber);
             // After the subscriber is in the track: a Joining FETCH that
@@ -1121,16 +1188,21 @@ impl Relay {
     fn accept_subscriber(
         &mut self,
         track_name: &FullTrackName,
-        session: SessionKey,
-        stream: StreamKey,
-        request: PeerRequestId,
+        (session, stream, request): (SessionKey, StreamKey, PeerRequestId),
         forward: bool,
+        filter: Option<SubscriptionFilter>,
         actions: &mut Vec<Action>,
     ) -> Option<(Subscriber, RequestSlot)> {
         let track = self.tracks.live(track_name)?;
         let state = self.sessions.get_mut(&session)?;
         // §10.2.11: LARGEST_OBJECT is present once Objects were published.
+        // WHY one value for the three: the subscriber works out from the
+        // LARGEST_OBJECT of its SUBSCRIBE_OK where its subscription starts
+        // and where a Joining FETCH ends (§5.1.2: "Largest Object is
+        // communicated in SUBSCRIBE_OK"; §10.12.2.1: "contiguous and
+        // non-overlapping"). The relay has to count from the same Location.
         let joining = track.largest;
+        let start = filter_start(filter, joining);
         let parameters = joining.map(Parameter::LargestObject).into_iter().collect();
         match state
             .moqt
@@ -1160,6 +1232,7 @@ impl Relay {
                     // that asks for 0 stays there.
                     forward,
                     joining,
+                    start,
                     streams_started: 0,
                     count_unknown: false,
                     outs: BTreeSet::new(),

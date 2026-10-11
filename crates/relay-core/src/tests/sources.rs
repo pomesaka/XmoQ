@@ -1,5 +1,7 @@
 //! Several sources of one track (§9.3, §9.5).
 
+use xmoq_moqt::params::SubscriptionFilter;
+
 use super::*;
 
 /// The alias Bob chose for the track he publishes.
@@ -112,6 +114,72 @@ fn what_two_publishers_of_a_track_send_reaches_the_subscribers() {
     assert_eq!(
         object_from(&mut relay, PUBLISHER, 7, 0),
         [send_object(0, 0)]
+    );
+}
+
+#[test]
+fn a_filter_is_counted_over_what_both_publishers_of_a_track_brought() {
+    let mut relay = relay_with_two_publishers();
+    // The first publisher brought {3, 0} and the second {5, 0}: the Largest
+    // Object of the track is {5, 0}.
+    stream_from(&mut relay, PUBLISHER, 7, 3);
+    object_from(&mut relay, PUBLISHER, 7, 0);
+    stream_from(&mut relay, BOB, 9, 5);
+    object_from(&mut relay, BOB, 9, 0);
+    // Alice subscribes with the Largest Object filter: from {5, 1}.
+    let largest = Location {
+        group: 5,
+        object: 0,
+    };
+    let subscribed = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            full_track_name: track(b"a"),
+            parameters: vec![Parameter::SubscriptionFilter(
+                SubscriptionFilter::LargestObject,
+            )],
+        }),
+    });
+    // (The Track Properties are those of the publisher that came last,
+    // which gave none.)
+    let ok = ControlMessage::SubscribeOk(SubscribeOk {
+        track_alias: 0,
+        parameters: vec![Parameter::LargestObject(largest)],
+        track_properties: vec![],
+    });
+    assert_eq!(
+        subscribed,
+        [Action::SendRequest {
+            session: ALICE,
+            stream: StreamKey(0),
+            message: ok,
+        }]
+    );
+    // What the first publisher sends below it does not pass, whichever
+    // source it is from: the rest of its Group 3, and a Group 4.
+    assert_eq!(object_from(&mut relay, PUBLISHER, 7, 1), []);
+    assert_eq!(stream_from(&mut relay, PUBLISHER, 8, 4), []);
+    assert_eq!(object_from(&mut relay, PUBLISHER, 8, 0), []);
+    // The rest of the second publisher's Group 5 does, and a Group 6 of
+    // the first.
+    let late = SubgroupHeader {
+        subgroup_id: SubgroupId::Explicit(0),
+        first_object: false,
+        ..header_of_group(0, 5)
+    };
+    assert_eq!(
+        object_from(&mut relay, BOB, 9, 1),
+        [open_data_stream(ALICE, 0, late), send_object(0, 1)]
+    );
+    assert_eq!(
+        stream_from(&mut relay, PUBLISHER, 6, 6),
+        [open_data_stream(ALICE, 1, header_of_group(0, 6))]
+    );
+    assert_eq!(
+        object_from(&mut relay, PUBLISHER, 6, 0),
+        [send_object(1, 0)]
     );
 }
 

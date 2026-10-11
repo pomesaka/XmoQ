@@ -235,6 +235,16 @@ pub fn forward(parameters: &[Parameter]) -> bool {
         .unwrap_or(true)
 }
 
+/// The Subscription Filter a parameter list has; none means that the
+/// subscription is unfiltered (§10.2.9).
+#[must_use]
+pub fn subscription_filter(parameters: &[Parameter]) -> Option<SubscriptionFilter> {
+    parameters.iter().find_map(|parameter| match parameter {
+        Parameter::SubscriptionFilter(filter) => Some(*filter),
+        _ => None,
+    })
+}
+
 /// Reads `Number of Parameters` and that many parameters.
 ///
 /// More than [`MAX_PARAMETERS`] are [`Error::TooManyParameters`], which ends the
@@ -546,6 +556,35 @@ mod tests {
         ];
         for (parameters, expected) in cases {
             assert_eq!(forward(parameters), *expected, "{parameters:?}");
+        }
+    }
+
+    #[test]
+    fn a_subscription_without_the_parameter_is_unfiltered() {
+        let start = Location {
+            group: 3,
+            object: 2,
+        };
+        let cases: &[(&[Parameter], Option<SubscriptionFilter>)] = &[
+            (&[], None),
+            (&[Parameter::Forward(false)], None),
+            (
+                &[Parameter::SubscriptionFilter(
+                    SubscriptionFilter::LargestObject,
+                )],
+                Some(SubscriptionFilter::LargestObject),
+            ),
+            (
+                &[
+                    Parameter::SubscriberPriority(1),
+                    Parameter::SubscriptionFilter(SubscriptionFilter::AbsoluteStart { start }),
+                    Parameter::Forward(true),
+                ],
+                Some(SubscriptionFilter::AbsoluteStart { start }),
+            ),
+        ];
+        for (parameters, expected) in cases {
+            assert_eq!(subscription_filter(parameters), *expected, "{parameters:?}");
         }
     }
 

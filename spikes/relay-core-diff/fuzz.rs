@@ -78,6 +78,14 @@
 //! and the `FETCH_OK` it sent. A world in which these are near 0 has not
 //! tried what it is for.
 //!
+//! With `XMOQ_FUZZ_FILTERS` set, half of the SUBSCRIBEs have a Subscription
+//! Filter (§5.1.2): Largest Object (half of those), Next Group Start, and
+//! `AbsoluteStart` or `AbsoluteRange` with a Start Location among the Groups
+//! and Objects the streams of these worlds have. `compare.py` calls `full`,
+//! `split-one` and `shared` with it `filters`, `split-filters` and
+//! `shared-filters`; in the two with halves only sessions 1 and 2 send a
+//! filter. `FUZZ_FILTERED` counts the SUBSCRIBEs sent by their filter.
+//!
 //! `XMOQ_FUZZ_TOUCH` chooses which events count as the ones a change is
 //! about: `subgroups` (the default; a stream that leaves the Subgroup ID to
 //! its first Object, or a second stream for a Subgroup) or `publishers` (a
@@ -107,7 +115,7 @@ use xmoq_moqt::message::{
     RequestError, RequestUpdate, Setup, Subscribe, SubscribeOk,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
-use xmoq_moqt::params::{GroupOrder, Parameter};
+use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
 use xmoq_moqt::session::Role;
 
 use crate::{
@@ -506,13 +514,24 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
             let (id, new) = new_request(peer);
             peer.subscribed = Some(id);
             let forward_0 = rng.next(4) == 0;
+            let mut parameters = if forward_0 { vec![Parameter::Forward(false)] } else { vec![] };
+            // In the worlds with two halves, the first half alone.
+            if std::env::var_os("XMOQ_FUZZ_FILTERS").is_some() && !(world.is_split() && half == 1) && rng.next(2) == 0 {
+                let start = Location { group: rng.next(4), object: rng.next(4) };
+                parameters.push(Parameter::SubscriptionFilter(match rng.next(6) {
+                    0..=2 => SubscriptionFilter::LargestObject,
+                    3 => SubscriptionFilter::NextGroupStart,
+                    4 => SubscriptionFilter::AbsoluteStart { start },
+                    _ => SubscriptionFilter::AbsoluteRange { start, end_group_delta: rng.next(2) },
+                }));
+            }
             Event::RequestOpened {
                 session,
                 stream: new,
                 first: ControlMessage::Subscribe(Subscribe {
                     request_id: id,
                     full_track_name: subscribed(name),
-                    parameters: if forward_0 { vec![Parameter::Forward(false)] } else { vec![] },
+                    parameters,
                 }),
             }
         }
@@ -904,6 +923,10 @@ fn the_two_cores_answer_random_events_alike() {
     // wrote, Joining FETCH requests it held, FETCH_OK it sent.
     let mut fetch_counts = [0u64; 5];
     let mut with_a_fetch_passed_on = 0u64;
+    let filters = std::env::var_os("XMOQ_FUZZ_FILTERS").is_some();
+    // SUBSCRIBEs by their filter: none, Largest Object, Next Group Start,
+    // AbsoluteStart, AbsoluteRange.
+    let mut subscribes = [0u64; 5];
     let mut events = 0u64;
     let (mut touching, mut differing, mut differing_before_touching) = (0u64, 0u64, 0u64);
     let (mut opened_downstream, mut objects_sent, mut with_an_object) = (0u64, 0u64, 0u64);
@@ -984,6 +1007,11 @@ fn the_two_cores_answer_random_events_alike() {
                 "asks" => several_can_be_asked(&event, &mut published),
                 "priority" => opens_a_group_with_another_priority(&event, &mut priorities_of_groups),
                 "fetch" => is_about_a_fetch,
+                "filters" => matches!(
+                    &event,
+                    Event::RequestOpened { first: ControlMessage::Subscribe(subscribe), .. }
+                        if subscribe.parameters.iter().any(|parameter| matches!(parameter, Parameter::SubscriptionFilter(_)))
+                ),
                 other => panic!("XMOQ_FUZZ_TOUCH={other}: not a kind of event fuzz.rs knows"),
             };
             if world == World::Shared {
@@ -999,6 +1027,19 @@ fn the_two_cores_answer_random_events_alike() {
                     _ => {}
                 }
                 watch(&watched);
+            }
+            if let Event::RequestOpened { first: ControlMessage::Subscribe(subscribe), .. } = &event {
+                let filter = subscribe.parameters.iter().find_map(|parameter| match parameter {
+                    Parameter::SubscriptionFilter(filter) => Some(*filter),
+                    _ => None,
+                });
+                subscribes[match filter {
+                    None => 0,
+                    Some(SubscriptionFilter::LargestObject) => 1,
+                    Some(SubscriptionFilter::NextGroupStart) => 2,
+                    Some(SubscriptionFilter::AbsoluteStart { .. }) => 3,
+                    Some(SubscriptionFilter::AbsoluteRange { .. }) => 4,
+                }] += 1;
             }
             let before = differences();
             let actions = relay.handle(event);
@@ -1049,6 +1090,12 @@ fn the_two_cores_answer_random_events_alike() {
         let [asked, passed_on, written, held, fetch_ok] = fetch_counts;
         println!(
             "FUZZ_FETCHED asked_of_publishers={asked} streams_passed_on={passed_on} streams_written={written} joining_held={held} fetch_ok_sent={fetch_ok} sequences_with_a_stream_passed_on={with_a_fetch_passed_on} of {runs}"
+        );
+    }
+    if filters {
+        let [none, largest, next_group, absolute_start, absolute_range] = subscribes;
+        println!(
+            "FUZZ_FILTERED subscribes_without_a_filter={none} largest_object={largest} next_group_start={next_group} absolute_start={absolute_start} absolute_range={absolute_range}"
         );
     }
     println!(
