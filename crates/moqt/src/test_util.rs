@@ -1,10 +1,17 @@
 //! Helpers shared by the unit tests.
 
-/// Reads `fixtures/moqt-18/<name>.hex`, bytes captured from moqtail. The
+/// Reads `fixtures/moqt-18/<name>.hex`, bytes captured from moqtail and, for
+/// one stream, from `moqlivemock`. The
 /// directory is shared with the TypeScript implementation; its README records
 /// where each file comes from.
 pub(crate) fn fixture(name: &str) -> Vec<u8> {
     read_hex("moqt-18", name)
+}
+
+/// Reads `fixtures/loc-04/<name>.hex`: a payload `moqlivemock`'s publisher
+/// sent, which a stream of `fixtures/moqt-18/` carries.
+pub(crate) fn fixture_of_loc(name: &str) -> Vec<u8> {
+    read_hex("loc-04", name)
 }
 
 /// Reads `fixtures/moqt-18-by-hand/<name>.hex`, bytes written by hand from
