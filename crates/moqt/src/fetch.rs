@@ -178,12 +178,6 @@ impl FetchStreamDecoder {
         }
     }
 
-    /// Bytes pushed and not yet returned as events.
-    #[must_use]
-    pub fn buffered_len(&self) -> usize {
-        self.buffer.unread().len()
-    }
-
     /// Adds bytes read from the stream.
     ///
     /// # Errors
