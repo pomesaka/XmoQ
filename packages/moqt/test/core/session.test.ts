@@ -1031,7 +1031,9 @@ describe("Session", () => {
 			said(
 				session.receivePeerBidiStreamData(2000, hex("0d 00 02 01 00"), true),
 			).map((output) => output.type),
-		).toEqual(["respond", "event"]);
+			// The refusal, that it was refused, and that the peer has ended
+			// its direction.
+		).toEqual(["respond", "event", "event"]);
 	});
 
 	test("records the Request ID of a REQUEST_UPDATE that crosses this endpoint's PUBLISH_DONE (§10.1)", () => {
@@ -1057,13 +1059,13 @@ describe("Session", () => {
 			name: "a FIN",
 			end: (session: Session) =>
 				session.receiveRequestStreamData(2, new Uint8Array(0), true),
-			event: { type: "publish-done-peer-ended", requestId: 2n, how: "fin" },
+			event: { type: "peer-direction-ended", requestId: 2n, how: "fin" },
 		},
 		{
 			name: "a reset",
 			end: (session: Session) => session.requestStreamReset(2, 1),
 			event: {
-				type: "publish-done-peer-ended",
+				type: "peer-direction-ended",
 				requestId: 2n,
 				how: "reset",
 				resetCode: 1,
@@ -1078,7 +1080,7 @@ describe("Session", () => {
 			expect(end(session)).toEqual([{ type: "event", event }]);
 			// The stream is forgotten: neither a second end nor the expiry does anything.
 			expect(session.requestStreamReset(2, 1)).toEqual([]);
-			expect(session.expirePublishDonePeerEnd(2n)).toEqual([]);
+			expect(session.expirePeerEnd(2n)).toEqual([]);
 		},
 	);
 
@@ -1090,7 +1092,7 @@ describe("Session", () => {
 			{ type: "finish", stream: 2 },
 			{
 				type: "event",
-				event: { type: "publish-done-peer-ended", requestId: 2n, how: "fin" },
+				event: { type: "peer-direction-ended", requestId: 2n, how: "fin" },
 			},
 		]);
 	});
@@ -1099,14 +1101,14 @@ describe("Session", () => {
 		const session = withRequests();
 		session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
 		session.publishDone(2n, 2n, "");
-		expect(session.expirePublishDonePeerEnd(2n)).toEqual([
+		expect(session.expirePeerEnd(2n)).toEqual([
 			{ type: "stop-peer-direction", stream: 2, code: 1 },
 		]);
 		expect(
 			session.receiveRequestStreamData(2, new Uint8Array(0), true),
 		).toEqual([]);
 		// A request that did not send PUBLISH_DONE has no such wait.
-		expect(session.expirePublishDonePeerEnd(0n)).toEqual([]);
+		expect(session.expirePeerEnd(0n)).toEqual([]);
 	});
 
 	test("a SUBSCRIBE_OK that is refused does not take the Track Alias of a draining subscription (§2.5.1)", () => {

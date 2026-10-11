@@ -100,8 +100,8 @@ function brief(output: SessionOutput): string {
 					return `event request-closed ${event.requestId} ${event.reason}`;
 				case "peer-request-rejected":
 					return `event peer-request-rejected ${event.requestId} code ${event.errorCode}`;
-				case "publish-done-peer-ended":
-					return `event publish-done-peer-ended ${event.requestId} ${event.how}`;
+				case "peer-direction-ended":
+					return `event peer-direction-ended ${event.requestId} ${event.how}`;
 				default:
 					return `event ${event.type}`;
 			}
@@ -221,13 +221,13 @@ describe("a SUBSCRIBE of the peer", () => {
 		// number for the stream.
 		expect(
 			briefly(session.receivePeerBidiStreamData(0, new Uint8Array(0), true)),
-		).toEqual(["event publish-done-peer-ended 1 fin"]);
+		).toEqual(["event peer-direction-ended 1 fin"]);
 	});
 
 	test("a subscriber that does not end its direction after PUBLISH_DONE is stopped when the wait is over", () => {
 		const session = serving();
 		session.publishDone(1n, 2n, "");
-		expect(briefly(session.expirePublishDonePeerEnd(1n))).toEqual([
+		expect(briefly(session.expirePeerEnd(1n))).toEqual([
 			"stop peer direction 1 code 1",
 		]);
 	});
@@ -475,7 +475,7 @@ describe("what is kept for a SUBSCRIBE of the peer", () => {
 			steps: [
 				(session) => session.acceptSubscribe(1n, {}),
 				(session) => session.publishDone(1n, 2n, ""),
-				(session) => session.expirePublishDonePeerEnd(1n),
+				(session) => session.expirePeerEnd(1n),
 				// The stop ends the peer's direction for the I/O layer, which
 				// reports it like an end.
 				peerFin,

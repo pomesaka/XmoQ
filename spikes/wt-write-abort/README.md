@@ -11,6 +11,8 @@ Spike, outside lint and review. It is the measurement of [the record](../../docs
 | `out/peer-opened-stop-now-40.txt`, `out/own-opened-stop-now-40.txt` | `--only stop-now`, with and without `--opened-by peer`: a STOP_SENDING at once, with how long the writer took to hear of it and how the server saw each session end |
 | `own-reset.ts` | The same server and browser: what a writer and a write under way fail with when the page aborts the writer itself |
 | `out/own-reset-20.txt` | What that printed |
+| `moqt-refused.ts`, `moqt-entry.ts` | A page that runs `@xmoq/moqt` against the `/moqt-` paths of the server: the server opens a request, is refused, and leaves its direction open or finishes it |
+| `out/moqt-refused-5.txt` | What that printed |
 
 ```sh
 (cd spikes/wt-write-abort && cargo build --locked)

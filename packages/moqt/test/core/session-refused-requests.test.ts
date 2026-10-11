@@ -559,3 +559,281 @@ describe("a FETCH of the peer counts among the requests the peer may have", () =
 		).toEqual(["REQUEST_ERROR 9"]);
 	});
 });
+
+describe("the wait for the peer to end its direction after a refusal", () => {
+	/** The stops among the outputs, and the events that say how the peer ended its direction. */
+	const stopsAndEnds = (outputs: SessionOutput[]): string[] =>
+		outputs.flatMap((output) => {
+			switch (output.type) {
+				case "abandon-peer-request":
+					return [`abandon peer stream ${output.peerStream}, ${output.code}`];
+				case "stop-peer-direction":
+					return [`stop the peer's direction, ${output.code}`];
+				case "close-session":
+					return [`close ${output.code}`];
+				case "event":
+					return output.event.type === "peer-direction-ended"
+						? [`ended ${output.event.requestId} ${output.event.how}`]
+						: [];
+				default:
+					return [];
+			}
+		});
+
+	// `stop` is how the stream is given up: one the session answered by
+	// itself is known by the peer's number alone; one that was handed on is
+	// among the session's own.
+	const ROWS = REFUSED.map((row, index) => ({
+		...row,
+		stop: [0, 1, 5].includes(index)
+			? "stop the peer's direction, 1"
+			: "abandon peer stream 0, 1",
+	}));
+
+	test("the rows that were handed on are the ones the application or a REQUEST_UPDATE ended", () => {
+		expect(
+			ROWS.filter((row) => row.stop.startsWith("stop")).map((row) => row.name),
+		).toEqual([
+			"a SUBSCRIBE the application rejects",
+			"a FETCH the application rejects",
+			"a SUBSCRIBE that a REQUEST_UPDATE before its answer ended",
+		]);
+	});
+
+	test.each(ROWS)(
+		"$name: when the wait is over, the peer's direction is stopped (CANCELLED) and what still comes is dropped",
+		({ setup, refuse, stop }) => {
+			const session = started();
+			setup?.(session);
+			const before = session.heldStreams();
+			refuse(session);
+			expect(stopsAndEnds(session.expirePeerEnd(1n))).toEqual([stop]);
+			// A second time, nothing.
+			expect(session.expirePeerEnd(1n)).toEqual([]);
+			// What the peer sent before it saw the stop: bytes that would
+			// close the session on a stream that is read.
+			expect(
+				session.receivePeerBidiStreamData(0, hex("3f 00 00"), false),
+			).toEqual([]);
+			expect(session.closed).toBe(false);
+			// The end the stop brings about; nothing is left of the stream.
+			expect(
+				stopsAndEnds(
+					session.receivePeerBidiStreamData(0, new Uint8Array(0), true),
+				),
+			).toEqual([]);
+			expect(session.heldStreams()).toBe(before);
+		},
+	);
+
+	test.each(ROWS)(
+		"$name: when the wait is over, the request holds no place among the peer's requests",
+		({ setup, refuse }) => {
+			const session = started(1);
+			setup?.(session);
+			refuse(session);
+			// The one place is taken.
+			expect(
+				said(
+					session.receivePeerBidiStreamData(1, subscribeBytes(5, "75"), false),
+				),
+			).toEqual(["REQUEST_ERROR 9"]);
+			session.expirePeerEnd(1n);
+			expect(
+				said(
+					session.receivePeerBidiStreamData(2, subscribeBytes(7, "75"), false),
+				),
+			).toEqual([]);
+		},
+	);
+
+	test.each(
+		ROWS.flatMap(({ name, setup, refuse }) => [
+			{
+				name,
+				setup,
+				refuse,
+				how: "a FIN",
+				end: (session: Session) =>
+					session.receivePeerBidiStreamData(0, new Uint8Array(0), true),
+				ended: "ended 1 fin",
+			},
+			{
+				name,
+				setup,
+				refuse,
+				how: "a reset",
+				end: (session: Session) => session.peerBidiStreamReset(0, 1),
+				ended: "ended 1 reset",
+			},
+		]),
+	)(
+		"$name: $how of the peer is reported, so that the wait ends, and nothing is stopped after it",
+		({ setup, refuse, end, ended }) => {
+			const session = started();
+			setup?.(session);
+			refuse(session);
+			expect(stopsAndEnds(end(session))).toEqual([ended]);
+			expect(session.expirePeerEnd(1n)).toEqual([]);
+		},
+	);
+
+	test.each([
+		{ name: "a SUBSCRIBE", bytes: subscribeBytes(1) },
+		{ name: "a FETCH", bytes: fetchBytes(1, [0, 0], [1, 0]) },
+	])(
+		"$name whose peer had finished its direction before the application rejected it is reported as ended with the rejection",
+		({ bytes }) => {
+			const session = started();
+			const before = session.heldStreams();
+			session.receivePeerBidiStreamData(0, bytes, true);
+			expect(stopsAndEnds(session.rejectPeerRequest(1n, 0x10n, ""))).toEqual([
+				"ended 1 fin",
+			]);
+			expect(session.heldStreams()).toBe(before);
+		},
+	);
+
+	test("a request that was refused with its FIN in the same read is reported as ended at once", () => {
+		const session = started();
+		expect(
+			stopsAndEnds(session.receivePeerBidiStreamData(0, trackStatus(1), true)),
+		).toEqual(["ended 1 fin"]);
+	});
+
+	test.each([
+		{
+			how: "a FIN",
+			end: (session: Session) =>
+				session.receivePeerBidiStreamData(1, new Uint8Array(0), true),
+			ended: "ended 3 fin",
+		},
+		{
+			how: "a reset",
+			end: (session: Session) => session.peerBidiStreamReset(1, 1),
+			ended: "ended 3 reset",
+		},
+	])(
+		"$how of the peer after a request that is not kept is reported as well, so that its wait ends",
+		({ end, ended }) => {
+			const session = started(1);
+			session.receivePeerBidiStreamData(0, trackStatus(1), false);
+			// As many are kept as may be: this one is not.
+			session.receivePeerBidiStreamData(1, trackStatus(3), false);
+			expect(stopsAndEnds(end(session))).toEqual([ended]);
+			expect(session.expirePeerEnd(3n)).toEqual([]);
+		},
+	);
+
+	// A request that is not kept has its Request ID for the wait alone: it
+	// is no request that is kept, so its ID, once it is no longer
+	// remembered, is not a duplicate.
+	test("the Request ID of a request that is not kept is not held on to once it is no longer remembered", () => {
+		const session = started(1);
+		// Request ID 1 never comes, so 3 and 5 stay above the gap.
+		session.receivePeerBidiStreamData(0, trackStatus(3), false);
+		session.receivePeerBidiStreamData(1, trackStatus(5), false);
+		// 1,100 requests, each whole and ended: more than the 1,024 IDs that
+		// are remembered, so 3 and 5 are pushed out.
+		for (let index = 0; index < 1100; index++) {
+			const requestId = (7 + index * 2).toString(16).padStart(16, "0");
+			session.receivePeerBidiStreamData(
+				100 + index,
+				hex(`0d 00 09 ff ${requestId.match(/../g)?.join(" ")}`),
+				true,
+			);
+		}
+		expect(session.closed).toBe(false);
+		// 3 is kept, and still a duplicate; 5 is not kept, and reads as new.
+		expect(
+			said(session.receivePeerBidiStreamData(5000, trackStatus(5), true)),
+		).toEqual(["REQUEST_ERROR 3"]);
+		expect(
+			said(session.receivePeerBidiStreamData(5001, trackStatus(3), true)),
+		).toEqual(["close 4"]);
+	});
+
+	test("a request that is not kept, for as many being kept as may be, is stopped the same when the wait is over", () => {
+		const session = started(1);
+		session.receivePeerBidiStreamData(0, trackStatus(1), false);
+		session.receivePeerBidiStreamData(1, trackStatus(3), false);
+		expect(stopsAndEnds(session.expirePeerEnd(3n))).toEqual([
+			"abandon peer stream 1, 1",
+		]);
+	});
+});
+
+// What comes in one read with the FIN is looked at like what comes in reads
+// of its own, also for the wait: the end is reported once, after the checks.
+describe("the wait after a refusal, where the request, what follows it and the FIN come in one read", () => {
+	const ends = (outputs: SessionOutput[]): string[] =>
+		outputs.flatMap((output) => {
+			if (output.type === "close-session") return [`close ${output.code}`];
+			return output.type === "event" &&
+				output.event.type === "peer-direction-ended"
+				? [`ended ${output.event.requestId} ${output.event.how}`]
+				: [];
+		});
+
+	test.each<{ what: string; bytes: string; outcome: string[] }>([
+		{ what: "nothing", bytes: "", outcome: ["ended 1 fin"] },
+		{
+			what: "a REQUEST_UPDATE",
+			bytes: "02 00 02 03 00",
+			outcome: ["ended 1 fin"],
+		},
+		{
+			what: "a REQUEST_UPDATE with a Request ID of the wrong parity",
+			bytes: "02 00 02 04 00",
+			outcome: ["close 4"],
+		},
+		{ what: "the start of a message", bytes: "02 00 02", outcome: ["close 3"] },
+	])(
+		"a refused request, then $what: the same in one read as in three",
+		({ bytes, outcome }) => {
+			const after = hex(bytes);
+			const inOne = started();
+			const one = ends(
+				inOne.receivePeerBidiStreamData(
+					0,
+					new Uint8Array([...trackStatus(1), ...after]),
+					true,
+				),
+			);
+			const inThree = started();
+			const three = [
+				...ends(inThree.receivePeerBidiStreamData(0, trackStatus(1), false)),
+				...ends(inThree.receivePeerBidiStreamData(0, after, false)),
+				...ends(inThree.receivePeerBidiStreamData(0, new Uint8Array(0), true)),
+			];
+			expect(one).toEqual(outcome);
+			expect(three).toEqual(outcome);
+			// Nothing is left to stop where the peer ended its direction.
+			expect(inOne.expirePeerEnd(1n)).toEqual([]);
+			expect(inThree.expirePeerEnd(1n)).toEqual([]);
+		},
+	);
+
+	test.each([
+		{ name: "in one read", cut: false },
+		{ name: "in a read of its own", cut: true },
+	])(
+		"after the stop, bytes that do not decode and the FIN, $name, are dropped",
+		({ cut }) => {
+			const session = started();
+			const before = session.heldStreams();
+			session.receivePeerBidiStreamData(0, trackStatus(1), false);
+			session.expirePeerEnd(1n);
+			const bad = hex("3f 00 00");
+			const outputs = cut
+				? [
+						...session.receivePeerBidiStreamData(0, bad, false),
+						...session.receivePeerBidiStreamData(0, new Uint8Array(0), true),
+					]
+				: session.receivePeerBidiStreamData(0, bad, true);
+			expect(outputs).toEqual([]);
+			expect(session.closed).toBe(false);
+			expect(session.heldStreams()).toBe(before);
+		},
+	);
+});

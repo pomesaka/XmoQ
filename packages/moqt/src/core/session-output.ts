@@ -69,12 +69,14 @@ export type SessionEvent =
 	/** The request ended and no REQUEST_ERROR said so. */
 	| {
 			/**
-			 * After this endpoint's PUBLISH_DONE, the subscriber ended its
-			 * direction of the request stream: with a FIN, or with a reset.
-			 * Nothing in the draft gives that a meaning; the implementation
-			 * notes have what an XmoQ relay means by it.
+			 * After this endpoint finished its direction of a request stream
+			 * (PUBLISH_DONE, the end of a FETCH it served, REQUEST_ERROR for a
+			 * request of the peer), the peer ended its own: with a FIN, or
+			 * with a reset. Nothing in the draft gives that a meaning; the
+			 * implementation notes have what an XmoQ relay means by it after
+			 * PUBLISH_DONE.
 			 */
-			type: "publish-done-peer-ended";
+			type: "peer-direction-ended";
 			requestId: bigint;
 			how: "fin" | "reset";
 			/** With "reset": the error code of the reset, when the transport reported one. */

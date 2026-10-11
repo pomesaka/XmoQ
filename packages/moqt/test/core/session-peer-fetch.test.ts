@@ -139,7 +139,7 @@ function brief(output: SessionOutput): string {
 					return `event request-closed ${event.requestId} ${event.reason}`;
 				case "peer-request-rejected":
 					return `event peer-request-rejected ${event.requestId} code ${event.errorCode}`;
-				case "publish-done-peer-ended":
+				case "peer-direction-ended":
 					return `event peer-ended ${event.requestId} ${event.how}`;
 				default:
 					return `event ${event.type}`;
@@ -438,7 +438,7 @@ describe("a Standalone FETCH of the peer", () => {
 	test("served, waits for the subscriber to end its direction, and stops it when the wait is over", () => {
 		const session = serving();
 		session.finishFetch(1n);
-		expect(briefly(session.expirePublishDonePeerEnd(1n))).toEqual([
+		expect(briefly(session.expirePeerEnd(1n))).toEqual([
 			"stop peer direction 1 code 1",
 		]);
 	});

@@ -15,6 +15,7 @@ import {
 	protocolViolation,
 	RequestErrorCode,
 	SessionErrorCode,
+	StreamResetErrorCode,
 } from "./error.ts";
 import { endsBefore } from "./parameters.ts";
 import type { PeerSubscribeOpened } from "./requests.ts";
@@ -83,7 +84,13 @@ export interface PeerRequests {
 		fin: boolean,
 		out: SessionOutput[],
 	): AdoptedPeerStream | undefined;
-	reset(peerStream: number): void;
+	reset(peerStream: number, out: SessionOutput[]): void;
+	/**
+	 * The wait for the peer to end its direction of the stream of a request
+	 * that was refused here is over: the stream is given up, and nothing of
+	 * the request is kept. Does nothing when the stream has ended.
+	 */
+	expire(requestId: bigint, out: SessionOutput[]): void;
 	/** The peer opened the stream; nothing of it has arrived yet. */
 	open(peerStream: number): void;
 	/**
@@ -117,12 +124,18 @@ type PeerRequestStream =
 	 * `kept` is `undefined` where nothing is kept, and what follows is
 	 * dropped: a request refused while as many requests of the peer are kept
 	 * as may be (a request that was kept there would make the limit no
-	 * limit), and a stream that was given up for not saying what it is.
+	 * limit), and a stream that was given up: for not saying what it is, or
+	 * for a peer that did not end its direction in time after the refusal.
+	 *
+	 * `requestId` is the Request ID of the request while the peer has time
+	 * to end its direction, kept or not; `undefined` once the stream was
+	 * given up.
 	 */
 	| {
 			answered: true;
 			missing: number;
-			kept: { requestId: bigint; inbound: Uint8Array } | undefined;
+			requestId: bigint | undefined;
+			kept: { inbound: Uint8Array } | undefined;
 	  };
 
 /** The first message of the request is whole: the stream has said what it is. */
@@ -248,7 +261,13 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 	const keeps = (requestId: bigint): boolean => {
 		if (options.holdsRequestId(requestId)) return true;
 		for (const stream of streams.values()) {
-			if (stream.answered && stream.kept?.requestId === requestId) return true;
+			if (
+				stream.answered &&
+				stream.kept !== undefined &&
+				stream.requestId === requestId
+			) {
+				return true;
+			}
 		}
 		return false;
 	};
@@ -346,6 +365,15 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			};
 			if (fin) streams.delete(peerStream);
 			else streams.set(peerStream, stream);
+			// The peer ended its direction after the refusal: the wait for
+			// that is over. After the checks of what came with the FIN.
+			const endedAfterRefusal = (requestId: bigint | undefined): void => {
+				if (!fin || requestId === undefined) return;
+				out.push({
+					type: "event",
+					event: { type: "peer-direction-ended", requestId, how: "fin" },
+				});
+			};
 			// A stream that ends inside its first message is treated like a
 			// Message Length that its payload does not match, a
 			// PROTOCOL_VIOLATION (§10), as the Rust implementation does
@@ -365,8 +393,12 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 					out.push(identified(peerStream));
 				}
 				const { kept } = stream;
-				if (kept === undefined) return undefined;
+				if (kept === undefined) {
+					endedAfterRefusal(stream.requestId);
+					return undefined;
+				}
 				readAfterRefusal(kept, data.subarray(ofTheFirst), fin);
+				endedAfterRefusal(stream.requestId);
 				return undefined;
 			}
 
@@ -482,21 +514,58 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// request refused for that very reason finds no room here either.)
 			const room =
 				options.heldRequests() + keptHere() < options.maxPeerRequests;
-			const kept = room ? { requestId, inbound: new Uint8Array(0) } : undefined;
+			const kept = room ? { inbound: new Uint8Array(0) } : undefined;
 			// WHY also with a FIN, where nothing of the stream stays: what
 			// came with the request in the same read is looked at like what
 			// comes in a later one. How the bytes of a stream are cut into
 			// reads is not the peer's doing, and must not change what becomes
 			// of them.
-			if (!fin) streams.set(peerStream, { answered: true, missing, kept });
+			if (!fin) {
+				streams.set(peerStream, { answered: true, missing, requestId, kept });
+			}
 			if (kept !== undefined) {
 				const whole = Math.min(buffer.length, messageLength);
 				readAfterRefusal(kept, buffer.subarray(whole), fin);
 			}
+			// After the checks of what came with the FIN.
+			endedAfterRefusal(requestId);
 			return undefined;
 		},
-		reset(peerStream) {
+		reset(peerStream, out) {
+			const stream = streams.get(peerStream);
 			streams.delete(peerStream);
+			if (stream?.answered !== true || stream.requestId === undefined) return;
+			out.push({
+				type: "event",
+				event: {
+					type: "peer-direction-ended",
+					requestId: stream.requestId,
+					how: "reset",
+				},
+			});
+		},
+		expire(requestId, out) {
+			for (const [peerStream, stream] of streams) {
+				if (!stream.answered || stream.requestId !== requestId) continue;
+				// WHY the stream stays known, as one whose bytes are dropped:
+				// as in `giveUpUnidentified` below. `missing` is 0 so that the
+				// end of the stream, which the stop brings about, is no end
+				// inside a message.
+				streams.set(peerStream, {
+					answered: true,
+					missing: 0,
+					requestId: undefined,
+					kept: undefined,
+				});
+				// §3.3.2: the request is cancelled by stopping the direction
+				// that is still open. This endpoint's own has its FIN.
+				out.push({
+					type: "abandon-peer-request",
+					peerStream,
+					code: StreamResetErrorCode.CANCELLED,
+				});
+				return;
+			}
 		},
 		open(peerStream) {
 			if (streams.has(peerStream)) return;
@@ -511,7 +580,12 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// end inside a message. Forgotten here, what still arrives would be
 			// read as the start of a request, and close the session. It goes
 			// when the stream ends, like every other.
-			streams.set(peerStream, { answered: true, missing: 0, kept: undefined });
+			streams.set(peerStream, {
+				answered: true,
+				missing: 0,
+				requestId: undefined,
+				kept: undefined,
+			});
 			return true;
 		},
 		keptRequests: keptHere,

@@ -232,13 +232,12 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * A stream that does not send its first message whole is stopped after
 	 * `firstBytesTimeoutMs` (`startFirstBytesTimer` above).
 	 *
-	 * FIXME: nothing ends a stream whose request was refused and whose peer
-	 * does not end its direction: as many of them as the limit keep every
-	 * later request of the peer from being read. (A subscription this
-	 * endpoint ended with PUBLISH_DONE is not among them: the peer's
-	 * direction is stopped after `peerStreamEndTimeoutMs`.) The Rust
-	 * implementation has the same ("how long it stays open is the business
-	 * of the two endpoints", crates/moqt-io/src/streams.rs).
+	 * A stream on which this endpoint has finished its direction, for a
+	 * request it refused, a FETCH it served or a subscription it ended with
+	 * PUBLISH_DONE, has the peer's direction stopped after
+	 * `peerStreamEndTimeoutMs` (`awaitPeerEndAfterRefusal` in connection.ts):
+	 * as many of them as the limit would keep every later request of the
+	 * peer from being read.
 	 *
 	 * A subgroup stream that stays open after its header holds a place among
 	 * the unidirectional streams in the same way, and is left to: a time
