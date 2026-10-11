@@ -64,6 +64,8 @@ interface Chat {
 export interface Room {
 	/** Resolves with the broadcast the room has when this page comes, or null. */
 	readonly broadcast: Promise<Broadcast | null>;
+	/** The broadcast the room has now, as it last said; null without one, or before it said anything. */
+	current(): Broadcast | null;
 	/** Says where this page publishes; holds as long as this page is connected to the room. */
 	publish(broadcast: Broadcast): void;
 }
@@ -88,6 +90,7 @@ export function joinRoom(as: string): Room | undefined {
 		log.append(line);
 		log.scrollTop = log.scrollHeight;
 	};
+	let latest: Broadcast | null = null;
 	let first: (broadcast: Broadcast | null) => void = () => {};
 	const broadcast = new Promise<Broadcast | null>((resolve) => {
 		first = resolve;
@@ -97,6 +100,9 @@ export function joinRoom(as: string): Room | undefined {
 		if (message.type === "hello") {
 			message.history.forEach(show);
 			first(message.broadcast);
+		}
+		if (message.type === "hello" || message.type === "broadcast") {
+			latest = message.broadcast;
 		}
 		if (message.type === "chat") show(message);
 		if ((message.type === "hello" || message.type === "connected") && count !== null) {
@@ -115,6 +121,7 @@ export function joinRoom(as: string): Room | undefined {
 	});
 	return {
 		broadcast,
+		current: () => latest,
 		publish(where) {
 			const tell = (): void =>
 				socket.send(JSON.stringify({ type: "broadcast", broadcast: where }));
@@ -122,6 +129,18 @@ export function joinRoom(as: string): Room | undefined {
 			else socket.addEventListener("open", tell, { once: true });
 		},
 	};
+}
+
+/**
+ * `?via=PORT`: the relay through another port of this machine, where
+ * something stands in between (`spikes/lossy-link`).
+ */
+export function through(broadcast: Broadcast): Broadcast {
+	const via = new URLSearchParams(location.search).get("via");
+	if (via === null) return broadcast;
+	const url = new URL(broadcast.relayUrl);
+	url.port = via;
+	return { ...broadcast, relayUrl: url.href };
 }
 
 /** Connects to the relay of a broadcast. */

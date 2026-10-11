@@ -8,4 +8,6 @@ node spikes/lossy-link/proxy.mjs --listen 45386 --to 45382 --control 45387
 bun spikes/lossy-link/measure.ts http://localhost:45381 45386 http://127.0.0.1:45387 "$PWD/interop"
 ```
 
+`reconnect.ts` (a cut of 8 seconds, for the viewer and for the publisher) and `audio-under-loss.ts` (the sound with a longer buffer and with several chunks in a Group) take the same four arguments.
+
 By hand: open `/publish`, then `/watch?via=45386`, and change the link with `curl 'http://127.0.0.1:45387/set?loss=0.05&delay=50&jitter=10'`.

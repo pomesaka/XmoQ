@@ -50,8 +50,38 @@ In `spikes/lossy-link/README.md`. One run of 10 seconds for each condition and m
 - **Delay is added as it is**: 50 and 200 ms more to "came" and "shown", and nothing else. With 200 ms the picture began later (fewer frames in the 10 seconds) and stood twice at the start.
 - **Datagrams that pass each other broke it**: with 30 ms of jitter on 50 ms of delay and 1% loss, a fifth of the frames or fewer were shown and the picture stood for most of the run. **Not looked into**; what is known of QUIC is that it takes a packet that is passed by three later ones for lost and slows down, and this link reorders nearly every packet. A real link jitters without reordering this much, so the row says more about the link here than about a network.
 - **A cut of 3 seconds is survived**: the picture stood for 3.4 seconds and a frame was shown half a second after the link came back. What had been sent meanwhile came all at once and was dropped as too old (`late`) with a Group on a stream; with an Object on a stream the receiver's limits were met as well (`overflow`, `gap`) and the decoder fell behind.
-- **A cut of 8 seconds ends the session, and the page does not come back**: longer than the relay's idle timeout of 6 seconds. The watching page neither connects again nor says that it ended: its line of numbers goes on showing the last ones.
+- **A cut of 8 seconds ends the session, and the page did not come back** (it does now: "Afterwards"): longer than the relay's idle timeout of 6 seconds. The watching page neither connects again nor says that it ended: its line of numbers goes on showing the last ones.
 - **The two mappings did not differ in a way one run each can show**, but for the kinds of drop after a cut and under reordering.
+
+## Afterwards: the pages connect again, and the sound under loss
+
+### A session that ends
+
+Both pages of the demo now say when their session has ended and connect again every 2 seconds; the watching page asks the room anew where the broadcast is, and also starts over when the video track ends while its session is still there. `spikes/lossy-link/reconnect.ts`, a cut of 8 seconds, one run each:
+
+| Whose link was cut | While it was cut | The picture back | The sound back |
+|---|---|---|---|
+| The viewer's | "the session ended (error)" after 6 seconds, then "connecting" | 1.8 s after the link came back | 1.3 s |
+| The publisher's | The viewer still said "playing" at 8 seconds | 3.4 s after the link came back | 3.4 s |
+
+- **A publisher that comes back announces the same namespace again and is taken**: the relay had let the old session go by its idle timeout. Nothing had to be changed in the relay.
+- **A viewer is not told that its publisher is gone for at least 8 seconds.** It learns it some time after the link is back (the run did not note when), and that is where the 3.4 seconds come from: the publisher's 2 seconds, and the viewer's.
+- The encoders of the publishing page go on while it has no session; what they make then goes nowhere.
+
+### The sound under loss
+
+`spikes/lossy-link/audio-under-loss.ts`: the viewer's link with loss, 10 seconds, two runs each. Pieces of audio that came after their time, of about 480:
+
+| | Loss 5% | Loss 10% |
+|---|---|---|
+| As it is: a stream for every chunk of 20 ms, buffer 150 ms | 143, 172 | 292, 320 |
+| Buffer 400 ms (picture and sound) | 0, 0 | 105, 98 |
+| 5 chunks a Group, 100 ms a stream (`chunksPerGroup`, buffer 150 ms) | 0, 0 | 100, 75 |
+| 25 chunks a Group, 500 ms a stream | 0, 0 | **0, 0** |
+
+- **With a stream for every chunk the sound falls behind and stays behind**: a piece came 171 to 397 ms after its time at the median, where the picture came within a few. With 25 chunks a stream it came 12 to 14 ms after, under the same loss. **Why a new stream every 20 ms costs this much under loss was not looked into** (what a stream needs before it can be opened, and what happens when that is lost, would be the place to look).
+- A longer buffer hides it at 5% and not at 10%.
+- **What several chunks in a Group cost was not measured**: a viewer that comes waits for the next Group's first chunk (up to 500 ms with 25), and a lost packet holds back what follows it on its stream. `chunksPerGroup` is an option for trying; without it the publisher does as before.
 
 ## Limitations and blockers
 

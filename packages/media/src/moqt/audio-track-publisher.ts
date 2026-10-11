@@ -15,6 +15,7 @@ import {
 	type PeerSubscribe,
 	type PublishedTrack,
 	RequestErrorCode,
+	type SubgroupWriter,
 } from "@xmoq/moqt";
 
 /** PUBLISH_DONE Status Code TRACK_ENDED (transport draft 18 §10.11). */
@@ -37,6 +38,13 @@ export interface AudioTrackPublisherOptions {
 	epoch: bigint;
 	/** `DEFAULT_MAX_PENDING_AUDIO_CHUNKS` when left out. */
 	maxPendingChunks?: number;
+	/**
+	 * How many chunks share a Group, and so a stream: 1 when left out, the
+	 * example of LOC-04 §4.1. **For trying out**: with more, a subscriber
+	 * can only begin at a Group's first chunk, and a chunk that is lost
+	 * holds the ones after it on its stream back.
+	 */
+	chunksPerGroup?: number;
 }
 
 export interface AudioTrackPublisherStats {
@@ -76,6 +84,10 @@ export function createAudioTrackPublisher(
 	let nextGroup = options.firstGroup;
 	let pending = 0;
 	let queue: Promise<void> = Promise.resolve();
+	const chunksPerGroup = Math.max(1, Math.floor(options.chunksPerGroup ?? 1));
+	/** The chunk's place in its Group, and the stream of the Group that is open. */
+	let nextObject = 0;
+	let open: { to: PublishedTrack; stream: SubgroupWriter } | undefined;
 
 	const isThisTrack = (request: PeerSubscribe | PeerFetch): boolean =>
 		sameBytes(request.trackName, options.trackName) &&
@@ -121,10 +133,16 @@ export function createAudioTrackPublisher(
 		},
 
 		push(chunk) {
-			// A Group for every chunk, also for one that is not sent: the
-			// Group IDs say how many chunks there were.
+			// A place for every chunk, also for one that is not sent: the IDs
+			// say how many chunks there were.
 			const groupId = nextGroup;
-			nextGroup += 1n;
+			const objectId = nextObject;
+			nextObject += 1;
+			const last = nextObject === chunksPerGroup;
+			if (last) {
+				nextGroup += 1n;
+				nextObject = 0;
+			}
 			const to = track;
 			if (ended || to === undefined) return skip("no-subscriber");
 			if (pending >= maxPending) return skip("behind");
@@ -133,22 +151,35 @@ export function createAudioTrackPublisher(
 			queue = queue
 				.then(async () => {
 					if (track !== to) return;
-					const stream = await to.openSubgroup({
-						groupId,
-						subgroupId: { mode: "Zero" },
-						properties: true,
-						// The one Object of its Group.
-						endOfGroup: true,
-					});
+					// A subscriber begins with a Group's first chunk, and a
+					// Group whose stream failed is not gone on with.
+					if (objectId === 0) {
+						if (open !== undefined) await open.stream.reset().catch(() => {});
+						open = {
+							to,
+							stream: await to.openSubgroup({
+								groupId,
+								subgroupId: { mode: "Zero" },
+								properties: true,
+								endOfGroup: false,
+							}),
+						};
+					}
+					if (open === undefined || open.to !== to) return;
+					const { stream } = open;
 					try {
 						await stream.write({
-							objectId: 0n,
+							objectId: BigInt(objectId),
 							payload: chunk.data,
 							properties: locProperties({ timestamp }),
 						});
-						await stream.close();
+						if (last) {
+							open = undefined;
+							await stream.close();
+						}
 						stats.written += 1;
 					} catch (error) {
+						open = undefined;
 						await stream.reset().catch(() => {});
 						throw error;
 					}
@@ -167,6 +198,7 @@ export function createAudioTrackPublisher(
 			const to = track;
 			if (to === undefined) return;
 			await queue;
+			await open?.stream.close().catch(() => {});
 			track = undefined;
 			await to.done(TRACK_ENDED, "").catch(() => {});
 		},
