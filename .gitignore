@@ -1,3 +1,4 @@
 /target/
 node_modules/
+/demo/.cert/
 /.claude/tmp/

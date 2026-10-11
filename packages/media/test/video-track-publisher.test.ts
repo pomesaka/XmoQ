@@ -284,6 +284,24 @@ describe("createVideoTrackPublisher: what is written to the subscription", () =>
 		]);
 	});
 
+	test("a Group that is cut while nobody is subscribed has no key chunk asked for; the subscriber that comes has one, once", async () => {
+		const publisher = publisherOf("stream-per-group");
+		expect(pushed(publisher, ["k", "D", "d"])).toEqual([
+			"no-subscriber",
+			"too-large",
+			"no-key-frame",
+		]);
+		const asked = fakeSubscribe(NAMESPACE, "video");
+		publisher.subscribe(asked.request);
+		await settle();
+		expect(pushed(publisher, ["d", "d", "k", "d"])).toEqual([
+			"no-key-frame+key",
+			"no-key-frame",
+			"",
+			"",
+		]);
+	});
+
 	test("with FORWARD 0 nothing is written, and the end of the track is told", async () => {
 		const { publisher, track } = await subscribed(
 			"stream-per-group",

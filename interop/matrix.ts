@@ -1074,6 +1074,22 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 				})),
 			),
 		),
+		...(relays.includes("own")
+			? [
+					{
+						name: "own relay: video: an own page encodes and publishes video, and moqlivemock's subscriber takes its Groups and Objects",
+						script: "video.ts" as const,
+						args: ["--video", "to-mlmsub"],
+						relay: "own",
+					},
+					{
+						name: "own relay: video: an own page whose key frames are all over what it sends is told so",
+						script: "video.ts" as const,
+						args: ["--video", "key-frames-too-large"],
+						relay: "own",
+					},
+				]
+			: []),
 		// The other two runs with a catalog go through the own relay, and
 		// `catalog.ts` starts it itself.
 		...(relays.includes("own")

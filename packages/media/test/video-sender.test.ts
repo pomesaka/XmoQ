@@ -12,7 +12,7 @@ import {
 	type VideoSenderStep,
 	type VideoStreamMapping,
 } from "../src/index.ts";
-import { capturedObjects } from "./captured.ts";
+import { capturedChunk, capturedObjects } from "./captured.ts";
 
 /** A start code and a NAL unit of two bytes. */
 const DATA = [0x00, 0x00, 0x00, 0x01, 0xaa, 0xbb];
@@ -579,6 +579,35 @@ describe("what the sender writes, the receiver of this package reads", () => {
 			expect(got.map(frameWord)).toEqual(FRAMES);
 		},
 	);
+
+	test("two chunks of Chromium's encoder: each is sent as it is, the key chunk as Object 0 of a Group and the other after it, and the receiver hands both on unchanged", () => {
+		const key = capturedChunk("key");
+		const delta = capturedChunk("delta");
+		const sender = createVideoSender({ firstGroup: 7n, epoch: 1000000n });
+		// The times the encoder gave them, of a source that began at 5 seconds.
+		const steps = [
+			...sender.push({ type: "key", timestamp: 5000000, data: key }),
+			...sender.push({ type: "delta", timestamp: 5040000, data: delta }),
+		];
+		expect(steps.map((step) => step.type)).toEqual(["object", "object"]);
+		const sent = objectsOf(steps);
+		expect(sent.map((object) => object.object.payload)).toEqual([
+			capturedChunk("key"),
+			capturedChunk("delta"),
+		]);
+		const receiver = createVideoReceiver();
+		const frames = sent.flatMap((object) => receiver.push(object));
+		expect(
+			frames.map((event) =>
+				event.type === "frame"
+					? `${event.group},${event.object}${event.key ? "k" : ""}@${event.timestamp} ${event.data.length} bytes`
+					: event.type,
+			),
+		).toEqual(["7,0k@6000000 229 bytes", "7,1@6040000 92 bytes"]);
+		expect(
+			frames.map((event) => (event.type === "frame" ? event.data : undefined)),
+		).toEqual([capturedChunk("key"), capturedChunk("delta")]);
+	});
 
 	test("the frames of moqlivemock's publisher, re-sent: the receiver gives the same for the Objects of the sender as for the ones that were captured", () => {
 		// The captured Objects, as @xmoq/moqt decodes their stream: Group

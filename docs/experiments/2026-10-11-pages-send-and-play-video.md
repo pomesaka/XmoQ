@@ -92,6 +92,31 @@ Run 38123516380 of the pull request, Ubuntu: the browser has an H.264 encoder (t
 | Every 40th frame is not encoded | Fails: "2 numbers are passed over between the frames, and the viewer dropped 0 Objects" |
 | Every 40th frame is painted with the number of the one before | Fails: a frame that does not show a later number |
 
+## The caller is told when no key frame can be sent
+
+`createVideoTrackEncoder` now calls `onKeyChunksNotSent` when 3 key chunks in a row were not sent for what they are. `--video key-frames-too-large`: the bars, with payloads of 100 bytes at most, through the own relay, nobody viewing. Expected, written before the first run, and seen at it: the page was told once, `{"because":"too-large","inARow":3,"length":264}`; with 5 key chunks encoded it had still been told once; no Object written, 5 chunks `too-large`, the encoder not failed.
+
+Temporary changes, each taken back: told at every key chunk from the third on, never told, told at the first: the run fails for each.
+
+Also in the runs with bars now: the page hands the encoder one frame with the time of the frame before it, while the viewer plays. It is counted as `time-not-after` and not encoded; with that check taken out, the run fails (the viewer has a number twice).
+
+## A chunk of the encoder, kept
+
+The first two chunks of the encoder are in `fixtures/loc-04/` (its README has how they were taken): 229 and 92 bytes. **Every NAL unit in them has a start code of 4 bytes**, the ones after the first of a chunk as well, which had not been looked at. The sequence parameter set says `42 00 0d` where the encoder was configured with `avc1.42E01F`.
+
+## `moqlivemock`'s subscriber takes the video
+
+`--video to-mlmsub`: the bars, a Group on a stream, through the own relay; `mlmsub` v0.16.1 with `-videoname video -loglevel debug`. What it does with a track was read in its source first (`internal/sub/sub.go`, `internal/sub/loc.go`, commit `91d903e9`).
+
+| | Seen |
+|---|---|
+| The catalog | Read with a Joining FETCH; "selected video track based on substring match trackName=video"; "catalog uses LOC packaging" |
+| Groups | Three in a row, Group IDs up by 1, Subgroup 0, Timestamps 1,000,000 microseconds apart and at the time of the clock. As expected |
+| Objects | 1 to 24 of the first Group, 40,000 microseconds apart. As expected |
+
+- **With `-videoout`, `mlmsub` cannot take this video, and one expectation was wrong.** Its `LOCVideoWriter` takes a payload to have a length of 4 bytes before every NAL unit. It read the start code of the first Object as a length of 1 and the next four bytes as a length: `failed to write LOC sample error="LOC AVC: NALU length 1107299721 exceeds remaining data 237"`, which had been worked out from the source. **What had not been read is the `return` after that line**: `mlmsub` reads the track no further, so the three Groups that were expected all the same did not come. The run is without `-videoout`.
+- So the two implementations agree on the transport, the catalog and the Timestamp, and **not on the form of the payload**: `moqlivemock` sends and reads lengths, the sender here writes start codes, and the receiver here reads both.
+
 ## Limitations and blockers
 
 - **Not run**: a viewer that comes later than the relay's subscription (it waits for the next key frame; a Joining FETCH is not sent); frames of a real picture; a viewer that does not read, with a stream for every Object, which is where the relay's limit of 256 streams would be met; a subscriber that is behind and a write that fails, with a browser; `moqlivemock`'s subscriber as the viewer; Linux.
@@ -103,5 +128,6 @@ Run 38123516380 of the pull request, Ubuntu: the browser has an H.264 encoder (t
 ## Open questions raised
 
 - Whether `maxEncodeQueue` of 2 is right: frames were lost to it while the encoder started.
-- What a publisher is to do when its key frames are over what it sends: say so to the caller, send them all the same, or ask the encoder for less.
+- What a caller is to do when it is told that its key frames are over what is sent, and whether the limit is to go up.
+- Whether the sender is to write lengths before the NAL units, as `moqlivemock` does, for a subscriber like `mlmsub`.
 - Whether `playVideoTrack` is to send a Joining FETCH, now that the relay keeps the latest Group.
