@@ -164,6 +164,11 @@ async function main(): Promise<void> {
 		bitrate: 1_500_000,
 		framerate: FRAMES_A_SECOND,
 		keyFrameIntervalMs: 1000,
+		// `?mapping=stream-per-object` puts every Object on a stream of its own.
+		...(new URLSearchParams(location.search).get("mapping") ===
+		"stream-per-object"
+			? { mapping: "stream-per-object" as const }
+			: {}),
 		onKeyChunksNotSent(event) {
 			say(`key frames are not sent: ${JSON.stringify(event)}`);
 		},

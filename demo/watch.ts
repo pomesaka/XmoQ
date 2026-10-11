@@ -67,6 +67,14 @@ async function main(): Promise<void> {
 		}
 		broadcast = found;
 	}
+	// `?via=PORT`: the relay through another port of this machine, where
+	// something stands in between (`spikes/lossy-link`).
+	const via = query.get("via");
+	if (via !== null) {
+		const url = new URL(broadcast.relayUrl);
+		url.port = via;
+		broadcast = { ...broadcast, relayUrl: url.href };
+	}
 	document.body.dataset.broadcast = JSON.stringify(broadcast);
 	say("connecting");
 	const connection = await connectToRelay(broadcast);
@@ -97,6 +105,10 @@ async function main(): Promise<void> {
 	let firstFrameAfterMs: number | undefined;
 	let frames: { frame: VideoFrame; due: number; mark: boolean }[] = [];
 	let markShown = false;
+	/** When a frame was last drawn, how many were, and when the picture stood still, by this page's clock in milliseconds. */
+	let lastShown: number | undefined;
+	let shown = 0;
+	const stalls: { from: number; to: number }[] = [];
 	const playback = await playVideoTrack(connection, {
 		trackNamespace: namespace(broadcast.namespace),
 		trackName: trackName(),
@@ -149,6 +161,12 @@ async function main(): Promise<void> {
 			context.drawImage(show.frame, 0, 0);
 			played.video.add(now - show.frame.timestamp / 1000);
 			show.frame.close();
+			// A picture that stood still for more than 100 ms.
+			if (lastShown !== undefined && now - lastShown > 100) {
+				stalls.push({ from: lastShown, to: now });
+			}
+			lastShown = now;
+			shown += 1;
 		}
 		requestAnimationFrame(repaint);
 	};
@@ -228,6 +246,10 @@ async function main(): Promise<void> {
 			videoFrames: stats.decoded,
 			audioPieces: heard?.decoded ?? 0,
 			tooLate,
+			shown,
+			stalls,
+			lastShown: lastShown ?? null,
+			dropped: { video: stats.dropped, audio: heard?.dropped ?? {} },
 			arrived: { video: arrived.video.text(), audio: arrived.audio.text() },
 			played: { video: played.video.text(), audio: played.audio.text() },
 			together,
