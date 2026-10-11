@@ -61,6 +61,24 @@ Where the NetworkError came:
 
 What a wrong reading would cost, should a NetworkError come at the end of a session after all, by the paths of `@xmoq/moqt` as they are: for a subgroup stream, a reset is written to a session that has ended, and nothing else. For the request stream of a PUBLISH, the subscription would be reported as ended by the peer (`peer-reset`) a moment before the session is reported closed. For the control stream, a stop is a PROTOCOL_VIOLATION of the peer, which is why that stream has to be left out of any such reading.
 
+### A stream the server opened
+
+Added later on 2026-10-11, for `MoqtConnection.serve`: a subscription the page accepted is on a bidirectional stream the relay opened, and a relay that cancels it resets its direction of that stream and sends STOP_SENDING for the page's. The runs above were on streams the page opened. Same server, with paths that open a bidirectional stream, write one byte on it, and then act; same browser. `bun spikes/wt-write-abort/run.ts --rounds 40 --opened-by peer`, 840 samples (`out/peer-opened-40.txt`), and the two runs of one scenario named below.
+
+| What the server does to its stream | `writer.closed` of the page, and a write under way | Samples |
+|---|---|---|
+| STOP_SENDING after 100 ms | `WebTransportError`, `source` "stream", code 7 | 120 of 120 |
+| Reset of its direction and STOP_SENDING, after 100 ms | `DOMException` NetworkError, "The stream was aborted by the remote server"; no code | 120 of 120 |
+| The same, at once | The same NetworkError in 107. **In 13 the stream was not handed to the page at all** (nothing from `incomingBidirectionalStreams` within a second) | 120 |
+| STOP_SENDING at once | Code 7 in 94, NetworkError in 19, **and in 7 nothing**: the first write resolved, `writer.closed` stayed pending, and the connection ended 2 seconds later | 120 |
+| Closes the session; the page closes it; the server is killed | `WebTransportError`, `source` "session" | 360 of 360 |
+
+- **The reading of the library holds on a stream the peer opened**: a NetworkError is a stream the peer stopped, with a code the page does not get, and the end of a session is never one (0 of 360 here, 0 of 1080 above).
+- **A relay's way of cancelling, reset and STOP_SENDING, gives the page no code on the writer**: every one of the 227 writers got the NetworkError. The code of the reset reaches the page on the reading side, which is not looked at here.
+- **A STOP_SENDING that arrives before the page has taken the stream can go unreported.** Run again alone (`--only stop-now`, `out/peer-opened-stop-now-40.txt`): 13 of 120. The server saw each of those connections closed by Chromium for "No recent network activity after 2000 ms", with two active streams; the writes the page made meanwhile resolved or stayed pending, and nothing went out. On streams the page opened, the same scenario reported every stop (240 of 240, `out/own-opened-stop-now-40.txt`): the page has the writer before the server can stop it.
+  - The server of the spike sends no keep-alive. A relay that does keeps such a session open, and the page then goes on believing in a stream that was stopped.
+  - What `@xmoq/moqt` reads on such a stream is still read: a peer that also resets its direction, as the own relay does when it cancels, is noticed there.
+
 ## Limitations and blockers
 
 No blocker.

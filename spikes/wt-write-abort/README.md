@@ -7,6 +7,8 @@ Spike, outside lint and review. It is the measurement of [the record](../../docs
 | `src/main.rs` | A WebTransport server on `web-transport-quinn` 0.13.2 that stops streams, closes the session, or holds everything |
 | `run.ts` | Starts the server and Chromium, runs the samples on raw `WebTransport`, and prints how often each outcome was seen |
 | `out/rounds-60.txt` | What the run of the record printed |
+| `out/peer-opened-40.txt` | `run.ts --opened-by peer`: the same on a bidirectional stream the server opened, with a server that also resets its direction (the `/peer-` paths) |
+| `out/peer-opened-stop-now-40.txt`, `out/own-opened-stop-now-40.txt` | `--only stop-now`, with and without `--opened-by peer`: a STOP_SENDING at once, with how long the writer took to hear of it and how the server saw each session end |
 | `own-reset.ts` | The same server and browser: what a writer and a write under way fail with when the page aborts the writer itself |
 | `out/own-reset-20.txt` | What that printed |
 

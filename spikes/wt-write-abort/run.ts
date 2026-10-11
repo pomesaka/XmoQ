@@ -18,6 +18,11 @@ const { values: options } = parseArgs({
 		rounds: { type: "string", default: "40" },
 		port: { type: "string", default: "47330" },
 		out: { type: "string", default: "" },
+		// "peer": the server opens a bidirectional stream, and the page
+		// writes on that one.
+		"opened-by": { type: "string", default: "page" },
+		// Runs this scenario alone, and no killed server.
+		only: { type: "string", default: "" },
 	},
 });
 const rounds = Number(options.rounds);
@@ -28,6 +33,8 @@ const key = join(root, "interop/.cert/key.pem");
 const certSha256 = createHash("sha256")
 	.update(new X509Certificate(readFileSync(cert)).raw)
 	.digest("hex");
+
+const serverLines: string[] = [];
 
 /** Starts the server and resolves once it listens. */
 async function startServer(): Promise<ChildProcess> {
@@ -40,13 +47,24 @@ async function startServer(): Promise<ChildProcess> {
 		server.stdout?.setEncoding("utf8");
 		server.stdout?.on("data", (text: string) => {
 			if (text.includes("LISTENING")) resolve();
+			// How the server saw a session end, and what it failed with.
+			for (const line of text.split("\n")) {
+				if (/^(ENDED|ERROR)/.test(line)) serverLines.push(line);
+			}
 		});
 		server.once("exit", (code) => reject(new Error(`the server exited: ${code}`)));
 	});
 	return server;
 }
 
-type Scenario = "stop" | "stop-now" | "peer-close" | "local-close" | "killed";
+type Scenario =
+	| "stop"
+	| "stop-now"
+	| "cancel"
+	| "cancel-now"
+	| "peer-close"
+	| "local-close"
+	| "killed";
 type Kind = "uni" | "bidi";
 /**
  * What the writer does when it happens: nothing; one large write that waits
@@ -74,16 +92,19 @@ interface Sample {
 	sessionClosed: Outcome;
 	/** Milliseconds from `writer.closed` settling to `closed` of the session settling; negative when the session was first, null when it had not settled 300 ms later. */
 	sessionAfterMs: number | null;
+	/** Milliseconds from the page having the writer to `writer.closed` settling; null when it had not. */
+	writerClosedAfterMs: number | null;
 }
 
 // Runs in the page, on raw `WebTransport`. `go` resolves when the driver has
 // done its part of the scenario (killed the server); the others need none.
-async function sample([url, hashHex, scenario, kind, mode]: [
+async function sample([url, hashHex, scenario, kind, mode, byPeer]: [
 	string,
 	string,
 	Scenario,
 	Kind,
 	Mode,
+	boolean,
 ]): Promise<Sample> {
 	const describe = (error: unknown): string => {
 		// biome-ignore lint/suspicious/noExplicitAny: a value of the browser, looked at field by field
@@ -95,13 +116,25 @@ async function sample([url, hashHex, scenario, kind, mode]: [
 	const hash = new Uint8Array(
 		(hashHex.match(/../g) ?? []).map((pair) => Number.parseInt(pair, 16)),
 	);
-	const path = {
-		stop: "/stop",
-		"stop-now": "/stop-now",
-		"peer-close": "/close",
-		"local-close": "/hold",
-		killed: "/hold",
-	}[scenario];
+	const path = byPeer
+		? {
+				stop: "/peer-stop",
+				"stop-now": "/peer-stop-now",
+				cancel: "/peer-cancel",
+				"cancel-now": "/peer-cancel-now",
+				"peer-close": "/peer-close",
+				"local-close": "/peer-hold",
+				killed: "/peer-hold",
+			}[scenario]
+		: {
+				stop: "/stop",
+				"stop-now": "/stop-now",
+				cancel: "/unknown",
+				"cancel-now": "/unknown",
+				"peer-close": "/close",
+				"local-close": "/hold",
+				killed: "/hold",
+			}[scenario];
 	// biome-ignore lint/suspicious/noExplicitAny: `WebTransport` is not in the types of this script
 	const transport = new (globalThis as any).WebTransport(url + path, {
 		serverCertificateHashes: [{ algorithm: "sha-256", value: hash }],
@@ -119,11 +152,36 @@ async function sample([url, hashHex, scenario, kind, mode]: [
 			sessionClosedAt = performance.now();
 		},
 	);
-	const writable: WritableStream<Uint8Array> =
-		kind === "uni"
+	// A stream the server opened and reset at once may never be handed to the
+	// page; that is reported and not waited for.
+	const incoming = byPeer
+		? await Promise.race([
+				transport.incomingBidirectionalStreams.getReader().read(),
+				sleep(1000).then(() => undefined),
+			])
+		: undefined;
+	if (byPeer && incoming?.value === undefined) {
+		transport.close();
+		return {
+			scenario,
+			kind,
+			mode,
+			firstWrite: "the stream was not handed to the page within 1 s",
+			writerClosed: "none",
+			pendingWrite: "none",
+			lateWrite: "none",
+			sessionClosed,
+			sessionAfterMs: null,
+			writerClosedAfterMs: null,
+		};
+	}
+	const writable: WritableStream<Uint8Array> = byPeer
+		? incoming.value.writable
+		: kind === "uni"
 			? await transport.createUnidirectionalStream()
 			: (await transport.createBidirectionalStream()).writable;
 	const writer = writable.getWriter();
+	const hadWriterAt = performance.now();
 	// The stream exists for the peer from its first byte on. A peer that
 	// stops the stream at once can make this write fail already.
 	const firstWrite: string = await writer.write(new Uint8Array([1])).then(
@@ -200,6 +258,10 @@ async function sample([url, hashHex, scenario, kind, mode]: [
 		lateWrite,
 		sessionClosed,
 		sessionAfterMs,
+		writerClosedAfterMs:
+			writerClosedAt === undefined
+				? null
+				: Math.round(writerClosedAt - hadWriterAt),
 	};
 }
 
@@ -226,29 +288,35 @@ await page.exposeFunction("serverKilled", () => whenKilled);
 
 const url = `https://127.0.0.1:${options.port}`;
 const samples: Sample[] = [];
-const combos: [Kind, Mode][] = [
-	["uni", "idle"],
-	["uni", "waiting"],
-	["uni", "writing"],
-	["bidi", "idle"],
-	["bidi", "waiting"],
-	["bidi", "writing"],
-];
+const byPeer = options["opened-by"] === "peer";
+const combos: [Kind, Mode][] = byPeer
+	? [
+			["bidi", "idle"],
+			["bidi", "waiting"],
+			["bidi", "writing"],
+		]
+	: [
+			["uni", "idle"],
+			["uni", "waiting"],
+			["uni", "writing"],
+			["bidi", "idle"],
+			["bidi", "waiting"],
+			["bidi", "writing"],
+		];
 const run = (scenario: Scenario, kind: Kind, mode: Mode): Promise<Sample> =>
-	page.evaluate(sample, [url, certSha256, scenario, kind, mode] satisfies [
+	page.evaluate(sample, [url, certSha256, scenario, kind, mode, byPeer] satisfies [
 		string,
 		string,
 		Scenario,
 		Kind,
 		Mode,
+		boolean,
 	]);
 
-for (const scenario of [
-	"stop",
-	"stop-now",
-	"peer-close",
-	"local-close",
-] satisfies Scenario[]) {
+for (const scenario of (byPeer
+	? ["stop", "stop-now", "cancel", "cancel-now", "peer-close", "local-close"]
+	: ["stop", "stop-now", "peer-close", "local-close"]) satisfies Scenario[]) {
+	if (options.only !== "" && scenario !== options.only) continue;
 	for (const [kind, pending] of combos) {
 		// Eight at a time: one after the other would take minutes.
 		for (let done = 0; done < rounds; done += 8) {
@@ -267,7 +335,7 @@ for (const scenario of [
 // gives a sample for each: ten of each kind and mode a kill, with a server
 // started anew in between. WHY not more at once: the server gives a session
 // 3 seconds without traffic, and a batch has to be open before that.
-for (let done = 0; done < rounds; done += 10) {
+for (let done = 0; options.only === "" && done < rounds; done += 10) {
 	const open = combos.flatMap(([kind, mode]) =>
 		Array.from({ length: Math.min(10, rounds - done) }, () =>
 			run("killed", kind, mode),
@@ -294,7 +362,15 @@ for (const each of samples) {
 			: each.sessionAfterMs >= 0
 				? "writer first"
 				: "session first";
-	const row = `${each.scenario} | ${each.kind} | ${each.mode} | first write: ${each.firstWrite} | writer.closed: ${each.writerClosed} | waiting write: ${each.pendingWrite} | later write: ${each.lateWrite} | session: ${each.sessionClosed} | ${order}`;
+	// A writer that hears of nothing until the server gives the idle
+	// connection up, after 3 seconds, was not told of what was done to it.
+	const heard =
+		each.writerClosedAfterMs === null
+			? "never"
+			: each.writerClosedAfterMs >= 2500
+				? "after 2.5 s or more"
+				: "within 2.5 s";
+	const row = `${each.scenario} | ${each.kind} | ${each.mode} | first write: ${each.firstWrite} | writer.closed (${heard}): ${each.writerClosed} | waiting write: ${each.pendingWrite} | later write: ${each.lateWrite} | session: ${each.sessionClosed} | ${order}`;
 	table.set(row, (table.get(row) ?? 0) + 1);
 	if (each.sessionAfterMs !== null) {
 		const group = `${each.scenario} | ${each.kind} | ${each.mode}`;
@@ -310,6 +386,14 @@ const lines = [
 		return `${group}: ${sorted[0]} / ${sorted[Math.floor(sorted.length / 2)]} / ${sorted.at(-1)} (n=${sorted.length})`;
 	}),
 ];
+const serverSaw = new Map<string, number>();
+for (const line of serverLines) {
+	serverSaw.set(line, (serverSaw.get(line) ?? 0) + 1);
+}
+lines.push(
+	"how the server saw the sessions end:",
+	...[...serverSaw.entries()].sort().map(([line, count]) => `${count} x ${line}`),
+);
 console.log(lines.join("\n"));
 if (options.out !== "") writeFileSync(options.out, `${lines.join("\n")}\n`);
 
