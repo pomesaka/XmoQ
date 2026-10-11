@@ -152,7 +152,7 @@ export interface FakePeer {
  * the write is then rejected with what the stream was aborted with.
  *
  * WHY `abort` of the writer is wrapped: by the Streams standard an abort
- * waits for the write that is under way, and bun 1.3.12 has no
+ * waits for the write that is under way, and bun 1.3.14 has no
  * `controller.signal` for a sink to hear of the abort. Chromium's stream
  * rejects the write at once.
  */
@@ -196,7 +196,7 @@ function stallingWritable(stalls: () => boolean): WritableStream<Uint8Array> {
  * the stream was aborted with. That is what Chromium 156 does to a write of
  * 8 MiB that waits for the peer's window when the page aborts the writer
  * (spikes/wt-write-abort/out/own-reset-20.txt). WHY not the pipe of the
- * other streams with a reader that does not read: in bun 1.3.12 `abort()`
+ * other streams with a reader that does not read: in bun 1.3.14 `abort()`
  * of such a stream waits for the write that is under way and settles
  * nothing. The peer's side of these streams reads nothing.
  */

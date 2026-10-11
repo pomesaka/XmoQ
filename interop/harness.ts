@@ -232,8 +232,9 @@ const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 } as const;
  *
  * WHY `once` for the signals: a second signal then gets the default action
  * and ends the driver at once, which is the way out if a cleanup hangs.
- * WHY the uncaught failures: Bun 1.3.12 ends the process on them without
- * running any `finally`, and the relay stayed behind with its port.
+ * WHY the uncaught failures: Bun ends the process on them without running
+ * any `finally` (1.3.12, and 1.3.14 the same), and the relay stayed behind
+ * with its port.
  */
 export function stopEverythingOnExit(): void {
 	for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -503,8 +504,9 @@ async function servePages(clients: BrowserClient[]): Promise<string> {
 		const build = await Bun.build({
 			entrypoints: [page.entrypoint],
 			target: "browser",
-			// WHY: Bun 1.3.12 otherwise throws an error that says only "Bundle
-			// failed"; the reasons are in `build.logs`.
+			// WHY: Bun otherwise throws an error whose message is only "Bundle
+			// failed" (1.3.12, and 1.3.14 the same); the reasons are in
+			// `build.logs`.
 			throw: false,
 		});
 		const [bundle] = build.outputs;
