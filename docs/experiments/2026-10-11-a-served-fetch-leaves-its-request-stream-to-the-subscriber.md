@@ -57,3 +57,12 @@ In every sequence that differs, the first difference is that the last action of 
 - No run had a subscriber that never ends its direction: the 3 seconds, and the 2 after them, ran in no real run. In the Rust client the wait is a test of the task of the request stream, with shorter times.
 - `@xmoq/moqt`, where it answers a FETCH, is changed by another session; nothing of it was run here.
 - "The first difference" is all the comparison says of a sequence; see [the record of that tool](2026-10-11-relay-core-diff-with-fetch.md).
+
+## The table of how a served FETCH ends, read by the tests
+
+Added after the runs above, with `fixtures/peer-fetch/served-end.tsv`. Its outcomes were written from the rule before any test read them.
+
+- The relay's test (`crates/relay/src/tests.rs`, over the hub and in-memory connections) had all ten rows as written.
+- The Rust client's test (`crates/moqt-client/src/serving.rs`) did not, and two mistakes of the client were put right; no row changed. One: the task of a request stream waited for ever where the client let go of its queue of messages and ended the stream in one step. The other: a direction the subscriber had stopped at the moment the fetch stream was written was finished, where it is to be reset.
+- **The table's test holds the first of the two and not the second.** A reviewer took each correction out again: without the first, the table's test fails; without the second it passes, and `an_answer_that_cannot_be_written_still_ends_the_request_stream_once` fails. The table has no row for a STOP_SENDING that came before the fetch stream was written.
+- In the Rust client's test the `update` step sent nothing at first, so the `update` column was read and not checked. It now hands an answer over for the stream and checks that none is written.

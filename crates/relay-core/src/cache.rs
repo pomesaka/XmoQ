@@ -384,25 +384,25 @@ impl Cache {
         if start.group != group.id || last.group != group.id || start > last {
             return None;
         }
-        // The first Object ID that is not known yet.
-        let mut unknown_from = 0u64;
+        // The first Object ID that is not known yet; none when the Group
+        // is known to its end.
+        let mut unknown_from = Some(0u64);
         for (object_id, cached) in &group.objects {
             // A gap larger than the Object ID makes the track malformed
             // (§12.9), which is not found here: the cache does not answer.
             let covered_from = object_id.checked_sub(cached.prior_gap())?;
-            if covered_from > unknown_from {
+            if unknown_from.is_none_or(|unknown| covered_from > unknown) {
                 break;
             }
-            if cached.object.status == ObjectStatus::EndOfGroup {
-                unknown_from = u64::MAX;
-                break;
-            }
-            unknown_from = object_id.saturating_add(1);
-            if unknown_from > last.object {
+            unknown_from = match cached.object.status {
+                ObjectStatus::EndOfGroup => None,
+                _ => object_id.checked_add(1),
+            };
+            if unknown_from.is_none_or(|unknown| unknown > last.object) {
                 break;
             }
         }
-        if unknown_from <= last.object {
+        if unknown_from.is_some_and(|unknown| unknown <= last.object) {
             return None;
         }
         // A fetch stream has no Object Status (§11.4.4.1): an End of Group
@@ -546,11 +546,13 @@ mod tests {
         let ended = || vec![object(5, 0, 0), object(5, 1, 0), status(5, 2, end_of_group)];
         let (cache, _) = cache_of(ended());
         // (the first and the last Object ID asked for; the answer)
-        let cases: [(Asked, Answer); 4] = [
+        let cases: [(Asked, Answer); 5] = [
             ((0, 1), Some(&[0, 1])),
             ((0, 2), Some(&[0, 1])),
             ((1, 900), Some(&[1])),
             ((2, 900), Some(&[])),
+            // Up to the last Object ID there is.
+            ((0, u64::MAX), Some(&[0, 1])),
         ];
         for ((first, last), answer) in cases {
             assert_eq!(
