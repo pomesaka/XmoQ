@@ -36,6 +36,11 @@ pub fn catalog_track(track: &xmoq_msf::CatalogTrack) {
     );
 }
 
+/// The peer closed the session, with this Session Termination Error Code.
+pub fn closed_by_peer(code: u32, reason: &str) {
+    println!("SESSION_CLOSED_BY_PEER code={code:#x} reason={reason:?}");
+}
+
 pub fn subscribed(track_alias: u64) {
     println!("SUBSCRIBED track_alias={track_alias}");
 }
