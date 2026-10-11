@@ -41,23 +41,28 @@
 //                     that fetches gives the FETCH up after a second.
 //   page-refuses      The publisher refuses with DOES_NOT_EXIST.
 //   page-large-group-cancelled
-//                     The publisher sends one more Group, of 8 Objects of
-//                     900,000 bytes each, which the relay then holds as the
+//                     The publisher sends one more Group, of 83 Objects of
+//                     100,000 bytes each, which the relay then holds as the
 //                     latest. The page asks for that Group, reads nothing
 //                     of the fetch stream, and gives the FETCH up after a
 //                     second. Written before the first run, from the notes
 //                     ("The relay's cache", "The subscriber gives its FETCH
 //                     up"): the relay answers itself, FETCH_OK with End
-//                     Location {3, 8} and `WRITE_FETCH_STREAM … pieces=8`,
-//                     and sends no FETCH to the publisher; the 7.2 MB do not
+//                     Location {3, 83} and `WRITE_FETCH_STREAM … pieces=83`,
+//                     and sends no FETCH to the publisher; the 8.3 MB do not
 //                     fit into what a subscriber that reads nothing takes,
 //                     so the relay is still writing when the page gives up.
 //                     A page that gives a FETCH up stops the fetch stream as
 //                     well as the request stream (`cancel` of `@xmoq/moqt`),
 //                     so the relay's writer meets the stop of its own
 //                     stream: `FETCH_WRITE_ENDED … stopped pieces=K
-//                     code=0x1` with K below 8. A write that was whole says
-//                     `finished pieces=8`, and the run fails for it. (The
+//                     code=0x1` with K below 83. A write that was whole says
+//                     `finished pieces=83`, and the run fails for it. WHY 83
+//                     Objects of 100,000 bytes: the relay had handed about
+//                     6.2 MB to the transport when the page gave up (62
+//                     Objects; 6 of 8 with Objects of 900,000 bytes), and
+//                     8.3 MB is what fits under the 8 MiB the relay keeps of
+//                     a track, so 2.1 MB is the margin there is. (The
 //                     first expectation, `ABORT_FETCH_WRITE`, was wrong, 7
 //                     runs of 7: that is the relay's own order to stop, for
 //                     a subscriber that leaves the fetch stream alone.)
@@ -714,8 +719,8 @@ async function expectServedToTheMoqtailRelay(
 	}
 }
 
-/** The Objects of the large Group, and the bytes of each: 7.2 MB, under the 8 MiB the relay keeps of a track, each Object under the 1 MiB it takes. */
-const LARGE_GROUP = { objects: 8, bytes: 900_000 };
+/** The Objects of the large Group, and the bytes of each: 8.3 MB, just under the 8 MiB (8,388,608 bytes) the relay keeps of a track. */
+const LARGE_GROUP = { objects: 83, bytes: 100_000 };
 
 /** `page-large-group-cancelled`, which has a report of its own: nothing of the fetch stream is read. */
 async function largeGroupCancelled(): Promise<string> {

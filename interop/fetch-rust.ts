@@ -19,6 +19,31 @@
 //                         of their own, and the relay may read the FETCH
 //                         first.
 //
+//   page-large-request-only
+//                         The page sends one more Group, 8 Objects of
+//                         900,000 bytes, which the relay then holds as the
+//                         latest. The client asks for that Group, reads
+//                         nothing of the fetch stream, and gives the FETCH
+//                         up after a second **on the request stream alone**
+//                         (`--fetch-cancel-request-only`): it resets and
+//                         stops that stream and leaves the fetch stream as
+//                         it is. Written before the first run, from the
+//                         notes ("The relay's cache", "The subscriber gives
+//                         its FETCH up"): the client has FETCH_OK with End
+//                         Location {3, 8} and `FETCH_ENDED … how=cancelled …
+//                         objects=0`, and exits with 0. The relay answers
+//                         itself (`WRITE_FETCH_STREAM … pieces=8`, no FETCH
+//                         to the publisher), is still writing when the
+//                         request stream is reset, and stops by its own
+//                         order: `ABORT_FETCH_WRITE session=S stream=T
+//                         code=0x1` (**corrected after the first run**:
+//                         expected once, and it came twice, for the reset of
+//                         the request stream and for its stop; the run takes
+//                         one or more), then `FETCH_WRITE_ENDED session=S
+//                         stream=T aborted pieces=K code=0x1` with K below
+//                         8. `stopped` in place of `aborted` would say that
+//                         the client stopped the fetch stream as well.
+//
 // The cases that begin with `test-` have moqtail's test client as the
 // publisher, which publishes by itself, three Objects a Group.
 //
@@ -29,6 +54,7 @@
 // What is expected is in `EXPECTED`, written before the runs.
 
 import { parseArgs } from "node:util";
+import { startSubscriber } from "./clients.ts";
 import {
 	PAGE_GROUPS_BEFORE,
 	publishFromAPage,
@@ -37,11 +63,13 @@ import {
 import {
 	captureGroup,
 	log,
+	pollFor,
 	runCleanups,
 	spawnRustClient,
 	startRun,
 	stopEverythingOnExit,
 	TRACK,
+	withTimeout,
 } from "./harness.ts";
 
 const { values: options } = parseArgs({
@@ -154,7 +182,166 @@ const EXPECTED: Record<string, Partial<Record<Case, Expected>>> = {
 /** How many Objects a Group of moqtail's test client has. */
 const TEST_OBJECTS_A_GROUP = 3;
 
+/** The Objects of the large Group, and the bytes of each: 7.2 MB, under the 8 MiB the relay keeps of a track. The relay had written 1 of the 8 when the client gave up, in 7 runs of 7. */
+const LARGE_GROUP = { objects: 8, bytes: 900_000 };
+/** After how long the client gives its FETCH up, in milliseconds. */
+const CANCEL_AFTER_MS = 1000;
+
+/** `page-large-request-only`: nothing of the fetch stream is read, so the client prints no Object. */
+async function largeGroupRequestOnly(): Promise<string> {
+	const sentHex = Buffer.from("xmoq-fetch large").toString("hex");
+	const context = await startRun({
+		relay: options.relay,
+		port: options.port,
+		clients: ["own-browser", "own-browser", "own-rust"],
+		verbose: options.verbose,
+	});
+	const publisher = await publishFromAPage("serve", context, sentHex);
+	// Says when the relay has passed an Object on, and so holds it.
+	const watcher = await startSubscriber(
+		"own-browser",
+		"watcher:own-browser",
+		{ context, payloadHex: sentHex },
+		{},
+	);
+	const watched = watcher.objectsOfGroup;
+	if (publisher.sendLargeGroup === undefined || watched === undefined) {
+		throw new Error(
+			"the run needs own pages for the publisher and the watcher",
+		);
+	}
+	const { objects, bytes } = LARGE_GROUP;
+	const group = await withTimeout(
+		publisher.sendLargeGroup(objects, bytes),
+		"the publisher to send the large Group",
+	);
+	await pollFor(
+		async () => ((await watched(group)) === objects ? true : undefined),
+		`the watching page to have the ${objects} Objects of Group ${group} by its subscription`,
+	);
+	const client = spawnRustClient(
+		context,
+		"fetcher:own-rust",
+		"own-rust",
+		"fetch",
+		TRACK,
+		[
+			"--fetch-start",
+			`${group},0`,
+			"--fetch-end",
+			`${group + 1},0`,
+			// Longer than the run: nothing of the fetch stream is read. The
+			// stream is open when the FETCH is given up, which a stream that
+			// came after that would not be: the session stops it.
+			"--fetch-read-after-ms",
+			"60000",
+			"--fetch-cancel-after-ms",
+			String(CANCEL_AFTER_MS),
+			"--fetch-cancel-request-only",
+			// The relay's lines for the end of its writing come while the
+			// session is there.
+			"--fetch-stay-ms",
+			"3000",
+			"--timeout-secs",
+			"20",
+		],
+	);
+	const ended = await client.waitForLine(
+		/^FETCH_ENDED request_id=(\d+) how=(\S+) code=(\S+) objects=(\d+)$/,
+	);
+	const seen = `${client
+		.matches(/^FETCH_(?:OK|REFUSED|OBJECT|RANGE_END|STREAM_REFUSED) .*$/)
+		.map((match) => match[0])
+		.join("; ")}; ${ended[0]}`;
+	log("driver", `REPORT ${seen}`);
+	const ok = client
+		.matches(/^FETCH_OK request_id=\d+ end_group=(\d+) end_object=(\d+) /)
+		.at(0);
+	if (
+		ok === undefined ||
+		`${captureGroup(ok, 1)},${captureGroup(ok, 2)}` !== `${group},${objects}`
+	) {
+		throw new Error(
+			`the FETCH got no FETCH_OK with End Location {${group}, ${objects}}: ${seen}`,
+		);
+	}
+	if (
+		captureGroup(ended, 2) !== "cancelled" ||
+		captureGroup(ended, 4) !== "0"
+	) {
+		throw new Error(
+			`the FETCH did not end as cancelled, without an Object read: ${seen}`,
+		);
+	}
+
+	const written = await context.relay.waitForLine(
+		/^WRITE_FETCH_STREAM session=(\d+) request_id=\d+ pieces=(\d+)$/,
+	);
+	if (captureGroup(written, 2) !== String(objects)) {
+		throw new Error(
+			`the relay wrote ${captureGroup(written, 2)} pieces, not the ${objects} Objects of the Group: ${written[0]}`,
+		);
+	}
+	const session = captureGroup(written, 1);
+	const ENDED = new RegExp(
+		`^FETCH_WRITE_ENDED session=${session} stream=(\\d+) (\\S+) pieces=(\\d+)(?: code=(\\S+))?$`,
+	);
+	const end = await context.relay.waitForLine(ENDED);
+	const [stream, how, pieces, code] = [1, 2, 3, 4].map((index) => end[index]);
+	if (how !== "aborted" || code !== "0x1" || Number(pieces) >= objects) {
+		throw new Error(
+			`the relay's writing was to end by the relay's own order (aborted) with CANCELLED (0x1), before all ${objects} Objects were written: ${end[0]}`,
+		);
+	}
+	const orders = await context.relay.linesBefore(
+		{ line: ENDED },
+		new RegExp(
+			`^ABORT_FETCH_WRITE session=${session} stream=${stream} code=(\\S+)$`,
+		),
+	);
+	// One for the reset of the request stream and one for its stop, where
+	// both have come before the writing ended: the second does nothing.
+	if (orders.length === 0 || orders.some((order) => order[1] !== "0x1")) {
+		throw new Error(
+			`the relay was to order its writing stopped with CANCELLED (0x1) before the writing ended; it printed [${orders.map((order) => order[0]).join("; ")}]`,
+		);
+	}
+	const asked = await context.relay.linesBefore(
+		{ line: ENDED },
+		/^OPEN_REQUEST session=\d+ own=\d+ FETCH/,
+	);
+	if (asked.length > 0) {
+		throw new Error(
+			`the relay was to answer the FETCH itself, and sent one to a publisher: ${asked.map((match) => match[0]).join("; ")}`,
+		);
+	}
+	const exit = await withTimeout(client.exited, "the client to exit");
+	if (exit !== 0) {
+		throw new Error(`the client exited with ${exit}, not 0`);
+	}
+	return `the relay answered with FETCH_OK for {${group}, ${objects}} and began to write ${objects} Objects of ${bytes} bytes; the client read none and gave the FETCH up on the request stream alone, and the relay stopped its writing by its own order, ${pieces} Objects written (${end[0]})`;
+}
+
 async function main(): Promise<void> {
+	if (options.fetch === "page-large-request-only") {
+		if (options.relay !== "own") {
+			throw new Error(
+				"--fetch page-large-request-only runs through the own relay",
+			);
+		}
+		let summary: string;
+		try {
+			summary = await largeGroupRequestOnly();
+		} finally {
+			await runCleanups();
+		}
+		log(
+			"driver",
+			`RESULT ${JSON.stringify({ fetch: options.fetch, relay: options.relay })}`,
+		);
+		log("driver", `SUMMARY ${summary}`);
+		return;
+	}
 	const which = CASES.find((each) => each === options.fetch);
 	if (which === undefined) {
 		throw new Error(

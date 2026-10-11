@@ -197,6 +197,16 @@ struct FetchArgs {
     join: Option<Join>,
     /// How this client reads a fetch stream.
     reading: Reading,
+    /// `--fetch-stay-ms`: how long `--mode fetch` stays after every FETCH
+    /// is over, with its streams as they are. WHY a flag: a client that
+    /// leaves closes its connection, and what a publisher does about a
+    /// FETCH that was cancelled is seen only on a connection that lasts.
+    ///
+    /// The stay does not watch the connection: the client stays the whole
+    /// time and leaves with the exit code 0 also when the connection went
+    /// meanwhile. It counts against `--timeout-secs`, so a stay beyond that
+    /// ends as a run that took too long.
+    stay: Duration,
     /// `--answer-fetch`: a publisher answers a Standalone FETCH for its
     /// track from the Objects it sent, at this pace. Without the flag it
     /// refuses every FETCH with `NOT_SUPPORTED`.
@@ -241,6 +251,9 @@ struct FetchFlags {
     read_after_ms: u64,
     read_every_ms: u64,
     cancel_after_objects: Option<u64>,
+    cancel_after_ms: Option<u64>,
+    cancel_request_only: bool,
+    stay_ms: u64,
     answer: bool,
     answer_delay_ms: u64,
     stream_delay_ms: u64,
@@ -276,6 +289,10 @@ impl FetchFlags {
                 self.cancel_after_objects =
                     Some(value.parse().context("--fetch-cancel-after-objects")?);
             }
+            "--fetch-cancel-after-ms" => {
+                self.cancel_after_ms = Some(value.parse().context("--fetch-cancel-after-ms")?);
+            }
+            "--fetch-stay-ms" => self.stay_ms = value.parse().context("--fetch-stay-ms")?,
             "--fetch-answer-delay-ms" => {
                 self.answer_delay_ms = value.parse().context("--fetch-answer-delay-ms")?;
             }
@@ -302,7 +319,8 @@ impl FetchFlags {
             || self.group_order.is_some()
             || self.read_after_ms != 0
             || self.read_every_ms != 0
-            || self.cancel_after_objects.is_some();
+            || self.cancel_after_objects.is_some()
+            || self.cancel_after_ms.is_some();
         if of_a_range && !fetches {
             return Some("--fetch-start, --fetch-end and --fetch-count belong to --mode fetch");
         }
@@ -325,6 +343,18 @@ impl FetchFlags {
         }
         if self.cancel_after_objects == Some(0) {
             return Some("--fetch-cancel-after-objects 0 is never reached");
+        }
+        // WHY not with a number of Objects: the task that counts them ends
+        // when the number is reached, and the fetch stream it read is
+        // stopped with it before anything can say that it is to be kept.
+        let by_time_alone = self.cancel_after_ms.is_some() && self.cancel_after_objects.is_none();
+        if self.cancel_request_only && !(fetches && by_time_alone) {
+            return Some(
+                "--fetch-cancel-request-only belongs to --mode fetch with --fetch-cancel-after-ms, and not with --fetch-cancel-after-objects",
+            );
+        }
+        if self.stay_ms != 0 && !fetches {
+            return Some("--fetch-stay-ms belongs to --mode fetch");
         }
         if self.answer && mode != "publish" && mode != "publish-namespace" {
             return Some("--answer-fetch belongs to the modes that publish");
@@ -355,7 +385,10 @@ impl FetchFlags {
                 after: Duration::from_millis(self.read_after_ms),
                 every: Duration::from_millis(self.read_every_ms),
                 cancel_after_objects: self.cancel_after_objects,
+                cancel_after: self.cancel_after_ms.map(Duration::from_millis),
+                cancel_request_only: self.cancel_request_only,
             },
+            stay: Duration::from_millis(self.stay_ms),
             answering: self.answer.then(|| Pace {
                 answer_after: Duration::from_millis(self.answer_delay_ms),
                 stream_after: Duration::from_millis(self.stream_delay_ms),
@@ -569,6 +602,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--publish-on-line" => Some(&mut publish_on_line),
             "--serve-on-line" => Some(&mut serve_on_line),
             "--join-at-once" => Some(&mut fetch.join_at_once),
+            "--fetch-cancel-request-only" => Some(&mut fetch.cancel_request_only),
             "--answer-fetch" => Some(&mut fetch.answer),
             _ => None,
         };
@@ -909,6 +943,8 @@ impl Client<'_> {
                 },
             }
         }
+        // `fetches` is held meanwhile, and with it the streams it kept.
+        tokio::time::sleep(self.args.fetch.stay).await;
         Ok(())
     }
 
@@ -988,6 +1024,7 @@ impl Client<'_> {
                 (index, happened)
             }
             Note::RequestClosed(index, how) => (index, Happened::RequestClosed(how)),
+            Note::CancelDue(index) => (index, Happened::GaveUp),
             Note::RequestBroken(error) => return Err(error),
             Note::Body(index, end) => {
                 let happened = match end {
@@ -1031,7 +1068,7 @@ impl Client<'_> {
         }
         if let Some(ended) = step.ended {
             fetch.print_ended(ended);
-            fetches.end(index, ended.cancel);
+            fetches.end(index, ended.cancel, happened == Happened::GaveUp);
         }
     }
 
@@ -2642,6 +2679,12 @@ mod tests {
                 flags(|f| f.cancel_after_objects = Some(2)),
             ),
             (
+                "--fetch-cancel-after-ms",
+                "1500",
+                flags(|f| f.cancel_after_ms = Some(1_500)),
+            ),
+            ("--fetch-stay-ms", "3000", flags(|f| f.stay_ms = 3_000)),
+            (
                 "--fetch-answer-delay-ms",
                 "6000",
                 flags(|f| f.answer_delay_ms = 6_000),
@@ -2704,6 +2747,21 @@ mod tests {
             ),
             ("publish", flags(|_| ())),
             ("publish-namespace", flags(|_| ())),
+            (
+                "fetch",
+                flags(|f| (range(f), f.cancel_after_ms = Some(1_500)).1),
+            ),
+            (
+                "fetch",
+                flags(|f| {
+                    range(f);
+                    (f.cancel_after_ms, f.cancel_request_only, f.stay_ms) = (Some(1), true, 9);
+                }),
+            ),
+            (
+                "subscribe",
+                flags(|f| (f.join, f.cancel_after_ms) = (Some((true, 1)), Some(1))),
+            ),
             ("publish", flags(|f| f.answer = true)),
             ("publish-namespace", flags(|f| f.answer = true)),
             (
@@ -2735,6 +2793,7 @@ mod tests {
         const ANY: &str =
             "the flags of a FETCH belong to --mode fetch and to --mode subscribe with --join";
         const ANSWERS: &str = "--answer-fetch belongs to the modes that publish";
+        const REQUEST_ONLY: &str = "--fetch-cancel-request-only belongs to --mode fetch with --fetch-cancel-after-ms, and not with --fetch-cancel-after-objects";
         const PACE: &str = "--fetch-answer-delay-ms, --fetch-stream-delay-ms and --fetch-write-every-ms need --answer-fetch";
         let range = |f: &mut FetchFlags| (f.start, f.end) = (Some(at(0, 0)), Some(at(2, 0)));
         // (mode; flags; why they are refused)
@@ -2779,6 +2838,46 @@ mod tests {
                 flags(|f| (range(f), f.cancel_after_objects = Some(0)).1),
                 "--fetch-cancel-after-objects 0 is never reached",
             ),
+            // Without something that cancels, and in a mode that does not
+            // stay.
+            (
+                "fetch",
+                flags(|f| (range(f), f.cancel_request_only = true).1),
+                REQUEST_ONLY,
+            ),
+            // With a number of Objects to cancel after, alone and beside a
+            // time.
+            (
+                "fetch",
+                flags(|f| {
+                    range(f);
+                    (f.cancel_after_objects, f.cancel_request_only) = (Some(2), true);
+                }),
+                REQUEST_ONLY,
+            ),
+            (
+                "fetch",
+                flags(|f| {
+                    range(f);
+                    (f.cancel_after_objects, f.cancel_after_ms) = (Some(2), Some(1));
+                    f.cancel_request_only = true;
+                }),
+                REQUEST_ONLY,
+            ),
+            (
+                "subscribe",
+                flags(|f| {
+                    f.join = Some((true, 1));
+                    (f.cancel_after_ms, f.cancel_request_only) = (Some(1), true);
+                }),
+                REQUEST_ONLY,
+            ),
+            (
+                "subscribe",
+                flags(|f| (f.join, f.stay_ms) = (Some((true, 1)), 1)),
+                "--fetch-stay-ms belongs to --mode fetch",
+            ),
+            ("publish", flags(|f| f.cancel_after_ms = Some(1)), ANY),
             ("subscribe", flags(|f| f.answer = true), ANSWERS),
             ("fetch", flags(|f| (range(f), f.answer = true).1), ANSWERS),
             ("publish", flags(|f| f.answer_delay_ms = 1), PACE),
@@ -2788,6 +2887,53 @@ mod tests {
         for (mode, flags, why) in cases {
             assert_eq!(flags.misuse(mode), Some(why), "{mode} {flags:?}");
         }
+    }
+
+    #[test]
+    fn a_fetch_is_given_up_as_the_flags_say() {
+        let ms = Duration::from_millis;
+        let reading = |flags: FetchFlags| {
+            let args = flags.args();
+            let reading = args.reading;
+            (
+                reading.cancel_after_objects,
+                reading.cancel_after,
+                reading.cancel_request_only,
+                args.stay,
+            )
+        };
+        // Without the flags: never, both streams, and the client leaves at
+        // once.
+        assert_eq!(reading(flags(|_| ())), (None, None, false, ms(0)));
+        let all = flags(|f| {
+            (f.cancel_after_objects, f.cancel_after_ms) = (Some(2), Some(1_500));
+            (f.cancel_request_only, f.stay_ms) = (true, 3_000);
+        });
+        assert_eq!(reading(all), (Some(2), Some(ms(1_500)), true, ms(3_000)));
+        // The flag without a value is read where the others are.
+        let cert = "00".repeat(32);
+        let line = [
+            "--mode",
+            "fetch",
+            "--url",
+            "https://127.0.0.1:1",
+            "--cert-sha256",
+            cert.as_str(),
+            "--namespace",
+            "xmoq",
+            "--track",
+            "a",
+            "--fetch-start",
+            "0,0",
+            "--fetch-end",
+            "1,0",
+            "--fetch-cancel-after-ms",
+            "1500",
+            "--fetch-cancel-request-only",
+        ];
+        let args = parse_args(line.iter().map(ToString::to_string)).unwrap();
+        assert!(args.fetch.reading.cancel_request_only);
+        assert_eq!(args.fetch.reading.cancel_after, Some(ms(1_500)));
     }
 
     #[test]

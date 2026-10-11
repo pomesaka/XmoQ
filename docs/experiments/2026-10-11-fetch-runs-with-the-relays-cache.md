@@ -43,7 +43,7 @@ mise run interop -- --base-port 45300
 | **New**: a page publishes a Group on two subgroup streams (Subgroup 0 with Publisher Priority 10 and a property of an odd type, Subgroup 1 with 200 and one of an even type), written in the order 1, 0, 2, then 4, 3, 5. Another page subscribes after the first three and sends a Relative Joining FETCH with Joining Start 0, and asks for the whole Group when it is there | The relay answers both itself, in the order of the Object IDs, each Object with its Subgroup ID, Publisher Priority, property and payload: Objects 0 to 2 with End Location {3, 3} (`pieces=3`, `finished`), and all six with {3, 6} (`pieces=6`, `finished`). The subscription brings Objects 3 to 5 and no other of the Group. No FETCH to the publisher. As expected, at the first run |
 
 - Temporary changes to the runs, each taken back: with one Group where two are to be sent, the run with the publisher that refuses fails (the relay answers); without the second publisher, the run with the FETCH that is given up fails; with two Groups before the FETCH of the latest, that run fails (the publisher refuses); with the publisher named as the one to answer the latest Group, it fails waiting for the relay's FETCH.
-- `mise run check` passed. `mise run interop -- --base-port 45300`: 106 of 106 pairings, the 104 from before and these two; 107 of 107 with the run on two subgroup streams.
+- `mise run check` passed. `mise run interop -- --base-port 45300`: 106 of 106 pairings, the 104 from before and these two; 107 of 107 with the run on two subgroup streams, and 108 of 108 with the Rust client that cancels on the request stream alone.
 - Temporary changes for the two runs above, each taken back: a large Group of 3 Objects fails the run (`finished pieces=3`); the fetch stream expected in the order the Objects were sent fails; a page that reports every fetched Object as of Subgroup 0, without properties, or with Publisher Priority 10, fails each; Objects 0 to 5 expected of the subscription fails.
 
 ### The relay's writing, cut short
@@ -52,11 +52,37 @@ In the run with the large Group the page took about 0.5 MB of the 7.2 MB and no 
 
 - **Why, as read from the two sides and not shown by a run**: `cancel` of `@xmoq/moqt` resets the request stream and stops the fetch stream at once. The relay's writer meets the stop of the stream it writes and ends by itself; the relay then resets the request stream, and its order to stop the writing has nothing left to stop.
 - So the run takes either line, and says in its summary which it was.
-- **`ABORT_FETCH_WRITE` is still not seen with real streams.** It needs a subscriber that resets or stops the request stream and leaves the fetch stream alone, which a page of `@xmoq/moqt` does not do.
+- `ABORT_FETCH_WRITE` needs a subscriber that resets or stops the request stream and leaves the fetch stream alone, which a page of `@xmoq/moqt` does not do. The own Rust client does with `--fetch-cancel-request-only`; the run with it is below.
+
+### The relay stops its writing by its own order
+
+`bun fetch-rust.ts --fetch page-large-request-only --relay own`: a page publishes a Group of 8 Objects of 900,000 bytes; the own Rust client asks for it with `--fetch-read-after-ms 60000 --fetch-cancel-after-ms 1000 --fetch-cancel-request-only --fetch-stay-ms 3000`.
+
+Expected, written before the first run: the client has FETCH_OK with End Location {3, 8} and `FETCH_ENDED … how=cancelled … objects=0`, and exits with 0; the relay prints `WRITE_FETCH_STREAM … pieces=8`, `ABORT_FETCH_WRITE session=S stream=T code=0x1`, and `FETCH_WRITE_ENDED session=S stream=T aborted pieces=K code=0x1` with K below 8, and sends no FETCH to the publisher.
+
+Seen, in 7 runs of 7:
+
+```
+[relay] WRITE_FETCH_STREAM session=3 request_id=0 pieces=8
+FETCH_OK request_id=0 end_group=3 end_object=8 end_of_track=false track_properties=none; FETCH_ENDED request_id=0 how=cancelled code=none objects=0
+[relay] RESET_RECEIVED session=3 stream=1 code=0x1
+[relay] ABORT_FETCH_WRITE session=3 stream=1 code=0x1
+[relay] ABORT_FETCH_WRITE session=3 stream=1 code=0x1
+[relay] FETCH_WRITE_ENDED session=3 stream=1 aborted pieces=1 code=0x1
+[relay] RESET_REQUEST session=3 stream=1 code=0x1
+```
+
+- As expected, **but for one thing the expectation had added by itself**: `ABORT_FETCH_WRITE` once. It comes twice, for the reset of the request stream and for its stop. The second does nothing (the writing has its order already). The run takes one or more.
+- **This is the first time the relay's own order to stop a fetch stream it writes was seen to stop one with real streams.** `pieces=1`: the Rust client's transport took far less than the browser's before the writer stood still.
+- A temporary change, taken back: without `--fetch-cancel-request-only` the client stops the fetch stream too, and the run fails with `FETCH_WRITE_ENDED session=3 stream=1 stopped pieces=1 code=0x1`.
+
+### The large Group of the run with a page, made of more and smaller Objects
+
+With 8 Objects of 900,000 bytes the relay had written 6 when the page gave up; with 8 of 1,000,000 bytes, 6 as well; with 83 of 100,000 bytes, 62 (2 runs each). So the browser's transport takes about 6.2 MB from the relay before the writer stands still, and the margin of the first form was about 1 MB, not the 2 Objects it looked like. The run now sends 83 Objects of 100,000 bytes, 8.3 MB, which is what fits under the 8 MiB the relay keeps: a margin of about 2.1 MB. **A transport that takes 8.3 MB without being read fails the run**, and the Group cannot be made larger.
 
 ## Limitations and blockers
 
-- **`pieces=6` of 8 in the run with the large Group is what the relay handed to the transport, not what the page took**: the page's log of one run with `--verbose` had about 0.5 MB. Two Objects is the margin by which the run tells a write that was cut short from one that was whole; the Group cannot be larger, for the 8 MiB the relay keeps.
+- **`pieces` in the run with the large Group is what the relay handed to the transport, not what the page took**: the page's log of one run with `--verbose` had about 0.5 MB when the relay had written 6 Objects of 900,000 bytes. The margin by which the run tells a write that was cut short from one that was whole is about 2.1 MB (the section on the large Group above), and depends on the transport of the browser and the machine.
 - Not written: a run in which a publisher leaves an Object of the Group out, so that the relay asks it; a FETCH of the latest Group from the own Rust client and from the `moqtail` clients.
 - The relay with the cache is a copy of a change under review; what it does can still change.
 
