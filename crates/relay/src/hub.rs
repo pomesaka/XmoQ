@@ -81,6 +81,9 @@ pub struct HubConfig {
     /// milliseconds for every subscriber. On loopback a stream opens in
     /// well under a millisecond.
     pub slow_open: Duration,
+    /// The key of the experiment in authorization (`crate::auth`). None:
+    /// every request is allowed.
+    pub auth_key: Option<Vec<u8>>,
     /// How long a stream is held for a Track Alias that is not known yet
     /// (§11.4.2: "buffer it for a brief period").
     pub early_stream_timeout: Duration,
@@ -121,6 +124,7 @@ impl Default for HubConfig {
             send: SendLimits::default(),
             drain_timeout: Duration::from_secs(2),
             slow_open: Duration::from_millis(10),
+            auth_key: None,
             early_stream_timeout: Duration::from_secs(2),
             request_close_timeout: Duration::from_secs(2),
             closed_read_timeout: Duration::from_secs(1),
@@ -592,8 +596,12 @@ impl<C: Connection> HubHandle<C> {
 #[must_use]
 pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>) {
     let (events, inbox) = mpsc::channel(config.event_queue_len);
+    let mut relay = Relay::new(&config.implementation);
+    if let Some(key) = &config.auth_key {
+        relay.set_authorize(crate::auth::authorizer(key));
+    }
     let hub = Hub {
-        relay: Relay::new(&config.implementation),
+        relay,
         config,
         events: events.clone(),
         sessions: HashMap::new(),

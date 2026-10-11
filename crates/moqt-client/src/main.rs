@@ -4,6 +4,7 @@
 //! one Object. What it prints to stdout is a contract with the scripts that
 //! drive it; see `report`.
 
+mod auth;
 mod catalog;
 mod fetching;
 mod hex;
@@ -106,6 +107,8 @@ struct Args {
     track_name: String,
     /// `--annex-b-out`, `--viewers` and `--video-in`.
     video: video::VideoFlags,
+    /// `--auth-token-hex`.
+    auth: auth::AuthFlag,
     /// `--catalog-video`: `--track` names the catalog track of MSF, and
     /// `--mode subscribe` subscribes to the first H.264 video track of the
     /// catalog it reads there.
@@ -590,8 +593,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut mode, mut payload_hex) = (None, None);
     let (mut objects, mut video) = (1, video::VideoFlags::default());
     let (mut url, mut cert_sha256) = (None, None);
-    let mut namespace = None;
-    let mut track_name = None;
+    let (mut namespace, mut track_name) = (None, None);
     let (mut timeout_secs, mut publish_delay_ms) = (20, 0);
     let mut subgroup_id = SubgroupId::Zero;
     let mut first_group = 0;
@@ -600,7 +602,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut serve_delay_ms, mut answer_delay_ms) = (0, 0);
     let mut subscription_filter = Some(SubscriptionFilter::LargestObject);
     let (mut publish_on_line, mut serve_on_line) = (false, false);
-    let mut fetch = FetchFlags::default();
+    let (mut fetch, mut auth) = (FetchFlags::default(), auth::AuthFlag::default());
     let (mut trace, mut catalog_video) = (false, false);
 
     while let Some(flag) = args.next() {
@@ -652,7 +654,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             }
             "--subscription-filter" => subscription_filter = parse_subscription_filter(&value)?,
             other => {
-                if !fetch.read(other, &value)? && !video.read(other, &value)? {
+                if !(fetch.read(other, &value)?
+                    || video.read(other, &value)?
+                    || auth.read(other, &value)?)
+                {
                     bail!("unknown flag {other}");
                 }
             }
@@ -668,6 +673,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         namespace: namespace.context("--namespace is required")?,
         track_name: track_name.context("--track is required")?,
         video,
+        auth,
         catalog_video,
         timeout_secs,
         publish_delay: Duration::from_millis(publish_delay_ms),
@@ -891,20 +897,19 @@ impl Client<'_> {
         join: Option<Join>,
         wanted: Option<u64>,
     ) -> Result<()> {
-        let (request_id, message) = self.session.subscribe(
-            track,
-            [
-                Some(Parameter::Forward(true)),
-                Some(Parameter::SubscriberPriority(128)),
-                self.args
-                    .subscription_filter
-                    .map(Parameter::SubscriptionFilter),
-                Some(Parameter::GroupOrder(GroupOrder::Ascending)),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
-        )?;
+        let parameters = [
+            Some(Parameter::Forward(true)),
+            Some(Parameter::SubscriberPriority(128)),
+            self.args
+                .subscription_filter
+                .map(Parameter::SubscriptionFilter),
+            Some(Parameter::GroupOrder(GroupOrder::Ascending)),
+        ];
+        let parameters = self
+            .args
+            .auth
+            .with(parameters.into_iter().flatten().collect());
+        let (request_id, message) = self.session.subscribe(track, parameters)?;
         let mut fetches = Fetches::new(self.args.fetch.reading);
         let joining = join.map(|join| {
             let joining_request_id = request_id.value();
@@ -1008,6 +1013,7 @@ impl Client<'_> {
         if let Some(group_order) = self.args.fetch.group_order {
             parameters.push(Parameter::GroupOrder(group_order));
         }
+        let parameters = self.args.auth.with(parameters);
         let (request_id, message) = self.session.fetch(range, parameters)?;
         let label = format!("fetch#{}", request_id.value());
         let stream = self.open_request(request_id, &message, &label).await?;
@@ -1353,7 +1359,7 @@ impl Client<'_> {
     ) -> Result<(RequestStream, RequestId, RequestStream)> {
         let (namespace_request, message) = self
             .session
-            .publish_namespace(self.args.track_namespace()?, vec![])?;
+            .publish_namespace(self.args.track_namespace()?, self.args.auth.with(vec![]))?;
         let (namespace_stream, event) = self
             .request_attending(
                 peer_requests,
@@ -1392,7 +1398,7 @@ impl Client<'_> {
         let (publish_request, message) = self.session.publish(
             self.args.full_track_name()?,
             PUBLISH_TRACK_ALIAS,
-            vec![Parameter::Forward(true)],
+            self.args.auth.with(vec![Parameter::Forward(true)]),
             vec![],
         )?;
         let (publish_stream, event) = self
@@ -1709,6 +1715,7 @@ impl Client<'_> {
         // published, as they were under the first PUBLISH.
         let mut parameters = vec![Parameter::Forward(true)];
         parameters.extend(self.largest.parameter());
+        let parameters = self.args.auth.with(parameters);
         let (new_request, message) = self.session.publish(
             self.args.full_track_name()?,
             track_alias,
@@ -1767,7 +1774,7 @@ impl Client<'_> {
     async fn serve(&mut self, payload: &[u8]) -> Result<()> {
         let (namespace_request, message) = self
             .session
-            .publish_namespace(self.args.track_namespace()?, vec![])?;
+            .publish_namespace(self.args.track_namespace()?, self.args.auth.with(vec![]))?;
         let mut peer_requests = self
             .peer_requests
             .take()
