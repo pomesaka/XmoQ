@@ -12,9 +12,11 @@ Phase 0bの項目は全部終わっている。いまの課題はPhase 1（映�
 
 Rustのcrateは次のように分かれている。`xmoq-moqt`（符号化とセッションの状態）、`xmoq-relay-core`（リレーの経路と配信の論理）は入出力に依存しない。`xmoq-moqt-io`が`Connection`トレイトの上でストリームを読み書きし、WebTransportのライブラリに触るのはこのcrateの1ファイルだけ。`xmoq-relay`と`xmoq-moqt-client`がそれらをつなぐ。`Connection`の契約は、メモリ上の接続と実際のループバックの接続の両方に同じテストを当てて確かめる。テスト用の接続だけで通る挙動を前提にしない。
 
+TypeScriptのパッケージは層になっている。`@xmoq/moqt`（MoQ Transport）と`@xmoq/loc`（LOCの詰め方）が層0、`@xmoq/msf`（MSFのカタログ）が層1、`@xmoq/media`（映像のトラックの送り受け）が層2で、自分より下の層にだけ依存できる。層の表は`scripts/ci/check-layers.sh`の`package_layer`にあり、表に無いパッケージは検査で落ちる。各パッケージの中核（`src/core`）は入出力に依存しない。
+
 draftが黙っている箇所と矛盾している箇所で2つの実装がどう動くかは、`docs/moqt-implementation-notes.md`に表がある。片方の実装だけを変えない。表に行を足すときと裁定を出すときは、該当の節を本文で読んでから書く。
 
-検査は`mise run check`で走らせる。道具の版は`mise.toml`と`rust-toolchain.toml`で固定してあり、初回は`mise trust`と`mise install`が要る。個別には`mise run check:rust`（fmt、clippy、test）、`check:ts`（Biome、oxlint、型検査、`bun test`）、`check:layers`（層の依存）、`check:workflows`（actionlint、shellcheck）があり、整形は`mise run fmt`。CIは同じタスクを呼ぶので、検査を足すときはワークフローでなく`scripts/ci/`を直す。
+検査は`mise run check`で走らせる。道具の版は`mise.toml`と`rust-toolchain.toml`で固定してあり（Bun、Node、Biome、oxlintなど。照合の相手の`moqlivemock`をビルドするGoも）、初回は`mise trust`と`mise install`が要る。個別には`mise run check:rust`（fmt、clippy、test）、`check:ts`（Biome、oxlint、型検査、`bun test`）、`check:layers`（層の依存）、`check:workflows`（actionlint、shellcheck）があり、整形は`mise run fmt`。CIは同じタスクを呼ぶので、検査を足すときはワークフローでなく`scripts/ci/`を直す。
 
 ## 着手前に読む
 
@@ -83,7 +85,11 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | fixtures/first-bytes/README.md | 仕様書 | 相手の開いたストリームが「何であるかを言った」と見なす時点の表。2つの実装が読む |
 | fixtures/ のほかのディレクトリのREADME | 仕様書 | 2つ以上の実装が同じ場面で同じ動きをすることを確かめる共有の表（`joining-request-id`、`peer-subscribe`、`peer-fetch`、`published-fetch`）と、相手から採ったLOCとMSFの実データ（`loc-04`、`msf-01`） |
 | packages/moqt/README.md | 仕様書 | ブラウザ用クライアントライブラリの範囲、層の決まり、公開API |
+| packages/loc/README.md | 仕様書 | LOCのどの版を実装しているか、プロパティの番号、draftが言っていない所の読み方 |
+| packages/msf/README.md | 仕様書 | MSFのカタログを読む・追う・出す部品の範囲と、draftに届いていない所 |
+| packages/media/README.md | 仕様書 | 映像のトラックの受け手と送り手の決めごと、仮の値、既知の不足 |
 | interop/README.md | 運用手順書 | moqtailの相手の用意と、照合の走らせ方 |
+| interop/peers/moqlivemock/README.md | 運用手順書 | moqlivemockの版、ビルド、当てているパッチ |
 | .github/workflows/、scripts/ci/、mise.toml | コーディングポリシー | CIとローカルの検査。規約を検査で守る |
 | .claude/agents/、.claude/skills/ | コーディングポリシー | レビュアーのsubagentと`/review-team-xmoq`。報告は`.claude/tmp/reviews/`に書かれ、コミットされない |
 
