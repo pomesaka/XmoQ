@@ -141,6 +141,10 @@ struct Args {
     /// On loopback that window is too short to hit on purpose; the delays
     /// widen it.
     answer_delay: Duration,
+    /// `--subscription-filter`: the Subscription Filter of the SUBSCRIBE
+    /// this client sends (§5.1.2); `None` for an unfiltered one. Largest
+    /// Object without the flag.
+    subscription_filter: Option<SubscriptionFilter>,
     /// `--publish-on-line`: the publisher prints `READY_TO_PUBLISH` where it
     /// would send its PUBLISH, and sends it when the driver writes the line
     /// `publish`.
@@ -372,6 +376,25 @@ fn parse_location(text: &str) -> Result<Location> {
     })
 }
 
+/// Reads `--subscription-filter`: `none` (an unfiltered subscription),
+/// `largest-object`, `next-group-start`, or `absolute-start:<group>,<object>`.
+///
+/// WHY no `AbsoluteRange`: no run needs a subscription that ends, and the
+/// relay does not look at the End Group.
+fn parse_subscription_filter(text: &str) -> Result<Option<SubscriptionFilter>> {
+    Ok(match text.split_once(':') {
+        None if text == "none" => None,
+        None if text == "largest-object" => Some(SubscriptionFilter::LargestObject),
+        None if text == "next-group-start" => Some(SubscriptionFilter::NextGroupStart),
+        Some(("absolute-start", start)) => Some(SubscriptionFilter::AbsoluteStart {
+            start: parse_location(start)?,
+        }),
+        _ => bail!(
+            "--subscription-filter {text} is none of none, largest-object, next-group-start, absolute-start:<group>,<object>"
+        ),
+    })
+}
+
 /// Reads `relative:<n>` or `absolute:<n>` of `--join`.
 fn parse_join(text: &str) -> Result<(bool, u64)> {
     let (kind, start) = text
@@ -496,7 +519,14 @@ fn read_mode(
     })
 }
 
-fn parse_args() -> Result<Args> {
+/// Reads `--cert-sha256`: the SHA-256 of the relay's certificate, in hex.
+fn read_cert_sha256(text: Option<String>) -> Result<[u8; 32]> {
+    hex::decode(&text.context("--cert-sha256 is required")?)?
+        .try_into()
+        .map_err(|_| anyhow!("--cert-sha256 must be 32 bytes"))
+}
+
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let mut mode = None;
     let mut payload_hex = None;
     let mut objects = 1;
@@ -512,12 +542,12 @@ fn parse_args() -> Result<Args> {
     let mut object_properties = Vec::new();
     let mut serve_delay_ms = 0;
     let mut answer_delay_ms = 0;
+    let mut subscription_filter = Some(SubscriptionFilter::LargestObject);
     let mut publish_on_line = false;
     let mut serve_on_line = false;
     let mut fetch = FetchFlags::default();
     let mut trace = false;
 
-    let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let switch = match flag.as_str() {
             "--trace" => Some(&mut trace),
@@ -563,6 +593,7 @@ fn parse_args() -> Result<Args> {
             "--answer-delay-ms" => {
                 answer_delay_ms = value.parse().context("--answer-delay-ms")?;
             }
+            "--subscription-filter" => subscription_filter = parse_subscription_filter(&value)?,
             other => {
                 if !fetch.read(other, &value)? {
                     bail!("unknown flag {other}");
@@ -572,14 +603,11 @@ fn parse_args() -> Result<Args> {
     }
 
     let mode = read_mode(mode, payload_hex.as_deref(), objects, &fetch)?;
-    let cert_sha256 = hex::decode(&cert_sha256.context("--cert-sha256 is required")?)?
-        .try_into()
-        .map_err(|_| anyhow!("--cert-sha256 must be 32 bytes"))?;
 
     Ok(Args {
         mode,
         url: url.context("--url is required")?,
-        cert_sha256,
+        cert_sha256: read_cert_sha256(cert_sha256)?,
         namespace: namespace.context("--namespace is required")?,
         track_name: track_name.context("--track is required")?,
         timeout_secs,
@@ -590,6 +618,7 @@ fn parse_args() -> Result<Args> {
         object_properties,
         serve_delay: Duration::from_millis(serve_delay_ms),
         answer_delay: Duration::from_millis(answer_delay_ms),
+        subscription_filter,
         publish_on_line,
         serve_on_line,
         fetch: fetch.args(),
@@ -764,12 +793,17 @@ impl Client<'_> {
     async fn subscribe(&mut self, wanted: u64) -> Result<()> {
         let (request_id, message) = self.session.subscribe(
             self.args.full_track_name()?,
-            vec![
-                Parameter::Forward(true),
-                Parameter::SubscriberPriority(128),
-                Parameter::SubscriptionFilter(SubscriptionFilter::LargestObject),
-                Parameter::GroupOrder(GroupOrder::Ascending),
-            ],
+            [
+                Some(Parameter::Forward(true)),
+                Some(Parameter::SubscriberPriority(128)),
+                self.args
+                    .subscription_filter
+                    .map(Parameter::SubscriptionFilter),
+                Some(Parameter::GroupOrder(GroupOrder::Ascending)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         )?;
         let mut fetches = Fetches::new(self.args.fetch.reading);
         let joining = self.args.fetch.join.map(|join| {
@@ -2318,7 +2352,7 @@ async fn run(args: &Args) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    run(&parse_args()?).await
+    run(&parse_args(std::env::args().skip(1))?).await
 }
 
 #[cfg(test)]
@@ -2374,6 +2408,69 @@ mod tests {
                 (publishing, serving),
                 "{request:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_subscribe_has_the_largest_object_filter_unless_the_flag_says_otherwise() {
+        // (the flags after the ones every run has; the filter of the
+        //  SUBSCRIBE)
+        let cases: [(&[&str], _); 4] = [
+            (&[], Some(SubscriptionFilter::LargestObject)),
+            (&["--subscription-filter", "none"], None),
+            (
+                &["--subscription-filter", "next-group-start"],
+                Some(SubscriptionFilter::NextGroupStart),
+            ),
+            (
+                &["--subscription-filter", "absolute-start:3,2"],
+                Some(SubscriptionFilter::AbsoluteStart { start: at(3, 2) }),
+            ),
+        ];
+        for (more, filter) in cases {
+            let cert = "00".repeat(32);
+            let always = [
+                "--mode",
+                "subscribe",
+                "--url",
+                "https://127.0.0.1:1",
+                "--cert-sha256",
+                cert.as_str(),
+                "--namespace",
+                "xmoq",
+                "--track",
+                "a",
+            ];
+            let flags = always.iter().chain(more).map(ToString::to_string);
+            let args = parse_args(flags).unwrap();
+            assert_eq!(args.subscription_filter, filter, "{more:?}");
+        }
+    }
+
+    #[test]
+    fn the_subscription_filter_of_the_flag_is_read() {
+        let read = |text| parse_subscription_filter(text).map_err(|error| error.to_string());
+        assert_eq!(read("none"), Ok(None));
+        assert_eq!(
+            read("largest-object"),
+            Ok(Some(SubscriptionFilter::LargestObject))
+        );
+        assert_eq!(
+            read("next-group-start"),
+            Ok(Some(SubscriptionFilter::NextGroupStart))
+        );
+        assert_eq!(
+            read("absolute-start:3,2"),
+            Ok(Some(SubscriptionFilter::AbsoluteStart { start: at(3, 2) }))
+        );
+        for wrong in [
+            "",
+            "largest",
+            "absolute-start",
+            "absolute-start:3",
+            "absolute-range:3,2",
+        ] {
+            assert!(read(wrong).is_err(), "{wrong}");
         }
     }
 

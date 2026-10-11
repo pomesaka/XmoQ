@@ -10,8 +10,10 @@ for what the random events are made of; `fuzz.rs` describes them.
 publisher of the second half never says PUBLISH_DONE, and `no-announce` is
 `full` in which nobody announces a namespace. `fetch`, `split-fetch` and
 `shared-fetch` are `full`, `split-one` and `shared` in which one event in
-three is about a FETCH (in the two with halves, of the first half only). The
-default is `v1`. With `--priorities` the subgroup streams have one of three Publisher
+three is about a FETCH (in the two with halves, of the first half only);
+`filters`, `split-filters` and `shared-filters` are the same three in which
+half of the SUBSCRIBEs have a Subscription Filter (of the first half only).
+The default is `v1`. With `--priorities` the subgroup streams have one of three Publisher
 Priorities, where they all have the same without it.
 `--touch subgroups|publishers|republish|waiting-or-draining|asks|priority` says which events `--touching` takes
 for the ones a change is about; the default is `subgroups`.
@@ -139,14 +141,16 @@ SPIKES = [
 ]
 
 
-TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks", "priority", "fetch")
+TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks", "priority", "fetch", "filters")
 WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared", "split-steady", "shared-steady",
-          "no-announce", "fetch", "split-fetch", "shared-fetch")
+          "no-announce", "fetch", "split-fetch", "shared-fetch", "filters", "split-filters", "shared-filters")
 # Worlds of `fuzz.rs` with something taken out on top: the world, and the
 # variable that tells `fuzz.rs` what.
 VARIANTS = {"split-steady": ("split-one", "XMOQ_FUZZ_STEADY"), "shared-steady": ("shared", "XMOQ_FUZZ_STEADY"),
             "no-announce": ("full", "XMOQ_FUZZ_NO_ANNOUNCE"), "fetch": ("full", "XMOQ_FUZZ_FETCH"),
-            "split-fetch": ("split-one", "XMOQ_FUZZ_FETCH"), "shared-fetch": ("shared", "XMOQ_FUZZ_FETCH")}
+            "split-fetch": ("split-one", "XMOQ_FUZZ_FETCH"), "shared-fetch": ("shared", "XMOQ_FUZZ_FETCH"),
+            "filters": ("full", "XMOQ_FUZZ_FILTERS"), "split-filters": ("split-one", "XMOQ_FUZZ_FILTERS"),
+            "shared-filters": ("shared", "XMOQ_FUZZ_FILTERS")}
 
 
 def jj(*args):
@@ -743,6 +747,12 @@ def report(name, output, totals, random_events=False):
         for count, what in first:
             print(f"      {count:>6}: {what}")
         print("      Nothing is said here about what follows the first difference of a sequence.")
+    filtered = re.search(r"FUZZ_FILTERED (.*)", output)
+    if filtered:
+        print(f"    the SUBSCRIBEs of the random events, by their Subscription Filter: {filtered.group(1)}")
+    elif random_events and os.environ.get("XMOQ_FUZZ_FILTERS"):
+        print("    THE SUBSCRIBES WERE NOT COUNTED BY THEIR FILTER: no FUZZ_FILTERED line")
+        totals["not_counted"] += 1
     fetched = re.search(r"FUZZ_FETCHED (.*)", output)
     if fetched:
         print(f"    what the new version did about FETCH in the random events: {fetched.group(1)}")

@@ -10,6 +10,7 @@ use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 
 mod fetch;
+mod filters;
 mod routing;
 mod sources;
 mod subgroups;

@@ -2,7 +2,8 @@
 //!
 //! It takes PUBLISH from publishers and SUBSCRIBE from subscribers and forwards
 //! the Objects of each track to its subscribers. It keeps no Objects: a
-//! subscriber gets what arrives after it subscribed.
+//! subscriber gets what arrives after it subscribed, from the Start Location
+//! of its Subscription Filter on.
 //!
 //! Provisional, for testing only: there is no authentication or authorization,
 //! so anyone who can reach the port can publish and subscribe.

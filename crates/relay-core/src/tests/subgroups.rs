@@ -513,6 +513,47 @@ fn a_stream_that_takes_the_place_of_another_does_so_for_every_subscriber() {
 }
 
 #[test]
+fn a_stream_that_takes_the_place_of_another_starts_where_the_subscription_does() {
+    let mut relay = relay_with_track();
+    // Alice gets everything; Bob's subscription starts at {3, 1}.
+    subscribe_to_track(&mut relay, ALICE);
+    super::filters::subscribe_with(&mut relay, Some(super::filters::from(3, 1)));
+    data_stream_opened(&mut relay, 7);
+    object_arrived(&mut relay, 7, 0);
+    object_arrived(&mut relay, 7, 1);
+    // Alice has stream 0 and Bob stream 1, from Object 1 on. A second
+    // stream of the publisher for the Subgroup resets both. Alice gets a
+    // new one with the header; Bob gets his with the first Object that
+    // passes again, and not with Object 0.
+    assert_eq!(
+        stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS)),
+        [
+            reset(0, 0x1),
+            reset(1, 0x1),
+            stopped(7),
+            open_data_stream(ALICE, 2, header(0)),
+        ]
+    );
+    assert_eq!(object_arrived(&mut relay, 8, 0), [send_object(2, 0)]);
+    assert_eq!(
+        object_arrived(&mut relay, 8, 1),
+        [
+            open_data_stream(
+                BOB,
+                3,
+                SubgroupHeader {
+                    subgroup_id: SubgroupId::Explicit(0),
+                    first_object: false,
+                    ..header(0)
+                }
+            ),
+            send_object(2, 1),
+            send_object(3, 1),
+        ]
+    );
+}
+
+#[test]
 fn a_stream_that_took_the_place_of_another_and_ends_without_an_object() {
     let mut relay = relay_with_track();
     subscribe_to_track(&mut relay, ALICE);

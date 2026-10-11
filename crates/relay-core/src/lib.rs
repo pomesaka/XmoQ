@@ -22,9 +22,9 @@
 //! for a track nobody is subscribed to; and a SUBSCRIBE for a track whose
 //! sources all drain is refused.
 //!
-//! FIXME: apply the Subscription Filter of a SUBSCRIBE (§5.1.2). Every
-//! subscriber gets the Objects that arrive after its subscription, which is what
-//! the Largest Object filter asks for, and what the other filters do not.
+//! A subscriber gets the Objects from the Start Location of its Subscription
+//! Filter on (§5.1.2); the End Group of an `AbsoluteRange` filter is not
+//! looked at (`routing::filter_start`).
 //!
 //! FIXME: pass a `NEW_GROUP_REQUEST` of a subscriber on to the publisher
 //! (§10.2.13, MUST for a relay). It is ignored.
@@ -291,6 +291,11 @@ struct Subscriber {
     /// this subscriber got, which a Joining FETCH counts its range from.
     /// `None` when no Object had been published.
     joining: Option<Location>,
+    /// The first Location the subscription passes (§5.1.2), counted from the
+    /// same `LARGEST_OBJECT` where the filter is relative to it. `None`:
+    /// nothing passes. "A publisher MUST NOT send objects from outside the
+    /// requested range."
+    start: Option<Location>,
     /// Subgroup streams the relay started for the subscription.
     streams_started: u64,
     /// Whether one of them may never have been opened, so that the number
@@ -299,6 +304,18 @@ struct Subscriber {
     /// The streams of the subscription that are not done yet, in the order
     /// they were started.
     outs: BTreeSet<OutStreamKey>,
+}
+
+impl Subscriber {
+    /// Whether the subscription passes the Object at `location` (§5.1.2).
+    fn passes(&self, location: Location) -> bool {
+        self.start.is_some_and(|start| location >= start)
+    }
+
+    /// Whether it passes every Object the Group can have.
+    fn passes_all_of(&self, group: u64) -> bool {
+        self.passes(Location { group, object: 0 })
+    }
 }
 
 /// A subgroup stream the relay writes to a subscriber, until the I/O side
@@ -1645,7 +1662,8 @@ impl Relay {
     ) {
         let track_name = &subscribe.full_track_name;
         let forward = params::forward(&subscribe.parameters);
-        let waiter = Waiter::new(session, stream, request, forward);
+        let filter = params::subscription_filter(&subscribe.parameters);
+        let waiter = Waiter::new(session, stream, request, forward, filter);
         let waits = match self.tracks.phase(track_name) {
             // §9.5: "When a Relay receives an authorized SUBSCRIBE for a Track
             // with one or more Established upstream subscriptions, it MUST
@@ -2288,7 +2306,11 @@ impl Relay {
         // header that is followed by a reset says that there is a Subgroup
         // the source will not send (§11.4.3).
         if passage == Passage::Passed {
-            for subscriber in &mut track.subscribers {
+            // A subscription that starts inside this Group gets its stream
+            // with the first Object that passes (`Self::on_object`): which
+            // Objects the stream will carry is not known here.
+            let passing = |subscriber: &&mut Subscriber| subscriber.passes_all_of(header.group_id);
+            for subscriber in track.subscribers.iter_mut().filter(passing) {
                 let out = OutStreamAllocator {
                     next: &mut self.next_out_stream,
                     out_streams: &mut self.out_streams,
@@ -2387,7 +2409,7 @@ impl Relay {
             in_stream.header
         };
         for subscriber in &mut track.subscribers {
-            if !in_stream.outs.contains_key(&subscriber.session) {
+            if !in_stream.outs.contains_key(&subscriber.session) && subscriber.passes(location) {
                 let out = OutStreamAllocator {
                     next: &mut self.next_out_stream,
                     out_streams: &mut self.out_streams,
