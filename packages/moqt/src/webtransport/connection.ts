@@ -2002,7 +2002,28 @@ export async function connectOver(
 			// Registered before the request is sent, so the response finds it.
 			pending.set(result.value, response);
 			return result;
-		}).catch(response.reject);
+		}).catch(async (error: unknown) => {
+			// WHY one turn of the timers before the error is given: where the
+			// peer closes the session as the request is being written, the
+			// write fails 0.3 ms before `closed` of the transport settles, and
+			// with a NetworkError that does not say it is the session's
+			// (Chromium 156, 4 of 10 against a relay that closes at SETUP).
+			// The request then fails with how the session ended, as the
+			// requests after it do.
+			// WHY not until `closed` settles: a write may fail for the stream
+			// alone, and the request would never be answered.
+			if (sessionClose === undefined) {
+				await Promise.race([
+					closed.promise,
+					new Promise((resolve) => setTimeout(resolve, 0)),
+				]);
+			}
+			response.reject(
+				sessionClose === undefined
+					? toError(error)
+					: new SessionClosedError(sessionClose),
+			);
+		});
 		return response.promise;
 	};
 
