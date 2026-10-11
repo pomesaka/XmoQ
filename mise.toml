@@ -3,7 +3,12 @@
 [tools]
 actionlint = "1.7.12"
 biome = "2.5.15"
-bun = "1.3.12"
+# WHY not 1.3.12: its `test.each` does not keep its table alive, so a garbage
+# collection between `test.each(table)` and the call that follows hands the
+# test rows of something else. Fixed in 1.3.14 (oven-sh/bun pull request
+# 30050, read on 2026-10-11); see
+# docs/experiments/2026-10-11-bun-test-each-loses-its-table.md.
+bun = "1.3.14"
 jq = "1.7.1"
 # oxlint is installed from npm (it has shipped no standalone binary since 1.17.0), so it needs node.
 node = "24.21.0"
