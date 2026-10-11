@@ -125,6 +125,7 @@ package_layer() {
 	case "$1" in
 	@xmoq/moqt | @xmoq/loc) echo 0 ;;
 	@xmoq/msf) echo 1 ;;
+	@xmoq/media) echo 2 ;;
 	*) echo "" ;;
 	esac
 }

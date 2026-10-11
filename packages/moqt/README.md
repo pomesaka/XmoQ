@@ -20,7 +20,7 @@ Not implemented: the server role, the other requests opened by the peer (refused
 
 | Import | Content |
 |---|---|
-| `@xmoq/moqt` | `connect`, and the types and errors of a connection, a published Track and a subscription |
+| `@xmoq/moqt` | `connect`, and the types and errors of a connection, a published Track and a subscription. `createSubgroupStreamDecoder`, the decoder of one subgroup stream as bytes, which a connection uses itself: **exported for tests outside this package that read a captured stream** (`@xmoq/media` reads the one of `moqlivemock` in `fixtures/moqt-18/`), not as a second way to receive Objects |
 | `@xmoq/moqt/diagnostics` | The types of the logging hooks in `ConnectOptions.diagnostics`. They show the session's internal events, which can change with the implementation |
 
 How a subscription, a published Track, a FETCH or the session ended is a value with a `type` (`Subscription.ended`, `PublishedTrack.ended`, `Fetch.ended`, `MoqtConnection.closed`), and every rejection is one of the error classes listed at `RequestFailedError` in `src/webtransport/endings.ts`.

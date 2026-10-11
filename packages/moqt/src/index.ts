@@ -26,10 +26,17 @@ export type {
 	SubscribeAnswer,
 	SubscribeRequest,
 } from "./core/requests.ts";
-export type {
-	ObjectStatus,
-	SubgroupId,
-	SubgroupObject,
+export {
+	createSubgroupStreamDecoder,
+	type ObjectStatus,
+	type ObjectStreamFailure,
+	type SubgroupHeader,
+	type SubgroupId,
+	type SubgroupObject,
+	type SubgroupStreamDecoder,
+	type SubgroupStreamItem,
+	type SubgroupStreamLimits,
+	type SubgroupStreamResult,
 } from "./core/subgroup.ts";
 export type { FullTrackName, TrackNamespace } from "./core/track.ts";
 export type { ConnectOptions } from "./webtransport/connect.ts";

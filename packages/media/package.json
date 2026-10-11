@@ -1,0 +1,21 @@
+{
+	"name": "@xmoq/media",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.core.json"
+	},
+	"dependencies": {
+		"@xmoq/loc": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.2",
+		"@xmoq/moqt": "workspace:*",
+		"typescript": "6.0.3"
+	}
+}

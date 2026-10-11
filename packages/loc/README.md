@@ -58,7 +58,7 @@ Everything is bytes and numbers: no I/O, and **no other package of this reposito
 - **The Timescale of a track is not read** (the table above). What receives media needs a way to hand the track's value in.
 - **A payload with start codes of 3 bytes can come out `ok` and broken.** Its first four bytes are read as a length; where that happens to be the number of bytes that follow, the fourth byte, the first of the NAL unit, is overwritten: `00 00 01 09` and 265 bytes becomes `00 00 00 01` and those 265 bytes. Every other such payload is `invalid`. A track with start codes of 3 bytes is not given to `toAnnexB`.
 - **No Timescale that another implementation sent was read**: `0x08` is written here and read here. The Timestamp is in the bytes of `moqlivemock`.
-- **Nothing checks that `LocProperty` is the shape of `KeyValuePair` of `@xmoq/moqt`**, and no test hands the properties of the captured stream to `readLocTiming`: neither package can import the other. It is for the package that uses both.
+- **Nothing in this package checks that `LocProperty` is the shape of `KeyValuePair` of `@xmoq/moqt`**: neither package can import the other. A test of `@xmoq/media`, which uses both, decodes the captured stream with `@xmoq/moqt` and hands its Objects, properties and all, to what reads them with `readLocTiming`.
 - **A video payload is not checked to be video.** `toAnnexB` knows lengths and start codes, and nothing of what a NAL unit is: it cannot tell a key frame from another, nor say that parameter sets are missing.
 - The time of a frame is carried and not compared: nothing here says that timestamps grow.
 - `microsecondsOf` rounds down, so two frames closer than a microsecond in a fine timescale get the same time.

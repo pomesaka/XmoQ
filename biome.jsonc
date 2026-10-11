@@ -125,6 +125,51 @@
 			}
 		},
 		{
+			// WHY: what orders the frames of a track and says which a decoder gets is
+			// numbers and bytes. It knows the format of a media Object and nothing of a
+			// connection or a catalog; tsconfig.core.json keeps the I/O globals out, and
+			// this the imports.
+			// An override replaces the options of the rule, so the two patterns above are
+			// repeated here.
+			"includes": ["packages/media/src/core/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": ["**/spikes/**"],
+										"message": "spikes/ is throwaway validation code; packages must not depend on it."
+									},
+									{
+										"group": [
+											"**/interop/**",
+											"@xmoq/interop",
+											"@xmoq/interop/**"
+										],
+										"message": "interop/ checks the packages against other implementations; a package must not depend on it."
+									},
+									{
+										"group": [
+											"@xmoq/moqt",
+											"@xmoq/moqt/**",
+											"**/moqt/**",
+											"@xmoq/msf",
+											"@xmoq/msf/**",
+											"**/msf/**"
+										],
+										"message": "src/core of @xmoq/media orders frames without MoQ Transport and without a catalog; what uses a connection belongs outside src/core."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
 			// WHY: scripts/ci/check-layers.sh sees a dependency that package.json declares.
 			// A file of @xmoq/moqt could still reach the other package by a relative path,
 			// which declares nothing.
