@@ -48,3 +48,22 @@ mise run check
 - If the person pressed "sound" when the pages were in two windows already, this is not the cause of the silence, and the line under the picture will say what is.
 - A window that is wholly covered by another can be slowed like a background tab; the worker's clock is the same answer, and that was not tried either.
 - The camera and the microphone were not looked at again: they do not run on a timer of the page.
+
+## Afterwards: the sound crackled
+
+A person heard the sound after the change above, and it crackled ("it can be heard, though").
+
+- **Measured**: the watching page counts, in what leaves for the loudspeaker, the steps from one sample to the next of more than 0.15 of full scale (the beep, 0.6 at 1,000 Hz, moves 0.08 a sample at most).
+
+| How a piece of 20 ms is given to the `AudioContext` | Breaks in 8 seconds (397 pieces) |
+|---|---|
+| Each at its own time (before) | 802, 804 |
+| After the one before it, to the sample, where that is within 8 ms of its own time | 5, 10 |
+| The same, and the level of the tone moving to its value within about 2 ms where the beep begins and ends | 2, 3, 1, 4 |
+
+- **The cause**: every piece began at a time worked out from its own Timestamp and this page's clock, which counts whole milliseconds. A piece a fraction of a millisecond late leaves a gap of some samples, and one that is early sounds over the end of the one before. About 100 breaks a second: every piece, not every Group of 10.
+- **Mended in `demo/watch.ts`**: a piece follows the one before it exactly; only where its own time is more than 8 ms from there does it begin at its own time (2 pieces of 397 did: the first, and one more).
+- `demo/check.ts` fails for more than 10 breaks in 4 seconds. With the old way put back for one run it counted 383 and failed; with the change, 1.
+- **The microphone (`?audio=mic`, Chromium's fake device)**: 719 breaks in 8 seconds with the change, 860 before it. **This says nothing either way**: the fake device beeps, and its own wave may have steps that large (not looked at). 6 pieces of 397 did not follow the one before. A real microphone was not tried.
+- The breaks that remain (1 to 4 in 8 seconds) were not looked into.
+- Nobody heard it here.

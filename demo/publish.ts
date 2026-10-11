@@ -54,6 +54,7 @@ function tone(onData: (data: AudioData) => void): void {
 	const began = Date.now();
 	let piece = 0;
 	let phase = 0;
+	let level = 0;
 	every(10, () => {
 		while (piece * 20 <= Date.now() - began) {
 			const loud = marked(began + piece * 20);
@@ -62,8 +63,12 @@ function tone(onData: (data: AudioData) => void): void {
 				const seconds = (piece * frames + index) / SAMPLE_RATE;
 				const pitch = loud ? 1000 : 440 + 220 * Math.sin(Math.PI * seconds);
 				phase += (2 * Math.PI * pitch) / SAMPLE_RATE;
-				// Loud enough to be heard on the loudspeaker of a laptop.
-				samples[index] = (loud ? 0.6 : 0.25) * Math.sin(phase);
+				// Loud enough to be heard on the loudspeaker of a laptop. WHY
+				// the level moves towards its value and does not jump: a
+				// step in the level is a click where the beep begins and
+				// ends. It is there within about 2 ms.
+				level += ((loud ? 0.6 : 0.25) - level) * 0.02;
+				samples[index] = level * Math.sin(phase);
 			}
 			onData(
 				new AudioData({

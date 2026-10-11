@@ -1,7 +1,7 @@
 // Checks the demo that `bun demo/serve.ts` serves, in headless Chromium:
-// the picture is shown at the rate it is made, and **sound leaves the
-// watching page for the loudspeaker** (what goes into the AudioContext's
-// output is listened to; nobody hears it).
+// the picture is shown at the rate it is made, **sound leaves the watching
+// page for the loudspeaker** (what goes into the AudioContext's output is
+// listened to; nobody hears it), and it leaves without breaks.
 //
 // Usage: bun demo/check.ts [http://localhost:8080] [more of the publishing page's address]
 //
@@ -37,8 +37,15 @@ try {
 		shownASecond: number;
 		decodedASecond: number;
 		tooLate: number;
-		sound: { state: string; soundedASecond: number; leaving: { peak: number; hz: number } | null };
+		sound: {
+			state: string;
+			soundedASecond: number;
+			breaks: number;
+			leaving: { peak: number; hz: number } | null;
+		};
 	} | null = null;
+	const breaksBefore: number =
+		JSON.parse((await viewer.evaluate(() => document.body.dataset.report)) ?? "null")?.sound.breaks ?? 0;
 	for (let tick = 0; tick < 16; tick++) {
 		await wait(250);
 		report = JSON.parse((await viewer.evaluate(() => document.body.dataset.report)) ?? "null");
@@ -59,6 +66,12 @@ try {
 		// The tone is 0.25 of full scale between 220 and 660 Hz, the beep 0.6 at 1000 Hz.
 		if (peak < 0.1) failures.push(`what leaves for the loudspeaker is ${peak.toFixed(3)} of full scale at most: silence`);
 		if (hz < 150 || hz > 1200) failures.push(`the loudest pitch is ${hz} Hz, where the tone is 220 to 660 and the beep 1000`);
+		// A step from one sample to the next that the tone does not make: a
+		// piece of audio that does not join the one before it. 100 a second
+		// where every piece begins at its own time.
+		const breaks = report.sound.breaks - breaksBefore;
+		console.log(`breaks in the sound: ${breaks} in 4 seconds`);
+		if (breaks > 10) failures.push(`${breaks} breaks in 4 seconds of sound: it crackles`);
 	}
 	console.log(`sound leaving: ${peak.toFixed(2)} of full scale at most, at ${hz} Hz`);
 } finally {
