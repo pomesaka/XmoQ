@@ -4,5 +4,7 @@
 		"lib": ["ES2022", "DOM", "DOM.Iterable"],
 		"types": []
 	},
-	"include": ["page.ts", "peers/moqtail/browser/page.ts"]
+	"include": ["page.ts", "peers/moqtail/browser/page.ts"],
+	// `exclude` is inherited, and the one it would inherit leaves out page.ts.
+	"exclude": []
 }

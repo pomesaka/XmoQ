@@ -277,25 +277,36 @@ async function main(): Promise<void> {
 		if (which === "page-join-at-once") {
 			// The relay prints the line when it holds a FETCH whose SUBSCRIBE
 			// it has not read. Whether it did is a matter of which stream it
-			// read first; by now it has printed everything about this FETCH.
-			const hold = context.relay
-				.matches(
-					new RegExp(`^HOLD_REQUEST session=${session} stream=(\\d+) FETCH$`),
-				)
-				.at(0);
+			// read first.
+			//
+			// WHY a fence: the client's lines and the relay's reach the driver
+			// in no order, so what the relay printed "by now" depends on when
+			// the driver looks (harness.ts, `RelayLog`). The relay prints this
+			// line when it has written the whole fetch stream, after
+			// everything else about the FETCH.
+			const fence = {
+				line: new RegExp(
+					`^FETCH_PIPE_ENDED session=${session} stream=\\d+ finished$`,
+				),
+			};
+			const [hold] = await context.relay.linesBefore(
+				fence,
+				new RegExp(`^HOLD_REQUEST session=${session} stream=(\\d+) FETCH$`),
+			);
 			const held = hold !== undefined;
 			// A FETCH that was held is answered on the stream it was held on.
-			if (
-				hold !== undefined &&
-				!context.relay.hasPrinted(
+			if (hold !== undefined) {
+				const answers = await context.relay.linesBefore(
+					fence,
 					new RegExp(
 						`^SEND session=${session} stream=${captureGroup(hold, 1)} FETCH_OK$`,
 					),
-				)
-			) {
-				throw new Error(
-					`the relay held the FETCH (${hold[0]}) and printed no FETCH_OK for that stream`,
 				);
+				if (answers.length !== 1) {
+					throw new Error(
+						`the relay held the FETCH (${hold[0]}) and printed ${answers.length} FETCH_OK for that stream, not 1`,
+					);
+				}
 			}
 			summary += held
 				? "; the relay read the FETCH first and held it for its SUBSCRIBE"

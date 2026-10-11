@@ -171,13 +171,14 @@ export function withTimeout<T>(
  * of whoever started it and not with its own message.
  */
 export async function pollFor<T>(
-	look: () => T | undefined,
+	// A page is asked with a call that takes time, so `look` may be async.
+	look: () => T | undefined | Promise<T | undefined>,
 	what: string,
 	timeoutMs: number = STEP_TIMEOUT_MS,
 ): Promise<T> {
 	const deadline = performance.now() + timeoutMs;
 	for (;;) {
-		const found = look();
+		const found = await look();
 		if (found !== undefined) return found;
 		if (performance.now() >= deadline) {
 			throw new Error(`timed out waiting for ${what}`);
