@@ -581,6 +581,106 @@ fn what_happens_to_a_fetch_and_what_the_relay_does_about_it() {
     }
 }
 
+/// A `REQUEST_UPDATE` of Alice on the stream of her FETCH, with FORWARD,
+/// which the update of a FETCH may not carry (§10.2.12).
+fn update_with_forward(request_id: u64) -> Event {
+    Event::RequestMessage {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        message: ControlMessage::RequestUpdate(RequestUpdate {
+            request_id,
+            parameters: vec![Parameter::Forward(true)],
+        }),
+    }
+}
+
+/// What Alice still sends on the stream of a FETCH whose answer the relay
+/// has ended: a `REQUEST_UPDATE` gets no answer, one with a parameter that
+/// closes the session while the FETCH is served does not, and each uses up
+/// its Request ID.
+fn nothing_is_answered_any_more(ended: impl Fn() -> Relay, next: u64, name: &str) {
+    // `next` is Alice's next Request ID.
+    for request_id in [next, next + 2] {
+        let mut relay = ended();
+        assert_eq!(happen(&mut relay, &Happens::Update(next)), [], "{name}");
+        assert_eq!(relay.step(update_with_forward(next + 2)), [], "{name}");
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(9),
+            first: subscribe(request_id, b"b"),
+        });
+        // INVALID_REQUEST_ID (0x4).
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [Action::CloseSession {
+                    session: ALICE,
+                    code: 0x4,
+                    ..
+                }]
+            ),
+            "{name}: {request_id}: {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn what_comes_after_the_relay_ended_its_direction_of_a_fetch_gets_no_answer() {
+    use Happens::{Ok, PipeEnded, Stream};
+    // While the FETCH is served, the same two: REQUEST_OK, and
+    // PROTOCOL_VIOLATION (0x3).
+    let mut relay = fetching();
+    happen(&mut relay, &Stream);
+    happen(&mut relay, &Ok);
+    assert_eq!(happen(&mut relay, &Happens::Update(2)), [request_ok()]);
+    let closed = relay.step(update_with_forward(4));
+    assert!(
+        matches!(
+            closed.as_slice(),
+            [
+                Action::CloseSession {
+                    session: ALICE,
+                    code: 0x3,
+                    ..
+                },
+                ..
+            ]
+        ),
+        "{closed:?}"
+    );
+
+    // The relay finished its direction: where the stream ended after the
+    // answer, and where the answer came after the stream had ended.
+    let finished = FetchPipeEnd::Finished;
+    let ways: [(&str, [Happens; 3]); 2] = [
+        ("the stream ended last", [Stream, Ok, PipeEnded(finished)]),
+        ("the answer came last", [Stream, PipeEnded(finished), Ok]),
+    ];
+    for (name, steps) in ways {
+        let ended = || {
+            let mut relay = fetching();
+            for step in &steps {
+                happen(&mut relay, step);
+            }
+            relay
+        };
+        nothing_is_answered_any_more(ended, 2, name);
+    }
+
+    // A fetch stream the relay wrote itself: finished, and reset where the
+    // subscriber did not take it, TOO_FAR_BEHIND (0x5).
+    for given_up in [None, Some(0x5)] {
+        let ended = || {
+            let mut relay = relay_with_a_subscription(true);
+            relay.step(joining(true, 1, vec![Parameter::FillTimeout(0)]));
+            relay.step(written(given_up));
+            relay
+        };
+        // The SUBSCRIBE has the Request ID 0, the Joining FETCH 2.
+        nothing_is_answered_any_more(ended, 4, &format!("written, {given_up:?}"));
+    }
+}
+
 #[test]
 fn a_publisher_that_goes_takes_its_fetches_with_it() {
     // Before it answered: DOES_NOT_EXIST (0x10), as for a SUBSCRIBE.
@@ -1529,6 +1629,44 @@ fn a_joining_fetch_that_is_held_is_settled_by_its_own_session_alone() {
         message: request_error(0x32),
     };
     assert!(bob_uses.contains(&refused), "{bob_uses:?}");
+    assert_eq!(relay.counts().fetches, 0);
+}
+
+#[test]
+fn a_request_id_used_on_the_stream_of_a_refused_request_settles_a_held_fetch_at_once() {
+    let mut relay = relay_for_early_fetches();
+    // Alice's SUBSCRIBE 0, for a track nobody has, is refused; her
+    // direction of its stream stays open.
+    let refused = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            full_track_name: FullTrackName::new(
+                TrackNamespace::new(vec![b"other".to_vec()]).unwrap(),
+                b"x".to_vec(),
+            )
+            .unwrap(),
+            parameters: vec![],
+        }),
+    });
+    assert!(
+        refused.contains(&send(StreamKey(0), request_error(0x10))),
+        "{refused:?}"
+    );
+    // Her FETCH 4 names the Request ID 2, which has not come: held.
+    assert_eq!(relay.step(joining_fetch(4, 2)), [HOLD]);
+    // The ID 2 comes as a REQUEST_UPDATE on the stream of the refused
+    // SUBSCRIBE: INVALID_JOINING_REQUEST_ID (0x32), without waiting.
+    let used = relay.step(Event::RequestMessage {
+        session: ALICE,
+        stream: StreamKey(0),
+        message: ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: 2,
+            parameters: vec![],
+        }),
+    });
+    assert_eq!(used, [send(FETCH_STREAM, request_error(0x32)), FINISH]);
     assert_eq!(relay.counts().fetches, 0);
 }
 

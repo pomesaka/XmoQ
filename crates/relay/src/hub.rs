@@ -366,6 +366,9 @@ struct Timers {
     /// Where the timer for the answer to a request of the relay is, so that
     /// it can be dropped when the answer came.
     upstream: HashMap<(SessionKey, OwnRequestKey), (Instant, u64)>,
+    /// Where the timer for a peer to end its half of a request stream is,
+    /// so that it can be dropped when the peer did.
+    request_close: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
     next: u64,
 }
 
@@ -390,8 +393,14 @@ impl Timers {
         }
         *running += 1;
         let at = (Instant::now() + wait, self.next);
-        if let Event::UpstreamTimeout { session, request } = event {
-            self.upstream.insert((session, request), at);
+        match event {
+            Event::UpstreamTimeout { session, request } => {
+                self.upstream.insert((session, request), at);
+            }
+            Event::RequestTimeout { session, stream } => {
+                self.request_close.insert((session, stream), at);
+            }
+            _ => {}
         }
         self.pending.insert(at, (session, event));
         self.next = self.next.wrapping_add(1);
@@ -401,6 +410,23 @@ impl Timers {
     /// Drops the timer for the answer to a request of the relay.
     fn stop_upstream(&mut self, session: SessionKey, request: OwnRequestKey) {
         let Some(at) = self.upstream.remove(&(session, request)) else {
+            return;
+        };
+        if self.pending.remove(&at).is_some()
+            && let Some(running) = self.per_session.get_mut(&session)
+        {
+            *running = running.saturating_sub(1);
+        }
+    }
+
+    /// Drops the timer for a peer to end its half of a request stream.
+    ///
+    /// WHY dropped and not left to run out: every request the relay refuses
+    /// or serves to its end starts one, and a peer that ends its streams as
+    /// it should would hold as many timers as it made requests in that
+    /// time, against a limit that is there for peers that do not.
+    fn stop_request_close(&mut self, session: SessionKey, stream: StreamKey) {
+        let Some(at) = self.request_close.remove(&(session, stream)) else {
             return;
         };
         if self.pending.remove(&at).is_some()
@@ -429,8 +455,14 @@ impl Timers {
             if let Some(running) = self.per_session.get_mut(&session) {
                 *running = running.saturating_sub(1);
             }
-            if let Event::UpstreamTimeout { session, request } = event {
-                self.upstream.remove(&(session, request));
+            match event {
+                Event::UpstreamTimeout { session, request } => {
+                    self.upstream.remove(&(session, request));
+                }
+                Event::RequestTimeout { session, stream } => {
+                    self.request_close.remove(&(session, stream));
+                }
+                _ => {}
             }
             events.push_back(event);
         }
@@ -441,6 +473,7 @@ impl Timers {
         self.per_session.remove(&session);
         self.pending.retain(|_, (owner, _)| *owner != session);
         self.upstream.retain(|(owner, _), _| *owner != session);
+        self.request_close.retain(|(owner, _), _| *owner != session);
     }
 
     #[cfg(test)]
@@ -680,21 +713,17 @@ impl<C: Connection> Hub<C> {
                     )
                 });
             }
+            // The peer's half of the stream is gone: nothing is left to wait
+            // for there.
+            if let Event::RequestClosed {
+                session, stream, ..
+            } = &event
+            {
+                self.timers.stop_request_close(*session, *stream);
+            }
             let actions = self.relay.handle(event);
-            // A SUBSCRIBE that got no answer in the step that read it waits
-            // for a publisher's: the one thing the relay does with a request
-            // that none of its other lines shows. One that closed its
-            // session got no answer either, and is not held.
             if let Some((session, stream)) = subscribe
-                && !actions.iter().any(|action| match action {
-                    Action::SendRequest {
-                        session: to,
-                        stream: on,
-                        ..
-                    } => (*to, *on) == (session, stream),
-                    Action::CloseSession { session: of, .. } => *of == session,
-                    _ => false,
-                })
+                && subscribe_is_held(&actions, session, stream)
             {
                 self.log(|| {
                     format!(
@@ -750,6 +779,7 @@ impl<C: Connection> Hub<C> {
                 if let Some(handle) = self.sessions.get_mut(&session) {
                     handle.requests.remove(&stream);
                 }
+                self.set_timer(&action, pending);
             }
             Action::ResetRequest {
                 session,
@@ -805,7 +835,6 @@ impl<C: Connection> Hub<C> {
             }
             Action::StartDrainTimer { .. }
             | Action::StartEarlyTimer { .. }
-            | Action::StartRequestTimer { .. }
             | Action::StartJoiningFetchTimer { .. }
             | Action::StartUpstreamTimer { .. }
             | Action::StartFetchStreamTimer { .. }
@@ -1094,7 +1123,9 @@ impl<C: Connection> Hub<C> {
                 self.config.early_stream_timeout,
                 Event::EarlyStreamTimeout { session, stream },
             ),
-            Action::StartRequestTimer { session, stream } => (
+            // The time the peer gets to end its half of a request stream
+            // the relay finished its own half of.
+            Action::FinishRequest { session, stream } => (
                 session,
                 self.config.request_close_timeout,
                 Event::RequestTimeout { session, stream },
@@ -1855,8 +1886,7 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartFetchStreamTimer { .. }
         | Action::StopUpstreamTimer { .. }
         | Action::SendObject { .. }
-        | Action::StartEarlyTimer { .. }
-        | Action::StartRequestTimer { .. } => return None,
+        | Action::StartEarlyTimer { .. } => return None,
         // The relay read a Joining FETCH before the SUBSCRIBE it names, and
         // holds it until that comes. The same word as for a SUBSCRIBE that
         // waits for a publisher (`Hub::feed`).
@@ -1927,6 +1957,64 @@ fn name(message: &ControlMessage) -> String {
     }
 }
 
+/// Whether the SUBSCRIBE on `stream` of `session` waits after the step that
+/// read it and led to `actions`: it got no answer, and waits for a
+/// publisher's. The one thing the relay does with a request that none of
+/// its other lines shows. One that closed its session got no answer either,
+/// and is not held.
+fn subscribe_is_held(actions: &[Action], session: SessionKey, stream: StreamKey) -> bool {
+    !actions.iter().any(|action| match action {
+        Action::SendRequest {
+            session: to,
+            stream: on,
+            ..
+        } => (*to, *on) == (session, stream),
+        Action::CloseSession { session: of, .. } => *of == session,
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod held_tests {
+    use xmoq_moqt::message::RequestOk;
+
+    use super::*;
+
+    #[test]
+    fn a_subscribe_is_held_when_its_step_neither_answered_it_nor_closed_its_session() {
+        let answer = |session, stream| Action::SendRequest {
+            session: SessionKey(session),
+            stream: StreamKey(stream),
+            message: ControlMessage::RequestOk(RequestOk::default()),
+        };
+        let close = |session| Action::CloseSession {
+            session: SessionKey(session),
+            code: 0x4,
+            reason: String::new(),
+        };
+        // The SUBSCRIBE is on stream 1 of session 5.
+        // (what the step led to; whether the SUBSCRIBE is held)
+        let cases = [
+            (vec![], true),
+            (vec![answer(5, 1)], false),
+            (vec![close(5)], false),
+            // Another stream of the session, the stream of that number in
+            // another session, and another session that is closed.
+            (vec![answer(5, 3)], true),
+            (vec![answer(6, 1)], true),
+            (vec![close(6)], true),
+            (vec![close(6), answer(5, 1)], false),
+        ];
+        for (actions, held) in cases {
+            assert_eq!(
+                subscribe_is_held(&actions, SessionKey(5), StreamKey(1)),
+                held,
+                "{actions:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod timer_tests {
     use super::*;
@@ -1936,6 +2024,44 @@ mod timer_tests {
             session: SessionKey(session),
             stream: StreamKey(stream),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_timer_for_a_peer_to_end_a_request_stream_goes_when_it_did() {
+        let mut timers = Timers::default();
+        let wait = Duration::from_secs(2);
+        for stream in 0..3 {
+            assert!(
+                timers
+                    .start(SessionKey(1), 3, wait, timeout(1, stream))
+                    .is_none()
+            );
+        }
+        // The peer ended the stream 1: its timer is gone, and makes room.
+        timers.stop_request_close(SessionKey(1), StreamKey(1));
+        assert_eq!(timers.len(), 2);
+        assert!(
+            timers
+                .start(SessionKey(1), 3, wait, timeout(1, 3))
+                .is_none()
+        );
+        // A stream that has none, and one of another session with that
+        // number: nothing.
+        timers.stop_request_close(SessionKey(1), StreamKey(1));
+        timers.stop_request_close(SessionKey(2), StreamKey(0));
+        assert_eq!(timers.len(), 3);
+        tokio::time::sleep(wait).await;
+        assert_eq!(
+            timers.take_due(),
+            [timeout(1, 0), timeout(1, 2), timeout(1, 3)]
+        );
+        // One that fired is not counted down a second time.
+        timers.stop_request_close(SessionKey(1), StreamKey(0));
+        assert!(
+            timers
+                .start(SessionKey(1), 1, wait, timeout(1, 4))
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]

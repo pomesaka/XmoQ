@@ -14,6 +14,15 @@ Variable-length integers are those of §1.4.1, not of QUIC: `80 8c` is 0x8C and 
 | `fetch-stream-indicator-first-group-delta` | Ascending | FETCH_HEADER, Request ID 0. End of Unknown Range at {3, 1}; Object {9, 0}, Subgroup 0, priority 7, no payload | The same, with a Group ID Delta that counts from the indicator |
 | `fetch-stream-subgroup-id-modes` | Ascending | FETCH_HEADER, Request ID 0. Object {1, 0} without a Subgroup ID (the Datagram bit), priority 7; Object {2, 0} in Subgroup 4, priority 9; Object {2, 1} in Subgroup 5, priority 9. No payloads | §11.4.4.1, Table 8 and the bit 0x40 |
 
+Control messages, one a file:
+
+| File | Decodes to | Built from |
+|---|---|---|
+| `request-update-request-id-3` | REQUEST_UPDATE, Request ID 3, no parameters | §10.9, Figure 12: Type `0x2`, a Length of 16 bits, Request ID, Number of Parameters. No capture of a REQUEST_UPDATE exists: `moqtail`'s clients send none |
+| `request-update-request-id-5` | The same with Request ID 5 | The same |
+
+`02 00 02 03 00`: the type, a Length of 2 for the two bytes that follow, Request ID 3, no parameters. [`fixtures/peer-subscribe/`](../peer-subscribe/README.md) has what the two are sent for.
+
 The Group Order is that of the FETCH the stream answers. The bytes do not carry it, and the same bytes decode to other Group IDs under the other order.
 
 ## Byte by byte

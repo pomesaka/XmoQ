@@ -80,11 +80,19 @@ pub enum PeerRequestOpened {
     /// with [`Session::on_peer_request_closed`].
     Request(PeerRequestId, PeerRequest),
     /// The session refused the request by itself. The caller sends `response`,
-    /// a `REQUEST_ERROR`, and ends the stream with a FIN (§3.3.2). Nothing is
-    /// kept for the request.
+    /// a `REQUEST_ERROR`, and ends the stream with a FIN (§3.3.2).
     Refused {
         /// The message to send on the request stream.
         response: ControlMessage,
+        /// The request, which the session keeps as one that was rejected:
+        /// the caller feeds what still comes on its stream with
+        /// [`Session::on_peer_request_message`] and reports the end of the
+        /// stream with [`Session::on_peer_request_closed`], as for a request
+        /// it rejected itself. `None` where the session keeps nothing, which
+        /// is when it holds as many requests of the peer as it may
+        /// ([`MAX_PEER_REQUESTS`]); what still comes on that stream is
+        /// dropped.
+        request: Option<PeerRequestId>,
     },
 }
 
@@ -144,9 +152,12 @@ pub enum PeerRequestEvent {
     /// would be read as the answer to the FETCH. [`Session::accept_fetch`]
     /// says how many are owed.
     UpdateHeld,
-    /// A message for a subscription this endpoint already ended with
-    /// `PUBLISH_DONE`. It crossed the `PUBLISH_DONE` on the way; there is
-    /// nothing to do.
+    /// A message for a request this endpoint has said its last on: a
+    /// subscription it ended with `PUBLISH_DONE`, a request that was
+    /// rejected, a FETCH whose answer it ended
+    /// ([`Session::on_fetch_answer_ended`]). The peer sent it before it saw
+    /// that; there is nothing to do. A `REQUEST_UPDATE` among them has used
+    /// up its Request ID.
     LateMessage,
 }
 
@@ -179,6 +190,12 @@ enum PeerRequestState {
         established: bool,
     },
     Fetch(FetchPhase),
+    /// `REQUEST_ERROR` was sent, by the caller or by the session itself; the
+    /// stream is not yet reported gone. What the peer sent before it saw
+    /// the answer still arrives, and gets none. WHY kept: a `REQUEST_UPDATE`
+    /// among it uses up a Request ID of the peer (§10.1), whoever refused
+    /// the request and whatever kind it was; the peer counts on from there.
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,9 +211,11 @@ enum FetchPhase {
     },
     /// `FETCH_OK` was sent.
     Answered,
-    /// `REQUEST_ERROR` was sent; the stream is not yet reported gone. What
-    /// the peer sent before it saw the answer still arrives, and gets none.
-    Rejected,
+    /// `FETCH_OK` was sent, and this endpoint has ended its direction of
+    /// the request stream since. What the peer sent before it saw that
+    /// still arrives, and gets no answer, as after a rejection
+    /// ([`PeerRequestState::Rejected`]).
+    Over,
 }
 
 /// The requests the peer has open, and the Request IDs it has used.
@@ -383,6 +402,31 @@ fn request_error(error_code: u64) -> ControlMessage {
 const NOT_PENDING: UsageError = UsageError("the request is not waiting for a response");
 
 impl Session {
+    /// Refuses a request of the peer whose Request ID was taken, and keeps it
+    /// as rejected until its stream is reported gone.
+    fn refuse_opened(&mut self, request: PeerRequestId, error_code: u64) -> PeerRequestOpened {
+        let kept = self.peer.live.len() < MAX_PEER_REQUESTS;
+        if kept {
+            self.peer
+                .live
+                .insert(request.id, PeerRequestState::Rejected);
+        }
+        PeerRequestOpened::Refused {
+            response: request_error(error_code),
+            request: kept.then_some(request),
+        }
+    }
+
+    /// Turns a request of the peer into one that was rejected: what it held
+    /// is let go of, and the request stays until its stream is reported
+    /// gone.
+    fn reject_peer_request(&mut self, request_id: u64) {
+        if let Some(state) = self.peer.live.get_mut(&request_id) {
+            let was = std::mem::replace(state, PeerRequestState::Rejected);
+            self.forget_peer_request(&was);
+        }
+    }
+
     /// Feeds the first message of a bidirectional stream the peer opened.
     ///
     /// # Errors
@@ -408,11 +452,6 @@ impl Session {
             }
         };
         self.peer.take_id(request_id)?;
-        let refused = |error_code| {
-            Ok(PeerRequestOpened::Refused {
-                response: request_error(error_code),
-            })
-        };
         let id = PeerRequestId {
             session: self.tag,
             id: request_id,
@@ -422,7 +461,7 @@ impl Session {
             ControlMessage::Subscribe(message) => {
                 // §5.1: at most one subscription to a track in each role.
                 if self.is_publishing(&message.full_track_name) {
-                    return refused(request_error_code::DUPLICATE_SUBSCRIPTION);
+                    return Ok(self.refuse_opened(id, request_error_code::DUPLICATE_SUBSCRIPTION));
                 }
                 let state = PeerRequestState::Subscribe {
                     full_track_name: message.full_track_name.clone(),
@@ -450,7 +489,7 @@ impl Session {
                         .pending_subscribe_to(&message.full_track_name)
                         .is_none()
                 {
-                    return refused(request_error_code::DUPLICATE_SUBSCRIPTION);
+                    return Ok(self.refuse_opened(id, request_error_code::DUPLICATE_SUBSCRIPTION));
                 }
                 // §2.5.1: this crate understands no Mandatory Track Property.
                 if message
@@ -458,7 +497,7 @@ impl Session {
                     .iter()
                     .any(KeyValuePair::is_mandatory_track_property)
                 {
-                    return refused(request_error_code::UNSUPPORTED_EXTENSION);
+                    return Ok(self.refuse_opened(id, request_error_code::UNSUPPORTED_EXTENSION));
                 }
                 // The alias means the track before the answer: §10.10 lets the
                 // publisher send Objects "possibly before PUBLISH_OK".
@@ -478,7 +517,7 @@ impl Session {
             ControlMessage::Fetch(message) => {
                 let start = match self.peer.start_of(request_id, &message.range) {
                     Ok(start) => start,
-                    Err(error_code) => return refused(error_code),
+                    Err(error_code) => return Ok(self.refuse_opened(id, error_code)),
                 };
                 let joins = match &message.range {
                     FetchRange::Standalone { .. } => None,
@@ -497,11 +536,15 @@ impl Session {
                 (state, PeerRequest::Fetch(message))
             }
             // The types `request_id` was read from above, less the ones handled.
-            _ => return refused(request_error_code::NOT_SUPPORTED),
+            _ => return Ok(self.refuse_opened(id, request_error_code::NOT_SUPPORTED)),
         };
+        // The one refusal that keeps nothing: the table is full.
         if self.peer.live.len() >= MAX_PEER_REQUESTS {
             self.forget_peer_request(&state);
-            return refused(request_error_code::EXCESSIVE_LOAD);
+            return Ok(PeerRequestOpened::Refused {
+                response: request_error(request_error_code::EXCESSIVE_LOAD),
+                request: None,
+            });
         }
         self.peer.live.insert(request_id, state);
         Ok(PeerRequestOpened::Request(id, request))
@@ -522,15 +565,21 @@ impl Session {
         track_properties: Vec<KeyValuePair>,
     ) -> Result<(u64, ControlMessage), UsageError> {
         check_own_parameters(&parameters, MessageKind::SubscribeOk)?;
-        let track_alias = self.next_free_alias()?;
-        let Some(PeerRequestState::Subscribe { phase, .. }) = self.peer_request_mut(request)?
-        else {
-            return Err(NOT_PENDING);
-        };
-        if *phase != SubscribePhase::Pending {
+        // Before an alias is taken: a call that fails uses none up.
+        let pending = matches!(
+            self.peer_request_mut(request)?,
+            Some(PeerRequestState::Subscribe {
+                phase: SubscribePhase::Pending,
+                ..
+            })
+        );
+        if !pending {
             return Err(NOT_PENDING);
         }
-        *phase = SubscribePhase::Established { track_alias };
+        let track_alias = self.next_free_alias()?;
+        if let Some(PeerRequestState::Subscribe { phase, .. }) = self.peer_request_mut(request)? {
+            *phase = SubscribePhase::Established { track_alias };
+        }
         self.published_aliases.insert(track_alias);
         let message = ControlMessage::SubscribeOk(SubscribeOk {
             track_alias,
@@ -710,20 +759,17 @@ impl Session {
             Some(PeerRequestState::Fetch(phase)) => {
                 matches!(phase, FetchPhase::Pending { .. })
             }
-            None => false,
+            Some(PeerRequestState::Rejected) | None => false,
         };
         if !pending {
             return Err(NOT_PENDING);
         }
-        // WHY a rejected FETCH stays where the other requests go at once: a
-        // REQUEST_UPDATE for it can be on its way, as the answer to it is
-        // held back until the FETCH is answered. One for a request that is
-        // gone would close the session.
-        if let Some(PeerRequestState::Fetch(phase)) = self.peer_request_mut(request)? {
-            *phase = FetchPhase::Rejected;
-        } else {
-            self.end_peer_request(request.id);
-        }
+        // WHY the request stays: what the peer sent before it saw the
+        // answer still arrives, and a REQUEST_UPDATE among it uses up a
+        // Request ID (§10.1). One for a request that is gone would close
+        // the session, and one that is not seen would leave this endpoint
+        // behind the peer's count.
+        self.reject_peer_request(request.id);
         Ok(ControlMessage::RequestError(RequestError {
             error_code,
             retry_interval,
@@ -755,7 +801,8 @@ impl Session {
             PeerRequestState::Subscribe {
                 phase: SubscribePhase::Done,
                 ..
-            } | PeerRequestState::Fetch(FetchPhase::Rejected)
+            } | PeerRequestState::Rejected
+                | PeerRequestState::Fetch(FetchPhase::Over)
         );
         let is_fetch = matches!(state, PeerRequestState::Fetch(_));
         // §10.1: a REQUEST_UPDATE consumes a Request ID of its sender, also
@@ -860,11 +907,39 @@ impl Session {
         request.session == self.tag && self.peer.yet_to_come(request_id, request.id)
     }
 
-    /// Records that a request stream of the peer is gone: finished, reset,
-    /// stopped or lost with the connection, by either endpoint (§3.3.2). Call it
-    /// for every stream that led to [`PeerRequestOpened::Request`], or the
-    /// request stays open in this session. Does nothing for a request that is
-    /// already forgotten, or for a handle of another session.
+    /// Records that this endpoint ended its direction of the request stream
+    /// of a FETCH it answered with `FETCH_OK`, by a FIN or by a reset. From
+    /// here on a message of the peer on that stream gets no answer, and a
+    /// `REQUEST_UPDATE` among them uses up its Request ID (§10.1). Does
+    /// nothing for any other request.
+    ///
+    /// WHY the caller has to say so: the streams are the caller's, and a
+    /// `REQUEST_UPDATE` for a FETCH that is answered gets a `REQUEST_OK`
+    /// only while there is a direction to send it on. WHY no parameter of
+    /// such a late `REQUEST_UPDATE` closes the session, where one does
+    /// while the FETCH is served: the peer sent it before it saw the end,
+    /// and after a rejection the same message is not looked at either.
+    pub fn on_fetch_answer_ended(&mut self, request: PeerRequestId) {
+        if request.session != self.tag {
+            return;
+        }
+        if let Some(PeerRequestState::Fetch(phase @ FetchPhase::Answered)) =
+            self.peer.live.get_mut(&request.id)
+        {
+            *phase = FetchPhase::Over;
+        }
+    }
+
+    /// Records that the peer's direction of a request stream is gone:
+    /// finished, reset, stopped by this endpoint, or lost with the
+    /// connection (§3.3.2). Call it for every stream that led to
+    /// [`PeerRequestOpened::Request`], and for every one whose
+    /// [`PeerRequestOpened::Refused`] names a request, or the request stays
+    /// held in this session and counts against what the peer may have open:
+    /// a request that was rejected, ended with `PUBLISH_DONE` or answered is
+    /// kept until then, for what the peer still sends on its stream. Does
+    /// nothing for a request that is already forgotten, or for a handle of
+    /// another session.
     pub fn on_peer_request_closed(&mut self, request: PeerRequestId) {
         if request.session == self.tag {
             self.end_peer_request(request.id);
@@ -914,7 +989,9 @@ impl Session {
                 PeerRequestEvent::UpdateHeld
             }
             // Sorted out before this is called.
-            Some(PeerRequestState::Fetch(FetchPhase::Rejected)) => PeerRequestEvent::LateMessage,
+            Some(PeerRequestState::Rejected | PeerRequestState::Fetch(FetchPhase::Over)) => {
+                PeerRequestEvent::LateMessage
+            }
             Some(PeerRequestState::Subscribe { phase, .. }) => match *phase {
                 SubscribePhase::Established { track_alias } => {
                     *phase = SubscribePhase::UpdateRefused { track_alias };
@@ -925,7 +1002,7 @@ impl Session {
                 // REQUEST_ERROR sent before the response to the request itself
                 // can only be read as that response.
                 SubscribePhase::Pending | SubscribePhase::Done => {
-                    self.end_peer_request(request_id);
+                    self.reject_peer_request(request_id);
                     refused(AfterRefusal::CloseStream)
                 }
             },
@@ -938,7 +1015,7 @@ impl Session {
             // answered yet ends the same way, for the reason given above.
             Some(PeerRequestState::Publish { .. } | PeerRequestState::PublishNamespace { .. })
             | None => {
-                self.end_peer_request(request_id);
+                self.reject_peer_request(request_id);
                 refused(AfterRefusal::CloseStream)
             }
         }
@@ -1001,7 +1078,8 @@ impl Session {
             }
             PeerRequestState::Subscribe { .. }
             | PeerRequestState::PublishNamespace { .. }
-            | PeerRequestState::Fetch(_) => {}
+            | PeerRequestState::Fetch(_)
+            | PeerRequestState::Rejected => {}
         }
     }
 }
@@ -1013,7 +1091,7 @@ mod tests {
     use crate::name::TrackNamespace;
     use crate::session::RequestState;
     use crate::session::Transport;
-    use crate::test_util::fixture;
+    use crate::test_util::{REQUEST_UPDATES_BY_HAND, fixture, fixture_by_hand};
 
     fn server() -> Session {
         Session::new(Role::Server, Transport::WebTransport)
@@ -1083,9 +1161,16 @@ mod tests {
         }
     }
 
-    fn refusal(error_code: u64) -> PeerRequestOpened {
-        PeerRequestOpened::Refused {
-            response: request_error(error_code),
+    /// What the session refused a request of the peer with by itself: the
+    /// error code, and the Request ID of the request it keeps as rejected,
+    /// `None` where it keeps nothing.
+    fn refusal(opened: Result<PeerRequestOpened, Error>) -> Result<(u64, Option<u64>), String> {
+        match opened {
+            Ok(PeerRequestOpened::Refused {
+                response: ControlMessage::RequestError(error),
+                request,
+            }) => Ok((error.error_code, request.map(PeerRequestId::value))),
+            other => Err(format!("{other:?}")),
         }
     }
 
@@ -1148,6 +1233,123 @@ mod tests {
         }
         for id in [0, 2, 4998, 9998] {
             assert_eq!(peer.take_id(id), Err(Error::InvalidRequestId(id)), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_fetch_whose_answer_this_endpoint_ended_takes_only_request_ids() {
+        let asked = |session: &mut Session| {
+            let request = opened(session, standalone(0, at(3, 0), at(5, 0)));
+            session
+                .accept_fetch(request, false, at(5, 0), vec![])
+                .unwrap();
+            request
+        };
+        let with = |request_id, parameters| {
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id,
+                parameters,
+            })
+        };
+        let forward = vec![Parameter::Forward(true)];
+        // While the FETCH is served: REQUEST_OK, and FORWARD, which the
+        // update of a FETCH may not carry (§10.2.12), closes the session.
+        let mut session = server();
+        let request = asked(&mut session);
+        assert!(matches!(
+            session.on_peer_request_message(request, with(2, vec![])),
+            Ok(PeerRequestEvent::UpdateAccepted { .. })
+        ));
+        assert_eq!(
+            session.on_peer_request_message(request, with(4, forward.clone())),
+            Err(RequestFault::Peer(Error::ProtocolViolation(
+                "parameter not allowed in this message"
+            )))
+        );
+        // After this endpoint ended its direction: no answer to either,
+        // and each used up its Request ID.
+        let mut session = server();
+        let request = asked(&mut session);
+        session.on_fetch_answer_ended(request);
+        for (request_id, parameters) in [(2, vec![]), (4, forward)] {
+            assert_eq!(
+                session.on_peer_request_message(request, with(request_id, parameters)),
+                Ok(PeerRequestEvent::LateMessage),
+                "{request_id}"
+            );
+            assert_eq!(
+                session.on_peer_request_opened(subscribe(request_id, b"b")),
+                Err(Error::InvalidRequestId(request_id))
+            );
+        }
+        // An ID that cannot be the peer's next still closes the session.
+        assert_eq!(
+            session.on_peer_request_message(request, with(3, vec![])),
+            Err(RequestFault::Peer(Error::InvalidRequestId(3)))
+        );
+        // Held until its stream is gone, and no longer.
+        assert_eq!(session.peer_request_count(), 1);
+        session.on_peer_request_closed(request);
+        assert_eq!(session.peer_request_count(), 0);
+
+        // It changes nothing for a FETCH that has no answer, nor for any
+        // other request.
+        let mut session = server();
+        let waiting = opened(&mut session, standalone(0, at(3, 0), at(5, 0)));
+        let subscription = opened(&mut session, subscribe(2, b"a"));
+        session.on_fetch_answer_ended(waiting);
+        session.on_fetch_answer_ended(subscription);
+        assert_eq!(
+            session.on_peer_request_message(waiting, with(4, vec![])),
+            Ok(PeerRequestEvent::UpdateHeld)
+        );
+        assert!(
+            session
+                .accept_subscribe(subscription, vec![], vec![])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_id_of_a_request_that_is_still_held_is_never_taken_twice() {
+        // The request with the ID 2 is held while 1025 later IDs push it
+        // out of the memory of IDs (0 was not used, so the gap is below
+        // it), whatever it has come to: open, ended with PUBLISH_DONE, or
+        // rejected.
+        type Ends = fn(&mut Session, PeerRequestId);
+        let cases: [(&str, Ends); 3] = [
+            ("open", |_, _| {}),
+            ("ended with PUBLISH_DONE", |session, request| {
+                session.accept_subscribe(request, vec![], vec![]).unwrap();
+                session
+                    .subscribe_done(request, 0x2, 0, ReasonPhrase::default())
+                    .unwrap();
+            }),
+            ("rejected", |session, request| {
+                session
+                    .reject(request, 0x10, 0, ReasonPhrase::default())
+                    .unwrap();
+            }),
+        ];
+        for (name, ends) in cases {
+            let mut session = server();
+            let request = opened(&mut session, subscribe(2, b"a"));
+            ends(&mut session, request);
+            for index in 2..=1026 {
+                session.peer.take_id(index * 2).unwrap();
+            }
+            assert_eq!(
+                session.on_peer_request_opened(subscribe(2, b"b")),
+                Err(Error::InvalidRequestId(2)),
+                "{name}"
+            );
+            // Once its stream is gone, the ID reads as one that is yet to
+            // come (`REQUEST_IDS_AHEAD_LIMIT`): the price of the limit.
+            session.on_peer_request_closed(request);
+            assert!(
+                session.on_peer_request_opened(subscribe(2, b"b")).is_ok(),
+                "{name}"
+            );
         }
     }
 
@@ -1286,6 +1488,34 @@ mod tests {
                     .reject(request, 0x10, 0, ReasonPhrase::default())
                     .unwrap();
             }
+            "subscribe-rejected-then-update" => {
+                let request = handed(&mut session);
+                session
+                    .reject(request, 0x10, 0, ReasonPhrase::default())
+                    .unwrap();
+                // REQUEST_UPDATE with the Request ID 3, on that stream.
+                let update = whole_message(&fixture_by_hand("request-update-request-id-3"));
+                session.on_peer_request_message(request, update).unwrap();
+            }
+            "subscribe-refused-then-update" => {
+                handed(&mut session);
+                // A second SUBSCRIBE for the track, with the Request ID 3.
+                let ControlMessage::Subscribe(mut second) = subscribe.clone() else {
+                    panic!("{before}: no SUBSCRIBE: {subscribe:?}");
+                };
+                second.request_id = 3;
+                let refused = session.on_peer_request_opened(ControlMessage::Subscribe(second));
+                let Ok(PeerRequestOpened::Refused {
+                    request: Some(request),
+                    ..
+                }) = refused
+                else {
+                    panic!("{before}: {refused:?}");
+                };
+                // REQUEST_UPDATE with the Request ID 5, on that stream.
+                let update = whole_message(&fixture_by_hand("request-update-request-id-5"));
+                session.on_peer_request_message(request, update).unwrap();
+            }
             other => panic!("a state the test does not know: {other}"),
         }
         session
@@ -1302,8 +1532,9 @@ mod tests {
         );
         let table = std::fs::read_to_string(&path).expect("the fixture is there");
         let rows = opened_rows(&table).unwrap_or_else(|error| panic!("{path}: {error}"));
-        // Every row of the table is read here; a row that is added is run.
-        assert_eq!(rows.len(), 10, "{path}");
+        // As many as the table has: a row that is added there and not
+        // read here is counted.
+        assert_eq!(rows.len(), 12, "{path}");
         // The README has the request that came before be the SUBSCRIBE of
         // the first row: Request ID 1, for the track "object".
         let first = rows.first().expect("rows");
@@ -1320,6 +1551,7 @@ mod tests {
                 }
                 Ok(PeerRequestOpened::Refused {
                     response: ControlMessage::RequestError(error),
+                    ..
                 }) => format!("refused {:#x}", error.error_code),
                 Err(error) => match error.termination_code() {
                     Some(code) => format!("closed {:#x}", code.code()),
@@ -1628,11 +1860,253 @@ mod tests {
                 }
                 // INVALID_JOINING_REQUEST_ID (0x32), and the session stays.
                 other => {
-                    assert_eq!(other, Ok(refusal(0x32)), "{row:?}");
+                    assert_eq!(refusal(other), Ok((0x32, Some(row.fetch))), "{row:?}");
                     assert!(!row.held, "{row:?}: refused");
                 }
             }
         }
+    }
+
+    /// A server's session in which the request of the client with the Request
+    /// ID 0 was rejected, by the caller or by the session itself, and the
+    /// handle of that request.
+    fn rejected(how: &str) -> (Session, PeerRequestId) {
+        let mut session = server();
+        let reason = ReasonPhrase::default;
+        // What the caller is handed and rejects with DOES_NOT_EXIST (0x10).
+        let by_the_caller = |session: &mut Session, first| {
+            let request = opened(session, first);
+            session.reject(request, 0x10, 0, reason()).unwrap();
+            request
+        };
+        // What the session refuses by itself.
+        let by_the_session =
+            |session: &mut Session, first| match session.on_peer_request_opened(first) {
+                Ok(PeerRequestOpened::Refused {
+                    request: Some(request),
+                    ..
+                }) => request,
+                other => panic!("{how}: {other:?}"),
+            };
+        let request = match how {
+            "a SUBSCRIBE the caller rejects" => by_the_caller(&mut session, subscribe(0, b"a")),
+            "a PUBLISH the caller rejects" => by_the_caller(&mut session, publish(0, b"a", 7)),
+            "a PUBLISH_NAMESPACE the caller rejects" => {
+                by_the_caller(&mut session, publish_namespace(0))
+            }
+            "a FETCH the caller rejects" => {
+                by_the_caller(&mut session, standalone(0, at(0, 0), at(1, 0)))
+            }
+            // The track this endpoint publishes: DUPLICATE_SUBSCRIPTION.
+            "a SUBSCRIBE the session refuses" => {
+                session.publish(track(b"a"), 1, vec![], vec![]).unwrap();
+                by_the_session(&mut session, subscribe(0, b"a"))
+            }
+            // TRACK_STATUS: NOT_SUPPORTED.
+            "a request the session does not implement" => by_the_session(
+                &mut session,
+                ControlMessage::UnsupportedRequest {
+                    message_type: 0x0d,
+                    request_id: 0,
+                },
+            ),
+            // A SUBSCRIBE that is refused by the REQUEST_ERROR for a
+            // REQUEST_UPDATE that came before its answer.
+            "a SUBSCRIBE an early REQUEST_UPDATE ended" => {
+                let request = opened(&mut session, subscribe(0, b"a"));
+                assert!(matches!(
+                    session.on_peer_request_message(request, update(100)),
+                    Ok(PeerRequestEvent::UpdateRefused {
+                        then: AfterRefusal::CloseStream,
+                        ..
+                    })
+                ));
+                request
+            }
+            other => panic!("a way the test does not know: {other}"),
+        };
+        (session, request)
+    }
+
+    const REJECTED: [&str; 7] = [
+        "a SUBSCRIBE the caller rejects",
+        "a PUBLISH the caller rejects",
+        "a PUBLISH_NAMESPACE the caller rejects",
+        "a FETCH the caller rejects",
+        "a SUBSCRIBE the session refuses",
+        "a request the session does not implement",
+        "a SUBSCRIBE an early REQUEST_UPDATE ended",
+    ];
+
+    #[test]
+    fn a_request_that_was_rejected_is_kept_until_its_stream_is_gone() {
+        for how in REJECTED {
+            let (mut session, request) = rejected(how);
+            assert_eq!(session.peer_request_count(), 1, "{how}");
+            // A REQUEST_UPDATE the peer sent before it saw the answer gets
+            // none, and uses up its Request ID (§10.1): the next request
+            // cannot have it.
+            assert_eq!(
+                session.on_peer_request_message(request, update(2)),
+                Ok(PeerRequestEvent::LateMessage),
+                "{how}"
+            );
+            assert_eq!(
+                session.on_peer_request_opened(publish_namespace(2)),
+                Err(Error::InvalidRequestId(2)),
+                "{how}"
+            );
+            // So does any other message, a PUBLISH_DONE here.
+            assert_eq!(
+                session.on_peer_request_message(request, ControlMessage::PublishDone(done(0))),
+                Ok(PeerRequestEvent::LateMessage),
+                "{how}"
+            );
+            // The stream is gone: so is the request, and a message for it
+            // now is one for a request that ended.
+            session.on_peer_request_closed(request);
+            assert_eq!(session.peer_request_count(), 0, "{how}");
+            assert_eq!(
+                session.on_peer_request_message(request, update(4)),
+                Err(RequestFault::Peer(Error::ProtocolViolation(
+                    "message after the request ended"
+                ))),
+                "{how}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_update_for_a_rejected_request_is_held_to_its_request_id() {
+        // (the Request ID of the REQUEST_UPDATE; what the session says)
+        let cases = [
+            // Not one of a client's.
+            (3, Err(RequestFault::Peer(Error::InvalidRequestId(3)))),
+            // The ID of the request itself, used.
+            (0, Err(RequestFault::Peer(Error::InvalidRequestId(0)))),
+            // Far ahead, as requests may overtake each other.
+            (1000, Ok(PeerRequestEvent::LateMessage)),
+        ];
+        for how in REJECTED {
+            for (request_id, expected) in &cases {
+                // 100 is used up in the one way that has a REQUEST_UPDATE
+                // before the rejection; none of the cases is 100.
+                let (mut session, request) = rejected(how);
+                assert_eq!(
+                    session.on_peer_request_message(request, update(*request_id)),
+                    *expected,
+                    "{how}, {request_id}"
+                );
+            }
+        }
+    }
+
+    /// The `REQUEST_UPDATE` messages that the rows of `fixtures/peer-subscribe/`
+    /// about a rejected request have arrive before their SUBSCRIBE. Written
+    /// by hand from §10.9, so read here: each is that message, and is
+    /// written the same.
+    #[test]
+    fn the_request_updates_written_by_hand_say_what_they_were_meant_to() {
+        for (name, request_id) in REQUEST_UPDATES_BY_HAND {
+            let bytes = fixture_by_hand(name);
+            assert_eq!(
+                ControlMessage::decode(&bytes),
+                Ok(Some((update(request_id), bytes.len()))),
+                "{name}"
+            );
+            let mut encoded = Vec::new();
+            update(request_id).encode(&mut encoded).unwrap();
+            assert_eq!(encoded, bytes, "{name}");
+        }
+    }
+
+    #[test]
+    fn accepting_a_subscribe_that_cannot_be_accepted_uses_up_no_track_alias() {
+        let mut session = server();
+        let first = opened(&mut session, subscribe(0, b"a"));
+        let (alias, _) = session.accept_subscribe(first, vec![], vec![]).unwrap();
+        // Accepted already, rejected, and no SUBSCRIBE: each fails.
+        let rejected = opened(&mut session, subscribe(2, b"b"));
+        session
+            .reject(rejected, 0x10, 0, ReasonPhrase::default())
+            .unwrap();
+        let namespace = opened(&mut session, publish_namespace(4));
+        for request in [first, rejected, namespace] {
+            assert_eq!(
+                session.accept_subscribe(request, vec![], vec![]),
+                Err(UsageError("the request is not waiting for a response")),
+                "{request:?}"
+            );
+        }
+        // The next SUBSCRIBE gets the alias after the first one's.
+        let next = opened(&mut session, subscribe(6, b"c"));
+        let (next_alias, _) = session.accept_subscribe(next, vec![], vec![]).unwrap();
+        assert_eq!((alias, next_alias), (0, 1));
+    }
+
+    /// What a client makes of the Joining FETCH `fetch` of its server that
+    /// names `names`, after the server used the odd Request IDs `used`
+    /// and left `open`, a Standalone FETCH, open among them: `held` for one
+    /// it hands on as naming a request that is yet to come, or the code it
+    /// refuses the FETCH with.
+    fn at_the_limit_of_remembered_ids(
+        used: std::ops::RangeInclusive<u64>,
+        open: Option<u64>,
+        fetch: u64,
+        names: u64,
+    ) -> String {
+        let mut session = Session::new(Role::Client, Transport::WebTransport);
+        if let Some(open) = open {
+            opened(&mut session, standalone(open, at(0, 0), at(1, 0)));
+        }
+        for id in used.step_by(2) {
+            session.peer.take_id(id).unwrap();
+        }
+        match session.on_peer_request_opened(joining(fetch, names)) {
+            Ok(PeerRequestOpened::Request(request, PeerRequest::Fetch(_))) => {
+                assert!(session.peer_request_yet_to_come(names, request));
+                "held".to_string()
+            }
+            Ok(PeerRequestOpened::Refused {
+                response: ControlMessage::RequestError(error),
+                ..
+            }) => format!("refused {:#x}", error.error_code),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_fetch_itself_can_push_the_id_it_names_out_of_the_memory() {
+        // The expectations below are spelled out for a limit of 1024.
+        assert_eq!(REQUEST_IDS_AHEAD_LIMIT, 1024);
+        // The Request ID 1 has not come. The ID of the FETCH is taken
+        // before the one it names is looked up, and is the 1025th ahead of
+        // the gap: the lowest one remembered is forgotten for it, and reads
+        // as yet to come. `@xmoq/moqt` has the same two cases in a test.
+        //
+        // 3 to 2049 are 1024 IDs; the FETCH 2051 pushes out 3.
+        assert_eq!(
+            at_the_limit_of_remembered_ids(3..=2049, None, 2051, 3),
+            "held"
+        );
+        // 3 to 2051 are 1025 IDs, so 3 was pushed out before; the FETCH
+        // 2053 pushes out 5.
+        assert_eq!(
+            at_the_limit_of_remembered_ids(3..=2051, None, 2053, 5),
+            "held"
+        );
+        // One that is still remembered: INVALID_JOINING_REQUEST_ID (0x32).
+        assert_eq!(
+            at_the_limit_of_remembered_ids(3..=2049, None, 2051, 5),
+            "refused 0x32"
+        );
+        // And one that was pushed out while its request is open, the
+        // Standalone FETCH 3, is not yet to come: 0x32, as it is no
+        // SUBSCRIBE.
+        assert_eq!(
+            at_the_limit_of_remembered_ids(5..=2053, Some(3), 2055, 3),
+            "refused 0x32"
+        );
     }
 
     #[test]
@@ -1657,11 +2131,13 @@ mod tests {
         let mut session = server();
         // TRACK_STATUS, with Request ID 0.
         assert_eq!(
-            session.on_peer_request_opened(ControlMessage::UnsupportedRequest {
-                message_type: 0x0d,
-                request_id: 0,
-            }),
-            Ok(refusal(0x3))
+            refusal(
+                session.on_peer_request_opened(ControlMessage::UnsupportedRequest {
+                    message_type: 0x0d,
+                    request_id: 0,
+                })
+            ),
+            Ok((0x3, Some(0)))
         );
         // Its Request ID is used up all the same.
         assert_eq!(
@@ -1764,7 +2240,7 @@ mod tests {
                         "{fetch:?}: {result:?}"
                     );
                 }
-                Some(code) => assert_eq!(result, Ok(refusal(code)), "{fetch:?}"),
+                Some(code) => assert_eq!(refusal(result), Ok((code, Some(10))), "{fetch:?}"),
             }
             // Its Request ID is used up either way.
             assert_eq!(
@@ -2131,13 +2607,13 @@ mod tests {
         let mut session = server();
         opened(&mut session, subscribe(0, b"a"));
         assert_eq!(
-            session.on_peer_request_opened(subscribe(2, b"a")),
-            Ok(refusal(0x19))
+            refusal(session.on_peer_request_opened(subscribe(2, b"a"))),
+            Ok((0x19, Some(2)))
         );
         opened(&mut session, publish(4, b"b", 7));
         assert_eq!(
-            session.on_peer_request_opened(publish(6, b"b", 8)),
-            Ok(refusal(0x19))
+            refusal(session.on_peer_request_opened(publish(6, b"b", 8))),
+            Ok((0x19, Some(6)))
         );
         // The same track in the other role is a different subscription.
         opened(&mut session, publish(8, b"a", 9));
@@ -2173,8 +2649,8 @@ mod tests {
         let (own, _) = session.subscribe(track(b"a"), vec![]).unwrap();
         session.on_request_message(own, subscribe_ok(3)).unwrap();
         assert_eq!(
-            session.on_peer_request_opened(publish(0, b"a", 7)),
-            Ok(refusal(0x19))
+            refusal(session.on_peer_request_opened(publish(0, b"a", 7))),
+            Ok((0x19, Some(0)))
         );
 
         // Accepted between the PUBLISH and its answer: the PUBLISH cannot be
@@ -2248,8 +2724,8 @@ mod tests {
             track_properties: vec![KeyValuePair::varint(0x4000, 1).unwrap()],
         };
         assert_eq!(
-            session.on_peer_request_opened(ControlMessage::Publish(message.clone())),
-            Ok(refusal(0x33))
+            refusal(session.on_peer_request_opened(ControlMessage::Publish(message.clone()))),
+            Ok((0x33, Some(0)))
         );
         assert_eq!(session.subscribed_alias(7), SubscribedAlias::Unknown);
 
@@ -2652,8 +3128,8 @@ mod tests {
         // The session refuses the 257th request itself, and the alias the
         // refused PUBLISH named is the draining subscription's again.
         assert_eq!(
-            session.on_peer_request_opened(publish(514, b"a", 7)),
-            Ok(refusal(0x9))
+            refusal(session.on_peer_request_opened(publish(514, b"a", 7))),
+            Ok((0x9, None))
         );
         assert!(matches!(
             session.subscribed_alias(7),
@@ -2701,11 +3177,32 @@ mod tests {
             opened(&mut session, publish_namespace(index * 2));
         }
         assert_eq!(
-            session.on_peer_request_opened(publish(512, b"a", 7)),
-            Ok(refusal(0x9))
+            refusal(session.on_peer_request_opened(publish(512, b"a", 7))),
+            Ok((0x9, None))
         );
         // The refused PUBLISH left its alias behind as unwanted.
         assert_eq!(session.subscribed_alias(7), SubscribedAlias::Retired);
+    }
+
+    #[test]
+    fn a_refused_request_is_kept_while_the_session_has_room_for_it() {
+        // The expectations below are spelled out for a limit of 256.
+        assert_eq!(MAX_PEER_REQUESTS, 256);
+        // (requests held before; whether the request that is refused is
+        //  kept; requests held after)
+        let cases = [(254, true, 255), (255, true, 256), (256, false, 256)];
+        for (held, kept, after) in cases {
+            let mut session = server();
+            for index in 0..held {
+                opened(&mut session, publish_namespace(index * 2));
+            }
+            // A FETCH that ends before it starts: the session refuses it
+            // itself, with INVALID_RANGE (0x11).
+            let fetch = standalone(1000, at(3, 4), at(3, 3));
+            let (code, request) = refusal(session.on_peer_request_opened(fetch)).unwrap();
+            assert_eq!((code, request.is_some()), (0x11, kept), "{held}");
+            assert_eq!(session.peer_request_count(), after, "{held}");
+        }
     }
 
     #[test]

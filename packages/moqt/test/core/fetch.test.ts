@@ -6,7 +6,13 @@ import {
 	type FetchStreamItem,
 } from "../../src/core/fetch.ts";
 import type { GroupOrder } from "../../src/core/parameters.ts";
-import { byHand, byHandNames, hex, toHex } from "../helpers.ts";
+import {
+	BY_HAND_CONTROL_MESSAGES,
+	byHand,
+	byHandNames,
+	hex,
+	toHex,
+} from "../helpers.ts";
 
 const LIMITS = {
 	maxObjectPayloadLength: 1024,
@@ -153,9 +159,12 @@ function decodeIn(bytes: Uint8Array, chunk: number, groupOrder: GroupOrder) {
 }
 
 // WHY: a file added to fixtures/moqt-18-by-hand/ and not to the table would
-// be read by the Rust implementation alone.
-test("every file of fixtures/moqt-18-by-hand/ is in the table, and every table entry is a file", () => {
-	expect(BY_HAND.map(({ file }) => file).sort()).toEqual(byHandNames());
+// be read by the Rust implementation alone. The files that are one control
+// message are read where that message is (`BY_HAND_CONTROL_MESSAGES`).
+test("every file of fixtures/moqt-18-by-hand/ is in the table or a control message, and every table entry is a file", () => {
+	expect(
+		[...BY_HAND.map(({ file }) => file), ...BY_HAND_CONTROL_MESSAGES].sort(),
+	).toEqual(byHandNames());
 });
 
 describe("fetch streams written by hand from the draft", () => {

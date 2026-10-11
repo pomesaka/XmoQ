@@ -33,7 +33,9 @@ type Before =
 	| "subscribe"
 	| "subscribe-accepted"
 	| "subscribe-done"
-	| "subscribe-rejected";
+	| "subscribe-rejected"
+	| "subscribe-rejected-then-update"
+	| "subscribe-refused-then-update";
 type Outcome = "handed" | "refused 0x19" | "closed 0x4";
 
 const rows: [name: string, before: Before, sent: string, outcome: Outcome][] = [
@@ -47,6 +49,10 @@ const rows: [name: string, before: Before, sent: string, outcome: Outcome][] = [
 	["track-after-a-rejection", "subscribe-rejected", subscribe(3), "handed"],
 	["request-id-of-the-wrong-parity", "nothing", subscribe(2), "closed 0x4"],
 	["request-id-used-before", "subscribe", subscribe(1, "objecu"), "closed 0x4"],
+	// A REQUEST_UPDATE that came on the stream of a request that was refused
+	// used up its Request ID (§10.1), whoever refused the request.
+	["request-id-of-an-update-after-a-rejection", "subscribe-rejected-then-update", subscribe(3), "closed 0x4"],
+	["request-id-of-an-update-after-the-session-refused", "subscribe-refused-then-update", subscribe(5, "objecu"), "closed 0x4"],
 ];
 
 writeFileSync(

@@ -446,7 +446,7 @@ impl Relay {
     ) {
         if self.fetches.open_of(session) >= MAX_FETCHES_PER_SESSION {
             let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
-            return self.refuse_fetch(session, stream, request, &too_many, actions);
+            return self.refuse(session, stream, request, &too_many, actions);
         }
         let slot = RequestSlot::Fetch {
             request,
@@ -557,7 +557,7 @@ impl Relay {
             // SUBSCRIBE that is over, or another kind of request.
             None => {
                 let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
-                self.refuse_fetch(session, stream, request, &gone, actions);
+                self.refuse(session, stream, request, &gone, actions);
             }
         }
     }
@@ -596,7 +596,7 @@ impl Relay {
         });
         let Some((track, forward, joining)) = subscription else {
             let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
-            return self.refuse_fetch(session, stream, request, &gone, actions);
+            return self.refuse(session, stream, request, &gone, actions);
         };
         // §10.12.2: "A Joining Fetch is only permitted when the associated
         // subscription has Forward State 1; otherwise the publisher MUST
@@ -611,7 +611,7 @@ impl Relay {
             .and_then(|joining| joining_range(&fetch.range, joining));
         let Some((start, end)) = range else {
             let invalid = Refusal::code(request_error_code::INVALID_RANGE);
-            return self.refuse_fetch(session, stream, request, &invalid, actions);
+            return self.refuse(session, stream, request, &invalid, actions);
         };
         let asked = AskedRange {
             track,
@@ -633,7 +633,7 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let refuse = |relay: &mut Self, error_code, actions: &mut Vec<Action>| {
-            relay.refuse_fetch(
+            relay.refuse(
                 session,
                 stream,
                 request,
@@ -773,7 +773,7 @@ impl Relay {
         let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
         for stream in missed {
             if let Some(held) = self.fetches.take_held(&(session, stream)) {
-                self.refuse_fetch(session, stream, held.request, &gone, actions);
+                self.refuse(session, stream, held.request, &gone, actions);
             }
         }
     }
@@ -827,7 +827,7 @@ impl Relay {
     ) {
         let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
         for (stream, held) in self.take_held(session, subscribe) {
-            self.refuse_fetch(session, stream, held.request, &gone, actions);
+            self.refuse(session, stream, held.request, &gone, actions);
         }
         let mut joined: Vec<StreamKey> = self
             .fetches
@@ -932,7 +932,7 @@ impl Relay {
         };
         let (Some(largest), None) = (largest, refusal) else {
             let error_code = refusal.unwrap_or(request_error_code::INTERNAL_ERROR);
-            self.refuse_fetch(
+            self.refuse(
                 session,
                 stream,
                 request,
@@ -967,10 +967,9 @@ impl Relay {
             // As where a publisher's answer cannot be passed on: this FETCH
             // alone.
             let failed = Refusal::code(request_error_code::INTERNAL_ERROR);
-            return self.refuse_fetch(session, stream, request, &failed, actions);
+            return self.refuse(session, stream, request, &failed, actions);
         };
-        let peer_finished = state.peer_finished(stream);
-        self.fetch_has_its_answer(session, stream, request, peer_finished, actions);
+        self.finish_slot(session, stream, Some(request), actions);
         // An indicator is a Location, written the same in either Group
         // Order. WHY the last Location of the range also for a Descending
         // FETCH, which begins there: §11.4.4.2 has an indicator cover what
@@ -1021,8 +1020,48 @@ impl Relay {
         if !self.fetches.finish_written(&(session, stream)) {
             return;
         }
+        self.end_answered_fetch(session, stream, given_up, actions);
+    }
+
+    /// Ends the relay's direction of the request stream of a FETCH that has
+    /// its `FETCH_OK`, while the session goes on holding the request: with a
+    /// FIN, or with a reset and the code `given_up`.
+    ///
+    /// Every FIN of an answered FETCH goes through here (a stream that was
+    /// passed on to its end, and one the relay wrote), and the reset of a
+    /// stream the relay wrote and the subscriber did not take. The session
+    /// has to hear of it (`Session::on_fetch_answer_ended`): until it has,
+    /// it answers a `REQUEST_UPDATE` of the subscriber with a `REQUEST_OK`
+    /// that the relay has no direction left to send on.
+    ///
+    /// WHY NOT the other resets of an answered FETCH (`Self::fail_fetch`
+    /// where no stream came, `Self::drop_fetch` for a subscriber that
+    /// stalled or is gone): they forget the request at once, in the session
+    /// and in the slot. The reset stops the subscriber's direction as well,
+    /// so what follows on it is not read; a `REQUEST_UPDATE` that was read
+    /// before the stop took effect finds no request and uses up no Request
+    /// ID there, where it does after the reset of this function. Which of
+    /// the two a reset should be is not decided, since neither can count
+    /// what the stop kept from being read (implementation notes, row on
+    /// what still comes on the stream of a request that was refused).
+    fn end_answered_fetch(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        given_up: Option<u32>,
+        actions: &mut Vec<Action>,
+    ) {
+        // The slot is gone where the subscriber had finished its direction:
+        // the session was told that the stream is gone, then.
+        if let Some(state) = self.sessions.get_mut(&session)
+            && let Some(RequestSlot::Finished(Some(request))) = state.requests.get(stream)
+        {
+            let request = *request;
+            state.moqt.on_fetch_answer_ended(request);
+        }
         actions.push(match given_up {
             None => Action::FinishRequest { session, stream },
+            // The I/O side stops the subscriber's direction with the reset.
             Some(code) => Action::ResetRequest {
                 session,
                 stream,
@@ -1055,55 +1094,6 @@ impl Relay {
                 stream_reset_code::MALFORMED_TRACK,
                 actions,
             );
-        }
-    }
-
-    /// Answers a FETCH with `REQUEST_ERROR` and a FIN. The session keeps a
-    /// rejected FETCH until its stream is gone, for the `REQUEST_UPDATE`
-    /// that can still be on its way; the slot tells it when that is.
-    pub(crate) fn refuse_fetch(
-        &mut self,
-        session: SessionKey,
-        stream: StreamKey,
-        request: PeerRequestId,
-        refusal: &Refusal,
-        actions: &mut Vec<Action>,
-    ) {
-        // Read before the refusal, which takes the slot of a stream the
-        // peer has finished.
-        let peer_finished = self
-            .sessions
-            .get(&session)
-            .is_some_and(|state| state.peer_finished(stream));
-        self.refuse(session, stream, request, refusal, actions);
-        self.fetch_has_its_answer(session, stream, request, peer_finished, actions);
-    }
-
-    /// The slot of a FETCH the relay has said its last on, whether that was
-    /// `FETCH_OK` or a refusal.
-    ///
-    /// The session keeps such a FETCH until its stream is gone, for the
-    /// `REQUEST_UPDATE` that can still be on its way, and the slot tells it
-    /// when that is. WHY not where the peer has finished its direction:
-    /// nothing more comes then, and no report of the stream closing either;
-    /// a slot left there, and the request in the session, would stay for the
-    /// life of the session and count against what the peer may have open.
-    fn fetch_has_its_answer(
-        &mut self,
-        session: SessionKey,
-        stream: StreamKey,
-        request: PeerRequestId,
-        peer_finished: bool,
-        actions: &mut Vec<Action>,
-    ) {
-        if peer_finished {
-            if let Some(state) = self.sessions.get_mut(&session) {
-                state.moqt.on_peer_request_closed(request);
-            }
-            self.take_slot(session, stream, actions);
-        } else {
-            let slot = RequestSlot::Finished(Some(request));
-            self.put_slot(session, stream, slot, actions);
         }
     }
 
@@ -1155,7 +1145,7 @@ impl Relay {
         }
         self.cancel_upstream(&fetch, actions);
         match (fetch.answered, fetch.pipe) {
-            (false, _) => self.refuse_fetch(session, stream, fetch.request, refusal, actions),
+            (false, _) => self.refuse(session, stream, fetch.request, refusal, actions),
             // WHY a reset of the request stream: the subscriber has its
             // FETCH_OK and waits for a fetch stream, which it is owed also
             // for a range without Objects (§10.12.3: "the publisher opens
@@ -1189,12 +1179,8 @@ impl Relay {
         request: PeerRequestId,
         actions: &mut Vec<Action>,
     ) {
-        let Some(state) = self.sessions.get_mut(&session) else {
-            return;
-        };
-        let peer_finished = state.peer_finished(stream);
-        self.fetch_has_its_answer(session, stream, request, peer_finished, actions);
-        actions.push(Action::FinishRequest { session, stream });
+        self.finish_slot(session, stream, Some(request), actions);
+        self.end_answered_fetch(session, stream, None, actions);
     }
 
     /// The FETCH is served when the subscriber has its `FETCH_OK` and the
@@ -1626,7 +1612,7 @@ impl Relay {
             if held.held_updates > MAX_HELD_FETCH_UPDATES
                 && let Some(held) = self.fetches.take_held(&subscriber)
             {
-                self.refuse_fetch(session, stream, held.request, &too_many, actions);
+                self.refuse(session, stream, held.request, &too_many, actions);
             }
             return;
         }

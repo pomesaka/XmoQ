@@ -284,8 +284,9 @@ pub enum Event {
         /// The request stream of the Joining FETCH.
         stream: StreamKey,
     },
-    /// The time a peer gets to close a request stream that the relay is done
-    /// with is over. Answers [`Action::StartRequestTimer`].
+    /// The time a peer gets to end its direction of a request stream that
+    /// the relay finished its own direction of is over. Reported for every
+    /// [`Action::FinishRequest`], whatever became of the stream since.
     RequestTimeout {
         /// The session.
         session: SessionKey,
@@ -325,7 +326,16 @@ pub enum Action {
         /// The message.
         message: ControlMessage,
     },
-    /// End the relay's half of a request stream with a FIN.
+    /// End the relay's half of a request stream with a FIN, and report
+    /// [`Event::RequestTimeout`] after the time the peer gets to end its
+    /// half.
+    ///
+    /// WHY the two in one action: the relay finishes its half when it has
+    /// said its last, with a refusal, `PUBLISH_DONE` or the end of a FETCH,
+    /// and nothing makes the peer end its own. Until it does, the stream
+    /// counts as one of those the peer may have open, and the request with
+    /// it where the session still holds it. A time limit that had to be
+    /// asked for next to every FIN would be left out somewhere.
     FinishRequest {
         /// The session.
         session: SessionKey,
@@ -459,14 +469,6 @@ pub enum Action {
         /// The session.
         session: SessionKey,
         /// The request stream of the Joining FETCH.
-        stream: StreamKey,
-    },
-    /// Report [`Event::RequestTimeout`] after the time a peer gets to close
-    /// its direction of a request stream the relay is done with.
-    StartRequestTimer {
-        /// The session.
-        session: SessionKey,
-        /// The request stream.
         stream: StreamKey,
     },
     /// Tell the peer to stop sending on a request stream (`STOP_SENDING`),

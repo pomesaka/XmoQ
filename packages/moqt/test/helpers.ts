@@ -47,6 +47,16 @@ export function fixtureNames(): string[] {
 	return hexFileNames(FIXTURE_DIR);
 }
 
+/**
+ * The files of `fixtures/moqt-18-by-hand/` that are one control message.
+ * The others are fetch streams, which test/core/fetch.test.ts has a table
+ * of.
+ */
+export const BY_HAND_CONTROL_MESSAGES = [
+	"request-update-request-id-3",
+	"request-update-request-id-5",
+] as const;
+
 /** The names `byHand` accepts: every `.hex` file of `fixtures/moqt-18-by-hand/`. */
 export function byHandNames(): string[] {
 	return hexFileNames(BY_HAND_DIR);
