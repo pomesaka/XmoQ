@@ -27,6 +27,8 @@ async function main(): Promise<void> {
 		trackNamespace: namespace(),
 		trackName: trackName(),
 		codec: DECODER_CODEC,
+		// `?join=no` waits for the next key frame, as without the FETCH.
+		joiningFetch: new URLSearchParams(location.search).get("join") !== "no",
 		onFrame(frame) {
 			firstFrameAfterMs ??= Math.round(performance.now() - began);
 			if (
@@ -47,7 +49,7 @@ async function main(): Promise<void> {
 	setInterval(() => {
 		const stats = playback.stats();
 		say(
-			`decoded ${stats.decoded} frames; first after ${firstFrameAfterMs ?? "?"} ms; the last one ${lastDelayMs} ms after it was made; dropped ${JSON.stringify(stats.dropped)}; decoder failures ${stats.decoderFailures}`,
+			`decoded ${stats.decoded} frames; first after ${firstFrameAfterMs ?? "?"} ms; the last one ${lastDelayMs} ms after it was made; dropped ${JSON.stringify(stats.dropped)}; decoder failures ${stats.decoderFailures}; joining FETCH ${stats.joiningFetch}`,
 		);
 		// For a script that looks at the page.
 		document.body.dataset.decoded = String(stats.decoded);
