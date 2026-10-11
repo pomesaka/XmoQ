@@ -40,8 +40,8 @@ use xmoq_moqt::session::{
 use xmoq_moqt::{ErrorScope, stream_reset_code};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, Direction, PeerRequestStreamEvent, RequestClose, RequestStreamEvent, SendStream,
-    StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
+    Connection, ConnectionEnd, Direction, PeerRequestStreamEvent, RequestClose, RequestStreamEvent,
+    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
 };
 
 use crate::fetching::{BodyEnd, Fetches, Happened, Note, Reading, StreamEnded, Tell};
@@ -2450,6 +2450,10 @@ fn termination_code(result: &Result<()>) -> u32 {
         .map_or(0, xmoq_moqt::TerminationCode::code)
 }
 
+/// How long a client that failed waits to learn whether the peer closed the
+/// session, and with what ([`run`]).
+const PEER_CLOSE_WAIT: Duration = Duration::from_millis(500);
+
 async fn run(args: &Args) -> Result<()> {
     // WHY one deadline for connecting and the session: `--timeout-secs` bounds
     // the whole run, and a relay that never answers the handshake must not
@@ -2474,6 +2478,15 @@ async fn run(args: &Args) -> Result<()> {
         Ok(result) => result,
         Err(_) => Err(timed_out()),
     };
+    // A session the peer closed: what failed first in this client is one of
+    // several things (a stream that ended, a read that was lost), and none
+    // of them says why. The connection does, a moment later.
+    if result.is_err()
+        && let Ok(ConnectionEnd::ClosedByPeer { code, reason }) =
+            tokio::time::timeout(PEER_CLOSE_WAIT, connection.closed()).await
+    {
+        report::closed_by_peer(code, &reason);
+    }
     connection.close(termination_code(&result), b"");
     // The close carries its code to the peer, which takes a moment; a process
     // that exits before that leaves the peer with a lost connection.

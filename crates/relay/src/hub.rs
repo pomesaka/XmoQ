@@ -296,6 +296,13 @@ fn path_now<C: Connection>(connection: &C) -> String {
     })
 }
 
+/// How long the streams of a session the relay closed are kept as they are,
+/// for the close to reach the peer first ([`Hub::close`]). The library
+/// closes the connection when the peer has answered the capsule, or after
+/// max(3 x RTT, 100 ms) (web-transport-quinn 0.13.2, `Session::close`), so
+/// this is a bound for a connection that does not end.
+const CLOSE_REACHES_THE_PEER: Duration = Duration::from_secs(2);
+
 impl<C: Connection> Drop for SessionHandle<C> {
     fn drop(&mut self) {
         for task in self.tasks.iter().chain(&self.fetch_writes) {
@@ -611,6 +618,7 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
         out_streams: HashMap::new(),
         fetch_pipes: HashMap::new(),
         timers: Timers::default(),
+        closing: std::collections::HashSet::new(),
     };
     let task = tokio::spawn(hub.run(inbox));
     let handle = HubHandle {
@@ -634,6 +642,10 @@ struct Hub<C: Connection> {
     /// it short. Dropping that cuts it short as well.
     fetch_pipes: HashMap<(SessionKey, StreamKey), oneshot::Sender<u32>>,
     timers: Timers,
+    /// The sessions the relay closed itself and has not forgotten yet: their
+    /// streams are held by a task until the close has reached the peer
+    /// ([`Self::close`]).
+    closing: std::collections::HashSet<SessionKey>,
 }
 
 /// The timers the relay asked for, in one place.
@@ -1596,7 +1608,7 @@ impl<C: Connection> Hub<C> {
         reason: &str,
         pending: &mut VecDeque<Event>,
     ) {
-        let Some(handle) = self.sessions.get(&session) else {
+        let Some(handle) = self.sessions.remove(&session) else {
             return;
         };
         self.log(|| {
@@ -1610,11 +1622,36 @@ impl<C: Connection> Hub<C> {
         // queue would be lost, and the peer would see the connection go away
         // without the code.
         handle.connection.close(code, reason.as_bytes());
+        // WHY the streams of the session are kept as they are until the
+        // connection is closed, and not let go of with the session: a stream
+        // that is dropped is reset or stopped, each of which the peer is
+        // told at once, on its own, while the code of the close travels in
+        // a capsule on another stream. A peer would then learn of a control
+        // stream that was reset before it learns why, or instead of it, in
+        // whichever order the frames came. The draft has nothing on the
+        // streams of a session that is terminated (§3.5).
+        let of_the_session: Vec<OutStreamKey> = self
+            .out_streams
+            .iter()
+            .filter(|(_, (owner, _))| *owner == session)
+            .map(|(out_stream, _)| *out_stream)
+            .collect();
+        let writers: Vec<OutgoingSubgroup> = of_the_session
+            .iter()
+            .filter_map(|out_stream| self.out_streams.remove(out_stream))
+            .map(|(_, writer)| writer)
+            .collect();
+        let connection = Arc::clone(&handle.connection);
+        self.closing.insert(session);
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(CLOSE_REACHES_THE_PEER, connection.closed()).await;
+            drop((handle, writers));
+        });
         pending.push_back(Event::SessionClosed { session });
     }
 
     fn forget_session(&mut self, session: SessionKey) {
-        if self.sessions.remove(&session).is_some() {
+        if self.sessions.remove(&session).is_some() | self.closing.remove(&session) {
             self.log(|| format!("SESSION_CLOSED session={}", session.0));
         }
         // Every writer of the session, also one that was finished and has not
