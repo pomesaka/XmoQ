@@ -16,7 +16,7 @@ import {
 	HERE,
 	MARK,
 	namespace,
-	roomUrl,
+	joinRoom,
 	SAMPLE_RATE,
 	say,
 	trackName,
@@ -53,19 +53,19 @@ async function main(): Promise<void> {
 		throw new Error("no canvas");
 	}
 	if (probe === null) throw new Error("no canvas to read a pixel with");
-	// With `?room=NAME` the room says where the broadcast is; without, it
-	// is the relay this page was served with.
-	const room = roomUrl();
+	// Where rooms run, the room says where the broadcast is; else it is the
+	// relay this page was served with.
+	const room = joinRoom(`viewer-${Math.floor(Math.random() * 1000)}`);
 	let broadcast: Broadcast = HERE;
 	if (room !== undefined) {
 		say("asking the room where the broadcast is");
-		const found: { broadcast: Broadcast | null } = await (
-			await fetch(room)
-		).json();
-		if (found.broadcast === null) {
-			throw new Error("nobody publishes in this room");
+		const found = await room.broadcast;
+		if (found === null) {
+			throw new Error(
+				"nobody publishes in this room: open /publish, and load this page again",
+			);
 		}
-		broadcast = found.broadcast;
+		broadcast = found;
 	}
 	document.body.dataset.broadcast = JSON.stringify(broadcast);
 	say("connecting");

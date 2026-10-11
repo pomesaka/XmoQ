@@ -1,6 +1,11 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787]
+//
+// The rooms (a chat, a count, and where the broadcast is) are the spike in
+// spikes/durable-objects-room, run locally with Miniflare. They start when
+// that directory has its dependencies (`npm install` there); without them
+// the demo runs without a room.
 //
 // Open http://localhost:8080/publish in Chromium, then /watch in one or
 // more other tabs. Ctrl-C stops the relay as well.
@@ -14,6 +19,7 @@ import { parseArgs } from "node:util";
 const { values: options } = parseArgs({
 	options: {
 		"relay-port": { type: "string", default: "4443" },
+		"rooms-port": { type: "string", default: "8787" },
 		port: { type: "string", default: "8080" },
 	},
 });
@@ -85,8 +91,19 @@ relay.on("exit", (code) => {
 	console.log(`the relay exited with ${code}`);
 	process.exit(code ?? 1);
 });
+// The rooms, where the spike is installed.
+const roomsDir = join(here, "..", "spikes", "durable-objects-room");
+const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
+	? spawn("node", ["run.mjs", "--port", options["rooms-port"]], {
+			cwd: roomsDir,
+			stdio: ["ignore", "ignore", "inherit"],
+		})
+	: undefined;
+const roomsUrl =
+	rooms === undefined ? null : `http://127.0.0.1:${options["rooms-port"]}/`;
 const stop = (): void => {
 	relay.kill("SIGINT");
+	rooms?.kill("SIGINT");
 };
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
@@ -103,6 +120,7 @@ for (const [path, entry] of Object.entries(PAGES)) {
 		throw: false,
 		define: {
 			XMOQ_DEMO: JSON.stringify({
+				roomsUrl,
 				relayUrl: `https://127.0.0.1:${options["relay-port"]}/`,
 				certSha256Hex,
 			}),
@@ -133,6 +151,13 @@ const html = (path: string): string => `<!doctype html>
 		<canvas width="640" height="360"></canvas>
 		${path === "/watch" ? '<p><button id="sound">sound</button></p>' : ""}
 		<pre id="status">loading</pre>
+		${
+			roomsUrl === null
+				? "<p>no rooms: npm install in spikes/durable-objects-room, and start again</p>"
+				: `<p id="connected"></p>
+		<div id="chat" style="height: 8em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
+		<form><input size="40" placeholder="say something" /> <button>send</button></form>`
+		}
 		<script type="module" src="${path}.js"></script>
 	</body>
 </html>
@@ -160,3 +185,4 @@ const server = Bun.serve({
 // WHY localhost: it is a secure context, which WebTransport and the camera need.
 console.log(`publish: http://localhost:${server.port}/publish`);
 console.log(`watch:   http://localhost:${server.port}/watch`);
+console.log(roomsUrl === null ? "rooms:   none" : `rooms:   ${roomsUrl}`);

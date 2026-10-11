@@ -8,9 +8,6 @@ node run.mjs           # the rooms, on http://127.0.0.1:8787
 node check.mjs         # the broadcast, the chat and the count, against it
 ```
 
-With the demo (`mise run demo` in the repository root), in Chromium:
-
-- <http://localhost:8080/publish?room=studio> publishes, and tells the room `studio` where: the relay's URL, the hash of its certificate, the namespace.
-- <http://localhost:8080/watch?room=studio> asks the room, and connects to what it says.
+`mise run demo` in the repository root starts these rooms with the relay and the pages: the publishing page tells the room where it publishes, over its WebSocket, and the watching page learns it there; both show the chat and the count. `?room=NAME` on both pages is another room.
 
 `worker.js` has the paths and the messages at its top.

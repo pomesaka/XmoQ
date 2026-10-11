@@ -23,13 +23,21 @@ function join(name) {
 }
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 1. The broadcast of a room.
+// 1. The broadcast of a room: there while its publisher's socket is.
 say("before:", await (await fetch(`${origin}/rooms/${room}`)).json());
 const broadcast = { relayUrl: "https://127.0.0.1:4443/", namespace: ["xmoq", "demo"], certSha256Hex: "ab".repeat(32) };
-await fetch(`${origin}/rooms/${room}/broadcast`, { method: "PUT", body: JSON.stringify(broadcast), headers: { "content-type": "application/json" } });
+const publisher = join("publisher");
+await publisher.opened;
+publisher.socket.send(JSON.stringify({ type: "broadcast", broadcast }));
+await wait(300);
 const found = await (await fetch(`${origin}/rooms/${room}`)).json();
 say("after the publisher registered:", found);
 if (found.broadcast?.relayUrl !== broadcast.relayUrl || found.broadcast?.namespace?.join("/") !== "xmoq/demo") fail("the room does not give the broadcast back");
+publisher.socket.close();
+await wait(500);
+const gone = await (await fetch(`${origin}/rooms/${room}`)).json();
+say("after the publisher's socket closed:", gone);
+if (gone.broadcast !== null || gone.connected !== 0) fail("the broadcast outlived its publisher");
 
 // 2. Chat: two send at once, 20 messages each; both see one order.
 const a = join("a");
@@ -57,7 +65,7 @@ const late = join("late");
 await late.opened;
 await wait(300);
 const hello = late.got.find((message) => message.type === "hello");
-say("the late one's hello:", { history: hello?.history?.length, first: hello?.history?.[0]?.seq, last: hello?.history?.at(-1)?.seq, connected: hello?.connected, broadcast: hello?.broadcast?.relayUrl });
+say("the late one's hello:", { history: hello?.history?.length, first: hello?.history?.[0]?.seq, last: hello?.history?.at(-1)?.seq, connected: hello?.connected });
 if (hello?.history?.length !== 50 || hello.history[0].seq !== 21 || hello.history.at(-1).seq !== 70) fail("the history is not the last 50 messages, 21 to 70");
 if (hello?.connected !== 3) fail("the late one is not told that 3 are connected");
 say("the count, as a was told:", a.got.filter((message) => message.type === "connected").map((message) => message.connected));
