@@ -80,7 +80,7 @@ declare const window: { readonly xmoqOwn: OwnPageExtras };
 const { values: options } = parseArgs({
 	options: {
 		catalog: { type: "string", default: "from-mlmpub" },
-		port: { type: "string", default: "44380" },
+		port: { type: "string", default: "24380" },
 		// The matrix gives every driver a relay; each case here has its own.
 		relay: { type: "string", default: "" },
 		verbose: { type: "boolean", default: false },

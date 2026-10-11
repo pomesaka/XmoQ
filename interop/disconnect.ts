@@ -262,7 +262,7 @@ const { values: options } = parseArgs({
 		// second stream of the Subgroup, as "0,1" or "128,default".
 		priorities: { type: "string" },
 		"second-joins": { type: "string" },
-		port: { type: "string", default: "44340" },
+		port: { type: "string", default: "24340" },
 		verbose: { type: "boolean", default: false },
 	},
 });
