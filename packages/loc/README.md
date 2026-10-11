@@ -85,6 +85,8 @@ To follow another revision:
 
 The section numbers in the comments of `@xmoq/media` say "LOC-04 §..."; they are of the revision they were read in, and are read again with the new one.
 
+**`LocRevision` has a place only for what is implemented**: the time of a frame as Object Properties, and the form of a video payload. A revision that is to give more (a Timescale or a Video Config of the track, Video Frame Marking, audio) needs the shape widened first, in `src/core/revision.ts`.
+
 ## Known gaps
 
 - **The Timescale of a track is not read** (the table above). What receives media needs a way to hand the track's value in.

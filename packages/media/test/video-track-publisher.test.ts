@@ -250,19 +250,39 @@ describe("createVideoTrackPublisher: what is written to the subscription", () =>
 			],
 		},
 	])(
-		"$mapping: a subscriber that comes in the middle of a Group gets nothing of it, and the next key chunk first",
+		"$mapping: a subscriber that comes in the middle of a Group gets nothing of it, has a key chunk asked for once, and gets the next key chunk first",
 		async ({ mapping, log }) => {
 			const publisher = publisherOf(mapping);
 			pushed(publisher, ["k"]);
 			const asked = fakeSubscribe(NAMESPACE, "video");
 			publisher.subscribe(asked.request);
 			await settle();
-			expect(pushed(publisher, ["d", "k"])).toEqual(["no-subscriber", ""]);
+			// A key chunk is asked for with the first chunk after it came, and
+			// not again.
+			expect(pushed(publisher, ["d", "d", "k"])).toEqual([
+				"no-subscriber+key",
+				"no-subscriber",
+				"",
+			]);
 			await settle();
 			expect(asked.answers).toEqual(["SUBSCRIBE_OK largest {5, 0}"]);
 			expect(asked.accepted.log).toEqual(log);
 		},
 	);
+
+	test("a subscriber whose first chunk is a key chunk has none asked for; the next one that comes has", async () => {
+		const { publisher, track } = await subscribed("stream-per-group");
+		expect(pushed(publisher, ["k", "d"])).toEqual(["", ""]);
+		track.end({ type: "peer-reset", code: 1 });
+		await settle();
+		const again = fakeSubscribe(NAMESPACE, "video");
+		publisher.subscribe(again.request);
+		await settle();
+		expect(pushed(publisher, ["d", "d"])).toEqual([
+			"no-subscriber+key",
+			"no-subscriber",
+		]);
+	});
 
 	test("with FORWARD 0 nothing is written, and the end of the track is told", async () => {
 		const { publisher, track } = await subscribed(
@@ -529,6 +549,33 @@ describe("createVideoTrackPublisher: a write that fails, and a subscriber that i
 			"group 7 Zero: opened",
 			"group 7 Zero: object 0 6 bytes at 1000000",
 		]);
+	});
+
+	test("a Group that is cut while its stream is being opened: the stream is reset when it has come, nothing is written to it, and the next Group goes on a new one", async () => {
+		const { publisher, track } = await subscribed("stream-per-group", {
+			maxPendingObjects: 2,
+		});
+		let release: () => void = () => {};
+		track.holdOpens(
+			new Promise((resolve) => {
+				release = resolve;
+			}),
+		);
+		expect(pushed(publisher, ["k", "d"])).toEqual(["", ""]);
+		// The stream of Group 5 is being opened, and no write is under way.
+		await settle();
+		expect(pushed(publisher, ["d"])).toEqual(["behind"]);
+		release();
+		await settle();
+		expect(pushed(publisher, ["d", "k"])).toEqual(["no-key-frame+key", ""]);
+		await settle();
+		expect(track.log).toEqual([
+			"group 5 Zero: opened",
+			"group 5 Zero: reset",
+			"group 6 Zero: opened",
+			"group 6 Zero: object 0 6 bytes at 1000000",
+		]);
+		expect(publisher.stats().writeFailures).toBe(0);
 	});
 
 	test("the bytes that wait have a limit as well, and are counted no more once they are written", async () => {

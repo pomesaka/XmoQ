@@ -75,6 +75,9 @@ export interface VideoPushResult {
 	 * once for each time it is needed, and not again before a key chunk
 	 * came and what waited was written down to half of what may wait: a
 	 * subscriber that stays behind does not get a key frame every frame.
+	 *
+	 * True as well, once, with the first chunk after a subscriber came that
+	 * is no key chunk: the subscriber gets nothing before one.
 	 */
 	askForKeyFrame: boolean;
 }
@@ -99,7 +102,7 @@ export interface VideoTrackPublisher {
 	 * subscription ended is accepted.
 	 *
 	 * The subscriber gets nothing of the Group that is being sent when it
-	 * comes: its first Object is the next key chunk.
+	 * comes: its first Object is the next key chunk, which `push` asks for.
 	 */
 	subscribe(request: PeerSubscribe): boolean;
 	/**
@@ -148,6 +151,8 @@ interface Subscriber {
 	track: PublishedTrack;
 	/** Whether it has been sent a key chunk: nothing goes to it before one. */
 	started: boolean;
+	/** Whether the encoder was asked for the key chunk it starts with. */
+	askedToStart: boolean;
 	/**
 	 * FORWARD 0 (transport §5.1): nothing is sent, and it is told of the end.
 	 * As the SUBSCRIBE had it: `PublishedTrack` has its parameters and no
@@ -427,6 +432,7 @@ export function createVideoTrackPublisher(
 						const accepted: Subscriber = {
 							track,
 							started: false,
+							askedToStart: false,
 							// Transport §5.1: "The publisher does not send Objects
 							// if the Forward State is 0".
 							silent: request.parameters.forward === false,
@@ -510,12 +516,21 @@ export function createVideoTrackPublisher(
 			if (skipped !== undefined) skip(skipped);
 			// Asked once, and only when there is room again for what is asked
 			// for.
-			const askForKeyFrame =
+			const afterACut =
 				needsKey &&
 				!asked &&
 				(to?.pendingObjects ?? 0) * 2 <= maxPendingObjects &&
 				(to?.pendingBytes ?? 0) * 2 <= maxPendingBytes;
-			if (askForKeyFrame) asked = true;
+			if (afterACut) asked = true;
+			// WHY asked for a subscriber that has nothing yet: it came in the
+			// middle of a Group, of which it gets nothing, and would wait for
+			// the key chunk the encoder makes by itself, up to its whole
+			// interval. Once for a subscription: a relay makes one for all its
+			// viewers.
+			const toStart =
+				to !== undefined && !to.silent && !to.started && !to.askedToStart;
+			if (toStart) to.askedToStart = true;
+			const askForKeyFrame = afterACut || toStart;
 			return skipped === undefined
 				? { askForKeyFrame }
 				: { skipped, askForKeyFrame };
@@ -524,8 +539,11 @@ export function createVideoTrackPublisher(
 		end() {
 			ended ??= (async () => {
 				let timer: ReturnType<typeof setTimeout> | undefined;
+				// One timer at a time: the one before has fired, or its wait
+				// is over.
 				const timeIsOver = (): Promise<"late"> =>
 					new Promise((resolve) => {
+						clearTimeout(timer);
 						timer = setTimeout(() => resolve("late"), endTimeoutMs);
 					});
 				try {
@@ -549,12 +567,10 @@ export function createVideoTrackPublisher(
 						// before the reset has settled here.
 						subscriber = undefined;
 						// A stream that is neither closed nor reset keeps
-						// PUBLISH_DONE from being sent.
-						await Promise.all(
-							[to.writing, to.open].map((stream) =>
-								stream?.writer.reset().catch(() => {}),
-							),
-						);
+						// PUBLISH_DONE from being sent. The stream of the write
+						// that stands still is the only one there can be: with
+						// a stream for a Group, it is that stream.
+						await to.writing?.writer.reset().catch(() => {});
 						// What was under way ends with that; an `openSubgroup`
 						// that was, with its stream reset when it has come
 						// (`write`). WHY waited for: a stream that is opened and

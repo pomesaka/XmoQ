@@ -1052,6 +1052,28 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--video", "from-mlmpub"],
 			relay: "none",
 		},
+		// A page encodes and publishes video, and another plays it: through
+		// each relay, with each way of putting Objects onto streams.
+		// `video.ts` starts the relay itself.
+		...relays.flatMap((relay) =>
+			(["stream-per-group", "stream-per-object"] as const).flatMap((mapping) =>
+				(["bars", "noise"] as const).map((picture) => ({
+					name: `${relay} relay: video: an own page encodes and publishes ${picture === "bars" ? "video" : "video of several MiB a Group"}, ${mapping === "stream-per-group" ? "a Group" : "an Object"} on a stream, and another plays it`,
+					script: "video.ts" as const,
+					args: [
+						"--video",
+						"page-to-page",
+						"--through",
+						relay,
+						"--mapping",
+						mapping,
+						"--picture",
+						picture,
+					],
+					relay,
+				})),
+			),
+		),
 		// The other two runs with a catalog go through the own relay, and
 		// `catalog.ts` starts it itself.
 		...(relays.includes("own")
