@@ -12,7 +12,7 @@
 | Audio | Decided: Opus, from Phase 2 |
 | Rust relay and Rust CLI | Discussed |
 | Ghostty video, audio, chat | Desired; validation required |
-| Durable Objects for room/chat state | Discussed; integration undecided |
+| Durable Objects for room/chat state | Validation required: a room that says where a broadcast is, chat and a count ran in Miniflare on one machine, with the demo's pages; the publishing page registers with the room (decided 2026-10-11). Not on Cloudflare, no authentication |
 | SNS event integration | Future goal |
 | Multiple publishers / bidirectional calls | Future possibility |
 | Reactions | Proposed; delivery undecided |
