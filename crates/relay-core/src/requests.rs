@@ -25,7 +25,9 @@ pub(crate) enum Subscribed {
 pub(crate) enum Joinable {
     /// No subscription began or ended.
     Unchanged,
-    /// A SUBSCRIBE that waited was accepted.
+    /// A SUBSCRIBE came, and waits for its answer.
+    Arrived,
+    /// A SUBSCRIBE was accepted: one that waited, or one that just came.
     Established,
     /// A SUBSCRIBE, waiting or accepted, is over.
     Over,
@@ -35,9 +37,10 @@ impl Joinable {
     /// From what the slot held of a SUBSCRIBE before and after.
     fn of(before: Option<Subscribed>, after: Option<Subscribed>) -> Self {
         match (before, after) {
-            (Some(Subscribed::Waiting), Some(Subscribed::Accepted)) => Self::Established,
+            (None, Some(Subscribed::Waiting)) => Self::Arrived,
+            (None | Some(Subscribed::Waiting), Some(Subscribed::Accepted)) => Self::Established,
             (Some(_), None) => Self::Over,
-            (None | Some(_), _) => Self::Unchanged,
+            (None, None) | (Some(_), Some(_)) => Self::Unchanged,
         }
     }
 }

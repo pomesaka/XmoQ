@@ -588,7 +588,10 @@ describe("what the session answers by itself", () => {
 			},
 			code: 0x32n,
 		},
-		{ name: "no request at all", session: started, code: 0x32n },
+		// The Request ID 1 was not used, and the FETCH has 3: the SUBSCRIBE
+		// can be on its way. The Rust session hands such a FETCH on, and the
+		// Rust client refuses it as it does any FETCH.
+		{ name: "a request that is yet to come", session: started, code: 3n },
 	])(
 		"a Joining FETCH that names $name is refused with $code",
 		({ session, code }) => {

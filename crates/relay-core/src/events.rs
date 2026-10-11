@@ -8,13 +8,13 @@ use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::session::Role;
 
 /// Names one MOQT session. The I/O side picks the numbers and never reuses one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionKey(pub u64);
 
 /// Names one stream the peer opened in a session: a request stream or a
 /// subgroup stream. The I/O side picks the numbers; they are unique within the
 /// session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StreamKey(pub u64);
 
 /// Names one subgroup stream the relay opens. The relay picks the numbers and
@@ -191,7 +191,8 @@ pub enum Event {
         request_id: u64,
     },
     /// The passing on of a fetch stream ended by itself. Not reported after
-    /// [`Action::AbortFetchPipe`].
+    /// [`Action::AbortFetchPipe`]: an I/O side whose task ended at the same
+    /// moment drops the report.
     FetchPipeEnded {
         /// The session of the subscriber.
         session: SessionKey,
@@ -273,6 +274,14 @@ pub enum Event {
         /// The session.
         session: SessionKey,
         /// The stream.
+        stream: StreamKey,
+    },
+    /// The time for the SUBSCRIBE of a Joining FETCH to come is over. Answers
+    /// [`Action::StartJoiningFetchTimer`].
+    JoiningFetchTimeout {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the Joining FETCH.
         stream: StreamKey,
     },
     /// The time a peer gets to close a request stream that the relay is done
@@ -440,6 +449,16 @@ pub enum Action {
         /// The session.
         session: SessionKey,
         /// The stream.
+        stream: StreamKey,
+    },
+    /// Report [`Event::JoiningFetchTimeout`] after the time a stream of the
+    /// peer gets to say what it is: the relay holds a Joining FETCH whose
+    /// SUBSCRIBE it has not read yet, and the SUBSCRIBE has that long to
+    /// come.
+    StartJoiningFetchTimer {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the Joining FETCH.
         stream: StreamKey,
     },
     /// Report [`Event::RequestTimeout`] after the time a peer gets to close

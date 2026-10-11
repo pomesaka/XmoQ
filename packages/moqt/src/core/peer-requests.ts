@@ -111,14 +111,20 @@ const NOT_SUPPORTED = {
 
 /**
  * What a FETCH of the peer is refused with before anyone is asked, and why;
- * `undefined` for a Standalone FETCH that is handed on. The first two are
- * what the session of the Rust implementation answers by itself for the
- * same FETCH, so that the same bytes get the same code from both
- * (`fixtures/peer-fetch/`).
+ * `undefined` for a Standalone FETCH that is handed on.
+ *
+ * INVALID_RANGE and INVALID_JOINING_REQUEST_ID are what the session of the
+ * Rust implementation answers by itself for the same FETCH
+ * (`fixtures/peer-fetch/`, `fixtures/joining-request-id/`). A Joining FETCH
+ * that the Rust session hands to its caller is refused here with
+ * NOT_SUPPORTED, which is what the Rust client, the caller that serves no
+ * FETCH, answers it with: the same bytes get the same code from a client of
+ * either implementation.
  */
 function fetchRefusal(
 	range: FetchRange,
 	isOpenSubscribe: (requestId: bigint) => boolean,
+	isYetToCome: (requestId: bigint) => boolean,
 ): { code: bigint; reason: string } | undefined {
 	switch (range.fetchType) {
 		case "Standalone":
@@ -141,7 +147,15 @@ function fetchRefusal(
 			// INVALID_JOINING_REQUEST_ID". A SUBSCRIBE of the peer is such a
 			// subscription until it is over; a PUBLISH of this endpoint is not
 			// taken as one (the notes, known gaps), as in the Rust session.
-			if (!isOpenSubscribe(range.joiningRequestId)) {
+			//
+			// A Joining Request ID whose request is yet to come is no reason
+			// for that code: the SUBSCRIBE travels on a stream of its own and
+			// can be read after the FETCH. The Rust session hands such a FETCH
+			// to its caller, and a relay holds it for the SUBSCRIBE.
+			if (
+				!isOpenSubscribe(range.joiningRequestId) &&
+				!isYetToCome(range.joiningRequestId)
+			) {
 				return {
 					code: RequestErrorCode.INVALID_JOINING_REQUEST_ID,
 					reason: "the Joining Request ID names no subscription",
@@ -151,6 +165,8 @@ function fetchRefusal(
 			// hands it to its caller: a relay turns a viewer's Joining FETCH
 			// into a Standalone one before it asks a publisher, so a publisher
 			// behind a relay gets none. The Rust client refuses it the same.
+			// WHY at once for one whose SUBSCRIBE is yet to come, where a relay
+			// waits for it: what would be answered after the wait is this.
 			return {
 				code: RequestErrorCode.NOT_SUPPORTED,
 				reason: "a Joining FETCH is not served",
@@ -227,6 +243,22 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 		seenAhead.delete(lowestSeen);
 	};
 
+	/**
+	 * Whether the request with this ID is yet to come, for a request with
+	 * the ID `before` that names it: one of the peer's IDs, smaller than
+	 * that of the request that names it (§10.1: "Each endpoint increments its
+	 * Request ID by 2 for each new request", so a request that names another
+	 * was made after it), and not used. The rule of both implementations
+	 * (`fixtures/joining-request-id/`).
+	 *
+	 * An ID that was pushed out of what is remembered reads as yet to come.
+	 */
+	const isYetToCome = (requestId: bigint, before: bigint): boolean =>
+		requestId % 2n === 1n &&
+		requestId < before &&
+		requestId >= lowestUnseen &&
+		!seenAhead.has(requestId);
+
 	return {
 		checkRequestId,
 		receive(peerStream, data, fin, out) {
@@ -302,10 +334,16 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 					stream.buffer = buffer;
 					return undefined;
 				}
+				// WHY the Request ID of a FETCH is used before the one it names is
+				// looked at: using it can push the lowest ID out of what is
+				// remembered, and the Rust session, which takes the ID first
+				// (`on_peer_request_opened`), then reads that ID as yet to come.
+				checkRequestId(requestId);
 				if (whole.value.type === "FETCH") {
 					const refused = fetchRefusal(
 						whole.value.range,
 						options.isOpenSubscribe,
+						(joined) => isYetToCome(joined, requestId),
 					);
 					if (refused !== undefined) refusal = refused;
 					else handedOn = { message: whole.value, bytesRead: whole.bytesRead };
@@ -313,8 +351,9 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 				if (whole.value.type === "SUBSCRIBE") {
 					handedOn = { message: whole.value, bytesRead: whole.bytesRead };
 				}
+			} else {
+				checkRequestId(requestId);
 			}
-			checkRequestId(requestId);
 			// WHY only when the message is whole, where the request is refused
 			// on its Request ID: a stream that sent the start of a request and
 			// stops has not said what it is, as in the Rust implementation.

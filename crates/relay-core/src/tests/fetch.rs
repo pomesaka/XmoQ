@@ -1325,17 +1325,323 @@ fn a_joining_fetch_that_is_given_up_while_it_waits_is_not_asked_for() {
     );
 }
 
-#[test]
-fn a_joining_fetch_that_is_read_before_its_subscribe_is_refused() {
-    // No SUBSCRIBE with the Request ID 0 has come from Alice: the session
-    // knows no such request. INVALID_JOINING_REQUEST_ID (0x32), and the
-    // session stays.
+/// A relay in which the publisher offers the track "b" with the largest
+/// Location {5, 2}, and Bob has announced the namespace.
+fn relay_for_early_fetches() -> Relay {
     let mut relay = relay_with_track();
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(1),
+        first: ControlMessage::Publish(Publish {
+            request_id: 2,
+            full_track_name: track(b"b"),
+            track_alias: 41,
+            parameters: vec![Parameter::LargestObject(at(5, 2))],
+            track_properties: vec![],
+        }),
+    });
+    relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: StreamKey(0),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 0,
+            track_namespace: namespace(),
+            parameters: vec![],
+        }),
+    });
+    relay
+}
+
+/// A Relative Joining FETCH of Alice on [`FETCH_STREAM`], for the last Group.
+fn joining_fetch(request_id: u64, joining_request_id: u64) -> Event {
+    Event::RequestOpened {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        first: ControlMessage::Fetch(Fetch {
+            request_id,
+            range: FetchRange::RelativeJoining {
+                joining_request_id,
+                joining_start: 0,
+            },
+            parameters: vec![],
+        }),
+    }
+}
+
+const HOLD: Action = Action::StartJoiningFetchTimer {
+    session: ALICE,
+    stream: FETCH_STREAM,
+};
+
+#[test]
+fn a_joining_fetch_that_is_read_before_its_subscribe_waits_for_it() {
+    let opens = |first| Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first,
+    };
+    let refused = vec![send(FETCH_STREAM, request_error(0x32)), FINISH];
+    // Alice's FETCH with the Request ID 2 names the Request ID 0, which has
+    // not come: it is held. Then the request with the ID 0 comes.
+    //
+    // (what it is; the end of what the relay does; Alice's FETCH requests
+    //  after it)
+    let cases = [
+        // A SUBSCRIBE that is accepted at once: the FETCH is asked for,
+        // counted from the LARGEST_OBJECT of its SUBSCRIBE_OK, {5, 2}.
+        (opens(subscribe(0, b"b")), asks_for(at(5, 0), at(5, 3)), 1),
+        // A SUBSCRIBE that the relay refuses at once, for a track nobody
+        // has: INVALID_JOINING_REQUEST_ID (0x32).
+        (
+            opens(ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: FullTrackName::new(
+                    TrackNamespace::new(vec![b"other".to_vec()]).unwrap(),
+                    b"x".to_vec(),
+                )
+                .unwrap(),
+                parameters: vec![],
+            })),
+            refused.clone(),
+            0,
+        ),
+        // Something that is no SUBSCRIBE: the same.
+        (
+            opens(ControlMessage::PublishNamespace(PublishNamespace {
+                request_id: 0,
+                track_namespace: TrackNamespace::new(vec![b"alice".to_vec()]).unwrap(),
+                parameters: vec![],
+            })),
+            refused.clone(),
+            0,
+        ),
+        // Nothing, in the time a stream gets to say what it is: the same.
+        (
+            Event::JoiningFetchTimeout {
+                session: ALICE,
+                stream: FETCH_STREAM,
+            },
+            refused,
+            0,
+        ),
+        // Alice gives the FETCH up: CANCELLED (0x1) on its request stream.
+        (
+            Event::RequestClosed {
+                session: ALICE,
+                stream: FETCH_STREAM,
+                how: RequestEnd::Aborted,
+            },
+            vec![reset(0x1)],
+            0,
+        ),
+        (Event::SessionClosed { session: ALICE }, vec![], 0),
+    ];
+    for (comes, expected, fetches) in cases {
+        let mut relay = relay_for_early_fetches();
+        assert_eq!(relay.step(joining_fetch(2, 0)), [HOLD], "{comes:?}");
+        // Held, and one of the 16 Alice may have open.
+        assert_eq!(relay.counts().fetches, 1, "{comes:?}");
+        let actions = relay.step(comes.clone());
+        // In this order, among what else the step brings (the relay asks
+        // Bob for the track as well, §9.5).
+        let mut rest = actions.iter();
+        for action in &expected {
+            assert!(
+                rest.any(|done| done == action),
+                "{comes:?}: {action:?} in {actions:?}"
+            );
+        }
+        assert_eq!(relay.counts().fetches, fetches, "{comes:?}");
+        // The time that runs out later finds nothing to do.
+        let late = relay.step(Event::JoiningFetchTimeout {
+            session: ALICE,
+            stream: FETCH_STREAM,
+        });
+        assert_eq!(late, [], "{comes:?}");
+    }
+}
+
+#[test]
+fn a_joining_fetch_that_is_held_is_settled_by_its_own_session_alone() {
+    // Alice's FETCH 2 names her Request ID 0. Bob, who used 0 for his
+    // PUBLISH_NAMESPACE, sends the FETCH 4 that names 2, on a stream with
+    // the number of Alice's.
+    let mut relay = relay_for_early_fetches();
+    assert_eq!(relay.step(joining_fetch(2, 0)), [HOLD]);
+    let bobs_hold = Action::StartJoiningFetchTimer {
+        session: BOB,
+        stream: FETCH_STREAM,
+    };
+    let bobs = relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: FETCH_STREAM,
+        first: ControlMessage::Fetch(Fetch {
+            request_id: 4,
+            range: FetchRange::RelativeJoining {
+                joining_request_id: 2,
+                joining_start: 0,
+            },
+            parameters: vec![],
+        }),
+    });
+    assert_eq!(bobs, [bobs_hold]);
+    assert_eq!(relay.counts().fetches, 2);
+    // Alice's time runs out: hers is refused, Bob's stays.
     assert_eq!(
-        relay.step(joining(true, 0, vec![])),
+        relay.step(Event::JoiningFetchTimeout {
+            session: ALICE,
+            stream: FETCH_STREAM,
+        }),
         [send(FETCH_STREAM, request_error(0x32)), FINISH]
     );
+    assert_eq!(relay.counts().fetches, 1);
+    // Alice uses the Request ID that Bob's FETCH names, 2 being taken by
+    // her FETCH, with the next one: nothing of Bob's is touched.
+    let alices = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(11),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 4,
+            track_namespace: TrackNamespace::new(vec![b"alice".to_vec()]).unwrap(),
+            parameters: vec![],
+        }),
+    });
+    assert!(
+        alices.iter().all(
+            |action| !matches!(action, Action::SendRequest { session, .. } if *session == BOB)
+        ),
+        "{alices:?}"
+    );
+    assert_eq!(relay.counts().fetches, 1);
+    // Bob uses his: INVALID_JOINING_REQUEST_ID (0x32) for his FETCH.
+    let bob_uses = relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: StreamKey(11),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 2,
+            track_namespace: TrackNamespace::new(vec![b"bob".to_vec()]).unwrap(),
+            parameters: vec![],
+        }),
+    });
+    let refused = Action::SendRequest {
+        session: BOB,
+        stream: FETCH_STREAM,
+        message: request_error(0x32),
+    };
+    assert!(bob_uses.contains(&refused), "{bob_uses:?}");
     assert_eq!(relay.counts().fetches, 0);
+}
+
+#[test]
+fn a_joining_fetch_that_was_read_first_waits_on_with_its_subscribe() {
+    // The SUBSCRIBE comes and has to wait itself, for Bob's answer: the
+    // FETCH waits with it, and the time for the SUBSCRIBE to come no longer
+    // counts.
+    let mut relay = relay_for_early_fetches();
+    assert_eq!(relay.step(joining_fetch(2, 0)), [HOLD]);
+    let asked = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: subscribe(0, b"c"),
+    });
+    assert!(
+        matches!(
+            asked.as_slice(),
+            [Action::OpenRequest { session: BOB, .. }, _]
+        ),
+        "{asked:?}"
+    );
+    assert_eq!(
+        relay.step(Event::JoiningFetchTimeout {
+            session: ALICE,
+            stream: FETCH_STREAM,
+        }),
+        []
+    );
+    assert_eq!(relay.counts().fetches, 1);
+    // Bob accepts: Alice's SUBSCRIBE_OK has LARGEST_OBJECT {7, 1}, and the
+    // FETCH is asked of Bob for {7, 0} to {7, 2}.
+    let actions = bob_answers(
+        &mut relay,
+        ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: UPSTREAM_ALIAS,
+            parameters: vec![Parameter::LargestObject(at(7, 1))],
+            track_properties: vec![],
+        }),
+    );
+    let fetch = Action::OpenRequest {
+        session: BOB,
+        request: OwnRequestKey(1),
+        message: standalone(3, b"c", (at(7, 0), at(7, 2)), vec![]),
+    };
+    assert!(actions.contains(&fetch), "{actions:?}");
+}
+
+#[test]
+fn a_joining_request_id_that_the_session_or_an_update_uses_up_refuses_the_fetch() {
+    let refused = [send(FETCH_STREAM, request_error(0x32)), FINISH];
+    // Alice subscribes to "b" with the Request ID 0, and her FETCH with the
+    // ID 6 names the ID 2, which has not come.
+    let held = || {
+        let mut relay = relay_with_a_subscription(true);
+        assert_eq!(relay.step(joining_fetch(6, 2)), [HOLD]);
+        relay
+    };
+    // (what uses the Request ID 2)
+    let cases = [
+        // A second SUBSCRIBE for the track, which the session refuses by
+        // itself: DUPLICATE_SUBSCRIPTION.
+        Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(3),
+            first: subscribe(2, b"b"),
+        },
+        // A REQUEST_UPDATE on the stream of her subscription.
+        Event::RequestMessage {
+            session: ALICE,
+            stream: StreamKey(0),
+            message: ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: 2,
+                parameters: vec![],
+            }),
+        },
+    ];
+    for uses in cases {
+        let mut relay = held();
+        let actions = relay.step(uses.clone());
+        assert!(actions.ends_with(&refused), "{uses:?}: {actions:?}");
+        assert_eq!(relay.counts().fetches, 0, "{uses:?}");
+    }
+}
+
+#[test]
+fn a_joining_request_id_that_cannot_come_is_refused_at_once() {
+    let refused = [send(FETCH_STREAM, request_error(0x32)), FINISH];
+    // (the Request ID of the FETCH; the Joining Request ID)
+    let cases = [
+        // Not smaller than the FETCH's own.
+        (2, 4),
+        (2, 2),
+        // Not one of a client's.
+        (2, 1),
+    ];
+    for (request_id, joining_request_id) in cases {
+        let mut relay = relay_for_early_fetches();
+        assert_eq!(
+            relay.step(joining_fetch(request_id, joining_request_id)),
+            refused,
+            "{request_id} {joining_request_id}"
+        );
+        assert_eq!(relay.counts().fetches, 0);
+    }
+    // Used, by a SUBSCRIBE that is over: Alice cancelled it.
+    let mut relay = relay_with_a_subscription(true);
+    relay.step(Event::RequestClosed {
+        session: ALICE,
+        stream: StreamKey(0),
+        how: RequestEnd::Aborted,
+    });
+    assert_eq!(relay.step(joining_fetch(2, 0)), refused);
 }
 
 #[test]
@@ -2107,4 +2413,37 @@ fn a_fetch_the_relay_answers_itself_after_its_subscriber_finished_the_stream_lea
             0
         )
     );
+}
+
+#[test]
+fn an_answer_to_a_subscribe_the_relay_cancelled_is_dropped() {
+    // (what Bob answers to the SUBSCRIBE the relay has cancelled)
+    let answers = [
+        ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: UPSTREAM_ALIAS,
+            parameters: vec![Parameter::LargestObject(at(7, 1))],
+            track_properties: vec![],
+        }),
+        request_error(0x10),
+    ];
+    for answer in answers {
+        // Alice's SUBSCRIBE waits for Bob's answer, and she gives it up: the
+        // relay cancels what it asked of Bob.
+        let mut relay = relay_with_a_pending_subscription(true);
+        let actions = relay.step(Event::RequestClosed {
+            session: ALICE,
+            stream: StreamKey(0),
+            how: RequestEnd::Aborted,
+        });
+        let cancelled = Action::CancelOwnRequest {
+            session: BOB,
+            request: OwnRequestKey(0),
+            code: 0x1,
+        };
+        assert!(actions.contains(&cancelled), "{actions:?}");
+        // Bob sent his answer before he saw that: nothing follows from it,
+        // and Bob's session is not closed for it.
+        assert_eq!(bob_answers(&mut relay, answer.clone()), [], "{answer:?}");
+        assert_eq!(relay.counts().sessions, 3, "{answer:?}");
+    }
 }
