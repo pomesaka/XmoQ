@@ -8,7 +8,7 @@ Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。
 
 Phase 0b（MoQ Transportの層をRustとTypeScriptで自前実装する）の終了条件にも、2026-10-10に届いた。自前のブラウザクライアント、Rustクライアント、Rustリレーのあいだで、Objectが1つ通る。版はdraft 18に固定している。理由と範囲は`docs/protocols.md`にある。映像はまだ流していない。
 
-いまの課題は、`docs/roadmap.md`のPhase 0bに残っている1項目（1つのトラックに複数のpublisher。draftの§9.3と§9.5がリレーに課すMUST）と、その後のPhase 1。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーは最小限で、キャッシュと認可が無く、WebTransportだけを受ける。名前空間での経路決定は入っているが、一致するpublisherのうち最初の1つにしかSUBSCRIBEを送らない。
+Phase 0bの項目は全部終わっている。いまの課題はPhase 1（映像）。FETCH、MSFのカタログ、LOCの詰め方、映像の受け手と送り手の中核が入っていて、ブラウザのエンコーダとデコーダにつなぐ所と、リレーのキャッシュが作業中。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーは、認可が無く、WebTransportだけを受ける。draftに届いていない所は`docs/moqt-implementation-notes.md`の既知の不足にある。
 
 Rustのcrateは次のように分かれている。`xmoq-moqt`（符号化とセッションの状態）、`xmoq-relay-core`（リレーの経路と配信の論理）は入出力に依存しない。`xmoq-moqt-io`が`Connection`トレイトの上でストリームを読み書きし、WebTransportのライブラリに触るのはこのcrateの1ファイルだけ。`xmoq-relay`と`xmoq-moqt-client`がそれらをつなぐ。`Connection`の契約は、メモリ上の接続と実際のループバックの接続の両方に同じテストを当てて確かめる。テスト用の接続だけで通る挙動を前提にしない。
 
@@ -37,7 +37,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 
 `interop/`は、自前の部品を`moqtail`の相手とつないで確かめるスクリプトの置き場で、lintと型検査の対象にする。`interop/peers/`は`moqtail`のコードの写しなので、整形もlintもしない（元との差分を読めるようにするため）。`interop/`は`packages/`に依存してよいが、逆は禁止する。
 
-照合は`mise run interop`で走らせる。自前と`moqtail`のクライアントの全部の組み合わせで、`moqtail`のリレーと自前のリレーのそれぞれを通してObjectを1つ運び、実物のChromiumで確かめる。加えて、publisherやsubscriberが転送の途中で去る場面（kill、取り消し、読まないsubscriber）を、自前のリレーを通して走らせる。場面は、リレーのログの行を待って進むので、その行の書式を変えると落ちる（`interop/disconnect.ts`の冒頭）。`mise run check`には入っていない。同じマシンで2つの作業コピーから同時に走らせるときは、`--base-port`を分ける。CIでは`interop`ジョブが同じタスクを呼び、照合が依存するパスに触れていないPRでは、skipと表示して終わる。`crates/`、`packages/`、`interop/`、`fixtures/`を変えたら、報告の前に`mise run interop`も走らせる。
+照合は`mise run interop`で走らせる。自前と`moqtail`のクライアントの全部の組み合わせで、`moqtail`のリレーと自前のリレーのそれぞれを通してObjectを1つ運び、実物のChromiumで確かめる。FETCH（StandaloneとJoining）の組と、MSFのカタログを`moqlivemock`の配信元と視聴者（`interop/peers/moqlivemock/`。Goでビルドする）とのあいだで読み書きする組もある。加えて、publisherやsubscriberが転送の途中で去る場面（kill、取り消し、読まないsubscriber）を、自前のリレーを通して走らせる。場面は、リレーのログの行を待って進むので、その行の書式を変えると落ちる（`interop/disconnect.ts`の冒頭）。`mise run check`には入っていない。同じマシンで2つの作業コピーから同時に走らせるときは、`--base-port`を分ける。CIでは`interop`ジョブが同じタスクを呼び、照合が依存するパスに触れていないPRでは、skipと表示して終わる。`crates/`、`packages/`、`interop/`、`fixtures/`を変えたら、報告の前に`mise run interop`も走らせる。
 
 1. 実装する。終わったと報告する前に`mise run check`を実際に走らせ、その出力を報告に含める。通っていない状態で終わったと報告しない
 2. 実装者とは別のレビュアーがコードを読む（`/review-team-xmoq`）。レビュアーには実装者の報告を渡さず、差分だけを渡す
@@ -79,6 +79,9 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | docs/moqt-implementation-notes.md | 仕様書 | draftが黙っている箇所と矛盾している箇所で、2つの実装がそろえる挙動。既知の不足 |
 | fixtures/moqt-18/README.md | 仕様書 | moqtailから採った実バイト列の出どころと復号後の値 |
 | fixtures/webtransport-close/README.md | 仕様書 | セッションを閉じるときの理由の切り方。Chromiumが送った実バイト列の出どころ |
+| fixtures/moqt-18-by-hand/README.md | 仕様書 | draft 18の本文から手で書いたバイト列。相手から採ったもの（`fixtures/moqt-18/`）とは分けて置く |
+| fixtures/first-bytes/README.md | 仕様書 | 相手の開いたストリームが「何であるかを言った」と見なす時点の表。2つの実装が読む |
+| fixtures/ のほかのディレクトリのREADME | 仕様書 | 2つ以上の実装が同じ場面で同じ動きをすることを確かめる共有の表（`joining-request-id`、`peer-subscribe`、`peer-fetch`、`published-fetch`）と、相手から採ったLOCとMSFの実データ（`loc-04`、`msf-01`） |
 | packages/moqt/README.md | 仕様書 | ブラウザ用クライアントライブラリの範囲、層の決まり、公開API |
 | interop/README.md | 運用手順書 | moqtailの相手の用意と、照合の走らせ方 |
 | .github/workflows/、scripts/ci/、mise.toml | コーディングポリシー | CIとローカルの検査。規約を検査で守る |
