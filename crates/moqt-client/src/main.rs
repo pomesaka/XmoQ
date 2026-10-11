@@ -632,6 +632,29 @@ async fn sleep_until(deadline: Option<Instant>) {
     }
 }
 
+/// The Largest Object of the track a client publishes (§10.2.11): the
+/// Location of the last Object it sent. Each Object is Object 0 of a Group
+/// of its own, and the Groups go up.
+#[derive(Debug, Default)]
+struct Largest(Option<Location>);
+
+impl Largest {
+    /// Notes that the Object of the Group `group_id` was sent.
+    fn sent(&mut self, group_id: u64) {
+        self.0 = Some(Location {
+            group: group_id,
+            object: 0,
+        });
+    }
+
+    /// `LARGEST_OBJECT`, for a message that says where the track is. None
+    /// before the first Object: "If omitted from a message, the sending
+    /// endpoint has not published or received any Objects in the Track."
+    fn parameter(&self) -> Option<Parameter> {
+        self.0.map(Parameter::LargestObject)
+    }
+}
+
 /// One session and what the two modes need to use it.
 struct Client<'a> {
     connection: &'a Arc<WtConnection>,
@@ -651,14 +674,33 @@ struct Client<'a> {
     /// session forgets the request only when it is told that the stream is
     /// gone.
     said_the_last: HashMap<u64, PeerRequestId>,
-    /// The Location of the last Object this client sent: the Largest Object
-    /// of its track (§10.2.11).
-    largest_sent: Option<Location>,
+    /// The Largest Object of the track this client publishes.
+    largest: Largest,
+    /// The refusals that wait for `--answer-delay-ms`. They go with the
+    /// client: a session that is over sends nothing more.
+    later: tokio::task::JoinSet<()>,
     /// The Objects this client sent, for a FETCH.
     published: Published,
     /// The FETCH requests of the peer that are being answered.
     answers: Answers,
     args: &'a Args,
+}
+
+/// The code a client that publishes refuses a request of the peer with,
+/// where it serves none of that kind. `serves`: the mode that serves a
+/// SUBSCRIBE for its track, for which this is asked about any other.
+///
+/// WHY one code for every request in the mode that sends PUBLISH: it serves
+/// none, and said so with this code before it asked its session about them.
+fn refusal_code(serves: bool, request: &PeerRequest) -> u64 {
+    match request {
+        PeerRequest::Fetch(_) => request_error_code::NOT_SUPPORTED,
+        _ if !serves => request_error_code::NOT_SUPPORTED,
+        PeerRequest::Subscribe(_) => request_error_code::DOES_NOT_EXIST,
+        PeerRequest::Publish(_) | PeerRequest::PublishNamespace(_) => {
+            request_error_code::UNINTERESTED
+        }
+    }
 }
 
 /// What a client that publishes turns to between the things its mode does.
@@ -708,26 +750,6 @@ async fn stopped(serving: &mut Option<Serving>) -> Option<u32> {
 }
 
 impl Client<'_> {
-    /// Sends a request on a new stream and returns the event its response
-    /// produces. On any failure the request is cancelled, in the session and on
-    /// the stream, so it does not stay open on either.
-    async fn request(
-        &mut self,
-        request_id: RequestId,
-        message: &ControlMessage,
-        label: &str,
-    ) -> Result<(RequestStream, RequestEvent)> {
-        let mut stream = self.open_request(request_id, message, label).await?;
-        match self.response(request_id, &mut stream, label).await {
-            Ok(event) => Ok((stream, event)),
-            Err(error) => {
-                self.session.cancel(request_id);
-                stream.cancel();
-                Err(error)
-            }
-        }
-    }
-
     async fn subscribe(&mut self, wanted: u64) -> Result<()> {
         let (request_id, message) = self.session.subscribe(
             self.args.full_track_name()?,
@@ -990,7 +1012,18 @@ impl Client<'_> {
         stream: &mut RequestStream,
         label: &str,
     ) -> Result<RequestEvent> {
-        match stream.next_event().await? {
+        let event = stream.next_event().await?;
+        self.on_response(request_id, event, label)
+    }
+
+    /// The event that what came on the stream of a request makes of it.
+    fn on_response(
+        &mut self,
+        request_id: RequestId,
+        event: RequestStreamEvent,
+        label: &str,
+    ) -> Result<RequestEvent> {
+        match event {
             RequestStreamEvent::Message(response) => {
                 Ok(self.session.on_request_message(request_id, response)?)
             }
@@ -1159,7 +1192,12 @@ impl Client<'_> {
             .session
             .publish_namespace(self.args.track_namespace()?, vec![])?;
         let (namespace_stream, event) = self
-            .request(namespace_request, &message, "publish-namespace")
+            .request_attending(
+                peer_requests,
+                &mut None,
+                None,
+                (namespace_request, &message, "publish-namespace"),
+            )
             .await?;
         match event {
             RequestEvent::PublishNamespaceEstablished => report::namespace_published(),
@@ -1170,12 +1208,22 @@ impl Client<'_> {
         }
         // The peer is answered meanwhile: a relay asks whoever announced
         // the namespace, and waits for the answer.
-        self.attending(peer_requests, tokio::time::sleep(self.args.publish_delay))
-            .await?;
+        self.attending(
+            peer_requests,
+            &mut None,
+            None,
+            tokio::time::sleep(self.args.publish_delay),
+        )
+        .await?;
         if self.args.publish_on_line {
             report::ready_to_publish();
-            self.attending(peer_requests, wait_for_line(stdin, "publish"))
-                .await??;
+            self.attending(
+                peer_requests,
+                &mut None,
+                None,
+                wait_for_line(stdin, "publish"),
+            )
+            .await??;
         }
 
         let (publish_request, message) = self.session.publish(
@@ -1184,7 +1232,14 @@ impl Client<'_> {
             vec![Parameter::Forward(true)],
             vec![],
         )?;
-        let (publish_stream, event) = self.request(publish_request, &message, "publish").await?;
+        let (publish_stream, event) = self
+            .request_attending(
+                peer_requests,
+                &mut None,
+                None,
+                (publish_request, &message, "publish"),
+            )
+            .await?;
         match event {
             RequestEvent::PublishEstablished { forward, .. } => {
                 report::published(PUBLISH_TRACK_ALIAS, forward);
@@ -1207,15 +1262,24 @@ impl Client<'_> {
     /// that takes the track from another publisher as well does it to every
     /// Subgroup it has from the other one. `SENT` is printed all the same: it
     /// says that this client did its part.
-    async fn send_object(&self, track_alias: u64, group_id: u64, payload: &[u8]) -> Result<()> {
+    ///
+    /// WHY it borrows nothing of the client: the client answers its peer
+    /// while the Object is under way ([`Self::attending`]).
+    async fn send_object(
+        connection: &WtConnection,
+        args: &Args,
+        track_alias: u64,
+        group_id: u64,
+        payload: &[u8],
+    ) -> Result<()> {
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
             track_alias,
             group_id,
-            subgroup_id: self.args.subgroup_id,
-            publisher_priority: self.args.publisher_priority,
+            subgroup_id: args.subgroup_id,
+            publisher_priority: args.publisher_priority,
             // §11.4.2: the bit is of the stream, and says that every Object
             // on it has the Properties Length field.
-            properties: !self.args.object_properties.is_empty(),
+            properties: !args.object_properties.is_empty(),
             // This Object is the only one of its Group, so the stream holds the
             // Group's largest Object and its first.
             end_of_group: true,
@@ -1223,14 +1287,13 @@ impl Client<'_> {
         });
         encoder.object(&SubgroupObject {
             object_id: 0,
-            properties: self.args.object_properties.clone(),
+            properties: args.object_properties.clone(),
             status: ObjectStatus::Normal,
             payload: payload.to_vec(),
         })?;
-        let mut data = self.connection.open_uni().await?;
+        let mut data = connection.open_uni().await?;
         let bytes = encoder.take_bytes();
-        self.args
-            .trace
+        args.trace
             .bytes(Direction::Send, &format!("data#{group_id}"), &bytes);
         let failed = |error| anyhow!("could not write the subgroup stream: {error:?}");
         match data.write_all(&bytes).await {
@@ -1279,6 +1342,7 @@ impl Client<'_> {
         // Track Alias or the same one; see `Self::publish_anew`. `publish-done`
         // and then `publish-anew` or `publish-anew-same-alias` do the same in
         // two steps, with whatever the driver waits for in between.
+        let track = self.args.full_track_name()?;
         let mut track_alias = PUBLISH_TRACK_ALIAS;
         // Objects sent in all, and data streams of the subscription as it is.
         let (mut sent, mut stream_count) = (0, 0);
@@ -1290,7 +1354,12 @@ impl Client<'_> {
                             track_alias += 1;
                         }
                         (publish_request, publish_stream) = self
-                            .publish_anew(publish_request, publish_stream, track_alias)
+                            .publish_anew(
+                                &mut peer_requests,
+                                publish_request,
+                                publish_stream,
+                                track_alias,
+                            )
                             .await?;
                         stream_count = 0;
                     }
@@ -1312,7 +1381,12 @@ impl Client<'_> {
                             track_alias += 1;
                         }
                         (publish_request, publish_stream) = self
-                            .publish_after_done(publish_request, publish_stream, track_alias)
+                            .publish_after_done(
+                                &mut peer_requests,
+                                publish_request,
+                                publish_stream,
+                                track_alias,
+                            )
                             .await?;
                         stream_count = 0;
                     }
@@ -1323,8 +1397,8 @@ impl Client<'_> {
                         // Each Object is a Group of its own. The Groups go on
                         // through a `republish`: it is the same track.
                         let group_id = self.args.first_group + sent;
-                        self.send_object(track_alias, group_id, payload).await?;
-                        self.sent(group_id, payload);
+                        self.send_attending(&mut peer_requests, &mut None, None, (track_alias, group_id, payload))
+                            .await?;
                         sent += 1;
                         stream_count += 1;
                     }
@@ -1332,7 +1406,7 @@ impl Client<'_> {
                     None => break publish_done_status::TRACK_ENDED,
                 },
                 turned = attention(&mut peer_requests, &mut self.answers, &mut self.objects) => {
-                    self.attend(turned?, &mut None, None).await?;
+                    self.attend(turned?, &track, &mut None, None).await?;
                 }
                 // This client has no subgroup stream open between Objects, so a
                 // subscriber that ends the subscription leaves none to reset
@@ -1368,6 +1442,20 @@ impl Client<'_> {
             }
         };
 
+        self.end_publishing(publish_request, publish_stream, status_code, stream_count)
+            .await
+    }
+
+    /// The driver is done, or the subscription failed an update: ends the
+    /// subscription of `request` with `PUBLISH_DONE` and waits for the peer
+    /// to end its stream.
+    async fn end_publishing(
+        &mut self,
+        publish_request: RequestId,
+        mut publish_stream: RequestStream,
+        status_code: u64,
+        stream_count: u64,
+    ) -> Result<()> {
         self.leave_answers();
         // §10.11: PUBLISH_DONE goes out after the data streams are closed, and
         // the request stream is closed right after it. `send_object` closes its
@@ -1414,12 +1502,14 @@ impl Client<'_> {
     /// the second step then; this function, in one step, can be refused.
     async fn publish_anew(
         &mut self,
+        peer_requests: &mut io::PeerRequests,
         request: RequestId,
         mut stream: RequestStream,
         track_alias: u64,
     ) -> Result<(RequestId, RequestStream)> {
         self.end_without_a_count(request, &mut stream).await?;
-        self.publish_after_done(request, stream, track_alias).await
+        self.publish_after_done(peer_requests, request, stream, track_alias)
+            .await
     }
 
     /// Sends `PUBLISH_DONE` for `request` with the Stream Count of a
@@ -1444,17 +1534,29 @@ impl Client<'_> {
     /// `request`. Returns the new request and its stream.
     async fn publish_after_done(
         &mut self,
+        peer_requests: &mut io::PeerRequests,
         request: RequestId,
         stream: RequestStream,
         track_alias: u64,
     ) -> Result<(RequestId, RequestStream)> {
+        // §10.2.11: LARGEST_OBJECT is there once Objects of the track were
+        // published, as they were under the first PUBLISH.
+        let mut parameters = vec![Parameter::Forward(true)];
+        parameters.extend(self.largest.parameter());
         let (new_request, message) = self.session.publish(
             self.args.full_track_name()?,
             track_alias,
-            vec![Parameter::Forward(true)],
+            parameters,
             vec![],
         )?;
-        let (new_stream, event) = self.request(new_request, &message, "publish").await?;
+        let (new_stream, event) = self
+            .request_attending(
+                peer_requests,
+                &mut None,
+                None,
+                (new_request, &message, "publish"),
+            )
+            .await?;
         match event {
             RequestEvent::PublishEstablished { forward, .. } => {
                 report::published(track_alias, forward);
@@ -1465,14 +1567,29 @@ impl Client<'_> {
             }
         }
         // How the peer ends the first subscription's stream: a relay that
-        // stops waiting for the stream that was counted resets it.
-        let session = &mut self.session;
-        let answered = stream
-            .finish_and_await_close(PUBLISH_DONE_ANSWER_WAIT, |message| {
-                session.on_request_message(request, message)?;
-                Ok(())
-            })
-            .await?;
+        // stops waiting for the stream that was counted resets it. As
+        // `RequestStream::finish_and_await_close`, with the peer answered
+        // meanwhile.
+        let deadline = Instant::now() + PUBLISH_DONE_ANSWER_WAIT;
+        let mut peers = stream.finish_own();
+        let mut answered = peers.finished.then_some(RequestClose::Fin);
+        while answered.is_none() {
+            let next = tokio::time::timeout_at(deadline, peers.next_event());
+            match self.attending(peer_requests, &mut None, None, next).await? {
+                Ok(event) => match event? {
+                    RequestStreamEvent::Closed(how) => answered = Some(how),
+                    // What crossed the PUBLISH_DONE: the session has to see
+                    // it (§10.1).
+                    RequestStreamEvent::Message(message) => {
+                        self.session.on_request_message(request, message)?;
+                    }
+                },
+                Err(_) => break,
+            }
+        }
+        if answered.is_none() {
+            peers.stop();
+        }
         report::publish_done_peer_ended(answered);
         Ok((new_request, new_stream))
     }
@@ -1485,8 +1602,19 @@ impl Client<'_> {
         let (namespace_request, message) = self
             .session
             .publish_namespace(self.args.track_namespace()?, vec![])?;
+        let mut peer_requests = self
+            .peer_requests
+            .take()
+            .context("the readers were not started to serve requests")?;
+        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+        let mut serving: Option<Serving> = None;
         let (namespace_stream, event) = self
-            .request(namespace_request, &message, "publish-namespace")
+            .request_attending(
+                &mut peer_requests,
+                &mut serving,
+                Some(&mut stdin),
+                (namespace_request, &message, "publish-namespace"),
+            )
             .await?;
         match event {
             RequestEvent::PublishNamespaceEstablished => report::namespace_published(),
@@ -1495,31 +1623,35 @@ impl Client<'_> {
                 return Err(refused("PUBLISH_NAMESPACE", other));
             }
         }
-        let mut peer_requests = self
-            .peer_requests
-            .take()
-            .context("the readers were not started to serve requests")?;
-        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
-        let mut serving: Option<Serving> = None;
         // Each Object is a Group of its own, numbered from 0 across
         // subscriptions.
+        let track = self.args.full_track_name()?;
         let mut group_id = self.args.first_group;
         loop {
             tokio::select! {
                 line = stdin.next_line() => match line? {
                     Some(_) => {
-                        let Some(serving) = &mut serving else {
+                        let Some((served, track_alias)) = serving
+                            .as_ref()
+                            .map(|serving| (serving.request, serving.track_alias))
+                        else {
                             bail!("asked to send while nobody is subscribed");
                         };
-                        self.send_object(serving.track_alias, group_id, payload).await?;
-                        self.sent(group_id, payload);
+                        let object = (track_alias, group_id, payload);
+                        self.send_attending(&mut peer_requests, &mut serving, Some(&mut stdin), object)
+                            .await?;
                         group_id += 1;
-                        serving.streams += 1;
+                        // The subscriber may have ended the subscription
+                        // meanwhile, and another may have begun.
+                        if let Some(serving) = serving.as_mut().filter(|now| now.request == served) {
+                            serving.streams += 1;
+                        }
                     }
                     None => break,
                 },
                 turned = attention(&mut peer_requests, &mut self.answers, &mut self.objects) => {
-                    self.attend(turned?, &mut serving, Some(&mut stdin)).await?;
+                    self.attend(turned?, &track, &mut serving, Some(&mut stdin))
+                        .await?;
                 }
                 // §5.1: the subscriber ends the subscription with STOP_SENDING.
                 // This client has no subgroup stream open between Objects, so
@@ -1535,6 +1667,16 @@ impl Client<'_> {
             }
         }
 
+        self.end_serving(serving, peer_requests).await
+    }
+
+    /// The driver is done: ends the subscription that is served, if one
+    /// is, with `PUBLISH_DONE`, and waits for the peer to end its stream.
+    async fn end_serving(
+        &mut self,
+        serving: Option<Serving>,
+        mut peer_requests: io::PeerRequests,
+    ) -> Result<()> {
         self.leave_answers();
         // The driver is done. §10.11: PUBLISH_DONE after the data streams are
         // closed, then a FIN; `send_object` closes its stream before it
@@ -1600,19 +1742,73 @@ impl Client<'_> {
 
     /// Waits for `work`, and meanwhile turns to what a client that publishes
     /// has to: the requests of the peer, the FETCH requests it answers, the
-    /// streams the peer opens. No SUBSCRIBE is served meanwhile.
+    /// streams the peer opens. `serving` and `stdin` are those of the mode
+    /// that serves a SUBSCRIBE; without `stdin` none is served meanwhile.
+    ///
+    /// WHY every wait of a mode that publishes goes through here: a relay
+    /// asks whoever announced a namespace and waits for the answer, whatever
+    /// this client is waiting for itself.
     async fn attending<T>(
         &mut self,
         peer_requests: &mut io::PeerRequests,
+        serving: &mut Option<Serving>,
+        mut stdin: Option<&mut DriverLines>,
         work: impl Future<Output = T>,
     ) -> Result<T> {
+        let track = self.args.full_track_name()?;
         tokio::pin!(work);
         loop {
             let turned = tokio::select! {
                 done = &mut work => return Ok(done),
                 turned = attention(peer_requests, &mut self.answers, &mut self.objects) => turned?,
             };
-            self.attend(turned, &mut None, None).await?;
+            self.attend(turned, &track, serving, stdin.as_deref_mut())
+                .await?;
+        }
+    }
+
+    /// Sends an Object (its Track Alias, its Group and its payload) with
+    /// [`Self::send_object`], answering the peer while it is under way, and
+    /// notes it as sent.
+    async fn send_attending(
+        &mut self,
+        peer_requests: &mut io::PeerRequests,
+        serving: &mut Option<Serving>,
+        stdin: Option<&mut DriverLines>,
+        (track_alias, group_id, payload): (u64, u64, &[u8]),
+    ) -> Result<()> {
+        let sending = Self::send_object(self.connection, self.args, track_alias, group_id, payload);
+        self.attending(peer_requests, serving, stdin, sending)
+            .await??;
+        self.sent(group_id, payload);
+        Ok(())
+    }
+
+    /// Sends a request on a new stream and returns the event its response
+    /// produces, answering the peer while the response is waited for. On any
+    /// failure the request is cancelled, in the session and on the stream, so
+    /// it does not stay open on either. `request` is the request, its message and the label of its
+    /// stream.
+    async fn request_attending(
+        &mut self,
+        peer_requests: &mut io::PeerRequests,
+        serving: &mut Option<Serving>,
+        stdin: Option<&mut DriverLines>,
+        request: (RequestId, &ControlMessage, &str),
+    ) -> Result<(RequestStream, RequestEvent)> {
+        let (request_id, message, label) = request;
+        let mut stream = self.open_request(request_id, message, label).await?;
+        let response = self
+            .attending(peer_requests, serving, stdin, stream.next_event())
+            .await
+            .and_then(|event| self.on_response(request_id, event?, label));
+        match response {
+            Ok(event) => Ok((stream, event)),
+            Err(error) => {
+                self.session.cancel(request_id);
+                stream.cancel();
+                Err(error)
+            }
         }
     }
 
@@ -1621,13 +1817,13 @@ impl Client<'_> {
     async fn attend(
         &mut self,
         turned: Attention,
+        track: &FullTrackName,
         serving: &mut Option<Serving>,
         stdin: Option<&mut DriverLines>,
     ) -> Result<()> {
         match turned {
             Attention::Peer(event) => {
-                let track = self.args.full_track_name()?;
-                self.on_peer_request_event(event, &track, serving, stdin)
+                self.on_peer_request_event(event, track, serving, stdin)
                     .await
             }
             Attention::Note(serving::Note(stream, happened)) => {
@@ -1669,10 +1865,7 @@ impl Client<'_> {
     /// Notes an Object that was sent, Object 0 of its Group, and keeps it
     /// for a FETCH where this client answers one.
     fn sent(&mut self, group_id: u64, payload: &[u8]) {
-        self.largest_sent = Some(Location {
-            group: group_id,
-            object: 0,
-        });
+        self.largest.sent(group_id);
         if self.args.fetch.answering.is_none() {
             return;
         }
@@ -1721,13 +1914,16 @@ impl Client<'_> {
     /// WHY a task: the delay is there to keep a relay waiting, and the
     /// client goes on with its mode meanwhile.
     fn answer_later(
-        &self,
+        &mut self,
         mut send: <WtConnection as Connection>::Send,
         response: ControlMessage,
         label: String,
     ) {
         let (delay, trace) = (self.args.answer_delay, self.args.trace.clone());
-        tokio::spawn(async move {
+        // Those that are done are let go of, so that the set holds what
+        // still waits and no more.
+        while self.later.try_join_next().is_some() {}
+        self.later.spawn(async move {
             tokio::time::sleep(delay).await;
             // An error means the peer is gone or stopped the stream.
             let _ = xmoq_moqt_io::send_message(&mut send, &response, &trace, &label).await;
@@ -1735,16 +1931,15 @@ impl Client<'_> {
         });
     }
 
-    /// Answers a FETCH of the peer from the Objects this client sent
-    /// (§10.12.3), or gives back the stream and the code to refuse it with.
-    fn answer_fetch(
-        &mut self,
-        stream: u64,
+    /// What a FETCH of the peer gets from the Objects this client sent
+    /// (§10.12.3), and the Group Order it asked for; or the code to refuse
+    /// it with.
+    fn plan_fetch(
+        &self,
         request: PeerRequestId,
-        send: <WtConnection as Connection>::Send,
         fetch: &Fetch,
         track: &FullTrackName,
-    ) -> Result<Option<(<WtConnection as Connection>::Send, u64)>> {
+    ) -> Result<(published::Answer, GroupOrder), u64> {
         // A relay turns a Joining FETCH into a Standalone one before it
         // asks a publisher, as `@xmoq/moqt` assumes too.
         let FetchRange::Standalone {
@@ -1753,10 +1948,10 @@ impl Client<'_> {
             end,
         } = &fetch.range
         else {
-            return Ok(Some((send, request_error_code::NOT_SUPPORTED)));
+            return Err(request_error_code::NOT_SUPPORTED);
         };
         if full_track_name != track {
-            return Ok(Some((send, request_error_code::DOES_NOT_EXIST)));
+            return Err(request_error_code::DOES_NOT_EXIST);
         }
         report::fetch_asked(request.value(), *start, *end);
         // §10.2.8: "If omitted from FETCH, the receiver uses Ascending".
@@ -1768,18 +1963,28 @@ impl Client<'_> {
                 _ => None,
             })
             .unwrap_or(GroupOrder::Ascending);
-        let refusal = if self.answers.has_room() {
+        let answer = if self.answers.has_room() {
             self.published.answer(*start, *end, group_order)
         } else {
             Err(request_error_code::EXCESSIVE_LOAD)
         };
-        let answer = match refusal {
-            Ok(answer) => answer,
+        match answer {
+            Ok(answer) => Ok((answer, group_order)),
             Err(code) => {
                 report::fetch_not_answered(request.value(), code);
-                return Ok(Some((send, code)));
+                Err(code)
             }
-        };
+        }
+    }
+
+    /// Accepts a FETCH of the peer and has it answered on its streams.
+    fn start_fetch(
+        &mut self,
+        stream: u64,
+        request: PeerRequestId,
+        send: <WtConnection as Connection>::Send,
+        (answer, group_order): (published::Answer, GroupOrder),
+    ) -> Result<()> {
         // End Of Track 0: the track goes on while this client answers.
         let (ok, owed) = self
             .session
@@ -1802,7 +2007,7 @@ impl Client<'_> {
             self.connection,
             &self.args.trace,
         );
-        Ok(None)
+        Ok(())
     }
 
     /// A request of the peer, in the modes that publish.
@@ -1838,10 +2043,8 @@ impl Client<'_> {
             self.before_serving(request, stdin).await?;
             // §10.2.11: there once this client has published an
             // Object of the track.
-            let largest = self.largest_sent.map(Parameter::LargestObject);
-            let (track_alias, ok) =
-                self.session
-                    .accept_subscribe(request, largest.into_iter().collect(), vec![])?;
+            let largest = self.largest.parameter().into_iter().collect();
+            let (track_alias, ok) = self.session.accept_subscribe(request, largest, vec![])?;
             xmoq_moqt_io::send_message(&mut send, &ok, wire, &label).await?;
             report::serving(track_alias);
             *serving = Some(Serving {
@@ -1858,22 +2061,14 @@ impl Client<'_> {
         // does not get here: the session refuses it itself
         // (DUPLICATE_SUBSCRIPTION, §5.1).
         let serves = matches!(self.args.mode, Mode::PublishNamespace { .. });
-        let (send, error_code) = match peer_request {
+        let error_code = match &peer_request {
             PeerRequest::Fetch(fetch) if self.args.fetch.answering.is_some() => {
-                match self.answer_fetch(stream, request, send, &fetch, track)? {
-                    None => return Ok(()),
-                    Some(refused) => refused,
+                match self.plan_fetch(request, fetch, track) {
+                    Ok(plan) => return self.start_fetch(stream, request, send, plan),
+                    Err(code) => code,
                 }
             }
-            PeerRequest::Fetch(_) => (send, request_error_code::NOT_SUPPORTED),
-            // WHY one code for every request in the mode that
-            // publishes: it serves none, and said so with this code
-            // before it asked its session about them.
-            _ if !serves => (send, request_error_code::NOT_SUPPORTED),
-            PeerRequest::Subscribe(_) => (send, request_error_code::DOES_NOT_EXIST),
-            PeerRequest::Publish(_) | PeerRequest::PublishNamespace(_) => {
-                (send, request_error_code::UNINTERESTED)
-            }
+            other => refusal_code(serves, other),
         };
         let response = self
             .session
@@ -2041,7 +2236,8 @@ async fn run_session(
         open_streams: HashMap::new(),
         peer_requests,
         said_the_last: HashMap::new(),
-        largest_sent: None,
+        largest: Largest::default(),
+        later: tokio::task::JoinSet::new(),
         published: Published::default(),
         answers: Answers::new(args.fetch.answering.unwrap_or_default()),
         args,
@@ -2114,6 +2310,73 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xmoq_moqt::message::{Publish, PublishNamespace, Subscribe};
+
+    #[test]
+    fn a_request_this_client_does_not_serve_is_refused_with_a_code_of_its_kind() {
+        let track = FullTrackName::new(
+            TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+            b"a".to_vec(),
+        )
+        .unwrap();
+        let subscribe = PeerRequest::Subscribe(Subscribe {
+            request_id: 1,
+            full_track_name: track.clone(),
+            parameters: vec![],
+        });
+        let publish = PeerRequest::Publish(Publish {
+            request_id: 1,
+            full_track_name: track.clone(),
+            track_alias: 1,
+            parameters: vec![],
+            track_properties: vec![],
+        });
+        let publish_namespace = PeerRequest::PublishNamespace(PublishNamespace {
+            request_id: 1,
+            track_namespace: track.namespace().clone(),
+            parameters: vec![],
+        });
+        let fetch = PeerRequest::Fetch(Fetch {
+            request_id: 1,
+            range: FetchRange::Standalone {
+                full_track_name: track,
+                start: at(0, 0),
+                end: at(1, 0),
+            },
+            parameters: vec![],
+        });
+        // NOT_SUPPORTED (0x3), DOES_NOT_EXIST (0x10), UNINTERESTED (0x20).
+        // (the request; in the mode that sends PUBLISH; in the mode that
+        //  serves a SUBSCRIBE)
+        let cases = [
+            (&subscribe, 0x3, 0x10),
+            (&publish, 0x3, 0x20),
+            (&publish_namespace, 0x3, 0x20),
+            (&fetch, 0x3, 0x3),
+        ];
+        for (request, publishing, serving) in cases {
+            assert_eq!(
+                (refusal_code(false, request), refusal_code(true, request)),
+                (publishing, serving),
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn largest_object_is_there_once_an_object_was_sent() {
+        let mut largest = Largest::default();
+        assert_eq!(largest.parameter(), None);
+        // Object 0 of each Group, and the last one sent counts.
+        for (group_id, location) in [(0, at(0, 0)), (7, at(7, 0)), (8, at(8, 0))] {
+            largest.sent(group_id);
+            assert_eq!(
+                largest.parameter(),
+                Some(Parameter::LargestObject(location)),
+                "{group_id}"
+            );
+        }
+    }
 
     #[test]
     fn the_lines_of_a_driver_are_told_apart() {
