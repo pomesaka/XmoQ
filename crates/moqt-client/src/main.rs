@@ -4,6 +4,7 @@
 //! one Object. What it prints to stdout is a contract with the scripts that
 //! drive it; see `report`.
 
+mod catalog;
 mod fetching;
 mod hex;
 mod io;
@@ -106,6 +107,10 @@ struct Args {
     /// `--annex-b-out`: where `--mode subscribe` writes the frames of a LOC
     /// video track, as an H.264 byte stream.
     annex_b_out: Option<String>,
+    /// `--catalog-video`: `--track` names the catalog track of MSF, and
+    /// `--mode subscribe` subscribes to the first H.264 video track of the
+    /// catalog it reads there.
+    catalog_video: bool,
     timeout_secs: u64,
     /// How long the publisher waits between the answer to its
     /// `PUBLISH_NAMESPACE` and its PUBLISH.
@@ -468,13 +473,7 @@ impl Args {
     /// convention of this command line, shared with moqtail's tools; the draft
     /// gives a Track Namespace no text form with slashes.
     fn track_namespace(&self) -> Result<TrackNamespace> {
-        let fields = self
-            .namespace
-            .split('/')
-            .filter(|field| !field.is_empty())
-            .map(|field| field.as_bytes().to_vec())
-            .collect();
-        Ok(TrackNamespace::new(fields)?)
+        track_namespace_of(&self.namespace)
     }
 
     fn full_track_name(&self) -> Result<FullTrackName> {
@@ -483,6 +482,16 @@ impl Args {
             self.track_name.as_bytes().to_vec(),
         )?)
     }
+}
+
+/// The Track Namespace a text names: its fields, separated by `/`.
+fn track_namespace_of(text: &str) -> Result<TrackNamespace> {
+    let fields = text
+        .split('/')
+        .filter(|field| !field.is_empty())
+        .map(|field| field.as_bytes().to_vec())
+        .collect();
+    Ok(TrackNamespace::new(fields)?)
 }
 
 /// A line of the driver on a publisher's stdin.
@@ -591,13 +600,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let mut first_group = 0;
     let mut publisher_priority = Some(0);
     let mut object_properties = Vec::new();
-    let mut serve_delay_ms = 0;
-    let mut answer_delay_ms = 0;
+    let (mut serve_delay_ms, mut answer_delay_ms) = (0, 0);
     let mut subscription_filter = Some(SubscriptionFilter::LargestObject);
-    let mut publish_on_line = false;
-    let mut serve_on_line = false;
+    let (mut publish_on_line, mut serve_on_line) = (false, false);
     let mut fetch = FetchFlags::default();
-    let mut trace = false;
+    let (mut trace, mut catalog_video) = (false, false);
 
     while let Some(flag) = args.next() {
         let switch = match flag.as_str() {
@@ -605,6 +612,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--publish-on-line" => Some(&mut publish_on_line),
             "--serve-on-line" => Some(&mut serve_on_line),
             "--join-at-once" => Some(&mut fetch.join_at_once),
+            "--catalog-video" => Some(&mut catalog_video),
             "--fetch-cancel-request-only" => Some(&mut fetch.cancel_request_only),
             "--answer-fetch" => Some(&mut fetch.answer),
             _ => None,
@@ -664,6 +672,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         namespace: namespace.context("--namespace is required")?,
         track_name: track_name.context("--track is required")?,
         annex_b_out,
+        catalog_video,
         timeout_secs,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
@@ -845,9 +854,49 @@ async fn stopped(serving: &mut Option<Serving>) -> Option<u32> {
 }
 
 impl Client<'_> {
+    /// `--mode subscribe`: to the track of `--track`, or with
+    /// `--catalog-video` to the video track its catalog names.
     async fn subscribe(&mut self, wanted: u64) -> Result<()> {
+        let join = self.args.fetch.join;
+        if !self.args.catalog_video {
+            let track = self.args.full_track_name()?;
+            return self.subscribe_to(track, join, Some(wanted)).await;
+        }
+        // MSF §5: "Subscribers accessing the catalog MUST use SUBSCRIBE with
+        // a Joining FETCH (offset = 0) in order to obtain the latest
+        // complete catalog".
+        catalog::want();
+        let latest = Join {
+            relative: true,
+            start: 0,
+            at_once: false,
+        };
+        let catalog_track = self.args.full_track_name()?;
+        self.subscribe_to(catalog_track, Some(latest), None).await?;
+        let payload = catalog::take().context("the catalog track ended before a catalog came")?;
+        let tracks = xmoq_msf::read_catalog(&payload)?;
+        let video = xmoq_msf::first_video_track(&tracks, "avc")
+            .context("the catalog has no H.264 video track with LOC packaging")?;
+        report::catalog_track(video);
+        // §5.2.2: a track without a namespace is in the catalog track's.
+        let namespace = match &video.namespace {
+            Some(namespace) => track_namespace_of(namespace)?,
+            None => self.args.track_namespace()?,
+        };
+        let track = FullTrackName::new(namespace, video.name.as_bytes().to_vec())?;
+        self.subscribe_to(track, join, Some(wanted)).await
+    }
+
+    /// Subscribes to `track` and takes its Objects: `wanted` of them, or
+    /// with `None` until a catalog came (`--catalog-video`).
+    async fn subscribe_to(
+        &mut self,
+        track: FullTrackName,
+        join: Option<Join>,
+        wanted: Option<u64>,
+    ) -> Result<()> {
         let (request_id, message) = self.session.subscribe(
-            self.args.full_track_name()?,
+            track,
             [
                 Some(Parameter::Forward(true)),
                 Some(Parameter::SubscriberPriority(128)),
@@ -861,7 +910,7 @@ impl Client<'_> {
             .collect(),
         )?;
         let mut fetches = Fetches::new(self.args.fetch.reading);
-        let joining = self.args.fetch.join.map(|join| {
+        let joining = join.map(|join| {
             let joining_request_id = request_id.value();
             let range = if join.relative {
                 FetchRange::RelativeJoining {
@@ -1136,6 +1185,13 @@ impl Client<'_> {
         }
     }
 
+    /// The writer of `--annex-b-out`. Not for the catalog track (`wanted`
+    /// is `None`): its Objects are no frames.
+    fn video_writer(&self, wanted: Option<u64>) -> Result<Option<video::AnnexBWriter>> {
+        let out = self.args.annex_b_out.as_deref();
+        video::AnnexBWriter::for_flag(out.filter(|_| wanted.is_some()))
+    }
+
     /// Prints Objects of the subscription until `wanted` arrived or the
     /// subscription ended. The request stream is read all the while: it carries
     /// `PUBLISH_DONE`, and the peer cancels the subscription by closing it
@@ -1145,17 +1201,19 @@ impl Client<'_> {
         request_id: RequestId,
         stream: RequestStream,
         track_alias: u64,
-        wanted: u64,
+        wanted: Option<u64>,
         fetches: &mut Fetches,
     ) -> Result<()> {
         let mut stream = Some(stream);
         let mut drain_deadline = None;
         let mut drain_timed_out = false;
         let mut received = 0;
-        let mut video = video::AnnexBWriter::for_flag(self.args.annex_b_out.as_deref())?;
+        let mut video = self.video_writer(wanted)?;
+        let more = |received| wanted.map_or_else(|| !catalog::came(), |wanted| received < wanted);
+        let wanted = wanted.unwrap_or(0);
 
         // A Joining FETCH is seen to its end as well.
-        while received < wanted || !fetches.all_over() {
+        while more(received) || !fetches.all_over() {
             tokio::select! {
                 note = fetches.next_note() => self.on_fetch_note(fetches, note)?,
                 event = self.objects.next_event() => match event? {

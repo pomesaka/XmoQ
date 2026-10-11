@@ -43,11 +43,13 @@ One run each.
 
 3. **Whole Groups through the own relay**, added afterwards as the run `interop/video-rust.ts` (`bun video-rust.ts`): a page of Chromium 156 encodes 320x180 at 25 frames a second, a key frame a second, and publishes it; the Rust client comes in the middle and takes 60 Objects. One run, as written at the top of the file before it: exit code 0, 60 frames of 3 Groups, none skipped, 5,939 bytes; the first `nal=7,8,5`, an IDR picture in every Object 0 and nowhere else, each frame the next Object ID and 40,000 later in its Timestamp, which is wall-clock time. `ffprobe`: `h264`, 320x180, 60 frames.
 
+4. **The track found in the catalog**, added afterwards (`--track catalog --catalog-video`): the client subscribes to the catalog track with a Relative Joining FETCH of offset 0, reads the catalog that comes last, names the first H.264 video track with LOC packaging (`CATALOG_TRACK`), and subscribes to it. One run each. From `mlmpub`: the catalog came by the subscription and by the FETCH (2,715 bytes each), `CATALOG_TRACK name=video_400kbps_avc codec=avc3.4D401F width=1280 height=720`, and 30 frames. Through the own relay, as `interop/video-rust.ts` now runs: the catalog came by the FETCH, which the relay asked the page for (176 bytes), `CATALOG_TRACK name=video codec=avc3.42E01F width=320 height=180`, and 60 frames.
+
 ## Limitations and blockers
 
 - In runs 1 and 2 no whole Group went through the relay: `mlmpub` is a server and does not connect to one, and the Rust publisher sends one Object a Group. Run 3 is the one with whole Groups.
 - `ffprobe` is not on the path of the matrix here or in CI: the run in the matrix says so and checks the frames by their lines alone.
-- The track was named on the command line; no catalog was read. Rust has nothing of `@xmoq/msf`.
+- In runs 1 to 3 the track was named on the command line. Run 4 reads the catalog.
 - The writer takes the next Object ID of the Group it is in, or Object 0 of a later Group with an IDR picture, and skips everything else. Neither run had an Object out of order, so the skipping ran in no run.
 - `ffprobe` read the frames; nothing was shown on a screen.
 - The Timescale is read and not used: both publishers send a Timestamp alone.

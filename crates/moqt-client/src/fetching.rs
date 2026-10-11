@@ -553,6 +553,7 @@ impl BodyTask {
                                 return BodyEnd::Stopped;
                             }
                             report::fetch_object(request_id, &object);
+                            crate::catalog::offer(&object.payload);
                             lines.objects += 1;
                             lines.objects
                         };

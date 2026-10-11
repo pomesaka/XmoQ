@@ -8,8 +8,13 @@
 // second, a key frame every second, a Group on one stream, frame `n` at
 // `5,000,000 + n * 40,000` microseconds for its encoder and at wall-clock
 // time in the Timestamp of LOC. The Rust client comes when the page has
-// painted 30 frames or more, and is told to take 60 Objects.
+// painted 30 frames or more, and is told to take 60 Objects. It is not
+// told the name of the video track: it reads the catalog of the namespace
+// with a SUBSCRIBE and a Joining FETCH (`--catalog-video`).
 //
+//   - **The client names the track it found in the catalog**
+//     (`CATALOG_TRACK`): `video`, with the codec `avc3.42E01F`, 320x180.
+//     Added with `--catalog-video`, before its first run.
 //   - The client ends with the exit code 0, and wrote 60 frames and skipped
 //     none (`VIDEO_WRITTEN`): the relay subscribes to the page when the
 //     client comes, the page begins a Group for it, and the Objects come in
@@ -185,8 +190,10 @@ async function run(): Promise<string> {
 		"viewer:own-rust",
 		"own-rust",
 		"subscribe",
-		VIDEO.trackName,
+		// The catalog track of MSF, where the client finds the video track.
+		"catalog",
 		[
+			"--catalog-video",
 			// The last of two wins: the namespace of the page's video.
 			"--namespace",
 			NAMESPACE,
@@ -198,6 +205,13 @@ async function run(): Promise<string> {
 			"15",
 		],
 	);
+	const [, found] = await client.waitForLine(/^CATALOG_TRACK (.*)$/, 20_000);
+	const expected = `name=${VIDEO.trackName} codec=${VIDEO.catalogCodec} width=${VIDEO.width} height=${VIDEO.height}`;
+	if (found !== expected) {
+		throw new Error(
+			`the client was to find "${expected}" in the catalog and found "${found}"`,
+		);
+	}
 	const written = await client.waitForLine(
 		/^VIDEO_WRITTEN file=\S+ frames=(\d+) groups=(\d+) skipped=(\d+) bytes=(\d+)$/,
 		20_000,

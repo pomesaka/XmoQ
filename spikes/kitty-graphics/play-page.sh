@@ -1,7 +1,8 @@
 #!/bin/sh
 # Plays the video a page of Chromium encodes and publishes, through the own relay, in this
-# terminal: the own Rust client subscribes and writes Annex B into a FIFO, ffmpeg decodes it
-# to RGB, kitty-frames draws it.
+# terminal: the own Rust client subscribes and writes Annex B into a FIFO, kitty-frames
+# decodes it with openh264 and draws it. MEDIUM=direct sends the pixels in the escape codes;
+# the default is a temporary file the terminal reads, which needs the same machine.
 #
 #   spikes/kitty-graphics/play-page.sh [frames] [scale]        # from the repository root
 #
@@ -34,12 +35,18 @@ done
 url=$(echo "$ready" | sed -E 's/.*url=([^ ]+).*/\1/')
 cert=$(echo "$ready" | sed -E 's/.*cert=([^ ]+).*/\1/')
 "$root/target/debug/xmoq-moqt-client" --mode subscribe --objects "$frames" --timeout-secs 120 \
-  --url "$url" --cert-sha256 "$cert" --namespace xmoq/video --track video \
+  --url "$url" --cert-sha256 "$cert" --namespace xmoq/video --track catalog --catalog-video \
   --annex-b-out "$work/video.h264" > "$work/client.log" 2>&1 &
 client=$!
-# Without -probesize and -analyzeduration ffmpeg waits for seconds of input before its first
-# frame. NOT -fflags nobuffer: with it 25 of 60 frames of a file did not come out.
-"$ffmpeg" -loglevel error -flags low_delay -probesize 32 -analyzeduration 0 \
-  -f h264 -i "$work/video.h264" -fps_mode passthrough -f rawvideo -pix_fmt rgb24 pipe:1 |
-  "$here/target/release/kitty-frames" --raw 320x180 --scale "$scale" --medium "${MEDIUM:-direct}"
+# The decoder is openh264, inside kitty-frames: a frame is drawn as it comes. FFMPEG=1 has
+# ffmpeg decode instead, as a process, which takes about a second to its first frame.
+if [ -n "${FFMPEG:-}" ]; then
+  # Without -probesize and -analyzeduration ffmpeg waits for seconds of input before its first
+  # frame. NOT -fflags nobuffer: with it 25 of 60 frames of a file did not come out.
+  "$ffmpeg" -loglevel error -flags low_delay -probesize 32 -analyzeduration 0 \
+    -f h264 -i "$work/video.h264" -fps_mode passthrough -f rawvideo -pix_fmt rgb24 pipe:1 |
+    "$here/target/release/kitty-frames" --raw 320x180 --scale "$scale" --medium "${MEDIUM:-file}"
+else
+  "$here/target/release/kitty-frames" --h264 --scale "$scale" --medium "${MEDIUM:-file}" < "$work/video.h264"
+fi
 grep VIDEO_WRITTEN "$work/client.log" >&2 || true
