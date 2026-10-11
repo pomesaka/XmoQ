@@ -196,6 +196,12 @@ async function main(): Promise<void> {
 	let output: GainNode | undefined;
 	let listener: AnalyserNode | undefined;
 	let sounded = 0;
+	/** Pieces that did not follow the one before them to the sample: the first, and one after a gap. */
+	let apart = 0;
+	/** Where the last piece that was given to the AudioContext ends, by its clock. */
+	let soundUntil: number | undefined;
+	/** How far from its own time a piece may begin so as to follow the one before it without a seam, in seconds: less than half a piece of 20 ms. */
+	const SEAM = 0.008;
 	const piecesSounded = perSecond();
 	const piecesTooLate = perSecond();
 	document.getElementById("sound")?.addEventListener("click", () => {
@@ -222,6 +228,29 @@ async function main(): Promise<void> {
 			hz: Math.round((loudest * sound.sampleRate) / listener.fftSize),
 		};
 	};
+	// Breaks in what leaves: a step from one sample to the next that no tone
+	// of the demo makes (the beep, 0.6 of full scale at 1,000 Hz, moves 0.08
+	// a sample at most). A piece that begins a little late or early leaves
+	// such a step, and is heard as a click. Looked at every 40 ms, over the
+	// 40 ms that came since.
+	const BREAK = 0.15;
+	let breaks = 0;
+	const breaksNow = perSecond();
+	every(40, () => {
+		if (listener === undefined || sound?.state !== "running") return;
+		const samples = new Float32Array(listener.fftSize);
+		listener.getFloatTimeDomainData(samples);
+		const from = samples.length - Math.round(sound.sampleRate * 0.04);
+		for (let index = Math.max(from, 1); index < samples.length; index++) {
+			const step = Math.abs(
+				(samples[index] ?? 0) - (samples[index - 1] ?? 0),
+			);
+			if (step > BREAK) {
+				breaks += 1;
+				breaksNow.count();
+			}
+		}
+	});
 	const audioOptions = {
 		trackName: audioTrackName(),
 		codec: "opus",
@@ -241,7 +270,39 @@ async function main(): Promise<void> {
 			const loud = samples.some((sample) => Math.abs(sample) > 0.3);
 			if (loud && !markHeard) marks.audio.push({ time: timeMs, played: due });
 			markHeard = loud;
-			if (due < now) {
+			const context = sound;
+			if (
+				context === undefined ||
+				output === undefined ||
+				context.state !== "running"
+			) {
+				// Nothing sounds: only what would have is counted.
+				if (due < now) {
+					tooLate += 1;
+					piecesTooLate.count();
+				} else {
+					played.audio.add(due - timeMs);
+					firstSoundAfterMs ??= Math.round(performance.now() - audioSince);
+				}
+				return;
+			}
+			// When the piece is to begin, by the AudioContext's clock: its
+			// own time; or, where that is where the piece before it ends,
+			// exactly there.
+			//
+			// WHY not its own time each time: this page's clock counts whole
+			// milliseconds, and a decoder gives times a microsecond off. A
+			// piece that begins a fraction of a millisecond late leaves a gap
+			// of some samples, and one that begins early sounds over the end
+			// of the one before: a click at every piece, 100 a second. So a
+			// piece follows the one before it to the sample, as long as that
+			// is within SEAM of its own time; beyond that the two are apart
+			// for a reason (a piece that did not come, a clock that was set),
+			// and the piece begins at its own time.
+			const wanted = context.currentTime + (due - now) / 1000;
+			const follows = soundUntil !== undefined && Math.abs(wanted - soundUntil) <= SEAM;
+			const begin = follows && soundUntil !== undefined ? soundUntil : wanted;
+			if (begin < context.currentTime) {
 				// Its time is over: it is not sounded.
 				tooLate += 1;
 				piecesTooLate.count();
@@ -249,19 +310,14 @@ async function main(): Promise<void> {
 			}
 			played.audio.add(due - timeMs);
 			firstSoundAfterMs ??= Math.round(performance.now() - audioSince);
-			if (
-				sound === undefined ||
-				output === undefined ||
-				sound.state !== "running"
-			) {
-				return;
-			}
-			const buffer = sound.createBuffer(1, samples.length, SAMPLE_RATE);
+			const buffer = context.createBuffer(1, samples.length, SAMPLE_RATE);
 			buffer.copyToChannel(samples, 0);
-			const source = sound.createBufferSource();
+			const source = context.createBufferSource();
 			source.buffer = buffer;
 			source.connect(output);
-			source.start(sound.currentTime + (due - now) / 1000);
+			source.start(begin);
+			if (!follows) apart += 1;
+			soundUntil = begin + buffer.duration;
 			sounded += 1;
 			piecesSounded.count();
 			lastHeard = now;
@@ -294,7 +350,7 @@ async function main(): Promise<void> {
 				`sound: ${
 					sound === undefined
 						? "off — click “sound” to hear it"
-						: `${sound.state}; ${piecesSounded.rate()} pieces a second go to the loudspeaker, ${piecesTooLate.rate()} a second come too late for it; leaving now at ${(leaving()?.peak ?? 0).toFixed(2)} of full scale, ${leaving()?.hz ?? 0} Hz${(leaving()?.peak ?? 0) < 0.01 ? " — SILENT" : ""}`
+						: `${sound.state}; ${piecesSounded.rate()} pieces a second go to the loudspeaker, ${piecesTooLate.rate()} a second come too late for it; ${breaksNow.rate()} breaks a second in it (${breaks} in all, ${apart} pieces apart from the one before); leaving now at ${(leaving()?.peak ?? 0).toFixed(2)} of full scale, ${leaving()?.hz ?? 0} Hz${(leaving()?.peak ?? 0) < 0.01 ? " — SILENT" : ""}`
 				}`,
 				`picture and sound: ${together.length} marks; the last one: the picture ${lastMark === undefined ? "?" : Math.round(lastMark.played)} ms after the sound (${lastMark === undefined ? "?" : Math.round(lastMark.sent)} ms as they were sent)`,
 			].join("\n"),
@@ -316,6 +372,9 @@ async function main(): Promise<void> {
 				state: sound?.state ?? "not started",
 				sounded,
 				soundedASecond: piecesSounded.rate(),
+				breaks,
+				apart,
+				breaksASecond: breaksNow.rate(),
 				tooLateASecond: piecesTooLate.rate(),
 				leaving: leaving() ?? null,
 			},
