@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -74,6 +74,13 @@ pub struct HubConfig {
     /// How long the last Objects of a track are waited for after
     /// `PUBLISH_DONE` (§10.11 of `draft-ietf-moq-transport-18`).
     pub drain_timeout: Duration,
+    /// How long a subgroup stream towards a subscriber may take to open,
+    /// from when the relay was told to open it, before the log has a line
+    /// for it (`DATA_OPENED`); 0 for a line for every stream. WHY not
+    /// every stream of itself: a track of audio opens one every 20
+    /// milliseconds for every subscriber. On loopback a stream opens in
+    /// well under a millisecond.
+    pub slow_open: Duration,
     /// How long a stream is held for a Track Alias that is not known yet
     /// (§11.4.2: "buffer it for a brief period").
     pub early_stream_timeout: Duration,
@@ -113,6 +120,7 @@ impl Default for HubConfig {
             session_queue_len: 256,
             send: SendLimits::default(),
             drain_timeout: Duration::from_secs(2),
+            slow_open: Duration::from_millis(10),
             early_stream_timeout: Duration::from_secs(2),
             request_close_timeout: Duration::from_secs(2),
             closed_read_timeout: Duration::from_secs(1),
@@ -252,6 +260,10 @@ struct SessionHandle<C: Connection> {
     stops: StreamStops,
     /// What waits to be written to this session's subgroup streams.
     budget: Arc<SendBudget>,
+    /// The subgroup streams towards it that the relay was told to open and
+    /// that are not open yet: they wait for the peer to allow one more
+    /// stream. For the log (`DATA_OPENED`).
+    opening: Arc<AtomicUsize>,
     /// The writers of its control and request streams, and the task that owns
     /// its readers.
     tasks: Vec<JoinHandle<()>>,
@@ -261,6 +273,20 @@ struct SessionHandle<C: Connection> {
     /// What stops such a task, by the request stream of its FETCH
     /// ([`Action::AbortFetchWrite`]).
     fetch_write_aborts: HashMap<StreamKey, oneshot::Sender<u32>>,
+}
+
+/// The path of a connection as fields of a log line; nothing for a
+/// connection that does not say.
+fn path_now<C: Connection>(connection: &C) -> String {
+    connection.path().map_or_else(String::new, |path| {
+        format!(
+            " cwnd={} rtt_ms={} lost_packets={} congestion_events={}",
+            path.cwnd,
+            path.rtt.as_millis(),
+            path.lost_packets,
+            path.congestion_events
+        )
+    })
 }
 
 impl<C: Connection> Drop for SessionHandle<C> {
@@ -883,6 +909,7 @@ impl<C: Connection> Hub<C> {
                 own_requests: HashMap::new(),
                 stops,
                 budget: SendBudget::new(self.config.send),
+                opening: Arc::new(AtomicUsize::new(0)),
                 tasks: vec![writer, watcher],
                 fetch_writes: Vec::new(),
                 fetch_write_aborts: HashMap::new(),
@@ -1333,9 +1360,37 @@ impl<C: Connection> Hub<C> {
         };
         let events = self.events.clone();
         let log = self.config.log.clone();
+        // For the log: when the stream was asked for, how many of the
+        // session wait to be opened, and how the path stands.
+        let asked = Instant::now();
+        let slow_open = self.config.slow_open;
+        let opening = Arc::clone(&handle.opening);
+        opening.fetch_add(1, Ordering::Relaxed);
+        let waits = Arc::new(AtomicBool::new(true));
+        let connection = Arc::clone(&handle.connection);
         let report = move |event| {
             let events = events.clone();
             let log = log.clone();
+            // Opened, or over without that: it waits to be opened no more.
+            let waited = waits.swap(false, Ordering::Relaxed);
+            let still_opening = if waited {
+                opening.fetch_sub(1, Ordering::Relaxed).saturating_sub(1)
+            } else {
+                opening.load(Ordering::Relaxed)
+            };
+            let after = asked.elapsed();
+            if matches!(event, OutgoingEvent::Opened)
+                && after >= slow_open
+                && let Some(log) = &log
+            {
+                log.print(format!(
+                    "DATA_OPENED session={} out={} after_ms={} opening={still_opening}{}",
+                    session.0,
+                    out_stream.0,
+                    after.as_millis(),
+                    path_now(&*connection),
+                ));
+            }
             async move {
                 let event = match event {
                     OutgoingEvent::Opened => Event::OutStreamOpened { out_stream },

@@ -351,6 +351,20 @@ impl Connection for WtConnection {
         Ok((WtSend(send), WtRecv(recv)))
     }
 
+    fn path(&self) -> Option<crate::PathNow> {
+        // WHY through `Deref`: the session has a `stats` of its own, which
+        // has less; the one of the QUIC connection is behind it
+        // (web-transport-quinn 0.13.2, `session.rs`).
+        let connection: &quinn::Connection = &self.session;
+        let path = connection.stats().path;
+        Some(crate::PathNow {
+            cwnd: path.cwnd,
+            rtt: path.rtt,
+            lost_packets: path.lost_packets,
+            congestion_events: path.congestion_events,
+        })
+    }
+
     fn close(&self, code: u32, reason: &[u8]) {
         // The library sends the reason as it is given, whatever its length.
         self.session

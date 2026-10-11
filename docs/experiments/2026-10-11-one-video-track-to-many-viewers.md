@@ -71,6 +71,28 @@ Added afterwards, with `--max-sessions 2000` for the relay, a flag for measuring
 - **Sending UDP packets**: of the samples that were not a thread waiting (`__psynch_cvwait`, `kevent`), 18,419 of about 19,400 were in `sendmsg`, the system call that sends one packet; 461 in `recvmsg`. The next were the encryption of a packet (`aes_gcm_enc`, 63), copying memory (47) and building packets in `quinn-proto` (`poll_transmit` 46, and others under 20 each).
 - Nothing of the relay's own code (the core, the hub) is among the first 28.
 
+### Sending several packets with one system call
+
+Added afterwards. What the libraries do, read in their sources as `Cargo.lock` has them (`quinn` 0.11.12, `quinn-proto` 0.11.19, `quinn-udp` 0.5.16, `web-transport-quinn` 0.13.2):
+
+- **On Linux it is on already.** `quinn-proto` has `enable_segmentation_offload: true` in `TransportConfig::default()`, and neither `web-transport-quinn` (`transport_config` in `client.rs`) nor `crates/moqt-io/src/wt.rs` changes it. `quinn-udp` sets `UDP_SEGMENT` on the socket and then sends up to 64 packets of a connection with one `sendmsg` (`max_gso_segments` in `unix.rs`), going back to 1 where the kernel turns the option down; it turns `UDP_GRO` on for receiving where it can. **Not run**: this machine has neither `podman` nor `docker`, and none was installed.
+- **On macOS it is off, and can be turned on.** Without the feature `fast-apple-datapath` of `quinn-udp` a build for an Apple system has `max_gso_segments` 1 and one `sendmsg` a packet, which is what the samples above show. With it, `quinn-udp` calls `sendmsg_x` and `recvmsg_x` for up to 32 packets at once. Those are not in Apple's public headers: `unix.rs` has their declaration "Adapted from" `bsd/sys/socket_private.h` of xnu. `quinn` 0.11.12 has no feature that passes it on; a crate of the workspace turns it on by depending on `quinn-udp` itself with the feature.
+
+Tried on macOS, for these runs only, with `quinn-udp = { version = "=0.5.16", features = ["fast-apple-datapath"] }` added to `crates/relay/Cargo.toml`, which turns it on for the relay and, since they are built together, for the clients; taken out again afterwards. The large video, one run each, the runs without it taken anew right before:
+
+| Viewers | `fast-apple-datapath` | Relay, processor (mean / highest) | Lateness: median of the medians / worst 99th percentile / highest | Frames skipped after a viewer's first key frame |
+|---|---|---|---|---|
+| 100 | no | 90% / 126% | 7.2 / 31.0 / 33.8 ms | 0 |
+| 100 | yes | 93% / 130% | 7.8 / 30.3 / 48.7 ms | 0 |
+| 250 | no | 159% / 232% | 11.9 / 72.2 / 99.2 ms | 0 |
+| 250 | yes | 110% / 167% | 10.0 / 48.4 / 75.3 ms | 0 |
+| 500 | no (the run above) | 198% / 332% | 31.2 / 1,329.9 / 1,392.5 ms | 496 |
+| 500 | yes | 153% / 240% | 12.9 / 87.3 / 117.0 ms | 0 |
+
+- **With it, 500 viewers of the large video got every frame**, the worst 117 ms late, where without it frames came 1.4 seconds late.
+- At 250 the relay took a third less of a processor; at 100 nothing changed that one run each can show.
+- Whether it was the relay's sending or the viewers' receiving that gained is not told apart: both had the feature.
+
 ## Limitations and blockers
 
 - One machine: the viewers and the relay share its cores, and loopback has no loss and no delay. The numbers say what the relay's own work costs here, not what a network does.
