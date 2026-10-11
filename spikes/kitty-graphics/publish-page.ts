@@ -1,5 +1,6 @@
 // Starts the own relay and a page of Chromium that encodes and publishes
-// video (the page of interop/video.ts, bars, 320x180 at 25 frames a second),
+// video (the page of interop/video.ts, bars, 320x180 at 25 frames a second)
+// and a tone as Opus on the track "audio",
 // prints where the relay is, and stays until it is stopped.
 //
 // Usage: bun spikes/kitty-graphics/publish-page.ts [--port N]
@@ -54,6 +55,17 @@ await withTimeout(
 		[NAMESPACE, VIDEO] satisfies [string, PageVideoSetup],
 	),
 	"the page to publish its video",
+);
+// Sound as well: a tone, Opus, on the track "audio". WHY a second page:
+// the page of interop/ answers the relay for one of the two at a time
+// (`publishAudio` takes the place of what `publishVideo` serves).
+const sounder = await openConnectedPage(context, "sounder", "own-browser");
+await withTimeout(
+	sounder.evaluate(
+		([namespace]) => window.xmoqOwn.publishAudio(namespace, "audio"),
+		[NAMESPACE] satisfies [string],
+	),
+	"the page to publish its audio",
 );
 await pollFor(
 	async () =>
