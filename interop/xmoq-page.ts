@@ -240,6 +240,9 @@ export type OwnPageExtras = {
 	 * frame `n` has the time `firstTimestamp + n * 1000000 / framerate`
 	 * microseconds and shows `n` modulo 256 as 8 bars from left to right,
 	 * the highest bit first, a white bar for a 1 and a black one for a 0.
+	 * **After frame 45 the page hands the encoder one frame more, with the
+	 * picture of frame 45 and the time of frame 44**, which is not to be
+	 * encoded (`time-not-after`).
 	 * Resolves when the namespace is announced.
 	 */
 	publishVideo(namespace: string, setup: PageVideoSetup): Promise<void>;
@@ -377,6 +380,8 @@ export type PageVideoSetup = {
 	mapping: "stream-per-group" | "stream-per-object";
 	/** The time of frame 0, in microseconds. */
 	firstTimestamp: number;
+	/** The longest payload that is sent; the sender's when left out. */
+	maxPayloadLength?: number;
 	/**
 	 * Fills the lower half of every frame with random pixels, another set
 	 * for every frame: a picture an encoder cannot make small. The bars of
@@ -398,6 +403,8 @@ export type PageVideoPublishReport = {
 	encodedBytes: number;
 	largestChunk: number;
 	encoderError: string | null;
+	/** Every time the encoder said that key chunks in a row could not be sent (`onKeyChunksNotSent`). */
+	keyChunksNotSent: { because: string; inARow: number; length: number }[];
 	/** Of the publisher: Objects handed to the transport, and writes that failed. */
 	written: number;
 	writeFailures: number;

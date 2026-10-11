@@ -4,7 +4,10 @@
 // the encoder makes necessary; which chunk becomes which Object is the
 // sender's, and what is written when is the publisher's.
 
-import type { VideoStreamMapping } from "../core/video-sender.ts";
+import type {
+	VideoSkipReason,
+	VideoStreamMapping,
+} from "../core/video-sender.ts";
 import {
 	createVideoTrackPublisher,
 	type VideoPushSkipReason,
@@ -18,6 +21,25 @@ import {
  * picture.
  */
 export const DEFAULT_MAX_ENCODE_QUEUE = 2;
+/**
+ * After how many key chunks in a row that could not be sent the caller is
+ * told. **Provisional.** WHY not the first: one key frame can be larger
+ * than the rest, and the next one is asked for at once.
+ */
+export const DEFAULT_MAX_UNSENT_KEY_CHUNKS = 3;
+
+/** Why the sender sends a chunk at no time: what the chunk is, and not who takes it. */
+const OF_THE_CHUNK: readonly VideoSkipReason[] = [
+	"too-large",
+	"not-annex-b",
+	"no-time",
+	"no-group-id",
+];
+/**
+ * How long `end` waits for the encoder to give what it holds, in
+ * milliseconds. Provisional: what the publisher waits for its writes.
+ */
+const DEFAULT_END_TIMEOUT_MS = 3000;
 
 export interface VideoTrackEncoderOptions {
 	trackNamespace: readonly Uint8Array[];
@@ -46,14 +68,46 @@ export interface VideoTrackEncoderOptions {
 	keyFrameIntervalMs: number;
 	/** How the Objects go onto streams; the sender's default when left out. */
 	mapping?: VideoStreamMapping;
+	/** The longest payload that is sent (`VideoSenderOptions.maxPayloadLength`). */
+	maxPayloadLength?: number;
 	/** `DEFAULT_MAX_ENCODE_QUEUE` when left out. */
 	maxEncodeQueue?: number;
+	/**
+	 * Called when `maxUnsentKeyChunks` key chunks in a row could not be
+	 * sent for what they are: too long, mostly (`too-large`). **Nothing of
+	 * the track reaches anybody then**: every Group begins with its key
+	 * chunk. Called once each time it comes to that, and again only after a
+	 * key chunk was sent in between.
+	 *
+	 * The encoder goes on, and so does the sending: a key frame of another
+	 * picture can be smaller, and is sent. What to do about it (a lower
+	 * resolution, another `maxPayloadLength`, ending the track) is the
+	 * caller's.
+	 */
+	onKeyChunksNotSent?(event: {
+		/** Why the last of them was not sent. */
+		because: VideoSkipReason;
+		/** How many in a row. */
+		inARow: number;
+		/** The length of the last of them, in bytes. */
+		length: number;
+	}): void;
+	/** `DEFAULT_MAX_UNSENT_KEY_CHUNKS` when left out. */
+	maxUnsentKeyChunks?: number;
+	/**
+	 * How long `end` waits for the encoder to give what it holds, and then
+	 * the publisher for its writes (`VideoTrackPublisherOptions.endTimeoutMs`);
+	 * 3000 ms when left out.
+	 */
+	endTimeoutMs?: number;
 }
 
 /** Why a frame did not become an Object, besides the reasons of the publisher. */
 export type VideoEncodeSkipReason =
 	/** More frames wait in the encoder than may: the frame was not encoded. */
 	| "encoder-behind"
+	/** Its time is not after the time of the frame before it. */
+	| "time-not-after"
 	/** The encoder has failed, or `end` was called. */
 	| "closed";
 
@@ -70,6 +124,8 @@ export interface VideoTrackEncoderStats {
 	notSent: Partial<Record<VideoPushSkipReason, number>>;
 	/** Times the publisher asked for a key frame. */
 	keyFramesAskedFor: number;
+	/** Key chunks that could not be sent for what they are, since the last one that was sent. */
+	unsentKeyChunksInARow: number;
 	/** The bytes of all chunks. */
 	encodedBytes: number;
 	/** The longest chunk, in bytes. */
@@ -92,9 +148,9 @@ export interface VideoTrackEncoder {
 	 */
 	encode(frame: VideoFrame): "encoded" | VideoEncodeSkipReason;
 	/**
-	 * What the encoder still holds is encoded and sent, the encoder is
-	 * closed, and the track is ended (`VideoTrackPublisher.end`). Never
-	 * rejects.
+	 * What the encoder still holds is encoded and sent, for `endTimeoutMs`
+	 * at most; then the encoder is closed and the track is ended
+	 * (`VideoTrackPublisher.end`, which has its own waits). Never rejects.
 	 */
 	end(): Promise<void>;
 	/**
@@ -114,7 +170,8 @@ export interface VideoTrackEncoder {
  * whole number from 1 and for options the publisher refuses, and with a
  * `DOMException` named NotSupportedError where the browser has no
  * `VideoEncoder` or none for this configuration
- * (`VideoEncoder.isConfigSupported`).
+ * (`VideoEncoder.isConfigSupported`), and as `isConfigSupported` does for
+ * a configuration that is none, with a `TypeError`.
  *
  * - The encoder is configured for Annex B and for low delay:
  *   `{ codec, width, height, avc: { format: "annexb" }, latencyMode:
@@ -136,6 +193,10 @@ export interface VideoTrackEncoder {
  *   them in the order of the frames. So the times go up as the frames'
  *   own do, whatever the clock does afterwards. The time of the first frame
  *   need not be 0.
+ * - **A frame whose time is not after the time of the frame before it is
+ *   not encoded** (`time-not-after`): the receiver of this package and a
+ *   decoder take the times to go up, and the key frame interval is counted
+ *   in them.
  * - **An encoder that fails is not made anew.** Provisional: what makes
  *   one fail is taken to be the configuration or the frames, which a new
  *   one would meet again.
@@ -144,8 +205,12 @@ export async function createVideoTrackEncoder(
 	options: VideoTrackEncoderOptions,
 ): Promise<VideoTrackEncoder> {
 	const maxEncodeQueue = options.maxEncodeQueue ?? DEFAULT_MAX_ENCODE_QUEUE;
+	const maxUnsentKeyChunks =
+		options.maxUnsentKeyChunks ?? DEFAULT_MAX_UNSENT_KEY_CHUNKS;
+	const endTimeoutMs = options.endTimeoutMs ?? DEFAULT_END_TIMEOUT_MS;
 	for (const [name, value] of [
 		["maxEncodeQueue", maxEncodeQueue],
+		["maxUnsentKeyChunks", maxUnsentKeyChunks],
 		["keyFrameIntervalMs", options.keyFrameIntervalMs],
 	] as const) {
 		if (!Number.isInteger(value) || value < 1) {
@@ -161,6 +226,10 @@ export async function createVideoTrackEncoder(
 		firstGroup: options.firstGroup,
 		epoch,
 		...(options.mapping === undefined ? {} : { mapping: options.mapping }),
+		...(options.maxPayloadLength === undefined
+			? {}
+			: { maxPayloadLength: options.maxPayloadLength }),
+		endTimeoutMs,
 	});
 	if (typeof VideoEncoder === "undefined") {
 		throw new DOMException(
@@ -194,6 +263,7 @@ export async function createVideoTrackEncoder(
 		notEncoded: {},
 		notSent: {},
 		keyFramesAskedFor: 0,
+		unsentKeyChunksInARow: 0,
 		encodedBytes: 0,
 		largestChunk: 0,
 		encoderError: undefined,
@@ -210,6 +280,8 @@ export async function createVideoTrackEncoder(
 	let lastKey: number | undefined;
 	/** The publisher asked for a key frame, and no frame was encoded since. */
 	let wantsKey = false;
+	/** The time of the last frame that was handed to the encoder. */
+	let lastTime: number | undefined;
 	let closed = false;
 	let fail: (error: unknown) => void = () => {};
 	const failed = new Promise<unknown>((resolve) => {
@@ -238,11 +310,31 @@ export async function createVideoTrackEncoder(
 				stats.keyFramesAskedFor += 1;
 				wantsKey = true;
 			}
+			if (chunk.type !== "key") return;
+			if (result.skipped === undefined) {
+				stats.unsentKeyChunksInARow = 0;
+				return;
+			}
+			// Not for want of a subscriber, or for one that is behind: those
+			// are not the chunk's doing, and pass by themselves.
+			const because = OF_THE_CHUNK.find((reason) => reason === result.skipped);
+			if (because === undefined) return;
+			stats.unsentKeyChunksInARow += 1;
+			if (stats.unsentKeyChunksInARow !== maxUnsentKeyChunks) return;
+			try {
+				options.onKeyChunksNotSent?.({
+					because,
+					inARow: stats.unsentKeyChunksInARow,
+					length: data.length,
+				});
+			} catch (error) {
+				reportError(error);
+			}
 		},
 		error: (error) => {
 			// The encoder is closed by the browser when it says this.
 			closed = true;
-			stats.encoderError = error.message;
+			stats.encoderError ??= error.message;
 			fail(error);
 		},
 	});
@@ -260,6 +352,9 @@ export async function createVideoTrackEncoder(
 		encode(frame) {
 			try {
 				if (closed) return notEncoded("closed");
+				if (lastTime !== undefined && frame.timestamp <= lastTime) {
+					return notEncoded("time-not-after");
+				}
 				if (encoder.encodeQueueSize > maxEncodeQueue) {
 					return notEncoded("encoder-behind");
 				}
@@ -278,7 +373,7 @@ export async function createVideoTrackEncoder(
 					// `encode` throws for a frame the encoder cannot take, and
 					// for an encoder that is closed.
 					closed = true;
-					stats.encoderError =
+					stats.encoderError ??=
 						error instanceof Error ? error.message : String(error);
 					if (encoder.state !== "closed") encoder.close();
 					fail(error);
@@ -288,6 +383,7 @@ export async function createVideoTrackEncoder(
 					lastKey = frame.timestamp;
 					wantsKey = false;
 				}
+				lastTime = frame.timestamp;
 				stats.submitted += 1;
 				return "encoded";
 			} finally {
@@ -299,8 +395,17 @@ export async function createVideoTrackEncoder(
 				const wasOpen = !closed;
 				closed = true;
 				if (wasOpen && encoder.state === "configured") {
-					// What the encoder still holds becomes Objects first.
-					await encoder.flush().catch(() => {});
+					// What the encoder still holds becomes Objects first. WHY
+					// with a time limit: nothing says that an encoder that
+					// stands still answers a flush.
+					let timer: ReturnType<typeof setTimeout> | undefined;
+					await Promise.race([
+						encoder.flush().catch(() => {}),
+						new Promise((resolve) => {
+							timer = setTimeout(resolve, endTimeoutMs);
+						}),
+					]);
+					clearTimeout(timer);
 				}
 				if (encoder.state !== "closed") encoder.close();
 				await publisher.end();

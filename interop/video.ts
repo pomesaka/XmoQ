@@ -34,7 +34,7 @@
 //       (`no-key-frame`), of which there can be none or up to a Group.
 //       No `gap`, no `unusable`, no `late`: `mlmpub` sends in order, on
 //       loopback, and its Objects are LOC's.
-
+//
 //   page-to-page  A page encodes frames it paints, 320x180 at 25 frames a
 //                 second with a key frame every second, and publishes them
 //                 with `createVideoTrackEncoder` of `@xmoq/media`, with a
@@ -72,6 +72,11 @@
 //       failed, and nothing was left unsent but as `no-subscriber`, before
 //       the relay came. At least 3 key chunks: the first, the one asked
 //       for, and one a second later.
+//     - **A frame whose time is not after the one before it is not
+//       encoded**: the page hands in one such, with the picture of frame 45
+//       and the time of frame 44, while the viewer plays. The publisher
+//       counts one `time-not-after`, and the viewer's numbers and times
+//       have no frame twice.
 //     - **Corrected after the first run**: "every frame that was painted
 //       was handed to the encoder" did not hold. 9 of 85 were not, as
 //       `encoder-behind`: more than 2 frames waited in the encoder. The
@@ -122,12 +127,60 @@
 //       judged: whether 2 frames are too few to let wait is what this run
 //       is to show.
 //
+//   key-frames-too-large
+//                 A page encodes the bars as in page-to-page, through the
+//                 own relay, and sends payloads of 100 bytes at most: every
+//                 key chunk is longer (256 bytes and more, in the runs with
+//                 bars). Nobody views. Written before the first run:
+//
+//     - **The page is told** (`onKeyChunksNotSent` of
+//       `createVideoTrackEncoder`): once, when the third key chunk in a row
+//       was not sent, with the reason `too-large` and the length of that
+//       chunk, over 100.
+//     - **Once and no more**: when two more key chunks have come, five in
+//       all, it has still been told once.
+//     - The encoder goes on and has not failed; no Object was written; as
+//       many chunks were left unsent as `too-large` as key chunks came.
+//
+//   to-mlmsub     A page encodes the bars as in page-to-page, a Group on a
+//                 stream, through the own relay, and `mlmsub` of moqlivemock
+//                 v0.16.1 takes the track (`-videoname video -loglevel
+//                 debug`). Read in its source before the
+//                 first run (`internal/sub/sub.go`, `internal/sub/loc.go` at
+//                 the commit `scripts/ci/interop.sh` builds): it reads the
+//                 catalog, takes the first video track whose name has the
+//                 text of `-videoname`, subscribes, and prints "group
+//                 start" for every Object 0 and "object" for every other
+//                 Object, with the Group, the Subgroup, the length of the
+//                 payload and the Timestamp of LOC. Written before the
+//                 first run:
+//
+//     - `mlmsub` selects the track `video`.
+//     - **Three Groups begin, one after the other**: their Group IDs go up
+//       by 1, each in Subgroup 0, and their Timestamps are 1,000,000
+//       microseconds apart and within a minute of the clock.
+//     - **Between the first two, Objects 1 to 24 of the first Group**, in
+//       that order, each 40,000 microseconds after the one before it.
+//     - **Not in the run: `mlmsub` cannot write this video out.** With
+//       `-videoout` it takes a payload to have a length of 4 bytes before
+//       every NAL unit (`LOCVideoWriter`); the payloads here begin with a
+//       start code, `00 00 00 01`, which it reads as a length of 1, and
+//       then four bytes of the parameter set as the next length. The first
+//       run was made with `-videoout` and expected that failure on every
+//       Object, and the three Groups all the same. **That was wrong, for a
+//       line of the source that was not read**: after "failed to write LOC
+//       sample" (`NALU length 1107299721 exceeds remaining data 237`, as
+//       worked out) `mlmsub` reads the track no further. So the run is
+//       without `-videoout`, and the failure is in the record.
+//
 import { parseArgs } from "node:util";
 import {
+	captureGroup,
 	log,
 	openConnectedPage,
 	pollFor,
 	runCleanups,
+	spawnMlmsub,
 	startMoqlivemockPublisher,
 	startRun,
 	stopEverythingOnExit,
@@ -438,8 +491,14 @@ async function pageToPage(): Promise<string> {
 
 	const { frames, stats } = final;
 	if (report.frames.length < FRAMES) {
+		const tooLarge = sent.notSent["too-large"] ?? 0;
+		// The cause where it is this one: the counts alone do not say it.
+		const cause =
+			tooLarge > 0
+				? `; **the publisher sent ${sent.written} Objects: ${tooLarge} chunks were over the longest payload it sends**, the largest ${sent.largestChunk} bytes (another encoder than the one the picture was sized for?)`
+				: "";
 		throw new Error(
-			`${report.frames.length} frames were decoded, not ${FRAMES}, when the viewer reported (after ${PLAY_TIMEOUT_MS} ms at the latest); the playing ${report.ended === null ? "went on" : `ended as ${report.ended}`}, the decoder failed ${report.stats.decoderFailures} times (${report.stats.lastDecoderError}): ${seen}`,
+			`${report.frames.length} frames were decoded, not ${FRAMES}, when the viewer reported (after ${PLAY_TIMEOUT_MS} ms at the latest); the playing ${report.ended === null ? "went on" : `ended as ${report.ended}`}, the decoder failed ${report.stats.decoderFailures} times (${report.stats.lastDecoderError})${cause}: ${seen}`,
 		);
 	}
 	if (final.ended?.startsWith("subscription-ended ") !== true) {
@@ -515,6 +574,11 @@ async function pageToPage(): Promise<string> {
 			`the first frame has the time ${first?.timestamp}, which is not within a minute of the clock (${before}): ${seen}`,
 		);
 	}
+	if (sent.notEncoded["time-not-after"] !== 1) {
+		throw new Error(
+			`the one frame the page handed in with the time of the frame before it was to be left unencoded as time-not-after: ${JSON.stringify(sent)}`,
+		);
+	}
 	const unsent = Object.keys(sent.notSent).filter(
 		(reason) => reason !== "no-subscriber",
 	);
@@ -543,8 +607,165 @@ async function pageToPage(): Promise<string> {
 	return `${sent.written} Objects of a page's video reached another through the ${options.through} relay (${mapping}), which decoded ${frames.length} frames, ${PAGE_VIDEO.width}x${PAGE_VIDEO.height}, each showing a later number than the one before it and that many times 40 ms after it, from ${first.number} on, and dropped ${dropped} with a decoder that was behind (${missing} numbers passed over); the largest chunk was ${sent.largestChunk} bytes and 25 chunks ${Math.round((sent.encodedBytes / sent.encoded) * 25)} on average, ${sent.keyChunks} key chunks of ${sent.encoded}, and ${sent.notEncoded["encoder-behind"] ?? 0} of ${sent.painted} frames were not encoded, the encoder being behind`;
 }
 
+async function keyFramesTooLarge(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser"],
+		verbose: options.verbose,
+	});
+	const publisher = await openConnectedPage(
+		context,
+		"publisher",
+		"own-browser",
+	);
+	await withTimeout(
+		publisher.evaluate(
+			([namespace, setup]) => window.xmoqOwn.publishVideo(namespace, setup),
+			[
+				PAGE_NAMESPACE,
+				{ ...BARS, mapping: "stream-per-group", maxPayloadLength: 100 },
+			] satisfies [string, PageVideoSetup],
+		),
+		"the page to publish its video",
+	);
+	// Five key chunks: two more than it takes to be told.
+	const sent = await pollFor(async () => {
+		const report = await publisher.evaluate(() =>
+			window.xmoqOwn.videoPublishReport(),
+		);
+		return report.keyChunks >= 5 ? report : undefined;
+	}, "the publisher to encode five key chunks");
+	const seen = JSON.stringify(sent);
+	log("driver", `REPORT ${seen}`);
+	const [told, ...again] = sent.keyChunksNotSent;
+	if (
+		told === undefined ||
+		again.length > 0 ||
+		told.because !== "too-large" ||
+		told.inARow !== 3 ||
+		told.length <= 100
+	) {
+		throw new Error(
+			`the page was to be told once, at the third key chunk over 100 bytes in a row, as too-large: ${seen}`,
+		);
+	}
+	if (
+		sent.encoderError !== null ||
+		sent.written !== 0 ||
+		sent.notSent["too-large"] !== sent.keyChunks
+	) {
+		throw new Error(
+			`the encoder was to go on, no Object to be written, and every key chunk to be left unsent as too-large: ${seen}`,
+		);
+	}
+	await withTimeout(
+		publisher.evaluate(() => window.xmoqOwn.stopVideo()),
+		"the publisher to end its track",
+	);
+	return `a page whose key chunks are all over what it sends was told so once, at the third in a row (${told.length} bytes, over 100), and went on encoding: ${sent.keyChunks} key chunks, none sent`;
+}
+
+async function toMlmsub(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser"],
+		verbose: options.verbose,
+	});
+	const publisher = await openConnectedPage(
+		context,
+		"publisher",
+		"own-browser",
+	);
+	await withTimeout(
+		publisher.evaluate(
+			([namespace, setup]) => window.xmoqOwn.publishVideo(namespace, setup),
+			[PAGE_NAMESPACE, { ...BARS, mapping: "stream-per-group" }] satisfies [
+				string,
+				PageVideoSetup,
+			],
+		),
+		"the page to publish its video",
+	);
+	await pollFor(
+		async () =>
+			(await publisher.evaluate(() => window.xmoqOwn.videoPublishReport()))
+				.painted >= PAINTED_BEFORE
+				? true
+				: undefined,
+		`the publisher to paint ${PAINTED_BEFORE} frames`,
+	);
+	const before = Date.now() * 1000;
+	const { process: mlmsub } = spawnMlmsub(context, PAGE_NAMESPACE, [
+		"-videoname",
+		BARS.trackName,
+		"-loglevel",
+		"debug",
+	]);
+	await mlmsub.waitForLine(
+		new RegExp(`selected video track.*trackName=${BARS.trackName}\\b`),
+	);
+	const START =
+		/msg="group start" track=video groupID=(\d+) subGroupID=(\d+) payloadLength=(\d+) locTimestampUs=(\d+)/;
+	// The third Group has begun: the first two are whole.
+	await pollFor(
+		async () => (mlmsub.matches(START).length >= 3 ? true : undefined),
+		"mlmsub to see three Groups begin",
+	);
+	const groups = mlmsub.matches(START).slice(0, 3);
+	const starts = groups.map((line) => ({
+		group: BigInt(captureGroup(line, 1)),
+		subgroup: captureGroup(line, 2),
+		time: Number(captureGroup(line, 4)),
+	}));
+	const seen = groups.map((line) => line[0]).join("; ");
+	log("driver", `REPORT ${seen}`);
+	const [first, second, third] = starts;
+	if (
+		first === undefined ||
+		second === undefined ||
+		third === undefined ||
+		second.group !== first.group + 1n ||
+		third.group !== first.group + 2n ||
+		starts.some((start) => start.subgroup !== "0") ||
+		second.time - first.time !== 1_000_000 ||
+		third.time - second.time !== 1_000_000 ||
+		Math.abs(first.time - before) > 60_000_000
+	) {
+		throw new Error(
+			`three Groups were to begin one after the other, in Subgroup 0, a second apart and at the time of the clock (${before}): ${seen}`,
+		);
+	}
+	const objects = mlmsub
+		.matches(
+			/msg=object track=video objectID=(\d+) groupID=(\d+) subGroupID=0 payloadLength=\d+ locTimestampUs=(\d+)/,
+		)
+		.filter((line) => BigInt(captureGroup(line, 2)) === first.group)
+		.map((line) => ({
+			object: Number(captureGroup(line, 1)),
+			time: Number(captureGroup(line, 3)),
+		}));
+	const wrong = objects.findIndex(
+		({ object, time }, index) =>
+			object !== index + 1 || time !== first.time + (index + 1) * 40_000,
+	);
+	if (objects.length !== 24 || wrong !== -1) {
+		throw new Error(
+			`mlmsub was to have Objects 1 to 24 of Group ${first.group}, each 40000 microseconds after the one before it; it had ${objects.length}, and the first that is not so is ${JSON.stringify(objects[wrong])}`,
+		);
+	}
+	await withTimeout(
+		publisher.evaluate(() => window.xmoqOwn.stopVideo()),
+		"the publisher to end its track",
+	);
+	return `mlmsub took the video of a page through the own relay: Groups ${first.group} to ${third.group} began a second apart, Objects 1 to 24 of the first 40 ms apart, with wall-clock Timestamps`;
+}
+
 const CASES: Record<string, () => Promise<string>> = {
+	"to-mlmsub": toMlmsub,
 	"from-mlmpub": fromMlmpub,
+	"key-frames-too-large": keyFramesTooLarge,
 	"page-to-page": pageToPage,
 };
 

@@ -78,6 +78,10 @@ export interface VideoPushResult {
 	 *
 	 * True as well, once, with the first chunk after a subscriber came that
 	 * is no key chunk: the subscriber gets nothing before one.
+	 *
+	 * **Never true while nobody is subscribed**: a key frame would be for
+	 * nobody. So it is once for each subscription at least, where a Group
+	 * was cut before the subscriber came.
 	 */
 	askForKeyFrame: boolean;
 }
@@ -159,9 +163,17 @@ interface Subscriber {
 	 * later ones.
 	 */
 	silent: boolean;
-	/** The stream that is open for it, with "stream-per-group". */
+	/**
+	 * The stream that was opened for a Group, with "stream-per-group", until
+	 * the step that finishes or resets it. It can have been reset before,
+	 * by a write that failed.
+	 */
 	open: OpenStream | undefined;
-	/** The stream an Object is being written to now. */
+	/**
+	 * The stream the last Object was written to, or is being written to
+	 * now. A reset of it does nothing where that write is over and the
+	 * stream finished or reset.
+	 */
 	writing: OpenStream | undefined;
 	/**
 	 * The Groups that were cut short: what is queued of them is not written.
@@ -310,6 +322,9 @@ export function createVideoTrackPublisher(
 			else await open.writer.reset();
 			return;
 		}
+		// WHY forgotten here: the queue is in the order of the Groups, so
+		// nothing of a Group below this one is queued any more, and a track
+		// that runs for long would else keep every Group that was ever cut.
 		for (const group of to.cut) {
 			if (group < step.groupId) to.cut.delete(group);
 		}
@@ -344,8 +359,7 @@ export function createVideoTrackPublisher(
 		}
 		// The stream of its Group is gone: it could not be opened.
 		if (writer === undefined) return;
-		const writing = { groupId: step.groupId, writer };
-		to.writing = writing;
+		to.writing = { groupId: step.groupId, writer };
 		try {
 			await writer.write({
 				objectId: step.objectId,
@@ -355,14 +369,11 @@ export function createVideoTrackPublisher(
 			stats.written += 1;
 			if (step.closesStream) await writer.close();
 		} catch (error) {
-			if (to.open?.writer === writer) to.open = undefined;
 			// A stream that is neither closed nor reset keeps PUBLISH_DONE
 			// from being sent; a reset of one that is closed does nothing.
 			// Where the subscription is over, its streams are gone with it.
 			if (!endedByThePeer(error)) await writer.reset().catch(() => {});
 			throw error;
-		} finally {
-			if (to.writing === writing) to.writing = undefined;
 		}
 	};
 
@@ -516,12 +527,16 @@ export function createVideoTrackPublisher(
 			if (skipped !== undefined) skip(skipped);
 			// Asked once, and only when there is room again for what is asked
 			// for.
+			// Not without a subscriber: the one that comes has a key chunk
+			// asked for itself, below.
 			const afterACut =
+				to !== undefined &&
+				!to.silent &&
 				needsKey &&
 				!asked &&
 				(to?.pendingObjects ?? 0) * 2 <= maxPendingObjects &&
 				(to?.pendingBytes ?? 0) * 2 <= maxPendingBytes;
-			if (afterACut) asked = true;
+
 			// WHY asked for a subscriber that has nothing yet: it came in the
 			// middle of a Group, of which it gets nothing, and would wait for
 			// the key chunk the encoder makes by itself, up to its whole
@@ -531,6 +546,9 @@ export function createVideoTrackPublisher(
 				to !== undefined && !to.silent && !to.started && !to.askedToStart;
 			if (toStart) to.askedToStart = true;
 			const askForKeyFrame = afterACut || toStart;
+			// The key chunk that is asked for a subscriber that came is the
+			// one a Group that was cut waits for as well.
+			if (askForKeyFrame && needsKey) asked = true;
 			return skipped === undefined
 				? { askForKeyFrame }
 				: { skipped, askForKeyFrame };

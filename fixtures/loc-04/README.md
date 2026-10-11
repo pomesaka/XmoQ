@@ -40,3 +40,25 @@ The 27 Objects that were read had no other property. The first Object of the nex
 | The other frame | 927 bytes, `41` (a slice of another picture) |
 
 What the first byte of a NAL unit means is H.264's and was not read from its specification for this: the three names are what the decoder of Chromium needs in a key frame, which took these two frames once every length was a start code ([record](../../docs/experiments/2026-10-11-loc-video-payloads-in-chromium.md)).
+
+## Chunks of an encoder: Chromium
+
+The first two chunks of the H.264 encoder of Chromium 156.0.8078.4 (playwright-core 1.64.0, headless, macOS 14.4, arm64), as `VideoEncoder` gave them to `createVideoTrackEncoder` of `@xmoq/media`: configured with `{ codec: "avc1.42E01F", width: 320, height: 180, bitrate: 500000, framerate: 25, avc: { format: "annexb" }, latencyMode: "realtime" }`, fed with the frames the page of the interop run paints (8 bars, black or white; the first shows 0, all black).
+
+Taken on 2026-10-11 from a run of `interop/video.ts --video key-frames-too-large`, with one line added to `packages/media/src/web/encode-video-track.ts` for the run, which printed the type, the time and the bytes of the first chunks, and was taken out again.
+
+| File | Bytes | What it is |
+|---|---|---|
+| `video-key-annex-b-from-chromium.hex` | 229 | The first chunk: `type` "key", `timestamp` 5000000 (the page begins its times at 5 seconds) |
+| `video-delta-annex-b-from-chromium.hex` | 92 | The second: `type` "delta", `timestamp` 5040000 |
+
+**Every NAL unit has a start code of 4 bytes before it, `00 00 00 01`; none has one of 3 bytes**:
+
+| Chunk | NAL units, as the byte after the start code and the bytes of the unit |
+|---|---|
+| The key chunk | `27`, 19 bytes (a sequence parameter set); `28`, 4 bytes (a picture parameter set); `25`, 194 bytes (a slice of an IDR picture) |
+| The other | `21`, 88 bytes (a slice of another picture) |
+
+The names are by the low five bits of that byte (7, 8, 5 and 1), as for `moqlivemock`'s above; H.264's specification was not read for this. The sequence parameter set begins `27 42 00 0d`: **the encoder wrote profile and level bytes `42 00 0d`, not the `42 E0 1F` it was configured with**, and the catalog of the interop run says `avc3.42E01F`. The decoder of Chromium took the track with that codec string.
+
+`@xmoq/loc` reads both as payloads with start codes that stay as they are (`packages/loc/test/draft-04/video-payload.test.ts`), and the sender and the receiver of `@xmoq/media` pass them on unchanged (`packages/media/test/video-sender.test.ts`).

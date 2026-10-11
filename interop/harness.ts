@@ -700,6 +700,8 @@ export async function startMoqlivemockPublisher(setup: {
 export function spawnMlmsub(
 	context: RunContext,
 	namespace: string,
+	/** Further flags of `mlmsub`, after the ones every run has. */
+	extraArgs: string[] = [],
 ): { process: LoggedProcess; catalogOut: string } {
 	const binary = join(moqlivemockRoot, "bin", "mlmsub");
 	if (!existsSync(binary)) {
@@ -723,6 +725,7 @@ export function spawnMlmsub(
 		"60",
 		"-qlog",
 		join(logDir, `mlmsub-${port}.qlog`),
+		...extraArgs,
 	]);
 	defer(() => stopProcess(spawned, "SIGINT"));
 	return { process: spawned, catalogOut };

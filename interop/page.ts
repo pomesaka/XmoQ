@@ -40,6 +40,7 @@ import type {
 	PageFetchServing,
 	PageProperty,
 	PageReceivedObject,
+	PageVideoPublishReport,
 	PageVideoReport,
 	PageVideoSetup,
 	SubscriptionReport,
@@ -621,10 +622,14 @@ let videoPlaying: VideoPlaying | undefined;
 /** What `publishVideo` started. */
 interface VideoPublishing {
 	encoder: VideoTrackEncoder;
+	keyChunksNotSent: PageVideoPublishReport["keyChunksNotSent"];
 	painted: number;
 	timer: ReturnType<typeof setInterval>;
 }
 let videoPublishing: VideoPublishing | undefined;
+
+/** After this frame `publishVideo` hands the encoder one more with an earlier time: a frame a viewer of the interop runs is there for. */
+const STALE_FRAME_AFTER = 45;
 
 /** The bars a frame number is painted as, and read from. */
 const NUMBER_BITS = 8;
@@ -744,7 +749,15 @@ window.xmoqOwn = {
 		async (namespace: string, setup: PageVideoSetup) => {
 			const moq = connected();
 			const trackNamespace = namespaceTuple(namespace);
+			const keyChunksNotSent: PageVideoPublishReport["keyChunksNotSent"] = [];
 			const encoder = await createVideoTrackEncoder({
+				...(setup.maxPayloadLength === undefined
+					? {}
+					: { maxPayloadLength: setup.maxPayloadLength }),
+				onKeyChunksNotSent(event) {
+					keyChunksNotSent.push(event);
+					console.log(`key chunks not sent: ${JSON.stringify(event)}`);
+				},
 				trackNamespace,
 				trackName: utf8.encode(setup.trackName),
 				// MSF §6.1 has the time in milliseconds as one way to begin.
@@ -803,6 +816,7 @@ window.xmoqOwn = {
 				: [];
 			const publishing: VideoPublishing = {
 				encoder,
+				keyChunksNotSent,
 				painted: 0,
 				timer: setInterval(() => {
 					const number = publishing.painted;
@@ -812,13 +826,18 @@ window.xmoqOwn = {
 					if (tile !== undefined) {
 						context.drawImage(tile, 0, setup.height - tile.height);
 					}
-					encoder.encode(
-						new VideoFrame(canvas, {
-							timestamp:
-								setup.firstTimestamp +
-								Math.round((number * 1_000_000) / setup.framerate),
-						}),
-					);
+					const timeOf = (frame: number): number =>
+						setup.firstTimestamp +
+						Math.round((frame * 1_000_000) / setup.framerate);
+					encoder.encode(new VideoFrame(canvas, { timestamp: timeOf(number) }));
+					// Once, a frame that is not after the one before it: the
+					// picture of this frame with the time of the last one. It is
+					// not to be encoded.
+					if (number === STALE_FRAME_AFTER) {
+						encoder.encode(
+							new VideoFrame(canvas, { timestamp: timeOf(number - 1) }),
+						);
+					}
 				}, 1000 / setup.framerate),
 			};
 			videoPublishing = publishing;
@@ -847,6 +866,7 @@ window.xmoqOwn = {
 			encodedBytes: stats.encodedBytes,
 			largestChunk: stats.largestChunk,
 			encoderError: stats.encoderError ?? null,
+			keyChunksNotSent: [...videoPublishing.keyChunksNotSent],
 			written: sent.written,
 			writeFailures: sent.writeFailures,
 		};

@@ -70,6 +70,44 @@ describe("fixtures/loc-04: the video payloads of moqlivemock's publisher have a 
 		},
 	);
 
+	// The chunks of the H.264 encoder of Chromium, configured for Annex B:
+	// where each NAL unit begins, and the byte after its start code (0x27 a
+	// sequence parameter set, 0x28 a picture parameter set, 0x25 a slice of
+	// an IDR picture, 0x21 a slice of another one; the same kinds as above,
+	// with another `nal_ref_idc`).
+	test.each([
+		{
+			file: "video-key-annex-b-from-chromium",
+			length: 229,
+			units: [
+				{ at: 0, first: 0x27 },
+				{ at: 23, first: 0x28 },
+				{ at: 31, first: 0x25 },
+			],
+		},
+		{
+			file: "video-delta-annex-b-from-chromium",
+			length: 92,
+			units: [{ at: 0, first: 0x21 }],
+		},
+	])(
+		"$file: a chunk of Chromium's encoder has a start code of 4 bytes before every NAL unit, and stays as it is",
+		({ file, length, units }) => {
+			const payload = fixture(file);
+			expect(payload.length).toBe(length);
+			for (const { at, first } of units) {
+				expect(toHex(payload.subarray(at, at + 4))).toBe("00 00 00 01");
+				expect(payload[at + 4]).toBe(first);
+			}
+			expect(beginsWithStartCode(payload)).toBe(true);
+			expect(toAnnexB(payload)).toEqual({
+				type: "ok",
+				payload: fixture(file),
+				replaced: 0,
+			});
+		},
+	);
+
 	test("the key frame's first length is 25, the bytes of its sequence parameter set", () => {
 		expect(
 			toHex(

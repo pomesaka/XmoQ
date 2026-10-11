@@ -8,6 +8,31 @@ import { createSubgroupStreamDecoder, type ReceivedObject } from "@xmoq/moqt";
  * a key frame and the frame after it. Decoded by @xmoq/moqt, as a
  * subscription would deliver them; nothing of them is written out here.
  */
+/**
+ * A chunk of the H.264 encoder of Chromium, in Annex B form, that
+ * `fixtures/loc-04/` has: "key", the first chunk of a track, or "delta",
+ * the one after it, 40 ms later.
+ */
+export function capturedChunk(which: "key" | "delta"): Uint8Array {
+	return Uint8Array.from(
+		readFileSync(
+			join(
+				import.meta.dir,
+				"..",
+				"..",
+				"..",
+				"fixtures",
+				"loc-04",
+				`video-${which}-annex-b-from-chromium.hex`,
+			),
+			"utf8",
+		)
+			.trim()
+			.split(/\s+/)
+			.map((byte) => Number.parseInt(byte, 16)),
+	);
+}
+
 export function capturedObjects(): ReceivedObject[] {
 	const bytes = Uint8Array.from(
 		readFileSync(
