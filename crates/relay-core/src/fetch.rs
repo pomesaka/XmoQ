@@ -11,15 +11,15 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder, RangeEnd};
+use xmoq_moqt::fetch::RangeEnd;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{ControlMessage, Fetch, FetchRange, RequestOk, request_error_code};
 use xmoq_moqt::name::{FullTrackName, Location};
-use xmoq_moqt::params::{GroupOrder, Parameter};
+use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{FetchStreamOpened, PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
-use crate::events::{Event, FetchPipeEnd};
+use crate::events::{Event, FetchPiece, FetchPipeEnd};
 use crate::requests::{Joinable, Subscribed};
 use crate::routing::{MAX_OWN_REQUESTS_PER_SESSION, OwnRequestKind, Refusal};
 use crate::{
@@ -129,9 +129,9 @@ enum Standing {
     Held(HeldFetch),
     /// Asked of a publisher.
     Relayed(RelayedFetch),
-    /// Answered by the relay itself; the I/O side has not reported its
-    /// fetch stream written yet.
-    Written,
+    /// Answered by the relay itself, for this track; the I/O side has not
+    /// reported its fetch stream written yet.
+    Written(FullTrackName),
 }
 
 /// The FETCH requests of subscribers that the relay has not let go of, by
@@ -174,28 +174,43 @@ impl Fetches {
         self.0.insert(subscriber, Standing::Relayed(fetch));
     }
 
-    fn write(&mut self, subscriber: (SessionKey, StreamKey)) {
-        self.0.insert(subscriber, Standing::Written);
+    fn write(&mut self, subscriber: (SessionKey, StreamKey), track: FullTrackName) {
+        self.0.insert(subscriber, Standing::Written(track));
+    }
+
+    /// Whether the relay is writing the answer to a FETCH itself.
+    fn is_written(&self, subscriber: &(SessionKey, StreamKey)) -> bool {
+        matches!(self.0.get(subscriber), Some(Standing::Written(_)))
+    }
+
+    /// The FETCH requests for `track` the relay is writing the answer of,
+    /// in the order of their keys.
+    fn written_for(&self, track: &FullTrackName) -> Vec<(SessionKey, StreamKey)> {
+        self.0
+            .iter()
+            .filter(|(_, standing)| matches!(standing, Standing::Written(of) if of == track))
+            .map(|(subscriber, _)| *subscriber)
+            .collect()
     }
 
     fn relayed(&self, subscriber: &(SessionKey, StreamKey)) -> Option<&RelayedFetch> {
         match self.0.get(subscriber)? {
             Standing::Relayed(fetch) => Some(fetch),
-            Standing::Held(_) | Standing::Written => None,
+            Standing::Held(_) | Standing::Written(_) => None,
         }
     }
 
     fn relayed_mut(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<&mut RelayedFetch> {
         match self.0.get_mut(subscriber)? {
             Standing::Relayed(fetch) => Some(fetch),
-            Standing::Held(_) | Standing::Written => None,
+            Standing::Held(_) | Standing::Written(_) => None,
         }
     }
 
     fn held_mut(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<&mut HeldFetch> {
         match self.0.get_mut(subscriber)? {
             Standing::Held(held) => Some(held),
-            Standing::Relayed(_) | Standing::Written => None,
+            Standing::Relayed(_) | Standing::Written(_) => None,
         }
     }
 
@@ -205,7 +220,7 @@ impl Fetches {
             Entry::Occupied(entry) if matches!(entry.get(), Standing::Relayed(_)) => {
                 match entry.remove() {
                     Standing::Relayed(fetch) => Some(fetch),
-                    Standing::Held(_) | Standing::Written => None,
+                    Standing::Held(_) | Standing::Written(_) => None,
                 }
             }
             Entry::Occupied(_) | Entry::Vacant(_) => None,
@@ -218,7 +233,7 @@ impl Fetches {
             Entry::Occupied(entry) if matches!(entry.get(), Standing::Held(_)) => {
                 match entry.remove() {
                     Standing::Held(held) => Some(held),
-                    Standing::Relayed(_) | Standing::Written => None,
+                    Standing::Relayed(_) | Standing::Written(_) => None,
                 }
             }
             Entry::Occupied(_) | Entry::Vacant(_) => None,
@@ -228,7 +243,7 @@ impl Fetches {
     /// Lets go of a FETCH whose stream the relay wrote itself. Whether
     /// there was one.
     fn finish_written(&mut self, subscriber: &(SessionKey, StreamKey)) -> bool {
-        if !matches!(self.0.get(subscriber), Some(Standing::Written)) {
+        if !self.is_written(subscriber) {
             return false;
         }
         self.0.remove(subscriber).is_some()
@@ -239,7 +254,7 @@ impl Fetches {
             .iter()
             .filter_map(|(subscriber, standing)| match standing {
                 Standing::Relayed(fetch) => Some((subscriber, fetch)),
-                Standing::Held(_) | Standing::Written => None,
+                Standing::Held(_) | Standing::Written(_) => None,
             })
     }
 
@@ -257,7 +272,7 @@ impl Fetches {
         self.of(session)
             .filter_map(|(stream, standing)| match standing {
                 Standing::Held(held) => Some((stream, held)),
-                Standing::Relayed(_) | Standing::Written => None,
+                Standing::Relayed(_) | Standing::Written(_) => None,
             })
     }
 }
@@ -952,6 +967,35 @@ impl Relay {
         } else {
             end
         };
+        // An indicator is a Location, written the same in either Group
+        // Order. WHY the last Location of the range also for a Descending
+        // FETCH, which begins there: §11.4.4.2 has an indicator cover what
+        // lies "between the last serialized Object, if any, and this
+        // Location", and does not say from where when no Object came before
+        // and the Groups run downwards. A subscriber may read this one as
+        // covering nothing, or everything.
+        let unknown = FetchPiece::EndOfRange(RangeEnd::Unknown, last_location(end));
+        self.write_answer(
+            session,
+            stream,
+            request,
+            track,
+            (end, vec![unknown]),
+            actions,
+        );
+    }
+
+    /// Answers a FETCH with `FETCH_OK` and a fetch stream the relay writes
+    /// itself: the End Location and what the stream carries.
+    fn write_answer(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        request: PeerRequestId,
+        track: &FullTrackName,
+        (end, pieces): (Location, Vec<FetchPiece>),
+        actions: &mut Vec<Action>,
+    ) {
         // §9.6: "Relays MUST forward all Track Properties ... in the
         // responses to requests for that Track".
         let properties = self
@@ -970,18 +1014,6 @@ impl Relay {
             return self.refuse(session, stream, request, &failed, actions);
         };
         self.finish_slot(session, stream, Some(request), actions);
-        // An indicator is a Location, written the same in either Group
-        // Order. WHY the last Location of the range also for a Descending
-        // FETCH, which begins there: §11.4.4.2 has an indicator cover what
-        // lies "between the last serialized Object, if any, and this
-        // Location", and does not say from where when no Object came before
-        // and the Groups run downwards. A subscriber may read this one as
-        // covering nothing, or everything.
-        // The header is taken off: the I/O side writes it.
-        let mut encoder =
-            FetchStreamEncoder::new(FetchHeader { request_id }, GroupOrder::Ascending);
-        encoder.take_bytes();
-        encoder.end_of_range(RangeEnd::Unknown, last_location(end));
         actions.push(Action::SendRequest {
             session,
             stream,
@@ -992,12 +1024,31 @@ impl Relay {
             session,
             stream,
             request_id,
-            body: encoder.take_bytes(),
+            pieces,
             wait_ms: FETCH_DOWNSTREAM_WAIT_MS,
         });
         // Counted as one of the session's FETCHes until its stream is
         // written, or given up. The request stream is ended then.
-        self.fetches.write((session, stream));
+        self.fetches.write((session, stream), track.clone());
+    }
+
+    /// The subscriber cancelled a FETCH the relay is writing the answer of
+    /// (§5.2: "It MUST reset the bidi request stream and unidirectional data
+    /// stream associated with the FETCH"). The I/O side reports the stream
+    /// given up, which lets go of the FETCH.
+    pub(crate) fn cancel_written_fetch(
+        &self,
+        session: SessionKey,
+        stream: StreamKey,
+        actions: &mut Vec<Action>,
+    ) {
+        if self.fetches.is_written(&(session, stream)) {
+            actions.push(Action::AbortFetchWrite {
+                session,
+                stream,
+                code: stream_reset_code::CANCELLED,
+            });
+        }
     }
 
     /// The I/O side is done with a fetch stream the relay made itself.
@@ -1006,9 +1057,6 @@ impl Relay {
     /// subscriber that got `FETCH_OK` and a FIN is owed a fetch stream, and
     /// one that gives the relay no stream to write on would wait for it
     /// with nothing left to tell it by. The reset says that none comes.
-    ///
-    /// A track found malformed meanwhile does not reach a stream that is
-    /// written here: it carries one End of Range indicator and no Object.
     fn on_fetch_stream_written(
         &mut self,
         session: SessionKey,
@@ -1094,6 +1142,16 @@ impl Relay {
                 stream_reset_code::MALFORMED_TRACK,
                 actions,
             );
+        }
+        // The ones the relay answers itself have their `FETCH_OK`; their
+        // streams are reset, the request stream when the I/O side reports
+        // the fetch stream given up.
+        for (session, stream) in self.fetches.written_for(track) {
+            actions.push(Action::AbortFetchWrite {
+                session,
+                stream,
+                code: stream_reset_code::MALFORMED_TRACK,
+            });
         }
     }
 

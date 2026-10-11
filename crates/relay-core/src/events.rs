@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use xmoq_moqt::Error;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
+use xmoq_moqt::fetch::RangeEnd;
 use xmoq_moqt::message::ControlMessage;
+use xmoq_moqt::name::Location;
 use xmoq_moqt::session::Role;
 
 /// Names one MOQT session. The I/O side picks the numbers and never reuses one.
@@ -26,6 +28,14 @@ pub struct OutStreamKey(pub u64);
 /// never reuses one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OwnRequestKey(pub u64);
+
+/// What a fetch stream the relay writes itself carries after its header, in
+/// the order of the stream ([`Action::WriteFetchStream`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchPiece {
+    /// An End of Range indicator with this Location (§11.4.4.2).
+    EndOfRange(RangeEnd, Location),
+}
 
 /// What ended on a request stream the relay opened. "Own" is the relay's
 /// word for the requests it opens, next to the requests a peer opens.
@@ -417,8 +427,9 @@ pub enum Action {
         code: u32,
     },
     /// Open a unidirectional stream to the peer, write a `FETCH_HEADER` with
-    /// `request_id` and then `body`, and end the stream with a FIN. The end
-    /// is reported with [`Event::FetchStreamWritten`].
+    /// `request_id` and then `pieces`, one after the other, and end the
+    /// stream with a FIN. The end is reported with
+    /// [`Event::FetchStreamWritten`].
     WriteFetchStream {
         /// The session.
         session: SessionKey,
@@ -427,11 +438,23 @@ pub enum Action {
         stream: StreamKey,
         /// The Request ID of the FETCH the stream answers.
         request_id: u64,
-        /// What follows the header, encoded.
-        body: Vec<u8>,
+        /// What follows the header.
+        pieces: Vec<FetchPiece>,
         /// How long the subscriber may take nothing, in milliseconds, before
-        /// the stream is reset with `TOO_FAR_BEHIND`.
+        /// the stream is reset with `TOO_FAR_BEHIND`: for the stream to be
+        /// opened with its header, and for each piece.
         wait_ms: u64,
+    },
+    /// Stop writing a fetch stream of [`Action::WriteFetchStream`] and reset
+    /// it with `code`. The end is reported as for a stream that was given
+    /// up, with this code. Does nothing when the stream is written.
+    AbortFetchWrite {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH.
+        stream: StreamKey,
+        /// A Stream Reset Error Code (§3.3.3).
+        code: u32,
     },
     /// Tell the peer to stop sending on one of its subgroup streams.
     StopDataStream {

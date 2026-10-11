@@ -16,8 +16,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use xmoq_moqt::data::SubgroupHeader;
-use xmoq_moqt::fetch::FetchHeader;
+use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
+use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::session::MAX_PEER_REQUESTS;
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
@@ -28,8 +29,8 @@ use xmoq_moqt_io::{
     read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
-    Action, Event, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd,
-    Role, SessionKey, StreamKey,
+    Action, Event, FetchPiece, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay,
+    RequestEnd, Role, SessionKey, StreamKey,
 };
 
 /// Limits of the relay. Every value is provisional: the draft sets none of
@@ -257,6 +258,9 @@ struct SessionHandle<C: Connection> {
     /// The tasks that write a fetch stream the relay made itself and are not
     /// done.
     fetch_writes: Vec<JoinHandle<()>>,
+    /// What stops such a task, by the request stream of its FETCH
+    /// ([`Action::AbortFetchWrite`]).
+    fetch_write_aborts: HashMap<StreamKey, oneshot::Sender<u32>>,
 }
 
 impl<C: Connection> Drop for SessionHandle<C> {
@@ -265,6 +269,152 @@ impl<C: Connection> Drop for SessionHandle<C> {
             task.abort();
         }
     }
+}
+
+/// A fetch stream the relay writes itself ([`Action::WriteFetchStream`]).
+struct FetchWrite<C> {
+    connection: Arc<C>,
+    header: FetchHeader,
+    pieces: Vec<FetchPiece>,
+    /// How long the subscriber may take nothing.
+    patience: Duration,
+    trace: Trace,
+    label: String,
+}
+
+impl<C: Connection> FetchWrite<C> {
+    /// Opens the stream, writes the pieces one after the other and finishes
+    /// it. `None` when that was done; else the Stream Reset Error Code the
+    /// stream was given up with, which what was opened of it was reset with.
+    ///
+    /// A subscriber that takes nothing for `patience`, of the stream itself
+    /// or of one piece, is told so with the code of a fetch stream that is
+    /// passed on and not taken; one that stops the stream, or is gone, with
+    /// `CANCELLED`; and what comes on `aborted` ends the stream with the
+    /// code that came, whenever it comes before the stream is finished. A
+    /// stream that cannot be opened within `patience` has nothing to reset
+    /// with the code of an order; the order's code is still what is
+    /// returned.
+    ///
+    /// WHY piece by piece, and the wait anew for each: a subscriber that
+    /// takes the stream slowly is not one that takes nothing. As for a fetch
+    /// stream that is passed on, nothing bounds the whole of it.
+    async fn run(self, mut aborted: oneshot::Receiver<u32>) -> Option<u32> {
+        let not_taken = stream_reset_code::TOO_FAR_BEHIND;
+        // Whether an order to stop can still come.
+        let mut abortable = true;
+        // The order that came while the stream was being opened.
+        let mut ordered = None;
+        let opened = {
+            let opening = open_fetch_stream(
+                &*self.connection,
+                self.header,
+                &self.trace,
+                &self.label,
+                not_taken,
+            );
+            tokio::pin!(opening);
+            // WHY the opening goes on after an order to stop: what ends the
+            // call resets the stream with a code that is chosen before, and
+            // an order brings its own. The order is kept, and the stream
+            // reset with its code once it is open.
+            let opening = async {
+                loop {
+                    tokio::select! {
+                        biased;
+                        order = &mut aborted, if abortable && ordered.is_none() => match order {
+                            Ok(code) => ordered = Some(code),
+                            // Nobody is left to order it.
+                            Err(_) => abortable = false,
+                        },
+                        opened = &mut opening => break opened,
+                    }
+                }
+            };
+            tokio::time::timeout(self.patience, opening).await
+        };
+        let mut writer = match opened {
+            Ok(Ok(writer)) => writer,
+            // An order that came is what the stream is given up for, also
+            // where it could not be opened and reset with that code.
+            Ok(Err(_)) => return Some(ordered.unwrap_or(stream_reset_code::CANCELLED)),
+            Err(_) => return Some(ordered.unwrap_or(not_taken)),
+        };
+        if let Some(code) = ordered {
+            writer.reset(code);
+            return Some(code);
+        }
+        // An indicator is encoded alike in either Group Order.
+        let mut encoder = FetchStreamEncoder::new(self.header, GroupOrder::Ascending);
+        // The header, which `open_fetch_stream` has written.
+        encoder.take_bytes();
+        for piece in &self.pieces {
+            match piece {
+                FetchPiece::EndOfRange(kind, location) => encoder.end_of_range(*kind, *location),
+            }
+            let bytes = encoder.take_bytes();
+            let given_up = {
+                // WHY one write that is polled again, and not a write anew
+                // after an order that was none: a write that is dropped may
+                // have written a part of the piece, and a second one would
+                // write that part again.
+                let write = tokio::time::timeout(self.patience, writer.write(&bytes));
+                tokio::pin!(write);
+                loop {
+                    tokio::select! {
+                        // WHY the order first: a write that can complete at
+                        // once would otherwise be taken as often as an order
+                        // that is there already, and the stream be finished
+                        // where §5.2 and §2.4.2 have it reset.
+                        biased;
+                        order = &mut aborted, if abortable => match order {
+                            Ok(code) => break Some(code),
+                            Err(_) => abortable = false,
+                        },
+                        written = &mut write => {
+                            break match written {
+                                Ok(Ok(())) => None,
+                                Ok(Err(_)) => Some(stream_reset_code::CANCELLED),
+                                Err(_) => Some(not_taken),
+                            };
+                        }
+                    }
+                }
+            };
+            if let Some(code) = given_up {
+                writer.reset(code);
+                return Some(code);
+            }
+        }
+        // An order that came with the last piece, or for a stream without
+        // any.
+        if abortable && let Ok(code) = aborted.try_recv() {
+            writer.reset(code);
+            return Some(code);
+        }
+        writer.finish();
+        None
+    }
+}
+
+/// Runs `work` as a task of its own and waits for it: `Err` where it
+/// panicked. The task ends when this call is dropped.
+///
+/// WHY a task of its own: the caller has to tell the relay how the work
+/// ended whatever became of it, a panic included. WHY it ends with the call:
+/// the caller is a task that goes with its session, and work that outlived
+/// it would keep the connection it holds open, with nobody left to stop it.
+async fn in_a_task_that_ends_with_this_call<T: Send + 'static>(
+    work: impl Future<Output = T> + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    struct EndsWithIt<T>(JoinHandle<T>);
+    impl<T> Drop for EndsWithIt<T> {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let mut task = EndsWithIt(tokio::spawn(work));
+    (&mut task.0).await
 }
 
 /// Adds sessions to a running hub.
@@ -632,6 +782,7 @@ impl<C: Connection> Hub<C> {
                 budget: SendBudget::new(self.config.send),
                 tasks: vec![writer, watcher],
                 fetch_writes: Vec::new(),
+                fetch_write_aborts: HashMap::new(),
             },
         );
         self.feed(VecDeque::from([Event::SessionOpened {
@@ -860,7 +1011,8 @@ impl<C: Connection> Hub<C> {
             | Action::CancelOwnRequest { .. }
             | Action::PipeFetch { .. }
             | Action::AbortFetchPipe { .. }
-            | Action::WriteFetchStream { .. } => {}
+            | Action::WriteFetchStream { .. }
+            | Action::AbortFetchWrite { .. } => {}
         }
     }
 
@@ -921,9 +1073,23 @@ impl<C: Connection> Hub<C> {
                 session,
                 stream,
                 request_id,
-                body,
+                pieces,
                 wait_ms,
-            } => self.write_fetch_stream((session, stream), request_id, body, wait_ms),
+            } => self.write_fetch_stream((session, stream), request_id, pieces, wait_ms),
+            Action::AbortFetchWrite {
+                session,
+                stream,
+                code,
+            } => {
+                let abort = self
+                    .sessions
+                    .get_mut(&session)
+                    .and_then(|handle| handle.fetch_write_aborts.remove(&stream));
+                if let Some(abort) = abort {
+                    // The task may have just ended; then nobody needs this.
+                    let _ = abort.send(code);
+                }
+            }
             other => return Some(other),
         }
         None
@@ -935,7 +1101,7 @@ impl<C: Connection> Hub<C> {
         &mut self,
         (session, stream): (SessionKey, StreamKey),
         request_id: u64,
-        body: Vec<u8>,
+        pieces: Vec<FetchPiece>,
         wait_ms: u64,
     ) {
         let written = move |given_up| Event::FetchStreamWritten {
@@ -947,49 +1113,29 @@ impl<C: Connection> Hub<C> {
             return;
         };
         // The relay lets a session have only so many of these at once, so
-        // the list stays short. The tasks go with the session.
+        // the lists stay short. The tasks go with the session.
         handle.fetch_writes.retain(|task| !task.is_finished());
-        let connection = Arc::clone(&handle.connection);
-        let trace = self.config.streams.trace.clone();
-        let label = format!("session#{} fetch#{request_id}", session.0);
-        let patience = Duration::from_millis(wait_ms);
+        handle
+            .fetch_write_aborts
+            .retain(|_, abort| !abort.is_closed());
+        let (abort, aborted) = oneshot::channel();
+        handle.fetch_write_aborts.insert(stream, abort);
+        let writing = FetchWrite {
+            connection: Arc::clone(&handle.connection),
+            header: FetchHeader { request_id },
+            pieces,
+            patience: Duration::from_millis(wait_ms),
+            trace: self.config.streams.trace.clone(),
+            label: format!("session#{} fetch#{request_id}", session.0),
+        };
         let events = self.events.clone();
         handle.fetch_writes.push(tokio::spawn(async move {
-            let writing = tokio::spawn(async move {
-                // One wait for all of it. A subscriber that does not take
-                // the stream in that time is told so on both streams, with
-                // the code of a fetch stream that is passed on and not
-                // taken; one that stops the stream, or is gone, with
-                // `CANCELLED`.
-                let not_taken = stream_reset_code::TOO_FAR_BEHIND;
-                let deadline = tokio::time::Instant::now() + patience;
-                let header = FetchHeader { request_id };
-                let opening = open_fetch_stream(&*connection, header, &trace, &label, not_taken);
-                let mut writer = match tokio::time::timeout_at(deadline, opening).await {
-                    Ok(Ok(writer)) => writer,
-                    Ok(Err(_)) => return Some(stream_reset_code::CANCELLED),
-                    Err(_) => return Some(not_taken),
-                };
-                match tokio::time::timeout_at(deadline, writer.write(&body)).await {
-                    Ok(Ok(())) => {
-                        writer.finish();
-                        None
-                    }
-                    Ok(Err(_)) => {
-                        writer.reset(stream_reset_code::CANCELLED);
-                        Some(stream_reset_code::CANCELLED)
-                    }
-                    Err(_) => {
-                        writer.reset(not_taken);
-                        Some(not_taken)
-                    }
-                }
-            });
             // Told whatever became of the write. A panic: the writer that
             // went with it reset the stream.
-            let given_up = writing
+            let given_up = in_a_task_that_ends_with_this_call(writing.run(aborted))
                 .await
                 .unwrap_or(Some(stream_reset_code::INTERNAL_ERROR));
+            // The hub is gone when this fails, and the relay with it.
             let _ = events.send(Envelope::Core(written(given_up))).await;
         }));
     }
@@ -1043,7 +1189,7 @@ impl<C: Connection> Hub<C> {
             // FETCH would stay in the relay for as long as its sessions do.
             // Both streams go with that task: the writer resets the
             // subscriber's, and the body, dropped, stops the publisher's.
-            let how = match tokio::spawn(pipe.run(aborted)).await {
+            let how = match in_a_task_that_ends_with_this_call(pipe.run(aborted)).await {
                 Ok(how) => how,
                 Err(_) => Some(FetchPipeEnd::UpstreamLost),
             };
@@ -1889,7 +2035,8 @@ fn describe(action: &Action) -> Option<String> {
         ),
         Action::PipeFetch { .. }
         | Action::AbortFetchPipe { .. }
-        | Action::WriteFetchStream { .. } => return describe_fetch(action),
+        | Action::WriteFetchStream { .. }
+        | Action::AbortFetchWrite { .. } => return describe_fetch(action),
         // Logged where the session is closed, whoever asked for it.
         Action::CloseSession { .. }
         | Action::StartUpstreamTimer { .. }
@@ -1932,12 +2079,20 @@ fn describe_fetch(action: &Action) -> Option<String> {
         Action::WriteFetchStream {
             session,
             request_id,
-            body,
+            pieces,
             ..
         } => format!(
-            "WRITE_FETCH_STREAM session={} request_id={request_id} bytes={}",
+            "WRITE_FETCH_STREAM session={} request_id={request_id} pieces={}",
             session.0,
-            body.len()
+            pieces.len()
+        ),
+        Action::AbortFetchWrite {
+            session,
+            stream,
+            code,
+        } => format!(
+            "ABORT_FETCH_WRITE session={} stream={} code={code:#x}",
+            session.0, stream.0
         ),
         _ => return None,
     })
@@ -2152,5 +2307,332 @@ mod timer_tests {
                 .is_none()
         );
         assert_eq!(timers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod fetch_write_tests {
+    use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, RangeEnd};
+    use xmoq_moqt::name::Location;
+    use xmoq_moqt_io::ReadError;
+    use xmoq_moqt_io::memory::{MemoryConnection, pair, pair_with_window};
+
+    use super::*;
+
+    const IN_TIME: Duration = Duration::from_secs(5);
+
+    /// An End of Unknown Range indicator of 20 bytes: its Group and its
+    /// Object ID take nine bytes each.
+    fn indicator(n: u64) -> FetchPiece {
+        let location = Location {
+            group: u64::MAX - 1_000 + n,
+            object: u64::MAX,
+        };
+        FetchPiece::EndOfRange(RangeEnd::Unknown, location)
+    }
+
+    /// The same as a fetch stream gives it.
+    fn read(piece: FetchPiece) -> FetchEvent {
+        let FetchPiece::EndOfRange(kind, location) = piece;
+        FetchEvent::EndOfRange { kind, location }
+    }
+
+    /// A write of `pieces`, and the connection, which the hub holds for as
+    /// long as the session lasts: it is closed when nobody holds it.
+    fn write(
+        connection: MemoryConnection,
+        pieces: Vec<FetchPiece>,
+        patience: Duration,
+    ) -> (FetchWrite<MemoryConnection>, Arc<MemoryConnection>) {
+        let connection = Arc::new(connection);
+        let write = FetchWrite {
+            connection: Arc::clone(&connection),
+            header: FetchHeader { request_id: 4 },
+            pieces,
+            patience,
+            trace: Trace::default(),
+            label: "test".to_string(),
+        };
+        (write, connection)
+    }
+
+    /// Reads a fetch stream to its end, waiting `pause` before every read:
+    /// what it carried, and the error it ended with, `None` for a FIN.
+    async fn read_all(
+        mut stream: impl RecvStream,
+        pause: Duration,
+    ) -> (Vec<FetchEvent>, Option<ReadError>) {
+        let mut decoder = FetchStreamDecoder::new(64 * 1024, GroupOrder::Ascending);
+        let mut events = Vec::new();
+        let mut buffer = [0u8; 64];
+        loop {
+            tokio::time::sleep(pause).await;
+            match stream.read(&mut buffer).await {
+                Ok(Some(read)) => {
+                    decoder.push(&buffer[..read]).unwrap();
+                    while let Some(event) = decoder.next_event().unwrap() {
+                        events.push(event);
+                    }
+                }
+                Ok(None) => return (events, None),
+                Err(error) => return (events, Some(error)),
+            }
+        }
+    }
+
+    async fn in_time<T>(what: impl Future<Output = T>) -> T {
+        tokio::time::timeout(IN_TIME, what).await.expect("in time")
+    }
+
+    #[tokio::test]
+    async fn the_pieces_are_written_in_their_order_and_the_stream_is_finished() {
+        let (relay, subscriber) = pair();
+        let small = FetchPiece::EndOfRange(
+            RangeEnd::Unknown,
+            Location {
+                group: 2,
+                object: 7,
+            },
+        );
+        let pieces = vec![small, indicator(0), indicator(1)];
+        let (write, _session) = write(relay, pieces.clone(), IN_TIME);
+        // Nobody can order it stopped.
+        let writing = tokio::spawn(write.run(oneshot::channel().1));
+        let stream = in_time(subscriber.accept_uni()).await.unwrap();
+        let (events, end) = in_time(read_all(stream, Duration::ZERO)).await;
+        let mut expected = vec![FetchEvent::Header(FetchHeader { request_id: 4 })];
+        expected.extend(pieces.into_iter().map(read));
+        assert_eq!((events, end), (expected, None));
+        assert_eq!(in_time(writing).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_that_takes_the_pieces_slowly_gets_all_of_them() {
+        // The window lets 64 bytes wait; 50 indicators of 20 bytes.
+        let (relay, subscriber) = pair_with_window(64);
+        let pieces: Vec<FetchPiece> = (0..50).map(indicator).collect();
+        // A second for each piece, and the subscriber takes 64 bytes every
+        // 100 ms: no piece waits for a second, and all of them take more.
+        let patience = Duration::from_secs(1);
+        let started = Instant::now();
+        let (write, _session) = write(relay, pieces.clone(), patience);
+        let writing = tokio::spawn(write.run(oneshot::channel().1));
+        let stream = in_time(subscriber.accept_uni()).await.unwrap();
+        let (events, end) = in_time(read_all(stream, Duration::from_millis(100))).await;
+        let mut expected = vec![FetchEvent::Header(FetchHeader { request_id: 4 })];
+        expected.extend(pieces.into_iter().map(read));
+        assert_eq!((events, end), (expected, None));
+        assert_eq!(in_time(writing).await.unwrap(), None);
+        assert!(started.elapsed() > patience, "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_write_that_waits_goes_on_when_nobody_is_left_to_order_it_stopped() {
+        // The window lets 8 bytes wait, and a piece is 20: the first write
+        // waits with a part of the piece written. Nobody can order the
+        // stream stopped, which the writer learns then or before; a write
+        // begun anew would write that part twice. Which of the two the
+        // writer sees first is drawn, so many times.
+        for run in 0..40 {
+            let (relay, subscriber) = pair_with_window(8);
+            let pieces = vec![indicator(0), indicator(1)];
+            let (write, _session) = write(relay, pieces.clone(), IN_TIME);
+            let writing = tokio::spawn(write.run(oneshot::channel().1));
+            let stream = in_time(subscriber.accept_uni()).await.unwrap();
+            let (events, end) = in_time(read_all(stream, Duration::ZERO)).await;
+            let mut expected = vec![FetchEvent::Header(FetchHeader { request_id: 4 })];
+            expected.extend(pieces.into_iter().map(read));
+            assert_eq!((events, end), (expected, None), "run {run}");
+            assert_eq!(in_time(writing).await.unwrap(), None);
+        }
+    }
+
+    /// Reads a stream to where it ends: `None` for a FIN.
+    async fn end_of(mut stream: impl RecvStream) -> Option<ReadError> {
+        let mut buffer = [0u8; 64];
+        loop {
+            match in_time(stream.read(&mut buffer)).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return None,
+                Err(error) => return Some(error),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_is_not_written_to_its_end_is_reset_with_the_code_of_what_ended_it() {
+        // TOO_FAR_BEHIND (0x5), MALFORMED_TRACK (0x12), CANCELLED (0x1).
+        // (the order to stop that comes while the writer waits in a piece,
+        //  `None` where the subscriber just takes nothing; the code the
+        //  stream is given up with, which the subscriber reads as the reset)
+        let cases = [(None, 0x5), (Some(0x12), 0x12), (Some(0x1), 0x1)];
+        for (order, code) in cases {
+            // More than the window of 64 bytes lets wait.
+            let (relay, subscriber) = pair_with_window(64);
+            let pieces = (0..50).map(indicator).collect();
+            let patience = match order {
+                None => Duration::from_millis(200),
+                Some(_) => IN_TIME,
+            };
+            let (orders, ordered) = oneshot::channel();
+            let (write, _session) = write(relay, pieces, patience);
+            let writing = tokio::spawn(write.run(ordered));
+            let stream = in_time(subscriber.accept_uni()).await.unwrap();
+            if let Some(with) = order {
+                // The writer waits in a piece by now or soon; the order is
+                // taken wherever it waits.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                orders.send(with).unwrap();
+            }
+            assert_eq!(in_time(writing).await.unwrap(), Some(code), "{order:?}");
+            // What was written and not read is gone with the reset.
+            assert_eq!(
+                end_of(stream).await,
+                Some(ReadError::Reset(Some(code))),
+                "{order:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_order_to_stop_that_is_there_before_a_write_is_always_kept() {
+        // (how many pieces; the window)
+        // A piece that the window takes at once, and no piece at all: the
+        // write, or the end of the stream, is as ready as the order is.
+        for (pieces, window) in [(1, 1_024), (0, 1_024), (3, 8)] {
+            // Many times: which of two things that are ready is taken was
+            // drawn once, and an order was lost every other time.
+            for run in 0..50 {
+                let (relay, subscriber) = pair_with_window(window);
+                let pieces = (0..pieces).map(indicator).collect();
+                let (write, _session) = write(relay, pieces, IN_TIME);
+                let (orders, ordered) = oneshot::channel();
+                // MALFORMED_TRACK (0x12), before the task has run once.
+                orders.send(0x12).unwrap();
+                let writing = tokio::spawn(write.run(ordered));
+                assert_eq!(in_time(writing).await.unwrap(), Some(0x12), "run {run}");
+                let stream = in_time(subscriber.accept_uni()).await.unwrap();
+                assert_eq!(
+                    end_of(stream).await,
+                    Some(ReadError::Reset(Some(0x12))),
+                    "run {run}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_order_to_stop_that_comes_with_the_end_of_the_last_write_is_kept() {
+        // The window lets 16 bytes wait: the header, 2 bytes, and 14 of the
+        // 20 of the one piece. The write waits for the last 6.
+        for run in 0..50 {
+            let (relay, subscriber) = pair_with_window(16);
+            let (write, _session) = write(relay, vec![indicator(0)], IN_TIME);
+            let (orders, ordered) = oneshot::channel();
+            let writing = tokio::spawn(write.run(ordered));
+            let mut stream = in_time(subscriber.accept_uni()).await.unwrap();
+            let mut buffer = [0u8; 16];
+            let mut read = 0;
+            while read < 16 {
+                read += in_time(stream.read(&mut buffer[read..]))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            // Now the write can complete, and the order is there as well,
+            // before the writer runs again: CANCELLED (0x1).
+            orders.send(0x1).unwrap();
+            assert_eq!(in_time(writing).await.unwrap(), Some(0x1), "run {run}");
+            assert_eq!(
+                end_of(stream).await,
+                Some(ReadError::Reset(Some(0x1))),
+                "run {run}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_that_stops_the_stream_or_is_gone_ends_it_as_cancelled() {
+        // The subscriber stops the stream, with another code than the relay
+        // answers with: CANCELLED (0x1).
+        let (relay, subscriber) = pair_with_window(64);
+        let (stopped, _session) = write(relay, (0..50).map(indicator).collect(), IN_TIME);
+        let writing = tokio::spawn(stopped.run(oneshot::channel().1));
+        in_time(subscriber.accept_uni()).await.unwrap().stop(0x77);
+        assert_eq!(in_time(writing).await.unwrap(), Some(0x1));
+
+        // The connection is gone before the stream is opened.
+        let (relay, subscriber) = pair();
+        subscriber.close(0, b"gone");
+        let (unopened, _session) = write(relay, vec![indicator(0)], IN_TIME);
+        assert_eq!(in_time(unopened.run(oneshot::channel().1)).await, Some(0x1));
+    }
+
+    #[tokio::test]
+    async fn an_indicator_is_written_as_the_bytes_both_implementations_read() {
+        // `fixtures/moqt-18-by-hand/fetch-stream-indicator-first.hex`: a
+        // FETCH_HEADER with the Request ID 0, an End of Unknown Range
+        // indicator at {3, 1}, and then an Object, which the relay does not
+        // write. The file is read by the decoders of `crates/moqt` and of
+        // `@xmoq/moqt`.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/moqt-18-by-hand/fetch-stream-indicator-first.hex"
+        );
+        let fixture: Vec<u8> = std::fs::read_to_string(path)
+            .unwrap()
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect();
+        assert_eq!(fixture[..6], [0x05, 0x00, 0x81, 0x0c, 0x03, 0x01]);
+
+        let (relay, subscriber) = pair();
+        let connection = Arc::new(relay);
+        let unknown = Location {
+            group: 3,
+            object: 1,
+        };
+        let write = FetchWrite {
+            connection: Arc::clone(&connection),
+            header: FetchHeader { request_id: 0 },
+            pieces: vec![FetchPiece::EndOfRange(RangeEnd::Unknown, unknown)],
+            patience: IN_TIME,
+            trace: Trace::default(),
+            label: "test".to_string(),
+        };
+        assert_eq!(in_time(write.run(oneshot::channel().1)).await, None);
+        let mut stream = in_time(subscriber.accept_uni()).await.unwrap();
+        let mut written = Vec::new();
+        let mut buffer = [0u8; 64];
+        while let Some(read) = in_time(stream.read(&mut buffer)).await.unwrap() {
+            written.extend_from_slice(&buffer[..read]);
+        }
+        assert_eq!(written, fixture[..6]);
+    }
+
+    #[tokio::test]
+    async fn work_in_a_task_of_its_own_ends_when_the_task_that_waits_for_it_does() {
+        // What the work holds, as a write holds its connection.
+        let held = Arc::new(());
+        let holds = Arc::clone(&held);
+        let waiting = tokio::spawn(in_a_task_that_ends_with_this_call(async move {
+            std::future::pending::<()>().await;
+            drop(holds);
+        }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(Arc::strong_count(&held), 2);
+        // The session goes: its tasks are aborted.
+        waiting.abort();
+        in_time(async {
+            while Arc::strong_count(&held) > 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        // And work that came to its end is handed over.
+        assert_eq!(
+            in_a_task_that_ends_with_this_call(async { 7 }).await.ok(),
+            Some(7)
+        );
     }
 }

@@ -50,8 +50,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 pub use events::{
-    Action, Event, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey, RequestEnd,
-    SessionKey, StreamEnd, StreamKey,
+    Action, Event, FetchPiece, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey,
+    RequestEnd, SessionKey, StreamEnd, StreamKey,
 };
 pub use fetch::fetch_reset_passed_on;
 use requests::{Requests, Subscribed};
@@ -1354,7 +1354,15 @@ impl Relay {
                 how,
             } => match how {
                 RequestEnd::Fin => self.on_request_half_closed(session, stream, &mut actions),
-                RequestEnd::Aborted => self.on_request_closed(session, stream, true, &mut actions),
+                RequestEnd::Aborted => {
+                    // §5.2: a FETCH is cancelled by its request stream. One
+                    // the relay is still writing the answer of ends there.
+                    // WHY here and not where a request is over: a subscriber
+                    // that only finishes its direction has given nothing up,
+                    // and ends up there as well.
+                    self.cancel_written_fetch(session, stream, &mut actions);
+                    self.on_request_closed(session, stream, true, &mut actions);
+                }
             },
             Event::OwnRequestMessage {
                 session,
@@ -3291,7 +3299,8 @@ impl Action {
             | Self::StopUpstreamTimer { session, .. }
             | Self::PipeFetch { session, .. }
             | Self::AbortFetchPipe { session, .. }
-            | Self::WriteFetchStream { session, .. } => Target::Session(*session),
+            | Self::WriteFetchStream { session, .. }
+            | Self::AbortFetchWrite { session, .. } => Target::Session(*session),
             Self::SendObject { out_stream, .. }
             | Self::FinishDataStream { out_stream }
             | Self::ResetDataStream { out_stream, .. } => Target::OutStream(*out_stream),
