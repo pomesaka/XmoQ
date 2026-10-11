@@ -39,6 +39,20 @@ const gone = await (await fetch(`${origin}/rooms/${room}`)).json();
 say("after the publisher's socket closed:", gone);
 if (gone.broadcast !== null || gone.connected !== 0) fail("the broadcast outlived its publisher");
 
+// 1b. A token, where the rooms have a key: the text the relay checks.
+{
+	const asker = join("asker");
+	await asker.opened;
+	asker.socket.send(JSON.stringify({ type: "token-for", role: "sub", namespace: ["xmoq", "demo"] }));
+	await wait(300);
+	const answer = asker.got.find((message) => message.type === "token");
+	say("a token for sub in xmoq/demo:", answer?.token === null ? "none (the rooms have no key)" : String(answer?.token).replace(/[0-9a-f]{64}$/, "<mac>"));
+	if (answer === undefined) fail("no answer to token-for");
+	if (process.env.AUTH_KEY_HEX && !/^v1\|xmoq\/demo\|sub\|\d+\|[0-9a-f]{64}$/.test(answer?.token ?? "")) fail("the token has not the form v1|namespace|role|expiry|mac");
+	asker.socket.close();
+	await wait(200);
+}
+
 // 2. Chat: two send at once, 20 messages each; both see one order.
 const a = join("a");
 const b = join("b");

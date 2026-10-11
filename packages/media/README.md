@@ -20,6 +20,8 @@ Written: `createVideoReceiver`. The Objects of a video track go in as a subscrip
 
 **Audio, in its smallest form**: `createAudioTrackPublisher` (`src/moqt`), `createAudioTrackEncoder` and `playAudioTrack` (`src/web/audio-track.ts`). Every chunk of an `AudioEncoder` is a Group of its own with one Object, on a stream of its own (the example of LOC-04 §4.1), with the Timestamp of LOC; a chunk that cannot be written in time is left out. The player decodes the Objects in the order they come and drops one whose Group is not after the last. Opus at 48,000 Hz, mono, was run, page to page through the own relay ([record](../../docs/experiments/2026-10-11-opus-audio-page-to-page.md)). **No `description` is sent or given to the decoder** (Chromium's encoder gives one of 19 bytes; whether it is to travel is undecided). No unit test; no Audio Config or Audio Level of LOC; nothing keeps audio and video in step.
 
+`playVideoTrack` and `playAudioTrack` take an `authorizationToken` and send it with their SUBSCRIBE and their Joining FETCH (transport §10.2.2); `followCatalog` of `@xmoq/msf` does the same. An experiment: how a relay authorizes is undecided, and nothing is sent without the option.
+
 Not implemented: a source of frames (a camera, a screen), drawing the picture, sounding the audio, a buffer for playback, anything by which a viewer asks a publisher for a key frame.
 
 ## Layer rules

@@ -18,6 +18,19 @@
 // or leaves. A client sends {type: "chat", text}, and a publisher the
 // message above.
 
+// **Tokens, an experiment** (how the relay authorizes is undecided): where
+// the Worker has the key it shares with the relay (`AUTH_KEY_HEX`), a
+// client sends {type: "token-for", role: "pub" | "sub", namespace: [...]}
+// and gets {type: "token", role, namespace, token}, or token null where
+// there is no key. The token is the text the relay checks
+// (crates/relay/src/auth.rs): `v1|<namespace>|<role>|<expiry>|<mac>`, the
+// mac HMAC-SHA-256 over what stands before it. **Anybody who asks gets
+// one**: who may publish in a room, and who may watch, is what would be
+// decided here, and is not.
+
+/** How long a token is good for, in seconds. */
+const TOKEN_SECONDS = 600;
+
 /** How many chat messages a room keeps for those who come later. */
 const HISTORY = 50;
 
@@ -47,6 +60,23 @@ export default {
 export class Room {
 	constructor(ctx, env) {
 		this.ctx = ctx;
+		this.env = env;
+	}
+
+	/** The text of a token for the role in the namespace, or null without a key. */
+	async token(role, namespace) {
+		const hex = this.env.AUTH_KEY_HEX;
+		if (typeof hex !== "string" || hex === "") return null;
+		const key = await crypto.subtle.importKey(
+			"raw",
+			Uint8Array.from(hex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16)),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const signed = `v1|${namespace.join("/")}|${role}|${Math.floor(Date.now() / 1000) + TOKEN_SECONDS}`;
+		const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signed)));
+		return `${signed}|${Array.from(mac, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 	}
 
 	async fetch(request) {
@@ -109,6 +139,11 @@ export class Room {
 			};
 			socket.serializeAttachment({ ...socket.deserializeAttachment(), broadcast });
 			this.tellAll({ type: "broadcast", broadcast: this.broadcast() });
+			return;
+		}
+		if (said?.type === "token-for" && (said.role === "pub" || said.role === "sub") && Array.isArray(said.namespace)) {
+			const namespace = said.namespace.map(String);
+			socket.send(JSON.stringify({ type: "token", role: said.role, namespace, token: await this.token(said.role, namespace) }));
 			return;
 		}
 		if (said?.type !== "chat" || typeof said.text !== "string") return;

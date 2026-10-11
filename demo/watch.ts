@@ -26,6 +26,7 @@ import {
 	SAMPLE_RATE,
 	say,
 	through,
+	why,
 	trackName,
 } from "./shared.ts";
 
@@ -285,17 +286,23 @@ async function main(): Promise<void> {
 				link = "connecting";
 				connection = await connectToRelay(broadcast);
 				const trackNamespace = namespace(broadcast.namespace);
+				// Where the rooms give tokens, the requests carry one.
+				const token = await room?.token("sub", broadcast.namespace);
+				const authorization =
+					token === undefined ? {} : { authorizationToken: token };
 				// `?video=no` plays the sound alone, for looking into it.
 				const video =
 					query.get("video") === "no"
 						? undefined
 						: await playVideoTrack(connection, {
 								...videoOptions,
+								...authorization,
 								trackNamespace,
 							});
 				playback = video;
 				audio = await playAudioTrack(connection, {
 					...audioOptions,
+					...authorization,
 					trackNamespace,
 				})
 					.then((playing) => {
@@ -320,7 +327,7 @@ async function main(): Promise<void> {
 				]);
 				link = `${how} at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
 			} catch (error) {
-				link = `could not play (${String(error).slice(0, 120)}); trying again every 2 s`;
+				link = `could not play (${why(error)}); trying again every 2 s`;
 			} finally {
 				// Also a session in which nothing could be played is not left open.
 				connection?.close();

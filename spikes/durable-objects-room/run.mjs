@@ -11,6 +11,8 @@ const miniflare = new Miniflare({
 	scriptPath: new URL("./worker.js", import.meta.url).pathname,
 	compatibilityDate: "2026-07-01",
 	durableObjects: { ROOMS: { className: "Room", useSQLite: true } },
+	// The key the rooms share with the relay, for the tokens; none without.
+	bindings: { AUTH_KEY_HEX: process.env.AUTH_KEY_HEX ?? "" },
 	host: "127.0.0.1",
 	port,
 });

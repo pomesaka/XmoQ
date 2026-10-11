@@ -21,4 +21,6 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 **A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again every 2 seconds.
 
+**With tokens** (an experiment; how the relay authorizes is undecided): `bun demo/serve.ts --auth` makes a key for the run and gives it to the relay and to the rooms. The relay then refuses a request without a token; the pages ask the room for one (`pub` to announce, `sub` to subscribe) and send it along. `?token=no` on a page asks for none, and the page says that the relay refused.
+
 No catalog. The times are compared on one machine, where the two pages have the same clock.

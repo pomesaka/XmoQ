@@ -169,6 +169,13 @@ export interface PlayAudioTrackOptions {
 	/** Called with each decoded piece of audio; **the callee closes it**. */
 	onData(data: AudioData): void;
 	/**
+	 * An AUTHORIZATION TOKEN for the requests this sends (transport draft 18
+	 * §10.2.2): the Token structure as bytes, as `MessageParameters` of
+	 * `@xmoq/moqt` carries it. None is sent when left out. **An experiment**:
+	 * how a relay authorizes is undecided.
+	 */
+	authorizationToken?: Uint8Array;
+	/**
 	 * Whether the Group the listener comes into is fetched from its start (a
 	 * Relative Joining FETCH with Joining Start 0). **False when left out;
 	 * for trying**: it matters where a Group has several chunks, and what
@@ -246,11 +253,16 @@ export async function playAudioTrack(
 		},
 	});
 	decoder.configure(config);
+	const parameters =
+		options.authorizationToken === undefined
+			? undefined
+			: { authorizationToken: [options.authorizationToken] };
 	let subscription: Awaited<ReturnType<MoqtConnection["subscribe"]>>;
 	try {
 		subscription = await connection.subscribe({
 			trackNamespace: options.trackNamespace,
 			trackName: options.trackName,
+			...(parameters === undefined ? {} : { parameters }),
 		});
 	} catch (error) {
 		decoder.close();
@@ -309,6 +321,7 @@ export async function playAudioTrack(
 					joiningRequestId: subscription.requestId,
 					joiningStart: 0n,
 				},
+				...(parameters === undefined ? {} : { parameters }),
 			});
 			fetch.response.catch(() => {});
 			const reader = decodeFetchBody(connection, fetch).getReader();
