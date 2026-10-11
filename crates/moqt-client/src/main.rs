@@ -377,12 +377,27 @@ fn parse_location(text: &str) -> Result<Location> {
 }
 
 /// Reads `--subscription-filter`: `none` (an unfiltered subscription),
-/// `largest-object`, `next-group-start`, or `absolute-start:<group>,<object>`.
+/// `largest-object`, `next-group-start`, `absolute-start:<group>,<object>`,
+/// or `absolute-range:<group>,<object>,<end group>`.
 ///
-/// WHY no `AbsoluteRange`: no run needs a subscription that ends, and the
-/// relay does not look at the End Group.
+/// WHY the End Group and not the End Group Delta the filter carries
+/// (§5.1.2): whoever writes a run thinks of the last Group it wants.
 fn parse_subscription_filter(text: &str) -> Result<Option<SubscriptionFilter>> {
     Ok(match text.split_once(':') {
+        Some(("absolute-range", range)) => {
+            let (start, end_group) = range
+                .rsplit_once(',')
+                .with_context(|| format!("{range} is not <group>,<object>,<end group>"))?;
+            let start = parse_location(start)?;
+            let end_group: u64 = end_group.parse().context("the End Group of a range")?;
+            let end_group_delta = end_group
+                .checked_sub(start.group)
+                .with_context(|| format!("the End Group {end_group} is before the range starts"))?;
+            Some(SubscriptionFilter::AbsoluteRange {
+                start,
+                end_group_delta,
+            })
+        }
         None if text == "none" => None,
         None if text == "largest-object" => Some(SubscriptionFilter::LargestObject),
         None if text == "next-group-start" => Some(SubscriptionFilter::NextGroupStart),
@@ -390,7 +405,7 @@ fn parse_subscription_filter(text: &str) -> Result<Option<SubscriptionFilter>> {
             start: parse_location(start)?,
         }),
         _ => bail!(
-            "--subscription-filter {text} is none of none, largest-object, next-group-start, absolute-start:<group>,<object>"
+            "--subscription-filter {text} is none of none, largest-object, next-group-start, absolute-start:<group>,<object>, absolute-range:<group>,<object>,<end group>"
         ),
     })
 }
@@ -2464,12 +2479,26 @@ mod tests {
             read("absolute-start:3,2"),
             Ok(Some(SubscriptionFilter::AbsoluteStart { start: at(3, 2) }))
         );
+        // The End Group, which the filter carries as a delta to the Group
+        // of the Start Location.
+        let range = |start, end_group_delta| {
+            Ok(Some(SubscriptionFilter::AbsoluteRange {
+                start,
+                end_group_delta,
+            }))
+        };
+        assert_eq!(read("absolute-range:3,2,3"), range(at(3, 2), 0));
+        assert_eq!(read("absolute-range:3,2,9"), range(at(3, 2), 6));
+        assert_eq!(read("absolute-range:0,0,0"), range(at(0, 0), 0));
         for wrong in [
             "",
             "largest",
             "absolute-start",
             "absolute-start:3",
             "absolute-range:3,2",
+            "absolute-range:3,2,x",
+            // An End Group before the Start Location.
+            "absolute-range:3,2,2",
         ] {
             assert!(read(wrong).is_err(), "{wrong}");
         }

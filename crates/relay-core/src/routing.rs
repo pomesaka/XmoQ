@@ -107,10 +107,8 @@ pub(crate) struct OwnRequest {
 /// Start: "{Largest Object.Group + 1, 0}"; for both, "If no content has been
 /// delivered yet, the filter Start Location is {0, 0}". `AbsoluteStart` and
 /// `AbsoluteRange`: the Start Location they give, which "MAY be less than the
-/// Largest Object observed at the publisher".
-///
-/// FIXME: the End Group of an `AbsoluteRange` filter (§5.1.2). Its Start
-/// Location is kept; what comes after its End Group is sent as well.
+/// Largest Object observed at the publisher". Where an `AbsoluteRange`
+/// filter ends is [`filter_end_group`].
 pub(crate) fn filter_start(
     filter: Option<SubscriptionFilter>,
     largest: Option<Location>,
@@ -142,6 +140,33 @@ pub(crate) fn filter_start(
             ),
             _,
         ) => Some(start),
+    }
+}
+
+/// The last Group a subscription passes (§5.1.2), `None` where it is open
+/// ended: every filter but `AbsoluteRange`, of which the draft has "There is
+/// no End Group - the subscription is open ended".
+///
+/// The End Group is the Group of the Start Location plus the End Group
+/// Delta, and it passes whole: "Only objects ... having Locations greater
+/// than or equal to Start Location and strictly less than or equal to the
+/// End Group (when present) pass the filter"; "If the specified End Group
+/// Delta is zero, the remainder of that Group passes the filter. Otherwise,
+/// the last Group ID to be delivered will be the Group ID in Start Location
+/// plus the End Group Delta."
+pub(crate) fn filter_end_group(filter: Option<SubscriptionFilter>) -> Option<u64> {
+    match filter? {
+        SubscriptionFilter::AbsoluteRange {
+            start,
+            end_group_delta,
+        } => {
+            // A sum over 2^64 - 1 is a PROTOCOL_VIOLATION the decoder has
+            // found (§5.1.2); the last Group there is stands for it here.
+            Some(start.group.saturating_add(end_group_delta))
+        }
+        SubscriptionFilter::LargestObject
+        | SubscriptionFilter::NextGroupStart
+        | SubscriptionFilter::AbsoluteStart { .. } => None,
     }
 }
 
@@ -1203,6 +1228,7 @@ impl Relay {
         // non-overlapping"). The relay has to count from the same Location.
         let joining = track.largest;
         let start = filter_start(filter, joining);
+        let end_group = filter_end_group(filter);
         let parameters = joining.map(Parameter::LargestObject).into_iter().collect();
         match state
             .moqt
@@ -1233,6 +1259,7 @@ impl Relay {
                     forward,
                     joining,
                     start,
+                    end_group,
                     streams_started: 0,
                     count_unknown: false,
                     outs: BTreeSet::new(),

@@ -5,7 +5,7 @@ use xmoq_moqt::message::{Fetch, FetchRange};
 use xmoq_moqt::params::SubscriptionFilter;
 
 use super::*;
-use crate::routing::filter_start;
+use crate::routing::{filter_end_group, filter_start};
 
 fn at(group: u64, object: u64) -> Location {
     Location { group, object }
@@ -59,6 +59,32 @@ fn the_start_location_of_a_filter_is_counted_from_the_largest_object() {
             start,
             "{filter:?} {largest:?}"
         );
+    }
+}
+
+#[test]
+fn the_end_group_of_a_filter_is_the_group_of_its_start_plus_the_delta() {
+    let range = |group, end_group_delta| {
+        Some(SubscriptionFilter::AbsoluteRange {
+            start: at(group, 7),
+            end_group_delta,
+        })
+    };
+    // (the filter; the last Group that passes, `None` where the
+    //  subscription is open ended)
+    let cases = [
+        (None, None),
+        (LARGEST, None),
+        (NEXT_GROUP, None),
+        (Some(from(3, 2)), None),
+        (range(3, 0), Some(3)),
+        (range(3, 1), Some(4)),
+        (range(0, 0), Some(0)),
+        (range(10, 250), Some(260)),
+        (range(u64::MAX, 0), Some(u64::MAX)),
+    ];
+    for (filter, end_group) in cases {
+        assert_eq!(filter_end_group(filter), end_group, "{filter:?}");
     }
 }
 
@@ -124,8 +150,22 @@ fn a_subscriber_gets_the_objects_from_the_start_location_of_its_filter_on() {
         (Some(from(3, 3)), [false, false, true]),
         (Some(from(4, 0)), [false, false, true]),
         (Some(from(4, 1)), [false, false, false]),
-        // The End Group is not looked at: the Start Location alone.
-        (range(at(3, 2), 0), [true, false, true]),
+        // `AbsoluteRange`: to the End Group, the Group of the Start
+        // Location plus the End Group Delta, which passes whole. Delta 0:
+        // "the remainder of that Group".
+        (range(at(3, 2), 0), [true, false, false]),
+        (range(at(3, 2), 1), [true, false, true]),
+        (range(at(3, 3), 1), [false, false, true]),
+        (range(at(2, 1), 1), [true, false, false]),
+        (range(at(2, 1), 2), [true, false, true]),
+        // An End Group that {3, 2} is past already: the Group 2 that comes
+        // late is still in the range, and is sent.
+        (range(at(2, 0), 0), [false, true, false]),
+        (range(at(0, 0), 3), [true, true, false]),
+        (range(at(0, 0), 4), [true, true, true]),
+        // The whole range is before what comes, or after it.
+        (range(at(0, 0), 1), [false, false, false]),
+        (range(at(5, 0), 9), [false, false, false]),
     ];
     for (filter, expected) in cases {
         let mut relay = relay_with_track();
@@ -412,6 +452,38 @@ fn a_stream_the_subscriber_gets_nothing_of_leaves_nothing_of_the_subscriber_to_e
         let mut expected = done_actions(ALICE, 0x2, 2).to_vec();
         expected.extend(done_actions(BOB, 0x2, 0));
         assert_eq!(gone, expected, "{end:?}");
+    }
+}
+
+#[test]
+fn a_stream_of_the_end_group_is_opened_with_its_header() {
+    let range = |start, end_group_delta| {
+        Some(SubscriptionFilter::AbsoluteRange {
+            start,
+            end_group_delta,
+        })
+    };
+    // (Bob's filter; whether the header of a stream of Group 2 opens a
+    //  stream for him)
+    let cases = [
+        // The End Group itself: a stream of it that ends without an Object
+        // still says that there is a Subgroup (§11.4.3).
+        (range(at(2, 0), 0), true),
+        (range(at(1, 0), 1), true),
+        (range(at(0, 0), 5), true),
+        // After the End Group, and a range that starts inside the Group.
+        (range(at(0, 0), 1), false),
+        (range(at(2, 1), 0), false),
+    ];
+    for (filter, opened) in cases {
+        let mut relay = relay_with_track();
+        subscribe_with(&mut relay, filter);
+        let expected = if opened {
+            vec![open_data_stream(BOB, 0, header_of_group(0, 2))]
+        } else {
+            vec![]
+        };
+        assert_eq!(data_stream_opened(&mut relay, 2), expected, "{filter:?}");
     }
 }
 
