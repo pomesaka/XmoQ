@@ -33,7 +33,7 @@ const isOwn = (client: Client): boolean => client.startsWith("own-");
 interface Pairing {
 	name: string;
 	/** The driver that runs it. */
-	script: "run.ts" | "disconnect.ts" | "fetch.ts";
+	script: "run.ts" | "disconnect.ts" | "fetch.ts" | "fetch-rust.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -269,6 +269,44 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		name: "own-browser fetches from an own page that refuses with DOES_NOT_EXIST",
 		script: "fetch.ts",
 		args: ["--fetch", "page-refuses"],
+		relays: ["own"],
+	},
+	// The own Rust client is the one that fetches. What each has to show is
+	// at `EXPECTED` in fetch-rust.ts.
+	{
+		name: "own-rust fetches {0, 0} to {2, 1} from an own page that answers a FETCH",
+		script: "fetch-rust.ts",
+		args: ["--fetch", "page-standalone"],
+		relays: ["own"],
+	},
+	{
+		name: "own-rust subscribes and sends a Relative Joining FETCH; the relay asks the own page for the range",
+		script: "fetch-rust.ts",
+		args: ["--fetch", "page-join-relative"],
+		relays: ["own"],
+	},
+	{
+		name: "own-rust subscribes and sends an Absolute Joining FETCH; the relay asks the own page for the range",
+		script: "fetch-rust.ts",
+		args: ["--fetch", "page-join-absolute"],
+		relays: ["own"],
+	},
+	{
+		name: "own-rust fetches {0, 1} to {1, 2} of what moqtail's test client publishes",
+		script: "fetch-rust.ts",
+		args: ["--fetch", "test-standalone"],
+		relays: ["moqtail", "own"],
+	},
+	{
+		name: "own-rust subscribes and sends a Relative Joining FETCH for what moqtail's test client publishes",
+		script: "fetch-rust.ts",
+		args: ["--fetch", "test-join-relative"],
+		relays: ["own"],
+	},
+	{
+		name: "own-rust sends its SUBSCRIBE and a Joining FETCH at once; the relay answers the FETCH whichever it reads first",
+		script: "fetch-rust.ts",
+		args: ["--fetch", "page-join-at-once"],
 		relays: ["own"],
 	},
 ];

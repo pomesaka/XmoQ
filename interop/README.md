@@ -63,7 +63,7 @@ bun matrix.ts
 | An `own-browser` page that only announces the namespace, with `moqtail-rust` and with `own-rust` as the subscriber (2) | The relay asks the page for the track with a SUBSCRIBE of its own, the page accepts it (`serve` of `@xmoq/moqt`), and the subscriber gets the Object the page sends on that subscription. Both relays ask a publisher that only announced |
 | `own-browser` and `own-rust` subscribing to a track nobody published (2) | The run fails, and its log shows REQUEST_ERROR `0x10` |
 
-The runs in which an own page sends a FETCH have names that begin with `fetch:`. What each has to show is written, with where it comes from, at `EXPECTED` in `fetch.ts`, before the runs; the [record](../docs/experiments/2026-10-11-fetch-from-a-page.md) has what the runs showed. The page reads the fetch stream with `decodeFetchBody` of `@xmoq/moqt`.
+The runs in which an own page sends a FETCH have names that begin with `fetch:`. What each has to show is written, with where it comes from, at `EXPECTED` in `fetch.ts`, before the runs; the [record](../docs/experiments/2026-10-11-fetch-from-a-page.md) has what the runs showed. The page reads the fetch stream with `decodeFetchBody` of `@xmoq/moqt`. The runs in which the own Rust client sends the FETCH, a Standalone one or a Joining one for its own subscription, are in the same group; theirs is `EXPECTED` in `fetch-rust.ts`, and the [record](../docs/experiments/2026-10-11-fetch-from-the-rust-client-through-the-matrix.md) has what they showed.
 
 | Runs with a FETCH (15) | Through | What is expected |
 |---|---|---|
@@ -175,6 +175,8 @@ Not every client can leave in every way. `own-rust` and `moqtail-rust` close the
 | `run.ts` | The driver that moves one Object |
 | `disconnect.ts` | The driver for the runs in which a client leaves |
 | `fetch.ts` | The driver for the runs in which an own page sends a FETCH; each case of `--fetch` has its publisher, and the cases that begin with `page-` an own page that answers the FETCH. `--report-only` prints what the page saw and compares it with nothing |
+| `fetch-rust.ts` | The driver for the runs in which the own Rust client sends a FETCH (`--mode fetch`, or `--mode subscribe` with `--join`). In `page-join-at-once` the run does not choose which of the two streams the relay reads first; where the relay held the FETCH (`HOLD_REQUEST … FETCH`), the run wants the FETCH_OK on that stream |
+| `fetch-publishers.ts` | The two publishers both FETCH drivers start: an own page that answers a FETCH, and `moqtail`'s test client |
 | `matrix.ts` | The list of pairings, and the table |
 | `page.ts`, `xmoq-page.ts` | The own page, and the contract between the drivers and both pages |
 
