@@ -135,6 +135,15 @@ check_packages() {
 			report "${manifest} depends on interop/, which checks packages and is not part of them: ${interop_deps}"
 		fi
 	done
+	# WHY: MoQ Transport is the lower layer. @xmoq/msf may use @xmoq/moqt; a transport that
+	# knew the streaming format on top of it could no longer carry another one.
+	if [[ -f packages/moqt/package.json ]]; then
+		local format_deps
+		format_deps="$(package_deps packages/moqt/package.json | grep -E '^@xmoq/msf: |packages/msf' || true)"
+		if [[ -n "${format_deps}" ]]; then
+			report "packages/moqt/package.json depends on @xmoq/msf, which is the layer above it: ${format_deps}"
+		fi
+	fi
 }
 
 checked=0

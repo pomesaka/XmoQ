@@ -32,6 +32,14 @@ The libraries that were considered, and what each Phase 0 run showed, are in [Mo
 
 The implementation follows the draft text, not library behaviour and not model memory. The scope starts with SETUP, PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE and subgroup streams; other messages are added when a roadmap item needs them.
 
+## Streaming format: decided, the catalog partly implemented
+
+Tracks are described by a catalog of `draft-ietf-moq-msf-01` (MSF), and media Objects are packaged as LOC says. `@xmoq/msf` reads and writes the catalog as bytes; nothing publishes or reads one over a connection yet ([roadmap](roadmap.md), Phase 1).
+
+- **The layer above MoQ Transport, in a package of its own.** `@xmoq/msf` may use `@xmoq/moqt`, never the other way round, and the part that reads and checks a catalog uses neither a connection nor `@xmoq/moqt`. A relay does not read a catalog (MSF-01 §5: "The payload of the Catalog object is opaque to Relays"), so the Rust side has nothing of MSF yet.
+- **Which revision of LOC** is an [open decision](open-questions.md): MSF-01 cites LOC-02, whose property numbers collide with transport draft 18. The catalog names the packaging with the string `"loc"` and carries no property number, so it does not wait for that decision.
+- Where MSF-01 leaves a choice or contradicts itself, what `@xmoq/msf` does is in [its README](../packages/msf/README.md), "How the draft is read".
+
 ## Discussed
 
 - MoQ over WebTransport for browser streaming.
@@ -49,6 +57,8 @@ The implementation follows the draft text, not library behaviour and not model m
 ## Primary specifications
 
 - [IETF MoQ](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
+- [MOQT Streaming Format (MSF)](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/)
+- [Low Overhead Media Container (LOC)](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/)
 - [W3C WebTransport](https://www.w3.org/TR/webtransport/)
 - [W3C WebCodecs](https://www.w3.org/TR/webcodecs/)
 - [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/)
