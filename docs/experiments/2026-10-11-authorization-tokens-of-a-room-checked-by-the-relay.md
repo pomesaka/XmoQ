@@ -70,12 +70,13 @@ The project's owner chose the form: a token on every request, made with a key th
 
 The codes of the right column are from the relay's log (`CLOSE_SESSION ... code=`). For the middle column the log of that run was not kept; what the codes are there is a test of `crates/relay/src/auth.rs` (0x17 for `USE_ALIAS` and `DELETE`, 0x13 for `REGISTER`, 0x6). The client says of a session that was closed whatever it met first: "connection lost", a request stream that ended, or its control stream closed.
 
+Later, once `@xmoq/moqt` put the token of a connection into its SETUP and into every request: **with a key the relay asks for the token in SETUP of itself** (`--auth-setup off` takes that out), a Joining FETCH has to have a token, and `USE_ALIAS` and `DELETE` in a SETUP close the session with `PROTOCOL_VIOLATION` also with `--auth-setup off`. One run of the same subscribers against each: with the default, a subscriber without a token, with an expired one or with one of the alias forms lost its connection, and one with a good token got its Object, also by a Joining FETCH; with `--auth-setup off`, the ones without a token and with an expired one were refused on their SUBSCRIBE (0x1, 0x5) and the rest was the same.
+
 ## Limitations and blockers
 
 - **No browser.** `@xmoq/moqt` reads and writes the parameter (`core/parameters.ts`) and has no way to give a token to a request. What it would take: an option for the token on `subscribe`, `publish`, `publishNamespace` and `fetch`; `@xmoq/msf` and `@xmoq/media` passing it on to the requests they send; the room making tokens (HMAC with WebCrypto in its worker) and handing one to each page with the broadcast; the pages of the demo carrying it. None of it was written.
 - **A token is checked when a request comes, and never again.** A subscription that was allowed goes on after its token has expired.
 - No aliases are kept: the Alias Types are treated as §10.2.2 has them for a receiver that keeps none (above).
-- A Joining FETCH without a token is allowed.
 - The relay's own SUBSCRIBE and FETCH to a publisher carry no token.
 - One shared key: whoever has it can make any token. The namespace has to match whole; there are no prefixes.
 

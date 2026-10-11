@@ -84,7 +84,8 @@ pub struct HubConfig {
     /// The key of the experiment in authorization (`crate::auth`). None:
     /// every request is allowed.
     pub auth_key: Option<Vec<u8>>,
-    /// With a key: a client's SETUP has to carry a token as well.
+    /// With a key: a client's SETUP has to carry a token as well. On unless
+    /// it is taken out; without a key it means nothing.
     pub auth_setup: bool,
     /// How long a stream is held for a Track Alias that is not known yet
     /// (§11.4.2: "buffer it for a brief period").
@@ -127,7 +128,7 @@ impl Default for HubConfig {
             drain_timeout: Duration::from_secs(2),
             slow_open: Duration::from_millis(10),
             auth_key: None,
-            auth_setup: false,
+            auth_setup: true,
             early_stream_timeout: Duration::from_secs(2),
             request_close_timeout: Duration::from_secs(2),
             closed_read_timeout: Duration::from_secs(1),

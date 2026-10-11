@@ -91,7 +91,8 @@ struct Args {
     /// `--auth-key-hex`: the key requests are authorized with
     /// ([`HubConfig::auth_key`]). An experiment.
     auth_key: Option<Vec<u8>>,
-    /// `--auth-setup on`: [`HubConfig::auth_setup`].
+    /// `--auth-setup off`: with a key, the SETUP of a client is not asked
+    /// for a token ([`HubConfig::auth_setup`]). On with a key otherwise.
     auth_setup: bool,
 }
 
@@ -103,7 +104,7 @@ fn parse_args() -> Result<Args> {
     let mut max_sessions = None;
     let mut slow_open = None;
     let mut auth_key = None;
-    let mut auth_setup = false;
+    let mut auth_setup = true;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -129,7 +130,13 @@ fn parse_args() -> Result<Args> {
             "--auth-key-hex" => {
                 auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
             }
-            "--auth-setup" => auth_setup = value == "on",
+            "--auth-setup" => {
+                auth_setup = match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => bail!("--auth-setup {other}: on or off"),
+                };
+            }
             other => bail!("unknown flag {other}"),
         }
     }

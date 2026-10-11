@@ -64,7 +64,7 @@ The relay gets a cache of the latest Group of each track in Phase 1; decided on 
 - [ ] Validate Durable Objects integration.
 - [ ] Decide chat transport, persistence and ordering.
 - [ ] Implement chat; evaluate reactions.
-- [ ] Design and test authorization before broader rollout.
+- [ ] Design and test authorization before broader rollout. The form of the token and where it is checked are decided and run (a token of the room in every request and in SETUP, checked by the relay with a shared key; the demo with `--auth`); who may get a token is not designed.
 
 **Exit:** managed room with verified browser/CLI interactions.
 
