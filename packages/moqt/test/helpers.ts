@@ -74,8 +74,9 @@ export function byHand(name: string): string {
 }
 
 /**
- * The bytes of `fixtures/moqt-18/<name>.hex`, captured from moqtail, in the
- * form `hex` reads. The directory is shared with the Rust implementation; its
+ * The bytes of `fixtures/moqt-18/<name>.hex`, captured from another
+ * implementation (moqtail, and one file from moqlivemock), in the form `hex`
+ * reads. The directory is shared with the Rust implementation; its
  * README records where each file comes from and what it decodes to.
  */
 export function fixture(name: string): string {
