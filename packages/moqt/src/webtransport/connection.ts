@@ -157,9 +157,13 @@ export interface SessionConnectOptions {
 	 * sends. It goes before the tokens a request has of its own
 	 * (`parameters.authorizationToken`). Nothing is added when left out.
 	 *
-	 * Not sent in SETUP (§10.3.1.4), and not registered under an alias: the
-	 * whole token travels with every request. Decided on 2026-10-11 as the
-	 * first step; what it carries and who checks it is the application's.
+	 * **It is in SETUP as well** (the AUTHORIZATION TOKEN Setup Option,
+	 * §10.3.1.4: "functionally equivalent to the AUTHORIZATION TOKEN message
+	 * parameter ... that the peer can use to authorize MOQT session
+	 * establishment"), so a relay can turn a connection down before any
+	 * request. Not registered under an alias: the whole token travels each
+	 * time. Decided on 2026-10-11; what it carries and who checks it is the
+	 * application's.
 	 */
 	authorizationToken?: Uint8Array;
 	/** Limits to use in place of the defaults; the ones left out keep their default. */
@@ -930,6 +934,7 @@ export async function connectOver(
 	);
 	const session: Session = createSession({
 		implementation: options.implementation,
+		authorizationToken: options.authorizationToken,
 		limits: options.limits,
 	});
 	const pendingNamespaces = new Map<bigint, Deferred<void>>();

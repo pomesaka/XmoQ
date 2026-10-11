@@ -5,7 +5,9 @@
 // `--auth` (an experiment; how the relay authorizes is undecided): a key
 // is made for this run and given to the relay and to the rooms. The relay
 // then refuses a request without a token of the rooms, and the pages ask
-// the room for one; `?token=no` on a page asks for none.
+// the room for one; `?token=no` on a page asks for none. With
+// `--auth-setup` as well, the relay looks at the token in SETUP and closes
+// a session without one before any request.
 //
 // The rooms (a chat, a count, and where the broadcast is) are the spike in
 // spikes/durable-objects-room, run locally with Miniflare. They start when
@@ -26,6 +28,9 @@ const { values: options } = parseArgs({
 		"relay-port": { type: "string", default: "4443" },
 		"rooms-port": { type: "string", default: "8787" },
 		auth: { type: "boolean", default: false },
+		// With --auth: the relay looks at the token in SETUP as well, and
+		// closes a session that has none.
+		"auth-setup": { type: "boolean", default: false },
 		// Another relay than the one of this tree, for trying one out.
 		"relay-binary": { type: "string" },
 		port: { type: "string", default: "8080" },
@@ -99,6 +104,9 @@ const relay = spawn(
 		"--key-file",
 		keyFile,
 		...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
+		...(authKeyHex !== undefined && options["auth-setup"]
+			? ["--auth-setup", "on"]
+			: []),
 	],
 	// Its lines, one for each thing it does, are not shown.
 	{ stdio: ["ignore", "ignore", "inherit"] },

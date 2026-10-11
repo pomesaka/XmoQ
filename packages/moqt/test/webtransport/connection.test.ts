@@ -193,6 +193,30 @@ describe("the connection's AUTHORIZATION TOKEN (§10.2.2)", () => {
 	});
 });
 
+describe("the connection's AUTHORIZATION TOKEN in SETUP (§10.3.1.4)", () => {
+	test.each<{ name: string; options: SessionConnectOptions; setup: string }>([
+		{
+			name: "a connection with a token sends it as Setup Option 0x03, before MOQT_IMPLEMENTATION",
+			options: {
+				implementation: "xmoq/0",
+				authorizationToken: Uint8Array.of(0x03, 0x00, 0x61, 0x62),
+			},
+			setup: "af 00 00 0e 03 04 03 00 61 62 04 06 78 6d 6f 71 2f 30",
+		},
+		{
+			name: "a connection without one sends SETUP as before",
+			options: { implementation: "xmoq/0" },
+			setup: "af 00 00 08 07 06 78 6d 6f 71 2f 30",
+		},
+	])("$name", async ({ options, setup }) => {
+		const peer = createFakePeer();
+		const connecting = connectOver(peer.transport, options);
+		expect(await sentHex(await peer.clientUni())).toBe(setup);
+		await peer.openUni().write(hex(MOQTAIL_RELAY_SETUP));
+		(await connecting).close();
+	});
+});
+
 describe("connectOver", () => {
 	test("sends SETUP on a new control stream and resolves with the peer's Setup Options", async () => {
 		const peer = createFakePeer();

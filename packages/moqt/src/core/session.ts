@@ -2,6 +2,7 @@ import { concatBytes, createByteReader, ShortBufferError } from "./bytes.ts";
 import { encodeControlMessage, SETUP_MESSAGE_TYPE } from "./control-message.ts";
 import {
 	createPeerControlStream,
+	SETUP_OPTION_AUTHORIZATION_TOKEN,
 	SETUP_OPTION_MOQT_IMPLEMENTATION,
 } from "./control-stream.ts";
 import { MoqtError, protocolViolation, StreamResetErrorCode } from "./error.ts";
@@ -35,6 +36,11 @@ import { isSubgroupHeaderType } from "./subgroup.ts";
 export interface SessionOptions {
 	/** Value of the MOQT_IMPLEMENTATION Setup Option (§10.3.1.5). Not sent when undefined. */
 	implementation?: string;
+	/**
+	 * Value of the AUTHORIZATION TOKEN Setup Option (§10.3.1.4), a Token
+	 * structure as bytes. Not sent when undefined.
+	 */
+	authorizationToken?: Uint8Array;
 	/** Limits to use in place of the defaults; the ones left out keep their default. */
 	limits?: Partial<SessionLimits>;
 }
@@ -449,6 +455,13 @@ export function createSession(options: SessionOptions = {}): Session {
 			if (started) throw new Error("the session has already started");
 			started = true;
 			const setupOptions: KeyValuePair[] = [];
+			// Before the other: the options go in the order of their types.
+			if (options.authorizationToken !== undefined) {
+				setupOptions.push({
+					type: SETUP_OPTION_AUTHORIZATION_TOKEN,
+					value: options.authorizationToken,
+				});
+			}
 			if (options.implementation !== undefined) {
 				setupOptions.push({
 					type: SETUP_OPTION_MOQT_IMPLEMENTATION,

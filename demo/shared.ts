@@ -224,7 +224,9 @@ export function connectToRelay(
 export const why = (error: unknown): string =>
 	/REQUEST_ERROR 0x1:/.test(String(error))
 		? "the relay refused: not authorized (no token of the room, or one it does not take)"
-		: String(error).slice(0, 120);
+		: /closed the session: code=(2|22|24) /.test(String(error))
+			? `the relay closed the session: not authorized (${String(error).slice(0, 90)})`
+			: String(error).slice(0, 120);
 
 export const say = (text: string): void => {
 	const status = document.getElementById("status");
