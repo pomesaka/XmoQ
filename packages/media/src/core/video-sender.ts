@@ -5,7 +5,11 @@
 //
 // "LOC" is draft-ietf-moq-loc-04 and "MSF" draft-ietf-moq-msf-01.
 
-import { type LocProperty, locProperties } from "@xmoq/loc";
+import {
+	beginsWithStartCode,
+	type LocProperty,
+	locProperties,
+} from "@xmoq/loc";
 
 /**
  * A chunk as an encoder gives it: the fields of `EncodedVideoChunk` of
@@ -29,9 +33,45 @@ export type VideoStreamMapping =
 	/** The Objects of a Group on one stream, Subgroup 0. */
 	| "stream-per-group";
 
+/**
+ * How the Objects go onto streams when nothing else is asked for: a Group
+ * on one stream. Decided on 2026-10-11.
+ *
+ * WHY a stream for every Group:
+ * - A delta frame needs the frames before it, and transport draft 18 §2.2
+ *   has "If an Object is dependent on all previous Objects in a Subgroup,
+ *   it likely fits best in that Subgroup".
+ * - A stream delivers in order, so a receiver gets the frames of a Group in
+ *   the order they are decoded in, and holds nothing back for a frame that
+ *   is on its way on another stream.
+ * - Every sender that was read sends this way: `moqlivemock` v0.16.1, whose
+ *   bytes are in `fixtures/`, and, as read on 2026-10-11 and not run,
+ *   `moq-dev/moq` and the MoQT code of `quiche`. LOC-04 §4.2 has it in its
+ *   example.
+ * - The limits of the relay here are counted in streams and Subgroups (256
+ *   streams waiting for one subscriber, 256 Subgroups remembered a track),
+ *   which a stream for every frame reaches in seconds.
+ *
+ * WHY NOT a stream for every Object, though MSF-01 §6 has "Irrespective of
+ * the Section 4 in place, each MOQT Object MUST be mapped to a new MOQT
+ * Stream": **this default leaves that MUST, on purpose.** As `moq-wg/msf`
+ * stood on 2026-10-11: issue #148 (open) names the sentence, and two authors
+ * answer there, "We can restrict to subgroup 0 only for now" and "On stream
+ * per object is definitely not the goal with LOC ... This needs to be
+ * fixed"; pull requests that replace it are open and none is merged, the
+ * latest (#211) with a field of the catalog that says which mapping a track
+ * has and "subscribers MUST be prepared to consume any of them". Within
+ * MSF-01 the sentence does not go together with §5, which has every catalog
+ * Object in Subgroup 0, and transport §2.2, which has the Objects of one
+ * Subgroup on one stream. "stream-per-object" stays as a setting, for a
+ * peer that sends or expects the letter of §6; the receiver of this package
+ * reads both.
+ */
+export const DEFAULT_MAPPING: VideoStreamMapping = "stream-per-group";
+
 /** Why a chunk is not sent. */
 export type VideoSkipReason =
-	/** A delta chunk before the first key chunk, or after a chunk of its Group that was not sent. */
+	/** A delta chunk with no Group to be in: before the first key chunk, after a chunk of its Group that was not sent, or after `endGroup`. */
 	| "no-key-frame"
 	/** Its data is longer than `maxPayloadLength`. */
 	| "too-large"
@@ -109,7 +149,7 @@ export interface VideoSenderOptions {
 	 * moment the encoder's `timestamp` counts from.
 	 *
 	 * WHY asked for here, and not left to the caller to add: the Timestamp
-	 * of LOC without a Timescale is wall-clock time (LOC §2.3.1.1), and an
+	 * of LOC without a Timescale is wall-clock time (LOC-04 §2.3.1.1), and an
 	 * encoder's is not. With one field for "the time", the encoder's would
 	 * be handed on as it is, and read as a moment in 1970.
 	 *
@@ -117,7 +157,7 @@ export interface VideoSenderOptions {
 	 * hands a decoder.
 	 */
 	epoch: bigint;
-	/** "stream-per-object" when left out. */
+	/** `DEFAULT_MAPPING`, a stream for every Group, when left out. */
 	mapping?: VideoStreamMapping;
 	/** `DEFAULT_MAX_PAYLOAD_LENGTH` when left out. */
 	maxPayloadLength?: number;
@@ -144,14 +184,6 @@ export interface VideoSender {
 const MAX_ID = 2n ** 64n - 1n;
 /** The largest time that is sent: what the receiver of this package hands on, the largest whole number a JavaScript number has exactly. */
 const MAX_TIMESTAMP = BigInt(Number.MAX_SAFE_INTEGER);
-
-/** LOC §2.1.4: "The start code value is 1 in network byte order". A start code alone is no NAL unit. */
-const beginsWithStartCode = (data: Uint8Array): boolean =>
-	data.length > 4 &&
-	data[0] === 0 &&
-	data[1] === 0 &&
-	data[2] === 0 &&
-	data[3] === 1;
 
 /**
  * Says for each chunk of an encoder which Object of the track it is.
@@ -187,15 +219,22 @@ const beginsWithStartCode = (data: Uint8Array): boolean =>
  */
 export function createVideoSender(options: VideoSenderOptions): VideoSender {
 	const { firstGroup, epoch } = options;
-	const mapping = options.mapping ?? "stream-per-object";
+	const mapping = options.mapping ?? DEFAULT_MAPPING;
 	const maxPayloadLength =
 		options.maxPayloadLength ?? DEFAULT_MAX_PAYLOAD_LENGTH;
-	if (firstGroup < 0n || firstGroup > MAX_ID) {
-		throw new RangeError(`${firstGroup} is no Group ID`);
+	// WHY the type is looked at where the types say it already: a caller
+	// without types that hands in a number would get a `TypeError` from the
+	// first `push`, which does not throw.
+	if (
+		typeof firstGroup !== "bigint" ||
+		firstGroup < 0n ||
+		firstGroup > MAX_ID
+	) {
+		throw new RangeError(`${String(firstGroup)} is no Group ID`);
 	}
-	if (epoch < 0n || epoch > MAX_TIMESTAMP) {
+	if (typeof epoch !== "bigint" || epoch < 0n || epoch > MAX_TIMESTAMP) {
 		throw new RangeError(
-			`${epoch} is no time since the Unix epoch that can be sent`,
+			`${String(epoch)} is no time since the Unix epoch that can be sent`,
 		);
 	}
 	if (mapping !== "stream-per-object" && mapping !== "stream-per-group") {
@@ -272,7 +311,17 @@ export function createVideoSender(options: VideoSenderOptions): VideoSender {
 
 		endGroup(because) {
 			sending = undefined;
-			return end(because === "write-failed" ? "reset" : "close");
+			switch (because) {
+				case "track-ended":
+					return end("close");
+				case "write-failed":
+					return end("reset");
+				default:
+					// WHY a reset for anything else, which the types do not
+					// let through: a FIN says that every Object of the Group
+					// was written, and that is not known here.
+					return end("reset");
+			}
 		},
 	};
 }

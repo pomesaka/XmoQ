@@ -1,21 +1,11 @@
-// The two forms the payload of a video Object of LOC can have for H.264
-// and H.265 (draft-ietf-moq-loc-04 §2.1): a length before every NAL unit,
-// or a start code before every NAL unit. Section numbers are of that draft.
+// draft-ietf-moq-loc-04, §2.1: the two forms the payload of a video Object
+// can have for H.264 and H.265, a length before every NAL unit or a start
+// code before every NAL unit. Section numbers are of that revision.
+
+import type { AnnexBPayload } from "../core/revision.ts";
 
 /** §2.1.4: "The start code value is 1 in network byte order". */
 const START_CODE = [0, 0, 0, 1];
-
-/** What became of a video payload that was to have start codes. */
-export type AnnexBPayload =
-	| {
-			type: "ok";
-			/** The payload with a start code of 4 bytes before every NAL unit. */
-			payload: Uint8Array;
-			/** How many length prefixes were replaced; 0 for a payload that had start codes already. */
-			replaced: number;
-	  }
-	/** The payload is in neither form; `reason` is for a log. */
-	| { type: "invalid"; reason: string };
 
 /**
  * Makes a start code of every length prefix of a video payload, for a
@@ -89,4 +79,24 @@ export function toAnnexB(payload: Uint8Array): AnnexBPayload {
 		at += 4 + length;
 	}
 	return { type: "ok", payload: out, replaced };
+}
+
+/**
+ * Whether a payload begins with a start code of 4 bytes and has something
+ * after it: the form `toAnnexB` gives, and leaves as it is. §2.1.4: "The
+ * start code value is 1 in network byte order". A start code alone is no
+ * NAL unit.
+ *
+ * WHY 4 bytes and not also 3, which §2.1.4 allows: `toAnnexB` tells lengths
+ * from start codes by the first four bytes, and reads a start code of 3
+ * bytes as a length. A sender that keeps to this is read by that receiver.
+ */
+export function beginsWithStartCode(payload: Uint8Array): boolean {
+	return (
+		payload.length > 4 &&
+		payload[0] === 0 &&
+		payload[1] === 0 &&
+		payload[2] === 0 &&
+		payload[3] === 1
+	);
 }

@@ -1,6 +1,7 @@
 {
 	"name": "@xmoq/loc",
 	"version": "0.0.0",
+	"description": "The Low Overhead Media Container, draft-ietf-moq-loc-04, for MoQ Transport draft 18",
 	"private": true,
 	"type": "module",
 	"exports": {

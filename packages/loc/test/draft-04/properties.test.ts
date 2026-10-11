@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import type { LocProperty } from "../../src/core/revision.ts";
 import {
-	type LocProperty,
 	locProperties,
 	microsecondsOf,
 	readLocTiming,
-} from "../src/core/properties.ts";
+} from "../../src/draft-04/properties.ts";
 
 describe("locProperties: the Object Properties of a frame", () => {
 	test("a timestamp alone is the Timestamp, 0x10", () => {

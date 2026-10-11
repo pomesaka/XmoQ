@@ -38,7 +38,8 @@ interface Pairing {
 		| "disconnect.ts"
 		| "fetch.ts"
 		| "fetch-rust.ts"
-		| "catalog.ts";
+		| "catalog.ts"
+		| "video.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -937,8 +938,11 @@ async function runPairing(
 			join(here, pairing.script),
 			...pairing.args,
 			// `disconnect.ts` runs through the own relay only, and `catalog.ts`
-			// through none; neither takes a relay.
-			...(pairing.script === "disconnect.ts" || pairing.script === "catalog.ts"
+			// and `video.ts` through one of their own or none; none of them
+			// takes a relay.
+			...(pairing.script === "disconnect.ts" ||
+			pairing.script === "catalog.ts" ||
+			pairing.script === "video.ts"
 				? []
 				: ["--relay", pairing.relay]),
 			"--port",
@@ -1036,6 +1040,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--catalog", "from-mlmpub"],
 			relay: "none",
 		},
+		{
+			name: "no relay: video: own-browser plays a video track of moqlivemock's publisher",
+			script: "video.ts",
+			args: ["--video", "from-mlmpub"],
+			relay: "none",
+		},
 		// The other two runs with a catalog go through the own relay, and
 		// `catalog.ts` starts it itself.
 		...(relays.includes("own")
@@ -1080,7 +1090,10 @@ async function main(): Promise<void> {
 		basePort +
 		pairings.length -
 		1 +
-		(pairings.some((pairing) => pairing.script === "catalog.ts")
+		(pairings.some(
+			(pairing) =>
+				pairing.script === "catalog.ts" || pairing.script === "video.ts",
+		)
 			? MOQLIVEMOCK_SIDE_PORT_OFFSET
 			: 0);
 	if (basePort < 1 || lastPort > 65535) {

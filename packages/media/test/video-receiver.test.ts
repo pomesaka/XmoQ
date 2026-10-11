@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { type LocProperty, locProperties } from "@xmoq/loc";
 import type { ReceivedObject } from "@xmoq/moqt";
 import {
 	createVideoReceiver,
@@ -28,7 +29,7 @@ function objectOf(token: string): VideoObject {
 		groupId: BigInt(group),
 		object: {
 			objectId: BigInt(object),
-			properties: mark === "?" ? [] : [{ type: 0x10n, value: 1000n }],
+			properties: mark === "?" ? [] : locProperties({ timestamp: 1000n }),
 			status:
 				mark === "E" ? "EndOfGroup" : mark === "T" ? "EndOfTrack" : "Normal",
 			payload:
@@ -320,46 +321,40 @@ describe("createVideoReceiver: the time and the data of a frame", () => {
 
 	test.each<{
 		name: string;
-		properties: { type: bigint; value: bigint }[];
+		properties: LocProperty[];
 		trackTimescale?: bigint;
 		timestamp: bigint;
 	}>([
 		{
 			name: "a Timestamp alone is wall-clock time in microseconds",
-			properties: [{ type: 0x10n, value: 1791690527000000n }],
+			properties: locProperties({ timestamp: 1791690527000000n }),
 			timestamp: 1791690527000000n,
 		},
 		{
 			name: "with a Timescale of the Object",
-			properties: [
-				{ type: 0x08n, value: 90000n },
-				{ type: 0x10n, value: 3000n },
-			],
+			properties: locProperties({ timestamp: 3000n, timescale: 90000n }),
 			timestamp: 33333n,
 		},
 		{
 			name: "with the Timescale of the track",
-			properties: [{ type: 0x10n, value: 3000n }],
+			properties: locProperties({ timestamp: 3000n }),
 			trackTimescale: 90000n,
 			timestamp: 33333n,
 		},
 		{
 			name: "the largest time that is handed on",
-			properties: [{ type: 0x10n, value: 9007199254740991n }],
+			properties: locProperties({ timestamp: 9007199254740991n }),
 			timestamp: 9007199254740991n,
 		},
 		{
 			name: "the largest Timescale of a track",
-			properties: [{ type: 0x10n, value: 18446744073709551615n }],
+			properties: locProperties({ timestamp: 18446744073709551615n }),
 			trackTimescale: 18446744073709551615n,
 			timestamp: 1000000n,
 		},
 		{
 			name: "the Timescale of the Object goes before the track's",
-			properties: [
-				{ type: 0x08n, value: 1000n },
-				{ type: 0x10n, value: 3000n },
-			],
+			properties: locProperties({ timestamp: 3000n, timescale: 1000n }),
 			trackTimescale: 90000n,
 			timestamp: 3000000n,
 		},
@@ -372,7 +367,7 @@ describe("createVideoReceiver: the time and the data of a frame", () => {
 	});
 
 	test("the data has a start code where the payload had a length", () => {
-		expect(frameOf([{ type: 0x10n, value: 0n }])).toEqual({
+		expect(frameOf(locProperties({ timestamp: 0n }))).toEqual({
 			type: "frame",
 			group: 0n,
 			object: 0n,
@@ -384,13 +379,13 @@ describe("createVideoReceiver: the time and the data of a frame", () => {
 
 	test.each<{
 		name: string;
-		properties: { type: bigint; value: bigint }[];
+		properties: LocProperty[];
 		detail: string;
 	}>([
 		{ name: "no Timestamp", properties: [], detail: "no Timestamp" },
 		{
 			name: "a time that is no exact number for a decoder",
-			properties: [{ type: 0x10n, value: 9007199254740992n }],
+			properties: locProperties({ timestamp: 9007199254740992n }),
 			detail: "a time beyond 2^53 - 1 microseconds",
 		},
 		{

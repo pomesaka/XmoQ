@@ -9,6 +9,7 @@
       "name": "@xmoq/interop",
       "version": "0.0.0",
       "dependencies": {
+        "@xmoq/media": "workspace:*",
         "@xmoq/moqt": "workspace:*",
         "@xmoq/msf": "workspace:*",
         "moqtail": "0.13.0",
@@ -32,10 +33,10 @@
       "version": "0.0.0",
       "dependencies": {
         "@xmoq/loc": "workspace:*",
+        "@xmoq/moqt": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "1.4.2",
-        "@xmoq/moqt": "workspace:*",
         "typescript": "6.0.3",
       },
     },
