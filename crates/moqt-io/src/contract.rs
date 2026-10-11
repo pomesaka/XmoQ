@@ -602,6 +602,7 @@ const LOOPBACK_LIMITS: crate::wt::QuicLimits = crate::wt::QuicLimits {
     receive_window: 16 * 1024,
     send_window: 16 * 1024,
     idle_timeout: crate::wt::IDLE_TIMEOUT,
+    congestion: crate::wt::Congestion::Cubic,
 };
 
 #[cfg(feature = "quic")]

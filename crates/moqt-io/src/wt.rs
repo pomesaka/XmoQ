@@ -117,6 +117,26 @@ pub struct QuicLimits {
     /// packet from the peer, and after 3 seconds at the latest, so a peer
     /// that vanished is noticed after at most one and a half times this.
     pub idle_timeout: Duration,
+    /// How the server holds back what it sends.
+    pub congestion: Congestion,
+}
+
+/// The congestion control of a server's connections: what quinn has.
+///
+/// WHY it can be chosen: on a path that loses packets at random and has a
+/// round trip of tens of milliseconds, a control that reads every loss as
+/// congestion sends less than a video takes, and the video falls behind
+/// for good. Which to use is not decided; Cubic is quinn's own default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Congestion {
+    /// CUBIC (RFC 8312), the default of quinn-proto 0.11.19.
+    #[default]
+    Cubic,
+    /// New Reno (RFC 9002 §7).
+    NewReno,
+    /// BBR, which quinn-proto 0.11.19 marks "Experimental! Use at your own
+    /// risk" (`congestion/bbr/mod.rs`).
+    Bbr,
 }
 
 /// WHY added to the streams a peer may open: the limits of QUIC count every
@@ -143,6 +163,11 @@ impl QuicLimits {
             .receive_window(self.receive_window.into())
             .send_window(u64::from(self.send_window))
             .datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER))
+            .congestion_controller_factory(match self.congestion {
+                Congestion::Cubic => Arc::new(quinn::congestion::CubicConfig::default()),
+                Congestion::NewReno => Arc::new(quinn::congestion::NewRenoConfig::default()),
+                Congestion::Bbr => Arc::new(quinn::congestion::BbrConfig::default()),
+            })
             .keep_alive_interval(Some(keep_alive))
             .max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
         transport
@@ -1019,6 +1044,7 @@ mod tests {
         receive_window: 262_144,
         send_window: 262_144,
         idle_timeout: IDLE_TIMEOUT,
+        congestion: crate::wt::Congestion::Cubic,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

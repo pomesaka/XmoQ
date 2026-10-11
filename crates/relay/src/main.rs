@@ -23,7 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::Semaphore;
 use xmoq_moqt_io::StreamConfig;
-use xmoq_moqt_io::wt::{QuicLimits, WtConnection, WtServer, accept};
+use xmoq_moqt_io::wt::{Congestion, QuicLimits, WtConnection, WtServer, accept};
 
 use crate::hub::{HubConfig, HubHandle, Log};
 
@@ -58,7 +58,11 @@ const MAX_HANDSHAKES: usize = 64;
 ///
 /// The windows bound what the QUIC layer holds for one peer; `HubConfig` adds
 /// them up with the rest.
-fn quic_limits(streams: &StreamConfig, idle_timeout: Duration) -> QuicLimits {
+fn quic_limits(
+    streams: &StreamConfig,
+    idle_timeout: Duration,
+    congestion: Congestion,
+) -> QuicLimits {
     const STREAM_RECEIVE_WINDOW: u32 = 256 * 1024;
     const RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
     const SEND_WINDOW: u32 = 4 * 1024 * 1024;
@@ -70,6 +74,7 @@ fn quic_limits(streams: &StreamConfig, idle_timeout: Duration) -> QuicLimits {
         receive_window: RECEIVE_WINDOW,
         send_window: SEND_WINDOW,
         idle_timeout,
+        congestion,
     }
 }
 
@@ -81,6 +86,9 @@ struct Args {
     /// as lost. A run that waits for the relay to notice a vanished peer
     /// sets it lower than the default.
     idle_timeout: Duration,
+    /// `--congestion cubic|newreno|bbr`: the congestion control of the
+    /// relay's connections ([`Congestion`]). For measuring.
+    congestion: Congestion,
     /// `--max-sessions`: how many sessions the relay takes at once, where a
     /// run wants another number than the relay's own
     /// ([`HubConfig::max_sessions`]). For measuring.
@@ -101,6 +109,7 @@ fn parse_args() -> Result<Args> {
     let mut cert_file = None;
     let mut key_file = None;
     let mut idle_timeout = xmoq_moqt_io::wt::IDLE_TIMEOUT;
+    let mut congestion = Congestion::default();
     let mut max_sessions = None;
     let mut slow_open = None;
     let mut auth_key = None;
@@ -114,6 +123,14 @@ fn parse_args() -> Result<Args> {
             "--port" => port = Some(value.parse().context("--port")?),
             "--cert-file" => cert_file = Some(value),
             "--key-file" => key_file = Some(value),
+            "--congestion" => {
+                congestion = match value.as_str() {
+                    "cubic" => Congestion::Cubic,
+                    "newreno" => Congestion::NewReno,
+                    "bbr" => Congestion::Bbr,
+                    other => bail!("--congestion {other}: cubic, newreno or bbr"),
+                };
+            }
             "--idle-timeout-ms" => {
                 let millis: u64 = value.parse().context("--idle-timeout-ms")?;
                 if millis == 0 {
@@ -145,6 +162,7 @@ fn parse_args() -> Result<Args> {
         cert_file: cert_file.context("--cert-file is required")?,
         key_file: key_file.context("--key-file is required")?,
         idle_timeout,
+        congestion,
         max_sessions,
         slow_open,
         auth_key,
@@ -168,7 +186,7 @@ async fn main() -> Result<()> {
     }
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
-    let limits = quic_limits(&config.streams, args.idle_timeout);
+    let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
     let (hub, hub_task) = hub::spawn(config);
