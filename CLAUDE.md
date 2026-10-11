@@ -8,11 +8,11 @@ Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。
 
 Phase 0b（MoQ Transportの層をRustとTypeScriptで自前実装する）の終了条件にも、2026-10-10に届いた。自前のブラウザクライアント、Rustクライアント、Rustリレーのあいだで、Objectが1つ通る。版はdraft 18に固定している。理由と範囲は`docs/protocols.md`にある。映像はまだ流していない。
 
-Phase 0bの項目は全部終わっている。いまの課題はPhase 1（映像）。FETCH、MSFのカタログ、LOCの詰め方、映像の受け手と送り手の中核、リレーのキャッシュ（トラックごとに最新のGroup）が入っていて、ブラウザのエンコーダとデコーダにつなぐ所が作業中。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーは、認可が無く、WebTransportだけを受ける。キャッシュは、配信元がいるあいだだけ持つ。draftに届いていない所は`docs/moqt-implementation-notes.md`の既知の不足にある。
+Phase 0bの項目は全部終わっている。いまの課題はPhase 1（映像）。FETCH、MSFのカタログ、LOCの詰め方、映像の受け手と送り手の中核、映像のトラックを出す部品とブラウザで再生する部品、リレーのキャッシュ（トラックごとに最新のGroup）が入っていて、ブラウザのエンコーダにつなぐ所が作業中。映像はGroupを1本のストリームで送り、LOCはLOC-04の番号をdraft 18の上で使う。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーは、認可が無く、WebTransportだけを受ける。キャッシュは、配信元がいるあいだだけ持つ。draftに届いていない所は`docs/moqt-implementation-notes.md`の既知の不足にある。
 
 Rustのcrateは次のように分かれている。`xmoq-moqt`（符号化とセッションの状態）、`xmoq-relay-core`（リレーの経路と配信の論理）は入出力に依存しない。`xmoq-moqt-io`が`Connection`トレイトの上でストリームを読み書きし、WebTransportのライブラリに触るのはこのcrateの1ファイルだけ。`xmoq-relay`と`xmoq-moqt-client`がそれらをつなぐ。`Connection`の契約は、メモリ上の接続と実際のループバックの接続の両方に同じテストを当てて確かめる。テスト用の接続だけで通る挙動を前提にしない。
 
-TypeScriptのパッケージは層になっている。`@xmoq/moqt`（MoQ Transport）と`@xmoq/loc`（LOCの詰め方）が層0、`@xmoq/msf`（MSFのカタログ）が層1、`@xmoq/media`（映像のトラックの送り受け）が層2で、自分より下の層にだけ依存できる。層の表は`scripts/ci/check-layers.sh`の`package_layer`にあり、表に無いパッケージは検査で落ちる。各パッケージの中核（`src/core`）は入出力に依存しない。
+TypeScriptのパッケージは層になっている。`@xmoq/moqt`（MoQ Transport）と`@xmoq/loc`（LOCの詰め方）が層0、`@xmoq/msf`（MSFのカタログ）が層1、`@xmoq/media`（映像のトラックの送り受け）が層2で、自分より下の層にだけ依存できる。層の表は`scripts/ci/check-layers.sh`の`package_layer`にあり、表に無いパッケージは検査で落ちる。各パッケージの中核（`src/core`）は入出力に依存しない。LOCは、版に依る部分（プロパティの番号、ペイロードの決まり）を版の名前のフォルダ（`packages/loc/src/draft-04/`）に置き、切り替えを`packages/loc/src/index.ts`の1行にしてある。版に依る値を、そのフォルダの外に書かない。
 
 draftが黙っている箇所と矛盾している箇所で2つの実装がどう動くかは、`docs/moqt-implementation-notes.md`に表がある。片方の実装だけを変えない。表に行を足すときと裁定を出すときは、該当の節を本文で読んでから書く。
 

@@ -1,6 +1,15 @@
 # @xmoq/loc
 
-The Low Overhead Media Container, written from the text of `draft-ietf-moq-loc-04`. Section numbers below are of that draft unless they say "transport", which is `draft-ietf-moq-transport-18`.
+**This package implements `draft-ietf-moq-loc-04`** (`LOC_REVISION`), the Low Overhead Media Container, written from the text of that revision. Section numbers below are of it unless they say "transport", which is `draft-ietf-moq-transport-18`.
+
+**The revision is LOC-04, and its numbers are used on transport draft 18. Decided on 2026-10-11.** No document names that pair: MSF-01 cites LOC-02, LOC-03 cites draft 18, and LOC-04 cites draft 19.
+
+- WHY LOC-04: none of its six numbers is one transport draft 18 defines, and all are below `0x4000`, where the Mandatory Track Properties begin (the table below). `moqlivemock`'s publisher sends `0x10` for the Timestamp on draft 18, and its bytes are in `fixtures/`.
+- WHY NOT LOC-02, which MSF-01 cites: its Timestamp is `0x06`, the SUBGROUP_DELIVERY_TIMEOUT of draft 18.
+- WHY NOT LOC-03, the one revision that cites draft 18: it has two numbers for the Timestamp, `0x0A` in §2.3.1.1 and `0x06` in the table of its IANA section, and the second is the same collision.
+- WHY NOT move the transport to draft 19, which LOC-04 cites: the peers the interop run is made against speak draft 18.
+
+What is of that revision is in `src/draft-04/`, and one line of `src/index.ts` chooses it ("Following another revision", below).
 
 Status: partly implemented. What is here was run against bytes of `moqlivemock`'s publisher and, for the video payload, against the H.264 decoder of Chromium 156. Nothing encodes or plays media yet.
 
@@ -10,6 +19,7 @@ Implemented:
 
 - The time of a frame as Object Properties: `locProperties` makes the Timestamp (and the Timescale, where there is one) of a frame, `readLocTiming` reads them out of the properties of an Object, `microsecondsOf` gives the time in the unit of WebCodecs.
 - `toAnnexB`: a video payload that has a length before every NAL unit becomes one with start codes, which is the form a decoder of WebCodecs takes without a description.
+- `beginsWithStartCode`: whether a payload is in that form already, a start code of 4 bytes and something after it. What a sender checks before it sends.
 
 Outside this package: how frames become Objects and Groups, which MSF-01 says for a LOC track (§4.1, one sample an Object and a group of pictures a Group; §6, an Object a stream). That is for what sends and receives media.
 
@@ -17,13 +27,13 @@ Not implemented: Video Config, Video Frame Marking, Audio Config and Audio Level
 
 ## Layer rules
 
-Everything is bytes and numbers: no I/O, and **no other package of this repository**. `@xmoq/loc` does not import `@xmoq/moqt`: an Object Property is taken and given as a type and a value, the shape of a Key-Value-Pair there. `tsconfig.core.json` type-checks `src/core` without the DOM library, `noRestrictedImports` in the root `biome.jsonc` keeps the imports out, and `scripts/ci/check-layers.sh` the dependencies: `@xmoq/moqt` and `@xmoq/loc` are the lowest layer and know nothing of each other.
+Everything is bytes and numbers: no I/O, and **no other package of this repository**. `@xmoq/loc` does not import `@xmoq/moqt`: an Object Property is taken and given as a type and a value, the shape of a Key-Value-Pair there. `tsconfig.core.json` type-checks `src` without the DOM library, `noRestrictedImports` in the root `biome.jsonc` keeps the imports out, and `scripts/ci/check-layers.sh` the dependencies: `@xmoq/moqt` and `@xmoq/loc` are the lowest layer and know nothing of each other.
 
 ## How the draft is read
 
 | Point | What is done | From |
 |---|---|---|
-| Which revision of LOC, on which transport | The numbers of LOC-04 on transport draft 18. **Provisional** ([open question](../../docs/open-questions.md)): MSF-01 cites LOC-02, and LOC-04 cites transport draft 19. The one revision that cites draft 18 is LOC-03, which has two numbers for the Timestamp, `0x0A` in §2.3.1.1 and `0x06` in the table of its IANA section | The table below: no number of LOC-04 is one transport draft 18 defines. `moqlivemock`'s publisher sends `0x10` for the Timestamp on draft 18 (`fixtures/loc-04/`) |
+| Which revision of LOC, on which transport | The numbers of LOC-04 on transport draft 18; decided, and why is at the top of this file | The table below: no number of LOC-04 is one transport draft 18 defines. `moqlivemock`'s publisher sends `0x10` for the Timestamp on draft 18 (`fixtures/loc-04/`) |
 | Which properties an Object has | The Timestamp, and the Timescale where the time is not the wall clock. No property is required | §2.2: "The LOC Public and Private Properties carry optional metadata related to the Payload". None of the six definitions has a MUST |
 | The Timestamp without a Timescale | Microseconds since the Unix epoch | §2.3.1.1: "If no timescale property is present, the timestamp is interpreted as wall-clock time in microseconds since the Unix epoch." |
 | The order of the properties that are written | Timescale (`0x08`), then Timestamp (`0x10`) | MoQ Transport writes the types of a list of Key-Value-Pairs as differences, in ascending order (transport §1.4.3) |
@@ -52,6 +62,28 @@ Everything is bytes and numbers: no I/O, and **no other package of this reposito
 
 - No number is in both columns, and all of LOC-04's are below `0x4000`, where the Mandatory Track Properties of transport §2.5.1 begin.
 - **The same section of transport draft 18 has a second table, of registrations it expects from LOC, with other numbers**: TIMESTAMP `0x06`, TIMESCALE `0x08`, VIDEO_FRAME_MARKING `0x0A`, AUDIO_LEVEL `0x0C`, VIDEO_CONFIG `0x0D`. Its `0x06` is the SUBGROUP_DELIVERY_TIMEOUT of the first table. **No revision of LOC, from -00 to -04, has that set of numbers**: `0x0A` is the Video Frame Marking in none (4 up to -02, `0x09` from -03), and the Timestamp is 2 up to -01, `0x06` in -02, `0x0A` and `0x06` in -03, `0x10` in -04. They are not used here.
+
+## Following another revision
+
+The package is one revision at a time, chosen when it is built; nothing chooses at run time, and nothing outside this package names a revision.
+
+| Where | What is there |
+|---|---|
+| `src/draft-04/` | Everything that is of that revision: the numbers of the properties and what a Timestamp without a Timescale means (`properties.ts`), the forms of a video payload (`video-payload.ts`), and `index.ts`, which says which document the directory follows |
+| `src/core/revision.ts` | What every revision gives: the shapes (`LocProperty`, `LocTiming`, ...) and `LocRevision`, the functions a revision has to have |
+| `src/index.ts` | **The one line that chooses**: `import { revision } from "./draft-04/index.ts"`. It hands the revision's functions on under the names of the package, and its name as `LOC_REVISION` |
+| `test/draft-04/` | The tests of that revision, with its numbers written out, and the ones that read `fixtures/loc-04/` |
+| `test/index.test.ts` | What holds whichever revision it is; it names no number |
+
+To follow another revision:
+
+1. Read its text, and write `src/draft-NN/` from it, with the three files of `src/draft-04/`: at the top of each, the document, the revision and the sections.
+2. Take bytes of a peer that speaks it into `fixtures/loc-NN/`, with a README, and write `test/draft-NN/` against them.
+3. Change the import in `src/index.ts`.
+4. Run the tests of every package. **These fail, and are to be looked at one by one**: the name in `test/index.test.ts`; in `@xmoq/media`, the two tests that read the stream of `moqlivemock` in `fixtures/moqt-18/`, whose Objects are of LOC-04; and the run of the interop matrix that plays the video of `moqlivemock`. Nothing else did when this was tried with a made-up revision whose Timestamp had another number ([record](../../docs/experiments/2026-10-11-loc-revision-switch.md)).
+5. Write the table of numbers in this file anew, and the sentence at its top; `docs/protocols.md` has one line.
+
+The section numbers in the comments of `@xmoq/media` say "LOC-04 §..."; they are of the revision they were read in, and are read again with the new one.
 
 ## Known gaps
 

@@ -158,9 +158,10 @@
 											"**/moqt/**",
 											"@xmoq/msf",
 											"@xmoq/msf/**",
-											"**/msf/**"
+											"**/msf/**",
+											"**/web/**"
 										],
-										"message": "src/core of @xmoq/media orders frames without MoQ Transport and without a catalog; what uses a connection belongs outside src/core."
+										"message": "src/core of @xmoq/media orders frames without MoQ Transport, without a catalog and without a browser; what uses a connection or WebCodecs belongs outside src/core."
 									}
 								]
 							}

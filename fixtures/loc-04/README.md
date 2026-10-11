@@ -1,5 +1,7 @@
 # A LOC video stream of another implementation
 
+**Revision: `draft-ietf-moq-loc-04`**, on `draft-ietf-moq-transport-18`. The directory has the name of the revision; bytes of another revision go into a directory of their own.
+
 The start of a video stream of `mlmpub`, the publisher of [`Eyevinn/moqlivemock`](https://github.com/Eyevinn/moqlivemock) v0.16.1 (commit `91d903e9933a452f8baaa860f9fcd20cf195e077`), as an own client received it: the track `video_400kbps_avc` of the namespace `mlm/msf/clear`, H.264 (`avc3.4D401F` in its catalog), 1280x720, 25 frames a second. `@xmoq/loc` reads the payloads. The stream they came on is bytes of MoQ Transport and lives with the other streams, in [`fixtures/moqt-18/`](../moqt-18/README.md), where the decoders of `@xmoq/moqt` and of `crates/moqt` read it; both take its two payloads from here. No Rust code reads LOC yet; one that does reads these files.
 
 Taken on 2026-10-11, with `mlmpub` as `scripts/ci/interop.sh` builds it (unchanged) and the own Rust client of `main` at `36e51810`:

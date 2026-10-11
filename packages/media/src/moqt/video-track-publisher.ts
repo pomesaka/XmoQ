@@ -1,0 +1,579 @@
+// A LOC video track published over a connection: the chunks of an encoder
+// go through the sender of this package (`src/core/video-sender.ts`), and
+// what it says is written to the subscription a relay made. No WebCodecs:
+// a chunk comes in as numbers and bytes.
+
+import {
+	type PeerFetch,
+	type PeerSubscribe,
+	PublishEndedError,
+	type PublishedTrack,
+	RequestErrorCode,
+	SessionClosedError,
+	type SubgroupWriter,
+} from "@xmoq/moqt";
+import {
+	createVideoSender,
+	DEFAULT_MAX_PAYLOAD_LENGTH,
+	type VideoChunk,
+	type VideoSenderStep,
+	type VideoSkipReason,
+	type VideoStreamMapping,
+} from "../core/video-sender.ts";
+
+/** PUBLISH_DONE Status Code TRACK_ENDED (transport draft 18 §10.11). */
+const TRACK_ENDED = 0x2n;
+
+/**
+ * How many Objects may wait to be written before the Group is cut short.
+ * **Provisional, not measured**: what the receiver of this package holds,
+ * and well below what the relay of this repository lets wait for one
+ * subscriber (256 streams, 4,096 Objects).
+ */
+export const DEFAULT_MAX_PENDING_OBJECTS = 32;
+/** How many bytes of payload may wait to be written. **Provisional, not measured**: the relay's limit for one subscriber. */
+export const DEFAULT_MAX_PENDING_BYTES = 4 * 1024 * 1024;
+/**
+ * How long `end` waits for what is queued to be written, in milliseconds.
+ * Provisional: the time `@xmoq/moqt` gives a peer to end a request stream.
+ */
+const DEFAULT_END_TIMEOUT_MS = 3000;
+
+export interface VideoTrackPublisherOptions {
+	trackNamespace: readonly Uint8Array[];
+	trackName: Uint8Array;
+	/** The Group of the first key chunk (`VideoSenderOptions.firstGroup`). */
+	firstGroup: bigint;
+	/** The wall-clock time of the moment the encoder counts from (`VideoSenderOptions.epoch`). */
+	epoch: bigint;
+	/** How the Objects go onto streams; the sender's default when left out (`VideoSenderOptions.mapping`). */
+	mapping?: VideoStreamMapping;
+	/** The longest payload that is sent (`VideoSenderOptions.maxPayloadLength`). */
+	maxPayloadLength?: number;
+	/** `DEFAULT_MAX_PENDING_OBJECTS` when left out. */
+	maxPendingObjects?: number;
+	/** `DEFAULT_MAX_PENDING_BYTES` when left out. Not below the longest payload that is sent. */
+	maxPendingBytes?: number;
+	/** How long `end` waits for what is queued to be written; 3000 ms when left out. */
+	endTimeoutMs?: number;
+}
+
+/** Why a chunk was not sent, besides the reasons of the sender. */
+export type VideoPushSkipReason =
+	| VideoSkipReason
+	/** Nobody is subscribed, or the subscriber came after the key chunk of this Group. */
+	| "no-subscriber"
+	/** More waits to be written than may: the Group is cut short. */
+	| "behind";
+
+export interface VideoPushResult {
+	/** Why the chunk is not sent; absent for one that is. */
+	skipped?: VideoPushSkipReason;
+	/**
+	 * Whether the encoder is to make its next chunk a key chunk: a Group
+	 * was cut short, and nothing is sent before the next key chunk. True
+	 * once for each time it is needed, and not again before a key chunk
+	 * came and what waited was written down to half of what may wait: a
+	 * subscriber that stays behind does not get a key frame every frame.
+	 */
+	askForKeyFrame: boolean;
+}
+
+export interface VideoTrackPublisherStats {
+	/** Objects handed to the transport. */
+	written: number;
+	/** Chunks that were not sent, by the reason. */
+	skipped: Partial<Record<VideoPushSkipReason, number>>;
+	/** Times a write failed for another reason than that the subscriber went. */
+	writeFailures: number;
+	/** Objects that wait to be written now. */
+	pendingObjects: number;
+}
+
+export interface VideoTrackPublisher {
+	/**
+	 * For the `subscribe` handler of `MoqtConnection.serve`. False for
+	 * another track. **One subscription at a time**: a relay makes one for
+	 * all its viewers. A second one while the first is open is refused with
+	 * DUPLICATE_SUBSCRIPTION; a relay that comes again after its
+	 * subscription ended is accepted.
+	 *
+	 * The subscriber gets nothing of the Group that is being sent when it
+	 * comes: its first Object is the next key chunk.
+	 */
+	subscribe(request: PeerSubscribe): boolean;
+	/**
+	 * For the `fetch` handler. False for another track. A FETCH for this
+	 * track is refused with NOT_SUPPORTED: no frame is kept here.
+	 */
+	fetch(request: PeerFetch): boolean;
+	/** Takes the next chunk of the encoder. Does not wait for the write, and does not throw. */
+	push(chunk: VideoChunk): VideoPushResult;
+	/**
+	 * Ends the track: what is queued is written, and the subscription gets
+	 * PUBLISH_DONE (TRACK_ENDED). A SUBSCRIBE after it is refused with
+	 * DOES_NOT_EXIST, and a chunk is not sent. Never rejects.
+	 *
+	 * **How long it takes at most**: `endTimeoutMs` for what is queued. What
+	 * is not written by then is not written: its stream is reset, and what
+	 * is under way then has `endTimeoutMs` once more to end. After that
+	 * `PublishedTrack.done` of `@xmoq/moqt` waits for the subscriber to end
+	 * its direction of the request stream, 3 seconds at most. A SUBSCRIBE
+	 * that is being answered when `end` is called gets its PUBLISH_DONE once
+	 * the answer is out, and `end` waits `endTimeoutMs` at most for that.
+	 *
+	 * **Where a stream could not be opened or reset in that time,
+	 * PUBLISH_DONE is not sent** (transport §10.11 has it wait for the
+	 * streams), and the failure is reported with `reportError`.
+	 */
+	end(): Promise<void>;
+	/** What was counted so far; a copy. */
+	stats(): VideoTrackPublisherStats;
+}
+
+const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
+	a.length === b.length && a.every((byte, index) => byte === b[index]);
+
+/** Whether a call on the subscription failed because the subscriber ended it, or the session is over. */
+const endedByThePeer = (error: unknown): boolean =>
+	error instanceof PublishEndedError || error instanceof SessionClosedError;
+
+/** A subgroup stream, and the Group it is of. */
+interface OpenStream {
+	groupId: bigint;
+	writer: SubgroupWriter;
+}
+
+interface Subscriber {
+	track: PublishedTrack;
+	/** Whether it has been sent a key chunk: nothing goes to it before one. */
+	started: boolean;
+	/**
+	 * FORWARD 0 (transport §5.1): nothing is sent, and it is told of the end.
+	 * As the SUBSCRIBE had it: `PublishedTrack` has its parameters and no
+	 * later ones.
+	 */
+	silent: boolean;
+	/** The stream that is open for it, with "stream-per-group". */
+	open: OpenStream | undefined;
+	/** The stream an Object is being written to now. */
+	writing: OpenStream | undefined;
+	/**
+	 * The Groups that were cut short: what is queued of them is not written.
+	 * A Group below the one the queue has come to is forgotten.
+	 */
+	cut: Set<bigint>;
+	/** Objects that wait to be written to it. */
+	pendingObjects: number;
+	/** Their bytes of payload. */
+	pendingBytes: number;
+	/** Settles when everything queued for it was written or given up. */
+	queue: Promise<void>;
+}
+
+/**
+ * Publishes a video track to the one subscription it has.
+ *
+ * - The order on the wire is the order of the chunks: every step of the
+ *   sender is queued behind the one before it, so a write waits for the
+ *   one before, as `SubgroupWriter` asks.
+ * - **A write that fails cuts the Group short**, for whatever reason but
+ *   that the subscriber went: the stream is reset, what was queued of the
+ *   Group is not written, and nothing is sent before the next key chunk.
+ * - **So does a subscriber that does not take what is sent**: when more
+ *   Objects or bytes wait than may, the chunk is not sent and the Group
+ *   ends there. **What waits of that Group is not written either**, and a
+ *   write of it that is under way is given up by resetting its stream. WHY
+ *   not written first and cut after: the subscriber is behind by what
+ *   waits, and frames of a Group that ends without its last ones would
+ *   hold the next key frame back by as much again.
+ * - Either way `push` asks for a key chunk, so that the picture comes back
+ *   before the encoder would make one by itself.
+ *
+ * Throws a `RangeError` for options the sender refuses, for a limit that
+ * is no whole number from 1, and for `maxPendingBytes` below the longest
+ * payload that is sent: a chunk of that length could never be queued.
+ */
+export function createVideoTrackPublisher(
+	options: VideoTrackPublisherOptions,
+): VideoTrackPublisher {
+	const sender = createVideoSender({
+		firstGroup: options.firstGroup,
+		epoch: options.epoch,
+		...(options.mapping === undefined ? {} : { mapping: options.mapping }),
+		...(options.maxPayloadLength === undefined
+			? {}
+			: { maxPayloadLength: options.maxPayloadLength }),
+	});
+	const maxPendingObjects =
+		options.maxPendingObjects ?? DEFAULT_MAX_PENDING_OBJECTS;
+	const maxPendingBytes = options.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES;
+	const endTimeoutMs = options.endTimeoutMs ?? DEFAULT_END_TIMEOUT_MS;
+	for (const [name, value, least] of [
+		["maxPendingObjects", maxPendingObjects, 1],
+		["maxPendingBytes", maxPendingBytes, 1],
+		["endTimeoutMs", endTimeoutMs, 0],
+	] as const) {
+		if (!Number.isInteger(value) || value < least || value > 2 ** 31 - 1) {
+			throw new RangeError(
+				`${name} is a whole number from ${least} to ${2 ** 31 - 1}, not ${value}`,
+			);
+		}
+	}
+
+	const maxPayloadLength =
+		options.maxPayloadLength ?? DEFAULT_MAX_PAYLOAD_LENGTH;
+	if (maxPayloadLength > maxPendingBytes) {
+		throw new RangeError(
+			`maxPendingBytes (${maxPendingBytes}) is not below the longest payload that is sent (${maxPayloadLength})`,
+		);
+	}
+
+	// WHY what waits is counted for each subscriber, and not here: a write
+	// to a subscription that is over can stay under way, and would take from
+	// what the next subscriber may have waiting.
+	const stats: Omit<VideoTrackPublisherStats, "pendingObjects"> = {
+		written: 0,
+		skipped: {},
+		writeFailures: 0,
+	};
+	/** The one subscription, while there is one. */
+	let subscriber: Subscriber | undefined;
+	/** The Location of the last Object the sender made, for LARGEST_OBJECT. */
+	let largest: { group: bigint; object: bigint } | undefined;
+	/** A Group was cut short, and no key chunk has come since. */
+	let needsKey = false;
+	/** The encoder was asked for the key chunk that `needsKey` waits for. */
+	let asked = false;
+	/** A SUBSCRIBE is being answered, and has the one place; settles when that is done with. */
+	let answer: Promise<void> | undefined;
+	let ended: Promise<void> | undefined;
+
+	const isThisTrack = (request: PeerSubscribe | PeerFetch): boolean =>
+		sameBytes(request.trackName, options.trackName) &&
+		request.trackNamespace.length === options.trackNamespace.length &&
+		request.trackNamespace.every((field, index) => {
+			const own = options.trackNamespace[index];
+			return own !== undefined && sameBytes(field, own);
+		});
+
+	const skip = (because: VideoPushSkipReason): void => {
+		stats.skipped[because] = (stats.skipped[because] ?? 0) + 1;
+	};
+
+	/**
+	 * Nothing more of the Group that is being sent, until a key chunk; what
+	 * is queued of it is not written.
+	 */
+	const cutGroup = (to: Subscriber): void => {
+		// With `needsKey` the sender is in no Group: the last one ended before.
+		const group = needsKey ? undefined : largest?.group;
+		needsKey = true;
+		if (group !== undefined) {
+			to.cut.add(group);
+			// The write that holds the queue up: it fails with this, and what
+			// is queued behind it is passed over.
+			if (to.writing?.groupId === group) {
+				to.writing.writer.reset().catch(() => {});
+			}
+		}
+		for (const step of sender.endGroup("write-failed")) queueStep(to, step);
+	};
+
+	/** PUBLISH_DONE for a subscription; does not reject. */
+	const tellEnd = (track: PublishedTrack): Promise<void> =>
+		track.done(TRACK_ENDED, "").then(
+			() => {},
+			(error: unknown) => {
+				// `reportError` is the global of HTML for an error nobody is
+				// there to take: it goes where an uncaught one goes.
+				if (!endedByThePeer(error)) reportError(error);
+			},
+		);
+
+	/** Does one step of the sender for the subscriber; rejects as the transport does. */
+	const write = async (
+		to: Subscriber,
+		step: VideoSenderStep,
+	): Promise<void> => {
+		if (step.type === "skipped") return;
+		if (step.type === "close" || step.type === "reset") {
+			const open = to.open;
+			if (open?.groupId !== step.groupId) return;
+			to.open = undefined;
+			if (step.type === "close") await open.writer.close();
+			else await open.writer.reset();
+			return;
+		}
+		for (const group of to.cut) {
+			if (group < step.groupId) to.cut.delete(group);
+		}
+		// Its stream is not open: the write that was under way on it failed
+		// with the reset that cut the Group, or it was never opened.
+		if (to.cut.has(step.groupId)) return;
+		let writer = to.open?.groupId === step.groupId ? to.open.writer : undefined;
+		if (step.opensStream) {
+			writer = await to.track.openSubgroup({
+				groupId: step.groupId,
+				// A stream that is finished after its one Object is the
+				// sender's stream for every Object: the Subgroup ID is the
+				// Object ID, which the header says without a field
+				// (transport §11.4.2). Else it is the stream of a Group,
+				// Subgroup 0.
+				subgroupId: step.closesStream
+					? { mode: "FirstObjectId" }
+					: { mode: "Zero" },
+				properties: true,
+				// WHY never: whether the Group ends with this stream is not
+				// known before the next key chunk has come.
+				endOfGroup: false,
+			});
+			// WHY looked at again: the stream counts as open from the call
+			// on, and nobody else has its writer. A stream that is left
+			// open keeps PUBLISH_DONE from being sent.
+			if (subscriber !== to || to.cut.has(step.groupId)) {
+				await writer.reset();
+				return;
+			}
+			if (!step.closesStream) to.open = { groupId: step.groupId, writer };
+		}
+		// The stream of its Group is gone: it could not be opened.
+		if (writer === undefined) return;
+		const writing = { groupId: step.groupId, writer };
+		to.writing = writing;
+		try {
+			await writer.write({
+				objectId: step.objectId,
+				payload: step.payload,
+				properties: step.properties,
+			});
+			stats.written += 1;
+			if (step.closesStream) await writer.close();
+		} catch (error) {
+			if (to.open?.writer === writer) to.open = undefined;
+			// A stream that is neither closed nor reset keeps PUBLISH_DONE
+			// from being sent; a reset of one that is closed does nothing.
+			// Where the subscription is over, its streams are gone with it.
+			if (!endedByThePeer(error)) await writer.reset().catch(() => {});
+			throw error;
+		} finally {
+			if (to.writing === writing) to.writing = undefined;
+		}
+	};
+
+	/** Queues a step behind the ones before it. */
+	const queueStep = (to: Subscriber, step: VideoSenderStep): void => {
+		const bytes = step.type === "object" ? step.payload.length : 0;
+		if (step.type === "object") {
+			to.pendingObjects += 1;
+			to.pendingBytes += bytes;
+		}
+		to.queue = to.queue
+			.then(() => (subscriber === to ? write(to, step) : undefined))
+			.catch((error: unknown) => {
+				if (subscriber !== to) return;
+				if (endedByThePeer(error)) {
+					// `track.ended` takes the subscriber away.
+					return;
+				}
+				// A write of a Group that was cut failed with the reset that
+				// gave it up.
+				if (step.type === "object" && to.cut.has(step.groupId)) return;
+				stats.writeFailures += 1;
+				if (step.type !== "object") return;
+				to.cut.add(step.groupId);
+				// WHY only where the sender is still in that Group: a key
+				// chunk that came meanwhile began a Group that is whole.
+				if (largest?.group === step.groupId) cutGroup(to);
+			})
+			.finally(() => {
+				if (step.type === "object") {
+					to.pendingObjects -= 1;
+					to.pendingBytes -= bytes;
+				}
+			});
+	};
+
+	return {
+		subscribe(request) {
+			if (!isThisTrack(request)) return false;
+			if (ended !== undefined) {
+				request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
+				return true;
+			}
+			if (subscriber !== undefined || answer !== undefined) {
+				request
+					.reject(
+						RequestErrorCode.DUPLICATE_SUBSCRIPTION,
+						"the track has its one subscription",
+					)
+					.catch(() => {});
+				return true;
+			}
+			// From here on, so that a second SUBSCRIBE that comes while this
+			// one is answered is refused.
+			const answered = request
+				.accept(
+					// §10.2.11: a publisher that has published Objects of the
+					// Track says how far it is.
+					largest === undefined
+						? {}
+						: { parameters: { largestObject: largest } },
+				)
+				.then(
+					(track) => {
+						// The track ended while the answer was sent.
+						if (ended !== undefined) return tellEnd(track);
+						const accepted: Subscriber = {
+							track,
+							started: false,
+							// Transport §5.1: "The publisher does not send Objects
+							// if the Forward State is 0".
+							silent: request.parameters.forward === false,
+							open: undefined,
+							writing: undefined,
+							cut: new Set(),
+							pendingObjects: 0,
+							pendingBytes: 0,
+							queue: Promise.resolve(),
+						};
+						subscriber = accepted;
+						void track.ended.then(() => {
+							if (subscriber === accepted) subscriber = undefined;
+						});
+					},
+					(error: unknown) => {
+						// The request went before it was answered.
+						if (request.signal.aborted) return;
+						// The answer was not sent, and the request waits for one.
+						request.reject(RequestErrorCode.INTERNAL_ERROR).catch(() => {});
+						reportError(error);
+					},
+				)
+				.finally(() => {
+					answer = undefined;
+				});
+			answer = answered;
+			return true;
+		},
+
+		fetch(request) {
+			if (!isThisTrack(request)) return false;
+			request
+				.reject(
+					ended === undefined
+						? RequestErrorCode.NOT_SUPPORTED
+						: RequestErrorCode.DOES_NOT_EXIST,
+				)
+				.catch(() => {});
+			return true;
+		},
+
+		push(chunk) {
+			if (ended !== undefined) {
+				skip("no-subscriber");
+				return { skipped: "no-subscriber", askForKeyFrame: false };
+			}
+			const to = subscriber;
+			// More waits than may: this chunk is not sent, and its Group ends.
+			const behind =
+				to !== undefined &&
+				!to.silent &&
+				(to.pendingObjects >= maxPendingObjects ||
+					to.pendingBytes + chunk.data.length > maxPendingBytes);
+			let skipped: VideoPushSkipReason | undefined;
+			if (behind) {
+				cutGroup(to);
+				skipped = "behind";
+			} else {
+				for (const step of sender.push(chunk)) {
+					if (step.type === "skipped") {
+						skipped = step.because;
+						// A chunk the sender does not send ends its Group as well.
+						if (step.because !== "no-key-frame") needsKey = true;
+					}
+					if (step.type === "object") {
+						largest = { group: step.groupId, object: step.objectId };
+						if (step.objectId === 0n) {
+							needsKey = false;
+							asked = false;
+							if (to !== undefined) to.started = true;
+						}
+						if (to === undefined || to.silent || !to.started) {
+							skipped = "no-subscriber";
+							continue;
+						}
+					}
+					if (to !== undefined && !to.silent) queueStep(to, step);
+				}
+			}
+			if (skipped !== undefined) skip(skipped);
+			// Asked once, and only when there is room again for what is asked
+			// for.
+			const askForKeyFrame =
+				needsKey &&
+				!asked &&
+				(to?.pendingObjects ?? 0) * 2 <= maxPendingObjects &&
+				(to?.pendingBytes ?? 0) * 2 <= maxPendingBytes;
+			if (askForKeyFrame) asked = true;
+			return skipped === undefined
+				? { askForKeyFrame }
+				: { skipped, askForKeyFrame };
+		},
+
+		end() {
+			ended ??= (async () => {
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				const timeIsOver = (): Promise<"late"> =>
+					new Promise((resolve) => {
+						timer = setTimeout(() => resolve("late"), endTimeoutMs);
+					});
+				try {
+					const to = subscriber;
+					if (to === undefined) {
+						// A SUBSCRIBE that is being answered is told of the end
+						// when its answer is out.
+						if (answer !== undefined) {
+							await Promise.race([answer, timeIsOver()]);
+						}
+						return;
+					}
+					if (!to.silent) {
+						for (const step of sender.endGroup("track-ended"))
+							queueStep(to, step);
+					}
+					if ((await Promise.race([to.queue, timeIsOver()])) === "late") {
+						// WHY before anything is waited for: the write that is
+						// stuck fails with the reset below, and the step behind
+						// it would begin at once, and could open a stream,
+						// before the reset has settled here.
+						subscriber = undefined;
+						// A stream that is neither closed nor reset keeps
+						// PUBLISH_DONE from being sent.
+						await Promise.all(
+							[to.writing, to.open].map((stream) =>
+								stream?.writer.reset().catch(() => {}),
+							),
+						);
+						// What was under way ends with that; an `openSubgroup`
+						// that was, with its stream reset when it has come
+						// (`write`). WHY waited for: a stream that is opened and
+						// not yet reset keeps PUBLISH_DONE from being sent too.
+						await Promise.race([to.queue, timeIsOver()]);
+					}
+					subscriber = undefined;
+					await tellEnd(to.track);
+				} finally {
+					clearTimeout(timer);
+				}
+			})();
+			return ended;
+		},
+
+		stats: () => ({
+			...stats,
+			skipped: { ...stats.skipped },
+			pendingObjects: subscriber?.pendingObjects ?? 0,
+		}),
+	};
+}

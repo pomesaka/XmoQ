@@ -1,9 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { toAnnexB } from "../src/core/video-payload.ts";
+import {
+	beginsWithStartCode,
+	toAnnexB,
+} from "../../src/draft-04/video-payload.ts";
 
-const FIXTURES = join(import.meta.dir, "..", "..", "..", "fixtures", "loc-04");
+const FIXTURES = join(
+	import.meta.dir,
+	"..",
+	"..",
+	"..",
+	"..",
+	"fixtures",
+	"loc-04",
+);
 
 /** Bytes written as pairs of hex digits, with spaces between or without. */
 function hex(text: string): Uint8Array {
@@ -202,5 +213,44 @@ describe("toAnnexB", () => {
 			payload: hex("00 00 00 01 aa bb"),
 			replaced: 1,
 		});
+	});
+});
+
+describe("beginsWithStartCode", () => {
+	test.each<{ name: string; payload: string; begins: boolean }>([
+		{
+			name: "a start code of 4 bytes and a NAL unit",
+			payload: "00 00 00 01 65",
+			begins: true,
+		},
+		{
+			name: "a first byte that is not 0",
+			payload: "01 00 00 01 65",
+			begins: false,
+		},
+		{
+			name: "a second byte that is not 0",
+			payload: "00 01 00 01 65",
+			begins: false,
+		},
+		{
+			name: "a third byte that is not 0",
+			payload: "00 00 01 01 65",
+			begins: false,
+		},
+		{ name: "a length of 2", payload: "00 00 00 02 65", begins: false },
+		{
+			name: "a start code of 3 bytes",
+			payload: "00 00 01 65 aa",
+			begins: false,
+		},
+		{
+			name: "a start code with nothing after it",
+			payload: "00 00 00 01",
+			begins: false,
+		},
+		{ name: "no bytes", payload: "", begins: false },
+	])("$name", ({ payload, begins }) => {
+		expect(beginsWithStartCode(hex(payload))).toBe(begins);
 	});
 });

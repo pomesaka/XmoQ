@@ -1,40 +1,23 @@
-// The properties of draft-ietf-moq-loc-04 §2.3 that say when a frame is:
-// what goes into the Object Properties of MoQ Transport, and what is read
-// out of them. Section numbers are of that draft.
+// draft-ietf-moq-loc-04, §2.3 and §6.1: the properties that say when a
+// frame is. What goes into the Object Properties of MoQ Transport, and what
+// is read out of them. Section numbers are of that revision.
+//
+// Of this revision alone: the numbers of the properties, and what a
+// Timestamp without a Timescale means.
 
-/**
- * One Object Property as MoQ Transport carries it (a Key-Value-Pair): an
- * even type has an integer of up to 64 bits, an odd type has bytes. The
- * same shape as `KeyValuePair` of @xmoq/moqt, which this package does not
- * depend on.
- */
-export interface LocProperty {
-	readonly type: bigint;
-	readonly value: bigint | Uint8Array;
-}
+import type {
+	LocProperty,
+	LocTiming,
+	LocTimingRead,
+} from "../core/revision.ts";
 
 /** §2.3.1.1, ID 0x10: "Timestamp of the encoded media frame encoded as vi64." */
-export const TIMESTAMP = 0x10n;
+const TIMESTAMP = 0x10n;
 /** §2.3.1.2, ID 0x08: "The number of Timestamp units per second, encoded as vi64." */
-export const TIMESCALE = 0x08n;
+const TIMESCALE = 0x08n;
 
 /** The largest integer a property carries. */
 const MAX_VALUE = 2n ** 64n - 1n;
-
-/** When a frame is, as LOC has it. */
-export interface LocTiming {
-	/**
-	 * In the unit `timescale` gives. Without one: "wall-clock time in
-	 * microseconds since the Unix epoch" (§2.3.1.1).
-	 */
-	readonly timestamp: bigint;
-	/**
-	 * The units of `timestamp` a second has. With it, "the Timestamp
-	 * represents media time rather than wall-clock time. The epoch or anchor
-	 * point for the timestamp is application-defined" (§2.3.1.2).
-	 */
-	readonly timescale?: bigint;
-}
 
 /**
  * The Object Properties for a frame, in ascending order of type, which is
@@ -58,13 +41,6 @@ export function locProperties(timing: LocTiming): LocProperty[] {
 		{ type: TIMESTAMP, value: timing.timestamp },
 	];
 }
-
-/** What the Object Properties of an Object say of its time. */
-export type LocTimingRead =
-	/** `timing` is absent where the Object has no Timestamp: §2.2 has the properties as "optional metadata". */
-	| { type: "ok"; timing: LocTiming | undefined }
-	/** The properties are not ones LOC writes; `reason` is for a log. */
-	| { type: "invalid"; reason: string };
 
 /**
  * Reads the Timestamp and the Timescale out of the Object Properties of an

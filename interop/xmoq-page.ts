@@ -214,6 +214,25 @@ export type OwnPageExtras = {
 	 * "publish-done <status code>", or the type of another end.
 	 */
 	catalogEnded(): Promise<string>;
+	/**
+	 * Starts playing the video track with `playVideoTrack` of `@xmoq/media`:
+	 * a SUBSCRIBE, and a decoder of WebCodecs configured with `codec`. The
+	 * frames are not drawn: their time and size are noted, and each is
+	 * closed. Resolves when the SUBSCRIBE was accepted.
+	 */
+	playVideo(namespace: string, trackName: string, codec: string): Promise<void>;
+	/**
+	 * Whether the browser has a decoder for the codec, for Annex B without a
+	 * description: "supported", "not supported", or "no VideoDecoder".
+	 */
+	videoDecoderSupport(codec: string): Promise<string>;
+	/**
+	 * What the playing started with `playVideo` has given so far. Resolves
+	 * once `frames` frames at least were decoded, the playing has ended, or
+	 * `timeoutMs` are over, whichever comes first: a run that gets too few
+	 * frames still has a report to show.
+	 */
+	videoReport(frames: number, timeoutMs: number): Promise<PageVideoReport>;
 	/** Cancels the subscription and keeps the session. */
 	cancelSubscription(): Promise<void>;
 	/** Resolves once the subscription has ended and its Objects were read; JSON of `SubscriptionReport`. */
@@ -287,6 +306,23 @@ export type SubscriptionReport = {
 	streamCount: string | null;
 	/** How reading the Objects ended: "closed", or the error `objects` failed with. */
 	objectsEnd: string;
+};
+
+/** What `playVideoTrack` of `@xmoq/media` gave a page, in values that survive `page.evaluate`. */
+export type PageVideoReport = {
+	/** The frames the decoder gave, in the order it gave them: the time in microseconds, and the size the frame is shown at. */
+	frames: { timestamp: number; width: number; height: number }[];
+	stats: {
+		decoded: number;
+		submitted: number;
+		/** Objects that did not become a frame for the decoder, by the reason. */
+		dropped: Record<string, number>;
+		decoderFailures: number;
+		lastDecoderError: string | null;
+		endOfTrack: boolean;
+	};
+	/** How the playing ended, or null while it goes on: "subscription-ended <type>", "decoder-failed <error>" or "failed <error>". */
+	ended: string | null;
 };
 
 /** What `followCatalog` of `@xmoq/msf` gave a page, in values that survive `page.evaluate`. */

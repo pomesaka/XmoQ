@@ -59,12 +59,12 @@ export type VideoReceiverEvent =
 			 * nothing in the payload is looked at here. No draft has it as a
 			 * rule: MSF §4.1 has a group of pictures in one Group, transport
 			 * draft 18 §2.3 that Groups "SHOULD be independently useful", and
-			 * LOC §4.2 says it of its example, where "shall" is no key word.
+			 * LOC-04 §4.2 says it of its example, where "shall" is no key word.
 			 */
 			key: boolean;
 			/**
 			 * In microseconds: since the Unix epoch, or with a Timescale since
-			 * whatever the sender counts from (LOC §2.3.1). At most 2^53 - 1,
+			 * whatever the sender counts from (LOC-04 §2.3.1). At most 2^53 - 1,
 			 * so that it is a number a decoder of WebCodecs takes as it is.
 			 */
 			timestamp: bigint;
@@ -95,7 +95,8 @@ export type VideoReceiverEvent =
 export const DEFAULT_MAX_HELD_OBJECTS = 32;
 /**
  * How many bytes of payload are held at most. **Provisional**: four
- * Objects of the largest size the sender of this package sends (1 MiB). An
+ * Objects of about the largest size the sender of this package sends
+ * (1,000,000 bytes). An
  * Object that is larger than this by itself is never held, so a viewer
  * sets the limit of its connection for an Object no higher.
  */

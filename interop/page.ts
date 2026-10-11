@@ -3,6 +3,7 @@
 // same shape as the moqtail-ts page in peers/moqtail/browser so the driver can
 // swap one for the other.
 
+import { playVideoTrack, type VideoPlayback } from "@xmoq/media";
 import {
 	connect,
 	decodeFetchBody,
@@ -34,6 +35,7 @@ import type {
 	PageFetchServing,
 	PageProperty,
 	PageReceivedObject,
+	PageVideoReport,
 	SubscriptionReport,
 } from "./xmoq-page.ts";
 
@@ -594,6 +596,15 @@ interface CatalogReading {
 let catalogReading: CatalogReading | undefined;
 let catalogPublisher: CatalogPublisher | undefined;
 
+/** What `playVideoTrack` has given this page so far. */
+interface VideoPlaying {
+	playback: VideoPlayback;
+	frames: PageVideoReport["frames"];
+	/** How the playing ended; absent while it goes on. */
+	ended: string | undefined;
+}
+let videoPlaying: VideoPlaying | undefined;
+
 window.xmoqOwn = {
 	followCatalog: withPlainErrors(async (namespace: string) => {
 		const follower = await followCatalog(connected(), {
@@ -640,6 +651,72 @@ window.xmoqOwn = {
 		})().catch((error: unknown) => {
 			console.log(`the catalog could not be read on: ${errorText(error)}`);
 		});
+	}),
+
+	playVideo: withPlainErrors(
+		async (namespace: string, trackName: string, codec: string) => {
+			const frames: PageVideoReport["frames"] = [];
+			const playback = await playVideoTrack(connected(), {
+				trackNamespace: namespaceTuple(namespace),
+				trackName: utf8.encode(trackName),
+				codec,
+				onFrame(frame) {
+					frames.push({
+						timestamp: frame.timestamp,
+						width: frame.displayWidth,
+						height: frame.displayHeight,
+					});
+					// The frame is this page's from here on.
+					frame.close();
+				},
+			});
+			const playing: VideoPlaying = { playback, frames, ended: undefined };
+			videoPlaying = playing;
+			void playback.ended.then((end) => {
+				playing.ended =
+					end.type === "subscription-ended"
+						? `subscription-ended ${end.end.type}`
+						: `${end.type} ${errorText(end.error)}`;
+				console.log(`video ended: ${playing.ended}`);
+			});
+		},
+	),
+
+	videoDecoderSupport: withPlainErrors(async (codec: string) => {
+		if (typeof VideoDecoder !== "function") return "no VideoDecoder";
+		const { supported } = await VideoDecoder.isConfigSupported({
+			codec,
+			optimizeForLatency: true,
+		});
+		return supported === true ? "supported" : "not supported";
+	}),
+
+	videoReport: withPlainErrors(async (frames: number, timeoutMs: number) => {
+		const until = performance.now() + timeoutMs;
+		for (;;) {
+			const playing = videoPlaying;
+			if (
+				playing !== undefined &&
+				(playing.frames.length >= frames ||
+					playing.ended !== undefined ||
+					performance.now() >= until)
+			) {
+				const stats = playing.playback.stats();
+				return {
+					frames: [...playing.frames],
+					stats: {
+						decoded: stats.decoded,
+						submitted: stats.submitted,
+						dropped: { ...stats.dropped },
+						decoderFailures: stats.decoderFailures,
+						lastDecoderError: stats.lastDecoderError ?? null,
+						endOfTrack: stats.endOfTrack,
+					},
+					ended: playing.ended ?? null,
+				};
+			}
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
 	}),
 
 	catalogEnded: withPlainErrors(async () => {
