@@ -1441,8 +1441,8 @@ impl Client<'_> {
         group_id: u64,
         payload: &[u8],
     ) -> Result<()> {
-        if let Some(groups) = &args.video.video_in {
-            return video::send_group(connection, track_alias, group_id, groups).await;
+        if args.video.video_in.is_some() {
+            return video::send_group(connection, track_alias, group_id, &args.video).await;
         }
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
             track_alias,

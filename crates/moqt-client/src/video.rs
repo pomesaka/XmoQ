@@ -34,6 +34,12 @@ pub struct VideoFlags {
     /// milliseconds, each with the wall-clock time as its Timestamp of LOC;
     /// after the last Group comes the first again. An experiment's as well.
     pub video_in: Option<Groups>,
+    /// `--video-streams object`: with `--video-in`, every frame goes on a
+    /// stream of its own, as the one Object of a Subgroup with its Object
+    /// ID; `group`, which is what is done without the flag, puts a Group
+    /// on one stream. An experiment's: a frame on its own stream does not
+    /// wait for one before it that was lost on the way.
+    pub stream_per_object: bool,
 }
 
 impl VideoFlags {
@@ -47,6 +53,13 @@ impl VideoFlags {
                 let groups = groups_of(&bytes);
                 anyhow::ensure!(!groups.is_empty(), "--video-in {value}: no key frame");
                 self.video_in = Some(groups);
+            }
+            "--video-streams" => {
+                self.stream_per_object = match value {
+                    "object" => true,
+                    "group" => false,
+                    other => anyhow::bail!("--video-streams {other}: group or object"),
+                };
             }
             _ => return Ok(false),
         }
@@ -92,10 +105,14 @@ pub async fn send_group<C: Connection>(
     connection: &C,
     track_alias: u64,
     group_id: u64,
-    groups: &Groups,
+    flags: &VideoFlags,
 ) -> Result<()> {
+    let groups = flags.video_in.as_deref().unwrap_or(&[]);
     let index = usize::try_from(group_id).unwrap_or(0) % groups.len().max(1);
     let frames = groups.get(index).map_or(&[][..], Vec::as_slice);
+    if flags.stream_per_object {
+        return send_objects(connection, track_alias, group_id, frames).await;
+    }
     let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
         track_alias,
         group_id,
@@ -135,6 +152,54 @@ pub async fn send_group<C: Connection>(
     Ok(())
 }
 
+/// `--video-streams object`: the frames of one Group, each on a stream of
+/// its own, at the pace of 25 frames a second.
+async fn send_objects<C: Connection>(
+    connection: &C,
+    track_alias: u64,
+    group_id: u64,
+    frames: &[Vec<u8>],
+) -> Result<()> {
+    let mut bytes = 0;
+    let mut next = tokio::time::Instant::now();
+    for (object_id, frame) in (0u64..).zip(frames) {
+        tokio::time::sleep_until(next).await;
+        next += std::time::Duration::from_millis(40);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let now = u64::try_from(now.as_micros()).unwrap_or(u64::MAX);
+        // §11.4.2: each stream is a Subgroup of its own, with the Object ID
+        // as its Subgroup ID.
+        let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
+            track_alias,
+            group_id,
+            subgroup_id: SubgroupId::Explicit(object_id),
+            publisher_priority: Some(128),
+            properties: true,
+            end_of_group: false,
+            first_object: true,
+        });
+        encoder.object(&SubgroupObject {
+            object_id,
+            properties: vec![KeyValuePair::varint(0x10, now)?],
+            status: ObjectStatus::Normal,
+            payload: frame.clone(),
+        })?;
+        bytes += frame.len();
+        let mut data = connection.open_uni().await?;
+        if let Err(error) = data.write_all(&encoder.take_bytes()).await {
+            anyhow::bail!("could not write the subgroup stream: {error:?}");
+        }
+        data.finish();
+    }
+    println!(
+        "SENT group={group_id} objects={} payload_len={bytes}",
+        frames.len()
+    );
+    Ok(())
+}
+
 /// The NAL unit type of a slice of an IDR picture, in H.264.
 const IDR_SLICE: u8 = 5;
 
@@ -155,6 +220,9 @@ pub struct AnnexBWriter {
     /// to the clock of this machine when it came. A Timestamp of LOC
     /// without a Timescale is wall-clock time.
     late: Vec<u64>,
+    /// `--viewers`: every Object that came, also one that was not taken
+    /// for being out of order (`Self::note_arrival`).
+    arrivals: Vec<(u64, u64, u64)>,
     /// The Group that is written, and the Object ID that comes next in it.
     at: Option<(u64, u64)>,
     frames: u64,
@@ -178,6 +246,7 @@ impl AnnexBWriter {
             file: None,
             path: "none".to_string(),
             late: Vec::new(),
+            arrivals: Vec::new(),
             at: None,
             frames: 0,
             groups: 0,
@@ -192,6 +261,7 @@ impl AnnexBWriter {
             file: Some(File::create(path).with_context(|| format!("--annex-b-out {path}"))?),
             path: path.to_string(),
             late: Vec::new(),
+            arrivals: Vec::new(),
             at: None,
             frames: 0,
             groups: 0,
@@ -199,6 +269,28 @@ impl AnnexBWriter {
             before: 0,
             bytes: 0,
         })
+    }
+
+    /// `--viewers`: when an Object came, whatever came before it. In the
+    /// order they came, as (Group, Object ID, microseconds from its
+    /// Timestamp to this machine's clock).
+    fn note_arrival(&mut self, group_id: u64, object: &SubgroupObject) {
+        let timestamp = object
+            .properties
+            .iter()
+            .find_map(|pair| match pair.value() {
+                // The Timestamp of LOC-04.
+                Value::Varint(value) if pair.ty() == 0x10 => Some(*value),
+                _ => None,
+            });
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let now = u64::try_from(now.as_micros()).unwrap_or(u64::MAX);
+        if let Some(timestamp) = timestamp {
+            self.arrivals
+                .push((group_id, object.object_id, now.saturating_sub(timestamp)));
+        }
     }
 
     /// Takes one Object, and prints `VIDEO_FRAME` for a frame it wrote.
@@ -209,6 +301,9 @@ impl AnnexBWriter {
         let frame = loc::to_annex_b(&object.payload)
             .with_context(|| format!("the payload of {group_id}/{}", object.object_id))?;
         let types = loc::h264_nal_unit_types(&frame);
+        if self.file.is_none() {
+            self.note_arrival(group_id, object);
+        }
         let begins_a_group = object.object_id == 0
             && types.contains(&IDR_SLICE)
             && self.at.is_none_or(|(group, _)| group_id > group);
@@ -283,6 +378,13 @@ impl Drop for AnnexBWriter {
                 at(99),
                 self.late.last().copied().unwrap_or(0),
             );
+            // WHY one line: a run with hundreds of viewers has one for each.
+            let arrivals: Vec<String> = self
+                .arrivals
+                .iter()
+                .map(|(group, object, late)| format!("{group}:{object}:{late}"))
+                .collect();
+            println!("VIDEO_ARRIVALS {}", arrivals.join(","));
             return;
         }
         println!(
