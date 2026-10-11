@@ -5,17 +5,20 @@
 
 A frame can be shown when it and every frame of its Group before it have come: that moment,
 counted from the frame's Timestamp, is how late it is here. The Objects of a Group a viewer came
-into the middle of are left out. The frames are 40 ms apart.
+into the middle of are left out. The frames are 40 ms apart, or FRAME_MS of the environment.
 """
 import statistics
 import sys
 
-FRAME_US = 40_000
+import os
+
+FRAME_US = int(os.environ.get("FRAME_MS", "40")) * 1000
 log, delay, loss, video, streams = sys.argv[1:6]
 congestion, relay_log, publisher_log = (sys.argv[6:9] + ["cubic", "", ""])[:3]
 # The median lateness of each quarter of a viewer's run, over the viewers: whether it grows.
 quarters = [[], [], [], []]
 late = []          # of every frame of every viewer, in the order of the frames
+came_late = []     # the same for when the frame itself came, whatever came before it
 episodes = []      # lengths, in frames, of runs of frames more than a frame later than the median
 never = 0          # frames that could not be shown: one before them did not come
 viewers = 0
@@ -38,6 +41,7 @@ for line in open(log):
                 never += max(objects) - obj
                 break
             # When it came, counted from the Timestamp of Object 0 of its Group.
+            came_late.append(objects[obj])
             came = objects[obj] + obj * FRAME_US
             ready = came if ready is None else max(ready, came)
             of_viewer.append(ready - obj * FRAME_US)
@@ -75,5 +79,6 @@ print(
     f"never={never} late_ms_p50={at(0.5):.0f} p95={at(0.95):.0f} p99={at(0.99):.0f} max={late[-1] / 1000:.0f} "
     f"episodes={len(episodes)} episode_frames_median={statistics.median(episodes) if episodes else 0:.0f} "
     f"episode_frames_max={max(episodes, default=0)} "
+    + f"came_ms_p50={sorted(came_late)[len(came_late) // 2] / 1000:.0f} came_p99={sorted(came_late)[int(len(came_late) * 0.99)] / 1000:.0f} "
     + " ".join(f"in_{ms}ms={within(ms):.1f}%" for ms in (50, 100, 150, 200, 300))
 )

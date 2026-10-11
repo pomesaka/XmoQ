@@ -40,6 +40,10 @@ pub struct VideoFlags {
     /// on one stream. An experiment's: a frame on its own stream does not
     /// wait for one before it that was lost on the way.
     pub stream_per_object: bool,
+    /// `--video-frame-ms N`: with `--video-in`, the time from one frame to
+    /// the next; 40 without the flag. An experiment's: 20 with a file of
+    /// Groups of 10 small frames has the shape of a track of audio.
+    pub frame_ms: Option<u64>,
 }
 
 impl VideoFlags {
@@ -54,6 +58,7 @@ impl VideoFlags {
                 anyhow::ensure!(!groups.is_empty(), "--video-in {value}: no key frame");
                 self.video_in = Some(groups);
             }
+            "--video-frame-ms" => self.frame_ms = Some(value.parse().context("--video-frame-ms")?),
             "--video-streams" => {
                 self.stream_per_object = match value {
                     "object" => true,
@@ -99,8 +104,8 @@ fn groups_of(annex_b: &[u8]) -> Groups {
     groups
 }
 
-/// `--video-in`: sends one Group on one stream, at the pace of 25 frames a
-/// second.
+/// `--video-in`: sends one Group on one stream, a frame every 40 ms or
+/// what `--video-frame-ms` says.
 pub async fn send_group<C: Connection>(
     connection: &C,
     track_alias: u64,
@@ -110,8 +115,9 @@ pub async fn send_group<C: Connection>(
     let groups = flags.video_in.as_deref().unwrap_or(&[]);
     let index = usize::try_from(group_id).unwrap_or(0) % groups.len().max(1);
     let frames = groups.get(index).map_or(&[][..], Vec::as_slice);
+    let every = std::time::Duration::from_millis(flags.frame_ms.unwrap_or(40));
     if flags.stream_per_object {
-        return send_objects(connection, track_alias, group_id, frames).await;
+        return send_objects(connection, track_alias, group_id, frames, every).await;
     }
     let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
         track_alias,
@@ -127,7 +133,7 @@ pub async fn send_group<C: Connection>(
     let mut next = tokio::time::Instant::now();
     for (object_id, frame) in (0u64..).zip(frames) {
         tokio::time::sleep_until(next).await;
-        next += std::time::Duration::from_millis(40);
+        next += every;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
@@ -153,18 +159,19 @@ pub async fn send_group<C: Connection>(
 }
 
 /// `--video-streams object`: the frames of one Group, each on a stream of
-/// its own, at the pace of 25 frames a second.
+/// its own, at the same pace.
 async fn send_objects<C: Connection>(
     connection: &C,
     track_alias: u64,
     group_id: u64,
     frames: &[Vec<u8>],
+    every: std::time::Duration,
 ) -> Result<()> {
     let mut bytes = 0;
     let mut next = tokio::time::Instant::now();
     for (object_id, frame) in (0u64..).zip(frames) {
         tokio::time::sleep_until(next).await;
-        next += std::time::Duration::from_millis(40);
+        next += every;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
