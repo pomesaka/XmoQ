@@ -54,6 +54,30 @@
 //! the relay has no publisher to ask. `compare.py` calls `full` with it
 //! `no-announce`.
 //!
+//! With `XMOQ_FUZZ_FETCH` set, one event in three is about a FETCH:
+//! `compare.py` calls `full`, `split-one` and `shared` with it `fetch`,
+//! `split-fetch` and `shared-fetch`. A subscriber sends a Standalone FETCH
+//! (half of them for the whole of Group 2, the last one the streams of
+//! these worlds have; the rest for an old Group, for several, for a range
+//! that ends beyond the last Group, and for one that begins there), a
+//! Relative or an Absolute Joining FETCH (for a SUBSCRIBE it sent, for one it
+//! is yet to send, for a Request ID that is no SUBSCRIBE), a REQUEST_UPDATE
+//! on the stream of a FETCH, or ends such a stream. A publisher answers a
+//! FETCH the relay sent it, opens the fetch stream for it, or lets the time
+//! for either run out. The I/O side reports how the passing on of a fetch
+//! stream ended, and that a stream the relay wrote is written. WHY the
+//! events of the publisher and of the I/O side name what the relay did
+//! before in the sequence, and are not drawn at random: a FETCH the relay
+//! never sent has no answer, and almost every draw would be one. In the
+//! worlds with two halves, only sessions 1 and 2 have any of this, for the
+//! track of the first half.
+//!
+//! `FUZZ_FETCHED` says how much of it the sequences got to: the FETCH
+//! requests the relay sent a publisher, the fetch streams it passed on and
+//! wrote itself, the Joining FETCH requests it held for a SUBSCRIBE to come,
+//! and the `FETCH_OK` it sent. A world in which these are near 0 has not
+//! tried what it is for.
+//!
 //! `XMOQ_FUZZ_TOUCH` chooses which events count as the ones a change is
 //! about: `subgroups` (the default; a stream that leaves the Subgroup ID to
 //! its first Object, or a second stream for a Subgroup) or `publishers` (a
@@ -79,16 +103,16 @@ use std::hash::{DefaultHasher, Hasher};
 use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError,
-    RequestUpdate, Setup, Subscribe, SubscribeOk,
+    ControlMessage, Fetch, FetchOk, FetchRange, Publish, PublishDone, PublishNamespace, ReasonPhrase,
+    RequestError, RequestUpdate, Setup, Subscribe, SubscribeOk,
 };
-use xmoq_moqt::name::{FullTrackName, TrackNamespace};
-use xmoq_moqt::params::Parameter;
+use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
+use xmoq_moqt::params::{GroupOrder, Parameter};
 use xmoq_moqt::session::Role;
 
 use crate::{
-    Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, SessionKey, StreamEnd,
-    StreamKey,
+    Action, Event, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, SessionKey,
+    StreamEnd, StreamKey,
 };
 
 struct Rng(u64);
@@ -142,6 +166,201 @@ struct Peer {
     next_stream: u64,
     next_group: u64,
     open: bool,
+    /// A Request ID that was left out for a Joining FETCH to name before
+    /// its request comes: the next request has it.
+    left_out: Option<u64>,
+    /// The Request ID of the last SUBSCRIBE.
+    subscribed: Option<u64>,
+    /// The streams of the FETCH requests it sent.
+    fetches: Vec<StreamKey>,
+}
+
+impl Peer {
+    fn new() -> Self {
+        Self { next_request: 0, next_stream: 0, next_group: 0, open: true, left_out: None, subscribed: None, fetches: Vec::new() }
+    }
+}
+
+/// What the relay did in a sequence that an event about a FETCH can name.
+#[derive(Default)]
+struct Fetched {
+    /// The FETCH requests the relay sent: the publisher's session, the
+    /// request, and the Request ID the relay gave it.
+    asked: Vec<(SessionKey, OwnRequestKey, u64)>,
+    /// The fetch streams it passes on, and the ones it writes, by the
+    /// subscriber's session and request stream.
+    passed_on: Vec<(SessionKey, StreamKey)>,
+    written: Vec<(SessionKey, StreamKey)>,
+    /// The Joining FETCH requests it holds for a SUBSCRIBE to come.
+    held: Vec<(SessionKey, StreamKey)>,
+}
+
+impl Fetched {
+    fn note(&mut self, actions: &[Action], counts: &mut [u64; 5]) {
+        for action in actions {
+            match action {
+                Action::OpenRequest { session, request, message: ControlMessage::Fetch(fetch) } => {
+                    self.asked.push((*session, *request, fetch.request_id));
+                    counts[0] += 1;
+                }
+                Action::PipeFetch { session, stream, .. } => {
+                    self.passed_on.push((*session, *stream));
+                    counts[1] += 1;
+                }
+                Action::WriteFetchStream { session, stream, .. } => {
+                    self.written.push((*session, *stream));
+                    counts[2] += 1;
+                }
+                Action::StartJoiningFetchTimer { session, stream } => {
+                    self.held.push((*session, *stream));
+                    counts[3] += 1;
+                }
+                Action::SendRequest { message: ControlMessage::FetchOk(_), .. } => counts[4] += 1,
+                _ => {}
+            }
+        }
+    }
+}
+
+fn one_of<T: Copy>(rng: &mut Rng, known: &[T]) -> Option<T> {
+    let index = usize::try_from(rng.next(u64::try_from(known.len()).unwrap().max(1))).unwrap();
+    // The later ones are the ones that are still open, more often than not.
+    known.get(index).copied().filter(|_| rng.next(3) == 0).or_else(|| known.last().copied())
+}
+
+fn at(group: u64, object: u64) -> Location {
+    Location { group, object }
+}
+
+/// An event about a FETCH; see the head of this file. `None` where the relay
+/// has done nothing yet that the event drawn could name.
+fn fetch_event(rng: &mut Rng, peers: &mut [Peer], world: World, fetched: &Fetched) -> Option<Event> {
+    // In the worlds with two halves, the first half alone.
+    let who = if world.is_split() { rng.next(2) } else { rng.next(4) };
+    let session = SessionKey(who + 1);
+    let peer = &mut peers[usize::try_from(who).unwrap()];
+    let name = if world.is_split() { track_of_half(0) } else { track(rng.next(2)) };
+    let fetch = |peer: &mut Peer, request_id: u64, range: FetchRange, parameters: Vec<Parameter>| {
+        let stream = StreamKey(peer.next_stream);
+        peer.next_stream += 1;
+        peer.fetches.push(stream);
+        Event::RequestOpened {
+            session,
+            stream,
+            first: ControlMessage::Fetch(Fetch { request_id, range, parameters }),
+        }
+    };
+    Some(match rng.next(18) {
+        0..=3 => {
+            let (start, end) = match rng.next(8) {
+                // The whole of the last Group.
+                0..=3 => (at(2, 0), at(2, 0)),
+                4 => (at(0, 0), at(0, 0)),
+                5 => (at(0, 0), at(2, 0)),
+                6 => (at(2, 0), at(9, 0)),
+                _ => (at(5, 0), at(9, 0)),
+            };
+            let parameters = match rng.next(6) {
+                // Answered by the relay itself.
+                0..=1 => vec![Parameter::FillTimeout(0)],
+                2 => vec![Parameter::GroupOrder(GroupOrder::Descending)],
+                _ => vec![],
+            };
+            let (request_id, _) = new_request_id(peer);
+            fetch(peer, request_id, FetchRange::Standalone { full_track_name: name, start, end }, parameters)
+        }
+        4..=5 => {
+            let (request_id, joining_request_id) = match (rng.next(4), peer.subscribed) {
+                // A SUBSCRIBE that is yet to come: its Request ID is left
+                // out, and the next request of the session has it.
+                (0, _) if peer.left_out.is_none() => {
+                    let left_out = peer.next_request;
+                    peer.next_request += 4;
+                    peer.left_out = Some(left_out);
+                    (left_out + 2, left_out)
+                }
+                (1, _) | (_, None) => (new_request_id(peer).0, rng.next(8)),
+                (_, Some(subscribed)) => (new_request_id(peer).0, subscribed),
+            };
+            let range = if rng.next(2) == 0 {
+                FetchRange::RelativeJoining { joining_request_id, joining_start: rng.next(3) }
+            } else {
+                FetchRange::AbsoluteJoining { joining_request_id, joining_start: rng.next(4) }
+            };
+            let parameters = if rng.next(6) == 0 { vec![Parameter::FillTimeout(0)] } else { vec![] };
+            fetch(peer, request_id, range, parameters)
+        }
+        6 => {
+            let stream = one_of(rng, &peer.fetches)?;
+            let (request_id, _) = new_request_id(peer);
+            let parameters = match rng.next(3) {
+                0 => vec![],
+                1 => vec![Parameter::SubscriberPriority(200)],
+                // Not one an update of a FETCH may carry (§10.2.12).
+                _ => vec![Parameter::Forward(true)],
+            };
+            Event::RequestMessage {
+                session,
+                stream,
+                message: ControlMessage::RequestUpdate(RequestUpdate { request_id, parameters }),
+            }
+        }
+        7 => Event::RequestClosed {
+            session,
+            stream: one_of(rng, &peer.fetches)?,
+            how: if rng.next(2) == 0 { RequestEnd::Fin } else { RequestEnd::Aborted },
+        },
+        8..=10 => {
+            let (session, request, _) = one_of(rng, &fetched.asked)?;
+            let message = match rng.next(6) {
+                0 => error(0x11),
+                1 => error(0x10),
+                2 => ControlMessage::FetchOk(FetchOk {
+                    end_of_track: false,
+                    end_location: at(2, 4),
+                    parameters: vec![],
+                    track_properties: vec![],
+                }),
+                _ => ControlMessage::FetchOk(FetchOk {
+                    end_of_track: false,
+                    end_location: at(2, 0),
+                    parameters: vec![],
+                    track_properties: vec![],
+                }),
+            };
+            Event::OwnRequestMessage { session, request, message }
+        }
+        11..=12 => {
+            let (session, _, request_id) = one_of(rng, &fetched.asked)?;
+            Event::FetchStreamOpened { session, stream: StreamKey(300 + rng.next(8)), request_id }
+        }
+        13..=14 => {
+            let (session, stream) = one_of(rng, &fetched.passed_on)?;
+            let how = match rng.next(10) {
+                0..=4 => FetchPipeEnd::Finished,
+                5 => FetchPipeEnd::UpstreamAborted(Some(0x2)),
+                6 => FetchPipeEnd::UpstreamLost,
+                7 => FetchPipeEnd::UpstreamStalled,
+                8 => FetchPipeEnd::DownstreamStopped(Some(0x1)),
+                _ => if rng.next(2) == 0 { FetchPipeEnd::DownstreamStalled } else { FetchPipeEnd::DownstreamLost },
+            };
+            Event::FetchPipeEnded { session, stream, how }
+        }
+        15 => {
+            let (session, stream) = one_of(rng, &fetched.written)?;
+            // TOO_FAR_BEHIND (0x5), for a subscriber that did not take it.
+            let given_up = if rng.next(4) == 0 { Some(0x5) } else { None };
+            Event::FetchStreamWritten { session, stream, given_up }
+        }
+        16 => {
+            let (session, stream) = one_of(rng, &fetched.held)?;
+            Event::JoiningFetchTimeout { session, stream }
+        }
+        _ => {
+            let (session, request, _) = one_of(rng, &fetched.asked)?;
+            Event::UpstreamTimeout { session, request }
+        }
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -220,10 +439,20 @@ impl World {
 }
 
 fn new_request(peer: &mut Peer) -> (u64, StreamKey) {
-    let opened = (peer.next_request, StreamKey(peer.next_stream));
-    peer.next_request += 2;
+    let (request_id, _) = new_request_id(peer);
+    let opened = (request_id, StreamKey(peer.next_stream));
     peer.next_stream += 1;
     opened
+}
+
+/// The next Request ID of a session: one that was left out for a Joining
+/// FETCH, where there is one. The second value says that it was.
+fn new_request_id(peer: &mut Peer) -> (u64, bool) {
+    if let Some(left_out) = peer.left_out.take() {
+        return (left_out, true);
+    }
+    peer.next_request += 2;
+    (peer.next_request - 2, false)
 }
 
 /// One of 25 kinds of event, about one of 4 sessions, 2 tracks, 2 Track
@@ -275,6 +504,7 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
         },
         0..=2 => {
             let (id, new) = new_request(peer);
+            peer.subscribed = Some(id);
             let forward_0 = rng.next(4) == 0;
             Event::RequestOpened {
                 session,
@@ -424,7 +654,7 @@ fn random_event(rng: &mut Rng, peers: &mut [Peer], world: World) -> Event {
         }
         // The I/O side never opens a session under a key that is in use.
         28 if !peer.open => {
-            *peer = Peer { next_request: 0, next_stream: 0, next_group: 0, open: true };
+            *peer = Peer::new();
             Event::SessionOpened { session, role: Role::Server }
         }
         _ => Event::DataStreamClosed {
@@ -642,7 +872,15 @@ fn start_a_track(relay: &mut Relay, peers: &mut [Peer], publisher: usize, subscr
             request_id,
             full_track_name: name.clone(),
             track_alias: 40,
-            parameters: vec![],
+            // WHY a Largest Object where the events are about FETCH: the
+            // relay answers a FETCH with FILL_TIMEOUT 0 itself, and works
+            // out the range of a Joining FETCH, only for a track it knows
+            // one of, and few sequences get an Object through first.
+            parameters: if std::env::var_os("XMOQ_FUZZ_FETCH").is_some() {
+                vec![Parameter::LargestObject(at(2, 3))]
+            } else {
+                vec![]
+            },
             track_properties: vec![],
         }),
     });
@@ -661,18 +899,24 @@ fn the_two_cores_answer_random_events_alike() {
     let steady = std::env::var_os("XMOQ_FUZZ_STEADY").is_some();
     let no_announce = std::env::var_os("XMOQ_FUZZ_NO_ANNOUNCE").is_some();
     let priorities = std::env::var_os("XMOQ_FUZZ_PRIORITIES").is_some();
+    let fetches = std::env::var_os("XMOQ_FUZZ_FETCH").is_some();
+    // Requests the relay sent a publisher, streams it passed on, streams it
+    // wrote, Joining FETCH requests it held, FETCH_OK it sent.
+    let mut fetch_counts = [0u64; 5];
+    let mut with_a_fetch_passed_on = 0u64;
     let mut events = 0u64;
     let (mut touching, mut differing, mut differing_before_touching) = (0u64, 0u64, 0u64);
     let (mut opened_downstream, mut objects_sent, mut with_an_object) = (0u64, 0u64, 0u64);
     let differences = || crate::DIFFERENCES.load(std::sync::atomic::Ordering::Relaxed);
+    // The first difference of each sequence that differs, by its kind.
+    let mut first_differences: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     // `DefaultHasher::new()` has fixed keys, unlike the hasher of a `HashMap`.
     let mut digest = DefaultHasher::new();
     for seed in 1..=runs {
         let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let mut relay = Relay::new("fuzz/0");
-        let mut peers: Vec<Peer> = (0..4)
-            .map(|_| Peer { next_request: 0, next_stream: 0, next_group: 0, open: true })
-            .collect();
+        let mut peers: Vec<Peer> = (0..4).map(|_| Peer::new()).collect();
+        let mut fetched = Fetched::default();
         for session in 1..=4 {
             relay.handle(Event::SessionOpened { session: SessionKey(session), role: Role::Server });
         }
@@ -709,8 +953,15 @@ fn the_two_cores_answer_random_events_alike() {
         let (mut opened, mut touched, mut differed) = (Vec::new(), false, false);
         let objects_before = objects_sent;
         let mut waits: Vec<((SessionKey, u64), u64)> = Vec::new();
+        let passed_on_before = fetch_counts[1];
         for index in 0..length {
-            let event = random_event(&mut rng, &mut peers, world);
+            let about_a_fetch = if fetches && rng.next(3) == 0 {
+                fetch_event(&mut rng, &mut peers, world, &fetched)
+            } else {
+                None
+            };
+            let is_about_a_fetch = about_a_fetch.is_some();
+            let event = about_a_fetch.unwrap_or_else(|| random_event(&mut rng, &mut peers, world));
             // A timer that runs out is one the relay started: the last one
             // for the alias, or, every fourth event, the first, which a
             // later wait under the alias must not be ended by.
@@ -732,6 +983,7 @@ fn the_two_cores_answer_random_events_alike() {
                 "waiting-or-draining" => publishes_to_a_waiting_or_draining_track(&event, &mut published),
                 "asks" => several_can_be_asked(&event, &mut published),
                 "priority" => opens_a_group_with_another_priority(&event, &mut priorities_of_groups),
+                "fetch" => is_about_a_fetch,
                 other => panic!("XMOQ_FUZZ_TOUCH={other}: not a kind of event fuzz.rs knows"),
             };
             if world == World::Shared {
@@ -750,6 +1002,7 @@ fn the_two_cores_answer_random_events_alike() {
             }
             let before = differences();
             let actions = relay.handle(event);
+            fetched.note(&actions, &mut fetch_counts);
             for action in &actions {
                 if let Action::StartDrainTimer { session, track_alias, wait } = action {
                     waits.push(((*session, *track_alias), *wait));
@@ -758,6 +1011,7 @@ fn the_two_cores_answer_random_events_alike() {
             if differences() != before && !differed {
                 differed = true;
                 differing += 1;
+                *first_differences.entry(crate::LAST_DIFFERENCE.lock().unwrap().clone()).or_default() += 1;
                 // The event itself may be the one that touches.
                 if !touched && !touches {
                     differing_before_touching += 1;
@@ -776,15 +1030,27 @@ fn the_two_cores_answer_random_events_alike() {
         }
         touching += u64::from(touched);
         with_an_object += u64::from(objects_sent != objects_before);
+        with_a_fetch_passed_on += u64::from(fetch_counts[1] != passed_on_before);
     }
     println!("FUZZ runs={runs} events={events} digest={:016x}", digest.finish());
     println!("FUZZ_WORLD {} touch={touch}", std::env::var("XMOQ_FUZZ_WORLD").unwrap_or_else(|_| "v1".to_string()));
     println!(
         "FUZZ_TOUCH sequences={runs} touching={touching} differing={differing} differing_before_touching={differing_before_touching}"
     );
+    let mut by_count: Vec<(&String, &u64)> = first_differences.iter().collect();
+    by_count.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (what, sequences) in by_count {
+        println!("FUZZ_FIRST_DIFFERENCE sequences={sequences} {what}");
+    }
     println!(
         "FUZZ_CARRIED streams_opened_to_subscribers={opened_downstream} objects_sent={objects_sent} sequences_with_an_object={with_an_object} of {runs}"
     );
+    if fetches {
+        let [asked, passed_on, written, held, fetch_ok] = fetch_counts;
+        println!(
+            "FUZZ_FETCHED asked_of_publishers={asked} streams_passed_on={passed_on} streams_written={written} joining_held={held} fetch_ok_sent={fetch_ok} sequences_with_a_stream_passed_on={with_a_fetch_passed_on} of {runs}"
+        );
+    }
     println!(
         "FUZZ_UNKNOWN_TO_THE_OLD_CORE events={}",
         crate::UNKNOWN_TO_THE_OLD_CORE.load(std::sync::atomic::Ordering::Relaxed)

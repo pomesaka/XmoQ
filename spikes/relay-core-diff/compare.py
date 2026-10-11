@@ -8,11 +8,24 @@ Add `--world v1|distinct|full|split|one-publisher|split-one|shared` to either
 for what the random events are made of; `fuzz.rs` describes them.
 `split-steady` and `shared-steady` are `split-one` and `shared` in which the
 publisher of the second half never says PUBLISH_DONE, and `no-announce` is
-`full` in which nobody announces a namespace. The default
-is `v1`. With `--priorities` the subgroup streams have one of three Publisher
+`full` in which nobody announces a namespace. `fetch`, `split-fetch` and
+`shared-fetch` are `full`, `split-one` and `shared` in which one event in
+three is about a FETCH (in the two with halves, of the first half only). The
+default is `v1`. With `--priorities` the subgroup streams have one of three Publisher
 Priorities, where they all have the same without it.
 `--touch subgroups|publishers|republish|waiting-or-draining|asks|priority` says which events `--touching` takes
 for the ones a change is about; the default is `subgroups`.
+
+`--kinds` is for a change that is meant to alter what the relay does, where
+the events it alters it for are none `--touch` knows. The sequences run to
+their end, and for every sequence in which the two versions differ, the first
+difference is counted under its kind: the kind of the event, and the kinds of
+the actions each version answered with. "The versions differ in this one
+way" then means: in every sequence that differs, they first differ in this
+way. It says nothing about what follows, since two versions that have parted
+hold different things and differ in everything after for that reason alone.
+The run fails for a bystander that is treated differently, and when nothing
+was counted; not for the differences.
 
 `--touching` is for a change that is meant to alter what the relay does with
 some inputs and nothing else. `fuzz.rs` knows which events those inputs are
@@ -56,7 +69,10 @@ feed every event to both and to compare the actions they return. Then it runs
 
 --mutate is the check of the tool itself: it changes one decision of <after>
 (the Error Code after an upstream timeout) before comparing, and the run has
-to end with content mismatches and exit code 1.
+to end with content mismatches and exit code 1. --mutate-fetch does the same with
+a decision about a FETCH (the Error Code for a FETCH whose publisher did not
+answer in time), for the worlds with FETCH: without them no sequence gets to
+that decision.
 
 --same asks another question of one version: do the same events always lead
 to the same actions, in the same order? It runs the random events through
@@ -123,13 +139,14 @@ SPIKES = [
 ]
 
 
-TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks", "priority")
+TOUCHES = ("subgroups", "publishers", "republish", "waiting-or-draining", "asks", "priority", "fetch")
 WORLDS = ("v1", "distinct", "full", "split", "one-publisher", "split-one", "shared", "split-steady", "shared-steady",
-          "no-announce")
+          "no-announce", "fetch", "split-fetch", "shared-fetch")
 # Worlds of `fuzz.rs` with something taken out on top: the world, and the
 # variable that tells `fuzz.rs` what.
 VARIANTS = {"split-steady": ("split-one", "XMOQ_FUZZ_STEADY"), "shared-steady": ("shared", "XMOQ_FUZZ_STEADY"),
-            "no-announce": ("full", "XMOQ_FUZZ_NO_ANNOUNCE")}
+            "no-announce": ("full", "XMOQ_FUZZ_NO_ANNOUNCE"), "fetch": ("full", "XMOQ_FUZZ_FETCH"),
+            "split-fetch": ("split-one", "XMOQ_FUZZ_FETCH"), "shared-fetch": ("shared", "XMOQ_FUZZ_FETCH")}
 
 
 def jj(*args):
@@ -227,6 +244,51 @@ pub(crate) static DIFFERENCES: std::sync::atomic::AtomicU64 = std::sync::atomic:
 pub(crate) static BYSTANDER_DIFFERENCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Actions of the new core for those sessions, so far.
 pub(crate) static BYSTANDER_ACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// What the last such difference was: the kind of event, and the kinds of
+/// actions each core answered with. For `fuzz.rs`, which counts the first
+/// difference of every sequence under it.
+pub(crate) static LAST_DIFFERENCE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The name of the variant a `Debug` text begins with.
+fn variant(text: &str) -> &str {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or("")
+}
+
+/// The kind of an event, from its `Debug` text: its variant, the variant of
+/// the message it brings, and for a REQUEST_UPDATE the parameters it has.
+fn kind_of_event(event: &str) -> String {
+    let message = event.split("message: ").nth(1).or_else(|| event.split("first: ").nth(1));
+    let Some(message) = message else {
+        return variant(event).to_string();
+    };
+    let parameters = if variant(message) == "RequestUpdate" {
+        let listed = message.split("parameters: [").nth(1).and_then(|rest| rest.split(']').next()).unwrap_or("");
+        let names: Vec<&str> = listed.split(", ").map(variant).filter(|name| !name.is_empty()).collect();
+        format!(" {}", if names.is_empty() { "no parameters".to_string() } else { names.join(" ") })
+    } else {
+        String::new()
+    };
+    format!("{}({}{parameters})", variant(event), variant(message))
+}
+
+/// The kind of an action, from its `Debug` text: its variant, the variant of
+/// the message it sends, and the code it gives (of a REQUEST_ERROR, a reset,
+/// a stop, a closed session).
+fn kind_of(action: &str) -> String {
+    let number_after = |field: &str| {
+        let digits = action.split(field).nth(1)?;
+        let end = digits.find(|c: char| !c.is_ascii_digit()).unwrap_or(digits.len());
+        (end > 0).then(|| digits[..end].to_string())
+    };
+    let message = action.split("message: ").nth(1).map(variant);
+    let code = number_after("error_code: ").or_else(|| number_after(" code: "));
+    match (message, code) {
+        (Some(message), Some(code)) => format!("{}({message} {code})", variant(action)),
+        (Some(message), None) => format!("{}({message})", variant(action)),
+        (None, Some(code)) => format!("{}({code})", variant(action)),
+        (None, None) => variant(action).to_string(),
+    }
+}
 
 /// Request streams of a session that is a bystander in part: what is done on
 /// them, and to the subscription that was accepted on them, has to be the
@@ -318,7 +380,11 @@ impl OutNames {
             Action::SendRequest { session, stream, .. }
             | Action::FinishRequest { session, stream, .. }
             | Action::ResetRequest { session, stream, .. }
-            | Action::StopRequest { session, stream, .. } => streams.contains(&(session.0, stream.0)),
+            | Action::StopRequest { session, stream, .. }
+            | Action::PipeFetch { session, stream, .. }
+            | Action::AbortFetchPipe { session, stream, .. }
+            | Action::WriteFetchStream { session, stream, .. }
+            | Action::StartJoiningFetchTimer { session, stream } => streams.contains(&(session.0, stream.0)),
             Action::OpenDataStream { session, header, .. } => {
                 self.watched_aliases.contains(&(session.0, header.track_alias))
             }
@@ -527,6 +593,11 @@ impl Relay {
             println!("CORE_MISMATCH kind={kind} {line}");
             if kind != "order" {
                 DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let kinds = |actions: &[Action]| {
+                    actions.iter().map(|action| kind_of(&format!("{action:?}"))).collect::<Vec<_>>().join(" ")
+                };
+                *LAST_DIFFERENCE.lock().unwrap() =
+                    format!("{kind} | {} | {} | {}", kind_of_event(&said), kinds(&before), kinds(&after));
             }
             let keep_going = std::env::var_os("XMOQ_DIFF_KEEP_GOING").is_some();
             assert!(kind == "order" || !cfg!(test) || keep_going, "CORE_MISMATCH kind={kind} {line}");
@@ -552,7 +623,9 @@ def same(revision):
             "#[cfg(test)]\n"
             "pub(crate) static BYSTANDER_ACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);\n"
             "#[cfg(test)]\n"
-            "pub(crate) static BYSTANDER_STREAMS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());\n")
+            "pub(crate) static BYSTANDER_STREAMS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());\n"
+            "#[cfg(test)]\n"
+            "pub(crate) static LAST_DIFFERENCE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());\n")
     path.write_text(once(path.read_text(), "mod events;\n", "mod events;\n#[cfg(test)]\nmod fuzz;\n", "mod events;") + stub)
     digests = []
     for _ in range(3):
@@ -635,7 +708,7 @@ def report(name, output, totals, random_events=False):
               f"in which the versions differ: {touch.group(3)}; differ before such an event: {touch.group(4)}")
         totals["before_touching"] += int(touch.group(4))
         totals["differing_sequences"] += int(touch.group(3))
-    elif random_events and ("--touching" in sys.argv or "--random-only" in sys.argv):
+    elif random_events and any(flag in sys.argv for flag in ("--touching", "--random-only", "--kinds")):
         # WHY checked: without the line nothing was counted, and 0 would read as a pass.
         print("    THE SEQUENCES WERE NOT COUNTED: no FUZZ_TOUCH line")
         totals["not_counted"] += 1
@@ -658,6 +731,23 @@ def report(name, output, totals, random_events=False):
             totals["not_counted"] += 1
     elif random_events:
         print("    THE EVENTS UNKNOWN TO THE OLD CORE WERE NOT COUNTED: no FUZZ_UNKNOWN_TO_THE_OLD_CORE line")
+        totals["not_counted"] += 1
+    first = re.findall(r"FUZZ_FIRST_DIFFERENCE sequences=(\d+) (.*)", output)
+    if first:
+        # WHY "first": once the two versions have parted in a sequence they
+        # hold different things, and everything after differs for that
+        # reason alone. What the table can say is that in every sequence
+        # that differs, the versions part at one of these.
+        print("    the first difference of each sequence that differs, by its kind "
+              "(sequences: kind | event | actions before | actions after):")
+        for count, what in first:
+            print(f"      {count:>6}: {what}")
+        print("      Nothing is said here about what follows the first difference of a sequence.")
+    fetched = re.search(r"FUZZ_FETCHED (.*)", output)
+    if fetched:
+        print(f"    what the new version did about FETCH in the random events: {fetched.group(1)}")
+    elif random_events and os.environ.get("XMOQ_FUZZ_FETCH"):
+        print("    WHAT WAS DONE ABOUT FETCH WAS NOT COUNTED: no FUZZ_FETCHED line")
         totals["not_counted"] += 1
     carried = re.search(r"FUZZ_CARRIED (.*)", output)
     if carried:
@@ -702,7 +792,7 @@ def main():
         os.environ["XMOQ_FUZZ_TOUCH"] = sys.argv[at + 1]
         del sys.argv[at:at + 2]
     print(f"touch: {os.environ.get('XMOQ_FUZZ_TOUCH', 'subgroups')}")
-    if "--touching" in sys.argv:
+    if "--touching" in sys.argv or "--kinds" in sys.argv:
         os.environ["XMOQ_DIFF_KEEP_GOING"] = "1"
     if "--priorities" in sys.argv:
         os.environ["XMOQ_FUZZ_PRIORITIES"] = "1"
@@ -726,9 +816,15 @@ def main():
     patch_new_core()
     if "--mutate" in sys.argv:
         path = WORK / CORE / "routing.rs"
-        path.write_text(once(path.read_text(), "&Refusal::code(request_error_code::TIMEOUT),",
-                             "&Refusal::code(request_error_code::DOES_NOT_EXIST),", "the TIMEOUT refusal"))
+        path.write_text(once(path.read_text(), "let too_late = Refusal::code(request_error_code::TIMEOUT);",
+                             "let too_late = Refusal::code(request_error_code::DOES_NOT_EXIST);", "the TIMEOUT refusal"))
         print("MUTATED: the new core answers DOES_NOT_EXIST where it answered TIMEOUT")
+    if "--mutate-fetch" in sys.argv:
+        path = WORK / CORE / "fetch.rs"
+        path.write_text(once(path.read_text(), "let too_late = Refusal::code(request_error_code::TIMEOUT);",
+                             "let too_late = Refusal::code(request_error_code::DOES_NOT_EXIST);",
+                             "the TIMEOUT refusal of a FETCH"))
+        print("MUTATED: the new core refuses a FETCH with DOES_NOT_EXIST where it refused it with TIMEOUT")
     totals = collections.Counter()
     output = compared("test", "--locked", "-p", "xmoq-relay-core", "--", "--nocapture", "--test-threads", "1")
     report("tests of xmoq-relay-core and the random events", output, totals, random_events=True)
@@ -748,7 +844,7 @@ def main():
             totals["failed"] += not matched
     print(f"TOTAL content={totals['content']} state={totals['state']} sequence={totals['sequence']} "
           f"order={totals['order']} failed={totals['failed']}")
-    if totals["not_counted"] and ("--touching" in sys.argv or "--random-only" in sys.argv):
+    if totals["not_counted"] and any(flag in sys.argv for flag in ("--touching", "--random-only", "--kinds")):
         # WHY no counts here: the sequences were not counted, and a line of
         # zeros would be read as a result.
         print("NOT COMPARED: the random sequences were not counted (see above).")
@@ -759,6 +855,14 @@ def main():
         print(f"TOUCHING differing_before_touching={totals['before_touching']} bystander={totals['bystander']} "
               f"not_counted={totals['not_counted']}")
         sys.exit(1 if totals["before_touching"] or totals["bystander"] or totals["not_counted"] else 0)
+    if "--kinds" in sys.argv:
+        # For a change that is meant to alter what the relay does: the
+        # sequences differ, and the table above says where each one first
+        # does. What fails the run is a bystander treated differently, and a
+        # run that did not count.
+        print(f"KINDS differing_sequences={totals['differing_sequences']} bystander={totals['bystander']} "
+              f"not_counted={totals['not_counted']}")
+        sys.exit(1 if totals["bystander"] or totals["not_counted"] else 0)
     if "--random-only" in sys.argv:
         # For a change that comes with tests of its own: those differ between
         # the versions, as they are meant to, and say nothing about whether
