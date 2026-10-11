@@ -190,6 +190,35 @@ pub fn asked(request_id: u64) {
     println!("ASKED request_id={request_id}");
 }
 
+/// A Standalone FETCH for this client's track came, with this Request ID.
+pub fn fetch_asked(request_id: u64, start: Location, end: Location) {
+    println!(
+        "FETCH_ASKED request_id={request_id} start_group={} start_object={} end_group={} end_object={}",
+        start.group, start.object, end.group, end.object
+    );
+}
+
+/// This client accepted that FETCH: the End Location of its `FETCH_OK`.
+pub fn fetch_answered(request_id: u64, end_location: Location) {
+    println!(
+        "FETCH_ANSWERED request_id={request_id} end_group={} end_object={}",
+        end_location.group, end_location.object
+    );
+}
+
+/// This client refused that FETCH, with this code.
+pub fn fetch_not_answered(request_id: u64, error_code: u64) {
+    println!("FETCH_ANSWERED request_id={request_id} error_code={error_code:#x}");
+}
+
+/// Printed once for every FETCH this client accepted, whatever became of
+/// it. `how` is one word; `code` is the code the subscriber ended it with,
+/// where it did; `objects` counts the Objects written to their end.
+pub fn fetch_served(request_id: u64, how: &str, code: Option<u32>, objects: u64) {
+    let code = code.map_or_else(|| "none".to_string(), |code| format!("{code:#x}"));
+    println!("FETCH_SERVED request_id={request_id} how={how} code={code} objects={objects}");
+}
+
 /// A FETCH of this client went out, with this Request ID.
 pub fn fetch_sent(request_id: u64) {
     println!("FETCH_SENT request_id={request_id}");

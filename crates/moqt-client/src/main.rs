@@ -7,7 +7,9 @@
 mod fetching;
 mod hex;
 mod io;
+mod published;
 mod report;
+mod serving;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,10 +21,10 @@ use tokio::time::Instant;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
-use xmoq_moqt::fetch::FetchHeader;
+use xmoq_moqt::fetch::{FetchHeader, FetchObject};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, FetchRange, ReasonPhrase, RequestError, publish_done_status,
+    ControlMessage, Fetch, FetchRange, ReasonPhrase, RequestError, RequestOk, publish_done_status,
     request_error_code, setup_option,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
@@ -41,6 +43,8 @@ use xmoq_moqt_io::{
 
 use crate::fetching::{BodyEnd, Fetches, Happened, Note, Reading, StreamEnded, Tell};
 use crate::io::{DataInbox, RequestStream};
+use crate::published::Published;
+use crate::serving::{Answer, Answers, Over, Pace};
 
 /// Track Alias this client announces in PUBLISH. It publishes one track per
 /// session, so any value is unique (§11.1).
@@ -189,6 +193,13 @@ struct FetchArgs {
     join: Option<Join>,
     /// How this client reads a fetch stream.
     reading: Reading,
+    /// `--answer-fetch`: a publisher answers a Standalone FETCH for its
+    /// track from the Objects it sent, at this pace. Without the flag it
+    /// refuses every FETCH with `NOT_SUPPORTED`.
+    ///
+    /// WHY a flag and not what a publisher does: drivers count on a
+    /// publisher that refuses, to see what a relay makes of the refusal.
+    answering: Option<Pace>,
 }
 
 /// The Joining FETCH of `--join`.
@@ -226,6 +237,10 @@ struct FetchFlags {
     read_after_ms: u64,
     read_every_ms: u64,
     cancel_after_objects: Option<u64>,
+    answer: bool,
+    answer_delay_ms: u64,
+    stream_delay_ms: u64,
+    write_every_ms: u64,
 }
 
 impl FetchFlags {
@@ -256,6 +271,15 @@ impl FetchFlags {
             "--fetch-cancel-after-objects" => {
                 self.cancel_after_objects =
                     Some(value.parse().context("--fetch-cancel-after-objects")?);
+            }
+            "--fetch-answer-delay-ms" => {
+                self.answer_delay_ms = value.parse().context("--fetch-answer-delay-ms")?;
+            }
+            "--fetch-stream-delay-ms" => {
+                self.stream_delay_ms = value.parse().context("--fetch-stream-delay-ms")?;
+            }
+            "--fetch-write-every-ms" => {
+                self.write_every_ms = value.parse().context("--fetch-write-every-ms")?;
             }
             _ => return Ok(false),
         }
@@ -298,6 +322,16 @@ impl FetchFlags {
         if self.cancel_after_objects == Some(0) {
             return Some("--fetch-cancel-after-objects 0 is never reached");
         }
+        if self.answer && mode != "publish" && mode != "publish-namespace" {
+            return Some("--answer-fetch belongs to the modes that publish");
+        }
+        let paced =
+            self.answer_delay_ms != 0 || self.stream_delay_ms != 0 || self.write_every_ms != 0;
+        if paced && !self.answer {
+            return Some(
+                "--fetch-answer-delay-ms, --fetch-stream-delay-ms and --fetch-write-every-ms need --answer-fetch",
+            );
+        }
         // A range that ends before it starts is the session's to refuse,
         // where the FETCH is made (`Session::fetch`).
         None
@@ -318,6 +352,11 @@ impl FetchFlags {
                 every: Duration::from_millis(self.read_every_ms),
                 cancel_after_objects: self.cancel_after_objects,
             },
+            answering: self.answer.then(|| Pace {
+                answer_after: Duration::from_millis(self.answer_delay_ms),
+                stream_after: Duration::from_millis(self.stream_delay_ms),
+                write_every: Duration::from_millis(self.write_every_ms),
+            }),
         }
     }
 }
@@ -485,6 +524,7 @@ fn parse_args() -> Result<Args> {
             "--publish-on-line" => Some(&mut publish_on_line),
             "--serve-on-line" => Some(&mut serve_on_line),
             "--join-at-once" => Some(&mut fetch.join_at_once),
+            "--answer-fetch" => Some(&mut fetch.answer),
             _ => None,
         };
         if let Some(switch) = switch {
@@ -614,12 +654,18 @@ struct Client<'a> {
     /// The Location of the last Object this client sent: the Largest Object
     /// of its track (§10.2.11).
     largest_sent: Option<Location>,
+    /// The Objects this client sent, for a FETCH.
+    published: Published,
+    /// The FETCH requests of the peer that are being answered.
+    answers: Answers,
     args: &'a Args,
 }
 
 /// What a client that publishes turns to between the things its mode does.
 enum Attention {
     Peer(PeerRequestStreamEvent<<WtConnection as Connection>::Send>),
+    /// A task that answers a FETCH has something to tell.
+    Note(serving::Note),
     /// A unidirectional stream of the peer.
     Data(UniEvent),
 }
@@ -627,10 +673,12 @@ enum Attention {
 /// The next thing a client that publishes has to turn to.
 async fn attention(
     peer_requests: &mut io::PeerRequests,
+    answers: &mut Answers,
     objects: &mut DataInbox,
 ) -> Result<Attention> {
     tokio::select! {
         event = peer_requests.next_event() => Ok(Attention::Peer(event?)),
+        note = answers.next_note() => Ok(Attention::Note(note)),
         event = objects.next_event() => Ok(Attention::Data(event?)),
     }
 }
@@ -1276,14 +1324,14 @@ impl Client<'_> {
                         // through a `republish`: it is the same track.
                         let group_id = self.args.first_group + sent;
                         self.send_object(track_alias, group_id, payload).await?;
-                        self.sent(group_id);
+                        self.sent(group_id, payload);
                         sent += 1;
                         stream_count += 1;
                     }
                     None if sent == 0 => bail!("stdin closed before the send trigger"),
                     None => break publish_done_status::TRACK_ENDED,
                 },
-                turned = attention(&mut peer_requests, &mut self.objects) => {
+                turned = attention(&mut peer_requests, &mut self.answers, &mut self.objects) => {
                     self.attend(turned?, &mut None, None).await?;
                 }
                 // This client has no subgroup stream open between Objects, so a
@@ -1320,6 +1368,7 @@ impl Client<'_> {
             }
         };
 
+        self.leave_answers();
         // §10.11: PUBLISH_DONE goes out after the data streams are closed, and
         // the request stream is closed right after it. `send_object` closes its
         // data stream before it returns.
@@ -1463,13 +1512,13 @@ impl Client<'_> {
                             bail!("asked to send while nobody is subscribed");
                         };
                         self.send_object(serving.track_alias, group_id, payload).await?;
-                        self.sent(group_id);
+                        self.sent(group_id, payload);
                         group_id += 1;
                         serving.streams += 1;
                     }
                     None => break,
                 },
-                turned = attention(&mut peer_requests, &mut self.objects) => {
+                turned = attention(&mut peer_requests, &mut self.answers, &mut self.objects) => {
                     self.attend(turned?, &mut serving, Some(&mut stdin)).await?;
                 }
                 // §5.1: the subscriber ends the subscription with STOP_SENDING.
@@ -1486,6 +1535,7 @@ impl Client<'_> {
             }
         }
 
+        self.leave_answers();
         // The driver is done. §10.11: PUBLISH_DONE after the data streams are
         // closed, then a FIN; `send_object` closes its stream before it
         // returns.
@@ -1549,8 +1599,8 @@ impl Client<'_> {
     }
 
     /// Waits for `work`, and meanwhile turns to what a client that publishes
-    /// has to: the requests of the peer, and the streams it opens. No
-    /// SUBSCRIBE is served meanwhile.
+    /// has to: the requests of the peer, the FETCH requests it answers, the
+    /// streams the peer opens. No SUBSCRIBE is served meanwhile.
     async fn attending<T>(
         &mut self,
         peer_requests: &mut io::PeerRequests,
@@ -1560,7 +1610,7 @@ impl Client<'_> {
         loop {
             let turned = tokio::select! {
                 done = &mut work => return Ok(done),
-                turned = attention(peer_requests, &mut self.objects) => turned?,
+                turned = attention(peer_requests, &mut self.answers, &mut self.objects) => turned?,
             };
             self.attend(turned, &mut None, None).await?;
         }
@@ -1579,6 +1629,12 @@ impl Client<'_> {
                 let track = self.args.full_track_name()?;
                 self.on_peer_request_event(event, &track, serving, stdin)
                     .await
+            }
+            Attention::Note(serving::Note(stream, happened)) => {
+                if let Some(over) = self.answers.happened(stream, happened) {
+                    self.fetch_over(stream, over);
+                }
+                Ok(())
             }
             Attention::Data(event) => self.on_unasked_stream(event),
         }
@@ -1610,12 +1666,53 @@ impl Client<'_> {
         Ok(())
     }
 
-    /// Notes an Object that was sent, Object 0 of its Group.
-    fn sent(&mut self, group_id: u64) {
+    /// Notes an Object that was sent, Object 0 of its Group, and keeps it
+    /// for a FETCH where this client answers one.
+    fn sent(&mut self, group_id: u64, payload: &[u8]) {
         self.largest_sent = Some(Location {
             group: group_id,
             object: 0,
         });
+        if self.args.fetch.answering.is_none() {
+            return;
+        }
+        self.published.push(FetchObject {
+            group_id,
+            // Every `--subgroup-id` gives the one Object of a Group, Object
+            // 0, the Subgroup 0.
+            subgroup_id: Some(0),
+            object_id: 0,
+            // §12.4: "If omitted, the Default Publisher Priority is 128";
+            // this client sends no Track Property.
+            publisher_priority: self.args.publisher_priority.unwrap_or(128),
+            properties: self.args.object_properties.clone(),
+            payload: payload.to_vec(),
+        });
+    }
+
+    /// A FETCH this client answered is over.
+    fn fetch_over(&mut self, stream: u64, over: Over) {
+        if over.peer_gone {
+            self.session.on_peer_request_closed(over.request);
+            return;
+        }
+        // The subscriber's direction is still open: what comes on it is the
+        // session's to see, which answers none of it from here on.
+        self.session.on_fetch_answer_ended(over.request);
+        self.said_the_last.insert(stream, over.request);
+        // §3.3.2: "Implementations SHOULD cancel requests by abruptly
+        // terminating any directions of a stream that are still open by
+        // resetting or sending STOP_SENDING." The relay does the same.
+        if let Some(code) = over.reset {
+            self.stops.stop(stream, code);
+        }
+    }
+
+    /// The mode is done: the FETCH requests that are still answered end.
+    fn leave_answers(&mut self) {
+        for over in self.answers.leave() {
+            self.session.on_peer_request_closed(over.request);
+        }
     }
 
     /// Sends the last this client says on a request stream of the peer, and
@@ -1636,6 +1733,76 @@ impl Client<'_> {
             let _ = xmoq_moqt_io::send_message(&mut send, &response, &trace, &label).await;
             send.finish();
         });
+    }
+
+    /// Answers a FETCH of the peer from the Objects this client sent
+    /// (§10.12.3), or gives back the stream and the code to refuse it with.
+    fn answer_fetch(
+        &mut self,
+        stream: u64,
+        request: PeerRequestId,
+        send: <WtConnection as Connection>::Send,
+        fetch: &Fetch,
+        track: &FullTrackName,
+    ) -> Result<Option<(<WtConnection as Connection>::Send, u64)>> {
+        // A relay turns a Joining FETCH into a Standalone one before it
+        // asks a publisher, as `@xmoq/moqt` assumes too.
+        let FetchRange::Standalone {
+            full_track_name,
+            start,
+            end,
+        } = &fetch.range
+        else {
+            return Ok(Some((send, request_error_code::NOT_SUPPORTED)));
+        };
+        if full_track_name != track {
+            return Ok(Some((send, request_error_code::DOES_NOT_EXIST)));
+        }
+        report::fetch_asked(request.value(), *start, *end);
+        // §10.2.8: "If omitted from FETCH, the receiver uses Ascending".
+        let group_order = fetch
+            .parameters
+            .iter()
+            .find_map(|parameter| match parameter {
+                Parameter::GroupOrder(order) => Some(*order),
+                _ => None,
+            })
+            .unwrap_or(GroupOrder::Ascending);
+        let refusal = if self.answers.has_room() {
+            self.published.answer(*start, *end, group_order)
+        } else {
+            Err(request_error_code::EXCESSIVE_LOAD)
+        };
+        let answer = match refusal {
+            Ok(answer) => answer,
+            Err(code) => {
+                report::fetch_not_answered(request.value(), code);
+                return Ok(Some((send, code)));
+            }
+        };
+        // End Of Track 0: the track goes on while this client answers.
+        let (ok, owed) = self
+            .session
+            .accept_fetch(request, false, answer.end_location, vec![])?;
+        let mut messages = vec![ok];
+        messages.extend((0..owed).map(|_| ControlMessage::RequestOk(RequestOk::default())));
+        report::fetch_answered(request.value(), answer.end_location);
+        self.answers.start(
+            stream,
+            request,
+            send,
+            Answer {
+                messages,
+                header: FetchHeader {
+                    request_id: request.value(),
+                },
+                group_order,
+                pieces: answer.pieces,
+            },
+            self.connection,
+            &self.args.trace,
+        );
+        Ok(None)
     }
 
     /// A request of the peer, in the modes that publish.
@@ -1692,6 +1859,12 @@ impl Client<'_> {
         // (DUPLICATE_SUBSCRIPTION, §5.1).
         let serves = matches!(self.args.mode, Mode::PublishNamespace { .. });
         let (send, error_code) = match peer_request {
+            PeerRequest::Fetch(fetch) if self.args.fetch.answering.is_some() => {
+                match self.answer_fetch(stream, request, send, &fetch, track)? {
+                    None => return Ok(()),
+                    Some(refused) => refused,
+                }
+            }
             PeerRequest::Fetch(_) => (send, request_error_code::NOT_SUPPORTED),
             // WHY one code for every request in the mode that
             // publishes: it serves none, and said so with this code
@@ -1733,6 +1906,15 @@ impl Client<'_> {
                     .await?;
             }
             PeerRequestStreamEvent::Message { stream, message } => {
+                if let Some(request) = self.answers.request_on(stream) {
+                    // A REQUEST_UPDATE for a FETCH that is answered changes
+                    // nothing and gets its REQUEST_OK.
+                    let event = self.session.on_peer_request_message(request, message)?;
+                    if let PeerRequestEvent::UpdateAccepted { response } = event {
+                        self.answers.say(stream, response);
+                    }
+                    return Ok(());
+                }
                 let Some(served) = serving.as_mut().filter(|served| served.stream == stream) else {
                     // What crosses this client's PUBLISH_DONE or its
                     // REQUEST_ERROR is ignored by the session, which still
@@ -1765,6 +1947,10 @@ impl Client<'_> {
                 }
             }
             PeerRequestStreamEvent::Closed { stream, how } => {
+                let closed = serving::Happened::PeerClosed(how);
+                if let Some(over) = self.answers.happened(stream, closed) {
+                    self.fetch_over(stream, over);
+                }
                 if let Some(request) = self.said_the_last.remove(&stream) {
                     self.session.on_peer_request_closed(request);
                 }
@@ -1856,6 +2042,8 @@ async fn run_session(
         peer_requests,
         said_the_last: HashMap::new(),
         largest_sent: None,
+        published: Published::default(),
+        answers: Answers::new(args.fetch.answering.unwrap_or_default()),
         args,
     };
     // The session inbox is watched for the rest of the session: it reports a
