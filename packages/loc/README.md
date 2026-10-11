@@ -65,4 +65,4 @@ Everything is bytes and numbers: no I/O, and **no other package of this reposito
 
 ## Checked against
 
-`fixtures/loc-04/` has the start of a video stream of `moqlivemock`'s publisher: its two payloads are read by `toAnnexB`, and the stream as a whole by the decoder of `@xmoq/moqt` (a test there), not by Rust yet. After `toAnnexB`, the decoder of Chromium 156 took the key frame and the frame after it, and refused them as they came ([record](../../docs/experiments/2026-10-11-loc-video-payloads-in-chromium.md)).
+`fixtures/loc-04/` has the start of a video stream of `moqlivemock`'s publisher: its two payloads are read by `toAnnexB`, and the stream they came on, which is in `fixtures/moqt-18/`, by the decoders of `@xmoq/moqt` and of the Rust crate `xmoq-moqt`. After `toAnnexB`, the decoder of Chromium 156 took the key frame and the frame after it, and refused them as they came ([record](../../docs/experiments/2026-10-11-loc-video-payloads-in-chromium.md)).

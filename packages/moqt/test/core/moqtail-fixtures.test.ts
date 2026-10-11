@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	type ControlMessage,
 	decodeControlMessage,
@@ -310,6 +312,21 @@ const FETCH_STREAM_FIXTURES: {
 	},
 ];
 
+/** A payload of `fixtures/loc-04/`, which a stream of `fixtures/moqt-18/` carries. */
+function locPayload(name: string): Uint8Array<ArrayBuffer> {
+	const path = join(
+		import.meta.dir,
+		"..",
+		"..",
+		"..",
+		"..",
+		"fixtures",
+		"loc-04",
+		`${name}.hex`,
+	);
+	return hex(readFileSync(path, "utf8"));
+}
+
 // Whole subgroup streams as a subscriber received them from the relay.
 // `source` names the publisher whose SUBGROUP_HEADER Type the relay forwarded;
 // the relay replaced the Track Alias with its own.
@@ -445,6 +462,40 @@ const SUBGROUP_FIXTURES: {
 			},
 		],
 	},
+	{
+		// Not through the moqtail relay, and no code of moqtail: the start of
+		// a video stream as an own client received it from the publisher
+		// (fixtures/loc-04/README.md).
+		name: "Type 0x15: neither the end of the Group nor the first Object marked; a Timestamp on each of two video frames",
+		source: "moqlivemock's publisher mlmpub v0.16.1",
+		file: "subgroup-stream-two-objects-from-moqlivemock",
+		header: {
+			trackAlias: 0n,
+			groupId: 1791690527n,
+			subgroupId: { mode: "Explicit", value: 0n },
+			publisherPriority: 128,
+			properties: true,
+			endOfGroup: false,
+			firstObject: false,
+		},
+		objects: [
+			{
+				objectId: 0n,
+				// The wall-clock time in microseconds: the Group ID is the same
+				// time in seconds.
+				properties: [{ type: 0x10n, value: 1791690527000000n }],
+				status: "Normal",
+				payload: locPayload("video-key-length-prefixed-from-moqlivemock"),
+			},
+			{
+				objectId: 1n,
+				// 40 ms later: 25 frames a second.
+				properties: [{ type: 0x10n, value: 1791690527040000n }],
+				status: "Normal",
+				payload: locPayload("video-delta-length-prefixed-from-moqlivemock"),
+			},
+		],
+	},
 ];
 
 // WHY: the tests below read the files listed in the three tables. A file
@@ -504,12 +555,14 @@ describe("fetch streams captured from moqtail", () => {
 	);
 });
 
-describe("subgroup streams captured from moqtail", () => {
+describe("subgroup streams captured from another implementation", () => {
 	test.each(SUBGROUP_FIXTURES)(
 		"decodes $name ($source)",
 		({ file, header, objects }) => {
 			const decoder = createSubgroupStreamDecoder({
-				maxObjectPayloadLength: 1024,
+				// More than the largest payload of the table: a key frame of
+				// 21,533 bytes.
+				maxObjectPayloadLength: 32 * 1024,
 				maxObjectPropertiesLength: 1024,
 			});
 			expect(decoder.push(hex(fixture(file)))).toEqual({

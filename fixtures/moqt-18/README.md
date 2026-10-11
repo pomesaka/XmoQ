@@ -1,6 +1,6 @@
 # MOQT draft-18 wire fixtures
 
-Bytes that moqtail put on the wire, used as fixed expectations by XmoQ's own implementations. A codec that only decodes what it encoded itself cannot notice that both directions misread the draft in the same way; these files come from another implementation.
+Bytes that moqtail put on the wire, and one stream of `moqlivemock`'s publisher, used as fixed expectations by XmoQ's own implementations. A codec that only decodes what it encoded itself cannot notice that both directions misread the draft in the same way; these files come from another implementation.
 
 ## Format
 
@@ -38,6 +38,7 @@ Two ways of capturing were used.
 | `subgroup-stream-object-id-gaps-from-moqtail-rs.hex` | relay, forwarding Objects published by moqtail's own test client 0.15.0 | client trace | capture G |
 | `subgroup-stream-joined-mid-group-from-moqtail-rs.hex` | same | client trace | capture G |
 | `subgroup-stream-object-properties-from-own-ts.hex` | relay, forwarding an Object with two Object Properties published by XmoQ's own browser client (`@xmoq/moqt` at `a2a3884a`) in Chromium 156 | page trace | capture H |
+| `subgroup-stream-two-objects-from-moqlivemock.hex` | `mlmpub`, the publisher of `Eyevinn/moqlivemock` v0.16.1 (`91d903e9`), with no relay between: not moqtail, and not the relay above | client trace | capture O, on 2026-10-11 |
 | `fetch-standalone-moqtail-rs.hex` | moqtail's test client 0.15.0 | its log | capture I |
 | `fetch-ok-moqtail-relay.hex` | relay, answering that FETCH | log of the test client | capture I |
 | `fetch-relative-joining-moqtail-rs.hex` | moqtail's test client 0.15.0, after a SUBSCRIBE | its log | capture J |
@@ -122,6 +123,8 @@ $C --request "16 00 1b 00 01 $N 01 00 01 00 00"
 
 **What came back differs from draft 18 in places** ([record](../../docs/experiments/2026-10-11-moqtail-relay-fetch.md)); some of them are the doing of the publisher behind the relay, moqtail's test client, to which the relay passes a FETCH it cannot answer itself (nothing of Group G for an End Location {G, 0}, and one Group alone in Descending order), and for one it is not known which of the two decides. The files are fixtures for how the bytes are laid out, and not for which Objects a FETCH is to return.
 
+**Capture O is the one file no code of moqtail wrote.** It is the start of a video stream of `mlmpub`, received by the own Rust client, which printed the bytes as it read them; [`fixtures/loc-04/README.md`](../loc-04/README.md) has the commands, the revisions, and what the two payloads are. The file is the first 22,500 bytes of the first subgroup stream: its header and two Objects of the 25 the stream went on to carry, so it does not end where the stream did. The two payloads are files of `fixtures/loc-04/`, which the tests of both implementations read for the expected Objects.
+
 **The file of capture H is moqtail's encoding of a value an own client chose.** No moqtail client in this repository sends an Object Property with content, so the two properties came from the own browser client. The relay does not pass the bytes through: it parses each Object into a list of properties and serializes it again with moqtail's encoder, the type of each property as a delta from the one before. Read on 2026-10-11 at `dd8623d` in `apps/relay/src/server/subscription.rs` (`object.try_into_subgroup()`, then `sub_object.serialize(previous_object_id, has_properties)`) and `libs/moqtail-rs/src/model/common/pair.rs` (`serialize_delta`). So the file shows that moqtail's parser took what the own encoder wrote and that moqtail's encoder writes the same bytes for it; it does not show a property moqtail made up itself.
 
 Some values depend on the run and will differ when a capture is repeated: the Track Alias moqtail-ts picks at random (779698128977928661 in `publish-moqtail-ts`), the timestamp and nonce in the two 53-byte payloads, the 8 random payload bytes of capture G, and the Group that a subscriber happens to join in capture G. A repeated capture is a new fixture, not a check of the old one.
@@ -149,6 +152,7 @@ The subgroup streams are what the relay wrote, not what the publisher wrote: the
 | `subgroup-stream-from-moqtail-rs` | SUBGROUP_HEADER type 0x5D (PROPERTIES, explicit Subgroup ID, END_OF_GROUP, FIRST_OBJECT), Track Alias 0, Group ID 0, Subgroup ID 0, Publisher Priority 0. One Object: Object ID 0, Properties Length 0, payload `xmoq-phase0 2026-10-10T01:19:03.764Z bb30f5dd09c8981f` |
 | `subgroup-stream-object-id-gaps-from-moqtail-rs` | SUBGROUP_HEADER type 0x5D, Track Alias 0, Group ID 4, Subgroup ID 1, Publisher Priority 128. Three Objects with the payload `4d 3b c3 24 4c 84 57 2d`: Object ID 0 with no properties; Object ID 2 (Object ID Delta 1) and Object ID 4 (Object ID Delta 1), each with the property 0x3E (Prior Object ID Gap) = 1 |
 | `subgroup-stream-joined-mid-group-from-moqtail-rs` | SUBGROUP_HEADER type 0x5D, Track Alias 0, Group ID 3, Subgroup ID 1, Publisher Priority 128. One Object: Object ID 4 (Object ID Delta 4 as the first on the stream), property 0x3E = 1, payload `4d 3b c3 24 4c 84 57 2d`. Type 0x5D has FIRST_OBJECT set although Object ID 4 is not the first Object published in the Subgroup; see [the experiment record](../../docs/experiments/2026-10-10-own-rust-client-vs-moqtail.md) |
+| `subgroup-stream-two-objects-from-moqlivemock` | SUBGROUP_HEADER type 0x15 (Object Properties present, an explicit Subgroup ID, a Publisher Priority; neither the end of the Group nor FIRST_OBJECT), Track Alias 0, Group ID 1791690527, Subgroup ID 0, Publisher Priority 128. Two Objects, each with Properties Length 9 and the one property 0x10, an even type, with an integer in 8 bytes: Object ID 0, 1791690527000000 (`10 fe 06 5d 88 75 68 c5 c0`), a payload of 21,533 bytes, the file `../loc-04/video-key-length-prefixed-from-moqlivemock.hex`; Object ID 1, 1791690527040000 (`10 fe 06 5d 88 75 69 62 00`), 931 bytes, `../loc-04/video-delta-length-prefixed-from-moqlivemock.hex` |
 | `fetch-standalone-moqtail-rs` | FETCH, Request ID 0, Fetch Type 1 (Standalone), (`xmoq`, `phase0`) / `object`, Start Location {0, 1}, End Location {1, 2}, SUBSCRIBER_PRIORITY = 200 |
 | `fetch-ok-moqtail-relay` | FETCH_OK, End Of Track 0, End Location {1, 2}, no parameters, no Track Properties |
 | `fetch-relative-joining-moqtail-rs` | FETCH, Request ID 2, Fetch Type 2 (Relative Joining), Joining Request ID 0, Joining Start 0, SUBSCRIBER_PRIORITY = 200 |

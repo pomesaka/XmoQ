@@ -558,9 +558,11 @@ impl SubgroupStreamEncoder {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::test_util::fixture;
+    use crate::test_util::{fixture, fixture_of_loc};
 
-    const LIMIT: usize = 1_024;
+    /// More than the largest payload of a fixture: a key frame of 21,533
+    /// bytes.
+    const LIMIT: usize = 32 * 1_024;
 
     fn decode_stream(bytes: &[u8], chunk_len: usize) -> Result<Vec<SubgroupEvent>, Error> {
         let mut decoder = SubgroupStreamDecoder::new(LIMIT);
@@ -743,7 +745,7 @@ pub(crate) mod tests {
     /// Streams received from the moqtail relay 0.15.0, see `fixtures/moqt-18/README.md`.
     /// The fixture files this module reads.
     pub(crate) fn fixture_names() -> Vec<&'static str> {
-        moqtail_streams()
+        captured_streams()
             .into_iter()
             .map(|(name, _)| name)
             .collect()
@@ -846,9 +848,53 @@ pub(crate) mod tests {
         ]
     }
 
+    /// The start of a video stream of `moqlivemock`'s publisher
+    /// (`fixtures/loc-04/README.md`). Type 0x15: Object Properties, an
+    /// explicit Subgroup ID, a priority; neither the end of the Group nor
+    /// the first Object is marked. Each Object has the Timestamp of LOC
+    /// (0x10), in microseconds; the Group ID is the same time in seconds.
+    fn moqlivemock_stream() -> (&'static str, Stream) {
+        let at = |object_id, microseconds, payload: &str| SubgroupObject {
+            properties: vec![KeyValuePair::varint(0x10, microseconds).unwrap()],
+            ..normal(object_id, &fixture_of_loc(payload))
+        };
+        (
+            "subgroup-stream-two-objects-from-moqlivemock",
+            (
+                SubgroupHeader {
+                    group_id: 1_791_690_527,
+                    subgroup_id: SubgroupId::Explicit(0),
+                    publisher_priority: Some(128),
+                    properties: true,
+                    ..plain_header()
+                },
+                vec![
+                    at(
+                        0,
+                        1_791_690_527_000_000,
+                        "video-key-length-prefixed-from-moqlivemock",
+                    ),
+                    at(
+                        1,
+                        1_791_690_527_040_000,
+                        "video-delta-length-prefixed-from-moqlivemock",
+                    ),
+                ],
+            ),
+        )
+    }
+
+    /// The streams another implementation wrote: moqtail's, and one of
+    /// `moqlivemock`.
+    fn captured_streams() -> Vec<(&'static str, Stream)> {
+        let mut streams = moqtail_streams();
+        streams.push(moqlivemock_stream());
+        streams
+    }
+
     #[test]
-    fn decodes_streams_captured_from_moqtail() {
-        for (name, (header, objects)) in moqtail_streams() {
+    fn decodes_streams_captured_from_another_implementation() {
+        for (name, (header, objects)) in captured_streams() {
             assert_eq!(
                 decode_stream(&fixture(name), 7),
                 Ok(events(header, &objects)),
@@ -858,8 +904,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn encodes_the_bytes_moqtail_sent() {
-        for (name, (header, objects)) in moqtail_streams() {
+    fn encodes_the_bytes_another_implementation_sent() {
+        for (name, (header, objects)) in captured_streams() {
             assert_eq!(encode_stream(&header, &objects), fixture(name), "{name}");
         }
     }

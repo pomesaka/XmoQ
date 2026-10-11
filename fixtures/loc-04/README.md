@@ -1,6 +1,6 @@
 # A LOC video stream of another implementation
 
-The start of a video stream of `mlmpub`, the publisher of [`Eyevinn/moqlivemock`](https://github.com/Eyevinn/moqlivemock) v0.16.1 (commit `91d903e9933a452f8baaa860f9fcd20cf195e077`), as an own client received it: the track `video_400kbps_avc` of the namespace `mlm/msf/clear`, H.264 (`avc3.4D401F` in its catalog), 1280x720, 25 frames a second. `@xmoq/loc` reads the payloads, and `@xmoq/moqt` the stream. No Rust code reads LOC or these files yet; one that does reads these files.
+The start of a video stream of `mlmpub`, the publisher of [`Eyevinn/moqlivemock`](https://github.com/Eyevinn/moqlivemock) v0.16.1 (commit `91d903e9933a452f8baaa860f9fcd20cf195e077`), as an own client received it: the track `video_400kbps_avc` of the namespace `mlm/msf/clear`, H.264 (`avc3.4D401F` in its catalog), 1280x720, 25 frames a second. `@xmoq/loc` reads the payloads. The stream they came on is bytes of MoQ Transport and lives with the other streams, in [`fixtures/moqt-18/`](../moqt-18/README.md), where the decoders of `@xmoq/moqt` and of `crates/moqt` read it; both take its two payloads from here. No Rust code reads LOC yet; one that does reads these files.
 
 Taken on 2026-10-11, with `mlmpub` as `scripts/ci/interop.sh` builds it (unchanged) and the own Rust client of `main` at `36e51810`:
 
@@ -15,7 +15,7 @@ The client printed the bytes of the stream as it read them (`TRACE recv uni#1 ..
 
 | File | Bytes | What it is |
 |---|---|---|
-| `subgroup-stream-two-objects-from-moqlivemock.hex` | 22,500 | The first bytes of the first subgroup stream the client got, up to the end of its second Object. The stream went on: `mlmpub` sends a Group on one stream, 25 Objects. It is bytes of MoQ Transport: the decoder of `@xmoq/moqt` reads it (`test/core/moqlivemock-fixtures.test.ts`). **No Rust test reads it yet**, so the two implementations are not shown to agree on it |
+| `../moqt-18/subgroup-stream-two-objects-from-moqlivemock.hex` | 22,500 | The first bytes of the first subgroup stream the client got, up to the end of its second Object. The stream went on: `mlmpub` sends a Group on one stream, 25 Objects. Both implementations decode it to the values below and encode those to the same bytes (`packages/moqt/test/core/moqtail-fixtures.test.ts`, `crates/moqt/src/data.rs`) |
 | `video-key-length-prefixed-from-moqlivemock.hex` | 21,533 | The payload of the first Object, a key frame |
 | `video-delta-length-prefixed-from-moqlivemock.hex` | 931 | The payload of the second Object |
 
