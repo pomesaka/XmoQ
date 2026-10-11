@@ -5,6 +5,7 @@ import {
 	SessionErrorCode,
 	StreamResetErrorCode,
 } from "../core/error.ts";
+import type { FetchObject, RangeEnd } from "../core/fetch.ts";
 import type { KeyValuePair } from "../core/key-value-pair.ts";
 import type { SessionLimits } from "../core/limits.ts";
 import type {
@@ -17,6 +18,7 @@ import type {
 	MessageParameters,
 } from "../core/parameters.ts";
 import type {
+	FetchAnswer,
 	FetchRequest,
 	PublishRequest,
 	SubscribeAnswer,
@@ -42,6 +44,8 @@ import {
 	type RequestAbort,
 	RequestAbortedError,
 	RequestFailedError,
+	type ServedFetchEnd,
+	ServedFetchEndedError,
 	type SessionClose,
 	SessionClosedError,
 	SubgroupClosedError,
@@ -242,6 +246,11 @@ export interface SubgroupWriter {
 	 * (§11.4.3) and counts as ended, so PUBLISH_DONE is not kept back. Another
 	 * failure of the write is passed on as the transport gave it. In each
 	 * case `reset()` is safe to call.
+	 *
+	 * **Wait for a write before the next.** A write is handed to the
+	 * transport when it is called, and one that the transport has not taken
+	 * is held. With 16 writes of this stream under way, a further one rejects
+	 * with a `RangeError` and writes nothing; the stream is as it was.
 	 */
 	write(object: OutgoingObject): Promise<void>;
 	/**
@@ -457,7 +466,11 @@ export interface PeerSubscribe extends FullTrackName {
 	 * MUST include this parameter"; left out, it says that none were). The
 	 * library keeps no Object and cannot tell, so this is the application's
 	 * to do. A relay works out the range of a viewer's Joining FETCH from
-	 * it, and refuses that FETCH with `INVALID_RANGE` where it is missing.
+	 * it, and refuses that FETCH with `INVALID_RANGE` where it is missing
+	 * and the relay has seen no Object itself. A value smaller than what was
+	 * published leaves a gap between what such a FETCH gives a viewer and
+	 * what its subscription gives it, for as long as the relay has not seen
+	 * an Object beyond it.
 	 *
 	 * Rejects with the reason of `signal` for a request that is gone, with
 	 * an `Error` for one that was answered, and with a `RangeError` for an
@@ -477,15 +490,144 @@ export interface PeerSubscribe extends FullTrackName {
 	reject(errorCode: bigint, errorReason?: string): Promise<void>;
 }
 
+/**
+ * A Standalone FETCH of the peer, to be answered once with `accept` or
+ * `reject`: a relay that has no cache asks the publisher for a range of a
+ * Track. A relay turns a viewer's Joining FETCH into one of these.
+ *
+ * A relay waits a limited time for the answer (an XmoQ relay 5 seconds), and
+ * then cancels, which `signal` reports.
+ *
+ * What the draft asks of the publisher of a FETCH, and the library leaves
+ * to the application, which is the one that knows what was published:
+ *
+ * - §10.12.3: "If no Objects have been published for the track or Start
+ *   Location is greater than the Largest Object the publisher MUST return
+ *   REQUEST_ERROR with error code INVALID_RANGE" (`0x11`): `reject`.
+ * - §10.13: the End Location of the answer "is the End Location from the
+ *   FETCH request unless the requested range extends beyond published
+ *   data", and then {Largest.Group, Largest.Object + 1}.
+ * - §10.12.3: "A publisher MUST send fetched groups in the requested group
+ *   order", and no Object beyond the Largest one.
+ */
+export interface PeerFetch extends FullTrackName {
+	readonly requestId: bigint;
+	/** The first Object that is asked for. */
+	readonly startLocation: Location;
+	/**
+	 * Where the range ends, as the FETCH has it: **the last Object plus 1, and
+	 * Object 0 for a whole Group**. {2, 0} asks for everything up to the end
+	 * of Group 2; {1, 3} for everything up to Object 2 of Group 1.
+	 */
+	readonly endLocation: Location;
+	/** The order the Groups are to be sent in; Ascending where the FETCH does not say. */
+	readonly groupOrder: GroupOrder;
+	/**
+	 * FILL_TIMEOUT of the FETCH, in milliseconds, where it has one (§10.2.5):
+	 * how long a relay may take to get Objects it does not have from
+	 * upstream. A publisher that is the origin of the Track has nothing to
+	 * wait for: for what it does not have it writes `endOfRange`. The
+	 * library runs no timer on it.
+	 */
+	readonly fillTimeout: bigint | undefined;
+	readonly parameters: MessageParameters;
+	/** Aborts when the FETCH went before it was answered, as for `PeerSubscribe.signal`. */
+	readonly signal: AbortSignal;
+	/**
+	 * Sends FETCH_OK (§10.13) and opens the fetch stream at once, and
+	 * resolves with what writes it. `endLocation` is in the form of
+	 * `PeerFetch.endLocation`: the end of what the stream will cover, which
+	 * is what was asked for, or less where the Track ends before.
+	 *
+	 * Rejects like `PeerSubscribe.accept`; the `RangeError` that leaves the
+	 * FETCH waiting is for an `endLocation` before `startLocation`. One
+	 * beyond what was asked for is sent as it is: to stay within what was
+	 * asked for is the application's to keep.
+	 */
+	accept(answer: FetchAnswer): Promise<FetchWriter>;
+	/** Sends REQUEST_ERROR and ends the request, like `PeerSubscribe.reject`. */
+	reject(errorCode: bigint, errorReason?: string): Promise<void>;
+}
+
+/**
+ * The fetch stream of a FETCH this endpoint accepted. The library keeps no
+ * Object: what is written goes to the transport.
+ *
+ * A relay gives a fetch stream up when nothing comes on it for some time
+ * (an XmoQ relay after FILL_TIMEOUT, 5 seconds without one), so write or
+ * close without long pauses.
+ *
+ * The calls reject with `ServedFetchEndedError` once the FETCH is over, the
+ * end of the session among the ways it ends; and with `SessionClosedError`
+ * for a write that was under way when the session ended.
+ *
+ * A handler of `ServeHandlers.fetch` may let these rejections through: one
+ * that says the subscriber gave the FETCH up, or that the session ended, is
+ * no error of the application and is not reported. One that says the
+ * application itself had closed or reset the writer is.
+ */
+export interface FetchWriter {
+	readonly requestId: bigint;
+	/** Resolves once the FETCH is over, with how. Never rejects. */
+	readonly ended: Promise<ServedFetchEnd>;
+	/**
+	 * Writes the next Object. Resolves when the transport took it, which is
+	 * where a subscriber that reads slowly holds the writer back. **Wait for
+	 * a write before the next**: with 16 writes and indicators of this
+	 * stream under way, a further one rejects with a `RangeError` and writes
+	 * nothing.
+	 *
+	 * Rejects with a `RangeError`, and writes nothing, for an Object that
+	 * does not come after the one before it: a Group that goes against
+	 * `PeerFetch.groupOrder`, or an Object ID that does not grow within a
+	 * Group. The writer is as it was, and the next Object can be written.
+	 * **Whether an Object lies in the range that was asked for is not
+	 * checked**: that is the application's to keep.
+	 */
+	write(object: FetchObject): Promise<void>;
+	/**
+	 * Writes an End of Range indicator (§11.4.4.2): the Objects after what
+	 * was written before, up to and with `location`, do not exist
+	 * ("NonExistent") or are not known to this endpoint ("Unknown"). Rejects
+	 * with a `RangeError`, like `write`, for a Location that goes back, and
+	 * for one more than 16 under way.
+	 */
+	endOfRange(kind: RangeEnd, location: Location): Promise<void>;
+	/**
+	 * Everything was written: finishes the fetch stream and the request
+	 * stream, and the FETCH is over; `ended` resolves with `served`. Does
+	 * nothing on a FETCH that is over.
+	 *
+	 * The subscriber then has `peerStreamEndTimeoutMs` (3 seconds) to end its
+	 * direction of the request stream, after which it is stopped, as after
+	 * `PublishedTrack.done()`. Nothing of that is reported here.
+	 */
+	close(): Promise<void>;
+	/**
+	 * Gives the FETCH up: resets both of its streams (§5.2). `code` is a
+	 * Stream Reset Error Code (§3.3.3), CANCELLED when left out; a value that
+	 * is not a whole number from 0 to 255 rejects with a `RangeError`. Does
+	 * nothing on a FETCH that is over.
+	 */
+	reset(code?: number): Promise<void>;
+}
+
 /** What an application does with the requests the peer opens. */
 export interface ServeHandlers {
 	/**
 	 * Called for each SUBSCRIBE of the peer, which a relay sends to the
 	 * publisher of a namespace. The request may be answered later, also
 	 * after the handler has returned. Without this, a SUBSCRIBE is refused
-	 * with `NOT_SUPPORTED`. A handler that throws, or returns a promise that
-	 * rejects, refuses the request with `INTERNAL_ERROR` unless it was
-	 * answered, and the error is reported with `reportError`.
+	 * with `NOT_SUPPORTED`. A handler that throws, or returns a promise (or
+	 * another thenable) that rejects, refuses the request with
+	 * `INTERNAL_ERROR` unless it was answered, and the error is reported with
+	 * `reportError`. One exception: a handler that lets through what
+	 * `accept` or `reject` rejected with because the request had gone, or
+	 * what a call on the `PublishedTrack` or the `FetchWriter` it accepted
+	 * rejected with because the peer ended it or the session is over, is not
+	 * reported, and refuses nothing. A `SubgroupClosedError` is reported: the
+	 * subscriber stopped one stream, the Track goes on, and what to do about
+	 * that stream is the handler's to decide.
 	 *
 	 * Not called for a Track this endpoint already publishes to the peer
 	 * (`DUPLICATE_SUBSCRIPTION`, §5.1), nor while `limits.maxPeerRequests`
@@ -495,6 +637,16 @@ export interface ServeHandlers {
 	// function that returns something else is still taken, an `async` one
 	// among them, and what it returns is looked at when it is called.
 	subscribe?(request: PeerSubscribe): void;
+	/**
+	 * Called for each Standalone FETCH of the peer, in the way of
+	 * `subscribe`. Without this, a FETCH is refused with `NOT_SUPPORTED`.
+	 *
+	 * Not called for a FETCH whose range ends before it starts
+	 * (`INVALID_RANGE`), for a Joining FETCH (a relay sends a publisher
+	 * none), nor while `limits.maxPeerFetches` FETCHes of the peer are open
+	 * (`EXCESSIVE_LOAD`).
+	 */
+	fetch?(request: PeerFetch): void;
 }
 
 export interface MoqtConnection {
@@ -593,6 +745,13 @@ interface PeerStreamWait {
 	timer: ReturnType<typeof setTimeout> | undefined;
 }
 
+/** What the connection keeps for a FETCH of the peer, from its FETCH_OK on. */
+interface ActiveServedFetch {
+	ended: Deferred<ServedFetchEnd>;
+	/** Set once the FETCH is over. */
+	end: ServedFetchEnd | undefined;
+}
+
 /** What the connection keeps for a PUBLISH, from its PUBLISH_OK on. */
 interface ActivePublish {
 	ended: Deferred<PublishEnd>;
@@ -600,6 +759,77 @@ interface ActivePublish {
 	end: PublishEnd | undefined;
 	/** The session took a PUBLISH_DONE for it; `end` follows when it is written. */
 	doneTaken: boolean;
+}
+
+/**
+ * Writes of one stream that may be under way at once: made, and not yet
+ * taken by the transport. One more is refused.
+ *
+ * WHY: a write is encoded and handed to the transport when it is called,
+ * and the transport holds what it cannot send. An application that does not
+ * wait for its writes, to a peer that does not read, would have every
+ * Object it made held here, without an end. WHY 16: the number of Objects a
+ * subscription holds for a reader that does not read
+ * (`subscriptionHighWaterMark`). Provisional.
+ */
+const MAX_WRITES_UNDER_WAY = 16;
+
+/**
+ * Runs the writes of one stream, and refuses one more than
+ * `MAX_WRITES_UNDER_WAY` under way. `over` says what a write is rejected
+ * with once what the stream belongs to has ended.
+ */
+function boundedWrites(
+	over: () => Error | undefined,
+): <T>(write: () => Promise<T>) => Promise<T> {
+	let underWay = 0;
+	return async (write) => {
+		// WHY before the count: writes that were under way when the peer or
+		// the session ended it can stay so, and a further write is then
+		// rejected for that end, which is nobody's mistake, and not for the
+		// count, which would be the application's.
+		const ended = over();
+		if (ended !== undefined) throw ended;
+		// Before anything is done: the refusal leaves the stream as it was.
+		if (underWay >= MAX_WRITES_UNDER_WAY) {
+			throw new RangeError(
+				`${MAX_WRITES_UNDER_WAY} writes of the stream are under way: wait for a write before the next`,
+			);
+		}
+		underWay += 1;
+		try {
+			return await write();
+		} finally {
+			underWay -= 1;
+		}
+	};
+}
+
+/**
+ * Whether a handler failed with what a call on a request, or on what the
+ * request became, rejects with because the peer ended it or the session is
+ * over. That is how such a request ends, and no error of the application.
+ */
+function endedByThePeer(error: unknown): boolean {
+	if (error instanceof SessionClosedError) return true;
+	if (error instanceof ServedFetchEndedError) {
+		return (
+			error.end.type === "peer-cancelled" || error.end.type === "session-closed"
+		);
+	}
+	if (error instanceof PublishEndedError) {
+		return error.end.type !== "done";
+	}
+	return false;
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"then" in value &&
+		typeof value.then === "function"
+	);
 }
 
 function toError(value: unknown): Error {
@@ -684,6 +914,8 @@ export async function connectOver(
 	const peerStreamWaits = new Map<bigint, PeerStreamWait>();
 	/** Requests of the peer the application has not answered; each is aborted when its request goes. */
 	const pendingPeerRequests = new Map<bigint, AbortController>();
+	/** FETCHes of the peer that are being answered. */
+	const servedFetches = new Map<bigint, ActiveServedFetch>();
 	let serveHandlers: ServeHandlers = {};
 	/** Serializes outputs so that writes reach each stream in the order the session produced them. */
 	let queue: Promise<unknown> = Promise.resolve();
@@ -755,6 +987,14 @@ export async function connectOver(
 		pendingPeerRequests.delete(requestId);
 		gone.abort(reason);
 		return true;
+	};
+
+	const endServedFetch = (requestId: bigint, end: ServedFetchEnd): void => {
+		const fetch = servedFetches.get(requestId);
+		if (fetch === undefined) return;
+		servedFetches.delete(requestId);
+		fetch.end = end;
+		fetch.ended.resolve(end);
 	};
 
 	const endPublish = (requestId: bigint, end: PublishEnd): void => {
@@ -854,6 +1094,9 @@ export async function connectOver(
 		}
 		for (const requestId of [...pendingPeerRequests.keys()]) {
 			endPendingPeerRequest(requestId, error);
+		}
+		for (const requestId of [...servedFetches.keys()]) {
+			endServedFetch(requestId, { type: "session-closed", close });
 		}
 		closed.resolve(close);
 	}
@@ -994,12 +1237,19 @@ export async function connectOver(
 	): SubgroupWriter => {
 		/** `reset()` was called: a write that fails from then on was not stopped by the peer. */
 		let resetHere = false;
+		const bounded = boundedWrites(() =>
+			publish.end === undefined
+				? undefined
+				: new PublishEndedError(publish.end),
+		);
 		return {
 			write: (object) =>
-				onPublish(
-					publish,
-					() => applyVoid((s) => s.writeObject(stream, object)),
-					() => resetHere,
+				bounded(() =>
+					onPublish(
+						publish,
+						() => applyVoid((s) => s.writeObject(stream, object)),
+						() => resetHere,
+					),
 				),
 			close: () =>
 				onPublishIfOpen(publish, () =>
@@ -1116,13 +1366,19 @@ export async function connectOver(
 		};
 	};
 
-	const peerSubscribeFrom = (
-		event: EventOf<"peer-subscribe">,
-	): PeerSubscribe => {
-		const { requestId } = event;
+	/**
+	 * A request of the peer that waits for the application: what aborts when
+	 * it goes, and the one way an answer reaches the session.
+	 */
+	const pendingPeerRequest = (
+		requestId: bigint,
+	): {
+		signal: AbortSignal;
+		/** Gives the session the answer, unless the request is gone or has one. */
+		answer<T>(action: (session: Session) => SessionResult<T>): Promise<T>;
+	} => {
 		const gone = new AbortController();
 		pendingPeerRequests.set(requestId, gone);
-		/** Gives the session the answer, unless the request is gone or has one. */
 		const answer = async <T>(
 			action: (session: Session) => SessionResult<T>,
 		): Promise<T> => {
@@ -1148,12 +1404,20 @@ export async function connectOver(
 				throw error;
 			}
 		};
+		return { signal: gone.signal, answer };
+	};
+
+	const peerSubscribeFrom = (
+		event: EventOf<"peer-subscribe">,
+	): PeerSubscribe => {
+		const { requestId } = event;
+		const { signal, answer } = pendingPeerRequest(requestId);
 		return {
 			requestId,
 			trackNamespace: event.trackNamespace,
 			trackName: event.trackName,
 			parameters: event.parameters,
-			signal: gone.signal,
+			signal,
 			accept: (subscribeAnswer = {}) =>
 				answer((s) => {
 					const { value: trackAlias, outputs } = s.acceptSubscribe(
@@ -1172,25 +1436,161 @@ export async function connectOver(
 		};
 	};
 
-	/** Hands a SUBSCRIBE of the peer to the application, or refuses it where nobody serves one. */
-	const onPeerSubscribe = (event: EventOf<"peer-subscribe">): void => {
-		const handler = serveHandlers.subscribe;
-		const request = peerSubscribeFrom(event);
+	/** The fetch stream of a FETCH the session has just accepted. */
+	const fetchWriterFrom = (requestId: bigint): FetchWriter => {
+		const fetch: ActiveServedFetch = { ended: deferred(), end: undefined };
+		servedFetches.set(requestId, fetch);
+		const bounded = boundedWrites(() =>
+			fetch.end === undefined
+				? undefined
+				: new ServedFetchEndedError(fetch.end),
+		);
+		/** Runs a write; a FETCH that is over fails it with how it ended. */
+		const writing = async (
+			action: (session: Session) => SessionOutput[],
+		): Promise<void> => {
+			if (fetch.end !== undefined) throw new ServedFetchEndedError(fetch.end);
+			try {
+				await applyVoid(action);
+			} catch (error) {
+				// The application's mistake, and nothing was written.
+				if (error instanceof RangeError) throw error;
+				if (sessionClose !== undefined) {
+					throw new SessionClosedError(sessionClose);
+				}
+				// The subscriber may have given the FETCH up, which is what
+				// failed the write, or what the session knew already; the event
+				// that says so may still be in the queue.
+				await queue;
+				if (fetch.end !== undefined) throw new ServedFetchEndedError(fetch.end);
+				if (sessionClose !== undefined) {
+					throw new SessionClosedError(sessionClose);
+				}
+				throw error;
+			}
+		};
+		/** `close` and `reset`: a FETCH that is over needs neither. */
+		const ending = async (
+			end: ServedFetchEnd,
+			action: (session: Session) => SessionOutput[],
+		): Promise<void> => {
+			if (fetch.end !== undefined) return;
+			try {
+				await applyVoid((s) => {
+					const outputs = action(s);
+					// Once the session took the call: the FETCH is over for the
+					// application, whatever becomes of the writes.
+					endServedFetch(requestId, end);
+					return outputs;
+				});
+			} catch (error) {
+				if (!(error instanceof InactiveError)) throw error;
+			}
+		};
+		return {
+			requestId,
+			ended: fetch.ended.promise,
+			write: (object) =>
+				bounded(() => writing((s) => s.writeFetchObject(requestId, object))),
+			endOfRange: (kind, location) =>
+				bounded(() =>
+					writing((s) => s.writeFetchRangeEnd(requestId, kind, location)),
+				),
+			async close() {
+				// Nobody asks how the subscriber ends its direction of the
+				// request stream, but the stream is not left open for it: the
+				// wait of `PublishedTrack.done()`.
+				const wait: PeerStreamWait = { ended: deferred(), timer: undefined };
+				await ending({ type: "served" }, (s) => {
+					const outputs = s.finishFetch(requestId);
+					// WHY here: the event for a subscriber that had finished its
+					// direction is among these outputs, and ends the wait before
+					// a timer is started for it.
+					peerStreamWaits.set(requestId, wait);
+					return outputs;
+				});
+				// The wait is not there when the FETCH had ended before this
+				// call, so that nothing was sent, and when the subscriber ended
+				// its direction meanwhile.
+				if (peerStreamWaits.get(requestId) === wait) {
+					startPeerStreamTimer(requestId, wait);
+				}
+			},
+			reset(code = StreamResetErrorCode.CANCELLED) {
+				if (
+					!Number.isInteger(code) ||
+					code < 0 ||
+					code > MAX_STREAM_ERROR_CODE
+				) {
+					return Promise.reject(
+						new RangeError(
+							`a stream is reset with a whole number from 0 to ${MAX_STREAM_ERROR_CODE}, not ${String(code)}`,
+						),
+					);
+				}
+				return ending({ type: "reset" }, (s) => s.resetFetch(requestId, code));
+			},
+		};
+	};
+
+	const peerFetchFrom = (event: EventOf<"peer-fetch">): PeerFetch => {
+		const { requestId } = event;
+		const { signal, answer } = pendingPeerRequest(requestId);
+		return {
+			requestId,
+			trackNamespace: event.trackNamespace,
+			trackName: event.trackName,
+			startLocation: event.startLocation,
+			endLocation: event.endLocation,
+			groupOrder: event.parameters.groupOrder ?? "Ascending",
+			fillTimeout: event.parameters.fillTimeout,
+			parameters: event.parameters,
+			signal,
+			accept: (fetchAnswer) =>
+				answer((s) => {
+					const outputs = s.acceptFetch(requestId, fetchAnswer);
+					// The writer is registered in the same step, so that a
+					// cancellation right behind the FETCH_OK finds it.
+					return { value: fetchWriterFrom(requestId), outputs };
+				}),
+			reject: (errorCode, errorReason = "") =>
+				answer((s) => ({
+					value: undefined,
+					outputs: s.rejectPeerRequest(requestId, errorCode, errorReason),
+				})),
+		};
+	};
+
+	/**
+	 * Hands a request of the peer to the application, or refuses it where
+	 * nobody serves its kind.
+	 */
+	const handOver = <Request extends PeerSubscribe | PeerFetch>(
+		request: Request,
+		handler: ((request: Request) => void) | undefined,
+		kind: string,
+	): void => {
 		if (handler === undefined) {
 			// WHY through `request`, like an application's answer, and not
 			// straight to the session: the session may have ended the request
-			// in the read that brought it (a REQUEST_UPDATE right behind the
+			// in the read that brought it (a REQUEST_UPDATE right behind a
 			// SUBSCRIBE, which §10.9 allows). An answer to a request that is
 			// gone is no fault of anyone, and must not end the session.
 			request
 				.reject(
 					RequestErrorCode.NOT_SUPPORTED,
-					"this endpoint serves no SUBSCRIBE",
+					`this endpoint serves no ${kind}`,
 				)
 				.catch(() => {});
 			return;
 		}
 		const failed = (error: unknown): void => {
+			// The request went while the handler was at it, and the handler
+			// let the rejection of its `accept` or `reject` through, or of a
+			// write on what it accepted: that is how a request the peer ends
+			// ends, and no error of the application.
+			if (request.signal.aborted && error === request.signal.reason) return;
+			if (endedByThePeer(error)) return;
 			// The handler may have answered before it failed, and the request
 			// may be gone.
 			request
@@ -1206,8 +1606,9 @@ export async function connectOver(
 		};
 		try {
 			const returned: unknown = handler(request);
-			// An `async` handler fails by the promise it returns.
-			if (returned instanceof Promise) returned.catch(failed);
+			// An `async` handler fails by the promise it returns; so does one
+			// that returns a thenable of another kind.
+			if (isThenable(returned)) returned.then(undefined, failed);
 		} catch (error) {
 			failed(error);
 		}
@@ -1237,6 +1638,7 @@ export async function connectOver(
 				);
 				endSubscription(requestId, { type: "peer-reset", code: resetCode });
 				endPublish(requestId, { type: "peer-reset", code: resetCode });
+				endServedFetch(requestId, { type: "peer-cancelled", code: resetCode });
 				endFetch(requestId, { type: "peer-reset", code: resetCode });
 				return;
 			case "unsupported-track-property":
@@ -1399,7 +1801,14 @@ export async function connectOver(
 				};
 			}
 			case "peer-subscribe":
-				onPeerSubscribe(event);
+				handOver(
+					peerSubscribeFrom(event),
+					serveHandlers.subscribe,
+					"SUBSCRIBE",
+				);
+				return undefined;
+			case "peer-fetch":
+				handOver(peerFetchFrom(event), serveHandlers.fetch, "FETCH");
 				return undefined;
 			case "subgroup-abandoned":
 			case "peer-stream-timed-out":

@@ -65,15 +65,21 @@ bun matrix.ts
 
 The runs in which an own page sends a FETCH have names that begin with `fetch:`. What each has to show is written, with where it comes from, at `EXPECTED` in `fetch.ts`, before the runs; the [record](../docs/experiments/2026-10-11-fetch-from-a-page.md) has what the runs showed. The page reads the fetch stream with `decodeFetchBody` of `@xmoq/moqt`.
 
-| Runs with a FETCH (8) | Through | What is expected |
+| Runs with a FETCH (15) | Through | What is expected |
 |---|---|---|
 | The page asks for {0, 1} to {1, 2} of what moqtail's test client publishes | both relays | FETCH_OK with End Location {1, 2}, the four Objects of the range with the publisher's payload, a FIN |
 | The same publisher, {0, 0} to {2, 0} with FILL_TIMEOUT 0 | own relay | FETCH_OK with End Location {2, 0} and one End of Unknown Range indicator at {2, 2^64 - 1}: the relay asks no publisher and has no cache |
 | The page gives its FETCH up after a second, with `moqtail-rust` as the publisher, which answers no FETCH | own relay | The FETCH ends as cancelled for the page, and the relay cancels the FETCH it had sent the publisher (`CANCEL_OWN_REQUEST`, `0x1`), before any answer of the publisher |
 | `own-rust` publishes, which refuses a FETCH | both relays | The own relay: REQUEST_ERROR `DOES_NOT_EXIST` (`0x10`). The moqtail relay answers from what it holds: FETCH_OK with End Location {0, 1} and the one Object |
 | A track nobody published | both relays | REQUEST_ERROR `DOES_NOT_EXIST` |
+| **An own page is the publisher**: it only announced, serves the track when the relay asks, and answers a FETCH from the Objects it has sent (`serve` of `@xmoq/moqt`). It has sent Object 0 of Groups 0 to 2 to another subscriber before the page that fetches comes. The page asks for {0, 0} to {2, 1} | own relay | The relay asks the publisher. FETCH_OK with End Location {2, 1}, the three Objects, a FIN |
+| The page that fetches subscribes and sends a Relative Joining FETCH, one Group back | own relay | The relay makes a Standalone FETCH for {1, 0} to {2, 1} of it, from the LARGEST_OBJECT of the SUBSCRIBE_OK it sent the page, and the publisher answers: FETCH_OK with End Location {2, 1}, Object 0 of Groups 1 and 2 |
+| {0, 1} to the end of Group 0, where the publisher has nothing | own relay | FETCH_OK with End Location {0, 0} and the publisher's End of Range indicator, `NonExistent` at {0, 2^64 - 1} |
+| {100, 0} to {102, 1}: Objects the publisher has and never sent, so that no relay holds them | both relays | Own relay: FETCH_OK with End Location {102, 1} and the three Objects. **The moqtail relay asks the page as well**, and says that the publisher accepted with End Location {102, 1}; the publishing page served its FETCH whole. What the page that fetches gets from that relay is not looked at beyond its FETCH_OK: the relay sends it a fetch stream under the Request ID of its own FETCH, and `@xmoq/moqt` closes the session for that |
+| The publisher accepts and writes nothing; the page gives its FETCH up after a second | own relay | The page has a FETCH_OK and its FETCH ends as cancelled; the relay cancels the FETCH it had sent the publisher, after the publisher's FETCH_OK; the publishing page sees the FETCH it served end as cancelled by the peer |
+| The publisher refuses with `DOES_NOT_EXIST` | own relay | REQUEST_ERROR `DOES_NOT_EXIST`, passed on |
 
-A Joining FETCH is not run: the own relay refuses one. Neither is a FETCH from the own Rust client.
+A FETCH from the own Rust client is not run. Once the relay has a cache, a FETCH for what it holds will not reach the publisher, and the runs with a page as the publisher will have to ask for what it does not hold.
 
 The runs in which a client leaves go through the own relay only, because the driver waits for lines only that relay prints. Their names begin with `leaving:`. What each has to show, and why, is in the [record](../docs/experiments/2026-10-10-disconnects-through-own-relay.md).
 
@@ -168,7 +174,7 @@ Not every client can leave in every way. `own-rust` and `moqtail-rust` close the
 | `clients.ts` | The four clients behind one shape for a publisher and one for a subscriber |
 | `run.ts` | The driver that moves one Object |
 | `disconnect.ts` | The driver for the runs in which a client leaves |
-| `fetch.ts` | The driver for the runs in which an own page sends a FETCH; each case of `--fetch` has its publisher |
+| `fetch.ts` | The driver for the runs in which an own page sends a FETCH; each case of `--fetch` has its publisher, and the cases that begin with `page-` an own page that answers the FETCH. `--report-only` prints what the page saw and compares it with nothing |
 | `matrix.ts` | The list of pairings, and the table |
 | `page.ts`, `xmoq-page.ts` | The own page, and the contract between the drivers and both pages |
 

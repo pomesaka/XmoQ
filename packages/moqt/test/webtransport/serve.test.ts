@@ -286,6 +286,238 @@ describe("serve: a SUBSCRIBE of the peer", () => {
 		},
 	);
 
+	test("a handler that returns a thenable that is no Promise is watched like an `async` one", async () => {
+		const { peer, connection } = await connected();
+		const reported: unknown[] = [];
+		const original = globalThis.reportError;
+		globalThis.reportError = (error: unknown) => {
+			reported.push(error);
+		};
+		try {
+			const failure = new Error("the application failed");
+			const thenable = {
+				// biome-ignore lint/suspicious/noThenProperty: a thenable that is no Promise is what is tested
+				then(_resolved: unknown, rejected: (reason: unknown) => void): void {
+					rejected(failure);
+				},
+			};
+			connection.serve({ subscribe: (): object => thenable });
+			const stream = peer.openBidi();
+			await stream.reply.write(subscribeBytes(1));
+			expect(await sentMessage(stream.sent)).toBe(
+				'REQUEST_ERROR 0 "the publisher failed to handle the request"',
+			);
+			expect(reported).toEqual([failure]);
+		} finally {
+			globalThis.reportError = original;
+		}
+	});
+
+	test("an `async` handler whose `accept` is rejected because the request went is no error of the application", async () => {
+		const { peer, connection } = await connected();
+		const reported: unknown[] = [];
+		const original = globalThis.reportError;
+		globalThis.reportError = (error: unknown) => {
+			reported.push(error);
+		};
+		try {
+			let release: () => void = () => {};
+			const waited = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let handled: Promise<void> | undefined;
+			connection.serve({
+				subscribe: (request) => {
+					handled = (async () => {
+						await waited;
+						await request.accept();
+					})();
+					return handled;
+				},
+			});
+			const stream = peer.openBidi();
+			await stream.reply.write(subscribeBytes(1));
+			await settle();
+			// The peer cancels while the handler waits.
+			await stream.reply.abort(fakeStreamError(1, "reset"));
+			await settle();
+			release();
+			expect(await rejection(handled ?? Promise.resolve())).toBeInstanceOf(
+				RequestAbortedError,
+			);
+			await settle();
+			expect(reported).toEqual([]);
+			expect(peer.closeInfo()).toBeUndefined();
+		} finally {
+			globalThis.reportError = original;
+		}
+	});
+
+	test("an `async` handler that fails with something else after the request went is reported", async () => {
+		const { peer, connection } = await connected();
+		const reported: unknown[] = [];
+		const original = globalThis.reportError;
+		globalThis.reportError = (error: unknown) => {
+			reported.push(error);
+		};
+		try {
+			const failure = new Error("the application failed");
+			let release: () => void = () => {};
+			const waited = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let handled: Promise<void> | undefined;
+			connection.serve({
+				subscribe: () => {
+					handled = waited.then(() => {
+						throw failure;
+					});
+					return handled;
+				},
+			});
+			const stream = peer.openBidi();
+			await stream.reply.write(subscribeBytes(1));
+			await settle();
+			await stream.reply.abort(fakeStreamError(1, "reset"));
+			await settle();
+			release();
+			await rejection(handled ?? Promise.resolve());
+			await settle();
+			expect(reported).toEqual([failure]);
+			expect(peer.closeInfo()).toBeUndefined();
+		} finally {
+			globalThis.reportError = original;
+		}
+	});
+
+	// What a handler lets through of a call on the Track it accepted. That
+	// the peer ended the subscription, or that the session is over, is no
+	// error of the application; that the application ended it itself and
+	// went on is.
+	const trackRows: {
+		name: string;
+		/** What happens to the subscription while the handler waits. */
+		ending: (all: {
+			stream: PeerBidiStream;
+			connection: MoqtConnection;
+			track: PublishedTrack;
+		}) => Promise<unknown>;
+		reported: string[];
+	}[] = [
+		{
+			name: "the subscriber cancelled: not reported",
+			ending: ({ stream }) => stream.reply.abort(fakeStreamError(1, "reset")),
+			reported: [],
+		},
+		{
+			name: "the session was closed: not reported",
+			ending: ({ connection }) => Promise.resolve(connection.close(0, "bye")),
+			reported: [],
+		},
+		{
+			name: "the handler itself said PUBLISH_DONE: reported",
+			ending: ({ track }) => track.done(2n, ""),
+			reported: ["PublishEndedError done"],
+		},
+	];
+	test.each(trackRows)(
+		"a handler that opens a subgroup after $name",
+		async ({ ending, reported }) => {
+			const { peer, connection } = await connected();
+			const seen: string[] = [];
+			const original = globalThis.reportError;
+			globalThis.reportError = (error: unknown) => {
+				seen.push(
+					error instanceof PublishEndedError
+						? `PublishEndedError ${error.end.type}`
+						: String(error),
+				);
+			};
+			try {
+				let release: () => void = () => {};
+				const waited = new Promise<void>((resolve) => {
+					release = resolve;
+				});
+				let accepted: (track: PublishedTrack) => void = () => {};
+				const tracked = new Promise<PublishedTrack>((resolve) => {
+					accepted = resolve;
+				});
+				let handled: Promise<void> | undefined;
+				connection.serve({
+					subscribe: (request) => {
+						handled = (async () => {
+							const track = await request.accept();
+							accepted(track);
+							await waited;
+							await track.openSubgroup(SUBGROUP);
+						})();
+						return handled;
+					},
+				});
+				const stream = peer.openBidi();
+				await stream.reply.write(subscribeBytes(1));
+				const track = await tracked;
+				await stream.sent.read();
+				await ending({ stream, connection, track });
+				await settle();
+				release();
+				expect(await rejection(handled ?? Promise.resolve())).toBeInstanceOf(
+					PublishEndedError,
+				);
+				await settle();
+				expect(seen).toEqual(reported);
+			} finally {
+				globalThis.reportError = original;
+			}
+		},
+	);
+
+	test("a handler whose write is failed by the end of the session is not reported", async () => {
+		const { peer, connection } = await connected();
+		const seen: unknown[] = [];
+		const original = globalThis.reportError;
+		globalThis.reportError = (error: unknown) => {
+			seen.push(error);
+		};
+		try {
+			let release: () => void = () => {};
+			const waited = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let ready: () => void = () => {};
+			const opened = new Promise<void>((resolve) => {
+				ready = resolve;
+			});
+			let handled: Promise<void> | undefined;
+			connection.serve({
+				subscribe: (request) => {
+					handled = (async () => {
+						const track = await request.accept();
+						const subgroup = await track.openSubgroup(SUBGROUP);
+						ready();
+						await waited;
+						await subgroup.write({ objectId: 0n, payload: utf8("a") });
+					})();
+					return handled;
+				},
+			});
+			const stream = peer.openBidi();
+			await stream.reply.write(subscribeBytes(1));
+			await opened;
+			// The streams fail a task before `closed` settles, as in a
+			// browser: the write meets the end of the session itself.
+			peer.close({ closeCode: 0, reason: "bye" });
+			release();
+			expect(await rejection(handled ?? Promise.resolve())).toBeInstanceOf(
+				SessionClosedError,
+			);
+			await settle();
+			expect(seen).toEqual([]);
+		} finally {
+			globalThis.reportError = original;
+		}
+	});
+
 	test("`serve` called again replaces the handler for the requests that come after", async () => {
 		const { peer, connection, stream } = await asked();
 		connection.serve({});

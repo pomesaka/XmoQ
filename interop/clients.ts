@@ -22,6 +22,7 @@ import type {
 	OwnPageExtras,
 	PageFetch,
 	PageFetchReport,
+	PageFetchServing,
 	PageProperty,
 	SubscriptionReport,
 	XmoqPage,
@@ -94,6 +95,11 @@ export interface PublisherPlan {
 	 */
 	servesWhenAsked?: "at-once" | "on-line";
 	/**
+	 * own-browser, with `servesWhenAsked`: what the page does with a
+	 * Standalone FETCH for the track. "refuse" when left out.
+	 */
+	servesFetches?: PageFetchServing;
+	/**
 	 * own-rust: the client connects, announces the namespace, and holds its
 	 * PUBLISH back until `publish()`. WHY: what takes time on a loaded
 	 * machine, the start of the process and its connection, is then done
@@ -118,7 +124,12 @@ export interface PublisherPlan {
 export type PublisherPriority = number | "default";
 
 /** The clients that take no line of the driver before a PUBLISH or an answer: every one but own-rust. */
-const NO_LINES: Pick<Publisher, "publish" | "asked" | "serve"> = {
+const NO_LINES: Pick<
+	Publisher,
+	"publish" | "asked" | "serve" | "servedFetchEnds"
+> = {
+	servedFetchEnds: () =>
+		Promise.reject(new Error("only an own page that serves a track says")),
 	publish: () =>
 		Promise.reject(new Error("only own-rust holds a PUBLISH back")),
 	asked: () => Promise.reject(new Error("only own-rust holds an answer back")),
@@ -214,6 +225,8 @@ export interface Publisher {
 	 * for a publisher that serves when asked and has not answered yet.
 	 */
 	serving(): Promise<void>;
+	/** own-browser that serves when asked: how each FETCH it accepted ended, the library's `ServedFetchEnd` as JSON. */
+	servedFetchEnds(): Promise<string[]>;
 	/** A publisher that holds its PUBLISH back (`publishesOnLine`): sends it, and resolves when it is accepted. */
 	publish(): Promise<void>;
 	/** A publisher that holds its answer back (`servesWhenAsked: "on-line"`): resolves when the relay's SUBSCRIBE has come to it. */
@@ -421,6 +434,7 @@ async function startRustPublisher(
 			client.child.stdin.write("serve\n");
 			await client.waitForLine(SERVING);
 		},
+		servedFetchEnds: NO_LINES.servedFetchEnds,
 		async kill() {
 			client.child.kill("SIGKILL");
 			await client.exited;
@@ -479,8 +493,13 @@ async function startBrowserPublisher(
 			label,
 			"announce the namespace",
 			page.evaluate(
-				([ns, track]) => window.xmoqOwn.serveTrack(ns, track),
-				names,
+				([ns, track, fetches, unsent]) =>
+					window.xmoqOwn.serveTrack(ns, track, fetches, unsent),
+				[
+					...names,
+					plan.servesFetches ?? "refuse",
+					plan.payloadHex ?? run.payloadHex,
+				] satisfies [string, string, PageFetchServing, string],
 			),
 		);
 	} else {
@@ -636,6 +655,12 @@ async function startBrowserPublisher(
 			);
 		},
 		...NO_LINES,
+		servedFetchEnds: () =>
+			onPage(
+				label,
+				"say how the FETCHes it served ended",
+				page.evaluate(() => window.xmoqOwn.servedFetchEnds()),
+			),
 		async peerEndAfterPublishDone() {
 			const reported = await onPage(
 				label,

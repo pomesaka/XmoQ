@@ -1,0 +1,22 @@
+the-captured-range	nothing	standalone	16001d01010204786d6f7106706861736530066f626a656374000101020120c8	handed
+one-object	nothing	standalone	16001d01010204786d6f7106706861736530066f626a656374030403050120c8	handed
+end-is-the-start	nothing	standalone	16001d01010204786d6f7106706861736530066f626a656374030403040120c8	handed
+end-before-start-in-the-group	nothing	standalone	16001d01010204786d6f7106706861736530066f626a656374030403030120c8	refused 0x11
+end-is-the-whole-group-of-the-start	nothing	standalone	16001d01010204786d6f7106706861736530066f626a656374030403000120c8	handed
+end-in-an-earlier-group	nothing	standalone	16001d01010204786d6f7106706861736530066f626a656374030002090120c8	refused 0x11
+end-is-an-earlier-whole-group	nothing	standalone	16001d01010204786d6f7106706861736530066f626a656374030002000120c8	refused 0x11
+a-track-this-endpoint-published	publish	standalone	16001d01010204786d6f7106706861736530066f626a656374000101020120c8	handed
+a-track-the-peer-subscribed-to	subscribe-accepted	standalone	16001d03010204786d6f7106706861736530066f626a656374000101020120c8	handed
+joins-itself	nothing	joining	160007010201000120c8	refused 0x32
+joins-a-later-request-id	nothing	joining	160007010203000120c8	refused 0x32
+joins-a-publish-of-this-endpoint	publish	joining	160007010200000120c8	refused 0x32
+joins-a-subscribe-that-waits	subscribe	joining	160007030201000120c8	handed
+joins-an-accepted-subscribe	subscribe-accepted	joining	160007030201000120c8	handed
+joins-an-accepted-subscribe-absolute	subscribe-accepted	joining	160007030301050120c8	handed
+joins-a-subscribe-after-publish-done	subscribe-done	joining	160007030201000120c8	refused 0x32
+joins-a-rejected-subscribe	subscribe-rejected	joining	160007030201000120c8	refused 0x32
+request-id-of-the-wrong-parity	nothing	standalone	16001d02010204786d6f7106706861736530066f626a656374000101020120c8	closed 0x4
+request-id-used-before	subscribe	standalone	16001d01010204786d6f7106706861736530066f626a656374000101020120c8	closed 0x4
+a-parameter-that-is-none-of-a-fetch	nothing	standalone	16001d01010204786d6f7106706861736530066f626a65637400010102011001	closed 0x3
+a-fetch-type-that-is-none	nothing	neither	160007010401000120c8	closed 0x3
+wrong-in-its-range-and-in-its-request-id	nothing	standalone	16001d02010204786d6f7106706861736530066f626a656374030403030120c8	closed 0x4

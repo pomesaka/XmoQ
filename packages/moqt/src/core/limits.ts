@@ -29,6 +29,21 @@ export interface SessionLimits extends SubgroupStreamLimits {
 	 * stream: those give their place among the streams back and stay open.
 	 */
 	maxPeerRequests: number;
+	/**
+	 * FETCHes of the peer that are open at once, among `maxPeerRequests`:
+	 * the ones that wait for the application's answer and the ones whose
+	 * fetch stream is being written. One more is answered with REQUEST_ERROR
+	 * `EXCESSIVE_LOAD`.
+	 *
+	 * WHY 32, where an XmoQ relay asks one publisher for 16 at once: the
+	 * relay has room for its next FETCH when it cancels one, and this
+	 * endpoint has it when it has read that cancellation, which travels on
+	 * another stream than the next FETCH and can be read after it. With the
+	 * same number, a FETCH that follows a cancellation closely could be
+	 * refused for a place that is about to be free. Not seen in a run: the
+	 * number is twice the relay's by that argument alone.
+	 */
+	maxPeerFetches: number;
 }
 
 /** Provisional values: the draft sets no maximum and the project has not chosen any. */
@@ -37,6 +52,7 @@ const DEFAULT_SESSION_LIMITS: SessionLimits = {
 	maxObjectPropertiesLength: 64 * 1024,
 	maxHeldSubgroupBytes: 1024 * 1024,
 	maxPeerRequests: 64,
+	maxPeerFetches: 32,
 };
 
 /** The limits to run with: the defaults, with what the application set on top. */
@@ -55,5 +71,7 @@ export function resolveLimits(
 			DEFAULT_SESSION_LIMITS.maxHeldSubgroupBytes,
 		maxPeerRequests:
 			limits.maxPeerRequests ?? DEFAULT_SESSION_LIMITS.maxPeerRequests,
+		maxPeerFetches:
+			limits.maxPeerFetches ?? DEFAULT_SESSION_LIMITS.maxPeerFetches,
 	};
 }

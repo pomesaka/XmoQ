@@ -16,7 +16,8 @@ export type RequestClosedReason =
 	 * refused and the subscription ended with PUBLISH_DONE UPDATE_FAILED. For
 	 * a SUBSCRIBE of the peer that had no answer yet, the REQUEST_ERROR for
 	 * the update is the one answer the request gets, and no PUBLISH_DONE
-	 * follows.
+	 * follows. For a FETCH of the peer that had no answer yet: it was sent
+	 * more updates than may wait for that answer, and was refused.
 	 */
 	| "update-failed"
 	/**
@@ -145,6 +146,23 @@ export type SessionEvent =
 			requestId: bigint;
 			trackNamespace: TrackNamespace;
 			trackName: Uint8Array;
+			parameters: MessageParameters;
+	  }
+	/**
+	 * The peer asks for a range of a Track with a Standalone FETCH. The
+	 * caller answers with `acceptFetch` or `rejectPeerRequest`;
+	 * `request-closed` for the same Request ID says that the FETCH went, by
+	 * the peer's doing, before it was answered or while it was served.
+	 */
+	| {
+			type: "peer-fetch";
+			requestId: bigint;
+			trackNamespace: TrackNamespace;
+			trackName: Uint8Array;
+			/** As in the FETCH. */
+			startLocation: Location;
+			/** As in the FETCH: the last Object plus 1, or Object 0 for the whole Group. */
+			endLocation: Location;
 			parameters: MessageParameters;
 	  }
 	/** A request the peer opened was answered with REQUEST_ERROR, with this code. */

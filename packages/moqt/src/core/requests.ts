@@ -1,7 +1,10 @@
+import type { Bytes } from "./bytes.ts";
 import {
 	type ControlMessage,
 	drainControlMessages,
 	encodeControlMessage,
+	FETCH_MESSAGE_TYPE,
+	type Fetch,
 	type FetchOk,
 	type FetchRange,
 	type PublishDone,
@@ -21,6 +24,12 @@ import {
 	StreamResetErrorCode,
 } from "./error.ts";
 import {
+	createFetchStreamEncoder,
+	type FetchObject,
+	type FetchStreamEncoder,
+	type RangeEnd,
+} from "./fetch.ts";
+import {
 	createIncomingSubgroups,
 	type IncomingSubgroups,
 } from "./incoming-subgroups.ts";
@@ -36,6 +45,7 @@ import {
 } from "./outgoing-subgroups.ts";
 import {
 	endsBefore,
+	type GroupOrder,
 	type Location,
 	type MessageParameters,
 	parametersOutsideScope,
@@ -93,6 +103,18 @@ export interface SubscribeAnswer {
 	 * Track, so its caller has to keep that.
 	 */
 	parameters?: MessageParameters;
+	trackProperties?: KeyValuePair[];
+}
+
+/** What the application answers a FETCH of the peer with: the fields of FETCH_OK (§10.13). */
+export interface FetchAnswer {
+	/**
+	 * The end of what the fetch stream will cover, in the encoding of a
+	 * FETCH: the last Object plus 1, or Object 0 for the whole Group.
+	 */
+	endLocation: Location;
+	/** Whether `endLocation` is the end of the Track. False when left out. */
+	endOfTrack?: boolean;
 	trackProperties?: KeyValuePair[];
 }
 
@@ -197,6 +219,43 @@ export interface Requests {
 		peerStream: number,
 		out: SessionOutput[],
 	): PeerSubscribeOpened;
+	/**
+	 * A Standalone FETCH of the peer, whole, with a range that does not end
+	 * before it starts and a Request ID that was checked. Like
+	 * `peerSubscribeOpened`: refused here, or its stream is adopted and it
+	 * waits for `acceptFetch` or `rejectPeerRequest`.
+	 */
+	peerFetchOpened(
+		message: Fetch,
+		peerStream: number,
+		out: SessionOutput[],
+	): PeerSubscribeOpened;
+	/**
+	 * Accepts a FETCH of the peer: sends FETCH_OK, then a REQUEST_OK for each
+	 * REQUEST_UPDATE that came before, and opens the fetch stream with its
+	 * FETCH_HEADER. Throws a `RangeError`, and leaves the FETCH waiting, for
+	 * an End Location before the Start Location of the FETCH: its receiver
+	 * would close the session (§10.13). An End Location beyond what was asked
+	 * for is not checked, as in the Rust session.
+	 */
+	acceptFetch(requestId: bigint, answer: FetchAnswer): SessionOutput[];
+	/**
+	 * Writes the next Object of an accepted FETCH to its fetch stream. Throws
+	 * a `RangeError`, and writes nothing, for an Object that does not come
+	 * after what was written before it by the Group Order of the FETCH;
+	 * whether it lies in the range that was asked for is not checked.
+	 */
+	writeFetchObject(requestId: bigint, object: FetchObject): SessionOutput[];
+	/** Writes an End of Range indicator to the fetch stream (§11.4.4.2). */
+	writeFetchRangeEnd(
+		requestId: bigint,
+		kind: RangeEnd,
+		location: Location,
+	): SessionOutput[];
+	/** The fetch stream is whole: both streams of the FETCH are finished, and the FETCH is over. */
+	finishFetch(requestId: bigint): SessionOutput[];
+	/** Gives an accepted FETCH up: both of its streams are reset (§5.2). */
+	resetFetch(requestId: bigint, code: number): SessionOutput[];
 	/** Whether the Request ID names a SUBSCRIBE of the peer that waits for its answer or was accepted, and is not over (§10.12.2). */
 	isOpenPeerSubscribe(requestId: bigint): boolean;
 	/**
@@ -334,15 +393,52 @@ interface FetchEntry extends RequestCommon {
 	fetchStream: "none" | "ended" | { peerStream: number };
 }
 
+/**
+ * A Standalone FETCH of the peer: Pending until the application answers,
+ * Established while its fetch stream is written.
+ */
+interface PeerFetchEntry extends RequestCommon {
+	kind: "PEER_FETCH";
+	start: Location;
+	groupOrder: GroupOrder;
+	/** REQUEST_UPDATEs that came before the answer and get their REQUEST_OK after the FETCH_OK. */
+	heldUpdates: number;
+	/** The fetch stream and what encodes it, once the FETCH was accepted. */
+	writing: { stream: number; encoder: FetchStreamEncoder } | undefined;
+	/** This endpoint finished the fetch stream: how the peer ends its direction of the request stream is waited for, as after PUBLISH_DONE. */
+	served: boolean;
+}
+
 type RequestEntry =
 	| NamespaceEntry
 	| PublishEntry
 	| PeerSubscribeEntry
+	| PeerFetchEntry
 	| SubscribeEntry
 	| FetchEntry;
 
 /** §10.2.12: FORWARD defaults to 1 wherever it is omitted, except in REQUEST_UPDATE. */
 const DEFAULT_FORWARD = true;
+
+/** REQUEST_OK without a parameter: the answer to a REQUEST_UPDATE that changes nothing. */
+const REQUEST_OK = encodeControlMessage({
+	type: "REQUEST_OK",
+	parameters: {},
+	trackProperties: [],
+});
+
+/**
+ * REQUEST_UPDATEs for a FETCH of the peer that may wait for the answer to
+ * the FETCH, each of which is owed a REQUEST_OK after it. One more and the
+ * FETCH is refused with EXCESSIVE_LOAD.
+ *
+ * WHY a limit: the answers are sent in one go when the application's comes,
+ * and how many there are is the peer's to choose. The number and what
+ * happens beyond it are the relay's (`MAX_HELD_FETCH_UPDATES` in
+ * crates/relay-core/src/fetch.rs); the Rust session leaves it to its
+ * caller. Provisional.
+ */
+const MAX_HELD_FETCH_UPDATES = 64;
 
 /** PUBLISH_DONE status code UPDATE_FAILED (§10.11). */
 const UPDATE_FAILED = 0x8n;
@@ -369,6 +465,8 @@ export function createRequests(options: RequestsOptions): Requests {
 	 * session (`next_free_alias`).
 	 */
 	let nextServedAlias = 0n;
+	/** The FETCHes of the peer that are being served, by the number of their fetch stream. */
+	const fetchStreams = new Map<number, PeerFetchEntry>();
 	const outgoing = createOutgoingSubgroups(options.allocateStream);
 	// The three callbacks are function declarations further down, so that this
 	// table of dependencies can stand before the code that uses it.
@@ -411,10 +509,20 @@ export function createRequests(options: RequestsOptions): Requests {
 		for (const request of requests.values()) {
 			if (
 				request.kind === "PEER_SUBSCRIBE" ||
+				request.kind === "PEER_FETCH" ||
 				(request.kind === "PUBLISH" && request.openedBy === "peer")
 			) {
 				count += 1;
 			}
+		}
+		return count;
+	};
+
+	/** FETCHes of the peer that are open: waiting for their answer, or being served. */
+	const openPeerFetches = (): number => {
+		let count = 0;
+		for (const request of requests.values()) {
+			if (request.kind === "PEER_FETCH") count += 1;
 		}
 		return count;
 	};
@@ -455,7 +563,10 @@ export function createRequests(options: RequestsOptions): Requests {
 	 * wait for it ends with `publishDonePeerEndExpired`.
 	 */
 	const awaitsPeerEnd = (request: RequestEntry): boolean =>
-		request.kind === "PUBLISH" && request.endedLocally;
+		(request.kind === "PUBLISH" && request.endedLocally) ||
+		// A FETCH of the peer that was served: the same wait, so that a peer
+		// that does not end its direction does not hold the stream for good.
+		(request.kind === "PEER_FETCH" && request.served);
 
 	const reportPeerEndAfterPublishDone = (
 		request: RequestEntry,
@@ -518,6 +629,15 @@ export function createRequests(options: RequestsOptions): Requests {
 		}
 		if (request.kind === "SUBSCRIBE" && request.trackAlias !== undefined) {
 			incoming.release(request.trackAlias, code, out);
+		}
+		// §5.2: a publisher that learns of the cancellation "MUST reset the
+		// bidi request stream and unidirectional data stream associated with
+		// the FETCH". A fetch stream that was finished is not among these.
+		if (request.kind === "PEER_FETCH" && request.writing !== undefined) {
+			const { stream } = request.writing;
+			request.writing = undefined;
+			fetchStreams.delete(stream);
+			out.push({ type: "reset", stream, code });
 		}
 		// §5.2: "If the data stream is already open, the subscriber wishing to
 		// cancel the FETCH MAY send STOP_SENDING for the data stream as well".
@@ -841,6 +961,34 @@ export function createRequests(options: RequestsOptions): Requests {
 	};
 
 	/**
+	 * Refuses a request of the peer that has no answer yet, for a
+	 * REQUEST_UPDATE that came for it: the REQUEST_ERROR is the one answer
+	 * the request gets, and the application is told that it is gone.
+	 */
+	const refuseBeforeAnswer = (
+		request: PeerSubscribeEntry | PeerFetchEntry,
+		errorCode: bigint,
+		errorReason: string,
+		out: SessionOutput[],
+	): void => {
+		request.endedLocally = true;
+		endRequest(request, out, () => {
+			out.push({
+				type: "send",
+				stream: request.stream,
+				data: encodeControlMessage({
+					type: "REQUEST_ERROR",
+					errorCode,
+					retryInterval: 0n,
+					errorReason,
+				}),
+			});
+			out.push(closedEvent(request, "update-failed"));
+			finishSend(request, out);
+		});
+	};
+
+	/**
 	 * A REQUEST_UPDATE for a SUBSCRIBE of the peer that has no answer yet. It
 	 * is refused, and the request is over with that.
 	 *
@@ -855,21 +1003,55 @@ export function createRequests(options: RequestsOptions): Requests {
 	): void => {
 		// §10.1: REQUEST_UPDATE consumes a Request ID of its sender.
 		options.checkPeerRequestId(message.requestId);
-		request.endedLocally = true;
-		endRequest(request, out, () => {
-			out.push({
-				type: "send",
-				stream: request.stream,
-				data: encodeControlMessage({
-					type: "REQUEST_ERROR",
-					errorCode: RequestErrorCode.NOT_SUPPORTED,
-					retryInterval: 0n,
-					errorReason: "REQUEST_UPDATE is not implemented",
-				}),
-			});
-			out.push(closedEvent(request, "update-failed"));
-			finishSend(request, out);
-		});
+		refuseBeforeAnswer(
+			request,
+			RequestErrorCode.NOT_SUPPORTED,
+			"REQUEST_UPDATE is not implemented",
+			out,
+		);
+	};
+
+	/**
+	 * A REQUEST_UPDATE for a FETCH of the peer. It is accepted and changes
+	 * nothing: a refusal would cost the subscriber its fetch (§10.9.1 has the
+	 * publisher reset the fetch stream then), where it may only have meant to
+	 * change a priority, which nothing here uses.
+	 *
+	 * WHY one that comes before the answer is held: responses carry no
+	 * Request ID, so a REQUEST_OK sent first would be read as the answer to
+	 * the FETCH. The same in the Rust session (`fixtures/peer-fetch/`).
+	 */
+	const onUpdateOfPeerFetch = (
+		request: PeerFetchEntry,
+		message: RequestUpdate,
+		out: SessionOutput[],
+	): void => {
+		// §10.1: REQUEST_UPDATE consumes a Request ID of its sender.
+		options.checkPeerRequestId(message.requestId);
+		// §10.2.1, with what §10.2 lets the update of a FETCH carry.
+		const outside = parametersOutsideScope(
+			message.parameters,
+			"REQUEST_UPDATE_OF_FETCH",
+		);
+		if (outside.length > 0) {
+			throw protocolViolation(
+				`${outside.join(", ")} not allowed in the REQUEST_UPDATE of a FETCH`,
+			);
+		}
+		if (request.state === "Pending") {
+			request.heldUpdates += 1;
+			if (request.heldUpdates <= MAX_HELD_FETCH_UPDATES) return;
+			// One more than may wait: the FETCH is refused, and none of the
+			// updates gets an answer, as the relay does for a subscriber's.
+			refuseBeforeAnswer(
+				request,
+				RequestErrorCode.EXCESSIVE_LOAD,
+				"too many REQUEST_UPDATE messages before the answer",
+				out,
+			);
+			return;
+		}
+		out.push({ type: "send", stream: request.stream, data: REQUEST_OK });
 	};
 
 	const onResponse = (
@@ -888,6 +1070,11 @@ export function createRequests(options: RequestsOptions): Requests {
 		if (request.kind === "PEER_SUBSCRIBE") {
 			if (message.type !== "REQUEST_UPDATE") throw unexpected;
 			onUpdateBeforeAnswer(request, message, out);
+			return;
+		}
+		if (request.kind === "PEER_FETCH") {
+			if (message.type !== "REQUEST_UPDATE") throw unexpected;
+			onUpdateOfPeerFetch(request, message, out);
 			return;
 		}
 		switch (message.type) {
@@ -990,6 +1177,36 @@ export function createRequests(options: RequestsOptions): Requests {
 		return request;
 	};
 
+	/** A FETCH of the peer in the state named: waiting for its answer, or being served. */
+	const peerFetch = (
+		requestId: bigint,
+		state: "Pending" | "Established",
+	): PeerFetchEntry => {
+		const request = requests.get(requestId);
+		if (request?.kind !== "PEER_FETCH" || request.state !== state) {
+			throw new InactiveError(
+				state === "Pending"
+					? `Request ID ${requestId} is not a FETCH of the peer that waits for its answer`
+					: `Request ID ${requestId} is not a FETCH of the peer that is being served`,
+			);
+		}
+		return request;
+	};
+
+	/** Writes to the fetch stream of a FETCH that is being served. */
+	const toFetchStream = (
+		requestId: bigint,
+		encode: (encoder: FetchStreamEncoder) => Bytes,
+	): SessionOutput[] => {
+		const { writing } = peerFetch(requestId, "Established");
+		if (writing === undefined) {
+			throw new InactiveError(`the fetch stream of ${requestId} has ended`);
+		}
+		return [
+			{ type: "send", stream: writing.stream, data: encode(writing.encoder) },
+		];
+	};
+
 	/**
 	 * A subscription this endpoint is the publisher of, whose subscriber can
 	 * end its direction of the request stream and leave the subscription as
@@ -997,7 +1214,9 @@ export function createRequests(options: RequestsOptions): Requests {
 	 */
 	const outlivesPeerFin = (request: RequestEntry): boolean =>
 		(request.kind === "PUBLISH" && request.state === "Established") ||
-		(request.kind === "PEER_SUBSCRIBE" && request.state === "Pending");
+		(request.kind === "PEER_SUBSCRIBE" && request.state === "Pending") ||
+		// The subscriber of a FETCH has said everything with the FETCH.
+		(request.kind === "PEER_FETCH" && request.state !== "Terminated");
 
 	return {
 		incoming,
@@ -1210,6 +1429,129 @@ export function createRequests(options: RequestsOptions): Requests {
 			return { stream: entry.stream };
 		},
 
+		peerFetchOpened(message, peerStream, out) {
+			const { range } = message;
+			if (range.fetchType !== "Standalone") {
+				throw new Error("only a Standalone FETCH is handed on");
+			}
+			if (
+				openPeerRequests() >= options.limits.maxPeerRequests ||
+				openPeerFetches() >= options.limits.maxPeerFetches
+			) {
+				return { refused: RequestErrorCode.EXCESSIVE_LOAD };
+			}
+			const entry: PeerFetchEntry = {
+				requestId: message.requestId,
+				stream: options.allocateStream(),
+				state: "Pending",
+				inbound: new Uint8Array(0),
+				sendClosed: false,
+				endedLocally: false,
+				peerFinished: false,
+				kind: "PEER_FETCH",
+				start: range.startLocation,
+				// §10.2.8: Ascending where the FETCH does not say.
+				groupOrder: message.parameters.groupOrder ?? "Ascending",
+				heldUpdates: 0,
+				writing: undefined,
+				served: false,
+			};
+			requests.set(entry.requestId, entry);
+			requestStreams.set(entry.stream, entry);
+			out.push({ type: "adopt-peer-stream", peerStream, stream: entry.stream });
+			out.push({
+				type: "event",
+				event: {
+					type: "peer-fetch",
+					requestId: message.requestId,
+					trackNamespace: range.trackNamespace,
+					trackName: range.trackName,
+					startLocation: range.startLocation,
+					endLocation: range.endLocation,
+					parameters: message.parameters,
+				},
+			});
+			return { stream: entry.stream };
+		},
+
+		acceptFetch(requestId, answer) {
+			const request = peerFetch(requestId, "Pending");
+			if (endsBefore(request.start, answer.endLocation)) {
+				throw new RangeError(
+					"the FETCH_OK ends before the FETCH starts (§10.13)",
+				);
+			}
+			// Before anything changes: a value that does not fit its field
+			// throws here.
+			const ok = encodeControlMessage({
+				type: "FETCH_OK",
+				endOfTrack: answer.endOfTrack ?? false,
+				endLocation: answer.endLocation,
+				parameters: {},
+				trackProperties: answer.trackProperties ?? [],
+			});
+			const encoder = createFetchStreamEncoder(
+				{ requestId },
+				request.groupOrder,
+			);
+			const stream = options.allocateStream();
+			request.state = "Established";
+			request.writing = { stream, encoder };
+			fetchStreams.set(stream, request);
+			const out: SessionOutput[] = [
+				{ type: "send", stream: request.stream, data: ok },
+			];
+			for (; request.heldUpdates > 0; request.heldUpdates -= 1) {
+				out.push({ type: "send", stream: request.stream, data: REQUEST_OK });
+			}
+			// WHY at once, where §10.13 lets the stream come before or after
+			// the FETCH_OK: a relay that has the FETCH_OK waits a limited time
+			// for the stream to open, and the application then has nothing to
+			// do in time.
+			out.push({ type: "open-uni-stream", stream, data: encoder.header });
+			return out;
+		},
+
+		writeFetchObject: (requestId, object) =>
+			toFetchStream(requestId, (encoder) => encoder.object(object)),
+
+		writeFetchRangeEnd: (requestId, kind, location) =>
+			toFetchStream(requestId, (encoder) => encoder.endOfRange(kind, location)),
+
+		finishFetch(requestId) {
+			const request = peerFetch(requestId, "Established");
+			const out: SessionOutput[] = [];
+			if (request.writing !== undefined) {
+				const { stream } = request.writing;
+				// Before `endRequest`, which resets a fetch stream that is open.
+				request.writing = undefined;
+				fetchStreams.delete(stream);
+				out.push({ type: "finish", stream });
+			}
+			request.endedLocally = true;
+			request.served = true;
+			endRequest(request, out, () => finishSend(request, out));
+			// The subscriber had finished its direction already; nothing more
+			// comes on the stream.
+			if (request.peerFinished) {
+				requestStreams.delete(request.stream);
+				reportPeerEndAfterPublishDone(request, "fin", undefined, out);
+			}
+			return out;
+		},
+
+		resetFetch(requestId, code) {
+			const request = peerFetch(requestId, "Established");
+			const out: SessionOutput[] = [];
+			endRequest(
+				request,
+				out,
+				() => resetRequestStream(request, code, out),
+				code,
+			);
+			return out;
+		},
+
 		isOpenPeerSubscribe(requestId) {
 			const request = requests.get(requestId);
 			return (
@@ -1251,7 +1593,11 @@ export function createRequests(options: RequestsOptions): Requests {
 		},
 
 		rejectPeerRequest(requestId, errorCode, errorReason) {
-			const request = pendingPeerSubscribe(requestId);
+			const waiting = requests.get(requestId);
+			const request =
+				waiting?.kind === "PEER_FETCH"
+					? peerFetch(requestId, "Pending")
+					: pendingPeerSubscribe(requestId);
 			const data = encodeControlMessage({
 				type: "REQUEST_ERROR",
 				errorCode,
@@ -1268,7 +1614,10 @@ export function createRequests(options: RequestsOptions): Requests {
 					type: "event",
 					event: {
 						type: "peer-request-rejected",
-						messageType: SUBSCRIBE_MESSAGE_TYPE,
+						messageType:
+							request.kind === "PEER_FETCH"
+								? FETCH_MESSAGE_TYPE
+								: SUBSCRIBE_MESSAGE_TYPE,
 						requestId,
 						errorCode,
 					},
@@ -1420,6 +1769,16 @@ export function createRequests(options: RequestsOptions): Requests {
 		},
 
 		streamStopped(stream, code, out) {
+			// WHY a stop of the fetch stream alone ends the FETCH, where the
+			// draft has the subscriber stop the request stream (§5.2: "It MUST
+			// send STOP_SENDING for the bidi request stream", and MAY stop the
+			// data stream as well): a FETCH cannot go on without its stream.
+			// The own relay reads a subscriber in the same way.
+			const fetched = fetchStreams.get(stream);
+			if (fetched !== undefined) {
+				abandonRequest(fetched, "peer-reset", out, code);
+				return;
+			}
 			const request = requestStreams.get(stream);
 			if (request === undefined) return;
 			request.sendClosed = true;
@@ -1443,6 +1802,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			requestStreams.clear();
 			publishedAliases.clear();
 			nextServedAlias = 0n;
+			fetchStreams.clear();
 			outgoing.clear();
 			incoming.clear();
 		},

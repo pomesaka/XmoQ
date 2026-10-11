@@ -451,7 +451,9 @@ export interface FetchStreamEncoder {
 	/**
 	 * The bytes of an End of Range indicator: the Objects after what was
 	 * encoded before, up to and with `location`, do not exist or are not
-	 * known.
+	 * known. Throws a `RangeError`, encoding nothing, for a Location that
+	 * goes back: an earlier Group by the Group Order, or the same Group and
+	 * no larger Object ID.
 	 */
 	endOfRange(kind: RangeEnd, location: Location): Bytes;
 }
@@ -468,10 +470,16 @@ export interface FetchStreamEncoder {
  * 0.15.0 and the Rust implementation leave a field out in exactly these
  * places, so the bytes they wrote can be compared with what this writes.
  *
- * WHY NOT refuse an End of Range indicator that goes back, as an Object that
- * does is refused: §11.4.4.2 has an indicator cover what lies "between the
- * last serialized Object, if any, and this Location" and does not say which
- * of the two comes first in a Descending fetch.
+ * An End of Range indicator is refused like an Object where it certainly
+ * goes back: a Group against the Group Order, or the Group of what came
+ * before it and no larger Object ID. WHY refused: the fields of the next
+ * Object are written against the indicator's Location, so an indicator that
+ * went back would take the encoder back with it, and an Object that goes
+ * back would be written after it. WHY NOT more than that: §11.4.4.2 has an
+ * indicator cover what lies "between the last serialized Object, if any,
+ * and this Location" and does not say which Location of a Group that comes
+ * later in a Descending fetch an indicator is to name, so within such a
+ * Group any Object ID is taken.
  */
 export function createFetchStreamEncoder(
 	header: FetchHeader,
@@ -563,6 +571,17 @@ export function createFetchStreamEncoder(
 			return createByteWriter().varint(flags).bytes(fields.finish()).finish();
 		},
 		endOfRange(kind, location) {
+			if (prior !== undefined) {
+				if (prior.location.group === location.group) {
+					if (location.object <= prior.location.object) {
+						throw new RangeError("Object IDs must increase within a Group");
+					}
+				} else if (
+					groupDelta(prior.location.group, location.group) === undefined
+				) {
+					throw new RangeError("Groups must follow the Group Order");
+				}
+			}
 			const writer = createByteWriter().varint(RANGE_ENDS.toWire(kind));
 			encodeLocation(writer, location);
 			prior = afterRangeEnd(prior, location);
