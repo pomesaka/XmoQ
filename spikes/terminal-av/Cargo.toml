@@ -15,10 +15,14 @@ xmoq-loc = { path = "../../crates/loc" }
 xmoq-moqt = { path = "../../crates/moqt" }
 xmoq-moqt-io = { path = "../../crates/moqt-io" }
 anyhow = "=1.0.100"
-tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 cpal = "=0.18.2"
 opus-decoder = "=0.1.1"
 openh264 = "=0.9.8"
+# For --room. No TLS: the rooms are a Worker run locally (ws://).
+tokio-tungstenite = "=0.30.0"
+futures-util = "=0.3.31"
+serde_json = "=1.0.152"
 
 [profile.release]
 debug = false

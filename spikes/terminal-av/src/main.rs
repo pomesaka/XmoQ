@@ -6,6 +6,13 @@
 //!   xmoq-watch --url https://127.0.0.1:4443/ --cert-sha256 <hex> [--namespace xmoq/demo]
 //!       [--video video] [--audio audio] [--buffer-ms 50] [--volume 1] [--scale 1]
 //!       [--medium file|direct] [--out <file>] [--seconds N]
+//!   xmoq-watch --room http://127.0.0.1:8787/rooms/demo [--name terminal] [--say "a line"] [--token no]
+//!
+//! With `--room` the room says where the broadcast is (the relay, the hash
+//! of its certificate, the namespace) and gives a token for the relay,
+//! which goes into SETUP and into both SUBSCRIBEs; `--token no` asks for
+//! none. The chat of the room is written under the picture, and to stderr
+//! where stderr is no terminal (`CHAT ...`). `--say` sends one line.
 //!
 //! The clock: the smallest (arrival - Timestamp) seen on either track is
 //! taken for the time an Object needs at least, and every Object is due
@@ -16,10 +23,12 @@
 //! `AV_PLAYED` to stderr.
 
 mod picture;
+mod room;
 mod screen;
 mod sound;
 
-use std::sync::Arc;
+use std::io::IsTerminal;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
@@ -34,7 +43,7 @@ use xmoq_moqt::params::{GroupOrder, Parameter};
 use xmoq_moqt::session::{RequestEvent, RequestId, Role, Session, Transport};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, RequestReader, RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace, UniEvent, read_uni_streams,
+    Connection, RequestReader, RequestStreamEvent, StreamConfig, StreamStops, Trace, UniEvent, read_uni_streams,
     send_message,
 };
 
@@ -53,6 +62,21 @@ struct Args {
     medium: screen::Medium,
     out: Option<String>,
     seconds: Option<u64>,
+    room: Option<String>,
+    name: String,
+    say: Option<String>,
+    ask_token: bool,
+}
+
+fn hash_of(hex: &str) -> Result<[u8; 32]> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        bail!("the hash of a certificate is 64 hex digits");
+    }
+    let mut hash = [0; 32];
+    for (at, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[at * 2..at * 2 + 2], 16).context("the hash of a certificate")?;
+    }
+    Ok(hash)
 }
 
 fn parse_args() -> Result<Args> {
@@ -68,6 +92,10 @@ fn parse_args() -> Result<Args> {
         medium: screen::Medium::File,
         out: None,
         seconds: None,
+        room: None,
+        name: "terminal".to_string(),
+        say: None,
+        ask_token: true,
     };
     let mut given = std::env::args().skip(1);
     while let Some(flag) = given.next() {
@@ -75,12 +103,7 @@ fn parse_args() -> Result<Args> {
         match flag.as_str() {
             "--url" => args.url = value,
             "--cert-sha256" => {
-                if value.len() != 64 {
-                    bail!("--cert-sha256 is 64 hex digits");
-                }
-                for (at, byte) in args.cert_sha256.iter_mut().enumerate() {
-                    *byte = u8::from_str_radix(&value[at * 2..at * 2 + 2], 16).context("--cert-sha256")?;
-                }
+                args.cert_sha256 = hash_of(&value)?;
             }
             "--namespace" => args.namespace = value,
             "--video" => args.video = value,
@@ -97,11 +120,15 @@ fn parse_args() -> Result<Args> {
             }
             "--out" => args.out = Some(value),
             "--seconds" => args.seconds = Some(value.parse().context("--seconds")?),
+            "--room" => args.room = Some(value),
+            "--name" => args.name = value,
+            "--say" => args.say = Some(value),
+            "--token" => args.ask_token = value != "no",
             other => bail!("unknown flag {other}"),
         }
     }
-    if args.url.is_empty() {
-        bail!("--url is required");
+    if args.url.is_empty() && args.room.is_none() {
+        bail!("--url or --room is required");
     }
     Ok(args)
 }
@@ -119,13 +146,17 @@ async fn subscribe(
     session: &mut Session,
     namespace: &TrackNamespace,
     name: &str,
+    token: Option<&[u8]>,
 ) -> Result<Subscription> {
     let track = FullTrackName::new(namespace.clone(), name.as_bytes().to_vec())?;
-    let parameters = vec![
+    let mut parameters = vec![
         Parameter::Forward(true),
         Parameter::SubscriberPriority(128),
         Parameter::GroupOrder(GroupOrder::Ascending),
     ];
+    if let Some(token) = token {
+        parameters.push(Parameter::AuthorizationToken(token.to_vec()));
+    }
     let (request, message) = session.subscribe(track, parameters)?;
     let (mut send, recv) = connection.open_bi().await?;
     let trace = Trace::default();
@@ -192,29 +223,75 @@ fn spread(mut values: Vec<f32>) -> String {
 }
 
 async fn run(args: &Args) -> Result<()> {
-    let connection = Arc::new(wt::connect(&args.url, args.cert_sha256, &StreamConfig::default()).await?);
+    // With a room: where the broadcast is, and a token, are the room's to say.
+    let mut room = None;
+    let (mut url, mut cert_sha256, mut namespace) = (args.url.clone(), args.cert_sha256, args.namespace.clone());
+    let mut token = None;
+    if let Some(address) = &args.room {
+        let mut joined = room::Room::join(address, &args.name).await?;
+        let broadcast = joined.broadcast(Duration::from_secs(30)).await?;
+        eprintln!("ROOM_BROADCAST relay={} namespace={}", broadcast.relay_url, broadcast.namespace.join("/"));
+        if args.ask_token {
+            // §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value; as the pages do.
+            token = joined.token(&broadcast.namespace).await?.map(|text| [&[0x03, 0x00], text.as_bytes()].concat());
+            eprintln!("ROOM_TOKEN {}", if token.is_some() { "given" } else { "none: the room has no key" });
+        }
+        url = broadcast.relay_url;
+        cert_sha256 = hash_of(&broadcast.cert_sha256_hex)?;
+        namespace = broadcast.namespace.join("/");
+        if let Some(text) = &args.say {
+            joined.say(text).await?;
+        }
+        room = Some(joined);
+    }
+    let connection = Arc::new(wt::connect(&url, cert_sha256, &StreamConfig::default()).await?);
+    let played = play(args, &connection, &namespace, token.as_deref(), &mut room).await;
+    if played.is_err()
+        && let Ok(end) = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await
+    {
+        eprintln!("SESSION_ENDED {end:?}");
+    }
+    connection.close(0, b"");
+    let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
+    played
+}
+
+async fn play(
+    args: &Args,
+    connection: &Arc<WtConnection>,
+    namespace: &str,
+    token: Option<&[u8]>,
+    room: &mut Option<room::Room>,
+) -> Result<()> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
     let (queue, mut events) = mpsc::channel(64);
-    let _streams = read_uni_streams(Arc::clone(&connection), StreamConfig::default(), stops.clone(), queue, |event| event);
+    let _streams = read_uni_streams(Arc::clone(connection), StreamConfig::default(), stops.clone(), queue, |event| event);
     // §3.3: each peer opens one control stream that begins with SETUP. It stays open.
     let mut control = connection.open_uni().await?;
-    let setup = session.setup(vec![KeyValuePair::bytes(setup_option::MOQT_IMPLEMENTATION, b"xmoq-watch (spike)".to_vec())?])?;
+    // In ascending order of their types: the token (0x03), then the implementation (0x07).
+    let mut options = Vec::new();
+    if let Some(token) = token {
+        options.push(KeyValuePair::bytes(setup_option::AUTHORIZATION_TOKEN, token.to_vec())?);
+    }
+    options.push(KeyValuePair::bytes(setup_option::MOQT_IMPLEMENTATION, b"xmoq-watch (spike)".to_vec())?);
+    let setup = session.setup(options)?;
     send_message(&mut control, &setup, &Trace::default(), "control").await?;
     match events.recv().await {
         Some(UniEvent::Control(message)) => session.on_control_message(message)?,
         other => bail!("no SETUP from the relay: {other:?}"),
     };
 
-    let namespace = TrackNamespace::new(args.namespace.split('/').map(|field| field.as_bytes().to_vec()).collect())?;
-    let mut video = subscribe(&connection, &mut session, &namespace, &args.video).await?;
-    let mut audio = subscribe(&connection, &mut session, &namespace, &args.audio).await?;
+    let namespace = TrackNamespace::new(namespace.split('/').map(|field| field.as_bytes().to_vec()).collect())?;
+    let mut video = subscribe(connection, &mut session, &namespace, &args.video, token).await?;
+    let mut audio = subscribe(connection, &mut session, &namespace, &args.audio, token).await?;
 
+    let chat = Arc::new(Mutex::new(Vec::new()));
     let to: Box<dyn std::io::Write + std::marker::Send> = match &args.out {
         Some(path) => Box::new(std::fs::File::create(path)?),
         None => Box::new(std::io::stdout()),
     };
-    let screen = screen::Screen::new(to, args.medium, args.scale);
+    let screen = screen::Screen::new(to, args.medium, args.scale, Arc::clone(&chat));
     let (frames, for_picture) = std_mpsc::channel();
     let picture = std::thread::spawn(move || picture::run(for_picture, screen));
     let mut sound = sound::Sound::open(args.volume)?;
@@ -233,6 +310,31 @@ async fn run(args: &Args) -> Result<()> {
         tokio::select! {
             () = &mut end => break "the time was over",
             _ = tokio::signal::ctrl_c() => break "interrupted",
+            said = async {
+                match room.as_mut() {
+                    Some(room) => room.next().await,
+                    None => std::future::pending().await,
+                }
+            } => match said {
+                Ok(room::Said::Chat(line)) => {
+                    if !std::io::stderr().is_terminal() {
+                        eprintln!("CHAT {line}");
+                    }
+                    chat.lock().expect("the lock").push(line);
+                }
+                Ok(room::Said::Broadcast(broadcast)) => {
+                    if !std::io::stderr().is_terminal() {
+                        eprintln!("ROOM_BROADCAST {}", if broadcast.is_some() { "another" } else { "none" });
+                    }
+                }
+                // The room is gone; the broadcast is watched on without it.
+                Err(error) => {
+                    if !std::io::stderr().is_terminal() {
+                        eprintln!("ROOM_LOST {error:#}");
+                    }
+                    *room = None;
+                }
+            },
             event = video.reader.next_event() => {
                 if let RequestStreamEvent::Message(message) = event? {
                     session.on_request_message(video.request, message)?;
@@ -279,9 +381,8 @@ async fn run(args: &Args) -> Result<()> {
     drop(frames);
     let seen = picture.join().map_err(|_| anyhow!("the picture's thread panicked"))?;
     let heard = sound.counts();
-    connection.close(0, b"");
-    let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
-    control.finish();
+    // The control stream stays open until the session is closed (§3.3).
+    std::mem::forget(control);
 
     // The square and the beep begin at the same moment of the publisher's clock: how far apart
     // they left this program. More than zero: the picture is the later one.

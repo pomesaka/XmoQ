@@ -1,19 +1,42 @@
 // Opens the publishing page of a demo in headless Chromium and stays until
 // it is stopped: the clock's picture and the tone, no camera.
 //
-// Usage: bun spikes/terminal-av/publish-headless.ts http://localhost:48901
+// Usage: bun spikes/terminal-av/publish-headless.ts http://localhost:48901 [room] [a line for the chat]
+//
+// With a room the page joins it (`?room=`); the line is typed into the
+// page's chat 6 seconds after the page publishes. When stopped it prints
+// the chat as the page shows it (PAGE_CHAT).
 import { join } from "node:path";
 
 const origin = process.argv[2] ?? "http://localhost:8080";
+const room = process.argv[3];
+const line = process.argv[4];
 const { chromium } = await import(
 	join(import.meta.dir, "..", "..", "interop", "node_modules", "playwright-core", "index.mjs")
 );
-const browser = await chromium.launch({ headless: true });
+// WHY the signals are not Playwright's: the chat is read from the page when this is stopped.
+const browser = await chromium.launch({
+	headless: true,
+	handleSIGINT: false,
+	handleSIGTERM: false,
+});
 const page = await (await browser.newContext()).newPage();
-await page.goto(`${origin}/publish`);
+await page.goto(`${origin}/publish${room === undefined ? "" : `?room=${encodeURIComponent(room)}`}`);
 await new Promise((resolve) => setTimeout(resolve, 2000));
 console.log(`PUBLISHING ${((await page.textContent("#status")) ?? "").split("\n")[0]}`);
+if (line !== undefined) {
+	setTimeout(async () => {
+		await page.fill("form input", line);
+		await page.press("form input", "Enter");
+		console.log(`PAGE_SAID ${line}`);
+	}, 6000);
+}
 const stop = async () => {
+	if (room !== undefined) {
+		for (const shown of await page.locator("#chat div").allTextContents()) {
+			console.log(`PAGE_CHAT ${shown}`);
+		}
+	}
 	await browser.close();
 	process.exit(0);
 };
