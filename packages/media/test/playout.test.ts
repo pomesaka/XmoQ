@@ -432,3 +432,119 @@ describe("placePiece", () => {
 		},
 	);
 });
+
+test.each<{
+	name: string;
+	options: { autoWindowMs?: number; autoDown?: "step" | "quarter" };
+	/** When each tick comes after the bad second, in milliseconds, and the buffer after it. */
+	ticks: [number, number][];
+}>([
+	{
+		// The rule as it is, for the two below to be read against.
+		name: "as it is: the buffer stays for the 10 s it looks back over, and comes down 10 ms at a tick",
+		options: {},
+		ticks: [
+			[500, 310],
+			[9500, 310],
+			[10_500, 300],
+			[11_000, 290],
+		],
+	},
+	{
+		name: "quarter: the same 10 s, and then a quarter of what is left at a tick, 10 ms at least",
+		options: { autoDown: "quarter" },
+		ticks: [
+			[500, 310],
+			[9500, 310],
+			// 270 are left to 40: 70; then 200: 50; 150: 40; 110: 30.
+			[10_500, 240],
+			[11_000, 190],
+			[11_500, 150],
+			[12_000, 120],
+			// 80: 20; 60: 20; 40: 10; 30: 10; 20: 10; 10: 10.
+			[12_500, 100],
+			[13_000, 80],
+			[13_500, 70],
+			[14_000, 60],
+			[14_500, 50],
+			[15_000, 40],
+			[15_500, 40],
+		],
+	},
+	{
+		name: "a window of 3 s forgets the bad second after 3 s",
+		options: { autoWindowMs: 3000, autoDown: "quarter" },
+		ticks: [
+			[500, 310],
+			[2500, 310],
+			[3500, 240],
+			[4000, 190],
+		],
+	},
+])("the automatic buffer comes down, $name", ({ options, ticks }) => {
+	const clock = createPlayoutClock({ bufferMs: 50, auto: true, ...options });
+	// One Object every 10 ms. For one second they come 300 ms after the
+	// fastest, and after that 30 ms after it: what 99 of 100 came within is
+	// 300 while the second is looked back at, and 30 after.
+	const arrive = (from: number, to: number, late: number): void => {
+		for (let at = from; at < to; at += 10) {
+			clock.baseOf(at * 1000, 1000 + at + (at === 0 ? 0 : late));
+		}
+	};
+	arrive(0, 1000, 300);
+	let arrived = 1000;
+	expect(
+		ticks.map(([after]) => {
+			const until = 1000 + after;
+			arrive(arrived, until, 30);
+			arrived = until;
+			clock.tick(1000 + until);
+			return clock.bufferMs();
+		}),
+	).toEqual(ticks.map(([, buffer]) => buffer));
+});
+
+test.each<{
+	name: string;
+	/** How long the way stands still, in milliseconds: what was to come meanwhile comes at its end. */
+	pauseMs: number;
+	/** What 99 of 100 of the last 10 seconds came within, after it. */
+	lateness: number;
+	bufferMs: number;
+}>([
+	{
+		// One of 1,000: the 99th of 100 is not it. The buffer comes down its
+		// one step from 50 ms, as at any tick with nothing late.
+		name: "one Object that comes half a second late does not raise it",
+		pauseMs: 0,
+		lateness: 0,
+		bufferMs: 40,
+	},
+	{
+		// 30 Objects come 300, 290, ... 10 ms late; the tenth of them, a
+		// hundredth of the 1,000 in the window, 210 ms.
+		name: "a way that stands still for 0.3 s raises the buffer to what the tenth latest Object came within",
+		pauseMs: 300,
+		lateness: 210,
+		bufferMs: 220,
+	},
+])(
+	"what raises the automatic buffer: $name",
+	({ pauseMs, lateness, bufferMs }) => {
+		const clock = createPlayoutClock({ bufferMs: 50, auto: true });
+		// An Object every 10 ms for 10 seconds, each as fast as the fastest.
+		for (let at = 0; at < 10_000; at += 10) {
+			// The ones of the pause come when it is over; without a pause, one
+			// Object alone comes 500 ms late.
+			const held = at >= 9000 && at < 9000 + pauseMs;
+			const alone = pauseMs === 0 && at === 9000;
+			const came = held ? 9000 + pauseMs : at + (alone ? 500 : 0);
+			clock.baseOf(at * 1000, 1000 + came);
+		}
+		clock.tick(1000 + 10_000);
+		expect({ lateness: clock.lateness(), bufferMs: clock.bufferMs() }).toEqual({
+			lateness,
+			bufferMs,
+		});
+	},
+);

@@ -121,5 +121,6 @@ Nothing of the machine is changed: the link is the proxy of this repository, a p
    - 1% loss: `curl 'http://127.0.0.1:4445/set?loss=0.01&delay=50&rate=0'`. The buffer moves between 110 and 160 ms; this is where it changes speed most often, and where about one break in four seconds is left.
    - narrow, with `&picture=busy&bitrate=2500000` on the publishing page: `curl 'http://127.0.0.1:4445/set?loss=0&delay=50&rate=2000&queue=100'`. The buffer goes to 400 ms; then back to the clean link, and 26 s of coming down to listen to.
 6. The same with `buffer=150` and `buffer=50` in place of `buffer=auto`, for what it is compared with.
+7. Two variants of the automatic buffer that come down sooner ([record](2026-10-13-the-automatic-buffer-what-raises-it-and-how-fast-it-comes-down.md)): `buffer=auto&autoDown=quarter`, and `buffer=auto&autoDown=quarter&autoWindow=3000`, on the narrow link and back.
 
 What to say afterwards: whether the changes of speed are heard, on a voice and on the tone; whether the half second lost at the beginning matters; whether half a minute further behind after a bad moment does.

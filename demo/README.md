@@ -77,6 +77,7 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | publish | `ladder=1` | Trial: a second, small version of the video | One version |
 | watch | `buffer=N`, `buffer=auto` | The playout buffer in milliseconds; `auto` (trial) follows how late Objects come | 50 |
 | watch | `autoMax=MS`, `autoShare=F` | With `buffer=auto`: its limit, and the share of the Objects it covers | 400, 0.99 |
+| watch | `autoDown=quarter`, `autoWindow=MS` | Trials, with `buffer=auto`: it comes down a quarter of the way at a time, and looks back so far | 10 ms at a time; 10000 |
 | watch | `audioMin=MS` | The least the sound waits where the buffer is shorter | 30 |
 | watch | `order=no` | A piece of sound that comes before its turn is not held for the ones before it | Held |
 | watch | `join=no` | No Joining FETCH for the video: the picture begins with the next key frame | A Joining FETCH of the Group under way |
