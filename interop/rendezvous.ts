@@ -20,6 +20,34 @@
 //                     not before, with a Retry Interval of 1 (ask again at
 //                     once), which the page's library hands on as a wait
 //                     of 0 ms. The session is not closed over it.
+//   another-publisher-comes
+//                     As publisher-returns, but the first publisher has
+//                     sent three Objects (Groups 0, 1 and 2) before its
+//                     PUBLISH_DONE, and the PUBLISH that follows, half a
+//                     second later and so while the relay still waits for
+//                     late streams, is of another own-rust process, which
+//                     numbers its Groups from the time (`--first-group
+//                     now`; transport §2.4 has a publisher that resumes
+//                     "set the initial Group ID to a unique value
+//                     guaranteed to be larger than all previously used
+//                     groups"). The held subscriber gets SUBSCRIBE_OK and
+//                     the first Object the new publisher sends. (A
+//                     publisher that began at Group 0 again would have its
+//                     first three Groups left out for that subscriber.)
+//   page-publisher-returns
+//                     An own page publishes a broadcast (catalog, video,
+//                     sound) and another plays its video as the demo's
+//                     `/watch?wait=1` does: on one session, with a
+//                     RENDEZVOUS_TIMEOUT of 20 seconds on the SUBSCRIBE for
+//                     the catalog. The publishing page ends its tracks with
+//                     PUBLISH_DONE and stays connected. The viewer is told
+//                     that what it played ended, asks again on its session
+//                     a second later, and is held: it is never told "not
+//                     yet", and the relay sends no DOES_NOT_EXIST while no
+//                     page publishes. Three
+//                     seconds after the end a third page publishes the
+//                     broadcast anew, and the viewer draws 30 frames more,
+//                     on the session it had.
 //   viewer-before-the-broadcast
 //                     The terminal viewer (`xmoq-watch
 //                     --rendezvous-timeout-ms 20000`) comes first. The
@@ -386,6 +414,177 @@ async function viewerBeforeTheBroadcast(context: RunContext): Promise<string> {
 	return `xmoq-watch came 2 s before the broadcast, with a RENDEZVOUS_TIMEOUT of 20 s on its SUBSCRIBEs: the relay held the one for the catalog, and when a page began to publish the viewer found the tracks and played them (${drawn} frames drawn, ${packets} packets of sound)`;
 }
 
+async function anotherPublisherComes(
+	context: RunContext,
+	subscriber: string,
+): Promise<string> {
+	const first = spawnRustClient(
+		context,
+		"pub1:own-rust",
+		"own-rust",
+		"publish",
+		TRACK,
+		["--payload-hex", "01", "--timeout-secs", "40"],
+	);
+	await first.waitForLine(/^PUBLISHED /);
+	// Groups 0, 1 and 2.
+	for (let sent = 0; sent < 3; sent++) {
+		first.child.stdin.write("send\n");
+		await wait(100);
+	}
+	first.child.stdin.write("publish-done\n");
+	await first.waitForLine(/^PUBLISH_DONE_SENT$/);
+	const ended = Date.now();
+	const asked = await subscribe(context, subscriber, 20_000);
+	await context.relay.waitForLine(
+		/^HOLD_REQUEST session=1 stream=(\d+) SUBSCRIBE$/,
+	);
+	const second = spawnRustClient(
+		context,
+		"pub2:own-rust",
+		"own-rust",
+		"publish",
+		TRACK,
+		[
+			"--payload-hex",
+			PAYLOAD_HEX,
+			"--first-group",
+			"now",
+			"--timeout-secs",
+			"40",
+		],
+	);
+	await second.waitForLine(/^PUBLISHED /);
+	const after = Date.now() - ended;
+	if (after >= 2000) {
+		throw new Error(
+			`the second PUBLISH was to come while the relay waited for the track's late streams, not ${after} ms after the PUBLISH_DONE`,
+		);
+	}
+	const answer = await withTimeout(
+		asked.answer,
+		"the held SUBSCRIBE to be answered",
+	);
+	if (answer !== "ok") {
+		throw new Error(
+			`the held SUBSCRIBE was to be accepted when another publisher came: ${answer}`,
+		);
+	}
+	second.child.stdin.write("send\n");
+	const payload = await withTimeout(
+		asked.object(),
+		"the first Object of the publisher that came",
+	);
+	if (payload !== PAYLOAD_HEX) {
+		throw new Error(
+			`the subscriber was to get the new publisher's first Object, not ${payload}`,
+		);
+	}
+	return `${subscriber} subscribed after own-rust had sent Groups 0 to 2 and ended the track with PUBLISH_DONE, with a RENDEZVOUS_TIMEOUT of 20 s: the relay held the SUBSCRIBE, another own-rust process that numbers its Groups from the time sent PUBLISH ${after} ms after the PUBLISH_DONE, and the subscriber got SUBSCRIBE_OK and the first Object of the new publisher`;
+}
+
+/**
+ * A page that publishes ends its broadcast with PUBLISH_DONE, and another
+ * page publishes it anew: the viewer waits on its session.
+ */
+async function pagePublisherReturns(context: RunContext): Promise<string> {
+	const namespace = "xmoq/returns";
+	const first = await openConnectedPage(context, "publisher 1", "own-browser");
+	await withTimeout(
+		first.evaluate(([name]) => window.xmoqOwn.publishBroadcast(name), [
+			namespace,
+		] satisfies [string]),
+		"the first page to publish its broadcast",
+	);
+	const viewer = await openConnectedPage(context, "viewer", "own-browser");
+	await viewer.evaluate(
+		([url, hash, name]) =>
+			window.xmoqOwn.keepBroadcastPlayed(url, hash, name, 20_000),
+		[context.relayUrl, context.certSha256Hex, namespace] satisfies [
+			string,
+			string,
+			string,
+		],
+	);
+	const kept = () => viewer.evaluate(() => window.xmoqOwn.keptReport());
+	const until = async (
+		what: string,
+		reached: (report: Awaited<ReturnType<typeof kept>>) => boolean,
+	): Promise<Awaited<ReturnType<typeof kept>>> => {
+		const began = Date.now();
+		for (;;) {
+			const report = await kept();
+			if (reached(report)) return report;
+			if (Date.now() - began > 20_000) {
+				throw new Error(
+					`timed out waiting for ${what}: ${JSON.stringify(report.playing)}, ${report.shown.length} frames`,
+				);
+			}
+			await wait(100);
+		}
+	};
+	const before = await until(
+		"the viewer to draw 30 frames of the first broadcast",
+		(report) => report.shown.length >= 30,
+	);
+	// WHY counted between two lines of the relay: while a broadcast plays,
+	// the relay may answer a Joining FETCH of the viewer with
+	// DOES_NOT_EXIST (the page that publishes serves no FETCH for its video
+	// track), which is not what this run is about. The first page's is the
+	// relay's first session, and the page that publishes anew its fourth.
+	const refusedBy = async (fence: RegExp): Promise<number> =>
+		(
+			await context.relay.linesBefore(
+				{ line: fence },
+				/^SEND session=\d+ stream=\d+ REQUEST_ERROR error_code=0x10\b/,
+			)
+		).length;
+	await withTimeout(
+		first.evaluate(() => window.xmoqOwn.endBroadcast()),
+		"the first page to end its broadcast",
+	);
+	await until("the viewer to be told that what it played ended", (report) =>
+		report.playing.includes("playing-ended"),
+	);
+	// It asks again a second after that, and is held.
+	await wait(3000);
+	const held = await kept();
+	const second = await openConnectedPage(context, "publisher 2", "own-browser");
+	await withTimeout(
+		second.evaluate(([name]) => window.xmoqOwn.publishBroadcast(name), [
+			namespace,
+		] satisfies [string]),
+		"the second page to publish the broadcast",
+	);
+	const after = await until(
+		"the viewer to draw 30 frames of the second broadcast",
+		(report) => report.shown.length >= held.shown.length + 30,
+	);
+	const notYet = after.playing.filter((state) => state.startsWith("not-yet"));
+	if (notYet.length > 0) {
+		throw new Error(
+			`the viewer was to be held, and not told "not yet": ${JSON.stringify(after.playing)}`,
+		);
+	}
+	const whenItEnded = await refusedBy(/^RECV session=0 own=\d+ PUBLISH_DONE /);
+	const whenItWasBack = await refusedBy(
+		/^OPEN_REQUEST session=3 own=\d+ SUBSCRIBE$/,
+	);
+	if (whenItEnded !== whenItWasBack) {
+		throw new Error(
+			`the relay was to send nobody DOES_NOT_EXIST while no page published: ${whenItWasBack - whenItEnded} sent`,
+		);
+	}
+	const sessions = after.playing.filter((state) => /^playing \d+$/.test(state));
+	if (sessions.join(",") !== "playing 1,playing 1") {
+		throw new Error(
+			`the viewer was to play twice on its first session: ${JSON.stringify(after.playing)}`,
+		);
+	}
+	const drained = context.relay.hasPrinted(/^DRAIN_TIMER /);
+	return `a page ended its broadcast with PUBLISH_DONE and stayed connected; the viewer, which waits as /watch?wait=1 does, was told that what it played ended (${before.shown.length} frames drawn by then), asked again on its session and was held, and drew ${after.shown.length - held.shown.length} frames more when another page published the broadcast 3 s later: one session, never told "not yet", no DOES_NOT_EXIST from the relay between the end and the new broadcast (the relay ${drained ? "waited" : "did not wait"} for late streams of the tracks that ended); its states: ${after.playing.join(", ")}`;
+}
+
 const CASES: Record<
 	string,
 	(context: RunContext, subscriber: string) => Promise<string>
@@ -394,7 +593,9 @@ const CASES: Record<
 	"nobody-comes": nobodyComes,
 	"not-asked": notAsked,
 	"publisher-returns": publisherReturns,
+	"another-publisher-comes": anotherPublisherComes,
 	"viewer-before-the-broadcast": (context) => viewerBeforeTheBroadcast(context),
+	"page-publisher-returns": (context) => pagePublisherReturns(context),
 };
 
 async function main(): Promise<void> {
@@ -407,6 +608,7 @@ async function main(): Promise<void> {
 			port: options.port,
 			clients:
 				options.subscriber === "own-browser" ||
+				options.case === "page-publisher-returns" ||
 				options.case === "viewer-before-the-broadcast"
 					? ["own-browser", "own-rust"]
 					: ["own-rust"],

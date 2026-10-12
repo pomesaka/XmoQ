@@ -3978,4 +3978,40 @@ mod rendezvous {
         }
         assert_eq!(answers, ["ok", "ok", "ok", "ok", "ok", "0x9", "0x9"]);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscribe_read_after_its_session_was_closed_is_not_said_to_be_held() {
+        let (log, mut lines) = hub::Log::collect();
+        let (hub, _task) = hub::spawn(HubConfig {
+            log: Some(log),
+            ..HubConfig::default()
+        });
+        let viewer = Peer::connect(&hub, true).await;
+        let namespace = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
+        let subscribe = |request_id| {
+            ControlMessage::Subscribe(Subscribe {
+                request_id,
+                full_track_name: FullTrackName::new(namespace.clone(), b"a".to_vec()).unwrap(),
+                parameters: vec![Parameter::RendezvousTimeout(20_000)],
+            })
+        };
+        // A Request ID of the wrong parity closes the session (§10.1), and
+        // a SUBSCRIBE that is in order is on its way behind it.
+        let (mut wrong, _wrong_recv) = viewer.connection.open_bi().await.unwrap();
+        let (mut right, _right_recv) = viewer.connection.open_bi().await.unwrap();
+        send_message(&mut wrong, &subscribe(1), &Trace::default(), "request")
+            .await
+            .unwrap();
+        // At once, so that it is read after the session was closed.
+        let _ = send_message(&mut right, &subscribe(0), &Trace::default(), "request").await;
+        tokio::time::sleep(SOON).await;
+        let said: Vec<String> = logged(&mut lines)
+            .into_iter()
+            .filter(|line| line.starts_with("HOLD_REQUEST ") || line.starts_with("CLOSE_SESSION "))
+            .map(|line| line.split(' ').next().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(said, ["CLOSE_SESSION"]);
+        let held = hub.held().await;
+        assert_eq!((held.relay.pending_tracks, held.timers), (0, 0));
+    }
 }
