@@ -84,6 +84,12 @@ The time for the whole bounds one stream, and not what a session's 16 streams, o
 
 The relay says what it counted when it refuses or stops for it: `HELD_BEYOND_CACHE session=1 stream=1 stopped relay_bytes=8388608 session_bytes=8388608` in that run, the 8 MiB of the Group for the relay and for the session. The count is also in what the relay says of itself to its tests (`Counts::held_beyond_cache_bytes`). With the relay's own 256 MiB nothing was run: it takes 32 Groups of 8 MiB kept at once, which the tool, with one track, cannot make.
 
+## Afterwards: a track that comes again with the same Group number
+
+Whether the cache still has the Group a stream carries was asked by the track's name and the Group's number. A test of the relay's core showed what that misses: a stream carries Group 3 of a track, the publisher goes and the track ends (3 bytes counted), and a publisher brings the track again and sends a Group 3: the count went to 0, with the stream still keeping its three bytes. Each track with a source now has a number of its own, and the question is asked with it; the test has 3.
+
+Where else a Group number alone stands for a Group, in the relay's core: nowhere beyond one track. What a track remembers of its Groups (the cache, the Subgroups it took a stream for, its largest Location) goes with the track when it ends. Within one track the numbers are taken to go up, which is the publisher's to keep (transport §2.4; the implementation notes, row on a SUBSCRIBE for a track nobody publishes): a publisher that publishes anew while its track still drains and begins at Group 0 again has those Groups left out. The receivers of `@xmoq/media` and `@xmoq/msf` and the terminal viewer compare Group numbers within one subscription in the same way. The pages of this repository and of the demo number their Groups from the time of day; of the own publishers only the Rust client begins at 0, unless it is given `--first-group now`.
+
 ## Not run
 
 - 16 tracks, so that 16 Groups are kept alive at once: the tool publishes one track.

@@ -706,6 +706,13 @@ impl Source {
 /// one whose last source drains.
 #[derive(Debug)]
 struct Track {
+    /// Which of the tracks the relay has had this is, counted from 1.
+    ///
+    /// WHY: a name can have a track, lose it and have another, and the
+    /// second may number its Groups as the first did (a publisher that
+    /// begins at 0 again). What outlives a track, a fetch stream the relay
+    /// still writes, tells by this which track's Group it carries.
+    born: u32,
     /// Never empty: a track whose last source is over is taken out of
     /// [`Tracks`]. No more than [`MAX_SOURCES`], at most one of a session
     /// and a Track Alias, and at most one of a session that does not drain;
@@ -828,6 +835,7 @@ impl Track {
                 wait: None,
                 default_priority: default_publisher_priority(&properties),
             }],
+            born: 0,
             had_several_sources: false,
             asks: Vec::new(),
             declined: Declined::default(),
@@ -997,7 +1005,12 @@ enum TrackEntry {
 /// that have a source: a name is in one of the states or in none, and two
 /// maps would leave that to every place that writes to them.
 #[derive(Debug, Default)]
-struct Tracks(HashMap<FullTrackName, TrackEntry>);
+struct Tracks(
+    HashMap<FullTrackName, TrackEntry>,
+    /// How many tracks with a source there have been: each has the number
+    /// it was the how-manieth ([`Track::born`]).
+    u32,
+);
 
 impl Tracks {
     fn phase(&self, name: &FullTrackName) -> Option<TrackPhase> {
@@ -1141,6 +1154,10 @@ impl Tracks {
             });
         }
         let mut track = Track::established(from, properties, largest);
+        // WHY not past the largest: 4 billion tracks would take a relay
+        // centuries, and a number used twice is better than a panic.
+        self.1 = self.1.saturating_add(1);
+        track.born = self.1;
         let waiters = match self.0.remove(name) {
             Some(TrackEntry::Pending(pending)) => {
                 track.asks = pending.asks;
