@@ -29,7 +29,8 @@
 //! ms=..`, the Retry Interval being that of the refusal that came last): the
 //! measure of what a session that announces again and again costs a relay.
 //!
-//! With `--ask-per-second <n> --ask subscribe|fetch-nothing|fetch-old` it
+//! With `--ask-per-second <n> --ask subscribe|fetch-nothing|fetch-old` (or
+//! `--ask-every-ms <n>` for fewer than one a second) it
 //! is a subscriber that asks for something else each time: that many
 //! requests a second, each for a track of `(xmoq)` whose name was not used
 //! before (`subscribe`: a SUBSCRIBE for `s0`, `s1`, ..., with a
@@ -161,7 +162,8 @@ enum Cancel {
 /// `--ask-per-second`, `--ask`, `--rendezvous-ms` and `--cancel`.
 #[derive(Debug, Clone, Copy)]
 struct Ask {
-    per_second: u32,
+    /// The time from one request to the next.
+    every: Duration,
     what: Asked,
     rendezvous_ms: Option<u64>,
     cancel: Cancel,
@@ -188,6 +190,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut ask_per_second, mut asked, mut rendezvous_ms) = (None, Asked::Subscribe, None);
     let (mut cancel, mut announce_and_refuse) = (Cancel::Never, false);
     let (mut say_each, mut stay_quiet) = (false, false);
+    let mut ask_every = None;
     while let Some(flag) = args.next() {
         let value = args
             .next()
@@ -201,6 +204,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--send-setup" => setup = value == "yes",
             "--ask-per-second" => {
                 ask_per_second = Some(value.parse().context("--ask-per-second")?);
+            }
+            // One every so many milliseconds, where that is less than one
+            // a second.
+            "--ask-every-ms" => {
+                ask_every = Some(Duration::from_millis(
+                    value.parse().context("--ask-every-ms")?,
+                ));
+                ask_per_second.get_or_insert(1);
             }
             "--ask" => {
                 asked = match value.as_str() {
@@ -255,8 +266,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             setup,
             announce_per_second,
             hold_tracks,
-            ask: ask_per_second.map(|per_second| Ask {
-                per_second,
+            ask: ask_per_second.map(|per_second: u32| Ask {
+                every: ask_every.unwrap_or(Duration::from_secs(1) / per_second.max(1)),
                 what: asked,
                 rendezvous_ms,
                 cancel,
@@ -696,7 +707,7 @@ async fn ask_again_and_again(
     let (connection, _control) = connected(url, cert_sha256).await?;
     let answers = Arc::new(Answers::default());
     let began = tokio::time::Instant::now();
-    let mut tick = tokio::time::interval(Duration::from_secs(1) / ask.per_second.max(1));
+    let mut tick = tokio::time::interval(ask.every);
     let mut tasks = tokio::task::JoinSet::new();
     let mut sent = 0u64;
     let end = loop {

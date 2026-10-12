@@ -76,6 +76,8 @@ The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop
 | `--max-sessions` | How many sessions it takes at once | 256 |
 | `--announce-at-once` | How many `PUBLISH_NAMESPACE` requests a session may send at once | 5 |
 | `--announce-every-ms` | The time in which a session gets one of them back | 1,000 |
+| `--requests-for-one-session` | How many requests the relay has open on one publisher for one subscriber's session | 8 |
+| `--fetches-for-one-session` | How many of them are FETCH requests | 4 |
 | `--delivery-patience-ms` | Experiment: what a subscriber gets that asked for no delivery timeout | Off |
 | `--older-groups give-up`, `--older-groups-grace-ms` | Experiment: older Groups are given up when a newer one begins, after so long | `keep`; 0 |
 | `--auth-key-hex`, `--auth-setup off` | Experiment: the key tokens are checked with, and whether SETUP is asked for one | No tokens; on with a key |

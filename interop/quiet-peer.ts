@@ -81,6 +81,23 @@
 //                     It closes no session, and the subscriber gets the
 //                     Object the publisher sends afterwards.
 //
+//   relay-one-session-asks-for-much
+//                     The own relay, and `xmoq-quiet-peer` three times: as
+//                     a publisher that announces `(xmoq)`, publishes the
+//                     track `live` and answers nothing the relay asks of it
+//                     (`--announce-and-stay-quiet yes`); as a session that
+//                     sends 30 SUBSCRIBEs a second, each for a new track
+//                     name; and as a viewer that sends one SUBSCRIBE a
+//                     second for a name of its own. The relay has 8
+//                     requests open on the publisher for the first session
+//                     and refuses its others with EXCESSIVE_LOAD (0x9);
+//                     every SUBSCRIBE of the viewer is passed on to the
+//                     publisher, which shows as TIMEOUT (0x2) 5 seconds
+//                     later. Then the same with FETCH for Group 0 of
+//                     `live`: 10 a second, of which the relay has 4 open,
+//                     and the viewer's, one every 1.5 seconds, are all
+//                     passed on.
+//
 //   relay-idle-session
 //                     The own relay, told to let a session hold nothing
 //                     for 1.5 seconds (`--idle-session-ms`; 30 by itself),
@@ -692,10 +709,80 @@ async function relayManyAnnouncements(): Promise<string> {
 	return `a session sent ${sent} PUBLISH_NAMESPACE requests in 3 s, each withdrawn when answered: the own relay accepted ${ok} (five at once and one more each second), refused ${refused} with EXCESSIVE_LOAD (0x9) and closed nothing, and the subscriber of a track beside it got its Object afterwards: ${said}`;
 }
 
+/**
+ * One session asks a publisher that answers nothing for more than its
+ * share, and another viewer's requests reach that publisher all the same.
+ */
+async function relayOneSessionAsksForMuch(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: [],
+		verbose: options.verbose,
+	});
+	const publisher = spawnQuietClient(context, "publisher", 40_000, false, [
+		"--announce-and-stay-quiet",
+		"yes",
+	]);
+	await publisher.waitForLine(/^PUBLISHED_LIVE$/);
+	const said =
+		/^ASKED sent=(\d+) ok=0 refused=(\d+) \[([^\]]*)\] failed=0 unanswered=\d+ ms=\d+$/;
+	const parts: string[] = [];
+	// (what is asked; how often the one session asks; how often the viewer)
+	const scenes = [
+		["subscribe", "subscribe-own", "30", "1000", "SUBSCRIBEs"],
+		["fetch-live", "fetch-live", "10", "1500", "FETCHes"],
+	] as const;
+	for (const [muchAsked, viewerAsked, aSecond, every, name] of scenes) {
+		const much = spawnQuietClient(context, `much:${muchAsked}`, 9000, false, [
+			"--ask-per-second",
+			aSecond,
+			"--ask",
+			muchAsked,
+			"--cancel",
+			"answered",
+		]);
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		const viewer = spawnQuietClient(
+			context,
+			`viewer:${viewerAsked}`,
+			7500,
+			false,
+			["--ask-every-ms", every, "--ask", viewerAsked, "--cancel", "answered"],
+		);
+		const [viewerSaid, , viewerRefused = "", viewerCodes = ""] =
+			await viewer.waitForLine(said, 20_000);
+		// The publisher answers nothing, so a request that reached it is
+		// answered TIMEOUT (0x2) by the relay 5 seconds later; one that was
+		// not passed on is answered EXCESSIVE_LOAD (0x9) at once.
+		if (viewerCodes !== `0x2=${viewerRefused}` || Number(viewerRefused) < 2) {
+			throw new Error(
+				`every request of the viewer was to be passed on to the publisher (TIMEOUT), 2 or more of them: ${viewerSaid}`,
+			);
+		}
+		const [muchSaid, , , muchCodes = ""] = await much.waitForLine(said, 20_000);
+		const turnedAway = Number(/0x9=(\d+)/.exec(muchCodes)?.[1] ?? "0");
+		const passedOn = Number(/0x2=(\d+)/.exec(muchCodes)?.[1] ?? "0");
+		// Its share is 8 (4 for FETCH) at a time, for 5 seconds each: no more
+		// than two shares were answered in the 9 seconds.
+		const share = muchAsked === "subscribe" ? 8 : 4;
+		if (turnedAway < 20 || passedOn > share * 2) {
+			throw new Error(
+				`the session that asks for much was to have ${share} requests passed on at a time and the others refused with EXCESSIVE_LOAD: ${muchSaid}`,
+			);
+		}
+		parts.push(
+			`${name}: the session that sent ${aSecond} a second had ${passedOn} passed on and ${turnedAway} refused with EXCESSIVE_LOAD, and all ${viewerRefused} of the viewer beside it were passed on`,
+		);
+	}
+	return `a publisher that answers nothing, and one session that asks it for more than its share while another viewer asks beside it. ${parts.join(". ")}`;
+}
+
 const RELAY_CASES: Record<string, () => Promise<string>> = {
 	"relay-no-setup": relayNoSetup,
 	"relay-idle-session": relayIdleSession,
 	"relay-many-announcements": relayManyAnnouncements,
+	"relay-one-session-asks-for-much": relayOneSessionAsksForMuch,
 };
 
 async function main(): Promise<void> {

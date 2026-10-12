@@ -110,6 +110,11 @@ struct Args {
     /// `--announce-at-once`: [`HubConfig::announcements_at_once`], how many
     /// it may send at once; 5 where it is not said.
     announce_at_once: Option<u32>,
+    /// `--requests-for-one-session`, `--fetches-for-one-session`:
+    /// [`HubConfig::requests_for_one_subscriber`] and
+    /// [`HubConfig::fetches_for_one_subscriber`]; 8 and 4 where it is not
+    /// said.
+    for_one_session: (Option<usize>, Option<usize>),
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
     /// An experiment: what a subscriber gets that set no
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
@@ -128,6 +133,11 @@ struct Args {
     auth_setup: bool,
 }
 
+/// The number a flag gives.
+fn count(flag: &str, value: &str) -> Result<usize> {
+    value.parse().with_context(|| flag.to_string())
+}
+
 /// The milliseconds a flag gives.
 fn millis(flag: &str, value: &str) -> Result<Duration> {
     Ok(Duration::from_millis(
@@ -144,6 +154,7 @@ fn parse_args() -> Result<Args> {
     let mut max_sessions = None;
     let (mut slow_open, mut setup_timeout, mut idle_session) = (None, None, None);
     let (mut announce_every, mut announce_at_once) = (None, None);
+    let mut for_one_session = (None, None);
     let mut delivery_patience = None;
     let mut give_up_older_groups = false;
     let mut older_groups_grace = Duration::ZERO;
@@ -179,6 +190,8 @@ fn parse_args() -> Result<Args> {
             "--announce-every-ms" => {
                 announce_every = Some(value.parse().context("--announce-every-ms")?);
             }
+            "--requests-for-one-session" => for_one_session.0 = Some(count(&flag, &value)?),
+            "--fetches-for-one-session" => for_one_session.1 = Some(count(&flag, &value)?),
             "--announce-at-once" => {
                 announce_at_once = Some(value.parse().context("--announce-at-once")?);
             }
@@ -220,6 +233,7 @@ fn parse_args() -> Result<Args> {
         idle_session,
         announce_every,
         announce_at_once,
+        for_one_session,
         delivery_patience,
         give_up_older_groups,
         older_groups_grace,
@@ -250,6 +264,10 @@ async fn main() -> Result<()> {
     }
     config.announcement_every_ms = args.announce_every;
     config.announcements_at_once = args.announce_at_once;
+    (
+        config.requests_for_one_subscriber,
+        config.fetches_for_one_subscriber,
+    ) = args.for_one_session;
     config.send.delivery_patience = args.delivery_patience;
     config.give_up_older_groups = args.give_up_older_groups;
     config.older_groups_grace = args.older_groups_grace;

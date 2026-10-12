@@ -2216,7 +2216,12 @@ async fn a_publisher_that_answers_a_fetch_and_opens_no_stream_costs_the_subscrib
 
 #[tokio::test(start_paused = true)]
 async fn fetches_nobody_reads_do_not_keep_the_publisher_from_publishing() {
-    let (hub, _task) = hub::spawn(HubConfig::default());
+    // One session takes all 16 FETCH requests the relay has for a
+    // publisher: the limit for one session is not the one looked at.
+    let (hub, _task) = hub::spawn(HubConfig {
+        fetches_for_one_subscriber: Some(16),
+        ..HubConfig::default()
+    });
     let mut publisher = Peer::connect(&hub, true).await;
     let _publication = publisher.publish().await;
     let mut bob = Peer::connect(&hub, true).await;

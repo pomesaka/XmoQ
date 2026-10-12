@@ -109,6 +109,27 @@ pub const MAX_HELD_TRACKS: usize = 1_024;
 /// found in the text), so the number is the relay's own.
 pub const MAX_OWN_REQUESTS_PER_SESSION: usize = 64;
 
+/// Of those, how many the relay has open on one publisher for the
+/// SUBSCRIBEs of one subscriber's session. A publisher that has as many for
+/// that session is passed over for its next SUBSCRIBE, as one that has
+/// [`MAX_OWN_REQUESTS_PER_SESSION`] in all is for everybody's. **Provisional.**
+///
+/// A request of the relay counts for the session whose SUBSCRIBE waits
+/// first for the track it asks for: the one that made the relay ask, or,
+/// when that one is gone, the next that waits. A request for a track that
+/// has a source counts for nobody: there is one for a track and a
+/// publisher, however many subscribe.
+///
+/// WHY: a publisher that answers late has the relay's requests open for the
+/// 5 seconds an answer gets, and one session that asked for 13 new track
+/// names a second kept all 64 taken; another viewer's SUBSCRIBE for a track
+/// of that publisher was refused with `EXCESSIVE_LOAD` half of the time
+/// (measured 2026-10-13). §13.1 has a publisher "enforce limits to prevent
+/// resource exhaustion from a single subscriber or session". WHY NOT a
+/// limit on how often a session asks: a viewer sends 5 requests in its
+/// first second, and 13 a second is no more than three of them.
+pub const MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER: usize = 8;
+
 /// Publishers a track remembers as having been asked for it without
 /// becoming a source. Past that the one remembered longest is forgotten, and
 /// is asked again when the next subscriber comes. Provisional.
@@ -696,12 +717,25 @@ impl Relay {
     /// is why the publishers are asked: it comes before the ones that
     /// announced earlier and were left out, since §9.5 has the SUBSCRIBE go
     /// "to the publisher that sent the `PUBLISH_NAMESPACE`".
+    ///
+    /// `subscriber` is the session whose SUBSCRIBE has the publishers asked,
+    /// where the track has nobody waiting yet; otherwise the one that waits
+    /// first is taken. A publisher that has
+    /// [`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`] requests of the relay for that
+    /// session is passed over.
     pub(crate) fn ask_the_publishers(
         &mut self,
         track: &FullTrackName,
         first: Option<SessionKey>,
+        subscriber: Option<SessionKey>,
         actions: &mut Vec<Action>,
     ) -> Asked {
+        let subscriber = self
+            .tracks
+            .pending(track)
+            .and_then(|pending| pending.waiters.first())
+            .map(|waiter| waiter.session)
+            .or(subscriber);
         // WHY the sources are left out here, though the session state would
         // refuse a second subscription to the track on a session that is a
         // source (§5.1) and the relay would then open nothing: which
@@ -733,6 +767,14 @@ impl Relay {
             if asked.asks.len() >= room {
                 break;
             }
+            if subscriber
+                .is_some_and(|session| self.asked_for(session, publisher) >= self.requests_for_one)
+            {
+                asked
+                    .nobody_because
+                    .get_or_insert(request_error_code::EXCESSIVE_LOAD);
+                continue;
+            }
             match self.ask(publisher, track, actions) {
                 Ok(ask) => asked.asks.push(ask),
                 Err(error_code) => {
@@ -744,6 +786,21 @@ impl Relay {
             asks.extend(asked.asks.iter().copied());
         }
         asked
+    }
+
+    /// How many requests the relay has open on `publisher` for the
+    /// SUBSCRIBEs of `subscriber` ([`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`]).
+    fn asked_for(&self, subscriber: SessionKey, publisher: SessionKey) -> usize {
+        self.tracks
+            .all_pending()
+            .filter(|(_, pending)| {
+                pending
+                    .waiters
+                    .first()
+                    .is_some_and(|waiter| waiter.session == subscriber)
+                    && pending.asks.iter().any(|ask| ask.publisher == publisher)
+            })
+            .count()
     }
 
     /// Sends the relay's SUBSCRIBE for a track to a publisher.

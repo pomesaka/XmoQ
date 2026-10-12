@@ -111,14 +111,28 @@ The runs above had publishers that refuse at once, so the relay never had many r
 
 
 
+## With a share of a publisher for one session
+
+After the runs above the relay was given the share: of the 64 requests it has open on one publisher, 8 for one subscriber's session, and of its 16 FETCH requests, 4. The same scenes, the same machine, one run each. The viewer of scene B asks every 1.5 s here: at one a second and 5 s for an answer it has five FETCHes open by itself, which is more than its own share, and it was refused every fifth, before, while and after the other session asked (seen in the first run with the share, and not what the scene is about).
+
+| Scene | The viewer's requests | Before the other session | While it asked | After it | The other session |
+|---|---|---|---|---|---|
+| A | 31 SUBSCRIBEs, one a second | `TIMEOUT` 5.0 s later, each | **`TIMEOUT` 5.0 s later, each: all passed on** | the same | 451 sent: 16 `TIMEOUT`, 426 `EXCESSIVE_LOAD` |
+| B | 21 FETCHes, one every 1.5 s | `TIMEOUT` 5.0 s later, each | **`TIMEOUT` 5.0 s later, each: all passed on** | the same | 150 sent: 8 `TIMEOUT`, 138 `EXCESSIVE_LOAD` |
+
+- **Every request of the viewer reached the publisher while the other session asked**, where 8 of 15 SUBSCRIBEs and 12 of 14 FETCHes had been refused. The other session had 8 SUBSCRIBEs, or 4 FETCHes, passed on at a time (16 and 8 in its 15 s, two shares), and the rest refused at once. The relay opened 60 requests towards the publisher in A and 36 in B, where it had opened 213 and 68.
+- A viewer of the track `live` got SUBSCRIBE_OK after 207 ms before and 5 ms while the other session asked, as before.
+- **The demo is not touched by it**: `bun demo/check.ts` passed ("THE DEMO PLAYS: picture and sound"), a watching page with `&abr=1` played, and the relay's log of those runs has no `EXCESSIVE_LOAD` in its 832 lines. On loopback the page changed no version, so the moment of a change was not seen; the terminal viewer and every other client are in the interop run, which passed.
+- Interop run `relay-one-session-asks-for-much`, twice by itself: of 270 SUBSCRIBEs of the one session 8 passed on and 254 refused, and all 3 of the viewer passed on; of 90 FETCHes 4 passed on and 82 refused, and both of the viewer passed on.
+
 ## Not run
 
 - More than four publishers of one namespace. The requests the relay sends for one SUBSCRIBE are as many as the sessions that announced a namespace of the track, and nothing bounds those; by the cost of a request, about ten publishers would bring the relay to a whole core at 1,000 a second.
 - A publisher that answers a FETCH and writes its stream slowly (only one that answers nothing was run), and a page as the publisher that does not answer.
-- The share of a publisher's places for one session: not built, so not shown to help.
+- Several sessions of one sender, which have a share each: 8 sessions, or 4 for FETCH, would do what one did.
 - More than one session that asks; a machine with one core; a link that is not loopback; a page as the publisher that is asked.
 - How many requests a second a viewer of the demo and the terminal viewer send at their busiest. It is needed for the number of a limit, and was not counted, since no limit is made here.
 
 ## Next action
 
-No rate limit on requests was made: with publishers that answer, nothing beside the session was harmed on this machine. With a publisher that does not answer, one session keeps others from it; what would stop that is a share of the publisher's places for one session, which is reported with these numbers and not built.
+No rate limit on requests was made: with publishers that answer, nothing beside the session was harmed on this machine. With a publisher that does not answer, one session kept others from it; the relay now gives one subscriber's session a share of a publisher (8 of 64 requests, 4 of 16 FETCHes, provisional), with which the other viewer's requests all reached the publisher. Several sessions of one sender are not counted together.
