@@ -99,6 +99,10 @@ struct Args {
     /// `--setup-timeout-ms`: [`HubConfig::setup_timeout`], how long a
     /// client has for its SETUP; 10 seconds where it is not said.
     setup_timeout: Option<Duration>,
+    /// `--idle-session-ms`: [`HubConfig::idle_session_timeout`], how long
+    /// a session that has sent its SETUP may hold nothing; 30 seconds
+    /// where it is not said.
+    idle_session: Option<Duration>,
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
     /// An experiment: what a subscriber gets that set no
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
@@ -124,7 +128,7 @@ fn parse_args() -> Result<Args> {
     let mut idle_timeout = xmoq_moqt_io::wt::IDLE_TIMEOUT;
     let mut congestion = Congestion::default();
     let mut max_sessions = None;
-    let (mut slow_open, mut setup_timeout) = (None, None);
+    let (mut slow_open, mut setup_timeout, mut idle_session) = (None, None, None);
     let mut delivery_patience = None;
     let mut give_up_older_groups = false;
     let mut older_groups_grace = Duration::ZERO;
@@ -165,6 +169,11 @@ fn parse_args() -> Result<Args> {
                     value.parse().context("--setup-timeout-ms")?,
                 ));
             }
+            "--idle-session-ms" => {
+                idle_session = Some(Duration::from_millis(
+                    value.parse().context("--idle-session-ms")?,
+                ));
+            }
             "--delivery-patience-ms" => {
                 delivery_patience = Some(Duration::from_millis(
                     value.parse().context("--delivery-patience-ms")?,
@@ -203,6 +212,7 @@ fn parse_args() -> Result<Args> {
         max_sessions,
         slow_open,
         setup_timeout,
+        idle_session,
         delivery_patience,
         give_up_older_groups,
         older_groups_grace,
@@ -227,6 +237,9 @@ async fn main() -> Result<()> {
     }
     if let Some(setup_timeout) = args.setup_timeout {
         config.setup_timeout = setup_timeout;
+    }
+    if let Some(idle_session) = args.idle_session {
+        config.idle_session_timeout = idle_session;
     }
     config.send.delivery_patience = args.delivery_patience;
     config.give_up_older_groups = args.give_up_older_groups;

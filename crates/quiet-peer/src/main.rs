@@ -15,7 +15,8 @@
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
-//! stream, and says how the relay ended the session
+//! stream (with `--send-setup yes` it sends its SETUP first, and nothing
+//! after it), and says how the relay ended the session
 //! (`SESSION_ENDED ...`), or after that long that it did not
 //! (`STAYED ms=N`).
 //!
@@ -79,6 +80,8 @@ enum Args {
         url: String,
         cert_sha256: [u8; 32],
         stay: Duration,
+        /// `--send-setup yes`: it sends its SETUP, and nothing after it.
+        setup: bool,
     },
 }
 
@@ -97,7 +100,7 @@ fn sha256_of(text: &str) -> Result<[u8; 32]> {
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut port, mut cert_file, mut key_file, mut quiet) = (None, None, None, None);
-    let (mut url, mut cert_sha256, mut stay) = (None, None, None);
+    let (mut url, mut cert_sha256, mut stay, mut setup) = (None, None, None, false);
     while let Some(flag) = args.next() {
         let value = args
             .next()
@@ -108,6 +111,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--key-file" => key_file = Some(value),
             "--connect" => url = Some(value),
             "--cert-sha256" => cert_sha256 = Some(sha256_of(&value)?),
+            "--send-setup" => setup = value == "yes",
             "--stay-ms" => {
                 stay = Some(Duration::from_millis(value.parse().context("--stay-ms")?));
             }
@@ -131,6 +135,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             url,
             cert_sha256: cert_sha256.context("--cert-sha256 is required")?,
             stay: stay.context("--stay-ms is required")?,
+            setup,
         });
     }
     Ok(Args::Serve {
@@ -270,9 +275,21 @@ async fn serve(session: u64, connection: WtConnection, quiet: Quiet) -> Result<(
 
 /// Connects, sends nothing, and says how the session ended or that it did
 /// not.
-async fn stay_quiet(url: &str, cert_sha256: [u8; 32], stay: Duration) -> Result<()> {
+async fn stay_quiet(url: &str, cert_sha256: [u8; 32], stay: Duration, setup: bool) -> Result<()> {
     let connection = xmoq_moqt_io::wt::connect(url, cert_sha256, &StreamConfig::default()).await?;
     println!("CONNECTED");
+    // Kept to the end: a control stream that is let go of is finished.
+    let mut control = None;
+    if setup {
+        let mut moqt = Session::new(Role::Client, Transport::WebTransport);
+        let message = moqt.setup(vec![KeyValuePair::bytes(
+            setup_option::MOQT_IMPLEMENTATION,
+            b"xmoq-quiet-peer/0.0.0".to_vec(),
+        )?])?;
+        let stream = control.insert(connection.open_uni().await?);
+        send_message(stream, &message, &Trace::default(), "control").await?;
+        println!("SETUP_SENT");
+    }
     if let Ok(end) = tokio::time::timeout(stay, connection.closed()).await {
         println!("SESSION_ENDED {end:?}");
     } else {
@@ -289,7 +306,8 @@ async fn main() -> Result<()> {
             url,
             cert_sha256,
             stay,
-        } => return stay_quiet(&url, cert_sha256, stay).await,
+            setup,
+        } => return stay_quiet(&url, cert_sha256, stay, setup).await,
         Args::Serve {
             port,
             cert_file,

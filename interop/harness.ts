@@ -697,13 +697,16 @@ export async function startQuietPeer(setup: {
 
 /**
  * Starts `xmoq-quiet-peer` as a client of the relay of the run: it
- * connects, sends no SETUP and opens no stream, and prints how the relay
- * ended the session, or after `stayMs` that it did not.
+ * connects, sends no SETUP (or, with `sendsSetup`, its SETUP and nothing
+ * after it) and opens no stream, and prints how the relay ended the
+ * session, or after `stayMs` that it did not.
  */
 export function spawnQuietClient(
 	context: RunContext,
 	label: string,
 	stayMs: number,
+	/** Whether it sends its SETUP, and nothing after it. */
+	sendsSetup = false,
 ): LoggedProcess {
 	if (!existsSync(QUIET_PEER_BINARY)) {
 		throw new Error(
@@ -717,6 +720,7 @@ export function spawnQuietClient(
 		context.certSha256Hex,
 		"--stay-ms",
 		String(stayMs),
+		...(sendsSetup ? ["--send-setup", "yes"] : []),
 	]);
 	defer(() => stopProcess(spawned, "SIGTERM"));
 	return spawned;
