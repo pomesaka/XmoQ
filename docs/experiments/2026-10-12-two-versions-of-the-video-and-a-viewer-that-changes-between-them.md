@@ -60,3 +60,23 @@ Two runs each. Frames shown in each part of the run (of 450, 450, 450, 900), and
 - A third version, loss, BBR, a real network, a viewer in a terminal.
 - A better judge than lateness: the tries upwards are blind, and what they cost is above. An estimate of the link's room (from what the transport says, or from how fast a Group came) was not tried.
 - How the change looks: the small picture is drawn into the same canvas, scaled by the page's style. Nobody looked.
+
+## Later the same day: two viewers, one behind a narrow link
+
+Does a viewer whose link gets narrow change alone, and how long does a change take while somebody else watches? Expected, written before the runs: the viewer with room stays on the large version and misses nothing; the other goes down within a second or two, at once (nobody is on the small version, so the relay subscribes to it and the publisher begins a Group), and when it goes up it waits for the next Group of the large version, up to a second, playing the small one meanwhile.
+
+As above, with the relay's `--delivery-patience-ms 500`; two viewers with `?abr=1`, one through the proxy (50 ms each way; no limit for 10 s, 2,000 kbit/s for 20 s, no limit for 25 s) and one straight to the relay. Two runs.
+
+| Viewer | Room (300 frames) | 2 Mbit/s (600) | Room again (750) | Changes | Stood still (over 100 ms) |
+|---|---|---|---|---|---|
+| Narrow link | 303, 303 | 562, 568, on `video-low`, 53 and 59 ms behind | 757, 757, on `video` | 4 and 4 | 7 and 5 times, 1.5 and 1.2 s in all, 0.4 s at most |
+| With room | 304, 303 | 606, 606 | 757, 757 | none | never |
+
+- **The expectations held.** The viewer with room showed every frame and never stood still, its picture as late as before (within a millisecond), while the other changed four times.
+- **Down** 1.2 s after the link got narrow, the first frame of the small version 300 to 360 ms after that was decided, the picture standing still for 230 and 300 ms.
+- **Up while somebody else is on the large version takes longer**: at the try upwards 7.5 s into the narrow part, the first frame came after 1.3 s (the next Group of a track the relay already has), where it took 0.2 to 0.6 s with one viewer. The small version went on meanwhile; the picture stood still for 150 and 180 ms. The try failed, and the viewer was down again 2 s later (150 ms).
+- **Up for good** 0.4 and 0.7 s after the link had room again, the first frame 180 and 420 ms after that, with no standstill.
+- The publisher made 61 key frames on each track in 60 s: the changes of one viewer cost the other at most one or two key frames out of turn, when the small version got its first subscriber.
+- The narrow viewer's sound: 22 and 23 pieces too late and 4 and 5 breaks in 55 s; the other's 0 pieces and 0 and 1 breaks.
+
+Not done here: more viewers on either version, a viewer that leaves the small version as its last subscriber and comes back (the relay then asks the publisher anew), the relay without patience.
