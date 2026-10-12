@@ -102,6 +102,8 @@ struct Args {
     /// `--older-groups give-up`: [`HubConfig::give_up_older_groups`]. An
     /// experiment; `keep`, or no flag, gives no Group up.
     give_up_older_groups: bool,
+    /// `--older-groups-grace-ms`: [`HubConfig::older_groups_grace`].
+    older_groups_grace: Duration,
     /// `--auth-key-hex`: the key requests are authorized with
     /// ([`HubConfig::auth_key`]). An experiment.
     auth_key: Option<Vec<u8>>,
@@ -120,6 +122,7 @@ fn parse_args() -> Result<Args> {
     let mut slow_open = None;
     let mut delivery_patience = None;
     let mut give_up_older_groups = false;
+    let mut older_groups_grace = Duration::ZERO;
     let mut auth_key = None;
     let mut auth_setup = true;
     let mut args = std::env::args().skip(1);
@@ -157,6 +160,10 @@ fn parse_args() -> Result<Args> {
                     value.parse().context("--delivery-patience-ms")?,
                 ));
             }
+            "--older-groups-grace-ms" => {
+                older_groups_grace =
+                    Duration::from_millis(value.parse().context("--older-groups-grace-ms")?);
+            }
             "--older-groups" => {
                 give_up_older_groups = match value.as_str() {
                     "give-up" => true,
@@ -187,6 +194,7 @@ fn parse_args() -> Result<Args> {
         slow_open,
         delivery_patience,
         give_up_older_groups,
+        older_groups_grace,
         auth_key,
         auth_setup,
     })
@@ -208,6 +216,7 @@ async fn main() -> Result<()> {
     }
     config.send.delivery_patience = args.delivery_patience;
     config.give_up_older_groups = args.give_up_older_groups;
+    config.older_groups_grace = args.older_groups_grace;
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);
