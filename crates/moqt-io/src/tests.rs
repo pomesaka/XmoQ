@@ -1555,3 +1555,247 @@ async fn a_stream_has_said_what_it_is_where_the_shared_table_says() {
         }
     }
 }
+
+/// A subgroup stream that is written whole and not delivered yet. WHY on a
+/// connection of its own: the in-memory one has no send buffer for a stream
+/// to wait in (`memory`), and over the loopback interface a stream is
+/// delivered within a millisecond. This one hands the FIN to the peer when
+/// the test says so, and resets where it is given up first, as a real
+/// connection does (`contract::with_a_send_buffer`).
+mod held_until_delivered {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::{Notify, mpsc};
+    use tokio::time::timeout;
+
+    use super::{SOON, header, object};
+    use crate::memory::{MemoryConnection, MemorySend, pair};
+    use crate::{
+        Connection, ConnectionEnd, ConnectionLost, OutgoingEvent, OutgoingSubgroup, ReadError,
+        RecvStream, SendBudget, SendLimits, SendStream, Trace, WriteError,
+    };
+
+    struct Held(MemoryConnection, Arc<Notify>);
+    struct HeldSend(MemorySend, Arc<Notify>);
+
+    impl SendStream for HeldSend {
+        async fn write_all(&mut self, bytes: &[u8]) -> Result<(), WriteError> {
+            self.0.write_all(bytes).await
+        }
+
+        fn finish(self) {
+            self.0.finish();
+        }
+
+        async fn finish_and_wait(self) -> Result<(), WriteError> {
+            self.0.finish_and_wait().await
+        }
+
+        fn reset(self, code: u32) {
+            self.0.reset(code);
+        }
+
+        async fn stopped(&mut self) -> WriteError {
+            self.0.stopped().await
+        }
+
+        async fn finish_until<G>(self, give_up: G) -> bool
+        where
+            G: Future<Output = u32> + Send,
+        {
+            tokio::select! {
+                () = self.1.notified() => {
+                    self.0.finish();
+                    true
+                }
+                code = give_up => {
+                    self.0.reset(code);
+                    false
+                }
+            }
+        }
+    }
+
+    impl Connection for Held {
+        type Send = HeldSend;
+        type Recv = <MemoryConnection as Connection>::Recv;
+
+        async fn open_uni(&self) -> Result<Self::Send, ConnectionLost> {
+            Ok(HeldSend(self.0.open_uni().await?, Arc::clone(&self.1)))
+        }
+
+        async fn open_bi(&self) -> Result<(Self::Send, Self::Recv), ConnectionLost> {
+            let (send, recv) = self.0.open_bi().await?;
+            Ok((HeldSend(send, Arc::clone(&self.1)), recv))
+        }
+
+        async fn accept_uni(&self) -> Result<Self::Recv, ConnectionLost> {
+            self.0.accept_uni().await
+        }
+
+        async fn accept_bi(&self) -> Result<(Self::Send, Self::Recv), ConnectionLost> {
+            let (send, recv) = self.0.accept_bi().await?;
+            Ok((HeldSend(send, Arc::clone(&self.1)), recv))
+        }
+
+        fn close(&self, code: u32, reason: &[u8]) {
+            self.0.close(code, reason);
+        }
+
+        async fn closed(&self) -> ConnectionEnd {
+            self.0.closed().await
+        }
+    }
+
+    struct Scene {
+        out: OutgoingSubgroup,
+        budget: Arc<SendBudget>,
+        reports: mpsc::UnboundedReceiver<OutgoingEvent>,
+        recv: <MemoryConnection as Connection>::Recv,
+        delivered: Arc<Notify>,
+        /// Both ends: a connection that is let go of is closed.
+        _ends: (Arc<Held>, MemoryConnection),
+    }
+
+    /// One subgroup stream with an Object of 3 bytes, finished by its
+    /// writer and not delivered, towards a peer that has read the Object.
+    async fn written_and_not_delivered(patience: Option<Duration>) -> Scene {
+        let (local, peer) = pair();
+        let delivered = Arc::new(Notify::new());
+        let budget = SendBudget::new(SendLimits {
+            bytes: 1024,
+            objects: 8,
+            streams: 8,
+            delivery_patience: patience,
+        });
+        let (report, mut reports) = mpsc::unbounded_channel();
+        let local = Arc::new(Held(local, Arc::clone(&delivered)));
+        let out = OutgoingSubgroup::spawn(
+            Arc::clone(&local),
+            header(),
+            &budget,
+            move |event| {
+                let _ = report.send(event);
+                std::future::ready(())
+            },
+            Trace::default(),
+            "out".to_string(),
+        )
+        .expect("room for a stream");
+        out.send(Arc::new(object(0, 3)))
+            .expect("room for the Object");
+        out.finish();
+        assert_eq!(
+            timeout(SOON, reports.recv()).await,
+            Ok(Some(OutgoingEvent::Opened))
+        );
+        let mut recv = timeout(SOON, peer.accept_uni())
+            .await
+            .expect("in time")
+            .expect("accept");
+        let expected = super::subgroup_bytes(&[object(0, 3)]);
+        assert_eq!(
+            super::read_exactly(&mut recv, expected.len()).await,
+            expected
+        );
+        // Written whole: its bytes and its Object are given back. Not
+        // delivered: it still counts as a stream of the receiver.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(budget.in_use(), (0, 0, 1));
+        assert!(
+            reports.try_recv().is_err(),
+            "nothing is reported while it is held"
+        );
+        Scene {
+            out,
+            budget,
+            reports,
+            recv,
+            delivered,
+            _ends: (local, peer),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reset_after_the_fin_takes_the_stream_back() {
+        let mut scene = written_and_not_delivered(None).await;
+        // CANCELLED (0x1).
+        scene.out.reset(0x1);
+        // No `TimedOut`: nobody's patience ran out.
+        assert_eq!(
+            timeout(SOON, scene.reports.recv()).await,
+            Ok(Some(OutgoingEvent::Closed))
+        );
+        assert_eq!(scene.budget.in_use(), (0, 0, 0));
+        assert_eq!(
+            scene.recv.read(&mut [0; 8]).await,
+            Err(ReadError::Reset(Some(0x1)))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_is_not_delivered_in_time_is_reset_and_said_to_have_timed_out() {
+        let mut scene = written_and_not_delivered(Some(Duration::from_millis(500))).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(scene.budget.in_use(), (0, 0, 1));
+        assert_eq!(
+            timeout(SOON, scene.reports.recv()).await,
+            Ok(Some(OutgoingEvent::TimedOut))
+        );
+        assert_eq!(
+            timeout(SOON, scene.reports.recv()).await,
+            Ok(Some(OutgoingEvent::Closed))
+        );
+        assert_eq!(scene.budget.in_use(), (0, 0, 0));
+        // DELIVERY_TIMEOUT (0x2).
+        assert_eq!(
+            scene.recv.read(&mut [0; 8]).await,
+            Err(ReadError::Reset(Some(0x2)))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_is_closed_when_it_is_delivered_and_a_reset_after_that_does_nothing() {
+        let mut scene = written_and_not_delivered(Some(Duration::from_millis(500))).await;
+        scene.delivered.notify_one();
+        assert_eq!(
+            timeout(SOON, scene.reports.recv()).await,
+            Ok(Some(OutgoingEvent::Closed))
+        );
+        assert_eq!(scene.budget.in_use(), (0, 0, 0));
+        scene.out.reset(0x1);
+        assert_eq!(scene.recv.read(&mut [0; 8]).await, Ok(None));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn streams_that_are_held_count_against_the_receivers_streams() {
+        let (local, _peer) = pair();
+        let local = Arc::new(Held(local, Arc::new(Notify::new())));
+        let budget = SendBudget::new(SendLimits {
+            bytes: 1024,
+            objects: 8,
+            streams: 2,
+            delivery_patience: None,
+        });
+        let open = || {
+            OutgoingSubgroup::spawn(
+                Arc::clone(&local),
+                header(),
+                &budget,
+                |_| std::future::ready(()),
+                Trace::default(),
+                "out".to_string(),
+            )
+        };
+        let held: Vec<OutgoingSubgroup> = (0..2).map(|_| open().expect("room")).collect();
+        for out in &held {
+            out.finish();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(budget.in_use(), (0, 0, 2));
+        // A third is one too many: the receiver is told it is too slow.
+        assert!(open().is_err());
+    }
+}

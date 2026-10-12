@@ -17,8 +17,8 @@ It did not. The relay resets the streams of a cancelled subscription that are no
 The writer of a subgroup stream keeps the stream after its FIN until the subscriber's transport has acknowledged all of it; a reset that comes meanwhile resets the QUIC stream, which drops what was not delivered. The codes are the ones the relay used before (`CANCELLED` for a cancelled request); none was chosen anew.
 
 - A stream that is written whole is now "closed" for the relay when the subscriber has all of it, not when its FIN was handed over.
-- What a subscriber may have waiting (bytes, Objects and streams that are not written) is counted as before: a stream gives its share back at its FIN.
-- The connection in memory that the tests use does not say when its peer has everything, so nothing there is kept and no test covers the path. It was run over QUIC, below.
+- What a subscriber may have waiting is counted as before for bytes and Objects (what is not written). **A stream that is written whole and not acknowledged still counts as one of the subscriber's streams** (256 for a session): a subscriber that takes streams and acknowledges nothing reaches that limit and loses the subscription that hit it, as one that is too slow. Before, such a stream stopped counting at its FIN.
+- The connection in memory that the tests use holds nothing between a write and its peer, so a finished stream is a delivered one there. What the writer does with a stream that is not delivered is tested on a connection that delivers when the test says so; the reset itself on the real connection.
 
 ## Commands
 
