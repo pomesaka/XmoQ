@@ -125,6 +125,21 @@ After the runs above the relay was given the share: of the 64 requests it has op
 - **The demo is not touched by it**: `bun demo/check.ts` passed ("THE DEMO PLAYS: picture and sound"), a watching page with `&abr=1` played, and the relay's log of those runs has no `EXCESSIVE_LOAD` in its 832 lines. On loopback the page changed no version, so the moment of a change was not seen; the terminal viewer and every other client are in the interop run, which passed.
 - Interop run `relay-one-session-asks-for-much`, twice by itself: of 270 SUBSCRIBEs of the one session 8 passed on and 254 refused, and all 3 of the viewer passed on; of 90 FETCHes 4 passed on and 82 refused, and both of the viewer passed on.
 
+## How much of the share the own viewers use
+
+Whether a viewer comes near 8 requests and 4 FETCHes on one publisher. Counted from the order of the lines of the relay's log (`OPEN_REQUEST` for a request of the relay on the publisher, until its answer for a SUBSCRIBE and until its end for a FETCH), with one viewer in each run, so every request is for it. `bun demo/serve.ts` on ports of its own, headless Chromium; the publishers answer at once.
+
+| Viewer | Requests of the relay on the publisher, in all | At once at most |
+|---|---|---|
+| `/watch?abr=1&buffer=150` behind `spikes/lossy-link/proxy.mjs` (50 ms each way; without a limit for 8 s, 2 Mbit/s for 20 s, without a limit for 20 s), the publisher with `picture=busy&bitrate=2500000&ladder=1` | 7 SUBSCRIBE (4 more than the catalog, the video and the sound: the versions it changed to), 2 FETCH | 1 SUBSCRIBE unanswered, 1 FETCH open |
+| `xmoq-watch --url ... --namespace xmoq/demo`, 6 s | 3 SUBSCRIBE, 1 FETCH | 1 and 1 |
+| `xmoq-watch --room ...`, 6 s | 3 SUBSCRIBE, 1 FETCH | 1 and 1 |
+| `xmoq-watch ... --video-version name:video-low`, 6 s | 3 SUBSCRIBE, 1 FETCH | 1 and 1 |
+| Every run of the interop matrix but the one that is about the share (165 logs, moqlivemock's subscriber and the terminal viewer among them) | | 1 and 1 on any one publisher |
+
+- **No viewer came near the share, and the relay refused nothing with `EXCESSIVE_LOAD` in these runs.** The numbers stay 8 and 4.
+- **What this does not show**: how many a viewer has open at once goes by how fast the publisher answers, and these publishers answer at once. By what the watching page sends without waiting for an answer (read in `demo/watch.ts`, not run against a slow publisher), it could have the video, the sound and a version it tries unanswered together, and a FETCH for the catalog and one for the video: 3 and 2. A client that fetched three versions of the video, the sound and the catalog at once from a publisher that answers late would have 5 FETCHes and be refused the fifth; no client here does that.
+
 ## Not run
 
 - More than four publishers of one namespace. The requests the relay sends for one SUBSCRIBE are as many as the sessions that announced a namespace of the track, and nothing bounds those; by the cost of a request, about ten publishers would bring the relay to a whole core at 1,000 a second.

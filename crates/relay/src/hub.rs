@@ -127,7 +127,8 @@ pub struct HubConfig {
     /// one publisher for one subscriber's session.
     pub requests_for_one_subscriber: Option<usize>,
     /// `xmoq_relay_core::MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER`, in the same
-    /// way: how many of them are FETCH requests.
+    /// way: how many FETCH requests the relay has open on one publisher for
+    /// one subscriber's session. Counted apart from the SUBSCRIBEs above.
     pub fetches_for_one_subscriber: Option<usize>,
     /// How long a publisher gets to answer a SUBSCRIBE the relay sent it for
     /// a track of a namespace it announced. Then the subscribers that wait
