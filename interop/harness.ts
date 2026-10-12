@@ -755,6 +755,8 @@ export async function openConnectedPage(
 	client: BrowserClient,
 	/** Own page: the longest payload of an Object it takes; the library's when left out. */
 	maxObjectPayloadLength?: number,
+	/** Own page: how long the answer to a request is waited for; the library's when left out. */
+	answerTimeoutMs?: number,
 ): Promise<Page> {
 	if (context.pages === undefined) {
 		throw new Error(`${label} needs the browser, which was not started`);
@@ -768,12 +770,14 @@ export async function openConnectedPage(
 	await page.waitForFunction(() => typeof window.xmoq === "object");
 	await withTimeout(
 		page.evaluate(
-			([url, hash, limit]) => window.xmoq.connect(url, hash, limit),
+			([url, hash, limit, answer]) =>
+				window.xmoq.connect(url, hash, limit, answer),
 			[
 				context.relayUrl,
 				context.certSha256Hex,
 				maxObjectPayloadLength,
-			] satisfies [string, string, number | undefined],
+				answerTimeoutMs,
+			] satisfies [string, string, number | undefined, number | undefined],
 		),
 		`${label} to connect`,
 	);

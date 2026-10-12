@@ -58,6 +58,8 @@ export type FetchEnd =
 	| { type: "unsupported-track-property" }
 	/** This endpoint cancelled it: `cancel()`, the `signal` of the call, or a reader that cancelled `body`. */
 	| { type: "cancelled" }
+	/** No answer came in time (`answerTimeoutMs` of the connect options), so this endpoint cancelled it. The session stays open. */
+	| { type: "no-answer-in-time" }
 	| { type: "session-closed"; close: SessionClose };
 
 /**
@@ -153,6 +155,12 @@ export type RequestAbort =
 	| { type: "unsupported-track-property" }
 	/** This endpoint cancelled the request before it was answered. Only a FETCH is handed out before its answer. */
 	| { type: "cancelled" }
+	/**
+	 * The peer did not answer in time (`answerTimeoutMs` of the connect
+	 * options), so this endpoint cancelled the request: its stream is reset
+	 * with CANCELLED, and the session stays open.
+	 */
+	| { type: "no-answer-in-time" }
 	/**
 	 * For a request of the peer, before this endpoint had answered. A
 	 * SUBSCRIBE: the peer sent a REQUEST_UPDATE; updates are not implemented,

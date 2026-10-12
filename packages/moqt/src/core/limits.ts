@@ -1,3 +1,4 @@
+import type { MessageParameters } from "./parameters.ts";
 import type { SubgroupStreamLimits } from "./subgroup.ts";
 
 /**
@@ -77,4 +78,38 @@ export function resolveLimits(
 		maxPeerFetches:
 			limits.maxPeerFetches ?? DEFAULT_SESSION_LIMITS.maxPeerFetches,
 	};
+}
+
+/**
+ * How long the answer to a request is waited for at the least, in
+ * milliseconds, before the parameters of the request are looked at: the time
+ * the peer's SETUP gets. **Provisional**, and the value of the Rust
+ * implementation (`ANSWER_WAIT_MS` in crates/moqt).
+ */
+export const DEFAULT_ANSWER_WAIT_MS = 10_000;
+
+/** The longest an answer is waited for: the longest delay `setTimeout` takes (HTML, "timer initialization steps"). */
+export const MAX_ANSWER_WAIT_MS = 2 ** 31 - 1;
+
+/**
+ * How long the answer to a request with these parameters is waited for, in
+ * milliseconds: `baseMs`, and as long again as the request itself tells a
+ * relay to wait.
+ *
+ * WHY the two parameters are added: with RENDEZVOUS_TIMEOUT "The relay does
+ * not send SUBSCRIBE_OK until a publisher becomes available" (§10.2.6), and
+ * FILL_TIMEOUT is "the maximum total duration in milliseconds a relay SHOULD
+ * spend waiting for upstream sources" (§10.2.5). A requester that gave up
+ * sooner would give up what it asked for. The draft names no time (§13.6:
+ * "Each implementation is expected to set its own timeouts");
+ * `fixtures/request-answer-wait/` has the rows both implementations go by.
+ */
+export function answerWaitMs(
+	baseMs: number,
+	parameters: MessageParameters | undefined,
+): number {
+	const asked =
+		(parameters?.rendezvousTimeout ?? 0n) + (parameters?.fillTimeout ?? 0n);
+	const wait = BigInt(baseMs) + asked;
+	return wait > BigInt(MAX_ANSWER_WAIT_MS) ? MAX_ANSWER_WAIT_MS : Number(wait);
 }

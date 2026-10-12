@@ -113,7 +113,11 @@ describe("a stream of the peer that does not say what it is", () => {
 		},
 		{ name: "a padding stream", bytes: "f0 13 2b 3e 28" },
 	])("$name has said what it is and stays open", async ({ bytes }) => {
-		const { peer, connection } = await connected();
+		// WHY the longest wait for an answer: the SUBSCRIBE below has to stay
+		// unanswered for the hour the test lets pass.
+		const { peer, connection } = await connected({
+			answerTimeoutMs: 2_147_483_647,
+		});
 		// A SUBSCRIBE without an answer yet, so that the Track Alias of the
 		// subgroup stream can still be established and its stream is held.
 		void connection.subscribe({ trackNamespace: [], trackName: hex("61") });

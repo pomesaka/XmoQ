@@ -114,6 +114,11 @@ struct Args {
     /// catalog it reads there.
     catalog_video: bool,
     timeout_secs: u64,
+    /// `--answer-wait-ms`: how long the answer to a request is waited for
+    /// before the parameters of the request are looked at
+    /// (`xmoq_moqt::params::answer_wait_ms`). Then the request alone is
+    /// cancelled (`ANSWER_TIMED_OUT`), and the mode fails.
+    answer_wait_ms: u64,
     /// How long the publisher waits between the answer to its
     /// `PUBLISH_NAMESPACE` and its PUBLISH.
     publish_delay: Duration,
@@ -589,12 +594,18 @@ fn read_cert_sha256(text: Option<String>) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("--cert-sha256 must be 32 bytes"))
 }
 
+/// The value of a flag that takes milliseconds.
+fn millis(flag: &str, value: &str) -> Result<u64> {
+    value.parse().with_context(|| flag.to_string())
+}
+
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut mode, mut payload_hex) = (None, None);
     let (mut objects, mut video) = (1, video::VideoFlags::default());
     let (mut url, mut cert_sha256) = (None, None);
     let (mut namespace, mut track_name) = (None, None);
     let (mut timeout_secs, mut publish_delay_ms) = (20, 0);
+    let mut answer_wait_ms = xmoq_moqt::params::ANSWER_WAIT_MS;
     let mut subgroup_id = SubgroupId::Zero;
     let mut first_group = 0;
     let mut publisher_priority = Some(0);
@@ -632,6 +643,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--namespace" => namespace = Some(value),
             "--track" => track_name = Some(value),
             "--timeout-secs" => timeout_secs = value.parse().context("--timeout-secs")?,
+            "--answer-wait-ms" => answer_wait_ms = millis(&flag, &value)?,
             "--subgroup-id" => {
                 subgroup_id = match value.as_str() {
                     "zero" => SubgroupId::Zero,
@@ -643,15 +655,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--first-group" => first_group = value.parse().context("--first-group")?,
             "--publisher-priority" => publisher_priority = parse_publisher_priority(&value)?,
             "--object-property" => object_properties.push(parse_object_property(&value)?),
-            "--serve-delay-ms" => {
-                serve_delay_ms = value.parse().context("--serve-delay-ms")?;
-            }
-            "--publish-delay-ms" => {
-                publish_delay_ms = value.parse().context("--publish-delay-ms")?;
-            }
-            "--answer-delay-ms" => {
-                answer_delay_ms = value.parse().context("--answer-delay-ms")?;
-            }
+            "--serve-delay-ms" => serve_delay_ms = millis(&flag, &value)?,
+            "--publish-delay-ms" => publish_delay_ms = millis(&flag, &value)?,
+            "--answer-delay-ms" => answer_delay_ms = millis(&flag, &value)?,
             "--subscription-filter" => subscription_filter = parse_subscription_filter(&value)?,
             other => {
                 if !(fetch.read(other, &value)?
@@ -676,6 +682,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         auth,
         catalog_video,
         timeout_secs,
+        answer_wait_ms,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
         first_group,
@@ -693,6 +700,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             Trace::default()
         },
     })
+}
+
+/// Says that the answer to a request did not come in time
+/// (`ANSWER_TIMED_OUT`), and gives the error its caller fails with.
+fn not_answered(label: &str, waited_ms: u64) -> anyhow::Error {
+    report::answer_timed_out(label, waited_ms);
+    anyhow!("the peer did not answer the {label} request within {waited_ms} ms")
 }
 
 /// What a response other than the expected one means for the caller.
@@ -1014,13 +1028,17 @@ impl Client<'_> {
             parameters.push(Parameter::GroupOrder(group_order));
         }
         let parameters = self.args.auth.with(parameters);
+        let answer_wait = Duration::from_millis(xmoq_moqt::params::answer_wait_ms(
+            self.args.answer_wait_ms,
+            &parameters,
+        ));
         let (request_id, message) = self.session.fetch(range, parameters)?;
         let label = format!("fetch#{}", request_id.value());
         let stream = self.open_request(request_id, &message, &label).await?;
         report::fetch_sent(request_id.value());
         // §10.2.8: without the parameter the Groups come in Ascending order.
         let group_order = self.args.fetch.group_order.unwrap_or(GroupOrder::Ascending);
-        fetches.add(request_id, group_order, stream);
+        fetches.add(request_id, group_order, stream, answer_wait);
         Ok(())
     }
 
@@ -1081,6 +1099,7 @@ impl Client<'_> {
             }
             Note::RequestClosed(index, how) => (index, Happened::RequestClosed(how)),
             Note::CancelDue(index) => (index, Happened::GaveUp),
+            Note::AnswerDue(index) => (index, Happened::NotAnsweredInTime),
             Note::RequestBroken(error) => return Err(error),
             Note::Body(index, end) => {
                 let happened = match end {
@@ -1166,8 +1185,33 @@ impl Client<'_> {
         stream: &mut RequestStream,
         label: &str,
     ) -> Result<RequestEvent> {
-        let event = stream.next_event().await?;
+        let event = self.in_time(label, &[], stream.next_event()).await??;
         self.on_response(request_id, event, label)
+    }
+
+    /// `answer`, where it comes within the time the answer to a request
+    /// with these parameters gets (`answer_wait_ms`); else an error, after
+    /// `ANSWER_TIMED_OUT`. The caller cancels the request, as for any error
+    /// of it: its stream is reset with `CANCELLED`, and the session is not
+    /// closed over it.
+    ///
+    /// WHY the request and not the session, which §3.5 has a code for
+    /// (`CONTROL_MESSAGE_TIMEOUT`, "the peer took too long to respond to a
+    /// control message"): a relay answers a SUBSCRIBE when the publisher
+    /// behind it has, so one slow publisher would end every other request
+    /// of the session. `@xmoq/moqt` does the same
+    /// (`docs/moqt-implementation-notes.md`).
+    async fn in_time<T>(
+        &self,
+        label: &str,
+        parameters: &[Parameter],
+        answer: impl Future<Output = T>,
+    ) -> Result<T> {
+        let wait = xmoq_moqt::params::answer_wait_ms(self.args.answer_wait_ms, parameters);
+        let Ok(answer) = tokio::time::timeout(Duration::from_millis(wait), answer).await else {
+            return Err(not_answered(label, wait));
+        };
+        Ok(answer)
     }
 
     /// The event that what came on the stream of a request makes of it.
@@ -1976,10 +2020,15 @@ impl Client<'_> {
     ) -> Result<(RequestStream, RequestEvent)> {
         let (request_id, message, label) = request;
         let mut stream = self.open_request(request_id, message, label).await?;
+        let wait = xmoq_moqt::params::answer_wait_ms(self.args.answer_wait_ms, &[]);
+        let answer = tokio::time::timeout(Duration::from_millis(wait), stream.next_event());
         let response = self
-            .attending(peer_requests, serving, stdin, stream.next_event())
+            .attending(peer_requests, serving, stdin, answer)
             .await
-            .and_then(|event| self.on_response(request_id, event?, label));
+            .and_then(|event| {
+                let event = event.map_err(|_| not_answered(label, wait))?;
+                self.on_response(request_id, event?, label)
+            });
         match response {
             Ok(event) => Ok((stream, event)),
             Err(error) => {

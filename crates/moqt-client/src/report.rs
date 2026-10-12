@@ -100,6 +100,12 @@ pub fn track_malformed(track_alias: u64, error: &MoqtError) {
     println!("TRACK_MALFORMED track_alias={track_alias} error={error}");
 }
 
+/// The answer to the request of this stream did not come in time, and the
+/// request is given up.
+pub fn answer_timed_out(label: &str, waited_ms: u64) {
+    println!("ANSWER_TIMED_OUT request={label} after_ms={waited_ms}");
+}
+
 pub fn namespace_published() {
     println!("NAMESPACE_PUBLISHED");
 }
