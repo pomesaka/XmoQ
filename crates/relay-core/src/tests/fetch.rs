@@ -94,6 +94,7 @@ const PIPE: Action = Action::PipeFetch {
     request_id: 0,
     upstream_wait_ms: 5_000,
     downstream_wait_ms: 10_000,
+    send_order: FETCH_SEND_ORDER,
 };
 
 fn abort_pipe(code: u32) -> Action {
@@ -1256,6 +1257,7 @@ fn a_joining_fetch_that_waits_for_nothing_is_answered_up_to_the_joining_location
                 request_id: 2,
                 pieces: vec![unknown_through(5, 2)],
                 wait_ms: 10_000,
+                send_order: FETCH_SEND_ORDER,
             },
         ]
     );
@@ -1588,6 +1590,7 @@ fn a_joining_fetch_for_a_pending_subscribe_waits_for_its_answer() {
             request_id: 2,
             pieces: vec![unknown_through(7, 1)],
             wait_ms: 10_000,
+            send_order: FETCH_SEND_ORDER,
         },
     ];
     let refused = |error_code| vec![send(FETCH_STREAM, request_error(error_code)), FINISH];
@@ -2291,6 +2294,7 @@ fn a_fetch_that_waits_for_nothing_is_answered_from_what_the_relay_knows() {
                 request_id: 0,
                 pieces: vec![marker],
                 wait_ms: 10_000,
+                send_order: FETCH_SEND_ORDER,
             },
         ]
     };

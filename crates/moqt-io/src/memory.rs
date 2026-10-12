@@ -65,6 +65,8 @@ struct Pipe {
     reset: Option<Aborted>,
     /// The receiver stopped the stream.
     stopped: Option<Aborted>,
+    /// What the sender last said with [`SendStream::set_send_order`].
+    send_order: Option<i32>,
 }
 
 struct Shared {
@@ -160,6 +162,12 @@ impl SendStream for MemorySend {
         self.ended = true;
         self.shared.lock().finished = true;
         self.shared.changed.notify_waiters();
+    }
+
+    /// Noted, for a test to read ([`MemoryRecv::send_order`]): nothing is
+    /// between this half and its peer that could be put in order.
+    fn set_send_order(&mut self, order: i32) {
+        self.shared.lock().send_order = Some(order);
     }
 
     /// Finishes at once, as the default does, but for a stream of
@@ -305,6 +313,14 @@ impl RecvStream for MemoryRecv {
 }
 
 impl MemoryRecv {
+    /// What the sender of this stream last said with
+    /// [`SendStream::set_send_order`]; `None` when it never did. For tests:
+    /// a real receiver does not learn it.
+    #[must_use]
+    pub fn send_order(&self) -> Option<i32> {
+        self.shared.lock().send_order
+    }
+
     fn halt(&self, code: Option<u32>) {
         let mut pipe = self.shared.lock();
         if pipe.stopped.is_none() {

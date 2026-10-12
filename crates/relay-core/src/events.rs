@@ -449,6 +449,9 @@ pub enum Action {
         upstream_wait_ms: u64,
         /// How long the subscriber may take nothing, in milliseconds.
         downstream_wait_ms: u64,
+        /// Where the stream to the subscriber stands among the streams to
+        /// its session, as in [`Action::OpenDataStream`].
+        send_order: i32,
     },
     /// End the passing on of a fetch stream: reset the stream to the
     /// subscriber with `code` and stop the publisher's with `CANCELLED`.
@@ -483,6 +486,9 @@ pub enum Action {
         /// the stream is reset with `TOO_FAR_BEHIND`: for the stream to be
         /// opened with its header, and for each piece.
         wait_ms: u64,
+        /// Where the stream stands among the streams to the session, as in
+        /// [`Action::OpenDataStream`].
+        send_order: i32,
     },
     /// Stop writing a fetch stream of [`Action::WriteFetchStream`] and reset
     /// it with `code`. The end is reported as for a stream that was given

@@ -175,6 +175,14 @@ pub struct FetchStreamWriter<S: SendStream> {
 }
 
 impl<S: SendStream> FetchStreamWriter<S> {
+    /// [`SendStream::set_send_order`] for the stream. Called before the
+    /// first write, it holds for the header as well.
+    pub fn set_send_order(&mut self, order: i32) {
+        if let Some(send) = &mut self.send {
+            send.set_send_order(order);
+        }
+    }
+
     /// Writes bytes of the stream: Objects and End of Range indicators as
     /// §11.4.4 has them, or what another fetch stream carried. Waits while
     /// the peer does not take them.
@@ -266,7 +274,25 @@ pub async fn open_fetch_stream<C: Connection>(
     label: &str,
     given_up: u32,
 ) -> Result<FetchStreamWriter<C::Send>, WriteError> {
+    open_fetch_stream_in_order(connection, (header, 0), trace, label, given_up).await
+}
+
+/// [`open_fetch_stream`] for a stream that stands at `send_order` among the
+/// streams of its connection ([`SendStream::set_send_order`]), its header
+/// included.
+///
+/// # Errors
+///
+/// As [`open_fetch_stream`].
+pub async fn open_fetch_stream_in_order<C: Connection>(
+    connection: &C,
+    (header, send_order): (FetchHeader, i32),
+    trace: &Trace,
+    label: &str,
+    given_up: u32,
+) -> Result<FetchStreamWriter<C::Send>, WriteError> {
     let mut writer = open_fetch_stream_without_header(connection, trace, label).await?;
+    writer.set_send_order(send_order);
     writer.dropped_with = given_up;
     // The Group Order has no part in the header.
     let bytes = FetchStreamEncoder::new(header, GroupOrder::Ascending).take_bytes();
@@ -1859,7 +1885,10 @@ impl Writer {
             stream = connection.open_uni() => stream,
         };
         let Ok(mut send) = stream else { return };
-        // Before the first byte: the header is ordered like the rest.
+        // Before the first byte this crate writes. Not before the first
+        // byte of the stream: web-transport-quinn 0.13.2 has written the
+        // stream's type of WebTransport by then, with the highest priority
+        // there is (`Session::open_uni`), and that is on its way.
         send.set_send_order(self.send_order);
         report(OutgoingEvent::Opened).await;
 
