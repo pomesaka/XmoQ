@@ -171,6 +171,10 @@ async function main(): Promise<void> {
 
 	const began = performance.now();
 	let firstFrameAfterMs: number | undefined;
+	let firstShownAfterMs: number | undefined;
+	/** When the tracks of the first session were subscribed to, since the page began. */
+	let playingAfterMs: number | undefined;
+	const shownLog: [number, number][] = [];
 	/** Whether a frame that waits has the mark. */
 	const marked = new WeakMap<VideoFrame, boolean>();
 	let markShown = false;
@@ -239,6 +243,14 @@ async function main(): Promise<void> {
 		},
 		onFrameShown(show) {
 			const { now, turn } = show;
+			firstShownAfterMs ??= Math.round(performance.now() - began);
+			// `?diag=1`: when each of the first frames was shown, and how long after it was made.
+			if (shownLog.length < 300) {
+				shownLog.push([
+					Math.round(performance.now() - began),
+					Math.round(now - show.frame.timestamp / 1000),
+				]);
+			}
 			framesShown.count();
 			played.video.add(now - show.frame.timestamp / 1000);
 			delay.arrive.add(show.came - show.frame.timestamp / 1000);
@@ -481,6 +493,11 @@ async function main(): Promise<void> {
 				leaving: leaving() ?? null,
 			},
 			firstAudioAfterMs: firstAudioAfterMs ?? null,
+			firstFrameAfterMs: firstFrameAfterMs ?? null,
+			firstShownAfterMs: firstShownAfterMs ?? null,
+			playingAfterMs: playingAfterMs ?? null,
+			joiningFetch: stats.joiningFetch,
+			...(query.get("diag") === null ? {} : { shownLog }),
 			firstSoundAfterMs: firstSoundAfterMs ?? null,
 			...(query.get("diag") === null
 				? {}
@@ -648,6 +665,7 @@ async function main(): Promise<void> {
 					return;
 				case "playing":
 					sessions = state.session;
+					playingAfterMs ??= Math.round(performance.now() - began);
 					link = `playing (session ${sessions})`;
 					return;
 				case "session-ended":
