@@ -84,6 +84,13 @@ pub struct Args {
     /// opened, for the relay to allow one more; 10,000 where it is not
     /// said.
     pub open_wait_ms: u64,
+    /// `--rendezvous-timeout-ms`: the `RENDEZVOUS_TIMEOUT` of every
+    /// SUBSCRIBE the viewer sends (§10.2.6 of
+    /// `draft-ietf-moq-transport-18`): how long the relay may hold one for
+    /// a publisher to appear, so that the viewer can come before the
+    /// broadcast. `None`: the parameter is left out, and a broadcast that
+    /// is not there is refused at once.
+    pub rendezvous_ms: Option<u64>,
     /// `--volume`: 0 to 1.
     pub volume: f32,
     /// `--scale`: how many times its pixels the picture takes of the
@@ -145,6 +152,8 @@ xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line
                                     auto: it follows how late Objects come, from 50 up to 400 (a trial)
   --answer-wait-ms <ms>             how long the relay gets to answer a request (10000)
   --setup-wait-ms <ms>              how long the relay gets for its SETUP (10000)
+  --rendezvous-timeout-ms <ms>      ask the relay to hold the viewer's SUBSCRIBEs that long for a
+                                    broadcast that is not there yet (not asked; the relay holds 30 s at most)
   --open-wait-ms <ms>               how long the relay gets to allow a stream for a request (10000)
   --video-timeout-ms <ms>           ask the relay to give up a Group of the video that is not delivered
                                     that long after its last Object (not asked; 0 is not asking)
@@ -248,6 +257,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         answer_wait_ms: DEFAULT_ANSWER_WAIT_MS,
         setup_wait_ms: DEFAULT_ANSWER_WAIT_MS,
         open_wait_ms: DEFAULT_ANSWER_WAIT_MS,
+        rendezvous_ms: None,
         volume: 1.0,
         scale: 1,
         medium: Medium::File,
@@ -298,6 +308,11 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--answer-wait-ms" => args.answer_wait_ms = number(&flag, &value)?,
             "--setup-wait-ms" => args.setup_wait_ms = number(&flag, &value)?,
             "--open-wait-ms" => args.open_wait_ms = number(&flag, &value)?,
+            "--rendezvous-timeout-ms" => {
+                // §10.2.6: 0 is not wanting to wait, as without it.
+                let wait: u64 = number(&flag, &value)?;
+                args.rendezvous_ms = (wait > 0).then_some(wait);
+            }
             "--volume" => {
                 let volume: f32 = number(&flag, &value)?;
                 if !(0.0..=1.0).contains(&volume) {
@@ -381,6 +396,7 @@ mod tests {
             answer_wait_ms: 10_000,
             setup_wait_ms: 10_000,
             open_wait_ms: 10_000,
+            rendezvous_ms: None,
             volume: 1.0,
             scale: 1,
             medium: Medium::File,
@@ -417,7 +433,7 @@ mod tests {
         assert_eq!(
             parsed(
                 "--room http://h/rooms/a --name me --say hello --token no --video v --audio a \
-                 --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
+                 --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --rendezvous-timeout-ms 4500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
                  --seconds 20 --log l --sound off --measure-demo-marks on"
             ),
             Ok(Args {
@@ -435,6 +451,7 @@ mod tests {
                 answer_wait_ms: 1500,
                 setup_wait_ms: 2500,
                 open_wait_ms: 3500,
+                rendezvous_ms: Some(4500),
                 volume: 0.3,
                 scale: 2,
                 medium: Medium::Direct,

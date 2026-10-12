@@ -114,24 +114,14 @@ struct Args {
     /// catalog it reads there.
     catalog_video: bool,
     timeout_secs: u64,
-    /// `--answer-wait-ms`: how long the answer to a request is waited for
-    /// before the parameters of the request are looked at
-    /// (`xmoq_moqt::params::answer_wait_ms`). Then the request alone is
-    /// cancelled (`ANSWER_TIMED_OUT`), and the mode fails.
-    answer_wait_ms: u64,
+    /// `--answer-wait-ms`, `--setup-wait-ms`, `--open-wait-ms` and
+    /// `--rendezvous-timeout-ms`.
+    waits: Waits,
     /// `--update-subgroup-timeout-ms`: `--mode subscribe` sends a
     /// `REQUEST_UPDATE` with this `SUBGROUP_DELIVERY_TIMEOUT` once its
     /// SUBSCRIBE is accepted (§10.9), and prints `UPDATE_ACCEPTED` or
     /// `UPDATE_FAILED` when the answer comes.
     update_subgroup_timeout_ms: Option<u64>,
-    /// `--setup-wait-ms`: how long the peer's SETUP is waited for; 10,000
-    /// where it is not said. Then the session is closed with
-    /// `CONTROL_MESSAGE_TIMEOUT`.
-    setup_wait_ms: u64,
-    /// `--open-wait-ms`: how long a request may wait for its stream to be
-    /// opened, for the peer to allow one more; 10,000 where it is not
-    /// said. Then the request is not sent (`NOT_SENT`), and the mode fails.
-    open_wait_ms: u64,
     /// How long the publisher waits between the answer to its
     /// `PUBLISH_NAMESPACE` and its PUBLISH.
     publish_delay: Duration,
@@ -609,9 +599,23 @@ fn read_cert_sha256(text: Option<String>) -> Result<[u8; 32]> {
 
 /// The flags for how long this client waits for the peer, in milliseconds.
 struct Waits {
+    /// `--answer-wait-ms`: how long the answer to a request is waited for
+    /// before the parameters of the request are looked at
+    /// (`xmoq_moqt::params::answer_wait_ms`). Then the request alone is
+    /// given up (`ANSWER_TIMED_OUT`), and the mode fails.
     answer: u64,
+    /// `--setup-wait-ms`: how long the peer's SETUP is waited for. Then the
+    /// session is closed with `CONTROL_MESSAGE_TIMEOUT`.
     setup: u64,
+    /// `--open-wait-ms`: how long a request may wait for its stream to be
+    /// opened, for the peer to allow one more. Then the request is not
+    /// sent (`NOT_SENT`), and the mode fails.
     open: u64,
+    /// `--rendezvous-timeout-ms`: the `RENDEZVOUS_TIMEOUT` of the SUBSCRIBEs
+    /// this client sends (§10.2.6): how long a relay may hold one for a
+    /// publisher to appear. 0, and without the flag: the parameter is left
+    /// out.
+    rendezvous: u64,
 }
 
 impl Default for Waits {
@@ -620,6 +624,7 @@ impl Default for Waits {
             answer: xmoq_moqt::params::ANSWER_WAIT_MS,
             setup: SETUP_WAIT_MS,
             open: STREAM_OPEN_WAIT_MS,
+            rendezvous: 0,
         }
     }
 }
@@ -631,6 +636,7 @@ impl Waits {
             "--answer-wait-ms" => &mut self.answer,
             "--setup-wait-ms" => &mut self.setup,
             "--open-wait-ms" => &mut self.open,
+            "--rendezvous-timeout-ms" => &mut self.rendezvous,
             _ => return Ok(false),
         };
         *wait = millis(flag, value)?;
@@ -726,10 +732,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         auth,
         catalog_video,
         timeout_secs,
-        answer_wait_ms: waits.answer,
+        waits,
         update_subgroup_timeout_ms: update_ms,
-        setup_wait_ms: waits.setup,
-        open_wait_ms: waits.open,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
         first_group,
@@ -984,6 +988,9 @@ impl Client<'_> {
                 .subscription_filter
                 .map(Parameter::SubscriptionFilter),
             Some(Parameter::GroupOrder(GroupOrder::Ascending)),
+            Some(self.args.waits.rendezvous)
+                .filter(|wait| *wait > 0)
+                .map(Parameter::RendezvousTimeout),
         ];
         let parameters = self
             .args
@@ -1073,7 +1080,7 @@ impl Client<'_> {
         milliseconds: u64,
     ) -> Result<()> {
         let parameters = vec![Parameter::SubgroupDeliveryTimeout(milliseconds)];
-        let wait = xmoq_moqt::params::answer_wait_ms(self.args.answer_wait_ms, &parameters);
+        let wait = xmoq_moqt::params::answer_wait_ms(self.args.waits.answer, &parameters);
         let update = self.session.update_subscription(request_id, parameters)?;
         stream.send(&update).await?;
         let (answered, answer) = tokio::sync::oneshot::channel();
@@ -1156,7 +1163,7 @@ impl Client<'_> {
         }
         let parameters = self.args.auth.with(parameters);
         let answer_wait = Duration::from_millis(xmoq_moqt::params::answer_wait_ms(
-            self.args.answer_wait_ms,
+            self.args.waits.answer,
             &parameters,
         ));
         let (request_id, message) = self.session.fetch(range, parameters)?;
@@ -1305,15 +1312,15 @@ impl Client<'_> {
         // reset; the session is not closed over it. `@xmoq/moqt` gives a
         // request the same time (`openStreamTimeoutMs`), and the draft
         // names none (docs/moqt-implementation-notes.md).
-        let wait = Duration::from_millis(self.args.open_wait_ms);
+        let wait = Duration::from_millis(self.args.waits.open);
         let opening = RequestStream::open(self.connection, &self.args.trace, label);
         let opened = tokio::time::timeout(wait, opening)
             .await
             .unwrap_or_else(|_| {
-                report::not_sent(label, self.args.open_wait_ms);
+                report::not_sent(label, self.args.waits.open);
                 Err(anyhow!(
                     "the peer allowed no stream for the {label} request within {} ms",
-                    self.args.open_wait_ms
+                    self.args.waits.open
                 ))
             });
         let mut stream = match opened {
@@ -1363,7 +1370,7 @@ impl Client<'_> {
         parameters: &[Parameter],
         answer: impl Future<Output = T>,
     ) -> Result<T> {
-        let wait = xmoq_moqt::params::answer_wait_ms(self.args.answer_wait_ms, parameters);
+        let wait = xmoq_moqt::params::answer_wait_ms(self.args.waits.answer, parameters);
         let Ok(answer) = tokio::time::timeout(Duration::from_millis(wait), answer).await else {
             return Err(not_answered(label, wait));
         };
@@ -2209,7 +2216,7 @@ impl Client<'_> {
         let (request_id, message, label) = request;
         let mut stream = self.open_request(request_id, message, label).await?;
         let wait =
-            xmoq_moqt::params::answer_wait_ms(self.args.answer_wait_ms, parameters_of(message));
+            xmoq_moqt::params::answer_wait_ms(self.args.waits.answer, parameters_of(message));
         let answer = tokio::time::timeout(Duration::from_millis(wait), stream.next_event());
         let Ok(event) = self
             .attending(peer_requests, serving, stdin, answer)
@@ -2700,10 +2707,10 @@ async fn run_session(
     let setup = session.setup(setup_options)?;
     xmoq_moqt_io::send_message(control, &setup, &args.trace, "control").await?;
 
-    let setup_wait = Duration::from_millis(args.setup_wait_ms);
+    let setup_wait = Duration::from_millis(args.waits.setup);
     let Ok(first) = tokio::time::timeout(setup_wait, session_inbox.next_control_message()).await
     else {
-        return Err(NoSetupInTime(args.setup_wait_ms).into());
+        return Err(NoSetupInTime(args.waits.setup).into());
     };
     let peer_setup = session.on_control_message(first?)?;
     report::setup_ok(&peer_setup);

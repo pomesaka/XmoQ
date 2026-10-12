@@ -310,6 +310,8 @@ async function received(
 async function subscribeTo(
 	namespace: string,
 	trackName: string,
+	/** RENDEZVOUS_TIMEOUT in milliseconds (§10.2.6); left out when absent. */
+	rendezvousTimeoutMs?: number,
 ): Promise<Subscription> {
 	const subscription = await connected().subscribe({
 		trackNamespace: namespaceFromPath(namespace),
@@ -320,6 +322,9 @@ async function subscribeTo(
 			subscriberPriority: 128,
 			subscriptionFilter: { filterType: "LargestObject" },
 			groupOrder: "Ascending",
+			...(rendezvousTimeoutMs === undefined
+				? {}
+				: { rendezvousTimeout: BigInt(rendezvousTimeoutMs) }),
 		},
 	});
 	subscribed = subscription;
@@ -579,11 +584,21 @@ window.xmoq = {
 		sendIn(0n, payloadHex, true),
 	),
 
-	subscribe: withPlainErrors(async (namespace: string, trackName: string) => {
-		const subscription = await subscribeTo(namespace, trackName);
-		reading = readAll(subscription);
-		return subscription.requestId.toString();
-	}),
+	subscribe: withPlainErrors(
+		async (
+			namespace: string,
+			trackName: string,
+			rendezvousTimeoutMs?: number,
+		) => {
+			const subscription = await subscribeTo(
+				namespace,
+				trackName,
+				rendezvousTimeoutMs,
+			);
+			reading = readAll(subscription);
+			return subscription.requestId.toString();
+		},
+	),
 
 	firstObject: withPlainErrors(() =>
 		received("any Object with a payload", () => true),

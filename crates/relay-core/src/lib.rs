@@ -33,9 +33,6 @@
 //! (§8). They are ignored, as a parameter of a SUBSCRIBE and as a Track
 //! Property.
 //!
-//! FIXME: hold a SUBSCRIBE that carries `RENDEZVOUS_TIMEOUT` until a publisher
-//! appears (§10.2.6, SHOULD). It is rejected at once like any other.
-//!
 //! FIXME: share one encoding of an Object between subscribers. Each subscriber
 //! gets its own copy of the payload today.
 
@@ -59,7 +56,8 @@ pub use fetch::fetch_reset_passed_on;
 use requests::{Requests, Subscribed};
 use routing::{Announcement, Ask, Declined, OwnRequest, PendingTrack, Refusal, Waiter};
 pub use routing::{
-    MAX_NAMESPACES_PER_SESSION, MAX_OWN_REQUESTS_PER_SESSION, MAX_PASSED_ON_REASON_LEN,
+    MAX_HELD_SUBSCRIBES_PER_SESSION, MAX_HELD_TRACKS, MAX_NAMESPACES_PER_SESSION,
+    MAX_OWN_REQUESTS_PER_SESSION, MAX_PASSED_ON_REASON_LEN, MAX_RENDEZVOUS_MS,
     MAX_WAITING_SUBSCRIBERS,
 };
 use xmoq_moqt::data::{SubgroupHeader, SubgroupId, SubgroupObject};
@@ -1554,6 +1552,9 @@ impl Relay {
             Event::RequestTimeout { session, stream } => {
                 self.on_request_timeout(session, stream, &mut actions);
             }
+            Event::RendezvousTimeout { session, stream } => {
+                self.on_rendezvous_timeout(session, stream, &mut actions);
+            }
             Event::SessionFailed { session, error } => {
                 self.fail_session(session, &error, &mut actions);
             }
@@ -1924,6 +1925,23 @@ impl Relay {
             filter,
             routing::Delivery::of(&subscribe.parameters),
         );
+        // §10.2.6: "If the RENDEZVOUS_TIMEOUT is present, the relay SHOULD
+        // hold the subscription and wait for a publisher to appear, up to
+        // the specified duration. The relay does not send SUBSCRIBE_OK
+        // until a publisher becomes available."
+        // WHY the limit on such tracks is looked at here, for every way a
+        // held SUBSCRIBE comes to its track: one that is asked of a session
+        // which announced and then refuses is held as one that nobody was
+        // asked for, and a limit that one of the ways goes round is none.
+        let room = self.holds_a_subscribe(track_name) || self.held_tracks() < MAX_HELD_TRACKS;
+        let hold = self
+            .rendezvous_ms(session, &subscribe.parameters)
+            .filter(|_| room);
+        let waiter = if hold.is_some() {
+            waiter.held()
+        } else {
+            waiter
+        };
         let waits = match self.tracks.phase(track_name) {
             // §9.5: "When a Relay receives an authorized SUBSCRIBE for a Track
             // with one or more Established upstream subscriptions, it MUST
@@ -1951,11 +1969,19 @@ impl Relay {
             // who are there already and stay if that publisher accepts.
             Some(TrackPhase::Draining) => Err(request_error_code::DOES_NOT_EXIST),
             Some(TrackPhase::Pending) => {
-                let waits = self.wait_with_the_others(track_name, waiter);
-                if waits.is_ok() {
-                    self.ask_the_publishers(track_name, None, actions);
+                // A track that is held for a publisher to appear, and none
+                // is asked for it: a subscriber waits there by its own
+                // RENDEZVOUS_TIMEOUT or not at all (§10.2.6, as below).
+                let nobody_yet = self.tracks.asks(track_name).is_empty();
+                if nobody_yet && hold.is_none() {
+                    Err(request_error_code::DOES_NOT_EXIST)
+                } else {
+                    let waits = self.wait_with_the_others(track_name, waiter);
+                    if waits.is_ok() {
+                        self.ask_the_publishers(track_name, None, actions);
+                    }
+                    waits
                 }
-                waits
             }
             // §9.5: "If there are no Established upstream subscriptions for
             // the requested Track, the Relay MUST send a SUBSCRIBE request to
@@ -1963,7 +1989,19 @@ impl Relay {
             // or prefix thereof."
             None => {
                 let asked = self.ask_the_publishers(track_name, None, actions);
-                if asked.asks.is_empty() {
+                // WHY not held where a publisher is there and could not be
+                // asked: one has appeared, and the code says why it is not
+                // asked.
+                let holds = hold.is_some() && asked.nobody_because.is_none();
+                if asked.asks.is_empty() && holds {
+                    let pending = PendingTrack {
+                        asks: Vec::new(),
+                        waiters: vec![waiter],
+                        declined: Declined::default(),
+                    };
+                    self.tracks.insert_pending(track_name.clone(), pending);
+                    Ok(())
+                } else if asked.asks.is_empty() {
                     // §10.2.6: without RENDEZVOUS_TIMEOUT, or with 0, "MUST
                     // immediately return REQUEST_ERROR with error code
                     // DOES_NOT_EXIST if no publisher is available". Where
@@ -1991,6 +2029,16 @@ impl Relay {
                     peer_finished: false,
                 };
                 self.put_slot(session, stream, slot, actions);
+                // Its time to be held runs whether or not somebody is asked
+                // for the track now: the one that is asked may refuse.
+                let waits_still = self.tracks.pending(track_name).is_some();
+                if let (true, Some(wait_ms)) = (waits_still, hold) {
+                    actions.push(Action::StartRendezvousTimer {
+                        session,
+                        stream,
+                        wait_ms,
+                    });
+                }
             }
             Err(error_code) => {
                 self.refuse(
@@ -2002,6 +2050,90 @@ impl Relay {
                 );
             }
         }
+    }
+
+    /// How long a SUBSCRIBE of this session with these parameters is held
+    /// for a publisher to appear, in milliseconds: its `RENDEZVOUS_TIMEOUT`,
+    /// and no more than [`MAX_RENDEZVOUS_MS`]. `None` where it asks for
+    /// none, and where the session has as many held as it may
+    /// ([`MAX_HELD_SUBSCRIBES_PER_SESSION`]): such a SUBSCRIBE is answered as
+    /// one that does not want to wait.
+    fn rendezvous_ms(&self, session: SessionKey, parameters: &[Parameter]) -> Option<u64> {
+        let asked = params::rendezvous_timeout(parameters)?;
+        let held = self.sessions.get(&session).map_or(0, |state| {
+            state
+                .requests
+                .iter()
+                .filter(|(on, slot)| match slot {
+                    RequestSlot::Waiting { track, .. } => {
+                        self.tracks.pending(track).is_some_and(|pending| {
+                            pending
+                                .waiters
+                                .iter()
+                                .any(|waiter| waiter.is_on(session, **on) && waiter.is_held())
+                        })
+                    }
+                    _ => false,
+                })
+                .count()
+        });
+        (held < MAX_HELD_SUBSCRIBES_PER_SESSION).then_some(asked.min(MAX_RENDEZVOUS_MS))
+    }
+
+    /// The tracks without a source that have a SUBSCRIBE held for a
+    /// publisher to appear, whether or not somebody is asked for them now.
+    fn held_tracks(&self) -> usize {
+        self.tracks
+            .all_pending()
+            .filter(|(_, pending)| pending.waiters.iter().any(Waiter::is_held))
+            .count()
+    }
+
+    /// Whether the track is one of those [`Self::held_tracks`] counts.
+    fn holds_a_subscribe(&self, track: &FullTrackName) -> bool {
+        self.tracks
+            .pending(track)
+            .is_some_and(|pending| pending.waiters.iter().any(Waiter::is_held))
+    }
+
+    /// The time a SUBSCRIBE was held for a publisher to appear is over. It
+    /// is refused where none has: §10.2.6, "If the timeout expires without
+    /// a publisher, the relay SHOULD respond with `REQUEST_ERROR` with
+    /// error code TIMEOUT."
+    ///
+    /// WHY not where a publisher is asked for the track and has not
+    /// answered: "If a publisher becomes available within this time, the
+    /// relay proceeds with the subscription normally". The SUBSCRIBE is no
+    /// longer held then, and becomes of it what the publisher answers, or
+    /// the time the relay gives it to.
+    fn on_rendezvous_timeout(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        actions: &mut Vec<Action>,
+    ) {
+        let waiting = self
+            .sessions
+            .get(&session)
+            .and_then(|state| state.requests.get(stream))
+            .and_then(|slot| match slot {
+                RequestSlot::Waiting { request, track, .. } => Some((*request, track.clone())),
+                _ => None,
+            });
+        let Some((request, track)) = waiting else {
+            return;
+        };
+        if !self.hold_is_over(&track, session, stream) {
+            return;
+        }
+        self.waiters_left(&track, |waiter| waiter.is_on(session, stream), actions);
+        self.refuse(
+            session,
+            stream,
+            request,
+            &Refusal::code(request_error_code::TIMEOUT),
+            actions,
+        );
     }
 
     fn on_publish(
@@ -3671,6 +3803,7 @@ impl Action {
             | Self::StartDrainTimer { session, .. }
             | Self::StartEarlyTimer { session, .. }
             | Self::StartJoiningFetchTimer { session, .. }
+            | Self::StartRendezvousTimer { session, .. }
             | Self::StartFetchEndTimer { session, .. }
             | Self::StopRequest { session, .. }
             | Self::OpenRequest { session, .. }

@@ -43,7 +43,8 @@ interface Pairing {
 		| "video-rust.ts"
 		| "watch-rust.ts"
 		| "no-answer.ts"
-		| "quiet-peer.ts";
+		| "quiet-peer.ts"
+		| "rendezvous.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -1191,6 +1192,48 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			name: "own relay: quiet peer: the relay closes a session that sent its SETUP and holds nothing, and keeps one that announced",
 			script: "quiet-peer.ts",
 			args: ["--case", "relay-idle-session", "--client", "quiet-peer"],
+			relay: "own",
+		},
+		// A SUBSCRIBE that comes before its publisher (RENDEZVOUS_TIMEOUT).
+		{
+			name: "own relay: rendezvous: own-browser subscribes before anybody publishes the track, is held, and is accepted when own-rust publishes",
+			script: "rendezvous.ts",
+			args: ["--case", "publisher-comes", "--subscriber", "own-browser"],
+			relay: "own",
+		},
+		{
+			name: "own relay: rendezvous: own-rust subscribes before anybody publishes the track, is held, and is accepted when own-rust publishes",
+			script: "rendezvous.ts",
+			args: ["--case", "publisher-comes", "--subscriber", "own-rust"],
+			relay: "own",
+		},
+		{
+			name: "own relay: rendezvous: own-browser's held SUBSCRIBE is refused with TIMEOUT when nobody publishes the track",
+			script: "rendezvous.ts",
+			args: ["--case", "nobody-comes", "--subscriber", "own-browser"],
+			relay: "own",
+		},
+		{
+			name: "own relay: rendezvous: own-rust's held SUBSCRIBE is refused with TIMEOUT when nobody publishes the track",
+			script: "rendezvous.ts",
+			args: ["--case", "nobody-comes", "--subscriber", "own-rust"],
+			relay: "own",
+		},
+		{
+			name: "own relay: rendezvous: own-rust's SUBSCRIBE without RENDEZVOUS_TIMEOUT is refused at once",
+			script: "rendezvous.ts",
+			args: ["--case", "not-asked", "--subscriber", "own-rust"],
+			relay: "own",
+		},
+		{
+			name: "own relay: rendezvous: the terminal viewer comes before a page's broadcast, is held, and plays it",
+			script: "rendezvous.ts",
+			args: [
+				"--case",
+				"viewer-before-the-broadcast",
+				"--subscriber",
+				"xmoq-watch",
+			],
 			relay: "own",
 		},
 		// A page encodes and publishes video, and another plays it: through

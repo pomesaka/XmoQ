@@ -769,6 +769,12 @@ struct Timers {
     /// and the one after the relay finished its half. A stream has one of
     /// the two at a time.
     request_close: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
+    /// Where the timer of a SUBSCRIBE that is held for a publisher to appear
+    /// is, so that it can be dropped when the SUBSCRIBE is answered or
+    /// gone. WHY dropped, though it does nothing when it runs out then: a
+    /// peer chooses how long it runs, and it counts among the timers its
+    /// session may have.
+    rendezvous: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
     next: u64,
 }
 
@@ -801,6 +807,9 @@ impl Timers {
             | Event::FetchEndTimeout { session, stream } => {
                 self.request_close.insert((session, stream), at);
             }
+            Event::RendezvousTimeout { session, stream } => {
+                self.rendezvous.insert((session, stream), at);
+            }
             _ => {}
         }
         self.pending.insert(at, (session, event));
@@ -827,6 +836,19 @@ impl Timers {
     /// or serves to its end starts one, and a peer that ends its streams as
     /// it should would hold as many timers as it made requests in that
     /// time, against a limit that is there for peers that do not.
+    /// Drops the timer of a SUBSCRIBE that was held for a publisher to
+    /// appear: the SUBSCRIBE was answered, or its stream is gone.
+    fn stop_rendezvous(&mut self, session: SessionKey, stream: StreamKey) {
+        let Some(at) = self.rendezvous.remove(&(session, stream)) else {
+            return;
+        };
+        if self.pending.remove(&at).is_some()
+            && let Some(running) = self.per_session.get_mut(&session)
+        {
+            *running = running.saturating_sub(1);
+        }
+    }
+
     fn stop_request_close(&mut self, session: SessionKey, stream: StreamKey) {
         let Some(at) = self.request_close.remove(&(session, stream)) else {
             return;
@@ -865,6 +887,9 @@ impl Timers {
                 | Event::FetchEndTimeout { session, stream } => {
                     self.request_close.remove(&(session, stream));
                 }
+                Event::RendezvousTimeout { session, stream } => {
+                    self.rendezvous.remove(&(session, stream));
+                }
                 _ => {}
             }
             events.push_back(event);
@@ -877,6 +902,7 @@ impl Timers {
         self.pending.retain(|_, (owner, _)| *owner != session);
         self.upstream.retain(|(owner, _), _| *owner != session);
         self.request_close.retain(|(owner, _), _| *owner != session);
+        self.rendezvous.retain(|(owner, _), _| *owner != session);
     }
 
     #[cfg(test)]
@@ -1224,6 +1250,7 @@ impl<C: Connection> Hub<C> {
             } = &event
             {
                 self.timers.stop_request_close(*session, *stream);
+                self.timers.stop_rendezvous(*session, *stream);
             }
             let actions = self.relay.handle(event);
             if let Some((session, stream)) = subscribe
@@ -1245,6 +1272,26 @@ impl<C: Connection> Hub<C> {
         }
         if may_have_changed {
             self.watch_idle();
+        }
+    }
+
+    /// Finishes the relay's direction of a request stream of a peer, and
+    /// gives the peer its time to end its own.
+    fn finish_request(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        action: &Action,
+        pending: &mut VecDeque<Event>,
+    ) {
+        self.request(session, stream, RequestCommand::Finish, pending);
+        if let Some(handle) = self.sessions.get_mut(&session) {
+            handle.requests.remove(&stream);
+        }
+        // Nothing to wait for where the peer ended its direction before:
+        // the relay has let go of the stream then.
+        if self.relay.has_request_stream(session, stream) {
+            self.set_timer(action, pending);
         }
     }
 
@@ -1296,17 +1343,13 @@ impl<C: Connection> Hub<C> {
                 session,
                 stream,
                 message,
-            } => self.request(session, stream, RequestCommand::Send(message), pending),
+            } => {
+                // An answer, whatever it is: the SUBSCRIBE is held no longer.
+                self.timers.stop_rendezvous(session, stream);
+                self.request(session, stream, RequestCommand::Send(message), pending);
+            }
             Action::FinishRequest { session, stream } => {
-                self.request(session, stream, RequestCommand::Finish, pending);
-                if let Some(handle) = self.sessions.get_mut(&session) {
-                    handle.requests.remove(&stream);
-                }
-                // Nothing to wait for where the peer ended its direction
-                // before: the relay has let go of the stream then.
-                if self.relay.has_request_stream(session, stream) {
-                    self.set_timer(&action, pending);
-                }
+                self.finish_request(session, stream, &action, pending);
             }
             Action::ResetRequest {
                 session,
@@ -1357,6 +1400,7 @@ impl<C: Connection> Hub<C> {
             Action::StartDrainTimer { .. }
             | Action::StartEarlyTimer { .. }
             | Action::StartJoiningFetchTimer { .. }
+            | Action::StartRendezvousTimer { .. }
             | Action::StartFetchEndTimer { .. }
             | Action::StartUpstreamTimer { .. }
             | Action::StartFetchStreamTimer { .. }
@@ -1770,6 +1814,15 @@ impl<C: Connection> Hub<C> {
                 session,
                 self.config.streams.first_bytes_timeout,
                 Event::JoiningFetchTimeout { session, stream },
+            ),
+            Action::StartRendezvousTimer {
+                session,
+                stream,
+                wait_ms,
+            } => (
+                session,
+                Duration::from_millis(wait_ms),
+                Event::RendezvousTimeout { session, stream },
             ),
             Action::StartFetchEndTimer {
                 session,
@@ -2581,6 +2634,7 @@ fn describe(action: &Action) -> Option<String> {
         Action::PipeFetch { .. }
         | Action::AbortFetchPipe { .. }
         | Action::WriteFetchStream { .. }
+        | Action::StartJoiningFetchTimer { .. }
         | Action::AbortFetchWrite { .. } => return describe_fetch(action),
         // Logged where the session is closed, whoever asked for it.
         Action::CloseSession { .. }
@@ -2590,7 +2644,16 @@ fn describe(action: &Action) -> Option<String> {
         | Action::SendObject { .. }
         | Action::SetDeliveryTimeout { .. }
         | Action::StartFetchEndTimer { .. }
+        // The SUBSCRIBE it is for has its line where it was read
+        // (`HOLD_REQUEST`, `Hub::feed`).
+        | Action::StartRendezvousTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
+    })
+}
+
+/// The log line of an action that is about a fetch stream.
+fn describe_fetch(action: &Action) -> Option<String> {
+    Some(match action {
         // The relay read a Joining FETCH before the SUBSCRIBE it names, and
         // holds it until that comes. The same word as for a SUBSCRIBE that
         // waits for a publisher (`Hub::feed`).
@@ -2598,12 +2661,6 @@ fn describe(action: &Action) -> Option<String> {
             "HOLD_REQUEST session={} stream={} FETCH",
             session.0, stream.0
         ),
-    })
-}
-
-/// The log line of an action that is about a fetch stream.
-fn describe_fetch(action: &Action) -> Option<String> {
-    Some(match action {
         Action::PipeFetch {
             from,
             from_stream,

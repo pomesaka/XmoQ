@@ -48,7 +48,12 @@ export type XmoqPage = {
 	): Promise<void>;
 	publishTrack(namespace: string, trackName: string): Promise<string>;
 	sendObject(payloadHex: string): Promise<void> | void;
-	subscribe(namespace: string, trackName: string): Promise<string>;
+	subscribe(
+		namespace: string,
+		trackName: string,
+		/** Own page: the RENDEZVOUS_TIMEOUT of the SUBSCRIBE in milliseconds (§10.2.6); left out when absent. The moqtail page sends none. */
+		rendezvousTimeoutMs?: number,
+	): Promise<string>;
 	firstObject(): Promise<PageReceivedObject>;
 	disconnect(): Promise<void>;
 };
