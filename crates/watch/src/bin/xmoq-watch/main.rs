@@ -753,6 +753,8 @@ async fn play(
     // are drawn at the terminal's.
     let (frames, for_picture) = std_mpsc::sync_channel(MOST_FRAMES_WAITING);
     let measure = args.measure_demo_marks;
+    // For measuring: the viewer's clock at another speed (`--clock-skew-ppm`).
+    sound::CLOCK_SKEW_PPM.store(args.clock_skew_ppm, std::sync::atomic::Ordering::Relaxed);
     let stop_picture = Arc::new(AtomicBool::new(false));
     let picture = Picture {
         frames: for_picture,

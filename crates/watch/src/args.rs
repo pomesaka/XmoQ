@@ -117,6 +117,11 @@ pub struct Args {
     /// at the same moments; how far apart the two leave the viewer is
     /// reported at the end.
     pub measure_demo_marks: bool,
+    /// `--clock-skew-ppm`: for measuring. The viewer's clock runs so many
+    /// parts in a million faster than the machine's (slower with a
+    /// negative number), as that of a viewer on another machine does
+    /// against its publisher's. 0 where it is not said.
+    pub clock_skew_ppm: i64,
 }
 
 /// The value of `xmoq_moqt::params::ANSWER_WAIT_MS`, which this library
@@ -167,6 +172,8 @@ xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line
   --sound on|off                    off: the sound is decoded and counted, and no output is opened (on)
   --measure-demo-marks on|off       for measuring with the demo's publisher: how far apart the
                                     white square and the beep leave the viewer (off)
+  --clock-skew-ppm <n>              for measuring: the viewer's clock runs n parts in a million
+                                    faster than the machine's (0)
 Keys: q or Ctrl-C ends, + and - the volume, m mutes, t or Enter begins a line for the chat.";
 
 fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, Invalid> {
@@ -267,6 +274,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         log: None,
         sound: true,
         measure_demo_marks: false,
+        clock_skew_ppm: 0,
     };
     while let Some(flag) = given.next() {
         let value = given
@@ -341,6 +349,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--measure-demo-marks" => {
                 args.measure_demo_marks = one_of(&flag, &value, &[("on", true), ("off", false)])?;
             }
+            "--clock-skew-ppm" => args.clock_skew_ppm = number(&flag, &value)?,
             other => return Err(Invalid(format!("unknown flag {other}"))),
         }
     }
@@ -406,6 +415,7 @@ mod tests {
             log: None,
             sound: true,
             measure_demo_marks: false,
+            clock_skew_ppm: 0,
         }
     }
 
@@ -461,6 +471,7 @@ mod tests {
                 log: Some("l".to_string()),
                 sound: false,
                 measure_demo_marks: true,
+                clock_skew_ppm: 0,
             })
         );
         assert_eq!(

@@ -123,7 +123,7 @@ export function createPlayoutClock(
 	const audioBufferMs = (): number => Math.max(bufferMs, audioMinMs);
 	return {
 		baseOf(timestampUs, now) {
-			const taken = way.take(now - timestampUs / 1000);
+			const taken = way.take(now - timestampUs / 1000, now);
 			if (taken === undefined) return undefined;
 			// What came by the clock before says nothing of this one.
 			if (taken.anew) late = [];

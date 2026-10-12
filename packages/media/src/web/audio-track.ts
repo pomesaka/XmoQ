@@ -413,7 +413,8 @@ export async function playAudioTrack(
 		// others would be taken for the latest, and every piece after it
 		// dropped as late; it is left out, and after 30 of them in a row the
 		// order begins anew.
-		const way = fastest.take(Date.now() - timestamp / 1000);
+		const came = Date.now();
+		const way = fastest.take(came - timestamp / 1000, came);
 		if (way === undefined) {
 			drop("not-of-the-clock");
 			return;
