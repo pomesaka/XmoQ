@@ -56,8 +56,12 @@ pub struct Args {
     /// `--video` and `--audio`: the names of the tracks. `None`: what the
     /// catalog of the broadcast has.
     pub tracks: Option<(String, String)>,
-    /// `--buffer-ms`: how long an Object is held beyond the fastest way.
+    /// `--buffer-ms`: how long an Object is held beyond the fastest way;
+    /// with `auto`, where the buffer begins.
     pub buffer_ms: u64,
+    /// `--buffer-ms auto`: the buffer follows how late Objects come
+    /// ([`crate::clock::Clock::automatic`]).
+    pub buffer_auto: bool,
     /// `--video-timeout-ms`: the `SUBGROUP_DELIVERY_TIMEOUT` the SUBSCRIBE
     /// of the video track carries (§10.2.3 of
     /// `draft-ietf-moq-transport-18`): the relay gives up a Group the
@@ -114,7 +118,8 @@ pub const USAGE: &str = "\
 xmoq-watch --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
 xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line>] [--token no]
   --video <track> --audio <track>   the tracks by name; without them, those of the catalog
-  --buffer-ms <ms>                  how long an Object is held beyond the fastest way (50)
+  --buffer-ms <ms>|auto             how long an Object is held beyond the fastest way (50);
+                                    auto: it follows how late Objects come, from 50 up to 400 (a trial)
   --video-timeout-ms <ms>           ask the relay to give up a Group of the video that is not delivered
                                     that long after its last Object (not asked; 0 is not asking)
   --volume <0..1>                   (1)
@@ -191,6 +196,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         },
         tracks: None,
         buffer_ms: DEFAULT_BUFFER_MS,
+        buffer_auto: false,
         video_timeout_ms: None,
         volume: 1.0,
         scale: 1,
@@ -221,7 +227,12 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--token" => ask_token = one_of(&flag, &value, &[("yes", true), ("no", false)])?,
             "--video" => video = Some(value),
             "--audio" => audio = Some(value),
+            "--buffer-ms" if value == "auto" => {
+                args.buffer_ms = DEFAULT_BUFFER_MS;
+                args.buffer_auto = true;
+            }
             "--buffer-ms" => {
+                args.buffer_auto = false;
                 args.buffer_ms = number(&flag, &value)?;
                 // More than the clock takes an Object to be of it.
                 if args.buffer_ms > crate::clock::MOST_FROM_THE_LEAST_US / 1000 {
@@ -305,6 +316,7 @@ mod tests {
             source,
             tracks: None,
             buffer_ms: 50,
+            buffer_auto: false,
             video_timeout_ms: None,
             volume: 1.0,
             scale: 1,
@@ -354,6 +366,7 @@ mod tests {
                 },
                 tracks: Some(("v".to_string(), "a".to_string())),
                 buffer_ms: 150,
+                buffer_auto: false,
                 video_timeout_ms: Some(100),
                 volume: 0.3,
                 scale: 2,
@@ -369,6 +382,16 @@ mod tests {
         assert_eq!(
             parsed("--room http://h/rooms/a --fit none").map(|args| args.fit),
             Ok(Fit::AsItIs)
+        );
+        assert_eq!(
+            parsed("--room http://h/rooms/a --buffer-ms 300 --buffer-ms auto")
+                .map(|args| (args.buffer_ms, args.buffer_auto)),
+            Ok((50, true))
+        );
+        assert_eq!(
+            parsed("--room http://h/rooms/a --buffer-ms auto --buffer-ms 300")
+                .map(|args| (args.buffer_ms, args.buffer_auto)),
+            Ok((300, false))
         );
         // 0 is the draft's way of asking for no timeout.
         assert_eq!(

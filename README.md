@@ -30,6 +30,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Whether the SUBSCRIBE of a Joining FETCH is yet to come](fixtures/joining-request-id/README.md)
 - [What a publisher answers a FETCH range with, from what it published](fixtures/published-fetch/README.md)
 - [Catalogs of MSF, from another implementation and written by hand](fixtures/msf-01/README.md)
+- [When picture and sound are played: what the page and the terminal viewer agree on](fixtures/playout/README.md)
 - [A LOC video stream of another implementation](fixtures/loc-04/README.md)
 - [Browser client library `@xmoq/moqt`](packages/moqt/README.md)
 - [The Low Overhead Media Container in TypeScript, `@xmoq/loc`](packages/loc/README.md)

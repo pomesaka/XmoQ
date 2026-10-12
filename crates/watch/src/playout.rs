@@ -14,6 +14,104 @@ pub const RATE: u32 = 48_000;
 /// would be a click.
 const JOINS_US: u64 = 10_000;
 
+/// How far from its own time a packet may begin so as to follow the one
+/// before it without a seam: less than half a packet of 20 ms. As
+/// `SEAM_SECONDS` of `@xmoq/media` (`packages/media/src/core/audio-seam.ts`),
+/// from where the three values are; `fixtures/playout/seam.tsv` has what
+/// both go by.
+pub const SEAM_US: u64 = 8_000;
+/// How much slower or faster a packet is played to get back to its own
+/// time: a twentieth, so that 20 ms of sound make up 1 ms. **Provisional.**
+pub const STRETCH_ONE_IN: u64 = 20;
+/// How far from its own time the sound is brought back by speed alone.
+/// **Provisional.**
+pub const ABSORB_US: u64 = 300_000;
+
+/// Where a packet begins ([`place`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Its time is over: it is not played.
+    TooLate,
+    /// It is played.
+    Sound {
+        /// When its first sample is played.
+        begin_us: u64,
+        /// Where it ends: longer or shorter than it is, where it is
+        /// played slower or faster.
+        until_us: u64,
+        /// It follows the packet before it to the sample.
+        follows: bool,
+        /// It is played slower or faster.
+        stretched: bool,
+    },
+}
+
+/// Says where a packet begins: `wanted_us` is its own time, with the
+/// buffer; `sound_until_us` where the packet before it ends.
+///
+/// **A packet follows the one before it to the sample**, as long as that
+/// one still sounds and ends within [`ABSORB_US`] of the packet's own
+/// time. **Where the two are more than [`SEAM_US`] apart, the packet is
+/// played a little slower or faster**, packet after packet, until the
+/// sound is at its own time again. WHY: a buffer that moves moves the time
+/// of every packet, and a packet that jumps there leaves a gap or is cut.
+/// A changed speed is a changed pitch for a moment, and no click. Beyond
+/// [`ABSORB_US`], or where nothing sounds any more, the packet begins at
+/// its own time: that is a pause, not a drift.
+#[must_use]
+pub fn place(
+    wanted_us: u64,
+    sound_until_us: Option<u64>,
+    now_us: u64,
+    duration_us: u64,
+) -> Placement {
+    let sounding = sound_until_us.filter(|until| *until >= now_us);
+    let ahead = sounding.map(|until| i128::from(wanted_us) - i128::from(until));
+    let follows = ahead.filter(|ahead| ahead.unsigned_abs() <= u128::from(ABSORB_US));
+    let begin_us = match (follows, sounding) {
+        (Some(_), Some(until)) => until,
+        _ => wanted_us,
+    };
+    if begin_us < now_us {
+        return Placement::TooLate;
+    }
+    // How much longer (or shorter) the packet sounds than it is.
+    let most = i128::from(duration_us / STRETCH_ONE_IN);
+    let longer = follows
+        .filter(|ahead| ahead.unsigned_abs() > u128::from(SEAM_US))
+        .map_or(0, |ahead| ahead.clamp(-most, most));
+    let sounds_us = u64::try_from(i128::from(duration_us) + longer).unwrap_or(0);
+    Placement::Sound {
+        begin_us,
+        until_us: begin_us.saturating_add(sounds_us),
+        follows: follows.is_some(),
+        stretched: longer != 0,
+    }
+}
+
+/// `samples` as `length` samples that sound the same, slower or faster:
+/// each is on the line between the two it lies between.
+fn stretched(samples: &[f32], length: usize) -> Vec<f32> {
+    let Some(last) = samples.len().checked_sub(1) else {
+        return Vec::new();
+    };
+    (0..length)
+        .map(|index| {
+            // Counted in whole samples and a rest, so that nothing is
+            // rounded twice.
+            let at = index * samples.len();
+            let (whole, rest) = (at / length, at % length);
+            let here = samples.get(whole).copied().unwrap_or(0.0);
+            let next = samples.get((whole + 1).min(last)).copied().unwrap_or(here);
+            // WHY by way of a u16: an f32 has every one of them exactly. A
+            // packet of Opus is 5,760 samples at most, and 6,048 stretched.
+            let small = |count: usize| f32::from(u16::try_from(count).unwrap_or(u16::MAX));
+            let share = small(rest) / small(length).max(1.0);
+            here + (next - here) * share
+        })
+        .collect()
+}
+
 /// The most packets that wait. Two seconds of packets of 20 ms.
 const MOST_WAITING: usize = 100;
 
@@ -44,6 +142,9 @@ pub struct Counts {
     pub cut_late: u64,
     /// Packets left out because too many waited.
     pub dropped_full: u64,
+    /// Packets played slower or faster, to bring the sound back to its
+    /// own time.
+    pub stretched: u64,
 }
 
 /// The packets that wait, and where the output is in them.
@@ -55,6 +156,8 @@ pub struct Playout {
     began: bool,
     /// No more packets come.
     ended: bool,
+    /// Where the packet taken last ends.
+    sound_until_us: Option<u64>,
     /// The sample before this one was of a packet, not silence.
     flowing: bool,
     counts: Counts,
@@ -69,11 +172,36 @@ fn duration_us(samples: usize) -> u64 {
 }
 
 impl Playout {
-    /// Takes a packet. Where [`MOST_WAITING`] wait already, the oldest is
-    /// left out for it.
-    pub fn push(&mut self, packet: Packet) {
+    /// Takes a packet whose own time is `packet.due_us`, at `now_us`, and
+    /// has it begin where [`place`] says. Where [`MOST_WAITING`] wait
+    /// already, the oldest is left out for it.
+    pub fn push(&mut self, now_us: u64, packet: Packet) {
         self.counts.packets += 1;
-        self.waiting.push_back(packet);
+        let lasts_us = duration_us(packet.samples.len());
+        let Placement::Sound {
+            begin_us,
+            until_us,
+            stretched: is_stretched,
+            ..
+        } = place(packet.due_us, self.sound_until_us, now_us, lasts_us)
+        else {
+            self.counts.left_out_late += 1;
+            return;
+        };
+        self.sound_until_us = Some(until_us);
+        let samples = if is_stretched {
+            self.counts.stretched += 1;
+            let length =
+                usize::try_from((until_us - begin_us).saturating_mul(u64::from(RATE)) / 1_000_000)
+                    .unwrap_or(packet.samples.len());
+            stretched(&packet.samples, length)
+        } else {
+            packet.samples
+        };
+        self.waiting.push_back(Packet {
+            due_us: begin_us,
+            samples,
+        });
         while self.waiting.len() > MOST_WAITING {
             self.waiting.pop_front();
             self.counts.dropped_full += 1;
@@ -185,26 +313,91 @@ mod tests {
         (out[0], out[479])
     }
 
+    /// `fixtures/playout/seam.tsv`, which `@xmoq/media` reads too.
     #[test]
-    fn packets_are_played_when_they_are_due_and_joined_to_each_other() {
+    fn a_packet_is_placed_as_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/playout/seam.tsv");
+        let number = |field: &str| field.parse::<u64>().expect(field);
+        let yes = |field: &str| match field {
+            "yes" => true,
+            "no" => false,
+            other => panic!("yes or no: {other}"),
+        };
+        let mut rows = 0;
+        for row in table.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [
+                name,
+                wanted,
+                until,
+                now,
+                what,
+                begin,
+                ends,
+                follows,
+                stretched,
+            ] = fields[..]
+            else {
+                panic!("a row of 9 fields: {row}");
+            };
+            let sound_until = (until != "-").then(|| number(until));
+            let expected = match what {
+                "too-late" => Placement::TooLate,
+                "sound" => Placement::Sound {
+                    begin_us: number(begin),
+                    until_us: number(ends),
+                    follows: yes(follows),
+                    stretched: yes(stretched),
+                },
+                other => panic!("sound or too-late: {other}"),
+            };
+            assert_eq!(
+                place(number(wanted), sound_until, number(now), 20_000),
+                expected,
+                "{name}"
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 9);
+    }
+
+    #[test]
+    fn a_packet_is_made_longer_or_shorter_on_the_lines_between_its_samples() {
+        // (the samples; as how many; what they become)
+        let cases: [(&[f32], usize, &[f32]); 4] = [
+            (&[0.0, 2.0], 4, &[0.0, 1.0, 2.0, 2.0]),
+            (&[0.0, 1.0, 2.0, 3.0], 2, &[0.0, 2.0]),
+            (&[1.0, 2.0], 2, &[1.0, 2.0]),
+            (&[], 3, &[]),
+        ];
+        for (samples, length, expected) in cases {
+            assert_eq!(stretched(samples, length), expected, "{samples:?}");
+        }
+    }
+
+    #[test]
+    fn packets_follow_each_other_and_begin_at_their_own_time_after_a_pause() {
         let mut playout = Playout::default();
-        playout.push(packet(100_000, 1.0));
-        // Due 5 ms early for where the output will be: it joins.
-        playout.push(packet(115_000, 2.0));
-        // Due 30 ms after the end of the one before: silence first.
-        playout.push(packet(170_000, 3.0));
+        playout.push(0, packet(100_000, 1.0));
+        // Its own time is 5 ms before the end of the one before: it follows.
+        playout.push(0, packet(115_000, 2.0));
+        // 30 ms after the end of the one before: it follows as well, 1 ms
+        // longer than it is, from 140 to 161 ms.
+        playout.push(0, packet(170_000, 3.0));
+        // More than 0.3 s after: silence, and its own time.
+        playout.push(0, packet(500_000, 4.0));
         // (the call begins at; its first and its last sample)
         let cases = [
             (80_000, (0.0, 0.0)),
             // Not begun early after silence: the packet is due in the middle.
             (95_000, (0.0, 1.0)),
             (105_000, (1.0, 1.0)),
-            // 20 ms of it are played at 120 ms, and the next one follows at once.
             (115_000, (1.0, 2.0)),
             (125_000, (2.0, 2.0)),
-            (135_000, (2.0, 0.0)),
-            (145_000, (0.0, 0.0)),
-            (165_000, (0.0, 3.0)),
+            (135_000, (2.0, 3.0)),
+            (145_000, (3.0, 3.0)),
+            (155_000, (3.0, 0.0)),
+            (495_000, (0.0, 4.0)),
         ];
         for (first_us, samples) in cases {
             assert_eq!(ten_ms(&mut playout, first_us), samples, "{first_us}");
@@ -212,12 +405,13 @@ mod tests {
         assert_eq!(
             *playout.counts(),
             Counts {
-                packets: 3,
-                // 960, 960, and the 5 ms of the third.
-                played: 2_160,
+                packets: 4,
+                // 960, 960, the 1,008 of the third and 5 ms of the fourth.
+                played: 3_168,
                 underruns: 0,
-                // Of the calls above: from 140 to 155 ms, and from 165 to 170 ms.
-                waited: 960,
+                // Of the calls above: from 161 to 165 ms, and from 495 to 500 ms.
+                waited: 432,
+                stretched: 1,
                 ..Counts::default()
             }
         );
@@ -226,21 +420,23 @@ mod tests {
     #[test]
     fn a_late_packet_begins_at_the_sample_that_is_due_and_one_that_is_over_is_left_out() {
         let mut playout = Playout::default();
-        // Over 5 ms before the output begins.
-        playout.push(packet(0, 1.0));
-        // 15 ms of it are over.
-        playout.push(packet(10_000, 2.0));
+        // Over before the output comes to it.
+        playout.push(0, packet(0, 1.0));
+        // Its own time, after a pause; 15 ms of it are over at the output.
+        playout.push(0, packet(400_000, 2.0));
+        // Over when it comes: not taken at all.
+        playout.push(450_000, packet(100_000, 3.0));
         let mut out = [9.0; 480];
-        playout.fill(25_000, &mut out);
+        playout.fill(415_000, &mut out);
         // Its last 5 ms, and silence.
         assert_eq!((out[0], out[239], out[240]), (2.0, 2.0, 0.0));
         assert_eq!(
             *playout.counts(),
             Counts {
-                packets: 2,
+                packets: 3,
                 played: 240,
                 underruns: 1,
-                left_out_late: 1,
+                left_out_late: 2,
                 cut_late: 1,
                 ..Counts::default()
             }
@@ -252,7 +448,7 @@ mod tests {
         let mut playout = Playout::default();
         // Before anything was played: no underrun.
         assert_eq!(ten_ms(&mut playout, 0), (0.0, 0.0));
-        playout.push(packet(10_000, 1.0));
+        playout.push(0, packet(10_000, 1.0));
         assert_eq!(ten_ms(&mut playout, 10_000), (1.0, 1.0));
         assert_eq!(ten_ms(&mut playout, 20_000), (1.0, 1.0));
         assert_eq!(playout.counts().underruns, 0);
@@ -260,7 +456,7 @@ mod tests {
         assert_eq!(ten_ms(&mut playout, 30_000), (0.0, 0.0));
         assert_eq!(playout.counts().underruns, 1);
         // A packet that waits and is not due yet is no underrun.
-        playout.push(packet(100_000, 2.0));
+        playout.push(40_000, packet(100_000, 2.0));
         assert_eq!(ten_ms(&mut playout, 40_000), (0.0, 0.0));
         assert_eq!(playout.counts().underruns, 1);
         assert_eq!(ten_ms(&mut playout, 100_000), (2.0, 2.0));
@@ -275,7 +471,7 @@ mod tests {
     fn the_oldest_packets_are_left_out_where_too_many_wait() {
         let mut playout = Playout::default();
         for number in 0..103u16 {
-            playout.push(packet(u64::from(number) * 20_000, f32::from(number)));
+            playout.push(0, packet(u64::from(number) * 20_000, f32::from(number)));
         }
         assert_eq!(playout.counts().dropped_full, 3);
         // The first that is left: number 3, due at 60 ms.

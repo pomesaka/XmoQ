@@ -113,6 +113,8 @@ Where a draft says it, the sentence is quoted. **Much of this no draft has as a 
 | A piece that waits for the ones before it | `clock.holdForOrderMs` for `playAudioTrack`: the buffer of the sound less 20 ms | What the decoder and the loudspeaker need is left |
 | Sound before a click | `startSound` makes the `AudioContext`, and is to be called from a click. Until then the pieces are counted as what would have sounded (`onPiece`) | A browser lets a page make sound only after one |
 
+The automatic buffer and where a piece of sound begins are what the viewer for the terminal (`crates/watch`) does as well: both read the rows of [`fixtures/playout/`](../../fixtures/playout/README.md) in their tests, and a rule is changed for both.
+
 Limits on what the publisher decides: 1,600 arrivals are kept for the automatic buffer (`MAX_LATENESS_SAMPLES`), and a chunk of sound is dropped while more than 50 wait in the decoder (`MAX_AUDIO_DECODE_QUEUE`, `decoder-behind`); both **provisional, not measured**. `playVideoTrack` by itself hands every frame on with the time it carries: the limit on times is the playout's.
 
 Not here: video does not wait for a Group that is late (tried, [record](../../docs/experiments/2026-10-12-a-later-group-of-video-waits-for-the-one-before-it.md)); nothing conceals a piece of sound that is missing; **`createPlayout` has no test without a browser**, and is run by the demo (`bun demo/check.ts`); nobody judged the sync by eye and ear.

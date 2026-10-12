@@ -1,10 +1,84 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	createFrameQueue,
 	createPlayoutClock,
 	type PlayoutClockOptions,
 	placePiece,
 } from "../src/index.ts";
+
+/** The rows of a table of `fixtures/playout/`, which `crates/watch` reads too. */
+function sharedRows(file: string, fields: number): string[][] {
+	const rows = readFileSync(
+		join(import.meta.dir, "..", "..", "..", "fixtures", "playout", file),
+		"utf8",
+	)
+		.split("\n")
+		.filter((row) => row !== "")
+		.map((row) => row.split("\t"));
+	for (const row of rows) {
+		if (row.length !== fields) throw new Error(`a row of ${fields}: ${row}`);
+	}
+	return rows;
+}
+
+function yes(field: string | undefined): boolean {
+	if (field !== "yes" && field !== "no") throw new Error(`yes or no: ${field}`);
+	return field === "yes";
+}
+
+describe("fixtures/playout", () => {
+	const autoBuffer = sharedRows("auto-buffer.tsv", 8);
+	const seam = sharedRows("seam.tsv", 9);
+
+	test("the tables have the rows both players count on", () => {
+		expect({ autoBuffer: autoBuffer.length, seam: seam.length }).toEqual({
+			autoBuffer: 6,
+			seam: 9,
+		});
+	});
+
+	test.each(autoBuffer)(
+		"the automatic buffer: %s",
+		(_name, begins, auto, most, objects, late, ticks, after) => {
+			const clock = createPlayoutClock({
+				bufferMs: Number(begins),
+				auto: yes(auto),
+				...(most === "-" ? {} : { autoMaxMs: Number(most) }),
+			});
+			let now = 1000;
+			for (let index = 0; index < Number(objects); index++) {
+				now = 1000 + index * 10 + (index === 0 ? 0 : Number(late));
+				clock.baseOf(index * 10_000, now);
+			}
+			for (let tick = 0; tick < Number(ticks); tick++) clock.tick(now + 1);
+			expect(clock.bufferMs()).toBe(Number(after));
+		},
+	);
+
+	test.each(seam)(
+		"where a piece begins: %s",
+		(_name, wanted, until, now, what, begin, ends, follows, stretched) => {
+			const seconds = (field: string | undefined): number =>
+				Number(field) / 1_000_000;
+			const placed = placePiece({
+				wanted: seconds(wanted),
+				soundUntil: until === "-" ? undefined : seconds(until),
+				now: seconds(now),
+				duration: 0.02,
+			});
+			expect(placed.type).toBe(what === "sound" ? "sound" : "too-late");
+			if (placed.type !== "sound") return;
+			expect(placed.begin).toBeCloseTo(seconds(begin), 6);
+			expect(placed.until).toBeCloseTo(seconds(ends), 6);
+			expect({ follows: placed.follows, stretched: placed.stretched }).toEqual({
+				follows: yes(follows),
+				stretched: yes(stretched),
+			});
+		},
+	);
+});
 
 describe("createPlayoutClock", () => {
 	test("the base of a time is counted from the fastest one that came", () => {

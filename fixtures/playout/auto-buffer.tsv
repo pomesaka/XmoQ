@@ -1,0 +1,6 @@
+grows-at-once-to-what-99-of-100-came-within-and-10-ms-more	0	yes	-	100	35	1	50
+shrinks-10-ms-at-a-tick	150	yes	-	100	35	2	130
+goes-no-further-than-its-limit	50	yes	-	100	1000	1	400
+a-limit-that-is-set	50	yes	200	100	1000	1	200
+does-not-move-by-fewer-than-50	0	yes	-	49	35	1	0
+does-not-move-where-it-is-not-automatic	0	no	-	100	35	1	0
