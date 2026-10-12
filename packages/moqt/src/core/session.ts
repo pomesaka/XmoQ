@@ -179,6 +179,8 @@ export interface Session {
 	closeSubgroup(stream: number): SessionOutput[];
 	/** Resets a subgroup stream that will not carry every Object of the subgroup (§11.4.3). */
 	resetSubgroup(stream: number, code: number): SessionOutput[];
+	/** A subgroup stream could not be opened by the transport: it is forgotten, and not counted among the streams of its subscription. */
+	subgroupNotOpened(stream: number): SessionOutput[];
 	/**
 	 * The peer sent STOP_SENDING for a stream this endpoint opened. `code` is
 	 * its error code when the transport reports one.
@@ -515,6 +517,10 @@ export function createSession(options: SessionOptions = {}): Session {
 		closeSubgroup: (stream) => whileOpen(() => requests.outgoing.close(stream)),
 		resetSubgroup: (stream, code) =>
 			whileOpen(() => requests.outgoing.reset(stream, code)),
+		subgroupNotOpened: (stream) => {
+			if (!closed) requests.outgoing.notOpened(stream);
+			return [];
+		},
 
 		// Cancelling and expiring race with the end of the session, so after the
 		// end they do nothing instead of throwing.

@@ -188,6 +188,24 @@ export class RequestAbortedError extends Error {
 	}
 }
 
+/**
+ * A stream of this endpoint was not opened: the peer allowed no further
+ * stream. Nothing was sent on it, and the session stays open.
+ *
+ * `PublishedTrack.openSubgroup` rejects with it: that Subgroup is not sent,
+ * and the publisher goes on with the next. WHY not waited for, as a request
+ * is: a Subgroup of a live track that is sent late is worth less than the
+ * one after it. A request that could not be sent fails with a
+ * `RequestAbortedError` of `not-sent-in-time`.
+ */
+export class StreamNotOpenedError extends Error {
+	override readonly name = "StreamNotOpenedError";
+
+	constructor() {
+		super("the peer allowed no further stream");
+	}
+}
+
 export class SessionClosedError extends Error {
 	override readonly name = "SessionClosedError";
 	/**

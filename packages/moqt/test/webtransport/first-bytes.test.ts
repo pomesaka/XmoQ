@@ -150,8 +150,11 @@ describe("a stream of the peer that does not say what it is", () => {
 	] as const)(
 		"a stream is stopped in time while a request waits for a stream of its own: $name",
 		async ({ kind, before }) => {
+			// WHY an hour for the request's stream: its own limit is 10
+			// seconds as well, and a request that gave up at that moment
+			// would let the stop through whether or not it had been held.
 			const { peer, connection } = await connected(
-				{},
+				{ openStreamTimeoutMs: 3_600_000 },
 				new Promise<void>(() => {}),
 			);
 			const writer = kind === "uni" ? peer.openUni() : peer.openBidi().reply;

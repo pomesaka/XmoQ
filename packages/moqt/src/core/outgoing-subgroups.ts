@@ -43,6 +43,14 @@ export interface OutgoingSubgroups {
 	close(stream: number): SessionOutput[];
 	/** The subgroup is incomplete: reset (§11.4.3). */
 	reset(stream: number, code: number): SessionOutput[];
+	/**
+	 * The stream could not be opened: the peer allowed no further stream.
+	 * It is forgotten and is none of the streams opened for the
+	 * subscription, so that the Stream Count of PUBLISH_DONE stays exact
+	 * (§10.11: "the number of data streams the publisher opened for this
+	 * subscription"). Does nothing for a stream that is gone.
+	 */
+	notOpened(stream: number): void;
 	/** The peer sent STOP_SENDING for the stream: it is reset, as §11.4.3 asks ("The publisher SHOULD respond with a reset"). */
 	stopped(stream: number, out: SessionOutput[]): void;
 	/** Resets every open stream of a subscription (§5.1.1, §11.4.3). */
@@ -144,6 +152,14 @@ export function createOutgoingSubgroups(
 		reset(stream, code) {
 			forgetStream(stream);
 			return [{ type: "reset", stream, code }];
+		},
+
+		notOpened(stream) {
+			const subgroup = streams.get(stream);
+			if (subgroup === undefined) return;
+			forgetStream(stream);
+			const subscription = subscriptions.get(subgroup.requestId);
+			if (subscription !== undefined) subscription.opened -= 1n;
 		},
 
 		stopped(stream, out) {
