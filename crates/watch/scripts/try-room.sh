@@ -4,20 +4,19 @@
 # broadcast is and gives the token, the page says a line in the chat and the viewer says one.
 # Then once more without a token, which the relay is to refuse.
 #
-#   spikes/terminal-av/try-room.sh [seconds, 15]            # from the repository root
+#   crates/watch/scripts/try-room.sh [seconds, 15]            # from the repository root
 #
 # Needs `mise run interop` once (Playwright's Chromium), and npm for the rooms' dependencies
 # (installed into spikes/durable-objects-room where they are missing, as `mise run demo` does).
 # PORT (48910) and two more are used.
 set -eu
 seconds=${1:-15}
-root=$(cd "$(dirname "$0")/../.." && pwd)
-here="$root/spikes/terminal-av"
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+here="$root/crates/watch/scripts"
 port=${PORT:-48910}
 name="try-$$"
 work=$(mktemp -d)
-(cd "$here" && cargo build --release --quiet)
-(cd "$root" && cargo build --quiet -p xmoq-relay)
+(cd "$root" && cargo build --release --quiet --locked -p xmoq-watch && cargo build --quiet --locked -p xmoq-relay)
 [ -d "$root/spikes/durable-objects-room/node_modules" ] ||
   npm ci --prefix "$root/spikes/durable-objects-room" --no-audit --no-fund > /dev/null
 # WHY the binary and not `mise exec`: the signal at the end has to reach bun itself.
@@ -38,10 +37,10 @@ for _ in $(seq 1 40); do
 done
 room="http://127.0.0.1:$((port + 2))/rooms/$name"
 echo "--- with a token of the room"
-"$here/target/release/xmoq-watch" --room "$room" --say "hello from the terminal" \
+"$root/target/release/xmoq-watch" --room "$room" --say "hello from the terminal" \
   --seconds "$seconds" --volume 0 --medium direct --out "${OUT:-/dev/null}" 2>&1 | grep -E "ROOM_|CATALOG|CHAT|AV_PLAYED|SESSION_ENDED|Error" || true
 echo "--- without a token"
-"$here/target/release/xmoq-watch" --room "$room" --token no \
+"$root/target/release/xmoq-watch" --room "$room" --token no \
   --seconds 5 --volume 0 --medium direct --out /dev/null 2>&1 | grep -E "ROOM_|AV_PLAYED|SESSION_ENDED|Error" || true
 echo "--- the page"
 kill -INT "$page"

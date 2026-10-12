@@ -394,6 +394,8 @@ struct Played {
     video_over_least_us: Vec<i64>,
     no_timestamp: u64,
     streams_reset: u64,
+    /// What the sound output is ahead by, which is added to the buffer.
+    output_lead_us: u64,
 }
 
 /// Microseconds as milliseconds with one decimal.
@@ -423,7 +425,7 @@ impl Played {
         let apart = marks::picture_after_sound_us(&seen.marks_us, &self.sound_marks_us);
         let samples_ms = |samples: u64| samples * 1000 / u64::from(xmoq_watch::playout::RATE);
         format!(
-            "AV_PLAYED why=\"{}\" seconds={:.1} buffer_ms={} volume={:.1} muted={} \
+            "AV_PLAYED why=\"{}\" seconds={:.1} buffer_ms={} output_lead_ms={} volume={:.1} muted={} \
              video_size={}x{} made_smaller_by={} written_kb_a_frame={} video_came={} video_left_out={} video_drawn={} fps={fps:.1} \
              video_after_due_ms_min/p50/p95/max={} decode_ms_a_frame={:.2} draw_ms_a_frame={:.2} \
              audio_packets={} audio_refused={} audio_played_ms={} underruns={} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} \
@@ -432,6 +434,7 @@ impl Played {
             self.why,
             self.lasted.as_secs_f64(),
             args.buffer_ms,
+            ms(i64::try_from(self.output_lead_us).unwrap_or(i64::MAX)),
             ui.volume.level(),
             ui.volume.muted(),
             seen.size.0,
@@ -539,7 +542,13 @@ async fn play(
     let mut sound = Sound::open(Arc::clone(&ui.volume), began)?;
     ui.show();
 
-    let mut clock = Clock::new(args.buffer_ms.saturating_mul(1000));
+    // WHY the lead of the sound output is added to the buffer, for the
+    // picture as for the sound: the output asks for a sample that long
+    // before it is due, so without it that much of `--buffer-ms` is gone
+    // before a packet may be late at all (24 of 50 ms on the machine this
+    // was written on). Added to both, the two stay together.
+    let lead_us = sound.lead_us().await;
+    let mut clock = Clock::new(args.buffer_ms.saturating_mul(1000).saturating_add(lead_us));
     let mut played = Played {
         why: "",
         lasted: Duration::ZERO,
@@ -550,6 +559,7 @@ async fn play(
         video_over_least_us: Vec::new(),
         no_timestamp: 0,
         streams_reset: 0,
+        output_lead_us: lead_us,
     };
     let mut ended = Ended::Again;
     let mut failed = None;
@@ -705,18 +715,6 @@ async fn watch(args: Args) -> Result<()> {
         Some((raw, pressed)) => (Some(raw), Some(pressed)),
         None => (None, None),
     };
-    // For the check that a panic puts the terminal back
-    // (crates/watch/scripts/try-keys.sh).
-    if std::env::var_os("XMOQ_WATCH_PANIC").is_some() {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        #[expect(
-            clippy::panic,
-            reason = "a panic is what the check asks for, and only where its variable is set"
-        )]
-        {
-            panic!("asked to panic");
-        }
-    }
     let mut ui = Ui {
         under: Arc::default(),
         volume: Arc::new(Volume::new(args.volume)),

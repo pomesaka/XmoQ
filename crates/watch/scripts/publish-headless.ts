@@ -1,7 +1,7 @@
 // Opens the publishing page of a demo in headless Chromium and stays until
 // it is stopped: the clock's picture and the tone, no camera.
 //
-// Usage: bun spikes/terminal-av/publish-headless.ts http://localhost:48901 [room] [a line for the chat]
+// Usage: bun crates/watch/scripts/publish-headless.ts http://localhost:48901 [room] [a line for the chat]
 //
 // With a room the page joins it (`?room=`); the line is typed into the
 // page's chat 6 seconds after the page publishes. When stopped it prints
@@ -12,7 +12,7 @@ const origin = process.argv[2] ?? "http://localhost:8080";
 const room = process.argv[3];
 const line = process.argv[4];
 const { chromium } = await import(
-	join(import.meta.dir, "..", "..", "interop", "node_modules", "playwright-core", "index.mjs")
+	join(import.meta.dir, "..", "..", "..", "interop", "node_modules", "playwright-core", "index.mjs")
 );
 // WHY the signals are not Playwright's: the chat is read from the page when this is stopped.
 const browser = await chromium.launch({

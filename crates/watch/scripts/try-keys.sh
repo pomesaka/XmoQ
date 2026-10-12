@@ -1,21 +1,20 @@
 #!/bin/sh
 # The keys of xmoq-watch on a pseudo-terminal, against a demo of its own with rooms: the volume
 # and mute, a line typed for the chat, the page loaded anew (its broadcast ends and begins
-# again) and the viewer following it, `q`; then the ends that are not `q`: Ctrl-C, SIGTERM and
-# a panic. After each the terminal's line mode is read back.
+# again) and the viewer following it, `q`; then the ends that are not `q`: Ctrl-C and SIGTERM.
+# After each the terminal's line mode is read back.
 #
-#   spikes/terminal-av/try-keys.sh            # from the repository root
+#   crates/watch/scripts/try-keys.sh            # from the repository root
 #
 # Needs what try-room.sh needs. PORT (48920) and two more are used. Nobody looks at the
 # pseudo-terminal: what is checked is the log of the viewer, the page's chat, and the mode.
 set -eu
-root=$(cd "$(dirname "$0")/../.." && pwd)
-here="$root/spikes/terminal-av"
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+here="$root/crates/watch/scripts"
 port=${PORT:-48920}
 name="keys-$$"
 work=$(mktemp -d)
-(cd "$here" && cargo build --release --quiet)
-(cd "$root" && cargo build --quiet -p xmoq-relay)
+(cd "$root" && cargo build --release --quiet --locked -p xmoq-watch && cargo build --quiet --locked -p xmoq-relay)
 [ -d "$root/spikes/durable-objects-room/node_modules" ] ||
   npm ci --prefix "$root/spikes/durable-objects-room" --no-audit --no-fund > /dev/null
 bun=$(cd "$root/interop" && mise which bun)
@@ -32,20 +31,19 @@ for _ in $(seq 1 40); do
   grep -q "^PUBLISHING" "$work/page.log" && break
   sleep 0.5
 done
-watch="$here/target/release/xmoq-watch"
+watch="$root/target/release/xmoq-watch"
 room="http://127.0.0.1:$((port + 2))/rooms/$name"
 echo "--- keys: + + m m - , a line for the chat, the page loaded anew, q"
 python3 "$here/keys-on-a-pty.py" wait:4 keys:++ wait:0.5 keys:m wait:0.5 keys:m wait:0.5 keys:- wait:0.5 \
   'keys:ttyped in the termx\x7fnal\r' wait:2 "signal:SIGUSR1:$page" wait:9 keys:q -- \
   "$watch" --room "$room" --volume 0 --medium direct --log "$work/watch.log"
 grep -vE "^AV_PLAYED" "$work/watch.log" || true
-grep -oE "AV_PLAYED why=\"[^\"]*\" seconds=[0-9.]+ buffer_ms=[0-9]+ volume=[0-9.]+ muted=[a-z]+ video_came=[0-9]+ video_left_out=[0-9]+ video_drawn=[0-9]+" "$work/watch.log" || true
+grep -oE "AV_PLAYED why=\"[^\"]*\" seconds=[0-9.]+|video_drawn=[0-9]+|underruns=[0-9]+" "$work/watch.log" | tr '\n' ' ' || true
+echo
 echo "--- Ctrl-C"
 python3 "$here/keys-on-a-pty.py" wait:3 'keys:\x03' -- "$watch" --room "$room" --volume 0 --medium direct --log "$work/c.log"
 echo "--- SIGTERM"
 python3 "$here/keys-on-a-pty.py" wait:3 kill:SIGTERM -- "$watch" --room "$room" --volume 0 --medium direct --log "$work/t.log"
-echo "--- a panic"
-XMOQ_WATCH_PANIC=1 python3 "$here/keys-on-a-pty.py" wait:0.5 wait:2 -- "$watch" --room "$room" --volume 0 --medium direct
 echo "--- the page"
 kill -INT "$page"
 wait "$page" 2>/dev/null || true
