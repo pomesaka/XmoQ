@@ -349,7 +349,16 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--measure-demo-marks" => {
                 args.measure_demo_marks = one_of(&flag, &value, &[("on", true), ("off", false)])?;
             }
-            "--clock-skew-ppm" => args.clock_skew_ppm = number(&flag, &value)?,
+            "--clock-skew-ppm" => {
+                args.clock_skew_ppm = number(&flag, &value)?;
+                // WHY a limit: at a million slower the clock stands, and
+                // beyond it would run backwards.
+                if !(-999_999..=1_000_000).contains(&args.clock_skew_ppm) {
+                    return Err(Invalid(format!(
+                        "--clock-skew-ppm {value}: from -999999 to 1000000"
+                    )));
+                }
+            }
             other => return Err(Invalid(format!("unknown flag {other}"))),
         }
     }
@@ -546,6 +555,10 @@ mod tests {
             (
                 "--room r --buffer-ms 10001".to_string(),
                 "--buffer-ms 10001: 10000 at most",
+            ),
+            (
+                "--room r --clock-skew-ppm -1000000".to_string(),
+                "--clock-skew-ppm -1000000: from -999999 to 1000000",
             ),
             (
                 "--room r --volume 1.5".to_string(),

@@ -66,6 +66,7 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | both | `timer=page`, `timer=slow` | The page's own timer, and that timer as a background tab has it | A worker's timer |
 | both | `diag=1` | More in the page's report, for looking into a run | |
 | publish | `clockSkewPpm=N` | For measuring: the painted clock's times run N parts in a million faster than the machine's clock (the tone's do not follow: the encoder counts samples), as a camera's against a microphone's | 0 |
+| watch | `clockBehindMs=N` | For measuring: the page's clock is N ms behind for its first 5 seconds, which puts the fastest way N ms too fast until those seconds are forgotten, a minute later | 0 |
 | watch | `clockSkewPpm=N` | For measuring: the page's clock runs N parts in a million faster, as a viewer's on another machine against its publisher's | 0 |
 | publish | `size=360`, `720`, `1080` | The picture's size | 360 |
 | publish | `bitrate=N` | Bits a second of the video | The size's: 1.5, 3 and 6 Mbit/s |

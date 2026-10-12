@@ -153,6 +153,37 @@ A link that is narrow (2 Mbit/s under a picture of 2.5) for 90 s and good again,
 - No harm was seen from the least rising while the link is bad: the automatic buffer was at its limit throughout under both rules.
 - One run each; the numbers of the narrow spell differ from run to run by more than the two columns do.
 
+### The moment a least that was too low is forgotten
+
+Asked after the review: the test of the core has the base of every Object move 340 ms later at once, a minute after one Object with a time that far ahead. What do picture and sound do then? Expected, before the run: the frames wait a third of a second longer, so the picture stands that long; a piece of sound is due 340 ms after the one before it ends, more than the 300 ms a piece follows within, so there is one gap of silence and no change of speed.
+
+Run once: `/watch?clockBehindMs=340` (the page's clock 340 ms behind for its first 5 s), a buffer of 400 ms and the automatic one, read every second.
+
+| | 400 ms | Automatic |
+|---|---|---|
+| From second 6 to 64 | Lateness 351 to 353 ms; all sounds, all frames in time | The buffer goes to **370 ms** in one step (25 pieces too late and 15 frames after their turn in that second) and stands there; all sounds |
+| Second 65, when the first seconds are forgotten | **20 frames shown, where a second has 30; 2 breaks in the sound**; no piece too late, none at another speed | 21 frames; 2 breaks (and 1 the second before) |
+| After | 30 frames and 50 pieces a second; the lateness reads 13 ms from second 74, when the window of 10 s holds nothing older | The buffer comes down from second 74, 20 ms a second, with about 20 pieces a second at another speed, and is at 60 ms at second 89 |
+
+- As expected: **one gap in the sound and a picture that stands a third of a second, once**. It is heard and seen, and it is the end of a minute in which everything was 340 ms late.
+- Left as it is. What clocks do moves the base by 0.1 ms a second at 100 ppm, which nothing notices; a move at once needs a wrong time from the publisher or a path that got shorter and longer again. Spreading it over seconds would mean a base that is knowingly off meanwhile, and a rule of its own in both players and the shared table.
+- **The automatic buffer stood at 370 ms with a least 340 ms too low**, the very number of [the run that is not explained](2026-10-13-the-run-in-which-the-buffer-stood-still.md).
+
+### 100 ppm itself, for 30 minutes
+
+The number that was only counted before. Expected: with the least of the last minute no piece of sound is lost with the default 50 ms, on either side; before the change the viewer with the faster clock would have lost its sound after 7 to 10 minutes.
+
+One publishing page and three watching pages for 1,800 s, read every 300 s: 50 ms with the clock 100 ppm faster, 50 ms with it 100 ppm slower, 150 ms with it 100 ppm faster.
+
+| Viewer | Pieces too late in 30 minutes (90,000 pieces) | Frames after their turn |
+|---|---|---|
+| 50 ms, 100 ppm faster | **0** | 0 in the first 25 minutes; 1,256 of 9,088 in the last 5 |
+| 50 ms, 100 ppm slower | **0** | 0 in the first 25 minutes; 1,259 of 9,089 in the last 5 |
+| 150 ms, 100 ppm faster | **0** | 0 |
+
+- **As expected for the sound**: nothing lost in 30 minutes, where 18 minutes at 100 ppm are 108 ms of difference, twice the buffer. The lateness of 99 in 100 stayed at 13 to 22 ms on the faster side and 7 to 15 ms on the slower for 25 minutes.
+- **The last 5 minutes are not of the clocks**: all three viewers alike, the slower one too, had a lateness of 68 to 74 ms and 53 to 56 pieces at another speed, and the two with 50 ms drew a seventh of their frames after their turn. Something held Objects up for all three at once; what it was is not known (nothing of this workspace ran in those minutes; the machine is shared with other work). The sound came through it whole.
+
 ## For a person with a camera and a microphone: do the two tracks' clocks move apart?
 
 Not run. What it asks is in the watching page already, with no flag:

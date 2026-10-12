@@ -60,6 +60,19 @@ if (CLOCK_SKEW_PPM !== 0) {
 	Date.now = () =>
 		Math.round(began + (real() - began) * (1 + CLOCK_SKEW_PPM / 1_000_000));
 }
+/**
+ * `?clockBehindMs=N` (for measuring): this page's `Date.now()` is N ms
+ * behind for its first 5 seconds, and right after. What comes in those
+ * seconds seems to have taken N ms less than it did, as an Object with a
+ * time N ms ahead would: the fastest way is too fast by N until those
+ * seconds are forgotten.
+ */
+const CLOCK_BEHIND_MS = Number(query.get("clockBehindMs") ?? 0);
+if (CLOCK_BEHIND_MS !== 0) {
+	const now = Date.now.bind(Date);
+	const began = now();
+	Date.now = () => now() - (now() - began < 5000 ? CLOCK_BEHIND_MS : 0);
+}
 // When a frame and a piece are played, the buffer between, and how the
 // pieces of sound are joined are @xmoq/media's (`createPlayout`); this page
 // draws, counts and says what it sees. `?audioMin=`, `?autoMax=` and
@@ -571,6 +584,10 @@ async function main(): Promise<void> {
 			bufferMs,
 			auto,
 			lateness99: Math.round(lateness99()),
+			// When it came less the time it carries, the median of the last
+			// 200 of each track: their difference over time is how the
+			// publisher's two clocks move apart.
+			came: { video: arrived.video.median(), audio: arrived.audio.median() },
 			delay: {
 				total: played.video.median(),
 				arrive: delay.arrive.median(),
