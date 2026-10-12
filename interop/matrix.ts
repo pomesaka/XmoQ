@@ -42,7 +42,8 @@ interface Pairing {
 		| "video.ts"
 		| "video-rust.ts"
 		| "watch-rust.ts"
-		| "no-answer.ts";
+		| "no-answer.ts"
+		| "quiet-peer.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -1105,6 +1106,50 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			script: "no-answer.ts",
 			args: ["--subscriber", "xmoq-watch"],
 			relay: "own",
+		},
+		// The own clients against a peer that sends no SETUP, or answers no
+		// request (`crates/quiet-peer`): what reached the peer is what counts.
+		{
+			name: "no relay: quiet peer: own-browser closes its session with CONTROL_MESSAGE_TIMEOUT when the peer sends no SETUP",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-setup", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust closes its session with CONTROL_MESSAGE_TIMEOUT when the peer sends no SETUP",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-setup", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: the terminal viewer closes its session with CONTROL_MESSAGE_TIMEOUT when the peer sends no SETUP",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-setup", "--client", "xmoq-watch"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-browser ends a PUBLISH nobody answers with PUBLISH_DONE and a FIN",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-publish-answer", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust ends a PUBLISH nobody answers with PUBLISH_DONE and a FIN",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-publish-answer", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-browser gives up a FETCH nobody answers, and resets its request stream",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-fetch-answer", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust gives up a FETCH nobody answers, resets its request stream, and fails",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-fetch-answer", "--client", "own-rust"],
+			relay: "none",
 		},
 		// A page encodes and publishes video, and another plays it: through
 		// each relay, with each way of putting Objects onto streams.

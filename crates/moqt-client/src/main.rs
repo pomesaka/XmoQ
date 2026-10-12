@@ -124,6 +124,10 @@ struct Args {
     /// SUBSCRIBE is accepted (§10.9), and prints `UPDATE_ACCEPTED` or
     /// `UPDATE_FAILED` when the answer comes.
     update_subgroup_timeout_ms: Option<u64>,
+    /// `--setup-wait-ms`: how long the peer's SETUP is waited for; 10,000
+    /// where it is not said. Then the session is closed with
+    /// `CONTROL_MESSAGE_TIMEOUT`.
+    setup_wait_ms: u64,
     /// How long the publisher waits between the answer to its
     /// `PUBLISH_NAMESPACE` and its PUBLISH.
     publish_delay: Duration,
@@ -609,10 +613,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut objects, mut video) = (1, video::VideoFlags::default());
     let (mut url, mut cert_sha256) = (None, None);
     let (mut namespace, mut track_name) = (None, None);
-    let (mut timeout_secs, mut publish_delay_ms) = (20, 0);
+    let (mut timeout_secs, mut publish_delay_ms, mut setup_wait_ms) = (20, 0, SETUP_WAIT_MS);
     let (mut answer_wait_ms, mut update_ms) = (xmoq_moqt::params::ANSWER_WAIT_MS, None);
-    let mut subgroup_id = SubgroupId::Zero;
-    let mut first_group = 0;
+    let (mut subgroup_id, mut first_group) = (SubgroupId::Zero, 0);
     let mut publisher_priority = Some(0);
     let mut object_properties = Vec::new();
     let (mut serve_delay_ms, mut answer_delay_ms) = (0, 0);
@@ -650,6 +653,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--timeout-secs" => timeout_secs = value.parse().context("--timeout-secs")?,
             "--answer-wait-ms" => answer_wait_ms = millis(&flag, &value)?,
             "--update-subgroup-timeout-ms" => update_ms = Some(millis(&flag, &value)?),
+            "--setup-wait-ms" => setup_wait_ms = millis(&flag, &value)?,
             "--subgroup-id" => {
                 subgroup_id = match value.as_str() {
                     "zero" => SubgroupId::Zero,
@@ -690,6 +694,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         timeout_secs,
         answer_wait_ms,
         update_subgroup_timeout_ms: update_ms,
+        setup_wait_ms,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
         first_group,
@@ -2617,9 +2622,10 @@ async fn run_session(
     let setup = session.setup(setup_options)?;
     xmoq_moqt_io::send_message(control, &setup, &args.trace, "control").await?;
 
-    let Ok(first) = tokio::time::timeout(SETUP_WAIT, session_inbox.next_control_message()).await
+    let setup_wait = Duration::from_millis(args.setup_wait_ms);
+    let Ok(first) = tokio::time::timeout(setup_wait, session_inbox.next_control_message()).await
     else {
-        return Err(NoSetupInTime.into());
+        return Err(NoSetupInTime(args.setup_wait_ms).into());
     };
     let peer_setup = session.on_control_message(first?)?;
     report::setup_ok(&peer_setup);
@@ -2676,7 +2682,7 @@ fn termination_code(result: &Result<()>) -> u32 {
 /// How long the peer's SETUP is waited for, from when this client's was
 /// written. **Provisional**, and the time `@xmoq/moqt` and the terminal
 /// viewer give it.
-const SETUP_WAIT: Duration = Duration::from_secs(10);
+const SETUP_WAIT_MS: u64 = 10_000;
 
 /// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11): The session was closed because
 /// the peer took too long to respond to a control message." What the
@@ -2685,13 +2691,13 @@ const SETUP_WAIT: Duration = Duration::from_secs(10);
 /// ([`Client::in_time`]).
 const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
 
-/// The peer sent no SETUP in time.
+/// The peer sent no SETUP in so many milliseconds.
 #[derive(Debug)]
-struct NoSetupInTime;
+struct NoSetupInTime(u64);
 
 impl std::fmt::Display for NoSetupInTime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the peer sent no SETUP within 10 s")
+        write!(formatter, "the peer sent no SETUP within {} ms", self.0)
     }
 }
 
@@ -2787,9 +2793,9 @@ mod tests {
         let cases: [(Result<()>, u32); 4] = [
             (Ok(()), 0x0),
             (Err(anyhow!("the peer did not answer")), 0x0),
-            (Err(NoSetupInTime.into()), 0x11),
+            (Err(NoSetupInTime(10_000).into()), 0x11),
             (
-                Err(anyhow::Error::from(NoSetupInTime).context("the session")),
+                Err(anyhow::Error::from(NoSetupInTime(10_000)).context("the session")),
                 0x11,
             ),
         ];

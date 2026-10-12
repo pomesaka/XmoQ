@@ -81,13 +81,13 @@ struct UntilClosed {
     readers: Option<xmoq_moqt_io::IncomingStreams>,
 }
 
-/// The relay sent no SETUP in time.
+/// The relay sent no SETUP in so many milliseconds.
 #[derive(Debug)]
-struct NoSetupInTime;
+struct NoSetupInTime(u64);
 
 impl std::fmt::Display for NoSetupInTime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the relay sent no SETUP within 10 s")
+        write!(formatter, "the relay sent no SETUP within {} ms", self.0)
     }
 }
 
@@ -702,10 +702,11 @@ async fn play(
         let setup = session.setup(options)?;
         send_message(control, &setup, &Trace::default(), "control").await?;
         // 10 seconds, as `@xmoq/moqt` gives the peer's SETUP.
-        match tokio::time::timeout(ANSWER_WAIT, events.recv()).await {
+        let setup_wait = Duration::from_millis(args.setup_wait_ms);
+        match tokio::time::timeout(setup_wait, events.recv()).await {
             Ok(Some(UniEvent::Control(message))) => session.on_control_message(message)?,
             Ok(other) => bail!("no SETUP from the relay: {other:?}"),
-            Err(_) => return Err(NoSetupInTime.into()),
+            Err(_) => return Err(NoSetupInTime(args.setup_wait_ms).into()),
         };
         let namespace = TrackNamespace::new(
             place

@@ -41,6 +41,8 @@ export type XmoqPage = {
 		maxObjectPayloadLength?: number,
 		/** Own page: how long the answer to a request is waited for (`answerTimeoutMs` of `@xmoq/moqt`); the library's 10 seconds when left out. The moqtail page has no such wait to set. */
 		answerTimeoutMs?: number,
+		/** Own page: how long the peer's SETUP is waited for (`setupTimeoutMs` of `@xmoq/moqt`); the library's 10 seconds when left out. */
+		setupTimeoutMs?: number,
 	): Promise<void>;
 	publishTrack(namespace: string, trackName: string): Promise<string>;
 	sendObject(payloadHex: string): Promise<void> | void;

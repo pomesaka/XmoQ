@@ -47,10 +47,24 @@ The subscriber's wait is set to 1.5 seconds. WHY not the 10 it has by itself: th
 
 One run of each by hand, and all three in the interop run.
 
+## Against a peer that stays quiet
+
+Added later the same day. `xmoq-quiet-peer` (`crates/quiet-peer`) is a server built for this: it takes a session and sends no SETUP, or sends its SETUP and answers no request (one mode answers a PUBLISH_NAMESPACE, so that a client comes to its PUBLISH), and prints what reached it. No relay is in between. `bun quiet-peer.ts --case ... --client ...`, the clients' waits at 1.5 seconds; one run of each by hand, and all seven in the interop run.
+
+| Case | Client | What the peer printed |
+|---|---|---|
+| No SETUP | own-browser, own-rust, xmoq-watch | `SESSION_ENDED session=0 ClosedByPeer { code: 17, reason: "" }` (0x11, CONTROL_MESSAGE_TIMEOUT), 1,755, 2,302 and 2,220 ms after the client began |
+| No answer to a PUBLISH | own-browser, own-rust | `REQUEST session=0 stream=1 PUBLISH_DONE status_code=0x0 stream_count=0 reason="no answer in time"`, then `REQUEST_CLOSED session=0 stream=1 how=FIN` |
+| No answer to a FETCH | own-browser, own-rust | `REQUEST session=0 stream=0 FETCH`, then `REQUEST_CLOSED session=0 stream=0 how=reset, code 0x1`; own-rust printed `ANSWER_TIMED_OUT request=fetch#0 after_ms=1500` and left with a failure |
+
+The peer does not watch whether its own direction of a request stream is stopped, so the STOP_SENDING of these is not seen here; for a SUBSCRIBE the relay's log above has it.
+
+**The relay's side was read, not run**: no timer for a client's SETUP was found in `crates/relay-core` or `crates/relay/src/hub.rs`, so a client that connects and sends none appears to stay for as long as its connection lives. No client that sends no SETUP is at hand to run it.
+
 ## Not run
 
 - **The 10 seconds themselves, against a real peer.** The tests of `@xmoq/moqt` move a clock by hand: 9,999 ms nothing, 10,000 ms given up, for SUBSCRIBE, PUBLISH, PUBLISH_NAMESPACE and FETCH, and 13,000 and 30,000 ms with the two parameters. The Rust client's time is tokio's, run with 1.5 seconds only.
-- A FETCH, a PUBLISH and a PUBLISH_NAMESPACE that are not answered, against a real peer: the relay answers the last two itself at once. A FETCH was tried: the publisher that holds answers back (`--answer-fetch --fetch-answer-delay-ms`) refuses a range it has published nothing of at once, so nothing stayed unanswered, and a publisher with Objects that holds its FETCH_OK was not set up. What a PUBLISH nobody answered is ended with is the same bytes in both implementations by a shared file, and is not seen on a wire.
+- A PUBLISH_NAMESPACE that is not answered, against a real peer. A publisher that has Objects and holds its FETCH_OK back, behind the relay: the FETCH that was run is against the quiet peer, which answers nothing.
 - A relay that answers nothing at all. No such peer was built; the publisher behind the relay is what was silent.
 - A page long in the background, whose timers run late.
 
