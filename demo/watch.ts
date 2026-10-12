@@ -10,6 +10,13 @@
 import type { MoqtConnection } from "@xmoq/moqt";
 import {
 	type AudioPlayback,
+	AUTO_MARGIN_MS,
+	AUTO_WINDOW_MS,
+	createPlayout,
+	DEFAULT_AUDIO_MIN_MS,
+	DEFAULT_AUTO_MAX_MS,
+	DEFAULT_AUTO_SHARE,
+	DEFAULT_PLAYOUT_BUFFER_MS,
 	playAudioTrack,
 	playVideoTrack,
 	type VideoPlayback,
@@ -33,38 +40,14 @@ import {
 } from "./shared.ts";
 
 const query = new URLSearchParams(location.search);
-/** **Provisional**: on one machine 99 of 100 frames and pieces came within 17 to 24 ms of the fastest, and with 50 ms none was late (docs/experiments/2026-10-11-where-the-delay-of-the-demo-comes-from.md). */
-const DEFAULT_BUFFER_MS = 50;
-/**
- * The sound waits at least this long, also where the buffer is less
- * (`?audioMin=`). WHY: a piece is given to the loudspeaker for a time, and
- * with no buffer that time is over when the piece comes: nothing sounds.
- * The picture is drawn as it comes. **Provisional**: the least of 10, 20,
- * 30 and 40 ms with which no piece was too late on one machine.
- */
-const AUDIO_MIN_MS = Number(query.get("audioMin") ?? 30);
-/** What the buffer keeps for itself when a piece of audio waits for the ones before it (**provisional**). `?order=no`: nothing waits. */
-const ORDER_MARGIN_MS = 20;
-/**
- * `?buffer=auto` (**a trial, not the default**): the buffer follows how
- * late things come. It is what 99 of 100 of the last AUTO_WINDOW_MS came
- * within, after the fastest, and AUTO_MARGIN_MS more. It grows at once and
- * shrinks AUTO_STEP_MS at a time, twice a second.
- */
-const AUTO_WINDOW_MS = 10_000;
-const AUTO_MARGIN_MS = 10;
-const AUTO_STEP_MS = 10;
-/**
- * How far the automatic buffer goes, and which share of what came it
- * covers: `?autoMax=` and `?autoShare=`. WHY a limit: with loss, a few of
- * 100 come seconds late (measured: 0.8 s at 1 %, 5 s at 5 %), and a
- * buffer that waits for those is not live any more.
- */
-const AUTO_MAX_MS = Number(query.get("autoMax") ?? 400);
-const AUTO_SHARE = Number(query.get("autoShare") ?? 0.99);
+// When a frame and a piece are played, the buffer between, and how the
+// pieces of sound are joined are @xmoq/media's (`createPlayout`); this page
+// draws, counts and says what it sees. `?audioMin=`, `?autoMax=` and
+// `?autoShare=` set what the package has a value for.
+const AUDIO_MIN_MS = Number(query.get("audioMin") ?? DEFAULT_AUDIO_MIN_MS);
+const AUTO_MAX_MS = Number(query.get("autoMax") ?? DEFAULT_AUTO_MAX_MS);
+const AUTO_SHARE = Number(query.get("autoShare") ?? DEFAULT_AUTO_SHARE);
 
-/** How many decoded frames may wait to be drawn: a second of them. */
-const MAX_WAITING_FRAMES = 30;
 
 /** The last 200 values of something measured, for its median and its largest. */
 function measured(): {
@@ -111,76 +94,6 @@ async function main(): Promise<void> {
 	let link = "connecting";
 	let sessions = 0;
 
-	// The time of a frame or a piece is the publisher's clock, in
-	// microseconds. WHY the smallest difference to this page's clock is taken
-	// as "no delay": the two clocks need not agree, and the one that came
-	// fastest took at least no time. Everything is played `bufferMs` after
-	// that, so that picture and sound with the same time come out together.
-	let fastestMs = Number.POSITIVE_INFINITY;
-	let bufferMs =
-		query.get("buffer") === "auto"
-			? DEFAULT_BUFFER_MS
-			: Number(query.get("buffer") ?? DEFAULT_BUFFER_MS);
-	let auto = query.get("buffer") === "auto";
-	/** How long after the fastest each frame and piece of the last AUTO_WINDOW_MS came, and when. */
-	let lateness: { at: number; ms: number }[] = [];
-	/** What 99 of 100 of them came within. */
-	const lateness99 = (): number => {
-		const sorted = lateness.map((each) => each.ms).sort((a, b) => a - b);
-		return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * AUTO_SHARE))] ?? 0;
-	};
-	/** When something with this time would be played with no buffer: its time, on this page's clock. */
-	const baseOf = (timestampUs: number): number => {
-		const now = Date.now();
-		fastestMs = Math.min(fastestMs, now - timestampUs / 1000);
-		const base = timestampUs / 1000 + fastestMs;
-		lateness.push({ at: now, ms: now - base });
-		return base;
-	};
-
-	// The buffer can be set while watching.
-	const controls = document.createElement("span");
-	const slider = document.createElement("input");
-	slider.type = "range";
-	slider.min = "0";
-	slider.max = "500";
-	slider.step = "10";
-	slider.id = "buffer";
-	const setBuffer = (ms: number, byAuto = false): void => {
-		bufferMs = ms;
-		if (!byAuto) auto = false;
-		slider.value = String(ms);
-	};
-	controls.append(" buffer: ");
-	for (const ms of [0, 50, 150]) {
-		const button = document.createElement("button");
-		button.textContent = `${ms} ms`;
-		button.id = `buffer-${ms}`;
-		button.addEventListener("click", () => setBuffer(ms));
-		controls.append(button, " ");
-	}
-	const autoButton = document.createElement("button");
-	autoButton.textContent = "auto (a trial)";
-	autoButton.id = "buffer-auto";
-	autoButton.addEventListener("click", () => {
-		auto = true;
-	});
-	slider.addEventListener("input", () => setBuffer(Number(slider.value)));
-	controls.append(autoButton, " ", slider);
-	document.getElementById("sound")?.after(controls);
-	setBuffer(bufferMs, auto);
-	every(500, () => {
-		const since = Date.now() - AUTO_WINDOW_MS;
-		lateness = lateness.filter((each) => each.at > since);
-		if (!auto || lateness.length < 50) return;
-		const wanted = Math.min(
-			AUTO_MAX_MS,
-			Math.ceil((lateness99() + AUTO_MARGIN_MS) / AUTO_STEP_MS) * AUTO_STEP_MS,
-		);
-		if (wanted > bufferMs) setBuffer(wanted, true);
-		else if (wanted < bufferMs) setBuffer(bufferMs - AUTO_STEP_MS, true);
-	});
-
 	/** Of the frames that were drawn: how long each took to get here, waited for its turn, and waited for the repaint. */
 	const delay = { arrive: measured(), buffer: measured(), paint: measured() };
 	/** Frames that came after their turn, and were drawn late. */
@@ -194,17 +107,10 @@ async function main(): Promise<void> {
 		audio: { time: number; played: number }[];
 	} = { video: [], audio: [] };
 
-	// Video: decoded frames wait in a queue until their time, and the newest
-	// one that is due is drawn at the next repaint.
 	const began = performance.now();
 	let firstFrameAfterMs: number | undefined;
-	let frames: {
-		frame: VideoFrame;
-		/** When it would be drawn with no buffer, and when it was decoded, by this page's clock. */
-		base: number;
-		came: number;
-		mark: boolean;
-	}[] = [];
+	/** Whether a frame that waits has the mark. */
+	const marked = new WeakMap<VideoFrame, boolean>();
 	let markShown = false;
 	const framesDecoded = perSecond();
 	const framesShown = perSecond();
@@ -214,6 +120,132 @@ async function main(): Promise<void> {
 	const stalls: { from: number; to: number }[] = [];
 	let playback: VideoPlayback | undefined;
 	let audio: AudioPlayback | undefined;
+
+	let tooLate = 0;
+	/** From the SUBSCRIBE of the audio being accepted to the first piece decoded, and to the first that was in time to sound. */
+	let audioSince = performance.now();
+	let firstAudioAfterMs: number | undefined;
+	let firstSoundAfterMs: number | undefined;
+	/** When a piece of audio was last in time to be sounded, by this page's clock. */
+	let lastHeard: number | undefined;
+	let markHeard = false;
+	// Everything that sounds goes through the playout's output, where it is
+	// listened to (`listener`) on its way to the loudspeaker: what is said
+	// under the picture about the sound is what leaves here, not what was
+	// decoded.
+	let listener: AnalyserNode | undefined;
+	let sounded = 0;
+	/** Pieces that did not follow the one before them to the sample: the first, and one after a gap. */
+	let apart = 0;
+	/** Pieces that were played slower or faster. */
+	let stretched = 0;
+	const piecesSounded = perSecond();
+	const piecesTooLate = perSecond();
+
+	const playout = createPlayout({
+		bufferMs:
+			query.get("buffer") === "auto"
+				? DEFAULT_PLAYOUT_BUFFER_MS
+				: Number(query.get("buffer") ?? DEFAULT_PLAYOUT_BUFFER_MS),
+		auto: query.get("buffer") === "auto",
+		audioMinMs: AUDIO_MIN_MS,
+		autoMaxMs: AUTO_MAX_MS,
+		autoShare: AUTO_SHARE,
+		sampleRate: SAMPLE_RATE,
+		draw(frame) {
+			if (
+				canvas.width !== frame.displayWidth ||
+				canvas.height !== frame.displayHeight
+			) {
+				canvas.width = frame.displayWidth;
+				canvas.height = frame.displayHeight;
+			}
+			context.drawImage(frame, 0, 0);
+		},
+		onFramesDue(due, now) {
+			for (const each of due) {
+				// A mark that comes on is noted with the frame that shows it,
+				// also where that frame is passed over for a later one.
+				const mark = marked.get(each.frame) ?? false;
+				if (mark && !markShown) {
+					marks.video.push({ time: each.frame.timestamp / 1000, played: now });
+				}
+				markShown = mark;
+			}
+		},
+		onFrameShown(show) {
+			const { now, turn } = show;
+			framesShown.count();
+			played.video.add(now - show.frame.timestamp / 1000);
+			delay.arrive.add(show.came - show.frame.timestamp / 1000);
+			delay.buffer.add(Math.max(0, turn - show.came));
+			delay.paint.add(now - Math.max(turn, show.came));
+			if (show.came > turn) framesLate += 1;
+			// A picture that stood still for more than 100 ms.
+			if (lastShown !== undefined && now - lastShown > 100) {
+				stalls.push({ from: lastShown, to: now });
+			}
+			lastShown = now;
+			shown += 1;
+		},
+		onPiece(piece) {
+			firstAudioAfterMs ??= Math.round(performance.now() - audioSince);
+			const timeMs = piece.timestampUs / 1000;
+			arrived.audio.add(piece.now - timeMs);
+			const loud = piece.samples.some((sample) => Math.abs(sample) > 0.3);
+			if (loud && !markHeard) {
+				marks.audio.push({ time: timeMs, played: piece.due });
+			}
+			markHeard = loud;
+			if (piece.result === "too-late" || piece.result === "unheard-too-late") {
+				tooLate += 1;
+				piecesTooLate.count();
+				return;
+			}
+			played.audio.add(piece.due - timeMs);
+			firstSoundAfterMs ??= Math.round(performance.now() - audioSince);
+			// Nothing sounds: only what would have is counted.
+			if (piece.result === "unheard") return;
+			if (!piece.follows) apart += 1;
+			if (piece.stretched) stretched += 1;
+			sounded += 1;
+			piecesSounded.count();
+			lastHeard = piece.now;
+		},
+		connectOutput(output, sound) {
+			listener = sound.createAnalyser();
+			listener.fftSize = 2048;
+			output.connect(listener);
+			listener.connect(sound.destination);
+		},
+	});
+	const { clock } = playout;
+
+	// The buffer can be set while watching.
+	const controls = document.createElement("span");
+	const slider = document.createElement("input");
+	slider.type = "range";
+	slider.min = "0";
+	slider.max = "500";
+	slider.step = "10";
+	slider.id = "buffer";
+	controls.append(" buffer: ");
+	for (const ms of [0, 50, 150]) {
+		const button = document.createElement("button");
+		button.textContent = `${ms} ms`;
+		button.id = `buffer-${ms}`;
+		button.addEventListener("click", () => clock.setBuffer(ms));
+		controls.append(button, " ");
+	}
+	const autoButton = document.createElement("button");
+	autoButton.textContent = "auto (a trial)";
+	autoButton.id = "buffer-auto";
+	autoButton.addEventListener("click", () => clock.setAuto());
+	slider.addEventListener("input", () => clock.setBuffer(Number(slider.value)));
+	controls.append(autoButton, " ", slider);
+	document.getElementById("sound")?.after(controls);
+	slider.value = String(clock.bufferMs());
+
 	const videoOptions = {
 		trackName: trackName(),
 		codec: DECODER_CODEC,
@@ -234,109 +266,19 @@ async function main(): Promise<void> {
 			);
 			const [red] = probe.getImageData(0, 0, 1, 1).data;
 			framesDecoded.count();
-			// WHY a limit: a tab in the background is not repainted, and the
-			// frames it decodes would wait without end, each with its
-			// picture. The oldest go; the picture catches up at once when
-			// the tab is looked at again.
-			while (frames.length >= MAX_WAITING_FRAMES) frames.shift()?.frame.close();
-			frames.push({
-				frame,
-				base: baseOf(frame.timestamp),
-				came: Date.now(),
-				mark: (red ?? 0) > 128,
-			});
+			marked.set(frame, (red ?? 0) > 128);
+			playout.onFrame(frame);
 		},
 	};
-	const repaint = (): void => {
-		const now = Date.now();
-		// WHY the buffer is added here and not when the frame came: the
-		// buffer can be moved while watching, and the frames that wait
-		// follow it at once.
-		const due = frames.filter((each) => each.base + bufferMs <= now);
-		const show = due.at(-1);
-		for (const each of due) {
-			// A mark that comes on is noted with the frame that shows it,
-			// also where that frame is passed over for a later one.
-			if (each.mark && !markShown) {
-				marks.video.push({ time: each.frame.timestamp / 1000, played: now });
-			}
-			markShown = each.mark;
-			if (each !== show) each.frame.close();
-		}
-		frames = frames.filter((each) => each.base + bufferMs > now);
-		if (show !== undefined) {
-			if (
-				canvas.width !== show.frame.displayWidth ||
-				canvas.height !== show.frame.displayHeight
-			) {
-				canvas.width = show.frame.displayWidth;
-				canvas.height = show.frame.displayHeight;
-			}
-			context.drawImage(show.frame, 0, 0);
-			framesShown.count();
-			played.video.add(now - show.frame.timestamp / 1000);
-			const turn = show.base + bufferMs;
-			delay.arrive.add(show.came - show.frame.timestamp / 1000);
-			delay.buffer.add(Math.max(0, turn - show.came));
-			delay.paint.add(now - Math.max(turn, show.came));
-			if (show.came > turn) framesLate += 1;
-			show.frame.close();
-			// A picture that stood still for more than 100 ms.
-			if (lastShown !== undefined && now - lastShown > 100) {
-				stalls.push({ from: lastShown, to: now });
-			}
-			lastShown = now;
-			shown += 1;
-		}
-		requestAnimationFrame(repaint);
-	};
-	requestAnimationFrame(repaint);
 
-	// Audio: each piece is given to the `AudioContext` for its time. It
-	// sounds once the button was clicked (a browser lets a page make sound
-	// only after a click); the times are measured either way.
-	let sound: AudioContext | undefined;
-	let tooLate = 0;
-	/** From the SUBSCRIBE of the audio being accepted to the first piece decoded, and to the first that was in time to sound. */
-	let audioSince = performance.now();
-	let firstAudioAfterMs: number | undefined;
-	let firstSoundAfterMs: number | undefined;
-	/** When a piece of audio was last in time to be sounded, by this page's clock. */
-	let lastHeard: number | undefined;
-	let markHeard = false;
-	// Everything that sounds goes through `output`, where it is listened to
-	// (`listener`) on its way to the loudspeaker: what is said under the
-	// picture about the sound is what leaves here, not what was decoded.
-	let output: GainNode | undefined;
-	let listener: AnalyserNode | undefined;
-	let sounded = 0;
-	/** Pieces that did not follow the one before them to the sample: the first, and one after a gap. */
-	let apart = 0;
-	/** Where the last piece that was given to the AudioContext ends, by its clock. */
-	let soundUntil: number | undefined;
-	/** How far from its own time a piece may begin so as to follow the one before it without a seam, in seconds: less than half a piece of 20 ms. */
-	const SEAM = 0.008;
-	/** How much slower or faster a piece is played to get back to its own time (**provisional**): 20 ms of sound make up 1 ms. */
-	const STRETCH = 0.05;
-	/** How far from its own time the sound is brought back by speed alone, in seconds (**provisional**). */
-	const ABSORB = 0.3;
-	/** Pieces that were played slower or faster. */
-	let stretched = 0;
-	const piecesSounded = perSecond();
-	const piecesTooLate = perSecond();
+	// The sound: it sounds once the button was clicked (a browser lets a page
+	// make sound only after a click); the times are measured either way.
 	document.getElementById("sound")?.addEventListener("click", () => {
-		if (sound === undefined) {
-			sound = new AudioContext({ sampleRate: SAMPLE_RATE });
-			output = sound.createGain();
-			listener = sound.createAnalyser();
-			listener.fftSize = 2048;
-			output.connect(listener);
-			listener.connect(sound.destination);
-		}
-		void sound.resume();
+		playout.startSound();
 	});
 	/** The largest sample of the last 43 ms on its way out, of 1, and the pitch that is loudest in it, in Hz. */
 	const leaving = (): { peak: number; hz: number } | undefined => {
+		const sound = playout.sound();
 		if (listener === undefined || sound === undefined) return undefined;
 		const samples = new Float32Array(listener.fftSize);
 		listener.getFloatTimeDomainData(samples);
@@ -357,6 +299,7 @@ async function main(): Promise<void> {
 	let breaks = 0;
 	const breaksNow = perSecond();
 	every(40, () => {
+		const sound = playout.sound();
 		if (listener === undefined || sound?.state !== "running") return;
 		const samples = new Float32Array(listener.fftSize);
 		listener.getFloatTimeDomainData(samples);
@@ -378,94 +321,16 @@ async function main(): Promise<void> {
 		numberOfChannels: 1,
 		// `?audioJoin=1` fetches the Group of audio the page comes into.
 		joiningFetch: query.get("audioJoin") !== null,
-		onData(data: AudioData) {
-			firstAudioAfterMs ??= Math.round(performance.now() - audioSince);
-			const samples = new Float32Array(data.numberOfFrames);
-			data.copyTo(samples, { planeIndex: 0, format: "f32-planar" });
-			const timeMs = data.timestamp / 1000;
-			data.close();
-			const now = Date.now();
-			arrived.audio.add(now - timeMs);
-			const due = baseOf(data.timestamp) + Math.max(bufferMs, AUDIO_MIN_MS);
-			const loud = samples.some((sample) => Math.abs(sample) > 0.3);
-			if (loud && !markHeard) marks.audio.push({ time: timeMs, played: due });
-			markHeard = loud;
-			const context = sound;
-			if (
-				context === undefined ||
-				output === undefined ||
-				context.state !== "running"
-			) {
-				// Nothing sounds: only what would have is counted.
-				if (due < now) {
-					tooLate += 1;
-					piecesTooLate.count();
-				} else {
-					played.audio.add(due - timeMs);
-					firstSoundAfterMs ??= Math.round(performance.now() - audioSince);
-				}
-				return;
-			}
-			// When the piece is to begin, by the AudioContext's clock: its
-			// own time; or, where that is where the piece before it ends,
-			// exactly there.
-			//
-			// WHY not its own time each time: this page's clock counts whole
-			// milliseconds, and a decoder gives times a microsecond off. A
-			// piece that begins a fraction of a millisecond late leaves a gap
-			// of some samples, and one that begins early sounds over the end
-			// of the one before: a click at every piece, 100 a second. So a
-			// piece follows the one before it to the sample, as long as that
-			// is within SEAM of its own time; beyond that the two are apart
-			// for a reason (a piece that did not come, a clock that was set),
-			// and the piece begins at its own time.
-			const wanted = context.currentTime + (due - now) / 1000;
-			//
-			// Where the two are further apart, but the one before still
-			// sounds, the piece follows it all the same and is played a
-			// little slower or faster (STRETCH at most), piece after piece,
-			// until the sound is at its own time again. WHY: a buffer that
-			// moves (the automatic one, the slider) moves the time of every
-			// piece, and a piece that jumps there leaves a gap or sounds
-			// over the one before: a click each time. A changed speed is a
-			// changed pitch for a moment, and no click. Beyond ABSORB the
-			// piece begins at its own time: that is a pause, not a drift.
-			const ahead =
-				soundUntil !== undefined && soundUntil >= context.currentTime
-					? wanted - soundUntil
-					: undefined;
-			const follows = ahead !== undefined && Math.abs(ahead) <= ABSORB;
-			const begin = follows && soundUntil !== undefined ? soundUntil : wanted;
-			if (begin < context.currentTime) {
-				// Its time is over: it is not sounded.
-				tooLate += 1;
-				piecesTooLate.count();
-				return;
-			}
-			played.audio.add(due - timeMs);
-			firstSoundAfterMs ??= Math.round(performance.now() - audioSince);
-			const buffer = context.createBuffer(1, samples.length, SAMPLE_RATE);
-			buffer.copyToChannel(samples, 0);
-			const source = context.createBufferSource();
-			source.buffer = buffer;
-			source.connect(output);
-			// How much longer (or shorter) this piece sounds than it is.
-			const stretch =
-				!follows || ahead === undefined || Math.abs(ahead) <= SEAM
-					? 0
-					: Math.max(-STRETCH, Math.min(STRETCH, ahead / buffer.duration));
-			source.playbackRate.value = 1 / (1 + stretch);
-			source.start(begin);
-			if (!follows) apart += 1;
-			if (stretch !== 0) stretched += 1;
-			soundUntil = begin + buffer.duration * (1 + stretch);
-			sounded += 1;
-			piecesSounded.count();
-			lastHeard = now;
-		},
+		onData: playout.onData,
 	};
 
 	every(500, () => {
+		const sound = playout.sound();
+		const bufferMs = clock.bufferMs();
+		const auto = clock.isAuto();
+		const lateness99 = clock.lateness;
+		// The slider follows the buttons and the automatic buffer.
+		slider.value = String(bufferMs);
 		const stats = playback?.stats() ?? {
 			decoded: 0,
 			dropped: {},
@@ -513,7 +378,7 @@ async function main(): Promise<void> {
 			audioPieces: heard?.decoded ?? 0,
 			tooLate,
 			shown,
-			waiting: frames.length,
+			waiting: playout.waitingFrames(),
 			shownASecond: framesShown.rate(),
 			decodedASecond: framesDecoded.rate(),
 			stalls,
@@ -586,8 +451,7 @@ async function main(): Promise<void> {
 					...(query.get("order") === "no"
 						? {}
 						: {
-								holdForOrderMs: () =>
-									Math.max(0, Math.max(bufferMs, AUDIO_MIN_MS) - ORDER_MARGIN_MS),
+								holdForOrderMs: clock.holdForOrderMs,
 							}),
 					trackNamespace,
 				})
