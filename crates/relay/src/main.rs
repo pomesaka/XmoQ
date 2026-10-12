@@ -102,8 +102,7 @@ struct Args {
     /// gets. Without it only a subscriber's own timeout gives a stream up.
     delivery_patience: Option<Duration>,
     /// `--older-groups give-up`: [`HubConfig::give_up_older_groups`]. An
-    /// experiment, for the subscriptions that set a
-    /// `SUBGROUP_DELIVERY_TIMEOUT`; `keep`, or no flag, gives no Group up.
+    /// experiment; `keep`, or no flag, gives no Group up.
     give_up_older_groups: bool,
     /// `--older-groups-grace-ms`: [`HubConfig::older_groups_grace`].
     older_groups_grace: Duration,

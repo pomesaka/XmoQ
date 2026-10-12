@@ -86,9 +86,8 @@ pub struct HubConfig {
     /// of that track towards it that it does not have all of yet are reset
     /// with `DELIVERY_TIMEOUT`, and the subscription goes on (§8:
     /// "Publishers can, at their discretion, discontinue forwarding Objects
-    /// before either of the timeouts occurs"). **Only for a subscription
-    /// whose SUBSCRIBE had a `SUBGROUP_DELIVERY_TIMEOUT`** (provisional):
-    /// a subscriber that set none gets every stream whole.
+    /// before either of the timeouts occurs"). For every subscription,
+    /// whatever delivery timeout it set.
     pub give_up_older_groups: bool,
     /// With `give_up_older_groups`: how long an older Group still gets from
     /// the moment a newer one is opened. WHY more than nothing: the last
@@ -1430,14 +1429,11 @@ impl<C: Connection> Hub<C> {
         pending: &mut VecDeque<Event>,
     ) {
         let delivery_timeout = asked.map(Duration::from_millis);
-        // WHY only for a subscription that sent a delivery timeout
-        // (**provisional**, decided on 2026-10-12): a subscriber that says
-        // nothing is owed every Object (§8: "if none of the timeouts are set
-        // to a non-zero value, all Objects ... are delivered"), and the rule
-        // suits video and breaks sound, whose Groups are shorter than a
-        // round trip. A viewer that wants late Groups of a track dropped
-        // says so for that track.
-        if self.config.give_up_older_groups && delivery_timeout.is_some() {
+        // WHY for every subscription, whatever delivery timeout it set: a
+        // timeout says how long a subscriber is willing to wait, and a rule
+        // that held only for those who set one would cut a subscriber that
+        // asks for ten minutes sooner than one that asks for nothing.
+        if self.config.give_up_older_groups {
             self.give_up_groups_before(session, out_stream, &header);
         }
         let Some(handle) = self.sessions.get(&session) else {
