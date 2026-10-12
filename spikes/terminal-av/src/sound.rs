@@ -39,6 +39,10 @@ pub struct Counts {
     pub off_ms: Vec<f32>,
     /// The moments a beep began to be played.
     pub marks: Vec<Instant>,
+    /// How long after a callback its first sample leaves the machine, as the output said last.
+    pub ahead_ms: f32,
+    /// When each underrun was, in seconds from the first packet.
+    pub underruns_at: Vec<f32>,
 }
 
 #[derive(Default)]
@@ -46,6 +50,11 @@ struct Shared {
     waiting: VecDeque<Packet>,
     playing: Option<(Packet, usize)>,
     began: bool,
+    /// The moment the first packet was taken, and whether more are to come.
+    opened: Option<Instant>,
+    ended: bool,
+    /// The sample before this one was of a packet, not silence.
+    flowing: bool,
     was_loud: bool,
     counts: Counts,
 }
@@ -112,6 +121,7 @@ impl Sound {
                 let ahead = times.playback.duration_since(times.callback);
                 let first = Instant::now() + ahead;
                 let mut shared = for_output.lock().expect("the lock");
+                shared.counts.ahead_ms = ahead.as_secs_f32() * 1000.0;
                 let volume = volume.now();
                 let mut silent = false;
                 for (index, frame) in out.chunks_mut(channels).enumerate() {
@@ -123,8 +133,12 @@ impl Sound {
                         *sample = value * volume;
                     }
                 }
-                if silent && shared.began && shared.playing.is_none() && shared.waiting.is_empty() {
+                // WHY not once no more is to come: the output goes on asking until it is
+                // closed, and what it finds then is the end, not a packet that is late.
+                if silent && shared.began && !shared.ended && shared.playing.is_none() && shared.waiting.is_empty() {
                     shared.counts.underruns += 1;
+                    let at = shared.opened.map_or(0.0, |opened| opened.elapsed().as_secs_f32());
+                    shared.counts.underruns_at.push(at);
                 }
             },
             |error| eprintln!("AUDIO_OUTPUT_ERROR {error}"),
@@ -149,6 +163,7 @@ impl Sound {
             return;
         };
         shared.counts.packets += 1;
+        shared.opened.get_or_insert_with(Instant::now);
         let samples = self.pcm[..samples].to_vec();
         let loud = samples.iter().any(|sample| sample.abs() > LOUD);
         shared.waiting.push_back(Packet { due, samples, loud });
@@ -157,6 +172,11 @@ impl Sound {
             shared.waiting.pop_front();
             shared.counts.dropped_full += 1;
         }
+    }
+
+    /// No more packets come: what the output finds empty from here on is no underrun.
+    pub fn end(&self) {
+        self.shared.lock().expect("the lock").ended = true;
     }
 
     pub fn counts(&self) -> Counts {
@@ -174,16 +194,27 @@ impl Shared {
                     self.counts.given += 1;
                     self.counts.peak = self.counts.peak.max(value.abs());
                     self.counts.squares += f64::from(*value) * f64::from(*value);
+                    self.flowing = true;
                     return Some(*value);
                 }
                 self.playing = None;
             }
-            let next = self.waiting.front()?;
-            if next.due > at + JOINS {
+            let Some(next) = self.waiting.front() else {
+                self.flowing = false;
+                return None;
+            };
+            // WHY a packet joins the one before it up to 10 ms early, and one that follows
+            // silence does not: joined, the sound has no gap of a few samples; begun early,
+            // every packet after it is played that much early as well, and the buffer is
+            // that much smaller for good. 10 ms of 50 was what made a packet 17 ms late
+            // an underrun.
+            let early = if self.flowing { JOINS } else { Duration::ZERO };
+            if next.due > at + early {
                 // Not yet: silence until it is due.
                 if self.began {
                     self.counts.waits += 1;
                 }
+                self.flowing = false;
                 return None;
             }
             let packet = self.waiting.pop_front()?;
