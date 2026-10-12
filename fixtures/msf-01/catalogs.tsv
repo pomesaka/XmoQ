@@ -59,6 +59,7 @@ alt-group-as-a-string	invalid	{"version":"draft-01","tracks":[{"name":"video","p
 render-group-as-a-string	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"renderGroup":"1"}]}
 samplerate-as-a-string	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"samplerate":"48000"}]}
 samplerate-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"samplerate":1e999}]}
+samplerate-that-is-no-whole-number	catalog	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":1,"samplerate":44100.5}]}
 channel-config-as-a-number	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"channelConfig":2}]}
 channel-config-with-half-a-surrogate-pair	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"channelConfig":"\ud800"}]}
 delta-update-as-in-the-example-that-adds	delta-update	{"generatedAt":1746104606044,"deltaUpdate":[{"op":"add","tracks":[{"name":"slides","isLive":true,"role":"video","codec":"av01.0.08M.10.0.110.09"}]}]}

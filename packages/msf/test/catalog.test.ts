@@ -104,9 +104,21 @@ describe("fixtures/msf-01/catalogs.tsv: what a payload is read as", () => {
 			return { name, outcome, json };
 		});
 
-	test("the table has 68 rows, each with a name of its own", () => {
-		expect(rows.length).toBe(68);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(68);
+	test("the table has 69 rows, each with a name of its own", () => {
+		expect(rows.length).toBe(69);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(69);
+	});
+
+	// §5.2.28 has a JSON Number and no more; `crates/msf` reads the same
+	// row to the same value.
+	test("a sample rate that is no whole number is kept as it is", () => {
+		const row = rows.find(
+			(each) => each.name === "samplerate-that-is-no-whole-number",
+		);
+		if (row === undefined) throw new Error("the row is gone");
+		const read = readCatalog(utf8(row.json));
+		if (read.type !== "catalog") throw new Error(JSON.stringify(read));
+		expect(read.catalog.tracks[0]?.samplerate).toBe(44100.5);
 	});
 
 	test.each(rows)("$name: $outcome", ({ outcome, json }) => {
