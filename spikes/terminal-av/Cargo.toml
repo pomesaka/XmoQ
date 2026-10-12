@@ -14,6 +14,7 @@ path = "src/main.rs"
 xmoq-loc = { path = "../../crates/loc" }
 xmoq-moqt = { path = "../../crates/moqt" }
 xmoq-moqt-io = { path = "../../crates/moqt-io" }
+xmoq-msf = { path = "../../crates/msf" }
 anyhow = "=1.0.100"
 tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 cpal = "=0.18.2"

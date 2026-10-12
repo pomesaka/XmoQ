@@ -3,12 +3,13 @@
 //!
 //! **What is read is what a viewer needs to choose a track**, and far less
 //! than `@xmoq/msf` checks: the version, and of every track its name, its
-//! packaging, its role, its codec and its size. A document `@xmoq/msf`
-//! turns down for another reason (`fixtures/msf-01/catalogs.tsv`) is read
-//! here.
+//! packaging, its role, its codec, its size, and the sample rate and the
+//! channels of its audio. A document `@xmoq/msf` turns down for another
+//! reason (`fixtures/msf-01/catalogs.tsv`) is read here.
 //!
-//! FIXME: read `fixtures/msf-01/catalogs.tsv` and turn down what
-//! `@xmoq/msf` turns down.
+//! FIXME: read all of `fixtures/msf-01/catalogs.tsv` and turn down what
+//! `@xmoq/msf` turns down. Of it, the rows on the sample rate and the
+//! channels are read by the tests.
 
 use serde_json::Value;
 
@@ -35,6 +36,14 @@ pub struct CatalogTrack {
     pub width: Option<u64>,
     /// §5.2.27, in pixels.
     pub height: Option<u64>,
+    /// §5.2.28: "The number of audio frame samples per second." `None`
+    /// also for a number that is no whole number of samples: `@xmoq/msf`
+    /// takes any number, and a viewer has no use for a part of a sample.
+    pub samplerate: Option<u64>,
+    /// §5.2.29: "A string specifying the audio channel configuration". The
+    /// draft's examples and `moqlivemock` have the number of channels in
+    /// it, `"2"`; no other form is said.
+    pub channel_config: Option<String>,
 }
 
 /// Why a document is no catalog that is read here.
@@ -56,8 +65,9 @@ impl std::error::Error for Invalid {}
 /// # Errors
 ///
 /// [`Invalid`] for bytes that are no JSON object, another version than
-/// [`MSF_VERSION`], no array of tracks, and a track without a name or a
-/// packaging.
+/// [`MSF_VERSION`], no array of tracks, a track without a name or a
+/// packaging, and a `samplerate` that is no number or a `channelConfig`
+/// that is no string, as in `@xmoq/msf`.
 pub fn read_catalog(payload: &[u8]) -> Result<Vec<CatalogTrack>, Invalid> {
     let document: Value =
         serde_json::from_slice(payload).map_err(|error| Invalid(format!("no JSON: {error}")))?;
@@ -76,6 +86,13 @@ pub fn read_catalog(payload: &[u8]) -> Result<Vec<CatalogTrack>, Invalid> {
         .map(|track| {
             let text = |field: &str| track.get(field).and_then(Value::as_str).map(str::to_string);
             let number = |field: &str| track.get(field).and_then(Value::as_u64);
+            // A field of the track that is there has to be of its type.
+            let of_type = |field: &str, is: fn(&Value) -> bool, what: &str| match track.get(field) {
+                Some(value) if !is(value) => Err(Invalid(format!("{field:?} is no {what}"))),
+                _ => Ok(()),
+            };
+            of_type("samplerate", Value::is_number, "number")?;
+            of_type("channelConfig", Value::is_string, "string")?;
             let required = |field: &str| {
                 text(field).ok_or_else(|| Invalid(format!("a track without the string {field:?}")))
             };
@@ -87,6 +104,8 @@ pub fn read_catalog(payload: &[u8]) -> Result<Vec<CatalogTrack>, Invalid> {
                 codec: text("codec"),
                 width: number("width"),
                 height: number("height"),
+                samplerate: number("samplerate"),
+                channel_config: text("channelConfig"),
             })
         })
         .collect()
@@ -101,6 +120,23 @@ pub fn first_video_track<'a>(
 ) -> Option<&'a CatalogTrack> {
     tracks.iter().find(|track| {
         track.role.as_deref() == Some("video")
+            && track.packaging == LOC_PACKAGING
+            && track
+                .codec
+                .as_deref()
+                .is_some_and(|codec| codec.starts_with(codec_prefix))
+    })
+}
+
+/// The first track with the role `audio` and LOC packaging whose codec
+/// begins with `codec_prefix` (`opus`).
+#[must_use]
+pub fn first_audio_track<'a>(
+    tracks: &'a [CatalogTrack],
+    codec_prefix: &str,
+) -> Option<&'a CatalogTrack> {
+    tracks.iter().find(|track| {
+        track.role.as_deref() == Some("audio")
             && track.packaging == LOC_PACKAGING
             && track
                 .codec
@@ -131,11 +167,76 @@ mod tests {
                 codec: Some("avc3.4D401F".to_string()),
                 width: Some(1280),
                 height: Some(720),
+                samplerate: None,
+                channel_config: None,
             }
+        );
+        let opus = first_audio_track(&tracks, "opus").unwrap();
+        assert_eq!(
+            (
+                opus.name.as_str(),
+                opus.samplerate,
+                opus.channel_config.as_deref()
+            ),
+            ("audio_monotonic_128kbps_opus", Some(48000), Some("2"))
+        );
+        let aac = first_audio_track(&tracks, "mp4a").unwrap();
+        assert_eq!(
+            (
+                aac.name.as_str(),
+                aac.samplerate,
+                aac.channel_config.as_deref()
+            ),
+            ("audio_monotonic_128kbps_aac", Some(48000), Some("2"))
         );
         let hevc = first_video_track(&tracks, "hev1").unwrap();
         assert_eq!(hevc.name, "video_400kbps_hevc");
         assert_eq!(first_video_track(&tracks, "vp9"), None);
+    }
+
+    /// The rows of `fixtures/msf-01/catalogs.tsv` on the sample rate and
+    /// the channels, which `@xmoq/msf` reads as well: what the table says
+    /// of each is what is asked of this reader.
+    #[test]
+    fn the_sample_rate_and_the_channels_are_read_as_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/msf-01/catalogs.tsv");
+        let rows: Vec<(&str, &str, &str)> = table
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                Some((fields.next()?, fields.next()?, fields.next()?))
+            })
+            .filter(|(name, _, _)| name.contains("samplerate") || name.contains("channel-config"))
+            .collect();
+        let names: Vec<&str> = rows.iter().map(|(name, _, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "audio-track-with-samplerate-and-channel-config",
+                "samplerate-as-a-string",
+                "samplerate-too-large-for-a-number",
+                "channel-config-as-a-number",
+                "channel-config-with-half-a-surrogate-pair",
+            ]
+        );
+        for (name, expected, document) in rows {
+            let read = read_catalog(document.as_bytes());
+            assert_eq!(read.is_ok(), expected == "catalog", "{name}: {read:?}");
+        }
+        let (_, _, document) = table
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                Some((fields.next()?, fields.next()?, fields.next()?))
+            })
+            .find(|(name, _, _)| *name == "audio-track-with-samplerate-and-channel-config")
+            .unwrap();
+        let tracks = read_catalog(document.as_bytes()).unwrap();
+        let audio = first_audio_track(&tracks, "opus").unwrap();
+        assert_eq!(
+            (audio.samplerate, audio.channel_config.as_deref()),
+            (Some(48000), Some("1"))
+        );
     }
 
     #[test]
