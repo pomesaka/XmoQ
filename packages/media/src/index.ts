@@ -12,6 +12,12 @@ export {
 	type WaitingFrame,
 } from "./core/frame-queue.ts";
 export {
+	DEFAULT_RECONNECT_DELAY_MS,
+	type KeepSessionOptions,
+	keepSession,
+	type SessionOutcome,
+} from "./core/keep-session.ts";
+export {
 	AUTO_MARGIN_MS,
 	AUTO_MIN_SAMPLES,
 	AUTO_STEP_MS,
@@ -54,6 +60,15 @@ export {
 	createAudioTrackPublisher,
 	DEFAULT_MAX_PENDING_AUDIO_CHUNKS,
 } from "./moqt/audio-track-publisher.ts";
+export {
+	type KeepPlayingOptions,
+	type KeepPublishingOptions,
+	keepPlaying,
+	keepPublishing,
+	type PlayingState,
+	type PublishingState,
+	type ServedTrack,
+} from "./moqt/keep-broadcast.ts";
 export {
 	createVideoTrackPublisher,
 	DEFAULT_MAX_PENDING_BYTES,

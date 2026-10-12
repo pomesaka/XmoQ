@@ -8,9 +8,9 @@
 import {
 	type AudioTrackEncoder,
 	createAudioTrackEncoder,
+	keepPublishing,
 	createVideoTrackEncoder,
 } from "@xmoq/media";
-import { RequestErrorCode } from "@xmoq/moqt";
 import {
 	audioTrackName,
 	connectToRelay,
@@ -241,45 +241,38 @@ async function main(): Promise<void> {
 	}
 	/** What the line under the picture says of the session. */
 	let link = "connecting";
-	// One session after the other: the encoders go on, and when the session
-	// ends the page connects again after two seconds and announces anew.
+	// One session after the other (`keepPublishing` of @xmoq/media): the
+	// encoders go on, and when the session ends the page connects again
+	// after two seconds and announces anew.
 	const room = joinRoom("publisher");
-	void (async () => {
-		for (let session = 1; ; session++) {
-			try {
-				link = "connecting";
-				// Where the rooms give tokens, the connection carries one.
-				const connection = await connectToRelay(
-					through(HERE),
-					await room?.token("pub", HERE.namespace),
-				);
-				connection.serve({
-					subscribe(request) {
-						if (encoder.publisher.subscribe(request)) return;
-						if (audio?.publisher.subscribe(request)) return;
-						request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-					},
-					fetch(request) {
-						if (encoder.publisher.fetch(request)) return;
-						if (audio?.publisher.fetch(request)) return;
-						request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-					},
-				});
-				await connection.publishNamespace(namespace());
-				// The room is told where this broadcast is, for viewers to
-				// find it; that holds as long as this page is connected to
-				// the room.
-				room?.publish(HERE);
-				link = `publishing (session ${session})`;
-				const close = await connection.closed;
-				link = `the session ended (${close.type}) at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
-			} catch (error) {
-				link = `could not publish (${why(error)}); trying again every 2 s`;
+	void keepPublishing({
+		// Where the rooms give tokens, the connection carries one.
+		connect: async () =>
+			connectToRelay(through(HERE), await room?.token("pub", HERE.namespace)),
+		trackNamespace: namespace(),
+		tracks: [encoder.publisher, ...(audio === undefined ? [] : [audio.publisher])],
+		onState(state) {
+			switch (state.type) {
+				case "connecting":
+					link = "connecting";
+					return;
+				case "publishing":
+					// The room is told where this broadcast is, for viewers to
+					// find it; that holds as long as this page is connected to
+					// the room.
+					room?.publish(HERE);
+					link = `publishing (session ${state.session})`;
+					return;
+				case "session-ended":
+					link = `the session ended (${state.close.type}) at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
+					break;
+				case "failed":
+					link = `could not publish (${why(state.error)}); trying again every 2 s`;
+					break;
 			}
 			document.body.dataset.link = link;
-			await new Promise((resolve) => setTimeout(resolve, 2000));
-		}
-	})();
+		},
+	});
 	const framesIn = perSecond();
 	const onFrame = (frame: VideoFrame): void => {
 		framesIn.count();

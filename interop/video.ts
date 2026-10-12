@@ -233,6 +233,7 @@ import {
 } from "./harness.ts";
 import type {
 	OwnPageExtras,
+	PageKeptReport,
 	PageVideoPublishReport,
 	PageVideoReport,
 	PageVideoSetup,
@@ -1001,6 +1002,147 @@ async function audio(): Promise<string> {
 	return `${pieces.length} pieces of Opus audio of a page decoded by another through the own relay, ${first.frames} frames each at 48000 Hz, one after the other (within ${offBy} microseconds), the largest sample ${peak.toFixed(2)} of 1; ${Math.round(sent.encodedBytes / sent.encoded)} bytes a chunk; the encoder gave ${sent.descriptionLength === null ? "no description" : `a description of ${sent.descriptionLength} bytes, which is not sent`}`;
 }
 
+/** Frames the viewer shows on a session before the run goes on: a second of them. */
+const SHOWN_A_SESSION = 25;
+
+/**
+ * Throws unless the frames a viewer showed on `session` are at least
+ * `SHOWN_A_SESSION`, each with a number that can be read and that is after
+ * the one before it (by 1 to 50 modulo 256: a repaint shows the newest
+ * frame that is due, so numbers are passed over, and none comes back).
+ */
+function checkShown(report: PageKeptReport, session: number): number {
+	const shown = report.shown.filter((each) => each.session === session);
+	if (shown.length < SHOWN_A_SESSION) {
+		throw new Error(
+			`${shown.length} frames were shown on session ${session}, not ${SHOWN_A_SESSION}: ${JSON.stringify(report)}`,
+		);
+	}
+	shown.forEach((frame, index) => {
+		const before = shown[index - 1];
+		if (frame.number === null) {
+			throw new Error(
+				`frame ${index} of session ${session} shows no number: ${JSON.stringify(report)}`,
+			);
+		}
+		if (before === undefined || before.number === null) return;
+		const ahead = (frame.number - before.number + 256) % 256;
+		if (ahead < 1 || ahead > 50) {
+			throw new Error(
+				`frame ${index} of session ${session} shows ${frame.number} after ${before.number}: ${JSON.stringify(report)}`,
+			);
+		}
+	});
+	return shown.length;
+}
+
+async function reconnect(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser"],
+		verbose: options.verbose,
+	});
+	// The pages make their own connections; the one `openConnectedPage`
+	// makes is not used.
+	const publisher = await openConnectedPage(
+		context,
+		"publisher",
+		"own-browser",
+	);
+	const viewer = await openConnectedPage(context, "viewer", "own-browser");
+	const kept = async (): Promise<PageKeptReport> => {
+		const [published, played] = await Promise.all([
+			publisher.evaluate(() => window.xmoqOwn.keptReport()),
+			viewer.evaluate(() => window.xmoqOwn.keptReport()),
+		]);
+		return {
+			publishing: published.publishing,
+			playing: played.playing,
+			shown: played.shown,
+		};
+	};
+	const until = (
+		what: string,
+		reached: (report: PageKeptReport) => boolean,
+	): Promise<PageKeptReport> =>
+		pollFor(async () => {
+			const report = await kept();
+			return reached(report) ? report : undefined;
+		}, what);
+	const shownOn = (report: PageKeptReport, session: number): number =>
+		report.shown.filter((each) => each.session === session).length;
+
+	await withTimeout(
+		publisher.evaluate(
+			([url, hash, namespace, setup]) =>
+				window.xmoqOwn.keepVideoPublished(url, hash, namespace, setup),
+			[
+				context.relayUrl,
+				context.certSha256Hex,
+				PAGE_NAMESPACE,
+				{ ...BARS, mapping: "stream-per-group" },
+			] satisfies [string, string, string, PageVideoSetup],
+		),
+		"the page to begin publishing",
+	);
+	await until("the publisher to publish on its first session", (report) =>
+		report.publishing.includes("publishing 1"),
+	);
+	await withTimeout(
+		viewer.evaluate(
+			([url, hash, namespace, name, codec]) =>
+				window.xmoqOwn.keepVideoPlayed(url, hash, namespace, name, codec),
+			[
+				context.relayUrl,
+				context.certSha256Hex,
+				PAGE_NAMESPACE,
+				BARS.trackName,
+				BARS.catalogCodec,
+			] satisfies [string, string, string, string, string],
+		),
+		"the page to begin playing",
+	);
+	await until(
+		`the viewer to show ${SHOWN_A_SESSION} frames on its first session`,
+		(report) => shownOn(report, 1) >= SHOWN_A_SESSION,
+	);
+
+	await withTimeout(context.stopRelay(), "the relay to stop");
+	const down = await until(
+		"both pages to fail to connect while the relay is gone",
+		(report) =>
+			report.publishing.includes("failed") && report.playing.includes("failed"),
+	);
+	await withTimeout(context.startRelayAnew(), "the relay to start anew");
+	const back = await until(
+		`the viewer to show ${SHOWN_A_SESSION} frames on its second session`,
+		(report) => shownOn(report, 2) >= SHOWN_A_SESSION,
+	);
+
+	for (const [who, states] of [
+		["publisher", down.publishing],
+		["viewer", down.playing],
+	] as const) {
+		const ended = states.find((state) => state.endsWith("-ended"));
+		if (ended === undefined) {
+			throw new Error(
+				`the ${who} was not told that its session ended: ${JSON.stringify(down)}`,
+			);
+		}
+	}
+	if (!back.publishing.includes("publishing 2")) {
+		throw new Error(
+			`the publisher did not publish on a second session: ${JSON.stringify(back)}`,
+		);
+	}
+	const first = checkShown(back, 1);
+	const second = checkShown(back, 2);
+	const failed = (states: string[]): number =>
+		states.filter((state) => state === "failed").length;
+	return `the relay was stopped and started anew: the publisher published on a second session after ${failed(back.publishing)} tries that failed, and the viewer showed ${first} frames before and ${second} after, after ${failed(back.playing)} tries that failed`;
+}
+
 const CASES: Record<string, () => Promise<string>> = {
 	audio,
 	"late-viewer": lateViewer,
@@ -1008,6 +1150,7 @@ const CASES: Record<string, () => Promise<string>> = {
 	"from-mlmpub": fromMlmpub,
 	"key-frames-too-large": keyFramesTooLarge,
 	"page-to-page": pageToPage,
+	reconnect,
 };
 
 async function main(): Promise<void> {

@@ -290,6 +290,44 @@ export type OwnPageExtras = {
 	 * `timeoutMs`. A Joining FETCH joins the page's subscription.
 	 */
 	fetchRange(fetch: PageFetch, timeoutMs: number): Promise<string>;
+	/**
+	 * Publishes the bars of `publishVideo` with `keepPublishing` of
+	 * `@xmoq/media`, on connections of its own: when the session ends it
+	 * connects again after `KEPT_DELAY_MS` and publishes anew. No catalog.
+	 */
+	keepVideoPublished(
+		relayUrl: string,
+		certSha256Hex: string,
+		namespace: string,
+		setup: PageVideoSetup,
+	): Promise<void>;
+	/**
+	 * Plays that track with `keepPlaying` and `createPlayout` of
+	 * `@xmoq/media`, on connections of its own: the frames are shown after
+	 * the playout's buffer, at a repaint.
+	 */
+	keepVideoPlayed(
+		relayUrl: string,
+		certSha256Hex: string,
+		namespace: string,
+		trackName: string,
+		codec: string,
+	): Promise<void>;
+	/** What the two have seen so far. */
+	keptReport(): Promise<PageKeptReport>;
+};
+
+/** How long a page that keeps publishing or playing waits before it connects again, in the interop run. */
+export const KEPT_DELAY_MS = 500;
+
+/** What `keepVideoPublished` and `keepVideoPlayed` saw on a page. */
+export type PageKeptReport = {
+	/** The states of `keepPublishing`, in order: the type, and with "publishing" the number of the session ("publishing 2"). */
+	publishing: string[];
+	/** The states of `keepPlaying`, in the same way ("playing 2"). */
+	playing: string[];
+	/** The frames the playout drew: the number its bars say, and the session it came on. */
+	shown: { number: number | null; session: number }[];
 };
 
 /**
