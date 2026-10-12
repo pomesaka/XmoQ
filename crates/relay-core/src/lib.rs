@@ -743,6 +743,12 @@ struct Track {
     /// said, or a larger one seen since.
     largest: Option<Location>,
     subscribers: Vec<Subscriber>,
+    /// SUBSCRIBEs that came while every source of the track drained, and
+    /// are held for a publisher to appear (§10.2.6): no more than
+    /// [`MAX_WAITING_SUBSCRIBERS`]. They become subscribers when the track
+    /// gets a source again, and go on waiting under the same name when the
+    /// track is over. Empty for a track that does not drain.
+    held: Vec<Waiter>,
     /// By the session and the stream they arrive on: stream numbers repeat
     /// from session to session.
     in_streams: HashMap<InStreamKey, InStream>,
@@ -821,6 +827,7 @@ impl Track {
             properties,
             largest,
             subscribers: Vec::new(),
+            held: Vec::new(),
             in_streams: HashMap::new(),
             subgroups: Subgroups::default(),
             cache: cache::Cache::default(),
@@ -1119,8 +1126,9 @@ impl Tracks {
             track.never_cached |= !cache::may_be_cached(&properties);
             track.properties = properties;
             track.largest = track.largest.max(largest);
+            // The publisher they were held for has come.
             return Ok(Added {
-                waiters: Vec::new(),
+                waiters: std::mem::take(&mut track.held),
                 replaced,
             });
         }
@@ -1240,6 +1248,32 @@ impl Tracks {
             TrackEntry::Live(track) => Some((name, track)),
             TrackEntry::Pending(_) => None,
         })
+    }
+
+    /// The SUBSCRIBEs that wait under the name: for an answer of a
+    /// publisher, for a publisher to appear, or, where every source of the
+    /// track drains, for one to come back.
+    fn waiters(&self, name: &FullTrackName) -> &[Waiter] {
+        match self.0.get(name) {
+            Some(TrackEntry::Pending(pending)) => &pending.waiters,
+            Some(TrackEntry::Live(track)) => &track.held,
+            None => &[],
+        }
+    }
+
+    /// How many names have a SUBSCRIBE that is held for a publisher to
+    /// appear.
+    fn held(&self) -> usize {
+        self.0
+            .values()
+            .filter(|entry| {
+                let waiters = match entry {
+                    TrackEntry::Pending(pending) => &pending.waiters,
+                    TrackEntry::Live(track) => &track.held,
+                };
+                waiters.iter().any(Waiter::is_held)
+            })
+            .count()
     }
 
     fn all_pending(&self) -> impl Iterator<Item = (&FullTrackName, &PendingTrack)> {
@@ -1962,11 +1996,20 @@ impl Relay {
             }
             // Every source said PUBLISH_DONE and the track still drains: it
             // has no Established upstream subscription (§9.4). §9.5 has the
-            // publishers of the namespace asked then; the subscriber is
-            // refused, because a track with a source has no place for one
-            // that waits (known gap). WHY a PUBLISH_NAMESPACE that arrives
+            // publishers of the namespace asked then; a subscriber that
+            // did not ask to be held is refused instead (known gap; §10.2.6
+            // has it answered at once). WHY a PUBLISH_NAMESPACE that arrives
             // now does have its publisher asked: the track has subscribers,
             // who are there already and stay if that publisher accepts.
+            //
+            // One that is held for a publisher to appear waits with the
+            // track: its sources are all done, so it has no publisher
+            // (§10.2.6: "This applies when a relay receives a SUBSCRIBE for
+            // a Track that has no current publisher."), and one
+            // may come back while the last streams are awaited.
+            Some(TrackPhase::Draining) if hold.is_some() => {
+                self.wait_while_it_drains(track_name, waiter)
+            }
             Some(TrackPhase::Draining) => Err(request_error_code::DOES_NOT_EXIST),
             Some(TrackPhase::Pending) => {
                 // A track that is held for a publisher to appear, and none
@@ -2031,7 +2074,8 @@ impl Relay {
                 self.put_slot(session, stream, slot, actions);
                 // Its time to be held runs whether or not somebody is asked
                 // for the track now: the one that is asked may refuse.
-                let waits_still = self.tracks.pending(track_name).is_some();
+                let waits_still =
+                    self.tracks.pending(track_name).is_some() || self.holds_a_subscribe(track_name);
                 if let (true, Some(wait_ms)) = (waits_still, hold) {
                     actions.push(Action::StartRendezvousTimer {
                         session,
@@ -2065,14 +2109,11 @@ impl Relay {
                 .requests
                 .iter()
                 .filter(|(on, slot)| match slot {
-                    RequestSlot::Waiting { track, .. } => {
-                        self.tracks.pending(track).is_some_and(|pending| {
-                            pending
-                                .waiters
-                                .iter()
-                                .any(|waiter| waiter.is_on(session, **on) && waiter.is_held())
-                        })
-                    }
+                    RequestSlot::Waiting { track, .. } => self
+                        .tracks
+                        .waiters(track)
+                        .iter()
+                        .any(|waiter| waiter.is_on(session, **on) && waiter.is_held()),
                     _ => false,
                 })
                 .count()
@@ -2080,20 +2121,33 @@ impl Relay {
         (held < MAX_HELD_SUBSCRIBES_PER_SESSION).then_some(asked.min(MAX_RENDEZVOUS_MS))
     }
 
-    /// The tracks without a source that have a SUBSCRIBE held for a
-    /// publisher to appear, whether or not somebody is asked for them now.
+    /// The tracks that have a SUBSCRIBE held for a publisher to appear:
+    /// those without a source, whether or not somebody is asked for them
+    /// now, and those whose sources all drain.
     fn held_tracks(&self) -> usize {
-        self.tracks
-            .all_pending()
-            .filter(|(_, pending)| pending.waiters.iter().any(Waiter::is_held))
-            .count()
+        self.tracks.held()
     }
 
     /// Whether the track is one of those [`Self::held_tracks`] counts.
     fn holds_a_subscribe(&self, track: &FullTrackName) -> bool {
-        self.tracks
-            .pending(track)
-            .is_some_and(|pending| pending.waiters.iter().any(Waiter::is_held))
+        self.tracks.waiters(track).iter().any(Waiter::is_held)
+    }
+
+    /// Holds a SUBSCRIBE that came while every source of the track drains.
+    fn wait_while_it_drains(
+        &mut self,
+        track_name: &FullTrackName,
+        waiter: Waiter,
+    ) -> Result<(), u64> {
+        // Never absent: the caller found the track draining.
+        let Some(track) = self.tracks.live_mut(track_name) else {
+            return Err(request_error_code::DOES_NOT_EXIST);
+        };
+        if track.held.len() >= MAX_WAITING_SUBSCRIBERS {
+            return Err(request_error_code::EXCESSIVE_LOAD);
+        }
+        track.held.push(waiter);
+        Ok(())
     }
 
     /// The time a SUBSCRIBE was held for a publisher to appear is over. It
@@ -3072,6 +3126,20 @@ impl Relay {
         }
         for subscriber in &track.subscribers {
             self.send_publish_done(subscriber, status_code, actions);
+        }
+        // The SUBSCRIBEs that were held while the track drained wait on
+        // under its name, for what is left of their time: the track has no
+        // source, and the publishers of its namespace are asked as for any
+        // SUBSCRIBE that comes to a name without one.
+        let held = std::mem::take(&mut track.held);
+        if !held.is_empty() {
+            let pending = PendingTrack {
+                asks: Vec::new(),
+                waiters: held,
+                declined: Declined::default(),
+            };
+            self.tracks.insert_pending(track_name.clone(), pending);
+            self.ask_the_publishers(track_name, None, actions);
         }
     }
 

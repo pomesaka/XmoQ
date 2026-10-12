@@ -591,6 +591,10 @@ impl Relay {
         session: SessionKey,
         stream: StreamKey,
     ) -> bool {
+        // A track that drains has no publisher to wait for an answer of.
+        if let Some(live) = self.tracks.live(track) {
+            return live.held.iter().any(|waiter| waiter.is_on(session, stream));
+        }
         let Some(pending) = self.tracks.pending_mut(track) else {
             return false;
         };
@@ -1110,6 +1114,12 @@ impl Relay {
         gone: impl Fn(&Waiter) -> bool,
         actions: &mut Vec<Action>,
     ) {
+        // One that was held while its track drained is with that track,
+        // which goes on without it.
+        if let Some(track) = self.tracks.live_mut(track_name) {
+            track.held.retain(|waiter| !gone(waiter));
+            return;
+        }
         let Some(pending) = self.tracks.pending_mut(track_name) else {
             return;
         };
