@@ -3046,6 +3046,77 @@ mod delivery_timeouts {
         }
     }
 
+    /// §10.9: a `REQUEST_UPDATE` that sets `SUBGROUP_DELIVERY_TIMEOUT` is
+    /// answered with `REQUEST_OK`, and holds for the streams the relay
+    /// learns the end of after it. A stream whose timer runs keeps the
+    /// time it was finished with (docs/moqt-implementation-notes.md,
+    /// provisional).
+    #[tokio::test(start_paused = true)]
+    async fn an_update_of_the_delivery_timeout_holds_for_the_streams_that_end_after_it() {
+        // (the timeout of the SUBSCRIBE; that of the update, 0 for none;
+        // whether the update comes before the FIN of the stream or 100 ms
+        // after it; the streams the relay holds 250 ms and 550 ms after
+        // the FIN), in milliseconds. The subscriber takes no stream.
+        let cases = [
+            (None, 200, true, 0, 0),
+            (Some(200), 0, true, 1, 1),
+            (Some(200), 500, true, 1, 0),
+            (Some(500), 200, true, 0, 0),
+            // The timer runs with what was asked when the stream ended.
+            (None, 200, false, 1, 1),
+            (Some(200), 0, false, 0, 0),
+            (Some(500), 100, false, 1, 0),
+        ];
+        for (asked, updated, before_the_fin, held_at_250, held_at_550) in cases {
+            let case = format!("asked {asked:?}, then {updated}, before the FIN: {before_the_fin}");
+            let (hub, _task) = hub::spawn(HubConfig::default());
+            let mut publisher = Peer::connect(&hub, true).await;
+            let _publication = publisher.publish().await;
+            let mut stalled = Peer::connect(&hub, false).await;
+            let (mut subscription, _alias) = stalled.subscribe_with(timeout_of(asked)).await;
+            let update = ControlMessage::RequestUpdate(xmoq_moqt::message::RequestUpdate {
+                request_id: subscription.id.value() + 2,
+                parameters: vec![Parameter::SubgroupDeliveryTimeout(updated)],
+            });
+            let objects = [object(0, 4 * STREAM_WINDOW), object(1, 4 * STREAM_WINDOW)];
+            let mut stream = Some(publisher.send_objects(&objects).await);
+            if !before_the_fin {
+                stream.take().unwrap().finish();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            send_message(
+                &mut subscription.send,
+                &update,
+                &Trace::default(),
+                "request",
+            )
+            .await
+            .unwrap();
+            let answer = timeout(SOON, subscription.reader.next_event())
+                .await
+                .expect(&case)
+                .unwrap();
+            assert!(
+                matches!(
+                    answer,
+                    RequestStreamEvent::Message(ControlMessage::RequestOk(_))
+                ),
+                "{case}: {answer:?}"
+            );
+            // Up to 250 ms after the FIN.
+            let more = if let Some(stream) = stream {
+                stream.finish();
+                250
+            } else {
+                150
+            };
+            tokio::time::sleep(Duration::from_millis(more)).await;
+            assert_eq!(hub.held().await.out_streams, held_at_250, "{case}");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(hub.held().await.out_streams, held_at_550, "{case}");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_older_group_is_given_up_when_a_newer_one_begins_whatever_timeout_was_set() {
         // (`--older-groups-grace-ms`, how long after Group 1 began Group 0

@@ -290,6 +290,13 @@ export type OwnPageExtras = {
 	 */
 	videoDecoderSupport(codec: string): Promise<string>;
 	/**
+	 * Asks for another SUBGROUP_DELIVERY_TIMEOUT on the subscription of
+	 * `playVideo`, with `setDeliveryTimeouts` of the playback (a
+	 * REQUEST_UPDATE, transport §10.9). Resolves with "accepted" when the
+	 * sender answered REQUEST_OK, and with what went wrong otherwise.
+	 */
+	updateVideoDeliveryTimeout(subgroupMs: number): Promise<string>;
+	/**
 	 * What the playing started with `playVideo` has given so far. Resolves
 	 * once `frames` frames at least were decoded, the playing has ended, or
 	 * `timeoutMs` are over, whichever comes first: a run that gets too few

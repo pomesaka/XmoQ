@@ -27,8 +27,8 @@ function subscribeBytes(requestId: number): Uint8Array {
 	return hex(pairs.join(" "));
 }
 
-/** REQUEST_UPDATE with Request ID 3 and no parameters. */
-const REQUEST_UPDATE = hex("02 00 02 03 00");
+/** REQUEST_UPDATE with Request ID 3 and FORWARD = 0: one that is refused. */
+const REQUEST_UPDATE = hex("02 00 04 03 01 10 00");
 
 const SUBGROUP = {
 	groupId: 0n,

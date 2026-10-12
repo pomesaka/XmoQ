@@ -960,6 +960,12 @@ export interface SubscriberPlan {
 	leavesAfterObjects?: number;
 	/** own-browser: subscribes and never reads the Objects. */
 	withoutReading?: boolean;
+	/**
+	 * own-rust: once its SUBSCRIBE is accepted it asks for this
+	 * SUBGROUP_DELIVERY_TIMEOUT with a REQUEST_UPDATE (transport §10.9), and
+	 * it counts as subscribed when the relay has answered REQUEST_OK.
+	 */
+	updatesSubgroupTimeoutMs?: number;
 }
 
 function startRustSubscriber(
@@ -978,7 +984,16 @@ function startRustSubscriber(
 		...(kind === "own-rust"
 			? ["--objects", String(plan.leavesAfterObjects ?? 1_000_000)]
 			: []),
+		...(plan.updatesSubgroupTimeoutMs === undefined
+			? []
+			: [
+					"--update-subgroup-timeout-ms",
+					String(plan.updatesSubgroupTimeoutMs),
+				]),
 	]);
+	if (plan.updatesSubgroupTimeoutMs !== undefined && kind !== "own-rust") {
+		throw new Error(`${kind} sends no REQUEST_UPDATE`);
+	}
 	const kill = async (): Promise<void> => {
 		client.child.kill("SIGKILL");
 		await client.exited;
@@ -1014,7 +1029,10 @@ function startRustSubscriber(
 	return {
 		kind,
 		label,
-		subscribed: client.waitForLine(/^SUBSCRIBED /),
+		subscribed:
+			plan.updatesSubgroupTimeoutMs === undefined
+				? client.waitForLine(/^SUBSCRIBED /)
+				: client.waitForLine(/^UPDATE_ACCEPTED$/),
 		object: (group) =>
 			objectOf(new RegExp(`^OBJECT group=${group} .*payload_hex=([0-9a-f]*)$`)),
 		async properties(group) {

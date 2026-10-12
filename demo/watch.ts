@@ -66,6 +66,15 @@ const AUTO_SHARE = Number(query.get("autoShare") ?? DEFAULT_AUTO_SHARE);
  * (docs/experiments/2026-10-12-which-delivery-timeout-a-viewer-asks-for-on-its-video.md).
  */
 const VIDEO_TIMEOUT_MS = Number(query.get("videoTimeout") ?? 150);
+/**
+ * `?videoTimeoutThen=N&videoTimeoutAfter=S`: `S` seconds after the video
+ * began (10 when left out), the page asks for a timeout of `N` ms on the
+ * subscription it has, with a REQUEST_UPDATE (`setDeliveryTimeouts` of the
+ * playback; transport §10.9). For seeing that the relay follows a timeout
+ * that changes; nothing is updated without it.
+ */
+const VIDEO_TIMEOUT_THEN = query.get("videoTimeoutThen");
+const VIDEO_TIMEOUT_AFTER_S = Number(query.get("videoTimeoutAfter") ?? 10);
 
 
 /** The last 200 values of something measured, for its median and its largest. */
@@ -205,6 +214,8 @@ async function main(): Promise<void> {
 	let shown = 0;
 	const stalls: { from: number; to: number }[] = [];
 	let playback: VideoPlayback | undefined;
+	/** `?videoTimeoutThen`: what was asked for, when (`Date.now()`), and what the relay answered. */
+	let timeoutNow: { ms: number; at: number; answer: string } | undefined;
 	/** The namespace of the broadcast the page last connected to. */
 	let playingNamespace: Uint8Array[] = namespace();
 	let audio: AudioPlayback | undefined;
@@ -507,6 +518,7 @@ async function main(): Promise<void> {
 			videoFrames: stats.decoded,
 			decoderFailures: playback?.stats().decoderFailures ?? 0,
 			videoTimeoutMs: VIDEO_TIMEOUT_MS,
+			...(timeoutNow === undefined ? {} : { videoTimeoutThen: timeoutNow }),
 			strays,
 			quality,
 			audioPieces: heard?.decoded ?? 0,
@@ -602,6 +614,20 @@ async function main(): Promise<void> {
 					? undefined
 					: await playVersion(tracks.video, { signal: leave.signal });
 			playback = video;
+			if (VIDEO_TIMEOUT_THEN !== null && video !== undefined) {
+				const then = Number(VIDEO_TIMEOUT_THEN);
+				setTimeout(() => {
+					const asked = Date.now();
+					video.setDeliveryTimeouts({ subgroupMs: then }).then(
+						() => {
+							timeoutNow = { ms: then, at: asked, answer: "accepted" };
+						},
+						(error: unknown) => {
+							timeoutNow = { ms: then, at: asked, answer: String(error) };
+						},
+					);
+				}, VIDEO_TIMEOUT_AFTER_S * 1000);
+			}
 			quality.level = 0;
 			quality.track = tracks.video.name;
 			/** Resolves when the version that is played ends; one that was left for another does not count. */

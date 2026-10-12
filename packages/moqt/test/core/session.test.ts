@@ -431,10 +431,10 @@ describe("Session", () => {
 		session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
 		session.openSubgroup(2n, SUBGROUP);
 
-		// REQUEST_UPDATE with Request ID 1 and no parameters.
+		// REQUEST_UPDATE with Request ID 1 and FORWARD = 0.
 		const outputs = session.receiveRequestStreamData(
 			2,
-			hex("02 00 02 01 00"),
+			hex("02 00 04 01 01 10 00"),
 			false,
 		);
 		expect(outputs.map((output) => output.type)).toEqual([

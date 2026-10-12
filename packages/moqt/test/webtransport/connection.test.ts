@@ -445,7 +445,7 @@ describe("connectOver", () => {
 			// (§5.1): a REQUEST_UPDATE that crossed PUBLISH_DONE, then the FIN.
 			name: "a message and then a FIN",
 			act: async (request: PeerBidiStream) => {
-				await request.reply.write(hex("02 00 02 01 00"));
+				await request.reply.write(hex("02 00 04 01 01 10 00"));
 				await request.reply.close();
 			},
 			end: { type: "fin" },
@@ -516,7 +516,7 @@ describe("connectOver", () => {
 	// Rust client.
 	test("after a refused REQUEST_UPDATE, the subscriber's direction is stopped when the wait is over", async () => {
 		const { request, track } = await published({ peerStreamEndTimeoutMs: 0 });
-		await request.reply.write(hex("02 00 02 01 00"));
+		await request.reply.write(hex("02 00 04 01 01 10 00"));
 		expect(await track.ended).toEqual({ type: "update-failed" });
 		expect(await rejection(request.reply.closed)).toMatchObject({
 			streamErrorCode: 1,
@@ -837,7 +837,7 @@ describe("connectOver", () => {
 		},
 		{
 			name: "a REQUEST_UPDATE, which is refused (§10.9.1)",
-			act: (request) => request.reply.write(hex("02 00 02 01 00")),
+			act: (request) => request.reply.write(hex("02 00 04 01 01 10 00")),
 			end: { type: "update-failed" },
 		},
 	] satisfies {

@@ -1378,6 +1378,16 @@ window.xmoqOwn = {
 		return supported === true ? "supported" : "not supported";
 	}),
 
+	updateVideoDeliveryTimeout: withPlainErrors(async (subgroupMs: number) => {
+		if (videoPlaying === undefined) return "nothing is played";
+		try {
+			await videoPlaying.playback.setDeliveryTimeouts({ subgroupMs });
+			return "accepted";
+		} catch (error) {
+			return `not accepted: ${errorText(error)}`;
+		}
+	}),
+
 	videoReport: withPlainErrors(async (frames: number, timeoutMs: number) => {
 		const until = performance.now() + timeoutMs;
 		for (;;) {

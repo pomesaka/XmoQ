@@ -1588,9 +1588,13 @@ pub struct OutgoingSubgroup {
     queue: mpsc::UnboundedSender<Command>,
     share: Arc<Share>,
     reset: watch::Sender<Option<u32>>,
-    /// When [`Self::finish`] was called; the time the stream may take to be
-    /// delivered is counted from then.
-    finished: watch::Sender<Option<Instant>>,
+    /// When [`Self::finish`] was called, and how long the stream may take
+    /// to be delivered, counted from then: the smaller of `asked` as it was
+    /// at that call and the sender's own limit.
+    finished: watch::Sender<Option<(Instant, Option<Duration>)>>,
+    /// The receiver's delivery timeout, as it stands
+    /// ([`Self::set_delivery_timeout`]).
+    asked: watch::Sender<Option<Duration>>,
 }
 
 impl OutgoingSubgroup {
@@ -1600,7 +1604,7 @@ impl OutgoingSubgroup {
     ///
     /// `delivery_timeout` is the receiver's own word on how long it may take
     /// to have all of the stream (the `SUBGROUP_DELIVERY_TIMEOUT` of its
-    /// subscription). §8: the sender "MUST start a timer of
+    /// subscription), until [`Self::set_delivery_timeout`] says another. §8: the sender "MUST start a timer of
     /// `SUBGROUP_DELIVERY_TIMEOUT` duration once it becomes aware that all of
     /// the objects on the subgroup have been published", which here is
     /// [`Self::finish`], and "If the timer expires before the underlying
@@ -1649,9 +1653,9 @@ impl OutgoingSubgroup {
         let (queue, commands) = mpsc::unbounded_channel();
         let (reset, reset_signal) = watch::channel(None);
         let (finished, finished_signal) = watch::channel(None);
+        let (asked, _) = watch::channel(delivery_timeout);
         let writer = Writer {
             share: Arc::clone(&share),
-            patience: smaller_of(delivery_timeout, budget.limits.delivery_patience),
             finished: finished_signal,
             commands,
             reset: reset_signal,
@@ -1669,7 +1673,20 @@ impl OutgoingSubgroup {
             share,
             reset,
             finished,
+            asked,
         })
+    }
+
+    /// The receiver changed the delivery timeout of its subscription
+    /// (`REQUEST_UPDATE`, §10.9); `None` for none, as in [`Self::spawn`].
+    ///
+    /// It holds for a stream that [`Self::finish`] is called on after this.
+    /// A stream that was finished before keeps the time it was finished
+    /// with: its timer runs. WHY: §8 starts the timer when the sender knows
+    /// the Subgroup is complete and says nothing of a timeout that changes
+    /// under it (docs/moqt-implementation-notes.md, **provisional**).
+    pub fn set_delivery_timeout(&self, delivery_timeout: Option<Duration>) {
+        self.asked.send_replace(delivery_timeout);
     }
 
     /// Queues an Object.
@@ -1697,9 +1714,13 @@ impl OutgoingSubgroup {
     /// the stream may take to be delivered runs from this call
     /// ([`Self::spawn`]).
     pub fn finish(&self) {
+        let patience = smaller_of(
+            *self.asked.borrow(),
+            self.share.budget.limits.delivery_patience,
+        );
         self.finished.send_if_modified(|at| {
             at.is_none() && {
-                *at = Some(Instant::now());
+                *at = Some((Instant::now(), patience));
                 true
             }
         });
@@ -1745,11 +1766,10 @@ fn smaller_of(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
 
 struct Writer {
     share: Arc<Share>,
-    /// How long after `finish` the stream may take to be delivered before it
-    /// is given up ([`OutgoingSubgroup::spawn`]).
-    patience: Option<Duration>,
-    /// When `finish` was called on the handle.
-    finished: watch::Receiver<Option<Instant>>,
+    /// When `finish` was called on the handle, and how long after it the
+    /// stream may take to be delivered before it is given up
+    /// ([`OutgoingSubgroup::spawn`]).
+    finished: watch::Receiver<Option<(Instant, Option<Duration>)>>,
     commands: mpsc::UnboundedReceiver<Command>,
     reset: watch::Receiver<Option<u32>>,
     trace: Trace,
@@ -1783,20 +1803,16 @@ impl Writer {
     fn given_up(&self) -> impl Future<Output = (u32, bool)> + Send + use<> {
         let asked = self.reset_asked();
         let mut finished = self.finished.clone();
-        let patience = self.patience;
         async move {
             let timed_out = async {
-                let Some(patience) = patience else {
-                    return std::future::pending().await;
-                };
                 // An error: the handle is gone and never called `finish`.
                 let at = match finished.wait_for(Option::is_some).await {
                     Ok(at) => *at,
                     Err(_) => None,
                 };
                 match at {
-                    Some(at) => tokio::time::sleep_until(at + patience).await,
-                    None => std::future::pending().await,
+                    Some((at, Some(patience))) => tokio::time::sleep_until(at + patience).await,
+                    Some((_, None)) | None => std::future::pending().await,
                 }
             };
             tokio::select! {

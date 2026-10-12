@@ -209,6 +209,21 @@ export interface Requests {
 	): void;
 	cancelRequest(requestId: bigint): SessionOutput[];
 	/**
+	 * Asks the publisher to change parameters of an Established subscription
+	 * this endpoint made with SUBSCRIBE (§10.9): sends a REQUEST_UPDATE on
+	 * the stream of that SUBSCRIBE. A parameter that is left out stays as
+	 * it was. The answer comes as the event `update-ok` or `update-error`.
+	 *
+	 * Throws a `RangeError` for a request that is not an Established
+	 * SUBSCRIBE of this endpoint, for a parameter that may not appear in
+	 * REQUEST_UPDATE, and when `MAX_UNANSWERED_UPDATES` updates wait for
+	 * their answer. Nothing is sent and no Request ID is used up then.
+	 */
+	updateSubscription(
+		requestId: bigint,
+		parameters: MessageParameters,
+	): SessionOutput[];
+	/**
 	 * A SUBSCRIBE of the peer, whole, with a Request ID that was checked.
 	 * Unless it is refused here, the stream it came on is adopted
 	 * (`adopt-peer-stream`), and the request waits for `acceptSubscribe` or
@@ -390,6 +405,8 @@ interface SubscribeEntry extends RequestCommon {
 	kind: "SUBSCRIBE";
 	/** Set by SUBSCRIBE_OK. */
 	trackAlias: bigint | undefined;
+	/** REQUEST_UPDATEs this endpoint sent that have no answer yet (`updateSubscription`). */
+	updates: number;
 }
 
 /**
@@ -456,6 +473,14 @@ const REQUEST_OK = encodeControlMessage({
  * caller. Provisional.
  */
 const MAX_HELD_FETCH_UPDATES = 64;
+
+/**
+ * REQUEST_UPDATEs of one subscription that may wait for their answer.
+ * **Provisional**; `MAX_UNANSWERED_UPDATES` of the Rust session is the same.
+ * WHY a limit: a publisher that answers none would have the count grow with
+ * every call.
+ */
+export const MAX_UNANSWERED_UPDATES = 16;
 
 /** PUBLISH_DONE status code UPDATE_FAILED (§10.11). */
 const UPDATE_FAILED = 0x8n;
@@ -808,6 +833,49 @@ export function createRequests(options: RequestsOptions): Requests {
 		});
 	};
 
+	const onUpdateAnswered = (
+		request: SubscribeEntry,
+		message: RequestOk | RequestError,
+		out: SessionOutput[],
+	): void => {
+		const { requestId } = request;
+		if (message.type === "REQUEST_ERROR") {
+			// §10.9.1: the publisher "MUST also terminate the subscription by
+			// sending a PUBLISH_DONE with error code UPDATE_FAILED", which
+			// comes next and ends the request. WHY the count goes to 0: a
+			// receiver may answer several updates with one REQUEST_ERROR.
+			request.updates = 0;
+			out.push({
+				type: "event",
+				event: {
+					type: "update-error",
+					requestId,
+					errorCode: message.errorCode,
+					errorReason: message.errorReason,
+				},
+			});
+			return;
+		}
+		// What a REQUEST_UPDATE_OK may carry: §10.2.10, §10.2.11.
+		const outside = Object.keys(message.parameters).filter(
+			(name) => name !== "expires" && name !== "largestObject",
+		);
+		if (outside.length > 0) {
+			throw protocolViolation(
+				`${outside.join(", ")} not allowed in REQUEST_UPDATE_OK`,
+			);
+		}
+		// §10.5: Track Properties are empty in REQUEST_UPDATE_OK.
+		if (message.trackProperties.length > 0) {
+			throw protocolViolation("Track Properties in REQUEST_UPDATE_OK");
+		}
+		request.updates -= 1;
+		out.push({
+			type: "event",
+			event: { type: "update-ok", requestId, parameters: message.parameters },
+		});
+	};
+
 	const onSubscribeOk = (
 		request: SubscribeEntry,
 		message: SubscribeOk,
@@ -956,11 +1024,24 @@ export function createRequests(options: RequestsOptions): Requests {
 	};
 
 	/**
-	 * §10.9: the subscriber of a subscription made with PUBLISH may update it.
-	 * Updates are not implemented, so the update fails: §4 asks a limited
-	 * endpoint for NOT_SUPPORTED, and §10.9.1 says "When a REQUEST_UPDATE is
-	 * unsuccessful, the publisher MUST also terminate the subscription by
-	 * sending a PUBLISH_DONE with error code UPDATE_FAILED."
+	 * §10.9: the subscriber of an Established subscription may update it.
+	 *
+	 * An update with no parameter, or with SUBGROUP_DELIVERY_TIMEOUT alone, is
+	 * answered with REQUEST_OK. Nothing here changes by it: this endpoint
+	 * acts on no delivery timeout, that of a SUBSCRIBE included (the relay
+	 * does, and applies the update). WHY one without a parameter is
+	 * accepted: §10.9 has "If a parameter previously set on the request is
+	 * not present in REQUEST_UPDATE, its value remains unchanged", and
+	 * §13.6.1 names "REQUEST_UPDATE with no modified Message Parameters" as
+	 * a way to keep a session from idling out.
+	 *
+	 * Any other update fails: §4 asks a limited endpoint for NOT_SUPPORTED,
+	 * and §10.9.1 says "When a REQUEST_UPDATE is unsuccessful, the publisher
+	 * MUST also terminate the subscription by sending a PUBLISH_DONE with
+	 * error code UPDATE_FAILED." WHY not accepted without effect: a
+	 * REQUEST_OK for a filter or a Forward State that then does not change
+	 * would have the subscriber wait for Objects that do not come. The Rust
+	 * session has the same rule (`only_the_subgroup_timeout`).
 	 */
 	const onRequestUpdate = (
 		request: PublishEntry,
@@ -970,6 +1051,14 @@ export function createRequests(options: RequestsOptions): Requests {
 		// §10.1: REQUEST_UPDATE consumes a Request ID of its sender.
 		options.checkPeerRequestId(message.requestId);
 		const { stream, requestId } = request;
+		if (
+			Object.keys(message.parameters).every(
+				(name) => name === "subgroupDeliveryTimeout",
+			)
+		) {
+			out.push({ type: "send", stream, data: REQUEST_OK });
+			return;
+		}
 		out.push({
 			type: "send",
 			stream,
@@ -1116,6 +1205,18 @@ export function createRequests(options: RequestsOptions): Requests {
 		if (request.kind === "PEER_FETCH") {
 			if (message.type !== "REQUEST_UPDATE") throw unexpected;
 			onUpdateOfPeerFetch(request, message, out);
+			return;
+		}
+		// §10.9: "The receiver of a REQUEST_UPDATE MUST respond with exactly
+		// one REQUEST_OK or REQUEST_ERROR". Responses carry no Request ID, so
+		// they answer the updates in the order sent.
+		if (
+			request.kind === "SUBSCRIBE" &&
+			request.state === "Established" &&
+			request.updates > 0 &&
+			(message.type === "REQUEST_OK" || message.type === "REQUEST_ERROR")
+		) {
+			onUpdateAnswered(request, message, out);
 			return;
 		}
 		switch (message.type) {
@@ -1317,7 +1418,12 @@ export function createRequests(options: RequestsOptions): Requests {
 
 		subscribe(request) {
 			return openRequest((common) => ({
-				entry: { ...common, kind: "SUBSCRIBE", trackAlias: undefined },
+				entry: {
+					...common,
+					kind: "SUBSCRIBE",
+					trackAlias: undefined,
+					updates: 0,
+				},
 				message: {
 					type: "SUBSCRIBE",
 					requestId: common.requestId,
@@ -1418,6 +1524,35 @@ export function createRequests(options: RequestsOptions): Requests {
 		fetchStreamReset(requestId, peerStream, code, out) {
 			const request = fetchOfStream(requestId, peerStream);
 			if (request !== undefined) fetchStreamEnded(request, "reset", code, out);
+		},
+
+		updateSubscription(requestId, parameters) {
+			const request = requests.get(requestId);
+			if (
+				request === undefined ||
+				request.kind !== "SUBSCRIBE" ||
+				request.state !== "Established" ||
+				request.endedLocally
+			) {
+				throw new RangeError(
+					`request ${requestId} is not an Established SUBSCRIBE of this endpoint`,
+				);
+			}
+			if (request.updates >= MAX_UNANSWERED_UPDATES) {
+				throw new RangeError(
+					`${MAX_UNANSWERED_UPDATES} updates of request ${requestId} wait for their answer`,
+				);
+			}
+			// Throws for a parameter that is not allowed, before anything is
+			// taken. §10.1: a REQUEST_UPDATE consumes a Request ID.
+			const data = encodeControlMessage({
+				type: "REQUEST_UPDATE",
+				requestId: nextRequestId,
+				parameters,
+			});
+			nextRequestId += 2n;
+			request.updates += 1;
+			return [{ type: "send", stream: request.stream, data }];
 		},
 
 		cancelRequest(requestId) {
