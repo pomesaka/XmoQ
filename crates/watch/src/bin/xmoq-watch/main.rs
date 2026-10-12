@@ -453,8 +453,11 @@ async fn subscriptions(
         )
     };
     Ok(Subscribed {
-        video: requests.subscribe(&video).await?,
-        audio: requests.subscribe(&audio).await?,
+        // WHY the video alone: a Group of it is a second of frames that
+        // depend on each other, and one that is late is not worth waiting
+        // for; the sound's are 200 ms and small, and losing one is heard.
+        video: requests.subscribe(&video, args.video_timeout_ms).await?,
+        audio: requests.subscribe(&audio, None).await?,
         _catalog: kept,
         found,
     })

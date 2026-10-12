@@ -58,6 +58,13 @@ pub struct Args {
     pub tracks: Option<(String, String)>,
     /// `--buffer-ms`: how long an Object is held beyond the fastest way.
     pub buffer_ms: u64,
+    /// `--video-timeout-ms`: the `SUBGROUP_DELIVERY_TIMEOUT` the SUBSCRIBE
+    /// of the video track carries (§10.2.3 of
+    /// `draft-ietf-moq-transport-18`): the relay gives up a Group the
+    /// viewer does not have that long after its last Object, and goes on
+    /// with the next. `None`: the parameter is left out, and every Group is
+    /// delivered however late.
+    pub video_timeout_ms: Option<u64>,
     /// `--volume`: 0 to 1.
     pub volume: f32,
     /// `--scale`: how many times its pixels the picture takes of the
@@ -108,6 +115,8 @@ xmoq-watch --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
 xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line>] [--token no]
   --video <track> --audio <track>   the tracks by name; without them, those of the catalog
   --buffer-ms <ms>                  how long an Object is held beyond the fastest way (50)
+  --video-timeout-ms <ms>           ask the relay to give up a Group of the video that is not delivered
+                                    that long after its last Object (not asked; 0 is not asking)
   --volume <0..1>                   (1)
   --scale <n>                       the picture at n times its pixels (1)
   --medium file|direct              a file the terminal reads (file), or the pixels in the escape codes
@@ -182,6 +191,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         },
         tracks: None,
         buffer_ms: DEFAULT_BUFFER_MS,
+        video_timeout_ms: None,
         volume: 1.0,
         scale: 1,
         medium: Medium::File,
@@ -217,6 +227,11 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                 if args.buffer_ms > crate::clock::MOST_FROM_THE_LEAST_US / 1000 {
                     return Err(Invalid(format!("--buffer-ms {value}: 10000 at most")));
                 }
+            }
+            "--video-timeout-ms" => {
+                // §8: "a value of 0 means that there is no timeout set".
+                let timeout: u64 = number(&flag, &value)?;
+                args.video_timeout_ms = (timeout > 0).then_some(timeout);
             }
             "--volume" => {
                 let volume: f32 = number(&flag, &value)?;
@@ -290,6 +305,7 @@ mod tests {
             source,
             tracks: None,
             buffer_ms: 50,
+            video_timeout_ms: None,
             volume: 1.0,
             scale: 1,
             medium: Medium::File,
@@ -326,7 +342,7 @@ mod tests {
         assert_eq!(
             parsed(
                 "--room http://h/rooms/a --name me --say hello --token no --video v --audio a \
-                 --buffer-ms 150 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
+                 --buffer-ms 150 --video-timeout-ms 100 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
                  --seconds 20 --log l --sound off --measure-demo-marks on"
             ),
             Ok(Args {
@@ -338,6 +354,7 @@ mod tests {
                 },
                 tracks: Some(("v".to_string(), "a".to_string())),
                 buffer_ms: 150,
+                video_timeout_ms: Some(100),
                 volume: 0.3,
                 scale: 2,
                 medium: Medium::Direct,
@@ -352,6 +369,12 @@ mod tests {
         assert_eq!(
             parsed("--room http://h/rooms/a --fit none").map(|args| args.fit),
             Ok(Fit::AsItIs)
+        );
+        // 0 is the draft's way of asking for no timeout.
+        assert_eq!(
+            parsed("--room http://h/rooms/a --video-timeout-ms 0")
+                .map(|args| args.video_timeout_ms),
+            Ok(None)
         );
     }
 
