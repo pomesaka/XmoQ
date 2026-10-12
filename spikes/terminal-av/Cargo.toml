@@ -23,6 +23,8 @@ openh264 = "=0.9.8"
 tokio-tungstenite = "=0.30.0"
 futures-util = "=0.3.31"
 serde_json = "=1.0.152"
+# For the terminal's line mode (termios).
+libc = "0.2"
 
 [profile.release]
 debug = false

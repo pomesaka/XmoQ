@@ -12,7 +12,13 @@
 //! of its certificate, the namespace) and gives a token for the relay,
 //! which goes into SETUP and into both SUBSCRIBEs; `--token no` asks for
 //! none. The chat of the room is written under the picture, and to stderr
-//! where stderr is no terminal (`CHAT ...`). `--say` sends one line.
+//! where stderr is no terminal (`CHAT ...`). `--say` sends one line. When
+//! the room's broadcast begins, ends or moves, the viewer follows it.
+//!
+//! Keys, where stdin is a terminal: `q` or Ctrl-C ends, `+` and `-` change
+//! the volume, `m` mutes, `t` or Enter begins a line for the chat (Enter
+//! sends it, Esc gives it up). `--log <file>` takes the lines about the room
+//! and the keys, for a run whose stderr is the terminal.
 //!
 //! The clock: the smallest (arrival - Timestamp) seen on either track is
 //! taken for the time an Object needs at least, and every Object is due
@@ -22,12 +28,13 @@
 //! It ends with Ctrl-C, after `--seconds`, or when a track ends, and prints
 //! `AV_PLAYED` to stderr.
 
+mod keys;
 mod picture;
 mod room;
 mod screen;
 mod sound;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
@@ -66,6 +73,7 @@ struct Args {
     name: String,
     say: Option<String>,
     ask_token: bool,
+    log: Option<String>,
 }
 
 fn hash_of(hex: &str) -> Result<[u8; 32]> {
@@ -96,6 +104,7 @@ fn parse_args() -> Result<Args> {
         name: "terminal".to_string(),
         say: None,
         ask_token: true,
+        log: None,
     };
     let mut given = std::env::args().skip(1);
     while let Some(flag) = given.next() {
@@ -124,6 +133,7 @@ fn parse_args() -> Result<Args> {
             "--name" => args.name = value,
             "--say" => args.say = Some(value),
             "--token" => args.ask_token = value != "no",
+            "--log" => args.log = Some(value),
             other => bail!("unknown flag {other}"),
         }
     }
@@ -222,47 +232,205 @@ fn spread(mut values: Vec<f32>) -> String {
     )
 }
 
-async fn run(args: &Args) -> Result<()> {
-    // With a room: where the broadcast is, and a token, are the room's to say.
-    let mut room = None;
-    let (mut url, mut cert_sha256, mut namespace) = (args.url.clone(), args.cert_sha256, args.namespace.clone());
-    let mut token = None;
-    if let Some(address) = &args.room {
-        let mut joined = room::Room::join(address, &args.name).await?;
-        let broadcast = joined.broadcast(Duration::from_secs(30)).await?;
-        eprintln!("ROOM_BROADCAST relay={} namespace={}", broadcast.relay_url, broadcast.namespace.join("/"));
-        if args.ask_token {
-            // §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value; as the pages do.
-            token = joined.token(&broadcast.namespace).await?.map(|text| [&[0x03, 0x00], text.as_bytes()].concat());
-            eprintln!("ROOM_TOKEN {}", if token.is_some() { "given" } else { "none: the room has no key" });
-        }
-        url = broadcast.relay_url;
-        cert_sha256 = hash_of(&broadcast.cert_sha256_hex)?;
-        namespace = broadcast.namespace.join("/");
-        if let Some(text) = &args.say {
-            joined.say(text).await?;
-        }
-        room = Some(joined);
-    }
-    let connection = Arc::new(wt::connect(&url, cert_sha256, &StreamConfig::default()).await?);
-    let played = play(args, &connection, &namespace, token.as_deref(), &mut room).await;
-    if played.is_err()
-        && let Ok(end) = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await
-    {
-        eprintln!("SESSION_ENDED {end:?}");
-    }
-    connection.close(0, b"");
-    let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
-    played
+/// What the viewer shares between its parts while it runs.
+struct Ui {
+    under: Arc<Mutex<screen::Under>>,
+    volume: Arc<sound::Volume>,
+    keys: keys::Keys,
+    pressed: Option<mpsc::Receiver<u8>>,
+    log: Option<std::fs::File>,
+    /// Becomes true when the process is told to end.
+    stop: tokio::sync::watch::Receiver<bool>,
+    deadline: Option<tokio::time::Instant>,
 }
 
+impl Ui {
+    /// A line about the room or the keys: to `--log`, or to stderr where that is no terminal.
+    fn note(&mut self, line: &str) {
+        if let Some(log) = &mut self.log {
+            let _ = writeln!(log, "{line}");
+        } else if !std::io::stderr().is_terminal() {
+            eprintln!("{line}");
+        }
+    }
+
+    fn chat(&mut self, line: String) {
+        self.note(&format!("CHAT {line}"));
+        let mut under = self.under.lock().expect("the lock");
+        under.chat.push(line);
+        under.version += 1;
+    }
+
+    /// Writes the line of the keys anew.
+    fn show(&self) {
+        let status = match self.keys.typing() {
+            Some(line) => format!("> {line}_"),
+            None => format!(
+                "[q] quit  [+/-] volume {:.1}{}  [t] say",
+                self.volume.level(),
+                if self.volume.muted() { " (muted, [m])" } else { "  [m] mute" }
+            ),
+        };
+        let mut under = self.under.lock().expect("the lock");
+        under.status = status.chars().filter(|char| !char.is_control()).take(120).collect();
+        under.version += 1;
+    }
+
+    /// The next thing that is not the broadcast's: a key that asks for something, the end of
+    /// the time, or the order to end.
+    async fn asked(&mut self) -> keys::Asked {
+        loop {
+            let pressed = async {
+                match self.pressed.as_mut() {
+                    Some(pressed) => pressed.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let deadline = async {
+                match self.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                () = deadline => return keys::Asked::Quit,
+                _ = self.stop.changed() => return keys::Asked::Quit,
+                byte = pressed => {
+                    // Stdin is over: no more keys.
+                    let Some(byte) = byte else {
+                        self.pressed = None;
+                        continue;
+                    };
+                    let asked = self.keys.press(byte);
+                    match &asked {
+                        Some(keys::Asked::Louder) => self.volume.change(0.1),
+                        Some(keys::Asked::Quieter) => self.volume.change(-0.1),
+                        Some(keys::Asked::Mute) => self.volume.mute(),
+                        _ => {}
+                    }
+                    self.show();
+                    match asked {
+                        Some(keys::Asked::Louder | keys::Asked::Quieter | keys::Asked::Mute) => {
+                            let line = format!("VOLUME level={:.1} muted={}", self.volume.level(), self.volume.muted());
+                            self.note(&line);
+                        }
+                        Some(asked) => return asked,
+                        None => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How a broadcast stopped being played.
+enum Ended {
+    /// The viewer is to end.
+    Quit,
+    /// The broadcast ended or moved: the room says what comes next.
+    Again,
+}
+
+/// Waits until the room has a broadcast. None when the viewer is to end first.
+async fn broadcast_of(room: &mut room::Room, ui: &mut Ui) -> Result<Option<room::Broadcast>> {
+    loop {
+        if let Some(broadcast) = room.current() {
+            return Ok(Some(broadcast));
+        }
+        tokio::select! {
+            said = room.next() => match said? {
+                room::Said::Chat(line) => ui.chat(line),
+                room::Said::Broadcast(_) => {}
+            },
+            asked = ui.asked() => match asked {
+                keys::Asked::Say(text) => room.say(&text).await?,
+                _ => return Ok(None),
+            },
+        }
+    }
+}
+
+async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
+    // With a room: where the broadcast is, and a token, are the room's to say.
+    let mut room = match &args.room {
+        Some(address) => Some(room::Room::join(address, &args.name).await?),
+        None => None,
+    };
+    if let (Some(room), Some(text)) = (&mut room, &args.say) {
+        room.say(text).await?;
+    }
+    let mut first = true;
+    loop {
+        let (mut url, mut cert_sha256, mut namespace) = (args.url.clone(), args.cert_sha256, args.namespace.clone());
+        let mut token = None;
+        let mut playing = None;
+        if let Some(room) = &mut room {
+            if room.current().is_none() {
+                ui.note("ROOM_BROADCAST none: waiting");
+            }
+            let Some(broadcast) = broadcast_of(room, ui).await? else { return Ok(()) };
+            ui.note(&format!("ROOM_BROADCAST relay={} namespace={}", broadcast.relay_url, broadcast.namespace.join("/")));
+            if args.ask_token {
+                // §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value; as the pages do.
+                token = room.token(&broadcast.namespace).await?.map(|text| [&[0x03, 0x00], text.as_bytes()].concat());
+                ui.note(&format!("ROOM_TOKEN {}", if token.is_some() { "given" } else { "none: the room has no key" }));
+            }
+            url = broadcast.relay_url.clone();
+            cert_sha256 = hash_of(&broadcast.cert_sha256_hex)?;
+            namespace = broadcast.namespace.join("/");
+            playing = Some(broadcast);
+        }
+        let mut began = false;
+        let played = match wt::connect(&url, cert_sha256, &StreamConfig::default()).await {
+            Ok(connection) => {
+                let connection = Arc::new(connection);
+                let played = play(args, &connection, &namespace, token.as_deref(), &mut room, playing.as_ref(), ui, &mut began).await;
+                if played.is_err()
+                    && let Ok(end) = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await
+                {
+                    ui.note(&format!("SESSION_ENDED {end:?}"));
+                    // To the person as well, where the note went elsewhere.
+                    if !began && (ui.log.is_some() || std::io::stderr().is_terminal()) {
+                        eprintln!("SESSION_ENDED {end:?}");
+                    }
+                }
+                connection.close(0, b"");
+                let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
+                played
+            }
+            Err(error) => Err(error.into()),
+        };
+        match played {
+            Ok(Ended::Quit) => return Ok(()),
+            Ok(Ended::Again) if room.is_some() => {}
+            Ok(Ended::Again) => return Ok(()),
+            // WHY the first try ends the viewer and a later one does not: a relay that turns
+            // the viewer down is to be seen, and a broadcast that broke off may come back.
+            Err(error) if room.is_none() || (first && !began) => return Err(error),
+            Err(error) => {
+                ui.note(&format!("PLAY_ENDED {error:#}"));
+                // The room may still name the broadcast that is gone: not at once again.
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    asked = ui.asked() => if !matches!(asked, keys::Asked::Say(_)) { return Ok(()) },
+                }
+            }
+        }
+        first = false;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn play(
     args: &Args,
     connection: &Arc<WtConnection>,
     namespace: &str,
     token: Option<&[u8]>,
     room: &mut Option<room::Room>,
-) -> Result<()> {
+    playing: Option<&room::Broadcast>,
+    ui: &mut Ui,
+    began_playing: &mut bool,
+) -> Result<Ended> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
     let (queue, mut events) = mpsc::channel(64);
@@ -286,69 +454,79 @@ async fn play(
     let mut video = subscribe(connection, &mut session, &namespace, &args.video, token).await?;
     let mut audio = subscribe(connection, &mut session, &namespace, &args.audio, token).await?;
 
-    let chat = Arc::new(Mutex::new(Vec::new()));
     let to: Box<dyn std::io::Write + std::marker::Send> = match &args.out {
-        Some(path) => Box::new(std::fs::File::create(path)?),
+        Some(path) => Box::new(std::fs::OpenOptions::new().create(true).append(true).open(path)?),
         None => Box::new(std::io::stdout()),
     };
-    let screen = screen::Screen::new(to, args.medium, args.scale, Arc::clone(&chat));
+    let screen = screen::Screen::new(to, args.medium, args.scale, Arc::clone(&ui.under));
     let (frames, for_picture) = std_mpsc::channel();
     let picture = std::thread::spawn(move || picture::run(for_picture, screen));
-    let mut sound = sound::Sound::open(args.volume)?;
+    let mut sound = sound::Sound::open(Arc::clone(&ui.volume))?;
+    ui.show();
 
     let began = Instant::now();
     let mut clock = Clock { began, least: None, buffer: args.buffer };
-    let end = async {
-        match args.seconds {
-            Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds)).await,
-            None => std::future::pending().await,
-        }
-    };
-    tokio::pin!(end);
     let (mut no_timestamp, mut streams_reset) = (0u64, 0u64);
+    let mut ended = Ended::Again;
+    let mut failed = None;
     let why = loop {
         tokio::select! {
-            () = &mut end => break "the time was over",
-            _ = tokio::signal::ctrl_c() => break "interrupted",
+            asked = ui.asked() => match asked {
+                keys::Asked::Say(text) => match room.as_mut() {
+                    Some(room) => {
+                        ui.note(&format!("SAID {text}"));
+                        room.say(&text).await?;
+                    }
+                    None => ui.note("SAID nothing: no room"),
+                },
+                _ => {
+                    ended = Ended::Quit;
+                    break "the viewer was ended";
+                }
+            },
             said = async {
                 match room.as_mut() {
                     Some(room) => room.next().await,
                     None => std::future::pending().await,
                 }
             } => match said {
-                Ok(room::Said::Chat(line)) => {
-                    if !std::io::stderr().is_terminal() {
-                        eprintln!("CHAT {line}");
-                    }
-                    chat.lock().expect("the lock").push(line);
-                }
+                Ok(room::Said::Chat(line)) => ui.chat(line),
                 Ok(room::Said::Broadcast(broadcast)) => {
-                    if !std::io::stderr().is_terminal() {
-                        eprintln!("ROOM_BROADCAST {}", if broadcast.is_some() { "another" } else { "none" });
+                    if broadcast.is_some() && broadcast.as_ref() != playing {
+                        break "the room has another broadcast";
+                    }
+                    if broadcast.is_none() {
+                        ui.note("ROOM_BROADCAST none");
                     }
                 }
                 // The room is gone; the broadcast is watched on without it.
                 Err(error) => {
-                    if !std::io::stderr().is_terminal() {
-                        eprintln!("ROOM_LOST {error:#}");
-                    }
+                    ui.note(&format!("ROOM_LOST {error:#}"));
                     *room = None;
                 }
             },
             event = video.reader.next_event() => {
-                if let RequestStreamEvent::Message(message) = event? {
-                    session.on_request_message(video.request, message)?;
+                match event {
+                    Ok(RequestStreamEvent::Message(message)) => {
+                        session.on_request_message(video.request, message)?;
+                    }
+                    Ok(RequestStreamEvent::Closed(_)) => {}
+                    Err(error) => failed = Some(error.into()),
                 }
                 break "the video track ended";
             }
             event = audio.reader.next_event() => {
-                if let RequestStreamEvent::Message(message) = event? {
-                    session.on_request_message(audio.request, message)?;
+                match event {
+                    Ok(RequestStreamEvent::Message(message)) => {
+                        session.on_request_message(audio.request, message)?;
+                    }
+                    Ok(RequestStreamEvent::Closed(_)) => {}
+                    Err(error) => failed = Some(error.into()),
                 }
                 break "the audio track ended";
             }
-            event = events.recv() => match event.ok_or_else(|| anyhow!("the connection is gone"))? {
-                UniEvent::Object { header, object, .. } => {
+            event = events.recv() => match event {
+                Some(UniEvent::Object { header, object, .. }) => {
                     if object.status != ObjectStatus::Normal {
                         continue;
                     }
@@ -356,6 +534,7 @@ async fn play(
                         no_timestamp += 1;
                         continue;
                     };
+                    *began_playing = true;
                     let due = clock.due(timestamp);
                     if header.track_alias == video.track_alias {
                         let annex_b = loc::to_annex_b(&object.payload).map_err(|error| anyhow!("a video payload: {}", error.0))?;
@@ -365,15 +544,22 @@ async fn play(
                         sound.take(&object.payload, due);
                     }
                 }
-                UniEvent::SubgroupClosed { header, end, .. } => {
+                Some(UniEvent::SubgroupClosed { header, end, .. }) => {
                     session.on_data_stream_closed(header.track_alias);
                     if !matches!(end, xmoq_moqt_io::StreamEnd::Fin) {
                         streams_reset += 1;
                     }
                 }
-                UniEvent::SubgroupOpened { .. } => {}
-                UniEvent::Failed(error) => return Err(error.into()),
-                other => bail!("not expected of the relay: {other:?}"),
+                Some(UniEvent::SubgroupOpened { .. }) => {}
+                Some(UniEvent::Failed(error)) => {
+                    failed = Some(error.into());
+                    break "the session failed";
+                }
+                Some(other) => bail!("not expected of the relay: {other:?}"),
+                None => {
+                    failed = Some(anyhow!("the connection is gone"));
+                    break "the connection is gone";
+                }
             },
         }
     };
@@ -403,14 +589,15 @@ async fn play(
         _ => 0.0,
     };
     let rms = if heard.given == 0 { 0.0 } else { (heard.squares / heard.given as f64).sqrt() };
-    eprintln!(
-        "AV_PLAYED why=\"{why}\" seconds={seconds:.1} buffer_ms={} volume={} \
+    let line = format!(
+        "AV_PLAYED why=\"{why}\" seconds={seconds:.1} buffer_ms={} volume={:.1} muted={} \
          video_came={} video_left_out={} video_drawn={} fps={:.1} video_off_ms_min/p50/p95/max={} decode_ms_a_frame={:.2} draw_ms_a_frame={:.2} \
          audio_packets={} audio_refused={} audio_seconds={:.2} underruns={} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} \
          audio_off_ms_min/p50/p95/max={} peak={:.3} rms={:.3} \
          marks_video={} marks_audio={} picture_after_sound_ms_min/p50/p95/max={} no_timestamp={no_timestamp} streams_reset={streams_reset}",
         args.buffer.as_millis(),
-        args.volume,
+        ui.volume.level(),
+        ui.volume.muted(),
         seen.came,
         seen.left_out,
         seen.drawn,
@@ -433,11 +620,54 @@ async fn play(
         heard.marks.len(),
         spread(apart),
     );
-    Ok(())
+    eprintln!("{line}");
+    if ui.log.is_some() {
+        ui.note(&line);
+    }
+    match failed {
+        Some(error) => Err(error),
+        None => Ok(ended),
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = parse_args()?;
-    run(&args).await
+    // Told to end by a signal: the loop ends, and what is below puts the terminal back.
+    let (stopping, stop) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut terminate), Ok(mut hangup)) = (signal(SignalKind::terminate()), signal(SignalKind::hangup())) else {
+            return;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+            _ = hangup.recv() => {}
+        }
+        let _ = stopping.send(true);
+    });
+    // The terminal is put back when `_raw` is dropped, on every way out of this function.
+    let (_raw, pressed) = match keys::start() {
+        Some((raw, pressed)) => (Some(raw), Some(pressed)),
+        None => (None, None),
+    };
+    // For the check that a panic puts the terminal back (try-keys.sh).
+    if std::env::var_os("XMOQ_WATCH_PANIC").is_some() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        panic!("asked to panic");
+    }
+    let mut ui = Ui {
+        under: Arc::default(),
+        volume: Arc::new(sound::Volume::new(args.volume)),
+        keys: keys::Keys::default(),
+        pressed,
+        log: match &args.log {
+            Some(path) => Some(std::fs::File::create(path)?),
+            None => None,
+        },
+        stop,
+        deadline: args.seconds.map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds)),
+    };
+    run(&args, &mut ui).await
 }

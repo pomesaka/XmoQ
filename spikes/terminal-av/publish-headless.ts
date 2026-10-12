@@ -40,6 +40,11 @@ const stop = async () => {
 	await browser.close();
 	process.exit(0);
 };
+// SIGUSR1: the page is loaded anew, which ends its broadcast and begins another.
+process.on("SIGUSR1", async () => {
+	await page.reload();
+	console.log("PAGE_RELOADED");
+});
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 setInterval(() => {}, 60_000);

@@ -4,8 +4,18 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
-/// Lines under the picture, for the chat of a room.
-pub const LINES: usize = 3;
+/// Lines under the picture: the last of the chat, and one for the keys.
+pub const LINES: usize = 4;
+
+/// What stands under the picture.
+#[derive(Default)]
+pub struct Under {
+    pub chat: Vec<String>,
+    /// The keys, or the line that is being typed.
+    pub status: String,
+    /// Counted up with every change.
+    pub version: u64,
+}
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -37,14 +47,14 @@ pub struct Screen {
     encoded: Vec<u8>,
     out: Vec<u8>,
     pub drawn: u64,
-    /// The last lines of the chat, and how many of them are written.
-    lines: Arc<Mutex<Vec<String>>>,
-    written: usize,
+    under: Arc<Mutex<Under>>,
+    /// The version of `under` that is written.
+    written: u64,
 }
 
 impl Screen {
-    pub fn new(to: Box<dyn Write + Send>, medium: Medium, scale: usize, lines: Arc<Mutex<Vec<String>>>) -> Self {
-        Self { to, medium, scale, size: None, rows: 0, encoded: Vec::new(), out: Vec::new(), drawn: 0, lines, written: 0 }
+    pub fn new(to: Box<dyn Write + Send>, medium: Medium, scale: usize, under: Arc<Mutex<Under>>) -> Self {
+        Self { to, medium, scale, size: None, rows: 0, encoded: Vec::new(), out: Vec::new(), drawn: 0, under, written: 0 }
     }
 
     /// Draws one frame of RGB over the one before. A frame of another size
@@ -93,17 +103,18 @@ impl Screen {
                 self.out.extend_from_slice(b"\x1b\\");
             }
         }
-        // The chat under the picture, when it has a new line. WHY with the frame: one
+        // What stands under the picture, when it has changed. WHY with the frame: one
         // writer, and the cursor is put back to the picture before every frame.
-        let lines = self.lines.lock().expect("the lock");
-        if lines.len() != self.written {
-            self.written = lines.len();
+        let under = self.under.lock().expect("the lock");
+        if under.version != self.written {
+            self.written = under.version;
             self.out.extend_from_slice(format!("\x1b8\x1b[{}B", self.rows).as_bytes());
-            for line in lines.iter().rev().take(LINES).rev() {
+            let chat = under.chat.len().saturating_sub(LINES - 1);
+            for line in under.chat[chat..].iter().chain(std::iter::once(&under.status)) {
                 self.out.extend_from_slice(format!("\r\x1b[K{line}\x1b[B").as_bytes());
             }
         }
-        drop(lines);
+        drop(under);
         self.to.write_all(&self.out)?;
         self.to.flush()?;
         self.drawn += 1;
