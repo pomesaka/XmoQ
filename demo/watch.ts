@@ -454,7 +454,7 @@ async function main(): Promise<void> {
 			const took = Date.now() - frame.timestamp / 1000;
 			arrived.video.add(took);
 			// A frame whose time is not of the clock says nothing of the link.
-			const way = fastestVideo.take(took);
+			const way = fastestVideo.take(took, Date.now());
 			if (way !== undefined) {
 				seenVideo = true;
 				recent.push({ at: performance.now(), late: took - way.fastestMs });
@@ -781,7 +781,7 @@ async function main(): Promise<void> {
 							onFrame(frame) {
 								if (began.shown) return videoOptions.onFrame(frame);
 								const took = Date.now() - frame.timestamp / 1000;
-								const way = fastestVideo.take(took);
+								const way = fastestVideo.take(took, Date.now());
 								if (way !== undefined) {
 									began.late.push({
 										at: performance.now(),

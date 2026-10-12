@@ -89,9 +89,17 @@ fn locked(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The microseconds from `began` to `at`.
+/// `--clock-skew-ppm`: by how many parts in a million [`micros_since`]
+/// counts faster than the machine's clock. For measuring; 0 unless the
+/// flag says otherwise, and set once before anything is counted.
+pub static CLOCK_SKEW_PPM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// The microseconds from `began` to `at`, on the viewer's clock.
 pub fn micros_since(began: Instant, at: Instant) -> u64 {
-    u64::try_from(at.saturating_duration_since(began).as_micros()).unwrap_or(u64::MAX)
+    let real = i128::try_from(at.saturating_duration_since(began).as_micros()).unwrap_or(i128::MAX);
+    // Relaxed: one number, written once at the start.
+    let ppm = i128::from(CLOCK_SKEW_PPM.load(std::sync::atomic::Ordering::Relaxed));
+    u64::try_from(real + real * ppm / 1_000_000).unwrap_or(u64::MAX)
 }
 
 impl Sound {

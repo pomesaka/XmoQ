@@ -12,6 +12,7 @@ export {
 export {
 	ANEW_AFTER,
 	createFastestWay,
+	FASTEST_WINDOW_MS,
 	type FastestWay,
 	MOST_FROM_THE_FASTEST_MS,
 } from "./core/fastest-way.ts";

@@ -90,3 +90,65 @@ macOS 14.4, arm64, one machine, no link in between; Chromium 156.0.8078.4 (playw
 ## Next action
 
 A report, and no change to the rule here: the mending touches `@xmoq/media`'s core, the shared table and the terminal viewer. The flags stay for measuring it: `/watch?clockSkewPpm=N` (the viewer's clock) and `/publish?clockSkewPpm=N` (the video's times against the sound's).
+
+## Afterwards: the least way is of the last minute
+
+Decided on the report above: the rule itself is changed, in both players. **The least is the least of the Objects that came in this second of the viewer's clock and the 59 before it**, and no longer the least ever seen. What follows was written before the change was run.
+
+**The 60 seconds, provisional, from both sides**:
+
+- *How fast clocks move apart.* The viewer is behind the least by what the clocks have moved in the window: 6 ms at 100 ppm, which any buffer holds. A shorter window would hold more; this one already holds what real clocks do.
+- *How long a bad spell is believed.* A link that is bad for longer than the window has its delay taken for the way itself. The longer the window, the longer a spell has to last for that. A minute is longer than the narrow spells and the stretches of loss that were run (20 s and less), and short enough that a path that really got longer is followed within the minute.
+
+**What the 10 seconds and the 30 in a row are for now**: unchanged, and for what they were for, a time that is not of the clock at all. An Object more than 10 s from the least of the window is left out, and 30 such in a row begin the clock anew: a publisher whose clock jumped is followed after 30 Objects, not after a minute. New: where nothing of the clock came for a minute the window is empty, and the next Object is the clock's first, whatever its time.
+
+**Expected**:
+
+| Run | Before | With the change |
+|---|---|---|
+| The viewer's clock 1% faster | The sound stops for good after 10, 20, 40 s | **Not mended, and not meant to be**: the viewer is 600 ms behind the least of the minute, more than any of the three buffers. The sound stops as before |
+| 0.1% faster (1,000 ppm) | Stops after 40 to 60 s with 50 ms, 140 to 160 s with 150 ms | Behind by 60 ms, and no more, from the first minute on. 150 ms and the automatic buffer (which stands at 70 to 80 ms): whole, for as long as it runs. 50 ms: 60 ms is more than the buffer, so pieces go on being lost |
+| 300 ppm faster | Would stop after about 3 minutes with 50 ms | Behind by 18 ms: whole with every buffer, to the end of a run of 5 minutes |
+| 100 ppm faster, 13 minutes | Would stop after 7 to 10 minutes with 50 ms | Behind by 6 ms: whole |
+| 1% slower | Nothing | Nothing |
+| A link that is narrow for 90 s and good again, the clocks alike | The least stays; the automatic buffer at 400 ms, down 27 s after | After a minute of the narrow spell the least rises by what the sound has been late (65 to 105 ms), and the lateness the buffer sees falls by as much; nothing is lost by that, the automatic buffer may come down a step or two while the link is still bad. **When the link is good, everything comes sooner than the least at once**: the sound has 65 to 105 ms to make up, played faster for about 2 seconds (100 pieces), with no break and none too late |
+| The terminal viewer, the same clocks | (not run before) | As the page, by the same table |
+
+And in the core's tests: a least that was put a third of a second too low by one Object in the first seconds is back where it belongs a minute later.
+
+### Result with the change
+
+The page, the same runs as above (`/watch?clockSkewPpm`, one machine):
+
+| The viewer's clock | Buffer | Before | With the least of the last minute |
+|---|---|---|---|
+| 1% faster, 80 s | 50, 150, automatic | The sound stops for good within 10, 20, 40 s | **The same**: stops within 20 s (50 ms), within 40 s (150 ms), within 60 s (automatic, at 400 ms). The lateness stands at 604 to 608 ms from the first minute on, and no longer grows |
+| 0.1% faster, 220 s | 50 ms | Stops between 40 and 60 s | Stops between 60 and 80 s, and for good: the lateness stands at 72 to 73 ms, over the buffer |
+| 0.1% faster | 150 ms | Stops between 140 and 160 s | **Whole to the end**: 1,000 of 1,000 pieces in each 20 s, none too late, none at another speed after the first minute |
+| 0.1% faster | automatic | Rises 1 ms a second, 230 ms after 200 s | **Stands at 90 ms from 60 s on**, whole |
+| 300 ppm faster, 300 s | all three | (not run; 50 ms would stop after about 3 minutes) | **Whole**: no piece too late in 5 minutes, the lateness at 31 ms throughout, the automatic buffer at 50 ms |
+| 1% slower, 60 s | all three | Nothing | Nothing |
+
+The terminal viewer (`crates/watch/scripts/try.sh 200 --buffer-ms … --clock-skew-ppm 1000`, three at once; "before" is the same build with the window set to 600,000 s for the run):
+
+| Buffer | Before: sound played of 200 s, packets left out as late | With the change |
+|---|---|---|
+| 50 ms | 58 s, 6,793 of 9,993 | 135 s, 1,066 (and 3,167 cut at their beginning): 60 ms is over this buffer too |
+| 150 ms | 162 s, 1,636 | **199.7 s, 0** |
+| automatic | 199.8 s, 0; the buffer up to 220 ms | 199.8 s, 0; **the buffer up to 90 ms** |
+
+A link that is narrow (2 Mbit/s under a picture of 2.5) for 90 s and good again, the clocks alike, 150 ms and the automatic buffer; one run of each rule:
+
+| | The least ever | The least of the last minute |
+|---|---|---|
+| While narrow: lateness of 99 in 100 | 790 to 910 ms | 770 to 950 ms, **and no lower after the first minute of it** |
+| While narrow, 150 ms: pieces too late | 16 to 53 in every 5 s | 0 to 60 in every 5 s |
+| While narrow, automatic | 400 ms throughout, no piece too late after the first 5 s | the same |
+| From 60 s into the narrow spell: pieces at another speed | 0 | 17 (150 ms) and 21 (automatic) in the 5 s after the minute, a few after |
+| The 5 s in which the link is good again | no piece too late, none at another speed | no piece too late, no break but 2 in the first 5 s (150 ms); **24 and 18 pieces at another speed** |
+| Automatic buffer back at 30 ms | 30 s after | 30 s after |
+
+- **What real clocks do is held, and what was held is as counted**: the viewer stays behind by what the clocks move in a minute (18 ms at 300 ppm, 60 ms at 1,000, 600 ms at 10,000), and the sound is whole where the buffer is more than that. 100 ppm was not run; 300 ppm, three times that, lost nothing in 5 minutes with the default buffer.
+- **Wrong in the expectation**: with 50 ms and 1,000 ppm the page's sound does not "go on losing pieces", it stops; the terminal viewer plays two thirds. And **the narrow link did not raise the least by the 65 to 105 ms expected**: enough Objects still come by the fast way in every minute of it. What the change did there is some twenty pieces played at another speed a minute into the spell and again when it ends, which says the least moved a little, by how much was not read. A link whose every Object is late for more than a minute (a longer route, not a full queue) was not run, and is where the cost would show.
+- No harm was seen from the least rising while the link is bad: the automatic buffer was at its limit throughout under both rules.
+- One run each; the numbers of the narrow spell differ from run to run by more than the two columns do.

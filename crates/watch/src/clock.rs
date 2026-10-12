@@ -1,9 +1,9 @@
 //! When an Object is due, from its Timestamp of LOC.
 //!
 //! The Timestamps are of the publisher's clock, which the viewer does not
-//! have. The smallest (arrival - Timestamp) seen on any track is taken for
-//! the least an Object needs on the way, and every Object is due a buffer
-//! after its Timestamp plus that. Both tracks have to carry Timestamps of
+//! have. The smallest (arrival - Timestamp) seen on any track in the last
+//! minute is taken for the least an Object needs on the way, and every
+//! Object is due a buffer after its Timestamp plus that. Both tracks have to carry Timestamps of
 //! one clock for their Objects to be due at matching moments.
 
 /// How far from the fastest way an Object may be, sooner or later, and
@@ -21,6 +21,15 @@ pub const MOST_FROM_THE_LEAST_US: u64 = 10_000_000;
 /// again), or the first Object was the one that was wrong. **Provisional**:
 /// a second of video, more or less.
 pub const ANEW_AFTER: u32 = 30;
+
+/// How far back the least is looked for: it is the least of the Objects
+/// that came in this second of the viewer's clock and the 59 before it.
+/// **Provisional**, and the value of `@xmoq/media` (`FASTEST_WINDOW_MS` of
+/// `packages/media/src/core/fastest-way.ts`, which has why a least that was
+/// kept for good lost the sound of a viewer whose clock runs faster than
+/// its publisher's, and why a minute). `fixtures/playout/least.tsv` has
+/// what both go by.
+pub const LEAST_WINDOW_SECONDS: u64 = 60;
 
 /// The sound waits at least this long, also where the buffer is less
 /// (`DEFAULT_AUDIO_MIN_MS` of `@xmoq/media`). **Provisional.**
@@ -53,8 +62,10 @@ pub const AUTO_MOST_OBJECTS: usize = 1600;
 /// publisher's.
 #[derive(Debug, Clone)]
 pub struct Clock {
-    /// The smallest (arrival - Timestamp) so far.
-    least: Option<i128>,
+    /// The smallest (arrival - Timestamp) of each second in which an Object
+    /// of the clock came, the oldest first; at most
+    /// [`LEAST_WINDOW_SECONDS`] of them.
+    least: std::collections::VecDeque<(u64, i128)>,
     buffer_us: u64,
     /// The most the automatic buffer may become; `None`: it is not
     /// automatic.
@@ -80,7 +91,7 @@ impl Clock {
     #[must_use]
     pub fn new(buffer_us: u64) -> Self {
         Self {
-            least: None,
+            least: std::collections::VecDeque::new(),
             buffer_us,
             auto_most_us: None,
             late: std::collections::VecDeque::new(),
@@ -108,20 +119,39 @@ impl Clock {
     /// is not known yet.
     pub fn base(&mut self, arrived_us: u64, timestamp_us: u64) -> Option<Base> {
         let took = i128::from(arrived_us) - i128::from(timestamp_us);
-        if let Some(least) = self.least
+        // A clock that was set back does not open a second before the last
+        // one: the Object counts for the newest.
+        let second = (arrived_us / 1_000_000).max(self.least.back().map_or(0, |(at, _)| *at));
+        while self
+            .least
+            .front()
+            .is_some_and(|(at, _)| at.saturating_add(LEAST_WINDOW_SECONDS) <= second)
+        {
+            self.least.pop_front();
+        }
+        let of_the_window = self.least.iter().map(|(_, least)| *least).min();
+        if let Some(least) = of_the_window
             && (took - least).unsigned_abs() > u128::from(MOST_FROM_THE_LEAST_US)
         {
             self.strays += 1;
             if self.strays < ANEW_AFTER {
                 return None;
             }
-            self.least = None;
+            self.least.clear();
             // What came by the clock before says nothing of this one.
             self.late.clear();
         }
         self.strays = 0;
-        let least = self.least.map_or(took, |least| least.min(took));
-        self.least = Some(least);
+        match self.least.back_mut() {
+            Some((at, least)) if *at == second => *least = (*least).min(took),
+            _ => self.least.push_back((second, took)),
+        }
+        let least = self
+            .least
+            .iter()
+            .map(|(_, least)| *least)
+            .min()
+            .unwrap_or(took);
         let over_least_us = u64::try_from(took - least).unwrap_or(u64::MAX);
         self.forget(arrived_us);
         self.late.push_back((arrived_us, over_least_us));
@@ -306,6 +336,45 @@ mod tests {
                 (picture, sound)
             );
         }
+    }
+
+    /// `fixtures/playout/least.tsv`, which `@xmoq/media` reads too: when
+    /// each Object came and how long it took, in milliseconds, and the
+    /// least after it (`-` where it is left out).
+    #[test]
+    fn the_least_is_of_the_last_minute_as_the_shared_table_says() {
+        // The arrivals count from 200 s, a whole number of seconds, so that
+        // an Object that took less than no time still has a Timestamp.
+        const BEGAN: i64 = 200_000;
+        let micros = |millis: i64| u64::try_from(millis * 1000).expect("a time from 0");
+        let table = include_str!("../../../fixtures/playout/least.tsv");
+        let mut rows = 0;
+        for row in table.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [name, came, after] = fields[..] else {
+                panic!("a row of 3 fields: {row}");
+            };
+            let mut clock = Clock::new(0);
+            let got: Vec<String> = came
+                .split(' ')
+                .map(|each| {
+                    let (at, took) = each.split_once(':').expect(each);
+                    let arrived = BEGAN + at.parse::<i64>().expect(at);
+                    let timestamp = micros(arrived - took.parse::<i64>().expect(took));
+                    match clock.base(micros(arrived), timestamp) {
+                        // The least: the base less the Timestamp.
+                        Some(base) => {
+                            let least = i128::from(base.at_us) - i128::from(timestamp);
+                            (least / 1000).to_string()
+                        }
+                        None => "-".to_string(),
+                    }
+                })
+                .collect();
+            assert_eq!(got.join(" "), after, "{name}");
+            rows += 1;
+        }
+        assert_eq!(rows, 8);
     }
 
     /// `fixtures/playout/auto-buffer.tsv`, which `@xmoq/media` reads too.

@@ -1,11 +1,14 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createFastestWay } from "../src/index.ts";
 
 /** What each Object that took so long gives: the fastest way, "anew N" where the clock began anew, "out" where it is left out. */
 function taken(took: number[]): string[] {
 	const way = createFastestWay();
 	return took.map((each) => {
-		const got = way.take(each);
+		// All in one second: nothing is forgotten in these rows.
+		const got = way.take(each, 0);
 		if (got === undefined) return "out";
 		return `${got.anew ? "anew " : ""}${got.fastestMs}`;
 	});
@@ -65,3 +68,31 @@ test("one that is of the clock between them begins the count of 30 again", () =>
 		"1000",
 	]);
 });
+
+// The rows of `fixtures/playout/least.tsv`, which `crates/watch` reads too:
+// when each Object came and how long it took, and the fastest way after it
+// ("-" where it is left out).
+const LEAST = readFileSync(
+	join(import.meta.dir, "..", "..", "..", "fixtures", "playout", "least.tsv"),
+	"utf8",
+)
+	.split("\n")
+	.filter((row) => row !== "")
+	.map((row) => row.split("\t"));
+
+test("the table of the least has the rows both players count on", () => {
+	expect(LEAST.length).toBe(8);
+});
+
+test.each(LEAST)(
+	"the fastest way of the last minute: %s",
+	(_name, came, after) => {
+		const way = createFastestWay();
+		const got = (came ?? "").split(" ").map((each) => {
+			const [at, took] = each.split(":").map(Number);
+			const taken = way.take(took ?? Number.NaN, at ?? Number.NaN);
+			return taken === undefined ? "-" : String(taken.fastestMs);
+		});
+		expect(got.join(" ")).toBe(after ?? "");
+	},
+);

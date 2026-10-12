@@ -548,3 +548,28 @@ test.each<{
 		});
 	},
 );
+
+test("an Object with a time a third of a second ahead holds everything late for a minute, and no longer", () => {
+	const clock = createPlayoutClock({ bufferMs: 50, auto: true });
+	// The first Object carries a time 340 ms ahead of when it came; every
+	// one after it, each 10 ms, a time that is its own.
+	const lateness: number[] = [];
+	const buffer: number[] = [];
+	for (let at = 0; at <= 90_000; at += 10) {
+		clock.baseOf((at + (at === 0 ? 340 : 0)) * 1000, 1000 + at);
+		if (at % 10_000 === 5000) {
+			clock.tick(1000 + at);
+			lateness.push(clock.lateness());
+			buffer.push(clock.bufferMs());
+		}
+	}
+	// Read at 5, 15, ... 85 s, with one tick each. The first Object came
+	// in second 1 of the clock and is forgotten with second 61, 60 s after
+	// it came; the Objects of the 10 s before that still count as 340 ms
+	// late at 65 s, and none does at 75 s. Then the buffer comes down, its
+	// 10 ms at a tick.
+	expect({ lateness, buffer }).toEqual({
+		lateness: [340, 340, 340, 340, 340, 340, 340, 0, 0],
+		buffer: [350, 350, 350, 350, 350, 350, 350, 340, 330],
+	});
+});

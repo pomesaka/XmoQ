@@ -26,7 +26,7 @@ The library (`src/*.rs`) decides, and does no input or output: it is given its t
 | `tracks` | Which tracks of a catalog are played |
 | `keys` | What a key asks for |
 | `room` | What a room says and is told; a line of the chat made safe for a terminal |
-| `marks` | For measuring with the demo's publisher (`--measure-demo-marks`) |
+| `marks` | For measuring with the demo's publisher (`--measure-demo-marks`). `--clock-skew-ppm <n>`, also for measuring, has the viewer's clock run n parts in a million faster (`sound.rs`, `micros_since`) |
 
 The binary (`src/bin/xmoq-watch/`) does the input and output, one kind a file: `session.rs` (the requests on the MoQ Transport session), `room_socket.rs` (the room's WebSocket), `terminal.rs` (line mode, keys, the window's size), `picture.rs` (the thread that decodes and writes frames), `sound.rs` (the Opus decoder and the queue of the output), and the two files below.
 
@@ -75,7 +75,7 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 
 | What | Limit | Why that value | Where |
 |---|---|---|---|
-| A Timestamp far from the clock (the fastest way an Object took) | 10 s either way; the Object is left out and the clock stays. After 30 in a row the clock begins anew | Far beyond a buffer and beyond what one waits for a live picture; 30 is a second of video, for a publisher that began again | `clock` |
+| A Timestamp far from the clock (the fastest way an Object took) | 10 s either way; the Object is left out and the clock stays. After 30 in a row the clock begins anew. The fastest way is that of the last 60 s (`LEAST_WINDOW_SECONDS`, the page's rule and value; `fixtures/playout/least.tsv`), so that a clock that runs faster than the publisher's does not lose its sound in time | Far beyond a buffer and beyond what one waits for a live picture; 30 is a second of video, for a publisher that began again | `clock` |
 | `--buffer-ms` | 10,000; `auto` goes to 400 ms | The same 10 s; the page's limit | `args`, `clock` |
 | Arrivals the automatic buffer goes by | 1,600, the newest | The page's: 10 seconds of 30 frames and 50 packets, twice over | `clock` |
 | Frames that wait to be decoded and drawn | 30; one more is left out, and the picture goes on at the next Group | What the watching page holds | `picture.rs` |
