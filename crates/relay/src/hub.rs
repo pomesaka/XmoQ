@@ -1270,7 +1270,11 @@ impl<C: Connection> Hub<C> {
                 self.timers.stop_rendezvous(*session, *stream);
             }
             let actions = self.relay.handle(event);
+            // WHY only of a session that is there: a SUBSCRIBE that is read
+            // after its session was closed gets no answer either, and the
+            // relay keeps nothing of it.
             if let Some((session, stream)) = subscribe
+                && self.sessions.contains_key(&session)
                 && subscribe_is_held(&actions, session, stream)
             {
                 self.log(|| {

@@ -675,6 +675,9 @@ let broadcastPublishing:
 	| {
 			video: VideoTrackEncoder;
 			audio: AudioTrackEncoder;
+			catalog: CatalogPublisher;
+			/** The timers that paint and make sound. */
+			timers: ReturnType<typeof setInterval>[];
 			painted: number;
 			made: number;
 	  }
@@ -1277,9 +1280,10 @@ window.xmoqOwn = {
 		const canvas = new OffscreenCanvas(BROADCAST.width, BROADCAST.height);
 		const context = canvas.getContext("2d");
 		if (context === null) throw new Error("no 2d context");
-		const publishing = { video, audio, painted: 0, made: 0 };
+		const timers: ReturnType<typeof setInterval>[] = [];
+		const publishing = { video, audio, catalog, timers, painted: 0, made: 0 };
 		broadcastPublishing = publishing;
-		setInterval(() => {
+		timers[0] = setInterval(() => {
 			const now = Date.now();
 			publishing.painted += 1;
 			context.fillStyle = "#444";
@@ -1302,7 +1306,7 @@ window.xmoqOwn = {
 		// Every piece is 20 ms after the one before it, whenever its timer
 		// came: a decoder wants the sound without gaps.
 		const firstPiece = audioBegan;
-		setInterval(() => {
+		timers[1] = setInterval(() => {
 			const piece = publishing.made;
 			publishing.made += 1;
 			const loud = marked(firstPiece + piece * 20);
@@ -1330,6 +1334,99 @@ window.xmoqOwn = {
 		await moq.publishNamespace(trackNamespace);
 		console.log("broadcast published");
 	}),
+
+	endBroadcast: withPlainErrors(async () => {
+		if (broadcastPublishing === undefined) {
+			throw new Error("publishBroadcast() has not completed");
+		}
+		const { video, audio, catalog, timers } = broadcastPublishing;
+		for (const timer of timers) clearInterval(timer);
+		// Each ends its track with PUBLISH_DONE (TRACK_ENDED). The session
+		// and the namespace it announced stay.
+		await Promise.all([video.end(), audio.end(), catalog.end()]);
+		console.log("broadcast ended");
+	}),
+
+	keepBroadcastPlayed: withPlainErrors(
+		async (
+			relayUrl: string,
+			certSha256Hex: string,
+			namespace: string,
+			waitMs: number,
+		) => {
+			const reading = new OffscreenCanvas(1, 1).getContext("2d", {
+				willReadFrequently: true,
+			});
+			if (reading === null) throw new Error("no 2d context");
+			let session = 0;
+			const playout = createPlayout({
+				// No sound is played here.
+				sampleRate: 48_000,
+				draw(frame) {
+					kept.shown.push({ number: readNumber(reading, frame), session });
+				},
+			});
+			const trackNamespace = namespaceTuple(namespace);
+			void keepPlaying({
+				connect: () => connectAnew(relayUrl, certSha256Hex),
+				async play(connection) {
+					// What this call subscribed to is let go when the video has
+					// ended, so that the next call is no second subscription.
+					const over = new AbortController();
+					const follower = await followCatalog(connection, {
+						namespace: trackNamespace,
+						signal: over.signal,
+						rendezvousTimeoutMs: waitMs,
+					});
+					const catalogs = follower.states.getReader();
+					let video: string | undefined;
+					while (video === undefined) {
+						const next = await catalogs.read();
+						if (next.done) {
+							throw new Error("the catalog track ended without a catalog");
+						}
+						video = next.value.current?.catalog.tracks.find(
+							(track) => track.role === "video",
+						)?.name;
+					}
+					const playback = await playVideoTrack(connection, {
+						trackNamespace,
+						trackName: utf8.encode(video),
+						codec: BROADCAST.catalogCodec,
+						onFrame: playout.onFrame,
+					});
+					return {
+						ended: playback.ended.then((end) => {
+							over.abort();
+							return end.type;
+						}),
+					};
+				},
+				// As the demo's `/watch?wait=1`: "not yet" is the relay's TIMEOUT
+				// for a SUBSCRIBE it held, and DOES_NOT_EXIST.
+				stay: {
+					notYet: (error: unknown) =>
+						error instanceof RequestFailedError &&
+						(error.errorCode === RequestErrorCode.TIMEOUT ||
+							error.errorCode === RequestErrorCode.DOES_NOT_EXIST),
+				},
+				delayMs: KEPT_DELAY_MS,
+				onState(state) {
+					if (state.type === "playing") session = state.session;
+					const said =
+						state.type === "playing"
+							? `playing ${state.session}`
+							: state.type === "not-yet"
+								? `not-yet ${errorText(state.error)}`
+								: state.type;
+					kept.playing.push(said);
+					console.log(
+						`kept playing: ${said}${state.type === "failed" ? ` ${errorText(state.error)}` : ""}`,
+					);
+				},
+			});
+		},
+	),
 
 	broadcastReport: withPlainErrors(async (): Promise<PageBroadcastReport> => {
 		if (broadcastPublishing === undefined) {

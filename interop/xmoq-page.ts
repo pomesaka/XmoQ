@@ -292,6 +292,27 @@ export type OwnPageExtras = {
 	 * far apart picture and sound leave it by.
 	 */
 	publishBroadcast(namespace: string): Promise<void>;
+	/**
+	 * Ends the three tracks of `publishBroadcast` with PUBLISH_DONE
+	 * (TRACK_ENDED), as a publisher that stops its broadcast and stays
+	 * connected. The namespace stays announced.
+	 */
+	endBroadcast(): Promise<void>;
+	/**
+	 * Plays the video of such a broadcast as the demo's `/watch?wait=1`
+	 * does, with `keepPlaying` and its `stay` of `@xmoq/media`, on a
+	 * connection of its own: the SUBSCRIBE for the catalog carries a
+	 * RENDEZVOUS_TIMEOUT of `waitMs`, and where the relay says "not yet"
+	 * (TIMEOUT or DOES_NOT_EXIST) and where the video has ended, the page
+	 * asks again on its session. `keptReport` has its states ("not-yet"
+	 * with what it was told) and the frames drawn.
+	 */
+	keepBroadcastPlayed(
+		relayUrl: string,
+		certSha256Hex: string,
+		namespace: string,
+		waitMs: number,
+	): Promise<void>;
 	/** What `publishBroadcast` has made so far. */
 	broadcastReport(): Promise<PageBroadcastReport>;
 	/**

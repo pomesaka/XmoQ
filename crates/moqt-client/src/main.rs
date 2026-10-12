@@ -504,6 +504,25 @@ fn track_namespace_of(text: &str) -> Result<TrackNamespace> {
     Ok(TrackNamespace::new(fields)?)
 }
 
+/// `--first-group`: a number, or `now` for the milliseconds since 1970.
+///
+/// WHY `now`: a publisher that comes back to a track it published before
+/// has to begin above every Group it used (§2.4: "set the initial Group ID
+/// to a unique value guaranteed to be larger than all previously used
+/// groups. This can be done by choosing a Group ID based on the current
+/// time"). A relay that still has the track gives its subscribers nothing
+/// of a Group that is not larger than what it had. The pages of this
+/// repository count from the time as well.
+fn first_group_of(value: &str) -> Result<u64> {
+    if value != "now" {
+        return value.parse().context("--first-group");
+    }
+    let since_1970 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("the clock is before 1970")?;
+    u64::try_from(since_1970.as_millis()).context("--first-group now")
+}
+
 /// A line of the driver on a publisher's stdin.
 #[derive(Debug, PartialEq, Eq)]
 enum PublisherLine {
@@ -701,7 +720,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                     other => bail!("unknown --subgroup-id {other}"),
                 };
             }
-            "--first-group" => first_group = value.parse().context("--first-group")?,
+            "--first-group" => first_group = first_group_of(&value)?,
             "--publisher-priority" => publisher_priority = parse_publisher_priority(&value)?,
             "--object-property" => object_properties.push(parse_object_property(&value)?),
             "--serve-delay-ms" => serve_delay_ms = millis(&flag, &value)?,
@@ -2880,6 +2899,19 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use xmoq_moqt::message::{Publish, PublishDone, PublishNamespace, Subscribe};
+
+    #[test]
+    fn the_first_group_is_a_number_or_the_time() {
+        assert_eq!(first_group_of("0").unwrap(), 0);
+        assert_eq!(first_group_of("1000").unwrap(), 1_000);
+        // The milliseconds since 1970: more than those of 2026-01-01, and
+        // not less the second time.
+        let now = first_group_of("now").unwrap();
+        assert!(now > 1_767_225_600_000, "{now}");
+        assert!(first_group_of("now").unwrap() >= now);
+        assert!(first_group_of("soon").is_err());
+        assert!(first_group_of("-1").is_err());
+    }
 
     #[test]
     fn the_session_is_closed_with_the_code_its_failure_asks_for() {
