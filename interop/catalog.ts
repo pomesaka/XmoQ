@@ -38,6 +38,18 @@
 //     - After the update, the reader has the new catalog at Object 0 of the
 //       next Group, not outdated: it came on the subscription.
 //
+//   reader-first  An own page reads the catalog of a broadcast that has not
+//                 begun (`followCatalog` with `rendezvousTimeoutMs` of 20
+//                 seconds), through the own relay.
+//
+//     - The relay holds the SUBSCRIBE (`HOLD_REQUEST session=0 stream=S
+//       SUBSCRIBE`), and `followCatalog` has not resolved 2 seconds later.
+//     - Then another page publishes a catalog: `followCatalog` resolves,
+//       and the reader has that catalog, at the Location the publisher has
+//       it, once. How it came is not held to one way: by the Joining FETCH
+//       where the SUBSCRIBE_OK had a LARGEST_OBJECT, by the subscription
+//       where it had none.
+//
 //   to-mlmsub     An own page publishes a catalog through the own relay,
 //                 and `mlmsub` of moqlivemock reads it. `mlmsub` is built
 //                 with a patch of one line, without which it connects to
@@ -320,6 +332,52 @@ async function own(): Promise<string> {
 	return `the catalog at {${publisher.at.join(", ")}} read with a Joining FETCH that was served with one Object; its replacement at {${next.join(", ")}} read from the subscription; the last one at {${last.join(", ")}}, published right before the end of the track, read before the subscription ended with TRACK_ENDED`;
 }
 
+async function readerFirst(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser"],
+		verbose: options.verbose,
+	});
+	const reader = await openConnectedPage(context, "reader", "own-browser");
+	let accepted = false;
+	const following = reader
+		.evaluate(([name]) => window.xmoqOwn.followCatalog(name, 20_000), [
+			NAMESPACE,
+		] satisfies [string])
+		.then(() => {
+			accepted = true;
+		});
+	// The reader is the first session of the relay.
+	await context.relay.waitForLine(
+		/^HOLD_REQUEST session=0 stream=\d+ SUBSCRIBE$/,
+	);
+	await new Promise((resolve) => setTimeout(resolve, 2000));
+	if (accepted) {
+		throw new Error(
+			"followCatalog resolved while nobody published the catalog track",
+		);
+	}
+	const publisher = await publishFromAPage(context);
+	await withTimeout(
+		following,
+		"the reader's SUBSCRIBE to be accepted once the catalog is published",
+	);
+	const report = await withTimeout(
+		reader.evaluate(() => window.xmoqOwn.catalogReport(1)),
+		"the reader to have the catalog",
+	);
+	const seen = JSON.stringify(report).slice(0, 900);
+	log("driver", `REPORT ${seen}`);
+	expectState(report.states.at(0), FIRST, publisher.at, seen);
+	if (report.states.length !== 1) {
+		throw new Error(
+			`the reader has ${report.states.length} states, not 1: ${seen}`,
+		);
+	}
+	return `a reader that came first was held by the relay for 2 s and more, and read the catalog at {${publisher.at.join(", ")}} once it was published (Joining FETCH: ${report.joiningFetch ?? "not settled"})`;
+}
+
 async function toMlmsub(): Promise<string> {
 	const context = await startRun({
 		relay: "own",
@@ -361,6 +419,7 @@ async function toMlmsub(): Promise<string> {
 const CASES: Record<string, () => Promise<string>> = {
 	"from-mlmpub": fromMlmpub,
 	own,
+	"reader-first": readerFirst,
 	"to-mlmsub": toMlmsub,
 };
 

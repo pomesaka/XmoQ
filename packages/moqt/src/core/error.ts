@@ -30,6 +30,12 @@ export const StreamResetErrorCode = {
 export const RequestErrorCode = {
 	/** An error of this endpoint: a handler of the application failed. */
 	INTERNAL_ERROR: 0x0n,
+	/**
+	 * The request was not answered in time (§10.6). Not sent by the
+	 * library; what a relay answers a SUBSCRIBE with that it held for a
+	 * publisher that did not come (RENDEZVOUS_TIMEOUT, §10.2.6).
+	 */
+	TIMEOUT: 0x2n,
 	NOT_SUPPORTED: 0x3n,
 	/** Too many requests of the peer are open (§10.6.2). */
 	EXCESSIVE_LOAD: 0x9n,
