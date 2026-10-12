@@ -1,7 +1,7 @@
 // A request the peer does not answer: the own clients give it up after the
 // time its answer gets, and their session stays open.
 //
-// Usage: bun no-answer.ts --subscriber own-browser|own-rust [--port N]
+// Usage: bun no-answer.ts --subscriber own-browser|own-rust|xmoq-watch [--port N]
 //
 // Through the own relay. An own-rust publisher announces the namespace and
 // holds back its answer to the SUBSCRIBE the relay sends it, for as long as
@@ -20,8 +20,13 @@
 //     `subscribe()` fails with `RequestAbortedError` of `no-answer-in-time`,
 //     the Rust client prints `ANSWER_TIMED_OUT request=subscribe
 //     after_ms=1500`.
-//   - Its request stream is reset with CANCELLED (0x1): the relay prints
-//     `RESET_RECEIVED` with `code=0x1` for a stream of that session.
+//   - Its request stream is reset, and the relay's direction of it stopped,
+//     both with CANCELLED (0x1): the relay prints `RESET_RECEIVED` and
+//     `STOP_SENDING_RECEIVED` with `code=0x1` for a stream of that session.
+//   - The terminal viewer (`--subscriber xmoq-watch`) does the same with
+//     the SUBSCRIBE of its video track, says that the relay did not answer
+//     it within 1500 ms, and leaves: a viewer without its picture has
+//     nothing to show. It closes its session with NO_ERROR.
 //   - The relay did not answer the SUBSCRIBE, and closed no session.
 //   - **The session stays open** (the page): its `closed` has not settled,
 //     and a PUBLISH_NAMESPACE and a PUBLISH it sends afterwards on the same
@@ -37,6 +42,7 @@ import {
 	type RunContext,
 	runCleanups,
 	spawnRustClient,
+	spawnTerminalViewer,
 	startRun,
 	stopEverythingOnExit,
 	TRACK,
@@ -78,7 +84,7 @@ async function subscribersSession(context: RunContext): Promise<string> {
 	return session;
 }
 
-/** The relay's lines about the subscriber's SUBSCRIBE: reset with CANCELLED, and not answered. */
+/** The relay's lines about the subscriber's SUBSCRIBE: reset and stopped with CANCELLED, and not answered. */
 async function expectCancelledAtTheRelay(
 	context: RunContext,
 	session: string,
@@ -97,6 +103,13 @@ async function expectCancelledAtTheRelay(
 			`the relay was to answer nothing and close no session before the SUBSCRIBE was given up: ${unwanted.map((match) => match[0]).join(" | ")}`,
 		);
 	}
+	// §5.1: "The subscriber terminates a subscription in the Pending
+	// (Subscriber) or Established states by sending STOP_SENDING."
+	await context.relay.waitForLine(
+		new RegExp(
+			`^STOP_SENDING_RECEIVED session=${session} stream=\\d+ code=0x1$`,
+		),
+	);
 }
 
 async function withAPage(context: RunContext): Promise<string> {
@@ -149,7 +162,7 @@ async function withAPage(context: RunContext): Promise<string> {
 		),
 		"the page's requests after the one it gave up to be answered",
 	);
-	return `own-browser gave its SUBSCRIBE up ${after} ms after it was sent (its wait: ${ANSWER_WAIT_MS} ms), the relay saw the request stream reset with CANCELLED, and a PUBLISH_NAMESPACE and a PUBLISH on the same session were answered afterwards`;
+	return `own-browser gave its SUBSCRIBE up ${after} ms after it was sent (its wait: ${ANSWER_WAIT_MS} ms), the relay saw the request stream reset and stopped with CANCELLED, and a PUBLISH_NAMESPACE and a PUBLISH on the same session were answered afterwards`;
 }
 
 async function withARustClient(context: RunContext): Promise<string> {
@@ -183,14 +196,64 @@ async function withARustClient(context: RunContext): Promise<string> {
 			`^CONNECTION_ENDED session=${session} ClosedByPeer \\{ code: 0,`,
 		),
 	);
-	return `own-rust gave its SUBSCRIBE up ${after} ms after it started (its wait: ${ANSWER_WAIT_MS} ms), the relay saw the request stream reset with CANCELLED, and the client closed its session with NO_ERROR`;
+	return `own-rust gave its SUBSCRIBE up ${after} ms after it started (its wait: ${ANSWER_WAIT_MS} ms), the relay saw the request stream reset and stopped with CANCELLED, and the client closed its session with NO_ERROR`;
 }
+
+async function withTheTerminalViewer(context: RunContext): Promise<string> {
+	const began = Date.now();
+	// The tracks are named, so that it asks for no catalog; the video is
+	// the first it subscribes to.
+	const viewer = spawnTerminalViewer(context, "sub:xmoq-watch", [
+		"--namespace",
+		NAMESPACE,
+		"--video",
+		TRACK,
+		"--audio",
+		"sound",
+		"--answer-wait-ms",
+		String(ANSWER_WAIT_MS),
+		"--sound",
+		"off",
+		"--medium",
+		"direct",
+		"--out",
+		"/dev/null",
+	]);
+	const session = await subscribersSession(context);
+	await viewer.waitForLine(
+		new RegExp(
+			`the relay did not answer the SUBSCRIBE of ${TRACK} within ${ANSWER_WAIT_MS} ms`,
+		),
+	);
+	const after = Date.now() - began;
+	if (after < ANSWER_WAIT_MS || after > GIVEN_UP_BEFORE_MS) {
+		throw new Error(
+			`xmoq-watch was to give up between ${ANSWER_WAIT_MS} and ${GIVEN_UP_BEFORE_MS} ms, not after ${after}`,
+		);
+	}
+	await expectCancelledAtTheRelay(context, session);
+	const code = await withTimeout(viewer.exited, "xmoq-watch to leave");
+	if (code === 0) throw new Error("xmoq-watch was to fail, and left with 0");
+	await context.relay.waitForLine(
+		new RegExp(
+			`^CONNECTION_ENDED session=${session} ClosedByPeer \\{ code: 0,`,
+		),
+	);
+	return `xmoq-watch gave the SUBSCRIBE of its video up ${after} ms after it started (its wait: ${ANSWER_WAIT_MS} ms), the relay saw the request stream reset and stopped with CANCELLED, and the viewer closed its session with NO_ERROR`;
+}
+
+const SUBSCRIBERS: Record<string, (context: RunContext) => Promise<string>> = {
+	"own-browser": withAPage,
+	"own-rust": withARustClient,
+	"xmoq-watch": withTheTerminalViewer,
+};
 
 async function main(): Promise<void> {
 	const subscriber = options.subscriber;
-	if (subscriber !== "own-browser" && subscriber !== "own-rust") {
+	const run = SUBSCRIBERS[subscriber];
+	if (run === undefined) {
 		throw new Error(
-			`--subscriber is own-browser or own-rust, not ${subscriber}`,
+			`--subscriber is own-browser, own-rust or xmoq-watch, not ${subscriber}`,
 		);
 	}
 	let summary: string;
@@ -214,10 +277,7 @@ async function main(): Promise<void> {
 			["--payload-hex", "00", "--serve-on-line", "--timeout-secs", "60"],
 		);
 		await publisher.waitForLine(/^NAMESPACE_PUBLISHED/);
-		summary =
-			subscriber === "own-browser"
-				? await withAPage(context)
-				: await withARustClient(context);
+		summary = await run(context);
 		// The relay asked the publisher, which is what was not answered.
 		await publisher.waitForLine(/^ASKED request_id=\d+$/);
 	} finally {

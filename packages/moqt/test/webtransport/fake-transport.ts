@@ -183,7 +183,9 @@ function stallingWritable(stalls: () => boolean): WritableStream<Uint8Array> {
  * `holdBidi`: `createBidirectionalStream` of the client does not resolve
  * before this has, as when the peer gives no credit for a stream. The
  * connection performs its outputs in order, so everything behind the
- * request that waits for the stream waits with it.
+ * request that waits for the stream waits with it. With `holdBidiFrom`
+ * the first so many streams are not held, as when the peer gave credit for
+ * that many.
  *
  * `failUni`: `createUnidirectionalStream` of the client rejects with what
  * this returns, when it returns something. In Chromium that is a `DOMException` named
@@ -203,10 +205,12 @@ function stallingWritable(stalls: () => boolean): WritableStream<Uint8Array> {
 export function createFakePeer(
 	options: {
 		holdBidi?: Promise<void>;
+		holdBidiFrom?: number;
 		failUni?: () => unknown;
 		stallWrites?: () => boolean;
 	} = {},
 ): FakePeer {
+	let bidisAsked = 0;
 	const clientUnis = handover<ReadableStreamDefaultReader<Uint8Array>>();
 	const clientBidis = handover<PeerBidiStream>();
 	const incomingUni = new TransformStream<
@@ -268,7 +272,9 @@ export function createFakePeer(
 				return Promise.resolve(stream.writable);
 			},
 			async createBidirectionalStream() {
-				await options.holdBidi;
+				const nth = bidisAsked;
+				bidisAsked += 1;
+				if (nth >= (options.holdBidiFrom ?? 0)) await options.holdBidi;
 				const fromClient = pipe();
 				const toClient = pipe();
 				clientBidis.put({

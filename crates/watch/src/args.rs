@@ -69,6 +69,10 @@ pub struct Args {
     /// with the next. `None`: the parameter is left out, and every Group is
     /// delivered however late.
     pub video_timeout_ms: Option<u64>,
+    /// `--answer-wait-ms`: how long the answer to a request is waited for
+    /// before the parameters of the request are looked at
+    /// (`xmoq_moqt::params::answer_wait_ms`); 10,000 where it is not said.
+    pub answer_wait_ms: u64,
     /// `--volume`: 0 to 1.
     pub volume: f32,
     /// `--scale`: how many times its pixels the picture takes of the
@@ -97,6 +101,10 @@ pub struct Args {
     pub measure_demo_marks: bool,
 }
 
+/// The value of `xmoq_moqt::params::ANSWER_WAIT_MS`, which this library
+/// does not depend on. **Provisional.**
+const DEFAULT_ANSWER_WAIT_MS: u64 = 10_000;
+
 /// The default of `--buffer-ms`, as the watching page of the demo has it.
 /// **Provisional.**
 pub const DEFAULT_BUFFER_MS: u64 = 50;
@@ -120,6 +128,7 @@ xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line
   --video <track> --audio <track>   the tracks by name; without them, those of the catalog
   --buffer-ms <ms>|auto             how long an Object is held beyond the fastest way (50);
                                     auto: it follows how late Objects come, from 50 up to 400 (a trial)
+  --answer-wait-ms <ms>             how long the relay gets to answer a request (10000)
   --video-timeout-ms <ms>           ask the relay to give up a Group of the video that is not delivered
                                     that long after its last Object (not asked; 0 is not asking)
   --volume <0..1>                   (1)
@@ -198,6 +207,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         buffer_ms: DEFAULT_BUFFER_MS,
         buffer_auto: false,
         video_timeout_ms: None,
+        answer_wait_ms: DEFAULT_ANSWER_WAIT_MS,
         volume: 1.0,
         scale: 1,
         medium: Medium::File,
@@ -244,6 +254,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                 let timeout: u64 = number(&flag, &value)?;
                 args.video_timeout_ms = (timeout > 0).then_some(timeout);
             }
+            "--answer-wait-ms" => args.answer_wait_ms = number(&flag, &value)?,
             "--volume" => {
                 let volume: f32 = number(&flag, &value)?;
                 if !(0.0..=1.0).contains(&volume) {
@@ -318,6 +329,7 @@ mod tests {
             buffer_ms: 50,
             buffer_auto: false,
             video_timeout_ms: None,
+            answer_wait_ms: 10_000,
             volume: 1.0,
             scale: 1,
             medium: Medium::File,
@@ -354,7 +366,7 @@ mod tests {
         assert_eq!(
             parsed(
                 "--room http://h/rooms/a --name me --say hello --token no --video v --audio a \
-                 --buffer-ms 150 --video-timeout-ms 100 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
+                 --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
                  --seconds 20 --log l --sound off --measure-demo-marks on"
             ),
             Ok(Args {
@@ -368,6 +380,7 @@ mod tests {
                 buffer_ms: 150,
                 buffer_auto: false,
                 video_timeout_ms: Some(100),
+                answer_wait_ms: 1500,
                 volume: 0.3,
                 scale: 2,
                 medium: Medium::Direct,

@@ -93,6 +93,35 @@ const FETCH_BODY_HIGH_WATER_MARK = 4;
  */
 const MAX_STREAM_ERROR_CODE = 255;
 const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
+/** The Error Reason of the PUBLISH_DONE that ends a PUBLISH nobody answered; the Rust client sends the same. */
+const NO_ANSWER_IN_TIME = "no answer in time";
+
+/** The Status Code INTERNAL_ERROR of PUBLISH_DONE (§10.11): "An implementation specific or generic error occurred." */
+const PUBLISH_DONE_INTERNAL_ERROR = 0x0n;
+
+/** Whether the event is the peer's answer to a request of this endpoint. */
+function isAnswer(event: SessionEvent): event is Extract<
+	SessionEvent,
+	{
+		type:
+			| "publish-namespace-ok"
+			| "publish-ok"
+			| "subscribe-ok"
+			| "request-error"
+			| "fetch-ok";
+	}
+> {
+	switch (event.type) {
+		case "publish-namespace-ok":
+		case "publish-ok":
+		case "subscribe-ok":
+		case "request-error":
+		case "fetch-ok":
+			return true;
+		default:
+			return false;
+	}
+}
 /**
  * Provisional, and the value of the Rust implementation
  * (`first_bytes_timeout` in crates/moqt-io); docs/open-questions.md, on the
@@ -412,9 +441,10 @@ export interface FetchResponse {
  * The answer and the Objects come on two streams, in either order (§10.13),
  * so they are two things here. The FETCH is over when it was rejected or
  * cancelled, or when both `response` has resolved and `body` has ended. A
- * publisher that never answers leaves it open, where it takes up one of the
- * requests the session may have: nothing here ends it after a time, so give
- * the call a `signal` or call `cancel()`.
+ * publisher that does not answer has it given up after `answerTimeoutMs`
+ * (`ended` then has `no-answer-in-time`); one that answers and sends no
+ * stream, or never ends it, leaves it open, where it takes up one of the
+ * requests the session may have: give the call a `signal` or call `cancel()`.
  */
 export interface Fetch {
 	readonly requestId: bigint;
@@ -782,6 +812,8 @@ interface ActiveSubscription {
 /** What the connection keeps for a FETCH, from the moment it is sent. */
 interface ActiveFetch {
 	body: ObjectQueue<Uint8Array>;
+	/** Called when the FETCH is written; set where it is registered. */
+	sent: () => void;
 	response: Deferred<FetchResponse>;
 	ended: Deferred<FetchEnd>;
 	/** How the publisher ended the fetch stream, once it has. */
@@ -962,6 +994,8 @@ export async function connectOver(
 		authorizationToken: options.authorizationToken,
 		limits: options.limits,
 	});
+	/** The requests of this endpoint whose answer the session has read, until their response is given. */
+	const answered = new Set<bigint>();
 	const pendingNamespaces = new Map<bigint, Deferred<void>>();
 	const pendingPublishes = new Map<bigint, Deferred<PublishedTrack>>();
 	const pendingSubscribes = new Map<bigint, Deferred<Subscription>>();
@@ -1455,19 +1489,31 @@ export async function connectOver(
 		const cancel = (): Promise<void> => giveUp("cancelled");
 		const active: ActiveFetch = {
 			body: createObjectQueue<Uint8Array>(FETCH_BODY_HIGH_WATER_MARK, cancel),
+			sent: () => {},
 			response: deferred(),
 			ended: deferred(),
 			streamEnd: undefined,
 		};
-		// WHY the rejection is dropped: a reset that could not be written ends
-		// the session, and `closed` and `ended` report that.
-		const unanswered = setTimeout(() => {
-			giveUp("no-answer-in-time").catch(() => {});
-		}, answerWait);
+		let unanswered: ReturnType<typeof setTimeout> | undefined;
+		// The FETCH is written: the time its answer gets begins (as in
+		// `request`).
+		active.sent = () => {
+			if (!fetches.has(requestId) || answered.has(requestId)) return;
+			unanswered = setTimeout(() => {
+				if (answered.has(requestId)) return;
+				// WHY the rejection is dropped: a reset that could not be
+				// written ends the session, and `closed` and `ended` report
+				// that.
+				giveUp("no-answer-in-time").catch(() => {});
+			}, answerWait);
+		};
 		// A caller that reads `body` and `ended` alone leaves this unhandled.
 		active.response.promise
 			.catch(() => {})
-			.finally(() => clearTimeout(unanswered));
+			.finally(() => {
+				clearTimeout(unanswered);
+				answered.delete(requestId);
+			});
 		fetches.set(requestId, active);
 		return {
 			requestId,
@@ -2006,7 +2052,17 @@ export async function connectOver(
 	): Promise<void> {
 		if (sessionClose !== undefined) return;
 		try {
-			const waits = await enqueue(action(session));
+			const outputs = action(session);
+			// WHY here and not where the event is handled: outputs are
+			// performed in one line, and an answer waits there behind a
+			// request whose stream the peer gives no credit for yet. The
+			// answer has come when the session has read it.
+			for (const output of outputs) {
+				if (output.type === "event" && isAnswer(output.event)) {
+					answered.add(output.event.requestId);
+				}
+			}
+			const waits = await enqueue(outputs);
 			// The source of this input is not read further until its outputs were
 			// taken. A write that fails here answers a peer that has left the
 			// stream, which is not an error of this input.
@@ -2029,56 +2085,109 @@ export async function connectOver(
 			}),
 	);
 
-	/** Sends a request and waits for its response. `pending` is where the response is delivered. */
+	/**
+	 * Sends a request and waits for its response. `pending` is where the
+	 * response is delivered; `giveUp` is what the session does with a
+	 * request that got no answer in time.
+	 */
 	const request = <T>(
 		pending: Map<bigint, Deferred<T>>,
 		parameters: MessageParameters | undefined,
 		action: (session: Session) => SessionResult<bigint>,
+		giveUp: (requestId: bigint) => Promise<void> = (requestId) =>
+			applyVoid((s) => s.cancelRequest(requestId)),
 	): Promise<T> => {
 		const response = deferred<T>();
 		let unanswered: ReturnType<typeof setTimeout> | undefined;
+		let sent: bigint | undefined;
 		apply((s) => {
 			const result = action(s);
-			const requestId = result.value;
+			sent = result.value;
 			// Registered before the request is sent, so the response finds it.
-			pending.set(requestId, response);
-			unanswered = setTimeout(
-				() => {
-					if (pending.get(requestId) !== response) return;
-					rejectPending(
-						requestId,
-						new RequestAbortedError({ type: "no-answer-in-time" }),
-					);
-					// WHY the rejection is dropped: a reset that could not be
-					// written ends the session, and `closed` reports that.
-					applyVoid((s) => s.cancelRequest(requestId)).catch(() => {});
-				},
-				answerWaitMs(answerTimeoutMs, parameters),
-			);
+			pending.set(sent, response);
 			return result;
-		}).catch(async (error: unknown) => {
-			// WHY one turn of the timers before the error is given: where the
-			// peer closes the session as the request is being written, the
-			// write fails 0.3 ms before `closed` of the transport settles, and
-			// with a NetworkError that does not say it is the session's
-			// (Chromium 156, 4 of 10 against a relay that closes at SETUP).
-			// The request then fails with how the session ended, as the
-			// requests after it do.
-			// WHY not until `closed` settles: a write may fail for the stream
-			// alone, and the request would never be answered.
-			if (sessionClose === undefined) {
-				await Promise.race([
-					closed.promise,
-					new Promise((resolve) => setTimeout(resolve, 0)),
-				]);
-			}
-			response.reject(
-				sessionClose === undefined
-					? toError(error)
-					: new SessionClosedError(sessionClose),
-			);
+		}).then(
+			(requestId) => {
+				// WHY from here: the time is the peer's to answer in, and it
+				// begins when the request is written. A request whose stream
+				// the peer gives no credit for waits before this, and would be
+				// given up before the peer had it.
+				if (pending.get(requestId) !== response || answered.has(requestId)) {
+					return;
+				}
+				unanswered = setTimeout(
+					() => {
+						if (pending.get(requestId) !== response) return;
+						if (answered.has(requestId)) return;
+						rejectPending(
+							requestId,
+							new RequestAbortedError({ type: "no-answer-in-time" }),
+						);
+						// WHY the rejection is dropped: what could not be
+						// written ends the session, and `closed` reports that.
+						giveUp(requestId).catch(() => {});
+					},
+					answerWaitMs(answerTimeoutMs, parameters),
+				);
+			},
+			async (error: unknown) => {
+				// WHY one turn of the timers before the error is given: where the
+				// peer closes the session as the request is being written, the
+				// write fails 0.3 ms before `closed` of the transport settles, and
+				// with a NetworkError that does not say it is the session's
+				// (Chromium 156, 4 of 10 against a relay that closes at SETUP).
+				// The request then fails with how the session ended, as the
+				// requests after it do.
+				// WHY not until `closed` settles: a write may fail for the stream
+				// alone, and the request would never be answered.
+				if (sessionClose === undefined) {
+					await Promise.race([
+						closed.promise,
+						new Promise((resolve) => setTimeout(resolve, 0)),
+					]);
+				}
+				response.reject(
+					sessionClose === undefined
+						? toError(error)
+						: new SessionClosedError(sessionClose),
+				);
+			},
+		);
+		return response.promise.finally(() => {
+			clearTimeout(unanswered);
+			if (sent !== undefined) answered.delete(sent);
 		});
-		return response.promise.finally(() => clearTimeout(unanswered));
+	};
+
+	/**
+	 * Ends a PUBLISH that got no answer in time: PUBLISH_DONE and a FIN, and
+	 * the subscriber has the time of `startPeerStreamTimer` to end its
+	 * direction, as after `done()`.
+	 *
+	 * WHY PUBLISH_DONE, where every other request is reset: a PUBLISH that
+	 * waits for its answer is a subscription in the state Pending
+	 * (Publisher), and §5.1 has "The publisher terminates a subscription in
+	 * the Pending (Publisher) or Established states by sending PUBLISH_DONE
+	 * and closing the stream"; §11.4.1: "When possible, Publishers SHOULD
+	 * send a PUBLISH_DONE when terminating a subscription instead of
+	 * abruptly terminating the associated control stream".
+	 * WHY INTERNAL_ERROR: §10.11 has no code for a time that ran out
+	 * (EXPIRED is "the timeout specified in SUBSCRIBE_OK"), and this one is
+	 * "An implementation specific or generic error". The session counts the
+	 * streams itself: none, so Stream Count is 0.
+	 */
+	const endUnansweredPublish = (requestId: bigint): Promise<void> => {
+		const wait: PeerStreamWait = { ended: deferred(), timer: undefined };
+		return applyVoid((s) => {
+			const outputs = s.publishDone(
+				requestId,
+				PUBLISH_DONE_INTERNAL_ERROR,
+				NO_ANSWER_IN_TIME,
+			);
+			peerStreamWaits.set(requestId, wait);
+			startPeerStreamTimer(requestId, wait);
+			return outputs;
+		});
 	};
 
 	const setupTimer = setTimeout(
@@ -2136,11 +2245,16 @@ export async function connectOver(
 				...asked,
 				parameters: authorized(asked.parameters),
 			};
-			return request(pendingPublishes, asked.parameters, (s) => {
-				const result = s.publish(publishRequest);
-				pendingPublishAliases.set(result.value, publishRequest.trackAlias);
-				return result;
-			});
+			return request(
+				pendingPublishes,
+				asked.parameters,
+				(s) => {
+					const result = s.publish(publishRequest);
+					pendingPublishAliases.set(result.value, publishRequest.trackAlias);
+					return result;
+				},
+				endUnansweredPublish,
+			);
 		},
 		subscribe(asked) {
 			return request(pendingSubscribes, asked.parameters, (s) =>
@@ -2167,6 +2281,7 @@ export async function connectOver(
 					outputs,
 				};
 			});
+			fetches.get(handle.requestId)?.sent();
 			if (signal !== undefined) {
 				// WHY the rejection is dropped: `cancel()` rejects when the reset
 				// could not be written, which ends the session, and `closed` and

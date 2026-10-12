@@ -115,6 +115,9 @@ pub mod setup_option {
 
 /// `PUBLISH_DONE` Status Codes (§10.11).
 pub mod publish_done_status {
+    /// `INTERNAL_ERROR`: an implementation specific or generic error
+    /// occurred.
+    pub const INTERNAL_ERROR: u64 = 0x0;
     /// `TRACK_ENDED`: the track is no longer being published.
     pub const TRACK_ENDED: u64 = 0x2;
     /// `TOO_FAR_BEHIND`: the publisher's queue for this subscriber exceeded its

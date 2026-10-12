@@ -305,6 +305,11 @@ pub struct OwnFetch {
     /// Tells the task of the fetch stream to read no more and to keep the
     /// stream as it is (`Reading::cancel_request_only`).
     hold: Arc<tokio::sync::Notify>,
+    /// How long its answer gets, in milliseconds.
+    pub answer_wait_ms: u64,
+    /// The task that says when that time is over; stopped when the answer
+    /// came, and when the FETCH is over.
+    answer_timer: JoinHandle<()>,
 }
 
 /// What was printed for a FETCH.
@@ -338,6 +343,9 @@ impl OwnFetch {
 /// The FETCH requests of this client and the queue of their notes.
 pub struct Fetches {
     pub sent: Vec<OwnFetch>,
+    /// A FETCH was given up because its answer did not come in time: the
+    /// mode that sent it fails.
+    pub unanswered: bool,
     notes: mpsc::Receiver<Note>,
     queue: mpsc::Sender<Note>,
     reading: Reading,
@@ -348,6 +356,7 @@ impl Fetches {
         let (queue, notes) = mpsc::channel(NOTE_QUEUE);
         Self {
             sent: Vec::new(),
+            unanswered: false,
             notes,
             queue,
             reading,
@@ -368,7 +377,7 @@ impl Fetches {
         let (request, cancelled) = oneshot::channel();
         tokio::spawn(watch_request(index, stream, cancelled, self.queue.clone()));
         let notes = self.queue.clone();
-        tokio::spawn(async move {
+        let answer_timer = tokio::spawn(async move {
             tokio::time::sleep(answer_wait).await;
             // The client is gone when this fails.
             let _ = notes.send(Note::AnswerDue(index)).await;
@@ -389,7 +398,17 @@ impl Fetches {
             request: Some(request),
             body: None,
             hold: Arc::new(tokio::sync::Notify::new()),
+            answer_wait_ms: u64::try_from(answer_wait.as_millis()).unwrap_or(u64::MAX),
+            answer_timer,
         });
+    }
+
+    /// The answer of a FETCH came, or the FETCH is over: nothing waits for
+    /// its answer any more.
+    pub fn stop_answer_timer(&mut self, index: usize) {
+        if let Some(fetch) = self.sent.get(index) {
+            fetch.answer_timer.abort();
+        }
     }
 
     /// The next note; never, when no FETCH is open.
