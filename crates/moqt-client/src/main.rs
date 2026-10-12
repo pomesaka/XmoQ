@@ -2540,7 +2540,11 @@ async fn run_session(
     let setup = session.setup(setup_options)?;
     xmoq_moqt_io::send_message(control, &setup, &args.trace, "control").await?;
 
-    let peer_setup = session.on_control_message(session_inbox.next_control_message().await?)?;
+    let Ok(first) = tokio::time::timeout(SETUP_WAIT, session_inbox.next_control_message()).await
+    else {
+        return Err(NoSetupInTime.into());
+    };
+    let peer_setup = session.on_control_message(first?)?;
     report::setup_ok(&peer_setup);
 
     let mut client = Client {
@@ -2578,12 +2582,42 @@ fn termination_code(result: &Result<()>) -> u32 {
     };
     // WHY walk the chain: `anyhow::Error::context` wraps the cause, and a
     // protocol error has to be found under any number of such wrappers.
+    if error
+        .chain()
+        .any(<dyn std::error::Error>::is::<NoSetupInTime>)
+    {
+        return CONTROL_MESSAGE_TIMEOUT;
+    }
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
         .and_then(xmoq_moqt::Error::termination_code)
         .map_or(0, xmoq_moqt::TerminationCode::code)
 }
+
+/// How long the peer's SETUP is waited for, from when this client's was
+/// written. **Provisional**, and the time `@xmoq/moqt` and the terminal
+/// viewer give it.
+const SETUP_WAIT: Duration = Duration::from_secs(10);
+
+/// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11): The session was closed because
+/// the peer took too long to respond to a control message." What the
+/// session is closed with where no SETUP came, as `@xmoq/moqt` does. A
+/// request that is not answered is given up alone, and closes nothing
+/// ([`Client::in_time`]).
+const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
+
+/// The peer sent no SETUP in time.
+#[derive(Debug)]
+struct NoSetupInTime;
+
+impl std::fmt::Display for NoSetupInTime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the peer sent no SETUP within 10 s")
+    }
+}
+
+impl std::error::Error for NoSetupInTime {}
 
 /// How long a client that failed waits to learn whether the peer closed the
 /// session, and with what ([`run`]).
@@ -2668,6 +2702,23 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use xmoq_moqt::message::{Publish, PublishDone, PublishNamespace, Subscribe};
+
+    #[test]
+    fn the_session_is_closed_with_the_code_its_failure_asks_for() {
+        // (how the mode ended; the code the session is closed with)
+        let cases: [(Result<()>, u32); 4] = [
+            (Ok(()), 0x0),
+            (Err(anyhow!("the peer did not answer")), 0x0),
+            (Err(NoSetupInTime.into()), 0x11),
+            (
+                Err(anyhow::Error::from(NoSetupInTime).context("the session")),
+                0x11,
+            ),
+        ];
+        for (result, code) in cases {
+            assert_eq!(termination_code(&result), code, "{result:?}");
+        }
+    }
 
     /// `fixtures/request-answer-wait/`, which `@xmoq/moqt` reads too: what
     /// this client ends a PUBLISH with that nobody answered.
