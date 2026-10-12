@@ -199,7 +199,7 @@ enum Standing {
         /// payload: what the write keeps alive when the cache lets go of
         /// that Group ([`MAX_BYTES_HELD_BEYOND_THE_CACHE`]). `None` for a
         /// stream without an Object.
-        holds: Option<(u64, usize)>,
+        holds: Option<(KeptGroup, usize)>,
         /// The I/O side was told to give the stream up
         /// ([`Action::AbortFetchWrite`]).
         told_to_stop: bool,
@@ -250,7 +250,7 @@ impl Fetches {
         &mut self,
         subscriber: (SessionKey, StreamKey),
         track: FullTrackName,
-        holds: Option<(u64, usize)>,
+        holds: Option<(KeptGroup, usize)>,
     ) {
         self.0.insert(
             subscriber,
@@ -266,7 +266,7 @@ impl Fetches {
     /// carry Objects: who reads it, the track, the Group and the bytes.
     fn writes(
         &self,
-    ) -> impl Iterator<Item = (&(SessionKey, StreamKey), &FullTrackName, u64, usize)> {
+    ) -> impl Iterator<Item = (&(SessionKey, StreamKey), &FullTrackName, KeptGroup, usize)> {
         self.0
             .iter()
             .filter_map(|(subscriber, standing)| match standing {
@@ -447,6 +447,19 @@ pub(crate) struct OwnFetch {
     id: RequestId,
     /// The session and request stream of the subscriber's FETCH.
     subscriber: (SessionKey, StreamKey),
+}
+
+/// A Group as a cache had it: which track with the name (`Track::born`),
+/// and the Group ID.
+///
+/// WHY not the Group ID alone: a track that comes again under the name may
+/// count its Groups as the one before did, and the cache of the new track
+/// having a Group of that number says nothing of the Objects a stream of
+/// the old one carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct KeptGroup {
+    track: u32,
+    group: u64,
 }
 
 /// What the fetch streams the relay writes keep alive beyond the cache.
@@ -1261,9 +1274,10 @@ impl Relay {
             FetchPiece::Object(cached) => Some((cached.group_id, cached.object.payload.len())),
             FetchPiece::EndOfRange(..) => None,
         };
+        let born = self.tracks.live(track).map_or(0, |live| live.born);
         let holds = pieces.iter().find_map(payload).map(|(group, _)| {
             (
-                group,
+                KeptGroup { track: born, group },
                 pieces
                     .iter()
                     .filter_map(payload)
@@ -1294,14 +1308,11 @@ impl Relay {
     pub(crate) fn held_beyond_the_cache(&self) -> Held {
         // The largest stream of each Group, for the relay and for each
         // session.
-        let mut groups: BTreeMap<(&FullTrackName, u64), usize> = BTreeMap::new();
-        let mut of_sessions: BTreeMap<(SessionKey, &FullTrackName, u64), usize> = BTreeMap::new();
+        let mut groups: BTreeMap<(&FullTrackName, KeptGroup), usize> = BTreeMap::new();
+        let mut of_sessions: BTreeMap<(SessionKey, &FullTrackName, KeptGroup), usize> =
+            BTreeMap::new();
         for ((session, _), track, group, bytes) in self.fetches.writes() {
-            let cached = self
-                .tracks
-                .live(track)
-                .is_some_and(|live| live.cache.keeps(group));
-            if cached {
+            if self.cache_has(track, group) {
                 continue;
             }
             let most = groups.entry((track, group)).or_default();
@@ -1317,6 +1328,14 @@ impl Relay {
             total: groups.values().sum(),
             sessions,
         }
+    }
+
+    /// Whether the cache of the track with that name still has the Group:
+    /// the same track, and the Group it keeps.
+    fn cache_has(&self, track: &FullTrackName, kept: KeptGroup) -> bool {
+        self.tracks
+            .live(track)
+            .is_some_and(|live| live.born == kept.track && live.cache.keeps(kept.group))
     }
 
     /// The cache of a track has let go of a Group, or a track is over: the
@@ -1355,11 +1374,7 @@ impl Relay {
                 .fetches
                 .writes()
                 .filter(|((of, _), track, group, _)| {
-                    *of == session
-                        && !self
-                            .tracks
-                            .live(track)
-                            .is_some_and(|live| live.cache.keeps(*group))
+                    *of == session && !self.cache_has(track, *group)
                 })
                 .max_by_key(|(subscriber, _, _, bytes)| (*bytes, **subscriber))
                 .map(|(subscriber, ..)| *subscriber);

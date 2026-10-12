@@ -1047,3 +1047,30 @@ fn what_is_kept_beyond_the_cache_is_counted_when_the_track_ends_and_no_longer_wh
     relay.step(Event::SessionClosed { session: ALICE });
     assert_eq!(relay.counts().held_beyond_cache_bytes, 0);
 }
+
+#[test]
+fn a_group_of_the_same_number_of_a_track_that_came_again_is_not_the_one_a_stream_keeps() {
+    let mut relay = relay_with_three_objects();
+    assert_eq!(fetches_group(&mut relay, ALICE, 7, 3), "written");
+    // The publisher goes, and the track with it: the stream keeps the
+    // three bytes of its Group 3.
+    relay.step(Event::SessionClosed { session: PUBLISHER });
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+    // A publisher brings the track again, and counts its Groups as the
+    // first did: Group 3, on stream 7, with one Object.
+    relay.step(Event::SessionOpened {
+        session: PUBLISHER,
+        role: Role::Server,
+    });
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        first: publish(0, b"a"),
+    });
+    assert_eq!(data_stream_opened(&mut relay, 7), []);
+    assert_eq!(object_arrived(&mut relay, 7, 0), []);
+    assert_eq!(relay.counts().cached_bytes, 1);
+    // The cache has a Group 3, and it is not the one the stream carries:
+    // the three bytes are kept by the stream as before.
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+}
