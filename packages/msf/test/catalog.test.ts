@@ -41,7 +41,7 @@ describe("fixtures/msf-01: the catalog of moqlivemock's publisher", () => {
 	});
 
 	// The fields this package reads, and none of the others the catalog
-	// has (`renderGroup`, `altGroup`, `lang`, `samplerate`, `channelConfig`).
+	// has (`renderGroup`, `altGroup`, `lang`).
 	test.each([
 		{
 			index: 0,
@@ -66,6 +66,8 @@ describe("fixtures/msf-01: the catalog of moqlivemock's publisher", () => {
 				role: "audio",
 				codec: "opus",
 				bitrate: 135200,
+				samplerate: 48000,
+				channelConfig: "2",
 			},
 		},
 	])(
@@ -98,9 +100,9 @@ describe("fixtures/msf-01/catalogs.tsv: what a payload is read as", () => {
 			return { name, outcome, json };
 		});
 
-	test("the table has 61 rows, each with a name of its own", () => {
-		expect(rows.length).toBe(61);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(61);
+	test("the table has 66 rows, each with a name of its own", () => {
+		expect(rows.length).toBe(66);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(66);
 	});
 
 	test.each(rows)("$name: $outcome", ({ outcome, json }) => {

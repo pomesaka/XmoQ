@@ -33,7 +33,7 @@ No track has `namespace`, `initRef` or `timescale`, and the catalog has no `init
 
 **Nobody's implementation wrote these documents.** They were written by hand from the text of the draft, one for each thing the check of `@xmoq/msf` looks at, and the person who read the draft wrote down what each is read as. They are no check against another implementation; they keep two implementations of ours from reading one document in two ways.
 
-61 rows, tab-separated, a newline after each:
+66 rows, tab-separated, a newline after each:
 
 | Column | |
 |---|---|

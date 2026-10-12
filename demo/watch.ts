@@ -356,9 +356,6 @@ async function main(): Promise<void> {
 		}
 	});
 	const audioOptions = {
-		// The catalog of @xmoq/msf has no sample rate and no channels yet: these two are the demo's.
-		sampleRate: SAMPLE_RATE,
-		numberOfChannels: 1,
 		// `?audioJoin=1` fetches the Group of audio the page comes into.
 		joiningFetch: query.get("audioJoin") !== null,
 		onData: playout.onData,
@@ -500,6 +497,9 @@ async function main(): Promise<void> {
 				trackNamespace: trackNamespaceOf(sound, playingNamespace),
 				trackName: utf8.encode(sound.name),
 				codec: sound.codec ?? "",
+				// From the catalog; the demo's own where a catalog has none.
+				sampleRate: sound.samplerate ?? SAMPLE_RATE,
+				numberOfChannels: Number(sound.channelConfig ?? 1),
 			})
 				.then((playing) => {
 					audioSince = performance.now();
