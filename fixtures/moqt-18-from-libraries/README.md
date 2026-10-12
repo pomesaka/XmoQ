@@ -10,5 +10,7 @@ Variable-length integers are those of §1.4.1: `80 fa` is 250 and `81 f4` is 500
 |---|---|---|
 | `subscribe-delivery-timeouts-moqtail-ts` | moqtail npm 0.13.0, `Subscribe.newLatestObject(0n, FullTrackName.tryNew("xmoq/phase0", "object"), [new ObjectDeliveryTimeout(250n), new SubgroupDeliveryTimeout(500n)]).serialize()`, run with Bun on 2026-10-12 | SUBSCRIBE, Request ID 0, (`xmoq`, `phase0`) / `object`, OBJECT_DELIVERY_TIMEOUT = 250, SUBGROUP_DELIVERY_TIMEOUT = 500, SUBSCRIPTION_FILTER = Largest Object |
 | `subscribe-subgroup-delivery-timeout-moqtail-ts` | The same with `[new SubgroupDeliveryTimeout(500n)]` | The same without OBJECT_DELIVERY_TIMEOUT |
+| `request-update-subgroup-delivery-timeout-moqtail-ts` | moqtail npm 0.13.0, `new RequestUpdate(2n, [new SubgroupDeliveryTimeout(250n)]).serialize()`, run with Bun on 2026-10-12 | REQUEST_UPDATE, Request ID 2, SUBGROUP_DELIVERY_TIMEOUT = 250 |
+| `request-update-no-subgroup-delivery-timeout-moqtail-ts` | The same with `new SubgroupDeliveryTimeout(0n)` | REQUEST_UPDATE, Request ID 2, SUBGROUP_DELIVERY_TIMEOUT = 0 (§8: no timeout) |
 
 The parameters come out in ascending order of their types whatever order the library is given them in (seen with the two swapped), as §10.2 asks.

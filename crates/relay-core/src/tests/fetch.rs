@@ -2130,7 +2130,8 @@ impl Ending {
                 stream: StreamKey(0),
                 message: ControlMessage::RequestUpdate(RequestUpdate {
                     request_id: 4,
-                    parameters: vec![],
+                    // One the relay does not apply.
+                    parameters: vec![Parameter::Forward(false)],
                 }),
             }],
         };

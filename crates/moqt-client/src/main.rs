@@ -119,6 +119,11 @@ struct Args {
     /// (`xmoq_moqt::params::answer_wait_ms`). Then the request alone is
     /// cancelled (`ANSWER_TIMED_OUT`), and the mode fails.
     answer_wait_ms: u64,
+    /// `--update-subgroup-timeout-ms`: `--mode subscribe` sends a
+    /// `REQUEST_UPDATE` with this `SUBGROUP_DELIVERY_TIMEOUT` once its
+    /// SUBSCRIBE is accepted (§10.9), and prints `UPDATE_ACCEPTED` or
+    /// `UPDATE_FAILED` when the answer comes.
+    update_subgroup_timeout_ms: Option<u64>,
     /// How long the publisher waits between the answer to its
     /// `PUBLISH_NAMESPACE` and its PUBLISH.
     publish_delay: Duration,
@@ -595,6 +600,18 @@ fn read_cert_sha256(text: Option<String>) -> Result<[u8; 32]> {
 }
 
 /// The value of a flag that takes milliseconds.
+/// What else the stream of an Established SUBSCRIBE carries: the answers to
+/// `--update-subgroup-timeout-ms`. After a refusal the publisher's
+/// `PUBLISH_DONE` follows (§10.9.1).
+fn update_answered(event: RequestEvent) -> Result<()> {
+    match event {
+        RequestEvent::UpdateAccepted { .. } => report::update_answered(None),
+        RequestEvent::UpdateFailed(error) => report::update_answered(Some(error.error_code)),
+        other => bail!("unexpected message on the subscribe stream: {other:?}"),
+    }
+    Ok(())
+}
+
 fn millis(flag: &str, value: &str) -> Result<u64> {
     value.parse().with_context(|| flag.to_string())
 }
@@ -605,7 +622,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut url, mut cert_sha256) = (None, None);
     let (mut namespace, mut track_name) = (None, None);
     let (mut timeout_secs, mut publish_delay_ms) = (20, 0);
-    let mut answer_wait_ms = xmoq_moqt::params::ANSWER_WAIT_MS;
+    let (mut answer_wait_ms, mut update_ms) = (xmoq_moqt::params::ANSWER_WAIT_MS, None);
     let mut subgroup_id = SubgroupId::Zero;
     let mut first_group = 0;
     let mut publisher_priority = Some(0);
@@ -644,6 +661,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--track" => track_name = Some(value),
             "--timeout-secs" => timeout_secs = value.parse().context("--timeout-secs")?,
             "--answer-wait-ms" => answer_wait_ms = millis(&flag, &value)?,
+            "--update-subgroup-timeout-ms" => update_ms = Some(millis(&flag, &value)?),
             "--subgroup-id" => {
                 subgroup_id = match value.as_str() {
                     "zero" => SubgroupId::Zero,
@@ -683,6 +701,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         catalog_video,
         timeout_secs,
         answer_wait_ms,
+        update_subgroup_timeout_ms: update_ms,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
         first_group,
@@ -990,6 +1009,13 @@ impl Client<'_> {
             }
         };
         report::subscribed(track_alias);
+        if let Some(milliseconds) = self.args.update_subgroup_timeout_ms {
+            let update = self.session.update_subscription(
+                request_id,
+                vec![Parameter::SubgroupDeliveryTimeout(milliseconds)],
+            )?;
+            stream.send(&update).await?;
+        }
         if let Some((range, false)) = joining {
             self.send_fetch(&mut fetches, range).await?;
         }
@@ -1354,7 +1380,7 @@ impl Client<'_> {
                                 report::publish_done_received(&done);
                                 drain_deadline = Some(Instant::now() + DRAIN_TIMEOUT);
                             }
-                            other => bail!("unexpected message on the subscribe stream: {other:?}"),
+                            other => update_answered(other)?,
                         }
                     }
                     RequestStreamEvent::Closed(how) => {
@@ -1669,6 +1695,12 @@ impl Client<'_> {
                                 publish_stream.send(&response).await?;
                                 report::update_refused();
                                 break publish_done_status::UPDATE_FAILED;
+                            }
+                            // §10.9: the REQUEST_OK. WHY nothing else: this
+                            // client acts on no delivery timeout, that of a
+                            // PUBLISH_OK or a SUBSCRIBE included.
+                            RequestEvent::SubscriptionUpdated { response, .. } => {
+                                publish_stream.send(&response).await?;
                             }
                             other => bail!("unexpected message on the publish stream: {other:?}"),
                         }
@@ -2426,9 +2458,14 @@ impl Client<'_> {
                 let event = self
                     .session
                     .on_peer_request_message(served.request, message)?;
-                // §10.9: this client applies no update, answers the first one
-                // with REQUEST_ERROR, and then ends the subscription
-                // (§10.9.1).
+                // §10.9: an update of the subgroup timeout, or of nothing,
+                // gets its REQUEST_OK; this client acts on no delivery
+                // timeout.
+                if let PeerRequestEvent::SubscriptionUpdated { response, .. } = &event {
+                    xmoq_moqt_io::send_message(&mut served.send, response, wire, "served").await?;
+                }
+                // Any other update is refused: the first one is answered
+                // with REQUEST_ERROR, and the subscription ends (§10.9.1).
                 if let PeerRequestEvent::UpdateRefused { response, .. } = event {
                     xmoq_moqt_io::send_message(&mut served.send, &response, wire, "served").await?;
                     report::update_refused();

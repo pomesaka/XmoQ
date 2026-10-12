@@ -391,6 +391,18 @@ pub enum Action {
         /// nothing, or for 0.
         subgroup_delivery_timeout: Option<u64>,
     },
+    /// The subscriber changed the `SUBGROUP_DELIVERY_TIMEOUT` of its
+    /// subscription with a `REQUEST_UPDATE` (§10.9). Sent for every stream
+    /// of the subscription that is not done; the I/O side lets it hold for
+    /// the ones it has not been told to finish (see
+    /// docs/moqt-implementation-notes.md, the row on a delivery timeout
+    /// that changes).
+    SetDeliveryTimeout {
+        /// The stream.
+        out_stream: OutStreamKey,
+        /// As in [`Action::OpenDataStream`].
+        subgroup_delivery_timeout: Option<u64>,
+    },
     /// Write an Object on a subgroup stream the relay opened.
     SendObject {
         /// The stream.

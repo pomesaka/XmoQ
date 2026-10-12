@@ -141,6 +141,19 @@ const ANNOUNCE_ONLY: Pairing[] = ["moqtail-rust", "own-rust"].map(
  */
 const ONE_TO_MANY: Pairing[] = [
 	{
+		// §10.9: the relay answers REQUEST_OK, and the subscription goes on.
+		name: "own-browser to own-rust, which changes its delivery timeout with a REQUEST_UPDATE first",
+		script: "run.ts",
+		args: [
+			"--publisher",
+			"own-browser",
+			"--subscriber",
+			"own-rust",
+			"--update-subgroup-timeout-ms",
+			"5000",
+		],
+	},
+	{
 		name: "own-rust to 3 own-browser, then PUBLISH_DONE",
 		script: "run.ts",
 		args: [
@@ -1127,6 +1140,25 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 				relay,
 				"--delivery-timeout-ms",
 				"10000",
+			],
+			relay,
+		})),
+		// The viewer changes its SUBGROUP_DELIVERY_TIMEOUT while it plays, with
+		// a REQUEST_UPDATE (§10.9): the relay answers REQUEST_OK, and every
+		// frame is played as without it. That a relay acts on the new time is
+		// not seen here, where nothing is late (the own relay's tests have it).
+		...relays.map((relay) => ({
+			name: `${relay} relay: video: a viewer that changes its delivery timeout with a REQUEST_UPDATE goes on playing the video of an own page`,
+			script: "video.ts" as const,
+			args: [
+				"--video",
+				"page-to-page",
+				"--through",
+				relay,
+				"--delivery-timeout-ms",
+				"10000",
+				"--update-delivery-timeout-ms",
+				"5000",
 			],
 			relay,
 		})),

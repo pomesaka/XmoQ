@@ -132,6 +132,8 @@ function fake(options: {
 			end({ type: "cancelled" });
 			if (options.cancelFails === true) throw new Error("the reset failed");
 		},
+		// The reader of a catalog updates nothing.
+		update: () => Promise.reject(new Error("not updated here")),
 	};
 	const heldBody = hand<Uint8Array>();
 	const connection: Fake["connection"] = {

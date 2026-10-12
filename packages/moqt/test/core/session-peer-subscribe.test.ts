@@ -27,6 +27,9 @@ function subscribeBytes(requestId: number, lastLetter = "74"): Uint8Array {
  */
 const REQUEST_UPDATE = hex(byHand("request-update-request-id-3"));
 
+/** REQUEST_UPDATE with Request ID 3 and FORWARD = 0: one that is not applied. */
+const REFUSED_UPDATE = hex("02 00 04 03 01 10 00");
+
 /** The captured Relative Joining FETCH, as Request ID 3 of the server, naming its SUBSCRIBE with Request ID 1. */
 function joiningFetchBytes(): Uint8Array {
 	const pairs = fixture("fetch-relative-joining-moqtail-rs").split(" ");
@@ -311,7 +314,45 @@ describe("a SUBSCRIBE of the peer, and what the subscriber does next", () => {
 			name: "REQUEST_UPDATE after SUBSCRIBE_OK: refused, and PUBLISH_DONE UPDATE_FAILED (§10.9.1)",
 			session: serving,
 			act: (session: Session) =>
+				session.receivePeerBidiStreamData(0, REFUSED_UPDATE, false),
+			outputs: [
+				"send 1: REQUEST_ERROR 3",
+				"send 1: PUBLISH_DONE 8 streams 0",
+				"event request-closed 1 update-failed",
+				"finish 1",
+			],
+		},
+		{
+			name: "REQUEST_UPDATE without a parameter after SUBSCRIBE_OK: REQUEST_OK, and the subscription goes on (§10.9)",
+			session: serving,
+			act: (session: Session) =>
 				session.receivePeerBidiStreamData(0, REQUEST_UPDATE, false),
+			outputs: ["send 1: REQUEST_OK"],
+		},
+		{
+			// The bytes of fixtures/moqt-18-from-libraries/
+			// request-update-subgroup-delivery-timeout-moqtail-ts, with the
+			// Request ID 3 of a server.
+			name: "REQUEST_UPDATE with SUBGROUP_DELIVERY_TIMEOUT alone after SUBSCRIBE_OK: REQUEST_OK (§10.9)",
+			session: serving,
+			act: (session: Session) =>
+				session.receivePeerBidiStreamData(
+					0,
+					hex("02 00 05 03 01 06 80 fa"),
+					false,
+				),
+			outputs: ["send 1: REQUEST_OK"],
+		},
+		{
+			// SUBGROUP_DELIVERY_TIMEOUT = 250 and FORWARD = 0.
+			name: "REQUEST_UPDATE with the timeout and another parameter: refused as a whole (§10.9.1)",
+			session: serving,
+			act: (session: Session) =>
+				session.receivePeerBidiStreamData(
+					0,
+					hex("02 00 07 03 02 06 80 fa 0a 00"),
+					false,
+				),
 			outputs: [
 				"send 1: REQUEST_ERROR 3",
 				"send 1: PUBLISH_DONE 8 streams 0",

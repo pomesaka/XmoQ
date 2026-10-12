@@ -1192,7 +1192,8 @@ fn a_request_update_is_refused_and_ends_the_subscription() {
             stream: StreamKey(0),
             message: ControlMessage::RequestUpdate(RequestUpdate {
                 request_id: 2,
-                parameters: vec![],
+                // One the relay does not apply.
+                parameters: vec![Parameter::Forward(false)],
             }),
         }),
         expected
@@ -1965,6 +1966,74 @@ fn known_gap_a_stream_sent_ahead_for_a_refused_publish_is_taken_for_the_draining
         ]
     );
     assert_eq!(relay.counts().tracks, 1);
+}
+
+#[test]
+fn an_update_of_the_subgroup_delivery_timeout_is_accepted_and_reaches_the_streams() {
+    // (the parameters of the REQUEST_UPDATE; whether the stream that is
+    // open is told; the timeout after it, which the stream is told and the
+    // next one is opened with). The SUBSCRIBE asked for 500 ms.
+    let cases: [(Vec<Parameter>, bool, Option<u64>); 3] = [
+        // §10.9: "its value remains unchanged".
+        (vec![], false, Some(500)),
+        (
+            vec![Parameter::SubgroupDeliveryTimeout(120)],
+            true,
+            Some(120),
+        ),
+        // §8: "a value of 0 means that there is no timeout set".
+        (vec![Parameter::SubgroupDeliveryTimeout(0)], true, None),
+    ];
+    for (parameters, told, next) in cases {
+        let case = format!("{parameters:?}");
+        let mut relay = relay_with_track();
+        relay.step(Event::RequestOpened {
+            session: BOB,
+            stream: StreamKey(0),
+            first: ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: track(b"a"),
+                parameters: vec![Parameter::SubgroupDeliveryTimeout(500)],
+            }),
+        });
+        data_stream_opened(&mut relay, 7);
+        object_arrived(&mut relay, 7, 0);
+        let mut expected = vec![Action::SendRequest {
+            session: BOB,
+            stream: StreamKey(0),
+            message: ControlMessage::RequestOk(RequestOk::default()),
+        }];
+        expected.extend(told.then_some(Action::SetDeliveryTimeout {
+            out_stream: OutStreamKey(0),
+            subgroup_delivery_timeout: next,
+        }));
+        assert_eq!(
+            relay.step(Event::RequestMessage {
+                session: BOB,
+                stream: StreamKey(0),
+                message: ControlMessage::RequestUpdate(RequestUpdate {
+                    request_id: 2,
+                    parameters,
+                }),
+            }),
+            expected,
+            "{case}"
+        );
+        let mut actions = data_stream_opened(&mut relay, 11);
+        actions.extend(object_arrived(&mut relay, 11, 0));
+        let opened: Vec<Option<u64>> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::OpenDataStream {
+                    session: BOB,
+                    subgroup_delivery_timeout,
+                    ..
+                } => Some(*subgroup_delivery_timeout),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [next], "{case}");
+    }
 }
 
 #[test]

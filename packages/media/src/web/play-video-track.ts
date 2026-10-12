@@ -112,6 +112,18 @@ export interface VideoPlayback {
 	readonly ended: Promise<VideoPlaybackEnd>;
 	/** What was counted so far; a copy. */
 	stats(): VideoPlaybackStats;
+	/**
+	 * Asks the sender for other delivery timeouts while the track plays,
+	 * with a REQUEST_UPDATE of the subscription (transport §10.9). A
+	 * timeout that is left out stays as it was; 0 asks for none.
+	 *
+	 * Resolves when the sender accepted. Rejects as `Subscription.update`
+	 * of `@xmoq/moqt` does: **a sender that refuses the update ends the
+	 * subscription** (§10.9.1), and `ended` says so. The XmoQ relay
+	 * accepts an update that sets `subgroupMs` alone, and it holds for the
+	 * Groups that end after it.
+	 */
+	setDeliveryTimeouts(timeouts: DeliveryTimeouts): Promise<void>;
 }
 
 /**
@@ -428,5 +440,8 @@ export async function playVideoTrack(
 	return {
 		ended,
 		stats: () => ({ ...stats, dropped: { ...stats.dropped } }),
+		setDeliveryTimeouts: async (timeouts) => {
+			await subscription.update(deliveryTimeoutParameters(timeouts));
+		},
 	};
 }

@@ -14,7 +14,7 @@ import {
 import type { KeyValuePair } from "./key-value-pair.ts";
 import { resolveLimits, type SessionLimits } from "./limits.ts";
 import type { OutgoingObject, SubgroupOptions } from "./outgoing-subgroups.ts";
-import type { Location } from "./parameters.ts";
+import type { Location, MessageParameters } from "./parameters.ts";
 import { createPeerRequests } from "./peer-requests.ts";
 import {
 	createRequests,
@@ -72,6 +72,11 @@ export interface Session {
 	fetch(request: FetchRequest): SessionResult<bigint>;
 	/** Cancels a request this endpoint made (§3.3.2). */
 	cancelRequest(requestId: bigint): SessionOutput[];
+	/** `Requests.updateSubscription`: a REQUEST_UPDATE for an Established SUBSCRIBE of this endpoint (§10.9). */
+	updateSubscription(
+		requestId: bigint,
+		parameters: MessageParameters,
+	): SessionOutput[];
 	/**
 	 * Accepts a SUBSCRIBE of the peer that the event `peer-subscribe`
 	 * reported: sends SUBSCRIBE_OK (§10.8). Returns the Track Alias, which
@@ -515,6 +520,8 @@ export function createSession(options: SessionOptions = {}): Session {
 		// end they do nothing instead of throwing.
 		cancelRequest: (requestId) =>
 			closed ? [] : requests.cancelRequest(requestId),
+		updateSubscription: (requestId, parameters) =>
+			whileOpen(() => requests.updateSubscription(requestId, parameters)),
 		expireSubscription: (requestId) =>
 			guard((out) => requests.subscriptionExpired(requestId, out)),
 		finishServedFetchSend: (requestId) =>

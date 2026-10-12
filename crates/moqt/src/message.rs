@@ -1097,6 +1097,20 @@ pub(crate) mod tests {
                     Parameter::SubscriptionFilter(SubscriptionFilter::LargestObject),
                 ]),
             ),
+            (
+                "request-update-subgroup-delivery-timeout-moqtail-ts",
+                ControlMessage::RequestUpdate(RequestUpdate {
+                    request_id: 2,
+                    parameters: vec![Parameter::SubgroupDeliveryTimeout(250)],
+                }),
+            ),
+            (
+                "request-update-no-subgroup-delivery-timeout-moqtail-ts",
+                ControlMessage::RequestUpdate(RequestUpdate {
+                    request_id: 2,
+                    parameters: vec![Parameter::SubgroupDeliveryTimeout(0)],
+                }),
+            ),
         ]
     }
 

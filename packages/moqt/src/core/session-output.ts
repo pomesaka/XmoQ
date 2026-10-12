@@ -56,6 +56,28 @@ export type SessionEvent =
 			redirect: Redirect | undefined;
 	  }
 	/**
+	 * The publisher accepted a REQUEST_UPDATE of a subscription
+	 * (`updateSubscription`), with the parameters of its REQUEST_OK
+	 * (EXPIRES and LARGEST_OBJECT, where it sent them). The answers come in
+	 * the order the updates were sent.
+	 */
+	| {
+			type: "update-ok";
+			requestId: bigint;
+			parameters: MessageParameters;
+	  }
+	/**
+	 * The publisher refused a REQUEST_UPDATE of a subscription. The
+	 * subscription is still there: its PUBLISH_DONE with UPDATE_FAILED
+	 * follows (§10.9.1) and ends it as any other.
+	 */
+	| {
+			type: "update-error";
+			requestId: bigint;
+			errorCode: bigint;
+			errorReason: string;
+	  }
+	/**
 	 * Late streams can still deliver Objects after this. The subscription ends
 	 * with `request-closed`, reason "publish-done".
 	 */

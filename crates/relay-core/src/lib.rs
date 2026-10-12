@@ -307,10 +307,11 @@ struct Subscriber {
     /// can be prohibitively expensive, Relays are not required or expected
     /// to do so". A Group at or before the End Group can still come late.
     end_group: Option<u64>,
-    /// The `SUBGROUP_DELIVERY_TIMEOUT` of the SUBSCRIBE, in milliseconds
-    /// (§8, §10.2.3); `None` without one, and for 0. Handed to the I/O side
-    /// with every stream of the subscription ([`Action::OpenDataStream`]),
-    /// which acts on it. As the SUBSCRIBE had it: `REQUEST_UPDATE` is refused.
+    /// The `SUBGROUP_DELIVERY_TIMEOUT` of the SUBSCRIBE, or of the last
+    /// `REQUEST_UPDATE` that had one, in milliseconds (§8, §10.2.3, §10.9);
+    /// `None` without one, and for 0. Handed to the I/O side with every
+    /// stream of the subscription ([`Action::OpenDataStream`]), which acts
+    /// on it.
     subgroup_delivery_timeout: Option<u64>,
     /// Subgroup streams the relay started for the subscription.
     streams_started: u64,
@@ -2280,6 +2281,23 @@ impl Relay {
                     }
                 }
             }
+            PeerRequestEvent::SubscriptionUpdated {
+                response,
+                subgroup_delivery_timeout,
+            } => {
+                // §10.9: "MUST respond with exactly one REQUEST_OK or
+                // REQUEST_ERROR".
+                actions.push(Action::SendRequest {
+                    session,
+                    stream,
+                    message: response,
+                });
+                // §10.9: a parameter that is not in the update "remains
+                // unchanged".
+                if let (Some(milliseconds), Some(track)) = (subgroup_delivery_timeout, track) {
+                    self.set_delivery_timeout(&track, session, milliseconds, actions);
+                }
+            }
             // For a FETCH that has its FETCH_OK. Nothing of it changes.
             PeerRequestEvent::UpdateAccepted { response } => actions.push(Action::SendRequest {
                 session,
@@ -3059,6 +3077,42 @@ impl Relay {
     }
 
     /// Ends one subscription from the relay's side, with `PUBLISH_DONE`.
+    /// A `REQUEST_UPDATE` set the `SUBGROUP_DELIVERY_TIMEOUT` of a
+    /// subscription, in milliseconds; 0 is no timeout (§8).
+    ///
+    /// WHY not sent on to the publishers: §10.2.3 has "SHOULD NOT be
+    /// forwarded upstream by a relay that intends to serve multiple
+    /// subscriptions for the same track".
+    fn set_delivery_timeout(
+        &mut self,
+        track_name: &FullTrackName,
+        session: SessionKey,
+        milliseconds: u64,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(track) = self.tracks.live_mut(track_name) else {
+            return;
+        };
+        let Some(subscriber) = track
+            .subscribers
+            .iter_mut()
+            .find(|subscriber| subscriber.session == session)
+        else {
+            return;
+        };
+        let subgroup_delivery_timeout = Some(milliseconds).filter(|asked| *asked != 0);
+        subscriber.subgroup_delivery_timeout = subgroup_delivery_timeout;
+        actions.extend(
+            subscriber
+                .outs
+                .iter()
+                .map(|out_stream| Action::SetDeliveryTimeout {
+                    out_stream: *out_stream,
+                    subgroup_delivery_timeout,
+                }),
+        );
+    }
+
     fn end_subscription(
         &mut self,
         track_name: &FullTrackName,
@@ -3565,6 +3619,7 @@ impl Action {
             | Self::WriteFetchStream { session, .. }
             | Self::AbortFetchWrite { session, .. } => Target::Session(*session),
             Self::SendObject { out_stream, .. }
+            | Self::SetDeliveryTimeout { out_stream, .. }
             | Self::FinishDataStream { out_stream }
             | Self::ResetDataStream { out_stream, .. } => Target::OutStream(*out_stream),
             Self::CloseSession { .. } => Target::Closing,

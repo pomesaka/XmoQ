@@ -258,6 +258,10 @@ const { values: options } = parseArgs({
 		// OBJECT_DELIVERY_TIMEOUT of this many milliseconds with its SUBSCRIBE;
 		// neither without it.
 		"delivery-timeout-ms": { type: "string", default: "" },
+		// page-to-page: once its SUBSCRIBE is accepted, the viewer asks for
+		// this SUBGROUP_DELIVERY_TIMEOUT with a REQUEST_UPDATE (§10.9), which
+		// the relay has to accept; no update without it.
+		"update-delivery-timeout-ms": { type: "string", default: "" },
 		verbose: { type: "boolean", default: false },
 	},
 });
@@ -505,6 +509,7 @@ async function pageToPage(): Promise<string> {
 				frames,
 				timeoutMs,
 				deliveryTimeoutMs,
+				updatedMs,
 			]) => {
 				await window.xmoqOwn.playVideo(
 					namespace,
@@ -514,7 +519,14 @@ async function pageToPage(): Promise<string> {
 					false,
 					deliveryTimeoutMs ?? undefined,
 				);
-				return window.xmoqOwn.videoReport(frames, timeoutMs);
+				const updated =
+					updatedMs === null
+						? null
+						: await window.xmoqOwn.updateVideoDeliveryTimeout(updatedMs);
+				return {
+					updated,
+					...(await window.xmoqOwn.videoReport(frames, timeoutMs)),
+				};
 			},
 			[
 				PAGE_NAMESPACE,
@@ -526,11 +538,28 @@ async function pageToPage(): Promise<string> {
 				options["delivery-timeout-ms"] === ""
 					? null
 					: Number(options["delivery-timeout-ms"]),
-			] satisfies [string, string, string, number, number, number | null],
+				options["update-delivery-timeout-ms"] === ""
+					? null
+					: Number(options["update-delivery-timeout-ms"]),
+			] satisfies [
+				string,
+				string,
+				string,
+				number,
+				number,
+				number | null,
+				number | null,
+			],
 		),
 		`the viewer to report on its playing, which it does after ${PLAY_TIMEOUT_MS} ms at the latest`,
 		PLAY_TIMEOUT_MS + 5_000,
 	);
+	// §10.9: "The receiver of a REQUEST_UPDATE MUST respond with exactly one
+	// REQUEST_OK or REQUEST_ERROR". A relay that refuses also ends the
+	// subscription (§10.9.1), which the frames below would show as well.
+	if (report.updated !== null && report.updated !== "accepted") {
+		throw new Error(`the update of the delivery timeout was ${report.updated}`);
+	}
 	// The track is ended, and the viewer says what it has when its
 	// subscription has ended: nothing is on its way any more, so what the
 	// publisher wrote and what the viewer got can be counted against each

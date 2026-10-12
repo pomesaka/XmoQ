@@ -1175,6 +1175,10 @@ impl<C: Connection> Hub<C> {
                 header,
                 subgroup_delivery_timeout: asked,
             } => self.open_data_stream((session, out_stream), header, asked, pending),
+            Action::SetDeliveryTimeout {
+                out_stream,
+                subgroup_delivery_timeout: asked,
+            } => self.set_delivery_timeout(out_stream, asked),
             Action::SendObject { out_stream, object } => {
                 self.send_object(out_stream, object, pending);
             }
@@ -1421,6 +1425,14 @@ impl<C: Connection> Hub<C> {
     /// Starts the writer of a subgroup stream towards a subscriber. `asked`
     /// is the `SUBGROUP_DELIVERY_TIMEOUT` of the subscription, in
     /// milliseconds, where its SUBSCRIBE had one.
+    /// The subscriber changed its `SUBGROUP_DELIVERY_TIMEOUT`
+    /// ([`OutgoingSubgroup::set_delivery_timeout`]).
+    fn set_delivery_timeout(&self, out_stream: OutStreamKey, asked: Option<u64>) {
+        if let Some((_, writer)) = self.out_streams.get(&out_stream) {
+            writer.set_delivery_timeout(asked.map(Duration::from_millis));
+        }
+    }
+
     fn open_data_stream(
         &mut self,
         (session, out_stream): (SessionKey, OutStreamKey),
@@ -2414,6 +2426,7 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartFetchStreamTimer { .. }
         | Action::StopUpstreamTimer { .. }
         | Action::SendObject { .. }
+        | Action::SetDeliveryTimeout { .. }
         | Action::StartFetchEndTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
         // The relay read a Joining FETCH before the SUBSCRIBE it names, and

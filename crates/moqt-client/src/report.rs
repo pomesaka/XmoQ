@@ -114,6 +114,15 @@ pub fn published(track_alias: u64, forward: bool) {
     println!("PUBLISHED track_alias={track_alias} forward={forward}");
 }
 
+/// The answer to a `REQUEST_UPDATE` this client sent: `REQUEST_OK`, or
+/// `REQUEST_ERROR` with this code.
+pub fn update_answered(refused_with: Option<u64>) {
+    match refused_with {
+        None => println!("UPDATE_ACCEPTED"),
+        Some(error_code) => println!("UPDATE_FAILED error_code={error_code:#x}"),
+    }
+}
+
 /// A `REQUEST_UPDATE` was answered with `REQUEST_ERROR` `NOT_SUPPORTED`.
 pub fn update_refused() {
     println!("UPDATE_REFUSED");

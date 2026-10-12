@@ -10,6 +10,9 @@
 //     the Object.
 //   --subscribe-track: track the subscriber asks for (default: the published one).
 //     Another name makes the relay answer REQUEST_ERROR, and the run fails by design.
+//   --update-subgroup-timeout-ms: the subscriber, own-rust, sends a
+//     REQUEST_UPDATE with this SUBGROUP_DELIVERY_TIMEOUT once it is subscribed;
+//     the run goes on when the relay has answered REQUEST_OK.
 //   --await-publish-done: after the transfer, makes the publisher leave and
 //     waits until the subscriber, which has to be an own client, has seen
 //     PUBLISH_DONE.
@@ -50,6 +53,10 @@ const { values: options } = parseArgs({
 		// sends on the subscription the relay asks it for. own-browser only.
 		"announce-only": { type: "boolean", default: false },
 		"subscribe-track": { type: "string", default: TRACK },
+		// The subscriber, own-rust, asks for this SUBGROUP_DELIVERY_TIMEOUT
+		// with a REQUEST_UPDATE once it is subscribed, and the relay has to
+		// accept it before the Object is sent.
+		"update-subgroup-timeout-ms": { type: "string", default: "" },
 		verbose: { type: "boolean", default: false },
 	},
 });
@@ -170,6 +177,13 @@ async function transferOneObject(
 				// A subscriber that is not asked how its subscription ended leaves
 				// once it has the Object.
 				...(awaitsPublishDone ? {} : { leavesAfterObjects: 1 }),
+				...(options["update-subgroup-timeout-ms"] === ""
+					? {}
+					: {
+							updatesSubgroupTimeoutMs: Number(
+								options["update-subgroup-timeout-ms"],
+							),
+						}),
 			}),
 		);
 	}

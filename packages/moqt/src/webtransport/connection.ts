@@ -422,6 +422,21 @@ export interface Subscription {
 	readonly ended: Promise<SubscriptionEnd>;
 	/** Cancels the SUBSCRIBE request (§3.3.2). Does nothing once the subscription or the session has ended. */
 	cancel(): Promise<void>;
+	/**
+	 * Asks the publisher to change parameters of the subscription with a
+	 * REQUEST_UPDATE (§10.9); a parameter that is left out stays as it
+	 * was. Resolves with the parameters of the REQUEST_OK.
+	 *
+	 * Rejects with `RequestFailedError` when the publisher refuses: the
+	 * subscription then ends, with the publisher's PUBLISH_DONE
+	 * (UPDATE_FAILED, §10.9.1). Rejects with `SubscriptionEndedError` when
+	 * the subscription ends before the answer, with a `RangeError` for a
+	 * parameter a REQUEST_UPDATE may not carry or when too many updates
+	 * wait for their answer, and with an `Error` when no answer comes
+	 * within `answerTimeoutMs`: the subscription goes on then, and what
+	 * the publisher made of the update is not known.
+	 */
+	update(parameters: MessageParameters): Promise<MessageParameters>;
 }
 
 /** What a FETCH_OK says (§10.13). */
@@ -807,6 +822,8 @@ interface ActiveSubscription {
 	/** PUBLISH_DONE, once it arrived. */
 	publishDone: EventOf<"publish-done"> | undefined;
 	publishDoneTimer: ReturnType<typeof setTimeout> | undefined;
+	/** The `update()` calls that wait for their answer, in the order sent. */
+	updates: Deferred<MessageParameters>[];
 }
 
 /** What the connection keeps for a FETCH, from the moment it is sent. */
@@ -1035,6 +1052,9 @@ export async function connectOver(
 		if (subscription === undefined) return;
 		subscriptions.delete(requestId);
 		clearTimeout(subscription.publishDoneTimer);
+		for (const update of subscription.updates.splice(0)) {
+			update.reject(new SubscriptionEndedError(end));
+		}
 		switch (objectsOutcome(end)) {
 			case "close":
 				subscription.objects.end();
@@ -1266,8 +1286,40 @@ export async function connectOver(
 			ended: deferred(),
 			publishDone: undefined,
 			publishDoneTimer: undefined,
+			updates: [],
 		};
 		subscriptions.set(requestId, active);
+		const update = async (
+			parameters: MessageParameters,
+		): Promise<MessageParameters> => {
+			if (subscriptions.get(requestId) !== active) {
+				throw new SubscriptionEndedError(await active.ended.promise);
+			}
+			const answer = deferred<MessageParameters>();
+			// Before the write: the answer finds it whenever it comes.
+			active.updates.push(answer);
+			const unanswered = setTimeout(() => {
+				const at = active.updates.indexOf(answer);
+				if (at < 0) return;
+				// WHY the place is kept, with an answer nobody waits for:
+				// answers carry no Request ID and are told apart by their
+				// order alone.
+				active.updates[at] = deferred();
+				active.updates[at]?.promise.catch(() => {});
+				answer.reject(new Error(NO_ANSWER_IN_TIME));
+			}, answerTimeoutMs);
+			try {
+				await applyVoid((s) => s.updateSubscription(requestId, parameters));
+				return await answer.promise;
+			} catch (error) {
+				// Not sent: no answer will come for it.
+				const at = active.updates.indexOf(answer);
+				if (at >= 0) active.updates.splice(at, 1);
+				throw error;
+			} finally {
+				clearTimeout(unanswered);
+			}
+		};
 		return {
 			requestId,
 			trackAlias: event.trackAlias,
@@ -1276,6 +1328,7 @@ export async function connectOver(
 			objects: active.objects.readable,
 			ended: active.ended.promise,
 			cancel: cancelRequest,
+			update,
 		};
 	};
 
@@ -1897,6 +1950,23 @@ export async function connectOver(
 					?.resolve(subscriptionFrom(event));
 				pendingSubscribes.delete(event.requestId);
 				return undefined;
+			case "update-ok":
+				subscriptions
+					.get(event.requestId)
+					?.updates.shift()
+					?.resolve(event.parameters);
+				return undefined;
+			case "update-error": {
+				// One REQUEST_ERROR may answer every update that waits (§10.9.1).
+				const error = new RequestFailedError({
+					errorCode: event.errorCode,
+					retryInterval: 0n,
+					errorReason: event.errorReason,
+				});
+				const waiting = subscriptions.get(event.requestId)?.updates ?? [];
+				for (const update of waiting.splice(0)) update.reject(error);
+				return undefined;
+			}
 			case "request-error": {
 				const error = new RequestFailedError(event);
 				rejectPending(event.requestId, error);

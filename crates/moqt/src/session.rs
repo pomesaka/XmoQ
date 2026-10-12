@@ -19,8 +19,9 @@ pub use crate::aliases::SubscribedAlias;
 use crate::aliases::SubscribedAliases;
 use crate::kvp::KeyValuePair;
 use crate::message::{
-    ControlMessage, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError, Setup,
-    Subscribe, SubscribeOk, publish_done_status, request_error_code, setup_option,
+    ControlMessage, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError, RequestOk,
+    RequestUpdate, Setup, Subscribe, SubscribeOk, publish_done_status, request_error_code,
+    setup_option,
 };
 use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
@@ -81,6 +82,11 @@ impl RequestId {
     }
 }
 
+/// `REQUEST_UPDATE`s of one subscription that may wait for their answer.
+/// **Provisional.** WHY a limit: each is kept until its answer comes, and a
+/// publisher that answers none would have the count grow with every call.
+pub const MAX_UNANSWERED_UPDATES: u32 = 16;
+
 /// States of a request after it is sent (§5.1 for subscriptions; §6.2 gives
 /// `PUBLISH_NAMESPACE` the same single response).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +107,9 @@ enum Request {
     Subscribe {
         full_track_name: FullTrackName,
         track_alias: Option<u64>,
+        /// `REQUEST_UPDATE`s this endpoint sent that have no answer yet
+        /// ([`Session::update_subscription`]).
+        updates: u32,
     },
     Publish {
         full_track_name: FullTrackName,
@@ -190,8 +199,30 @@ pub enum RequestEvent {
     /// is Terminated; the Track Alias keeps draining, see
     /// [`SubscribedAlias::Draining`].
     SubscriptionDone(PublishDone),
-    /// `REQUEST_UPDATE` from the subscriber of a track this endpoint publishes.
-    /// This crate applies no updates. The caller sends `response`, a
+    /// The publisher accepted a `REQUEST_UPDATE` this endpoint sent
+    /// ([`Session::update_subscription`]), with the parameters of its
+    /// `REQUEST_OK`.
+    UpdateAccepted {
+        /// `EXPIRES` and `LARGEST_OBJECT`, where the publisher sent them.
+        parameters: Vec<Parameter>,
+    },
+    /// The publisher refused a `REQUEST_UPDATE` this endpoint sent. The
+    /// subscription is still there: its `PUBLISH_DONE` with `UPDATE_FAILED`
+    /// follows (§10.9.1) and ends it as any other.
+    UpdateFailed(RequestError),
+    /// `REQUEST_UPDATE` from the subscriber of a track this endpoint
+    /// publishes, with no parameter or `SUBGROUP_DELIVERY_TIMEOUT` alone:
+    /// as [`PeerRequestEvent::SubscriptionUpdated`], for a subscription
+    /// that a PUBLISH made. The caller sends `response`, a `REQUEST_OK`.
+    SubscriptionUpdated {
+        /// The message to send on the request stream.
+        response: ControlMessage,
+        /// The `SUBGROUP_DELIVERY_TIMEOUT` of the update in milliseconds,
+        /// 0 for no timeout; `None` when the update had none.
+        subgroup_delivery_timeout: Option<u64>,
+    },
+    /// `REQUEST_UPDATE` from the subscriber of a track this endpoint publishes
+    /// that carries any other parameter. The caller sends `response`, a
     /// `REQUEST_ERROR` with `NOT_SUPPORTED` (§10.9), and then has to end the
     /// subscription with [`Session::publish_done`] and the status
     /// `UPDATE_FAILED` (§10.9.1). Until it does, the session takes nothing else
@@ -359,6 +390,7 @@ impl Session {
         let request_id = self.open(Request::Subscribe {
             full_track_name: full_track_name.clone(),
             track_alias: None,
+            updates: 0,
         })?;
         let message = ControlMessage::Subscribe(Subscribe {
             request_id: request_id.0,
@@ -366,6 +398,48 @@ impl Session {
             parameters,
         });
         Ok((request_id, message))
+    }
+
+    /// Asks the publisher to change parameters of an Established
+    /// subscription this endpoint made with SUBSCRIBE (§10.9). Returns the
+    /// `REQUEST_UPDATE` to send on the stream of that SUBSCRIBE; a parameter
+    /// that is left out stays as it was. The answer comes as
+    /// [`RequestEvent::UpdateAccepted`] or [`RequestEvent::UpdateFailed`],
+    /// in the order the updates were sent.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a request that is not an Established SUBSCRIBE of this
+    /// endpoint, when a parameter may not appear in `REQUEST_UPDATE`, when
+    /// [`MAX_UNANSWERED_UPDATES`] updates wait for their answer, and when
+    /// the Request IDs are used up (§10.1: an update consumes one).
+    pub fn update_subscription(
+        &mut self,
+        request: RequestId,
+        parameters: Vec<Parameter>,
+    ) -> Result<ControlMessage, UsageError> {
+        check_own_parameters(&parameters, MessageKind::RequestUpdate)?;
+        self.check_own(request)?;
+        let Some(Request::Subscribe {
+            track_alias: Some(_),
+            updates,
+            ..
+        }) = self.requests.get_mut(&request.0)
+        else {
+            return Err(UsageError("not an established subscription of a SUBSCRIBE"));
+        };
+        if *updates >= MAX_UNANSWERED_UPDATES {
+            return Err(UsageError("too many updates wait for their answer"));
+        }
+        let request_id = self.next_request_id;
+        self.next_request_id = request_id
+            .checked_add(2)
+            .ok_or(UsageError("request ids are exhausted"))?;
+        *updates += 1;
+        Ok(ControlMessage::RequestUpdate(RequestUpdate {
+            request_id,
+            parameters,
+        }))
     }
 
     /// Offers a track to the peer. Returns the handle of the request and the
@@ -493,6 +567,11 @@ impl Session {
             (Request::Subscribe { .. }, ControlMessage::SubscribeOk(ok)) if !established => {
                 self.on_subscribe_ok(request, ok)
             }
+            // The answers to the updates this endpoint sent (§10.9).
+            (
+                Request::Subscribe { updates, .. },
+                answer @ (ControlMessage::RequestOk(_) | ControlMessage::RequestError(_)),
+            ) if established && *updates > 0 => update_answered(updates, answer),
             (
                 Request::Subscribe {
                     track_alias: Some(track_alias),
@@ -532,6 +611,14 @@ impl Session {
                 if *state == PublishState::Established =>
             {
                 self.peer.take_id(update.request_id)?;
+                if let Some(peer::AppliedUpdate(subgroup_delivery_timeout)) =
+                    peer::only_the_subgroup_timeout(&update.parameters)
+                {
+                    return Ok(RequestEvent::SubscriptionUpdated {
+                        response: ControlMessage::RequestOk(RequestOk::default()),
+                        subgroup_delivery_timeout,
+                    });
+                }
                 *state = PublishState::UpdateRefused;
                 Ok(RequestEvent::UpdateRefused {
                     response: ControlMessage::RequestError(RequestError {
@@ -715,6 +802,7 @@ impl Session {
         if let Some(Request::Subscribe {
             full_track_name,
             track_alias,
+            ..
         }) = self.requests.get_mut(&request.0)
         {
             *track_alias = Some(ok.track_alias);
@@ -779,7 +867,7 @@ impl Session {
         self.requests.iter().find_map(|(id, request)| {
             matches!(
                 request,
-                Request::Subscribe { full_track_name: name, track_alias: None }
+                Request::Subscribe { full_track_name: name, track_alias: None, .. }
                     if name == full_track_name
             )
             .then_some(RequestId(*id, self.tag))
@@ -857,6 +945,46 @@ fn check_request_ok(
     Ok(())
 }
 
+/// The answer to a `REQUEST_UPDATE` of a subscription. §10.9: "The receiver
+/// of a `REQUEST_UPDATE` MUST respond with exactly one `REQUEST_OK` or
+/// `REQUEST_ERROR`". Responses carry no Request ID, so they answer the
+/// updates in the order sent.
+fn update_answered(updates: &mut u32, answer: ControlMessage) -> Result<RequestEvent, Error> {
+    let ok = match answer {
+        ControlMessage::RequestOk(ok) => ok,
+        // §10.9.1: "When a REQUEST_UPDATE is unsuccessful, the publisher
+        // MUST also terminate the subscription by sending a PUBLISH_DONE
+        // with error code UPDATE_FAILED", which comes next and ends the
+        // request. WHY the count goes to 0: a receiver may answer several
+        // updates with a single REQUEST_ERROR (§10.9.1).
+        ControlMessage::RequestError(error) => {
+            *updates = 0;
+            return Ok(RequestEvent::UpdateFailed(error));
+        }
+        _ => return Err(Error::ProtocolViolation("no answer to a REQUEST_UPDATE")),
+    };
+    // What a REQUEST_UPDATE_OK may carry: §10.2.10, §10.2.11.
+    let allowed = ok
+        .parameters
+        .iter()
+        .all(|each| matches!(each, Parameter::Expires(_) | Parameter::LargestObject(_)));
+    if !allowed {
+        return Err(Error::ProtocolViolation(
+            "parameter not allowed in this message",
+        ));
+    }
+    // §10.5: Track Properties "are empty in ... `REQUEST_UPDATE_OK`".
+    if !ok.track_properties.is_empty() {
+        return Err(Error::ProtocolViolation(
+            "track properties in a REQUEST_OK that must not carry them",
+        ));
+    }
+    *updates = updates.saturating_sub(1);
+    Ok(RequestEvent::UpdateAccepted {
+        parameters: ok.parameters,
+    })
+}
+
 /// The two MUSTs of §10.6.1 for a Redirect in `REQUEST_ERROR`.
 fn check_redirect(role: Role, request: &Request, error: &RequestError) -> Result<(), Error> {
     let Some(redirect) = &error.redirect else {
@@ -880,7 +1008,7 @@ fn check_redirect(role: Role, request: &Request, error: &RequestError) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Redirect, RequestOk, RequestUpdate};
+    use crate::message::Redirect;
     use crate::params::GroupOrder;
 
     fn track(name: &[u8]) -> FullTrackName {
@@ -1662,10 +1790,11 @@ mod tests {
             /// The peer opened a request with Request ID 1.
             PeerRequest,
         }
+        // One that is refused where it is answered at all.
         let update = |request_id| {
             ControlMessage::RequestUpdate(RequestUpdate {
                 request_id,
-                parameters: vec![],
+                parameters: vec![Parameter::Forward(false)],
             })
         };
         let refused = || RequestEvent::UpdateRefused {
@@ -1753,6 +1882,112 @@ mod tests {
                 "{before:?} {request_id}"
             );
         }
+    }
+
+    #[test]
+    fn an_update_of_a_published_subscription_is_applied_when_it_only_sets_the_subgroup_timeout() {
+        // (the parameters of the update; the timeout that is reported, or
+        // `Err` where the update is refused).
+        let cases = [
+            (vec![], Ok(None)),
+            (vec![Parameter::SubgroupDeliveryTimeout(250)], Ok(Some(250))),
+            (vec![Parameter::SubgroupDeliveryTimeout(0)], Ok(Some(0))),
+            (vec![Parameter::ObjectDeliveryTimeout(250)], Err(())),
+            (
+                vec![
+                    Parameter::SubgroupDeliveryTimeout(250),
+                    Parameter::Forward(true),
+                ],
+                Err(()),
+            ),
+        ];
+        for (parameters, expected) in cases {
+            let mut session = client();
+            let (publish, _) = session.publish(track(b"a"), 1, vec![], vec![]).unwrap();
+            session.feed(publish, request_ok(vec![])).unwrap();
+            let update = |request_id, parameters| {
+                ControlMessage::RequestUpdate(RequestUpdate {
+                    request_id,
+                    parameters,
+                })
+            };
+            let reported = match session
+                .feed(publish, update(1, parameters.clone()))
+                .unwrap()
+            {
+                RequestEvent::SubscriptionUpdated {
+                    response: ControlMessage::RequestOk(_),
+                    subgroup_delivery_timeout,
+                } => Ok(subgroup_delivery_timeout),
+                RequestEvent::UpdateRefused { .. } => Err(()),
+                other => panic!("{parameters:?}: {other:?}"),
+            };
+            assert_eq!(reported, expected, "{parameters:?}");
+            // Applied, the subscription takes another and ends as it likes.
+            if expected.is_ok() {
+                assert!(matches!(
+                    session.feed(publish, update(3, vec![])),
+                    Ok(RequestEvent::SubscriptionUpdated { .. })
+                ));
+                assert!(
+                    session
+                        .publish_done(publish, 2, 0, ReasonPhrase::default())
+                        .is_ok()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_subscriber_updates_its_subscription_and_reads_the_answers_in_order() {
+        let timeout = |milliseconds| vec![Parameter::SubgroupDeliveryTimeout(milliseconds)];
+        let update = |request_id, parameters| {
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id,
+                parameters,
+            })
+        };
+        let mut session = client();
+        let (subscribe, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        // Before SUBSCRIBE_OK there is no subscription to update.
+        assert_eq!(
+            session.update_subscription(subscribe, timeout(250)),
+            Err(UsageError("not an established subscription of a SUBSCRIBE"))
+        );
+        session.feed(subscribe, subscribe_ok(7, vec![])).unwrap();
+        // §10.2.10: EXPIRES is the publisher's to send.
+        assert_eq!(
+            session.update_subscription(subscribe, vec![Parameter::Expires(5)]),
+            Err(UsageError("parameter not allowed in this message"))
+        );
+        // A REQUEST_OK that answers nothing is no message of this stream.
+        assert!(session.feed(subscribe, request_ok(vec![])).is_err());
+
+        let mut session = client();
+        let (subscribe, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        session.feed(subscribe, subscribe_ok(7, vec![])).unwrap();
+        // §10.1: each update has a Request ID of this endpoint's own, after
+        // that of the SUBSCRIBE (0).
+        assert_eq!(
+            session.update_subscription(subscribe, timeout(250)),
+            Ok(update(2, timeout(250)))
+        );
+        assert_eq!(
+            session.update_subscription(subscribe, vec![]),
+            Ok(update(4, vec![]))
+        );
+        assert_eq!(
+            session.feed(subscribe, request_ok(vec![Parameter::Expires(9)])),
+            Ok(RequestEvent::UpdateAccepted {
+                parameters: vec![Parameter::Expires(9)]
+            })
+        );
+        // The refusal answers what is left, and PUBLISH_DONE ends it.
+        assert_eq!(
+            session.feed(subscribe, ControlMessage::RequestError(request_error())),
+            Ok(RequestEvent::UpdateFailed(request_error()))
+        );
+        assert!(session.feed(subscribe, request_ok(vec![])).is_err());
     }
 
     #[test]
