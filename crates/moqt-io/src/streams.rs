@@ -1455,13 +1455,6 @@ pub struct SendLimits {
     /// discretion, discontinue forwarding Objects before either of the
     /// timeouts occurs"). `None`: every stream is delivered, however late.
     pub delivery_patience: Option<Duration>,
-    /// A subgroup stream that was written whole is kept until the receiver
-    /// has all of it, so that it can still be reset
-    /// ([`OutgoingSubgroup::reset`]) and what was not delivered is not sent.
-    /// For whoever gives up the Groups before the newest. `false`: a stream
-    /// that was written whole is the transport's, and a reset no longer
-    /// reaches it.
-    pub held_until_delivered: bool,
 }
 
 impl Default for SendLimits {
@@ -1471,7 +1464,6 @@ impl Default for SendLimits {
             objects: 4096,
             streams: 256,
             delivery_patience: None,
-            held_until_delivered: false,
         }
     }
 }
@@ -1539,9 +1531,12 @@ impl Share {
     }
 
     /// Gives back whatever the writer still holds, and its stream. Called
-    /// once, when the writer ends, however it ends.
+    /// when the writer has nothing more to write, and again when it ends:
+    /// the second call does nothing.
     fn release(&self) {
-        self.released.store(true, Ordering::Relaxed);
+        if self.released.swap(true, Ordering::Relaxed) {
+            return;
+        }
         let budget = &self.budget;
         budget
             .bytes
@@ -1563,10 +1558,8 @@ pub enum OutgoingEvent {
     /// The writer resets the stream in answer (§11.4.3). A stop that arrives
     /// while nothing is being written is not seen until the next write.
     Stopped(Option<u32>),
-    /// The stream was finished and then reset, because the receiver did not
-    /// have all of it within [`SendLimits::delivery_patience`], or because a
-    /// reset was asked for while it was held
-    /// ([`SendLimits::held_until_delivered`]).
+    /// The stream was finished and the receiver did not have all of it
+    /// within [`SendLimits::delivery_patience`]: it was reset.
     TimedOut,
     /// The writer is done: the stream was finished, reset, or never opened.
     /// Reported once for every writer, and last.
@@ -1672,8 +1665,9 @@ impl OutgoingSubgroup {
     }
 
     /// Resets the stream with a Stream Reset Error Code, dropping what is
-    /// queued. Works after [`Self::finish`] too, for as long as the writer has
-    /// not written everything out.
+    /// queued. Works after [`Self::finish`] too, for as long as the receiver's
+    /// transport does not have all of the stream (where the transport can
+    /// tell: [`SendStream::finish_until`]).
     pub fn reset(&self, code: u32) {
         self.reset.send_replace(Some(code));
     }
@@ -1788,25 +1782,41 @@ impl Writer {
                 }
                 Some(Command::Finish) => {
                     let Some(open) = send else { return };
-                    let limits = self.share.budget.limits;
-                    if limits.delivery_patience.is_none() && !limits.held_until_delivered {
-                        open.finish();
-                        return;
-                    }
+                    // WHY the stream is kept after its FIN, until the receiver's
+                    // transport has all of it: what is written and not yet
+                    // delivered waits in the transport, megabytes of it for a
+                    // slow receiver, and a reset that comes then (the
+                    // subscription was cancelled, §11.4.3: "Early
+                    // termination of subscription due to request
+                    // cancellation") has to take it back. A stream that is
+                    // let go of at its FIN goes on being sent whatever
+                    // happens to its subscription.
+                    // WHY its share of the budget is given back first: the
+                    // budget counts what is not written, and the transport
+                    // bounds what it holds itself.
+                    self.share.release();
+                    let patience = self.share.budget.limits.delivery_patience;
+                    let timed_out = Arc::new(AtomicBool::new(false));
                     let asked = self.reset_asked();
-                    let give_up = async move {
-                        let patience = async {
-                            match limits.delivery_patience {
-                                Some(patience) => tokio::time::sleep(patience).await,
-                                None => std::future::pending().await,
+                    let give_up = {
+                        let timed_out = Arc::clone(&timed_out);
+                        async move {
+                            let patience = async {
+                                match patience {
+                                    Some(patience) => tokio::time::sleep(patience).await,
+                                    None => std::future::pending().await,
+                                }
+                            };
+                            tokio::select! {
+                                code = asked => code,
+                                () = patience => {
+                                    timed_out.store(true, Ordering::Relaxed);
+                                    stream_reset_code::DELIVERY_TIMEOUT
+                                }
                             }
-                        };
-                        tokio::select! {
-                            code = asked => code,
-                            () = patience => stream_reset_code::DELIVERY_TIMEOUT,
                         }
                     };
-                    if !open.finish_until(give_up).await {
+                    if !open.finish_until(give_up).await && timed_out.load(Ordering::Relaxed) {
                         report(OutgoingEvent::TimedOut).await;
                     }
                     return;

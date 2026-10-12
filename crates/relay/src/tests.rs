@@ -278,7 +278,6 @@ async fn a_subscriber_that_stops_reading_is_cut_off_alone() {
             objects: 4096,
             streams: 256,
             delivery_patience: None,
-            held_until_delivered: false,
         },
         ..HubConfig::default()
     };

@@ -179,8 +179,9 @@ pub trait SendStream: Send + 'static {
     /// when the stream ended some other way; `false` when it was reset here.
     ///
     /// WHY a default that only finishes: a transport that cannot tell when
-    /// its peer has everything has nothing to give up by. The experiments
-    /// this is for run over QUIC alone.
+    /// its peer has everything has nothing to give up by. FIXME: the
+    /// in-memory connection of the tests can tell, and does not say; what
+    /// follows a reset after the FIN is run over QUIC alone.
     fn finish_until<G>(self, give_up: G) -> impl Future<Output = bool> + Send
     where
         Self: Sized,

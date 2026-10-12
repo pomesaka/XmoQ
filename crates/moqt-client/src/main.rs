@@ -105,7 +105,7 @@ struct Args {
     cert_sha256: [u8; 32],
     namespace: String,
     track_name: String,
-    /// `--annex-b-out`, `--viewers` and `--video-in`.
+    /// `--annex-b-out`, `--viewers`, `--video-in` and `--stay-after-ms`.
     video: video::VideoFlags,
     /// `--auth-token-hex`.
     auth: auth::AuthFlag,
@@ -2346,7 +2346,14 @@ impl Client<'_> {
 
     async fn run_mode(&mut self) -> Result<()> {
         match &self.args.mode {
-            Mode::Subscribe { objects } => self.subscribe(*objects).await,
+            Mode::Subscribe { objects } => {
+                self.subscribe(*objects).await?;
+                if !self.args.video.stay_after.is_zero() {
+                    report::staying();
+                    tokio::time::sleep(self.args.video.stay_after).await;
+                }
+                Ok(())
+            }
             Mode::Fetch { start, end } => self.fetch(*start, *end).await,
             Mode::Publish { payload } => self.publish(payload).await,
             Mode::PublishNamespace { payload } => self.serve(payload).await,

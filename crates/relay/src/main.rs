@@ -207,7 +207,6 @@ async fn main() -> Result<()> {
         config.slow_open = slow_open;
     }
     config.send.delivery_patience = args.delivery_patience;
-    config.send.held_until_delivered = args.give_up_older_groups;
     config.give_up_older_groups = args.give_up_older_groups;
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
