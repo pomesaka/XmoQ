@@ -134,6 +134,7 @@ fn open_data_stream(session: SessionKey, out_stream: u64, header: SubgroupHeader
         session,
         out_stream: OutStreamKey(out_stream),
         header,
+        subgroup_delivery_timeout: None,
     }
 }
 
@@ -1964,4 +1965,51 @@ fn known_gap_a_stream_sent_ahead_for_a_refused_publish_is_taken_for_the_draining
         ]
     );
     assert_eq!(relay.counts().tracks, 1);
+}
+
+#[test]
+fn a_stream_towards_a_subscriber_carries_the_subgroup_delivery_timeout_of_its_subscribe() {
+    // The parameters of the SUBSCRIBE, and what its streams are opened with.
+    let cases: [(Vec<Parameter>, Option<u64>); 5] = [
+        (vec![], None),
+        (vec![Parameter::SubgroupDeliveryTimeout(500)], Some(500)),
+        // §8: "a value of 0 means that there is no timeout set".
+        (vec![Parameter::SubgroupDeliveryTimeout(0)], None),
+        // The Object's timeout is read and not acted on.
+        (vec![Parameter::ObjectDeliveryTimeout(250)], None),
+        (
+            vec![
+                Parameter::ObjectDeliveryTimeout(250),
+                Parameter::SubgroupDeliveryTimeout(500),
+            ],
+            Some(500),
+        ),
+    ];
+    for (parameters, expected) in cases {
+        let case = format!("{parameters:?}");
+        let mut relay = relay_with_track();
+        relay.step(Event::RequestOpened {
+            session: BOB,
+            stream: StreamKey(0),
+            first: ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: track(b"a"),
+                parameters,
+            }),
+        });
+        let mut actions = data_stream_opened(&mut relay, 7);
+        actions.extend(object_arrived(&mut relay, 7, 0));
+        let opened: Vec<Option<u64>> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::OpenDataStream {
+                    session: BOB,
+                    subgroup_delivery_timeout,
+                    ..
+                } => Some(*subgroup_delivery_timeout),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [expected], "{case}");
+    }
 }

@@ -90,6 +90,9 @@ pub struct MemorySend {
     closed: watch::Receiver<bool>,
     /// `finish` or `reset` was called.
     ended: bool,
+    /// Of a stream of [`pair_that_delivers_when_told`]: a finished stream
+    /// counts as delivered when this is notified.
+    delivers_when_told: Option<Arc<Notify>>,
 }
 
 /// The receiving half of an in-memory stream.
@@ -111,6 +114,7 @@ fn pipe(closed: &watch::Receiver<bool>, window: usize) -> (MemorySend, MemoryRec
             window,
             closed: closed.clone(),
             ended: false,
+            delivers_when_told: None,
         },
         MemoryRecv {
             shared,
@@ -156,6 +160,30 @@ impl SendStream for MemorySend {
         self.ended = true;
         self.shared.lock().finished = true;
         self.shared.changed.notify_waiters();
+    }
+
+    /// Finishes at once, as the default does, but for a stream of
+    /// [`pair_that_delivers_when_told`]: that one is delivered when the
+    /// test says so, and reset with what `give_up` gives where that comes
+    /// first.
+    async fn finish_until<G>(self, give_up: G) -> bool
+    where
+        G: Future<Output = u32> + Send,
+    {
+        let Some(told) = self.delivers_when_told.clone() else {
+            self.finish();
+            return true;
+        };
+        tokio::select! {
+            () = told.notified() => {
+                self.finish();
+                true
+            }
+            code = give_up => {
+                self.reset(code);
+                false
+            }
+        }
     }
 
     fn finish_and_wait(mut self) -> impl Future<Output = Result<(), WriteError>> + Send {
@@ -325,12 +353,30 @@ pub struct MemoryConnection {
     close: Arc<Mutex<Option<Close>>>,
     /// Whether this is the first end of its pair.
     first: bool,
+    /// [`pair_that_delivers_when_told`], for the unidirectional streams this
+    /// end opens.
+    delivers_when_told: Option<Arc<Notify>>,
 }
 
 /// Two connected ends.
 #[must_use]
 pub fn pair() -> (MemoryConnection, MemoryConnection) {
     pair_with_window(STREAM_WINDOW)
+}
+
+/// Two connected ends, and what a test notifies (`notify_waiters`) to have
+/// the finished unidirectional streams of the first end count as delivered.
+/// Until then such a stream stays with its writer after its FIN, as it does
+/// on a real connection while the receiver's transport has not acknowledged
+/// all of it ([`SendStream::finish_until`]), and can be given up; its bytes
+/// can be read by the peer all the while. WHY: [`pair`] delivers a finished
+/// stream at once, so nothing that waits for a delivery can be seen on it.
+#[must_use]
+pub fn pair_that_delivers_when_told() -> (MemoryConnection, MemoryConnection, Arc<Notify>) {
+    let (mut first, second) = pair();
+    let told = Arc::new(Notify::new());
+    first.delivers_when_told = Some(Arc::clone(&told));
+    (first, second, told)
 }
 
 /// Two connected ends whose streams hold `window` bytes unread before a
@@ -358,6 +404,7 @@ pub fn pair_with_window(window: usize) -> (MemoryConnection, MemoryConnection) {
         closed_sender: Arc::clone(&closed_sender),
         closed: closed.clone(),
         close: Arc::clone(&close),
+        delivers_when_told: None,
     };
     (
         end(true, a_uni, a_bi, a_incoming_uni, a_incoming_bi),
@@ -391,7 +438,8 @@ impl Connection for MemoryConnection {
     type Recv = MemoryRecv;
 
     async fn open_uni(&self) -> Result<MemorySend, ConnectionLost> {
-        let (send, recv) = pipe(&self.closed, self.window);
+        let (mut send, recv) = pipe(&self.closed, self.window);
+        send.delivers_when_told.clone_from(&self.delivers_when_told);
         tokio::select! {
             biased;
             () = self.until_closed() => return Err(Self::lost()),

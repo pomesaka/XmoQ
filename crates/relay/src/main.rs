@@ -97,10 +97,13 @@ struct Args {
     /// how long streams take to open; 0 logs every stream.
     slow_open: Option<Duration>,
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
-    /// An experiment; without it no stream is given up.
+    /// An experiment: what a subscriber gets that set no
+    /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
+    /// gets. Without it only a subscriber's own timeout gives a stream up.
     delivery_patience: Option<Duration>,
     /// `--older-groups give-up`: [`HubConfig::give_up_older_groups`]. An
-    /// experiment; `keep`, or no flag, gives no Group up.
+    /// experiment, for the subscriptions that set a
+    /// `SUBGROUP_DELIVERY_TIMEOUT`; `keep`, or no flag, gives no Group up.
     give_up_older_groups: bool,
     /// `--older-groups-grace-ms`: [`HubConfig::older_groups_grace`].
     older_groups_grace: Duration,

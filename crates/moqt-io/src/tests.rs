@@ -908,6 +908,7 @@ impl Sending {
         OutgoingSubgroup::spawn(
             Arc::clone(&self.local),
             header(),
+            None,
             &self.budget,
             move |event| {
                 let _ = report.send((number, event));
@@ -1661,7 +1662,8 @@ mod held_until_delivered {
 
     /// One subgroup stream with an Object of 3 bytes, finished by its
     /// writer and not delivered, towards a peer that has read the Object.
-    async fn written_and_not_delivered(patience: Option<Duration>) -> Scene {
+    /// `patience` is the sender's limit, and `own` the stream's own time.
+    async fn written_and_not_delivered(patience: Option<Duration>, own: Option<Duration>) -> Scene {
         let (local, peer) = pair();
         let delivered = Arc::new(Notify::new());
         let budget = SendBudget::new(SendLimits {
@@ -1675,6 +1677,7 @@ mod held_until_delivered {
         let out = OutgoingSubgroup::spawn(
             Arc::clone(&local),
             header(),
+            own,
             &budget,
             move |event| {
                 let _ = report.send(event);
@@ -1720,7 +1723,7 @@ mod held_until_delivered {
 
     #[tokio::test(start_paused = true)]
     async fn a_reset_after_the_fin_takes_the_stream_back() {
-        let mut scene = written_and_not_delivered(None).await;
+        let mut scene = written_and_not_delivered(None, None).await;
         // CANCELLED (0x1).
         scene.out.reset(0x1);
         // No `TimedOut`: nobody's patience ran out.
@@ -1737,7 +1740,7 @@ mod held_until_delivered {
 
     #[tokio::test(start_paused = true)]
     async fn a_stream_that_is_not_delivered_in_time_is_reset_and_said_to_have_timed_out() {
-        let mut scene = written_and_not_delivered(Some(Duration::from_millis(500))).await;
+        let mut scene = written_and_not_delivered(Some(Duration::from_millis(500)), None).await;
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(scene.budget.in_use(), (0, 0, 1));
         assert_eq!(
@@ -1756,9 +1759,61 @@ mod held_until_delivered {
         );
     }
 
+    /// The time a stream is given up after is the smaller of the sender's
+    /// limit and the stream's own, and the one that is there where the
+    /// other is not (§8, for the two that speak for a subscription).
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_is_given_up_after_the_smaller_of_the_limit_and_its_own_time() {
+        // (the sender's limit, the stream's own time, when it is reset), in
+        // milliseconds; never where the last is `None`.
+        let cases: [(Option<u64>, Option<u64>, Option<u64>); 6] = [
+            (None, None, None),
+            (Some(500), None, Some(500)),
+            (None, Some(300), Some(300)),
+            (Some(500), Some(300), Some(300)),
+            (Some(300), Some(500), Some(300)),
+            (Some(300), Some(300), Some(300)),
+        ];
+        for (limit, own, reset_after) in cases {
+            let case = format!("limit {limit:?}, own {own:?}");
+            let mut scene = written_and_not_delivered(
+                limit.map(Duration::from_millis),
+                own.map(Duration::from_millis),
+            )
+            .await;
+            let Some(reset_after) = reset_after else {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                assert_eq!(scene.budget.in_use(), (0, 0, 1), "{case}");
+                assert!(scene.reports.try_recv().is_err(), "{case}");
+                continue;
+            };
+            // Not yet 100 ms before its time, and gone 100 ms after it.
+            tokio::time::sleep(Duration::from_millis(reset_after - 100)).await;
+            assert_eq!(scene.budget.in_use(), (0, 0, 1), "{case}");
+            assert!(scene.reports.try_recv().is_err(), "{case}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                scene.reports.try_recv(),
+                Ok(OutgoingEvent::TimedOut),
+                "{case}"
+            );
+            assert_eq!(
+                scene.reports.try_recv(),
+                Ok(OutgoingEvent::Closed),
+                "{case}"
+            );
+            // DELIVERY_TIMEOUT (0x2).
+            assert_eq!(
+                scene.recv.read(&mut [0; 8]).await,
+                Err(ReadError::Reset(Some(0x2))),
+                "{case}"
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_stream_is_closed_when_it_is_delivered_and_a_reset_after_that_does_nothing() {
-        let mut scene = written_and_not_delivered(Some(Duration::from_millis(500))).await;
+        let mut scene = written_and_not_delivered(Some(Duration::from_millis(500)), None).await;
         scene.delivered.notify_one();
         assert_eq!(
             timeout(SOON, scene.reports.recv()).await,
@@ -1783,6 +1838,7 @@ mod held_until_delivered {
             OutgoingSubgroup::spawn(
                 Arc::clone(&local),
                 header(),
+                None,
                 &budget,
                 |_| std::future::ready(()),
                 Trace::default(),

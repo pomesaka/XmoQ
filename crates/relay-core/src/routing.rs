@@ -188,6 +188,8 @@ pub(crate) struct Waiter {
     /// is worked out when the SUBSCRIBE is accepted, from the Largest Object
     /// of that moment.
     filter: Option<SubscriptionFilter>,
+    /// [`Subscriber::subgroup_delivery_timeout`].
+    subgroup_delivery_timeout: Option<u64>,
 }
 
 impl Waiter {
@@ -202,6 +204,7 @@ impl Waiter {
         request: PeerRequestId,
         forward: bool,
         filter: Option<SubscriptionFilter>,
+        subgroup_delivery_timeout: Option<u64>,
     ) -> Self {
         Self {
             session,
@@ -209,6 +212,7 @@ impl Waiter {
             request,
             forward,
             filter,
+            subgroup_delivery_timeout,
         }
     }
 }
@@ -1191,12 +1195,14 @@ impl Relay {
             request,
             forward,
             filter,
+            subgroup_delivery_timeout,
         } = *waiter;
         if let Some((subscriber, slot)) = self.accept_subscriber(
             track_name,
             (session, stream, request),
             forward,
             filter,
+            subgroup_delivery_timeout,
             actions,
         ) && let Some(track) = self.tracks.live_mut(track_name)
         {
@@ -1216,6 +1222,7 @@ impl Relay {
         (session, stream, request): (SessionKey, StreamKey, PeerRequestId),
         forward: bool,
         filter: Option<SubscriptionFilter>,
+        subgroup_delivery_timeout: Option<u64>,
         actions: &mut Vec<Action>,
     ) -> Option<(Subscriber, RequestSlot)> {
         let track = self.tracks.live(track_name)?;
@@ -1260,6 +1267,7 @@ impl Relay {
                     joining,
                     start,
                     end_group,
+                    subgroup_delivery_timeout,
                     streams_started: 0,
                     count_unknown: false,
                     outs: BTreeSet::new(),
