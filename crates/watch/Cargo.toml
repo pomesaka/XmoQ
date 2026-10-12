@@ -1,7 +1,7 @@
 [package]
 name = "xmoq-watch"
 version = "0.0.0"
-description = "A viewer for the terminal: what it decides without touching a terminal, a sound device or a network."
+description = "A viewer for the terminal: the picture of a broadcast with the Kitty graphics protocol, its sound, and the chat of its room."
 edition.workspace = true
 publish.workspace = true
 
@@ -9,5 +9,20 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+xmoq-loc = { path = "../loc" }
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
 xmoq-msf = { path = "../msf" }
+anyhow = "=1.0.100"
 serde_json = "=1.0.152"
+tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# The decoders and the output are provisional (docs/open-questions.md); each is used in one
+# file of src/bin/xmoq-watch, named in the README.
+opus-decoder = "=0.1.1"
+openh264 = "=0.9.8"
+cpal = "=0.18.2"
+# The room's WebSocket. No TLS: the rooms are a Worker run locally (ws://).
+tokio-tungstenite = "=0.30.0"
+futures-util = "=0.3.31"
+# The terminal's line mode and the size of its window, without `unsafe`.
+rustix = { version = "=1.1.5", features = ["termios", "stdio"] }

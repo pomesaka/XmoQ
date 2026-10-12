@@ -1,0 +1,404 @@
+//! The flags of the viewer.
+
+use crate::room::certificate_hash;
+
+/// How a frame gets to the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Medium {
+    /// Its pixels in the escape codes: a terminal anywhere.
+    Direct,
+    /// A temporary file the terminal reads and removes: the same machine.
+    File,
+}
+
+/// How large a frame may be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// As large as the terminal's window, where the terminal says how
+    /// many pixels it has; as it is where it does not.
+    Terminal,
+    /// As it is.
+    AsItIs,
+    /// No more than so many pixels.
+    Most(usize, usize),
+}
+
+/// Where the broadcast is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// A relay, the hash of its certificate, and the Track Namespace.
+    Relay {
+        /// `--url`.
+        url: String,
+        /// `--cert-sha256`.
+        cert_sha256: [u8; 32],
+        /// `--namespace`, its fields between slashes.
+        namespace: String,
+    },
+    /// A room that says where the broadcast is and gives a token.
+    Room {
+        /// `--room`: `http://host:port/rooms/<name>`.
+        address: String,
+        /// `--name`: what the viewer is called in the chat.
+        name: String,
+        /// `--say`: a line for the chat when the viewer has joined.
+        say: Option<String>,
+        /// `--token no` asks the room for none.
+        ask_token: bool,
+    },
+}
+
+/// What the viewer was started with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Args {
+    /// Where the broadcast is.
+    pub source: Source,
+    /// `--video` and `--audio`: the names of the tracks. `None`: what the
+    /// catalog of the broadcast has.
+    pub tracks: Option<(String, String)>,
+    /// `--buffer-ms`: how long an Object is held beyond the fastest way.
+    pub buffer_ms: u64,
+    /// `--volume`: 0 to 1.
+    pub volume: f32,
+    /// `--scale`: how many times its pixels the picture takes of the
+    /// terminal.
+    pub scale: usize,
+    /// `--medium`.
+    pub medium: Medium,
+    /// `--fit`.
+    pub fit: Fit,
+    /// `--out`: a file for what would go to the terminal.
+    pub out: Option<String>,
+    /// `--seconds`: the viewer ends after so long.
+    pub seconds: Option<u64>,
+    /// `--log`: a file for the lines about the room and the keys.
+    pub log: Option<String>,
+    /// `--measure-demo-marks on`: for measuring with the demo's
+    /// publisher, whose picture has a white square and whose sound a beep
+    /// at the same moments; how far apart the two leave the viewer is
+    /// reported at the end.
+    pub measure_demo_marks: bool,
+}
+
+/// The default of `--buffer-ms`, as the watching page of the demo has it.
+/// **Provisional.**
+pub const DEFAULT_BUFFER_MS: u64 = 50;
+
+/// What is wrong with the flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invalid(pub String);
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Invalid {}
+
+/// The flags, each of which takes a value.
+pub const USAGE: &str = "\
+xmoq-watch --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
+xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line>] [--token no]
+  --video <track> --audio <track>   the tracks by name; without them, those of the catalog
+  --buffer-ms <ms>                  how long an Object is held beyond the fastest way (50)
+  --volume <0..1>                   (1)
+  --scale <n>                       the picture at n times its pixels (1)
+  --medium file|direct              a file the terminal reads (file), or the pixels in the escape codes
+  --fit terminal|none|<w>x<h>       the most pixels that are written (terminal: the window's)
+  --out <file>                      what would go to the terminal, to a file
+  --seconds <n>                     end after so long
+  --log <file>                      the lines about the room and the keys
+  --measure-demo-marks on|off       for measuring with the demo's publisher: how far apart the
+                                    white square and the beep leave the viewer (off)
+Keys: q or Ctrl-C ends, + and - the volume, m mutes, t or Enter begins a line for the chat.";
+
+fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, Invalid> {
+    value
+        .parse()
+        .map_err(|_| Invalid(format!("{flag} {value}: not a number it takes")))
+}
+
+fn one_of<T: Copy>(flag: &str, value: &str, choices: &[(&str, T)]) -> Result<T, Invalid> {
+    choices
+        .iter()
+        .find(|(name, _)| *name == value)
+        .map(|(_, choice)| *choice)
+        .ok_or_else(|| {
+            let names: Vec<&str> = choices.iter().map(|(name, _)| *name).collect();
+            Invalid(format!("{flag} {value}: {}", names.join(" or ")))
+        })
+}
+
+fn fit(value: &str) -> Result<Fit, Invalid> {
+    match value {
+        "terminal" => Ok(Fit::Terminal),
+        "none" => Ok(Fit::AsItIs),
+        size => {
+            let invalid = || Invalid(format!("--fit {size}: terminal, none or <width>x<height>"));
+            let (width, height) = size.split_once('x').ok_or_else(invalid)?;
+            let (width, height): (usize, usize) = (
+                width.parse().map_err(|_| invalid())?,
+                height.parse().map_err(|_| invalid())?,
+            );
+            if width == 0 || height == 0 {
+                return Err(invalid());
+            }
+            Ok(Fit::Most(width, height))
+        }
+    }
+}
+
+/// Reads the flags, without the name of the program.
+///
+/// # Errors
+///
+/// [`Invalid`] for a flag that is not one, a flag without its value, a
+/// value a flag does not take, neither or both of `--url` and `--room`,
+/// `--url` without `--cert-sha256`, and one of `--video` and `--audio`
+/// without the other.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm a flag: cut in two, the list of the flags would be in two places"
+)]
+pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
+    let (mut url, mut cert_sha256, mut namespace) = (None, None, "xmoq/demo".to_string());
+    let (mut room, mut name, mut say, mut ask_token) = (None, "terminal".to_string(), None, true);
+    let (mut video, mut audio) = (None, None);
+    let mut args = Args {
+        // Replaced below: a source is asked for.
+        source: Source::Room {
+            address: String::new(),
+            name: String::new(),
+            say: None,
+            ask_token: true,
+        },
+        tracks: None,
+        buffer_ms: DEFAULT_BUFFER_MS,
+        volume: 1.0,
+        scale: 1,
+        medium: Medium::File,
+        fit: Fit::Terminal,
+        out: None,
+        seconds: None,
+        log: None,
+        measure_demo_marks: false,
+    };
+    while let Some(flag) = given.next() {
+        let value = given
+            .next()
+            .ok_or_else(|| Invalid(format!("{flag} needs a value")))?;
+        match flag.as_str() {
+            "--url" => url = Some(value),
+            "--cert-sha256" => {
+                cert_sha256 = Some(
+                    certificate_hash(&value)
+                        .map_err(|error| Invalid(format!("--cert-sha256: {error}")))?,
+                );
+            }
+            "--namespace" => namespace = value,
+            "--room" => room = Some(value),
+            "--name" => name = value,
+            "--say" => say = Some(value),
+            "--token" => ask_token = one_of(&flag, &value, &[("yes", true), ("no", false)])?,
+            "--video" => video = Some(value),
+            "--audio" => audio = Some(value),
+            "--buffer-ms" => args.buffer_ms = number(&flag, &value)?,
+            "--volume" => {
+                let volume: f32 = number(&flag, &value)?;
+                if !(0.0..=1.0).contains(&volume) {
+                    return Err(Invalid(format!("--volume {value}: from 0 to 1")));
+                }
+                args.volume = volume;
+            }
+            "--scale" => {
+                args.scale = number(&flag, &value)?;
+                if args.scale == 0 {
+                    return Err(Invalid("--scale 0: 1 or more".to_string()));
+                }
+            }
+            "--medium" => {
+                args.medium = one_of(
+                    &flag,
+                    &value,
+                    &[("file", Medium::File), ("direct", Medium::Direct)],
+                )?;
+            }
+            "--fit" => args.fit = fit(&value)?,
+            "--out" => args.out = Some(value),
+            "--seconds" => args.seconds = Some(number(&flag, &value)?),
+            "--log" => args.log = Some(value),
+            "--measure-demo-marks" => {
+                args.measure_demo_marks = one_of(&flag, &value, &[("on", true), ("off", false)])?;
+            }
+            other => return Err(Invalid(format!("unknown flag {other}"))),
+        }
+    }
+    args.source = match (url, room) {
+        (Some(url), None) => Source::Relay {
+            url,
+            cert_sha256: cert_sha256
+                .ok_or_else(|| Invalid("--url needs --cert-sha256".to_string()))?,
+            namespace,
+        },
+        (None, Some(address)) => Source::Room {
+            address,
+            name,
+            say,
+            ask_token,
+        },
+        (None, None) => return Err(Invalid("--url or --room is needed".to_string())),
+        (Some(_), Some(_)) => return Err(Invalid("--url or --room, not both".to_string())),
+    };
+    args.tracks = match (video, audio) {
+        (Some(video), Some(audio)) => Some((video, audio)),
+        (None, None) => None,
+        _ => {
+            return Err(Invalid(
+                "--video and --audio are given together, or neither".to_string(),
+            ));
+        }
+    };
+    Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(line: &str) -> Result<Args, Invalid> {
+        parse(line.split_whitespace().map(str::to_string))
+    }
+
+    fn defaults(source: Source) -> Args {
+        Args {
+            source,
+            tracks: None,
+            buffer_ms: 50,
+            volume: 1.0,
+            scale: 1,
+            medium: Medium::File,
+            fit: Fit::Terminal,
+            out: None,
+            seconds: None,
+            log: None,
+            measure_demo_marks: false,
+        }
+    }
+
+    fn room() -> Source {
+        Source::Room {
+            address: "http://h/rooms/a".to_string(),
+            name: "terminal".to_string(),
+            say: None,
+            ask_token: true,
+        }
+    }
+
+    #[test]
+    fn the_flags_are_read() {
+        let hash = "0f".repeat(32);
+        assert_eq!(
+            parsed(&format!("--url https://h:1/ --cert-sha256 {hash}")),
+            Ok(defaults(Source::Relay {
+                url: "https://h:1/".to_string(),
+                cert_sha256: [0x0f; 32],
+                namespace: "xmoq/demo".to_string(),
+            }))
+        );
+        assert_eq!(parsed("--room http://h/rooms/a"), Ok(defaults(room())));
+        assert_eq!(
+            parsed(
+                "--room http://h/rooms/a --name me --say hello --token no --video v --audio a \
+                 --buffer-ms 150 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
+                 --seconds 20 --log l --measure-demo-marks on"
+            ),
+            Ok(Args {
+                source: Source::Room {
+                    address: "http://h/rooms/a".to_string(),
+                    name: "me".to_string(),
+                    say: Some("hello".to_string()),
+                    ask_token: false,
+                },
+                tracks: Some(("v".to_string(), "a".to_string())),
+                buffer_ms: 150,
+                volume: 0.3,
+                scale: 2,
+                medium: Medium::Direct,
+                fit: Fit::Most(960, 540),
+                out: Some("o".to_string()),
+                seconds: Some(20),
+                log: Some("l".to_string()),
+                measure_demo_marks: true,
+            })
+        );
+        assert_eq!(
+            parsed("--room http://h/rooms/a --fit none").map(|args| args.fit),
+            Ok(Fit::AsItIs)
+        );
+    }
+
+    #[test]
+    fn flags_that_are_wrong_are_turned_down() {
+        let hash = "0f".repeat(32);
+        // (the flags; what is said of them)
+        let cases = [
+            (String::new(), "--url or --room is needed"),
+            ("--url https://h/".to_string(), "--url needs --cert-sha256"),
+            (
+                format!("--url https://h/ --cert-sha256 {hash} --room http://h/rooms/a"),
+                "--url or --room, not both",
+            ),
+            (
+                "--url https://h/ --cert-sha256 0f".to_string(),
+                "--cert-sha256: the hash of a certificate is 64 hex digits",
+            ),
+            ("--room".to_string(), "--room needs a value"),
+            ("--room r --nothing 1".to_string(), "unknown flag --nothing"),
+            (
+                "--room r --video v".to_string(),
+                "--video and --audio are given together, or neither",
+            ),
+            (
+                "--room r --buffer-ms soon".to_string(),
+                "--buffer-ms soon: not a number it takes",
+            ),
+            (
+                "--room r --buffer-ms -1".to_string(),
+                "--buffer-ms -1: not a number it takes",
+            ),
+            (
+                "--room r --volume 1.5".to_string(),
+                "--volume 1.5: from 0 to 1",
+            ),
+            (
+                "--room r --volume NaN".to_string(),
+                "--volume NaN: from 0 to 1",
+            ),
+            ("--room r --scale 0".to_string(), "--scale 0: 1 or more"),
+            (
+                "--room r --medium paper".to_string(),
+                "--medium paper: file or direct",
+            ),
+            (
+                "--room r --fit 0x10".to_string(),
+                "--fit 0x10: terminal, none or <width>x<height>",
+            ),
+            (
+                "--room r --fit wide".to_string(),
+                "--fit wide: terminal, none or <width>x<height>",
+            ),
+            (
+                "--room r --token maybe".to_string(),
+                "--token maybe: yes or no",
+            ),
+            (
+                "--room r --measure-demo-marks 1".to_string(),
+                "--measure-demo-marks 1: on or off",
+            ),
+        ];
+        for (flags, said) in cases {
+            assert_eq!(parsed(&flags), Err(Invalid(said.to_string())), "{flags}");
+        }
+    }
+}
