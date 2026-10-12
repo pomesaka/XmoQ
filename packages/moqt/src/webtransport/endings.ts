@@ -1,4 +1,5 @@
 import type { Redirect } from "../core/control-message.ts";
+import { retryWaitMs } from "../core/error.ts";
 
 /** How the session ended. */
 export type SessionClose =
@@ -144,6 +145,15 @@ export class RequestFailedError extends Error {
 		this.retryInterval = fields.retryInterval;
 		this.errorReason = fields.errorReason;
 		this.redirect = fields.redirect;
+	}
+
+	/**
+	 * How many milliseconds to wait before the same request is sent again,
+	 * as a timer takes it (0 for "at once"); `undefined` where the peer
+	 * said that it "SHOULD NOT be retried" (§10.6.2).
+	 */
+	get retryWaitMs(): number | undefined {
+		return retryWaitMs(this.retryInterval);
 	}
 }
 

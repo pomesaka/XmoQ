@@ -75,7 +75,9 @@
 //                     (`--announce-per-second 20`). The relay accepts 5 to
 //                     8 of them (five at once, and one more each second)
 //                     and refuses the others with EXCESSIVE_LOAD (`SEND
-//                     session=2 stream=S REQUEST_ERROR error_code=0x9`).
+//                     session=2 stream=S REQUEST_ERROR error_code=0x9`)
+//                     and a Retry Interval of 1,001: one more may be sent
+//                     after a second.
 //                     It closes no session, and the subscriber gets the
 //                     Object the publisher sends afterwards.
 //
@@ -656,7 +658,7 @@ async function relayManyAnnouncements(): Promise<string> {
 	]);
 	const [said, sent = "", ok = "", refused = "", failed = ""] =
 		await client.waitForLine(
-			/^ANNOUNCED sent=(\d+) ok=(\d+) refused=(\d+) failed=(\d+) asked=\d+ ms=\d+$/,
+			/^ANNOUNCED sent=(\d+) ok=(\d+) refused=(\d+) failed=(\d+) asked=\d+ retry_interval=1001 ms=\d+$/,
 		);
 	// Five at once and one more each second: 5 to 8 in 3 seconds.
 	if (

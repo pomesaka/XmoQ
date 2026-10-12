@@ -8,6 +8,7 @@ import {
 	type PeerFetch,
 	type PeerSubscribe,
 	RequestErrorCode,
+	RequestFailedError,
 	type SessionClose,
 } from "@xmoq/moqt";
 import { keepSession, stayOnSession } from "../core/keep-session.ts";
@@ -160,7 +161,9 @@ export interface KeepPlayingOptions<E> {
 	 * where there is nothing to play yet (`play` rejects, and `notYet` says
 	 * so of what it rejected with) and where what was played has ended:
 	 * `play` is called again on the same connection after `againMs`
-	 * (`DEFAULT_ASK_AGAIN_DELAY_MS`). For a viewer whose requests a relay
+	 * (`DEFAULT_ASK_AGAIN_DELAY_MS`), or, where "not yet" is a
+	 * REQUEST_ERROR that says when to ask again (its Retry Interval,
+	 * transport §10.6.2), after that long. For a viewer whose requests a relay
 	 * holds until a publisher is there (RENDEZVOUS_TIMEOUT, transport
 	 * §10.2.6), where "not yet" is the relay's REQUEST_ERROR `TIMEOUT`. A
 	 * session that ends, and a `play` that fails in another way, are
@@ -202,6 +205,10 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 						play: () => options.play(connection, signal),
 						closed: connection.closed,
 						notYet: stay.notYet,
+						againAfter: (error) =>
+							error instanceof RequestFailedError
+								? error.retryWaitMs
+								: undefined,
 						wait: (ms) => waitFor(ms, signal),
 						stopped: () => signal.aborted,
 						...(stay.againMs === undefined ? {} : { againMs: stay.againMs }),

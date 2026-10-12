@@ -115,10 +115,10 @@ pub struct HubConfig {
     /// Timers one session may have running at once. A timer beyond that is
     /// not started and its event is reported at once.
     pub max_timers_per_session: usize,
-    /// The time in which a session may send one `PUBLISH_NAMESPACE`: what
-    /// it used of [`Self::announcements_at_once`] comes back at this rate.
-    /// Provisional.
-    pub announcement_interval: Duration,
+    /// `xmoq_relay_core::ANNOUNCEMENT_EVERY_MS`, where it is not the relay's
+    /// own number: the time in which a session may send one
+    /// `PUBLISH_NAMESPACE`.
+    pub announcement_every_ms: Option<u64>,
     /// `xmoq_relay_core::MAX_ANNOUNCEMENTS_AT_ONCE`, where it is not the
     /// relay's own number.
     pub announcements_at_once: Option<u32>,
@@ -178,7 +178,7 @@ impl Default for HubConfig {
             request_close_timeout: Duration::from_secs(2),
             closed_read_timeout: Duration::from_secs(1),
             max_timers_per_session: 1024,
-            announcement_interval: Duration::from_secs(1),
+            announcement_every_ms: None,
             announcements_at_once: None,
             upstream_timeout: Duration::from_secs(5),
             setup_timeout: Duration::from_secs(10),
@@ -709,9 +709,14 @@ impl<C: Connection> HubHandle<C> {
 pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>) {
     let (events, inbox) = mpsc::channel(config.event_queue_len);
     let mut relay = Relay::new(&config.implementation);
-    if let Some(announcements) = config.announcements_at_once {
-        relay.set_announcements_at_once(announcements);
-    }
+    relay.set_announcements(
+        config
+            .announcements_at_once
+            .unwrap_or(xmoq_relay_core::MAX_ANNOUNCEMENTS_AT_ONCE),
+        config
+            .announcement_every_ms
+            .unwrap_or(xmoq_relay_core::ANNOUNCEMENT_EVERY_MS),
+    );
     if let Some(key) = &config.auth_key {
         relay.set_authorizer(crate::auth::RoomTokens::new(key, config.auth_setup));
     }
@@ -1828,9 +1833,9 @@ impl<C: Connection> Hub<C> {
                 self.config.streams.first_bytes_timeout,
                 Event::JoiningFetchTimeout { session, stream },
             ),
-            Action::StartAnnouncementTimer { session } => (
+            Action::StartAnnouncementTimer { session, wait_ms } => (
                 session,
-                self.config.announcement_interval,
+                Duration::from_millis(wait_ms),
                 Event::AnnouncementTimeout { session },
             ),
             Action::StartRendezvousTimer {

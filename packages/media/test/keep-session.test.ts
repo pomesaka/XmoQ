@@ -118,6 +118,24 @@ test.each<{
 		result: "session-ended",
 	},
 	{
+		name: "a 'not yet' that names its pause is asked again after that long, and no sooner than 100 ms",
+		plays: ["not-yet after 250", "not-yet", "not-yet after 0", "closes"],
+		log: [
+			"play",
+			"not yet",
+			"wait 250",
+			"play",
+			"not yet",
+			"wait 1000",
+			"play",
+			"not yet",
+			"wait 100",
+			"play",
+			"playing 1",
+		],
+		result: "session-ended",
+	},
+	{
 		name: "a failure that is no 'not yet' is the caller's: nothing is asked again",
 		plays: ["not-yet", "fails"],
 		log: ["play", "not yet", "wait 1000", "play"],
@@ -141,7 +159,9 @@ test.each<{
 		play() {
 			seen.push("play");
 			const step = steps.shift();
-			if (step === "not-yet") return Promise.reject(new Error("not yet"));
+			if (step?.startsWith("not-yet")) {
+				return Promise.reject(new Error(step.replace("not-yet", "not yet")));
+			}
 			if (step === "fails") return Promise.reject(new Error("broken"));
 			if (step === "closes") {
 				queueMicrotask(() => close("gone"));
@@ -155,7 +175,15 @@ test.each<{
 			return Promise.resolve({ ended: Promise.resolve("over") });
 		},
 		closed,
-		notYet: (error) => error instanceof Error && error.message === "not yet",
+		notYet: (error) =>
+			error instanceof Error && error.message.startsWith("not yet"),
+		againAfter(error) {
+			const named =
+				error instanceof Error
+					? /^not yet after (\d+)$/.exec(error.message)?.[1]
+					: undefined;
+			return named === undefined ? undefined : Number(named);
+		},
 		wait(ms) {
 			seen.push(`wait ${ms}`);
 			return Promise.resolve();

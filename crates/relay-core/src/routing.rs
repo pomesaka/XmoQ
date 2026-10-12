@@ -25,7 +25,9 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use xmoq_moqt::kvp::KeyValuePair;
-use xmoq_moqt::message::{ControlMessage, ReasonPhrase, RequestError, request_error_code};
+use xmoq_moqt::message::{
+    ControlMessage, ReasonPhrase, RequestError, request_error_code, retry_interval,
+};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{Parameter, SubscriptionFilter};
 use xmoq_moqt::session::{PeerRequestId, RequestEvent, RequestId};
@@ -43,7 +45,8 @@ pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
 /// `PUBLISH_NAMESPACE` requests a session may send at once. Each uses one
 /// of these, which comes back after the time the I/O side has for it (a
 /// second), one at a time; with none left the request is refused with
-/// `EXCESSIVE_LOAD`. **Provisional.**
+/// `EXCESSIVE_LOAD`, with the time one takes to come back as its Retry
+/// Interval. **Provisional.**
 ///
 /// WHY a limit on these and no other request: an announcement makes the
 /// relay send that session a SUBSCRIBE for every track of the namespace
@@ -55,6 +58,10 @@ pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
 /// and would not have stopped this. WHY NOT by namespace: the session
 /// announces another name.
 pub const MAX_ANNOUNCEMENTS_AT_ONCE: u32 = 5;
+
+/// The time after which a session has back one of the announcements it
+/// used, in milliseconds. **Provisional.**
+pub const ANNOUNCEMENT_EVERY_MS: u64 = 1_000;
 
 /// Subscribers that may wait for one upstream SUBSCRIBE to be answered. One
 /// more is refused with `EXCESSIVE_LOAD`. Provisional.
@@ -400,6 +407,38 @@ pub(crate) enum OwnRequestKind {
     Fetch,
 }
 
+/// How long a requester is told to wait before it asks again for what is
+/// not there now and may be later. **Provisional.**
+pub const RETRY_WHAT_IS_NOT_THERE_MS: u64 = 1_000;
+
+/// The Retry Interval of a `REQUEST_ERROR` the relay makes up itself, by its
+/// Error Code. §10.6.2 has its sender include "a non-zero Retry Interval in
+/// the message" where "a request is retryable with the same parameters at a
+/// later time".
+///
+/// - `EXCESSIVE_LOAD`: a limit of the relay, which has room again later; as
+///   long as a session gives its own (a second).
+/// - `TIMEOUT`: at once. What ran out is a wait of the relay, and the same
+///   request starts that wait anew.
+/// - `DOES_NOT_EXIST`: after [`RETRY_WHAT_IS_NOT_THERE_MS`]. Nobody
+///   publishes the track now, and the relay cannot know when somebody will.
+///   WHY not 0: "the request SHOULD NOT be retried" would be said to a
+///   viewer that came before the broadcast, which is the one that is to
+///   ask again.
+/// - Every other code: 0. The same request gets the same answer
+///   (`INVALID_RANGE`, `NOT_SUPPORTED`, `UNINTERESTED`), or the relay does
+///   not know (`INTERNAL_ERROR`).
+///
+/// A publisher's own answer keeps the publisher's value where it is passed
+/// on ([`Refusal::passed_on`]).
+pub(crate) const fn retry_interval_of(error_code: u64) -> u64 {
+    match error_code {
+        request_error_code::TIMEOUT => retry_interval::AT_ONCE,
+        request_error_code::DOES_NOT_EXIST => retry_interval::after_ms(RETRY_WHAT_IS_NOT_THERE_MS),
+        other => retry_interval::made_up(other),
+    }
+}
+
 /// What a request is refused with: the fields of a `REQUEST_ERROR`.
 pub(crate) struct Refusal {
     error_code: u64,
@@ -408,14 +447,22 @@ pub(crate) struct Refusal {
 }
 
 impl Refusal {
-    /// With that code and nothing else.
-    ///
-    /// FIXME: a Retry Interval where a retry can succeed later, as when a
-    /// publisher may still appear. §10.6.2 reads 0 as "do not retry".
+    /// With that code, and the Retry Interval the relay gives a refusal of
+    /// its own with it ([`retry_interval_of`]).
     pub(crate) fn code(error_code: u64) -> Self {
         Self {
             error_code,
-            retry_interval: 0,
+            retry_interval: retry_interval_of(error_code),
+            reason: ReasonPhrase::default(),
+        }
+    }
+
+    /// `EXCESSIVE_LOAD`, for a request that has room again after `ms`
+    /// milliseconds at the latest.
+    pub(crate) fn loaded_for_ms(ms: u64) -> Self {
+        Self {
+            error_code: request_error_code::EXCESSIVE_LOAD,
+            retry_interval: retry_interval::after_ms(ms),
             reason: ReasonPhrase::default(),
         }
     }

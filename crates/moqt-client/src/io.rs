@@ -12,7 +12,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use xmoq_moqt::message::{ControlMessage, ReasonPhrase, RequestError, request_error_code};
+use xmoq_moqt::message::{
+    ControlMessage, ReasonPhrase, RequestError, request_error_code, retry_interval,
+};
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
@@ -259,7 +261,7 @@ fn refuse_requests(
     let refuser = tokio::spawn(async move {
         let not_supported = ControlMessage::RequestError(RequestError {
             error_code: request_error_code::NOT_SUPPORTED,
-            retry_interval: 0,
+            retry_interval: retry_interval::made_up(request_error_code::NOT_SUPPORTED),
             error_reason: ReasonPhrase::default(),
             redirect: None,
         });

@@ -25,7 +25,8 @@
 //! `PUBLISH_NAMESPACE` for the namespace `(xmoq)`, which it cancels as
 //! soon as it is answered. A SUBSCRIBE the relay sends it meanwhile is
 //! refused. At the end it says what it counted
-//! (`ANNOUNCED sent=.. ok=.. refused=.. failed=.. asked=.. ms=..`): the
+//! (`ANNOUNCED sent=.. ok=.. refused=.. failed=.. asked=.. retry_interval=..
+//! ms=..`, the Retry Interval being that of the refusal that came last): the
 //! measure of what a session that announces again and again costs a relay.
 //!
 //! With `--hold-tracks <n>` it is that many viewers that came early: it
@@ -338,6 +339,8 @@ struct Announced {
     failed: AtomicU64,
     /// SUBSCRIBEs of the relay that were refused.
     asked: AtomicU64,
+    /// The Retry Interval of the refusal that came last.
+    retry_interval: AtomicU64,
 }
 
 /// One `PUBLISH_NAMESPACE` for `(xmoq)`, cancelled when it is answered.
@@ -361,7 +364,12 @@ async fn announce_once(connection: &WtConnection, request_id: u64, counts: &Anno
     };
     let counter = match sent.await {
         Some(RequestStreamEvent::Message(ControlMessage::RequestOk(_))) => &counts.ok,
-        Some(RequestStreamEvent::Message(ControlMessage::RequestError(_))) => &counts.refused,
+        Some(RequestStreamEvent::Message(ControlMessage::RequestError(error))) => {
+            counts
+                .retry_interval
+                .store(error.retry_interval, Ordering::Relaxed);
+            &counts.refused
+        }
         _ => &counts.failed,
     };
     counter.fetch_add(1, Ordering::Relaxed);
@@ -435,11 +443,12 @@ async fn announce(url: &str, cert_sha256: [u8; 32], stay: Duration, per_second: 
         }
     };
     println!(
-        "ANNOUNCED sent={sent} ok={} refused={} failed={} asked={} ms={}",
+        "ANNOUNCED sent={sent} ok={} refused={} failed={} asked={} retry_interval={} ms={}",
         counts.ok.load(Ordering::Relaxed),
         counts.refused.load(Ordering::Relaxed),
         counts.failed.load(Ordering::Relaxed),
         counts.asked.load(Ordering::Relaxed),
+        counts.retry_interval.load(Ordering::Relaxed),
         began.elapsed().as_millis()
     );
     match end {

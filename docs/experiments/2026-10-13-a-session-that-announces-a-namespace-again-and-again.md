@@ -79,6 +79,22 @@ After the second run the relay was given a limit: a session may send five PUBLIS
 - What is left at 1,000 a second (0.14 of a core) is the refusing itself: 9,986 requests read and answered.
 - The interop run `relay-many-announcements` has the same in the matrix, at 20 a second for 3 s beside a publisher and a subscriber: 7 accepted, 53 refused with `0x9`, no session closed, and the subscriber got its Object afterwards.
 
+## The demo on the relay with the limit
+
+Whether the demo comes near the limit, or near the other limits the relay got on 2026-10-12 and 13 (10 s for a SETUP, 30 s for a session that holds nothing, SUBSCRIBEs held under RENDEZVOUS_TIMEOUT). `bun demo/serve.ts` on ports of its own (relay 48443, pages 48080, rooms 48787), with the room, the relay of this tree with its own values, and headless Chromium. No code was changed. One run.
+
+| Step | Outcome |
+|---|---|
+| `bun demo/check.ts` | "THE DEMO PLAYS: picture and sound": 50 pieces of sound a second to the loudspeaker, 1 break in 4 s |
+| The publishing page closed and opened again, 6 times, 0.5 s apart | each time the publishing page published at 30 or 31 frames a second, and the watching page showed 25 frames a second or more within 1.0 to 1.5 s of being looked at |
+| The relay stopped and started again on the same port, 3 times | the publishing page went on in its sessions 2, 3 and 4, and the watching page showed 25 frames a second or more within 1.3 to 3.6 s of being looked at; at the end it played in its session 10 at 30 frames a second |
+
+- **The relay refused nothing with `EXCESSIVE_LOAD`**: no `error_code=0x9` among the 833 lines of its log. A publishing page announces once for a session, and a page that is opened again or connects again is a new session.
+- The relay closed 6 sessions, all with "the relay is stopping": none for a SETUP that did not come or for holding nothing.
+- It sent `DOES_NOT_EXIST` 12 times, to the watching page's SUBSCRIBEs while no page published, which is how that page waits without `?wait=1`.
+- The time "within which the page showed 25 frames a second" is from the first look 1.5 s (4 s after a stop of the relay) after the step, and the rate it reads is the page's own count over its last second, so it does not say how long the picture was away.
+- The watching page has no field to write a chat line into from a script; the chat was not written to. `?wait=1` and the terminal viewer were not run here.
+
 ## Not run
 
 - More than 100 announcements a second with 64 tracks or more to ask for, where the relay would need more than one core.

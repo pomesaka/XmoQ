@@ -1,6 +1,7 @@
 import {
 	InactiveError,
 	MoqtError,
+	madeUpRetryInterval,
 	RequestErrorCode,
 	SessionErrorCode,
 	StreamResetErrorCode,
@@ -2007,7 +2008,7 @@ export async function connectOver(
 				// One REQUEST_ERROR may answer every update that waits (§10.9.1).
 				const error = new RequestFailedError({
 					errorCode: event.errorCode,
-					retryInterval: 0n,
+					retryInterval: madeUpRetryInterval(event.errorCode),
 					errorReason: event.errorReason,
 				});
 				const waiting = subscriptions.get(event.requestId)?.updates ?? [];

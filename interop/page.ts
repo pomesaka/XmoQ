@@ -237,6 +237,12 @@ function toPageProperty({ type, value }: KeyValuePair): PageProperty {
 }
 
 function errorText(error: unknown): string {
+	if (error instanceof RequestFailedError) {
+		// What the library hands the application of the Retry Interval, for
+		// the drivers that look at it.
+		const wait = error.retryWaitMs;
+		return `${error.name}: ${error.message} (retry: ${wait === undefined ? "no" : `after ${wait} ms`})`;
+	}
 	return error instanceof Error
 		? `${error.name}: ${error.message}`
 		: String(error);

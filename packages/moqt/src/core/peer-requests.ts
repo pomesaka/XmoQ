@@ -12,6 +12,7 @@ import {
 } from "./control-message.ts";
 import {
 	MoqtError,
+	madeUpRetryInterval,
 	protocolViolation,
 	RequestErrorCode,
 	SessionErrorCode,
@@ -496,7 +497,7 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 				data: encodeControlMessage({
 					type: "REQUEST_ERROR",
 					errorCode: refusal.code,
-					retryInterval: 0n,
+					retryInterval: madeUpRetryInterval(refusal.code),
 					errorReason: refusal.reason,
 				}),
 			});

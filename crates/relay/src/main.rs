@@ -103,10 +103,10 @@ struct Args {
     /// a session that has sent its SETUP may hold nothing; 30 seconds
     /// where it is not said.
     idle_session: Option<Duration>,
-    /// `--announce-every-ms`: [`HubConfig::announcement_interval`], the time
+    /// `--announce-every-ms`: [`HubConfig::announcement_every_ms`], the time
     /// in which a session may send one `PUBLISH_NAMESPACE`; a second where
     /// it is not said.
-    announce_every: Option<Duration>,
+    announce_every: Option<u64>,
     /// `--announce-at-once`: [`HubConfig::announcements_at_once`], how many
     /// it may send at once; 5 where it is not said.
     announce_at_once: Option<u32>,
@@ -176,7 +176,9 @@ fn parse_args() -> Result<Args> {
             "--max-sessions" => max_sessions = Some(value.parse().context("--max-sessions")?),
             "--slow-open-ms" => slow_open = Some(millis(&flag, &value)?),
             "--setup-timeout-ms" => setup_timeout = Some(millis(&flag, &value)?),
-            "--announce-every-ms" => announce_every = Some(millis(&flag, &value)?),
+            "--announce-every-ms" => {
+                announce_every = Some(value.parse().context("--announce-every-ms")?);
+            }
             "--announce-at-once" => {
                 announce_at_once = Some(value.parse().context("--announce-at-once")?);
             }
@@ -246,9 +248,7 @@ async fn main() -> Result<()> {
     if let Some(idle_session) = args.idle_session {
         config.idle_session_timeout = idle_session;
     }
-    if let Some(announce_every) = args.announce_every {
-        config.announcement_interval = announce_every;
-    }
+    config.announcement_every_ms = args.announce_every;
     config.announcements_at_once = args.announce_at_once;
     config.send.delivery_patience = args.delivery_patience;
     config.give_up_older_groups = args.give_up_older_groups;
