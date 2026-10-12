@@ -195,12 +195,36 @@ const BITRATE = Number(
 	new URLSearchParams(location.search).get("bitrate") ?? 1_500_000,
 );
 
+/**
+ * `?ladder=1` (**a trial**): the same picture is encoded a second time,
+ * smaller, as a track of its own, for a viewer whose link has no room for
+ * the first. The catalog has the two in one alternate group (MSF §5.2.12).
+ */
+const LADDER = new URLSearchParams(location.search).has("ladder");
+const LOW = { name: "video-low", width: 320, height: 180, bitrate: 500_000 };
+
 async function main(): Promise<void> {
+	// MSF §6.1 has the time in milliseconds as one way to begin. One number
+	// for both versions: their Groups are counted alike.
+	const firstGroup = BigInt(Date.now());
+	const low = LADDER
+		? await createVideoTrackEncoder({
+				trackNamespace: namespace(),
+				trackName: new TextEncoder().encode(LOW.name),
+				firstGroup,
+				codec: ENCODER_CODEC,
+				width: LOW.width,
+				height: LOW.height,
+				bitrate: LOW.bitrate,
+				framerate: FRAMES_A_SECOND,
+				keyFrameIntervalMs: 1000,
+			})
+		: undefined;
+	const small = new OffscreenCanvas(LOW.width, LOW.height).getContext("2d");
 	const encoder = await createVideoTrackEncoder({
 		trackNamespace: namespace(),
 		trackName: trackName(),
-		// MSF §6.1 has the time in milliseconds as one way to begin.
-		firstGroup: BigInt(Date.now()),
+		firstGroup,
 		codec: ENCODER_CODEC,
 		width: WIDTH,
 		height: HEIGHT,
@@ -265,6 +289,7 @@ async function main(): Promise<void> {
 					packaging: "loc",
 					isLive: true,
 					role: "video",
+					...(low === undefined ? {} : { renderGroup: 1, altGroup: 1 }),
 					// What a decoder is configured with: the parameter sets are in the key frames.
 					codec: DECODER_CODEC,
 					bitrate: BITRATE,
@@ -272,6 +297,23 @@ async function main(): Promise<void> {
 					height: HEIGHT,
 					framerate: FRAMES_A_SECOND,
 				},
+				...(low === undefined
+					? []
+					: [
+							{
+								name: LOW.name,
+								packaging: "loc",
+								isLive: true,
+								role: "video",
+								renderGroup: 1,
+								altGroup: 1,
+								codec: DECODER_CODEC,
+								bitrate: LOW.bitrate,
+								width: LOW.width,
+								height: LOW.height,
+								framerate: FRAMES_A_SECOND,
+							},
+						]),
 				...(audio === undefined
 					? []
 					: [
@@ -299,6 +341,7 @@ async function main(): Promise<void> {
 		tracks: [
 			catalog,
 			encoder.publisher,
+			...(low === undefined ? [] : [low.publisher]),
 			...(audio === undefined ? [] : [audio.publisher]),
 		],
 		onState(state) {
@@ -326,7 +369,20 @@ async function main(): Promise<void> {
 	const framesIn = perSecond();
 	const onFrame = (frame: VideoFrame): void => {
 		framesIn.count();
-		encoder.encode(frame);
+		if (low === undefined || small === null) {
+			encoder.encode(frame);
+			return;
+		}
+		// The same frame, smaller, with the same time. A key frame for one
+		// is a key frame for both, so that their Groups begin together and
+		// a viewer can go from one to the other at a Group's start.
+		small.drawImage(frame, 0, 0, LOW.width, LOW.height);
+		const smaller = new VideoFrame(small.canvas, {
+			timestamp: frame.timestamp,
+		});
+		const keyFrame = encoder.wantsKeyFrame() || low.wantsKeyFrame();
+		encoder.encode(frame, { keyFrame });
+		low.encode(smaller, { keyFrame });
 	};
 	if (new URLSearchParams(location.search).get("source") === "camera") {
 		void fromCamera(onFrame).catch((error: unknown) => {
@@ -345,7 +401,7 @@ async function main(): Promise<void> {
 					: cameraToEncoderMs.length === 0
 						? " · from the camera to the encoder: the browser does not say"
 						: ` · from the camera to the encoder: median ${Math.round([...cameraToEncoderMs].sort((a, b) => a - b)[Math.floor(cameraToEncoderMs.length / 2)] ?? 0)} ms (not in the viewer's numbers)`
-			}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
+			}${low === undefined ? "" : `\nvideo-low (${LOW.width}x${LOW.height}, ${LOW.bitrate / 1000} kbit/s): encoded ${low.stats().encoded} frames (${low.stats().keyChunks} key), ${Math.round(low.stats().encodedBytes / 1024)} KiB; sent ${low.publisher.stats().written} Objects`}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
 		);
 	});
 	void encoder.failed.then((error) => say(`the encoder failed: ${String(error)}`));

@@ -12,6 +12,7 @@ import {
 	AUTO_MARGIN_MS,
 	AUTO_WINDOW_MS,
 	createPlayout,
+	createQualitySwitch,
 	keepPlaying,
 	DEFAULT_AUDIO_MIN_MS,
 	DEFAULT_AUTO_MAX_MS,
@@ -31,6 +32,7 @@ import {
 	namespace,
 	joinRoom,
 	SAMPLE_RATE,
+	WIDTH,
 	say,
 	through,
 	why,
@@ -87,7 +89,11 @@ const CATALOG_TIMEOUT_MS = 5000;
 async function tracksOf(
 	connection: MoqtConnection,
 	catalogNamespace: Uint8Array[],
-): Promise<{ video: CatalogTrack; audio: CatalogTrack | undefined }> {
+): Promise<{
+	video: CatalogTrack;
+	versions: CatalogTrack[];
+	audio: CatalogTrack | undefined;
+}> {
 	const follower = await followCatalog(connection, {
 		namespace: catalogNamespace,
 	});
@@ -108,7 +114,22 @@ async function tracksOf(
 			const video = tracks.find((track) => track.role === "video");
 			if (video === undefined) throw new Error("the catalog has no video track");
 			document.body.dataset.catalog = JSON.stringify(tracks);
-			return { video, audio: tracks.find((track) => track.role === "audio") };
+			// The versions of the video: the tracks of its alternate group
+			// (MSF §5.2.12), the one that takes the most room first.
+			const versions =
+				video.altGroup === undefined
+					? [video]
+					: tracks
+							.filter(
+								(track) =>
+									track.role === "video" && track.altGroup === video.altGroup,
+							)
+							.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+			return {
+				video,
+				versions,
+				audio: tracks.find((track) => track.role === "audio"),
+			};
 		}
 	} finally {
 		// The subscription to the catalog goes on with the session; a later
@@ -289,15 +310,40 @@ async function main(): Promise<void> {
 	document.getElementById("sound")?.after(controls);
 	slider.value = String(clock.bufferMs());
 
+	// `?abr=1` (**a trial**): where the catalog has the video in several
+	// versions, the page plays a lower one when the picture comes late and
+	// a higher one again when it has come in time for a while
+	// (`createQualitySwitch` of @xmoq/media).
+	const ABR = query.has("abr");
+	/** The fastest a frame came, and how much later than that the frames of the last second came. */
+	let fastestVideo = Number.POSITIVE_INFINITY;
+	let recent: { at: number; late: number }[] = [];
+	const lateNow = (): number | undefined => {
+		const since = performance.now() - 1000;
+		recent = recent.filter((each) => each.at > since);
+		const sorted = recent.map((each) => each.late).sort((a, b) => a - b);
+		return sorted[Math.floor(sorted.length / 2)];
+	};
+	/** Which version is played, and every change: when it was decided, to which, and how long until its first frame. */
+	const quality: {
+		level: number;
+		track: string;
+		changes: { at: number; to: string; tookMs: number | null }[];
+	} = { level: 0, track: "", changes: [] };
 	const videoOptions = {
 		joiningFetch: query.get("join") !== "no",
 		onFrame(frame: VideoFrame) {
 			firstFrameAfterMs ??= Math.round(performance.now() - began);
-			arrived.video.add(Date.now() - frame.timestamp / 1000);
+			const took = Date.now() - frame.timestamp / 1000;
+			arrived.video.add(took);
+			fastestVideo = Math.min(fastestVideo, took);
+			recent.push({ at: performance.now(), late: took - fastestVideo });
+			// The mark is where it is in a picture of the full size.
+			const scale = frame.displayWidth / WIDTH;
 			probe.drawImage(
 				frame,
-				MARK.x + MARK.size / 2,
-				MARK.y + MARK.size / 2,
+				(MARK.x + MARK.size / 2) * scale,
+				(MARK.y + MARK.size / 2) * scale,
 				1,
 				1,
 				0,
@@ -413,6 +459,7 @@ async function main(): Promise<void> {
 			framesLate,
 			videoFrames: stats.decoded,
 			decoderFailures: playback?.stats().decoderFailures ?? 0,
+			quality,
 			audioPieces: heard?.decoded ?? 0,
 			tooLate,
 			shown,
@@ -475,16 +522,92 @@ async function main(): Promise<void> {
 			const tracks = await tracksOf(connection, playingNamespace);
 			const utf8 = new TextEncoder();
 			// `?video=no` plays the sound alone, for looking into it.
+			const playVersion = (
+				track: CatalogTrack,
+				more: Partial<Parameters<typeof playVideoTrack>[1]> = {},
+			): Promise<VideoPlayback> =>
+				playVideoTrack(connection, {
+					...videoOptions,
+					trackNamespace: trackNamespaceOf(track, playingNamespace),
+					trackName: utf8.encode(track.name),
+					codec: track.codec ?? "",
+					...more,
+				});
+			/** Stops the version that is played. */
+			let leave = new AbortController();
 			const video =
 				query.get("video") === "no"
 					? undefined
-					: await playVideoTrack(connection, {
-							...videoOptions,
-							trackNamespace: trackNamespaceOf(tracks.video, playingNamespace),
-							trackName: utf8.encode(tracks.video.name),
-							codec: tracks.video.codec ?? "",
-						});
+					: await playVersion(tracks.video, { signal: leave.signal });
 			playback = video;
+			quality.level = 0;
+			quality.track = tracks.video.name;
+			/** Resolves when the version that is played ends; one that was left for another does not count. */
+			let over: (how: string) => void = () => {};
+			const ended = new Promise<string>((resolve) => {
+				over = resolve;
+			});
+			void video?.ended.then((end) => {
+				if (playback === video) over(end.type);
+			});
+			if (ABR && video !== undefined && tracks.versions.length > 1) {
+				const versions = tracks.versions;
+				const chooser = createQualitySwitch({ levels: versions.length });
+				let changing = false;
+				const ticking = setInterval(() => {
+					// Nothing is judged before the first frame, or while a change is under way.
+					if (fastestVideo === Number.POSITIVE_INFINITY || changing) return;
+					const wanted = chooser.tick(performance.now(), lateNow());
+					const track = versions[wanted];
+					if (wanted === quality.level || track === undefined) return;
+					changing = true;
+					const change: (typeof quality.changes)[number] = {
+						at: Date.now(),
+						to: track.name,
+						tookMs: null,
+					};
+					quality.changes.push(change);
+					const decided = performance.now();
+					const stopBefore = leave;
+					const next = new AbortController();
+					let first = true;
+					// WHY no Joining FETCH: the version begins with its next
+					// Group, and the one before is played until then, so the
+					// change is at a Group's start and nothing old is fetched.
+					playVersion(track, {
+						joiningFetch: false,
+						signal: next.signal,
+						onFrame(frame) {
+							if (first) {
+								first = false;
+								change.tookMs = Math.round(performance.now() - decided);
+								// From its first frame on, the new version alone.
+								stopBefore.abort();
+								leave = next;
+								quality.level = wanted;
+								quality.track = track.name;
+								changing = false;
+							}
+							videoOptions.onFrame(frame);
+						},
+					}).then(
+						(playing) => {
+							// The version before is left when this one has its
+							// first frame; until then both come.
+							playback = playing;
+							void playing.ended.then((end) => {
+								if (playback === playing) over(end.type);
+							});
+						},
+						(error: unknown) => {
+							console.log(`no change of version: ${String(error)}`);
+							quality.changes.pop();
+							changing = false;
+						},
+					);
+				}, 250);
+				void connection.closed.then(() => clearInterval(ticking));
+			}
 			const sound = tracks.audio;
 			audio = sound === undefined ? undefined : await playAudioTrack(connection, {
 				...audioOptions,
@@ -511,10 +634,7 @@ async function main(): Promise<void> {
 				});
 			return {
 				// Without video, the session's end is the end.
-				ended:
-					video === undefined
-						? new Promise<string>(() => {})
-						: video.ended.then((end) => end.type),
+				ended,
 			};
 		},
 		onState(state) {

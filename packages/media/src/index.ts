@@ -32,6 +32,16 @@ export {
 	type PlayoutClockOptions,
 } from "./core/playout-clock.ts";
 export {
+	createQualitySwitch,
+	DEFAULT_DOWN_LATE_MS,
+	DEFAULT_HOLD_MS,
+	DEFAULT_UP_AFTER_MS,
+	DEFAULT_UP_LATE_MS,
+	MAX_UP_AFTER_FACTOR,
+	type QualitySwitch,
+	type QualitySwitchOptions,
+} from "./core/quality-switch.ts";
+export {
 	createVideoReceiver,
 	DEFAULT_MAX_HELD_BYTES,
 	DEFAULT_MAX_HELD_OBJECTS,

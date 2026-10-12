@@ -146,7 +146,26 @@ export interface VideoTrackEncoder {
 	 * Says whether it was handed to the encoder, or why not. Does not wait
 	 * for the encoder and does not throw.
 	 */
-	encode(frame: VideoFrame): "encoded" | VideoEncodeSkipReason;
+	encode(
+		frame: VideoFrame,
+		options?: {
+			/**
+			 * True makes this frame a key frame, whatever the interval says.
+			 * For a caller that encodes the same frames for several tracks
+			 * and has their Groups begin together (`wantsKeyFrame`).
+			 */
+			keyFrame?: boolean;
+		},
+	): "encoded" | VideoEncodeSkipReason;
+	/**
+	 * Whether the publisher asked for a key frame that was not encoded yet:
+	 * a subscriber came, or a Group was cut. The next frame is one. A
+	 * caller with several tracks of the same frames asks each, and gives
+	 * `keyFrame: true` to all when one says so: their Groups then begin
+	 * with the same frame and have the same numbers (the Groups are counted
+	 * by the key frames, also while nobody is subscribed).
+	 */
+	wantsKeyFrame(): boolean;
 	/**
 	 * What the encoder still holds is encoded and sent, for `endTimeoutMs`
 	 * at most; then the encoder is closed and the track is ended
@@ -349,7 +368,8 @@ export async function createVideoTrackEncoder(
 	let ended: Promise<void> | undefined;
 	return {
 		publisher,
-		encode(frame) {
+		wantsKeyFrame: () => wantsKey,
+		encode(frame, { keyFrame: asked = false } = {}) {
 			try {
 				if (closed) return notEncoded("closed");
 				if (lastTime !== undefined && frame.timestamp <= lastTime) {
@@ -364,6 +384,7 @@ export async function createVideoTrackEncoder(
 					sinceEpoch: Math.max(0, Number(BigInt(Date.now()) * 1000n - epoch)),
 				};
 				const keyFrame =
+					asked ||
 					wantsKey ||
 					lastKey === undefined ||
 					frame.timestamp - lastKey >= options.keyFrameIntervalMs * 1000;

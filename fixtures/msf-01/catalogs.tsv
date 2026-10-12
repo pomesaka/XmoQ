@@ -55,6 +55,8 @@ width-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"vi
 height-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"height":1e999}]}
 framerate-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"framerate":1e999}]}
 audio-track-with-samplerate-and-channel-config	catalog	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":67000,"samplerate":48000,"channelConfig":"1"}]}
+alt-group-as-a-string	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"altGroup":"1"}]}
+render-group-as-a-string	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"renderGroup":"1"}]}
 samplerate-as-a-string	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"samplerate":"48000"}]}
 samplerate-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"samplerate":1e999}]}
 channel-config-as-a-number	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"channelConfig":2}]}
