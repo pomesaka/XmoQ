@@ -244,6 +244,18 @@ impl SendStream for WtSend {
         let _ = self.0.reset(code);
     }
 
+    async fn finish_within(mut self, patience: Duration, code: u32) -> bool {
+        let _ = self.0.finish();
+        if tokio::time::timeout(patience, self.over()).await.is_ok() {
+            return true;
+        }
+        // quinn resets a stream that is finished and not yet acknowledged,
+        // and stops sending its data again (quinn-proto 0.11.19,
+        // `SendStream::reset`).
+        let _ = self.0.reset(code);
+        false
+    }
+
     async fn stopped(&mut self) -> WriteError {
         match self.over().await {
             Err(error) => error,

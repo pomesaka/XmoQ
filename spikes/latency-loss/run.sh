@@ -28,10 +28,13 @@ sha=$(openssl x509 -in "$cert" -outform der | shasum -a 256 | cut -d' ' -f1)
 seconds=$((frames / 25 + 14))
 node=$(command -v node || (cd interop && mise which bun))
 
+# PATIENCE_MS: the relay gives up a Group a viewer does not have that long after its last Object
+# (--delivery-patience-ms). Without it no Group is given up.
+patience=${PATIENCE_MS:+--delivery-patience-ms $PATIENCE_MS}
 # CONGESTION=cubic|newreno|bbr: the congestion control of the relay (cubic without it).
 # --slow-open-ms 0: a line for every stream the relay opens, with its congestion window.
 target/release/xmoq-relay --port "$port" --cert-file "$cert" --key-file interop/.cert/key.pem \
-  --congestion "${CONGESTION:-cubic}" --slow-open-ms 0 > "$logs/relay.log" 2>&1 &
+  --congestion "${CONGESTION:-cubic}" --slow-open-ms 0 $patience > "$logs/relay.log" 2>&1 &
 relay=$!
 "$node" spikes/lossy-link/proxy.mjs --listen "$link" --to "$port" --control "$control" > "$logs/link.log" 2>&1 &
 proxy=$!

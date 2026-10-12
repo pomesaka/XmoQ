@@ -22,6 +22,7 @@ came_late = []     # the same for when the frame itself came, whatever came befo
 episodes = []      # lengths, in frames, of runs of frames more than a frame later than the median
 never = 0          # frames that could not be shown: one before them did not come
 viewers = 0
+whole_groups = 0  # Groups a viewer has from Object 0, however many of their frames came
 for line in open(log):
     if not line.startswith("VIDEO_ARRIVALS "):
         continue
@@ -35,6 +36,7 @@ for line in open(log):
         objects = groups[group]
         if 0 not in objects:
             continue
+        whole_groups += 1
         ready = None
         for obj in range(max(objects) + 1):
             if obj not in objects:
@@ -74,7 +76,7 @@ sent = re.findall(r"^SENT .*payload_len=(\d+)", open(publisher_log).read(), re.M
 kbit = sum(int(n) for n in sent) * 8 // 1000 // max(len(sent), 1)
 grows = "/".join(f"{statistics.median(q) / 1000:.0f}" if q else "-" for q in quarters)
 print(
-    f"LATENCY congestion={congestion} kbit_s={kbit} delay_ms={delay} loss={loss} video={video} streams={streams} viewers={viewers} frames={len(late)} "
+    f"LATENCY congestion={congestion} kbit_s={kbit} delay_ms={delay} loss={loss} video={video} streams={streams} viewers={viewers} frames={len(late)} groups={whole_groups} "
     f"late_ms_by_quarter={grows} cwnd_median={cwnd[len(cwnd) // 2] if cwnd else 0} cwnd_min={cwnd[0] if cwnd else 0} "
     f"never={never} late_ms_p50={at(0.5):.0f} p95={at(0.95):.0f} p99={at(0.99):.0f} max={late[-1] / 1000:.0f} "
     f"episodes={len(episodes)} episode_frames_median={statistics.median(episodes) if episodes else 0:.0f} "
