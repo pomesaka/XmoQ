@@ -17,6 +17,8 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 
 **On a link that loses packets** the relay's congestion control decides whether the picture stays live: `bun demo/serve.ts --congestion bbr` (the relay's default is cubic; [record](../docs/experiments/2026-10-11-the-demo-over-a-lossy-link-with-bbr.md)). `/publish?picture=busy&bitrate=2500000` is a picture that fills its bitrate, and `--relay-log FILE` keeps the relay's lines.
 
+**On a link with less room than the video** `bun demo/serve.ts --delivery-patience-ms 500` starts the relay with its experiment of giving up a Group a viewer does not have in time: the picture then stays about half a second behind and does not fall further, and the page shows more frames than without ([record](../docs/experiments/2026-10-12-a-page-behind-a-link-with-too-little-room-and-a-relay-that-gives-groups-up.md)).
+
 `bun demo/check.ts` checks a running demo in headless Chromium: the frames a second, and that sound leaves the watching page.
 
 Ctrl-C stops the web server and the relay. `bun demo/serve.ts --port N --relay-port M` chooses other ports.

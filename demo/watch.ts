@@ -415,6 +415,7 @@ async function main(): Promise<void> {
 			},
 			framesLate,
 			videoFrames: stats.decoded,
+			decoderFailures: playback?.stats().decoderFailures ?? 0,
 			audioPieces: heard?.decoded ?? 0,
 			tooLate,
 			shown,
