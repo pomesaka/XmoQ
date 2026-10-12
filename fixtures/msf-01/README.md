@@ -1,6 +1,6 @@
 # Catalogs of draft-ietf-moq-msf-01
 
-What `@xmoq/msf` reads a catalog as. `crates/msf` reads `catalog-moqlivemock.json` as well, for the fields a viewer chooses a track by; it does not read `catalogs.tsv` yet, and turns down less than `@xmoq/msf` does.
+What `@xmoq/msf` reads a catalog as. `crates/msf` reads `catalog-moqlivemock.json` as well, for the fields a viewer chooses a track by, and of `catalogs.tsv` the rows on `samplerate` and `channelConfig`; it does not read the rest of the table yet, and turns down less than `@xmoq/msf` does.
 
 ## `catalog-moqlivemock.json`: what another implementation sent
 

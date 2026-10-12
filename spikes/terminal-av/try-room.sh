@@ -39,7 +39,7 @@ done
 room="http://127.0.0.1:$((port + 2))/rooms/$name"
 echo "--- with a token of the room"
 "$here/target/release/xmoq-watch" --room "$room" --say "hello from the terminal" \
-  --seconds "$seconds" --volume 0 --medium direct --out "${OUT:-/dev/null}" 2>&1 | grep -E "ROOM_|CHAT|AV_PLAYED|SESSION_ENDED|Error" || true
+  --seconds "$seconds" --volume 0 --medium direct --out "${OUT:-/dev/null}" 2>&1 | grep -E "ROOM_|CATALOG|CHAT|AV_PLAYED|SESSION_ENDED|Error" || true
 echo "--- without a token"
 "$here/target/release/xmoq-watch" --room "$room" --token no \
   --seconds 5 --volume 0 --medium direct --out /dev/null 2>&1 | grep -E "ROOM_|AV_PLAYED|SESSION_ENDED|Error" || true

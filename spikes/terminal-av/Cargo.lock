@@ -1548,6 +1548,7 @@ dependencies = [
  "xmoq-loc",
  "xmoq-moqt",
  "xmoq-moqt-io",
+ "xmoq-msf",
 ]
 
 [[package]]
@@ -2179,6 +2180,13 @@ dependencies = [
  "url",
  "web-transport-quinn",
  "xmoq-moqt",
+]
+
+[[package]]
+name = "xmoq-msf"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

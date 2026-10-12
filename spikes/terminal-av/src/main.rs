@@ -4,7 +4,7 @@
 //! output.
 //!
 //!   xmoq-watch --url https://127.0.0.1:4443/ --cert-sha256 <hex> [--namespace xmoq/demo]
-//!       [--video video] [--audio audio] [--buffer-ms 50] [--volume 1] [--scale 1]
+//!       [--video <track> --audio <track>] [--buffer-ms 50] [--volume 1] [--scale 1]
 //!       [--medium file|direct] [--out <file>] [--seconds N]
 //!   xmoq-watch --room http://127.0.0.1:8787/rooms/demo [--name terminal] [--say "a line"] [--token no]
 //!
@@ -20,6 +20,11 @@
 //! sends it, Esc gives it up). `--log <file>` takes the lines about the room
 //! and the keys, for a run whose stderr is the terminal.
 //!
+//! The tracks are found in the MSF catalog of the namespace (the track
+//! `catalog`): the first video track of H.264 and the first audio track of
+//! Opus, both with LOC packaging. `--video` and `--audio` name them
+//! instead, and no catalog is asked for.
+//!
 //! The clock: the smallest (arrival - Timestamp) seen on either track is
 //! taken for the time an Object needs at least, and every Object is due
 //! `--buffer-ms` after its Timestamp plus that. Both tracks have to carry
@@ -28,6 +33,7 @@
 //! It ends with Ctrl-C, after `--seconds`, or when a track ends, and prints
 //! `AV_PLAYED` to stderr.
 
+mod catalog;
 mod keys;
 mod picture;
 mod room;
@@ -61,8 +67,9 @@ struct Args {
     url: String,
     cert_sha256: [u8; 32],
     namespace: String,
-    video: String,
-    audio: String,
+    /// The names of the tracks; None: what the catalog has.
+    video: Option<String>,
+    audio: Option<String>,
     buffer: Duration,
     volume: f32,
     scale: usize,
@@ -92,8 +99,8 @@ fn parse_args() -> Result<Args> {
         url: String::new(),
         cert_sha256: [0; 32],
         namespace: "xmoq/demo".to_string(),
-        video: "video".to_string(),
-        audio: "audio".to_string(),
+        video: None,
+        audio: None,
         buffer: Duration::from_millis(50),
         volume: 1.0,
         scale: 1,
@@ -115,8 +122,8 @@ fn parse_args() -> Result<Args> {
                 args.cert_sha256 = hash_of(&value)?;
             }
             "--namespace" => args.namespace = value,
-            "--video" => args.video = value,
-            "--audio" => args.audio = value,
+            "--video" => args.video = Some(value),
+            "--audio" => args.audio = Some(value),
             "--buffer-ms" => args.buffer = Duration::from_millis(value.parse().context("--buffer-ms")?),
             "--volume" => args.volume = value.parse().context("--volume")?,
             "--scale" => args.scale = value.parse().context("--scale")?,
@@ -144,14 +151,14 @@ fn parse_args() -> Result<Args> {
 }
 
 /// A subscription: its request stream, kept open for as long as the track is wanted.
-struct Subscription {
-    request: RequestId,
-    track_alias: u64,
+pub(crate) struct Subscription {
+    pub(crate) request: RequestId,
+    pub(crate) track_alias: u64,
     reader: RequestReader<Recv>,
     _send: Send,
 }
 
-async fn subscribe(
+pub(crate) async fn subscribe(
     connection: &WtConnection,
     session: &mut Session,
     namespace: &TrackNamespace,
@@ -451,8 +458,33 @@ async fn play(
     };
 
     let namespace = TrackNamespace::new(namespace.split('/').map(|field| field.as_bytes().to_vec()).collect())?;
-    let mut video = subscribe(connection, &mut session, &namespace, &args.video, token).await?;
-    let mut audio = subscribe(connection, &mut session, &namespace, &args.audio, token).await?;
+    let (video_name, audio_name, _catalog) = match (&args.video, &args.audio) {
+        (Some(video), Some(audio)) => (video.clone(), audio.clone(), None),
+        (None, None) => {
+            let (tracks, kept) = catalog::read(connection, &mut session, &mut events, &stops, &namespace, token).await?;
+            let video = xmoq_msf::first_video_track(&tracks, "avc").context("the catalog has no H.264 video track with LOC packaging")?;
+            let audio = xmoq_msf::first_audio_track(&tracks, "opus").context("the catalog has no Opus audio track with LOC packaging")?;
+            // WHY said and not acted on: Opus is decoded at 48 kHz whatever it was made from,
+            // and the decoder mixes two channels into the one that is played.
+            let line = format!(
+                "CATALOG tracks={} video={} codec={} size={}x{} audio={} codec={} samplerate={} channel_config={}",
+                tracks.len(),
+                video.name,
+                video.codec.as_deref().unwrap_or("-"),
+                video.width.unwrap_or(0),
+                video.height.unwrap_or(0),
+                audio.name,
+                audio.codec.as_deref().unwrap_or("-"),
+                audio.samplerate.map_or("-".to_string(), |rate| rate.to_string()),
+                audio.channel_config.as_deref().unwrap_or("-"),
+            );
+            ui.note(&line.chars().filter(|char| !char.is_control()).collect::<String>());
+            (video.name.clone(), audio.name.clone(), Some(kept))
+        }
+        _ => bail!("--video and --audio are given together, or neither"),
+    };
+    let mut video = subscribe(connection, &mut session, &namespace, &video_name, token).await?;
+    let mut audio = subscribe(connection, &mut session, &namespace, &audio_name, token).await?;
 
     let to: Box<dyn std::io::Write + std::marker::Send> = match &args.out {
         Some(path) => Box::new(std::fs::OpenOptions::new().create(true).append(true).open(path)?),

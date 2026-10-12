@@ -35,4 +35,4 @@ cat "$work/page.log" >&2
 sha=$(openssl x509 -in "$root/demo/.cert/cert.pem" -outform der | shasum -a 256 | cut -d' ' -f1)
 /usr/bin/time -l "$here/target/release/xmoq-watch" --url "https://127.0.0.1:$port/" --cert-sha256 "$sha" \
   --seconds "$seconds" --volume 0 --medium direct --out "${OUT:-/dev/null}" "$@" 2> "$work/watch.log" || true
-grep -E "AV_PLAYED|Error|error|real|maximum resident|peak memory" "$work/watch.log" || cat "$work/watch.log"
+grep -E "CATALOG|AV_PLAYED|Error|error|real|maximum resident|peak memory" "$work/watch.log" || cat "$work/watch.log"
