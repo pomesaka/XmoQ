@@ -1,5 +1,22 @@
 //! Making a picture fit a terminal: smaller by a whole number each way.
 
+/// The most pixels of a decoded picture that are handled: those of
+/// 3840x2160. **Provisional.**
+///
+/// WHY: a picture's size is what its stream says, and 3 bytes are kept for
+/// every pixel of it. The largest the demo's publisher sends is 1920x1080;
+/// four times that is as far as a terminal's window goes.
+pub const MOST_PIXELS: usize = 3840 * 2160;
+
+/// Whether a picture of this size is more than is handled
+/// ([`MOST_PIXELS`]).
+#[must_use]
+pub fn too_large(size: (usize, usize)) -> bool {
+    size.0
+        .checked_mul(size.1)
+        .is_none_or(|pixels| pixels > MOST_PIXELS)
+}
+
 /// By how much a picture of `full` pixels is made smaller, each way, for it
 /// to have no more than `most`: 1 for a picture that fits.
 ///
@@ -83,6 +100,24 @@ mod tests {
         ];
         for (full, most, expected) in cases {
             assert_eq!(by(full, most), expected, "{full:?} into {most:?}");
+        }
+    }
+
+    #[test]
+    fn a_picture_of_more_pixels_than_3840x2160_is_too_large() {
+        // (the size; whether it is too large)
+        let cases = [
+            ((0, 0), false),
+            ((1920, 1080), false),
+            ((3840, 2160), false),
+            ((2160, 3840), false),
+            ((3841, 2160), true),
+            ((3840, 2161), true),
+            ((16_384, 16_384), true),
+            ((usize::MAX, 2), true),
+        ];
+        for (size, expected) in cases {
+            assert_eq!(too_large(size), expected, "{size:?}");
         }
     }
 

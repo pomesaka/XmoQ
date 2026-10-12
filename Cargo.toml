@@ -25,3 +25,14 @@ todo = "warn"
 unimplemented = "warn"
 dbg_macro = "warn"
 allow_attributes_without_reason = "warn"
+
+# WHY this one dependency is built without overflow checks, and with its optimizations, in a
+# debug build as well: `opus-decoder` 0.1.1 shifts a `u8` by 8 or more on packets a browser
+# encodes (`src/celt/vq.rs:118`, `mask |= 1 << i`), which panics where overflow is checked
+# and wraps where it is not. A debug build of `xmoq-watch` ended at its first such packet,
+# 0.3 seconds in; the release build has always wrapped there. Whether what it decodes then
+# is right is not known, and is a reason to look at the decoder again
+# (docs/open-questions.md). It is also far too slow unoptimized to keep up with the sound.
+[profile.dev.package.opus-decoder]
+overflow-checks = false
+opt-level = 3

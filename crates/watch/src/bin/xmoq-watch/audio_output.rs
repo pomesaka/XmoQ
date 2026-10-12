@@ -3,18 +3,31 @@
 //! (`docs/open-questions.md`).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use xmoq_watch::playout::RATE;
 
-/// The default output device, playing. Closed when it is dropped.
+/// The default output device, playing, or what stands in for it
+/// (`--sound off`). Closed when it is dropped.
 pub struct AudioOutput {
-    _stream: cpal::Stream,
+    _stream: Option<cpal::Stream>,
+    /// Stops the thread that stands in for a device.
+    stopped: Arc<AtomicBool>,
     lead_us: Arc<AtomicU64>,
 }
+
+impl Drop for AudioOutput {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Relaxed);
+    }
+}
+
+/// What the stand-in asks for at a time: 10 ms, about what the output of
+/// the Mac this was written on asks for.
+const SILENT_CALL: Duration = Duration::from_millis(10);
 
 /// How long the output is waited for to say its lead.
 const LEAD_WAIT: Duration = Duration::from_millis(300);
@@ -80,8 +93,34 @@ impl AudioOutput {
         )?;
         stream.play()?;
         Ok(Self {
-            _stream: stream,
+            _stream: Some(stream),
+            stopped: Arc::default(),
             lead_us,
         })
+    }
+
+    /// No device: a thread asks `fill` for 10 ms of samples every 10 ms, as
+    /// a device would, and lets them go. For a machine without a sound
+    /// output, where everything but the hearing is to happen.
+    pub fn silent(mut fill: impl FnMut(Instant, &mut [f32]) + Send + 'static) -> Self {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopped);
+        let call_us = u64::try_from(SILENT_CALL.as_micros()).unwrap_or(0);
+        let samples = usize::try_from(u64::from(RATE) * call_us / 1_000_000).unwrap_or(0);
+        std::thread::spawn(move || {
+            let mut one_channel = vec![0.0; samples];
+            let mut next = Instant::now();
+            while !stop.load(Ordering::Relaxed) {
+                fill(next, &mut one_channel);
+                next += SILENT_CALL;
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            }
+        });
+        Self {
+            _stream: None,
+            stopped,
+            // One call, and nothing ahead of it.
+            lead_us: Arc::new(AtomicU64::new(call_us)),
+        }
     }
 }

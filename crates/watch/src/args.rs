@@ -73,6 +73,12 @@ pub struct Args {
     pub seconds: Option<u64>,
     /// `--log`: a file for the lines about the room and the keys.
     pub log: Option<String>,
+    /// `--sound off`: the sound output of the machine is not opened. The
+    /// sound is decoded and its packets are taken from the queue at the
+    /// moments an output would take them, so that everything that is
+    /// counted is counted; nothing is heard. For a machine without an
+    /// output.
+    pub sound: bool,
     /// `--measure-demo-marks on`: for measuring with the demo's
     /// publisher, whose picture has a white square and whose sound a beep
     /// at the same moments; how far apart the two leave the viewer is
@@ -109,6 +115,7 @@ xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line
   --out <file>                      what would go to the terminal, to a file
   --seconds <n>                     end after so long
   --log <file>                      the lines about the room and the keys
+  --sound on|off                    off: the sound is decoded and counted, and no output is opened (on)
   --measure-demo-marks on|off       for measuring with the demo's publisher: how far apart the
                                     white square and the beep leave the viewer (off)
 Keys: q or Ctrl-C ends, + and - the volume, m mutes, t or Enter begins a line for the chat.";
@@ -182,6 +189,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         out: None,
         seconds: None,
         log: None,
+        sound: true,
         measure_demo_marks: false,
     };
     while let Some(flag) = given.next() {
@@ -203,7 +211,13 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--token" => ask_token = one_of(&flag, &value, &[("yes", true), ("no", false)])?,
             "--video" => video = Some(value),
             "--audio" => audio = Some(value),
-            "--buffer-ms" => args.buffer_ms = number(&flag, &value)?,
+            "--buffer-ms" => {
+                args.buffer_ms = number(&flag, &value)?;
+                // More than the clock takes an Object to be of it.
+                if args.buffer_ms > crate::clock::MOST_FROM_THE_LEAST_US / 1000 {
+                    return Err(Invalid(format!("--buffer-ms {value}: 10000 at most")));
+                }
+            }
             "--volume" => {
                 let volume: f32 = number(&flag, &value)?;
                 if !(0.0..=1.0).contains(&volume) {
@@ -228,6 +242,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--out" => args.out = Some(value),
             "--seconds" => args.seconds = Some(number(&flag, &value)?),
             "--log" => args.log = Some(value),
+            "--sound" => args.sound = one_of(&flag, &value, &[("on", true), ("off", false)])?,
             "--measure-demo-marks" => {
                 args.measure_demo_marks = one_of(&flag, &value, &[("on", true), ("off", false)])?;
             }
@@ -282,6 +297,7 @@ mod tests {
             out: None,
             seconds: None,
             log: None,
+            sound: true,
             measure_demo_marks: false,
         }
     }
@@ -311,7 +327,7 @@ mod tests {
             parsed(
                 "--room http://h/rooms/a --name me --say hello --token no --video v --audio a \
                  --buffer-ms 150 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
-                 --seconds 20 --log l --measure-demo-marks on"
+                 --seconds 20 --log l --sound off --measure-demo-marks on"
             ),
             Ok(Args {
                 source: Source::Room {
@@ -329,6 +345,7 @@ mod tests {
                 out: Some("o".to_string()),
                 seconds: Some(20),
                 log: Some("l".to_string()),
+                sound: false,
                 measure_demo_marks: true,
             })
         );
@@ -368,6 +385,10 @@ mod tests {
                 "--buffer-ms -1: not a number it takes",
             ),
             (
+                "--room r --buffer-ms 10001".to_string(),
+                "--buffer-ms 10001: 10000 at most",
+            ),
+            (
                 "--room r --volume 1.5".to_string(),
                 "--volume 1.5: from 0 to 1",
             ),
@@ -391,6 +412,10 @@ mod tests {
             (
                 "--room r --token maybe".to_string(),
                 "--token maybe: yes or no",
+            ),
+            (
+                "--room r --sound loud".to_string(),
+                "--sound loud: on or off",
             ),
             (
                 "--room r --measure-demo-marks 1".to_string(),

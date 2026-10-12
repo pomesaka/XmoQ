@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use xmoq_watch::room::{self, Broadcast, Said};
 
 type Socket =
@@ -12,6 +13,10 @@ type Socket =
 
 /// The most a room's messages may wait while something else is waited for.
 const KEPT: usize = 256;
+
+/// The most bytes of one message of a room. The hello of a room with a full
+/// history (50 lines of 500 characters) is under 128 KiB.
+const MOST_A_MESSAGE: usize = 256 * 1024;
 
 /// What a room says to a viewer while it watches.
 pub enum Heard {
@@ -33,9 +38,15 @@ impl RoomSocket {
     /// `name`.
     pub async fn join(address: &str, name: &str) -> Result<Self> {
         let address = room::websocket_address(address, name)?;
-        let (socket, _) = tokio_tungstenite::connect_async(&address)
-            .await
-            .with_context(|| format!("the room at {address}"))?;
+        // WHY a limit of its own: the library's is 64 MiB a message, and
+        // what a room says is a line of chat or where a broadcast is.
+        let limits = WebSocketConfig::default()
+            .max_message_size(Some(MOST_A_MESSAGE))
+            .max_frame_size(Some(MOST_A_MESSAGE));
+        let (socket, _) =
+            tokio_tungstenite::connect_async_with_config(&address, Some(limits), false)
+                .await
+                .with_context(|| format!("the room at {address}"))?;
         let mut joined = Self {
             socket,
             kept: VecDeque::new(),
