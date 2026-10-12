@@ -59,3 +59,40 @@ Against what was expected:
 - **The room is still what says where.** `?wait=1` takes the demo's own place where the room names none; a publisher that comes back at another relay or under another namespace is not found by a held SUBSCRIBE.
 - Not run: a publisher that ends its tracks with PUBLISH_DONE and comes back within 2 s; a relay with tokens, and a token that runs out while a SUBSCRIBE is held; a wait of minutes (one SUBSCRIBE every 31 s); many viewers waiting at once; a relay that is not ours (`moqtail`'s refuses at once, so the page would ask every second).
 - **The time of 2.5 s without the flag is the demo's, not the room's**: a page that took the room's word as it comes, and not every 2 s, would be nearer. That was not built or measured.
+
+## Afterwards: the page as it is takes the room's word when it comes
+
+**Why the page without the flag took 2.5 s** (read in the code before anything was changed): the room does push. Its Durable Object tells everybody in the room when a publisher registers a broadcast, and when one goes (`{type: "broadcast"}`, `spikes/durable-objects-room/worker.js`), and the page kept what it was told. It did not act on it: where the room named no broadcast the page said "nothing to play" and looked again after `keepPlaying`'s pause of 2 s. Nothing of the room has to change.
+
+**What was changed**, in the demo alone and as its default: the room's client has `named()`, which resolves with the room's broadcast, at once where it has one and else when the room says that one was registered; the watching page waits for that where it looked again every 2 s. `?wait=1` is as it was, and `@xmoq/media` is not touched.
+
+**Expected, written before the runs** (the same scenes and the same measure as above):
+
+| Scene | The page with the change, no flag |
+|---|---|
+| The viewer comes 10 s, or 40 s, before | The picture 0.5 to 0.8 s after the publisher's page was asked for: as `wait=1`, and later than it by a connection that is made only then (the handshake and the SETUP, some tens of milliseconds on one machine) and by the room's word, which the publisher sends after its announcement. 1 connection |
+| The publisher's page is closed and opened again 10 s later | The same 0.5 to 0.8 s, and 2 connections: the session is closed when what was played ends, as before, and the 2 s of pause are long over when the publisher is back |
+
+Where the publisher comes back within the 2 s of pause the page is still up to 2 s late; `wait=1` is not. That was not run.
+
+**Result** (three runs each; the 40 s scene one):
+
+| Scene | | Picture after the publisher's page was asked for, ms | Connections of the viewer |
+|---|---|---|---|
+| The viewer comes 10 s before | no flag, before the change | 2,492, 2,474, 2,481 | 1 |
+| | no flag, with the change | 504, 495, 501 | 1 |
+| | `wait=1` | 493, 500, 496 | 1 |
+| The viewer comes 40 s before | no flag, before the change | 2,500, 2,492 | 1 |
+| | no flag, with the change | 496 | 1 |
+| | `wait=1` | 501 | 1 |
+| The publisher's page is closed and opened again 10 s later | no flag, before the change | 2,425, 2,451, 2,467 | 2 |
+| | no flag, with the change | 442, 442, 436 | 2 |
+| | `wait=1` | 434, 441, 444 | 1 |
+
+(The rows "before the change" are the runs of the first table.)
+
+- **With the change the page without the flag is as soon as the one that waits at the relay**: half a second, within the 50 ms the measure reads by. Better than expected: the connection that is made only then does not show. What the half second is was not taken apart; it is the same in all three, so it is on the publisher's side (its page, its encoder's first key frame, its announcement).
+- What `wait=1` still has for itself is the one connection where the publisher goes and comes back, and a publisher that is back within the 2 s of pause.
+- `bun demo/check.ts` says what it said, and `mise run check` passed. Nothing of `packages/` or the room's worker was changed.
+
+**The terminal viewer** (`xmoq-watch --room`, read in `crates/watch/src/bin/xmoq-watch/main.rs`, not run for this): it has no such wait. Where the room names no broadcast it waits for the room's next message and goes on when one names a broadcast (`broadcast_of`). What it has is a least time of 1 s between two tries at a broadcast (`BETWEEN_TRIES`), which a viewer that comes first does not meet, and one whose publisher went and came back meets only where the publisher is back within that second.
