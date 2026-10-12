@@ -55,11 +55,18 @@ declare class MediaStreamTrackProcessor {
  */
 function tone(onData: (data: AudioData) => void): void {
 	const frames = SAMPLE_RATE / 50;
-	const began = Date.now();
+	// WHY the clock begins with the first tick, and not here: the timer is a
+	// worker's and takes a while to start (about 10 ms in Chromium, about
+	// 100 ms in Firefox). Counted from here, the first tick made all the
+	// pieces of that while at once, and the encoder takes the first piece
+	// it is given for "now": every piece then carried a time that much
+	// ahead of when it was made.
+	let began: number | undefined;
 	let piece = 0;
 	let phase = 0;
 	let level = 0;
 	every(10, () => {
+		began ??= Date.now();
 		while (piece * 20 <= Date.now() - began) {
 			const loud = marked(began + piece * 20);
 			const samples = new Float32Array(frames);
