@@ -82,6 +82,32 @@ Nothing was built or run for this section: it is read from the code as it is (`d
 
 **Which is the better way for a viewer that waits after the publisher has gone?** Where the place stays the same, the held SUBSCRIBE: it is one session in place of a connection every 2 seconds for each waiting viewer, the picture begins as soon as the publisher is back, and the relay, which is the one that knows when a publisher appears, is the one that says so. `keepPlaying` stays what it is for: a session that ended, a relay that went and came back. The two fit together: the room (or a fixed address) for the place and the token, the parameter for the moment, and connecting again for a session that is lost. The demo as it is needs neither more nor less than the room for what it shows; the parameter would matter for a viewer without a room, which is what the terminal viewer was before this, and for many viewers waiting at once.
 
+## With everything of the night together
+
+The relay as of the commit that gives its refusals a Retry Interval: it holds a SUBSCRIBE under RENDEZVOUS_TIMEOUT, also while a track drains, limits how often a session announces, and says with a refusal when to ask again. The watching page asks again after the time a refusal names (`@xmoq/media`). No code was changed for these runs; what does not work is reported and not mended here.
+
+**Expected, written before the runs:**
+
+| Scene | Expected |
+|---|---|
+| 1a. `/watch?wait=1` comes 10 s before the publishing page | As in the record of the page that waits: the picture about 0.5 s after the publishing page was asked for, 1 connection, told "not yet" 0 times |
+| 1b. It comes 40 s before | The relay's `TIMEOUT` once, at 30 s, with a Retry Interval of 1; the page asks again 100 ms later, where it waited a second before; the picture about 0.5 s after the publishing page was asked for; 1 connection; "not yet" 1 time; no `DOES_NOT_EXIST` |
+| 2. A publisher ends its track with PUBLISH_DONE after Groups 0 to 2, a subscriber asks with a RENDEZVOUS_TIMEOUT while the relay waits for late streams, and another publisher, which numbers its Groups from 0 again, sends PUBLISH within the 2 s | The subscriber is held and gets SUBSCRIBE_OK at the new PUBLISH, with the Largest Object of the first publisher (Group 2). It gets nothing of the new publisher's Groups 0, 1 and 2, and gets Group 3. With a publisher that numbers its Groups from the time, as the demo's page does, the new Groups are larger and all arrive (read in the code, `demo/publish.ts`; not run) |
+| 3. The relay with a key; a subscriber whose token runs out 5 s later asks with a RENDEZVOUS_TIMEOUT of 20 s, and a publisher comes after 8 s | The SUBSCRIBE is held, and accepted when the publisher comes although the token has run out: the relay looks at a token when the request comes, and not again |
+
+**Result.** macOS, arm64, loopback, debug builds. Scenes 1a and 1b: `bun demo/serve.ts` on ports of its own with its rooms, headless Chromium, `/watch?room=R&wait=1` and `/publish?room=R`; the time to the picture is from when the publishing page was asked for to the first frame the watching page counts, read every 50 ms. Scenes 2 and 3: the own relay and the own Rust clients, started by a throwaway script that is not in the repository.
+
+| Scene | Runs | Picture after the publisher's page was asked for, ms | Connections of the viewer | Told "not yet" |
+|---|---|---|---|---|
+| 1a. 10 s before | 3 | 478, 487, 526 | 1 | 0 |
+| 1b. 40 s before | 2 | 428, 479 | 1 | 1, 1 |
+
+- **1a and 1b: as expected**, and as in the record of the page that waits (493 to 499 ms there). In 1b the relay sent the page `TIMEOUT` once in each run and `DOES_NOT_EXIST` never. **How long the page waited before it asked again was not measured**: the relay's log has no times, and the page reports no time for it. That the pause is 100 ms after a first `TIMEOUT` is in the tests of `@xmoq/media`.
+- **2: as expected, and it is a way to lose the beginning of a broadcast.** The first publisher sent Groups 0, 1 and 2 and PUBLISH_DONE; the subscriber's SUBSCRIBE came 26 ms later and was held (`DRAIN_TIMER`, then `HOLD_REQUEST`); the second publisher, another process that numbers its Groups from 0, sent PUBLISH 0.7 s after the PUBLISH_DONE, and the subscriber got SUBSCRIBE_OK at once. Of the six Groups the second publisher sent (0 to 5), **the subscriber got 3, 4 and 5, and nothing of 0, 1 and 2**, which were not larger than what the first publisher had sent. With the second publisher numbering from 1,000 (`--first-group 1000`) it got all six. What a viewer sees with a publisher that numbers from 0 again: no picture until the new publisher has sent as many Groups as the old one had, which for a broadcast that ran an hour is an hour. The demo's publishing page numbers its Groups from the time of day in milliseconds (`demo/publish.ts`), so it is larger each time; that was read and not run. **Not run with the watching page**: nothing that is there publishes a broadcast the page can play and ends it with PUBLISH_DONE. The publishing page of the demo ends with its session, the Rust client publishes one track of bytes, and the interop page's broadcast has nothing to end it with.
+- **3: as expected.** The relay with a key (`--auth-key-hex`); a subscriber with a token that ran out 5 s later asked with a RENDEZVOUS_TIMEOUT of 20 s and was held; the publisher came after 8 s, 3 s after the token had run out, and the subscriber got SUBSCRIBE_OK and the Object. A subscriber that came with a token that had run out was closed in its SETUP (`CLOSE_SESSION ... code=0x18 reason="authorization"`). So a token bounds when a viewer may begin to wait, and not for how long: up to the 30 s the relay holds a SUBSCRIBE, and after that for as long as the subscription lasts, which the relay's code already has as a FIXME. The demo's rooms give tokens for 600 s (`spikes/durable-objects-room/worker.js`), which nothing sets from outside, so this was not run with the pages; the tokens here were made by the script with the relay's key.
+
+
+
 ## Not run
 
 - The 30 seconds themselves, and the limits of 16 and 1,024, against real connections: each is in the relay's tests, with connections in memory and a clock moved by hand. The 1,024 are there by both ways a held SUBSCRIBE comes to its track: nobody asked, and a session that announced asked and refusing. (The first version of the change had no test of the 1,024, and the second way went round the limit.)
