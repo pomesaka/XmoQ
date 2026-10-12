@@ -88,6 +88,8 @@ export function fakeTrack(): FakeTrack {
 		trackAlias: 0n,
 		parameters: {},
 		ended,
+		// No test asks this fake for a new Group.
+		onNewGroupRequest: () => {},
 		openSubgroup: async (options) => {
 			if (over !== undefined) throw new PublishEndedError(over);
 			if (openFailure !== undefined) {

@@ -129,6 +129,12 @@ pub fn update_answered(refused_with: Option<u64>) {
     }
 }
 
+/// The subscriber asked for a new Group with a `REQUEST_UPDATE`
+/// (§10.2.13), and was answered with `REQUEST_OK`.
+pub fn new_group_requested(group: u64) {
+    println!("NEW_GROUP_REQUESTED group={group}");
+}
+
 /// A `REQUEST_UPDATE` was answered with `REQUEST_ERROR` `NOT_SUPPORTED`.
 pub fn update_refused() {
     println!("UPDATE_REFUSED");

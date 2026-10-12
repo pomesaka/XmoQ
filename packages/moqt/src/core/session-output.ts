@@ -161,6 +161,12 @@ export type SessionEvent =
 	 */
 	| { type: "peer-stream-timed-out"; kind: PeerStreamKind; peerStream: number }
 	/**
+	 * The subscriber of a subscription this endpoint publishes asks for a
+	 * new Group with a REQUEST_UPDATE (§10.2.13). `group` is the largest
+	 * Group ID it knows plus 1, 0 where it knows none. Answered already.
+	 */
+	| { type: "new-group-request"; requestId: bigint; group: bigint }
+	/**
 	 * The peer asks for a subscription with SUBSCRIBE. The caller answers
 	 * with `acceptSubscribe` or `rejectPeerRequest`; `request-closed` for the
 	 * same Request ID says that the request went before it was answered.

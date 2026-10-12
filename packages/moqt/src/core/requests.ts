@@ -1043,6 +1043,13 @@ export function createRequests(options: RequestsOptions): Requests {
 	 * §13.6.1 names "REQUEST_UPDATE with no modified Message Parameters" as
 	 * a way to keep a session from idling out.
 	 *
+	 * NEW_GROUP_REQUEST is let by as well and handed to the application
+	 * (§10.2.13). WHY accepted whatever the Track is: it changes nothing of
+	 * the subscription, so a REQUEST_OK promises nothing that then does not
+	 * happen ("The Original Publisher MAY delay the NEW_GROUP_REQUEST", and
+	 * one that "does not support dynamic Groups ... ignores the parameter").
+	 * The session does not know whether the Track has DYNAMIC_GROUPS.
+	 *
 	 * Any other update fails: §4 asks a limited endpoint for NOT_SUPPORTED,
 	 * and §10.9.1 says "When a REQUEST_UPDATE is unsuccessful, the publisher
 	 * MUST also terminate the subscription by sending a PUBLISH_DONE with
@@ -1063,10 +1070,18 @@ export function createRequests(options: RequestsOptions): Requests {
 			Object.keys(message.parameters).every(
 				(name) =>
 					name === "subgroupDeliveryTimeout" ||
-					name === "objectDeliveryTimeout",
+					name === "objectDeliveryTimeout" ||
+					name === "newGroupRequest",
 			)
 		) {
 			out.push({ type: "send", stream, data: REQUEST_OK });
+			const group = message.parameters.newGroupRequest;
+			if (group !== undefined) {
+				out.push({
+					type: "event",
+					event: { type: "new-group-request", requestId, group },
+				});
+			}
 			return;
 		}
 		out.push({

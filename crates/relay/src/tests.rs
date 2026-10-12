@@ -10,8 +10,9 @@ use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
 use xmoq_moqt::fetch::{FetchEvent, FetchHeader, FetchObject, FetchStreamDecoder};
+use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, FetchRange, PublishDone, ReasonPhrase, RequestError, Subscribe,
+    ControlMessage, FetchRange, PublishDone, ReasonPhrase, RequestError, RequestUpdate, Subscribe,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter};
@@ -298,6 +299,66 @@ async fn objects_travel_from_a_publisher_to_two_subscribers() {
     // Each subscriber is told, with the count of the streams it was sent.
     assert_eq!(publish_done(&mut alice_request).await, done(0x2, 1));
     assert_eq!(publish_done(&mut bob_request).await, done(0x2, 1));
+}
+
+/// §10.2.13, over a connection: the relay's `REQUEST_UPDATE` reaches the
+/// publisher on the stream of its PUBLISH, and its answer is one the relay
+/// takes.
+#[tokio::test(start_paused = true)]
+async fn a_new_group_request_of_a_subscriber_reaches_the_publisher_of_a_track_with_dynamic_groups()
+{
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    // DYNAMIC_GROUPS (0x30) = 1.
+    let dynamic_groups = vec![KeyValuePair::varint(0x30, 1).unwrap()];
+    let (id, message) = publisher
+        .session
+        .publish(track(), PUBLISHER_ALIAS, vec![], dynamic_groups)
+        .unwrap();
+    let (mut publication, _) = publisher.request(id, message).await;
+    let mut alice = Peer::connect(&hub, true).await;
+    let (_request, alice_alias) = alice
+        .subscribe_with(vec![Parameter::NewGroupRequest(0)])
+        .await;
+
+    // The relay is the server: its first Request ID is 1.
+    let update = match timeout(SOON, publication.reader.next_event()).await {
+        Ok(Ok(RequestStreamEvent::Message(update))) => update,
+        other => panic!("no REQUEST_UPDATE: {other:?}"),
+    };
+    assert_eq!(
+        update,
+        ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: 1,
+            parameters: vec![Parameter::NewGroupRequest(0)],
+        })
+    );
+    let RequestEvent::SubscriptionUpdated {
+        response,
+        new_group_request,
+        ..
+    } = publisher
+        .session
+        .on_request_message(publication.id, update)
+        .unwrap()
+    else {
+        panic!("the publisher's session did not take the update");
+    };
+    assert_eq!(new_group_request, Some(0));
+    send_message(
+        &mut publication.send,
+        &response,
+        &Trace::default(),
+        "publish",
+    )
+    .await
+    .unwrap();
+
+    // The session of the publisher goes on: its next Group reaches Alice.
+    let data = publisher.send_group(1, &[object(0, 3)]).await;
+    data.finish();
+    assert_eq!(alice.receive_stream(alice_alias).await, [0]);
+    assert_eq!(hub.held().await.sessions, 2);
 }
 
 #[tokio::test(start_paused = true)]

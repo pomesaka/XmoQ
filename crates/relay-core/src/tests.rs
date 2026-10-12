@@ -12,6 +12,7 @@ use xmoq_moqt::params::Parameter;
 mod cache;
 mod fetch;
 mod filters;
+mod new_group;
 mod routing;
 mod sources;
 mod subgroups;

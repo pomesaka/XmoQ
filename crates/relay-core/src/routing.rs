@@ -269,6 +269,9 @@ pub(crate) struct Delivery {
     pub(crate) subgroup_delivery_timeout: Option<u64>,
     /// [`Subscriber::priority`].
     pub(crate) subscriber_priority: u8,
+    /// The `NEW_GROUP_REQUEST` of the SUBSCRIBE (§10.2.13): asked of the
+    /// publisher when the SUBSCRIBE is accepted.
+    pub(crate) new_group_request: Option<u64>,
 }
 
 impl Delivery {
@@ -283,6 +286,10 @@ impl Delivery {
                     _ => None,
                 })
                 .unwrap_or(crate::DEFAULT_PRIORITY),
+            new_group_request: parameters.iter().find_map(|parameter| match parameter {
+                Parameter::NewGroupRequest(group) => Some(*group),
+                _ => None,
+            }),
         }
     }
 }
@@ -719,23 +726,35 @@ impl Relay {
     /// "to the publisher that sent the `PUBLISH_NAMESPACE`".
     ///
     /// `subscriber` is the session whose SUBSCRIBE has the publishers asked,
-    /// where the track has nobody waiting yet; otherwise the one that waits
-    /// first is taken. A publisher that has
+    /// with the `NEW_GROUP_REQUEST` of that SUBSCRIBE, where the track has
+    /// nobody waiting yet; otherwise the one that waits first is taken. A publisher that has
     /// [`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`] requests of the relay for that
     /// session is passed over.
     pub(crate) fn ask_the_publishers(
         &mut self,
         track: &FullTrackName,
         first: Option<SessionKey>,
-        subscriber: Option<SessionKey>,
+        subscriber: Option<(SessionKey, Option<u64>)>,
         actions: &mut Vec<Action>,
     ) -> Asked {
+        // §10.2.13: "A relay that receives a NEW_GROUP_REQUEST for a Track
+        // without an Established subscription MUST include the
+        // NEW_GROUP_REQUEST when subscribing upstream." WHY the largest of
+        // those who wait: it is "the largest Group ID in the Track known by
+        // the subscriber, plus 1", and the relay asks for all of them.
+        let new_group = self
+            .tracks
+            .waiters(track)
+            .iter()
+            .filter_map(|waiter| waiter.asked.new_group_request)
+            .chain(subscriber.and_then(|(_, new_group)| new_group))
+            .max();
         let subscriber = self
             .tracks
             .pending(track)
             .and_then(|pending| pending.waiters.first())
             .map(|waiter| waiter.session)
-            .or(subscriber);
+            .or(subscriber.map(|(session, _)| session));
         // WHY counted once here, for every publisher: the tracks without a
         // source are gone through for it, and there may be a thousand.
         let asked_for = subscriber.map_or_else(HashMap::new, |session| self.asked_for(session));
@@ -776,7 +795,7 @@ impl Relay {
                     .get_or_insert(request_error_code::EXCESSIVE_LOAD);
                 continue;
             }
-            match self.ask(publisher, track, actions) {
+            match self.ask(publisher, track, new_group, actions) {
                 Ok(ask) => asked.asks.push(ask),
                 Err(error_code) => {
                     asked.nobody_because.get_or_insert(error_code);
@@ -843,6 +862,7 @@ impl Relay {
         &mut self,
         publisher: SessionKey,
         track: &FullTrackName,
+        new_group: Option<u64>,
         actions: &mut Vec<Action>,
     ) -> Result<Ask, u64> {
         let Some(state) = self.sessions.get_mut(&publisher) else {
@@ -862,10 +882,15 @@ impl Relay {
         // where FORWARD may not appear (§10.2.12, §10.2.1): a SUBSCRIBE that
         // carries it cannot be answered by such a publisher.
         //
-        // Nothing of the downstream SUBSCRIBE is copied: §7 keeps its
+        // Nothing else of the downstream SUBSCRIBE is copied: §7 keeps its
         // priorities out, and what a token of the subscriber means to the
-        // publisher is undecided.
-        let Ok((id, message)) = state.moqt.subscribe(track.clone(), vec![]) else {
+        // publisher is undecided. The NEW_GROUP_REQUEST is
+        // (`Self::ask_the_publishers`).
+        let parameters = new_group
+            .map(Parameter::NewGroupRequest)
+            .into_iter()
+            .collect();
+        let Ok((id, message)) = state.moqt.subscribe(track.clone(), parameters) else {
             // The session already has a subscription to the track in this
             // role, which is one that PUBLISH_DONE ended and that still
             // drains. The track is over for now.
@@ -1496,6 +1521,9 @@ impl Relay {
             // waited is let go by the slot, and reads its Joining Location
             // there.
             self.put_slot(session, stream, slot, actions);
+            if let Some(group) = asked.new_group_request {
+                self.ask_for_a_new_group(track_name, group, actions);
+            }
         }
     }
 

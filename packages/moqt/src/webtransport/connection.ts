@@ -371,6 +371,24 @@ export interface PublishedTrack {
 	readonly parameters: MessageParameters;
 	/** Resolves once the subscription has ended, with how. Never rejects. */
 	readonly ended: Promise<PublishEnd>;
+	/**
+	 * Names what is called when the subscriber asks for a new Group with a
+	 * REQUEST_UPDATE (§10.2.13): with the largest Group ID it knows plus 1,
+	 * or 0 where it knows none. The request is answered with REQUEST_OK
+	 * before the call, whatever the handler does; whether and when a new
+	 * Group begins is the publisher's ("The Original Publisher MAY delay
+	 * the NEW_GROUP_REQUEST"). A request that came before a handler was
+	 * named is handed over when one is, the last of them only. A second
+	 * call replaces the handler. What the handler throws is reported with
+	 * `reportError` and changes nothing.
+	 *
+	 * A subscriber "MUST NOT send this parameter ... if the Track did not
+	 * include the DYNAMIC_GROUPS Property with value 1": a publisher that
+	 * wants these sets that Track Property (0x30) on its PUBLISH or
+	 * SUBSCRIBE_OK. The NEW_GROUP_REQUEST of a SUBSCRIBE or a PUBLISH_OK is
+	 * in `parameters`.
+	 */
+	onNewGroupRequest(handler: (group: bigint) => void): void;
 	/** Rejects with `PublishEndedError` once the subscription is over. */
 	openSubgroup(options: SubgroupOptions): Promise<SubgroupWriter>;
 	/**
@@ -879,6 +897,10 @@ interface ActivePublish {
 	end: PublishEnd | undefined;
 	/** The session took a PUBLISH_DONE for it; `end` follows when it is written. */
 	doneTaken: boolean;
+	/** What `PublishedTrack.onNewGroupRequest` named. */
+	onNewGroup: ((group: bigint) => void) | undefined;
+	/** The last NEW_GROUP_REQUEST that came while no handler was named. */
+	newGroupAsked: bigint | undefined;
 }
 
 /**
@@ -1488,6 +1510,19 @@ export async function connectOver(
 		};
 	};
 
+	/** Hands a NEW_GROUP_REQUEST to the application, or keeps it for a handler to come. */
+	const newGroupAsked = (publish: ActivePublish, group: bigint): void => {
+		if (publish.onNewGroup === undefined) {
+			publish.newGroupAsked = group;
+			return;
+		}
+		try {
+			publish.onNewGroup(group);
+		} catch (error) {
+			reportError(error);
+		}
+	};
+
 	/** `subscription` is the Request ID of the subscription and what its subscriber asked for. */
 	const publishedTrackFrom = (
 		subscription: { requestId: bigint; parameters: MessageParameters },
@@ -1498,6 +1533,8 @@ export async function connectOver(
 			ended: deferred(),
 			end: undefined,
 			doneTaken: false,
+			onNewGroup: undefined,
+			newGroupAsked: undefined,
 		};
 		publishes.set(requestId, publish);
 		return {
@@ -1505,6 +1542,12 @@ export async function connectOver(
 			trackAlias,
 			parameters: subscription.parameters,
 			ended: publish.ended.promise,
+			onNewGroupRequest(handler) {
+				publish.onNewGroup = handler;
+				const asked = publish.newGroupAsked;
+				publish.newGroupAsked = undefined;
+				if (asked !== undefined) newGroupAsked(publish, asked);
+			},
 			openSubgroup: (subgroupOptions) =>
 				onPublish(publish, async () => {
 					let opening: number | undefined;
@@ -1997,6 +2040,11 @@ export async function connectOver(
 					?.resolve(subscriptionFrom(event));
 				pendingSubscribes.delete(event.requestId);
 				return undefined;
+			case "new-group-request": {
+				const publish = publishes.get(event.requestId);
+				if (publish !== undefined) newGroupAsked(publish, event.group);
+				return undefined;
+			}
 			case "update-ok":
 				subscriptions
 					.get(event.requestId)

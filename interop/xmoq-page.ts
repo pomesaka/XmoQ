@@ -316,6 +316,15 @@ export type OwnPageExtras = {
 	/** What `publishBroadcast` has made so far. */
 	broadcastReport(): Promise<PageBroadcastReport>;
 	/**
+	 * As `publishTrack` of the page, with the Track Property DYNAMIC_GROUPS
+	 * = 1 (transport §12.6) on the PUBLISH, and a handler for the
+	 * NEW_GROUP_REQUESTs of the subscriber. `sendObject` then sends on this
+	 * track.
+	 */
+	publishDynamicTrack(namespace: string, trackName: string): Promise<void>;
+	/** The values of the NEW_GROUP_REQUESTs the handler was called with, in order. */
+	newGroupRequests(): Promise<string[]>;
+	/**
 	 * Whether the browser has a decoder for the codec, for Annex B without a
 	 * description: "supported", "not supported", or "no VideoDecoder".
 	 */
