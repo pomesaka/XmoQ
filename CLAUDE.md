@@ -78,6 +78,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | docs/validation.md | 仕様書 | 検証する観点と記録する項目 |
 | docs/open-questions.md | 仕様書 | 未決事項の一覧 |
 | docs/experiments/ | 仕様書 | 検証の実行記録 |
+| docs/av-demo.md | 仕様書 | 映像と音のデモで測れたことと限界のまとめ。数字は`docs/experiments/`の記録から取る |
 | docs/assets/ | README | 文書に埋め込むSVG図 |
 | docs/moq-libraries.md | 仕様書 | ライブラリ調査の記録（終了済み） |
 | docs/moqt-implementation-notes.md | 仕様書 | draftが黙っている箇所と矛盾している箇所で、2つの実装がそろえる挙動。既知の不足 |
@@ -101,7 +102,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 |---|---|
 | 未決事項を決めた | docs/open-questions.md、docs/requirements.md、その話題を扱う文書かコードのコメント |
 | ライブラリやMoQ draftの版を選んだ・変えた | docs/protocols.md |
-| 検証を実行した（成功・失敗とも） | docs/experiments/ に追加 |
+| 検証を実行した（成功・失敗とも） | docs/experiments/ に追加。デモの映像と音に関わる結果なら docs/av-demo.md も |
 | roadmapの項目を終えた | docs/roadmap.md のチェックボックス、docs/requirements.md |
 | 構成要素の責務や接続を変えた | docs/architecture.md、docs/assets/architecture.svg、docs/assets/broadcast-flow.svg |
 | プロトコルの層や運ぶものを変えた | docs/protocols.md、docs/assets/protocol-layers.svg |
