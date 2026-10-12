@@ -73,6 +73,7 @@ export {
 	RequestFailedError,
 	ServedFetchEndedError,
 	SessionClosedError,
+	StreamNotOpenedError,
 	SubgroupClosedError,
 	SubscriptionEndedError,
 } from "./webtransport/endings.ts";

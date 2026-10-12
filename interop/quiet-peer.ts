@@ -41,6 +41,20 @@
 //                     The peer has printed no `REQUEST` line: nothing was
 //                     sent. All three clients. (The row "A request that
 //                     waits for a stream".)
+//   no-subgroup-stream
+//                     The peer answers a PUBLISH_NAMESPACE and a PUBLISH and
+//                     allows the client no unidirectional stream but its
+//                     control stream. The Object the client is to send has
+//                     no stream: it is not sent, the client says so, and
+//                     the session goes on. own-browser: `sendObject` fails
+//                     with `StreamNotOpenedError`, and its session is open
+//                     afterwards. own-rust is told to send six Objects: the
+//                     peer has room for the first one or two streams and
+//                     takes none of them, so the later Objects are not
+//                     sent (`NOT_SENT group=G object=0`, one at least), and
+//                     its PUBLISH_DONE has the Stream Count of the streams
+//                     it did open. (The row "A subgroup stream the peer
+//                     allows no room for".)
 //   relay-no-setup    The other way round: the own relay, told to give a
 //                     client 1.5 seconds for its SETUP
 //                     (`--setup-timeout-ms`; 10 by itself), and
@@ -411,10 +425,96 @@ async function noStream(
 	return `${client} could not send a SUBSCRIBE to a peer that allowed it no stream, and failed it as not sent after its wait (${WAIT_MS} ms); the peer read no request: ${said}`;
 }
 
+async function noSubgroupStream(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	let said: string;
+	switch (client) {
+		case "own-browser": {
+			const page = await connectedPage(context);
+			await withTimeout(page.connect, "the page to connect");
+			await withTimeout(
+				page.evaluate(
+					([namespace, track]) => window.xmoq.publishTrack(namespace, track),
+					[NAMESPACE, TRACK] satisfies [string, string],
+				),
+				"the page to publish its track",
+			);
+			said = await withTimeout(
+				page
+					.evaluate(() => Promise.resolve(window.xmoq.sendObject("00")))
+					.then(
+						() => "it was sent",
+						(error: unknown) => String(error),
+					),
+				"the page to send its Object, or not",
+			);
+			if (!said.includes("StreamNotOpenedError")) {
+				throw new Error(
+					`the page's Object was to be not sent, for a stream that was not opened: ${said}`,
+				);
+			}
+			const state = await page.evaluate(() => window.xmoqOwn.state());
+			if (!state.includes('"session":null')) {
+				throw new Error(`the page's session was to stay open: ${state}`);
+			}
+			if (context.relay.hasPrinted(/^SESSION_ENDED /)) {
+				throw new Error("the peer was to see the session go on");
+			}
+			break;
+		}
+		case "own-rust": {
+			const rust = spawnRustClient(
+				context,
+				"client:own-rust",
+				client,
+				"publish",
+				TRACK,
+				["--payload-hex", "00", "--publish-on-line"],
+			);
+			await rust.waitForLine(/^READY_TO_PUBLISH$/);
+			rust.child.stdin.write("publish\n");
+			await rust.waitForLine(/^PUBLISHED /);
+			// WHY six: the peer allows this client a stream or two beyond its
+			// control stream (its HTTP/3 layer uses fewer than the peer sets
+			// aside), does not take them, and so has no room after those.
+			const objects = 6;
+			rust.child.stdin.write("send\n".repeat(objects));
+			await rust.waitForLine(
+				new RegExp(`^(?:NOT_SENT|SENT) group=${objects - 1} object=0`),
+			);
+			const sent = rust.matches(/^SENT group=\d+ /).length;
+			const notSent = rust.matches(/^NOT_SENT group=\d+ object=0$/).length;
+			if (notSent === 0 || sent + notSent !== objects) {
+				throw new Error(
+					`own-rust was to leave out the Objects the peer had no stream for: ${sent} sent, ${notSent} not sent, of ${objects}`,
+				);
+			}
+			// Its input ends: the track is over, and it says so. The streams
+			// that were opened are counted, and no other (§10.11).
+			rust.child.stdin.end();
+			const [, counted] = await context.relay.waitForLine(
+				/^REQUEST session=0 stream=\d+ PUBLISH_DONE status_code=0x2 stream_count=(\d+) /,
+			);
+			if (Number(counted) !== sent) {
+				throw new Error(
+					`the Stream Count of PUBLISH_DONE was to be the ${sent} streams that were opened, not ${counted}`,
+				);
+			}
+			said = `${sent} of ${objects} Objects sent and ${notSent} not sent (NOT_SENT), then PUBLISH_DONE with Stream Count ${counted}`;
+			break;
+		}
+		case "xmoq-watch":
+			throw new Error("the terminal viewer publishes nothing");
+	}
+	return `${client} did not send a Subgroup the peer allowed no stream for, said so, and its session went on: ${said}`;
+}
+
 const CASES: Record<
 	string,
 	{
-		quiet: "setup" | "requests" | "publish" | "streams";
+		quiet: "setup" | "requests" | "publish" | "streams" | "subgroups";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
@@ -422,6 +522,7 @@ const CASES: Record<
 	"no-publish-answer": { quiet: "publish", run: noPublishAnswer },
 	"no-fetch-answer": { quiet: "requests", run: noFetchAnswer },
 	"no-stream": { quiet: "streams", run: noStream },
+	"no-subgroup-stream": { quiet: "subgroups", run: noSubgroupStream },
 };
 
 async function relayNoSetup(): Promise<string> {

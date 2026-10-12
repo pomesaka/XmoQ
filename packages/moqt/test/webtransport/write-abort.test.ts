@@ -8,6 +8,7 @@ import {
 import {
 	PublishEndedError,
 	SessionClosedError,
+	StreamNotOpenedError,
 	SubgroupClosedError,
 } from "../../src/webtransport/endings.ts";
 import { hex, MOQTAIL_RELAY_SETUP, utf8 } from "../helpers.ts";
@@ -250,21 +251,71 @@ describe("a stream this endpoint writes is stopped by the peer", () => {
 		}
 	});
 
-	// Chromium rejects `createUnidirectionalStream` with a NetworkError too,
-	// the name a stopped stream has. That ends the session here, and the
-	// caller has to hear that, not that a stream was stopped.
-	test("a stream that cannot be opened ends the session, and is not taken for a stream the subscriber stopped", async () => {
+	// Chromium rejects `createUnidirectionalStream` with a NetworkError, the
+	// name a stopped stream has, where the peer allows no further stream
+	// (seen against a peer that allows none). The Subgroup is not sent, the
+	// caller hears that and not that a stream was stopped, and the session
+	// goes on.
+	test("a stream the peer allows no room for is not opened: the caller is told, the session stays, and PUBLISH_DONE does not count it", async () => {
 		let fail = false;
-		const { connection, track } = await published({
+		const { peer, connection, request, track } = await published({
 			failUni: () =>
 				fail
-					? new DOMException("Failed to create send stream", "NetworkError")
+					? new DOMException("Failed to create send stream.", "NetworkError")
 					: undefined,
+		});
+		fail = true;
+		const refused = await rejection(track.openSubgroup(SUBGROUP));
+		expect(refused).toBeInstanceOf(StreamNotOpenedError);
+		// The next Subgroup goes out when the peer has room again.
+		fail = false;
+		const subgroup = await track.openSubgroup({ ...SUBGROUP, groupId: 1n });
+		const stream = await peer.clientUni();
+		await subgroup.write(OBJECT);
+		await subgroup.close();
+		await stream.read();
+		await request.reply.close();
+		expect(await track.done(0x2n, "")).toEqual({ type: "fin" });
+		const sent = await request.sent.read();
+		expect(decodeControlMessage(sent.value ?? new Uint8Array(0))).toMatchObject(
+			{
+				status: "ok",
+				// §10.11: the streams that were opened. The one that was not is
+				// none of them.
+				value: { type: "PUBLISH_DONE", statusCode: 0x2n, streamCount: 1n },
+			},
+		);
+		const open = Symbol("open");
+		expect(
+			await Promise.race([
+				connection.closed,
+				new Promise((resolve) => setTimeout(resolve, 0, open)),
+			]),
+		).toBe(open);
+	});
+
+	test("a failure to make a stream that is not the peer's refusal ends the session", async () => {
+		let fail = false;
+		const { connection, track } = await published({
+			failUni: () => (fail ? new TypeError("no such thing") : undefined),
 		});
 		fail = true;
 		const refused = await rejection(track.openSubgroup(SUBGROUP));
 		expect(refused).toBeInstanceOf(SessionClosedError);
 		expect(await connection.closed).toMatchObject({ type: "error" });
+	});
+
+	// A stream whose first write waits for the peer's window is given up at
+	// once when its subscription ends: the reset does not wait for the write.
+	test("a subgroup stream whose header is still being written is reset at once when the subscriber cancels", async () => {
+		let stall = false;
+		const { request, track } = await published({ stallWrites: () => stall });
+		stall = true;
+		const opening = track.openSubgroup(SUBGROUP);
+		await settle();
+		// The subscriber ends the subscription: its streams are reset.
+		await request.reply.abort(fakeStreamError(1, "cancelled"));
+		expect(await rejection(opening)).toBeInstanceOf(Error);
 	});
 
 	// A browser that fails a stream with an error of the session and then

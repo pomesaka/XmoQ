@@ -194,6 +194,12 @@ pub fn stop_sending_received(what: &str, code: Option<u32>) {
     }
 }
 
+/// The Object of this Group was not sent: the peer allowed no stream for
+/// its Subgroup.
+pub fn subgroup_not_sent(group_id: u64) {
+    println!("NOT_SENT group={group_id} object=0");
+}
+
 pub fn sent(group_id: u64, payload_len: usize) {
     println!("SENT group={group_id} object=0 payload_len={payload_len}");
 }

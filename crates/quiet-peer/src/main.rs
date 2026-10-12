@@ -9,6 +9,9 @@
 //! `--quiet publish`: as `requests`, but a `PUBLISH_NAMESPACE` is answered
 //! with `REQUEST_OK`. `--quiet streams`: it sends its SETUP and allows the
 //! client no bidirectional stream, so that no request can be sent.
+//! `--quiet subgroups`: it answers a `PUBLISH_NAMESPACE` and a PUBLISH with
+//! `REQUEST_OK` and allows the client no unidirectional stream beyond its
+//! control stream, so that no subgroup stream can be opened.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -51,6 +54,11 @@ enum Quiet {
     /// Room for a request: it sends its SETUP and allows the client no
     /// bidirectional stream.
     Streams,
+    /// Room for a subgroup stream: it answers a `PUBLISH_NAMESPACE` and a
+    /// PUBLISH with `REQUEST_OK`, as a subscriber that wants the track, and
+    /// allows the client one unidirectional stream, which its control
+    /// stream takes.
+    Subgroups,
     /// Its answers to requests, but for a `PUBLISH_NAMESPACE`, which gets
     /// its `REQUEST_OK`: a client that announces before it publishes then
     /// comes to its PUBLISH.
@@ -109,7 +117,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                     "requests" => Quiet::Requests,
                     "publish" => Quiet::Publish,
                     "streams" => Quiet::Streams,
-                    other => bail!("--quiet is setup, requests, publish or streams, not {other}"),
+                    "subgroups" => Quiet::Subgroups,
+                    other => bail!(
+                        "--quiet is setup, requests, publish, streams or subgroups, not {other}"
+                    ),
                 });
             }
             other => bail!("unknown flag {other}"),
@@ -168,8 +179,14 @@ async fn read_request(
                     "REQUEST session={session} stream={stream} {}",
                     described(&message)
                 );
-                if quiet == Quiet::Publish && matches!(message, ControlMessage::PublishNamespace(_))
-                {
+                let answered = matches!(
+                    (quiet, &message),
+                    (
+                        Quiet::Publish | Quiet::Subgroups,
+                        ControlMessage::PublishNamespace(_)
+                    ) | (Quiet::Subgroups, ControlMessage::Publish(_))
+                );
+                if answered {
                     let ok = ControlMessage::RequestOk(RequestOk::default());
                     let _ = send_message(&mut unanswered, &ok, &Trace::default(), "request").await;
                 }
@@ -194,9 +211,22 @@ async fn serve(session: u64, connection: WtConnection, quiet: Quiet) -> Result<(
     let connection = Arc::new(connection);
     println!("SESSION session={session}");
     let (queue, mut events) = tokio::sync::mpsc::channel(64);
+    // WHY one stream is read where no subgroup stream is to have room: a
+    // stream that is not taken keeps its place among the streams the
+    // client may have open, so that the few a client has beyond its control
+    // stream (how many depends on how its HTTP/3 layer counts) are used up
+    // by its first Subgroups and not given back.
+    let reading = if quiet == Quiet::Subgroups {
+        StreamConfig {
+            max_uni_streams: 1,
+            ..StreamConfig::default()
+        }
+    } else {
+        StreamConfig::default()
+    };
     let _readers = read_uni_streams(
         Arc::clone(&connection),
-        StreamConfig::default(),
+        reading,
         StreamStops::default(),
         queue,
         |event| event,
@@ -271,7 +301,11 @@ async fn main() -> Result<()> {
     let streams = StreamConfig::default();
     let (max_uni_streams, max_bi_streams) = xmoq_moqt_io::wt::streams_read_at_once(&streams);
     let limits = QuicLimits {
-        max_uni_streams,
+        max_uni_streams: if quiet == Quiet::Subgroups {
+            1
+        } else {
+            max_uni_streams
+        },
         // The stream the session itself is on is allowed beside these.
         max_bi_streams: if quiet == Quiet::Streams {
             0

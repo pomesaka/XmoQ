@@ -47,12 +47,28 @@ So a page whose peer had no room for one more request for a moment lost its whol
 
 That an answer is handed on while another request waits for its stream is in the tests of `@xmoq/moqt` alone, with the fake transport: a SUBSCRIBE_OK resolves its `subscribe()` while a request behind it has no stream, and a stream of the peer is stopped in time (the first-bytes rule) while one waits.
 
+## A subgroup stream the peer allows no room for
+
+Added later the same day, after the ruling that such a Subgroup is not sent and not waited for. The peer is `xmoq-quiet-peer --quiet subgroups`: it answers a PUBLISH_NAMESPACE and a PUBLISH, allows the client one unidirectional stream beyond those of HTTP/3, and takes no subgroup stream.
+
+| | The client | The peer |
+|---|---|---|
+| own-browser, as it was | `sendObject` failed with `SessionClosedError: the session failed: Failed to create send stream.` | `SESSION_ENDED session=0 ClosedByPeer { code: 1, reason: "Failed to create send stream." }` |
+| own-browser, now | `sendObject` failed with `StreamNotOpenedError: the peer allowed no further stream`; its session was open afterwards | no `SESSION_ENDED` |
+| own-rust, now, told to send six Objects | `SENT` for Groups 0 and 1, `NOT_SENT group=G object=0` for Groups 2 to 5 | `PUBLISH_DONE status_code=0x2 stream_count=2` |
+
+- **What Chromium throws** where a stream cannot be made for want of room, looked at once with a bare `WebTransport`: a `DOMException` named `NetworkError`, no `WebTransportError` (no `source`, no `streamErrorCode`), "Failed to create send stream." The library takes that kind alone for the peer's refusal; any other failure to make a stream still ends the session.
+- The Rust client had room for two subgroup streams where the page had none: the peer sets three unidirectional streams aside for HTTP/3, and the Rust client's HTTP/3 layer uses fewer. It was not looked into how many.
+- own-rust, as it was, was not run against this peer: it waited for the stream, with no time of its own for it.
+- That the senders of `@xmoq/media` go on with the next Group is in their tests, with a track whose `openSubgroup` fails (`packages/media/test/`, "a stream that could not be opened: its Group is cut short the same way"); a broadcast of a page was not run against this peer.
+
 ## Not run
 
-- **A unidirectional stream the peer allows no room for.** A subgroup stream is opened in the same way, and a creation that fails there still ends the session: the fake transport's `failUni` has had Chromium's "Failed to create send stream" since before, and that is what a publishing page would meet at a relay that allows it no further stream. No time was put on it, and nothing asks again.
 - The 10 seconds themselves against a real peer; a peer that allows a stream after some seconds (in the tests alone, on a clock moved by hand: refused for 3 seconds, then sent).
+- A peer that allows one request and no second, to see an answer handed on while another request waits: in the tests alone.
 - Firefox and Safari, which may wait where Chromium refuses.
+- A Group of the Rust client's `--video-in`, which still waits for its stream without a time.
 
 ## Next action
 
-Whether a subgroup stream that cannot be opened should wait and ask again as a request does, in place of ending the session.
+None from this record.

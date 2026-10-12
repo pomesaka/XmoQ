@@ -1,6 +1,7 @@
 import { StreamResetErrorCode } from "../core/error.ts";
 import type { Session } from "../core/session.ts";
 import type { PeerStreamKind, SessionOutput } from "../core/session-output.ts";
+import { StreamNotOpenedError } from "./endings.ts";
 import { createStreamSlots } from "./stream-slots.ts";
 import type { MoqtBidirectionalStream, MoqtTransport } from "./transport.ts";
 
@@ -104,18 +105,6 @@ interface LocalStream {
 }
 
 /**
- * A request stream was not opened in time: the peer allowed no further
- * stream. Nothing was sent. Not an error of the session.
- */
-export class StreamNotOpenedError extends Error {
-	override readonly name = "StreamNotOpenedError";
-
-	constructor() {
-		super("the peer allowed no stream for the request in time");
-	}
-}
-
-/**
  * How long after a refusal a request stream is asked for again
  * (**provisional**): short against the seconds a request waits, and no
  * load: one call that the browser refuses without sending anything.
@@ -153,6 +142,23 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		fatal,
 	} = options;
 	const localStreams = new Map<number, LocalStream>();
+	/** The timers of the request streams that are being opened. */
+	const openTimers = new Set<ReturnType<typeof setTimeout> | undefined>();
+
+	/**
+	 * Whether a stream could not be made because the peer allows no further
+	 * one for now. Chromium 156 rejects with a `DOMException` named
+	 * NetworkError that is no `WebTransportError` ("Failed to create send
+	 * stream.", "Failed to create bidirectional stream."; seen on
+	 * 2026-10-12 against a peer that allows none). WHY by the name and not
+	 * the text: the text is the browser's to change.
+	 */
+	const refusedForNow = (error: unknown): boolean =>
+		error instanceof Error &&
+		error.name === "NetworkError" &&
+		!transport.isStreamError(error) &&
+		!transport.isSessionError(error);
+
 	/** The streams of this endpoint that are not open yet, or that still have something kept for them. */
 	const opening = new Map<number, OpeningStream>();
 
@@ -450,11 +456,15 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 					return openInTurn(
 						stream,
 						async () => {
-							// A stream that cannot be made is the transport's
-							// failure, and the session's end.
+							// WHY a stream the peer allows no room for is not
+							// waited for, as a request's is: what goes on it is a
+							// Subgroup of a track, and the caller is told that it
+							// was not sent. Any other failure to make a stream is
+							// the transport's, and the session's end.
 							const writable = await transport
 								.createUnidirectionalStream()
 								.catch((error: unknown) => {
+									if (refusedForNow(error)) throw new StreamNotOpenedError();
 									fatal(toError(error));
 									throw error;
 								});
@@ -501,7 +511,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 									try {
 										return await transport.createBidirectionalStream();
 									} catch (error) {
-										if (late || cleared) throw error;
+										if (late || cleared || !refusedForNow(error)) throw error;
 										await new Promise((resolve) =>
 											setTimeout(resolve, OPEN_AGAIN_AFTER_MS),
 										);
@@ -526,7 +536,17 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 								},
 								() => {},
 							);
-							const bidi = await Promise.race([creating, inTime]);
+							openTimers.add(timer);
+							const bidi = await Promise.race([
+								// Not one the peer refused for now: the transport's
+								// failure, and the session's end.
+								creating.catch((error: unknown) => {
+									if (!late && !cleared) fatal(toError(error));
+									throw error;
+								}),
+								inTime,
+							]);
+							openTimers.delete(timer);
 							clearTimeout(timer);
 							if (bidi === undefined) throw new StreamNotOpenedError();
 							if (cleared) return;
@@ -619,9 +639,14 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 						void local.reader?.cancel(error).catch(() => {});
 						return undefined;
 					};
-					// WHY nobody waits for it, and it is not passed on where the
-					// stream was never opened: a reset says the caller is done
-					// with the stream, whatever became of it.
+					// WHY at once where the stream is open, also while a write on
+					// it waits: a write waits for the peer's window, and a
+					// stream that is given up must not wait for a peer that is
+					// slow. What was kept for the stream finds it gone. Where it
+					// is not open yet, it is reset when it is, with nothing
+					// written. Nobody waits for that: a reset says the caller is
+					// done with the stream, whatever became of it.
+					if (localStreams.has(stream)) return reset();
 					inTurn(stream, reset)?.settled.catch(() => {});
 					return undefined;
 				}
@@ -647,13 +672,16 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 					const { stream } = output;
 					// Fails when the peer's direction already ended, and then
 					// nothing is left to stop.
-					inTurn(stream, () => {
+					const stop = (): undefined => {
 						void localStreams
 							.get(stream)
 							?.reader?.cancel(error)
 							.catch(() => {});
 						return undefined;
-					})?.settled.catch(() => {});
+					};
+					// At once where the stream is open, as a reset.
+					if (localStreams.has(stream)) return stop();
+					inTurn(stream, stop)?.settled.catch(() => {});
 					return undefined;
 				}
 				case "peer-stream-identified":
@@ -789,6 +817,8 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		clear() {
 			localStreams.clear();
 			opening.clear();
+			for (const timer of openTimers) clearTimeout(timer);
+			openTimers.clear();
 			for (const streams of [peerUniStreams, peerBidiStreams]) {
 				for (const { firstBytesTimer } of streams.values()) {
 					clearTimeout(firstBytesTimer);

@@ -1632,6 +1632,9 @@ impl Client<'_> {
     /// Subgroup it has from the other one. `SENT` is printed all the same: it
     /// says that this client did its part.
     ///
+    /// Says whether a stream was opened for it: `false` where the peer allowed
+    /// none in time, and the Object was not sent.
+    ///
     /// WHY it borrows nothing of the client: the client answers its peer
     /// while the Object is under way ([`Self::attending`]).
     async fn send_object(
@@ -1640,9 +1643,13 @@ impl Client<'_> {
         track_alias: u64,
         group_id: u64,
         payload: &[u8],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if args.video.video_in.is_some() {
-            return video::send_group(connection, track_alias, group_id, &args.video).await;
+            // FIXME: a Group of `--video-in` still waits for its stream
+            // without a time.
+            return video::send_group(connection, track_alias, group_id, &args.video)
+                .await
+                .map(|()| true);
         }
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
             track_alias,
@@ -1663,7 +1670,19 @@ impl Client<'_> {
             status: ObjectStatus::Normal,
             payload: payload.to_vec(),
         })?;
-        let mut data = connection.open_uni().await?;
+        // WHY a stream the peer allows no room for is not waited for, as a
+        // request's is: what goes on it is a Subgroup of a live track, and
+        // one that is sent late is worth less than the next. The Subgroup
+        // is not sent, the caller hears it, and the session goes on.
+        // `@xmoq/moqt` does the same (`StreamNotOpenedError`); a browser
+        // refuses such a stream at once, and here it is given
+        // `SUBGROUP_OPEN_WAIT`.
+        let Ok(opened) = tokio::time::timeout(SUBGROUP_OPEN_WAIT, connection.open_uni()).await
+        else {
+            report::subgroup_not_sent(group_id);
+            return Ok(false);
+        };
+        let mut data = opened?;
         let bytes = encoder.take_bytes();
         args.trace
             .bytes(Direction::Send, &format!("data#{group_id}"), &bytes);
@@ -1676,7 +1695,7 @@ impl Client<'_> {
                 data.reset(stream_reset_code::CANCELLED);
                 report::stop_sending_received(&format!("data#{group_id}"), code);
                 report::sent(group_id, payload.len());
-                return Ok(());
+                return Ok(true);
             }
             Err(error) => return Err(failed(error)),
         }
@@ -1692,7 +1711,7 @@ impl Client<'_> {
             Err(_) => bail!("the peer did not take the subgroup stream in time"),
         }
         report::sent(group_id, payload.len());
-        Ok(())
+        Ok(true)
     }
 
     async fn publish(&mut self, payload: &[u8]) -> Result<()> {
@@ -1769,10 +1788,12 @@ impl Client<'_> {
                         // Each Object is a Group of its own. The Groups go on
                         // through a `republish`: it is the same track.
                         let group_id = self.args.first_group + sent;
-                        self.send_attending(&mut peer_requests, &mut None, None, (track_alias, group_id, payload))
-                            .await?;
+                        let object = (track_alias, group_id, payload);
+                        // §10.11: the streams that were opened are counted.
+                        if self.send_attending(&mut peer_requests, &mut None, None, object).await? {
+                            stream_count += 1;
+                        }
                         sent += 1;
-                        stream_count += 1;
                     }
                     None if sent == 0 => bail!("stdin closed before the send trigger"),
                     None => break publish_done_status::TRACK_ENDED,
@@ -2018,8 +2039,14 @@ impl Client<'_> {
                         // (an update that is refused) counts it.
                         served.streams += 1;
                         let object = (served.track_alias, group_id, payload);
-                        self.send_attending(&mut peer_requests, &mut serving, Some(&mut stdin), object)
+                        let opened = self
+                            .send_attending(&mut peer_requests, &mut serving, Some(&mut stdin), object)
                             .await?;
+                        // The stream was not opened after all, and is none
+                        // of the subscription's that is still there.
+                        if !opened && let Some(served) = serving.as_mut() {
+                            served.streams = served.streams.saturating_sub(1);
+                        }
                         group_id += 1;
                     }
                     None => break,
@@ -2160,12 +2187,11 @@ impl Client<'_> {
         serving: &mut Option<Serving>,
         stdin: Option<&mut DriverLines>,
         (track_alias, group_id, payload): (u64, u64, &[u8]),
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.sent(group_id, payload);
         let sending = Self::send_object(self.connection, self.args, track_alias, group_id, payload);
         self.attending(peer_requests, serving, stdin, sending)
-            .await??;
-        Ok(())
+            .await?
     }
 
     /// Sends a request on a new stream and returns the event its response
@@ -2735,6 +2761,11 @@ fn termination_code(result: &Result<()>) -> u32 {
 /// written. **Provisional**, and the time `@xmoq/moqt` and the terminal
 /// viewer give it.
 const SETUP_WAIT_MS: u64 = 10_000;
+
+/// How long a subgroup stream may wait to be opened: for the peer to allow
+/// one more. **Provisional**: long against the moment a stream takes to be
+/// opened where there is room, short against a Group of a live track.
+const SUBGROUP_OPEN_WAIT: Duration = Duration::from_millis(100);
 
 /// How long a request may wait for its stream to be opened. **Provisional**,
 /// and the time `@xmoq/moqt` gives it (`DEFAULT_OPEN_STREAM_TIMEOUT_MS`).

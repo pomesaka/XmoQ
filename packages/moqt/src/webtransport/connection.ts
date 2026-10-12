@@ -52,16 +52,13 @@ import {
 	ServedFetchEndedError,
 	type SessionClose,
 	SessionClosedError,
+	StreamNotOpenedError,
 	SubgroupClosedError,
 	type SubscriptionEnd,
 	SubscriptionEndedError,
 } from "./endings.ts";
 import { createObjectQueue, type ObjectQueue } from "./object-queue.ts";
-import {
-	type Backpressure,
-	createStreamIo,
-	StreamNotOpenedError,
-} from "./stream-io.ts";
+import { type Backpressure, createStreamIo } from "./stream-io.ts";
 import type { MoqtTransport } from "./transport.ts";
 
 /** Provisional defaults; the project has not chosen any of them. */
@@ -1509,12 +1506,29 @@ export async function connectOver(
 			parameters: subscription.parameters,
 			ended: publish.ended.promise,
 			openSubgroup: (subgroupOptions) =>
-				onPublish(publish, async () =>
-					subgroupWriter(
-						publish,
-						await apply((s) => s.openSubgroup(requestId, subgroupOptions)),
-					),
-				),
+				onPublish(publish, async () => {
+					let opening: number | undefined;
+					const stream = await apply((s) => {
+						const result = s.openSubgroup(requestId, subgroupOptions);
+						opening = result.value;
+						return result;
+					}).catch(async (error: unknown) => {
+						// The peer allowed no stream for it: the Subgroup is not
+						// sent. The session forgets the stream, which was never
+						// one, so that PUBLISH_DONE can be sent and counts right.
+						if (
+							error instanceof StreamNotOpenedError &&
+							opening !== undefined
+						) {
+							const never = opening;
+							await applyVoid((s) => s.subgroupNotOpened(never)).catch(
+								() => {},
+							);
+						}
+						throw error;
+					});
+					return subgroupWriter(publish, stream);
+				}),
 			done: (statusCode, errorReason) =>
 				onPublish(publish, async () => {
 					// WHY not left to the session: it refuses a second PUBLISH_DONE
