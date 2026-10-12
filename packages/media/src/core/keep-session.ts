@@ -69,10 +69,25 @@ export const DEFAULT_ASK_AGAIN_DELAY_MS = 1000;
 
 /**
  * **Provisional**: the shortest pause after a "not yet" that names its own
- * (`StayOptions.againAfter`). WHY any: a peer that says "at once" and then
- * refuses at once would be asked in a loop without a pause.
+ * (`StayOptions.againAfter`). It doubles with every such "not yet" that
+ * follows another without anything played in between, up to
+ * `MAX_MIN_ASK_AGAIN_DELAY_MS`.
+ *
+ * WHY any, and why it grows: a peer that says "at once" and then refuses
+ * at once would be asked in a loop, and ten times a second for as long as
+ * it went on with a pause that stayed as it began.
  */
 export const MIN_ASK_AGAIN_DELAY_MS = 100;
+
+/** **Provisional**: what the shortest pause grows to. */
+export const MAX_MIN_ASK_AGAIN_DELAY_MS = 5000;
+
+/**
+ * **Provisional**: the longest pause a "not yet" is let name. WHY: the
+ * value is the peer's, and a timer takes one of 24 days; a viewer that is
+ * told to come back that much later has in effect been told to go.
+ */
+export const MAX_NAMED_ASK_AGAIN_DELAY_MS = 30_000;
 
 export interface StayOptions<E, C> {
 	/** Begins to play on the session, and resolves once it plays, with `ended` (as `KeepPlayingOptions.play`). */
@@ -90,9 +105,10 @@ export interface StayOptions<E, C> {
 	 * The pause a "not yet" names itself, in milliseconds, where it names
 	 * one: a relay says with its refusal when to ask again (the Retry
 	 * Interval of a REQUEST_ERROR, transport §10.6.2). Used in place of
-	 * `againMs` for that one pause, and no shorter than
-	 * `MIN_ASK_AGAIN_DELAY_MS`. `undefined` where it names none; `againMs`
-	 * then.
+	 * `againMs` for that one pause: no shorter than
+	 * `MIN_ASK_AGAIN_DELAY_MS`, which doubles while nothing is played in
+	 * between, and no longer than `MAX_NAMED_ASK_AGAIN_DELAY_MS`.
+	 * `undefined` where it names none; `againMs` then.
 	 *
 	 * WHY asked again where the refusal says "do not retry" (a Retry
 	 * Interval of 0): whether to ask again is `notYet`'s to say. A relay
@@ -134,6 +150,8 @@ export async function stayOnSession<E, C>(
 		ms: number = againMs,
 	): Promise<Awaited<typeof over> | undefined> =>
 		Promise.race([over, options.wait(ms).then(() => undefined)]);
+	/** The shortest pause the next "not yet" that names one gets. */
+	let shortest = MIN_ASK_AGAIN_DELAY_MS;
 	for (let times = 1; !options.stopped(); ) {
 		let ended: Promise<E>;
 		try {
@@ -143,14 +161,18 @@ export async function stayOnSession<E, C>(
 			if (!options.notYet(error)) throw error;
 			options.onNotYet?.(error);
 			const named = options.againAfter?.(error);
-			const closed = await pause(
-				named === undefined ? againMs : Math.max(named, MIN_ASK_AGAIN_DELAY_MS),
-			);
+			let ms = againMs;
+			if (named !== undefined) {
+				ms = Math.min(Math.max(named, shortest), MAX_NAMED_ASK_AGAIN_DELAY_MS);
+				shortest = Math.min(shortest * 2, MAX_MIN_ASK_AGAIN_DELAY_MS);
+			}
+			const closed = await pause(ms);
 			if (closed !== undefined) return closed;
 			continue;
 		}
 		options.onPlaying?.(times);
 		times += 1;
+		shortest = MIN_ASK_AGAIN_DELAY_MS;
 		const first = await Promise.race([
 			over,
 			ended.then((end) => ({ type: "playing-ended" as const, end })),

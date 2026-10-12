@@ -855,6 +855,7 @@ export function createRequests(options: RequestsOptions): Requests {
 					type: "update-error",
 					requestId,
 					errorCode: message.errorCode,
+					retryInterval: message.retryInterval,
 					errorReason: message.errorReason,
 				},
 			});

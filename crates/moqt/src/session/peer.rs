@@ -1149,6 +1149,24 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_refusal_for_too_many_requests_says_on_the_wire_to_ask_again_after_a_second() {
+        // REQUEST_ERROR (0x5), 4 bytes: EXCESSIVE_LOAD (0x9), the Retry
+        // Interval 1,001 (0x3e9, in two bytes), and an empty reason.
+        let mut bytes = Vec::new();
+        request_error(request_error_code::EXCESSIVE_LOAD)
+            .encode(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, [0x05, 0x00, 0x04, 0x09, 0x83, 0xe9, 0x00]);
+        // And 0 with a code after which the same request gets the same
+        // answer: NOT_SUPPORTED (0x3).
+        let mut bytes = Vec::new();
+        request_error(request_error_code::NOT_SUPPORTED)
+            .encode(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, [0x05, 0x00, 0x03, 0x03, 0x00, 0x00]);
+    }
     use crate::message::RequestUpdate;
     use crate::name::TrackNamespace;
     use crate::session::RequestState;

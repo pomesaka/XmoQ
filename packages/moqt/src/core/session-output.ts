@@ -75,6 +75,8 @@ export type SessionEvent =
 			type: "update-error";
 			requestId: bigint;
 			errorCode: bigint;
+			/** The peer's Retry Interval, as it came (§10.6.2). */
+			retryInterval: bigint;
 			errorReason: string;
 	  }
 	/**

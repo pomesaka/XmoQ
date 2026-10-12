@@ -30,7 +30,8 @@ function told(outputs: SessionOutput[]): string[] {
 		const { event } = output;
 		if (event.type === "update-ok")
 			return `update-ok ${JSON.stringify(Object.keys(event.parameters))}`;
-		if (event.type === "update-error") return `update-error ${event.errorCode}`;
+		if (event.type === "update-error")
+			return `update-error ${event.errorCode} retry ${event.retryInterval}`;
 		return event.type;
 	});
 }
@@ -77,9 +78,22 @@ test.each<{
 		name: "a REQUEST_ERROR answers every update that waits, and PUBLISH_DONE ends the subscription (§10.9.1)",
 		updates: 2,
 		answers: [
-			["05 00 03 03 00 00", ["update-error 3"]],
+			["05 00 03 03 00 00", ["update-error 3 retry 0"]],
 			["0b 00 03 08 00 00", ["publish-done", "request-closed", "finish"]],
 		],
+	},
+	{
+		// REQUEST_ERROR EXCESSIVE_LOAD (0x9) with the Retry Interval 0, and
+		// with 7: the peer's value, and not what this endpoint would give
+		// that code (1,001).
+		name: "the Retry Interval of the REQUEST_ERROR that answers an update is the peer's",
+		updates: 1,
+		answers: [["05 00 03 09 00 00", ["update-error 9 retry 0"]]],
+	},
+	{
+		name: "the Retry Interval of the REQUEST_ERROR that answers an update is the peer's, where it is not 0",
+		updates: 1,
+		answers: [["05 00 03 09 07 00", ["update-error 9 retry 7"]]],
 	},
 	{
 		name: "a REQUEST_OK that answers nothing is no message of this stream",
