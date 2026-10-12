@@ -48,7 +48,7 @@ run = "scripts/ci/interop.sh"
 
 [tasks.demo]
 description = "Start the own relay and the pages of the demo: one publishes video, others watch"
-run = "cargo build --locked -p xmoq-relay && (test -d spikes/durable-objects-room/node_modules || npm ci --prefix spikes/durable-objects-room --no-audit --no-fund) && bun demo/serve.ts"
+run = "cargo build --locked -p xmoq-relay && bun install --frozen-lockfile && (test -d spikes/durable-objects-room/node_modules || npm ci --prefix spikes/durable-objects-room --no-audit --no-fund) && bun demo/serve.ts"
 
 [tasks.fmt]
 description = "Apply formatting and safe lint fixes"
