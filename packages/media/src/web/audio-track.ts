@@ -195,6 +195,8 @@ export interface AudioPlaybackStats {
 	decoded: number;
 	/** Objects that were not decoded: "late" (one with a later time was decoded already), "no-time", "empty". */
 	dropped: Partial<Record<"late" | "no-time" | "empty", number>>;
+	/** Objects that did not go to the decoder when they came: they came after a gap, and waited for what was missing (`holdForOrderMs`). */
+	held: number;
 	decoderError: string | undefined;
 }
 
@@ -268,6 +270,7 @@ export async function playAudioTrack(
 		received: 0,
 		decoded: 0,
 		dropped: {},
+		held: 0,
 		decoderError: undefined,
 	};
 	const drop = (because: keyof AudioPlaybackStats["dropped"]): void => {
@@ -318,7 +321,10 @@ export async function playAudioTrack(
 	};
 	options.signal?.addEventListener("abort", stop, { once: true });
 	if (options.signal?.aborted) stop();
+	/** How many Objects went on to the decoder, or were dropped as late: one that is neither when `push` returns is held. */
+	let passed = 0;
 	const decode = (chunk: { timestamp: number; data: Uint8Array }): void => {
+		passed += 1;
 		if (decoder.state !== "configured") return;
 		timesIn.push(chunk.timestamp);
 		decoder.decode(new EncodedAudioChunk({ type: "key", ...chunk }));
@@ -326,7 +332,10 @@ export async function playAudioTrack(
 	const order = createInOrder<{ timestamp: number; data: Uint8Array }>({
 		holdMs: options.holdForOrderMs ?? (() => 0),
 		next: decode,
-		late: () => drop("late"),
+		late: () => {
+			passed += 1;
+			drop("late");
+		},
 	});
 	let release: ReturnType<typeof setTimeout> | undefined;
 	/** Lets on what waited long enough, and comes back when the next has. */
@@ -357,11 +366,15 @@ export async function playAudioTrack(
 			return;
 		}
 		const timestamp = Number(microsecondsOf(read.timing));
+		const before = passed;
 		order.push(
 			timestamp,
 			{ timestamp, data: object.payload },
 			performance.now(),
 		);
+		// Nothing went on: this one waits. (One that lets earlier ones on
+		// with it is not counted, and it did not wait.)
+		if (passed === before) stats.held += 1;
 		releaseInTime();
 	};
 	if (options.joiningFetch === true) {
