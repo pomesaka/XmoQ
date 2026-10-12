@@ -110,18 +110,24 @@ pub enum AfterRefusal {
 }
 
 /// Whether the `REQUEST_UPDATE` of a subscription with these parameters is
-/// one that is applied: `Some` when it carries nothing, or
-/// `SUBGROUP_DELIVERY_TIMEOUT` alone, with that timeout in milliseconds if
-/// it is there (0 for no timeout, §8).
+/// one that is accepted: `Some` when it carries nothing but delivery
+/// timeouts, with the `SUBGROUP_DELIVERY_TIMEOUT` in milliseconds if it is
+/// there (0 for no timeout, §8).
+///
+/// WHY `OBJECT_DELIVERY_TIMEOUT` is let by, which nothing here acts on: a
+/// SUBSCRIBE that sets it is accepted the same way, and a parameter that
+/// is taken at first and ends the subscription when it is sent again
+/// would be the worse of the two.
 pub(super) fn only_the_subgroup_timeout(parameters: &[Parameter]) -> Option<AppliedUpdate> {
-    // The codec lets a parameter by once only (§10.2).
-    match parameters {
-        [] => Some(AppliedUpdate(None)),
-        [Parameter::SubgroupDeliveryTimeout(milliseconds)] => {
-            Some(AppliedUpdate(Some(*milliseconds)))
+    let mut subgroup = None;
+    for parameter in parameters {
+        match parameter {
+            Parameter::SubgroupDeliveryTimeout(milliseconds) => subgroup = Some(*milliseconds),
+            Parameter::ObjectDeliveryTimeout(_) => {}
+            _ => return None,
         }
-        _ => None,
     }
+    Some(AppliedUpdate(subgroup))
 }
 
 /// The `SUBGROUP_DELIVERY_TIMEOUT` of an update that is applied, if it has
@@ -141,8 +147,8 @@ pub enum PeerRequestEvent {
         done: PublishDone,
     },
     /// `REQUEST_UPDATE` for an Established subscription of the peer's
-    /// SUBSCRIBE that carries no parameter, or `SUBGROUP_DELIVERY_TIMEOUT`
-    /// alone. The caller sends `response`, a `REQUEST_OK`, and acts on the
+    /// SUBSCRIBE that carries no parameter but delivery timeouts
+    /// (`SUBGROUP_DELIVERY_TIMEOUT`, `OBJECT_DELIVERY_TIMEOUT`). The caller sends `response`, a `REQUEST_OK`, and acts on the
     /// timeout if it acts on that of a SUBSCRIBE.
     ///
     /// WHY one without a parameter is accepted: §10.9 has "If a parameter
@@ -2858,7 +2864,15 @@ mod tests {
             (vec![Parameter::SubgroupDeliveryTimeout(250)], Ok(Some(250))),
             // §8: 0 is "no timeout", which is a change like another.
             (vec![Parameter::SubgroupDeliveryTimeout(0)], Ok(Some(0))),
-            (vec![Parameter::ObjectDeliveryTimeout(250)], Err(())),
+            // Taken as a SUBSCRIBE that sets it is; nothing acts on it.
+            (vec![Parameter::ObjectDeliveryTimeout(250)], Ok(None)),
+            (
+                vec![
+                    Parameter::ObjectDeliveryTimeout(250),
+                    Parameter::SubgroupDeliveryTimeout(120),
+                ],
+                Ok(Some(120)),
+            ),
             (vec![Parameter::Forward(false)], Err(())),
             (vec![Parameter::SubscriberPriority(3)], Err(())),
             (vec![Parameter::NewGroupRequest(0)], Err(())),

@@ -218,6 +218,9 @@ export interface Requests {
 	 * SUBSCRIBE of this endpoint, for a parameter that may not appear in
 	 * REQUEST_UPDATE, and when `MAX_UNANSWERED_UPDATES` updates wait for
 	 * their answer. Nothing is sent and no Request ID is used up then.
+	 * **A publisher that answers none leaves the subscription unable to be
+	 * updated after that many**: nothing here has a clock, and a caller
+	 * that stops waiting for an answer does not make room.
 	 */
 	updateSubscription(
 		requestId: bigint,
@@ -1026,8 +1029,11 @@ export function createRequests(options: RequestsOptions): Requests {
 	/**
 	 * §10.9: the subscriber of an Established subscription may update it.
 	 *
-	 * An update with no parameter, or with SUBGROUP_DELIVERY_TIMEOUT alone, is
-	 * answered with REQUEST_OK. Nothing here changes by it: this endpoint
+	 * An update with no parameter but delivery timeouts
+	 * (SUBGROUP_DELIVERY_TIMEOUT, OBJECT_DELIVERY_TIMEOUT) is answered with
+	 * REQUEST_OK. WHY the Object's too: a SUBSCRIBE that sets it is accepted
+	 * the same way, and a parameter that is taken at first and ends the
+	 * subscription when it is sent again would be the worse of the two. Nothing here changes by it: this endpoint
 	 * acts on no delivery timeout, that of a SUBSCRIBE included (the relay
 	 * does, and applies the update). WHY one without a parameter is
 	 * accepted: §10.9 has "If a parameter previously set on the request is
@@ -1053,7 +1059,9 @@ export function createRequests(options: RequestsOptions): Requests {
 		const { stream, requestId } = request;
 		if (
 			Object.keys(message.parameters).every(
-				(name) => name === "subgroupDeliveryTimeout",
+				(name) =>
+					name === "subgroupDeliveryTimeout" ||
+					name === "objectDeliveryTimeout",
 			)
 		) {
 			out.push({ type: "send", stream, data: REQUEST_OK });
@@ -1532,7 +1540,12 @@ export function createRequests(options: RequestsOptions): Requests {
 				request === undefined ||
 				request.kind !== "SUBSCRIBE" ||
 				request.state !== "Established" ||
-				request.endedLocally
+				request.endedLocally ||
+				// §5.1: PUBLISH_DONE terminated the subscription; the entry is
+				// kept for the streams that are still counted, and is no
+				// subscription to update. The Rust session has dropped the
+				// request by then.
+				isDraining(request)
 			) {
 				throw new RangeError(
 					`request ${requestId} is not an Established SUBSCRIBE of this endpoint`,

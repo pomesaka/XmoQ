@@ -3090,6 +3090,12 @@ impl Relay {
         milliseconds: u64,
         actions: &mut Vec<Action>,
     ) {
+        // Neither `return` is reached: the session lets an update by for a
+        // subscription it has accepted and not ended, and the relay accepts
+        // one only on a track that has a source (`Tracks::live`) and ends
+        // every subscription of a track before the track goes. A track that
+        // waits for a publisher has waiters, whose SUBSCRIBE has no answer
+        // and whose update the session refuses.
         let Some(track) = self.tracks.live_mut(track_name) else {
             return;
         };

@@ -344,6 +344,19 @@ describe("a SUBSCRIBE of the peer, and what the subscriber does next", () => {
 			outputs: ["send 1: REQUEST_OK"],
 		},
 		{
+			// OBJECT_DELIVERY_TIMEOUT (0x02) = 250 and SUBGROUP_DELIVERY_TIMEOUT
+			// (0x06) = 250: taken as a SUBSCRIBE that sets them is.
+			name: "REQUEST_UPDATE with both delivery timeouts after SUBSCRIBE_OK: REQUEST_OK (§10.9)",
+			session: serving,
+			act: (session: Session) =>
+				session.receivePeerBidiStreamData(
+					0,
+					hex("02 00 08 03 02 02 80 fa 04 80 fa"),
+					false,
+				),
+			outputs: ["send 1: REQUEST_OK"],
+		},
+		{
 			// SUBGROUP_DELIVERY_TIMEOUT = 250 and FORWARD = 0.
 			name: "REQUEST_UPDATE with the timeout and another parameter: refused as a whole (§10.9.1)",
 			session: serving,

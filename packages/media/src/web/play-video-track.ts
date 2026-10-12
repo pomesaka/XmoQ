@@ -120,8 +120,8 @@ export interface VideoPlayback {
 	 * Resolves when the sender accepted. Rejects as `Subscription.update`
 	 * of `@xmoq/moqt` does: **a sender that refuses the update ends the
 	 * subscription** (§10.9.1), and `ended` says so. The XmoQ relay
-	 * accepts an update that sets `subgroupMs` alone, and it holds for the
-	 * Groups that end after it.
+	 * acts on `subgroupMs`, which holds for the Groups that end after it,
+	 * and takes `objectMs` without acting on it.
 	 */
 	setDeliveryTimeouts(timeouts: DeliveryTimeouts): Promise<void>;
 }
