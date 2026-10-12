@@ -650,13 +650,14 @@ const QUIET_PEER_BINARY = join(
 /**
  * Starts `xmoq-quiet-peer` (`crates/quiet-peer`), a server that takes
  * sessions and leaves out its SETUP (`setup`), its answers to requests
- * (`requests`), or those but for a PUBLISH_NAMESPACE (`publish`). The
+ * (`requests`), those but for a PUBLISH_NAMESPACE (`publish`), or room for
+ * a request stream (`streams`). The
  * context has it where a run through a relay has the relay. Everything
  * started is stopped by `runCleanups`.
  */
 export async function startQuietPeer(setup: {
 	port: string;
-	quiet: "setup" | "requests" | "publish";
+	quiet: "setup" | "requests" | "publish" | "streams";
 	clients: Client[];
 }): Promise<RunContext> {
 	if (!existsSync(QUIET_PEER_BINARY)) {

@@ -141,45 +141,26 @@ describe("a stream of the peer that does not say what it is", () => {
 		expect(await open(connection)).toBe(true);
 	});
 
-	// The stop is an output, and outputs are performed in order: one that
-	// waits, here a request whose stream the peer gives no credit for, holds
-	// the stop back, and the stream is read on meanwhile. What arrives then
-	// is what the peer would have sent anyway, and must not be read as a
-	// stream or a request from its start, which would close the session.
+	// The stop is an output. A request that waits for its stream, which the
+	// peer gives no credit for, does not hold it back: what is to happen on
+	// a stream that is being opened is kept for that stream alone.
 	test.each([
-		{
-			name: "a subgroup stream, the rest of its header",
-			kind: "uni",
-			before: "5d 00",
-			rest: "00 00 00 00 01 61",
-		},
-		{
-			name: "a request, the rest of its first message",
-			kind: "bidi",
-			before: "03 00 1f",
-			rest: "01 02 04 78 6d 6f 71",
-		},
+		{ name: "a subgroup stream", kind: "uni", before: "5d 00" },
+		{ name: "a request", kind: "bidi", before: "03 00 1f" },
 	] as const)(
-		"what a stopped stream still sends while the stop waits to be performed is dropped: $name",
-		async ({ kind, before, rest }) => {
-			let release: () => void = () => {};
-			const held = new Promise<void>((resolve) => {
-				release = resolve;
-			});
-			const { peer, connection } = await connected({}, held);
+		"a stream is stopped in time while a request waits for a stream of its own: $name",
+		async ({ kind, before }) => {
+			const { peer, connection } = await connected(
+				{},
+				new Promise<void>(() => {}),
+			);
 			const writer = kind === "uni" ? peer.openUni() : peer.openBidi().reply;
 			await writer.write(hex(before));
 			await flush();
-			// Only now the request that keeps every later output waiting: the
-			// stream is being read, and goes on being read behind it.
 			void connection.publishNamespace([hex("61")]).catch(() => {});
-			await pass(10_000);
-			// The stop has not reached the stream: the peer can still write.
-			await writer.write(hex(rest));
-			await flush();
-			expect(await open(connection)).toBe(true);
-			release();
-			await flush();
+			await pass(9_999);
+			expect(await state(writer.closed)).toBe("pending");
+			await pass(1);
 			expect(await state(writer.closed)).toMatchObject({
 				streamErrorCode: kind === "uni" ? 0 : 1,
 			});

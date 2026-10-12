@@ -31,6 +31,16 @@
 //                     failure). The terminal viewer sends a FETCH for its
 //                     catalog alone, which has 5 seconds as a whole.
 //
+//   no-stream         The peer sends its SETUP and allows the client no
+//                     bidirectional stream. The client's SUBSCRIBE waits
+//                     for a stream and fails as not sent: the page's
+//                     `subscribe()` with `RequestAbortedError` of
+//                     `not-sent-in-time`, its session still open; own-rust
+//                     with `NOT_SENT request=subscribe after_ms=1500`; the
+//                     terminal viewer with "the relay allowed no stream".
+//                     The peer has printed no `REQUEST` line: nothing was
+//                     sent. All three clients. (The row "A request that
+//                     waits for a stream".)
 //   relay-no-setup    The other way round: the own relay, told to give a
 //                     client 1.5 seconds for its SETUP
 //                     (`--setup-timeout-ms`; 10 by itself), and
@@ -102,7 +112,7 @@ async function connectedPage(context: RunContext): Promise<{
 	const connect = page
 		.evaluate(
 			([url, hash, wait]) =>
-				window.xmoq.connect(url, hash, undefined, wait, wait),
+				window.xmoq.connect(url, hash, undefined, wait, wait, wait),
 			[context.relayUrl, context.certSha256Hex, WAIT_MS] satisfies [
 				string,
 				string,
@@ -322,16 +332,96 @@ async function noFetchAnswer(
 	return `${client} gave up a FETCH nobody answered, and the peer saw its request stream reset with CANCELLED: ${said}`;
 }
 
+async function noStream(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	let said: string;
+	switch (client) {
+		case "own-browser": {
+			const page = await connectedPage(context);
+			await withTimeout(page.connect, "the page to connect");
+			said = await withTimeout(
+				page
+					.evaluate(
+						([namespace, track]) => window.xmoq.subscribe(namespace, track),
+						[NAMESPACE, TRACK] satisfies [string, string],
+					)
+					.then(
+						() => "it was answered",
+						(error: unknown) => String(error),
+					),
+				"the page to give up a SUBSCRIBE it cannot send",
+			);
+			if (!said.includes("not-sent-in-time")) {
+				throw new Error(
+					`the page's subscribe() was to fail as not sent: ${said}`,
+				);
+			}
+			const state = await page.evaluate(() => window.xmoqOwn.state());
+			if (!state.includes('"session":null')) {
+				throw new Error(`the page's session was to stay open: ${state}`);
+			}
+			break;
+		}
+		case "own-rust": {
+			const rust = spawnRustClient(
+				context,
+				"client:own-rust",
+				client,
+				"subscribe",
+				TRACK,
+				["--open-wait-ms", String(WAIT_MS)],
+			);
+			const [line] = await rust.waitForLine(
+				new RegExp(`^NOT_SENT request=subscribe after_ms=${WAIT_MS}$`),
+			);
+			const code = await withTimeout(rust.exited, "own-rust to leave");
+			if (code === 0) throw new Error("own-rust was to fail, and left with 0");
+			said = `${line}, and it left with ${code}`;
+			break;
+		}
+		case "xmoq-watch": {
+			const viewer = spawnTerminalViewer(context, "client:xmoq-watch", [
+				...VIEWER_ARGS,
+				"--open-wait-ms",
+				String(WAIT_MS),
+			]);
+			const [line] = await viewer.waitForLine(
+				new RegExp(
+					`the relay allowed no stream for ${TRACK} within ${WAIT_MS} ms`,
+				),
+			);
+			await withTimeout(viewer.exited, "xmoq-watch to leave");
+			said = line;
+			break;
+		}
+	}
+	// Nothing was sent. For the two that leave, every line of the peer
+	// before the end of their session has been read by then.
+	if (client !== "own-browser") {
+		const sent = await context.relay.linesBefore(
+			{ line: /^SESSION_ENDED session=0 ClosedByPeer \{ code: 0,/ },
+			/^REQUEST /,
+		);
+		if (sent.length > 0) throw new Error("the client was to send no request");
+	} else if (context.relay.hasPrinted(/^REQUEST /)) {
+		throw new Error("the page was to send no request");
+	}
+	return `${client} could not send a SUBSCRIBE to a peer that allowed it no stream, and failed it as not sent after its wait (${WAIT_MS} ms); the peer read no request: ${said}`;
+}
+
 const CASES: Record<
 	string,
 	{
-		quiet: "setup" | "requests" | "publish";
+		quiet: "setup" | "requests" | "publish" | "streams";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
 	"no-setup": { quiet: "setup", run: noSetup },
 	"no-publish-answer": { quiet: "publish", run: noPublishAnswer },
 	"no-fetch-answer": { quiet: "requests", run: noFetchAnswer },
+	"no-stream": { quiet: "streams", run: noStream },
 };
 
 async function relayNoSetup(): Promise<string> {

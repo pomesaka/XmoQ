@@ -192,6 +192,13 @@ function stallingWritable(stalls: () => boolean): WritableStream<Uint8Array> {
  * NetworkError as well ("Failed to create send stream", `web_transport.cc`),
  * the name a stopped stream has, for a stream that was never there.
  *
+ * `failBidi`: the same for `createBidirectionalStream`. **This, and not
+ * `holdBidi`, is what Chromium 156 does where the peer allows no further
+ * stream**: it rejects at once, with a `DOMException` named NetworkError,
+ * "Failed to create bidirectional stream." (seen against a peer that allows
+ * none, in the interop run with `quiet peer:` in its name). `holdBidi` is
+ * what the API describes.
+ *
  * `stallWrites`: the unidirectional streams of the client take a write at
  * once while this returns false, and keep it under way while it returns
  * true, until the stream is aborted; the write is then rejected with what
@@ -207,6 +214,7 @@ export function createFakePeer(
 		holdBidi?: Promise<void>;
 		holdBidiFrom?: number;
 		failUni?: () => unknown;
+		failBidi?: () => unknown;
 		stallWrites?: () => boolean;
 	} = {},
 ): FakePeer {
@@ -272,6 +280,8 @@ export function createFakePeer(
 				return Promise.resolve(stream.writable);
 			},
 			async createBidirectionalStream() {
+				const failure = options.failBidi?.();
+				if (failure !== undefined) throw failure;
 				const nth = bidisAsked;
 				bidisAsked += 1;
 				if (nth >= (options.holdBidiFrom ?? 0)) await options.holdBidi;

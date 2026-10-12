@@ -57,7 +57,11 @@ import {
 	SubscriptionEndedError,
 } from "./endings.ts";
 import { createObjectQueue, type ObjectQueue } from "./object-queue.ts";
-import { type Backpressure, createStreamIo } from "./stream-io.ts";
+import {
+	type Backpressure,
+	createStreamIo,
+	StreamNotOpenedError,
+} from "./stream-io.ts";
 import type { MoqtTransport } from "./transport.ts";
 
 /** Provisional defaults; the project has not chosen any of them. */
@@ -93,6 +97,8 @@ const FETCH_BODY_HIGH_WATER_MARK = 4;
  */
 const MAX_STREAM_ERROR_CODE = 255;
 const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
+/** Provisional: the time the peer's SETUP and an answer get. The Rust client has the same (`STREAM_OPEN_WAIT`). */
+const DEFAULT_OPEN_STREAM_TIMEOUT_MS = 10_000;
 /** The Error Reason of the PUBLISH_DONE that ends a PUBLISH nobody answered; the Rust client sends the same. */
 const NO_ANSWER_IN_TIME = "no answer in time";
 
@@ -275,6 +281,20 @@ export interface SessionConnectOptions {
 	 * row, and the Rust client does the same.
 	 */
 	answerTimeoutMs?: number;
+	/**
+	 * How long a request may wait for its stream to be opened, 10000 when
+	 * left out (**provisional**): a stream is opened when the peer allows
+	 * one more. Then the request fails with a `RequestAbortedError` of
+	 * `not-sent-in-time`; nothing was sent, and **the session stays open**.
+	 * A whole number as for `setupTimeoutMs`.
+	 *
+	 * The draft has no time for it (§13.5: "Endpoints MAY impose a MAX
+	 * STREAM count limit which would restrict the number of concurrent
+	 * streams which an application could have in flight"). The Rust client
+	 * and the terminal viewer give a request the same time
+	 * (docs/moqt-implementation-notes.md).
+	 */
+	openStreamTimeoutMs?: number;
 	/**
 	 * How long a subscription waits for late streams after PUBLISH_DONE when
 	 * its Stream Count is not reached (§10.11). With 0 it does not wait: the
@@ -1006,6 +1026,10 @@ export async function connectOver(
 		"answerTimeoutMs",
 		options.answerTimeoutMs ?? DEFAULT_ANSWER_WAIT_MS,
 	);
+	const openStreamTimeoutMs = timerDelay(
+		"openStreamTimeoutMs",
+		options.openStreamTimeoutMs ?? DEFAULT_OPEN_STREAM_TIMEOUT_MS,
+	);
 	const session: Session = createSession({
 		implementation: options.implementation,
 		authorizationToken: options.authorizationToken,
@@ -1041,6 +1065,7 @@ export async function connectOver(
 		maxPeerUniStreams,
 		maxPeerBidiStreams,
 		firstBytesTimeoutMs,
+		openBidiTimeoutMs: openStreamTimeoutMs,
 		trace: (direction, name, data) =>
 			options.diagnostics?.onBytes?.(direction, name, data),
 		input: (action) => applyInput(action),
@@ -1191,6 +1216,7 @@ export async function connectOver(
 				break;
 			case "cancelled":
 			case "no-answer-in-time":
+			case "not-sent-in-time":
 				fetch.response.reject(new RequestAbortedError({ type: end.type }));
 				fetch.body.abort(new FetchEndedError(end));
 				break;
@@ -1526,19 +1552,26 @@ export async function connectOver(
 		};
 	};
 
+	/** Ends a FETCH of this endpoint for whoever holds it, and has the session forget it. */
+	const giveUpFetch = (
+		requestId: bigint,
+		type: "cancelled" | "no-answer-in-time" | "not-sent-in-time",
+	): Promise<void> => {
+		if (!fetches.has(requestId)) return Promise.resolve();
+		endFetch(requestId, { type });
+		// The session agrees: cancelling after the end does nothing.
+		if (sessionClose !== undefined) return Promise.resolve();
+		return applyVoid((s) => s.cancelRequest(requestId));
+	};
+
 	/** Registers a FETCH the session has just taken, so that what comes for it finds it. */
 	const fetchFrom = (
 		requestId: bigint,
 		groupOrder: GroupOrder,
 		answerWait: number,
 	): Fetch => {
-		const giveUp = (type: "cancelled" | "no-answer-in-time"): Promise<void> => {
-			if (!fetches.has(requestId)) return Promise.resolve();
-			endFetch(requestId, { type });
-			// The session agrees: cancelling after the end does nothing.
-			if (sessionClose !== undefined) return Promise.resolve();
-			return applyVoid((s) => s.cancelRequest(requestId));
-		};
+		const giveUp = (type: "cancelled" | "no-answer-in-time"): Promise<void> =>
+			giveUpFetch(requestId, type);
 		const cancel = (): Promise<void> => giveUp("cancelled");
 		const active: ActiveFetch = {
 			body: createObjectQueue<Uint8Array>(FETCH_BODY_HIGH_WATER_MARK, cancel),
@@ -2201,6 +2234,18 @@ export async function connectOver(
 				);
 			},
 			async (error: unknown) => {
+				// The peer allowed no stream for it: the request was not sent.
+				// The session forgets it, which resets a stream that is not
+				// there and does nothing more.
+				if (error instanceof StreamNotOpenedError && sent !== undefined) {
+					const requestId = sent;
+					rejectPending(
+						requestId,
+						new RequestAbortedError({ type: "not-sent-in-time" }),
+					);
+					applyVoid((s) => s.cancelRequest(requestId)).catch(() => {});
+					return;
+				}
 				// WHY one turn of the timers before the error is given: where the
 				// peer closes the session as the request is being written, the
 				// write fails 0.3 ms before `closed` of the transport settles, and
@@ -2338,18 +2383,24 @@ export async function connectOver(
 			};
 			const { signal } = fetchOptions;
 			signal?.throwIfAborted();
+			let registered: Fetch | undefined;
 			const handle = await apply((s) => {
 				const { value, outputs } = s.fetch(fetchRequest);
 				// Registered before the request is sent, so that its answer and
 				// its stream find it.
-				return {
-					value: fetchFrom(
-						value,
-						fetchRequest.parameters?.groupOrder ?? "Ascending",
-						answerWaitMs(answerTimeoutMs, fetchRequest.parameters),
-					),
-					outputs,
-				};
+				registered = fetchFrom(
+					value,
+					fetchRequest.parameters?.groupOrder ?? "Ascending",
+					answerWaitMs(answerTimeoutMs, fetchRequest.parameters),
+				);
+				return { value: registered, outputs };
+			}).catch(async (error: unknown) => {
+				// The peer allowed no stream for it: the FETCH was not sent.
+				if (error instanceof StreamNotOpenedError && registered !== undefined) {
+					await giveUpFetch(registered.requestId, "not-sent-in-time");
+					throw new RequestAbortedError({ type: "not-sent-in-time" });
+				}
+				throw error;
 			});
 			fetches.get(handle.requestId)?.sent();
 			if (signal !== undefined) {

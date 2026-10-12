@@ -7,7 +7,8 @@
 //! `--quiet setup`: it sends no SETUP. `--quiet requests`: it sends its
 //! SETUP, reads every request the client opens, and answers none.
 //! `--quiet publish`: as `requests`, but a `PUBLISH_NAMESPACE` is answered
-//! with `REQUEST_OK`.
+//! with `REQUEST_OK`. `--quiet streams`: it sends its SETUP and allows the
+//! client no bidirectional stream, so that no request can be sent.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -47,6 +48,9 @@ enum Quiet {
     Setup,
     /// Its answers to requests.
     Requests,
+    /// Room for a request: it sends its SETUP and allows the client no
+    /// bidirectional stream.
+    Streams,
     /// Its answers to requests, but for a `PUBLISH_NAMESPACE`, which gets
     /// its `REQUEST_OK`: a client that announces before it publishes then
     /// comes to its PUBLISH.
@@ -104,7 +108,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                     "setup" => Quiet::Setup,
                     "requests" => Quiet::Requests,
                     "publish" => Quiet::Publish,
-                    other => bail!("--quiet is setup, requests or publish, not {other}"),
+                    "streams" => Quiet::Streams,
+                    other => bail!("--quiet is setup, requests, publish or streams, not {other}"),
                 });
             }
             other => bail!("unknown flag {other}"),
@@ -267,7 +272,12 @@ async fn main() -> Result<()> {
     let (max_uni_streams, max_bi_streams) = xmoq_moqt_io::wt::streams_read_at_once(&streams);
     let limits = QuicLimits {
         max_uni_streams,
-        max_bi_streams,
+        // The stream the session itself is on is allowed beside these.
+        max_bi_streams: if quiet == Quiet::Streams {
+            0
+        } else {
+            max_bi_streams
+        },
         stream_receive_window: 256 * 1024,
         receive_window: 4 * 1024 * 1024,
         send_window: 4 * 1024 * 1024,

@@ -15,7 +15,11 @@ const TRACK = { trackNamespace: [hex("61")], trackName: hex("62") };
 
 async function connected(
 	options: SessionConnectOptions = {},
-	hold: { holdBidi?: Promise<void>; holdBidiFrom?: number } = {},
+	hold: {
+		holdBidi?: Promise<void>;
+		holdBidiFrom?: number;
+		failBidi?: () => unknown;
+	} = {},
 ): Promise<{ peer: FakePeer; connection: MoqtConnection }> {
 	const peer = createFakePeer(hold);
 	const connecting = connectOver(peer.transport, options);
@@ -191,15 +195,119 @@ describe("a request the peer does not answer", () => {
 		expect(await state(connection.closed)).toBe("pending");
 	});
 
-	test("the time begins when the request is written: one that waits for a stream is not given up, and has its 10 seconds from then", async () => {
+	test.each<{
+		name: string;
+		ask: (connection: MoqtConnection) => Promise<unknown>;
+	}>([
+		{ name: "SUBSCRIBE", ask: (connection) => connection.subscribe(TRACK) },
+		{
+			name: "PUBLISH",
+			ask: (connection) => connection.publish({ ...TRACK, trackAlias: 1n }),
+		},
+		{ name: "FETCH", ask: (connection) => connection.fetch({ range: RANGE }) },
+	])(
+		"$name that waits for a stream the peer does not allow fails after 10000 ms as not sent, and the session stays open",
+		async ({ ask }) => {
+			let release = (): void => {};
+			const holdBidi = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const { peer, connection } = await connected({}, { holdBidi });
+			const asking = ask(connection);
+			await pass(9_999);
+			expect(await state(asking)).toBe("pending");
+			await pass(1);
+			const error = await state(asking);
+			expect(error).toBeInstanceOf(RequestAbortedError);
+			expect(error).toMatchObject({ abort: { type: "not-sent-in-time" } });
+			expect(await state(connection.closed)).toBe("pending");
+			// The stream comes after all: nothing is written on it, and both
+			// directions are given up with CANCELLED.
+			release();
+			const late = await peer.clientBidi();
+			expect(await state(late.sent.read())).toMatchObject({
+				streamErrorCode: 1,
+			});
+			expect(await state(late.reply.closed)).toMatchObject({
+				streamErrorCode: 1,
+			});
+			expect(await state(connection.closed)).toBe("pending");
+		},
+	);
+
+	// What Chromium does where the peer allows no further stream: the call
+	// is refused at once, and the request asks again.
+	test.each<{ name: string; refusedForMs: number; outcome: string }>([
+		{
+			name: "allowed after 3 seconds: the request is sent then",
+			refusedForMs: 3_000,
+			outcome: "sent",
+		},
+		{
+			name: "never allowed: it fails after 10000 ms as not sent",
+			refusedForMs: 3_600_000,
+			outcome: "not-sent-in-time",
+		},
+	])(
+		"a request whose stream the transport refuses to make is asked for again, $name",
+		async ({ refusedForMs, outcome }) => {
+			let refused = true;
+			const { peer, connection } = await connected(
+				{},
+				{
+					failBidi: () =>
+						refused
+							? new DOMException(
+									"Failed to create bidirectional stream.",
+									"NetworkError",
+								)
+							: undefined,
+				},
+			);
+			const asking = connection.subscribe(TRACK);
+			setTimeout(() => {
+				refused = false;
+			}, refusedForMs);
+			await pass(2_999);
+			expect(await state(asking)).toBe("pending");
+			expect(await state(connection.closed)).toBe("pending");
+			await pass(7_001);
+			if (outcome === "sent") {
+				const request = await peer.clientBidi();
+				await request.sent.read();
+				await request.reply.write(hex(SUBSCRIBE_OK_ALIAS_9));
+				expect(await state(asking)).toBe("resolved");
+			} else {
+				expect(await state(asking)).toMatchObject({
+					abort: { type: outcome },
+				});
+			}
+			expect(await state(connection.closed)).toBe("pending");
+		},
+	);
+
+	test("a wait for a stream that is set", async () => {
+		const { connection } = await connected(
+			{ openStreamTimeoutMs: 1500 },
+			{ holdBidi: new Promise<void>(() => {}) },
+		);
+		const asking = connection.subscribe(TRACK);
+		await pass(1_499);
+		expect(await state(asking)).toBe("pending");
+		await pass(1);
+		expect(await state(asking)).toMatchObject({
+			abort: { type: "not-sent-in-time" },
+		});
+	});
+
+	test("a request whose stream came in time has its 10 seconds for the answer from when it was written", async () => {
 		let release = (): void => {};
 		const holdBidi = new Promise<void>((resolve) => {
 			release = resolve;
 		});
 		const { peer, connection } = await connected({}, { holdBidi });
 		const asking = connection.subscribe(TRACK);
-		await pass(3_600_000);
-		expect(await state(asking)).toBe("pending");
+		await pass(9_000);
 		release();
 		const request = await peer.clientBidi();
 		await request.sent.read();
@@ -211,29 +319,23 @@ describe("a request the peer does not answer", () => {
 		});
 	});
 
-	// Outputs are performed in one line: the event of an answer waits there
-	// behind a request whose stream the peer gives no credit for.
-	test("an answer that came is not timed out while another request waits for its stream", async () => {
-		let release = (): void => {};
-		const holdBidi = new Promise<void>((resolve) => {
-			release = resolve;
-		});
+	// A request that waits for a stream holds nothing else back: neither an
+	// answer of the peer nor a request that is sent after it on a stream
+	// that is there.
+	test("an answer is handed on while another request waits for its stream", async () => {
 		const { peer, connection } = await connected(
 			{},
-			{ holdBidi, holdBidiFrom: 1 },
+			{ holdBidi: new Promise<void>(() => {}), holdBidiFrom: 1 },
 		);
 		const first = connection.subscribe(TRACK);
 		const request = await peer.clientBidi();
 		await request.sent.read();
-		// It waits for a stream, and everything behind it with it.
 		const second = connection.publishNamespace([hex("63")]);
 		await pass(1_000);
 		await request.reply.write(hex(SUBSCRIBE_OK_ALIAS_9));
-		await pass(3_600_000);
-		expect(await state(first)).toBe("pending");
-		expect(await state(request.sent.read())).toBe("pending");
-		release();
 		expect(await state(first)).toBe("resolved");
+		expect(await state(second)).toBe("pending");
+		expect(await state(connection.closed)).toBe("pending");
 		void second.catch(() => {});
 	});
 
