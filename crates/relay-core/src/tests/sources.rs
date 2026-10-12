@@ -284,6 +284,11 @@ fn ways_the_publisher_goes() -> [(&'static str, Vec<Event>, Vec<Action>); 4] {
                 Action::FinishDataStream {
                     out_stream: OutStreamKey(0),
                 },
+                // The timer of the wait is not needed any more.
+                Action::StopDrainTimer {
+                    session: PUBLISHER,
+                    wait: 0,
+                },
                 Action::FinishRequest {
                     session: PUBLISHER,
                     stream: StreamKey(0),
@@ -961,6 +966,11 @@ fn ways_the_subscribed_source_goes() -> [(&'static str, Vec<Event>, Vec<Action>)
                 Action::FinishDataStream {
                     out_stream: OutStreamKey(0),
                 },
+                // The timer of the wait is not needed any more.
+                Action::StopDrainTimer {
+                    session: PUBLISHER,
+                    wait: 0,
+                },
                 Action::FinishOwnRequest {
                     session: PUBLISHER,
                     request: OwnRequestKey(0),
@@ -1182,6 +1192,11 @@ fn a_track_whose_sources_drain_goes_on_with_a_publisher_that_comes() {
             Action::FinishDataStream {
                 out_stream: OutStreamKey(0),
             },
+            // The timer of the wait is not needed any more.
+            Action::StopDrainTimer {
+                session: PUBLISHER,
+                wait: 0,
+            },
             Action::FinishRequest {
                 session: PUBLISHER,
                 stream: StreamKey(0),
@@ -1371,6 +1386,11 @@ fn a_publisher_publishes_anew_under_another_alias_while_its_source_drains() {
         [
             Action::FinishDataStream {
                 out_stream: OutStreamKey(0),
+            },
+            // The timer of the wait is not needed any more.
+            Action::StopDrainTimer {
+                session: PUBLISHER,
+                wait: 0,
             },
             Action::FinishRequest {
                 session: PUBLISHER,
@@ -1738,6 +1758,11 @@ fn a_stream_of_the_subscription_before_is_not_counted_for_the_new_one() {
         Action::FinishDataStream {
             out_stream: OutStreamKey(1),
         },
+        // The timer of the wait is not needed any more.
+        Action::StopDrainTimer {
+            session: PUBLISHER,
+            wait: 1,
+        },
         Action::FinishRequest {
             session: PUBLISHER,
             stream: StreamKey(1),
@@ -1845,6 +1870,11 @@ fn a_stream_of_the_subscription_before_ends_with_the_source_that_took_its_alias(
     let mut expected = vec![
         Action::FinishDataStream {
             out_stream: OutStreamKey(1),
+        },
+        // The timer of the wait is not needed any more.
+        Action::StopDrainTimer {
+            session: PUBLISHER,
+            wait: 1,
         },
         stopped(PUBLISHER, 7),
         Action::FinishRequest {

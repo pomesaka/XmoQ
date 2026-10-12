@@ -401,6 +401,11 @@ fn publish_done_reaches_the_subscribers_once_the_streams_ended() {
         Action::FinishDataStream {
             out_stream: OutStreamKey(0),
         },
+        // The timer of the wait is not needed any more.
+        Action::StopDrainTimer {
+            session: PUBLISHER,
+            wait: 0,
+        },
         // The one stream PUBLISH_DONE counted has ended: the relay says so to
         // the publisher by finishing its direction of the request stream.
         Action::FinishRequest {
@@ -2023,10 +2028,15 @@ fn known_gap_a_stream_sent_ahead_for_a_refused_publish_is_taken_for_the_draining
     data_stream_closed(&mut relay, 8, StreamEnd::Fin);
     let last = data_stream_closed(&mut relay, 7, StreamEnd::Fin);
     assert_eq!(
-        last[..2],
+        last[..3],
         [
             Action::FinishDataStream {
                 out_stream: OutStreamKey(0),
+            },
+            // The timer of the wait is not needed any more.
+            Action::StopDrainTimer {
+                session: PUBLISHER,
+                wait: 0,
             },
             Action::FinishRequest {
                 session: PUBLISHER,

@@ -3163,6 +3163,16 @@ impl Relay {
         if gone.is_empty() {
             return;
         }
+        // WHY not for a wait that ran out: its timer is the one that said
+        // so.
+        if end != TrackEnd::TimedOut {
+            actions.extend(gone.iter().filter_map(|source| {
+                let (session, _) = source.session_and_alias();
+                source
+                    .wait
+                    .map(|wait| Action::StopDrainTimer { session, wait })
+            }));
+        }
         if kept.is_empty() {
             self.end_track(track_name, end, actions);
         } else {
@@ -4012,6 +4022,7 @@ impl Action {
             | Self::OpenDataStream { session, .. }
             | Self::StopDataStream { session, .. }
             | Self::StartDrainTimer { session, .. }
+            | Self::StopDrainTimer { session, .. }
             | Self::StartEarlyTimer { session, .. }
             | Self::StartJoiningFetchTimer { session, .. }
             | Self::StartRendezvousTimer { session, .. }

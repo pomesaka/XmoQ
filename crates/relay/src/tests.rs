@@ -767,6 +767,47 @@ async fn publish_done_is_passed_on_when_the_wait_for_late_streams_is_over() {
     assert_eq!(publish_done(&mut request).await, done(0x2, 0));
 }
 
+/// One round of a publisher that publishes the track, says `PUBLISH_DONE`
+/// that counts one stream, and sends that stream `late` afterwards. Returns
+/// how the relay ended its direction of the PUBLISH stream: a FIN where the
+/// stream was waited for.
+async fn publishes_and_ends(publisher: &mut Peer, group: u64, late: Duration) -> RequestClose {
+    let mut publication = publisher.publish().await;
+    let ended = publisher
+        .session
+        .publish_done(publication.id, 0x2, 1, ReasonPhrase::default())
+        .unwrap();
+    send_message(&mut publication.send, &ended, &Trace::default(), "publish")
+        .await
+        .unwrap();
+    publication.send.finish();
+    tokio::time::sleep(late).await;
+    let data = publisher.send_group(group, &[object(0, 3)]).await;
+    data.finish_and_wait().await.unwrap();
+    match timeout(SOON, publication.reader.next_event()).await {
+        Ok(Ok(RequestStreamEvent::Closed(close))) => close,
+        other => panic!("the relay did not end the stream: {other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_publisher_that_ended_its_track_a_thousand_times_is_still_waited_for() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    // 1,024 rounds whose counted stream comes at once: as many waits as a
+    // session may have timers, each over as soon as it began.
+    for group in 0..1024 {
+        let close = publishes_and_ends(&mut publisher, group, Duration::ZERO).await;
+        assert_eq!(close, RequestClose::Fin, "round {group}");
+    }
+    // The next round's stream comes 100 ms after PUBLISH_DONE, within the
+    // two seconds of the wait: a FIN, as in the first round.
+    let close = publishes_and_ends(&mut publisher, 1024, Duration::from_millis(100)).await;
+    assert_eq!(close, RequestClose::Fin);
+    // No timer of a wait that is over is left.
+    assert_eq!(hub.held().await.timers, 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_stream_without_a_publish_is_stopped_when_its_time_is_up() {
     let (hub, _task) = hub::spawn(HubConfig::default());
