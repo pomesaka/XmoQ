@@ -1455,6 +1455,13 @@ pub struct SendLimits {
     /// discretion, discontinue forwarding Objects before either of the
     /// timeouts occurs"). `None`: every stream is delivered, however late.
     pub delivery_patience: Option<Duration>,
+    /// A subgroup stream that was written whole is kept until the receiver
+    /// has all of it, so that it can still be reset
+    /// ([`OutgoingSubgroup::reset`]) and what was not delivered is not sent.
+    /// For whoever gives up the Groups before the newest. `false`: a stream
+    /// that was written whole is the transport's, and a reset no longer
+    /// reaches it.
+    pub held_until_delivered: bool,
 }
 
 impl Default for SendLimits {
@@ -1464,6 +1471,7 @@ impl Default for SendLimits {
             objects: 4096,
             streams: 256,
             delivery_patience: None,
+            held_until_delivered: false,
         }
     }
 }
@@ -1555,8 +1563,10 @@ pub enum OutgoingEvent {
     /// The writer resets the stream in answer (§11.4.3). A stop that arrives
     /// while nothing is being written is not seen until the next write.
     Stopped(Option<u32>),
-    /// The stream was finished and the receiver did not have all of it
-    /// within [`SendLimits::delivery_patience`]: it was reset.
+    /// The stream was finished and then reset, because the receiver did not
+    /// have all of it within [`SendLimits::delivery_patience`], or because a
+    /// reset was asked for while it was held
+    /// ([`SendLimits::held_until_delivered`]).
     TimedOut,
     /// The writer is done: the stream was finished, reset, or never opened.
     /// Reported once for every writer, and last.
@@ -1778,14 +1788,25 @@ impl Writer {
                 }
                 Some(Command::Finish) => {
                     let Some(open) = send else { return };
-                    let Some(patience) = self.share.budget.limits.delivery_patience else {
+                    let limits = self.share.budget.limits;
+                    if limits.delivery_patience.is_none() && !limits.held_until_delivered {
                         open.finish();
                         return;
+                    }
+                    let asked = self.reset_asked();
+                    let give_up = async move {
+                        let patience = async {
+                            match limits.delivery_patience {
+                                Some(patience) => tokio::time::sleep(patience).await,
+                                None => std::future::pending().await,
+                            }
+                        };
+                        tokio::select! {
+                            code = asked => code,
+                            () = patience => stream_reset_code::DELIVERY_TIMEOUT,
+                        }
                     };
-                    if !open
-                        .finish_within(patience, stream_reset_code::DELIVERY_TIMEOUT)
-                        .await
-                    {
+                    if !open.finish_until(give_up).await {
                         report(OutgoingEvent::TimedOut).await;
                     }
                     return;
