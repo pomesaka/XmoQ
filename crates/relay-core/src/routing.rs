@@ -1215,12 +1215,19 @@ impl Relay {
             };
             self.ask_is_over(&track, ask, &nobody, actions);
         }
-        // Tracks it waited for.
+        // Tracks it waited for: those without a source, and those that
+        // drain, where a SUBSCRIBE is held with the track.
         let waited: BTreeSet<FullTrackName> = self
             .tracks
             .all_pending()
             .filter(|(_, pending)| pending.waiters.iter().any(|w| w.session == session))
             .map(|(track, _)| track.clone())
+            .chain(
+                self.tracks
+                    .all_live()
+                    .filter(|(_, live)| live.held.iter().any(|w| w.session == session))
+                    .map(|(track, _)| track.clone()),
+            )
             .collect();
         for track in waited {
             self.waiters_left(&track, |waiter| waiter.session == session, actions);

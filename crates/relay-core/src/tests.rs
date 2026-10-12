@@ -1831,6 +1831,37 @@ fn the_tracks_of_a_publisher_that_goes_end_in_the_order_of_their_names() {
 }
 
 #[test]
+fn a_session_that_goes_while_its_subscribe_is_held_by_a_draining_track_leaves_nothing() {
+    let mut relay = relay_with_track();
+    // The publisher counts a stream that never comes: the track drains.
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 1),
+    });
+    let held_subscribe = ControlMessage::Subscribe(Subscribe {
+        request_id: 0,
+        full_track_name: track(b"a"),
+        parameters: vec![Parameter::RendezvousTimeout(10_000)],
+    });
+    relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: StreamKey(0),
+        first: held_subscribe,
+    });
+    // WHY the session alone, with no word of its request stream before: the
+    // I/O side may report the two in either order.
+    relay.step(Event::SessionClosed { session: BOB });
+    relay.step(Event::DrainTimeout {
+        session: PUBLISHER,
+        track_alias: UPSTREAM_ALIAS,
+        wait: 0,
+    });
+    let counts = relay.counts();
+    assert_eq!((counts.tracks, counts.pending_tracks), (0, 0));
+}
+
+#[test]
 fn a_drain_timer_of_a_track_that_is_gone_does_not_end_the_next_one_of_its_name() {
     let mut relay = relay_with_track();
     data_stream_opened(&mut relay, 7);
