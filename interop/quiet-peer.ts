@@ -66,6 +66,20 @@
 //                     { code: 17, reason: "no SETUP in time" }`, between
 //                     1.5 and 5 seconds after the client began.
 //
+//   relay-idle-session
+//                     The own relay, told to let a session hold nothing
+//                     for 1.5 seconds (`--idle-session-ms`; 30 by itself),
+//                     and `xmoq-quiet-peer` as a client that sends its
+//                     SETUP and nothing after it. The relay closes the
+//                     session with NO_ERROR: it prints `CLOSE_SESSION
+//                     session=0 code=0x0 reason="the session held
+//                     nothing"`, and the client `SESSION_ENDED ClosedByPeer
+//                     { code: 0, reason: "the session held nothing" }`,
+//                     between 1.5 and 5 seconds after the client began.
+//                     Beside it an own-rust publisher that announced its
+//                     namespace and has no subscriber: it holds something,
+//                     and is still there when the idle one has gone.
+//
 // Not seen here: the STOP_SENDING for the peer's direction of a request,
 // which the peer does not watch; the run with `no answer:` in its name has
 // it from the relay's log, for a SUBSCRIBE.
@@ -551,11 +565,58 @@ async function relayNoSetup(): Promise<string> {
 	return `the own relay closed the session of a client that sent no SETUP with CONTROL_MESSAGE_TIMEOUT (0x11) ${after} ms after the client began (the relay's wait: ${WAIT_MS} ms): ${said}`;
 }
 
+async function relayIdleSession(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-rust"],
+		verbose: options.verbose,
+		relayArgs: ["--idle-session-ms", String(WAIT_MS)],
+	});
+	// A session that holds something: a namespace, and nobody asks for it.
+	const publisher = spawnRustClient(
+		context,
+		"pub:own-rust",
+		"own-rust",
+		"publish-namespace",
+		TRACK,
+		["--payload-hex", "00", "--serve-on-line", "--timeout-secs", "60"],
+	);
+	await publisher.waitForLine(/^NAMESPACE_PUBLISHED/);
+	const began = Date.now();
+	const client = spawnQuietClient(context, "client:quiet-peer", 20_000, true);
+	const [said] = await client.waitForLine(
+		/^SESSION_ENDED ClosedByPeer \{ code: 0, reason: "the session held nothing" \}$/,
+	);
+	const after = Date.now() - began;
+	if (after < WAIT_MS || after > BEFORE_MS) {
+		throw new Error(
+			`the relay was to close between ${WAIT_MS} and ${BEFORE_MS} ms, not after ${after}`,
+		);
+	}
+	const closed =
+		/^CLOSE_SESSION session=1 code=0x0 reason="the session held nothing"$/;
+	const others = await context.relay.linesBefore(
+		{ line: closed },
+		/^(?:CLOSE_SESSION|SESSION_CLOSED) session=0\b/,
+	);
+	if (others.length > 0) {
+		throw new Error("the publisher that announced was to stay");
+	}
+	return `the own relay closed a session that sent its SETUP and held nothing with NO_ERROR ${after} ms after the client began (the relay's wait: ${WAIT_MS} ms), and kept the session of a publisher that had announced a namespace: ${said}`;
+}
+
+const RELAY_CASES: Record<string, () => Promise<string>> = {
+	"relay-no-setup": relayNoSetup,
+	"relay-idle-session": relayIdleSession,
+};
+
 async function main(): Promise<void> {
-	if (options.case === "relay-no-setup") {
+	const ofTheRelay = RELAY_CASES[options.case];
+	if (ofTheRelay !== undefined) {
 		let summary: string;
 		try {
-			summary = await relayNoSetup();
+			summary = await ofTheRelay();
 		} finally {
 			await runCleanups();
 		}

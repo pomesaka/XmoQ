@@ -3343,6 +3343,20 @@ impl Relay {
             .is_some_and(|state| state.requests.get(stream).is_some())
     }
 
+    /// Whether the session holds nothing: no request of the peer that is
+    /// open or held (a SUBSCRIBE, also one that waits for a publisher, a
+    /// PUBLISH, a namespace it announced, a FETCH), and no request the
+    /// relay has open on it. `false` for a session the relay does not have.
+    ///
+    /// For the I/O side, which lets go of a session that stays so
+    /// (§13.6.1 has a session that is idle be one that can close).
+    #[must_use]
+    pub fn holds_nothing(&self, session: SessionKey) -> bool {
+        self.sessions
+            .get(&session)
+            .is_some_and(|state| state.requests.len() == 0 && state.own_requests() == 0)
+    }
+
     /// What the relay holds.
     #[must_use]
     pub fn counts(&self) -> Counts {

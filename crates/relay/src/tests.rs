@@ -562,9 +562,76 @@ async fn a_client_that_sends_no_setup_is_closed_when_its_time_is_over() {
 async fn a_client_that_sent_its_setup_stays_when_that_time_is_over() {
     let (hub, _task) = hub::spawn(HubConfig::default());
     let mut peer = Peer::connect(&hub, true).await;
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    // Twice the time a SETUP has, and less than a session may hold nothing.
+    tokio::time::sleep(Duration::from_secs(20)).await;
     assert_eq!(peer.connection.close_info().map(|close| close.code), None);
     peer.publish().await;
+}
+
+/// What a session does after its SETUP, for the test below.
+#[derive(Debug, Clone, Copy)]
+enum Holds {
+    Nothing,
+    /// A namespace it announced, with no subscriber.
+    Namespace,
+    /// A PUBLISH with no subscriber.
+    Publish,
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_session_that_holds_nothing_is_closed_after_thirty_seconds_and_one_that_holds_something_stays()
+ {
+    // (what the session holds; whether it is closed, with NO_ERROR, after
+    //  30 seconds)
+    let cases = [
+        (Holds::Nothing, true),
+        (Holds::Namespace, false),
+        (Holds::Publish, false),
+    ];
+    for (holds, closed) in cases {
+        let (hub, _task) = hub::spawn(HubConfig::default());
+        let mut peer = Peer::connect(&hub, true).await;
+        let _kept = match holds {
+            Holds::Nothing => None,
+            Holds::Namespace => Some(peer.publish_namespace().await),
+            Holds::Publish => Some(peer.publish().await),
+        };
+        tokio::time::sleep(Duration::from_millis(29_900)).await;
+        assert_eq!(
+            peer.connection.close_info().map(|close| close.code),
+            None,
+            "{holds:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            peer.connection.close_info().map(|close| close.code),
+            closed.then_some(0x0),
+            "{holds:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_time_a_session_may_hold_nothing_begins_when_its_last_request_has_gone() {
+    let config = HubConfig {
+        idle_session_timeout: Duration::from_secs(3),
+        ..HubConfig::default()
+    };
+    let (hub, _task) = hub::spawn(config);
+    let mut peer = Peer::connect(&hub, true).await;
+    let announced = peer.publish_namespace().await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(peer.connection.close_info().map(|close| close.code), None);
+    // The namespace is withdrawn: the request is cancelled (§6.2).
+    // CANCELLED (0x1).
+    announced.send.reset(0x1);
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert_eq!(peer.connection.close_info().map(|close| close.code), None);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        peer.connection.close_info().map(|close| close.code),
+        Some(0x0)
+    );
 }
 
 /// A hub that holds nothing.

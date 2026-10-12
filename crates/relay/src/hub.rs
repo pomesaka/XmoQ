@@ -127,6 +127,19 @@ pub struct HubConfig {
     /// holds its place among the sessions for as long as its connection
     /// lives, which the keep-alives of the two ends see to.
     pub setup_timeout: Duration,
+    /// How long a session that has sent its SETUP may hold nothing: no
+    /// request of its own that is open or held, and none the relay has on
+    /// it. Then it is closed with `NO_ERROR`. **Provisional.**
+    ///
+    /// WHY a limit: the relay serves [`Self::max_sessions`] sessions, and
+    /// one that asks for nothing holds its place for as long as its
+    /// connection lives, which the keep-alives of the two ends see to; as
+    /// many such sessions as there are places keep everybody else out.
+    /// WHY longer than [`Self::setup_timeout`]: a client that has sent its
+    /// SETUP may be one that is about to announce, or a viewer between two
+    /// broadcasts. §13.6.1 has a client "Accept that idle connections can
+    /// close and implement reconnection logic when needed".
+    pub idle_session_timeout: Duration,
     /// Sent as `MOQT_IMPLEMENTATION`.
     pub implementation: String,
     /// Where one line about each thing the relay does goes, if anywhere.
@@ -160,6 +173,7 @@ impl Default for HubConfig {
             max_timers_per_session: 1024,
             upstream_timeout: Duration::from_secs(5),
             setup_timeout: Duration::from_secs(10),
+            idle_session_timeout: Duration::from_secs(30),
             implementation: concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"))
                 .to_string(),
             log: None,
@@ -250,6 +264,13 @@ enum Envelope<C: Connection> {
     SetupDue {
         session: SessionKey,
     },
+    /// The time a session may hold nothing is over
+    /// ([`HubConfig::idle_session_timeout`]), counted from the moment
+    /// `since` names.
+    IdleDue {
+        session: SessionKey,
+        since: u64,
+    },
     /// The relay is to stop: every session is closed, and the sender is
     /// answered when the closes have reached the peers.
     Stop(oneshot::Sender<()>),
@@ -298,6 +319,9 @@ struct SessionHandle<C: Connection> {
     /// A message came on the client's control stream: its SETUP, or what
     /// the relay closes the session for.
     said_something: bool,
+    /// Since when the session holds nothing, as a number that names the
+    /// moment; `None` while it holds something, or has sent no SETUP.
+    idle_since: Option<u64>,
     /// The writers of the request streams the peer has open.
     requests: HashMap<StreamKey, mpsc::Sender<RequestCommand>>,
     /// The tasks of the request streams the relay has open on the session.
@@ -682,6 +706,7 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
         out_groups: HashMap::new(),
         fetch_pipes: HashMap::new(),
         timers: Timers::default(),
+        idle_moments: 0,
         closing: std::collections::HashSet::new(),
     };
     let task = tokio::spawn(hub.run(inbox));
@@ -710,6 +735,8 @@ struct Hub<C: Connection> {
     /// it short. Dropping that cuts it short as well.
     fetch_pipes: HashMap<(SessionKey, StreamKey), oneshot::Sender<u32>>,
     timers: Timers,
+    /// The next number that names a moment a session began to hold nothing.
+    idle_moments: u64,
     /// The sessions the relay closed itself and has not forgotten yet: their
     /// streams are held by a task until the close has reached the peer
     /// ([`Self::close`]).
@@ -926,6 +953,7 @@ impl<C: Connection> Hub<C> {
                     self.feed(pending);
                 }
                 Envelope::SetupDue { session } => self.setup_due(session),
+                Envelope::IdleDue { session, since } => self.idle_due(session, since),
                 Envelope::Stop(answer) => self.stop(answer),
                 #[cfg(test)]
                 Envelope::Inspect(answer) => {
@@ -954,6 +982,49 @@ impl<C: Connection> Hub<C> {
     fn log(&self, line: impl FnOnce() -> String) {
         if let Some(log) = &self.config.log {
             log.print(line());
+        }
+    }
+
+    /// Notes which sessions have come to hold nothing, and starts their
+    /// time; one that holds something again has no time running.
+    fn watch_idle(&mut self) {
+        let wait = self.config.idle_session_timeout;
+        for (session, handle) in &mut self.sessions {
+            let idle = handle.said_something && self.relay.holds_nothing(*session);
+            match (handle.idle_since, idle) {
+                (None, true) => {
+                    let since = self.idle_moments;
+                    self.idle_moments = self.idle_moments.wrapping_add(1);
+                    handle.idle_since = Some(since);
+                    let (events, session) = (self.events.clone(), *session);
+                    handle.tasks.retain(|task| !task.is_finished());
+                    handle.tasks.push(tokio::spawn(async move {
+                        tokio::time::sleep(wait).await;
+                        // The hub is gone when this fails.
+                        let _ = events.send(Envelope::IdleDue { session, since }).await;
+                    }));
+                }
+                (Some(_), false) => handle.idle_since = None,
+                _ => {}
+            }
+        }
+    }
+
+    /// The time a session may hold nothing is over: it is closed, unless
+    /// it has held something since.
+    ///
+    /// WHY `NO_ERROR`: §3.5 has no code for it ("`NO_ERROR` (0x0): The
+    /// session is being terminated without an error"), and the peer did
+    /// nothing wrong.
+    fn idle_due(&mut self, session: SessionKey, since: u64) {
+        let still = self
+            .sessions
+            .get(&session)
+            .is_some_and(|handle| handle.idle_since == Some(since));
+        if still {
+            let mut pending = VecDeque::new();
+            self.close(session, NO_ERROR, "the session held nothing", &mut pending);
+            self.feed(pending);
         }
     }
 
@@ -1033,6 +1104,7 @@ impl<C: Connection> Hub<C> {
                 connection,
                 control,
                 said_something: false,
+                idle_since: None,
                 requests: HashMap::new(),
                 own_requests: HashMap::new(),
                 stops,
@@ -1074,7 +1146,18 @@ impl<C: Connection> Hub<C> {
     /// action can produce another event, such as a budget that turned out
     /// used up.
     fn feed(&mut self, mut pending: VecDeque<Event>) {
+        // WHY not after an Object or a stream of Objects: those come by
+        // the thousand, and change nothing of what a session holds.
+        let mut may_have_changed = false;
         while let Some(event) = pending.pop_front() {
+            may_have_changed |= !matches!(
+                event,
+                Event::Object { .. }
+                    | Event::DataStreamOpened { .. }
+                    | Event::OutStreamOpened { .. }
+                    | Event::OutStreamClosed { .. }
+                    | Event::FetchStreamWritten { .. }
+            );
             let closed = match &event {
                 Event::SessionClosed { session } => Some(*session),
                 _ => None,
@@ -1153,6 +1236,9 @@ impl<C: Connection> Hub<C> {
             if let Some(session) = closed {
                 self.forget_session(session);
             }
+        }
+        if may_have_changed {
+            self.watch_idle();
         }
     }
 

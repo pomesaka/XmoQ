@@ -68,6 +68,19 @@ The peer does not watch whether its own direction of a request stream is stopped
 
 The relay now gives a client 10 seconds for its SETUP, from when it took the session. The 10 seconds themselves are in a test on a clock that is moved by hand (9,999 ms open, 10,001 ms closed with 0x11).
 
+## A session that sends its SETUP and holds nothing
+
+Added on 2026-10-13. The quiet peer as a client with `--send-setup yes`: it sends its SETUP and opens no request.
+
+| Relay | What the client printed | What the relay printed |
+|---|---|---|
+| As it was | `STAYED ms=25000` | nothing after `SEND session=0 control SETUP` |
+| With the limit, `--idle-session-ms 1500` | `SESSION_ENDED ClosedByPeer { code: 0, reason: "the session held nothing" }`, 1,747 ms after it began | `CLOSE_SESSION session=1 code=0x0 reason="the session held nothing"`; the session of a publisher that had announced a namespace and had no subscriber was still there |
+
+The relay now closes such a session after 30 seconds. The 30 seconds themselves are in a test on a clock moved by hand (29.9 s open, 30.1 s closed with 0x0; a session with a namespace or a PUBLISH and no subscriber stays; the time begins anew when a namespace is withdrawn).
+
+**Whether the own clients come to hold nothing for 30 seconds**, with the relay as it is by itself: the demo on ports of its own, `bun demo/check.ts` (it plays), and then a watching page left for 40 seconds without a broadcast, 40 seconds with one, and 40 seconds after the publisher had gone. The relay's log has no session closed for holding nothing, and four sessions in all (the two of the check, the publisher, and the viewer once: it connects when the room has a broadcast). The terminal viewer and the Rust client were not left idle by hand: read from their code, they subscribe or announce at once and leave when they are refused.
+
 ## Not run
 
 - **The 10 seconds themselves, against a real peer.** The tests of `@xmoq/moqt` move a clock by hand: 9,999 ms nothing, 10,000 ms given up, for SUBSCRIBE, PUBLISH, PUBLISH_NAMESPACE and FETCH, and 13,000 and 30,000 ms with the two parameters. The Rust client's time is tokio's, run with 1.5 seconds only.
