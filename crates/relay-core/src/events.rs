@@ -384,6 +384,12 @@ pub enum Action {
         out_stream: OutStreamKey,
         /// The header to write.
         header: SubgroupHeader,
+        /// What the subscriber asked for with `SUBGROUP_DELIVERY_TIMEOUT`
+        /// on its SUBSCRIBE (§8, §10.2.3), in milliseconds: how long after
+        /// the stream's FIN it may take to have all of it, before the
+        /// stream is reset with `DELIVERY_TIMEOUT`. `None`: it asked for
+        /// nothing, or for 0.
+        subgroup_delivery_timeout: Option<u64>,
     },
     /// Write an Object on a subgroup stream the relay opened.
     SendObject {

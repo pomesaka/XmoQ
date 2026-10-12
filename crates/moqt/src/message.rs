@@ -850,7 +850,7 @@ pub(crate) mod tests {
     use crate::kvp::KeyValuePair;
     use crate::name::Location;
     use crate::params::{GroupOrder, SubscriptionFilter};
-    use crate::test_util::fixture;
+    use crate::test_util::{fixture, fixture_from_a_library};
 
     fn xmoq_namespace() -> TrackNamespace {
         TrackNamespace::new(vec![b"xmoq".to_vec(), b"phase0".to_vec()]).unwrap()
@@ -1066,6 +1066,57 @@ pub(crate) mod tests {
                 }),
             ),
         ]
+    }
+
+    /// The messages of `fixtures/moqt-18-from-libraries/`, each with what
+    /// its README says it decodes to.
+    fn messages_a_library_wrote() -> Vec<(&'static str, ControlMessage)> {
+        let subscribe = |parameters| {
+            ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: xmoq_track(),
+                parameters,
+            })
+        };
+        vec![
+            (
+                "subscribe-delivery-timeouts-moqtail-ts",
+                subscribe(vec![
+                    Parameter::ObjectDeliveryTimeout(250),
+                    Parameter::SubgroupDeliveryTimeout(500),
+                    Parameter::SubscriptionFilter(SubscriptionFilter::LargestObject),
+                ]),
+            ),
+            (
+                "subscribe-subgroup-delivery-timeout-moqtail-ts",
+                subscribe(vec![
+                    Parameter::SubgroupDeliveryTimeout(500),
+                    Parameter::SubscriptionFilter(SubscriptionFilter::LargestObject),
+                ]),
+            ),
+        ]
+    }
+
+    pub(crate) fn names_of_files_a_library_wrote() -> Vec<&'static str> {
+        messages_a_library_wrote()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    #[test]
+    fn decodes_and_encodes_the_bytes_a_library_wrote() {
+        for (name, message) in messages_a_library_wrote() {
+            let bytes = fixture_from_a_library(name);
+            assert_eq!(
+                ControlMessage::decode(&bytes),
+                Ok(Some((message.clone(), bytes.len()))),
+                "{name}"
+            );
+            let mut out = Vec::new();
+            message.encode(&mut out).unwrap();
+            assert_eq!(out, bytes, "{name}");
+        }
     }
 
     #[test]

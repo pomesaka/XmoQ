@@ -307,6 +307,11 @@ struct Subscriber {
     /// can be prohibitively expensive, Relays are not required or expected
     /// to do so". A Group at or before the End Group can still come late.
     end_group: Option<u64>,
+    /// The `SUBGROUP_DELIVERY_TIMEOUT` of the SUBSCRIBE, in milliseconds
+    /// (§8, §10.2.3); `None` without one, and for 0. Handed to the I/O side
+    /// with every stream of the subscription ([`Action::OpenDataStream`]),
+    /// which acts on it. As the SUBSCRIBE had it: `REQUEST_UPDATE` is refused.
+    subgroup_delivery_timeout: Option<u64>,
     /// Subgroup streams the relay started for the subscription.
     streams_started: u64,
     /// Whether one of them may never have been opened, so that the number
@@ -1907,7 +1912,14 @@ impl Relay {
         let track_name = &subscribe.full_track_name;
         let forward = params::forward(&subscribe.parameters);
         let filter = params::subscription_filter(&subscribe.parameters);
-        let waiter = Waiter::new(session, stream, request, forward, filter);
+        let waiter = Waiter::new(
+            session,
+            stream,
+            request,
+            forward,
+            filter,
+            params::subgroup_delivery_timeout(&subscribe.parameters),
+        );
         let waits = match self.tracks.phase(track_name) {
             // §9.5: "When a Relay receives an authorized SUBSCRIBE for a Track
             // with one or more Established upstream subscriptions, it MUST
@@ -3382,6 +3394,7 @@ impl OutStreamAllocator<'_> {
                 track_alias: subscriber.track_alias,
                 ..header
             },
+            subgroup_delivery_timeout: subscriber.subgroup_delivery_timeout,
         });
     }
 }

@@ -21,6 +21,13 @@ pub(crate) fn fixture_by_hand(name: &str) -> Vec<u8> {
     read_hex("moqt-18-by-hand", name)
 }
 
+/// Reads `fixtures/moqt-18-from-libraries/<name>.hex`, bytes a peer's
+/// library serialized in a script and no wire carried, which the TypeScript
+/// implementation reads too.
+pub(crate) fn fixture_from_a_library(name: &str) -> Vec<u8> {
+    read_hex("moqt-18-from-libraries", name)
+}
+
 fn read_hex(directory: &str, name: &str) -> Vec<u8> {
     let path = format!(
         "{}/../../fixtures/{directory}/{name}.hex",
@@ -64,6 +71,17 @@ fn every_fixture_file_is_read_by_a_test() {
     read.sort();
 
     assert_eq!(names_on_disk("moqt-18"), read);
+}
+
+#[test]
+fn every_file_a_library_wrote_is_read_by_a_test() {
+    let mut read: Vec<String> = crate::message::tests::names_of_files_a_library_wrote()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    read.sort();
+
+    assert_eq!(names_on_disk("moqt-18-from-libraries"), read);
 }
 
 /// The `REQUEST_UPDATE` messages written by hand, and the Request ID each

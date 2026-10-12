@@ -19,7 +19,9 @@ use xmoq_moqt::session::{
     PeerRequest, PeerRequestId, PeerRequestOpened, RequestEvent, RequestId, Role, Session,
     Transport,
 };
-use xmoq_moqt_io::memory::{MemoryConnection, MemoryRecv, MemorySend, STREAM_WINDOW, pair};
+use xmoq_moqt_io::memory::{
+    MemoryConnection, MemoryRecv, MemorySend, STREAM_WINDOW, pair, pair_that_delivers_when_told,
+};
 use xmoq_moqt_io::{
     Connection, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, ReadError, RecvStream,
     RequestClose, RequestReader, RequestStreamEvent, SendLimits, SendStream, StreamConfig,
@@ -83,6 +85,26 @@ impl Peer {
     /// a receiver that has stopped reading.
     async fn connect(hub: &HubHandle<MemoryConnection>, reads: bool) -> Self {
         let (local, remote) = pair();
+        Self::connect_over(hub, local, remote, reads).await
+    }
+
+    /// A peer that reads, towards which the relay's finished subgroup
+    /// streams are not delivered: they stay with their writers, as on a
+    /// real connection whose receiver has not acknowledged them, until the
+    /// test notifies what is returned with the peer.
+    async fn connect_without_delivery(
+        hub: &HubHandle<MemoryConnection>,
+    ) -> (Self, Arc<tokio::sync::Notify>) {
+        let (remote, local, told) = pair_that_delivers_when_told();
+        (Self::connect_over(hub, local, remote, true).await, told)
+    }
+
+    async fn connect_over(
+        hub: &HubHandle<MemoryConnection>,
+        local: MemoryConnection,
+        remote: MemoryConnection,
+        reads: bool,
+    ) -> Self {
         hub.add_session(remote).await;
         let connection = Arc::new(local);
         let mut session = Session::new(Role::Client, Transport::WebTransport);
@@ -165,7 +187,12 @@ impl Peer {
     /// Subscribes to the track and returns the request with the Track Alias
     /// the relay assigned.
     async fn subscribe(&mut self) -> (OpenRequest, u64) {
-        let (id, message) = self.session.subscribe(track(), vec![]).unwrap();
+        self.subscribe_with(vec![]).await
+    }
+
+    /// The same with these parameters on the SUBSCRIBE.
+    async fn subscribe_with(&mut self, parameters: Vec<Parameter>) -> (OpenRequest, u64) {
+        let (id, message) = self.session.subscribe(track(), parameters).unwrap();
         let (request, event) = self.request(id, message).await;
         let RequestEvent::SubscribeEstablished { track_alias, .. } = event else {
             panic!("not accepted: {event:?}");
@@ -2728,4 +2755,140 @@ async fn an_object_from_the_cache_keeps_its_subgroup_its_priority_and_its_proper
             object(3, 2, 200, bytes(), &[]),
         ]
     );
+}
+
+/// What the delivery timeout of a subscription and the relay's own flags do
+/// to a subgroup stream that is written whole and not delivered (§8), on a
+/// connection that delivers when the test says so.
+mod delivery_timeouts {
+    use super::*;
+
+    /// What came on the peer's unidirectional streams and was not taken yet.
+    fn arrived(peer: &mut Peer) -> Vec<UniEvent> {
+        let (events, _) = peer.data.as_mut().expect("this peer reads");
+        std::iter::from_fn(|| events.try_recv().ok()).collect()
+    }
+
+    /// The Groups whose stream was reset with `DELIVERY_TIMEOUT` (0x2) among
+    /// these events. A stream that ended another way fails the test.
+    fn given_up(events: &[UniEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                UniEvent::SubgroupClosed { header, end, .. } => {
+                    assert_eq!(*end, StreamEnd::Aborted(Some(0x2)), "{header:?}");
+                    Some(header.group_id)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A relay with these settings, a publisher of the track, and a viewer
+    /// that subscribed with this `SUBGROUP_DELIVERY_TIMEOUT` (none for
+    /// `None`) and to which nothing is delivered.
+    async fn scene(
+        config: HubConfig,
+        asked: Option<u64>,
+    ) -> (
+        Peer,
+        Peer,
+        (OpenRequest, OpenRequest),
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (hub, task) = hub::spawn(config);
+        let mut publisher = Peer::connect(&hub, true).await;
+        let publication = publisher.publish().await;
+        let (mut viewer, _told) = Peer::connect_without_delivery(&hub).await;
+        let parameters = asked
+            .map(Parameter::SubgroupDeliveryTimeout)
+            .into_iter()
+            .collect();
+        let (subscription, _alias) = viewer.subscribe_with(parameters).await;
+        (publisher, viewer, (publication, subscription), task)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_is_given_up_after_the_smaller_of_the_flag_and_what_the_subscriber_asked() {
+        // (`--delivery-patience-ms`, the SUBGROUP_DELIVERY_TIMEOUT of the
+        // SUBSCRIBE, when the stream is reset), in milliseconds; never where
+        // the last is `None`.
+        let cases: [(Option<u64>, Option<u64>, Option<u64>); 7] = [
+            (None, None, None),
+            (None, Some(300), Some(300)),
+            (Some(500), None, Some(500)),
+            (Some(500), Some(300), Some(300)),
+            (Some(300), Some(500), Some(300)),
+            // §8: "a value of 0 means that there is no timeout set".
+            (None, Some(0), None),
+            (Some(500), Some(0), Some(500)),
+        ];
+        for (flag, asked, reset_after) in cases {
+            let case = format!("flag {flag:?}, asked {asked:?}");
+            let config = HubConfig {
+                send: SendLimits {
+                    delivery_patience: flag.map(Duration::from_millis),
+                    ..SendLimits::default()
+                },
+                ..HubConfig::default()
+            };
+            let (publisher, mut viewer, _requests, _task) = scene(config, asked).await;
+            publisher.send_objects(&[object(0, 3)]).await.finish();
+            // The Object is there; its stream is finished and not delivered.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
+            let Some(reset_after) = reset_after else {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
+                continue;
+            };
+            tokio::time::sleep(Duration::from_millis(reset_after - 100)).await;
+            assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(given_up(&arrived(&mut viewer)), [0], "{case}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn older_groups_are_given_up_only_for_a_subscription_that_asked_for_a_delivery_timeout() {
+        // (`--older-groups-grace-ms`, the SUBGROUP_DELIVERY_TIMEOUT of the
+        // SUBSCRIBE, how long after Group 1 began Group 0 is reset); never
+        // where the last is `None`. The timeout asked for is far longer
+        // than the test, so that it is the rule that resets, not the timer.
+        let cases: [(u64, Option<u64>, Option<u64>); 4] = [
+            (0, None, None),
+            (100, None, None),
+            (0, Some(600_000), Some(0)),
+            (100, Some(600_000), Some(100)),
+        ];
+        for (grace, asked, reset_after) in cases {
+            let case = format!("grace {grace}, asked {asked:?}");
+            let config = HubConfig {
+                give_up_older_groups: true,
+                older_groups_grace: Duration::from_millis(grace),
+                ..HubConfig::default()
+            };
+            let (publisher, mut viewer, _requests, _task) = scene(config, asked).await;
+            publisher.send_group(0, &[object(0, 3)]).await.finish();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
+            publisher.send_group(1, &[object(0, 3)]).await.finish();
+            match reset_after {
+                None => {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
+                }
+                Some(0) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    assert_eq!(given_up(&arrived(&mut viewer)), [0], "{case}");
+                }
+                Some(reset_after) => {
+                    tokio::time::sleep(Duration::from_millis(reset_after - 50)).await;
+                    assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    assert_eq!(given_up(&arrived(&mut viewer)), [0], "{case}");
+                }
+            }
+        }
+    }
 }

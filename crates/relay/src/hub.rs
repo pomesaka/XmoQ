@@ -86,7 +86,9 @@ pub struct HubConfig {
     /// of that track towards it that it does not have all of yet are reset
     /// with `DELIVERY_TIMEOUT`, and the subscription goes on (§8:
     /// "Publishers can, at their discretion, discontinue forwarding Objects
-    /// before either of the timeouts occurs").
+    /// before either of the timeouts occurs"). **Only for a subscription
+    /// whose SUBSCRIBE had a `SUBGROUP_DELIVERY_TIMEOUT`** (provisional):
+    /// a subscriber that set none gets every stream whole.
     pub give_up_older_groups: bool,
     /// With `give_up_older_groups`: how long an older Group still gets from
     /// the moment a newer one is opened. WHY more than nothing: the last
@@ -1172,7 +1174,8 @@ impl<C: Connection> Hub<C> {
                 session,
                 out_stream,
                 header,
-            } => self.open_data_stream(session, out_stream, header, pending),
+                subgroup_delivery_timeout: asked,
+            } => self.open_data_stream((session, out_stream), header, asked, pending),
             Action::SendObject { out_stream, object } => {
                 self.send_object(out_stream, object, pending);
             }
@@ -1416,15 +1419,25 @@ impl<C: Connection> Hub<C> {
         });
     }
 
-    /// Starts the writer of a subgroup stream towards a subscriber.
+    /// Starts the writer of a subgroup stream towards a subscriber. `asked`
+    /// is the `SUBGROUP_DELIVERY_TIMEOUT` of the subscription, in
+    /// milliseconds, where its SUBSCRIBE had one.
     fn open_data_stream(
         &mut self,
-        session: SessionKey,
-        out_stream: OutStreamKey,
+        (session, out_stream): (SessionKey, OutStreamKey),
         header: SubgroupHeader,
+        asked: Option<u64>,
         pending: &mut VecDeque<Event>,
     ) {
-        if self.config.give_up_older_groups {
+        let delivery_timeout = asked.map(Duration::from_millis);
+        // WHY only for a subscription that sent a delivery timeout
+        // (**provisional**, decided on 2026-10-12): a subscriber that says
+        // nothing is owed every Object (§8: "if none of the timeouts are set
+        // to a non-zero value, all Objects ... are delivered"), and the rule
+        // suits video and breaks sound, whose Groups are shorter than a
+        // round trip. A viewer that wants late Groups of a track dropped
+        // says so for that track.
+        if self.config.give_up_older_groups && delivery_timeout.is_some() {
             self.give_up_groups_before(session, out_stream, &header);
         }
         let Some(handle) = self.sessions.get(&session) else {
@@ -1496,6 +1509,7 @@ impl<C: Connection> Hub<C> {
         let writer = OutgoingSubgroup::spawn(
             Arc::clone(&handle.connection),
             header,
+            delivery_timeout,
             &handle.budget,
             report,
             self.config.streams.trace.clone(),
@@ -2334,10 +2348,13 @@ fn describe(action: &Action) -> Option<String> {
             "RESET_REQUEST session={} stream={} code={code:#x}",
             session.0, stream.0
         ),
+        // WHY the delivery timeout is not in the line: the interop runs wait
+        // for these lines as they are.
         Action::OpenDataStream {
             session,
             out_stream,
             header,
+            ..
         } => format!(
             "OPEN_DATA session={} out={} track_alias={} group={}",
             session.0, out_stream.0, header.track_alias, header.group_id

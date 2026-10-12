@@ -235,6 +235,20 @@ pub fn forward(parameters: &[Parameter]) -> bool {
         .unwrap_or(true)
 }
 
+/// The `SUBGROUP_DELIVERY_TIMEOUT` a parameter list sets, in milliseconds.
+/// None without the parameter and for 0 (§8: "a value of 0 means that there
+/// is no timeout set").
+#[must_use]
+pub fn subgroup_delivery_timeout(parameters: &[Parameter]) -> Option<u64> {
+    parameters
+        .iter()
+        .find_map(|parameter| match parameter {
+            Parameter::SubgroupDeliveryTimeout(milliseconds) => Some(*milliseconds),
+            _ => None,
+        })
+        .filter(|milliseconds| *milliseconds != 0)
+}
+
 /// The Subscription Filter a parameter list has; none means that the
 /// subscription is unfiltered (§10.2.9).
 #[must_use]

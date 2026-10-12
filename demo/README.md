@@ -21,7 +21,7 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 
 `/publish?size=720` and `size=1080` send 1280x720 and 1920x1080 where the page otherwise sends 640x360, at 3 and 6 Mbit/s unless `?bitrate=` says otherwise, and ask a camera for that size ([record](../docs/experiments/2026-10-12-the-demo-at-720-and-1080-lines.md)).
 
-`/watch?videoTimeout=500` and `?audioTimeout=N` send a SUBGROUP_DELIVERY_TIMEOUT with the SUBSCRIBE of the one track; the relay does not act on it yet ([record](../docs/experiments/2026-10-12-delivery-timeouts-of-a-subscription-what-draft-18-has-and-who-does-what.md)).
+`/watch?videoTimeout=500` and `?audioTimeout=N` send a SUBGROUP_DELIVERY_TIMEOUT with the SUBSCRIBE of the one track, which the relay acts on: a Group that is not through that long after its end is given up for this viewer, and with `--older-groups give-up` the older Groups of that track, and of no other ([record](../docs/experiments/2026-10-12-the-relay-follows-the-delivery-timeout-a-viewer-asks-for.md)).
 
 `/publish?keyint=2000` makes a Group two seconds long (a second when left out), and `/watch?join=no` waits for the next key frame where the page otherwise fetches the Group it comes into ([record](../docs/experiments/2026-10-12-the-first-picture-of-a-viewer-who-comes-late-fetch-or-wait.md)).
 

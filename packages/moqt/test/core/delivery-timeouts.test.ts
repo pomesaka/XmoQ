@@ -4,23 +4,25 @@ import {
 	decodeControlMessage,
 	encodeControlMessage,
 } from "../../src/core/control-message.ts";
-import { hex, toHex, utf8 } from "../helpers.ts";
+import {
+	fromALibrary,
+	fromALibraryNames,
+	hex,
+	toHex,
+	utf8,
+} from "../helpers.ts";
 
 // A SUBSCRIBE with the delivery timeouts of §10.2.3 and §10.2.4, as
-// moqtail npm 0.13.0 serializes it (`Subscribe.newLatestObject(0n, name,
-// [new ObjectDeliveryTimeout(250n), new SubgroupDeliveryTimeout(500n)])`,
-// run on 2026-10-12). WHY here and not in fixtures/moqt-18/: no client of
-// moqtail sends these parameters, so the bytes were never on a wire, and
-// every file there is a capture that the Rust implementation reads too.
-test.each<{
-	name: string;
-	bytes: string;
+// moqtail npm 0.13.0 serializes it. The bytes are in
+// fixtures/moqt-18-from-libraries/, which the Rust implementation reads
+// too; its README has how they were made. WHY not fixtures/moqt-18/: no
+// client of moqtail sends these parameters, so no wire carried them.
+const FILES: {
+	file: string;
 	parameters: Extract<ControlMessage, { type: "SUBSCRIBE" }>["parameters"];
-}>([
+}[] = [
 	{
-		name: "OBJECT_DELIVERY_TIMEOUT 250 and SUBGROUP_DELIVERY_TIMEOUT 500",
-		bytes:
-			"03 00 1f 00 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 03 02 80 fa 04 81 f4 1b 01 02",
+		file: "subscribe-delivery-timeouts-moqtail-ts",
 		parameters: {
 			objectDeliveryTimeout: 250n,
 			subgroupDeliveryTimeout: 500n,
@@ -28,17 +30,21 @@ test.each<{
 		},
 	},
 	{
-		name: "SUBGROUP_DELIVERY_TIMEOUT 500 alone",
-		bytes:
-			"03 00 1c 00 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 02 06 81 f4 1b 01 02",
+		file: "subscribe-subgroup-delivery-timeout-moqtail-ts",
 		parameters: {
 			subgroupDeliveryTimeout: 500n,
 			subscriptionFilter: { filterType: "LargestObject" },
 		},
 	},
-])(
-	"a SUBSCRIBE with $name, as moqtail-ts writes it",
-	({ bytes, parameters }) => {
+];
+
+test("every file a library wrote is read here", () => {
+	expect(FILES.map(({ file }) => file).sort()).toEqual(fromALibraryNames());
+});
+
+test.each(FILES)(
+	"$file decodes to its value and is encoded to the same bytes",
+	({ file, parameters }) => {
 		const message: ControlMessage = {
 			type: "SUBSCRIBE",
 			requestId: 0n,
@@ -46,6 +52,7 @@ test.each<{
 			trackName: utf8("object"),
 			parameters,
 		};
+		const bytes = fromALibrary(file);
 		const input = hex(bytes);
 		expect(decodeControlMessage(input)).toEqual({
 			status: "ok",

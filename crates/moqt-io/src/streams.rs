@@ -1450,11 +1450,13 @@ pub struct SendLimits {
     /// acknowledged by the receiver's transport.
     pub streams: usize,
     /// How long after the last Object of a subgroup stream was written the
-    /// receiver may take to have all of it. A stream that is not delivered
-    /// by then is reset with `DELIVERY_TIMEOUT` and the subscription goes
-    /// on with the streams after it (§8: "Publishers can, at their
-    /// discretion, discontinue forwarding Objects before either of the
-    /// timeouts occurs"). `None`: every stream is delivered, however late.
+    /// receiver may take to have all of it, for a stream that is started
+    /// without a time of its own ([`OutgoingSubgroup::spawn`]). A stream
+    /// that is not delivered by then is reset with `DELIVERY_TIMEOUT` and
+    /// the subscription goes on with the streams after it (§8: "Publishers
+    /// can, at their discretion, discontinue forwarding Objects before
+    /// either of the timeouts occurs"). `None`: every such stream is
+    /// delivered, however late.
     pub delivery_patience: Option<Duration>,
 }
 
@@ -1585,6 +1587,16 @@ impl OutgoingSubgroup {
     /// `report` is called from the writer with what became of the stream; it
     /// may wait. `label` names the stream in the trace.
     ///
+    /// `delivery_timeout` is the receiver's own word on how long after the
+    /// stream's FIN it may take to have all of it (the
+    /// `SUBGROUP_DELIVERY_TIMEOUT` of its subscription, §8). The stream is
+    /// given up after the smaller of that and
+    /// [`SendLimits::delivery_patience`], and after the one that is there
+    /// where the other is not; with neither it is never given up. WHY the
+    /// smaller: §8 has it so for the two that speak for a subscription,
+    /// "if both the publisher and the subscriber have a non-zero value,
+    /// the smaller of the two is used", and the limit is this sender's.
+    ///
     /// # Errors
     ///
     /// [`QueueFull`] when the receiver already has as many unfinished streams
@@ -1592,6 +1604,7 @@ impl OutgoingSubgroup {
     pub fn spawn<C, R, F>(
         connection: Arc<C>,
         header: SubgroupHeader,
+        delivery_timeout: Option<Duration>,
         budget: &Arc<SendBudget>,
         report: R,
         trace: Trace,
@@ -1618,6 +1631,7 @@ impl OutgoingSubgroup {
         let (reset, reset_signal) = watch::channel(None);
         let writer = Writer {
             share: Arc::clone(&share),
+            patience: smaller_of(delivery_timeout, budget.limits.delivery_patience),
             commands,
             reset: reset_signal,
             trace,
@@ -1690,8 +1704,20 @@ impl OutgoingSubgroup {
     }
 }
 
+/// The smaller of two times, and the one that is there where the other is
+/// not.
+fn smaller_of(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (one, None) | (None, one) => one,
+    }
+}
+
 struct Writer {
     share: Arc<Share>,
+    /// How long after its FIN the stream may take to be delivered before it
+    /// is given up ([`OutgoingSubgroup::spawn`]).
+    patience: Option<Duration>,
     commands: mpsc::UnboundedReceiver<Command>,
     reset: watch::Receiver<Option<u32>>,
     trace: Trace,
@@ -1814,7 +1840,7 @@ impl Writer {
                     // entries of any number of them kept for it. Its bytes
                     // and Objects were given back as they were written; the
                     // transport's send window bounds those.
-                    let patience = self.share.budget.limits.delivery_patience;
+                    let patience = self.patience;
                     let timed_out = Arc::new(AtomicBool::new(false));
                     let asked = self.reset_asked();
                     let give_up = {

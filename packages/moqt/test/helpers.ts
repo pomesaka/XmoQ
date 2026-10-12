@@ -42,6 +42,22 @@ function hexFile(directory: string, name: string): string {
 	return pairs.join(" ");
 }
 
+const FROM_LIBRARIES_DIR = join(FIXTURES, "moqt-18-from-libraries");
+
+/** Every `.hex` file of `fixtures/moqt-18-from-libraries/`. */
+export function fromALibraryNames(): string[] {
+	return hexFileNames(FROM_LIBRARIES_DIR);
+}
+
+/**
+ * The bytes of `fixtures/moqt-18-from-libraries/<name>.hex`: what a peer's
+ * library serialized in a script, and no wire carried. The Rust
+ * implementation reads the same files.
+ */
+export function fromALibrary(name: string): string {
+	return hexFile(FROM_LIBRARIES_DIR, name);
+}
+
 /** The names `fixture` accepts: every `.hex` file of `fixtures/moqt-18/`. */
 export function fixtureNames(): string[] {
 	return hexFileNames(FIXTURE_DIR);
