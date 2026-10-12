@@ -2,6 +2,10 @@
 //! spikes/kitty-graphics: one image that every frame replaces.
 
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
+
+/// Lines under the picture, for the chat of a room.
+pub const LINES: usize = 3;
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -33,11 +37,14 @@ pub struct Screen {
     encoded: Vec<u8>,
     out: Vec<u8>,
     pub drawn: u64,
+    /// The last lines of the chat, and how many of them are written.
+    lines: Arc<Mutex<Vec<String>>>,
+    written: usize,
 }
 
 impl Screen {
-    pub fn new(to: Box<dyn Write + Send>, medium: Medium, scale: usize) -> Self {
-        Self { to, medium, scale, size: None, rows: 0, encoded: Vec::new(), out: Vec::new(), drawn: 0 }
+    pub fn new(to: Box<dyn Write + Send>, medium: Medium, scale: usize, lines: Arc<Mutex<Vec<String>>>) -> Self {
+        Self { to, medium, scale, size: None, rows: 0, encoded: Vec::new(), out: Vec::new(), drawn: 0, lines, written: 0 }
     }
 
     /// Draws one frame of RGB over the one before. A frame of another size
@@ -48,8 +55,8 @@ impl Screen {
         if self.size.is_none() {
             self.size = Some((width, height));
             self.rows = cells.1;
-            self.to.write_all("\n".repeat(self.rows).as_bytes())?;
-            self.to.write_all(format!("\x1b[{}A\x1b7", self.rows).as_bytes())?;
+            self.to.write_all("\n".repeat(self.rows + LINES).as_bytes())?;
+            self.to.write_all(format!("\x1b[{}A\x1b7", self.rows + LINES).as_bytes())?;
         }
         if self.size != Some((width, height)) {
             return Ok(());
@@ -86,6 +93,17 @@ impl Screen {
                 self.out.extend_from_slice(b"\x1b\\");
             }
         }
+        // The chat under the picture, when it has a new line. WHY with the frame: one
+        // writer, and the cursor is put back to the picture before every frame.
+        let lines = self.lines.lock().expect("the lock");
+        if lines.len() != self.written {
+            self.written = lines.len();
+            self.out.extend_from_slice(format!("\x1b8\x1b[{}B", self.rows).as_bytes());
+            for line in lines.iter().rev().take(LINES).rev() {
+                self.out.extend_from_slice(format!("\r\x1b[K{line}\x1b[B").as_bytes());
+            }
+        }
+        drop(lines);
         self.to.write_all(&self.out)?;
         self.to.flush()?;
         self.drawn += 1;
@@ -95,7 +113,7 @@ impl Screen {
     /// Leaves the cursor under the picture.
     pub fn leave(&mut self) {
         if self.size.is_some() {
-            let _ = self.to.write_all(format!("\x1b8\x1b[{}B\n", self.rows).as_bytes());
+            let _ = self.to.write_all(format!("\x1b8\x1b[{}B\n", self.rows + LINES).as_bytes());
             let _ = self.to.flush();
         }
     }
