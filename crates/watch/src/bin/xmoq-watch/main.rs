@@ -39,7 +39,7 @@ use xmoq_moqt_io::{
     read_uni_streams, send_message,
 };
 use xmoq_watch::args::{Args, Fit, Source};
-use xmoq_watch::clock::Clock;
+use xmoq_watch::clock::{AUTO_MOST_US, Clock};
 use xmoq_watch::keys::{Asked, Keys};
 use xmoq_watch::marks::Recent;
 use xmoq_watch::room::{self, Broadcast};
@@ -52,6 +52,10 @@ use crate::room_socket::{Heard, RoomSocket};
 use crate::session::{Requests, Subscription, timestamp_of};
 use crate::sound::{Sound, Volume, micros_since};
 use crate::video_decoder::VideoDecoder;
+
+/// How often the automatic buffer is moved: twice a second, as the
+/// watching page's (`packages/media/src/core/playout-clock.ts`).
+const BUFFER_TICK: Duration = Duration::from_millis(500);
 
 /// How long the relay gets to answer the SETUP and the requests of a
 /// broadcast, a room to take the viewer in, and either to be connected to.
@@ -506,6 +510,9 @@ struct Played {
     sound_marks_us: Vec<u64>,
     audio_over_least_us: Recent,
     video_over_least_us: Recent,
+    /// The least, the most and the last the buffer was, without the lead
+    /// of the output.
+    buffer_us: (u64, u64, u64),
     no_timestamp: u64,
     /// Objects whose Timestamp was too far from the clock to be of it.
     not_of_the_clock: u64,
@@ -543,16 +550,19 @@ impl Played {
         let apart = marks::picture_after_sound_us(&seen.marks_us, &self.sound_marks_us);
         let samples_ms = |samples: u64| samples * 1000 / u64::from(xmoq_watch::playout::RATE);
         format!(
-            "AV_PLAYED why=\"{}\" seconds={:.1} buffer_ms={} output_lead_ms={} volume={:.1} muted={} \
+            "AV_PLAYED why=\"{}\" seconds={:.1} buffer_ms={} buffer_auto={} buffer_ms_least/most={}/{} output_lead_ms={} volume={:.1} muted={} \
              video_size={}x{} made_smaller_by={} written_kb_a_frame={} video_came={} video_left_out={} video_drawn={} fps={fps:.1} \
              video_after_due_ms_min/p50/p95/max={} decode_ms_a_frame={:.2} draw_ms_a_frame={:.2} \
-             audio_packets={} audio_refused={} audio_played_ms={} underruns={} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} \
+             audio_packets={} audio_refused={} audio_played_ms={} underruns={} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} audio_stretched={} \
              peak={:.3} rms={:.3} audio_came_over_least_ms_min/p50/p95/max={} video_came_over_least_ms_min/p50/p95/max={} \
              marks_video={} marks_audio={} picture_after_sound_ms_min/p50/p95/max={} no_timestamp={} not_of_the_clock={} \
              frames_dropped_full={} pictures_too_large={} streams_reset={}",
             self.why,
             self.lasted.as_secs_f64(),
-            args.buffer_ms,
+            self.buffer_us.2 / 1000,
+            args.buffer_auto,
+            self.buffer_us.0 / 1000,
+            self.buffer_us.1 / 1000,
             ms(i64::try_from(self.output_lead_us).unwrap_or(i64::MAX)),
             ui.volume.level(),
             ui.volume.muted(),
@@ -574,6 +584,7 @@ impl Played {
             counts.left_out_late,
             counts.cut_late,
             counts.dropped_full,
+            counts.stretched,
             self.heard.peak,
             self.heard.rms,
             spread_ms(&self.audio_over_least_us.to_vec()),
@@ -702,9 +713,17 @@ async fn play(
     // picture as for the sound: the output asks for a sample that long
     // before it is due, so without it that much of `--buffer-ms` is gone
     // before a packet may be late at all (24 of 50 ms on the machine this
-    // was written on). Added to both, the two stay together.
+    // was written on). Added to both, the two stay together. WHY outside
+    // the clock: the buffer the clock has is then the watching page's, by
+    // the same rule, and the lead is this machine's.
     let lead_us = sound.lead_us().await;
-    let mut clock = Clock::new(args.buffer_ms.saturating_mul(1000).saturating_add(lead_us));
+    let buffer_us = args.buffer_ms.saturating_mul(1000);
+    let mut clock = if args.buffer_auto {
+        Clock::automatic(buffer_us, AUTO_MOST_US)
+    } else {
+        Clock::new(buffer_us)
+    };
+    let mut ticks = tokio::time::interval(BUFFER_TICK);
     let mut played = Played {
         why: "",
         lasted: Duration::ZERO,
@@ -713,6 +732,7 @@ async fn play(
         sound_marks_us: Vec::new(),
         audio_over_least_us: Recent::new(MOST_COUNTED),
         video_over_least_us: Recent::new(MOST_COUNTED),
+        buffer_us: (buffer_us, buffer_us, buffer_us),
         no_timestamp: 0,
         not_of_the_clock: 0,
         frames_dropped_full: 0,
@@ -723,6 +743,11 @@ async fn play(
     let mut failed = None;
     played.why = loop {
         tokio::select! {
+            _ = ticks.tick() => {
+                clock.tick(micros_since(began, Instant::now()));
+                let now = clock.buffer_us();
+                played.buffer_us = (played.buffer_us.0.min(now), played.buffer_us.1.max(now), now);
+            }
             asked = ui.asked() => {
                 let Asked::Say(text) = asked else {
                     ended = Ended::Quit;
@@ -796,12 +821,15 @@ async fn play(
                         continue;
                     };
                     *began_playing = true;
-                    let Some(due) = clock.due(micros_since(began, Instant::now()), timestamp)
+                    let Some(base) = clock.base(micros_since(began, Instant::now()), timestamp)
                     else {
                         played.not_of_the_clock += 1;
                         continue;
                     };
-                    let over_least = i64::try_from(due.over_least_us).unwrap_or(i64::MAX);
+                    let over_least = i64::try_from(base.over_least_us).unwrap_or(i64::MAX);
+                    let after_us = |buffer_us: u64| {
+                        base.at_us.saturating_add(buffer_us).saturating_add(lead_us)
+                    };
                     if of_video {
                         played.video_over_least_us.push(over_least);
                         let annex_b = loc::to_annex_b(&object.payload)
@@ -810,7 +838,7 @@ async fn play(
                             group: header.group_id,
                             object: object.object_id,
                             annex_b,
-                            due: began + Duration::from_micros(due.at_us),
+                            due: began + Duration::from_micros(after_us(clock.buffer_us())),
                         };
                         // Full: the frame is left out, and the picture
                         // goes on at the next Group.
@@ -819,11 +847,12 @@ async fn play(
                         }
                     } else {
                         played.audio_over_least_us.push(over_least);
-                        if sound.take(&object.payload, due.at_us)
+                        let due_us = after_us(clock.audio_buffer_us());
+                        if sound.take(&object.payload, due_us)
                             && measure
                             && played.sound_marks_us.len() < MOST_COUNTED
                         {
-                            played.sound_marks_us.push(due.at_us);
+                            played.sound_marks_us.push(due_us);
                         }
                     }
                 }

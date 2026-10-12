@@ -129,7 +129,9 @@ impl Sound {
         })
     }
 
-    /// Decodes one packet and queues it to be played at `due_us`. Says
+    /// Decodes one packet and queues it: `due_us` is its own time, and it
+    /// is played there or after the packet before it
+    /// ([`xmoq_watch::playout::place`]). Says
     /// whether the beep of the demo begins with it (`marks`).
     ///
     /// WHY decoded by the caller, on the task that reads the session, and
@@ -144,9 +146,10 @@ impl Sound {
         let marked = sound_is_marked(&samples);
         let begins = marked && !self.was_marked;
         self.was_marked = marked;
+        let now_us = micros_since(self.began, Instant::now());
         locked(&self.shared)
             .playout
-            .push(Packet { due_us, samples });
+            .push(now_us, Packet { due_us, samples });
         begins
     }
 

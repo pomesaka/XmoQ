@@ -48,6 +48,23 @@ WHY `rustix`: the workspace forbids `unsafe`, and `termios` and the window's siz
 
 Every Object is due `--buffer-ms` (50, the watching page's default; provisional) after the fastest way an Object was seen to take, **plus what the sound output is ahead by**: the output asks for a sample some time before it leaves the machine (how far ahead it asks, and the length of one call; 24.3 ms on the Mac this was written on), and that time is added to the picture's and the sound's due times alike. WHY: without it that much of the buffer is gone before a packet may be late at all, and 50 ms here would be less than 50 ms in the page. The lead is read once, when a broadcast begins to play; `AV_PLAYED` has it (`output_lead_ms`).
 
+**`--buffer-ms auto` (a trial, not the default)** has the buffer follow how late Objects come, by the rule of the watching page's `?buffer=auto` and with its values (`packages/media/src/core/playout-clock.ts`; all provisional): what 99 of 100 Objects of the last 10 seconds came within, after the fastest, and 10 ms more, in steps of 10 ms, from 50 up to 400 ms. It grows at once and shrinks 10 ms twice a second; fewer than 50 Objects move nothing. **A packet of sound follows the one before it to the sample**, and where the buffer has moved its time by more than 8 ms it is played up to a twentieth slower or faster until the sound is at its own time again (`playout::place`, the page's `placePiece`); this holds with a buffer that is set as well. Both players read the same rows of [`fixtures/playout/`](../../fixtures/playout/README.md) in their tests.
+
+Behind a narrow link it kept the sound where 50 ms did not, and went to its limit of 400 ms, since the frames count as the packets do and came later ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-has-the-pages-automatic-buffer.md)). Nobody has listened to it.
+
+Where the two are not alike, and why:
+
+| | The page | The viewer | Why |
+|---|---|---|---|
+| The unit | milliseconds, with fractions | whole microseconds | The page's clock counts milliseconds; LOC's Timestamps are microseconds. The shared rows are whole milliseconds, where both give the same |
+| Which of the Objects "99 of 100" is | the one at `floor(count * 0.99)` in order, counted in floating point | the one at `count * 99 / 100`, in whole numbers | The same for every count the tests have; a floating product just under a whole number would be one Object apart |
+| The lead of the sound output | none: the page's sound is timed by the `AudioContext` | added to the buffer, for picture and sound alike (above) | The output here asks for samples ahead of time. `AV_PLAYED` has the buffer without it (`buffer_ms`, `buffer_ms_least/most`) |
+| When a frame's time is fixed | when it is drawn: a buffer that moves moves the frames that wait | when it comes | The thread that draws has the frame's moment and not the clock; a step is 10 ms, a third of a frame |
+| A packet whose beginning is over at the output | not sounded | played from the sample that is due (`audio_cut_late`) | The output asks for samples ahead of time, so a packet that was placed in time can still be late there; cut, the sound does not stay behind |
+| Slower or faster | the browser's `playbackRate` | samples on the lines between the packet's samples | No resampler is among the crates; a twentieth for one packet |
+| Packets out of order | held until the ones before them came (`holdForOrderMs`) | played as they come | Not built. A stream keeps the order within a Group; between Groups nothing does |
+| The sound's least buffer | 30 ms | 30 ms, where `--buffer-ms` is less | The same rule (`AUDIO_MIN_US`); before, the viewer had none |
+
 Behind a link with less room than the video, 50 ms is not enough for the sound: packets come 50 to 100 ms later than the fastest there, and `--buffer-ms 300` was what played all of it ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)). `--video-timeout-ms N` asks the relay to give up Groups of the video that are not delivered N ms after their last Object, which keeps the picture from falling behind there.
 
 ## What a peer cannot make it do without end
@@ -57,7 +74,8 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 | What | Limit | Why that value | Where |
 |---|---|---|---|
 | A Timestamp far from the clock (the fastest way an Object took) | 10 s either way; the Object is left out and the clock stays. After 30 in a row the clock begins anew | Far beyond a buffer and beyond what one waits for a live picture; 30 is a second of video, for a publisher that began again | `clock` |
-| `--buffer-ms` | 10,000 | The same 10 s | `args` |
+| `--buffer-ms` | 10,000; `auto` goes to 400 ms | The same 10 s; the page's limit | `args`, `clock` |
+| Arrivals the automatic buffer goes by | 1,600, the newest | The page's: 10 seconds of 30 frames and 50 packets, twice over | `clock` |
 | Frames that wait to be decoded and drawn | 30; one more is left out, and the picture goes on at the next Group | What the watching page holds | `picture.rs` |
 | The pixels of a decoded picture | 3840x2160; a larger one is not drawn (`pictures_too_large` in `AV_PLAYED`) | Four times the largest the demo sends. What the decoder holds itself for such a picture is not bounded here | `fit`, `video_decoder.rs` |
 | Packets of sound that wait | 100 (2 s); the oldest goes | | `playout` |
@@ -98,7 +116,6 @@ Under `scripts/`, from the repository root; each starts a demo of its own on oth
 ## What it does not do
 
 - Decide anything about the video decoder and the output.
-- Follow how late Objects come with its buffer, as the watching page's playout does: `--buffer-ms` is what it is given. What the page looks at and how much it adds are provisional themselves, and the two are to be made alike before this is built.
 - Read a catalog that changes while it watches; choose between several video or audio tracks by anything but the first; follow a track into another namespace than the catalog's.
 - Conceal a packet of sound that did not come; resample (an output that does not take 48 kHz ends it); play more than one channel (two are mixed into one by the decoder).
 - Reach a room over TLS (`wss://`).

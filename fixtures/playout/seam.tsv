@@ -1,0 +1,9 @@
+the-first-piece-begins-at-its-own-time	1050000	-	1000000	sound	1050000	1070000	no	no
+a-piece-a-millisecond-off-follows-the-one-before-it-to-the-sample	1071000	1070000	1030000	sound	1070000	1090000	yes	no
+a-piece-whose-time-is-20-ms-later-follows-and-is-played-slower	1090000	1070000	1030000	sound	1070000	1091000	yes	yes
+a-piece-whose-time-is-20-ms-earlier-follows-and-is-played-faster	1050000	1070000	1030000	sound	1070000	1089000	yes	yes
+a-piece-whose-own-time-is-over-follows-the-one-that-still-sounds	1020000	1070000	1030000	sound	1070000	1089000	yes	yes
+a-piece-more-than-300-ms-from-the-one-before-begins-at-its-own-time	1500000	1070000	1030000	sound	1500000	1520000	no	no
+a-piece-after-one-that-has-ended-begins-at-its-own-time	1050000	1000000	1030000	sound	1050000	1070000	no	no
+the-first-piece-whose-time-is-over-is-not-sounded	990000	-	1000000	too-late	-	-	-	-
+a-piece-whose-time-is-over-after-one-that-has-ended-is-not-sounded	990000	980000	1000000	too-late	-	-	-	-
