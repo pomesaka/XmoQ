@@ -30,12 +30,17 @@ import {
 	through,
 	why,
 	trackName,
+	SIZES,
 	WIDTH,
 	every,
 	perSecond,
 } from "./shared.ts";
 
 const FRAMES_A_SECOND = 30;
+/** `?size=360|720|1080`: the size the picture is sent at; 360 when left out, or for a size that is none. */
+const asked = new URLSearchParams(location.search).get("size");
+const SIZE =
+	asked === "720" || asked === "1080" ? SIZES[asked] : SIZES["360"];
 
 /** Not in the DOM library of TypeScript yet: a track of a `MediaStream` as a stream of frames (Chromium has it). */
 declare class MediaStreamTrackProcessor {
@@ -117,16 +122,24 @@ const context = preview?.getContext("2d");
 if (preview === null || context === null || context === undefined) {
 	throw new Error("no canvas");
 }
-preview.width = WIDTH;
-preview.height = HEIGHT;
+preview.width = SIZE.width;
+preview.height = SIZE.height;
+// It is shown at one size whatever it is sent at.
+preview.style.width = `${WIDTH}px`;
 
 /** Calls `onFrame` with the frames of the camera, each of which the callee closes. */
 /** How long the last 200 frames of the camera took from the camera to here, in milliseconds. */
 const cameraToEncoderMs: number[] = [];
+/** The size of the frames the camera gives, which need not be the size it was asked for. */
+let cameraGave: string | undefined;
 
 async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 	const media = await navigator.mediaDevices.getUserMedia({
-		video: { width: WIDTH, height: HEIGHT, frameRate: FRAMES_A_SECOND },
+		video: {
+			width: SIZE.width,
+			height: SIZE.height,
+			frameRate: FRAMES_A_SECOND,
+		},
 	});
 	const [track] = media.getVideoTracks();
 	if (track === undefined) throw new Error("the camera gave no video track");
@@ -140,7 +153,8 @@ async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 		}
 		// The preview shows what is sent; the encoder is fixed to one size,
 		// so the frame is drawn to that size and taken from the canvas.
-		context?.drawImage(next.value, 0, 0, WIDTH, HEIGHT);
+		cameraGave = `${next.value.displayWidth}x${next.value.displayHeight}`;
+		context?.drawImage(next.value, 0, 0, SIZE.width, SIZE.height);
 		const { timestamp } = next.value;
 		// When the camera took the frame, on this page's clock, where the
 		// browser says (Chromium does, `captureTime`): how long the frame
@@ -165,6 +179,9 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	every(1000 / FRAMES_A_SECOND, () => {
 		if (context === null || context === undefined) return;
 		const elapsed = performance.now() - began;
+		// Painted in the units of the smallest size, and scaled to the one
+		// that is sent.
+		context.setTransform(SIZE.width / WIDTH, 0, 0, SIZE.height / HEIGHT, 0, 0);
 		context.fillStyle = "#10202c";
 		context.fillRect(0, 0, WIDTH, HEIGHT);
 		if (BUSY) {
@@ -201,9 +218,9 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 const KEY_INTERVAL_MS = Number(
 	new URLSearchParams(location.search).get("keyint") ?? 1000,
 );
-/** `?bitrate=`: for seeing what a smaller picture does on a bad link. */
+/** `?bitrate=`: for seeing what a smaller picture does on a bad link; the size's own when left out. */
 const BITRATE = Number(
-	new URLSearchParams(location.search).get("bitrate") ?? 1_500_000,
+	new URLSearchParams(location.search).get("bitrate") ?? SIZE.bitrate,
 );
 
 /**
@@ -232,13 +249,15 @@ async function main(): Promise<void> {
 			})
 		: undefined;
 	const small = new OffscreenCanvas(LOW.width, LOW.height).getContext("2d");
+	/** What `onKeyChunksNotSent` said: key frames that were over what is sent. */
+	const keyChunksNotSent: unknown[] = [];
 	const encoder = await createVideoTrackEncoder({
 		trackNamespace: namespace(),
 		trackName: trackName(),
 		firstGroup,
-		codec: ENCODER_CODEC,
-		width: WIDTH,
-		height: HEIGHT,
+		codec: `avc1.42E0${SIZE.level}`,
+		width: SIZE.width,
+		height: SIZE.height,
 		// `?bitrate=`: for seeing what a smaller picture does on a bad link.
 		bitrate: BITRATE,
 		framerate: FRAMES_A_SECOND,
@@ -249,6 +268,7 @@ async function main(): Promise<void> {
 			? { mapping: "stream-per-object" as const }
 			: {}),
 		onKeyChunksNotSent(event) {
+			keyChunksNotSent.push(event);
 			say(`key frames are not sent: ${JSON.stringify(event)}`);
 		},
 	});
@@ -302,10 +322,10 @@ async function main(): Promise<void> {
 					role: "video",
 					...(low === undefined ? {} : { renderGroup: 1, altGroup: 1 }),
 					// What a decoder is configured with: the parameter sets are in the key frames.
-					codec: DECODER_CODEC,
+					codec: `avc3.42E0${SIZE.level}`,
 					bitrate: BITRATE,
-					width: WIDTH,
-					height: HEIGHT,
+					width: SIZE.width,
+					height: SIZE.height,
 					framerate: FRAMES_A_SECOND,
 				},
 				...(low === undefined
@@ -405,6 +425,16 @@ async function main(): Promise<void> {
 	every(500, () => {
 		const stats = encoder.stats();
 		const sent = encoder.publisher.stats();
+		// For a script that looks at the page.
+		document.body.dataset.publish = JSON.stringify({
+			size: `${SIZE.width}x${SIZE.height}`,
+			bitrate: BITRATE,
+			cameraGave: cameraGave ?? null,
+			framesIn: framesIn.rate(),
+			stats,
+			written: sent.written,
+			keyChunksNotSent,
+		});
 		say(
 			`${link} · ${framesIn.rate()} frames a second${document.visibilityState === "hidden" ? " (this tab is in the background)" : ""}${
 				new URLSearchParams(location.search).get("source") !== "camera"
