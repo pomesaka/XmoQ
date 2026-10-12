@@ -80,7 +80,7 @@ pub struct Sound {
     refused: u64,
     began: Instant,
     was_marked: bool,
-    _output: AudioOutput,
+    output: AudioOutput,
 }
 
 fn locked(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -119,7 +119,7 @@ impl Sound {
             refused: 0,
             began,
             was_marked: false,
-            _output: output,
+            output,
         })
     }
 
@@ -162,6 +162,12 @@ impl Sound {
                 0.0
             },
         }
+    }
+
+    /// How long before a sample leaves the machine the output asks for it
+    /// ([`AudioOutput::lead_us`]).
+    pub async fn lead_us(&self) -> u64 {
+        self.output.lead_us().await
     }
 
     pub fn began(&self) -> Instant {

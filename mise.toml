@@ -46,6 +46,10 @@ run = "scripts/ci/check-workflows.sh"
 description = "Build the interop peers, run every pairing of own and moqtail clients and the runs in which a client leaves"
 run = "scripts/ci/interop.sh"
 
+[tasks.watch]
+description = "The viewer for the terminal: mise run watch -- --room http://127.0.0.1:8787/rooms/demo"
+run = "cargo run --release --locked -p xmoq-watch --"
+
 [tasks.demo]
 description = "Start the own relay and the pages of the demo: one publishes video, others watch"
 run = "cargo build --locked -p xmoq-relay && bun install --frozen-lockfile && (test -d spikes/durable-objects-room/node_modules || npm ci --prefix spikes/durable-objects-room --no-audit --no-fund) && bun demo/serve.ts"

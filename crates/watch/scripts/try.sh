@@ -3,18 +3,17 @@
 # for some seconds with the picture written to a file nobody looks at and the sound at volume 0.
 # Prints AV_PLAYED and what the viewer cost (/usr/bin/time -l).
 #
-#   spikes/terminal-av/try.sh [seconds, 20] [more flags of xmoq-watch]     # from the repository root
+#   crates/watch/scripts/try.sh [seconds, 20] [more flags of xmoq-watch]     # from the repository root
 #
 # Needs `mise run interop` once (Playwright's Chromium). PORT (48900) and two more are used.
 set -eu
 seconds=${1:-20}
 [ $# -gt 0 ] && shift
-root=$(cd "$(dirname "$0")/../.." && pwd)
-here="$root/spikes/terminal-av"
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+here="$root/crates/watch/scripts"
 port=${PORT:-48900}
 work=$(mktemp -d)
-(cd "$here" && cargo build --release --quiet)
-(cd "$root" && cargo build --quiet -p xmoq-relay)
+(cd "$root" && cargo build --release --quiet --locked -p xmoq-watch && cargo build --quiet --locked -p xmoq-relay)
 # WHY the binary and not `mise exec`: the signal at the end has to reach bun itself.
 bun=$(cd "$root/interop" && mise which bun)
 (cd "$root" && exec "$bun" demo/serve.ts --relay-port "$port" --port "$((port + 1))" --rooms-port "$((port + 2))") > "$work/demo.log" 2>&1 &
@@ -34,6 +33,6 @@ for _ in $(seq 1 40); do
 done
 cat "$work/page.log" >&2
 sha=$(openssl x509 -in "$root/demo/.cert/cert.pem" -outform der | shasum -a 256 | cut -d' ' -f1)
-/usr/bin/time -l "$here/target/release/xmoq-watch" --url "https://127.0.0.1:$port/" --cert-sha256 "$sha" \
-  --seconds "$seconds" --volume 0 --medium direct --out "${OUT:-/dev/null}" "$@" 2> "$work/watch.log" || true
+/usr/bin/time -l "$root/target/release/xmoq-watch" --url "https://127.0.0.1:$port/" --cert-sha256 "$sha" \
+  --seconds "$seconds" --volume 0 --medium direct --out "${OUT:-/dev/null}" --measure-demo-marks on "$@" 2> "$work/watch.log" || true
 grep -E "CATALOG|AV_PLAYED|Error|error|real|maximum resident|peak memory" "$work/watch.log" || cat "$work/watch.log"

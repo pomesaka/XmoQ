@@ -35,6 +35,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [The Low Overhead Media Container in TypeScript, `@xmoq/loc`](packages/loc/README.md)
 - [The MOQT Streaming Format in TypeScript, `@xmoq/msf`](packages/msf/README.md)
 - [Between a video track and a decoder, `@xmoq/media`](packages/media/README.md)
+- [The viewer for the terminal, `xmoq-watch`](crates/watch/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
 - [MoQ library candidates](docs/moq-libraries.md)
 - [The audio and video demo: what it does and where it ends](docs/av-demo.md)
@@ -56,6 +57,7 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run check:layers` | Dependency rules: `xmoq-moqt` stays free of I/O crates, nothing depends on `spikes/`, packages do not depend on `interop/` |
 | `mise run check:workflows` | `actionlint` and `shellcheck` |
 | `mise run demo` | Starts the own relay and a web server; a page publishes video (a painted clock or the camera) and other pages watch it, in Chromium. See [`demo/README.md`](demo/README.md). Outside lint and type checking |
+| `mise run watch -- <flags>` | The viewer for the terminal, `xmoq-watch`: the picture of a broadcast in Ghostty or kitty, its sound, and the chat of its room. `-- --room http://127.0.0.1:8787/rooms/demo` next to `mise run demo`. See [`crates/watch/README.md`](crates/watch/README.md) |
 | `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
 | `mise run fmt` | Apply formatting and safe fixes |
 
