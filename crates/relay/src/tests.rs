@@ -3634,4 +3634,189 @@ mod rendezvous {
             "nothing"
         );
     }
+
+    /// What happens a second after a track began to drain, for the test
+    /// below.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Then {
+        Nothing,
+        /// The publisher that said `PUBLISH_DONE` sends PUBLISH anew.
+        ThePublisherIsBack,
+        /// Another session sends PUBLISH for the track.
+        AnotherPublisherComes,
+        /// Another session sends PUBLISH three seconds later still, when
+        /// the track is over.
+        AnotherPublisherComesWhenItIsOver,
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscribe_that_comes_while_a_track_drains_is_held_as_one_for_a_track_without_a_publisher()
+     {
+        // The publisher says PUBLISH_DONE at 0 s and counts a stream that
+        // never comes, so the track drains until 2 s. The viewer asks at
+        // 0.5 s.
+        // (the viewer's RENDEZVOUS_TIMEOUT; what happens at 1 s; what the
+        //  viewer has by 1.8 s; what it has by 11 s, where it had nothing)
+        let cases = [
+            // Not held: DOES_NOT_EXIST (0x10) at once.
+            (None, Then::Nothing, "0x10", None),
+            // Its time is over while the track drains: TIMEOUT (0x2).
+            (Some(1_000), Then::Nothing, "0x2", None),
+            // The track is over at 2 s and nobody comes: TIMEOUT at 10.5 s,
+            // counted from the SUBSCRIBE.
+            (Some(10_000), Then::Nothing, "nothing", Some("0x2")),
+            (Some(10_000), Then::ThePublisherIsBack, "ok", None),
+            (Some(10_000), Then::AnotherPublisherComes, "ok", None),
+            (
+                Some(10_000),
+                Then::AnotherPublisherComesWhenItIsOver,
+                "nothing",
+                Some("ok"),
+            ),
+        ];
+        for (asked, then, by_two_seconds, by_eleven) in cases {
+            let (hub, _task) = hub::spawn(HubConfig::default());
+            let mut publisher = Peer::connect(&hub, true).await;
+            let mut publication = publisher.publish().await;
+            // Somebody watches, so that the track has a subscriber.
+            let mut watcher = Peer::connect(&hub, true).await;
+            let (_watching, _) = watcher.subscribe().await;
+            let ended = publisher
+                .session
+                .publish_done(publication.id, 0x2, 1, ReasonPhrase::default())
+                .unwrap();
+            send_message(&mut publication.send, &ended, &Trace::default(), "publish")
+                .await
+                .unwrap();
+            publication.send.finish();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            let mut viewer = Peer::connect(&hub, true).await;
+            let mut request = asks(&mut viewer, b"a", asked).await;
+            let first = answered(&mut viewer, &mut request, Duration::from_millis(500)).await;
+            let mut other = Peer::connect(&hub, true).await;
+            match then {
+                Then::ThePublisherIsBack => {
+                    publisher.publish().await;
+                }
+                Then::AnotherPublisherComes => {
+                    other.publish().await;
+                }
+                Then::Nothing | Then::AnotherPublisherComesWhenItIsOver => {}
+            }
+            let by_then = if first == "nothing" {
+                answered(&mut viewer, &mut request, Duration::from_millis(800)).await
+            } else {
+                first
+            };
+            assert_eq!(by_then, by_two_seconds, "{asked:?} {then:?}");
+            let Some(later) = by_eleven else {
+                continue;
+            };
+            if then == Then::AnotherPublisherComesWhenItIsOver {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                other.publish().await;
+            }
+            assert_eq!(
+                answered(&mut viewer, &mut request, Duration::from_secs(9)).await,
+                later,
+                "{asked:?} {then:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscribe_held_while_a_track_drains_and_given_up_leaves_nothing_when_the_track_is_over()
+     {
+        let (hub, _task) = hub::spawn(HubConfig::default());
+        let mut publisher = Peer::connect(&hub, true).await;
+        let mut publication = publisher.publish().await;
+        let mut watcher = Peer::connect(&hub, true).await;
+        let (_watching, _) = watcher.subscribe().await;
+        let ended = publisher
+            .session
+            .publish_done(publication.id, 0x2, 1, ReasonPhrase::default())
+            .unwrap();
+        send_message(&mut publication.send, &ended, &Trace::default(), "publish")
+            .await
+            .unwrap();
+        publication.send.finish();
+        let mut viewer = Peer::connect(&hub, true).await;
+        let request = asks(&mut viewer, b"a", Some(10_000)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // CANCELLED (0x1).
+        request.send.reset(0x1);
+        // The track is over at 2 s, and nothing waits under its name.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let held = hub.held().await;
+        assert_eq!((held.relay.tracks, held.relay.pending_tracks), (0, 0));
+    }
+
+    /// A SUBSCRIBE for the track `a` with a `RENDEZVOUS_TIMEOUT` of 10 s,
+    /// put on the wire without the peer's own session, which would refuse a
+    /// second one for a track it holds a subscription to. What comes back
+    /// within 100 ms: "ok", the code of a `REQUEST_ERROR`, or "nothing".
+    async fn asks_by_hand(peer: &Peer, request_id: u64) -> (String, RequestReader<MemoryRecv>) {
+        let namespace = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
+        let message = ControlMessage::Subscribe(Subscribe {
+            request_id,
+            full_track_name: FullTrackName::new(namespace, b"a".to_vec()).unwrap(),
+            parameters: vec![Parameter::RendezvousTimeout(10_000)],
+        });
+        let (mut send, recv) = peer.connection.open_bi().await.unwrap();
+        send_message(&mut send, &message, &Trace::default(), "request")
+            .await
+            .unwrap();
+        // WHY forgotten: dropping it would reset the stream, and with it
+        // the SUBSCRIBE.
+        std::mem::forget(send);
+        let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+        let answer = match timeout(Duration::from_millis(100), reader.next_event()).await {
+            Ok(Ok(RequestStreamEvent::Message(ControlMessage::SubscribeOk(_)))) => "ok".to_owned(),
+            Ok(Ok(RequestStreamEvent::Message(ControlMessage::RequestError(error)))) => {
+                format!("{:#x}", error.error_code)
+            }
+            Err(_) => "nothing".to_owned(),
+            other => panic!("neither an answer nor silence: {other:?}"),
+        };
+        (answer, reader)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_viewer_that_asks_anew_is_a_duplicate_until_it_was_sent_publish_done_and_never_after()
+    {
+        let (hub, _task) = hub::spawn(HubConfig::default());
+        let mut publisher = Peer::connect(&hub, true).await;
+        let mut publication = publisher.publish().await;
+        let mut viewer = Peer::connect(&hub, true).await;
+        let (mut request, _) = viewer.subscribe().await;
+        // The track drains for two seconds.
+        let ended = publisher
+            .session
+            .publish_done(publication.id, 0x2, 1, ReasonPhrase::default())
+            .unwrap();
+        send_message(&mut publication.send, &ended, &Trace::default(), "publish")
+            .await
+            .unwrap();
+        publication.send.finish();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Before its PUBLISH_DONE: the subscription it has goes on, and a
+        // second is DUPLICATE_SUBSCRIPTION (0x19).
+        let next = request.id.value() + 2;
+        let (early, _reader) = asks_by_hand(&viewer, next).await;
+        assert_eq!(early, "0x19");
+
+        // With its PUBLISH_DONE read: held, whatever comes first to the
+        // relay, since the relay ended the subscription before it sent it.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(publish_done(&mut request).await, done(0x2, 0));
+        let (after, mut reader) = asks_by_hand(&viewer, next + 2).await;
+        assert_eq!(after, "nothing");
+        publisher.publish().await;
+        match timeout(SOON, reader.next_event()).await {
+            Ok(Ok(RequestStreamEvent::Message(ControlMessage::SubscribeOk(_)))) => {}
+            other => panic!("no SUBSCRIBE_OK: {other:?}"),
+        }
+    }
 }

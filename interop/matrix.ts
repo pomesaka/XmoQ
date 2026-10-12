@@ -1226,6 +1226,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 		},
 		{
+			name: "own relay: rendezvous: own-browser subscribes while the relay waits for the late streams of a track that ended, is held, and is accepted when own-rust publishes anew",
+			script: "rendezvous.ts",
+			args: ["--case", "publisher-returns", "--subscriber", "own-browser"],
+			relay: "own",
+		},
+		{
+			name: "own relay: rendezvous: own-rust subscribes while the relay waits for the late streams of a track that ended, is held, and is accepted when own-rust publishes anew",
+			script: "rendezvous.ts",
+			args: ["--case", "publisher-returns", "--subscriber", "own-rust"],
+			relay: "own",
+		},
+		{
 			name: "own relay: rendezvous: the terminal viewer comes before a page's broadcast, is held, and plays it",
 			script: "rendezvous.ts",
 			args: [

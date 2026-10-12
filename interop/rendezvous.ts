@@ -28,6 +28,16 @@
 //                     100 packets of sound or more) and ends of itself.
 //   not-asked         The SUBSCRIBE without the parameter: DOES_NOT_EXIST
 //                     (0x10) at once, as before.
+//   publisher-returns An own-rust publisher ends its track with
+//                     PUBLISH_DONE and a Stream Count it does not know, so
+//                     that the relay waits two seconds for late streams.
+//                     In that time the subscriber sends its SUBSCRIBE with
+//                     20 seconds. The relay holds it and answers nothing,
+//                     neither while it waits for the streams nor when the
+//                     track is over. Four seconds after the PUBLISH_DONE
+//                     the publisher sends PUBLISH anew and one Object: the
+//                     relay answers SUBSCRIBE_OK, and the subscriber has
+//                     the Object.
 
 import { parseArgs } from "node:util";
 import {
@@ -146,9 +156,9 @@ async function subscribe(
 
 /** The second session of the run is the subscriber's where a publisher is there first; here the subscriber is the first. */
 const HELD = /^HOLD_REQUEST session=0 stream=(\d+) SUBSCRIBE$/;
-const answered = (stream: string): RegExp =>
+const answered = (stream: string, session = 0): RegExp =>
 	new RegExp(
-		`^SEND session=0 stream=${stream} (SUBSCRIBE_OK|REQUEST_ERROR.*)$`,
+		`^SEND session=${session} stream=${stream} (SUBSCRIBE_OK|REQUEST_ERROR.*)$`,
 	);
 
 async function publisherComes(
@@ -195,6 +205,62 @@ async function publisherComes(
 		);
 	}
 	return `${subscriber} subscribed 2 s before anybody published the track, with a RENDEZVOUS_TIMEOUT of 20 s: the relay held the SUBSCRIBE, answered SUBSCRIBE_OK when own-rust sent its PUBLISH, and the subscriber got the Object`;
+}
+
+async function publisherReturns(
+	context: RunContext,
+	subscriber: string,
+): Promise<string> {
+	const publisher = spawnRustClient(
+		context,
+		"pub:own-rust",
+		"own-rust",
+		"publish",
+		TRACK,
+		["--payload-hex", PAYLOAD_HEX, "--timeout-secs", "40"],
+	);
+	await publisher.waitForLine(/^PUBLISHED /);
+	publisher.child.stdin.write("publish-done\n");
+	await publisher.waitForLine(/^PUBLISH_DONE_SENT$/);
+	const ended = Date.now();
+	// The publisher's is the first session of the run.
+	const asked = await subscribe(context, subscriber, 20_000);
+	const [, stream = ""] = await context.relay.waitForLine(
+		/^HOLD_REQUEST session=1 stream=(\d+) SUBSCRIBE$/,
+	);
+	const heldAfter = Date.now() - ended;
+	if (heldAfter >= 2000) {
+		throw new Error(
+			`the SUBSCRIBE was to reach the relay while it waited for the track's late streams, not ${heldAfter} ms after the PUBLISH_DONE`,
+		);
+	}
+	await wait(4000 - heldAfter);
+	if (context.relay.hasPrinted(answered(stream, 1))) {
+		throw new Error(
+			"the relay was to answer nothing while the track's publisher was away",
+		);
+	}
+	publisher.child.stdin.write("publish-anew\n");
+	const answer = await withTimeout(
+		asked.answer,
+		"the held SUBSCRIBE to be answered",
+	);
+	if (answer !== "ok") {
+		throw new Error(
+			`the held SUBSCRIBE was to be accepted when the publisher returned: ${answer}`,
+		);
+	}
+	publisher.child.stdin.write("send\n");
+	const payload = await withTimeout(
+		asked.object(),
+		"the Object of the publisher that returned",
+	);
+	if (payload !== PAYLOAD_HEX) {
+		throw new Error(
+			`the subscriber was to get the publisher's Object, not ${payload}`,
+		);
+	}
+	return `${subscriber} subscribed ${heldAfter} ms after own-rust ended the track with PUBLISH_DONE, with a RENDEZVOUS_TIMEOUT of 20 s: the relay held the SUBSCRIBE through its wait for late streams and after the track was over, answered SUBSCRIBE_OK when own-rust sent PUBLISH anew 4 s after the PUBLISH_DONE, and the subscriber got the Object`;
 }
 
 async function nobodyComes(
@@ -307,6 +373,7 @@ const CASES: Record<
 	"publisher-comes": publisherComes,
 	"nobody-comes": nobodyComes,
 	"not-asked": notAsked,
+	"publisher-returns": publisherReturns,
 	"viewer-before-the-broadcast": (context) => viewerBeforeTheBroadcast(context),
 };
 
