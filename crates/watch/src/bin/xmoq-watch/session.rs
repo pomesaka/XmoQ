@@ -57,9 +57,36 @@ pub struct Requests<'a> {
     pub token: Option<&'a [u8]>,
     /// `--answer-wait-ms`.
     pub answer_wait_ms: u64,
+    /// `--open-wait-ms`.
+    pub open_wait_ms: u64,
 }
 
 impl Requests<'_> {
+    /// Opens the stream of a request, within the time the relay has to
+    /// allow one more. Nothing was sent when it fails, and what the session
+    /// has of the request is the caller's to let go of with the session.
+    ///
+    /// WHY a time: a relay that allows no stream would hold the viewer at
+    /// "connecting" for good. The page and the Rust client give a request
+    /// the same time (the row "A request that waits for a stream" of
+    /// docs/moqt-implementation-notes.md).
+    async fn open_stream(
+        &self,
+        what: &str,
+    ) -> Result<(
+        <WtConnection as Connection>::Send,
+        <WtConnection as Connection>::Recv,
+    )> {
+        let wait = Duration::from_millis(self.open_wait_ms);
+        let Ok(opened) = tokio::time::timeout(wait, self.connection.open_bi()).await else {
+            bail!(
+                "the relay allowed no stream for {what} within {} ms",
+                self.open_wait_ms
+            );
+        };
+        Ok(opened?)
+    }
+
     /// Subscribes to a track of the namespace. With `timeout_ms` the
     /// SUBSCRIBE carries a `SUBGROUP_DELIVERY_TIMEOUT` (§10.2.3): the
     /// publisher gives up a Subgroup that is not delivered that long after
@@ -79,7 +106,7 @@ impl Requests<'_> {
         }
         let wait = answer_wait_ms(self.answer_wait_ms, &parameters);
         let (request, message) = self.session.subscribe(full_name, parameters)?;
-        let (mut send, recv) = self.connection.open_bi().await?;
+        let (mut send, recv) = self.open_stream(name).await?;
         let trace = Trace::default();
         send_message(&mut send, &message, &trace, name).await?;
         let mut reader = RequestReader::new(recv, &trace, name);
@@ -131,7 +158,7 @@ impl Requests<'_> {
             .into_iter()
             .collect();
         let (fetch, message) = self.session.fetch(range, parameters)?;
-        let (mut send, recv) = self.connection.open_bi().await?;
+        let (mut send, recv) = self.open_stream("the catalog's FETCH").await?;
         let trace = Trace::default();
         send_message(&mut send, &message, &trace, "fetch").await?;
         let mut answers = Some(RequestReader::new(recv, &trace, "fetch"));

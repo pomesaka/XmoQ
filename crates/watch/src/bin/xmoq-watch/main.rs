@@ -721,6 +721,7 @@ async fn play(
             namespace: &namespace,
             token: place.token.as_deref(),
             answer_wait_ms: args.answer_wait_ms,
+            open_wait_ms: args.open_wait_ms,
         };
         let subscribed = subscriptions(args, &mut requests, &mut events, &stops).await?;
         Ok(subscribed)

@@ -60,6 +60,8 @@ export type FetchEnd =
 	| { type: "cancelled" }
 	/** No answer came in time (`answerTimeoutMs` of the connect options), so this endpoint cancelled it. The session stays open. */
 	| { type: "no-answer-in-time" }
+	/** The peer allowed no stream for it in time (`openStreamTimeoutMs`): it was not sent. The session stays open. */
+	| { type: "not-sent-in-time" }
 	| { type: "session-closed"; close: SessionClose };
 
 /**
@@ -161,6 +163,12 @@ export type RequestAbort =
 	 * with CANCELLED, and the session stays open.
 	 */
 	| { type: "no-answer-in-time" }
+	/**
+	 * The request was not sent: the peer allowed no further stream within
+	 * `openStreamTimeoutMs` of the connect options. Nothing reached the
+	 * peer, and the session stays open.
+	 */
+	| { type: "not-sent-in-time" }
 	/**
 	 * For a request of the peer, before this endpoint had answered. A
 	 * SUBSCRIBE: the peer sent a REQUEST_UPDATE; updates are not implemented,

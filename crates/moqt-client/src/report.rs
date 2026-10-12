@@ -106,6 +106,12 @@ pub fn answer_timed_out(label: &str, waited_ms: u64) {
     println!("ANSWER_TIMED_OUT request={label} after_ms={waited_ms}");
 }
 
+/// The request of this stream was not sent: the peer allowed no stream for
+/// it in time.
+pub fn not_sent(label: &str, waited_ms: u64) {
+    println!("NOT_SENT request={label} after_ms={waited_ms}");
+}
+
 pub fn namespace_published() {
     println!("NAMESPACE_PUBLISHED");
 }

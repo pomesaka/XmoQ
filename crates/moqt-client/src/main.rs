@@ -128,6 +128,10 @@ struct Args {
     /// where it is not said. Then the session is closed with
     /// `CONTROL_MESSAGE_TIMEOUT`.
     setup_wait_ms: u64,
+    /// `--open-wait-ms`: how long a request may wait for its stream to be
+    /// opened, for the peer to allow one more; 10,000 where it is not
+    /// said. Then the request is not sent (`NOT_SENT`), and the mode fails.
+    open_wait_ms: u64,
     /// How long the publisher waits between the answer to its
     /// `PUBLISH_NAMESPACE` and its PUBLISH.
     publish_delay: Duration,
@@ -603,6 +607,37 @@ fn read_cert_sha256(text: Option<String>) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("--cert-sha256 must be 32 bytes"))
 }
 
+/// The flags for how long this client waits for the peer, in milliseconds.
+struct Waits {
+    answer: u64,
+    setup: u64,
+    open: u64,
+}
+
+impl Default for Waits {
+    fn default() -> Self {
+        Self {
+            answer: xmoq_moqt::params::ANSWER_WAIT_MS,
+            setup: SETUP_WAIT_MS,
+            open: STREAM_OPEN_WAIT_MS,
+        }
+    }
+}
+
+impl Waits {
+    /// Takes the flag where it is one of these.
+    fn read(&mut self, flag: &str, value: &str) -> Result<bool> {
+        let wait = match flag {
+            "--answer-wait-ms" => &mut self.answer,
+            "--setup-wait-ms" => &mut self.setup,
+            "--open-wait-ms" => &mut self.open,
+            _ => return Ok(false),
+        };
+        *wait = millis(flag, value)?;
+        Ok(true)
+    }
+}
+
 /// The value of a flag that takes milliseconds.
 fn millis(flag: &str, value: &str) -> Result<u64> {
     value.parse().with_context(|| flag.to_string())
@@ -613,8 +648,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut objects, mut video) = (1, video::VideoFlags::default());
     let (mut url, mut cert_sha256) = (None, None);
     let (mut namespace, mut track_name) = (None, None);
-    let (mut timeout_secs, mut publish_delay_ms, mut setup_wait_ms) = (20, 0, SETUP_WAIT_MS);
-    let (mut answer_wait_ms, mut update_ms) = (xmoq_moqt::params::ANSWER_WAIT_MS, None);
+    let (mut timeout_secs, mut publish_delay_ms, mut update_ms) = (20, 0, None);
+    let mut waits = Waits::default();
     let (mut subgroup_id, mut first_group) = (SubgroupId::Zero, 0);
     let mut publisher_priority = Some(0);
     let mut object_properties = Vec::new();
@@ -651,9 +686,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--namespace" => namespace = Some(value),
             "--track" => track_name = Some(value),
             "--timeout-secs" => timeout_secs = value.parse().context("--timeout-secs")?,
-            "--answer-wait-ms" => answer_wait_ms = millis(&flag, &value)?,
             "--update-subgroup-timeout-ms" => update_ms = Some(millis(&flag, &value)?),
-            "--setup-wait-ms" => setup_wait_ms = millis(&flag, &value)?,
             "--subgroup-id" => {
                 subgroup_id = match value.as_str() {
                     "zero" => SubgroupId::Zero,
@@ -672,7 +705,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             other => {
                 if !(fetch.read(other, &value)?
                     || video.read(other, &value)?
-                    || auth.read(other, &value)?)
+                    || auth.read(other, &value)?
+                    || waits.read(other, &value)?)
                 {
                     bail!("unknown flag {other}");
                 }
@@ -692,9 +726,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         auth,
         catalog_video,
         timeout_secs,
-        answer_wait_ms,
+        answer_wait_ms: waits.answer,
         update_subgroup_timeout_ms: update_ms,
-        setup_wait_ms,
+        setup_wait_ms: waits.setup,
+        open_wait_ms: waits.open,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
         first_group,
@@ -1264,7 +1299,24 @@ impl Client<'_> {
         message: &ControlMessage,
         label: &str,
     ) -> Result<RequestStream> {
-        let mut stream = match RequestStream::open(self.connection, &self.args.trace, label).await {
+        // WHY a time for it, and the request alone that fails: a stream is
+        // opened when the peer allows one more, and a peer that allows none
+        // would hold the request for good. Nothing was sent, so nothing is
+        // reset; the session is not closed over it. `@xmoq/moqt` gives a
+        // request the same time (`openStreamTimeoutMs`), and the draft
+        // names none (docs/moqt-implementation-notes.md).
+        let wait = Duration::from_millis(self.args.open_wait_ms);
+        let opening = RequestStream::open(self.connection, &self.args.trace, label);
+        let opened = tokio::time::timeout(wait, opening)
+            .await
+            .unwrap_or_else(|_| {
+                report::not_sent(label, self.args.open_wait_ms);
+                Err(anyhow!(
+                    "the peer allowed no stream for the {label} request within {} ms",
+                    self.args.open_wait_ms
+                ))
+            });
+        let mut stream = match opened {
             Ok(stream) => stream,
             Err(error) => {
                 self.session.cancel(request_id);
@@ -2683,6 +2735,10 @@ fn termination_code(result: &Result<()>) -> u32 {
 /// written. **Provisional**, and the time `@xmoq/moqt` and the terminal
 /// viewer give it.
 const SETUP_WAIT_MS: u64 = 10_000;
+
+/// How long a request may wait for its stream to be opened. **Provisional**,
+/// and the time `@xmoq/moqt` gives it (`DEFAULT_OPEN_STREAM_TIMEOUT_MS`).
+const STREAM_OPEN_WAIT_MS: u64 = 10_000;
 
 /// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11): The session was closed because
 /// the peer took too long to respond to a control message." What the

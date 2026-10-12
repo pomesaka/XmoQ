@@ -43,6 +43,8 @@ export type XmoqPage = {
 		answerTimeoutMs?: number,
 		/** Own page: how long the peer's SETUP is waited for (`setupTimeoutMs` of `@xmoq/moqt`); the library's 10 seconds when left out. */
 		setupTimeoutMs?: number,
+		/** Own page: how long a request may wait for its stream to be opened (`openStreamTimeoutMs` of `@xmoq/moqt`); the library's 10 seconds when left out. */
+		openStreamTimeoutMs?: number,
 	): Promise<void>;
 	publishTrack(namespace: string, trackName: string): Promise<string>;
 	sendObject(payloadHex: string): Promise<void> | void;

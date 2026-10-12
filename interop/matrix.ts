@@ -1152,6 +1152,24 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "none",
 		},
 		{
+			name: "no relay: quiet peer: own-browser fails a SUBSCRIBE as not sent when the peer allows it no stream, and its session goes on",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-stream", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust fails a SUBSCRIBE as not sent when the peer allows it no stream",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-stream", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: the terminal viewer fails a SUBSCRIBE as not sent when the peer allows it no stream",
+			script: "quiet-peer.ts",
+			args: ["--case", "no-stream", "--client", "xmoq-watch"],
+			relay: "none",
+		},
+		{
 			name: "own relay: quiet peer: the relay closes the session of a client that sends no SETUP with CONTROL_MESSAGE_TIMEOUT",
 			script: "quiet-peer.ts",
 			args: ["--case", "relay-no-setup", "--client", "quiet-peer"],

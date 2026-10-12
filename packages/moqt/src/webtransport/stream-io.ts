@@ -1,7 +1,8 @@
+import { StreamResetErrorCode } from "../core/error.ts";
 import type { Session } from "../core/session.ts";
 import type { PeerStreamKind, SessionOutput } from "../core/session-output.ts";
 import { createStreamSlots } from "./stream-slots.ts";
-import type { MoqtTransport } from "./transport.ts";
+import type { MoqtBidirectionalStream, MoqtTransport } from "./transport.ts";
 
 /**
  * Something the caller has to wait for before it produces more for the same
@@ -40,6 +41,12 @@ export interface StreamIoOptions {
 	 * the transport, to say what it is. One that has not is stopped.
 	 */
 	firstBytesTimeoutMs: number;
+	/**
+	 * How long a bidirectional stream of this endpoint, a request, may wait
+	 * to be opened: for the peer to allow one more stream. Then what was to
+	 * be written on it fails with `StreamNotOpenedError`.
+	 */
+	openBidiTimeoutMs: number;
 	/** Called with the bytes of every stream. */
 	trace(direction: "sent" | "received", stream: string, data: Uint8Array): void;
 	/**
@@ -58,8 +65,13 @@ export interface StreamIoOptions {
  */
 export interface StreamIo {
 	/**
-	 * Performs one output. Stream creation is awaited so later outputs find the
-	 * stream; the write itself is returned as backpressure.
+	 * Performs one output. **A stream that is being opened is not waited
+	 * for**: what is to happen on it is kept for it, in order, and the
+	 * backpressure that is returned settles when that was done. WHY: the
+	 * transport opens a stream when the peer allows one more, and the
+	 * caller performs its outputs one after the other; waiting here would
+	 * hold back everything behind it, the answers of the peer that were
+	 * read among them.
 	 */
 	perform(output: StreamOutput): Promise<Backpressure | undefined>;
 	/** Starts accepting the streams the peer opens. */
@@ -91,6 +103,31 @@ interface LocalStream {
 	sendClosed: boolean;
 }
 
+/**
+ * A request stream was not opened in time: the peer allowed no further
+ * stream. Nothing was sent. Not an error of the session.
+ */
+export class StreamNotOpenedError extends Error {
+	override readonly name = "StreamNotOpenedError";
+
+	constructor() {
+		super("the peer allowed no stream for the request in time");
+	}
+}
+
+/**
+ * How long after a refusal a request stream is asked for again
+ * (**provisional**): short against the seconds a request waits, and no
+ * load: one call that the browser refuses without sending anything.
+ */
+const OPEN_AGAIN_AFTER_MS = 50;
+
+/** A stream this endpoint is opening, and what waits to be done on it. */
+interface OpeningStream {
+	/** Settles when everything asked of the stream so far was done. */
+	last: Promise<void>;
+}
+
 type StreamKind = "local" | "peer-uni" | "peer-bidi";
 
 /** Name of a stream in `trace`. */
@@ -110,11 +147,53 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		maxPeerUniStreams,
 		maxPeerBidiStreams,
 		firstBytesTimeoutMs,
+		openBidiTimeoutMs,
 		trace,
 		input,
 		fatal,
 	} = options;
 	const localStreams = new Map<number, LocalStream>();
+	/** The streams of this endpoint that are not open yet, or that still have something kept for them. */
+	const opening = new Map<number, OpeningStream>();
+
+	/**
+	 * Has `act` done on a local stream when what was asked of it before is
+	 * done; at once where nothing is. The order of what happens on one
+	 * stream is the order it was asked in.
+	 */
+	const inTurn = (
+		stream: number,
+		act: () => Promise<void> | undefined,
+	): Backpressure | undefined => {
+		const waits = opening.get(stream);
+		if (waits === undefined) {
+			const settled = act();
+			return settled === undefined ? undefined : { settled };
+		}
+		const last = waits.last.then(() => act());
+		waits.last = last;
+		// The stream is no longer one that waits when nothing was asked of it
+		// since.
+		const done = (): void => {
+			if (opening.get(stream)?.last === last) opening.delete(stream);
+		};
+		last.then(done, done);
+		return { settled: last };
+	};
+
+	/** Opens a stream of this endpoint without holding the caller: `open` registers it when the transport has made it. */
+	const openInTurn = (
+		stream: number,
+		open: () => Promise<void>,
+		data: Uint8Array,
+	): Backpressure | undefined => {
+		opening.set(stream, { last: open() });
+		return inTurn(stream, () => {
+			const local = localStreams.get(stream);
+			// Reset meanwhile, by a request that was given up.
+			return local === undefined ? undefined : write(local, data);
+		});
+	};
 	const peerUniStreams = new Map<number, PeerStream>();
 	const peerBidiWriters = new Map<
 		number,
@@ -367,48 +446,118 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		async perform(output) {
 			switch (output.type) {
 				case "open-uni-stream": {
-					const writable = await transport.createUnidirectionalStream();
-					const writer = writable.getWriter();
-					const local: LocalStream = {
-						name: streamName("local", output.stream),
-						writer,
-						reader: undefined,
-						sendClosed: false,
-					};
-					localStreams.set(output.stream, local);
-					watchStop(output.stream, writer);
-					return { settled: write(local, output.data) };
+					const { stream } = output;
+					return openInTurn(
+						stream,
+						async () => {
+							// A stream that cannot be made is the transport's
+							// failure, and the session's end.
+							const writable = await transport
+								.createUnidirectionalStream()
+								.catch((error: unknown) => {
+									fatal(toError(error));
+									throw error;
+								});
+							if (cleared) return;
+							const writer = writable.getWriter();
+							localStreams.set(stream, {
+								name: streamName("local", stream),
+								writer,
+								reader: undefined,
+								sendClosed: false,
+							});
+							watchStop(stream, writer);
+						},
+						output.data,
+					);
 				}
 				case "open-bidi-stream": {
 					const { stream } = output;
-					const bidi = await transport.createBidirectionalStream();
-					const writer = bidi.writable.getWriter();
-					const reader = bidi.readable.getReader();
-					const local: LocalStream = {
-						name: streamName("local", stream),
-						writer,
-						reader,
-						sendClosed: false,
-					};
-					localStreams.set(stream, local);
-					void pump({
-						name: streamName("local", stream),
-						reader,
-						onData: (session, data, fin) =>
-							session.receiveRequestStreamData(stream, data, fin),
-						onReset: (session, error) =>
-							session.requestStreamReset(
-								stream,
-								transport.streamErrorCode(error),
-							),
-						onEnd() {
-							const local = localStreams.get(stream);
-							if (local !== undefined) local.reader = undefined;
-							releaseLocalStream(stream);
+					return openInTurn(
+						stream,
+						async () => {
+							let late = false;
+							let timer: ReturnType<typeof setTimeout> | undefined;
+							const inTime = new Promise<undefined>((resolve) => {
+								timer = setTimeout(() => {
+									late = true;
+									resolve(undefined);
+								}, openBidiTimeoutMs);
+							});
+							// WHY it is asked for again and again: the WebTransport
+							// API has a stream made when the peer allows one more,
+							// and Chromium 156 rejects at once where the peer
+							// allows none ("Failed to create bidirectional
+							// stream", seen against a peer that allows no stream:
+							// docs/experiments/2026-10-12-a-request-that-waits-for-a-stream.md).
+							// Asked again, the request waits here as the API has
+							// it wait there.
+							// WHY not the end of the session, which it was: a peer
+							// that has no room for a request for a moment has not
+							// ended anything. A session that is gone is reported
+							// by the transport, and ends this by `cleared`.
+							const create = async (): Promise<MoqtBidirectionalStream> => {
+								for (;;) {
+									try {
+										return await transport.createBidirectionalStream();
+									} catch (error) {
+										if (late || cleared) throw error;
+										await new Promise((resolve) =>
+											setTimeout(resolve, OPEN_AGAIN_AFTER_MS),
+										);
+										if (late || cleared) throw error;
+									}
+								}
+							};
+							const creating = create();
+							// WHY the stream is given up when it comes late, and
+							// not used: the request it was for has failed by then.
+							// A stream the transport made cannot be unmade, so it
+							// is reset and stopped with nothing written on it.
+							creating.then(
+								(bidi) => {
+									if (!late) return;
+									const error = transport.streamError(
+										StreamResetErrorCode.CANCELLED,
+										"opened too late for its request",
+									);
+									void bidi.writable.abort(error).catch(() => {});
+									void bidi.readable.cancel(error).catch(() => {});
+								},
+								() => {},
+							);
+							const bidi = await Promise.race([creating, inTime]);
+							clearTimeout(timer);
+							if (bidi === undefined) throw new StreamNotOpenedError();
+							if (cleared) return;
+							const writer = bidi.writable.getWriter();
+							const reader = bidi.readable.getReader();
+							localStreams.set(stream, {
+								name: streamName("local", stream),
+								writer,
+								reader,
+								sendClosed: false,
+							});
+							void pump({
+								name: streamName("local", stream),
+								reader,
+								onData: (session, data, fin) =>
+									session.receiveRequestStreamData(stream, data, fin),
+								onReset: (session, error) =>
+									session.requestStreamReset(
+										stream,
+										transport.streamErrorCode(error),
+									),
+								onEnd() {
+									const local = localStreams.get(stream);
+									if (local !== undefined) local.reader = undefined;
+									releaseLocalStream(stream);
+								},
+							});
+							watchStop(stream, writer);
 						},
-					});
-					watchStop(stream, writer);
-					return { settled: write(local, output.data) };
+						output.data,
+					);
 				}
 				case "adopt-peer-stream": {
 					const { peerStream, stream } = output;
@@ -432,33 +581,48 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 					return undefined;
 				}
 				case "send": {
-					const local = localStreams.get(output.stream);
-					if (local === undefined) {
-						throw new Error(`stream ${output.stream} is not open`);
+					const { stream, data } = output;
+					if (!opening.has(stream) && !localStreams.has(stream)) {
+						throw new Error(`stream ${stream} is not open`);
 					}
-					return { settled: write(local, output.data) };
+					return inTurn(stream, () => {
+						const local = localStreams.get(stream);
+						// Reset before its turn came.
+						return local === undefined ? undefined : write(local, data);
+					});
 				}
 				case "finish": {
-					const local = localStreams.get(output.stream);
-					if (local === undefined) return undefined;
-					local.sendClosed = true;
-					releaseLocalStream(output.stream);
-					// A FIN fails when the peer already stopped or reset the stream.
-					// Either way this endpoint is done sending on it.
-					return { settled: local.writer.close().catch(() => {}) };
+					const { stream } = output;
+					return inTurn(stream, () => {
+						const local = localStreams.get(stream);
+						if (local === undefined) return undefined;
+						local.sendClosed = true;
+						releaseLocalStream(stream);
+						// A FIN fails when the peer already stopped or reset the
+						// stream. Either way this endpoint is done sending on it.
+						return local.writer.close().catch(() => {});
+					});
 				}
 				case "reset": {
-					const local = localStreams.get(output.stream);
-					if (local === undefined) return undefined;
-					localStreams.delete(output.stream);
-					const error = transport.streamError(
-						output.code,
-						"reset by the MOQT session",
-					);
-					// Both fail on a direction that is already closed or errored,
-					// which is the state a reset is meant to reach.
-					void local.writer.abort(error).catch(() => {});
-					void local.reader?.cancel(error).catch(() => {});
+					const { stream, code } = output;
+					const reset = (): undefined => {
+						const local = localStreams.get(stream);
+						if (local === undefined) return undefined;
+						localStreams.delete(stream);
+						const error = transport.streamError(
+							code,
+							"reset by the MOQT session",
+						);
+						// Both fail on a direction that is already closed or
+						// errored, which is the state a reset is meant to reach.
+						void local.writer.abort(error).catch(() => {});
+						void local.reader?.cancel(error).catch(() => {});
+						return undefined;
+					};
+					// WHY nobody waits for it, and it is not passed on where the
+					// stream was never opened: a reset says the caller is done
+					// with the stream, whatever became of it.
+					inTurn(stream, reset)?.settled.catch(() => {});
 					return undefined;
 				}
 				case "respond": {
@@ -480,12 +644,16 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 						output.code,
 						"stopped by the MOQT session",
 					);
+					const { stream } = output;
 					// Fails when the peer's direction already ended, and then
 					// nothing is left to stop.
-					void localStreams
-						.get(output.stream)
-						?.reader?.cancel(error)
-						.catch(() => {});
+					inTurn(stream, () => {
+						void localStreams
+							.get(stream)
+							?.reader?.cancel(error)
+							.catch(() => {});
+						return undefined;
+					})?.settled.catch(() => {});
 					return undefined;
 				}
 				case "peer-stream-identified":
@@ -620,6 +788,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 
 		clear() {
 			localStreams.clear();
+			opening.clear();
 			for (const streams of [peerUniStreams, peerBidiStreams]) {
 				for (const { firstBytesTimer } of streams.values()) {
 					clearTimeout(firstBytesTimer);
