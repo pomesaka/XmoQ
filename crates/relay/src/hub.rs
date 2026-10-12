@@ -1313,12 +1313,7 @@ impl<C: Connection> Hub<C> {
                     handle.stops.stop(stream.0, code);
                 }
             }
-            Action::OpenDataStream {
-                session,
-                out_stream,
-                header,
-                subgroup_delivery_timeout: asked,
-            } => self.open_data_stream((session, out_stream), header, asked, pending),
+            opening @ Action::OpenDataStream { .. } => self.open_data_stream(&opening, pending),
             Action::SetDeliveryTimeout {
                 out_stream,
                 subgroup_delivery_timeout: asked,
@@ -1577,13 +1572,19 @@ impl<C: Connection> Hub<C> {
         }
     }
 
-    fn open_data_stream(
-        &mut self,
-        (session, out_stream): (SessionKey, OutStreamKey),
-        header: SubgroupHeader,
-        asked: Option<u64>,
-        pending: &mut VecDeque<Event>,
-    ) {
+    /// Carries out [`Action::OpenDataStream`]; another action is none of
+    /// its business.
+    fn open_data_stream(&mut self, opening: &Action, pending: &mut VecDeque<Event>) {
+        let &Action::OpenDataStream {
+            session,
+            out_stream,
+            header,
+            subgroup_delivery_timeout: asked,
+            send_order,
+        } = opening
+        else {
+            return;
+        };
         let delivery_timeout = asked.map(Duration::from_millis);
         // WHY for every subscription, whatever delivery timeout it set: a
         // timeout says how long a subscriber is willing to wait, and a rule
@@ -1661,7 +1662,7 @@ impl<C: Connection> Hub<C> {
         let writer = OutgoingSubgroup::spawn(
             Arc::clone(&handle.connection),
             header,
-            delivery_timeout,
+            (delivery_timeout, send_order),
             &handle.budget,
             report,
             self.config.streams.trace.clone(),

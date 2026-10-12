@@ -2145,7 +2145,8 @@ fn known_gap_a_subgroup_without_a_priority_reaches_the_subscriber_under_another_
             stream: StreamKey(7),
             header: inherits(UPSTREAM_ALIAS),
         }),
-        [open_data_stream(ALICE, 0, inherits(0))]
+        // Sent in the order of the priority the publisher gave it: 10.
+        [open_data_stream_inheriting(ALICE, 0, inherits(0), 10)]
     );
 }
 
@@ -2564,7 +2565,10 @@ fn a_subgroup_that_was_cut_short_is_sent_again_across_a_new_default_priority() {
     // the Subgroup goes on (§2.2).
     assert_eq!(
         object_from(&mut relay, PUBLISHER, 8, 0),
-        [open_data_stream(ALICE, 1, unnamed(0)), send_object(1, 0)]
+        [
+            open_data_stream_inheriting(ALICE, 1, unnamed(0), 10),
+            send_object(1, 0)
+        ]
     );
 }
 

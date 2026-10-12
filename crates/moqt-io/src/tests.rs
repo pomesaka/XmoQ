@@ -908,7 +908,7 @@ impl Sending {
         OutgoingSubgroup::spawn(
             Arc::clone(&self.local),
             header(),
-            None,
+            (None, 0),
             &self.budget,
             move |event| {
                 let _ = report.send((number, event));
@@ -1677,7 +1677,7 @@ mod held_until_delivered {
         let out = OutgoingSubgroup::spawn(
             Arc::clone(&local),
             header(),
-            own,
+            (own, 0),
             &budget,
             move |event| {
                 let _ = report.send(event);
@@ -1838,7 +1838,7 @@ mod held_until_delivered {
             OutgoingSubgroup::spawn(
                 Arc::clone(&local),
                 header(),
-                None,
+                (None, 0),
                 &budget,
                 |_| std::future::ready(()),
                 Trace::default(),
@@ -1959,7 +1959,7 @@ mod delivers_when_told {
             let out = OutgoingSubgroup::spawn(
                 Arc::clone(&local),
                 header(),
-                own.map(Duration::from_millis),
+                (own.map(Duration::from_millis), 0),
                 &budget,
                 move |event| {
                     let _ = report.send(event);

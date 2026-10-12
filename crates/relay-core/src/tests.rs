@@ -129,10 +129,29 @@ fn send_object(out_stream: u64, object_id: u64) -> Action {
     }
 }
 
+/// [`open_data_stream`] for a stream whose header has no Publisher
+/// Priority, with the default of its source (§11.4.2).
+fn open_data_stream_inheriting(
+    session: SessionKey,
+    out_stream: u64,
+    header: SubgroupHeader,
+    default_priority: u8,
+) -> Action {
+    Action::OpenDataStream {
+        session,
+        out_stream: OutStreamKey(out_stream),
+        send_order: crate::send_order(128, default_priority),
+        header,
+        subgroup_delivery_timeout: None,
+    }
+}
+
 fn open_data_stream(session: SessionKey, out_stream: u64, header: SubgroupHeader) -> Action {
     Action::OpenDataStream {
         session,
         out_stream: OutStreamKey(out_stream),
+        // What a subscriber that named no priority and no order has: 128.
+        send_order: crate::send_order(128, header.publisher_priority.unwrap_or(128)),
         header,
         subgroup_delivery_timeout: None,
     }
@@ -2076,6 +2095,77 @@ fn a_stream_towards_a_subscriber_carries_the_subgroup_delivery_timeout_of_its_su
                     subgroup_delivery_timeout,
                     ..
                 } => Some(*subgroup_delivery_timeout),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [expected], "{case}");
+    }
+}
+
+/// §7.2, its first two steps: the Subscriber Priority, then the Publisher
+/// Priority. The larger number is sent first, and all are below 0, which
+/// the control stream and the request streams have.
+#[test]
+fn a_stream_is_sent_before_another_by_the_subscriber_priority_and_then_the_publishers() {
+    // (Subscriber Priority, Publisher Priority; the number)
+    let cases: [(u8, u8, i32); 6] = [
+        (0, 0, -1),
+        (0, 1, -2),
+        (0, 255, -256),
+        (1, 0, -257),
+        (128, 128, -32_897),
+        (255, 255, -65_536),
+    ];
+    for (subscriber, publisher, expected) in cases {
+        assert_eq!(
+            crate::send_order(subscriber, publisher),
+            expected,
+            "{subscriber} {publisher}"
+        );
+    }
+}
+
+#[test]
+fn a_stream_towards_a_subscriber_has_the_send_order_of_its_subscribe_and_its_header() {
+    // (the parameters of the SUBSCRIBE; the Publisher Priority of the
+    // stream's header; the number the stream is opened with)
+    let cases: [(Vec<Parameter>, Option<u8>, i32); 4] = [
+        (vec![], Some(128), -32_897),
+        (vec![Parameter::SubscriberPriority(1)], Some(0), -257),
+        // The sound of a publisher that gives it 64 goes before its video.
+        (vec![], Some(64), -32_833),
+        // §12.4: 128 where neither the header nor the track names one.
+        (vec![], None, -32_897),
+    ];
+    for (parameters, publisher_priority, expected) in cases {
+        let case = format!("{parameters:?} {publisher_priority:?}");
+        let mut relay = relay_with_track();
+        relay.step(Event::RequestOpened {
+            session: BOB,
+            stream: StreamKey(0),
+            first: ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: track(b"a"),
+                parameters,
+            }),
+        });
+        let mut actions = relay.step(Event::DataStreamOpened {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            header: SubgroupHeader {
+                publisher_priority,
+                ..header_of_group(UPSTREAM_ALIAS, 1)
+            },
+        });
+        actions.extend(object_arrived(&mut relay, 7, 0));
+        let opened: Vec<i32> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::OpenDataStream {
+                    session: BOB,
+                    send_order,
+                    ..
+                } => Some(*send_order),
                 _ => None,
             })
             .collect();

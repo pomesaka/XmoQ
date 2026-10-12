@@ -173,6 +173,20 @@ pub trait SendStream: Send + 'static {
     /// was written and not yet delivered may be lost.
     fn reset(self, code: u32);
 
+    /// Says where this stream stands among the streams of its connection
+    /// that have something to send: **of two, the one with the larger
+    /// number is sent first**, and streams with the same number take turns.
+    /// Until it is called a stream has 0. It holds for what is not on its
+    /// way yet; what the transport has sent is not called back.
+    ///
+    /// WHY a default that does nothing: it is right for a transport that
+    /// holds nothing between `write_all` and its peer, which the in-memory
+    /// connection is. There is nothing to put in order then. A transport
+    /// with a send buffer has to implement it.
+    fn set_send_order(&mut self, order: i32) {
+        let _ = order;
+    }
+
     /// Like [`Self::finish`], but what has not reached the peer's transport
     /// when `give_up` completes is given up: the stream is reset with the
     /// code `give_up` gave. `true` when everything and the FIN got there, or

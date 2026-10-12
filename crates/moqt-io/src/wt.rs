@@ -244,6 +244,15 @@ impl SendStream for WtSend {
         let _ = self.0.reset(code);
     }
 
+    /// quinn 0.11.12, `SendStream::set_priority`: "Every send stream has an
+    /// initial priority of 0. Locally buffered data from streams with
+    /// higher priority will be transmitted before data from streams with
+    /// lower priority." web-transport-quinn 0.13.2 hands the number on.
+    fn set_send_order(&mut self, order: i32) {
+        // An error only says the stream was already closed.
+        let _ = self.0.set_priority(order);
+    }
+
     async fn finish_until<G>(mut self, give_up: G) -> bool
     where
         G: Future<Output = u32> + Send,
