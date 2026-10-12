@@ -73,6 +73,15 @@ const VIDEO_TIMEOUT_MS = Number(query.get("videoTimeout") ?? 150);
  * playback; transport §10.9). For seeing that the relay follows a timeout
  * that changes; nothing is updated without it.
  */
+/**
+ * `?versionTimeouts=A,B` (**a trial**, with `?abr=1`): the timeout of each
+ * version of the video, in the order of the catalog, in milliseconds; 0
+ * for none. A version that has none here has `VIDEO_TIMEOUT_MS`.
+ */
+const VERSION_TIMEOUTS = (query.get("versionTimeouts") ?? "")
+	.split(",")
+	.filter((each) => each !== "")
+	.map(Number);
 const VIDEO_TIMEOUT_THEN = query.get("videoTimeoutThen");
 const VIDEO_TIMEOUT_AFTER_S = Number(query.get("videoTimeoutAfter") ?? 10);
 
@@ -368,6 +377,12 @@ async function main(): Promise<void> {
 	// a higher one again when it has come in time for a while
 	// (`createQualitySwitch` of @xmoq/media).
 	const ABR = query.has("abr");
+	/**
+	 * `?judge=try` (**a trial**, with `?abr=1`): the page receives a higher
+	 * version for 2 s before it shows it, and shows it only when its
+	 * pictures came in time (`tryMs` of `createQualitySwitch`).
+	 */
+	const TRY_FIRST = query.get("judge") === "try";
 	/** The fastest a frame came, and how much later than that the frames of the last second came. */
 	const fastestVideo = createFastestWay();
 	let seenVideo = false;
@@ -383,7 +398,9 @@ async function main(): Promise<void> {
 		level: number;
 		track: string;
 		changes: { at: number; to: string; tookMs: number | null }[];
-	} = { level: 0, track: "", changes: [] };
+		/** `?judge=try`: every try of a higher version: when it began, and whether it held. */
+		tries: { at: number; held: boolean }[];
+	} = { level: 0, track: "", changes: [], tries: [] };
 	const videoOptions = {
 		joiningFetch: query.get("join") !== "no",
 		onFrame(frame: VideoFrame) {
@@ -594,19 +611,22 @@ async function main(): Promise<void> {
 			const playVersion = (
 				track: CatalogTrack,
 				more: Partial<Parameters<typeof playVideoTrack>[1]> = {},
-			): Promise<VideoPlayback> =>
-				playVideoTrack(connection, {
+			): Promise<VideoPlayback> => {
+				const timeoutMs =
+					VERSION_TIMEOUTS[tracks.versions.indexOf(track)] ?? VIDEO_TIMEOUT_MS;
+				return playVideoTrack(connection, {
 					...videoOptions,
 					trackNamespace: trackNamespaceOf(track, playingNamespace),
 					trackName: utf8.encode(track.name),
 					codec: track.codec ?? "",
 					// The sender is asked to give a Group of video up so long
 					// after its end (`VIDEO_TIMEOUT_MS`); nothing is asked with 0.
-					...(VIDEO_TIMEOUT_MS > 0
-						? { deliveryTimeouts: { subgroupMs: VIDEO_TIMEOUT_MS } }
+					...(timeoutMs > 0
+						? { deliveryTimeouts: { subgroupMs: timeoutMs } }
 						: {}),
 					...more,
 				});
+			};
 			/** Stops the version that is played. */
 			let leave = new AbortController();
 			const video =
@@ -640,12 +660,104 @@ async function main(): Promise<void> {
 			});
 			if (ABR && video !== undefined && tracks.versions.length > 1) {
 				const versions = tracks.versions;
-				const chooser = createQualitySwitch({ levels: versions.length });
+				const chooser = createQualitySwitch({
+					levels: versions.length,
+					...(TRY_FIRST ? { tryMs: 2000 } : {}),
+				});
 				let changing = false;
+				/** The version that is received and not shown, to see whether the link has room for it. */
+				let trial:
+					| {
+							level: number;
+							at: number;
+							stop: AbortController;
+							playing: VideoPlayback | undefined;
+							late: { at: number; ms: number }[];
+							shown: boolean;
+					  }
+					| undefined;
 				const ticking = setInterval(() => {
 					// Nothing is judged before the first frame, or while a change is under way.
 					if (!seenVideo || changing) return;
-					const wanted = chooser.tick(performance.now(), lateNow());
+					const now = performance.now();
+					const tried = trial;
+					const triedLate = (tried?.late ?? [])
+						.filter((each) => each.at > now - 1000)
+						.map((each) => each.ms)
+						.sort((a, b) => a - b);
+					const wanted = chooser.tick(
+						now,
+						lateNow(),
+						triedLate[Math.floor(triedLate.length / 2)],
+					);
+					const trying = chooser.trying();
+					const triedTrack = trying === undefined ? undefined : versions[trying];
+					if (trying !== undefined && triedTrack !== undefined && tried === undefined) {
+						// The try begins: the higher version comes next to the one
+						// that is shown, and its frames are closed unseen.
+						const began: NonNullable<typeof trial> = {
+							level: trying,
+							at: Date.now(),
+							stop: new AbortController(),
+							playing: undefined,
+							late: [],
+							shown: false,
+						};
+						trial = began;
+						playVersion(triedTrack, {
+							joiningFetch: false,
+							signal: began.stop.signal,
+							onFrame(frame) {
+								if (began.shown) return videoOptions.onFrame(frame);
+								const took = Date.now() - frame.timestamp / 1000;
+								const way = fastestVideo.take(took);
+								if (way !== undefined) {
+									began.late.push({
+										at: performance.now(),
+										ms: took - way.fastestMs,
+									});
+									if (began.late.length > 200) began.late.shift();
+								}
+								frame.close();
+							},
+						}).then(
+							(playing) => {
+								began.playing = playing;
+								void playing.ended.then((end) => {
+									if (playback === playing) over(end.type);
+								});
+							},
+							(error: unknown) => {
+								console.log(`no try of a version: ${String(error)}`);
+							},
+						);
+						return;
+					}
+					if (trying === undefined && tried !== undefined) {
+						trial = undefined;
+						const held = wanted === tried.level && tried.playing !== undefined;
+						quality.tries.push({ at: tried.at, held });
+						if (quality.tries.length > 200) quality.tries.shift();
+						if (!held) {
+							tried.stop.abort();
+							return;
+						}
+						// It held: it is shown from its next frame on, and the
+						// version before is left.
+						const to = versions[tried.level];
+						tried.shown = true;
+						playback = tried.playing;
+						leave.abort();
+						leave = tried.stop;
+						quality.level = tried.level;
+						quality.track = to?.name ?? "";
+						quality.changes.push({
+							at: Date.now(),
+							to: to?.name ?? "",
+							tookMs: 0,
+						});
+						return;
+					}
 					const track = versions[wanted];
 					if (wanted === quality.level || track === undefined) return;
 					changing = true;
