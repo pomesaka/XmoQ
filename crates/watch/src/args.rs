@@ -1,6 +1,7 @@
 //! The flags of the viewer.
 
 use crate::room::certificate_hash;
+use crate::tracks::VideoVersion;
 
 /// How a frame gets to the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +57,9 @@ pub struct Args {
     /// `--video` and `--audio`: the names of the tracks. `None`: what the
     /// catalog of the broadcast has.
     pub tracks: Option<(String, String)>,
+    /// `--video-version`: which version of the video is played where the
+    /// catalog has several. Not with `--video`, which names the track.
+    pub video_version: VideoVersion,
     /// `--buffer-ms`: how long an Object is held beyond the fastest way;
     /// with `auto`, where the buffer begins.
     pub buffer_ms: u64,
@@ -133,6 +137,10 @@ pub const USAGE: &str = "\
 xmoq-watch --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
 xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line>] [--token no]
   --video <track> --audio <track>   the tracks by name; without them, those of the catalog
+  --video-version first|name:<track>|height:<n>|bitrate:<n>
+                                    which version of the video of the catalog: the first (first), the
+                                    one of that name, or the largest of at most so many pixels of
+                                    height or bits a second (the smallest where none is within it)
   --buffer-ms <ms>|auto             how long an Object is held beyond the fastest way (50);
                                     auto: it follows how late Objects come, from 50 up to 400 (a trial)
   --answer-wait-ms <ms>             how long the relay gets to answer a request (10000)
@@ -167,6 +175,26 @@ fn one_of<T: Copy>(flag: &str, value: &str, choices: &[(&str, T)]) -> Result<T, 
             let names: Vec<&str> = choices.iter().map(|(name, _)| *name).collect();
             Invalid(format!("{flag} {value}: {}", names.join(" or ")))
         })
+}
+
+fn video_version(value: &str) -> Result<VideoVersion, Invalid> {
+    let flag = "--video-version";
+    match value.split_once(':') {
+        None if value == "first" => Ok(VideoVersion::First),
+        Some(("name", name)) if !name.is_empty() => Ok(VideoVersion::Named(name.to_string())),
+        // The message has the value as it was typed.
+        Some(("height", most)) => most
+            .parse()
+            .map(VideoVersion::HeightAtMost)
+            .map_err(|_| Invalid(format!("{flag} {value}: not a number it takes"))),
+        Some(("bitrate", most)) => most
+            .parse()
+            .map(VideoVersion::BitrateAtMost)
+            .map_err(|_| Invalid(format!("{flag} {value}: not a number it takes"))),
+        _ => Err(Invalid(format!(
+            "{flag} {value}: first, name:<track>, height:<n> or bitrate:<n>"
+        ))),
+    }
 }
 
 fn fit(value: &str) -> Result<Fit, Invalid> {
@@ -213,6 +241,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             ask_token: true,
         },
         tracks: None,
+        video_version: VideoVersion::First,
         buffer_ms: DEFAULT_BUFFER_MS,
         buffer_auto: false,
         video_timeout_ms: None,
@@ -248,6 +277,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--token" => ask_token = one_of(&flag, &value, &[("yes", true), ("no", false)])?,
             "--video" => video = Some(value),
             "--audio" => audio = Some(value),
+            "--video-version" => args.video_version = video_version(&value)?,
             "--buffer-ms" if value == "auto" => {
                 args.buffer_ms = DEFAULT_BUFFER_MS;
                 args.buffer_auto = true;
@@ -315,6 +345,11 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         (None, None) => return Err(Invalid("--url or --room is needed".to_string())),
         (Some(_), Some(_)) => return Err(Invalid("--url or --room, not both".to_string())),
     };
+    if video.is_some() && args.video_version != VideoVersion::First {
+        return Err(Invalid(
+            "--video names the track; --video-version chooses one of the catalog".to_string(),
+        ));
+    }
     args.tracks = match (video, audio) {
         (Some(video), Some(audio)) => Some((video, audio)),
         (None, None) => None,
@@ -339,6 +374,7 @@ mod tests {
         Args {
             source,
             tracks: None,
+            video_version: VideoVersion::First,
             buffer_ms: 50,
             buffer_auto: false,
             video_timeout_ms: None,
@@ -392,6 +428,7 @@ mod tests {
                     ask_token: false,
                 },
                 tracks: Some(("v".to_string(), "a".to_string())),
+                video_version: VideoVersion::First,
                 buffer_ms: 150,
                 buffer_auto: false,
                 video_timeout_ms: Some(100),
@@ -413,6 +450,24 @@ mod tests {
             parsed("--room http://h/rooms/a --fit none").map(|args| args.fit),
             Ok(Fit::AsItIs)
         );
+        // (the value of `--video-version`; what it is read as)
+        let versions = [
+            ("first", VideoVersion::First),
+            (
+                "name:video-low",
+                VideoVersion::Named("video-low".to_string()),
+            ),
+            ("height:360", VideoVersion::HeightAtMost(360)),
+            ("bitrate:500000", VideoVersion::BitrateAtMost(500_000)),
+        ];
+        for (value, expected) in versions {
+            assert_eq!(
+                parsed(&format!("--room http://h/rooms/a --video-version {value}"))
+                    .map(|args| args.video_version),
+                Ok(expected),
+                "{value}"
+            );
+        }
         assert_eq!(
             parsed("--room http://h/rooms/a --buffer-ms 300 --buffer-ms auto")
                 .map(|args| (args.buffer_ms, args.buffer_auto)),
@@ -473,6 +528,22 @@ mod tests {
                 "--volume NaN: from 0 to 1",
             ),
             ("--room r --scale 0".to_string(), "--scale 0: 1 or more"),
+            (
+                "--room r --video-version low".to_string(),
+                "--video-version low: first, name:<track>, height:<n> or bitrate:<n>",
+            ),
+            (
+                "--room r --video-version name:".to_string(),
+                "--video-version name:: first, name:<track>, height:<n> or bitrate:<n>",
+            ),
+            (
+                "--room r --video-version height:tall".to_string(),
+                "--video-version height:tall: not a number it takes",
+            ),
+            (
+                "--room r --video v --audio a --video-version height:360".to_string(),
+                "--video names the track; --video-version chooses one of the catalog",
+            ),
             (
                 "--room r --medium paper".to_string(),
                 "--medium paper: file or direct",
