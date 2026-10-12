@@ -1,0 +1,18 @@
+[package]
+name = "opus-compare"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A spike: outside the workspace (the root Cargo.toml excludes spikes/), its lints and its
+# review. It sets the decoder `xmoq-watch` uses against libopus, sample by sample.
+[dependencies]
+opus-decoder = "=0.1.1"
+# libopus, which `opusic-sys` carries and builds: needs cmake and a C compiler.
+opus = "=0.4.0"
+
+# `cargo build --profile checked`: optimized as a release build, with the checks for overflow
+# of a debug build, to find the packets at which the decoder overflows.
+[profile.checked]
+inherits = "release"
+overflow-checks = true
