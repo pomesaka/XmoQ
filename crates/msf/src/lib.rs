@@ -20,7 +20,7 @@ pub const MSF_VERSION: &str = "draft-01";
 pub const LOC_PACKAGING: &str = "loc";
 
 /// A track of a catalog (§5.2): the fields a viewer chooses by.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CatalogTrack {
     /// §5.2.3.
     pub name: String,
@@ -36,10 +36,12 @@ pub struct CatalogTrack {
     pub width: Option<u64>,
     /// §5.2.27, in pixels.
     pub height: Option<u64>,
-    /// §5.2.28: "The number of audio frame samples per second." `None`
-    /// also for a number that is no whole number of samples: `@xmoq/msf`
-    /// takes any number, and a viewer has no use for a part of a sample.
-    pub samplerate: Option<u64>,
+    /// §5.2.28: "The number of audio frame samples per second." WHY a
+    /// float, where the sizes above are whole numbers: the draft has "JSON
+    /// Type: Number" and nothing on whole numbers, `@xmoq/msf` keeps the
+    /// number as it is, and both read the same rows of
+    /// `fixtures/msf-01/catalogs.tsv`.
+    pub samplerate: Option<f64>,
     /// §5.2.29: "A string specifying the audio channel configuration". The
     /// draft's examples and `moqlivemock` have the number of channels in
     /// it, `"2"`; no other form is said.
@@ -104,7 +106,7 @@ pub fn read_catalog(payload: &[u8]) -> Result<Vec<CatalogTrack>, Invalid> {
                 codec: text("codec"),
                 width: number("width"),
                 height: number("height"),
-                samplerate: number("samplerate"),
+                samplerate: track.get("samplerate").and_then(Value::as_f64),
                 channel_config: text("channelConfig"),
             })
         })
@@ -178,7 +180,7 @@ mod tests {
                 opus.samplerate,
                 opus.channel_config.as_deref()
             ),
-            ("audio_monotonic_128kbps_opus", Some(48000), Some("2"))
+            ("audio_monotonic_128kbps_opus", Some(48000.0), Some("2"))
         );
         let aac = first_audio_track(&tracks, "mp4a").unwrap();
         assert_eq!(
@@ -187,7 +189,7 @@ mod tests {
                 aac.samplerate,
                 aac.channel_config.as_deref()
             ),
-            ("audio_monotonic_128kbps_aac", Some(48000), Some("2"))
+            ("audio_monotonic_128kbps_aac", Some(48000.0), Some("2"))
         );
         let hevc = first_video_track(&tracks, "hev1").unwrap();
         assert_eq!(hevc.name, "video_400kbps_hevc");
@@ -215,28 +217,34 @@ mod tests {
                 "audio-track-with-samplerate-and-channel-config",
                 "samplerate-as-a-string",
                 "samplerate-too-large-for-a-number",
+                "samplerate-that-is-no-whole-number",
                 "channel-config-as-a-number",
                 "channel-config-with-half-a-surrogate-pair",
             ]
         );
-        for (name, expected, document) in rows {
+        for (name, expected, document) in &rows {
             let read = read_catalog(document.as_bytes());
-            assert_eq!(read.is_ok(), expected == "catalog", "{name}: {read:?}");
+            assert_eq!(read.is_ok(), *expected == "catalog", "{name}: {read:?}");
         }
-        let (_, _, document) = table
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.splitn(3, '\t');
-                Some((fields.next()?, fields.next()?, fields.next()?))
-            })
-            .find(|(name, _, _)| *name == "audio-track-with-samplerate-and-channel-config")
-            .unwrap();
-        let tracks = read_catalog(document.as_bytes()).unwrap();
-        let audio = first_audio_track(&tracks, "opus").unwrap();
-        assert_eq!(
-            (audio.samplerate, audio.channel_config.as_deref()),
-            (Some(48000), Some("1"))
-        );
+        // (the row; its sample rate; its channels)
+        let cases = [
+            (
+                "audio-track-with-samplerate-and-channel-config",
+                Some(48000.0),
+                Some("1"),
+            ),
+            ("samplerate-that-is-no-whole-number", Some(44100.5), None),
+        ];
+        for (row, samplerate, channel_config) in cases {
+            let (_, _, document) = rows.iter().find(|(name, _, _)| *name == row).unwrap();
+            let tracks = read_catalog(document.as_bytes()).unwrap();
+            let audio = first_audio_track(&tracks, "opus").unwrap();
+            assert_eq!(
+                (audio.samplerate, audio.channel_config.as_deref()),
+                (samplerate, channel_config),
+                "{row}"
+            );
+        }
     }
 
     #[test]
