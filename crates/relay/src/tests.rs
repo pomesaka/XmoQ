@@ -2758,54 +2758,70 @@ async fn an_object_from_the_cache_keeps_its_subgroup_its_priority_and_its_proper
 }
 
 /// What the delivery timeout of a subscription and the relay's own flags do
-/// to a subgroup stream that is written whole and not delivered (§8), on a
-/// connection that delivers when the test says so.
+/// to a subgroup stream that is not delivered (§8), on a connection that
+/// delivers a finished stream when the test says so.
 mod delivery_timeouts {
     use super::*;
 
-    /// What came on the peer's unidirectional streams and was not taken yet.
-    fn arrived(peer: &mut Peer) -> Vec<UniEvent> {
-        let (events, _) = peer.data.as_mut().expect("this peer reads");
-        std::iter::from_fn(|| events.try_recv().ok()).collect()
-    }
+    /// `DELIVERY_TIMEOUT` (0x2), as the end of a stream.
+    const TIMED_OUT: StreamEnd = StreamEnd::Aborted(Some(0x2));
 
-    /// The Groups whose stream was reset with `DELIVERY_TIMEOUT` (0x2) among
-    /// these events. A stream that ended another way fails the test.
-    fn given_up(events: &[UniEvent]) -> Vec<u64> {
-        events
-            .iter()
+    /// The Groups whose streams ended among what came on the peer's
+    /// unidirectional streams and was not taken yet, each with how.
+    fn ended(peer: &mut Peer) -> Vec<(u64, StreamEnd)> {
+        let (events, _) = peer.data.as_mut().expect("this peer reads");
+        std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(|event| match event {
-                UniEvent::SubgroupClosed { header, end, .. } => {
-                    assert_eq!(*end, StreamEnd::Aborted(Some(0x2)), "{header:?}");
-                    Some(header.group_id)
-                }
+                UniEvent::SubgroupClosed { header, end, .. } => Some((header.group_id, end)),
                 _ => None,
             })
             .collect()
     }
 
+    struct Scene {
+        hub: HubHandle<MemoryConnection>,
+        publisher: Peer,
+        viewer: Peer,
+        /// Notified: the finished streams towards the viewer are delivered.
+        told: Arc<tokio::sync::Notify>,
+        _requests: (OpenRequest, OpenRequest),
+        _task: tokio::task::JoinHandle<()>,
+    }
+
     /// A relay with these settings, a publisher of the track, and a viewer
     /// that subscribed with this `SUBGROUP_DELIVERY_TIMEOUT` (none for
-    /// `None`) and to which nothing is delivered.
-    async fn scene(
-        config: HubConfig,
-        asked: Option<u64>,
-    ) -> (
-        Peer,
-        Peer,
-        (OpenRequest, OpenRequest),
-        tokio::task::JoinHandle<()>,
-    ) {
+    /// `None`) and to which nothing is delivered until the test says so.
+    async fn scene(config: HubConfig, asked: Option<u64>) -> Scene {
         let (hub, task) = hub::spawn(config);
         let mut publisher = Peer::connect(&hub, true).await;
         let publication = publisher.publish().await;
-        let (mut viewer, _told) = Peer::connect_without_delivery(&hub).await;
-        let parameters = asked
+        let (mut viewer, told) = Peer::connect_without_delivery(&hub).await;
+        let (subscription, _alias) = viewer.subscribe_with(timeout_of(asked)).await;
+        Scene {
+            hub,
+            publisher,
+            viewer,
+            told,
+            _requests: (publication, subscription),
+            _task: task,
+        }
+    }
+
+    fn timeout_of(asked: Option<u64>) -> Vec<Parameter> {
+        asked
             .map(Parameter::SubgroupDeliveryTimeout)
             .into_iter()
-            .collect();
-        let (subscription, _alias) = viewer.subscribe_with(parameters).await;
-        (publisher, viewer, (publication, subscription), task)
+            .collect()
+    }
+
+    fn with_patience(flag: Option<u64>) -> HubConfig {
+        HubConfig {
+            send: SendLimits {
+                delivery_patience: flag.map(Duration::from_millis),
+                ..SendLimits::default()
+            },
+            ..HubConfig::default()
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -2825,70 +2841,109 @@ mod delivery_timeouts {
         ];
         for (flag, asked, reset_after) in cases {
             let case = format!("flag {flag:?}, asked {asked:?}");
-            let config = HubConfig {
-                send: SendLimits {
-                    delivery_patience: flag.map(Duration::from_millis),
-                    ..SendLimits::default()
-                },
-                ..HubConfig::default()
-            };
-            let (publisher, mut viewer, _requests, _task) = scene(config, asked).await;
-            publisher.send_objects(&[object(0, 3)]).await.finish();
+            let mut scene = scene(with_patience(flag), asked).await;
+            scene.publisher.send_objects(&[object(0, 3)]).await.finish();
             // The Object is there; its stream is finished and not delivered.
             tokio::time::sleep(Duration::from_millis(10)).await;
-            assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
-            let Some(reset_after) = reset_after else {
+            assert_eq!(ended(&mut scene.viewer), [], "{case}");
+            if let Some(reset_after) = reset_after {
+                tokio::time::sleep(Duration::from_millis(reset_after - 100)).await;
+                assert_eq!(ended(&mut scene.viewer), [], "{case}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                assert_eq!(ended(&mut scene.viewer), [(0, TIMED_OUT)], "{case}");
+            } else {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
-                continue;
-            };
-            tokio::time::sleep(Duration::from_millis(reset_after - 100)).await;
-            assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            assert_eq!(given_up(&arrived(&mut viewer)), [0], "{case}");
+                assert_eq!(ended(&mut scene.viewer), [], "{case}");
+                // It is still there to be delivered, and its writer goes
+                // when it is.
+                scene.told.notify_waiters();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                assert_eq!(ended(&mut scene.viewer), [(0, StreamEnd::Fin)], "{case}");
+            }
+            assert_eq!(scene.hub.held().await.out_streams, 0, "{case}");
         }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn older_groups_are_given_up_only_for_a_subscription_that_asked_for_a_delivery_timeout() {
-        // (`--older-groups-grace-ms`, the SUBGROUP_DELIVERY_TIMEOUT of the
-        // SUBSCRIBE, how long after Group 1 began Group 0 is reset); never
-        // where the last is `None`. The timeout asked for is far longer
-        // than the test, so that it is the rule that resets, not the timer.
-        let cases: [(u64, Option<u64>, Option<u64>); 4] = [
-            (0, None, None),
-            (100, None, None),
-            (0, Some(600_000), Some(0)),
-            (100, Some(600_000), Some(100)),
-        ];
-        for (grace, asked, reset_after) in cases {
-            let case = format!("grace {grace}, asked {asked:?}");
+    async fn a_stream_that_is_delivered_within_its_time_is_not_reset() {
+        // (`--delivery-patience-ms`, the SUBGROUP_DELIVERY_TIMEOUT of the
+        // SUBSCRIBE), in milliseconds; the stream is delivered after 100 ms.
+        for (flag, asked) in [(None, Some(300)), (Some(300), None), (Some(300), Some(500))] {
+            let case = format!("flag {flag:?}, asked {asked:?}");
+            let mut scene = scene(with_patience(flag), asked).await;
+            scene.publisher.send_objects(&[object(0, 3)]).await.finish();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(ended(&mut scene.viewer), [], "{case}");
+            scene.told.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(ended(&mut scene.viewer), [(0, StreamEnd::Fin)], "{case}");
+            assert_eq!(scene.hub.held().await.out_streams, 0, "{case}");
+            // Nothing happens when its time would have been over.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert_eq!(ended(&mut scene.viewer), [], "{case}");
+        }
+    }
+
+    /// §8: the timer starts when the relay knows that the Subgroup is whole
+    /// (the FIN of the publisher's stream), and a stream that is not
+    /// delivered when it is over is reset: also one the relay could not
+    /// write out, because the subscriber takes nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_the_subscriber_does_not_take_is_given_up_when_its_time_after_the_fin_is_over()
+    {
+        // (the SUBGROUP_DELIVERY_TIMEOUT of the SUBSCRIBE in milliseconds,
+        // the streams the relay still holds 400 ms after the FIN).
+        for (asked, held_after) in [(Some(300), 0), (None, 1)] {
+            let case = format!("asked {asked:?}");
+            let (hub, _task) = hub::spawn(HubConfig::default());
+            let mut publisher = Peer::connect(&hub, true).await;
+            let _publication = publisher.publish().await;
+            // It never takes a unidirectional stream.
+            let mut stalled = Peer::connect(&hub, false).await;
+            let _subscription = stalled.subscribe_with(timeout_of(asked)).await;
+            // More than a stream's window holds, and within what may wait
+            // for one subscriber.
+            let objects = [object(0, 4 * STREAM_WINDOW), object(1, 4 * STREAM_WINDOW)];
+            publisher.send_objects(&objects).await.finish();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(hub.held().await.out_streams, 1, "{case}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(hub.held().await.out_streams, held_after, "{case}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_older_group_is_given_up_when_a_newer_one_begins_whatever_timeout_was_set() {
+        // (`--older-groups-grace-ms`, how long after Group 1 began Group 0
+        // is reset), for a subscriber that set no delivery timeout.
+        for (grace, reset_after) in [(0, 0), (100, 100)] {
+            let case = format!("grace {grace}");
             let config = HubConfig {
                 give_up_older_groups: true,
                 older_groups_grace: Duration::from_millis(grace),
                 ..HubConfig::default()
             };
-            let (publisher, mut viewer, _requests, _task) = scene(config, asked).await;
-            publisher.send_group(0, &[object(0, 3)]).await.finish();
+            let mut scene = scene(config, None).await;
+            scene
+                .publisher
+                .send_group(0, &[object(0, 3)])
+                .await
+                .finish();
             tokio::time::sleep(Duration::from_millis(10)).await;
-            assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
-            publisher.send_group(1, &[object(0, 3)]).await.finish();
-            match reset_after {
-                None => {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
-                }
-                Some(0) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    assert_eq!(given_up(&arrived(&mut viewer)), [0], "{case}");
-                }
-                Some(reset_after) => {
-                    tokio::time::sleep(Duration::from_millis(reset_after - 50)).await;
-                    assert_eq!(given_up(&arrived(&mut viewer)), [0u64; 0], "{case}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    assert_eq!(given_up(&arrived(&mut viewer)), [0], "{case}");
-                }
+            assert_eq!(ended(&mut scene.viewer), [], "{case}");
+            scene
+                .publisher
+                .send_group(1, &[object(0, 3)])
+                .await
+                .finish();
+            if reset_after > 0 {
+                tokio::time::sleep(Duration::from_millis(reset_after - 50)).await;
+                assert_eq!(ended(&mut scene.viewer), [], "{case}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            assert_eq!(ended(&mut scene.viewer), [(0, TIMED_OUT)], "{case}");
         }
     }
 }

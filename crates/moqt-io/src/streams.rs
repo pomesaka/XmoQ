@@ -1449,14 +1449,21 @@ pub struct SendLimits {
     /// waiting for the peer's stream limit, or written whole and not yet
     /// acknowledged by the receiver's transport.
     pub streams: usize,
-    /// How long after the last Object of a subgroup stream was written the
-    /// receiver may take to have all of it, for a stream that is started
-    /// without a time of its own ([`OutgoingSubgroup::spawn`]). A stream
-    /// that is not delivered by then is reset with `DELIVERY_TIMEOUT` and
-    /// the subscription goes on with the streams after it (§8: "Publishers
-    /// can, at their discretion, discontinue forwarding Objects before
-    /// either of the timeouts occurs"). `None`: every such stream is
-    /// delivered, however late.
+    /// How long after a subgroup stream was finished
+    /// ([`OutgoingSubgroup::finish`]: the sender knows that the Subgroup has
+    /// no more Objects) the receiver may take to have all of it, for a
+    /// stream that is started without a time of its own
+    /// ([`OutgoingSubgroup::spawn`]). A stream that is not delivered by then
+    /// is reset with `DELIVERY_TIMEOUT`, written out or not, and the
+    /// subscription goes on with the streams after it. `None`: every such
+    /// stream is delivered, however late.
+    ///
+    /// WHY a sender may have such a limit of its own: §8, "Publishers can,
+    /// at their discretion, discontinue forwarding Objects before either of
+    /// the timeouts occurs". **With it the sender leaves §8's "if none of
+    /// the timeouts are set to a non-zero value, all Objects ... are
+    /// delivered"** for a receiver that set none; it is an experiment, and
+    /// `None` unless asked for.
     pub delivery_patience: Option<Duration>,
 }
 
@@ -1558,8 +1565,9 @@ pub enum OutgoingEvent {
     /// The writer resets the stream in answer (§11.4.3). A stop that arrives
     /// while nothing is being written is not seen until the next write.
     Stopped(Option<u32>),
-    /// The stream was finished and the receiver did not have all of it
-    /// within [`SendLimits::delivery_patience`]: it was reset.
+    /// The receiver did not have all of the stream within its time after
+    /// the stream was finished ([`OutgoingSubgroup::spawn`]): it was reset,
+    /// or was never opened.
     TimedOut,
     /// The writer is done: the stream was finished, reset, or never opened.
     /// Reported once for every writer, and last.
@@ -1580,6 +1588,9 @@ pub struct OutgoingSubgroup {
     queue: mpsc::UnboundedSender<Command>,
     share: Arc<Share>,
     reset: watch::Sender<Option<u32>>,
+    /// When [`Self::finish`] was called; the time the stream may take to be
+    /// delivered is counted from then.
+    finished: watch::Sender<Option<Instant>>,
 }
 
 impl OutgoingSubgroup {
@@ -1587,15 +1598,23 @@ impl OutgoingSubgroup {
     /// `report` is called from the writer with what became of the stream; it
     /// may wait. `label` names the stream in the trace.
     ///
-    /// `delivery_timeout` is the receiver's own word on how long after the
-    /// stream's FIN it may take to have all of it (the
-    /// `SUBGROUP_DELIVERY_TIMEOUT` of its subscription, §8). The stream is
-    /// given up after the smaller of that and
+    /// `delivery_timeout` is the receiver's own word on how long it may take
+    /// to have all of the stream (the `SUBGROUP_DELIVERY_TIMEOUT` of its
+    /// subscription). §8: the sender "MUST start a timer of
+    /// `SUBGROUP_DELIVERY_TIMEOUT` duration once it becomes aware that all of
+    /// the objects on the subgroup have been published", which here is
+    /// [`Self::finish`], and "If the timer expires before the underlying
+    /// transport stream reaches "all data committed" state ..., the
+    /// implementation MUST reset the stream": also one that is not written
+    /// out yet, because the receiver does not take it.
+    ///
+    /// The stream is given up after the smaller of that and
     /// [`SendLimits::delivery_patience`], and after the one that is there
     /// where the other is not; with neither it is never given up. WHY the
-    /// smaller: §8 has it so for the two that speak for a subscription,
-    /// "if both the publisher and the subscriber have a non-zero value,
-    /// the smaller of the two is used", and the limit is this sender's.
+    /// smaller: the limit is this sender's own, and §8 lets a publisher
+    /// stop sooner than a timeout asks ("at their discretion, discontinue
+    /// forwarding Objects before either of the timeouts occurs"); a
+    /// receiver that asks for less than the limit is given what it asks.
     ///
     /// # Errors
     ///
@@ -1629,9 +1648,11 @@ impl OutgoingSubgroup {
         // The channel has no bound of its own; `send` keeps the budget.
         let (queue, commands) = mpsc::unbounded_channel();
         let (reset, reset_signal) = watch::channel(None);
+        let (finished, finished_signal) = watch::channel(None);
         let writer = Writer {
             share: Arc::clone(&share),
             patience: smaller_of(delivery_timeout, budget.limits.delivery_patience),
+            finished: finished_signal,
             commands,
             reset: reset_signal,
             trace,
@@ -1647,6 +1668,7 @@ impl OutgoingSubgroup {
             queue,
             share,
             reset,
+            finished,
         })
     }
 
@@ -1671,8 +1693,16 @@ impl OutgoingSubgroup {
         Ok(())
     }
 
-    /// Ends the stream with a FIN after what is queued (§11.4.3).
+    /// Ends the stream with a FIN after what is queued (§11.4.3). The time
+    /// the stream may take to be delivered runs from this call
+    /// ([`Self::spawn`]).
     pub fn finish(&self) {
+        self.finished.send_if_modified(|at| {
+            at.is_none() && {
+                *at = Some(Instant::now());
+                true
+            }
+        });
         let _ = self.queue.send(Command::Finish);
     }
 
@@ -1715,9 +1745,11 @@ fn smaller_of(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
 
 struct Writer {
     share: Arc<Share>,
-    /// How long after its FIN the stream may take to be delivered before it
+    /// How long after `finish` the stream may take to be delivered before it
     /// is given up ([`OutgoingSubgroup::spawn`]).
     patience: Option<Duration>,
+    /// When `finish` was called on the handle.
+    finished: watch::Receiver<Option<Instant>>,
     commands: mpsc::UnboundedReceiver<Command>,
     reset: watch::Receiver<Option<u32>>,
     trace: Trace,
@@ -1745,6 +1777,47 @@ impl Writer {
         }
     }
 
+    /// Completes once the stream is to be given up: with the code a reset
+    /// was asked with, or with `DELIVERY_TIMEOUT` and `true` when `patience`
+    /// has passed since `finish` was called on the handle.
+    fn given_up(&self) -> impl Future<Output = (u32, bool)> + Send + use<> {
+        let asked = self.reset_asked();
+        let mut finished = self.finished.clone();
+        let patience = self.patience;
+        async move {
+            let timed_out = async {
+                let Some(patience) = patience else {
+                    return std::future::pending().await;
+                };
+                // An error: the handle is gone and never called `finish`.
+                let at = match finished.wait_for(Option::is_some).await {
+                    Ok(at) => *at,
+                    Err(_) => None,
+                };
+                match at {
+                    Some(at) => tokio::time::sleep_until(at + patience).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                code = asked => (code, false),
+                () = timed_out => (stream_reset_code::DELIVERY_TIMEOUT, true),
+            }
+        }
+    }
+
+    /// [`Self::given_up`] as the code alone, for `finish_until`; whether the
+    /// time ran out is noted in `timed_out`.
+    fn reset_code(&self, timed_out: Arc<AtomicBool>) -> impl Future<Output = u32> + Send + use<> {
+        let over = self.given_up();
+        async move {
+            let (code, by_the_time) = over.await;
+            timed_out.store(by_the_time, Ordering::Relaxed);
+            code
+        }
+    }
+
     async fn run<C, R, F>(mut self, connection: Arc<C>, header: SubgroupHeader, report: &R)
     where
         C: Connection,
@@ -1753,7 +1826,12 @@ impl Writer {
     {
         let stream = tokio::select! {
             biased;
-            _ = self.reset_asked() => return,
+            (_, timed_out) = self.given_up() => {
+                if timed_out {
+                    report(OutgoingEvent::TimedOut).await;
+                }
+                return;
+            }
             stream = connection.open_uni() => stream,
         };
         let Ok(send) = stream else { return };
@@ -1775,24 +1853,36 @@ impl Writer {
                 self.trace.bytes(Direction::Send, &self.label, &bytes);
                 let cut_short = tokio::select! {
                     biased;
-                    code = self.reset_asked() => Some(code),
+                    (code, timed_out) = self.given_up() => {
+                        // The time ran out on a stream the receiver does
+                        // not take: what is not written is not written.
+                        if timed_out {
+                            report(OutgoingEvent::TimedOut).await;
+                        }
+                        Some((code, true))
+                    }
                     written = open.write_all(&bytes) => match written {
                         Ok(()) => None,
                         // §11.4.3: "The publisher SHOULD respond with a reset"
                         // to a STOP_SENDING.
                         Err(WriteError::Stopped(code)) => {
                             report(OutgoingEvent::Stopped(code)).await;
-                            Some(stream_reset_code::CANCELLED)
+                            Some((stream_reset_code::CANCELLED, false))
                         }
                         // Nothing more can be written or reset, and nobody
                         // may be left to end this writer through its handle.
                         Err(WriteError::Lost(_)) => return,
                     },
                 };
-                if let Some(code) = cut_short
-                    && let Some(open) = send.take()
-                {
-                    open.reset(code);
+                if let Some((code, given_up)) = cut_short {
+                    if let Some(open) = send.take() {
+                        open.reset(code);
+                    }
+                    // Nothing more is taken for a stream that was given up;
+                    // what is queued goes with the writer.
+                    if given_up {
+                        return;
+                    }
                 }
             }
             for len in unwritten.drain(..) {
@@ -1800,9 +1890,12 @@ impl Writer {
             }
             let command = tokio::select! {
                 biased;
-                code = self.reset_asked() => {
+                (code, timed_out) = self.given_up() => {
                     if let Some(open) = send {
                         open.reset(code);
+                    }
+                    if timed_out {
+                        report(OutgoingEvent::TimedOut).await;
                     }
                     return;
                 }
@@ -1840,27 +1933,8 @@ impl Writer {
                     // entries of any number of them kept for it. Its bytes
                     // and Objects were given back as they were written; the
                     // transport's send window bounds those.
-                    let patience = self.patience;
                     let timed_out = Arc::new(AtomicBool::new(false));
-                    let asked = self.reset_asked();
-                    let give_up = {
-                        let timed_out = Arc::clone(&timed_out);
-                        async move {
-                            let patience = async {
-                                match patience {
-                                    Some(patience) => tokio::time::sleep(patience).await,
-                                    None => std::future::pending().await,
-                                }
-                            };
-                            tokio::select! {
-                                code = asked => code,
-                                () = patience => {
-                                    timed_out.store(true, Ordering::Relaxed);
-                                    stream_reset_code::DELIVERY_TIMEOUT
-                                }
-                            }
-                        }
-                    };
+                    let give_up = self.reset_code(Arc::clone(&timed_out));
                     if !open.finish_until(give_up).await && timed_out.load(Ordering::Relaxed) {
                         report(OutgoingEvent::TimedOut).await;
                     }

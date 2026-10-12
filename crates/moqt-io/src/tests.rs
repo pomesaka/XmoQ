@@ -1855,3 +1855,155 @@ mod held_until_delivered {
         assert!(open().is_err());
     }
 }
+
+/// The in-memory pair that delivers a finished stream when it is told to:
+/// what it shares with a real connection of the contract of `finish_until`,
+/// and a stream that is given up before it is written out.
+mod delivers_when_told {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+
+    use super::{SOON, header, object};
+    use crate::memory::{STREAM_WINDOW, pair, pair_that_delivers_when_told};
+    use crate::{
+        Connection, OutgoingEvent, OutgoingSubgroup, ReadError, RecvStream, SendBudget, SendLimits,
+        SendStream, Trace,
+    };
+
+    /// A stream of the first end with three bytes written, and its reader.
+    async fn held_stream() -> (
+        <crate::memory::MemoryConnection as Connection>::Send,
+        <crate::memory::MemoryConnection as Connection>::Recv,
+        (
+            crate::memory::MemoryConnection,
+            crate::memory::MemoryConnection,
+        ),
+        Arc<tokio::sync::Notify>,
+    ) {
+        let (a, b, told) = pair_that_delivers_when_told();
+        let mut send = a.open_uni().await.expect("open");
+        send.write_all(b"abc").await.expect("write");
+        let recv = timeout(SOON, b.accept_uni())
+            .await
+            .expect("in time")
+            .expect("accept");
+        (send, recv, (a, b), told)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_stream_waits_until_it_is_told_and_is_then_delivered() {
+        let (send, mut recv, _ends, told) = held_stream().await;
+        let finishing = tokio::spawn(send.finish_until(std::future::pending()));
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(!finishing.is_finished());
+        told.notify_waiters();
+        let delivered = timeout(SOON, finishing)
+            .await
+            .expect("in time")
+            .expect("the task ran");
+        assert!(delivered);
+        let mut buffer = [0; 8];
+        assert_eq!(recv.read(&mut buffer).await, Ok(Some(3)));
+        assert_eq!(recv.read(&mut buffer).await, Ok(None));
+    }
+
+    /// As `contract::finish_until_is_over_on_a_stopped_stream` has it of
+    /// every connection.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_the_peer_stops_is_over_without_being_told() {
+        let (send, recv, _ends, _told) = held_stream().await;
+        let finishing = tokio::spawn(send.finish_until(std::future::pending()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!finishing.is_finished());
+        // CANCELLED (0x1).
+        recv.stop(0x1);
+        let delivered = timeout(SOON, finishing)
+            .await
+            .expect("in time")
+            .expect("the task ran");
+        assert!(delivered);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_of_a_connection_that_is_gone_is_over_without_being_told() {
+        let (send, _recv, (a, _b), _told) = held_stream().await;
+        let finishing = tokio::spawn(send.finish_until(std::future::pending()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!finishing.is_finished());
+        a.close(0, b"");
+        let delivered = timeout(SOON, finishing)
+            .await
+            .expect("in time")
+            .expect("the task ran");
+        assert!(delivered);
+    }
+
+    /// §8: the timer runs from when the sender knows that the Subgroup is
+    /// whole, and "If the timer expires before the underlying transport
+    /// stream reaches "all data committed" state ..., the implementation
+    /// MUST reset the stream": also where the receiver takes nothing and
+    /// the Objects are not written out.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_cannot_be_written_out_is_given_up_when_its_time_after_finish_is_over() {
+        // (the stream's own time in milliseconds, whether it is reset).
+        for (own, reset) in [(Some(300), true), (None, false)] {
+            let case = format!("own {own:?}");
+            let (local, peer) = pair();
+            // Kept to the end: a connection that is let go of is closed.
+            let local = Arc::new(local);
+            let budget = SendBudget::new(SendLimits::default());
+            let (report, mut reports) = mpsc::unbounded_channel();
+            let out = OutgoingSubgroup::spawn(
+                Arc::clone(&local),
+                header(),
+                own.map(Duration::from_millis),
+                &budget,
+                move |event| {
+                    let _ = report.send(event);
+                    std::future::ready(())
+                },
+                Trace::default(),
+                "out".to_string(),
+            )
+            .expect("room for a stream");
+            // More than the stream's window: the write waits for a reader
+            // that never comes.
+            out.send(Arc::new(object(0, 4 * STREAM_WINDOW)))
+                .expect("room for the Object");
+            out.finish();
+            assert_eq!(
+                timeout(SOON, reports.recv()).await,
+                Ok(Some(OutgoingEvent::Opened)),
+                "{case}"
+            );
+            let mut recv = timeout(SOON, peer.accept_uni())
+                .await
+                .expect("in time")
+                .expect("accept");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(reports.try_recv().is_err(), "{case}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if !reset {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                assert!(reports.try_recv().is_err(), "{case}");
+                assert_eq!(budget.in_use().2, 1, "{case}");
+                continue;
+            }
+            assert_eq!(reports.try_recv(), Ok(OutgoingEvent::TimedOut), "{case}");
+            assert_eq!(reports.try_recv(), Ok(OutgoingEvent::Closed), "{case}");
+            assert_eq!(budget.in_use(), (0, 0, 0), "{case}");
+            // DELIVERY_TIMEOUT (0x2), whatever of the Object was in the pipe.
+            let mut buffer = vec![0; 8 * STREAM_WINDOW];
+            let end = loop {
+                match recv.read(&mut buffer).await {
+                    Ok(Some(_)) => {}
+                    other => break other,
+                }
+            };
+            assert_eq!(end, Err(ReadError::Reset(Some(0x2))), "{case}");
+        }
+    }
+}

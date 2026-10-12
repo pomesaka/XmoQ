@@ -165,8 +165,10 @@ impl SendStream for MemorySend {
     /// Finishes at once, as the default does, but for a stream of
     /// [`pair_that_delivers_when_told`]: that one is delivered when the
     /// test says so, and reset with what `give_up` gives where that comes
-    /// first.
-    async fn finish_until<G>(self, give_up: G) -> bool
+    /// first. As on a real connection, a stream the peer stopped and a
+    /// stream of a connection that is gone are over at once, and nothing is
+    /// waited for (`contract`: `finish_until_is_over_on_a_stopped_stream`).
+    async fn finish_until<G>(mut self, give_up: G) -> bool
     where
         G: Future<Output = u32> + Send,
     {
@@ -174,12 +176,18 @@ impl SendStream for MemorySend {
             self.finish();
             return true;
         };
-        tokio::select! {
-            () = told.notified() => {
+        let reset_with = tokio::select! {
+            () = told.notified() => None,
+            // Stopped by the peer, or the connection is gone.
+            _ = self.stopped() => None,
+            code = give_up => Some(code),
+        };
+        match reset_with {
+            None => {
                 self.finish();
                 true
             }
-            code = give_up => {
+            Some(code) => {
                 self.reset(code);
                 false
             }
@@ -371,6 +379,13 @@ pub fn pair() -> (MemoryConnection, MemoryConnection) {
 /// all of it ([`SendStream::finish_until`]), and can be given up; its bytes
 /// can be read by the peer all the while. WHY: [`pair`] delivers a finished
 /// stream at once, so nothing that waits for a delivery can be seen on it.
+///
+/// **It keeps the contract of a connection in all but one case**, by its
+/// purpose: `finish_until_is_over_when_the_peers_transport_has_the_stream`
+/// has a finished stream delivered without anybody saying so, which is what
+/// this pair holds back. So `contract_tests!` is not run on it; the cases
+/// about `finish_until` that it does keep (a stopped stream, a connection
+/// that is gone) are tested with it in `tests`.
 #[must_use]
 pub fn pair_that_delivers_when_told() -> (MemoryConnection, MemoryConnection, Arc<Notify>) {
     let (mut first, second) = pair();
