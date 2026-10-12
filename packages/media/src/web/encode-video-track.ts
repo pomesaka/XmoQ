@@ -4,6 +4,7 @@
 // the encoder makes necessary; which chunk becomes which Object is the
 // sender's, and what is written when is the publisher's.
 
+import { createStamp, type StampClock } from "../core/stamp.ts";
 import type {
 	VideoSkipReason,
 	VideoStreamMapping,
@@ -66,6 +67,12 @@ export interface VideoTrackEncoderOptions {
 	 * viewer that comes waits and how much a lost frame costs.
 	 */
 	keyFrameIntervalMs: number;
+	/**
+	 * How the frames' times are laid onto the wall clock (`StampClock`);
+	 * `"first"` when left out. `"least"` is for a source whose clock is not
+	 * the one the other track of the broadcast counts by.
+	 */
+	clock?: StampClock;
 	/** How the Objects go onto streams; the sender's default when left out. */
 	mapping?: VideoStreamMapping;
 	/** The longest payload that is sent (`VideoSenderOptions.maxPayloadLength`). */
@@ -211,7 +218,9 @@ export interface VideoTrackEncoder {
  *   would make the times jump, forwards or back, and a decoder is given
  *   them in the order of the frames. So the times go up as the frames'
  *   own do, whatever the clock does afterwards. The time of the first frame
- *   need not be 0.
+ *   need not be 0. With `clock: "least"` the clock is read with every
+ *   frame instead and the times follow it over minutes (`StampClock` has
+ *   why, and what it costs).
  * - **A frame whose time is not after the time of the frame before it is
  *   not encoded** (`time-not-after`): the receiver of this package and a
  *   decoder take the times to go up, and the key frame interval is counted
@@ -293,8 +302,7 @@ export async function createVideoTrackEncoder(
 		stats.notEncoded[because] = (stats.notEncoded[because] ?? 0) + 1;
 		return because;
 	};
-	/** The time of the first frame, as the frames say it, and how long after `epoch` it came; both in microseconds. */
-	let first: { timestamp: number; sinceEpoch: number } | undefined;
+	const stamp = createStamp(options.clock ?? "first");
 	/** The time of the last frame that was asked to be a key frame. */
 	let lastKey: number | undefined;
 	/** The publisher asked for a key frame, and no frame was encoded since. */
@@ -309,7 +317,8 @@ export async function createVideoTrackEncoder(
 
 	const encoder = new VideoEncoder({
 		output: (chunk) => {
-			if (first === undefined) return;
+			const wall = stamp.of(chunk.timestamp);
+			if (wall === undefined) return;
 			const data = new Uint8Array(chunk.byteLength);
 			chunk.copyTo(data);
 			stats.encoded += 1;
@@ -318,7 +327,8 @@ export async function createVideoTrackEncoder(
 			stats.largestChunk = Math.max(stats.largestChunk, data.length);
 			const result = publisher.push({
 				type: chunk.type,
-				timestamp: chunk.timestamp - first.timestamp + first.sinceEpoch,
+				// Not below 0, where the clock was set back since `epoch`.
+				timestamp: Math.max(0, Math.round(wall - Number(epoch))),
 				data,
 			});
 			if (result.skipped !== undefined) {
@@ -378,11 +388,7 @@ export async function createVideoTrackEncoder(
 				if (encoder.encodeQueueSize > maxEncodeQueue) {
 					return notEncoded("encoder-behind");
 				}
-				first ??= {
-					timestamp: frame.timestamp,
-					// Not below 0, where the clock was set back since `epoch`.
-					sinceEpoch: Math.max(0, Number(BigInt(Date.now()) * 1000n - epoch)),
-				};
+				stamp.take(frame.timestamp, Date.now());
 				const keyFrame =
 					asked ||
 					wantsKey ||

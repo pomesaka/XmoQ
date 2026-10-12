@@ -81,3 +81,64 @@ This is the case the summary names as not handled (a publisher whose video and s
 
 - Time the painted clock's frames by `Date.now()`, as the tone is (one line in `demo/publish.ts`, not done here), and run the hour again: the video's number should then stay where the sound's is.
 - The question that stays is the one already open: a real camera against a real microphone.
+
+## After the finding: the painted clock by `Date.now()`, and a sender that follows the wall clock
+
+Two changes. `fromACanvas` in `demo/publish.ts` takes its times from `Date.now()`, as the tone does (`/publish?canvasClock=performance` gives the two clocks back). And the encoders of `@xmoq/media` take `clock: "least"` (`/publish?stamp=least`): the source's times are moved by the smallest of "wall clock less the source's time" among the frames of the last minute, which is the rule the viewer measures its publisher by (`createFastestWay`). The default stays `"first"`.
+
+Flags that make a source's clock wrong on purpose: `/publish?clockSkewPpm=N` (the painted clock's times run N ppm fast against the tone's), `/publish?toneSkewPpm=N` (the tone makes its pieces N ppm faster than the wall clock passes, as a microphone with a clock of its own). 1,000 ppm is 60 ms a minute: 5 minutes of it are what 5 hours of this machine's two clocks were.
+
+### Expected, written before the runs
+
+10 minutes of the default (`Date.now()` for both, `"first"`): when the video came less its time stays within 2 ms of where it began, where it rose by 10 ms before.
+
+5 minutes each, three viewers (50 ms, 150 ms, automatic):
+
+| Publisher | Expected |
+|---|---|
+| `clockSkewPpm=1000`, first | The video's times run ahead, the viewer's fastest way follows them, and the sound is later against it by 1 ms a second: with 50 ms all of the sound too late from about the first minute on, with 150 ms from about the third |
+| `clockSkewPpm=-1000`, first | The video is later by 1 ms a second: every frame after its turn from about 50 s with 50 ms, from about 150 s with 150 ms; the sound whole |
+| `clockSkewPpm=1000&stamp=least` | The video's number stays where the sound's is (every frame renews the least); nothing of the sound too late beyond what the default has |
+| `clockSkewPpm=-1000&stamp=least` | The video's number rises for a minute to about 60 ms over the sound's (the least is a minute old, and a minute at 1,000 ppm is 60 ms) and **stays there**. With 50 ms the frames are after their turn all the same; at the 17 ppm that was measured it would be 1 ms |
+| `toneSkewPpm=1000&stamp=least` | The times of the sound's pieces are 19.98 ms apart for 20 ms of sound. The viewer's seam takes up to 8 ms (`SEAM_SECONDS`) by playing pieces at another speed: **more pieces at another speed, no breaks, nothing too late**. Both numbers of "came" stay |
+| `toneSkewPpm=-1000&stamp=least` | The least gives way once a second, by about 1 ms: one piece a second is 21 ms after the one before. The same: pieces at another speed, no breaks. The sound's number about 60 ms up, as the video's above |
+| `stamp=least` and no clock made wrong | As the default: nothing more too late, no more breaks, no more pieces at another speed |
+| `toneSkewPpm=1000`, first (what it is without) | The sound's times run ahead by 1 ms a second, the fastest way follows them, the video is later and later: frames after their turn as in the second row |
+
+Picture against sound (the marks, as they were played): within 20 ms of the default's where both numbers of "came" agree; off by what the numbers differ where they do not.
+
+Then an hour of `canvasClock=performance&stamp=least`: the video's number stays within a few milliseconds of the sound's for the whole hour; with 50 ms the frames after their turn stay a handful. The renderers: the heap of the pages' scripts (`performance.memory.usedJSHeapSize`) goes up and down and does not grow; whether the resident size levels off is what the run is to say, and is not guessed here.
+
+### Result: 10 minutes of the default
+
+Began 06:07 JST, stopped after 610 s (the hour that was begun was cut to this). The same pages and the terminal viewer as above. Another workspace ran `cargo clippy`, tests and one `mise run check` between 06:08 and 06:13.
+
+| What | 10 s | 2 min | 4 | 6 | 8 | 10 |
+|---|---|---|---|---|---|---|
+| When the video came less its time, median (all three alike) | -1 ms | -2 | -1 | -1 | -1 | -1 |
+| When the sound came less its time, median | 3 ms | 4 | 5 | 6 | 7 | 9 |
+| Lateness of 99 in 100 | 16 to 20 ms | 9 | 10 | 12 | 13 | 13 to 14 |
+
+- **As expected**: the video's number stays (it rose by 10 ms in these minutes before). Frames after their turn with 50 ms: 3, all in the first 10 s. The terminal viewer: video came a median of 1.0 ms over the least, and it drew its frames a median of 2.7 ms after they were due.
+- **The sound's number goes up by 6 ms and was not expected to**; the first hour has it too, between 2 and 9 ms and down again about every 10 minutes. A reading that fits and was not tested: the tone makes piece `n` at the first tick of a 10 ms timer after `n` × 20 ms of `Date.now()`, the timer keeps the other clock's pace, and so the wait for the tick goes from 0 to 10 ms and over again as the two clocks move. It is bounded by the tick, and is of the demo's tone only.
+
+### Result: clocks made wrong by 1,000 ppm, 5 minutes each
+
+06:28 to 06:49 JST, two at a time on two sets of ports, three watching pages each (no terminal viewer). Another workspace ran tests and one `mise run check` between 06:29 and 06:32. "Came" is the median of when Objects came less their time, video / sound, at the end; the counts are of 300 s (15,000 pieces, 9,137 frames).
+
+| Publisher | Came, video / sound | Sound too late: 50 ms, 150 ms, automatic | Breaks | Pieces at another speed | Frames after their turn: 50 ms, 150 ms | As expected? |
+|---|---|---|---|---|---|---|
+| `stamp=least`, no clock wrong | 2 / 5 ms | 4, 0, 0 | 1, 1, 1 | 25, 0, 0 | 1, 0 | Yes: as the default |
+| `clockSkewPpm=1000`, first | -299 / 3 | 12,794 (none sounds after about 44 s), 7,769 (none after about 144 s), 0 (its buffer went to 320 ms) | 119, 77, 1 | 59, 132, 37 | 1, 0 | Yes |
+| `clockSkewPpm=1000&stamp=least` | 3 / 5 | 5, 0, 0 | 2, 0, 0 | 25, 0, 4 | 1, 0 | Yes |
+| `clockSkewPpm=-1000`, first | 302 / 3 | 4, 0, 0 | 1, 1, 1 | 24, 0, 285 | 7,743, 4,735 | Yes |
+| `clockSkewPpm=-1000&stamp=least` | 62 / 5, from the first minute on | 5, 0, 0 | 2, 1, 0 | 24, 0, 48 | 7,748, 0 | Yes: 60 ms up and no further |
+| `toneSkewPpm=1000`, first | 0 / -298 | 4, 0, 0 | 1, 1, 1 | 323, 295, 31 | 7,646, 4,624 | Yes |
+| `toneSkewPpm=1000&stamp=least` | 2 / 4 | 6, 0, 0 | 0, 0, 1 | 330, 299, 303 | 1, 0 | Yes |
+| `toneSkewPpm=-1000&stamp=least` | 2 / 63, from the first minute on | **13,015 (none sounds after about 40 s)**, 0, 0 | 55, 0, 7 | 25, 239, 272 | 1, 0 | **Not for 50 ms**: see below |
+
+- **A sender with `"least"` holds a source's clock that is wrong, both tracks, both ways**: the number that ran away by 300 ms in 5 minutes stays where it began when the source's clock is fast, and 60 ms above when it is slow.
+- **What the viewer makes of sound whose times move by a millisecond now and then: pieces at another speed, and nothing else.** With a tone 1,000 ppm fast or slow the viewer played about one piece a second at another speed (299 and 239 in 300 s with 150 ms), with no break and no piece too late beyond the first seconds'. The seam (`SEAM_SECONDS`, 8 ms) reads the step as the same sound going on. Whether a person hears one piece a second 5% faster was not listened to; at 17 ppm it would be one piece a minute.
+- **Expected otherwise, 50 ms and a slow source**: the row said "no breaks, nothing too late" and with 50 ms all of the sound was too late from about 40 s on. The 60 ms that the least of a minute is behind at 1,000 ppm are more than the buffer: the same thing the row above says of the frames, which was written there and not here. **A slow source is behind by what its clock loses in a minute**: 60 ms at 1,000 ppm, 6 ms at 100, 1 ms at the 17 that was measured.
+- **The encoder numbers the sound's chunks by the samples and not by the times it is handed** (Chromium 156): with `clockSkewPpm=1000` and `"first"` the tone's `AudioData` carried times 1,000 ppm fast and the sound's number stayed at 1 to 3 ms. This is why the sender counts the sound's times from the samples.
+- **Picture against sound**: where both numbers agree the marks were played -16 to 34 ms apart, with `stamp=least` whether a clock was wrong or not. Where the video's number is 60 ms up (`clockSkewPpm=-1000&stamp=least`) the picture was 16 to 48 ms **before** the sound after the first minute (3 ms once): its times are 60 ms early, and it is drawn by them. **With `toneSkewPpm` the marks say nothing**: the tone then makes its beep sooner or later than the painted mark by what its pace is off (304 ms after 5 minutes), which a microphone, hearing the room as it is, would not.
