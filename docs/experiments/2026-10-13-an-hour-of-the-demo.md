@@ -142,3 +142,26 @@ Began 06:07 JST, stopped after 610 s (the hour that was begun was cut to this). 
 - **Expected otherwise, 50 ms and a slow source**: the row said "no breaks, nothing too late" and with 50 ms all of the sound was too late from about 40 s on. The 60 ms that the least of a minute is behind at 1,000 ppm are more than the buffer: the same thing the row above says of the frames, which was written there and not here. **A slow source is behind by what its clock loses in a minute**: 60 ms at 1,000 ppm, 6 ms at 100, 1 ms at the 17 that was measured.
 - **The encoder numbers the sound's chunks by the samples and not by the times it is handed** (Chromium 156): with `clockSkewPpm=1000` and `"first"` the tone's `AudioData` carried times 1,000 ppm fast and the sound's number stayed at 1 to 3 ms. This is why the sender counts the sound's times from the samples.
 - **Picture against sound**: where both numbers agree the marks were played -16 to 34 ms apart, with `stamp=least` whether a clock was wrong or not. Where the video's number is 60 ms up (`clockSkewPpm=-1000&stamp=least`) the picture was 16 to 48 ms **before** the sound after the first minute (3 ms once): its times are 60 ms early, and it is drawn by them. **With `toneSkewPpm` the marks say nothing**: the tone then makes its beep sooner or later than the painted mark by what its pace is off (304 ms after 5 minutes), which a microphone, hearing the room as it is, would not.
+
+### Result: 43 minutes of `canvasClock=performance&stamp=least`
+
+Began 06:54 JST and **stopped after 2,610 s, not the hour that was meant** (the machine was wanted). The same pages and the terminal viewer as the first hour. Another workspace ran `cargo clippy` and tests a dozen times and `mise run check` four times between 06:58 and 07:28, one pairing of the interop six times at 06:54:52 and twice at 07:23:42, and this workspace `mise run check` once at 06:56.
+
+| What | 10 s | 10 min | 20 | 30 | 40 | 43 |
+|---|---|---|---|---|---|---|
+| When the video came less its time, median (all three alike) | 2 ms | 3 | 3 | 3 | 3 | 3 |
+| When the sound came less its time, median | 9 ms | 4 | 3 | 4 | 2 to 3 | 2 |
+| Lateness of 99 in 100 | 12 to 23 ms | 6 to 7 | 15 | 7 to 8 | 14 | 13 |
+| Frames after their turn, 50 ms, in all | 2 | 2 | 2 | 2 | 2 | 4 of 79,167 |
+| The automatic buffer | 30 ms | 20 | 30 | 20 | 30 | 30 |
+| Heap of the script, publishing page | 10.7 MiB | 10.7 | 10.7 | 18.4 | 18.4 | 9.5 |
+| Heap of the script, watching pages | 12.8 to 15.4 MiB | 12.8 to 15.4 | 12.8 to 15.4 | 18.4 to 29.8 | 18.4 to 29.8 | 14.5 to 29.8 |
+| Renderer of the publishing page, resident | 149 MiB | 183 | 167 | 165 | 169 | 159 |
+| Renderers of the watching pages, resident | 312 to 326 MiB | 342 to 349 | 331 to 337 | 327 to 342 | 344 to 348 | 326 to 331 |
+| Relay, resident | 15.8 MiB | 15.8 | 15.5 | 15.5 | 15.6 | 15.1 |
+
+- **As expected: with `"least"` the two clocks of the first hour are held.** The video's number stayed at 2 to 3 ms for 43 minutes, where it was at 41 ms after 40 minutes before. With 50 ms, 4 frames after their turn in all (216 after 40 minutes before, and all of them after 50). The automatic buffer stayed at 20 to 30 ms (60 before). The terminal viewer: video came a median of 2.4 ms over the least (59.0 in the first hour), the picture a median of 8.6 ms after the sound.
+- **The sound**: 3, 0 and 3 pieces too late of 130,490 (50 ms, 150 ms, automatic); pieces at another speed 22, 1 and 22, which is no more than without `"least"` (54, 38 and 164 in the first hour).
+- **One moment, at 41 min 50 s (07:36:34)**: the lateness of 99 in 100 read 30 to 33 ms for all three, a timer of one page was 84 ms late, the automatic buffer went to 50 ms for a reading, and the pages with 50 ms and the automatic buffer each lost 1 and 3 pieces of sound. The busiest other processes in that reading were at 41% and 40% of a core (one of them the window server); the publisher's timer was not late. Taken for the machine; the terminal viewer's 9 underruns and its one frame 127.8 ms over the least are probably of the same moment, which its one line at the end cannot say.
+- **The renderers' memory does not grow with time in 43 minutes**: the resident size rose in the first 10 to 20 minutes (by 20 to 35 MiB) and then went up and down within about 20 MiB, ending near where it began. The heaps of the scripts go up and down between 9.5 and 29.8 MiB. What rose in the first hour's 60 minutes (to 349 to 360 MiB) was not followed to the hour here.
+- **Not shown**: the last 17 minutes of the hour; a camera and a microphone.

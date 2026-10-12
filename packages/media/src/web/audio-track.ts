@@ -117,7 +117,7 @@ export async function createAudioTrackEncoder(
 		descriptionLength: undefined,
 		encoderError: undefined,
 	};
-	const stamp = createStamp(options.clock ?? "first");
+	const stamp = createStamp(options.clock ?? "first", Number(epoch));
 	/** The time of the first `AudioData`, and how many frames of audio were handed to the encoder since. */
 	let handed: { firstUs: number; frames: number } | undefined;
 	let closed = false;
@@ -135,8 +135,9 @@ export async function createAudioTrackEncoder(
 			stats.encoded += 1;
 			stats.encodedBytes += data.length;
 			publisher.push({
-				// Not below 0, where the clock was set back since `epoch`.
-				timestamp: Math.max(0, Math.round(wall - Number(epoch))),
+				// Not below 0: with `"least"`, where the wall clock was set
+				// back since `epoch`.
+				timestamp: Math.max(0, wall - Number(epoch)),
 				data,
 			});
 		},

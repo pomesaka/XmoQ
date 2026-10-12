@@ -41,8 +41,8 @@ export interface Stamp {
 	take(sourceUs: number, nowMs: number): void;
 	/**
 	 * The time on the wall clock, in microseconds since 1970, of what the
-	 * encoder gave with the source's time `sourceUs`. Undefined before the
-	 * first `take`. With `"least"`, never at or before the one it gave
+	 * encoder gave with the source's time `sourceUs`, in whole
+	 * microseconds. Undefined before the first `take`. With `"least"`, never at or before the one it gave
 	 * last: where the wall clock is set back the times stand still, a
 	 * microsecond apart, until the source's have caught up (a decoder is
 	 * given them in the order of the frames).
@@ -50,7 +50,12 @@ export interface Stamp {
 	of(sourceUs: number): number | undefined;
 }
 
-export function createStamp(clock: StampClock): Stamp {
+/**
+ * `notBeforeUs`: with `"first"`, the first frame is not laid before this
+ * time on the wall clock (the caller's epoch, where the wall clock was set
+ * back since it was read).
+ */
+export function createStamp(clock: StampClock, notBeforeUs?: number): Stamp {
 	const way = createFastestWay();
 	/** What is added to a time of the source, in microseconds. */
 	let add: number | undefined;
@@ -58,7 +63,9 @@ export function createStamp(clock: StampClock): Stamp {
 	return {
 		take(sourceUs, nowMs) {
 			if (clock === "first") {
-				add ??= nowMs * 1000 - sourceUs;
+				add ??=
+					Math.max(nowMs * 1000, notBeforeUs ?? Number.NEGATIVE_INFINITY) -
+					sourceUs;
 				return;
 			}
 			// A frame that is not of the clock (the source's time jumped by
@@ -69,8 +76,11 @@ export function createStamp(clock: StampClock): Stamp {
 		},
 		of(sourceUs) {
 			if (add === undefined) return undefined;
-			if (clock === "first") return sourceUs + add;
-			const wall = sourceUs + add;
+			// WHY rounded here and not by the caller: two times less than a
+			// microsecond apart would be one after rounding, and the times
+			// are to go up.
+			const wall = Math.round(sourceUs + add);
+			if (clock === "first") return wall;
 			// Held to the last one only where it is a little before it. WHY
 			// not always: a frame whose time is not of the clock is as far
 			// off as its source says, and the frames after it would be held

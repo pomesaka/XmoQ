@@ -302,7 +302,7 @@ export async function createVideoTrackEncoder(
 		stats.notEncoded[because] = (stats.notEncoded[because] ?? 0) + 1;
 		return because;
 	};
-	const stamp = createStamp(options.clock ?? "first");
+	const stamp = createStamp(options.clock ?? "first", Number(epoch));
 	/** The time of the last frame that was asked to be a key frame. */
 	let lastKey: number | undefined;
 	/** The publisher asked for a key frame, and no frame was encoded since. */
@@ -327,8 +327,9 @@ export async function createVideoTrackEncoder(
 			stats.largestChunk = Math.max(stats.largestChunk, data.length);
 			const result = publisher.push({
 				type: chunk.type,
-				// Not below 0, where the clock was set back since `epoch`.
-				timestamp: Math.max(0, Math.round(wall - Number(epoch))),
+				// Not below 0: with `"least"`, where the wall clock was set
+				// back since `epoch`.
+				timestamp: Math.max(0, wall - Number(epoch)),
 				data,
 			});
 			if (result.skipped !== undefined) {
