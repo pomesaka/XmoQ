@@ -1,4 +1,31 @@
 export {
+	ABSORB_SECONDS,
+	type PiecePlacement,
+	placePiece,
+	SEAM_SECONDS,
+	STRETCH,
+} from "./core/audio-seam.ts";
+export {
+	createFrameQueue,
+	DEFAULT_MAX_WAITING_FRAMES,
+	type FrameQueue,
+	type WaitingFrame,
+} from "./core/frame-queue.ts";
+export {
+	AUTO_MARGIN_MS,
+	AUTO_MIN_SAMPLES,
+	AUTO_STEP_MS,
+	AUTO_WINDOW_MS,
+	createPlayoutClock,
+	DEFAULT_AUDIO_MIN_MS,
+	DEFAULT_AUTO_MAX_MS,
+	DEFAULT_AUTO_SHARE,
+	DEFAULT_PLAYOUT_BUFFER_MS,
+	ORDER_MARGIN_MS,
+	type PlayoutClock,
+	type PlayoutClockOptions,
+} from "./core/playout-clock.ts";
+export {
 	createVideoReceiver,
 	DEFAULT_MAX_HELD_BYTES,
 	DEFAULT_MAX_HELD_OBJECTS,
@@ -64,3 +91,10 @@ export {
 	type VideoPlaybackEnd,
 	type VideoPlaybackStats,
 } from "./web/play-video-track.ts";
+export {
+	createPlayout,
+	type PlayedPiece,
+	type Playout,
+	type PlayoutOptions,
+	type ShownFrame,
+} from "./web/playout.ts";
