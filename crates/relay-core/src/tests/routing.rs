@@ -419,13 +419,10 @@ fn answer_cases() -> [AnswerCase; 7] {
                 }),
             }),
             vec![finished],
-            // With the publisher's Retry Interval, 0.
-            Some(RequestError {
-                error_code: 0x10,
-                retry_interval: 0,
-                error_reason: ReasonPhrase::default(),
-                redirect: None,
-            }),
+            // With the relay's own Retry Interval for the code (1,001), and
+            // not the publisher's, which says for how long a REDIRECT may
+            // be kept.
+            Some(error(0x10)),
         ),
         (
             // No answer and no stream: DOES_NOT_EXIST (0x10).
@@ -1716,7 +1713,9 @@ fn a_publishers_error_code_is_passed_on_or_replaced() {
     // a row of the table of answers above.
     let cases: [(u64, u64, bool, u64); 17] = [
         // About the track at the publisher or its load, and the generic
-        // error: as they are.
+        // error: as they are, with the publisher's Retry Interval, also
+        // where the relay would give the code another of its own (1 with
+        // 0x2, 1,001 with 0x9 and 0x10).
         (0x0, 0x0, true, 7),
         (0x2, 0x2, true, 7),
         (0x9, 0x9, true, 7),
@@ -1727,9 +1726,10 @@ fn a_publishers_error_code_is_passed_on_or_replaced() {
         (0x4, 0x4, true, 7),
         (0x5, 0x5, true, 7),
         // NOT_SUPPORTED and GOING_AWAY are true of the publisher and the
-        // relay only: DOES_NOT_EXIST, to be retried when the publisher said.
-        (0x3, 0x10, false, 7),
-        (0x6, 0x10, false, 7),
+        // relay only: DOES_NOT_EXIST, with the relay's own Retry Interval
+        // for that code (after a second), and not the publisher's 7.
+        (0x3, 0x10, false, 1_001),
+        (0x6, 0x10, false, 1_001),
         // No answer to this SUBSCRIBE: INTERNAL_ERROR, and no word on a
         // retry. INVALID_RANGE (the relay names no range), MALFORMED_TRACK
         // (defined for FETCH), UNINTERESTED, PREFIX_OVERLAP,

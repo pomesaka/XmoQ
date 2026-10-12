@@ -481,13 +481,19 @@ impl Refusal {
     /// The reason is passed on with the publisher's code only; under another
     /// code it would explain something the subscriber was not told.
     ///
-    /// The Retry Interval is the publisher's where the subscriber's retry
-    /// is the publisher's business: with a code that is passed on, and with
-    /// `DOES_NOT_EXIST` in place of another, since a subscriber that asks
-    /// again makes the relay ask the same publisher again, and the publisher
-    /// said when that may be. Under `INTERNAL_ERROR` in place of another code
-    /// it is 0 ("SHOULD NOT be retried", §10.6.2): what the publisher's value
-    /// was about is not known, and 0 promises nothing.
+    /// The Retry Interval is the publisher's with a code that is passed on:
+    /// the publisher said when it may be asked again. With a code the relay
+    /// puts in place of the publisher's it is the relay's own for that code
+    /// ([`retry_interval_of`]): after a second with `DOES_NOT_EXIST`, 0
+    /// with `INTERNAL_ERROR`.
+    ///
+    /// WHY NOT the publisher's value under another code: it was said about
+    /// the publisher's code. With REDIRECT it is no time to wait at all
+    /// (§10.6.2: "A relay MAY cache a REDIRECT response for a Full Track
+    /// Name for up to Retry Interval milliseconds"), and the 0 of a
+    /// publisher that does not serve SUBSCRIBE or is going away would tell
+    /// the subscriber never to ask the relay again for a track another
+    /// publisher may bring.
     pub(crate) fn passed_on(error: &RequestError, asked: OwnRequestKind) -> Self {
         use request_error_code as code;
         let error_code = match error.error_code {
@@ -536,10 +542,10 @@ impl Refusal {
         let passed = error_code == error.error_code;
         Self {
             error_code,
-            retry_interval: if passed || error_code == code::DOES_NOT_EXIST {
+            retry_interval: if passed {
                 error.retry_interval
             } else {
-                0
+                retry_interval_of(error_code)
             },
             reason: if passed {
                 shortened(&error.error_reason)
