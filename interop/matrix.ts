@@ -1102,6 +1102,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 						relay: "own",
 					},
 					{
+						name: "own relay: video: the relay is stopped and started anew, and the pages that publish and play connect again and go on",
+						script: "video.ts" as const,
+						args: ["--video", "reconnect"],
+						relay: "own",
+					},
+					{
 						name: "own relay: video: an own page whose key frames are all over what it sends is told so",
 						script: "video.ts" as const,
 						args: ["--video", "key-frames-too-large"],

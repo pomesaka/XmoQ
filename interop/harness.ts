@@ -568,6 +568,10 @@ export interface RunContext {
 	pages: { origin: string; browser: Browser } | undefined;
 	/** Makes `own-rust` print the bytes of every stream. */
 	verbose: boolean;
+	/** Stops the relay. Its sessions end, and its port is free. */
+	stopRelay(): Promise<void>;
+	/** Starts the relay anew on the same port, with the same certificate; `relay` is the new one from then on. */
+	startRelayAnew(): Promise<void>;
 }
 
 /** The binaries a run needs and that are not built yet. */
@@ -602,25 +606,35 @@ export async function startRun(setup: {
 		`certificate sha256=${certificate.sha256Hex} validTo=${certificate.validTo}`,
 	);
 	const config = relayNamed(setup.relay);
-	const relay = spawnLogged(
-		"relay",
-		config.binary,
-		config.args(setup.port),
-		setup.verbose ? config.verboseEnv : {},
-	);
+	const startRelay = (): ReturnType<typeof spawnLogged> =>
+		spawnLogged(
+			"relay",
+			config.binary,
+			config.args(setup.port),
+			setup.verbose ? config.verboseEnv : {},
+		);
+	let relay = startRelay();
+	// The one that runs at the end: a run can start it anew.
 	defer(() => stopProcess(relay, "SIGINT"));
 	const relayVersion = captureGroup(await relay.waitForLine(config.ready), 1);
 	const pages = await startBrowser([
 		...new Set(setup.clients.filter(isBrowserClient)),
 	]);
-	return {
+	const context: RunContext = {
 		relayUrl: `https://127.0.0.1:${setup.port}`,
 		relay,
 		relayVersion,
 		certSha256Hex: certificate.sha256Hex,
 		pages,
 		verbose: setup.verbose,
+		stopRelay: () => stopProcess(relay, "SIGINT"),
+		async startRelayAnew() {
+			relay = startRelay();
+			context.relay = relay;
+			await relay.waitForLine(config.ready);
+		},
 	};
+	return context;
 }
 
 const moqlivemockRoot = join(here, "peers", "moqlivemock", ".tools");
@@ -688,6 +702,10 @@ export async function startMoqlivemockPublisher(setup: {
 		certSha256Hex,
 		pages,
 		verbose: setup.verbose,
+		// Not a relay: no run stops it and starts it anew.
+		stopRelay: () => Promise.reject(new Error("mlmpub is not stopped")),
+		startRelayAnew: () =>
+			Promise.reject(new Error("mlmpub is not started anew")),
 	};
 }
 

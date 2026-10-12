@@ -7,7 +7,10 @@ import {
 	type AudioPlayback,
 	type AudioTrackEncoder,
 	createAudioTrackEncoder,
+	createPlayout,
 	createVideoTrackEncoder,
+	keepPlaying,
+	keepPublishing,
 	playAudioTrack,
 	playVideoTrack,
 	type VideoPlayback,
@@ -43,6 +46,7 @@ import type {
 	PageFetch,
 	PageFetchReport,
 	PageFetchServing,
+	PageKeptReport,
 	PageProperty,
 	PageReceivedObject,
 	PageVideoPublishReport,
@@ -50,6 +54,7 @@ import type {
 	PageVideoSetup,
 	SubscriptionReport,
 } from "./xmoq-page.ts";
+import { KEPT_DELAY_MS } from "./xmoq-page.ts";
 
 /** Provisional: any value works, the relay maps it to its own alias per subscriber. */
 const PUBLISH_TRACK_ALIAS = 1n;
@@ -715,7 +720,128 @@ function readNumber(
 	return number;
 }
 
+/** What `keepVideoPublished` and `keepVideoPlayed` saw. */
+const kept: PageKeptReport = { publishing: [], playing: [], shown: [] };
+
+/** A connection of a page that makes its own, one for every session. */
+const connectAnew = (
+	relayUrl: string,
+	certSha256Hex: string,
+): Promise<MoqtConnection> =>
+	connect(relayUrl, {
+		implementation: "xmoq-moqt/0.0.0",
+		serverCertificateHashes: [
+			{ algorithm: "sha-256", value: fromHex(certSha256Hex) },
+		],
+	});
+
 window.xmoqOwn = {
+	keepVideoPublished: withPlainErrors(
+		async (
+			relayUrl: string,
+			certSha256Hex: string,
+			namespace: string,
+			setup: PageVideoSetup,
+		) => {
+			const trackNamespace = namespaceTuple(namespace);
+			const encoder = await createVideoTrackEncoder({
+				trackNamespace,
+				trackName: utf8.encode(setup.trackName),
+				firstGroup: BigInt(Date.now()),
+				codec: setup.codec,
+				width: setup.width,
+				height: setup.height,
+				framerate: setup.framerate,
+				bitrate: setup.bitrate,
+				keyFrameIntervalMs: setup.keyFrameIntervalMs,
+				mapping: setup.mapping,
+			});
+			const canvas = new OffscreenCanvas(setup.width, setup.height);
+			const context = canvas.getContext("2d");
+			if (context === null) throw new Error("no 2d context");
+			let painted = 0;
+			// The encoder goes on while no session is there.
+			setInterval(() => {
+				paintNumber(context, setup.width, setup.height, painted);
+				encoder.encode(
+					new VideoFrame(canvas, {
+						timestamp:
+							setup.firstTimestamp +
+							Math.round((painted * 1_000_000) / setup.framerate),
+					}),
+				);
+				painted += 1;
+			}, 1000 / setup.framerate);
+			void keepPublishing({
+				connect: () => connectAnew(relayUrl, certSha256Hex),
+				trackNamespace,
+				tracks: [encoder.publisher],
+				delayMs: KEPT_DELAY_MS,
+				onState(state) {
+					const said =
+						state.type === "publishing"
+							? `publishing ${state.session}`
+							: state.type;
+					kept.publishing.push(said);
+					console.log(
+						`kept publishing: ${said}${state.type === "failed" ? ` ${errorText(state.error)}` : ""}`,
+					);
+				},
+			});
+		},
+	),
+
+	keepVideoPlayed: withPlainErrors(
+		async (
+			relayUrl: string,
+			certSha256Hex: string,
+			namespace: string,
+			trackName: string,
+			codec: string,
+		) => {
+			const reading = new OffscreenCanvas(1, 1).getContext("2d", {
+				willReadFrequently: true,
+			});
+			if (reading === null) throw new Error("no 2d context");
+			let session = 0;
+			const playout = createPlayout({
+				// No sound is played here.
+				sampleRate: 48_000,
+				draw(frame) {
+					kept.shown.push({ number: readNumber(reading, frame), session });
+				},
+			});
+			void keepPlaying({
+				connect: () => connectAnew(relayUrl, certSha256Hex),
+				async play(connection) {
+					const playback = await playVideoTrack(connection, {
+						trackNamespace: namespaceTuple(namespace),
+						trackName: utf8.encode(trackName),
+						codec,
+						onFrame: playout.onFrame,
+					});
+					return { ended: playback.ended.then((end) => end.type) };
+				},
+				delayMs: KEPT_DELAY_MS,
+				onState(state) {
+					if (state.type === "playing") session = state.session;
+					const said =
+						state.type === "playing" ? `playing ${state.session}` : state.type;
+					kept.playing.push(said);
+					console.log(
+						`kept playing: ${said}${state.type === "failed" ? ` ${errorText(state.error)}` : ""}`,
+					);
+				},
+			});
+		},
+	),
+
+	keptReport: withPlainErrors(async () => ({
+		publishing: [...kept.publishing],
+		playing: [...kept.playing],
+		shown: [...kept.shown],
+	})),
+
 	followCatalog: withPlainErrors(async (namespace: string) => {
 		const follower = await followCatalog(connected(), {
 			namespace: namespaceTuple(namespace),

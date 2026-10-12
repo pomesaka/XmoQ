@@ -27,7 +27,7 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 **A room** comes with it: the spike in `spikes/durable-objects-room`, a Durable Object run locally with Miniflare (`mise run demo` installs it there the first time). Under the picture are a chat and how many are connected, and the watching page learns from the room where the broadcast is; `?room=NAME` on both pages is another room. The broadcast is known to the room as long as the publishing page is open.
 
-**A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again every 2 seconds.
+**A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again every 2 seconds (`keepPublishing` and `keepPlaying` of `@xmoq/media`).
 
 **With tokens** (an experiment; how the relay authorizes is undecided): `bun demo/serve.ts --auth` makes a key for the run and gives it to the relay and to the rooms. The relay then refuses a request without a token; the pages ask the room for one (`pub` to publish, `sub` to watch) and give it to their connection, which puts it into every request. The relay looks at the token in SETUP as well, and closes a session without one: `?token=no` on a page asks for none, and the page says that the relay closed the session as not authorized.
 

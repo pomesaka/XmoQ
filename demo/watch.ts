@@ -7,12 +7,12 @@
 //               (150 when left out; 0 plays each as it comes)
 //   ?join=no    waits for the next key frame, as without the Joining FETCH
 
-import type { MoqtConnection } from "@xmoq/moqt";
 import {
 	type AudioPlayback,
 	AUTO_MARGIN_MS,
 	AUTO_WINDOW_MS,
 	createPlayout,
+	keepPlaying,
 	DEFAULT_AUDIO_MIN_MS,
 	DEFAULT_AUTO_MAX_MS,
 	DEFAULT_AUTO_SHARE,
@@ -119,6 +119,8 @@ async function main(): Promise<void> {
 	let shown = 0;
 	const stalls: { from: number; to: number }[] = [];
 	let playback: VideoPlayback | undefined;
+	/** The namespace of the broadcast the page last connected to. */
+	let playingNamespace: Uint8Array[] = namespace();
 	let audio: AudioPlayback | undefined;
 
 	let tooLate = 0;
@@ -415,76 +417,85 @@ async function main(): Promise<void> {
 			together,
 		});
 	});
-	// One session after the other: when the session ends, or the tracks do
-	// (their publisher went), the page says so and connects again after two
-	// seconds, asking the room anew where the broadcast is.
-	for (;;) {
-		const found = room === undefined ? HERE : room.current();
-		if (found === null) {
-			link = "nobody publishes in this room; asking again every 2 s";
-		} else {
+	// One session after the other (`keepPlaying` of @xmoq/media): when the
+	// session ends, or the tracks do (their publisher went), the page says
+	// so and connects again after two seconds, asking the room anew where
+	// the broadcast is.
+	await keepPlaying({
+		async connect() {
+			const found = room === undefined ? HERE : room.current();
+			if (found === null) return undefined;
 			const broadcast = through(found);
 			document.body.dataset.broadcast = JSON.stringify(broadcast);
-			let connection: MoqtConnection | undefined;
-			try {
-				link = "connecting";
-				// Where the rooms give tokens, the connection carries one.
-				connection = await connectToRelay(
-					broadcast,
-					await room?.token("sub", broadcast.namespace),
-				);
-				const trackNamespace = namespace(broadcast.namespace);
-				// `?video=no` plays the sound alone, for looking into it.
-				const video =
-					query.get("video") === "no"
-						? undefined
-						: await playVideoTrack(connection, {
-								...videoOptions,
-								trackNamespace,
-							});
-				playback = video;
-				audio = await playAudioTrack(connection, {
-					...audioOptions,
-					// An Object that comes before its turn waits for the ones
-					// before it as long as the buffer leaves, less what the
-					// decoder and the loudspeaker need.
-					...(query.get("order") === "no"
-						? {}
-						: {
-								holdForOrderMs: clock.holdForOrderMs,
-							}),
-					trackNamespace,
+			playingNamespace = namespace(broadcast.namespace);
+			// Where the rooms give tokens, the connection carries one.
+			return connectToRelay(
+				broadcast,
+				await room?.token("sub", broadcast.namespace),
+			);
+		},
+		async play(connection) {
+			const trackNamespace = playingNamespace;
+			// `?video=no` plays the sound alone, for looking into it.
+			const video =
+				query.get("video") === "no"
+					? undefined
+					: await playVideoTrack(connection, {
+							...videoOptions,
+							trackNamespace,
+						});
+			playback = video;
+			audio = await playAudioTrack(connection, {
+				...audioOptions,
+				// An Object that comes before its turn waits for the ones
+				// before it as long as the buffer leaves, less what the
+				// decoder and the loudspeaker need.
+				...(query.get("order") === "no"
+					? {}
+					: { holdForOrderMs: clock.holdForOrderMs }),
+				trackNamespace,
+			})
+				.then((playing) => {
+					audioSince = performance.now();
+					return playing;
 				})
-					.then((playing) => {
-						audioSince = performance.now();
-						return playing;
-					})
-					.catch((error: unknown) => {
+				.catch((error: unknown) => {
 					console.log(`no audio: ${String(error)}`);
 					return undefined;
 				});
-				sessions += 1;
-				link = `playing (session ${sessions})`;
-				const how = await Promise.race([
-					connection.closed.then((close) => `the session ended (${close.type})`),
-					...(video === undefined
-						? []
-						: [
-								video.ended.then(
-									(end) => `the video track ended (${end.type})`,
-								),
-							]),
-				]);
-				link = `${how} at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
-			} catch (error) {
-				link = `could not play (${why(error)}); trying again every 2 s`;
-			} finally {
-				// Also a session in which nothing could be played is not left open.
-				connection?.close();
+			return {
+				// Without video, the session's end is the end.
+				ended:
+					video === undefined
+						? new Promise<string>(() => {})
+						: video.ended.then((end) => end.type),
+			};
+		},
+		onState(state) {
+			const at = new Date().toISOString().slice(11, 19);
+			switch (state.type) {
+				case "connecting":
+					link = "connecting";
+					return;
+				case "nothing-to-play":
+					link = "nobody publishes in this room; asking again every 2 s";
+					return;
+				case "playing":
+					sessions = state.session;
+					link = `playing (session ${sessions})`;
+					return;
+				case "session-ended":
+					link = `the session ended (${state.close.type}) at ${at}; connecting again every 2 s`;
+					return;
+				case "playing-ended":
+					link = `the video track ended (${state.end}) at ${at}; connecting again every 2 s`;
+					return;
+				case "failed":
+					link = `could not play (${why(state.error)}); trying again every 2 s`;
+					return;
 			}
-		}
-		await new Promise((resolve) => setTimeout(resolve, 2000));
-	}
+		},
+	});
 }
 
 main().catch((error: unknown) => {
