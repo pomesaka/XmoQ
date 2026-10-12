@@ -666,10 +666,79 @@ fn only_so_many_subscribers_wait_for_one_answer() {
 }
 
 #[test]
+fn a_session_gets_back_one_announcement_for_each_time_its_timer_runs_out() {
+    assert_eq!(crate::MAX_ANNOUNCEMENTS_AT_ONCE, 5);
+    let mut relay = relay();
+    // `handle`, where `step` leaves the timer out.
+    let announces = |relay: &mut Relay, stream: u64| {
+        let actions = relay.handle(Event::RequestOpened {
+            session: PUBLISHER,
+            stream: StreamKey(stream),
+            first: ControlMessage::PublishNamespace(PublishNamespace {
+                request_id: stream * 2,
+                track_namespace: namespace_of(&[b"xmoq"]),
+                parameters: vec![],
+            }),
+        });
+        let answer = actions.iter().find_map(|action| match action {
+            Action::SendRequest {
+                message: ControlMessage::RequestOk(_),
+                ..
+            } => Some("ok"),
+            Action::SendRequest {
+                message: ControlMessage::RequestError(error),
+                ..
+            } if error.error_code == 0x9 => Some("0x9"),
+            _ => None,
+        });
+        let timer = actions.contains(&Action::StartAnnouncementTimer { session: PUBLISHER });
+        (answer, timer)
+    };
+    let timeout = Event::AnnouncementTimeout { session: PUBLISHER };
+    let again = [Action::StartAnnouncementTimer { session: PUBLISHER }];
+
+    // The first starts the one timer; the sixth is EXCESSIVE_LOAD (0x9).
+    assert_eq!(announces(&mut relay, 0), (Some("ok"), true));
+    for stream in 1..5 {
+        assert_eq!(announces(&mut relay, stream), (Some("ok"), false));
+    }
+    assert_eq!(announces(&mut relay, 5), (Some("0x9"), false));
+    // One is back, the timer runs on, and one is all there is.
+    assert_eq!(relay.handle(timeout.clone()), again);
+    assert_eq!(announces(&mut relay, 6), (Some("ok"), false));
+    assert_eq!(announces(&mut relay, 7), (Some("0x9"), false));
+    // All five back: the timer runs out five times, and is not started a
+    // sixth time.
+    for _ in 0..4 {
+        assert_eq!(relay.handle(timeout.clone()), again);
+    }
+    assert_eq!(relay.handle(timeout.clone()), []);
+    // The next announcement starts it anew.
+    assert_eq!(announces(&mut relay, 8), (Some("ok"), true));
+    // Another session has its own.
+    let actions = announce(&mut relay, ALICE, 0, &[b"xmoq"]);
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::SendRequest {
+            message: ControlMessage::RequestOk(_),
+            ..
+        }]
+    ));
+}
+
+#[test]
 fn only_so_many_namespaces_are_kept_for_one_session() {
     // The expectation below is spelled out for a limit of 64.
     assert_eq!(crate::MAX_NAMESPACES_PER_SESSION, 64);
-    let mut relay = relay();
+    // The limit on how often a session announces is not the one looked at.
+    let mut relay = Relay::new("test/0");
+    relay.set_announcements_at_once(1_000);
+    for session in [PUBLISHER, BOB] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+    }
     for stream in 0..64 {
         let actions = announce(&mut relay, PUBLISHER, stream, &[b"xmoq"]);
         assert!(

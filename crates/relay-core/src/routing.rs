@@ -40,6 +40,22 @@ use crate::{
 /// with `EXCESSIVE_LOAD`. Provisional.
 pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
 
+/// `PUBLISH_NAMESPACE` requests a session may send at once. Each uses one
+/// of these, which comes back after the time the I/O side has for it (a
+/// second), one at a time; with none left the request is refused with
+/// `EXCESSIVE_LOAD`. **Provisional.**
+///
+/// WHY a limit on these and no other request: an announcement makes the
+/// relay send that session a SUBSCRIBE for every track of the namespace
+/// that is subscribed to or waited for, up to
+/// [`MAX_OWN_REQUESTS_PER_SESSION`]. One session that announced and
+/// withdrew 100 times a second had the relay send 6,400 SUBSCRIBEs a
+/// second and use 0.87 of a core (measured 2026-10-13). WHY NOT a limit on
+/// requests of every kind: 100 a second is no more than a viewer may send,
+/// and would not have stopped this. WHY NOT by namespace: the session
+/// announces another name.
+pub const MAX_ANNOUNCEMENTS_AT_ONCE: u32 = 5;
+
 /// Subscribers that may wait for one upstream SUBSCRIBE to be answered. One
 /// more is refused with `EXCESSIVE_LOAD`. Provisional.
 pub const MAX_WAITING_SUBSCRIBERS: usize = 64;

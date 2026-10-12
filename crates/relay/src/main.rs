@@ -103,6 +103,13 @@ struct Args {
     /// a session that has sent its SETUP may hold nothing; 30 seconds
     /// where it is not said.
     idle_session: Option<Duration>,
+    /// `--announce-every-ms`: [`HubConfig::announcement_interval`], the time
+    /// in which a session may send one `PUBLISH_NAMESPACE`; a second where
+    /// it is not said.
+    announce_every: Option<Duration>,
+    /// `--announce-at-once`: [`HubConfig::announcements_at_once`], how many
+    /// it may send at once; 5 where it is not said.
+    announce_at_once: Option<u32>,
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
     /// An experiment: what a subscriber gets that set no
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
@@ -121,6 +128,13 @@ struct Args {
     auth_setup: bool,
 }
 
+/// The milliseconds a flag gives.
+fn millis(flag: &str, value: &str) -> Result<Duration> {
+    Ok(Duration::from_millis(
+        value.parse().with_context(|| flag.to_string())?,
+    ))
+}
+
 fn parse_args() -> Result<Args> {
     let mut port = None;
     let mut cert_file = None;
@@ -129,6 +143,7 @@ fn parse_args() -> Result<Args> {
     let mut congestion = Congestion::default();
     let mut max_sessions = None;
     let (mut slow_open, mut setup_timeout, mut idle_session) = (None, None, None);
+    let (mut announce_every, mut announce_at_once) = (None, None);
     let mut delivery_patience = None;
     let mut give_up_older_groups = false;
     let mut older_groups_grace = Duration::ZERO;
@@ -159,26 +174,14 @@ fn parse_args() -> Result<Args> {
                 idle_timeout = Duration::from_millis(millis);
             }
             "--max-sessions" => max_sessions = Some(value.parse().context("--max-sessions")?),
-            "--slow-open-ms" => {
-                slow_open = Some(Duration::from_millis(
-                    value.parse().context("--slow-open-ms")?,
-                ));
+            "--slow-open-ms" => slow_open = Some(millis(&flag, &value)?),
+            "--setup-timeout-ms" => setup_timeout = Some(millis(&flag, &value)?),
+            "--announce-every-ms" => announce_every = Some(millis(&flag, &value)?),
+            "--announce-at-once" => {
+                announce_at_once = Some(value.parse().context("--announce-at-once")?);
             }
-            "--setup-timeout-ms" => {
-                setup_timeout = Some(Duration::from_millis(
-                    value.parse().context("--setup-timeout-ms")?,
-                ));
-            }
-            "--idle-session-ms" => {
-                idle_session = Some(Duration::from_millis(
-                    value.parse().context("--idle-session-ms")?,
-                ));
-            }
-            "--delivery-patience-ms" => {
-                delivery_patience = Some(Duration::from_millis(
-                    value.parse().context("--delivery-patience-ms")?,
-                ));
-            }
+            "--idle-session-ms" => idle_session = Some(millis(&flag, &value)?),
+            "--delivery-patience-ms" => delivery_patience = Some(millis(&flag, &value)?),
             "--older-groups-grace-ms" => {
                 older_groups_grace =
                     Duration::from_millis(value.parse().context("--older-groups-grace-ms")?);
@@ -213,6 +216,8 @@ fn parse_args() -> Result<Args> {
         slow_open,
         setup_timeout,
         idle_session,
+        announce_every,
+        announce_at_once,
         delivery_patience,
         give_up_older_groups,
         older_groups_grace,
@@ -241,6 +246,10 @@ async fn main() -> Result<()> {
     if let Some(idle_session) = args.idle_session {
         config.idle_session_timeout = idle_session;
     }
+    if let Some(announce_every) = args.announce_every {
+        config.announcement_interval = announce_every;
+    }
+    config.announcements_at_once = args.announce_at_once;
     config.send.delivery_patience = args.delivery_patience;
     config.give_up_older_groups = args.give_up_older_groups;
     config.older_groups_grace = args.older_groups_grace;

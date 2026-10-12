@@ -56,9 +56,9 @@ pub use fetch::fetch_reset_passed_on;
 use requests::{Requests, Subscribed};
 use routing::{Announcement, Ask, Declined, OwnRequest, PendingTrack, Refusal, Waiter};
 pub use routing::{
-    MAX_HELD_SUBSCRIBES_PER_SESSION, MAX_HELD_TRACKS, MAX_NAMESPACES_PER_SESSION,
-    MAX_OWN_REQUESTS_PER_SESSION, MAX_PASSED_ON_REASON_LEN, MAX_RENDEZVOUS_MS,
-    MAX_WAITING_SUBSCRIBERS,
+    MAX_ANNOUNCEMENTS_AT_ONCE, MAX_HELD_SUBSCRIBES_PER_SESSION, MAX_HELD_TRACKS,
+    MAX_NAMESPACES_PER_SESSION, MAX_OWN_REQUESTS_PER_SESSION, MAX_PASSED_ON_REASON_LEN,
+    MAX_RENDEZVOUS_MS, MAX_WAITING_SUBSCRIBERS,
 };
 use xmoq_moqt::data::{SubgroupHeader, SubgroupId, SubgroupObject};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
@@ -238,6 +238,11 @@ struct SessionState {
     own: HashMap<OwnRequestKey, OwnRequest>,
     /// FETCH requests the relay opened on this session.
     own_fetches: HashMap<OwnRequestKey, fetch::OwnFetch>,
+    /// `PUBLISH_NAMESPACE` requests the session may still send now
+    /// ([`MAX_ANNOUNCEMENTS_AT_ONCE`]).
+    announcements_left: u32,
+    /// The timer that gives one of them back runs.
+    announcement_timer: bool,
 }
 
 impl SessionState {
@@ -1389,6 +1394,8 @@ pub struct Relay {
     /// Says whether a session and a request are allowed
     /// ([`Self::set_authorizer`]). None: all of them are.
     authorizer: Option<Authorization>,
+    /// [`Self::set_announcements_at_once`].
+    announcements_at_once: u32,
 }
 
 /// What a request asks to be allowed to do with a namespace.
@@ -1465,6 +1472,47 @@ impl Relay {
             next_drain_wait: 0,
             next_own_request: 0,
             authorizer: None,
+            announcements_at_once: MAX_ANNOUNCEMENTS_AT_ONCE,
+        }
+    }
+
+    /// How many `PUBLISH_NAMESPACE` requests a session may send at once, in
+    /// place of [`MAX_ANNOUNCEMENTS_AT_ONCE`]. For the sessions that come
+    /// after the call.
+    pub fn set_announcements_at_once(&mut self, announcements: u32) {
+        self.announcements_at_once = announcements;
+    }
+
+    /// A session sends a `PUBLISH_NAMESPACE`: whether it may, by how many
+    /// it has sent of late.
+    fn takes_an_announcement(&mut self, session: SessionKey, actions: &mut Vec<Action>) -> bool {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return false;
+        };
+        if state.announcements_left == 0 {
+            return false;
+        }
+        state.announcements_left -= 1;
+        if !state.announcement_timer {
+            state.announcement_timer = true;
+            actions.push(Action::StartAnnouncementTimer { session });
+        }
+        true
+    }
+
+    /// The time for one announcement is over: the session has one more.
+    fn on_announcement_timeout(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
+        let at_once = self.announcements_at_once;
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        state.announcements_left = state.announcements_left.saturating_add(1).min(at_once);
+        // WHY one timer at a time: with one for each announcement, all that
+        // were used at once would come back at once, and the rate would be
+        // that of the burst.
+        state.announcement_timer = state.announcements_left < at_once;
+        if state.announcement_timer {
+            actions.push(Action::StartAnnouncementTimer { session });
         }
     }
 
@@ -1585,6 +1633,9 @@ impl Relay {
             }
             Event::RequestTimeout { session, stream } => {
                 self.on_request_timeout(session, stream, &mut actions);
+            }
+            Event::AnnouncementTimeout { session } => {
+                self.on_announcement_timeout(session, &mut actions);
             }
             Event::RendezvousTimeout { session, stream } => {
                 self.on_rendezvous_timeout(session, stream, &mut actions);
@@ -1758,6 +1809,8 @@ impl Relay {
                 early: VecDeque::new(),
                 own: HashMap::new(),
                 own_fetches: HashMap::new(),
+                announcements_left: self.announcements_at_once,
+                announcement_timer: false,
             },
         );
     }
@@ -1909,7 +1962,12 @@ impl Relay {
             }
             PeerRequest::PublishNamespace(publish_namespace) => {
                 let namespace = publish_namespace.track_namespace;
-                if !self.add_namespace(session, stream, namespace.clone()) {
+                // §10.6.2: "EXCESSIVE_LOAD: The responder is overloaded and
+                // cannot process the request at this time." Asked first, so
+                // that an announcement that is refused for another reason
+                // counts as well.
+                let may = self.takes_an_announcement(session, actions);
+                if !may || !self.add_namespace(session, stream, namespace.clone()) {
                     let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
                     self.refuse(session, stream, request, &too_many, actions);
                     return;
@@ -3872,6 +3930,7 @@ impl Action {
             | Self::StartEarlyTimer { session, .. }
             | Self::StartJoiningFetchTimer { session, .. }
             | Self::StartRendezvousTimer { session, .. }
+            | Self::StartAnnouncementTimer { session }
             | Self::StartFetchEndTimer { session, .. }
             | Self::StopRequest { session, .. }
             | Self::OpenRequest { session, .. }
