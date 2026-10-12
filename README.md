@@ -37,6 +37,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Between a video track and a decoder, `@xmoq/media`](packages/media/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
 - [MoQ library candidates](docs/moq-libraries.md)
+- [The audio and video demo: what it does and where it ends](docs/av-demo.md)
 - [Roadmap](docs/roadmap.md)
 - [Validation](docs/validation.md)
 - [Open questions](docs/open-questions.md)
