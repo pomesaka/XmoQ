@@ -3,11 +3,13 @@
 #
 #   spikes/terminal-av/watch.sh                 # from the repository root, in Ghostty
 #
-# after `mise run demo` is up and http://localhost:8080/publish is open in Chromium. Ctrl-C ends
-# it and prints what was played (AV_PLAYED). More flags of xmoq-watch go after the name:
+# after `mise run demo` is up and http://localhost:8080/publish is open in Chromium. Keys: q or
+# Ctrl-C ends it (and prints what was played, AV_PLAYED), + and - change the volume, m mutes, and
+# with a room t or Enter begins a line for the chat (Enter sends it, Esc gives it up).
+# More flags of xmoq-watch go after the name:
 #   spikes/terminal-av/watch.sh --volume 0.3 --scale 2 --buffer-ms 150
 # Through a room (the demo's rooms, also with `bun demo/serve.ts --auth`): the room's chat is
-# written under the picture, and --say "a line" sends one.
+# written under the picture, and when the broadcast ends or begins anew the viewer follows it.
 #   ROOM=http://127.0.0.1:8787/rooms/demo spikes/terminal-av/watch.sh
 # Another broadcast: URL=https://host:port/ CERT_SHA256=<hex> NAMESPACE=a/b watch.sh
 set -eu

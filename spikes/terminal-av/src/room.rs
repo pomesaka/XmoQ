@@ -2,7 +2,6 @@
 //! broadcast is, a token for the relay, and the chat.
 
 use std::collections::VecDeque;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
@@ -11,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Broadcast {
     pub relay_url: String,
     pub cert_sha256_hex: String,
@@ -90,19 +89,9 @@ impl Room {
         }
     }
 
-    /// The broadcast of the room, waited for where it has none yet.
-    pub async fn broadcast(&mut self, wait: Duration) -> Result<Broadcast> {
-        let waiting = async {
-            while self.broadcast.is_none() {
-                let message = self.message().await?;
-                if let Some(said) = self.said(&message) {
-                    self.kept.push_back(said);
-                }
-            }
-            Ok::<_, anyhow::Error>(())
-        };
-        tokio::time::timeout(wait, waiting).await.map_err(|_| anyhow!("the room has no broadcast"))??;
-        self.broadcast.clone().ok_or_else(|| anyhow!("the room has no broadcast"))
+    /// The broadcast the room has now, as it last said.
+    pub fn current(&self) -> Option<Broadcast> {
+        self.broadcast.clone()
     }
 
     /// A token for watching in the namespace, or None where the room gives none.

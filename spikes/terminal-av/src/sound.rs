@@ -2,6 +2,7 @@
 //! with `cpal`, each at the moment it is due.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,39 @@ struct Shared {
     counts: Counts,
 }
 
+/// How loud the sound is played, changed while it plays.
+pub struct Volume {
+    /// The bits of an f32, 0 to 1.
+    level: AtomicU32,
+    muted: AtomicBool,
+}
+
+impl Volume {
+    pub fn new(level: f32) -> Self {
+        Self { level: AtomicU32::new(level.to_bits()), muted: AtomicBool::new(false) }
+    }
+
+    pub fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    pub fn muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
+
+    pub fn change(&self, by: f32) {
+        self.level.store((self.level() + by).clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn mute(&self) {
+        self.muted.fetch_xor(true, Ordering::Relaxed);
+    }
+
+    fn now(&self) -> f32 {
+        if self.muted() { 0.0 } else { self.level() }
+    }
+}
+
 pub struct Sound {
     shared: Arc<Mutex<Shared>>,
     decoder: opus_decoder::OpusDecoder,
@@ -57,7 +91,7 @@ pub struct Sound {
 }
 
 impl Sound {
-    pub fn open(volume: f32) -> anyhow::Result<Self> {
+    pub fn open(volume: Arc<Volume>) -> anyhow::Result<Self> {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or_else(|| anyhow::anyhow!("no output device"))?;
@@ -78,6 +112,7 @@ impl Sound {
                 let ahead = times.playback.duration_since(times.callback);
                 let first = Instant::now() + ahead;
                 let mut shared = for_output.lock().expect("the lock");
+                let volume = volume.now();
                 let mut silent = false;
                 for (index, frame) in out.chunks_mut(channels).enumerate() {
                     let at = first + Duration::from_secs_f64(index as f64 / f64::from(RATE));

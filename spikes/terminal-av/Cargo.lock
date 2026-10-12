@@ -1539,6 +1539,7 @@ dependencies = [
  "anyhow",
  "cpal",
  "futures-util",
+ "libc",
  "openh264",
  "opus-decoder",
  "serde_json",
