@@ -69,9 +69,10 @@ const PICTURE_WAIT: Duration = Duration::from_secs(2);
 const BETWEEN_TRIES: Duration = Duration::from_secs(1);
 /// The most lines of the chat that are kept for the lines under the picture.
 const CHAT_KEPT: usize = 16;
-/// The most characters of a line this program writes about what a peer
-/// said: an error, the tracks of a catalog.
-const LINE_ABOUT_A_PEER: usize = 600;
+/// The most characters of a line this program writes: an error with what
+/// a peer said in it, the tracks of a catalog, and `AV_PLAYED`, which is
+/// the longest at about 1,100.
+const LINE_ABOUT_A_PEER: usize = 2000;
 
 /// Writes a line to stderr with nothing in it a terminal would act on.
 ///
@@ -779,7 +780,12 @@ async fn play(
             }
             event = events.recv() => match event {
                 Some(UniEvent::Object { header, object, .. }) => {
-                    if object.status != ObjectStatus::Normal {
+                    // An Object of the catalog's track, which stays
+                    // subscribed: a catalog that comes again is not read.
+                    let of_video = header.track_alias == video.track_alias;
+                    if object.status != ObjectStatus::Normal
+                        || !(of_video || header.track_alias == audio.track_alias)
+                    {
                         continue;
                     }
                     let Some(timestamp) = timestamp_of(&object) else {
@@ -793,7 +799,7 @@ async fn play(
                         continue;
                     };
                     let over_least = i64::try_from(due.over_least_us).unwrap_or(i64::MAX);
-                    if header.track_alias == video.track_alias {
+                    if of_video {
                         played.video_over_least_us.push(over_least);
                         let annex_b = loc::to_annex_b(&object.payload)
                             .map_err(|error| anyhow!("a video payload: {}", error.0))?;
@@ -808,7 +814,7 @@ async fn play(
                         if frames.try_send(frame).is_err() {
                             played.frames_dropped_full += 1;
                         }
-                    } else if header.track_alias == audio.track_alias {
+                    } else {
                         played.audio_over_least_us.push(over_least);
                         if sound.take(&object.payload, due.at_us)
                             && measure
@@ -825,6 +831,14 @@ async fn play(
                     }
                 }
                 Some(UniEvent::SubgroupOpened { .. }) => {}
+                // The stream of the catalog's FETCH, where the catalog came
+                // on its subscription first (moqlivemock's publisher sends
+                // it both ways): it is not read, and letting go of its body
+                // stops it.
+                Some(UniEvent::FetchOpened { stream, header }) => {
+                    session.on_fetch_stream(header.request_id)?;
+                    drop(stops.take_fetch_body(stream));
+                }
                 Some(UniEvent::Failed(error)) => {
                     failed = Some(error.into());
                     break "the session failed";

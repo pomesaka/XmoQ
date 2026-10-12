@@ -40,7 +40,8 @@ interface Pairing {
 		| "fetch-rust.ts"
 		| "catalog.ts"
 		| "video.ts"
-		| "video-rust.ts";
+		| "video-rust.ts"
+		| "watch-rust.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -1058,6 +1059,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			script: "video-rust.ts",
 			args: [],
 			relay: "own",
+		},
+		{
+			name: "own relay: watch: an own page publishes a catalog, video and sound on one connection, and the terminal viewer finds and plays them",
+			script: "watch-rust.ts",
+			args: ["--watch", "page"],
+			relay: "own",
+		},
+		{
+			name: "no relay: watch: the terminal viewer finds a video and an audio track in the catalog of moqlivemock's publisher and plays them",
+			script: "watch-rust.ts",
+			args: ["--watch", "from-mlmpub"],
+			relay: "none",
 		},
 		// A page encodes and publishes video, and another plays it: through
 		// each relay, with each way of putting Objects onto streams.

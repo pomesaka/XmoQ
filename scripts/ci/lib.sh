@@ -35,3 +35,19 @@ ran() {
 		echo "- ${what}: ran" >>"${GITHUB_STEP_SUMMARY}"
 	fi
 }
+
+# WHY here and not in the workflow: `xmoq-watch` plays sound through cpal, whose ALSA backend
+# (`alsa-sys`) asks pkg-config for the headers of ALSA when it is built for Linux. Whoever
+# builds it needs them, in CI or not: the Rust checks and the interop runs both do. macOS needs
+# nothing more.
+need_alsa_headers() {
+	if [[ "$(uname -s)" != Linux ]] || pkg-config --exists alsa 2>/dev/null; then
+		return
+	fi
+	if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+		sudo apt-get update
+		sudo apt-get install --yes --no-install-recommends libasound2-dev pkg-config
+	else
+		fail "the headers of ALSA are missing (Debian and Ubuntu: libasound2-dev and pkg-config), which xmoq-watch needs to build"
+	fi
+}

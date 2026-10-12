@@ -271,6 +271,18 @@ export type OwnPageExtras = {
 	/** Stops painting and ends the video track (`VideoTrackEncoder.end`). */
 	stopVideo(): Promise<void>;
 	/**
+	 * Publishes a broadcast as the demo's publishing page does, on the one
+	 * connection of the page: the catalog of MSF with both tracks, the video
+	 * track `BROADCAST.video` and the Opus track `BROADCAST.audio`. The
+	 * picture is grey with a white square, and the sound a tone with a loud
+	 * beep, for the first 200 ms of every 2 seconds of the page's clock
+	 * (`marked` and `MARK` of `demo/shared.ts`): what a viewer measures how
+	 * far apart picture and sound leave it by.
+	 */
+	publishBroadcast(namespace: string): Promise<void>;
+	/** What `publishBroadcast` has made so far. */
+	broadcastReport(): Promise<PageBroadcastReport>;
+	/**
 	 * Whether the browser has a decoder for the codec, for Annex B without a
 	 * description: "supported", "not supported", or "no VideoDecoder".
 	 */
@@ -450,6 +462,41 @@ export type PageAudioReport = {
 	received: number;
 	dropped: Record<string, number>;
 	decoderError: string | null;
+};
+
+/** What `publishBroadcast` publishes. */
+export const BROADCAST: {
+	video: string;
+	audio: string;
+	codec: string;
+	catalogCodec: string;
+	width: number;
+	height: number;
+	framerate: number;
+	bitrate: number;
+} = {
+	video: "video",
+	audio: "audio",
+	/** What the encoder is configured with, and what the catalog says. */
+	codec: "avc1.42E01F",
+	catalogCodec: "avc3.42E01F",
+	width: 640,
+	height: 360,
+	framerate: 30,
+	bitrate: 1_000_000,
+};
+
+/** What `publishBroadcast` made on a page. */
+export type PageBroadcastReport = {
+	/** Frames painted, and pieces of sound of 20 ms made. */
+	painted: number;
+	made: number;
+	videoEncoderError: string | null;
+	audioEncoderError: string | null;
+	/** Writes of the video track that failed. */
+	videoWriteFailures: number;
+	/** Pieces of sound handed to the transport. */
+	audioWritten: number;
 };
 
 /** What `publishVideo` is started with. */

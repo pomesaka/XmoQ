@@ -76,7 +76,10 @@ if [[ ! -x "${moqlivemock_root}/bin/mlmpub" || ! -f "${moqlivemock_stamp}" ]]; t
 fi
 
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
+need_alsa_headers
 cargo build --locked -p xmoq-moqt-client -p xmoq-relay
+# WHY --release for this one: interop/harness.ts, at `TERMINAL_VIEWER_BINARY`.
+cargo build --locked --release -p xmoq-watch
 
 bun install --frozen-lockfile
 

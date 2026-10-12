@@ -825,6 +825,48 @@ export function spawnMoqtailTestPublisher(
 	return spawned;
 }
 
+/**
+ * The viewer for the terminal, `xmoq-watch` (`crates/watch`).
+ *
+ * WHY the release build, where the other binaries are debug builds: this
+ * one decodes and writes a frame in the time a frame has. Unoptimized it
+ * took 32 of the 33 ms on the machine this was written on, and the picture
+ * fell a third of a second behind the sound within 8 seconds.
+ */
+const TERMINAL_VIEWER_BINARY = join(
+	here,
+	"..",
+	"target",
+	"release",
+	"xmoq-watch",
+);
+
+/**
+ * Starts `xmoq-watch` towards the relay of the run, or towards `url` and
+ * `certSha256Hex` where they are given. It is stopped with the run.
+ */
+export function spawnTerminalViewer(
+	context: RunContext,
+	label: string,
+	extraArgs: string[],
+	server?: { url: string; certSha256Hex: string },
+): LoggedProcess {
+	if (!existsSync(TERMINAL_VIEWER_BINARY)) {
+		throw new Error(
+			`${TERMINAL_VIEWER_BINARY} is missing: cargo build --release -p xmoq-watch`,
+		);
+	}
+	const spawned = spawnLogged(label, TERMINAL_VIEWER_BINARY, [
+		"--url",
+		server?.url ?? context.relayUrl,
+		"--cert-sha256",
+		server?.certSha256Hex ?? context.certSha256Hex,
+		...extraArgs,
+	]);
+	defer(() => stopProcess(spawned, "SIGTERM"));
+	return spawned;
+}
+
 export function spawnRustClient(
 	context: RunContext,
 	label: string,
