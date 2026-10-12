@@ -515,6 +515,22 @@ pub enum Action {
         /// A Stream Reset Error Code (§3.3.3).
         code: u32,
     },
+    /// Nothing to do but to say it: the relay refused a FETCH, or stopped a
+    /// fetch stream it writes, for what its fetch streams keep alive of
+    /// Groups its cache has let go of (`MAX_BYTES_HELD_BEYOND_THE_CACHE`).
+    /// The numbers are what was kept when it decided.
+    NoteHeldBeyondCache {
+        /// The session of the FETCH.
+        session: SessionKey,
+        /// The request stream of the FETCH.
+        stream: StreamKey,
+        /// The FETCH was refused; else its stream was stopped.
+        refused: bool,
+        /// Bytes kept for the relay as a whole.
+        relay_bytes: usize,
+        /// Bytes kept for the session.
+        session_bytes: usize,
+    },
     /// Tell the peer to stop sending on one of its subgroup streams.
     StopDataStream {
         /// The session.

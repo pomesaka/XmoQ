@@ -336,6 +336,22 @@ impl Cache {
         self.0.as_deref_mut().filter(|group| group.id == group_id)
     }
 
+    /// Whether the cache has the Objects of the Group `group_id`: it is the
+    /// Group that is kept, and was not given up.
+    pub(crate) fn keeps(&self, group_id: u64) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|group| group.id == group_id && !group.given_up)
+    }
+
+    /// The Group whose Objects the cache has.
+    pub(crate) fn kept_group(&self) -> Option<u64> {
+        self.0
+            .as_ref()
+            .filter(|group| !group.given_up)
+            .map(|group| group.id)
+    }
+
     /// Lets go of everything, for a track that ends or may not be cached
     /// any more.
     pub(crate) fn clear(&mut self, in_use: &mut usize) {

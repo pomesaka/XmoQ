@@ -130,6 +130,10 @@ pub struct HubConfig {
     /// where that is longer than [`Self::cached_fetch_whole_ms`].
     /// Provisional.
     pub cached_fetch_least_kbps: u64,
+    /// `xmoq_relay_core::MAX_BYTES_HELD_BEYOND_THE_CACHE`, where it is not
+    /// the relay's own number: how many bytes the fetch streams the relay
+    /// writes may keep alive of Groups its caches have let go of.
+    pub held_beyond_cache_bytes: Option<usize>,
     /// `xmoq_relay_core::MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`, where it is
     /// not the relay's own number: how many requests the relay has open on
     /// one publisher for one subscriber's session.
@@ -218,6 +222,7 @@ impl Default for HubConfig {
             announcements_at_once: None,
             cached_fetch_whole_ms: 30_000,
             cached_fetch_least_kbps: 500,
+            held_beyond_cache_bytes: None,
             requests_for_one_subscriber: None,
             fetches_for_one_subscriber: None,
             upstream_timeout: Duration::from_secs(5),
@@ -474,7 +479,13 @@ impl<C: Connection> FetchWrite<C> {
     /// with other fields before it (§11.4.4.1).
     async fn run(self, mut aborted: oneshot::Receiver<u32>) -> Written {
         let ended = |how, pieces| Written { how, pieces };
-        let by = tokio::time::Instant::now() + self.whole;
+        // WHY not simply added: a time for the whole that somebody set to
+        // more than a clock can hold would panic here. A year is as good as
+        // none.
+        let now = tokio::time::Instant::now();
+        let by = now
+            .checked_add(self.whole)
+            .unwrap_or_else(|| now + Duration::from_hours(8760));
         let mut orders = Orders {
             aborted: &mut aborted,
             open: true,
@@ -767,6 +778,10 @@ impl<C: Connection> HubHandle<C> {
 pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>) {
     let (events, inbox) = mpsc::channel(config.event_queue_len);
     let mut relay = Relay::new(&config.implementation);
+    if let Some(bytes) = config.held_beyond_cache_bytes {
+        // An eighth for one session, as of the relay's own number.
+        relay.set_held_beyond_the_cache(bytes, bytes / 8);
+    }
     relay.set_share_of_one_subscriber(
         config
             .requests_for_one_subscriber
@@ -1505,7 +1520,8 @@ impl<C: Connection> Hub<C> {
             | Action::PipeFetch { .. }
             | Action::AbortFetchPipe { .. }
             | Action::WriteFetchStream { .. }
-            | Action::AbortFetchWrite { .. } => {}
+            | Action::AbortFetchWrite { .. }
+            | Action::NoteHeldBeyondCache { .. } => {}
         }
     }
 
@@ -2736,6 +2752,7 @@ fn describe(action: &Action) -> Option<String> {
         | Action::AbortFetchPipe { .. }
         | Action::WriteFetchStream { .. }
         | Action::StartJoiningFetchTimer { .. }
+        | Action::NoteHeldBeyondCache { .. }
         | Action::AbortFetchWrite { .. } => return describe_fetch(action),
         // Logged where the session is closed, whoever asked for it.
         Action::CloseSession { .. }
@@ -2799,6 +2816,18 @@ fn describe_fetch(action: &Action) -> Option<String> {
         } => format!(
             "ABORT_FETCH_WRITE session={} stream={} code={code:#x}",
             session.0, stream.0
+        ),
+        Action::NoteHeldBeyondCache {
+            session,
+            stream,
+            refused,
+            relay_bytes,
+            session_bytes,
+        } => format!(
+            "HELD_BEYOND_CACHE session={} stream={} {} relay_bytes={relay_bytes} session_bytes={session_bytes}",
+            session.0,
+            stream.0,
+            if *refused { "refused" } else { "stopped" }
         ),
         _ => return None,
     })
@@ -3181,6 +3210,60 @@ mod fetch_write_tests {
         assert_eq!((events, end), (expected, None));
         assert_eq!(in_time(writing).await.unwrap().given_up(), None);
         assert!(started.elapsed() > patience, "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_time_for_the_whole_that_no_clock_holds_is_as_good_as_none() {
+        let (relay, subscriber) = pair();
+        let connection = Arc::new(relay);
+        let write = FetchWrite {
+            connection: Arc::clone(&connection),
+            header: FetchHeader { request_id: 4 },
+            send_order: 0,
+            pieces: vec![indicator(0)],
+            patience: IN_TIME,
+            whole: Duration::MAX,
+            trace: Trace::default(),
+            label: "test".to_string(),
+        };
+        let writing = tokio::spawn(write.run(oneshot::channel().1));
+        let stream = in_time(subscriber.accept_uni()).await.unwrap();
+        let (events, end) = in_time(read_all(stream, Duration::ZERO)).await;
+        assert_eq!((events.len(), end), (2, None));
+        assert_eq!(in_time(writing).await.unwrap().given_up(), None);
+    }
+
+    #[test]
+    fn the_whole_of_a_fetch_stream_has_the_least_time_or_its_bytes_at_the_least_rate() {
+        // 30 s at the least, and 500 kbit/s at the least.
+        let config = HubConfig::default();
+        // (bytes of payload, the time for the whole in ms)
+        let cases = [
+            (0, 30_000),
+            // 320 kB take 5.1 s at that rate: the least time.
+            (320_000, 30_000),
+            // 1,875,000 bytes take 30 s exactly.
+            (1_875_000, 30_000),
+            (1_875_063, 30_001),
+            // 8 MiB.
+            (8_388_608, 134_217),
+        ];
+        for (bytes, whole_ms) in cases {
+            assert_eq!(
+                config.cached_fetch_whole(bytes),
+                Duration::from_millis(whole_ms),
+                "{bytes}"
+            );
+        }
+        // A time nobody can wait for is no panic.
+        let forever = HubConfig {
+            cached_fetch_whole_ms: u64::MAX,
+            ..HubConfig::default()
+        };
+        assert_eq!(
+            forever.cached_fetch_whole(1),
+            Duration::from_millis(u64::MAX)
+        );
     }
 
     #[tokio::test(start_paused = true)]

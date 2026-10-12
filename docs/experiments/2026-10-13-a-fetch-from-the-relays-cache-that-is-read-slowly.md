@@ -71,9 +71,23 @@ A fetch stream the relay writes from its cache has a time for the whole, from wh
 
 **How many FETCHes from the cache a session may have open** (not changed; 16). With the time for the whole, one session can still have 16 Groups of 8 MiB kept alive at a time, 128 MiB, by asking for the newest Group of 16 tracks, or of one track as each comes, and beginning anew every 134 s. With 4, as for FETCHes that are passed on, it would be 32 MiB a session. Neither bounds the relay: 256 sessions are 32 GiB and 8 GiB by that count, against the 256 MiB the cache itself may take. What would bound it is counting the bytes that such writes keep alive beyond the cache against a limit of the relay, and refusing a FETCH from the cache with `EXCESSIVE_LOAD` beyond it. Neither was built.
 
+## Afterwards: what the streams keep is counted
+
+The time for the whole bounds one stream, and not what a session's 16 streams, or 256 sessions, keep together. The relay now counts the bytes its fetch streams keep of Groups the cache has let go of: 256 MiB for the relay and an eighth for one session (`--held-beyond-cache-bytes`; the implementation notes have what is counted). Beyond that it refuses a FETCH the cache could answer with `EXCESSIVE_LOAD`, and stops the streams that keep a Group the cache lets go of, with the same code.
+
+**Whether one session could keep others from the cache** (asked before it was built): with 256 MiB for all and 16 FETCH requests of 8 MiB, two sessions have the whole, and every other viewer's FETCH from the cache, the Joining FETCH of a viewer that begins, would be refused. Hence the share: 32 MiB for a session, four such Groups, and eight sessions for the whole.
+
+| Check | Outcome |
+|---|---|
+| Tests of the relay's core, four, with limits of some bytes | Two streams of one Group count its bytes once, from when the cache moves on until the last is written. A session that has its share kept is refused its next FETCH from the cache (`EXCESSIVE_LOAD`, Retry Interval 1,001) while another session is answered, and is answered again when its stream is written. When the cache moves on, the streams of a session over its share are stopped with `0x9`, and those of one within it are not. With 5 bytes for the relay and 3 for a session, two sessions that each keep 3 bytes of a Group of their own are within their share and 6 together: a stream of the one that has the most (the first of two that have as much) is stopped |
+| Interop run `relay-group-kept-beyond-the-cache` (16 MB for the relay, 2 MB for a session), once by itself | A reader took a Group of 8 MiB at 64 KiB a second; when the publisher sent the next Group the relay stopped that stream (`FETCH_WRITE_ENDED session=1 stream=1 aborted pieces=10 code=0x9`), the reader saw the reset with code 9, and another reader's FETCH for the Group the cache had then was answered and finished |
+
+The relay says what it counted when it refuses or stops for it: `HELD_BEYOND_CACHE session=1 stream=1 stopped relay_bytes=8388608 session_bytes=8388608` in that run, the 8 MiB of the Group for the relay and for the session. The count is also in what the relay says of itself to its tests (`Counts::held_beyond_cache_bytes`). With the relay's own 256 MiB nothing was run: it takes 32 Groups of 8 MiB kept at once, which the tool, with one track, cannot make.
+
 ## Not run
 
 - 16 tracks, so that 16 Groups are kept alive at once: the tool publishes one track.
+- The relay's own limit of 256 MiB, and the share of 32 MiB, reached in a run: only with limits of 16 MB and of some bytes.
 - A cache with 4,096 small Objects, and a reader for hours.
 - More than one session that reads slowly.
 - A viewer on a link of less than 500 kbit/s, which is cut where it asks for a Group larger than 1.9 MB (30 s at that rate) and takes it slower than that rate.
@@ -81,4 +95,4 @@ A fetch stream the relay writes from its cache has a time for the whole, from wh
 
 ## Next action
 
-The time for the whole is in; its two numbers are provisional (`docs/open-questions.md`). How many FETCHes from the cache a session may have, and a bound on what such writes keep alive for the relay as a whole, are reported and not built.
+The time for the whole and the count of what the streams keep beyond the cache are in; their numbers are provisional (`docs/open-questions.md`). Several sessions of one sender are not counted together.

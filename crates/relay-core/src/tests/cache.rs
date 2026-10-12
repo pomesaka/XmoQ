@@ -850,3 +850,200 @@ fn the_cache_keeps_what_the_relay_passes_on_and_lets_go_of_it_with_the_track() {
     relay.step(Event::SessionClosed { session: PUBLISHER });
     assert_eq!(relay.counts().cached_bytes, 0);
 }
+
+/// A Standalone FETCH of `session` on `stream` for the whole Group `group`
+/// of the track "a": "written" where the relay answers it from its cache,
+/// "asked" where it asks the publisher, or the code it refuses with.
+fn fetches_group(relay: &mut Relay, session: SessionKey, stream: u64, group: u64) -> String {
+    let actions = relay.step(Event::RequestOpened {
+        session,
+        stream: StreamKey(stream),
+        first: ControlMessage::Fetch(Fetch {
+            request_id: stream * 2,
+            range: FetchRange::Standalone {
+                full_track_name: track(b"a"),
+                start: at(group, 0),
+                end: at(group, 0),
+            },
+            parameters: vec![],
+        }),
+    });
+    actions
+        .iter()
+        .find_map(|action| match action {
+            Action::WriteFetchStream { .. } => Some("written".to_string()),
+            Action::OpenRequest { .. } => Some("asked".to_string()),
+            Action::SendRequest {
+                message: ControlMessage::RequestError(error),
+                ..
+            } => Some(format!(
+                "{:#x}, retry {}",
+                error.error_code, error.retry_interval
+            )),
+            _ => None,
+        })
+        .unwrap_or_else(|| "nothing".to_string())
+}
+
+/// A fetch stream the relay is told to stop: whose, on which request
+/// stream, and the Stream Reset Error Code.
+type Stopped = (SessionKey, u64, u32);
+
+/// The publisher sends Group `group` (on the stream of that number) with
+/// one Object: the cache lets go of the Group it had. The streams the relay
+/// is told to stop for it, with their codes.
+fn the_cache_moves_on_to(relay: &mut Relay, group: u64) -> Vec<Stopped> {
+    let mut actions = data_stream_opened(relay, group);
+    actions.extend(object_arrived(relay, group, 0));
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::AbortFetchWrite {
+                session,
+                stream,
+                code,
+            } => Some((*session, stream.0, *code)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn what_a_fetch_stream_keeps_of_a_group_the_cache_let_go_of_is_counted_until_it_is_written() {
+    // Group 3 has three Objects of one byte.
+    let mut relay = relay_with_three_objects();
+    assert_eq!(fetches_group(&mut relay, ALICE, 7, 3), "written");
+    assert_eq!(fetches_group(&mut relay, BOB, 7, 3), "written");
+    // The cache has the Group: the streams keep nothing it would not.
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 0);
+    // The cache moves on: the three bytes are kept by the streams, and
+    // counted once, though two streams carry them.
+    assert_eq!(the_cache_moves_on_to(&mut relay, 8), []);
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+    // One stream is written: the other keeps them.
+    relay.step(Event::FetchStreamWritten {
+        session: ALICE,
+        stream: StreamKey(7),
+        given_up: None,
+    });
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+    relay.step(Event::FetchStreamWritten {
+        session: BOB,
+        stream: StreamKey(7),
+        given_up: None,
+    });
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 0);
+}
+
+#[test]
+fn a_session_that_has_its_share_kept_beyond_the_cache_is_refused_and_no_other() {
+    // 24 bytes for the relay, so 3 for a session: what Group 3 has.
+    let mut relay = relay_with_three_objects();
+    relay.set_held_beyond_the_cache(24, 3);
+    assert_eq!(fetches_group(&mut relay, ALICE, 7, 3), "written");
+    // Her three bytes are her share and no more: the stream goes on.
+    assert_eq!(the_cache_moves_on_to(&mut relay, 8), []);
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+    // Her next FETCH the cache could answer is refused: EXCESSIVE_LOAD
+    // (0x9), to be retried after a second. Bob's is answered.
+    assert_eq!(fetches_group(&mut relay, ALICE, 9, 8), "0x9, retry 1001");
+    assert_eq!(fetches_group(&mut relay, BOB, 7, 8), "written");
+    // Her stream is written: she is answered again.
+    relay.step(Event::FetchStreamWritten {
+        session: ALICE,
+        stream: StreamKey(7),
+        given_up: None,
+    });
+    assert_eq!(fetches_group(&mut relay, ALICE, 11, 8), "written");
+}
+
+#[test]
+fn a_group_the_cache_lets_go_of_is_not_kept_for_a_session_over_its_share_or_a_relay_over_its_limit()
+{
+    // (the limit of the relay in bytes; who has a stream of Group 3, which
+    //  has 3 bytes; the streams that are reset when the cache moves on,
+    //  with EXCESSIVE_LOAD, 0x9)
+    let cases: [(usize, &[SessionKey], &[Stopped]); 3] = [
+        // A share of 3: nothing is reset.
+        (24, &[ALICE, BOB], &[]),
+        // A share of 2: Alice has 3, and her stream is reset.
+        (16, &[ALICE], &[(ALICE, 7, 0x9)]),
+        // The same for each of two.
+        (16, &[ALICE, BOB], &[(ALICE, 7, 0x9), (BOB, 7, 0x9)]),
+    ];
+    for (limit, readers, reset) in cases {
+        let mut relay = relay_with_three_objects();
+        relay.set_held_beyond_the_cache(limit, limit / 8);
+        for reader in readers {
+            assert_eq!(fetches_group(&mut relay, *reader, 7, 3), "written");
+        }
+        assert_eq!(
+            the_cache_moves_on_to(&mut relay, 8),
+            reset,
+            "{limit} {readers:?}"
+        );
+        // What is told to stop is counted no longer.
+        let kept = if reset.is_empty() { 3 } else { 0 };
+        assert_eq!(relay.counts().held_beyond_cache_bytes, kept, "{limit}");
+    }
+}
+
+#[test]
+fn where_the_relay_has_too_much_kept_and_no_session_more_than_its_share_the_one_with_the_most_is_stopped()
+ {
+    // 5 bytes for the relay and 3 for a session. Group 3 has three Objects
+    // of one byte.
+    let mut relay = relay_with_three_objects();
+    relay.set_held_beyond_the_cache(5, 3);
+    assert_eq!(fetches_group(&mut relay, ALICE, 7, 3), "written");
+    // Group 8 comes, with three Objects as well: Alice's stream keeps 3
+    // bytes, which is her share and less than the relay's 5.
+    assert_eq!(the_cache_moves_on_to(&mut relay, 8), []);
+    object_arrived(&mut relay, 8, 1);
+    object_arrived(&mut relay, 8, 2);
+    assert_eq!(fetches_group(&mut relay, BOB, 7, 8), "written");
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+    // Group 9 comes: Bob's stream keeps 3 bytes too, 6 together. Neither
+    // has more than its share; the relay has more than its 5, and stops a
+    // stream of the session that has the most, Alice's of the two that
+    // have as much: EXCESSIVE_LOAD (0x9).
+    assert_eq!(the_cache_moves_on_to(&mut relay, 9), [(ALICE, 7, 0x9)]);
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+}
+
+#[test]
+fn of_a_sessions_streams_the_one_that_carries_the_most_is_stopped_first() {
+    // 40 bytes for the relay and 5 for a session.
+    let mut relay = relay_with_three_objects();
+    relay.set_held_beyond_the_cache(40, 5);
+    // Alice has a stream of Group 3 (three bytes) on her stream 7, of
+    // Group 8 (one byte) on 9, and of Group 9 (two bytes) on 11: each is
+    // asked for while she has less than her 5 kept.
+    assert_eq!(fetches_group(&mut relay, ALICE, 7, 3), "written");
+    assert_eq!(the_cache_moves_on_to(&mut relay, 8), []);
+    assert_eq!(fetches_group(&mut relay, ALICE, 9, 8), "written");
+    assert_eq!(the_cache_moves_on_to(&mut relay, 9), []);
+    object_arrived(&mut relay, 9, 1);
+    assert_eq!(fetches_group(&mut relay, ALICE, 11, 9), "written");
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 4);
+    // Group 10 comes: 6 bytes are kept for her. The stream that carries
+    // the most is stopped, the one she opened first, and with the 3 that
+    // are left she is within her share.
+    assert_eq!(the_cache_moves_on_to(&mut relay, 10), [(ALICE, 7, 0x9)]);
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+}
+
+#[test]
+fn what_is_kept_beyond_the_cache_is_counted_when_the_track_ends_and_no_longer_when_the_reader_goes()
+{
+    let mut relay = relay_with_three_objects();
+    assert_eq!(fetches_group(&mut relay, ALICE, 7, 3), "written");
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 0);
+    // The publisher goes, and the track with it: the cache has let go of
+    // the Group, and the stream keeps its three bytes.
+    relay.step(Event::SessionClosed { session: PUBLISHER });
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
+    // The reader goes: nothing is kept.
+    relay.step(Event::SessionClosed { session: ALICE });
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 0);
+}

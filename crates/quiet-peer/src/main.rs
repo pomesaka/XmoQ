@@ -58,7 +58,8 @@
 //! `--next-group-after-ms <n>` Group 1, one small Object, that much later.
 //!
 //! With `--fetch-cached <n> --read-bytes-a-second <n>` it sends that many
-//! Standalone FETCH requests for Group 0 of `big` and reads each fetch stream at
+//! Standalone FETCH requests for Group 0 of `big` (or the Group
+//! `--fetch-group` names) and reads each fetch stream at
 //! that rate (0: not at all). It says every 5 seconds how much it has read
 //! (`READ bytes=.. open=..`), and how each stream ended
 //! (`FETCH_STREAM_ENDED after_ms=.. bytes=.. how=..`).
@@ -152,8 +153,8 @@ enum Args {
         answers_nothing: bool,
         /// `--publish-group` and `--next-group-after-ms`.
         publish_group: Option<(u64, usize, Option<Duration>)>,
-        /// `--fetch-cached` and `--read-bytes-a-second`.
-        fetch_cached: Option<(u64, usize)>,
+        /// `--fetch-cached`, `--read-bytes-a-second` and `--fetch-group`.
+        fetch_cached: Option<(u64, usize, u64)>,
     },
 }
 
@@ -242,7 +243,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut say_each, mut stay_quiet) = (false, false);
     let mut ask_every = None;
     let (mut group, mut next_group_after) = (None, None);
-    let (mut fetches, mut read_a_second) = (None, 0);
+    let (mut fetches, mut read_a_second, mut fetch_group) = (None, 0, 0);
     while let Some(flag) = args.next() {
         let value = args
             .next()
@@ -282,6 +283,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                 ));
             }
             "--fetch-cached" => fetches = Some(value.parse().context("--fetch-cached")?),
+            "--fetch-group" => fetch_group = value.parse().context("--fetch-group")?,
             "--read-bytes-a-second" => {
                 read_a_second = value.parse().context("--read-bytes-a-second")?;
             }
@@ -325,7 +327,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             announce_and_refuse,
             answers_nothing: stay_quiet,
             publish_group: group.map(|(objects, bytes)| (objects, bytes, next_group_after)),
-            fetch_cached: fetches.map(|fetches| (fetches, read_a_second)),
+            fetch_cached: fetches.map(|fetches| (fetches, read_a_second, fetch_group)),
         });
     }
     Ok(Args::Serve {
@@ -984,13 +986,13 @@ async fn publish_group(
     Ok(())
 }
 
-/// Sends `fetches` Standalone FETCH requests for Group 0 of `big` and reads every
+/// Sends `fetches` Standalone FETCH requests for the Group `group` of `big` and reads every
 /// stream the relay opens at `a_second` bytes a second.
 async fn fetch_cached(
     url: &str,
     cert_sha256: [u8; 32],
     stay: Duration,
-    (fetches, a_second): (u64, usize),
+    (fetches, a_second, group): (u64, usize, u64),
 ) -> Result<()> {
     let (connection, _control) = connected(url, cert_sha256).await?;
     let began = tokio::time::Instant::now();
@@ -1004,12 +1006,9 @@ async fn fetch_cached(
                     TrackNamespace::new(vec![b"xmoq".to_vec()])?,
                     b"big".to_vec(),
                 )?,
-                start: Location {
-                    group: 0,
-                    object: 0,
-                },
+                start: Location { group, object: 0 },
                 end: Location {
-                    group: 1,
+                    group: group + 1,
                     object: 0,
                 },
             },
