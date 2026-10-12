@@ -58,6 +58,35 @@ pub(crate) const MAX_OWN_FETCHES_PER_SESSION: usize = 16;
 /// resource exhaustion from a single subscriber or session".
 pub const MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER: usize = 4;
 
+/// Bytes of Objects that the fetch streams the relay writes keep alive
+/// after the cache has let go of their Group, over the whole relay: as much
+/// as the caches themselves may take. **Provisional.**
+///
+/// A fetch stream the relay writes from its cache shares the Objects with
+/// the cache, and costs nothing more while the cache has their Group. When
+/// the cache moves on to a later Group, the stream is what keeps them. They
+/// are counted then, once for a Group however many streams carry it, by the
+/// bytes of the stream that carries the most of it.
+///
+/// Over the limit, the relay refuses a FETCH it would answer from its
+/// cache with `EXCESSIVE_LOAD`, and a Group the cache lets go of is not
+/// kept for the streams that carry it: they are reset with
+/// `EXCESSIVE_LOAD`.
+///
+/// WHY: a subscriber that takes a stream slowly keeps a Group of up to
+/// 8 MiB for as long as the stream has (134 seconds for that much), a
+/// session has 16 FETCH requests, and the cache's own limit does not count
+/// what it has dropped.
+pub const MAX_BYTES_HELD_BEYOND_THE_CACHE: usize = 256 * 1024 * 1024;
+
+/// The part of [`MAX_BYTES_HELD_BEYOND_THE_CACHE`] one subscriber's session
+/// may have kept for it: an eighth. The session is refused, and its streams
+/// reset, as the relay does for all over the whole. **Provisional.**
+///
+/// WHY: with 16 FETCH requests of 8 MiB a session has half of the whole,
+/// and two sessions would have every other viewer's FETCH refused.
+pub(crate) const SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE: usize = 8;
+
 /// How long a publisher may send nothing on a fetch stream while the
 /// subscriber can take more, when the FETCH has no `FILL_TIMEOUT`
 /// (§10.2.5: "the relay waits for an implementation specific duration").
@@ -166,6 +195,11 @@ enum Standing {
     /// reported its fetch stream written yet.
     Written {
         track: FullTrackName,
+        /// The Group the stream carries Objects of, and how many bytes of
+        /// payload: what the write keeps alive when the cache lets go of
+        /// that Group ([`MAX_BYTES_HELD_BEYOND_THE_CACHE`]). `None` for a
+        /// stream without an Object.
+        holds: Option<(u64, usize)>,
         /// The I/O side was told to give the stream up
         /// ([`Action::AbortFetchWrite`]).
         told_to_stop: bool,
@@ -212,14 +246,37 @@ impl Fetches {
         self.0.insert(subscriber, Standing::Relayed(fetch));
     }
 
-    fn write(&mut self, subscriber: (SessionKey, StreamKey), track: FullTrackName) {
+    fn write(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        track: FullTrackName,
+        holds: Option<(u64, usize)>,
+    ) {
         self.0.insert(
             subscriber,
             Standing::Written {
                 track,
+                holds,
                 told_to_stop: false,
             },
         );
+    }
+
+    /// The fetch streams the relay writes and was not told to stop, that
+    /// carry Objects: who reads it, the track, the Group and the bytes.
+    fn writes(
+        &self,
+    ) -> impl Iterator<Item = (&(SessionKey, StreamKey), &FullTrackName, u64, usize)> {
+        self.0
+            .iter()
+            .filter_map(|(subscriber, standing)| match standing {
+                Standing::Written {
+                    track,
+                    holds: Some((group, bytes)),
+                    told_to_stop: false,
+                } => Some((subscriber, track, *group, *bytes)),
+                _ => None,
+            })
     }
 
     /// Whether the relay is writing the answer to a FETCH itself.
@@ -390,6 +447,21 @@ pub(crate) struct OwnFetch {
     id: RequestId,
     /// The session and request stream of the subscriber's FETCH.
     subscriber: (SessionKey, StreamKey),
+}
+
+/// What the fetch streams the relay writes keep alive beyond the cache.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Held {
+    /// For the relay: each Group once.
+    pub(crate) total: usize,
+    /// For each session that has any: each Group it has a stream of.
+    sessions: BTreeMap<SessionKey, usize>,
+}
+
+impl Held {
+    fn of(&self, session: SessionKey) -> usize {
+        self.sessions.get(&session).copied().unwrap_or(0)
+    }
 }
 
 /// The `FILL_TIMEOUT` of a FETCH, in milliseconds (§10.2.5).
@@ -789,6 +861,21 @@ impl Relay {
             );
         }
         if let Some((end, objects)) = self.cached(asked) {
+            // §10.6.2: "EXCESSIVE_LOAD: The responder is overloaded and
+            // cannot process the request at this time."
+            let held = self.held_beyond_the_cache();
+            if held.total >= self.held_beyond_cache_limit
+                || held.of(session) >= self.held_beyond_cache_share
+            {
+                actions.push(Action::NoteHeldBeyondCache {
+                    session,
+                    stream,
+                    refused: true,
+                    relay_bytes: held.total,
+                    session_bytes: held.of(session),
+                });
+                return refuse(self, request_error_code::EXCESSIVE_LOAD, actions);
+            }
             let pieces = objects.into_iter().map(FetchPiece::Object).collect();
             let answer = (end, pieces, asked.send_order);
             return self.write_answer(session, stream, request, &asked.track, answer, actions);
@@ -1168,6 +1255,22 @@ impl Relay {
             message: ok,
         });
         acknowledge_updates(session, stream, owed, actions);
+        // The Objects of the answer are of one Group, the one the cache
+        // has.
+        let payload = |piece: &FetchPiece| match piece {
+            FetchPiece::Object(cached) => Some((cached.group_id, cached.object.payload.len())),
+            FetchPiece::EndOfRange(..) => None,
+        };
+        let holds = pieces.iter().find_map(payload).map(|(group, _)| {
+            (
+                group,
+                pieces
+                    .iter()
+                    .filter_map(payload)
+                    .map(|(_, bytes)| bytes)
+                    .sum(),
+            )
+        });
         actions.push(Action::WriteFetchStream {
             session,
             stream,
@@ -1178,7 +1281,112 @@ impl Relay {
         });
         // Counted as one of the session's FETCHes until its stream is
         // written, or given up. The request stream is ended then.
-        self.fetches.write((session, stream), track.clone());
+        self.fetches.write((session, stream), track.clone(), holds);
+    }
+
+    /// What the fetch streams the relay writes keep alive of Groups the
+    /// cache has let go of ([`MAX_BYTES_HELD_BEYOND_THE_CACHE`]).
+    ///
+    /// WHY worked out anew each time, and not kept as a number: it changes
+    /// when a stream ends, when a Group is dropped and when a track ends,
+    /// and a number kept beside those would have to be right in each. The
+    /// streams are 16 for a session at most.
+    pub(crate) fn held_beyond_the_cache(&self) -> Held {
+        // The largest stream of each Group, for the relay and for each
+        // session.
+        let mut groups: BTreeMap<(&FullTrackName, u64), usize> = BTreeMap::new();
+        let mut of_sessions: BTreeMap<(SessionKey, &FullTrackName, u64), usize> = BTreeMap::new();
+        for ((session, _), track, group, bytes) in self.fetches.writes() {
+            let cached = self
+                .tracks
+                .live(track)
+                .is_some_and(|live| live.cache.keeps(group));
+            if cached {
+                continue;
+            }
+            let most = groups.entry((track, group)).or_default();
+            *most = (*most).max(bytes);
+            let most = of_sessions.entry((*session, track, group)).or_default();
+            *most = (*most).max(bytes);
+        }
+        let mut sessions: BTreeMap<SessionKey, usize> = BTreeMap::new();
+        for ((session, _, _), bytes) in of_sessions {
+            *sessions.entry(session).or_default() += bytes;
+        }
+        Held {
+            total: groups.values().sum(),
+            sessions,
+        }
+    }
+
+    /// The cache of a track has let go of a Group, or a track is over: the
+    /// fetch streams that carry what was let go of keep it alive from here
+    /// on. Where that is more than a session may have kept, or the relay,
+    /// streams are reset until it is not.
+    ///
+    /// WHY looked at here, and not only when a FETCH comes: a FETCH is
+    /// answered from the Group the cache has, which costs nothing then, and
+    /// becomes what keeps the Group when the cache moves on.
+    pub(crate) fn trim_what_is_held_beyond_the_cache(&mut self, actions: &mut Vec<Action>) {
+        let share = self.held_beyond_cache_share;
+        loop {
+            let held = self.held_beyond_the_cache();
+            // The session that has the most over its share; then, where
+            // the relay as a whole has too much, the one that has the most.
+            let over_its_share = held
+                .sessions
+                .iter()
+                .filter(|(_, bytes)| **bytes > share)
+                .max_by_key(|(session, bytes)| (**bytes, std::cmp::Reverse(**session)));
+            let most = held
+                .sessions
+                .iter()
+                .max_by_key(|(session, bytes)| (**bytes, std::cmp::Reverse(**session)));
+            let Some((&session, _)) =
+                over_its_share.or(most.filter(|_| held.total > self.held_beyond_cache_limit))
+            else {
+                return;
+            };
+            // Of its streams of Groups the cache has let go of, the one that
+            // carries the most, so that as few as can be are stopped; of
+            // those that carry as much, the one on the request stream it
+            // opened last.
+            let cut = self
+                .fetches
+                .writes()
+                .filter(|((of, _), track, group, _)| {
+                    *of == session
+                        && !self
+                            .tracks
+                            .live(track)
+                            .is_some_and(|live| live.cache.keeps(*group))
+                })
+                .max_by_key(|(subscriber, _, _, bytes)| (*bytes, **subscriber))
+                .map(|(subscriber, ..)| *subscriber);
+            let Some(subscriber) = cut else {
+                return;
+            };
+            // Never false: `writes` leaves out what was told to stop. WHY
+            // looked at all the same: a stream that could not be told would
+            // be found again and again.
+            if !self.fetches.tell_to_stop(&subscriber) {
+                return;
+            }
+            {
+                actions.push(Action::NoteHeldBeyondCache {
+                    session: subscriber.0,
+                    stream: subscriber.1,
+                    refused: false,
+                    relay_bytes: held.total,
+                    session_bytes: held.of(subscriber.0),
+                });
+                actions.push(Action::AbortFetchWrite {
+                    session: subscriber.0,
+                    stream: subscriber.1,
+                    code: stream_reset_code::EXCESSIVE_LOAD,
+                });
+            }
+        }
     }
 
     /// The subscriber cancelled a FETCH the relay is writing the answer of

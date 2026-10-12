@@ -110,6 +110,21 @@
 //                     session=1 stream=S too_slow pieces=N code=0x5`); the
 //                     one that reads gets the whole Group and a FIN.
 //
+//   relay-group-kept-beyond-the-cache
+//                     The own relay, told to let the fetch streams it
+//                     writes keep 16 MB of Groups its cache has let go of
+//                     (`--held-beyond-cache-bytes 16000000`; 256 MiB by
+//                     itself), which is 2 MB for one session. A reader
+//                     takes a Group of 8 MiB at 64 KiB a second; four
+//                     seconds later the publisher sends the next Group, and
+//                     the cache lets go of the first. The relay stops the
+//                     reader's stream with EXCESSIVE_LOAD
+//                     (`HELD_BEYOND_CACHE session=1 stream=S stopped
+//                     relay_bytes=8388608 session_bytes=8388608`, then
+//                     `FETCH_WRITE_ENDED session=1 stream=S aborted
+//                     pieces=N code=0x9`). Another reader's FETCH for the
+//                     Group the cache has then is answered.
+//
 //   relay-idle-session
 //                     The own relay, told to let a session hold nothing
 //                     for 1.5 seconds (`--idle-session-ms`; 30 by itself),
@@ -858,12 +873,89 @@ async function relaySlowCachedFetch(): Promise<string> {
 	return `the own relay, told to give a subscriber ${WHOLE_MS} ms for the whole of a fetch stream it writes from its cache: a reader that took 16 KiB a second of a Group of 8 MiB had its stream reset with TOO_FAR_BEHIND (${written}), and a reader that read as fast as it could got all ${fastBytes} bytes and a FIN`;
 }
 
+/**
+ * A fetch stream that keeps a Group the cache has let go of, for a session
+ * that has more than its share kept so: it is reset, and another reader is
+ * answered.
+ */
+async function relayGroupKeptBeyondTheCache(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: [],
+		verbose: options.verbose,
+		// 16 MB for the relay, so 2 MB for one session: less than the Group.
+		relayArgs: ["--held-beyond-cache-bytes", "16000000"],
+	});
+	// Group 0 of 8 MiB, and Group 1 four seconds later.
+	const publisher = spawnQuietClient(context, "publisher", 40_000, false, [
+		"--publish-group",
+		"64x131072",
+		"--next-group-after-ms",
+		"4000",
+	]);
+	await publisher.waitForLine(/^GROUP_SENT group=0 /);
+	// The relay's second session: it takes 64 KiB a second, each Object in
+	// two seconds.
+	const slow = spawnQuietClient(context, "reader:slow", 12_000, false, [
+		"--fetch-cached",
+		"1",
+		"--read-bytes-a-second",
+		"65536",
+	]);
+	await slow.waitForLine(/^FETCH n=0 FETCH_OK$/);
+	await publisher.waitForLine(/^GROUP_SENT group=1 /);
+	const [written] = await context.relay.waitForLine(
+		/^FETCH_WRITE_ENDED session=1 stream=\d+ (\S+) pieces=\d+ code=(0x[0-9a-f]+)$/,
+	);
+	// What the relay says it counted when it stopped the stream: the Group's
+	// 8 MiB, for the relay and for the session.
+	const [counted] = await context.relay.waitForLine(
+		/^HELD_BEYOND_CACHE session=1 stream=\d+ stopped relay_bytes=8388608 session_bytes=8388608$/,
+	);
+	if (!/ aborted pieces=\d+ code=0x9$/.test(written)) {
+		throw new Error(
+			`the relay was to stop the stream that kept the Group, with EXCESSIVE_LOAD (0x9): ${written}`,
+		);
+	}
+	const [, , , slowHow = ""] = await slow.waitForLine(
+		/^FETCH_STREAM_ENDED after_ms=(\d+) bytes=(\d+) how=(Reset.*)$/,
+		15_000,
+	);
+	if (!/Reset\(Some\(9\)\)/.test(slowHow)) {
+		throw new Error(
+			`the slow reader's stream was to be reset with EXCESSIVE_LOAD (0x9): ${slowHow}`,
+		);
+	}
+	// Another reader asks for the Group the cache has now.
+	const other = spawnQuietClient(context, "reader:other", 6000, false, [
+		"--fetch-cached",
+		"1",
+		"--fetch-group",
+		"1",
+		"--read-bytes-a-second",
+		"100000000",
+	]);
+	await other.waitForLine(/^FETCH n=0 FETCH_OK$/);
+	const [, , otherBytes = "", otherHow = ""] = await other.waitForLine(
+		/^FETCH_STREAM_ENDED after_ms=(\d+) bytes=(\d\d+) how=(.*)$/,
+		15_000,
+	);
+	if (otherHow !== "finished") {
+		throw new Error(
+			`another reader was to be answered from the cache: ${otherBytes} bytes, ${otherHow}`,
+		);
+	}
+	return `the own relay, told to let its fetch streams keep 16 MB beyond its cache (2 MB for one session): a reader took a Group of 8 MiB slowly, the cache moved on to the next Group, and the relay stopped that stream with EXCESSIVE_LOAD (${counted}; ${written}); another reader's FETCH for the Group the cache had then was answered and finished`;
+}
+
 const RELAY_CASES: Record<string, () => Promise<string>> = {
 	"relay-no-setup": relayNoSetup,
 	"relay-idle-session": relayIdleSession,
 	"relay-many-announcements": relayManyAnnouncements,
 	"relay-one-session-asks-for-much": relayOneSessionAsksForMuch,
 	"relay-slow-cached-fetch": relaySlowCachedFetch,
+	"relay-group-kept-beyond-the-cache": relayGroupKeptBeyondTheCache,
 };
 
 async function main(): Promise<void> {

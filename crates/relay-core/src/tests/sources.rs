@@ -1120,6 +1120,7 @@ fn nothing_is_left_when_everyone_has_gone() {
             declined: 0,
             early_streams: 0,
             cached_bytes: 0,
+            held_beyond_cache_bytes: 0,
             remembered_subgroups: 0,
             namespaces: 0,
             pending_tracks: 0,

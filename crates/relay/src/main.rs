@@ -120,6 +120,10 @@ struct Args {
     /// [`HubConfig::cached_fetch_least_kbps`]; 30,000 and 500 where it is
     /// not said.
     cached_fetch: (Option<u64>, Option<u64>),
+    /// `--held-beyond-cache-bytes`:
+    /// [`HubConfig::held_beyond_cache_bytes`]; 256 MiB where it is not
+    /// said.
+    held_beyond_cache: Option<usize>,
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
     /// An experiment: what a subscriber gets that set no
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
@@ -136,6 +140,11 @@ struct Args {
     /// `--auth-setup off`: with a key, the SETUP of a client is not asked
     /// for a token ([`HubConfig::auth_setup`]). On with a key otherwise.
     auth_setup: bool,
+}
+
+/// The number a flag gives.
+fn small(flag: &str, value: &str) -> Result<u32> {
+    value.parse().with_context(|| flag.to_string())
 }
 
 /// The number a flag gives.
@@ -166,6 +175,7 @@ fn parse_args() -> Result<Args> {
     let (mut announce_every, mut announce_at_once) = (None, None);
     let mut for_one_session = (None, None);
     let mut cached_fetch = (None, None);
+    let mut held_beyond_cache = None;
     let mut delivery_patience = None;
     let mut give_up_older_groups = false;
     let mut older_groups_grace = Duration::ZERO;
@@ -198,16 +208,13 @@ fn parse_args() -> Result<Args> {
             "--max-sessions" => max_sessions = Some(value.parse().context("--max-sessions")?),
             "--slow-open-ms" => slow_open = Some(millis(&flag, &value)?),
             "--setup-timeout-ms" => setup_timeout = Some(millis(&flag, &value)?),
-            "--announce-every-ms" => {
-                announce_every = Some(value.parse().context("--announce-every-ms")?);
-            }
+            "--announce-every-ms" => announce_every = Some(number(&flag, &value)?),
+            "--held-beyond-cache-bytes" => held_beyond_cache = Some(count(&flag, &value)?),
             "--cached-fetch-whole-ms" => cached_fetch.0 = Some(number(&flag, &value)?),
             "--cached-fetch-least-kbps" => cached_fetch.1 = Some(number(&flag, &value)?),
             "--requests-for-one-session" => for_one_session.0 = Some(count(&flag, &value)?),
             "--fetches-for-one-session" => for_one_session.1 = Some(count(&flag, &value)?),
-            "--announce-at-once" => {
-                announce_at_once = Some(value.parse().context("--announce-at-once")?);
-            }
+            "--announce-at-once" => announce_at_once = Some(small(&flag, &value)?),
             "--idle-session-ms" => idle_session = Some(millis(&flag, &value)?),
             "--delivery-patience-ms" => delivery_patience = Some(millis(&flag, &value)?),
             "--older-groups-grace-ms" => {
@@ -248,6 +255,7 @@ fn parse_args() -> Result<Args> {
         announce_at_once,
         for_one_session,
         cached_fetch,
+        held_beyond_cache,
         delivery_patience,
         give_up_older_groups,
         older_groups_grace,
@@ -282,6 +290,7 @@ async fn main() -> Result<()> {
         config.requests_for_one_subscriber,
         config.fetches_for_one_subscriber,
     ) = args.for_one_session;
+    config.held_beyond_cache_bytes = args.held_beyond_cache;
     if let Some(whole_ms) = args.cached_fetch.0 {
         config.cached_fetch_whole_ms = whole_ms;
     }

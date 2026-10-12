@@ -1219,6 +1219,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 			mostlyWaits: true,
 		},
+		{
+			name: "own relay: quiet peer: a fetch stream that keeps a Group the cache has let go of, beyond its session's share, is stopped with EXCESSIVE_LOAD, and another reader is answered",
+			script: "quiet-peer.ts",
+			args: [
+				"--case",
+				"relay-group-kept-beyond-the-cache",
+				"--client",
+				"quiet-peer",
+			],
+			relay: "own",
+			mostlyWaits: true,
+		},
 		// A SUBSCRIBE that comes before its publisher (RENDEZVOUS_TIMEOUT).
 		{
 			name: "own relay: rendezvous: own-browser subscribes before anybody publishes the track, is held, and is accepted when own-rust publishes",

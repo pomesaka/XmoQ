@@ -52,7 +52,9 @@ pub use events::{
     Action, Event, FetchPiece, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey,
     RequestEnd, SessionKey, StreamEnd, StreamKey,
 };
-pub use fetch::{MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER, fetch_reset_passed_on};
+pub use fetch::{
+    MAX_BYTES_HELD_BEYOND_THE_CACHE, MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER, fetch_reset_passed_on,
+};
 use requests::{Requests, Subscribed};
 pub use routing::{
     ANNOUNCEMENT_EVERY_MS, MAX_ANNOUNCEMENTS_AT_ONCE, MAX_HELD_SUBSCRIBES_PER_SESSION,
@@ -1348,6 +1350,9 @@ pub struct Counts {
     pub early_streams: usize,
     /// Bytes the caches of the tracks hold, over all tracks.
     pub cached_bytes: usize,
+    /// Bytes the fetch streams the relay writes keep alive of Groups the
+    /// caches have let go of ([`MAX_BYTES_HELD_BEYOND_THE_CACHE`]).
+    pub held_beyond_cache_bytes: usize,
     /// Subgroups the tracks remember the stream of, over all tracks
     /// ([`MAX_REMEMBERED_SUBGROUPS`] bounds them for each).
     pub remembered_subgroups: usize,
@@ -1403,6 +1408,14 @@ pub struct Relay {
     requests_for_one: usize,
     /// [`Self::set_share_of_one_subscriber`].
     fetches_for_one: usize,
+    /// [`Self::set_held_beyond_the_cache`].
+    held_beyond_cache_limit: usize,
+    /// [`Self::set_held_beyond_the_cache`].
+    held_beyond_cache_share: usize,
+    /// The cache of a track let go of a Group, or a track ended, while
+    /// this event was handled: what the fetch streams keep of it is looked
+    /// at before the event is done with.
+    cache_let_go: bool,
 }
 
 /// What a request asks to be allowed to do with a namespace.
@@ -1483,6 +1496,10 @@ impl Relay {
             announcement_every_ms: ANNOUNCEMENT_EVERY_MS,
             requests_for_one: MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER,
             fetches_for_one: MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER,
+            held_beyond_cache_limit: fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE,
+            held_beyond_cache_share: fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE
+                / fetch::SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE,
+            cache_let_go: false,
         }
     }
 
@@ -1503,6 +1520,15 @@ impl Relay {
     pub fn set_share_of_one_subscriber(&mut self, requests: usize, fetches: usize) {
         self.requests_for_one = requests;
         self.fetches_for_one = fetches;
+    }
+
+    /// How many bytes the fetch streams the relay writes may keep alive
+    /// beyond its cache, and how many of them for one subscriber's session,
+    /// in place of [`fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE`] and an eighth
+    /// of it.
+    pub fn set_held_beyond_the_cache(&mut self, bytes: usize, for_one_session: usize) {
+        self.held_beyond_cache_limit = bytes;
+        self.held_beyond_cache_share = for_one_session;
     }
 
     /// A session sends a `PUBLISH_NAMESPACE`: whether it may, by how many
@@ -1562,6 +1588,9 @@ impl Relay {
         let mut actions = self.handle_event(event);
         if let Some(session) = used_a_request_id {
             self.settle_early_fetches(session, None, &mut actions);
+        }
+        if std::mem::take(&mut self.cache_let_go) {
+            self.trim_what_is_held_beyond_the_cache(&mut actions);
         }
         actions
     }
@@ -2955,6 +2984,7 @@ impl Relay {
         // WHY before anything is done with the Object: one that shows the
         // track to be malformed is not counted as its largest and not sent
         // on, as an Object whose stream does (above).
+        let kept_before = track.cache.kept_group();
         let verdict = keep(
             &mut track.cache,
             track.never_cached,
@@ -2963,6 +2993,7 @@ impl Relay {
             &object,
             &mut self.cached_bytes,
         );
+        self.cache_let_go |= kept_before.is_some() && track.cache.kept_group() != kept_before;
         if verdict == cache::Verdict::Malformed {
             self.on_track_malformed(session, stream, actions);
             return;
@@ -3164,6 +3195,7 @@ impl Relay {
         let Some(mut track) = self.tracks.take_live(track_name) else {
             return;
         };
+        self.cache_let_go |= track.cache.kept_group().is_some();
         track.cache.clear(&mut self.cached_bytes);
         let (status_code, reset_code) = end.codes();
         for source in track.sources() {
@@ -3710,6 +3742,7 @@ impl Relay {
                 .sum(),
             early_streams: self.sessions.values().map(|state| state.early.len()).sum(),
             cached_bytes: self.cached_bytes,
+            held_beyond_cache_bytes: self.held_beyond_the_cache().total,
             remembered_subgroups: self
                 .tracks
                 .all_live()
@@ -3977,7 +4010,8 @@ impl Action {
             | Self::PipeFetch { session, .. }
             | Self::AbortFetchPipe { session, .. }
             | Self::WriteFetchStream { session, .. }
-            | Self::AbortFetchWrite { session, .. } => Target::Session(*session),
+            | Self::AbortFetchWrite { session, .. }
+            | Self::NoteHeldBeyondCache { session, .. } => Target::Session(*session),
             Self::SendObject { out_stream, .. }
             | Self::SetDeliveryTimeout { out_stream, .. }
             | Self::FinishDataStream { out_stream }
