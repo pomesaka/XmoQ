@@ -873,6 +873,10 @@ struct Timers {
     /// peer chooses how long it runs, and it counts among the timers its
     /// session may have.
     rendezvous: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
+    /// Where the timer of a wait for the last streams of a source is, by
+    /// the number of the wait, so that it can be dropped when the source
+    /// is over before it.
+    drain: HashMap<(SessionKey, u64), (Instant, u64)>,
     next: u64,
 }
 
@@ -908,6 +912,9 @@ impl Timers {
             Event::RendezvousTimeout { session, stream } => {
                 self.rendezvous.insert((session, stream), at);
             }
+            Event::DrainTimeout { session, wait, .. } => {
+                self.drain.insert((session, wait), at);
+            }
             _ => {}
         }
         self.pending.insert(at, (session, event));
@@ -938,6 +945,18 @@ impl Timers {
     /// appear: the SUBSCRIBE was answered, or its stream is gone.
     fn stop_rendezvous(&mut self, session: SessionKey, stream: StreamKey) {
         let Some(at) = self.rendezvous.remove(&(session, stream)) else {
+            return;
+        };
+        if self.pending.remove(&at).is_some()
+            && let Some(running) = self.per_session.get_mut(&session)
+        {
+            *running = running.saturating_sub(1);
+        }
+    }
+
+    /// Drops the timer of a wait for the last streams of a source.
+    fn stop_drain(&mut self, session: SessionKey, wait: u64) {
+        let Some(at) = self.drain.remove(&(session, wait)) else {
             return;
         };
         if self.pending.remove(&at).is_some()
@@ -988,6 +1007,9 @@ impl Timers {
                 Event::RendezvousTimeout { session, stream } => {
                     self.rendezvous.remove(&(session, stream));
                 }
+                Event::DrainTimeout { session, wait, .. } => {
+                    self.drain.remove(&(session, wait));
+                }
                 _ => {}
             }
             events.push_back(event);
@@ -1001,6 +1023,7 @@ impl Timers {
         self.upstream.retain(|(owner, _), _| *owner != session);
         self.request_close.retain(|(owner, _), _| *owner != session);
         self.rendezvous.retain(|(owner, _), _| *owner != session);
+        self.drain.retain(|(owner, _), _| *owner != session);
     }
 
     #[cfg(test)]
@@ -1500,6 +1523,7 @@ impl<C: Connection> Hub<C> {
                 }
             }
             Action::StartDrainTimer { .. }
+            | Action::StopDrainTimer { .. }
             | Action::StartEarlyTimer { .. }
             | Action::StartJoiningFetchTimer { .. }
             | Action::StartRendezvousTimer { .. }
@@ -1892,6 +1916,10 @@ impl<C: Connection> Hub<C> {
         let (session, wait, event) = match *action {
             Action::StopUpstreamTimer { session, request } => {
                 self.timers.stop_upstream(session, request);
+                return;
+            }
+            Action::StopDrainTimer { session, wait } => {
+                self.timers.stop_drain(session, wait);
                 return;
             }
             Action::StartDrainTimer {
@@ -2682,12 +2710,10 @@ fn describe(action: &Action) -> Option<String> {
             session,
             stream,
             message,
-        } => format!(
-            "SEND session={} stream={} {}",
-            session.0,
-            stream.0,
-            name(message)
-        ),
+        } => {
+            let kind = name(message);
+            format!("SEND session={} stream={} {kind}", session.0, stream.0)
+        }
         Action::FinishRequest { session, stream } => {
             format!("FINISH_REQUEST session={} stream={}", session.0, stream.0)
         }
@@ -2770,11 +2796,11 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartUpstreamTimer { .. }
         | Action::StartFetchStreamTimer { .. }
         | Action::StopUpstreamTimer { .. }
+        | Action::StopDrainTimer { .. }
         | Action::SendObject { .. }
         | Action::SetDeliveryTimeout { .. }
         | Action::StartFetchEndTimer { .. }
-        // The SUBSCRIBE it is for has its line where it was read
-        // (`HOLD_REQUEST`, `Hub::feed`).
+        // Its SUBSCRIBE has a line where it was read (`HOLD_REQUEST`).
         | Action::StartRendezvousTimer { .. }
         | Action::StartAnnouncementTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,

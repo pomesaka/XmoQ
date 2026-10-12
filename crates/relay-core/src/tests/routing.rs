@@ -1023,6 +1023,11 @@ fn publish_done_of_a_routed_track_reaches_the_subscribers() {
                 Action::FinishDataStream {
                     out_stream: OutStreamKey(0),
                 },
+                // The timer of the wait is not needed any more.
+                Action::StopDrainTimer {
+                    session: PUBLISHER,
+                    wait: 0,
+                },
                 Action::FinishOwnRequest {
                     session: PUBLISHER,
                     request: OwnRequestKey(0),

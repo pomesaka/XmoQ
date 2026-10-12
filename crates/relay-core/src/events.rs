@@ -540,6 +540,19 @@ pub enum Action {
         /// A Stream Reset Error Code (§3.3.3).
         code: u32,
     },
+    /// Drop the timer of [`Action::StartDrainTimer`] for this wait: the
+    /// source it was for is over, by the streams it counted or otherwise.
+    ///
+    /// WHY, though the event of such a timer does nothing: the timer counts
+    /// among those its session may have until it runs out, and a publisher
+    /// that ends its tracks in quick succession would have none left for
+    /// the wait it needs.
+    StopDrainTimer {
+        /// The session of the publisher.
+        session: SessionKey,
+        /// The wait, as [`Action::StartDrainTimer`] numbered it.
+        wait: u64,
+    },
     /// Report [`Event::DrainTimeout`] after the wait for late Objects.
     StartDrainTimer {
         /// The session of the publisher.
