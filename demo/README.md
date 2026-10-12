@@ -19,6 +19,8 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 
 **On a link with less room than the video** `bun demo/serve.ts --delivery-patience-ms 500` starts the relay with its experiment of giving up a Group a viewer does not have in time: the picture then stays about half a second behind and does not fall further, and the page shows more frames than without ([record](../docs/experiments/2026-10-12-a-page-behind-a-link-with-too-little-room-and-a-relay-that-gives-groups-up.md)).
 
+`/chat?room=R&name=a&peers=a,b` is a try of chat as MoQ tracks beside the room's WebSocket, driven by a script and linked from nowhere ([record](../docs/experiments/2026-10-12-chat-as-moq-tracks-beside-the-rooms-websocket.md)).
+
 `bun demo/check.ts` checks a running demo in headless Chromium: the frames a second, and that sound leaves the watching page.
 
 Ctrl-C stops the web server and the relay. `bun demo/serve.ts --port N --relay-port M` chooses other ports.

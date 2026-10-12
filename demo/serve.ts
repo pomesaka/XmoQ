@@ -153,6 +153,8 @@ process.on("SIGTERM", stop);
 const PAGES: Record<string, string> = {
 	"/publish": "publish.ts",
 	"/watch": "watch.ts",
+	// A try of chat as a MoQ track, beside the room's WebSocket; a script drives it.
+	"/chat": "chat.ts",
 };
 const scripts = new Map<string, string>();
 for (const [path, entry] of Object.entries(PAGES)) {
