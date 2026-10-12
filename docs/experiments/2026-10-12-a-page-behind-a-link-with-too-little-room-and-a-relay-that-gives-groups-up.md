@@ -81,3 +81,59 @@ The rows without a flag and with patience are as they were in the morning (327 a
 - The picture still stands still at the end of a Group that was cut, 6 to 12 times in 20 s with the grace, 250 ms at most.
 
 **What can be said from this.** On a link narrower than the video, the three experiments rank the same at both rates: giving older Groups up with a grace of 100 ms shows the most frames and keeps the sound; the patience of 500 ms shows fewer and is further behind; nothing shows the fewest and falls behind without end. Giving up with no grace is the nearest to live and breaks the sound, as long as sound is ten pieces a Group. What is not known: any of them with loss in place of a narrow link, where a Group that is late is late for another reason; with BBR; with more than one viewer; and what a picture that stands still several times in 20 s looks like against one that is whole and late. With `?abr=1` on top, one run is in [the record of the two versions](2026-10-12-two-versions-of-the-video-and-a-viewer-that-changes-between-them.md): the viewer went down later, as the picture was less far behind.
+
+## Later still: giving older Groups up, with the sound a piece a Group, and on a link with loss
+
+Three things the section above left open, for the decisions on the sound's Groups and on which of the relay's experiments could be a default. Nothing is decided here.
+
+Expected, written before the runs: with a piece of sound a Group the next Group begins 20 ms later, so giving up with no grace gives up most pieces that are not through and is worse than with ten; with 100 ms of grace it is fine on the narrow link. On a link with loss and room to spare, a Group that is late is late for a packet that is sent again, which takes a round trip (100 ms here) or more: giving up with 100 ms of grace may give up what would have come, and show fewer frames than no flag. A second viewer with room is not touched.
+
+### The narrow link, with the sound a piece a Group
+
+As above (the busy picture at 2.5 Mbit/s, buffer 150 ms, 20 s), `/publish?audioGroup=1`, two runs each; the rows with ten are those of the section before.
+
+| Relay | Link | Sound | Frames shown of 600 | Picture came after, ms | Sound: pieces received and sounded of 1,000, breaks |
+|---|---|---|---|---|---|
+| give up, no grace | 2.5 Mbit/s | 10 a Group | 475, 530 | 199, 181 | sounded 870, 864; 50, 47 |
+| give up, no grace | 2.5 Mbit/s | **1 a Group** | 528, 522 | 187, 197 | **received 652, 631; sounded 375, 225; 202, 163** |
+| give up, no grace | 2 Mbit/s | 10 a Group | 377, 412 | 303, 303 | sounded 898, 855; 39, 45 |
+| give up, no grace | 2 Mbit/s | **1 a Group** | 420, 409 | 299, 305 | **received 616, 619; sounded 204, 302; 143, 184** |
+| give up, grace 100 ms | 2.5 Mbit/s | 10 a Group | 518, 521 | 254, 251 | sounded 970, 976; 2, 0 |
+| give up, grace 100 ms | 2.5 Mbit/s | 1 a Group | 523, 472 | 228, 251 | received 985, 984; sounded 982, 980; 1, 0 |
+| give up, grace 100 ms | 2 Mbit/s | 10 a Group | 415, 415 | 345, 349 | sounded 966, 960; 0, 1 |
+| give up, grace 100 ms | 2 Mbit/s | 1 a Group | 408, 410 | 352, 353 | received 982, 982; sounded 975, 978; 2, 2 |
+
+- **As expected: with no grace, a piece a Group is much worse than ten.** A third of the pieces never reach the viewer (616 to 652 of about 985 do), and 204 to 375 sound; what sounds is in pieces.
+- **With 100 ms of grace a piece a Group is as good as ten**, and a little better in what sounds (975 to 982 against 960 to 976).
+
+### A link with loss and room to spare
+
+50 ms each way, 1% and 5% loss each way, no limit on the rate, the demo's clock at 640x360 (about 450 kbit/s), buffer 150 ms, 20 s; two runs each.
+
+| Relay | Loss | Sound | Frames shown of 600 | Picture came after, ms | Dropped by the page as `late` | Sound: sounded of 1,000 (received), breaks |
+|---|---|---|---|---|---|---|
+| no flag | 1% | 10 | 574, 596 | 52, 53 | 6, 0 | 954 (965), 982 (986); 5, 2 |
+| no flag | 1% | 1 | 587, 533 | 2,206 (once), 60 | 0, 5 | 976 (1,023), 968 (987); 1, 8 |
+| patience 500 ms | 1% | 10 | 594, 588 | 55, 53 | 0, 1 | 970 (986), 974 (974); 5, 0 |
+| patience 500 ms | 1% | 1 | 548, 593 | 54, 53 | 12, 0 | 976 (979), 982 (988); 3, 1 |
+| give up, grace 100 ms | 1% | 10 | 569, 365 | 55, 53 | 0, 0 | 956 (976), 608 (608); 8, 0 |
+| give up, grace 100 ms | 1% | 1 | 583, 570 | 54, 53 | 5, 0 | 972 (979), 946 (973); 7, 8 |
+| no flag | 5% | 10 | 271, 225 | 173, 346 | 187, 203 | 877 (973), 836 (974); 21, 31 |
+| no flag | 5% | 1 | 303, 234 | 207, 307 | 131, 116 | 883 (983), 926 (968); 19, 10 |
+| patience 500 ms | 5% | 10 | 394, 312 | 149, 209 | 34, 31 | 928 (984), 889 (959); 18, 27 |
+| patience 500 ms | 5% | 1 | 296, 339 | 227, 111 | 42, 39 | 886 (970), 899 (977); 16, 26 |
+| give up, grace 100 ms | 5% | 10 | 386, 338 | 124, 182 | 4, 0 | 864 (927), 866 (947); 23, 31 |
+| give up, grace 100 ms | 5% | 1 | 353, 363 | 130, 143 | 1, 0 | **728 (898), 774 (913); 48, 44** |
+
+Two runs stand apart and were not looked into: without a flag at 1% with a piece a Group the picture stood still once for 2.2 s and came back whole; with giving up at 1% with ten a Group the viewer had 365 frames and 608 pieces in the 20 s, with one short standstill counted, as if it had begun to play late.
+
+- **Not as feared for the picture: giving up does not show fewer frames than no flag.** At 1% the three are the same but for the two runs above. At 5% it shows more (338 to 386 against 225 to 303), as the patience does (296 to 394), and the picture is less far behind: without a flag the page throws away the ends of Groups itself (116 to 203 Objects a run as `late`), after the link has sent them again.
+- **As feared for the sound, with a piece a Group at 5%**: with giving up and 100 ms of grace 7 to 9 of 100 pieces never came (898 and 913 received of about 985) and 728 and 774 sounded, with 44 and 48 breaks; without a flag and with patience 883 to 926 sounded with 10 to 26 breaks. A piece that waits for a packet sent again waits a round trip, 100 ms here, and by then five later Groups have begun. With ten a Group the same flag costs less (864 and 866 sounded, 927 and 947 received), since a Group is 200 ms long.
+
+### Two viewers, one behind a narrow link
+
+`?ladder=1` and `?abr=1`, the relay with `--older-groups give-up --older-groups-grace-ms 100`, as in [the record of the two versions](2026-10-12-two-versions-of-the-video-and-a-viewer-that-changes-between-them.md), one run: the viewer with room showed 303, 606 and 757 frames of 300, 600 and 750, never stood still and stayed on the large version; the other went down 1.3 s after its link got narrow, showed 537 of 600 frames there, and was back 3.3 s after it had room. **The viewer with room is not touched.**
+
+### What can be said for a default, and what cannot
+
+For video, on what was run: giving older Groups up with a grace of 100 ms was the best of the three experiments on a narrow link and no worse than nothing on a link with loss, for one viewer and for two. **It cannot be a default as it stands, for the sound's sake**: it holds for every track, and what it does to sound depends on how long a Group of sound is against the grace. No grace breaks the sound at either size of Group; 100 ms is enough on a narrow link at either size, and too little under 5% loss with a piece a Group, where a piece that is late is a round trip late. So the two decisions hang together: with a piece of sound a Group, the rule wants either a grace longer than a round trip (which the relay does not know, and which gives the video back some of its lateness) or to leave sound alone, by track or by how small a Group is; with ten a Group, 100 ms does less harm and still costs 4 to 6 pieces of 100 at 5% loss. None of that was built. Not known either: a round trip other than 100 ms, loss together with a narrow link, BBR, and whether anybody hears the difference.
