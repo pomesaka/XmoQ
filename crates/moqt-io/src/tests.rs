@@ -1406,6 +1406,41 @@ async fn a_fetch_stream_given_up_while_its_header_waits_is_reset_with_the_caller
     assert_eq!(end, Err(ReadError::Reset(Some(0x5))));
 }
 
+/// The streams this crate opens for a subgroup and for a FETCH tell the
+/// transport where they stand, before their first byte.
+#[tokio::test(start_paused = true)]
+async fn the_writers_of_a_subgroup_and_of_a_fetch_say_their_send_order_to_the_transport() {
+    let (local, peer) = pair();
+    let local = Arc::new(local);
+    let budget = Arc::new(SendBudget::new(SendLimits::default()));
+    let out = OutgoingSubgroup::spawn(
+        Arc::clone(&local),
+        header(),
+        (None, -7),
+        &budget,
+        |_| std::future::ready(()),
+        Trace::default(),
+        "out".to_string(),
+    )
+    .unwrap();
+    let subgroup = timeout(SOON, peer.accept_uni()).await.unwrap().unwrap();
+    assert_eq!(subgroup.send_order(), Some(-7));
+    drop(out);
+
+    let fetch_header = FetchHeader { request_id: 2 };
+    let _writer = crate::open_fetch_stream_in_order(
+        &*local,
+        (fetch_header, -9),
+        &Trace::default(),
+        "fetch",
+        0x5,
+    )
+    .await
+    .unwrap();
+    let fetch = timeout(SOON, peer.accept_uni()).await.unwrap().unwrap();
+    assert_eq!(fetch.send_order(), Some(-9));
+}
+
 /// A writer that is dropped after `open_fetch_stream` returned says
 /// CANCELLED (0x1), whatever code the call was given for giving up.
 #[tokio::test(start_paused = true)]

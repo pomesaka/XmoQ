@@ -1082,6 +1082,18 @@ mod tests {
         crate::contract::opening_waits_at_the_peers_stream_limit(server, client, 66).await;
     }
 
+    /// `set_send_order` is quinn's priority of the stream, with the same
+    /// number: the larger first (quinn 0.11.12, `SendStream::set_priority`).
+    /// A stream nobody gave a number has 0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_send_order_of_a_stream_is_its_priority_in_quinn() {
+        let (_client, server, _keep) = loopback(TEST_LIMITS).await;
+        let mut send = server.open_uni().await.expect("open");
+        assert_eq!(send.0.priority().ok(), Some(0));
+        send.set_send_order(-32_897);
+        assert_eq!(send.0.priority().ok(), Some(-32_897));
+    }
+
     /// What the contract leaves open, as this transport has it: a sending
     /// half that is merely dropped ends its stream with a FIN (quinn 0.11.12
     /// through web-transport-quinn 0.13.2). WHY pinned: it is the reason a

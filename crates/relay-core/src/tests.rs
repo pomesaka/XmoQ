@@ -146,6 +146,10 @@ fn open_data_stream_inheriting(
     }
 }
 
+/// What the stream of a FETCH that names no priority is opened with: 128
+/// for the subscriber and 128 for the publisher (`send_order`).
+const FETCH_SEND_ORDER: i32 = -32_897;
+
 fn open_data_stream(session: SessionKey, out_stream: u64, header: SubgroupHeader) -> Action {
     Action::OpenDataStream {
         session,

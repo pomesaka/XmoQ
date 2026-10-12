@@ -35,7 +35,8 @@ pub use streams::{
     OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent, QueueFull, RequestClose,
     RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendError, SendLimits,
     StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, open_fetch_stream,
-    open_fetch_stream_without_header, read_request_streams, read_uni_streams, send_message,
+    open_fetch_stream_in_order, open_fetch_stream_without_header, read_request_streams,
+    read_uni_streams, send_message,
 };
 
 /// Why reading from a stream stopped short of a FIN.

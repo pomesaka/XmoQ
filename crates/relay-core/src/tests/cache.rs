@@ -62,6 +62,7 @@ fn answered(
             request_id: 2,
             pieces,
             wait_ms: 10_000,
+            send_order: FETCH_SEND_ORDER,
         },
     ]
 }

@@ -115,6 +115,8 @@ pub(crate) struct RelayedFetch {
     held_updates: u32,
     /// For a Joining FETCH: the request stream of the SUBSCRIBE it names.
     joins: Option<StreamKey>,
+    /// [`AskedRange::send_order`].
+    send_order: i32,
 }
 
 /// What a Joining FETCH that is held waits for. WHY two kinds and not one
@@ -330,6 +332,31 @@ struct AskedRange {
     end: Location,
     /// For a Joining FETCH: the request stream of the SUBSCRIBE it names.
     joins: Option<StreamKey>,
+    /// Where the fetch stream stands among the streams to the subscriber
+    /// ([`fetch_send_order`]).
+    send_order: i32,
+}
+
+/// Where the stream that answers a FETCH stands among the streams to its
+/// subscriber ([`crate::send_order`]): by the `SUBSCRIBER_PRIORITY` of the
+/// FETCH, 128 without one (§10.2.7: "relative to other subscriptions and
+/// fetch responses in the same session"), and a Publisher Priority of 128.
+///
+/// WHY 128 for the publisher's, where §7.1 has "FETCH responses however
+/// can contain objects with different publisher priorities": a fetch
+/// stream is one stream, the transport takes one number for a stream, and
+/// the relay passes its bytes on without reading the Objects' priorities.
+/// WHY a Joining FETCH is not put first: §7.2 has only the control stream
+/// and the request streams before "all subscribed Objects".
+fn fetch_send_order(parameters: &[Parameter]) -> i32 {
+    let subscriber_priority = parameters
+        .iter()
+        .find_map(|parameter| match parameter {
+            Parameter::SubscriberPriority(priority) => Some(*priority),
+            _ => None,
+        })
+        .unwrap_or(crate::DEFAULT_PRIORITY);
+    crate::send_order(subscriber_priority, crate::DEFAULT_PRIORITY)
 }
 
 /// How the answer to a FETCH that has its `FETCH_OK` ended.
@@ -559,6 +586,7 @@ impl Relay {
                     start: *start,
                     end: *end,
                     joins: None,
+                    send_order: fetch_send_order(&fetch.parameters),
                 };
                 self.ask_for(session, stream, request, &asked, &fetch.parameters, actions);
             }
@@ -713,6 +741,7 @@ impl Relay {
             start,
             end,
             joins: Some(subscribe),
+            send_order: fetch_send_order(&fetch.parameters),
         };
         self.ask_for(session, stream, request, &asked, &fetch.parameters, actions);
     }
@@ -738,7 +767,7 @@ impl Relay {
         };
         let fill_timeout = fill_timeout(parameters);
         if fill_timeout == Some(0) {
-            let range = (asked.start, asked.end);
+            let range = (asked.start, asked.end, asked.send_order);
             return self.answer_without_asking(
                 session,
                 stream,
@@ -750,7 +779,7 @@ impl Relay {
         }
         if let Some((end, objects)) = self.cached(asked) {
             let pieces = objects.into_iter().map(FetchPiece::Object).collect();
-            let answer = (end, pieces);
+            let answer = (end, pieces, asked.send_order);
             return self.write_answer(session, stream, request, &asked.track, answer, actions);
         }
         let Some(publisher) = self.whom_to_ask(&asked.track, session) else {
@@ -808,6 +837,7 @@ impl Relay {
                     .min(MAX_FETCH_UPSTREAM_WAIT_MS),
                 held_updates: 0,
                 joins: asked.joins,
+                send_order: asked.send_order,
             },
         );
     }
@@ -1010,7 +1040,7 @@ impl Relay {
         stream: StreamKey,
         request: PeerRequestId,
         track: &FullTrackName,
-        (start, end): (Location, Location),
+        (start, end, send_order): (Location, Location, i32),
         actions: &mut Vec<Action>,
     ) {
         let largest = self.tracks.live(track).and_then(|live| live.largest);
@@ -1058,7 +1088,7 @@ impl Relay {
             stream,
             request,
             track,
-            (end, vec![unknown]),
+            (end, vec![unknown], send_order),
             actions,
         );
     }
@@ -1093,7 +1123,7 @@ impl Relay {
         stream: StreamKey,
         request: PeerRequestId,
         track: &FullTrackName,
-        (end, pieces): (Location, Vec<FetchPiece>),
+        (end, pieces, send_order): (Location, Vec<FetchPiece>, i32),
         actions: &mut Vec<Action>,
     ) {
         // §9.6: "Relays MUST forward all Track Properties ... in the
@@ -1126,6 +1156,7 @@ impl Relay {
             request_id,
             pieces,
             wait_ms: FETCH_DOWNSTREAM_WAIT_MS,
+            send_order,
         });
         // Counted as one of the session's FETCHes until its stream is
         // written, or given up. The request stream is ended then.
@@ -1701,6 +1732,7 @@ impl Relay {
             request_id: fetch.request.value(),
             upstream_wait_ms: fetch.upstream_wait_ms,
             downstream_wait_ms: FETCH_DOWNSTREAM_WAIT_MS,
+            send_order: fetch.send_order,
         });
     }
 
@@ -1954,6 +1986,30 @@ mod tests {
 
     fn at(group: u64, object: u64) -> Location {
         Location { group, object }
+    }
+
+    /// §10.2.7: the `SUBSCRIBER_PRIORITY` of a FETCH is "relative to other
+    /// subscriptions and fetch responses in the same session", so its
+    /// stream stands where a subgroup stream of that priority and a
+    /// Publisher Priority of 128 stands, below the request streams (0).
+    #[test]
+    fn a_fetch_stream_stands_by_the_subscriber_priority_of_its_fetch() {
+        use xmoq_moqt::params::Parameter;
+        // (the parameters of the FETCH; the number of its stream)
+        let cases = [
+            (vec![], -32_897),
+            (vec![Parameter::SubscriberPriority(128)], -32_897),
+            (vec![Parameter::SubscriberPriority(0)], -129),
+            (vec![Parameter::SubscriberPriority(255)], -65_409),
+            (vec![Parameter::FillTimeout(5)], -32_897),
+        ];
+        for (parameters, expected) in cases {
+            assert_eq!(
+                super::fetch_send_order(&parameters),
+                expected,
+                "{parameters:?}"
+            );
+        }
     }
 
     #[test]
