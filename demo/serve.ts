@@ -1,6 +1,6 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N]
 //
 // `--auth` (an experiment; how the relay authorizes is undecided): a key
 // is made for this run and given to the relay and to the rooms. The relay
@@ -32,6 +32,9 @@ const { values: options } = parseArgs({
 		"relay-binary": { type: "string" },
 		// The relay's congestion control: cubic (its default), newreno or bbr.
 		congestion: { type: "string" },
+		// An experiment of the relay: a Group a viewer does not have this many
+		// milliseconds after it was written is given up (its stream is reset).
+		"delivery-patience-ms": { type: "string" },
 		// A file for the relay's lines, for looking into a run.
 		"relay-log": { type: "string" },
 		port: { type: "string", default: "8080" },
@@ -109,6 +112,9 @@ const relay = spawn(
 		...(options.congestion === undefined
 			? []
 			: ["--congestion", options.congestion]),
+		...(options["delivery-patience-ms"] === undefined
+			? []
+			: ["--delivery-patience-ms", options["delivery-patience-ms"]]),
 	],
 	// Its lines, one for each thing it does, are not shown; `--relay-log`
 	// writes them to a file, with how long every stream took to open.
