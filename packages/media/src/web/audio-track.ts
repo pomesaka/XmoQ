@@ -13,6 +13,7 @@ import {
 	type DeliveryTimeouts,
 	deliveryTimeoutParameters,
 } from "../core/delivery-timeout.ts";
+import { createFastestWay } from "../core/fastest-way.ts";
 import { createInOrder } from "../core/in-order.ts";
 import {
 	type AudioTrackPublisher,
@@ -200,13 +201,30 @@ export interface PlayAudioTrackOptions {
 	signal?: AbortSignal;
 }
 
+/**
+ * How many chunks may wait in the decoder before one more is dropped.
+ * **Provisional, not measured**: a second of pieces of 20 ms.
+ */
+export const MAX_AUDIO_DECODE_QUEUE = 50;
+
 export interface AudioPlaybackStats {
 	/** Objects that came. */
 	received: number;
 	/** Pieces of audio the decoder gave. */
 	decoded: number;
-	/** Objects that were not decoded: "late" (one with a later time was decoded already), "no-time", "empty". */
-	dropped: Partial<Record<"late" | "no-time" | "empty", number>>;
+	/**
+	 * Objects that were not decoded: "late" (one with a later time was
+	 * decoded already), "no-time", "empty", "not-of-the-clock" (its time is
+	 * more than 10 seconds from where the fastest one puts it,
+	 * `createFastestWay`) and "decoder-behind" (more than
+	 * `MAX_AUDIO_DECODE_QUEUE` chunks waited in the decoder).
+	 */
+	dropped: Partial<
+		Record<
+			"late" | "no-time" | "empty" | "not-of-the-clock" | "decoder-behind",
+			number
+		>
+	>;
 	/** Objects that did not go to the decoder when they came: they came after a gap, and waited for what was missing (`holdForOrderMs`). */
 	held: number;
 	decoderError: string | undefined;
@@ -339,6 +357,12 @@ export async function playAudioTrack(
 	const decode = (chunk: { timestamp: number; data: Uint8Array }): void => {
 		passed += 1;
 		if (decoder.state !== "configured") return;
+		// WHY a limit: how fast chunks come is the publisher's to decide, and
+		// a decoder that is slower would hold every one of them.
+		if (decoder.decodeQueueSize > MAX_AUDIO_DECODE_QUEUE) {
+			drop("decoder-behind");
+			return;
+		}
 		timesIn.push(chunk.timestamp);
 		decoder.decode(new EncodedAudioChunk({ type: "key", ...chunk }));
 	};
@@ -350,6 +374,7 @@ export async function playAudioTrack(
 			drop("late");
 		},
 	});
+	const fastest = createFastestWay();
 	let release: ReturnType<typeof setTimeout> | undefined;
 	/** Lets on what waited long enough, and comes back when the next has. */
 	const releaseInTime = (): void => {
@@ -379,6 +404,16 @@ export async function playAudioTrack(
 			return;
 		}
 		const timestamp = Number(microsecondsOf(read.timing));
+		// The time is the publisher's to say. One that is far from the
+		// others would be taken for the latest, and every piece after it
+		// dropped as late; it is left out, and after 30 of them in a row the
+		// order begins anew.
+		const way = fastest.take(Date.now() - timestamp / 1000);
+		if (way === undefined) {
+			drop("not-of-the-clock");
+			return;
+		}
+		if (way.anew) order.anew();
 		const before = passed;
 		order.push(
 			timestamp,

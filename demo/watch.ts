@@ -11,6 +11,7 @@ import {
 	type AudioPlayback,
 	AUTO_MARGIN_MS,
 	AUTO_WINDOW_MS,
+	createFastestWay,
 	createPlayout,
 	createQualitySwitch,
 	keepPlaying,
@@ -192,6 +193,8 @@ async function main(): Promise<void> {
 	let audio: AudioPlayback | undefined;
 
 	let tooLate = 0;
+	/** Frames and pieces that were left out because their time was not of the clock. */
+	let strays = 0;
 	/** From the SUBSCRIBE of the audio being accepted to the first piece decoded, and to the first that was in time to sound. */
 	let audioSince = performance.now();
 	let firstAudioAfterMs: number | undefined;
@@ -239,6 +242,8 @@ async function main(): Promise<void> {
 				const mark = marked.get(each.frame) ?? false;
 				if (mark && !markShown) {
 					marks.video.push({ time: each.frame.timestamp / 1000, played: now });
+					// The newest: how often the mark comes on is the publisher's to decide.
+					if (marks.video.length > 50) marks.video.shift();
 				}
 				markShown = mark;
 			}
@@ -262,6 +267,7 @@ async function main(): Promise<void> {
 			// A picture that stood still for more than 100 ms.
 			if (lastShown !== undefined && now - lastShown > 100) {
 				stalls.push({ from: lastShown, to: now });
+				if (stalls.length > 500) stalls.shift();
 			}
 			lastShown = now;
 			shown += 1;
@@ -274,6 +280,7 @@ async function main(): Promise<void> {
 			const loud = piece.samples.some((sample) => Math.abs(sample) > 0.3);
 			if (loud && !markHeard) {
 				marks.audio.push({ time: timeMs, played: piece.due });
+				if (marks.audio.length > 50) marks.audio.shift();
 			}
 			markHeard = loud;
 			if (piece.result === "too-late" || piece.result === "unheard-too-late") {
@@ -290,6 +297,9 @@ async function main(): Promise<void> {
 			sounded += 1;
 			piecesSounded.count();
 			lastHeard = piece.now;
+		},
+		onStray() {
+			strays += 1;
 		},
 		connectOutput(output, sound) {
 			listener = sound.createAnalyser();
@@ -331,7 +341,8 @@ async function main(): Promise<void> {
 	// (`createQualitySwitch` of @xmoq/media).
 	const ABR = query.has("abr");
 	/** The fastest a frame came, and how much later than that the frames of the last second came. */
-	let fastestVideo = Number.POSITIVE_INFINITY;
+	const fastestVideo = createFastestWay();
+	let seenVideo = false;
 	let recent: { at: number; late: number }[] = [];
 	const lateNow = (): number | undefined => {
 		const since = performance.now() - 1000;
@@ -351,8 +362,12 @@ async function main(): Promise<void> {
 			firstFrameAfterMs ??= Math.round(performance.now() - began);
 			const took = Date.now() - frame.timestamp / 1000;
 			arrived.video.add(took);
-			fastestVideo = Math.min(fastestVideo, took);
-			recent.push({ at: performance.now(), late: took - fastestVideo });
+			// A frame whose time is not of the clock says nothing of the link.
+			const way = fastestVideo.take(took);
+			if (way !== undefined) {
+				seenVideo = true;
+				recent.push({ at: performance.now(), late: took - way.fastestMs });
+			}
 			// The mark is where it is in a picture of the full size.
 			const scale = frame.displayWidth / WIDTH;
 			probe.drawImage(
@@ -474,6 +489,7 @@ async function main(): Promise<void> {
 			framesLate,
 			videoFrames: stats.decoded,
 			decoderFailures: playback?.stats().decoderFailures ?? 0,
+			strays,
 			quality,
 			audioPieces: heard?.decoded ?? 0,
 			tooLate,
@@ -590,7 +606,7 @@ async function main(): Promise<void> {
 				let changing = false;
 				const ticking = setInterval(() => {
 					// Nothing is judged before the first frame, or while a change is under way.
-					if (fastestVideo === Number.POSITIVE_INFINITY || changing) return;
+					if (!seenVideo || changing) return;
 					const wanted = chooser.tick(performance.now(), lateNow());
 					const track = versions[wanted];
 					if (wanted === quality.level || track === undefined) return;
@@ -601,6 +617,7 @@ async function main(): Promise<void> {
 						tookMs: null,
 					};
 					quality.changes.push(change);
+					if (quality.changes.length > 200) quality.changes.shift();
 					const decided = performance.now();
 					const stopBefore = leave;
 					const next = new AbortController();

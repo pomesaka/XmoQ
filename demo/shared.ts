@@ -122,6 +122,8 @@ export function joinRoom(as: string): Room | undefined {
 		const line = document.createElement("div");
 		line.textContent = `${chat.seq} ${chat.from}: ${chat.text}`;
 		log.append(line);
+		// The newest 200 lines: how many are said is the room's to decide.
+		while (log.childElementCount > 200) log.firstElementChild?.remove();
 		log.scrollTop = log.scrollHeight;
 	};
 	// Reactions: an emoji somebody pressed is shown to everybody for two
@@ -135,6 +137,8 @@ export function joinRoom(as: string): Room | undefined {
 		const shown = document.createElement("span");
 		shown.textContent = count === 1 ? emoji : `${emoji}×${count}`;
 		reactions.append(shown);
+		// The newest 50: how many come in two seconds is the room's to decide.
+		while (reactions.childElementCount > 50) reactions.firstElementChild?.remove();
 		setTimeout(() => shown.remove(), 2000);
 	};
 	for (const button of document.querySelectorAll<HTMLButtonElement>(

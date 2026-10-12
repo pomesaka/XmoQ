@@ -2,6 +2,8 @@
 // for both, so that picture and sound with the same time come out together.
 // No I/O and no clock of its own: the caller says what time it is.
 
+import { createFastestWay } from "./fastest-way.ts";
+
 /** **Provisional**: on one machine 99 of 100 frames and pieces came within 17 to 24 ms of the fastest, and with 50 ms none was late (docs/experiments/2026-10-11-where-the-delay-of-the-demo-comes-from.md). */
 export const DEFAULT_PLAYOUT_BUFFER_MS = 50;
 /**
@@ -31,6 +33,8 @@ export const AUTO_MIN_SAMPLES = 50;
  * waits for those is not live any more.
  */
 export const DEFAULT_AUTO_MAX_MS = 400;
+/** How many arrivals of the window the automatic buffer keeps at most, the newest: 10 seconds of 30 frames and 50 pieces of sound, twice over. */
+export const MAX_LATENESS_SAMPLES = 1600;
 export const DEFAULT_AUTO_SHARE = 0.99;
 
 export interface PlayoutClockOptions {
@@ -50,11 +54,13 @@ export interface PlayoutClock {
 	 * milliseconds). Called once for each frame and piece as it comes: how
 	 * late it came is what the automatic buffer goes by.
 	 *
-	 * WHY the smallest difference between the two clocks is taken as "no
-	 * delay": they need not agree, and the one that came fastest took at
-	 * least no time.
+	 * **Undefined for one that is not of this clock** (`createFastestWay`:
+	 * its time is more than 10 seconds from where the fastest one puts it):
+	 * the caller leaves it out. WHY: the time is the publisher's to say,
+	 * and one that is years off would have everything after it played years
+	 * late, or be held for years itself.
 	 */
-	baseOf(timestampUs: number, now: number): number;
+	baseOf(timestampUs: number, now: number): number | undefined;
 	/** How long after its base a frame is shown. */
 	bufferMs(): number;
 	/** How long after its base a piece of audio sounds: the buffer, and `audioMinMs` at least. */
@@ -79,7 +85,7 @@ export function createPlayoutClock(
 	const autoShare = options.autoShare ?? DEFAULT_AUTO_SHARE;
 	let bufferMs = options.bufferMs ?? DEFAULT_PLAYOUT_BUFFER_MS;
 	let auto = options.auto ?? false;
-	let fastestMs = Number.POSITIVE_INFINITY;
+	const way = createFastestWay();
 	/** How long after the fastest each frame and piece of the window came, and when. */
 	let late: { at: number; ms: number }[] = [];
 	const forget = (now: number): void => {
@@ -99,10 +105,17 @@ export function createPlayoutClock(
 	const audioBufferMs = (): number => Math.max(bufferMs, audioMinMs);
 	return {
 		baseOf(timestampUs, now) {
-			fastestMs = Math.min(fastestMs, now - timestampUs / 1000);
-			const base = timestampUs / 1000 + fastestMs;
+			const taken = way.take(now - timestampUs / 1000);
+			if (taken === undefined) return undefined;
+			// What came by the clock before says nothing of this one.
+			if (taken.anew) late = [];
+			const base = timestampUs / 1000 + taken.fastestMs;
 			forget(now);
 			late.push({ at: now, ms: now - base });
+			// WHY a limit beside the window: how many come in the window is
+			// the publisher's to decide, and the list is put in order at
+			// every tick.
+			if (late.length > MAX_LATENESS_SAMPLES) late.shift();
 			return base;
 		},
 		bufferMs: () => bufferMs,

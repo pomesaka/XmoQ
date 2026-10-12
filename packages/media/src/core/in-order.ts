@@ -24,6 +24,12 @@ export interface InOrder<T> {
 	release(now: number): void;
 	/** When `release` has something to do next, in milliseconds; undefined when nothing is held. */
 	nextRelease(): number | undefined;
+	/**
+	 * Begins anew: what is held is given to `late`, and the next item goes
+	 * on whatever its time. For a caller that found the times so far to be
+	 * of another clock than the ones to come.
+	 */
+	anew(): void;
 }
 
 /** How many items are held at most; the earliest goes on when one more comes. */
@@ -83,6 +89,11 @@ export function createInOrder<T>(options: {
 		nextRelease() {
 			const head = held[0];
 			return head === undefined ? undefined : head.came + options.holdMs();
+		},
+		anew() {
+			for (const each of held.splice(0)) options.late(each.item);
+			last = undefined;
+			step = undefined;
 		},
 	};
 }
