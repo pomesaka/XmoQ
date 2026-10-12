@@ -2,6 +2,8 @@
 
 A room that says where its broadcast is, carries a chat, and knows how many are connected. **Run locally with Miniflare only; nothing is deployed, and no Cloudflare account is used.** Record: [docs/experiments/2026-10-11-durable-objects-room.md](../../docs/experiments/2026-10-11-durable-objects-room.md).
 
+**Reactions** (2026-10-12): a client sends `{type: "reaction", emoji}` and everybody in the room gets it; nothing is kept. `REACTION_BATCH_MS=100 node run.mjs` makes the room send the reactions of that long as one message, which was for a measurement ([record](../../docs/experiments/2026-10-12-reactions-over-the-rooms-websocket.md)).
+
 ```sh
 npm install            # miniflare, into this directory
 node run.mjs           # the rooms, on http://127.0.0.1:8787

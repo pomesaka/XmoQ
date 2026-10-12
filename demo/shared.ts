@@ -57,6 +57,8 @@ type RoomMessage =
 	| { type: "hello"; history: Chat[]; connected: number; broadcast: Broadcast | null }
 	| ({ type: "chat" } & Chat)
 	| { type: "connected"; connected: number }
+	| { type: "reaction"; emoji: string }
+	| { type: "reactions"; counts: Record<string, number> }
 	| { type: "token"; role: string; namespace: string[]; token: string | null }
 	| { type: "broadcast"; broadcast: Broadcast | null };
 interface Chat {
@@ -101,6 +103,28 @@ export function joinRoom(as: string): Room | undefined {
 		log.append(line);
 		log.scrollTop = log.scrollHeight;
 	};
+	// Reactions: an emoji somebody pressed is shown to everybody for two
+	// seconds, and counted for a script that looks at the page.
+	const reactions = document.getElementById("reactions");
+	let reacted = 0;
+	const react = (emoji: string, count: number): void => {
+		reacted += count;
+		document.body.dataset.reactions = String(reacted);
+		if (reactions === null) return;
+		const shown = document.createElement("span");
+		shown.textContent = count === 1 ? emoji : `${emoji}×${count}`;
+		reactions.append(shown);
+		setTimeout(() => shown.remove(), 2000);
+	};
+	for (const button of document.querySelectorAll<HTMLButtonElement>(
+		"button[data-reaction]",
+	)) {
+		button.addEventListener("click", () => {
+			socket.send(
+				JSON.stringify({ type: "reaction", emoji: button.dataset.reaction }),
+			);
+		});
+	}
 	let latest: Broadcast | null = null;
 	/** Who waits for a token, in the order they asked: the room answers in that order. */
 	const tokens: ((token: string | null) => void)[] = [];
@@ -122,6 +146,12 @@ export function joinRoom(as: string): Room | undefined {
 			latest = message.broadcast;
 		}
 		if (message.type === "chat") show(message);
+		if (message.type === "reaction") react(message.emoji, 1);
+		if (message.type === "reactions") {
+			for (const [emoji, count] of Object.entries(message.counts)) {
+				react(emoji, count);
+			}
+		}
 		if (message.type === "token") {
 			const waiting = tokens.shift();
 			waiting?.(message.token);
