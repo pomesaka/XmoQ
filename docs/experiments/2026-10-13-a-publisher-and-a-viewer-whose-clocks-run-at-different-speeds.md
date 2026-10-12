@@ -152,3 +152,13 @@ A link that is narrow (2 Mbit/s under a picture of 2.5) for 90 s and good again,
 - **Wrong in the expectation**: with 50 ms and 1,000 ppm the page's sound does not "go on losing pieces", it stops; the terminal viewer plays two thirds. And **the narrow link did not raise the least by the 65 to 105 ms expected**: enough Objects still come by the fast way in every minute of it. What the change did there is some twenty pieces played at another speed a minute into the spell and again when it ends, which says the least moved a little, by how much was not read. A link whose every Object is late for more than a minute (a longer route, not a full queue) was not run, and is where the cost would show.
 - No harm was seen from the least rising while the link is bad: the automatic buffer was at its limit throughout under both rules.
 - One run each; the numbers of the narrow spell differ from run to run by more than the two columns do.
+
+## For a person with a camera and a microphone: do the two tracks' clocks move apart?
+
+Not run. What it asks is in the watching page already, with no flag:
+
+1. `mise run demo`, then <http://localhost:8080/publish?source=camera&audio=mic> in one tab and <http://localhost:8080/watch> in another, both left in front (two windows side by side), for 30 minutes.
+2. Under the picture, the lines beginning `video:` and `audio:` each say `came median N ms after it was made`: when it came, by this machine's clock, less the time the publisher gave it, over the last 200 of the track. Either number alone means little (a camera's times count from where the browser likes). **Write down the video's less the audio's after 1 minute, and again every 10 minutes.**
+3. If that difference stays within a few milliseconds, the two are timed by one clock and there is nothing to mend. If it moves one way steadily, they are not: 6 ms a minute are 100 ppm. The track whose number grows against the other is the one with the slower clock. Once the difference has moved by more than the buffer, that track shows it: `N too late` in the `audio:` line counts up and the sound stops, or (the video the slower one) the picture is still in time but drawn the moment it comes.
+
+Both pages are on one machine here, so the viewer's clock against the publisher's plays no part; what is read is the camera's clock against the microphone's alone. A reading once a second, for a script, would need the two medians in the page's report (`document.body.dataset.report`), where they are not.
