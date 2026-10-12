@@ -1495,8 +1495,9 @@ impl Relay {
         self.announcement_every_ms = every_ms;
     }
 
-    /// How many requests, and how many FETCH requests among them, the relay has
-    /// open on one publisher for one subscriber's session, in place of
+    /// How many SUBSCRIBE requests, and how many FETCH requests beside them,
+    /// the relay has open on one publisher for one subscriber's session, in
+    /// place of
     /// [`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`] and
     /// [`MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER`].
     pub fn set_share_of_one_subscriber(&mut self, requests: usize, fetches: usize) {

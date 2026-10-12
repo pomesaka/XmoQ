@@ -22,7 +22,7 @@
 //! or a SUBSCRIBE of the relay that a publisher accepted. An *ask* is a
 //! SUBSCRIBE of the relay that is not a source yet.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
@@ -736,6 +736,9 @@ impl Relay {
             .and_then(|pending| pending.waiters.first())
             .map(|waiter| waiter.session)
             .or(subscriber);
+        // WHY counted once here, for every publisher: the tracks without a
+        // source are gone through for it, and there may be a thousand.
+        let asked_for = subscriber.map_or_else(HashMap::new, |session| self.asked_for(session));
         // WHY the sources are left out here, though the session state would
         // refuse a second subscription to the track on a session that is a
         // source (§5.1) and the relay would then open nothing: which
@@ -767,9 +770,7 @@ impl Relay {
             if asked.asks.len() >= room {
                 break;
             }
-            if subscriber
-                .is_some_and(|session| self.asked_for(session, publisher) >= self.requests_for_one)
-            {
+            if asked_for.get(&publisher).copied().unwrap_or(0) >= self.requests_for_one {
                 asked
                     .nobody_because
                     .get_or_insert(request_error_code::EXCESSIVE_LOAD);
@@ -788,19 +789,49 @@ impl Relay {
         asked
     }
 
-    /// How many requests the relay has open on `publisher` for the
+    /// How many requests the relay has open on each publisher for the
     /// SUBSCRIBEs of `subscriber` ([`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`]).
-    fn asked_for(&self, subscriber: SessionKey, publisher: SessionKey) -> usize {
-        self.tracks
+    fn asked_for(&self, subscriber: SessionKey) -> HashMap<SessionKey, usize> {
+        let mut asked: HashMap<SessionKey, usize> = HashMap::new();
+        let of_the_subscriber = self.tracks.all_pending().filter(|(_, pending)| {
+            pending
+                .waiters
+                .first()
+                .is_some_and(|waiter| waiter.session == subscriber)
+        });
+        for (_, pending) in of_the_subscriber {
+            for ask in &pending.asks {
+                *asked.entry(ask.publisher).or_default() += 1;
+            }
+        }
+        asked
+    }
+
+    /// Asks the publishers for the tracks `subscriber` is held for and
+    /// nobody is asked for: one of the relay's requests for that session is
+    /// over, and a publisher that was passed over for such a track because
+    /// the session had its share of it may be asked now.
+    ///
+    /// WHY: a session may have 16 SUBSCRIBEs held and has 8 requests on a
+    /// publisher. When that publisher announces, the relay asks it for 8 of
+    /// the tracks, and the others would wait out their time unasked.
+    fn ask_for_what_was_passed_over(&mut self, subscriber: SessionKey, actions: &mut Vec<Action>) {
+        // By name, so that the same events lead to the same actions.
+        let unasked: BTreeSet<FullTrackName> = self
+            .tracks
             .all_pending()
             .filter(|(_, pending)| {
-                pending
-                    .waiters
-                    .first()
-                    .is_some_and(|waiter| waiter.session == subscriber)
-                    && pending.asks.iter().any(|ask| ask.publisher == publisher)
+                pending.asks.is_empty()
+                    && pending
+                        .waiters
+                        .first()
+                        .is_some_and(|waiter| waiter.session == subscriber)
             })
-            .count()
+            .map(|(track, _)| track.clone())
+            .collect();
+        for track in unasked {
+            self.ask_the_publishers(&track, None, None, actions);
+        }
     }
 
     /// Sends the relay's SUBSCRIBE for a track to a publisher.
@@ -1131,6 +1162,11 @@ impl Relay {
         refusal: &Refusal,
         actions: &mut Vec<Action>,
     ) {
+        let asked_for = self
+            .tracks
+            .pending(track_name)
+            .and_then(|pending| pending.waiters.first())
+            .map(|waiter| waiter.session);
         if let Some(asks) = self.tracks.asks_mut(track_name) {
             asks.retain(|other| *other != ask);
         }
@@ -1147,6 +1183,9 @@ impl Relay {
             .is_some_and(|pending| pending.asks.is_empty());
         if hopeless {
             self.refuse_waiters(track_name, refusal, actions);
+        }
+        if let Some(subscriber) = asked_for {
+            self.ask_for_what_was_passed_over(subscriber, actions);
         }
     }
 

@@ -869,6 +869,107 @@ fn one_subscribers_session_has_only_so_many_of_the_relays_requests_on_a_publishe
     assert_eq!(subscribes(&mut relay, ALICE, 10, "a10"), "0x9, retry 1001");
 }
 
+/// A SUBSCRIBE of `session` on `stream` for the track `name` of the
+/// namespace, with a `RENDEZVOUS_TIMEOUT` where `hold_ms` has one: how many
+/// requests the relay opens for it, or the code it refuses with.
+fn asks_for(
+    relay: &mut Relay,
+    session: SessionKey,
+    stream: u64,
+    name: &str,
+    hold_ms: Option<u64>,
+) -> String {
+    let actions = relay.step(Event::RequestOpened {
+        session,
+        stream: StreamKey(stream),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: stream * 2,
+            full_track_name: super::track(name.as_bytes()),
+            parameters: hold_ms
+                .map(Parameter::RendezvousTimeout)
+                .into_iter()
+                .collect(),
+        }),
+    });
+    let refused = actions.iter().find_map(|action| match action {
+        Action::SendRequest {
+            message: ControlMessage::RequestError(error),
+            ..
+        } => Some(format!("{:#x}", error.error_code)),
+        _ => None,
+    });
+    let opened = actions
+        .iter()
+        .filter(|action| matches!(action, Action::OpenRequest { .. }))
+        .count();
+    refused.unwrap_or_else(|| format!("{opened} asked"))
+}
+
+#[test]
+fn a_request_of_the_relay_counts_for_who_waits_first_and_is_given_back_when_it_ends() {
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    // Alice has her eight, and Bob waits behind her for the first of them.
+    for stream in 0..8 {
+        let name = format!("a{stream}");
+        assert_eq!(asks_for(&mut relay, ALICE, stream, &name, None), "1 asked");
+    }
+    assert_eq!(asks_for(&mut relay, ALICE, 8, "a8", None), "0x9");
+    assert_eq!(asks_for(&mut relay, BOB, 0, "a0", None), "0 asked");
+    // Alice gives `a0` up: the relay's request for it goes on, for Bob, and
+    // is Bob's first of eight. Alice has one back.
+    relay.step(Event::RequestClosed {
+        session: ALICE,
+        stream: StreamKey(0),
+        how: RequestEnd::Aborted,
+    });
+    assert_eq!(asks_for(&mut relay, ALICE, 9, "a9", None), "1 asked");
+    assert_eq!(asks_for(&mut relay, ALICE, 10, "a10", None), "0x9");
+    for stream in 1..8 {
+        let name = format!("b{stream}");
+        assert_eq!(asks_for(&mut relay, BOB, stream, &name, None), "1 asked");
+    }
+    assert_eq!(asks_for(&mut relay, BOB, 8, "b8", None), "0x9");
+    // Alice gives up one nobody else waits for: the relay's request is
+    // cancelled, and she has one back.
+    relay.step(Event::RequestClosed {
+        session: ALICE,
+        stream: StreamKey(3),
+        how: RequestEnd::Aborted,
+    });
+    assert_eq!(asks_for(&mut relay, ALICE, 11, "a11", None), "1 asked");
+}
+
+#[test]
+fn a_held_track_that_was_passed_over_is_asked_for_when_the_session_has_room_again() {
+    let mut relay = relay();
+    // Alice is held for nine tracks nobody publishes.
+    for stream in 0..9 {
+        let name = format!("h{stream}");
+        assert_eq!(
+            asks_for(&mut relay, ALICE, stream, &name, Some(20_000)),
+            "0 asked"
+        );
+    }
+    // A publisher announces the namespace: it is asked for eight of them.
+    let asked = announce(&mut relay, PUBLISHER, 0, &[b"xmoq"])
+        .iter()
+        .filter(|action| matches!(action, Action::OpenRequest { .. }))
+        .count();
+    assert_eq!(asked, 8);
+    // The time for one answer is over: the ninth is asked for.
+    let then = relay.step(Event::UpstreamTimeout {
+        session: PUBLISHER,
+        request: OwnRequestKey(0),
+    });
+    let asked = then
+        .iter()
+        .filter(|action| matches!(action, Action::OpenRequest { .. }))
+        .count();
+    assert_eq!(asked, 1);
+    assert_eq!(relay.counts().own_requests, 8);
+}
+
 #[test]
 fn only_so_many_namespaces_are_kept_for_one_session() {
     // The expectation below is spelled out for a limit of 64.

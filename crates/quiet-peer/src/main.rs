@@ -208,9 +208,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             // One every so many milliseconds, where that is less than one
             // a second.
             "--ask-every-ms" => {
-                ask_every = Some(Duration::from_millis(
-                    value.parse().context("--ask-every-ms")?,
-                ));
+                let ms: u64 = value.parse().context("--ask-every-ms")?;
+                if ms == 0 {
+                    bail!("--ask-every-ms must be more than 0");
+                }
+                ask_every = Some(Duration::from_millis(ms));
                 ask_per_second.get_or_insert(1);
             }
             "--ask" => {
