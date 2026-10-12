@@ -45,6 +45,22 @@ export interface PlayoutClockOptions {
 	audioMinMs?: number;
 	autoMaxMs?: number;
 	autoShare?: number;
+	/**
+	 * **A trial; `AUTO_WINDOW_MS` when left out.** How far back the
+	 * automatic buffer looks, in milliseconds. A shorter time forgets a bad
+	 * moment sooner, and so comes down sooner and is down again when the
+	 * next one comes.
+	 */
+	autoWindowMs?: number;
+	/**
+	 * **A trial; "step" when left out.** How the automatic buffer comes
+	 * down at a `tick`: `AUTO_STEP_MS` ("step"), or a quarter of what is
+	 * left to what is wanted, `AUTO_STEP_MS` at least, in steps of
+	 * `AUTO_STEP_MS` ("quarter"). WHY a quarter and not all of it at once:
+	 * the sound is played faster while the buffer shrinks, and a buffer
+	 * that fell 360 ms in one step would have that to make up at once.
+	 */
+	autoDown?: "step" | "quarter";
 }
 
 export interface PlayoutClock {
@@ -83,13 +99,15 @@ export function createPlayoutClock(
 	const audioMinMs = options.audioMinMs ?? DEFAULT_AUDIO_MIN_MS;
 	const autoMaxMs = options.autoMaxMs ?? DEFAULT_AUTO_MAX_MS;
 	const autoShare = options.autoShare ?? DEFAULT_AUTO_SHARE;
+	const autoWindowMs = options.autoWindowMs ?? AUTO_WINDOW_MS;
+	const autoDown = options.autoDown ?? "step";
 	let bufferMs = options.bufferMs ?? DEFAULT_PLAYOUT_BUFFER_MS;
 	let auto = options.auto ?? false;
 	const way = createFastestWay();
 	/** How long after the fastest each frame and piece of the window came, and when. */
 	let late: { at: number; ms: number }[] = [];
 	const forget = (now: number): void => {
-		const since = now - AUTO_WINDOW_MS;
+		const since = now - autoWindowMs;
 		if (late[0] !== undefined && late[0].at <= since) {
 			late = late.filter((each) => each.at > since);
 		}
@@ -137,7 +155,13 @@ export function createPlayoutClock(
 				Math.ceil((lateness() + AUTO_MARGIN_MS) / AUTO_STEP_MS) * AUTO_STEP_MS,
 			);
 			if (wanted > bufferMs) bufferMs = wanted;
-			else if (wanted < bufferMs) bufferMs -= AUTO_STEP_MS;
+			else if (wanted < bufferMs) {
+				const down =
+					autoDown === "quarter"
+						? Math.ceil((bufferMs - wanted) / 4 / AUTO_STEP_MS) * AUTO_STEP_MS
+						: AUTO_STEP_MS;
+				bufferMs -= Math.max(AUTO_STEP_MS, down);
+			}
 		},
 		lateness,
 	};

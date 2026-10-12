@@ -285,6 +285,15 @@ async function main(): Promise<void> {
 		audioMinMs: AUDIO_MIN_MS,
 		autoMaxMs: AUTO_MAX_MS,
 		autoShare: AUTO_SHARE,
+		// `?autoWindow=MS` and `?autoDown=quarter` (**trials**, with
+		// `?buffer=auto`): how far back the automatic buffer looks, and
+		// that it comes down a quarter of the way at a time.
+		...(query.get("autoWindow") === null
+			? {}
+			: { autoWindowMs: Number(query.get("autoWindow")) }),
+		...(query.get("autoDown") === "quarter"
+			? { autoDown: "quarter" as const }
+			: {}),
 		sampleRate: SAMPLE_RATE,
 		draw(frame) {
 			if (
