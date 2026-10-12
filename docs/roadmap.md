@@ -62,8 +62,8 @@ The relay gets a cache of the latest Group of each track in Phase 1; decided on 
 ## Phase 4 — Rooms and interactions
 - [ ] Design room/session identity. Done so far: in the spike a room has a name and says where its broadcast is (relay, certificate hash, namespace); the publishing page registers, for as long as its connection to the room lives (decided on 2026-10-11). Open: who may make or enter a room.
 - [ ] Validate Durable Objects integration. Done so far: the room, chat and a count ran in Miniflare on one machine, with the demo's pages ([record](experiments/2026-10-11-durable-objects-room.md)). Open: nothing was deployed to Cloudflare.
-- [ ] Decide chat transport, persistence and ordering.
-- [ ] Implement chat; evaluate reactions. Done so far: the spike's chat over the room's WebSocket, in the demo. Open: the transport is undecided (item above), and reactions were not looked at.
+- [ ] Decide chat transport, persistence and ordering. The transport is decided for now (2026-10-12): the room's WebSocket, as a provisional form on the way to everything over QUIC ([open decisions](open-questions.md), with the [trial of chat as MoQ tracks](experiments/2026-10-12-chat-as-moq-tracks-beside-the-rooms-websocket.md)). Open: persistence and ordering once it is on QUIC.
+- [ ] Implement chat; evaluate reactions. Done so far: the spike's chat over the room's WebSocket, in the demo and in the terminal viewer, and reactions over the same WebSocket in the demo ([record](experiments/2026-10-12-reactions-over-the-rooms-websocket.md)). Open: both are the spike's, not parts of the product.
 - [ ] Design and test authorization before broader rollout. The form of the token and where it is checked are decided and run (a token of the room in every request and in SETUP, checked by the relay with a shared key; the demo with `--auth`); who may get a token is not designed.
 
 **Exit:** managed room with verified browser/CLI interactions.
