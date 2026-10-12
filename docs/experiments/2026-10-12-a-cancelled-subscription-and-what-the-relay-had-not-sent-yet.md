@@ -18,7 +18,7 @@ The writer of a subgroup stream keeps the stream after its FIN until the subscri
 
 - A stream that is written whole is now "closed" for the relay when the subscriber has all of it, not when its FIN was handed over.
 - What a subscriber may have waiting is counted as before for bytes and Objects (what is not written). **A stream that is written whole and not acknowledged still counts as one of the subscriber's streams** (256 for a session): a subscriber that takes streams and acknowledges nothing reaches that limit and loses the subscription that hit it, as one that is too slow. Before, such a stream stopped counting at its FIN.
-- The connection in memory that the tests use holds nothing between a write and its peer, so a finished stream is a delivered one there. What the writer does with a stream that is not delivered is tested on a connection that delivers when the test says so; the reset itself on the real connection.
+- The connection in memory that the tests use holds nothing between a write and its peer, so a finished stream is a delivered one there. Since 2026-10-12 there is a pair that holds a finished stream back until the test says it is delivered (`memory::pair_that_delivers_when_told`), and the relay's tests run on it: a subscription whose request stream is reset or stopped has its held streams reset with `CANCELLED`; one that only finishes its half goes on, and so do its streams; held streams count against the subscriber's streams until another is one too many and the subscription ends with `TOO_FAR_BEHIND`; a session that closes leaves none. The reset of the QUIC stream itself is tested on the real connection.
 
 ## Commands
 

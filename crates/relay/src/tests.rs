@@ -2884,6 +2884,140 @@ mod delivery_timeouts {
         }
     }
 
+    /// How a subscription ends for the streams of it that were written
+    /// whole and not delivered: they are with their writers still, and are
+    /// taken back (§11.4.3: "If a sender closes the stream before delivering
+    /// all such objects to the QUIC stream, it MUST reset the stream. This
+    /// includes ... Early termination of subscription due to request
+    /// cancellation").
+    #[derive(Debug, Clone, Copy)]
+    enum Leaves {
+        /// The subscriber resets its request stream.
+        Resets,
+        /// The subscriber finishes its request stream.
+        Finishes,
+        /// The subscriber stops the relay's half of the request stream.
+        Stops,
+        /// The subscriber closes its session.
+        ClosesTheSession,
+    }
+
+    /// What the subscriber does; how its two streams end for it; and what
+    /// the relay is left with: streams held, sessions, subscriptions.
+    type Leaving = (Leaves, Vec<(u64, StreamEnd)>, (usize, usize, usize));
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscription_that_ends_takes_back_its_streams_that_are_not_delivered() {
+        /// `CANCELLED` (0x1).
+        const CANCELLED: StreamEnd = StreamEnd::Aborted(Some(0x1));
+        let cases: [Leaving; 4] = [
+            (
+                Leaves::Resets,
+                vec![(0, CANCELLED), (1, CANCELLED)],
+                (0, 2, 0),
+            ),
+            (
+                Leaves::Stops,
+                vec![(0, CANCELLED), (1, CANCELLED)],
+                (0, 2, 0),
+            ),
+            // Finishing its half ends nothing: the subscription goes on,
+            // and so do its streams.
+            (Leaves::Finishes, vec![], (2, 2, 1)),
+            // The subscriber closed the connection itself: its streams are
+            // lost with it, and the relay keeps none of them.
+            (
+                Leaves::ClosesTheSession,
+                vec![(0, StreamEnd::Lost), (1, StreamEnd::Lost)],
+                (0, 1, 0),
+            ),
+        ];
+        for (leaves, ends, left) in cases {
+            let Scene {
+                hub,
+                publisher,
+                mut viewer,
+                told: _told,
+                _requests: (_publication, subscription),
+                _task,
+            } = scene(HubConfig::default(), None).await;
+            publisher.send_group(0, &[object(0, 3)]).await.finish();
+            publisher.send_group(1, &[object(0, 3)]).await.finish();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Written whole, and held: nothing has ended for the subscriber.
+            assert_eq!(ended(&mut viewer), [], "{leaves:?}");
+            assert_eq!(hub.held().await.out_streams, 2, "{leaves:?}");
+            match leaves {
+                Leaves::Resets => subscription.send.reset(0x1),
+                Leaves::Finishes => subscription.send.finish(),
+                Leaves::Stops => subscription.reader.stop(0x1),
+                Leaves::ClosesTheSession => viewer.connection.close(0, b""),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut seen = ended(&mut viewer);
+            seen.sort_by_key(|(group, _)| *group);
+            assert_eq!(seen, ends, "{leaves:?}");
+            let held = hub.held().await;
+            assert_eq!(
+                (held.out_streams, held.sessions, held.relay.subscriptions),
+                left,
+                "{leaves:?}"
+            );
+        }
+    }
+
+    /// A subscriber that takes streams and acknowledges none has them
+    /// counted against it for as long as they are held, and is cut off as
+    /// one that is too slow when another would be one too many.
+    #[tokio::test(start_paused = true)]
+    async fn streams_that_are_not_delivered_count_until_the_subscriber_is_too_far_behind() {
+        /// `TOO_FAR_BEHIND` (0x5).
+        const TOO_FAR_BEHIND: StreamEnd = StreamEnd::Aborted(Some(0x5));
+        let config = HubConfig {
+            send: SendLimits {
+                streams: 3,
+                ..SendLimits::default()
+            },
+            ..HubConfig::default()
+        };
+        let Scene {
+            hub,
+            publisher,
+            mut viewer,
+            told: _told,
+            _requests: (_publication, mut subscription),
+            _task,
+        } = scene(config, None).await;
+        for group in 0..3 {
+            publisher.send_group(group, &[object(0, 3)]).await.finish();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Three are held, which is as many as the subscriber may have.
+        assert_eq!(ended(&mut viewer), []);
+        assert_eq!(hub.held().await.out_streams, 3);
+        // The fourth is one too many: the subscription ends with
+        // TOO_FAR_BEHIND, and the three are taken back. The Stream Count is
+        // the one for "not known" (§10.11, 2^62 - 1): the fourth stream was
+        // to be opened and never was.
+        publisher.send_group(3, &[object(0, 3)]).await.finish();
+        assert_eq!(
+            publish_done(&mut subscription).await,
+            done(0x5, (1 << 62) - 1)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut seen = ended(&mut viewer);
+        seen.sort_by_key(|(group, _)| *group);
+        assert_eq!(
+            seen,
+            [
+                (0, TOO_FAR_BEHIND),
+                (1, TOO_FAR_BEHIND),
+                (2, TOO_FAR_BEHIND)
+            ]
+        );
+        assert_eq!(hub.held().await.out_streams, 0);
+    }
+
     /// §8: the timer starts when the relay knows that the Subgroup is whole
     /// (the FIN of the publisher's stream), and a stream that is not
     /// delivered when it is over is reset: also one the relay could not
