@@ -44,7 +44,7 @@ The catalog the watching page read:
 
 ## Not done
 
-- The catalog has no sample rate and no channels for the audio track: `@xmoq/msf` does not write `samplerate` and `channelConfig` (its README has why). The watching page takes 48,000 Hz, mono, from the demo's code.
+- (Later the same day: `@xmoq/msf` reads and writes `samplerate` and `channelConfig`, the demo's audio track has `48000` and `"1"`, and the watching page takes both from the catalog. `demo/check.ts` and `--catalog-video` were run again and said the same.) At the time of this run: the catalog has no sample rate and no channels for the audio track: `@xmoq/msf` does not write `samplerate` and `channelConfig` (its README has why). The watching page takes 48,000 Hz, mono, from the demo's code.
 - The audio's `bitrate` in the catalog, 67,000, is what Chromium's Opus encoder was measured to make, not a setting.
 - A catalog that changes while a page watches is not followed: the page reads the first one of a session.
 - `mlmsub` was not made to write the tracks out.

@@ -41,6 +41,20 @@ export interface CatalogTrack {
 	/** §5.2.20, in frames per second. */
 	readonly framerate?: number;
 	/**
+	 * §5.2.28: "The number of audio frame samples per second." The draft
+	 * asks for it, and for `channelConfig`, on "tracks for which audio codecs
+	 * are specified"; this reads and writes them where they are there, and
+	 * asks for them nowhere (`checkTrack` has why).
+	 */
+	readonly samplerate?: number;
+	/**
+	 * §5.2.29: "A string specifying the audio channel configuration", a
+	 * string "to provide the flexibility to describe complex channel
+	 * configurations". The draft's examples and `moqlivemock` have the
+	 * number of channels in it, `"2"`; no other form is said.
+	 */
+	readonly channelConfig?: string;
+	/**
 	 * §5.2.38: the Objects of the track are encrypted with this scheme.
 	 * §4.3.1: "subscribers MUST decrypt the object payload using the
 	 * specified scheme before processing." Nothing here decrypts, so a track
@@ -151,6 +165,7 @@ function checkTrack(value: unknown, where: string): CatalogTrack {
 	// WHY NOT `samplerate` and `channelConfig` (§5.2.28, §5.2.29) as well:
 	// they are for "tracks for which audio codecs are specified", and
 	// telling an audio codec string from a video one takes the registry.
+	// They are read where they are there, with the types the draft gives.
 	const media = track.packaging === LOC_PACKAGING ? required : optional;
 	const fields = {
 		namespace: optional(value, where, "namespace", isString, "string"),
@@ -160,6 +175,8 @@ function checkTrack(value: unknown, where: string): CatalogTrack {
 		width: optional(value, where, "width", isNumber, "number"),
 		height: optional(value, where, "height", isNumber, "number"),
 		framerate: optional(value, where, "framerate", isNumber, "number"),
+		samplerate: optional(value, where, "samplerate", isNumber, "number"),
+		channelConfig: optional(value, where, "channelConfig", isString, "string"),
 		encryptionScheme: optional(
 			value,
 			where,
@@ -175,6 +192,10 @@ function checkTrack(value: unknown, where: string): CatalogTrack {
 	if (fields.width !== undefined) track.width = fields.width;
 	if (fields.height !== undefined) track.height = fields.height;
 	if (fields.framerate !== undefined) track.framerate = fields.framerate;
+	if (fields.samplerate !== undefined) track.samplerate = fields.samplerate;
+	if (fields.channelConfig !== undefined) {
+		track.channelConfig = fields.channelConfig;
+	}
 	if (fields.encryptionScheme !== undefined) {
 		track.encryptionScheme = fields.encryptionScheme;
 	}

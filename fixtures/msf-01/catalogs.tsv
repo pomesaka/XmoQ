@@ -54,6 +54,11 @@ half-a-surrogate-pair-in-a-key	catalog	{"version":"draft-01","\ud800":1,"tracks"
 width-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"width":1e999}]}
 height-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"height":1e999}]}
 framerate-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"framerate":1e999}]}
+audio-track-with-samplerate-and-channel-config	catalog	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":67000,"samplerate":48000,"channelConfig":"1"}]}
+samplerate-as-a-string	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"samplerate":"48000"}]}
+samplerate-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"samplerate":1e999}]}
+channel-config-as-a-number	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"channelConfig":2}]}
+channel-config-with-half-a-surrogate-pair	invalid	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"codec":"opus","bitrate":1,"channelConfig":"\ud800"}]}
 delta-update-as-in-the-example-that-adds	delta-update	{"generatedAt":1746104606044,"deltaUpdate":[{"op":"add","tracks":[{"name":"slides","isLive":true,"role":"video","codec":"av01.0.08M.10.0.110.09"}]}]}
 delta-update-as-in-the-example-that-removes	delta-update	{"generatedAt":1746104606044,"deltaUpdate":[{"op":"remove","tracks":[{"name":"video"},{"name":"slides"}]}]}
 delta-update-with-an-empty-version	invalid	{"version":"","deltaUpdate":[{"op":"add","tracks":[]}]}

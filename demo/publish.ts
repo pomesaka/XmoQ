@@ -283,6 +283,9 @@ async function main(): Promise<void> {
 								codec: "opus",
 								// What Chromium's encoder was seen to make without a setting.
 								bitrate: 67_000,
+								samplerate: SAMPLE_RATE,
+								// The number of channels, as the draft's examples have it.
+								channelConfig: "1",
 							},
 						]),
 			],
