@@ -49,6 +49,23 @@ const query = new URLSearchParams(location.search);
 const AUDIO_MIN_MS = Number(query.get("audioMin") ?? DEFAULT_AUDIO_MIN_MS);
 const AUTO_MAX_MS = Number(query.get("autoMax") ?? DEFAULT_AUTO_MAX_MS);
 const AUTO_SHARE = Number(query.get("autoShare") ?? DEFAULT_AUTO_SHARE);
+/**
+ * The delivery timeout this page asks for on its video, in milliseconds
+ * (SUBGROUP_DELIVERY_TIMEOUT, transport §8): a Group that is not through so
+ * long after its end is given up by the relay, for this viewer and this
+ * track. `?videoTimeout=N` for another, and `?videoTimeout=0` to ask for
+ * nothing. Nothing is asked for the sound (`?audioTimeout=N` asks).
+ *
+ * **Provisional**, decided on 2026-10-12 for the demo alone
+ * (`playVideoTrack` asks for nothing unless told). WHY 150: on a link
+ * narrower than the video, any timeout from 50 to 150 ms showed three times
+ * the frames of none at 10, 50 and 100 ms each way, and the three were
+ * alike; under loss none of them was worse than no timeout; 150 is the one
+ * of them that gives up the least of what a packet sent again would have
+ * brought on a long path
+ * (docs/experiments/2026-10-12-which-delivery-timeout-a-viewer-asks-for-on-its-video.md).
+ */
+const VIDEO_TIMEOUT_MS = Number(query.get("videoTimeout") ?? 150);
 
 
 /** The last 200 values of something measured, for its median and its largest. */
@@ -465,7 +482,7 @@ async function main(): Promise<void> {
 			[
 				`${link} · ${framesShown.rate()} frames a second shown, ${framesDecoded.rate()} decoded${document.visibilityState === "hidden" ? " (this tab is in the background: nothing is drawn)" : ""} · buffer ${bufferMs} ms${bufferMs < AUDIO_MIN_MS ? ` (the sound waits ${AUDIO_MIN_MS} ms at least: it is ${AUDIO_MIN_MS - bufferMs} ms behind the picture)` : ""}${auto ? ` (auto, ${AUTO_MAX_MS} ms at most: ${Math.round(AUTO_SHARE * 100)} of 100 came within ${Math.round(lateness99())} ms of the fastest in the last ${AUTO_WINDOW_MS / 1000} s, and ${AUTO_MARGIN_MS} more)` : ""}`,
 				`delay of the picture: ${played.video.median()} ms = ${delay.arrive.median()} to get here (encoder, link, relay, decoder) + ${delay.buffer.median()} waiting in the buffer + ${delay.paint.median()} for the next repaint (medians of the last 200 frames; ${framesLate} frames came after their turn). Not in it: from the camera to the encoder, and from the repaint to the screen`,
-				`video: ${stats.decoded} frames, first after ${firstFrameAfterMs ?? "?"} ms; came ${arrived.video.text()} after it was made, shown ${played.video.text()} after; dropped ${JSON.stringify(stats.dropped)}; joining FETCH ${stats.joiningFetch}`,
+				`video: ${stats.decoded} frames, first after ${firstFrameAfterMs ?? "?"} ms; came ${arrived.video.text()} after it was made, shown ${played.video.text()} after; dropped ${JSON.stringify(stats.dropped)}; joining FETCH ${stats.joiningFetch}; ${VIDEO_TIMEOUT_MS > 0 ? `the relay is asked to give a Group up ${VIDEO_TIMEOUT_MS} ms after its end` : "no delivery timeout is asked for"}`,
 				`audio: ${heard === undefined ? "none" : `${heard.decoded} pieces; came ${arrived.audio.text()} after it was made, sounded ${played.audio.text()} after; ${tooLate} too late; dropped ${JSON.stringify(heard.dropped)}`}`,
 				`sound: ${
 					sound === undefined
@@ -489,6 +506,7 @@ async function main(): Promise<void> {
 			framesLate,
 			videoFrames: stats.decoded,
 			decoderFailures: playback?.stats().decoderFailures ?? 0,
+			videoTimeoutMs: VIDEO_TIMEOUT_MS,
 			strays,
 			quality,
 			audioPieces: heard?.decoded ?? 0,
@@ -570,17 +588,11 @@ async function main(): Promise<void> {
 					trackNamespace: trackNamespaceOf(track, playingNamespace),
 					trackName: utf8.encode(track.name),
 					codec: track.codec ?? "",
-					// `?videoTimeout=N`: asks the sender to give a Group of video
-					// up N ms after its end (SUBGROUP_DELIVERY_TIMEOUT); nothing
-					// is asked without it. Whether the relay acts on it is the
-					// relay's.
-					...(query.get("videoTimeout") === null
-						? {}
-						: {
-								deliveryTimeouts: {
-									subgroupMs: Number(query.get("videoTimeout")),
-								},
-							}),
+					// The sender is asked to give a Group of video up so long
+					// after its end (`VIDEO_TIMEOUT_MS`); nothing is asked with 0.
+					...(VIDEO_TIMEOUT_MS > 0
+						? { deliveryTimeouts: { subgroupMs: VIDEO_TIMEOUT_MS } }
+						: {}),
 					...more,
 				});
 			/** Stops the version that is played. */
