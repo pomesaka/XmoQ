@@ -3,8 +3,8 @@
 //!
 //! **What is read is what a viewer needs to choose a track**, and far less
 //! than `@xmoq/msf` checks: the version, and of every track its name, its
-//! packaging, its role, its codec, its size, and the sample rate and the
-//! channels of its audio. A document `@xmoq/msf` turns down for another
+//! packaging, its role, its codec, its size, its bitrate, and the sample
+//! rate and the channels of its audio. A document `@xmoq/msf` turns down for another
 //! reason (`fixtures/msf-01/catalogs.tsv`) is read here.
 //!
 //! FIXME: read all of `fixtures/msf-01/catalogs.tsv` and turn down what
@@ -36,6 +36,8 @@ pub struct CatalogTrack {
     pub width: Option<u64>,
     /// §5.2.27, in pixels.
     pub height: Option<u64>,
+    /// §5.2.22: the maximum bitrate, in bits per second.
+    pub bitrate: Option<u64>,
     /// §5.2.28: "The number of audio frame samples per second." WHY a
     /// float, where the sizes above are whole numbers: the draft has "JSON
     /// Type: Number" and nothing on whole numbers, `@xmoq/msf` keeps the
@@ -106,6 +108,7 @@ pub fn read_catalog(payload: &[u8]) -> Result<Vec<CatalogTrack>, Invalid> {
                 codec: text("codec"),
                 width: number("width"),
                 height: number("height"),
+                bitrate: number("bitrate"),
                 samplerate: track.get("samplerate").and_then(Value::as_f64),
                 channel_config: text("channelConfig"),
             })
@@ -113,14 +116,20 @@ pub fn read_catalog(payload: &[u8]) -> Result<Vec<CatalogTrack>, Invalid> {
         .collect()
 }
 
-/// The first track with the role `video` and LOC packaging whose codec
-/// begins with `codec_prefix` (`avc` for H.264: `avc1.…` and `avc3.…`).
-#[must_use]
-pub fn first_video_track<'a>(
+/// The tracks with the role `video` and LOC packaging whose codec begins
+/// with `codec_prefix` (`avc` for H.264: `avc1.…` and `avc3.…`), in the
+/// order of the catalog: the versions a viewer with that decoder can
+/// choose from.
+///
+/// WHY not by `altGroup` (§5.2.12), which says which tracks are versions of
+/// one content: a catalog of one camera has one such group or none, and a
+/// viewer of two cameras would have to choose the camera first, which
+/// nothing here does.
+pub fn video_tracks<'a>(
     tracks: &'a [CatalogTrack],
-    codec_prefix: &str,
-) -> Option<&'a CatalogTrack> {
-    tracks.iter().find(|track| {
+    codec_prefix: &'a str,
+) -> impl Iterator<Item = &'a CatalogTrack> {
+    tracks.iter().filter(move |track| {
         track.role.as_deref() == Some("video")
             && track.packaging == LOC_PACKAGING
             && track
@@ -128,6 +137,15 @@ pub fn first_video_track<'a>(
                 .as_deref()
                 .is_some_and(|codec| codec.starts_with(codec_prefix))
     })
+}
+
+/// The first of [`video_tracks`].
+#[must_use]
+pub fn first_video_track<'a>(
+    tracks: &'a [CatalogTrack],
+    codec_prefix: &'a str,
+) -> Option<&'a CatalogTrack> {
+    video_tracks(tracks, codec_prefix).next()
 }
 
 /// The first track with the role `audio` and LOC packaging whose codec
@@ -169,9 +187,22 @@ mod tests {
                 codec: Some("avc3.4D401F".to_string()),
                 width: Some(1280),
                 height: Some(720),
+                bitrate: Some(379_454),
                 samplerate: None,
                 channel_config: None,
             }
+        );
+        // The versions a viewer with an H.264 decoder chooses from.
+        let versions: Vec<(&str, Option<u64>)> = video_tracks(&tracks, "avc")
+            .map(|track| (track.name.as_str(), track.bitrate))
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                ("video_400kbps_avc", Some(379_454)),
+                ("video_600kbps_avc", Some(564_523)),
+                ("video_900kbps_avc", Some(848_032)),
+            ]
         );
         let opus = first_audio_track(&tracks, "opus").unwrap();
         assert_eq!(

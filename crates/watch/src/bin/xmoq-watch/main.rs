@@ -479,7 +479,7 @@ async fn subscriptions(
         (video.clone(), audio.clone(), None, None)
     } else {
         let (catalog, kept) = requests.catalog(events, stops).await?;
-        let chosen = tracks::choose(&catalog)?;
+        let chosen = tracks::choose(&catalog, &args.video_version)?;
         let (video, audio) = (chosen.video, chosen.audio);
         // WHY said and not acted on: Opus is decoded at 48 kHz whatever it
         // was made from, and the decoder mixes two channels into the one

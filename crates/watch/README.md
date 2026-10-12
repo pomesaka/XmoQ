@@ -65,6 +65,8 @@ Where the two are not alike, and why:
 | Packets out of order | held until the ones before them came (`holdForOrderMs`) | played as they come | Not built. A stream keeps the order within a Group; between Groups nothing does |
 | The sound's least buffer | 30 ms | 30 ms, where `--buffer-ms` is less | The same rule (`AUDIO_MIN_US`); before, the viewer had none |
 
+**Which version of the video**: where the catalog has several H.264 tracks (the demo's `/publish?ladder=1`), `--video-version` says which is played: `first` (the default), `name:<track>`, or the largest within `height:<n>` or `bitrate:<n>`, and the smallest where none is within it. On a link of 2 Mbit/s the small version of the demo came whole and 10 ms after the fastest, where the large one lost a quarter of its frames and came 300 ms late ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-chooses-a-version-of-the-video.md)). The viewer does not change the version by itself.
+
 Behind a link with less room than the video, 50 ms is not enough for the sound: packets come 50 to 100 ms later than the fastest there, and `--buffer-ms 300` was what played all of it ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)). `--video-timeout-ms N` asks the relay to give up Groups of the video that are not delivered N ms after their last Object, which keeps the picture from falling behind there.
 
 ## What a peer cannot make it do without end
@@ -111,7 +113,7 @@ Under `scripts/`, from the repository root; each starts a demo of its own on oth
 | `try.sh [seconds]` | Picture and sound of the demo, found in its catalog: frames, underruns, how far apart the demo's marks leave the viewer, CPU and memory. `SIZE=1080` and `--fit 960x540` for a larger picture |
 | `try-room.sh` | A room says where the broadcast is and gives the token, chat both ways, and the relay's refusal without a token |
 | `try-keys.sh` | The keys on a pseudo-terminal (`keys-on-a-pty.py`), a broadcast that ends and begins again, and the terminal's line mode after `q`, Ctrl-C and SIGTERM |
-| `try-narrow-link.sh [seconds] [flags]` | The viewer behind a link of 2 Mbit/s with a picture of 2.5 Mbit/s (`spikes/lossy-link/proxy.mjs`): with `--video-timeout-ms 100` the relay gives up Groups of the video that are late, and the picture stays a quarter of a second behind ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)) |
+| `try-narrow-link.sh [seconds] [flags]` | The viewer behind a link of 2 Mbit/s with a picture of 2.5 Mbit/s (`spikes/lossy-link/proxy.mjs`): with `--video-timeout-ms 100` the relay gives up Groups of the video that are late, and the picture stays a quarter of a second behind ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)) With `PUBLISH_QUERY='bitrate=2500000&picture=busy&ladder=1'` the publisher has a second, small version, which `--video-version name:video-low` plays |
 | `try-silent-peers.sh` | A room and a relay that never answer: the viewer ends with `--seconds`, with SIGTERM, and of itself after 10 s. Needs no demo and no browser |
 
 **After a panic** the terminal is put back by a hook; that was run by hand on 2026-10-12 through a switch that is no longer in the binary, and nothing checks it now.

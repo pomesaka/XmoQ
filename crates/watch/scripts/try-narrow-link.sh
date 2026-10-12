@@ -6,6 +6,8 @@
 #
 #   crates/watch/scripts/try-narrow-link.sh [seconds, 25] [flags of xmoq-watch]   # from the root
 #
+# PUBLISH_QUERY is the publishing page's (bitrate=2500000&picture=busy); with &ladder=1 it has
+# a second, small version of the video, which --video-version chooses.
 # RATE (kbit/s, 2000), QUEUE (ms, 100) and DELAY (ms each way, 50) are the link's. The picture
 # goes to /dev/null and the sound is not opened. Prints AV_PLAYED and what the link dropped.
 # Needs `mise run interop` once (Playwright's Chromium). PORT (48960) and four more are used.
@@ -31,7 +33,7 @@ proxy=$!
 sleep 1
 curl -s "http://127.0.0.1:$control/set?loss=0&delay=${DELAY:-50}&rate=${RATE:-2000}&queue=${QUEUE:-100}" > /dev/null
 # A picture that fills the bitrate it asks for, at more than the link has room for.
-(cd "$root" && PUBLISH_QUERY="bitrate=2500000&picture=busy" exec "$bun" "$here/publish-headless.ts" "http://localhost:$((port + 1))") > "$work/page.log" 2>&1 &
+(cd "$root" && PUBLISH_QUERY="${PUBLISH_QUERY:-bitrate=2500000&picture=busy}" exec "$bun" "$here/publish-headless.ts" "http://localhost:$((port + 1))") > "$work/page.log" 2>&1 &
 page=$!
 for _ in $(seq 1 40); do grep -q "^PUBLISHING" "$work/page.log" && break; sleep 0.5; done
 sha=$(openssl x509 -in "$root/demo/.cert/cert.pem" -outform der | shasum -a 256 | cut -d' ' -f1)
