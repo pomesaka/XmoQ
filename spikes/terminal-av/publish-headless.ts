@@ -21,7 +21,12 @@ const browser = await chromium.launch({
 	handleSIGTERM: false,
 });
 const page = await (await browser.newContext()).newPage();
-await page.goto(`${origin}/publish${room === undefined ? "" : `?room=${encodeURIComponent(room)}`}`);
+// PUBLISH_QUERY: more for the page's address, as `size=720`.
+const query = [
+	...(room === undefined ? [] : [`room=${encodeURIComponent(room)}`]),
+	...(process.env.PUBLISH_QUERY ? [process.env.PUBLISH_QUERY] : []),
+].join("&");
+await page.goto(`${origin}/publish${query === "" ? "" : `?${query}`}`);
 await new Promise((resolve) => setTimeout(resolve, 2000));
 console.log(`PUBLISHING ${((await page.textContent("#status")) ?? "").split("\n")[0]}`);
 if (line !== undefined) {

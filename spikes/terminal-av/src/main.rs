@@ -5,7 +5,7 @@
 //!
 //!   xmoq-watch --url https://127.0.0.1:4443/ --cert-sha256 <hex> [--namespace xmoq/demo]
 //!       [--video <track> --audio <track>] [--buffer-ms 50] [--volume 1] [--scale 1]
-//!       [--medium file|direct] [--out <file>] [--seconds N]
+//!       [--medium file|direct] [--fit none|<width>x<height>] [--out <file>] [--seconds N]
 //!   xmoq-watch --room http://127.0.0.1:8787/rooms/demo [--name terminal] [--say "a line"] [--token no]
 //!
 //! With `--room` the room says where the broadcast is (the relay, the hash
@@ -74,6 +74,9 @@ struct Args {
     volume: f32,
     scale: usize,
     medium: screen::Medium,
+    /// `--fit`: the most pixels that are written; None: the frame as it is.
+    fit: Option<(usize, usize)>,
+    fit_asked: bool,
     out: Option<String>,
     seconds: Option<u64>,
     room: Option<String>,
@@ -105,6 +108,8 @@ fn parse_args() -> Result<Args> {
         volume: 1.0,
         scale: 1,
         medium: screen::Medium::File,
+        fit: None,
+        fit_asked: false,
         out: None,
         seconds: None,
         room: None,
@@ -132,6 +137,16 @@ fn parse_args() -> Result<Args> {
                     "file" => screen::Medium::File,
                     "direct" => screen::Medium::Direct,
                     other => bail!("--medium {other}: file or direct"),
+                }
+            }
+            "--fit" => {
+                args.fit_asked = true;
+                args.fit = match value.as_str() {
+                    "none" => None,
+                    size => {
+                        let (width, height) = size.split_once('x').context("--fit none or <width>x<height>")?;
+                        Some((width.parse().context("--fit")?, height.parse().context("--fit")?))
+                    }
                 }
             }
             "--out" => args.out = Some(value),
@@ -490,7 +505,16 @@ async fn play(
         Some(path) => Box::new(std::fs::OpenOptions::new().create(true).append(true).open(path)?),
         None => Box::new(std::io::stdout()),
     };
-    let screen = screen::Screen::new(to, args.medium, args.scale, Arc::clone(&ui.under));
+    let mut screen = screen::Screen::new(to, args.medium, args.scale, Arc::clone(&ui.under));
+    // Without `--fit`: to the terminal's window, where the picture goes to a terminal that says
+    // how many pixels it has. A frame larger than that would be scaled down by the terminal, and
+    // written in full for nothing.
+    let of_terminal = if args.out.is_none() { screen::terminal() } else { None };
+    match (args.fit, args.fit_asked, of_terminal) {
+        (Some(most), _, of_terminal) => screen = screen.fit(most, of_terminal.map_or((8, 16), |(_, cell)| cell)),
+        (None, false, Some((most, cell))) => screen = screen.fit(most, cell),
+        _ => {}
+    }
     let (frames, for_picture) = std_mpsc::channel();
     let picture = std::thread::spawn(move || picture::run(for_picture, screen));
     let mut sound = sound::Sound::open(Arc::clone(&ui.volume))?;
@@ -623,13 +647,17 @@ async fn play(
     let rms = if heard.given == 0 { 0.0 } else { (heard.squares / heard.given as f64).sqrt() };
     let line = format!(
         "AV_PLAYED why=\"{why}\" seconds={seconds:.1} buffer_ms={} volume={:.1} muted={} \
-         video_came={} video_left_out={} video_drawn={} fps={:.1} video_off_ms_min/p50/p95/max={} decode_ms_a_frame={:.2} draw_ms_a_frame={:.2} \
+         video_size={}x{} made_smaller_by={} written_kb_a_frame={} video_came={} video_left_out={} video_drawn={} fps={:.1} video_off_ms_min/p50/p95/max={} decode_ms_a_frame={:.2} draw_ms_a_frame={:.2} \
          audio_packets={} audio_refused={} audio_seconds={:.2} underruns={} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} \
          audio_off_ms_min/p50/p95/max={} peak={:.3} rms={:.3} \
          marks_video={} marks_audio={} picture_after_sound_ms_min/p50/p95/max={} no_timestamp={no_timestamp} streams_reset={streams_reset}",
         args.buffer.as_millis(),
         ui.volume.level(),
         ui.volume.muted(),
+        seen.size.0,
+        seen.size.1,
+        seen.by,
+        seen.bytes / 1024 / seen.drawn.max(1),
         seen.came,
         seen.left_out,
         seen.drawn,
