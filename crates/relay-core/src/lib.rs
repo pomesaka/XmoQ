@@ -313,6 +313,9 @@ struct Subscriber {
     /// stream of the subscription ([`Action::OpenDataStream`]), which acts
     /// on it.
     subgroup_delivery_timeout: Option<u64>,
+    /// The `SUBSCRIBER_PRIORITY` of the SUBSCRIBE (§10.2.7); 128 without
+    /// one. As the SUBSCRIBE had it: an update of it is refused.
+    priority: u8,
     /// Subgroup streams the relay started for the subscription.
     streams_started: u64,
     /// Whether one of them may never have been opened, so that the number
@@ -1919,7 +1922,7 @@ impl Relay {
             request,
             forward,
             filter,
-            params::subgroup_delivery_timeout(&subscribe.parameters),
+            routing::Delivery::of(&subscribe.parameters),
         );
         let waits = match self.tracks.phase(track_name) {
             // §9.5: "When a Relay receives an authorized SUBSCRIBE for a Track
@@ -3469,8 +3472,50 @@ impl OutStreamAllocator<'_> {
                 ..header
             },
             subgroup_delivery_timeout: subscriber.subgroup_delivery_timeout,
+            send_order: send_order(
+                subscriber.priority,
+                // The header's, or the default of the stream's source
+                // (§11.4.2). §12.4: "If omitted, the Default Publisher
+                // Priority is 128", which also stands in where the relay
+                // cannot tell the source (`InStream::priority`).
+                in_stream.priority.unwrap_or(DEFAULT_PRIORITY),
+            ),
         });
     }
+}
+
+/// The Subscriber Priority of a request that names none (§10.2.7), and the
+/// Publisher Priority of a track that names none (§12.4).
+pub(crate) const DEFAULT_PRIORITY: u8 = 128;
+
+/// Where a subgroup stream towards a subscriber stands among the streams of
+/// its session: **the larger number is sent first**, and streams with the
+/// same number take turns. §7.2, its first two steps: the higher
+/// Subscriber Priority (the lower number), then the higher Publisher
+/// Priority.
+///
+/// - **Every number is below 0**, which is what a stream has that nobody
+///   gave a number: the control stream and the request streams. §7.2: "the
+///   control streams SHOULD be prioritized highest, followed by the bidi
+///   request streams and then all subscribed Objects". WHY NOT the layout
+///   of `moqtail`'s relay (`compute_stream_priority`, tag `relay@0.15.0`),
+///   which spreads the pairs of priorities over all of an `i32`: a
+///   subscriber that asks for a priority above the middle would have its
+///   Objects sent before the answers to its requests.
+/// - **The Group does not count** (§7.2's third step, by the Group Order of
+///   the subscription, and its fourth, by the Subgroup ID): streams of one
+///   subscription take turns, the older Groups with the newer. WHY NOT a
+///   part of the number for the Group, as `moqtail`'s relay has: the
+///   transport knows one number for a stream and not which subscription
+///   it is of, so the Group would order the streams of different tracks
+///   as well, where §7.2 has "the expectation is that all subscriptions
+///   will be able to send some data". The demo's sound has five Groups a
+///   second and its video one, both counted from the time of day: with
+///   the older Group first the video's would be older for good, and on a
+///   link with less room than both the sound would not be sent at all.
+#[must_use]
+pub fn send_order(subscriber_priority: u8, publisher_priority: u8) -> i32 {
+    -1 - ((i32::from(subscriber_priority) << 8) | i32::from(publisher_priority))
 }
 
 /// Resets a stream that is not done and takes it out of the relay's books. A

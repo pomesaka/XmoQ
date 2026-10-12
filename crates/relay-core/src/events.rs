@@ -390,6 +390,10 @@ pub enum Action {
         /// stream is reset with `DELIVERY_TIMEOUT`. `None`: it asked for
         /// nothing, or for 0.
         subgroup_delivery_timeout: Option<u64>,
+        /// Where the stream stands among the streams to this session
+        /// ([`crate::send_order`]): of two that have something to send,
+        /// the one with the larger number goes first (§7.2).
+        send_order: i32,
     },
     /// The subscriber changed the `SUBGROUP_DELIVERY_TIMEOUT` of its
     /// subscription with a `REQUEST_UPDATE` (§10.9). Sent for every stream

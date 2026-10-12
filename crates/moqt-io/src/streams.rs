@@ -1602,6 +1602,10 @@ impl OutgoingSubgroup {
     /// `report` is called from the writer with what became of the stream; it
     /// may wait. `label` names the stream in the trace.
     ///
+    /// `send_order` is where the stream stands among the streams of the
+    /// connection that have something to send
+    /// ([`SendStream::set_send_order`]): the larger number first.
+    ///
     /// `delivery_timeout` is the receiver's own word on how long it may take
     /// to have all of the stream (the `SUBGROUP_DELIVERY_TIMEOUT` of its
     /// subscription), until [`Self::set_delivery_timeout`] says another. §8: the sender "MUST start a timer of
@@ -1627,7 +1631,7 @@ impl OutgoingSubgroup {
     pub fn spawn<C, R, F>(
         connection: Arc<C>,
         header: SubgroupHeader,
-        delivery_timeout: Option<Duration>,
+        (delivery_timeout, send_order): (Option<Duration>, i32),
         budget: &Arc<SendBudget>,
         report: R,
         trace: Trace,
@@ -1657,6 +1661,7 @@ impl OutgoingSubgroup {
         let writer = Writer {
             share: Arc::clone(&share),
             finished: finished_signal,
+            send_order,
             commands,
             reset: reset_signal,
             trace,
@@ -1770,6 +1775,9 @@ struct Writer {
     /// stream may take to be delivered before it is given up
     /// ([`OutgoingSubgroup::spawn`]).
     finished: watch::Receiver<Option<(Instant, Option<Duration>)>>,
+    /// Where the stream stands among those of its connection
+    /// ([`SendStream::set_send_order`]).
+    send_order: i32,
     commands: mpsc::UnboundedReceiver<Command>,
     reset: watch::Receiver<Option<u32>>,
     trace: Trace,
@@ -1850,7 +1858,9 @@ impl Writer {
             }
             stream = connection.open_uni() => stream,
         };
-        let Ok(send) = stream else { return };
+        let Ok(mut send) = stream else { return };
+        // Before the first byte: the header is ordered like the rest.
+        send.set_send_order(self.send_order);
         report(OutgoingEvent::Opened).await;
 
         let mut encoder = SubgroupStreamEncoder::new(&header);

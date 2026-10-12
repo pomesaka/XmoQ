@@ -188,8 +188,33 @@ pub(crate) struct Waiter {
     /// is worked out when the SUBSCRIBE is accepted, from the Largest Object
     /// of that moment.
     filter: Option<SubscriptionFilter>,
+    /// What the SUBSCRIBE asked of the delivery.
+    asked: Delivery,
+}
+
+/// What a SUBSCRIBE asks of how its Objects are delivered.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Delivery {
     /// [`Subscriber::subgroup_delivery_timeout`].
-    subgroup_delivery_timeout: Option<u64>,
+    pub(crate) subgroup_delivery_timeout: Option<u64>,
+    /// [`Subscriber::priority`].
+    pub(crate) subscriber_priority: u8,
+}
+
+impl Delivery {
+    /// Of the parameters of a SUBSCRIBE (§10.2.3, §10.2.7).
+    pub(crate) fn of(parameters: &[Parameter]) -> Self {
+        Self {
+            subgroup_delivery_timeout: xmoq_moqt::params::subgroup_delivery_timeout(parameters),
+            subscriber_priority: parameters
+                .iter()
+                .find_map(|parameter| match parameter {
+                    Parameter::SubscriberPriority(priority) => Some(*priority),
+                    _ => None,
+                })
+                .unwrap_or(crate::DEFAULT_PRIORITY),
+        }
+    }
 }
 
 impl Waiter {
@@ -204,7 +229,7 @@ impl Waiter {
         request: PeerRequestId,
         forward: bool,
         filter: Option<SubscriptionFilter>,
-        subgroup_delivery_timeout: Option<u64>,
+        asked: Delivery,
     ) -> Self {
         Self {
             session,
@@ -212,7 +237,7 @@ impl Waiter {
             request,
             forward,
             filter,
-            subgroup_delivery_timeout,
+            asked,
         }
     }
 }
@@ -1195,14 +1220,14 @@ impl Relay {
             request,
             forward,
             filter,
-            subgroup_delivery_timeout,
+            asked,
         } = *waiter;
         if let Some((subscriber, slot)) = self.accept_subscriber(
             track_name,
             (session, stream, request),
             forward,
             filter,
-            subgroup_delivery_timeout,
+            asked,
             actions,
         ) && let Some(track) = self.tracks.live_mut(track_name)
         {
@@ -1222,7 +1247,7 @@ impl Relay {
         (session, stream, request): (SessionKey, StreamKey, PeerRequestId),
         forward: bool,
         filter: Option<SubscriptionFilter>,
-        subgroup_delivery_timeout: Option<u64>,
+        asked: Delivery,
         actions: &mut Vec<Action>,
     ) -> Option<(Subscriber, RequestSlot)> {
         let track = self.tracks.live(track_name)?;
@@ -1267,7 +1292,8 @@ impl Relay {
                     joining,
                     start,
                     end_group,
-                    subgroup_delivery_timeout,
+                    subgroup_delivery_timeout: asked.subgroup_delivery_timeout,
+                    priority: asked.subscriber_priority,
                     streams_started: 0,
                     count_unknown: false,
                     outs: BTreeSet::new(),

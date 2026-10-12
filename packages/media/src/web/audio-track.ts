@@ -33,6 +33,8 @@ export interface AudioTrackEncoderOptions {
 	bitrate?: number;
 	/** `AudioTrackPublisherOptions.chunksPerGroup`. */
 	chunksPerGroup?: number;
+	/** `AudioTrackPublisherOptions.publisherPriority`. */
+	publisherPriority?: number;
 }
 
 export interface AudioTrackEncoderStats {
@@ -100,6 +102,9 @@ export async function createAudioTrackEncoder(
 		...(options.chunksPerGroup === undefined
 			? {}
 			: { chunksPerGroup: options.chunksPerGroup }),
+		...(options.publisherPriority === undefined
+			? {}
+			: { publisherPriority: options.publisherPriority }),
 	});
 	const stats: AudioTrackEncoderStats = {
 		submitted: 0,

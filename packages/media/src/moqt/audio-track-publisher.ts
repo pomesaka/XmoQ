@@ -72,6 +72,12 @@ export interface AudioTrackPublisherOptions {
 	 * stream in the middle of a Subgroup, as the one here does.
 	 */
 	chunksPerGroup?: number;
+	/**
+	 * The Publisher Priority of every stream of the track (transport §7.1;
+	 * 0 is the highest and 255 the lowest). Left out, the streams name
+	 * none and have the default of the track, 128 (§12.4).
+	 */
+	publisherPriority?: number;
 }
 
 export interface AudioTrackPublisherStats {
@@ -190,6 +196,9 @@ export function createAudioTrackPublisher(
 							stream: await to.openSubgroup({
 								groupId,
 								subgroupId: { mode: "Zero" },
+								...(options.publisherPriority === undefined
+									? {}
+									: { publisherPriority: options.publisherPriority }),
 								properties: true,
 								endOfGroup: false,
 							}),

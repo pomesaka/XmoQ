@@ -282,6 +282,15 @@ async function main(): Promise<void> {
 			codec: "opus",
 			sampleRate: SAMPLE_RATE,
 			numberOfChannels: 1,
+			// `?audioPriority=N`: the Publisher Priority of the sound's streams
+			// (0 the highest); without it, the default of `@xmoq/media`.
+			...(new URLSearchParams(location.search).has("audioPriority")
+				? {
+						publisherPriority: Number(
+							new URLSearchParams(location.search).get("audioPriority"),
+						),
+					}
+				: {}),
 			// `?audioGroup=N` puts N chunks of audio into a Group, on one stream;
 			// without it, the default of `@xmoq/media`.
 			...(new URLSearchParams(location.search).has("audioGroup")
