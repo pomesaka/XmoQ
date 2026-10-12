@@ -48,6 +48,8 @@ WHY `rustix`: the workspace forbids `unsafe`, and `termios` and the window's siz
 
 Every Object is due `--buffer-ms` (50, the watching page's default; provisional) after the fastest way an Object was seen to take, **plus what the sound output is ahead by**: the output asks for a sample some time before it leaves the machine (how far ahead it asks, and the length of one call; 24.3 ms on the Mac this was written on), and that time is added to the picture's and the sound's due times alike. WHY: without it that much of the buffer is gone before a packet may be late at all, and 50 ms here would be less than 50 ms in the page. The lead is read once, when a broadcast begins to play; `AV_PLAYED` has it (`output_lead_ms`).
 
+Behind a link with less room than the video, 50 ms is not enough for the sound: packets come 50 to 100 ms later than the fastest there, and `--buffer-ms 300` was what played all of it ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)). `--video-timeout-ms N` asks the relay to give up Groups of the video that are not delivered N ms after their last Object, which keeps the picture from falling behind there.
+
 ## What a peer cannot make it do without end
 
 The relay, the publisher behind it and the room all say things the viewer acts on. Each has a limit; **every value is provisional**, chosen to be far from what the demo does and near enough to stop.
@@ -88,6 +90,7 @@ Under `scripts/`, from the repository root; each starts a demo of its own on oth
 | `try.sh [seconds]` | Picture and sound of the demo, found in its catalog: frames, underruns, how far apart the demo's marks leave the viewer, CPU and memory. `SIZE=1080` and `--fit 960x540` for a larger picture |
 | `try-room.sh` | A room says where the broadcast is and gives the token, chat both ways, and the relay's refusal without a token |
 | `try-keys.sh` | The keys on a pseudo-terminal (`keys-on-a-pty.py`), a broadcast that ends and begins again, and the terminal's line mode after `q`, Ctrl-C and SIGTERM |
+| `try-narrow-link.sh [seconds] [flags]` | The viewer behind a link of 2 Mbit/s with a picture of 2.5 Mbit/s (`spikes/lossy-link/proxy.mjs`): with `--video-timeout-ms 100` the relay gives up Groups of the video that are late, and the picture stays a quarter of a second behind ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)) |
 | `try-silent-peers.sh` | A room and a relay that never answer: the viewer ends with `--seconds`, with SIGTERM, and of itself after 10 s. Needs no demo and no browser |
 
 **After a panic** the terminal is put back by a hook; that was run by hand on 2026-10-12 through a switch that is no longer in the binary, and nothing checks it now.

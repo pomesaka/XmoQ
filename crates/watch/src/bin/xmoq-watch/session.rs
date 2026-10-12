@@ -57,8 +57,11 @@ pub struct Requests<'a> {
 }
 
 impl Requests<'_> {
-    /// Subscribes to a track of the namespace.
-    pub async fn subscribe(&mut self, name: &str) -> Result<Subscription> {
+    /// Subscribes to a track of the namespace. With `timeout_ms` the
+    /// SUBSCRIBE carries a `SUBGROUP_DELIVERY_TIMEOUT` (§10.2.3): the
+    /// publisher gives up a Subgroup that is not delivered that long after
+    /// its last Object (§8).
+    pub async fn subscribe(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<Subscription> {
         let full_name = FullTrackName::new(self.namespace.clone(), name.as_bytes().to_vec())?;
         let mut parameters = vec![
             Parameter::Forward(true),
@@ -67,6 +70,9 @@ impl Requests<'_> {
         ];
         if let Some(token) = self.token {
             parameters.push(Parameter::AuthorizationToken(token.to_vec()));
+        }
+        if let Some(timeout_ms) = timeout_ms {
+            parameters.push(Parameter::SubgroupDeliveryTimeout(timeout_ms));
         }
         let (request, message) = self.session.subscribe(full_name, parameters)?;
         let (mut send, recv) = self.connection.open_bi().await?;
@@ -98,7 +104,7 @@ impl Requests<'_> {
         events: &mut mpsc::Receiver<UniEvent>,
         stops: &StreamStops,
     ) -> Result<(Vec<CatalogTrack>, CatalogKept)> {
-        let subscription = self.subscribe(CATALOG).await?;
+        let subscription = self.subscribe(CATALOG, None).await?;
         let range = FetchRange::RelativeJoining {
             joining_request_id: subscription.request.value(),
             joining_start: 0,
