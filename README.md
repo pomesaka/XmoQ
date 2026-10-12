@@ -63,6 +63,21 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
 | `mise run fmt` | Apply formatting and safe fixes |
 
+The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop run start it) has these flags, read off `crates/relay/src/main.rs` on 2026-10-13. The pages' and `demo/serve.ts`'s are in [the demo's README](demo/README.md), the terminal viewer's in `USAGE` of `crates/watch/src/args.rs`.
+
+| Flag | What it sets | Without it |
+|---|---|---|
+| `--port`, `--cert-file`, `--key-file` | Where it listens, and its certificate | Required |
+| `--congestion cubic\|newreno\|bbr` | The congestion control of its connections | cubic |
+| `--idle-timeout-ms` | How long nothing may arrive from a peer before its connection counts as lost | 6,000 |
+| `--setup-timeout-ms` | How long a client has for its SETUP | 10,000 |
+| `--idle-session-ms` | How long a session that has sent its SETUP may hold nothing | 30,000 |
+| `--max-sessions` | How many sessions it takes at once | 256 |
+| `--delivery-patience-ms` | Experiment: what a subscriber gets that asked for no delivery timeout | Off |
+| `--older-groups give-up`, `--older-groups-grace-ms` | Experiment: older Groups are given up when a newer one begins, after so long | `keep`; 0 |
+| `--auth-key-hex`, `--auth-setup off` | Experiment: the key tokens are checked with, and whether SETUP is asked for one | No tokens; on with a key |
+| `--slow-open-ms` | For a run that looks at how long streams take to open; 0 logs every stream | Not logged |
+
 CI (`.github/workflows/ci.yml`) runs the same tasks. A task whose target does not exist yet prints `SKIP` and succeeds; `spikes/` is outside every check, and so are the copies of `moqtail` code under `interop/peers/`. The interop run is a CI job of its own, which calls `mise run interop`; for a pull request that touches nothing the run depends on, the job reports that it skipped the pairings.
 
 License, deployment, supported platforms, codec profiles, authentication, and performance targets are undecided.
