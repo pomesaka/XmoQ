@@ -47,6 +47,19 @@ import {
 } from "./shared.ts";
 
 const query = new URLSearchParams(location.search);
+/**
+ * `?clockSkewPpm=N` (for measuring): this page's `Date.now()` runs N parts
+ * in a million faster than the machine's (slower with a negative N), as
+ * the clock of a viewer on another machine does against its publisher's.
+ * The sound's output goes by the sound card and is not touched.
+ */
+const CLOCK_SKEW_PPM = Number(query.get("clockSkewPpm") ?? 0);
+if (CLOCK_SKEW_PPM !== 0) {
+	const real = Date.now.bind(Date);
+	const began = real();
+	Date.now = () =>
+		Math.round(began + (real() - began) * (1 + CLOCK_SKEW_PPM / 1_000_000));
+}
 // When a frame and a piece are played, the buffer between, and how the
 // pieces of sound are joined are @xmoq/media's (`createPlayout`); this page
 // draws, counts and says what it sees. `?audioMin=`, `?autoMax=` and
