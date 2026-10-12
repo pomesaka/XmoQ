@@ -33,7 +33,7 @@ Tab-separated, a newline after each row.
 | 2 | The Objects in the order they come, a space between them: `when:took`, when it came on the player's clock and how long it took (when it came less the time it carries), both in milliseconds |
 | 3 | The fastest way after each, in milliseconds; `-` for an Object that is left out |
 
-The rule the rows pin: the fastest way is the smallest `took` among the Objects that came in this second of the player's clock and the 59 before it (seconds are whole: `when / 1000`, rounded down). An Object more than 10 seconds from it, either way, is left out and is not kept; where the 60 seconds hold nothing, the Object is the first. The 30 in a row after which the clock begins anew are in each implementation's own tests.
+The rule the rows pin: the fastest way is the smallest `took` among the Objects that came in this second of the player's clock and the 59 before it (seconds are whole: `when / 1000`, rounded down). An Object more than 10 seconds from it, either way, is left out and is not kept; where the 60 seconds hold nothing, the Object is the first. An Object that came before the newest second (a clock that was set back) counts for the newest. The 30 in a row after which the clock begins anew are in each implementation's own tests.
 
 ## `seam.tsv`: where a piece of sound begins
 

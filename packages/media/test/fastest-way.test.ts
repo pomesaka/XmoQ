@@ -59,6 +59,14 @@ test("after 30 in a row that are not of the clock, it begins anew with the thirt
 	expect(got.slice(30)).toEqual(["anew 1000", "1000"]);
 });
 
+test("a clock that began anew keeps nothing of the one before", () => {
+	const strays = Array.from({ length: 29 }, () => 60_000);
+	// The thirtieth begins anew at 60,000; what took 1000, as the first did,
+	// is then the one that is not of the clock.
+	const got = taken([1000, ...strays, 60_000, 1000, 60_005]);
+	expect(got.slice(29)).toEqual(["out", "anew 60000", "out", "60000"]);
+});
+
 test("one that is of the clock between them begins the count of 30 again", () => {
 	const strays = Array.from({ length: 29 }, () => 60_000);
 	const got = taken([1000, ...strays, 1005, ...strays, 1010]);
@@ -81,7 +89,7 @@ const LEAST = readFileSync(
 	.map((row) => row.split("\t"));
 
 test("the table of the least has the rows both players count on", () => {
-	expect(LEAST.length).toBe(8);
+	expect(LEAST.length).toBe(9);
 });
 
 test.each(LEAST)(

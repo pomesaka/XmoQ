@@ -308,6 +308,11 @@ mod tests {
             clock.base(2_250_000, 901_240_000),
             Some(at(2_240_000, 10_000))
         );
+        // Nothing of the clock before is kept: an Object by it is a stray now.
+        assert_eq!(
+            clock.base(2_300_000, 31_536_900_000_000_000 + 1_300_000),
+            None
+        );
         // One that is right in between counts from nothing again.
         let mut clock = Clock::new(0);
         assert_eq!(clock.base(1_000, 0), Some(at(1_000, 0)));
@@ -374,7 +379,7 @@ mod tests {
             assert_eq!(got.join(" "), after, "{name}");
             rows += 1;
         }
-        assert_eq!(rows, 8);
+        assert_eq!(rows, 9);
     }
 
     /// `fixtures/playout/auto-buffer.tsv`, which `@xmoq/media` reads too.
