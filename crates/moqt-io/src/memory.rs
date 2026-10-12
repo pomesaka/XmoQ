@@ -19,6 +19,14 @@
 //! * A stream that was not accepted when the connection is closed is never
 //!   accepted afterwards, whether or not it had arrived.
 //!
+//! * Nothing waits between a write and the peer: what `write_all` took is in
+//!   the peer's pipe. A real connection has a send buffer, so a stream can
+//!   be finished with part of it not delivered, and reset then
+//!   ([`SendStream::finish_until`]); here a finished stream is delivered.
+//!   What a writer does with a stream that is not delivered is tested on a
+//!   connection that delivers when it is told to (`tests`), and the reset
+//!   itself on the real connection (`contract`).
+//!
 //! It models nothing else of QUIC: no packets, no loss, no timing. Its windows
 //! are far smaller than real ones ([`STREAM_WINDOW`] bytes a stream and
 //! [`ACCEPT_QUEUE`] streams waiting to be accepted, against about 1.25 MB and

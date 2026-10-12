@@ -510,6 +510,56 @@ pub(crate) async fn writing_waits_while_the_peer_does_not_read<C: Connection>(
     }
 }
 
+/// `finish_until` is `finish` where the peer's transport takes all of the
+/// stream: it does not wait for the peer to read, and never for `give_up`.
+async fn finish_until_is_over_when_the_peers_transport_has_the_stream<C: Connection>(a: C, b: C) {
+    let (send, mut recv) = uni(&a, &b, b"abc").await;
+    let delivered = soon(
+        "the stream to be delivered",
+        send.finish_until(std::future::pending()),
+    );
+    assert!(delivered.await);
+    assert_eq!(read_to_end(&mut recv).await, (b"abc".to_vec(), Ok(())));
+}
+
+/// A stream the peer stopped is over as well: nothing is waited for.
+async fn finish_until_is_over_on_a_stopped_stream<C: Connection>(a: C, b: C) {
+    let (mut send, recv) = uni(&a, &b, b"abc").await;
+    // CANCELLED (0x1).
+    recv.stop(0x1);
+    assert_eq!(
+        soon("the stop", send.stopped()).await,
+        WriteError::Stopped(Some(0x1))
+    );
+    assert!(soon("the end", send.finish_until(std::future::pending())).await);
+}
+
+/// What the in-memory connection cannot be in: a stream that is finished
+/// and not yet all with the peer's transport.
+#[cfg(feature = "quic")]
+mod with_a_send_buffer {
+    use super::{LOOPBACK_LIMITS, read_to_end, soon};
+    use crate::{Connection, ReadError, SendStream};
+
+    /// WHY a `give_up` that is ready at once: over the loopback interface a
+    /// stream is acknowledged within a millisecond, and nothing here can
+    /// hold a packet back. At the first look the FIN has not left yet.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_until_resets_a_stream_that_is_given_up_before_it_is_delivered() {
+        let (a, b, _keep) = crate::wt::loopback(LOOPBACK_LIMITS).await;
+        let mut send = soon("open_uni", a.open_uni()).await.expect("open");
+        // Within the stream's window of 4096: the write is taken whole.
+        let body = vec![0x5a; 2 * 1024];
+        soon("a write", send.write_all(&body)).await.expect("write");
+        let mut recv = soon("accept_uni", b.accept_uni()).await.expect("accept");
+        // DELIVERY_TIMEOUT (0x2).
+        let delivered = soon("the end", send.finish_until(std::future::ready(0x2))).await;
+        assert!(!delivered);
+        let (_, end) = read_to_end(&mut recv).await;
+        assert_eq!(end, Err(ReadError::Reset(Some(0x2))));
+    }
+}
+
 /// Runs every case against one implementation. `$pair` makes two connected
 /// ends and whatever has to outlive them.
 macro_rules! contract_tests {
@@ -539,6 +589,8 @@ macro_rules! contract_tests {
                 a_close_reaches_the_peer_with_its_code_and_reason,
                 a_close_by_the_other_end_reaches_this_one,
                 a_long_close_reason_is_cut_at_a_character,
+                finish_until_is_over_when_the_peers_transport_has_the_stream,
+                finish_until_is_over_on_a_stopped_stream,
             ]);
 
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

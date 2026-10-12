@@ -1445,8 +1445,9 @@ pub struct SendLimits {
     pub bytes: usize,
     /// Objects that are not written yet.
     pub objects: usize,
-    /// Subgroup streams that are not done yet: not opened, not written out, or
-    /// waiting for the peer's stream limit.
+    /// Subgroup streams that are not done yet: not opened, not written out,
+    /// waiting for the peer's stream limit, or written whole and not yet
+    /// acknowledged by the receiver's transport.
     pub streams: usize,
     /// How long after the last Object of a subgroup stream was written the
     /// receiver may take to have all of it. A stream that is not delivered
@@ -1531,12 +1532,9 @@ impl Share {
     }
 
     /// Gives back whatever the writer still holds, and its stream. Called
-    /// when the writer has nothing more to write, and again when it ends:
-    /// the second call does nothing.
+    /// once, when the writer ends, however it ends.
     fn release(&self) {
-        if self.released.swap(true, Ordering::Relaxed) {
-            return;
-        }
+        self.released.store(true, Ordering::Relaxed);
         let budget = &self.budget;
         budget
             .bytes
@@ -1671,6 +1669,25 @@ impl OutgoingSubgroup {
     pub fn reset(&self, code: u32) {
         self.reset.send_replace(Some(code));
     }
+
+    /// [`Self::reset`], `after` from now, whatever becomes of this handle
+    /// meanwhile. A stream that is over by then is not touched.
+    pub fn reset_after(&self, code: u32, after: Duration) {
+        if after.is_zero() {
+            return self.reset(code);
+        }
+        let reset = self.reset.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            // An earlier reset keeps its code.
+            reset.send_if_modified(|asked| {
+                asked.is_none() && {
+                    *asked = Some(code);
+                    true
+                }
+            });
+        });
+    }
 }
 
 struct Writer {
@@ -1791,10 +1808,12 @@ impl Writer {
                     // cancellation") has to take it back. A stream that is
                     // let go of at its FIN goes on being sent whatever
                     // happens to its subscription.
-                    // WHY its share of the budget is given back first: the
-                    // budget counts what is not written, and the transport
-                    // bounds what it holds itself.
-                    self.share.release();
+                    // WHY the stream stays in the budget's count of streams
+                    // meanwhile: a receiver that takes streams and
+                    // acknowledges nothing would have the tasks and the
+                    // entries of any number of them kept for it. Its bytes
+                    // and Objects were given back as they were written; the
+                    // transport's send window bounds those.
                     let patience = self.share.budget.limits.delivery_patience;
                     let timed_out = Arc::new(AtomicBool::new(false));
                     let asked = self.reset_asked();

@@ -178,10 +178,11 @@ pub trait SendStream: Send + 'static {
     /// code `give_up` gave. `true` when everything and the FIN got there, or
     /// when the stream ended some other way; `false` when it was reset here.
     ///
-    /// WHY a default that only finishes: a transport that cannot tell when
-    /// its peer has everything has nothing to give up by. FIXME: the
-    /// in-memory connection of the tests can tell, and does not say; what
-    /// follows a reset after the FIN is run over QUIC alone.
+    /// WHY a default that only finishes: it is right for a transport that
+    /// holds nothing between `write_all` and its peer, which the in-memory
+    /// connection is (`memory`: what is written is in the peer's pipe).
+    /// There is nothing left to give up at the FIN then. A transport with a
+    /// send buffer has to implement this.
     fn finish_until<G>(self, give_up: G) -> impl Future<Output = bool> + Send
     where
         Self: Sized,
