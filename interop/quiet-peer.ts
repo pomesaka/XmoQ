@@ -98,6 +98,18 @@
 //                     and the viewer's, one every 1.5 seconds, are all
 //                     passed on.
 //
+//   relay-slow-cached-fetch
+//                     The own relay, told to give a subscriber 3 seconds
+//                     for the whole of a fetch stream it writes from its
+//                     cache (`--cached-fetch-whole-ms 3000`; 30 seconds and
+//                     more by itself), and `xmoq-quiet-peer` as a publisher
+//                     of one Group of 8 MiB and as two readers that FETCH
+//                     it. The one that takes 16 KiB a second, each Object
+//                     in time and the whole too slowly, has its stream
+//                     reset with TOO_FAR_BEHIND (`FETCH_WRITE_ENDED
+//                     session=1 stream=S too_slow pieces=N code=0x5`); the
+//                     one that reads gets the whole Group and a FIN.
+//
 //   relay-idle-session
 //                     The own relay, told to let a session hold nothing
 //                     for 1.5 seconds (`--idle-session-ms`; 30 by itself),
@@ -778,11 +790,80 @@ async function relayOneSessionAsksForMuch(): Promise<string> {
 	return `a publisher that answers nothing, and one session that asks it for more than its share while another viewer asks beside it. ${parts.join(". ")}`;
 }
 
+/**
+ * A FETCH the relay answers from its cache: a reader that takes the whole
+ * too slowly is cut, and one that reads is not.
+ */
+async function relaySlowCachedFetch(): Promise<string> {
+	const WHOLE_MS = 3000;
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: [],
+		verbose: options.verbose,
+		// The time for the whole is 3 s whatever the bytes: the least rate is
+		// one at which the megabyte takes less.
+		relayArgs: [
+			"--cached-fetch-whole-ms",
+			String(WHOLE_MS),
+			"--cached-fetch-least-kbps",
+			"100000",
+		],
+	});
+	// 8 MiB in one Group, which the relay caches. WHY that much: what fits
+	// into the windows of the connection is written at once and waits
+	// there, and the time for the whole is of what the relay still has to
+	// write.
+	const publisher = spawnQuietClient(context, "publisher", 40_000, false, [
+		"--publish-group",
+		"64x131072",
+	]);
+	await publisher.waitForLine(/^GROUP_SENT group=0 /);
+	// 16 KiB a second: each Object of 128 KiB in 8 seconds, the whole in 512.
+	const slow = spawnQuietClient(context, "reader:slow", 12_000, false, [
+		"--fetch-cached",
+		"1",
+		"--read-bytes-a-second",
+		"16384",
+	]);
+	await slow.waitForLine(/^FETCH n=0 FETCH_OK$/);
+	const [, , , slowHow = ""] = await slow.waitForLine(
+		/^FETCH_STREAM_ENDED after_ms=(\d+) bytes=(\d+) how=(Reset.*)$/,
+		15_000,
+	);
+	// The reader's is the relay's second session.
+	const [written] = await context.relay.waitForLine(
+		/^FETCH_WRITE_ENDED session=1 stream=\d+ (\S+) pieces=\d+ code=0x5$/,
+	);
+	if (!/ too_slow /.test(written) || !/Reset\(Some\(5\)\)/.test(slowHow)) {
+		throw new Error(
+			`the relay was to give the stream up as taken too slowly, with TOO_FAR_BEHIND (0x5): ${written}; the reader: ${slowHow}`,
+		);
+	}
+	const fast = spawnQuietClient(context, "reader:fast", 6000, false, [
+		"--fetch-cached",
+		"1",
+		"--read-bytes-a-second",
+		"100000000",
+	]);
+	const [, , fastBytes = "", fastHow = ""] = await fast.waitForLine(
+		/^FETCH_STREAM_ENDED after_ms=(\d+) bytes=(\d{6,}) how=(.*)$/,
+		15_000,
+	);
+	if (fastHow !== "finished" || Number(fastBytes) < 64 * 131072) {
+		throw new Error(
+			`a reader that reads was to get the whole Group: ${fastBytes} bytes, ${fastHow}`,
+		);
+	}
+	return `the own relay, told to give a subscriber ${WHOLE_MS} ms for the whole of a fetch stream it writes from its cache: a reader that took 16 KiB a second of a Group of 8 MiB had its stream reset with TOO_FAR_BEHIND (${written}), and a reader that read as fast as it could got all ${fastBytes} bytes and a FIN`;
+}
+
 const RELAY_CASES: Record<string, () => Promise<string>> = {
 	"relay-no-setup": relayNoSetup,
 	"relay-idle-session": relayIdleSession,
 	"relay-many-announcements": relayManyAnnouncements,
 	"relay-one-session-asks-for-much": relayOneSessionAsksForMuch,
+	"relay-slow-cached-fetch": relaySlowCachedFetch,
 };
 
 async function main(): Promise<void> {

@@ -122,6 +122,14 @@ pub struct HubConfig {
     /// `xmoq_relay_core::MAX_ANNOUNCEMENTS_AT_ONCE`, where it is not the
     /// relay's own number.
     pub announcements_at_once: Option<u32>,
+    /// How long a subscriber has for the whole of a fetch stream the relay
+    /// writes from its cache, at the least. Provisional.
+    pub cached_fetch_whole_ms: u64,
+    /// The rate, in kbit/s, a subscriber has to take such a stream at, at
+    /// the least: the stream has as long as its Objects take at that rate
+    /// where that is longer than [`Self::cached_fetch_whole_ms`].
+    /// Provisional.
+    pub cached_fetch_least_kbps: u64,
     /// `xmoq_relay_core::MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`, where it is
     /// not the relay's own number: how many requests the relay has open on
     /// one publisher for one subscriber's session.
@@ -161,6 +169,26 @@ pub struct HubConfig {
     pub log: Option<Log>,
 }
 
+impl HubConfig {
+    /// How long a subscriber has for the whole of a fetch stream the relay
+    /// writes from its cache, whose Objects have `bytes` bytes of payload:
+    /// [`Self::cached_fetch_whole_ms`], or as long as the bytes take at
+    /// [`Self::cached_fetch_least_kbps`] where that is longer.
+    ///
+    /// WHY by the bytes as well: a Group may be 8 MiB, which a viewer on a
+    /// link of 2 Mbit/s took 35 seconds for (measured 2026-10-13), and one
+    /// that is cut then has no way to get it. At 500 kbit/s such a Group
+    /// has 134 seconds, four times that. WHY a least rate, and not only a
+    /// time: the time a slow reader may keep a Group alive is then in
+    /// proportion to what it is given.
+    fn cached_fetch_whole(&self, bytes: usize) -> Duration {
+        let bits = u64::try_from(bytes).unwrap_or(u64::MAX).saturating_mul(8);
+        // kbit/s is bits a millisecond.
+        let at_the_least_rate = bits / self.cached_fetch_least_kbps.max(1);
+        Duration::from_millis(self.cached_fetch_whole_ms.max(at_the_least_rate))
+    }
+}
+
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
@@ -188,6 +216,8 @@ impl Default for HubConfig {
             max_timers_per_session: 1024,
             announcement_every_ms: None,
             announcements_at_once: None,
+            cached_fetch_whole_ms: 30_000,
+            cached_fetch_least_kbps: 500,
             requests_for_one_subscriber: None,
             fetches_for_one_subscriber: None,
             upstream_timeout: Duration::from_secs(5),
@@ -411,6 +441,9 @@ struct FetchWrite<C> {
     pieces: Vec<FetchPiece>,
     /// How long the subscriber may take nothing.
     patience: Duration,
+    /// How long the subscriber may take for the whole stream
+    /// ([`HubConfig::cached_fetch_whole`]).
+    whole: Duration,
     trace: Trace,
     label: String,
 }
@@ -428,14 +461,20 @@ impl<C: Connection> FetchWrite<C> {
     ///
     /// WHY piece by piece, and the wait anew for each: the pieces are the
     /// Objects of a Group, megabytes together, and a subscriber that takes
-    /// them slowly is not one that takes nothing. As for a fetch stream that
-    /// is passed on, nothing bounds the whole of it.
+    /// them slowly is not one that takes nothing.
+    ///
+    /// The whole has `whole` all the same, from when the stream is asked
+    /// for: a subscriber that takes each piece just in time would otherwise
+    /// keep the Objects of a Group the cache has moved on from for hours
+    /// (4,096 Objects, 10 seconds each), and 16 such streams of a session
+    /// as many Groups.
     ///
     /// WHY an Object is copied to be encoded, one at a time: the cache
     /// shares it with the subgroup streams, and a fetch stream encodes it
     /// with other fields before it (§11.4.4.1).
     async fn run(self, mut aborted: oneshot::Receiver<u32>) -> Written {
         let ended = |how, pieces| Written { how, pieces };
+        let by = tokio::time::Instant::now() + self.whole;
         let mut orders = Orders {
             aborted: &mut aborted,
             open: true,
@@ -463,7 +502,7 @@ impl<C: Connection> FetchWrite<C> {
         // either Group Order.
         let mut encoder = FetchStreamEncoder::new(self.header, GroupOrder::Ascending);
         let header = encoder.take_bytes();
-        if let Some(how) = self.write(&mut writer, &header, &mut orders).await {
+        if let Some(how) = self.write(&mut writer, &header, &mut orders, by).await {
             writer.reset(how.code());
             return ended(how, 0);
         }
@@ -488,7 +527,7 @@ impl<C: Connection> FetchWrite<C> {
                 FetchPiece::EndOfRange(kind, location) => encoder.end_of_range(*kind, *location),
             }
             let bytes = encoder.take_bytes();
-            if let Some(how) = self.write(&mut writer, &bytes, &mut orders).await {
+            if let Some(how) = self.write(&mut writer, &bytes, &mut orders, by).await {
                 writer.reset(how.code());
                 return ended(how, written);
             }
@@ -509,6 +548,7 @@ impl<C: Connection> FetchWrite<C> {
         writer: &mut FetchStreamWriter<C::Send>,
         bytes: &[u8],
         orders: &mut Orders<'_>,
+        by: tokio::time::Instant,
     ) -> Option<WriteEnd> {
         // WHY one write that is polled again, and not a write anew after an
         // order that was none: a write that is dropped may have written a
@@ -521,6 +561,7 @@ impl<C: Connection> FetchWrite<C> {
             // already.
             biased;
             code = orders.next() => Some(WriteEnd::Aborted(code)),
+            () = tokio::time::sleep_until(by) => Some(WriteEnd::TooSlow),
             written = &mut write => match written {
                 Ok(Ok(())) => None,
                 Ok(Err(_)) => Some(WriteEnd::Stopped),
@@ -537,6 +578,8 @@ enum WriteEnd {
     Finished,
     /// The subscriber took nothing for the time it had.
     NotTaken,
+    /// The subscriber did not take the whole stream in the time it had.
+    TooSlow,
     /// The subscriber stopped the stream, or the connection is gone.
     Stopped,
     /// The relay ordered it stopped, with this code
@@ -553,7 +596,11 @@ impl WriteEnd {
     fn code(self) -> u32 {
         match self {
             Self::Finished | Self::Stopped => stream_reset_code::CANCELLED,
-            Self::NotTaken => stream_reset_code::TOO_FAR_BEHIND,
+            // WHY the same code for both: either way the subscriber is
+            // behind what the relay keeps for it. §3.3.3 words the code for
+            // a subscription; the notes have why it is used for a FETCH
+            // (row on a fetch stream that is not taken).
+            Self::NotTaken | Self::TooSlow => stream_reset_code::TOO_FAR_BEHIND,
             Self::Aborted(code) => code,
             Self::Failed => stream_reset_code::INTERNAL_ERROR,
         }
@@ -581,6 +628,7 @@ impl Written {
         let how = match self.how {
             WriteEnd::Finished => "finished",
             WriteEnd::NotTaken => "not_taken",
+            WriteEnd::TooSlow => "too_slow",
             WriteEnd::Stopped => "stopped",
             WriteEnd::Aborted(_) => "aborted",
             WriteEnd::Failed => "failed",
@@ -1571,12 +1619,20 @@ impl<C: Connection> Hub<C> {
             .retain(|_, abort| !abort.is_closed());
         let (abort, aborted) = oneshot::channel();
         handle.fetch_write_aborts.insert(stream, abort);
+        let pieces_bytes: usize = pieces
+            .iter()
+            .map(|piece| match piece {
+                FetchPiece::Object(cached) => cached.object.payload.len(),
+                FetchPiece::EndOfRange(..) => 0,
+            })
+            .sum();
         let writing = FetchWrite {
             connection: Arc::clone(&handle.connection),
             header: FetchHeader { request_id },
             send_order,
             pieces,
             patience: Duration::from_millis(wait_ms),
+            whole: self.config.cached_fetch_whole(pieces_bytes),
             trace: self.config.streams.trace.clone(),
             label: format!("session#{} fetch#{request_id}", session.0),
         };
@@ -3008,6 +3064,8 @@ mod fetch_write_tests {
     use super::*;
 
     const IN_TIME: Duration = Duration::from_secs(5);
+    /// Longer than any test but the one about it takes.
+    const WHOLE: Duration = Duration::from_secs(3600);
 
     /// An End of Unknown Range indicator of 20 bytes: its Group and its
     /// Object ID take nine bytes each.
@@ -3048,6 +3106,7 @@ mod fetch_write_tests {
             send_order: 0,
             pieces,
             patience,
+            whole: WHOLE,
             trace: Trace::default(),
             label: "test".to_string(),
         };
@@ -3122,6 +3181,44 @@ mod fetch_write_tests {
         assert_eq!((events, end), (expected, None));
         assert_eq!(in_time(writing).await.unwrap().given_up(), None);
         assert!(started.elapsed() > patience, "{:?}", started.elapsed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscriber_that_takes_each_piece_in_time_and_the_whole_too_slowly_is_cut() {
+        // The window lets 64 bytes wait; 50 indicators of 20 bytes. The
+        // subscriber takes 64 bytes every 100 ms, so no piece waits for the
+        // second it has, and the whole would take about 1.6 s.
+        // (the time for the whole, in ms; whether the stream is finished)
+        for (whole_ms, finished) in [(3_000, true), (1_000, false)] {
+            let (relay, subscriber) = pair_with_window(64);
+            let pieces: Vec<FetchPiece> = (0..50).map(indicator).collect();
+            let connection = Arc::new(relay);
+            let write = FetchWrite {
+                connection: Arc::clone(&connection),
+                header: FetchHeader { request_id: 4 },
+                send_order: 0,
+                pieces,
+                patience: Duration::from_secs(1),
+                whole: Duration::from_millis(whole_ms),
+                trace: Trace::default(),
+                label: "test".to_string(),
+            };
+            let started = Instant::now();
+            let writing = tokio::spawn(write.run(oneshot::channel().1));
+            let stream = subscriber.accept_uni().await.unwrap();
+            let (events, end) = read_all(stream, Duration::from_millis(100)).await;
+            let written = writing.await.unwrap();
+            if finished {
+                assert_eq!((events.len(), end, written.given_up()), (51, None, None));
+            } else {
+                // TOO_FAR_BEHIND (0x5), a second after it began.
+                assert_eq!(written.how, WriteEnd::TooSlow);
+                assert_eq!(written.given_up(), Some(0x5));
+                assert_eq!(end, Some(ReadError::Reset(Some(0x5))));
+                assert!(events.len() < 51, "{}", events.len());
+                assert!(started.elapsed() < Duration::from_millis(1_500));
+            }
+        }
     }
 
     #[tokio::test]
@@ -3367,6 +3464,7 @@ mod fetch_write_tests {
                 send_order: 0,
                 pieces: vec![indicator(0), indicator(1)],
                 patience: IN_TIME,
+                whole: WHOLE,
                 trace: Trace::default(),
                 label: "test".to_string(),
             };
@@ -3438,6 +3536,7 @@ mod fetch_write_tests {
             send_order: 0,
             pieces: vec![FetchPiece::EndOfRange(RangeEnd::Unknown, unknown)],
             patience: IN_TIME,
+            whole: WHOLE,
             trace: Trace::default(),
             label: "test".to_string(),
         };
