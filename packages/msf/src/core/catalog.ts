@@ -30,6 +30,19 @@ export interface CatalogTrack {
 	readonly isLive: boolean;
 	/** §5.2.6. */
 	readonly role?: string;
+	/**
+	 * §5.2.11: "An integer specifying a group of tracks which are designed
+	 * to be rendered together", audio with its video.
+	 */
+	readonly renderGroup?: number;
+	/**
+	 * §5.2.12: "An integer specifying a group of tracks which are alternate
+	 * versions of one-another. ... Alternate tracks MUST have matching media
+	 * time sequences. A subscriber typically subscribes to one track from a
+	 * set". §4.2: such tracks "MUST be time-aligned". That it is an integer
+	 * is not checked: its JSON type is Number.
+	 */
+	readonly altGroup?: number;
 	/** §5.2.18: a codec string of the WebCodecs registry. With LOC packaging it is there. */
 	readonly codec?: string;
 	/** §5.2.22: the maximum bitrate, in bits per second. With LOC packaging it is there. */
@@ -170,6 +183,8 @@ function checkTrack(value: unknown, where: string): CatalogTrack {
 	const fields = {
 		namespace: optional(value, where, "namespace", isString, "string"),
 		role: optional(value, where, "role", isString, "string"),
+		renderGroup: optional(value, where, "renderGroup", isNumber, "number"),
+		altGroup: optional(value, where, "altGroup", isNumber, "number"),
 		codec: media(value, where, "codec", isString, "string"),
 		bitrate: media(value, where, "bitrate", isNumber, "number"),
 		width: optional(value, where, "width", isNumber, "number"),
@@ -187,6 +202,8 @@ function checkTrack(value: unknown, where: string): CatalogTrack {
 	};
 	if (fields.namespace !== undefined) track.namespace = fields.namespace;
 	if (fields.role !== undefined) track.role = fields.role;
+	if (fields.renderGroup !== undefined) track.renderGroup = fields.renderGroup;
+	if (fields.altGroup !== undefined) track.altGroup = fields.altGroup;
 	if (fields.codec !== undefined) track.codec = fields.codec;
 	if (fields.bitrate !== undefined) track.bitrate = fields.bitrate;
 	if (fields.width !== undefined) track.width = fields.width;
