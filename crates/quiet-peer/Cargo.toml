@@ -1,0 +1,15 @@
+[package]
+name = "xmoq-quiet-peer"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+description = "A peer for the interop runs that takes a session and stays quiet: no SETUP, or no answer to a request"
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

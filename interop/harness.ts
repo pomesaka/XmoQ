@@ -637,6 +637,61 @@ export async function startRun(setup: {
 	return context;
 }
 
+const QUIET_PEER_BINARY = join(
+	here,
+	"..",
+	"target",
+	"debug",
+	"xmoq-quiet-peer",
+);
+
+/**
+ * Starts `xmoq-quiet-peer` (`crates/quiet-peer`), a server that takes
+ * sessions and leaves out its SETUP (`setup`), its answers to requests
+ * (`requests`), or those but for a PUBLISH_NAMESPACE (`publish`). The
+ * context has it where a run through a relay has the relay. Everything
+ * started is stopped by `runCleanups`.
+ */
+export async function startQuietPeer(setup: {
+	port: string;
+	quiet: "setup" | "requests" | "publish";
+	clients: Client[];
+}): Promise<RunContext> {
+	if (!existsSync(QUIET_PEER_BINARY)) {
+		throw new Error(
+			`${QUIET_PEER_BINARY} is missing: cargo build -p xmoq-quiet-peer`,
+		);
+	}
+	const certificate = ensureCertificate();
+	const peer = spawnLogged("quiet-peer", QUIET_PEER_BINARY, [
+		"--port",
+		setup.port,
+		"--cert-file",
+		certFile,
+		"--key-file",
+		keyFile,
+		"--quiet",
+		setup.quiet,
+	]);
+	defer(() => stopProcess(peer, "SIGTERM"));
+	await peer.waitForLine(/^LISTENING port=/);
+	const pages = await startBrowser([
+		...new Set(setup.clients.filter(isBrowserClient)),
+	]);
+	return {
+		relayUrl: `https://127.0.0.1:${setup.port}`,
+		relay: peer,
+		relayVersion: "xmoq-quiet-peer/0.0.0",
+		certSha256Hex: certificate.sha256Hex,
+		pages,
+		verbose: false,
+		// Not a relay: no run stops it and starts it anew.
+		stopRelay: () => Promise.reject(new Error("the quiet peer is not stopped")),
+		startRelayAnew: () =>
+			Promise.reject(new Error("the quiet peer is not started anew")),
+	};
+}
+
 const moqlivemockRoot = join(here, "peers", "moqlivemock", ".tools");
 
 /** `mlmpub` serves the fingerprint of its certificate on its port plus this. */
@@ -749,14 +804,11 @@ export function spawnMlmsub(
 	return { process: spawned, catalogOut };
 }
 
-export async function openConnectedPage(
+/** Opens the page of a client, which has not connected to anything yet. */
+export async function openPage(
 	context: RunContext,
 	label: string,
 	client: BrowserClient,
-	/** Own page: the longest payload of an Object it takes; the library's when left out. */
-	maxObjectPayloadLength?: number,
-	/** Own page: how long the answer to a request is waited for; the library's when left out. */
-	answerTimeoutMs?: number,
 ): Promise<Page> {
 	if (context.pages === undefined) {
 		throw new Error(`${label} needs the browser, which was not started`);
@@ -768,6 +820,19 @@ export async function openConnectedPage(
 	page.on("pageerror", (error) => log(label, `pageerror: ${error.message}`));
 	await page.goto(`${origin}${BROWSER_PAGES[client].path}`);
 	await page.waitForFunction(() => typeof window.xmoq === "object");
+	return page;
+}
+
+export async function openConnectedPage(
+	context: RunContext,
+	label: string,
+	client: BrowserClient,
+	/** Own page: the longest payload of an Object it takes; the library's when left out. */
+	maxObjectPayloadLength?: number,
+	/** Own page: how long the answer to a request is waited for; the library's when left out. */
+	answerTimeoutMs?: number,
+): Promise<Page> {
+	const page = await openPage(context, label, client);
 	await withTimeout(
 		page.evaluate(
 			([url, hash, limit, answer]) =>
