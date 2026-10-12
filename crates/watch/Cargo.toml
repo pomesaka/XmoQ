@@ -1,0 +1,13 @@
+[package]
+name = "xmoq-watch"
+version = "0.0.0"
+description = "A viewer for the terminal: what it decides without touching a terminal, a sound device or a network."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-msf = { path = "../msf" }
+serde_json = "=1.0.152"

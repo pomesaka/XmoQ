@@ -1800,6 +1800,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xmoq-watch"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "xmoq-msf",
+]
+
+[[package]]
 name = "yasna"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
