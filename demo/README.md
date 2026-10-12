@@ -11,6 +11,17 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 1. Open <http://localhost:8080/publish>. It paints a clock and publishes it; <http://localhost:8080/publish?source=camera> publishes the camera.
 2. Open <http://localhost:8080/watch> in one or more other tabs. A viewer that comes while another watches fetches the Group so far from the relay and has a picture at once; <http://localhost:8080/watch?join=no> waits for the next key frame instead, a second at most.
 
+## What is worth a try now
+
+With `mise run demo` up; each line is one thing to open, and what nobody has judged by eye and ear yet. [Every flag](#every-flag) is below.
+
+- <http://localhost:8080/publish?source=camera&audio=mic>: a real camera and microphone, which so far ran only as Chromium's fake devices. Left on for half an hour beside a watching page it also answers whether the two are timed by one clock ([the steps](../docs/experiments/2026-10-13-a-publisher-and-a-viewer-whose-clocks-run-at-different-speeds.md#for-a-person-with-a-camera-and-a-microphone-do-the-two-tracks-clocks-move-apart)).
+- <http://localhost:8080/watch?buffer=150> and <http://localhost:8080/watch?buffer=auto> beside the plain <http://localhost:8080/watch> (50 ms): which buffer is the default is open, and what is missing is how the automatic one sounds while it moves ([record](../docs/experiments/2026-10-13-the-default-playout-buffer.md), with a link to listen through).
+- <http://localhost:8080/publish?source=camera&size=720> (or `size=1080`): the camera at a larger picture.
+- <http://localhost:8080/publish?ladder=1> with <http://localhost:8080/watch?abr=1&judge=try>: two versions of the video, and a viewer that changes between them (a trial; it shows on a narrow link).
+- <http://localhost:8080/watch?wait=1>, opened **before** the publishing page: the viewer waits at the relay and plays half a second after the broadcast begins (a trial).
+- `mise run watch -- --room http://127.0.0.1:8787/rooms/demo`, in Ghostty or Kitty: the same broadcast in the terminal, with the room's chat under the picture.
+
 **The publishing page may be a tab in the background**: its clock runs in a worker, which a browser does not slow down as it does the timers of a page nobody looks at. (Before, a publisher in a background tab sent one frame a second, and no sound that was in time.) The first line under each picture has the frames a second, and the watching page a line on the sound: what goes to the loudspeaker, and how loud.
 
 **Where the delay comes from** is the second line under the watching page's picture: how long a frame took to get there (encoder, link, relay, decoder), how long it waited in the buffer, and how long for the next repaint. On one machine nearly all of it is the buffer. The buffer is set with the buttons and the slider beside "sound" while watching (or `?buffer=50`); "auto" (`?buffer=auto`, a trial, not the default) lets it follow how late things come, 400 ms at most. The default is 50 ms. The sound waits 30 ms at least, also where the buffer is less: with no wait at all its pieces come after their time and nothing sounds. With a camera, the publishing page says how long a frame took from the camera to the encoder where the browser tells; that part is not in the viewer's numbers.
