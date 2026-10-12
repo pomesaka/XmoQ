@@ -360,6 +360,40 @@ fn decode_filter(reader: &mut Reader<'_>) -> ReadResult<SubscriptionFilter> {
     })
 }
 
+/// How long the answer to a request is waited for at the least, in
+/// milliseconds, before the parameters of the request are looked at: the
+/// time the peer's SETUP gets. **Provisional.**
+pub const ANSWER_WAIT_MS: u64 = 10_000;
+
+/// The longest an answer is waited for: the longest delay a timer of a
+/// browser takes, which is what `@xmoq/moqt` can wait.
+pub const MOST_ANSWER_WAIT_MS: u64 = 2_147_483_647;
+
+/// How long the answer to a request with these parameters is waited for,
+/// in milliseconds: `base_ms`, and as long again as the request itself
+/// tells a relay to wait.
+///
+/// WHY the two parameters are added: with `RENDEZVOUS_TIMEOUT` "the relay
+/// SHOULD hold the subscription and wait for a publisher to appear, up to
+/// the specified duration" (§10.2.6), and `FILL_TIMEOUT` is "the maximum
+/// total duration in milliseconds a relay SHOULD spend waiting for
+/// upstream sources"
+/// (§10.2.5). A requester that gave up sooner would give up what it asked
+/// for. The draft names no time (§13.6: "Each implementation is expected
+/// to set its own timeouts"); `fixtures/request-answer-wait/` has the rows
+/// both implementations go by.
+#[must_use]
+pub fn answer_wait_ms(base_ms: u64, parameters: &[Parameter]) -> u64 {
+    let asked = parameters
+        .iter()
+        .map(|parameter| match parameter {
+            Parameter::RendezvousTimeout(ms) | Parameter::FillTimeout(ms) => *ms,
+            _ => 0,
+        })
+        .fold(0u64, u64::saturating_add);
+    base_ms.saturating_add(asked).min(MOST_ANSWER_WAIT_MS)
+}
+
 /// Appends `Number of Parameters` and the parameters, in ascending type order as
 /// §10.2 requires.
 pub(crate) fn encode_all(parameters: &[Parameter], out: &mut Vec<u8>) -> Result<(), UsageError> {
@@ -434,6 +468,53 @@ mod tests {
 
     fn decode(bytes: &[u8]) -> Result<Vec<Parameter>, Error> {
         parse_exact(bytes, decode_all)
+    }
+
+    /// `fixtures/request-answer-wait/waits.tsv`, which `@xmoq/moqt` reads too.
+    #[test]
+    fn an_answer_is_waited_for_as_long_as_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/request-answer-wait/waits.tsv");
+        let mut rows = 0;
+        for row in table.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [name, _request, parameter, value, wait] = fields[..] else {
+                panic!("a row of 5 fields: {row}");
+            };
+            let ms = |field: &str| field.parse::<u64>().expect(field);
+            let parameters = match parameter {
+                "-" => vec![],
+                "RENDEZVOUS_TIMEOUT" => vec![Parameter::RendezvousTimeout(ms(value))],
+                "FILL_TIMEOUT" => vec![Parameter::FillTimeout(ms(value))],
+                "SUBGROUP_DELIVERY_TIMEOUT" => {
+                    vec![Parameter::SubgroupDeliveryTimeout(ms(value))]
+                }
+                other => panic!("a parameter this test knows: {other}"),
+            };
+            assert_eq!(
+                answer_wait_ms(ANSWER_WAIT_MS, &parameters),
+                ms(wait),
+                "{name}"
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 10);
+    }
+
+    #[test]
+    fn the_wait_for_an_answer_begins_from_what_it_is_given() {
+        // (the time without a parameter; the parameters; the wait)
+        let cases = [
+            (1_500, vec![], 1_500),
+            (1_500, vec![Parameter::FillTimeout(500)], 2_000),
+            (
+                0,
+                vec![Parameter::RendezvousTimeout(u64::MAX)],
+                2_147_483_647,
+            ),
+        ];
+        for (base, parameters, wait) in cases {
+            assert_eq!(answer_wait_ms(base, &parameters), wait, "{base}");
+        }
     }
 
     #[test]

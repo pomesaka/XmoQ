@@ -39,6 +39,8 @@ export type XmoqPage = {
 		certSha256Hex: string | null,
 		/** Own page: the longest payload of an Object it takes (`limits.maxObjectPayloadLength` of `@xmoq/moqt`); the library's when left out. The moqtail page has no such limit to set. */
 		maxObjectPayloadLength?: number,
+		/** Own page: how long the answer to a request is waited for (`answerTimeoutMs` of `@xmoq/moqt`); the library's 10 seconds when left out. The moqtail page has no such wait to set. */
+		answerTimeoutMs?: number,
 	): Promise<void>;
 	publishTrack(namespace: string, trackName: string): Promise<string>;
 	sendObject(payloadHex: string): Promise<void> | void;

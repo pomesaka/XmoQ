@@ -1,0 +1,10 @@
+subscribe-with-nothing	SUBSCRIBE	-	-	10000
+subscribe-that-waits-for-a-publisher	SUBSCRIBE	RENDEZVOUS_TIMEOUT	3000	13000
+subscribe-that-does-not-wait-for-a-publisher	SUBSCRIBE	RENDEZVOUS_TIMEOUT	0	10000
+subscribe-with-a-delivery-timeout	SUBSCRIBE	SUBGROUP_DELIVERY_TIMEOUT	5000	10000
+fetch-with-nothing	FETCH	-	-	10000
+fetch-with-a-fill-timeout	FETCH	FILL_TIMEOUT	20000	30000
+fetch-that-wants-only-what-is-there	FETCH	FILL_TIMEOUT	0	10000
+fetch-with-the-largest-fill-timeout	FETCH	FILL_TIMEOUT	4611686018427387903	2147483647
+publish	PUBLISH	-	-	10000
+publish-namespace	PUBLISH_NAMESPACE	-	-	10000

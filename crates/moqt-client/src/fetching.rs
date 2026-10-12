@@ -86,6 +86,9 @@ pub enum Note {
     Body(usize, BodyEnd),
     /// The time of `--fetch-cancel-after-ms` is over for this FETCH.
     CancelDue(usize),
+    /// The time the answer to this FETCH gets is over
+    /// (`xmoq_moqt::params::answer_wait_ms`).
+    AnswerDue(usize),
 }
 
 /// How the fetch stream of a FETCH ended.
@@ -148,6 +151,9 @@ pub enum Happened {
     StreamRefused,
     /// The client leaves while the FETCH is open.
     Left,
+    /// The time its answer gets is over. Nothing for a FETCH that was
+    /// answered.
+    NotAnsweredInTime,
 }
 
 /// What the session has to hear of a step.
@@ -258,7 +264,12 @@ pub fn step(progress: Progress, happened: Happened) -> Step {
         // The session has ended the request with the answer.
         Happened::Refused => ends("refused", None, false, None),
         Happened::UnsupportedTrackProperty => ends("unsupported_track_property", None, true, None),
-        Happened::RequestClosed(RequestClose::Fin) if progress.answered => nothing,
+        // The time was for the answer, not for the Objects.
+        Happened::RequestClosed(RequestClose::Fin) | Happened::NotAnsweredInTime
+            if progress.answered =>
+        {
+            nothing
+        }
         Happened::RequestClosed(RequestClose::Fin) => ends(
             "request_finished_unanswered",
             None,
@@ -273,6 +284,7 @@ pub fn step(progress: Progress, happened: Happened) -> Step {
         Happened::GaveUp => ends("cancelled", None, true, Some(Tell::Cancel)),
         Happened::StreamRefused => ends("stream_refused", None, true, Some(Tell::Cancel)),
         Happened::Left => ends("left", None, true, Some(Tell::Cancel)),
+        Happened::NotAnsweredInTime => ends("no_answer_in_time", None, true, Some(Tell::Cancel)),
     }
 }
 
@@ -343,10 +355,24 @@ impl Fetches {
     }
 
     /// Takes over the request stream of a FETCH that was sent on it.
-    pub fn add(&mut self, id: RequestId, group_order: GroupOrder, stream: RequestStream) {
+    /// `answer_wait` is how long its answer gets; then the FETCH is given
+    /// up ([`Happened::NotAnsweredInTime`]).
+    pub fn add(
+        &mut self,
+        id: RequestId,
+        group_order: GroupOrder,
+        stream: RequestStream,
+        answer_wait: Duration,
+    ) {
         let index = self.sent.len();
         let (request, cancelled) = oneshot::channel();
         tokio::spawn(watch_request(index, stream, cancelled, self.queue.clone()));
+        let notes = self.queue.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(answer_wait).await;
+            // The client is gone when this fails.
+            let _ = notes.send(Note::AnswerDue(index)).await;
+        });
         if let Some(after) = self.reading.cancel_after {
             let notes = self.queue.clone();
             tokio::spawn(async move {
@@ -813,6 +839,29 @@ mod tests {
                 Some(("left", None, true)),
                 (false, FIN),
             ),
+            (
+                (false, None),
+                Happened::NotAnsweredInTime,
+                cancel,
+                Some(("no_answer_in_time", None, true)),
+                (false, None),
+            ),
+            // Its stream came before its answer: the answer is still owed.
+            (
+                (false, FIN),
+                Happened::NotAnsweredInTime,
+                cancel,
+                Some(("no_answer_in_time", None, true)),
+                (false, FIN),
+            ),
+            // Answered: the time was for the answer, not for the Objects.
+            (
+                (true, None),
+                Happened::NotAnsweredInTime,
+                None,
+                None,
+                (true, None),
+            ),
         ]);
     }
 
@@ -830,6 +879,7 @@ mod tests {
             Happened::StreamEnded(StreamEnded::Reset(None)),
             Happened::GaveUp,
             Happened::Left,
+            Happened::NotAnsweredInTime,
         ] {
             let step = step(over, happened);
             assert_eq!(

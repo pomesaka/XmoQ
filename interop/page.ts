@@ -530,9 +530,11 @@ window.xmoq = {
 			relayUrl: string,
 			certSha256Hex: string | null,
 			maxObjectPayloadLength?: number,
+			answerTimeoutMs?: number,
 		) => {
 			connection = await connect(relayUrl, {
 				implementation: "xmoq-moqt/0.0.0",
+				...(answerTimeoutMs === undefined ? {} : { answerTimeoutMs }),
 				...(maxObjectPayloadLength === undefined
 					? {}
 					: { limits: { maxObjectPayloadLength } }),

@@ -7,7 +7,11 @@ import {
 } from "../core/error.ts";
 import type { FetchObject, RangeEnd } from "../core/fetch.ts";
 import type { KeyValuePair } from "../core/key-value-pair.ts";
-import type { SessionLimits } from "../core/limits.ts";
+import {
+	answerWaitMs,
+	DEFAULT_ANSWER_WAIT_MS,
+	type SessionLimits,
+} from "../core/limits.ts";
 import type {
 	OutgoingObject,
 	SubgroupOptions,
@@ -225,6 +229,23 @@ export interface SessionConnectOptions {
 	 * in time.
 	 */
 	setupTimeoutMs?: number;
+	/**
+	 * How long the answer to a request is waited for, 10000 when left out
+	 * (**provisional**); a SUBSCRIBE with a RENDEZVOUS_TIMEOUT and a FETCH
+	 * with a FILL_TIMEOUT are waited for that much longer (`answerWaitMs`).
+	 * When it is over the request alone is cancelled, as `cancel()` does it
+	 * (its stream is reset with CANCELLED), and fails with a
+	 * `RequestAbortedError` of `no-answer-in-time`; **the session stays
+	 * open**. A whole number as for `setupTimeoutMs`.
+	 *
+	 * WHY the request and not the session, which §3.5 has a code for
+	 * (CONTROL_MESSAGE_TIMEOUT, "the peer took too long to respond to a
+	 * control message"): a relay answers a SUBSCRIBE when the publisher
+	 * behind it has, so one slow publisher would end every other
+	 * subscription of the session. docs/moqt-implementation-notes.md has the
+	 * row, and the Rust client does the same.
+	 */
+	answerTimeoutMs?: number;
 	/**
 	 * How long a subscription waits for late streams after PUBLISH_DONE when
 	 * its Stream Count is not reached (§10.11). With 0 it does not wait: the
@@ -932,6 +953,10 @@ export async function connectOver(
 		"setupTimeoutMs",
 		options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
 	);
+	const answerTimeoutMs = timerDelay(
+		"answerTimeoutMs",
+		options.answerTimeoutMs ?? DEFAULT_ANSWER_WAIT_MS,
+	);
 	const session: Session = createSession({
 		implementation: options.implementation,
 		authorizationToken: options.authorizationToken,
@@ -1111,7 +1136,8 @@ export async function connectOver(
 				aborted({ type: "unsupported-track-property" });
 				break;
 			case "cancelled":
-				fetch.response.reject(new RequestAbortedError({ type: "cancelled" }));
+			case "no-answer-in-time":
+				fetch.response.reject(new RequestAbortedError({ type: end.type }));
 				fetch.body.abort(new FetchEndedError(end));
 				break;
 			case "session-closed": {
@@ -1414,22 +1440,34 @@ export async function connectOver(
 	};
 
 	/** Registers a FETCH the session has just taken, so that what comes for it finds it. */
-	const fetchFrom = (requestId: bigint, groupOrder: GroupOrder): Fetch => {
-		const cancel = (): Promise<void> => {
+	const fetchFrom = (
+		requestId: bigint,
+		groupOrder: GroupOrder,
+		answerWait: number,
+	): Fetch => {
+		const giveUp = (type: "cancelled" | "no-answer-in-time"): Promise<void> => {
 			if (!fetches.has(requestId)) return Promise.resolve();
-			endFetch(requestId, { type: "cancelled" });
+			endFetch(requestId, { type });
 			// The session agrees: cancelling after the end does nothing.
 			if (sessionClose !== undefined) return Promise.resolve();
 			return applyVoid((s) => s.cancelRequest(requestId));
 		};
+		const cancel = (): Promise<void> => giveUp("cancelled");
 		const active: ActiveFetch = {
 			body: createObjectQueue<Uint8Array>(FETCH_BODY_HIGH_WATER_MARK, cancel),
 			response: deferred(),
 			ended: deferred(),
 			streamEnd: undefined,
 		};
+		// WHY the rejection is dropped: a reset that could not be written ends
+		// the session, and `closed` and `ended` report that.
+		const unanswered = setTimeout(() => {
+			giveUp("no-answer-in-time").catch(() => {});
+		}, answerWait);
 		// A caller that reads `body` and `ended` alone leaves this unhandled.
-		active.response.promise.catch(() => {});
+		active.response.promise
+			.catch(() => {})
+			.finally(() => clearTimeout(unanswered));
 		fetches.set(requestId, active);
 		return {
 			requestId,
@@ -1994,13 +2032,29 @@ export async function connectOver(
 	/** Sends a request and waits for its response. `pending` is where the response is delivered. */
 	const request = <T>(
 		pending: Map<bigint, Deferred<T>>,
+		parameters: MessageParameters | undefined,
 		action: (session: Session) => SessionResult<bigint>,
 	): Promise<T> => {
 		const response = deferred<T>();
+		let unanswered: ReturnType<typeof setTimeout> | undefined;
 		apply((s) => {
 			const result = action(s);
+			const requestId = result.value;
 			// Registered before the request is sent, so the response finds it.
-			pending.set(result.value, response);
+			pending.set(requestId, response);
+			unanswered = setTimeout(
+				() => {
+					if (pending.get(requestId) !== response) return;
+					rejectPending(
+						requestId,
+						new RequestAbortedError({ type: "no-answer-in-time" }),
+					);
+					// WHY the rejection is dropped: a reset that could not be
+					// written ends the session, and `closed` reports that.
+					applyVoid((s) => s.cancelRequest(requestId)).catch(() => {});
+				},
+				answerWaitMs(answerTimeoutMs, parameters),
+			);
 			return result;
 		}).catch(async (error: unknown) => {
 			// WHY one turn of the timers before the error is given: where the
@@ -2024,7 +2078,7 @@ export async function connectOver(
 					: new SessionClosedError(sessionClose),
 			);
 		});
-		return response.promise;
+		return response.promise.finally(() => clearTimeout(unanswered));
 	};
 
 	const setupTimer = setTimeout(
@@ -2070,7 +2124,7 @@ export async function connectOver(
 		peerSetupOptions,
 		closed: closed.promise,
 		publishNamespace(trackNamespace, parameters) {
-			return request(pendingNamespaces, (s) =>
+			return request(pendingNamespaces, parameters, (s) =>
 				s.publishNamespace({
 					trackNamespace,
 					parameters: authorized(parameters),
@@ -2082,14 +2136,14 @@ export async function connectOver(
 				...asked,
 				parameters: authorized(asked.parameters),
 			};
-			return request(pendingPublishes, (s) => {
+			return request(pendingPublishes, asked.parameters, (s) => {
 				const result = s.publish(publishRequest);
 				pendingPublishAliases.set(result.value, publishRequest.trackAlias);
 				return result;
 			});
 		},
 		subscribe(asked) {
-			return request(pendingSubscribes, (s) =>
+			return request(pendingSubscribes, asked.parameters, (s) =>
 				s.subscribe({ ...asked, parameters: authorized(asked.parameters) }),
 			);
 		},
@@ -2108,6 +2162,7 @@ export async function connectOver(
 					value: fetchFrom(
 						value,
 						fetchRequest.parameters?.groupOrder ?? "Ascending",
+						answerWaitMs(answerTimeoutMs, fetchRequest.parameters),
 					),
 					outputs,
 				};

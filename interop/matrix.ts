@@ -41,7 +41,8 @@ interface Pairing {
 		| "catalog.ts"
 		| "video.ts"
 		| "video-rust.ts"
-		| "watch-rust.ts";
+		| "watch-rust.ts"
+		| "no-answer.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -1071,6 +1072,20 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			script: "watch-rust.ts",
 			args: ["--watch", "from-mlmpub"],
 			relay: "none",
+		},
+		// A publisher that holds its answer back: the subscriber gives its
+		// SUBSCRIBE up after the time its answer gets, and its session stays.
+		{
+			name: "own relay: no answer: own-browser gives up a SUBSCRIBE that is not answered in time, and its session goes on",
+			script: "no-answer.ts",
+			args: ["--subscriber", "own-browser"],
+			relay: "own",
+		},
+		{
+			name: "own relay: no answer: own-rust gives up a SUBSCRIBE that is not answered in time, and closes its session itself",
+			script: "no-answer.ts",
+			args: ["--subscriber", "own-rust"],
+			relay: "own",
 		},
 		// A page encodes and publishes video, and another plays it: through
 		// each relay, with each way of putting Objects onto streams.
