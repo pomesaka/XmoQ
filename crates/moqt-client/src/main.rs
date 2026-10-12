@@ -600,18 +600,6 @@ fn read_cert_sha256(text: Option<String>) -> Result<[u8; 32]> {
 }
 
 /// The value of a flag that takes milliseconds.
-/// What else the stream of an Established SUBSCRIBE carries: the answers to
-/// `--update-subgroup-timeout-ms`. After a refusal the publisher's
-/// `PUBLISH_DONE` follows (§10.9.1).
-fn update_answered(event: RequestEvent) -> Result<()> {
-    match event {
-        RequestEvent::UpdateAccepted { .. } => report::update_answered(None),
-        RequestEvent::UpdateFailed(error) => report::update_answered(Some(error.error_code)),
-        other => bail!("unexpected message on the subscribe stream: {other:?}"),
-    }
-    Ok(())
-}
-
 fn millis(flag: &str, value: &str) -> Result<u64> {
     value.parse().with_context(|| flag.to_string())
 }
@@ -818,6 +806,9 @@ struct Client<'a> {
     /// session forgets the request only when it is told that the stream is
     /// gone.
     said_the_last: HashMap<u64, PeerRequestId>,
+    /// Taken when the answer to `--update-subgroup-timeout-ms` comes; the
+    /// wait for it ends then ([`Client::send_update`]).
+    update_answer: Option<tokio::sync::oneshot::Sender<()>>,
     /// The Largest Object of the track this client publishes.
     largest: Largest,
     /// The refusals that wait for `--answer-delay-ms`. They go with the
@@ -1010,11 +1001,8 @@ impl Client<'_> {
         };
         report::subscribed(track_alias);
         if let Some(milliseconds) = self.args.update_subgroup_timeout_ms {
-            let update = self.session.update_subscription(
-                request_id,
-                vec![Parameter::SubgroupDeliveryTimeout(milliseconds)],
-            )?;
-            stream.send(&update).await?;
+            self.send_update(request_id, &mut stream, milliseconds)
+                .await?;
         }
         if let Some((range, false)) = joining {
             self.send_fetch(&mut fetches, range).await?;
@@ -1025,6 +1013,58 @@ impl Client<'_> {
         // The subscription can be over before its Joining FETCH is.
         self.leave_fetches(&mut fetches);
         received
+    }
+
+    /// `--update-subgroup-timeout-ms`: sends the `REQUEST_UPDATE` for the
+    /// subscription, and starts the wait for its answer.
+    ///
+    /// The answer gets the time a request gets (`--answer-wait-ms`), counted
+    /// from when the update is written. When it is over
+    /// `ANSWER_TIMED_OUT request=update` is printed and nothing else
+    /// happens. WHY the subscription goes on: an update is no request of
+    /// its own that could be cancelled alone (§10.9 has it on the stream
+    /// of the SUBSCRIBE), and giving the subscription up for it would cost
+    /// more than the update was for. The browser client does the same
+    /// (`Subscription.update`).
+    async fn send_update(
+        &mut self,
+        request_id: RequestId,
+        stream: &mut RequestStream,
+        milliseconds: u64,
+    ) -> Result<()> {
+        let parameters = vec![Parameter::SubgroupDeliveryTimeout(milliseconds)];
+        let wait = xmoq_moqt::params::answer_wait_ms(self.args.answer_wait_ms, &parameters);
+        let update = self.session.update_subscription(request_id, parameters)?;
+        stream.send(&update).await?;
+        let (answered, answer) = tokio::sync::oneshot::channel();
+        self.update_answer = Some(answered);
+        tokio::spawn(async move {
+            // An error: the client is gone, and nobody waits any more.
+            if tokio::time::timeout(Duration::from_millis(wait), answer)
+                .await
+                .is_err()
+            {
+                report::answer_timed_out("update", wait);
+            }
+        });
+        Ok(())
+    }
+
+    /// What else the stream of an Established SUBSCRIBE carries: the answers
+    /// to `--update-subgroup-timeout-ms`, also one that comes after its
+    /// time. After a refusal the publisher's `PUBLISH_DONE` follows
+    /// (§10.9.1).
+    fn update_answered(&mut self, event: RequestEvent) -> Result<()> {
+        match event {
+            RequestEvent::UpdateAccepted { .. } => report::update_answered(None),
+            RequestEvent::UpdateFailed(error) => report::update_answered(Some(error.error_code)),
+            other => bail!("unexpected message on the subscribe stream: {other:?}"),
+        }
+        if let Some(answered) = self.update_answer.take() {
+            // An error: its time was over already.
+            let _ = answered.send(());
+        }
+        Ok(())
     }
 
     /// `--mode fetch`: sends the Standalone FETCH requests and sees each to
@@ -1380,7 +1420,7 @@ impl Client<'_> {
                                 report::publish_done_received(&done);
                                 drain_deadline = Some(Instant::now() + DRAIN_TIMEOUT);
                             }
-                            other => update_answered(other)?,
+                            other => self.update_answered(other)?,
                         }
                     }
                     RequestStreamEvent::Closed(how) => {
@@ -2592,6 +2632,7 @@ async fn run_session(
         open_streams: HashMap::new(),
         peer_requests,
         said_the_last: HashMap::new(),
+        update_answer: None,
         largest: Largest::default(),
         later: tokio::task::JoinSet::new(),
         published: Published::default(),

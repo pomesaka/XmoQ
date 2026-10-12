@@ -120,6 +120,15 @@ test.each<{ name: string; act: (session: Session) => unknown }>([
 		act: (session) => session.updateSubscription(0n, { expires: 5n }),
 	},
 	{
+		// PUBLISH_DONE TRACK_ENDED (0x2) with a Stream Count of 1: the entry
+		// stays for the stream that is counted, and is Terminated (§5.1).
+		name: "a subscription whose PUBLISH_DONE came",
+		act: (session) => {
+			session.receiveRequestStreamData(1, hex("0b 00 03 02 01 00"), false);
+			return session.updateSubscription(0n, {});
+		},
+	},
+	{
 		name: "a seventeenth update while sixteen wait for their answer",
 		act: (session) => {
 			for (let sent = 0; sent < 16; sent++) session.updateSubscription(0n, {});

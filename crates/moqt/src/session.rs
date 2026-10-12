@@ -211,7 +211,7 @@ pub enum RequestEvent {
     /// follows (§10.9.1) and ends it as any other.
     UpdateFailed(RequestError),
     /// `REQUEST_UPDATE` from the subscriber of a track this endpoint
-    /// publishes, with no parameter or `SUBGROUP_DELIVERY_TIMEOUT` alone:
+    /// publishes, with no parameter but delivery timeouts:
     /// as [`PeerRequestEvent::SubscriptionUpdated`], for a subscription
     /// that a PUBLISH made. The caller sends `response`, a `REQUEST_OK`.
     SubscriptionUpdated {
@@ -412,7 +412,10 @@ impl Session {
     /// Fails for a request that is not an Established SUBSCRIBE of this
     /// endpoint, when a parameter may not appear in `REQUEST_UPDATE`, when
     /// [`MAX_UNANSWERED_UPDATES`] updates wait for their answer, and when
-    /// the Request IDs are used up (§10.1: an update consumes one).
+    /// the Request IDs are used up (§10.1: an update consumes one). **A
+    /// publisher that answers none leaves the subscription unable to be
+    /// updated after that many**: the session has no clock, and a caller
+    /// that stops waiting does not make room.
     pub fn update_subscription(
         &mut self,
         request: RequestId,
@@ -1892,7 +1895,7 @@ mod tests {
             (vec![], Ok(None)),
             (vec![Parameter::SubgroupDeliveryTimeout(250)], Ok(Some(250))),
             (vec![Parameter::SubgroupDeliveryTimeout(0)], Ok(Some(0))),
-            (vec![Parameter::ObjectDeliveryTimeout(250)], Err(())),
+            (vec![Parameter::ObjectDeliveryTimeout(250)], Ok(None)),
             (
                 vec![
                     Parameter::SubgroupDeliveryTimeout(250),
@@ -1981,6 +1984,38 @@ mod tests {
             Ok(RequestEvent::UpdateAccepted {
                 parameters: vec![Parameter::Expires(9)]
             })
+        );
+        // After PUBLISH_DONE there is no subscription to update (§5.1).
+        let mut ended = client();
+        let (over, _) = ended.subscribe(track(b"a"), vec![]).unwrap();
+        ended.feed(over, subscribe_ok(7, vec![])).unwrap();
+        ended
+            .feed(over, ControlMessage::PublishDone(publish_done()))
+            .unwrap();
+        assert_eq!(
+            ended.update_subscription(over, vec![]),
+            Err(UsageError("not an established subscription of a SUBSCRIBE"))
+        );
+        // `MAX_UNANSWERED_UPDATES` wait at most, and one that is not sent
+        // uses up no Request ID: the next one after an answer has the ID
+        // that follows the sixteenth.
+        let mut waiting = client();
+        let (asked, _) = waiting.subscribe(track(b"a"), vec![]).unwrap();
+        waiting.feed(asked, subscribe_ok(7, vec![])).unwrap();
+        for sent in 0..16 {
+            assert_eq!(
+                waiting.update_subscription(asked, vec![]),
+                Ok(update(2 + 2 * sent, vec![]))
+            );
+        }
+        assert_eq!(
+            waiting.update_subscription(asked, vec![]),
+            Err(UsageError("too many updates wait for their answer"))
+        );
+        waiting.feed(asked, request_ok(vec![])).unwrap();
+        assert_eq!(
+            waiting.update_subscription(asked, vec![]),
+            Ok(update(34, vec![]))
         );
         // The refusal answers what is left, and PUBLISH_DONE ends it.
         assert_eq!(

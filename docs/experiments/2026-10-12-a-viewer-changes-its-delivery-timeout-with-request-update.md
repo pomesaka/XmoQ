@@ -34,7 +34,7 @@ That a subscriber can change the SUBGROUP_DELIVERY_TIMEOUT of a subscription it 
 
 ## What was built
 
-- **The rule, in both sessions**: a REQUEST_UPDATE for an Established subscription this endpoint publishes is answered with REQUEST_OK when it carries nothing, or SUBGROUP_DELIVERY_TIMEOUT alone. With any other parameter it is refused as before (NOT_SUPPORTED, then PUBLISH_DONE UPDATE_FAILED).
+- **The rule, in both sessions**: a REQUEST_UPDATE for an Established subscription this endpoint publishes is answered with REQUEST_OK when it carries nothing but delivery timeouts (SUBGROUP_DELIVERY_TIMEOUT, and OBJECT_DELIVERY_TIMEOUT, which nobody acts on, as in a SUBSCRIBE). With any other parameter it is refused as before (NOT_SUPPORTED, then PUBLISH_DONE UPDATE_FAILED).
 - **The relay** takes the new time for the subscription, and for every stream towards the subscriber that it learns the end of after the update; a stream whose timer runs keeps its time (**provisional**; [the implementation notes](../moqt-implementation-notes.md) have the row). 0 takes the timeout away. `--delivery-patience-ms` holds as before, the smaller of the two.
 - **Sending**: `Subscription.update` of `@xmoq/moqt`, `setDeliveryTimeouts` of the playback of `playVideoTrack`, `Session::update_subscription` of `xmoq-moqt`, `--update-subgroup-timeout-ms` of the Rust client. At most 16 updates of a subscription wait for their answer.
 - **Fixtures**: `fixtures/moqt-18-from-libraries/` has two REQUEST_UPDATEs as `moqtail`'s npm package serializes them (a timeout of 250 ms, and of 0); both implementations decode them and encode the same bytes, and the page's own update is those bytes.
@@ -84,4 +84,5 @@ The four are pairings of `mise run interop` from here on. **That a relay acts on
 - A viewer can change the timeout on its video without subscribing anew, and the relay follows from the next Group that ends.
 - Not built: a page that changes the timeout by itself. The rule of the record before (the sound's lateness) showed no gain worth a pause at each change; without the pause it could be looked at again.
 - Not known: how long a viewer that asks for a timeout late takes to catch up; any of it on a real network.
-- Not done: updates of a filter, the Forward State, the priority, NEW_GROUP_REQUEST and OBJECT_DELIVERY_TIMEOUT (refused, and the subscription ends); updates of a FETCH, of a PUBLISH_NAMESPACE, and of a subscription a PUBLISH made, from a subscriber of ours; a time limit for the answer in the Rust client.
+- Not done: updates of a filter, the Forward State, the priority and NEW_GROUP_REQUEST (refused, and the subscription ends); acting on OBJECT_DELIVERY_TIMEOUT; updates of a FETCH, of a PUBLISH_NAMESPACE, and of a subscription a PUBLISH made, from a subscriber of ours.
+- **Not run**: an update that gets no answer. Both clients give the answer the time a request gets and then leave the subscription as it is; on loopback every answer came within the 1 and 2 ms that were tried, so the path was not seen with a real peer.
