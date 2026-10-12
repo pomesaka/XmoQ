@@ -106,3 +106,22 @@ The same link and picture as above; the relay with the change.
 - **A relay that schedules by priority is what the draft asks (§7.2, SHOULD), and it does not mend this.** It would where the relay itself holds a backlog that the sound stands behind, which this relay does not have between two subscriptions of one viewer: the transport already gave each stream its turn.
 - What would mend it is on the viewer's side or the sender's: a buffer for the sound that follows how late the sound comes (the automatic buffer does, and the terminal viewer played 23.4 of 24 s with it), a sender that keeps the link's queue short (a congestion control that does, or a video that fits: the small version), or less in the queue (a shorter timeout does not shorten it).
 - Not known: a real network, whose queues are not one FIFO of 100 ms; loss; many subscribers behind one relay, where a relay does hold a backlog.
+
+## What an automatic buffer by default would cost: what the records have, and what they lack
+
+Nothing here was run anew. The automatic buffer (`/watch?buffer=auto`, `xmoq-watch --buffer-ms auto`; `fixtures/playout/` has the rule both go by) holds what 99 of 100 Objects of the last 10 seconds came within, and 10 ms more, from 50 ms where it begins up to 400 ms.
+
+| Link | Where it stands | What it costs or gains against the fixed 50 ms | Record |
+|---|---|---|---|
+| No link, or 50 ms each way with no loss | 40 ms (the rule's least there) | Nothing that was measured: a frame is shown 27 ms after it was made with no link and 79 to 81 ms at 50 ms each way, where a fixed 150 ms has 147 and 192 to 196 ms; no break in the sound, and 175 pieces played slower or faster in 20 s where the fixed buffer has 12. The fixed 50 ms on that link is not in the record | [delay](2026-10-11-where-the-delay-of-the-demo-comes-from.md) |
+| 50 ms each way, 1% loss | 110 to 140 ms, moving | 6 to 10 breaks in the sound in a run and 7 to 20 pieces too late, where a fixed 150 ms leaves 1 break and none too late; the picture 162 to 175 ms after it was made against 197: the buffer covers 99 of 100 and the hundredth is the break | [delay](2026-10-11-where-the-delay-of-the-demo-comes-from.md) |
+| 50 ms each way, 5% loss | 360 to 400 ms | 0 to 5 breaks and the picture about 460 ms after it was made, where a fixed 150 ms has 23 to 41 breaks and 215 ms | [sound-following buffer](2026-10-12-a-timeout-and-a-buffer-that-follow-the-sound.md) |
+| 2 Mbit/s with a video of 2.5 | **400 ms, the limit, throughout**, page and terminal viewer | The sound whole (the terminal viewer plays 23.1 to 23.5 of 24 s, against 8 to 17 s with 50 ms), and picture and sound together about 480 ms behind. A fixed 150 ms on the page, or 300 ms in the terminal, plays all of the sound with less delay, and has the picture come after the sound | [sound-following buffer](2026-10-12-a-timeout-and-a-buffer-that-follow-the-sound.md), [terminal](2026-10-12-the-terminal-viewer-has-the-pages-automatic-buffer.md) |
+
+- **Where the link is good the automatic buffer costs nothing that was measured, and where it loses packets it is better than 50 ms and worse than a fixed 150 ms by a few breaks.** On the narrow link it keeps the sound and puts everything nearly half a second behind, because it follows the video's lateness too; the one that follows the sound alone stood at 110 ms there and let picture and sound be 230 to 270 ms apart, and was not taken.
+- **What is lacking for a decision**:
+  - the fixed 50 ms on the links with loss, run beside the automatic one (the record of 1% has 150 ms and automatic; the default itself was not in it);
+  - how the buffer moving sounds: pieces are played a twentieth slower or faster while it changes (27 to 330 packets a run in the terminal viewer), and nobody listened to that;
+  - the first seconds: the buffer begins at 50 ms and grows when 50 Objects have come, and the terminal viewer's underruns with it (25 to 56 a run) are thought to be of that beginning, which was not written down by the second;
+  - a link that is good and then bad and good again: how long the buffer stays large after the bad time (it shrinks 10 ms twice a second, so 400 ms take 18 s to come back to 40);
+  - a real network.
