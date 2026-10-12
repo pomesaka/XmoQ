@@ -71,3 +71,25 @@ node spikes/lossy-link/proxy.mjs --listen 45386 --to 45382 --control 45387
 - **With Firefox as the publisher the buffer does nothing for the picture**: Chromium showed a frame 14 ms after it was made where the buffer was 150 ms, the frame having waited 4 ms. `createPlayout` counts picture and sound from the fastest of either, and Firefox's Opus carries times about 100 ms ahead (above, from 2026-10-11): the sound sets the clock, and the picture is late by that much before it begins. Picture and sound are then that far apart as well. Not looked into further.
 - **The numbers while the link was narrow say nothing about a browser**: in this script the publisher went through the same proxy as the viewer, whose `rate` is shared by all, so 1 Mbit/s was less than the publisher needed to send. That the version changed and came back is what the row has.
 - One run each, headless; nothing was seen or heard.
+
+## 2026-10-12: where the 100 ms of Firefox's sound came from
+
+The sound of a Firefox publisher carried times about 100 ms ahead (above). It was the demo's doing, not Firefox's, and is mended in `demo/publish.ts`.
+
+- **Not the encoder.** `AudioEncoder` was given 25 pieces of 20 ms with the times 0, 20,000, ... in both browsers (a script outside the repository). Chromium 156 gave chunks with the times 0, 20,000, 40,000, ...; Firefox 157 gave 0, 13,500, 33,500, ...: from the second chunk on 6.5 ms earlier than the piece, which is 312 samples at 48,000 Hz, the look-ahead of libopus as it is commonly given (not read from a source here). Nothing near 100 ms. Both gave 26 chunks for 25 pieces, the last at the flush.
+- **Not `createAudioTrackEncoder`** as such: it takes the first piece it is given for "now", and counts the others from it by their own times. That holds for a source that hands its pieces in as they are made.
+- **The demo's tone did not**: it counted its pieces from the moment it was set up and made them at the ticks of a timer in a worker, which takes a while to start, about 10 ms in Chromium and about 100 ms in Firefox. The first tick made all the pieces of that while at once, so the piece that was taken for "now" was the oldest of them, and every piece after carried a time that much ahead of when it was made. Now the tone counts from its first tick.
+- The 6.5 ms of Firefox's encoder is left as it is.
+
+Chromium watching, buffer 150 ms, two runs each, 7 s (medians):
+
+| Publisher | | A piece of sound came (after the time it carries) | A frame waited in the buffer | The picture's mark after the sound's, as played |
+|---|---|---|---|---|
+| Firefox | before | -117, -106 ms | 23, 33 ms | -88, -82 ms |
+| Firefox | after | 14, 13 ms | 148, 147 ms | 35, 7 ms |
+| Chromium | before | -11, -11 ms | 133, 134 ms | -5, -1 ms |
+| Chromium | after | 9, 9 ms | 148, 149 ms | 38, 5 ms |
+
+- **Chromium had the same fault, at 11 ms**: its buffer of 150 ms held a frame for 133 ms, and now for 148.
+- The mark of the picture now comes 5 to 38 ms after the sound's. A frame is painted every 33 ms, so the first frame with the mark is up to that long after the moment the sound has it; before, the sound's lead hid it.
+- `bun demo/check.ts` before and after: 30 frames and 50 pieces of sound a second, 0 breaks in 4 s, "THE DEMO PLAYS" (once before, twice after).
