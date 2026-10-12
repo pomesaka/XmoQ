@@ -254,6 +254,10 @@ const { values: options } = parseArgs({
 		mapping: { type: "string", default: "stream-per-group" },
 		// page-to-page: "bars", or "noise" for frames an encoder cannot make small.
 		picture: { type: "string", default: "bars" },
+		// page-to-page: the viewer sends SUBGROUP_DELIVERY_TIMEOUT and
+		// OBJECT_DELIVERY_TIMEOUT of this many milliseconds with its SUBSCRIBE;
+		// neither without it.
+		"delivery-timeout-ms": { type: "string", default: "" },
 		verbose: { type: "boolean", default: false },
 	},
 });
@@ -494,8 +498,22 @@ async function pageToPage(): Promise<string> {
 	const before = Date.now() * 1000;
 	const report = await withTimeout(
 		viewer.evaluate(
-			async ([namespace, name, codec, frames, timeoutMs]) => {
-				await window.xmoqOwn.playVideo(namespace, name, codec, true);
+			async ([
+				namespace,
+				name,
+				codec,
+				frames,
+				timeoutMs,
+				deliveryTimeoutMs,
+			]) => {
+				await window.xmoqOwn.playVideo(
+					namespace,
+					name,
+					codec,
+					true,
+					false,
+					deliveryTimeoutMs ?? undefined,
+				);
 				return window.xmoqOwn.videoReport(frames, timeoutMs);
 			},
 			[
@@ -504,7 +522,11 @@ async function pageToPage(): Promise<string> {
 				codec,
 				FRAMES,
 				PLAY_TIMEOUT_MS,
-			] satisfies [string, string, string, number, number],
+				// The viewer's delivery timeouts, where the run asks for them.
+				options["delivery-timeout-ms"] === ""
+					? null
+					: Number(options["delivery-timeout-ms"]),
+			] satisfies [string, string, string, number, number, number | null],
 		),
 		`the viewer to report on its playing, which it does after ${PLAY_TIMEOUT_MS} ms at the latest`,
 		PLAY_TIMEOUT_MS + 5_000,

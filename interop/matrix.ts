@@ -1081,6 +1081,21 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 				})),
 			),
 		),
+		// The same with delivery timeouts in the viewer's SUBSCRIBE (transport
+		// §8): no relay here acts on them, and neither is to refuse them.
+		...relays.map((relay) => ({
+			name: `${relay} relay: video: a viewer that sends delivery timeouts with its SUBSCRIBE plays the video of an own page`,
+			script: "video.ts" as const,
+			args: [
+				"--video",
+				"page-to-page",
+				"--through",
+				relay,
+				"--delivery-timeout-ms",
+				"10000",
+			],
+			relay,
+		})),
 		...(relays.includes("own")
 			? [
 					{

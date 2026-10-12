@@ -21,6 +21,8 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 
 `/publish?size=720` and `size=1080` send 1280x720 and 1920x1080 where the page otherwise sends 640x360, at 3 and 6 Mbit/s unless `?bitrate=` says otherwise, and ask a camera for that size ([record](../docs/experiments/2026-10-12-the-demo-at-720-and-1080-lines.md)).
 
+`/watch?videoTimeout=500` and `?audioTimeout=N` send a SUBGROUP_DELIVERY_TIMEOUT with the SUBSCRIBE of the one track; the relay does not act on it yet ([record](../docs/experiments/2026-10-12-delivery-timeouts-of-a-subscription-what-draft-18-has-and-who-does-what.md)).
+
 `/publish?keyint=2000` makes a Group two seconds long (a second when left out), and `/watch?join=no` waits for the next key frame where the page otherwise fetches the Group it comes into ([record](../docs/experiments/2026-10-12-the-first-picture-of-a-viewer-who-comes-late-fetch-or-wait.md)).
 
 **Two versions of the video (a trial)**: `/publish?ladder=1` encodes the picture a second time at 320x180 and 500 kbit/s and has both tracks in one alternate group of the catalog; `/watch?abr=1` plays the smaller one while the picture comes late and the larger one again when it has come in time for a while ([record](../docs/experiments/2026-10-12-two-versions-of-the-video-and-a-viewer-that-changes-between-them.md)). Without the two flags the demo is as before.

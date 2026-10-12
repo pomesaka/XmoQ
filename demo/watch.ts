@@ -554,6 +554,17 @@ async function main(): Promise<void> {
 					trackNamespace: trackNamespaceOf(track, playingNamespace),
 					trackName: utf8.encode(track.name),
 					codec: track.codec ?? "",
+					// `?videoTimeout=N`: asks the sender to give a Group of video
+					// up N ms after its end (SUBGROUP_DELIVERY_TIMEOUT); nothing
+					// is asked without it. Whether the relay acts on it is the
+					// relay's.
+					...(query.get("videoTimeout") === null
+						? {}
+						: {
+								deliveryTimeouts: {
+									subgroupMs: Number(query.get("videoTimeout")),
+								},
+							}),
 					...more,
 				});
 			/** Stops the version that is played. */
@@ -646,6 +657,14 @@ async function main(): Promise<void> {
 				// From the catalog; the demo's own where a catalog has none.
 				sampleRate: sound.samplerate ?? SAMPLE_RATE,
 				numberOfChannels: Number(sound.channelConfig ?? 1),
+				// `?audioTimeout=N`: the same for the sound.
+				...(query.get("audioTimeout") === null
+					? {}
+					: {
+							deliveryTimeouts: {
+								subgroupMs: Number(query.get("audioTimeout")),
+							},
+						}),
 			})
 				.then((playing) => {
 					audioSince = performance.now();
