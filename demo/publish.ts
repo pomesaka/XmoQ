@@ -92,7 +92,7 @@ function tone(onData: (data: AudioData) => void): void {
 					sampleRate: SAMPLE_RATE,
 					numberOfFrames: frames,
 					numberOfChannels: 1,
-					timestamp: piece * 20_000,
+					timestamp: Math.round(piece * 20_000 * CLOCK_SKEW),
 					data: samples,
 				}),
 			);
@@ -172,6 +172,15 @@ async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 /** Paints a clock and a bar that moves, and calls `onFrame` with each picture. */
 /** `?picture=busy`: the clock's picture with blocks that change in every frame, for a picture that fills the bitrate it asks for. */
 const BUSY = new URLSearchParams(location.search).get("picture") === "busy";
+/**
+ * `?clockSkewPpm=N` (for measuring): the times the painted clock and the
+ * tone carry run faster than this machine's clock by N parts in a million
+ * (slower with a negative N), as those of a publisher on another machine
+ * do against its viewer's. Not for the camera and the microphone, whose
+ * times are the devices'.
+ */
+const CLOCK_SKEW =
+	1 + Number(new URLSearchParams(location.search).get("clockSkewPpm") ?? 0) / 1_000_000;
 
 function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	const began = performance.now();
@@ -208,7 +217,7 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 		painted += 1;
 		onFrame(
 			new VideoFrame(preview as HTMLCanvasElement, {
-				timestamp: Math.round(elapsed * 1000),
+				timestamp: Math.round(elapsed * 1000 * CLOCK_SKEW),
 			}),
 		);
 	});
