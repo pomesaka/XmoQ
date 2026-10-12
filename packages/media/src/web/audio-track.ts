@@ -9,6 +9,10 @@ import {
 	type MoqtConnection,
 	type SubscriptionEnd,
 } from "@xmoq/moqt";
+import {
+	type DeliveryTimeouts,
+	deliveryTimeoutParameters,
+} from "../core/delivery-timeout.ts";
 import { createInOrder } from "../core/in-order.ts";
 import {
 	type AudioTrackPublisher,
@@ -177,6 +181,14 @@ export interface PlayAudioTrackOptions {
 	 */
 	joiningFetch?: boolean;
 	/**
+	 * How long the sender may take with an Object or the end of a Subgroup
+	 * before it gives it up (`DeliveryTimeouts`, transport §8), sent with the
+	 * SUBSCRIBE. **Nothing is sent when left out.** A stream the sender
+	 * gives up is reset, and what was on it does not come: the Group ends
+	 * there for the player.
+	 */
+	deliveryTimeouts?: DeliveryTimeouts;
+	/**
 	 * How long an Object that comes after a gap waits for the ones before
 	 * it, in milliseconds, before it is decoded without them; asked each
 	 * time. **Nothing waits when left out**: Objects are decoded as they
@@ -311,6 +323,7 @@ export async function playAudioTrack(
 		subscription = await connection.subscribe({
 			trackNamespace: options.trackNamespace,
 			trackName: options.trackName,
+			parameters: deliveryTimeoutParameters(options.deliveryTimeouts),
 		});
 	} catch (error) {
 		decoder.close();

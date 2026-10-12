@@ -11,6 +11,10 @@ import {
 	type SubscriptionEnd,
 } from "@xmoq/moqt";
 import {
+	type DeliveryTimeouts,
+	deliveryTimeoutParameters,
+} from "../core/delivery-timeout.ts";
+import {
 	createVideoReceiver,
 	type VideoDropReason,
 	type VideoReceiverEvent,
@@ -47,6 +51,14 @@ export interface PlayVideoTrackOptions {
 	 * (`VideoFrame.close()`); a frame that is not closed keeps its memory.
 	 */
 	onFrame(frame: VideoFrame): void;
+	/**
+	 * How long the sender may take with an Object or the end of a Subgroup
+	 * before it gives it up (`DeliveryTimeouts`, transport §8), sent with the
+	 * SUBSCRIBE. **Nothing is sent when left out.** A stream the sender
+	 * gives up is reset, and what was on it does not come: the Group ends
+	 * there for the player.
+	 */
+	deliveryTimeouts?: DeliveryTimeouts;
 	/** Aborting it ends the playing: the subscription is cancelled. */
 	signal?: AbortSignal;
 	/**
@@ -152,6 +164,8 @@ export async function playVideoTrack(
 			throw new RangeError(`${name} is a whole number from 1, not ${value}`);
 		}
 	}
+	// Before anything is sent: a time that is none throws here.
+	const parameters = deliveryTimeoutParameters(options.deliveryTimeouts);
 	options.signal?.throwIfAborted();
 	if (typeof VideoDecoder === "undefined") {
 		throw new DOMException(
@@ -316,6 +330,7 @@ export async function playVideoTrack(
 		subscription = await connection.subscribe({
 			trackNamespace: options.trackNamespace,
 			trackName: options.trackName,
+			parameters,
 		});
 	} catch (error) {
 		decoder.close();

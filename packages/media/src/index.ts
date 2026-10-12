@@ -6,6 +6,10 @@ export {
 	STRETCH,
 } from "./core/audio-seam.ts";
 export {
+	type DeliveryTimeouts,
+	deliveryTimeoutParameters,
+} from "./core/delivery-timeout.ts";
+export {
 	createFrameQueue,
 	DEFAULT_MAX_WAITING_FRAMES,
 	type FrameQueue,

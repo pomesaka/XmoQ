@@ -233,6 +233,8 @@ export type OwnPageExtras = {
 		readNumbers?: boolean,
 		/** Sends the Joining FETCH of `playVideoTrack`; none when left out. */
 		joiningFetch?: boolean,
+		/** Sent with the SUBSCRIBE as SUBGROUP_DELIVERY_TIMEOUT and OBJECT_DELIVERY_TIMEOUT, in milliseconds; neither when left out. */
+		deliveryTimeoutMs?: number,
 	): Promise<void>;
 	/**
 	 * Publishes a catalog with one video track and the track itself, with

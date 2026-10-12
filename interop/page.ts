@@ -1162,6 +1162,7 @@ window.xmoqOwn = {
 			codec: string,
 			readNumbers = false,
 			joiningFetch = false,
+			deliveryTimeoutMs?: number,
 		) => {
 			const reading = readNumbers
 				? new OffscreenCanvas(1, 1).getContext("2d", {
@@ -1174,6 +1175,14 @@ window.xmoqOwn = {
 				trackName: utf8.encode(trackName),
 				codec,
 				joiningFetch,
+				...(deliveryTimeoutMs === undefined
+					? {}
+					: {
+							deliveryTimeouts: {
+								subgroupMs: deliveryTimeoutMs,
+								objectMs: deliveryTimeoutMs,
+							},
+						}),
 				onFrame(frame) {
 					frames.push({
 						timestamp: frame.timestamp,
