@@ -223,6 +223,8 @@ struct Clock {
     /// The smallest (arrival - Timestamp), in microseconds of `began`.
     least: Option<i128>,
     buffer: Duration,
+    /// How much longer than the least the Object of the last call took, in milliseconds.
+    last_over_least_ms: f32,
 }
 
 impl Clock {
@@ -231,6 +233,7 @@ impl Clock {
         let took = arrived - i128::from(timestamp);
         let least = self.least.map_or(took, |least| least.min(took));
         self.least = Some(least);
+        self.last_over_least_ms = (took - least) as f32 / 1000.0;
         let at = u64::try_from((i128::from(timestamp) + least).max(0)).unwrap_or(0);
         self.began + Duration::from_micros(at) + self.buffer
     }
@@ -521,7 +524,8 @@ async fn play(
     ui.show();
 
     let began = Instant::now();
-    let mut clock = Clock { began, least: None, buffer: args.buffer };
+    let mut clock = Clock { began, least: None, buffer: args.buffer, last_over_least_ms: 0.0 };
+    let (mut audio_over_least, mut video_over_least) = (Vec::new(), Vec::new());
     let (mut no_timestamp, mut streams_reset) = (0u64, 0u64);
     let mut ended = Ended::Again;
     let mut failed = None;
@@ -593,9 +597,11 @@ async fn play(
                     *began_playing = true;
                     let due = clock.due(timestamp);
                     if header.track_alias == video.track_alias {
+                        video_over_least.push(clock.last_over_least_ms);
                         let annex_b = loc::to_annex_b(&object.payload).map_err(|error| anyhow!("a video payload: {}", error.0))?;
                         let _ = frames.send(picture::Frame { group: header.group_id, object: object.object_id, annex_b, due });
                     } else if header.track_alias == audio.track_alias {
+                        audio_over_least.push(clock.last_over_least_ms);
                         // WHY here and not on a thread of its own: 2.5 ms for a packet of 20 ms.
                         sound.take(&object.payload, due);
                     }
@@ -619,6 +625,7 @@ async fn play(
             },
         }
     };
+    sound.end();
     let seconds = began.elapsed().as_secs_f64();
     drop(frames);
     let seen = picture.join().map_err(|_| anyhow!("the picture's thread panicked"))?;
@@ -648,8 +655,8 @@ async fn play(
     let line = format!(
         "AV_PLAYED why=\"{why}\" seconds={seconds:.1} buffer_ms={} volume={:.1} muted={} \
          video_size={}x{} made_smaller_by={} written_kb_a_frame={} video_came={} video_left_out={} video_drawn={} fps={:.1} video_off_ms_min/p50/p95/max={} decode_ms_a_frame={:.2} draw_ms_a_frame={:.2} \
-         audio_packets={} audio_refused={} audio_seconds={:.2} underruns={} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} \
-         audio_off_ms_min/p50/p95/max={} peak={:.3} rms={:.3} \
+         audio_packets={} audio_refused={} audio_seconds={:.2} underruns={} underruns_at_s={:?} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} \
+         audio_off_ms_min/p50/p95/max={} peak={:.3} rms={:.3} output_ahead_ms={:.1} audio_came_over_least_ms_min/p50/p95/max={} video_came_over_least_ms_min/p50/p95/max={} \
          marks_video={} marks_audio={} picture_after_sound_ms_min/p50/p95/max={} no_timestamp={no_timestamp} streams_reset={streams_reset}",
         args.buffer.as_millis(),
         ui.volume.level(),
@@ -669,6 +676,7 @@ async fn play(
         heard.refused,
         heard.given as f64 / 48_000.0,
         heard.underruns,
+        heard.underruns_at,
         heard.waits / 48,
         heard.left_out_late,
         heard.cut_late,
@@ -676,6 +684,9 @@ async fn play(
         spread(heard.off_ms),
         heard.peak,
         rms,
+        heard.ahead_ms,
+        spread(audio_over_least),
+        spread(video_over_least),
         seen.marks.len(),
         heard.marks.len(),
         spread(apart),
