@@ -8,7 +8,7 @@ Phase 0（既存ライブラリでのObject転送）は2026-10-10に通った。
 
 Phase 0b（MoQ Transportの層をRustとTypeScriptで自前実装する）の終了条件にも、2026-10-10に届いた。自前のブラウザクライアント、Rustクライアント、Rustリレーのあいだで、Objectが1つ通る。版はdraft 18に固定している。理由と範囲は`docs/protocols.md`にある。
 
-Phase 0bの項目は全部終わっている。Phase 1（映像）の終了条件には、2026-10-11にデモ（`mise run demo`）で届いた。Phase 2（音声と品質）からPhase 4（部屋）は、それぞれ最初の版がデモか`spikes/`で動いていて、どれも終わっていない。FETCH、MSFのカタログ、LOCの詰め方、映像の受け手と送り手の中核、映像のトラックを出す部品、ブラウザのエンコーダとデコーダにつなぐ部品、リレーのキャッシュ（トラックごとに最新のGroup）が入っていて、ページが符号化した映像を別のページがリレーを通して再生するところまで、照合で通っている。音声（Opus）も同じ形で通る。絵を画面に描く所、再生のバッファ、映像と音の同期は`demo/`にあり、パッケージには無い。映像はGroupを1本のストリームで送り、LOCはLOC-04の番号をdraft 18の上で使う。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーはWebTransportだけを受ける。認可は、鍵を渡したとき（`--auth-key-hex`）だけ、部屋のトークンを要求ごととSETUPで確かめる。キャッシュは、配信元がいるあいだだけ持つ。draftに届いていない所は`docs/moqt-implementation-notes.md`の既知の不足にある。
+Phase 0bの項目は全部終わっている。Phase 1（映像）の終了条件には、2026-10-11にデモ（`mise run demo`）で届いた。Phase 2（音声と品質）からPhase 4（部屋）は、それぞれ最初の版がデモか`spikes/`で動いていて、どれも終わっていない。FETCH、MSFのカタログ、LOCの詰め方、映像の受け手と送り手の中核、映像のトラックを出す部品、ブラウザのエンコーダとデコーダにつなぐ部品、リレーのキャッシュ（トラックごとに最新のGroup）が入っていて、ページが符号化した映像を別のページがリレーを通して再生するところまで、照合で通っている。音声（Opus）も同じ形で通る。再生のバッファ、映像と音の同期、つなぎ直しは`@xmoq/media`の部品で、絵を画面に描く所だけが`demo/`にある。映像はGroupを1本のストリームで送り、LOCはLOC-04の番号をdraft 18の上で使う。どこまでできているかは`docs/roadmap.md`のチェックで見る。リレーはWebTransportだけを受ける。認可は、鍵を渡したとき（`--auth-key-hex`）だけ、部屋のトークンを要求ごととSETUPで確かめる。キャッシュは、配信元がいるあいだだけ持つ。draftに届いていない所は`docs/moqt-implementation-notes.md`の既知の不足にある。
 
 Rustのcrateは次のように分かれている。`xmoq-moqt`（符号化とセッションの状態）、`xmoq-relay-core`（リレーの経路と配信の論理）は入出力に依存しない。`xmoq-moqt-io`が`Connection`トレイトの上でストリームを読み書きし、WebTransportのライブラリに触るのはこのcrateの1ファイルだけ。`xmoq-relay`と`xmoq-moqt-client`がそれらをつなぐ。`xmoq-loc`（LOCの読み取り。入出力に依存せず、版に依る部分はTypeScriptと同じく版の名前のモジュール`draft_04`に置く）を、クライアントが映像のトラックをAnnex Bのファイルに書き出すのに使う（`--annex-b-out`）。`Connection`の契約は、メモリ上の接続と実際のループバックの接続の両方に同じテストを当てて確かめる。テスト用の接続だけで通る挙動を前提にしない。
 
@@ -39,7 +39,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 
 `interop/`は、自前の部品を`moqtail`の相手とつないで確かめるスクリプトの置き場で、lintと型検査の対象にする。`interop/peers/`は`moqtail`のコードの写しなので、整形もlintもしない（元との差分を読めるようにするため）。`interop/`は`packages/`に依存してよいが、逆は禁止する。
 
-照合は`mise run interop`で走らせる。自前と`moqtail`のクライアントの全部の組み合わせで、`moqtail`のリレーと自前のリレーのそれぞれを通してObjectを1つ運び、実物のChromiumで確かめる。FETCH（StandaloneとJoining）の組と、MSFのカタログを`moqlivemock`の配信元と視聴者（`interop/peers/moqlivemock/`。Goでビルドする）とのあいだで読み書きする組もある。加えて、publisherやsubscriberが転送の途中で去る場面（kill、取り消し、読まないsubscriber）を、自前のリレーを通して走らせる。場面は、リレーのログの行を待って進むので、その行の書式を変えると落ちる（`interop/disconnect.ts`の冒頭）。`mise run check`には入っていない。同じマシンで2つの作業コピーから同時に走らせるときは、`--base-port`を分ける。CIでは`interop`ジョブが同じタスクを呼び、照合が依存するパスに触れていないPRでは、skipと表示して終わる。`crates/`、`packages/`、`interop/`、`fixtures/`を変えたら、報告の前に`mise run interop`も走らせる。
+照合は`mise run interop`で走らせる。自前と`moqtail`のクライアントの全部の組み合わせで、`moqtail`のリレーと自前のリレーのそれぞれを通してObjectを1つ運び、実物のChromiumで確かめる。FETCH（StandaloneとJoining）の組と、MSFのカタログを`moqlivemock`の配信元と視聴者（`interop/peers/moqlivemock/`。Goでビルドする）とのあいだで読み書きする組もある。加えて、publisherやsubscriberが転送の途中で去る場面（kill、取り消し、読まないsubscriber）を、自前のリレーを通して走らせる。リレーが止まって同じポートで戻り、ページがつなぎ直す場面もある。場面は、リレーのログの行を待って進むので、その行の書式を変えると落ちる（`interop/disconnect.ts`の冒頭）。`mise run check`には入っていない。同じマシンで2つの作業コピーから同時に走らせるときは、`--base-port`を分ける。CIでは`interop`ジョブが同じタスクを呼び、照合が依存するパスに触れていないPRでは、skipと表示して終わる。`crates/`、`packages/`、`interop/`、`fixtures/`を変えたら、報告の前に`mise run interop`も走らせる。
 
 人がブラウザで見るためのデモは`mise run demo`で立てる（`demo/`。リレーとページのサーバーが立ち、Chromiumで配信のページと視聴のページを開く）。`demo/`はlintと型検査の対象外で、本体から依存させない。
 
