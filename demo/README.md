@@ -69,8 +69,8 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | publish | `bitrate=N` | Bits a second of the video | The size's: 1.5, 3 and 6 Mbit/s |
 | publish | `keyint=MS` | A key frame every so many milliseconds | 1000 |
 | publish | `picture=busy` | A picture that fills the bitrate it asks for | The clock alone |
-| publish | `source=camera` | The camera and the microphone | The painted clock and a tone |
-| publish | `audio=none` | No sound | Opus, mono |
+| publish | `source=camera` | The camera | The painted clock |
+| publish | `audio=mic`, `audio=none` | The microphone; no sound | A tone, Opus, mono |
 | publish | `audioGroup=N` | Pieces of sound in a Group, and so on a stream | 10 |
 | publish | `audioPriority=N` | The Publisher Priority of the sound's streams, 0 the highest | None named (128, as the video) |
 | publish | `mapping=stream-per-object` | Every Object of the video on a stream of its own | A stream for a Group |
