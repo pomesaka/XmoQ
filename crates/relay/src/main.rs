@@ -115,6 +115,11 @@ struct Args {
     /// [`HubConfig::fetches_for_one_subscriber`]; 8 and 4 where it is not
     /// said.
     for_one_session: (Option<usize>, Option<usize>),
+    /// `--cached-fetch-whole-ms`, `--cached-fetch-least-kbps`:
+    /// [`HubConfig::cached_fetch_whole_ms`] and
+    /// [`HubConfig::cached_fetch_least_kbps`]; 30,000 and 500 where it is
+    /// not said.
+    cached_fetch: (Option<u64>, Option<u64>),
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
     /// An experiment: what a subscriber gets that set no
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
@@ -131,6 +136,11 @@ struct Args {
     /// `--auth-setup off`: with a key, the SETUP of a client is not asked
     /// for a token ([`HubConfig::auth_setup`]). On with a key otherwise.
     auth_setup: bool,
+}
+
+/// The number a flag gives.
+fn number(flag: &str, value: &str) -> Result<u64> {
+    value.parse().with_context(|| flag.to_string())
 }
 
 /// The number a flag gives.
@@ -155,6 +165,7 @@ fn parse_args() -> Result<Args> {
     let (mut slow_open, mut setup_timeout, mut idle_session) = (None, None, None);
     let (mut announce_every, mut announce_at_once) = (None, None);
     let mut for_one_session = (None, None);
+    let mut cached_fetch = (None, None);
     let mut delivery_patience = None;
     let mut give_up_older_groups = false;
     let mut older_groups_grace = Duration::ZERO;
@@ -190,6 +201,8 @@ fn parse_args() -> Result<Args> {
             "--announce-every-ms" => {
                 announce_every = Some(value.parse().context("--announce-every-ms")?);
             }
+            "--cached-fetch-whole-ms" => cached_fetch.0 = Some(number(&flag, &value)?),
+            "--cached-fetch-least-kbps" => cached_fetch.1 = Some(number(&flag, &value)?),
             "--requests-for-one-session" => for_one_session.0 = Some(count(&flag, &value)?),
             "--fetches-for-one-session" => for_one_session.1 = Some(count(&flag, &value)?),
             "--announce-at-once" => {
@@ -234,6 +247,7 @@ fn parse_args() -> Result<Args> {
         announce_every,
         announce_at_once,
         for_one_session,
+        cached_fetch,
         delivery_patience,
         give_up_older_groups,
         older_groups_grace,
@@ -268,6 +282,12 @@ async fn main() -> Result<()> {
         config.requests_for_one_subscriber,
         config.fetches_for_one_subscriber,
     ) = args.for_one_session;
+    if let Some(whole_ms) = args.cached_fetch.0 {
+        config.cached_fetch_whole_ms = whole_ms;
+    }
+    if let Some(least_kbps) = args.cached_fetch.1 {
+        config.cached_fetch_least_kbps = least_kbps;
+    }
     config.send.delivery_patience = args.delivery_patience;
     config.give_up_older_groups = args.give_up_older_groups;
     config.older_groups_grace = args.older_groups_grace;

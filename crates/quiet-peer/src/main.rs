@@ -52,6 +52,17 @@
 //! (PUBLISH, no Object), and answers nothing the relay asks of it
 //! (`QUIET asked=..`).
 //!
+//! With `--publish-group <objects>x<bytes>` it publishes the track `big` of
+//! `(xmoq)` and sends Group 0 with that many Objects of that many bytes on
+//! one subgroup stream (`GROUP_SENT group=0 bytes=..`), and with
+//! `--next-group-after-ms <n>` Group 1, one small Object, that much later.
+//!
+//! With `--fetch-cached <n> --read-bytes-a-second <n>` it sends that many
+//! Standalone FETCH requests for Group 0 of `big` and reads each fetch stream at
+//! that rate (0: not at all). It says every 5 seconds how much it has read
+//! (`READ bytes=.. open=..`), and how each stream ended
+//! (`FETCH_STREAM_ENDED after_ms=.. bytes=.. how=..`).
+//!
 //! With `--hold-tracks <n>` it is that many viewers that came early: it
 //! opens a session for every 16 of them, and sends a SUBSCRIBE for each of
 //! the tracks `h0`, `h1`, ... of `(xmoq)` with a `RENDEZVOUS_TIMEOUT` of 30
@@ -75,6 +86,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use xmoq_moqt::data::{
+    ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
+};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, Publish, PublishNamespace, ReasonPhrase, RequestError,
@@ -85,8 +99,8 @@ use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{Role, Session, Transport};
 use xmoq_moqt_io::wt::{Congestion, QuicLimits, WtConnection, WtServer, accept};
 use xmoq_moqt_io::{
-    Connection, RequestReader, RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace,
-    UniEvent, read_uni_streams, send_message,
+    Connection, RecvStream, RequestReader, RequestStreamEvent, SendStream, StreamConfig,
+    StreamStops, Trace, UniEvent, read_uni_streams, send_message,
 };
 
 /// What the peer leaves out.
@@ -136,6 +150,10 @@ enum Args {
         announce_and_refuse: bool,
         /// `--announce-and-stay-quiet yes`: it answers nothing.
         answers_nothing: bool,
+        /// `--publish-group` and `--next-group-after-ms`.
+        publish_group: Option<(u64, usize, Option<Duration>)>,
+        /// `--fetch-cached` and `--read-bytes-a-second`.
+        fetch_cached: Option<(u64, usize)>,
     },
 }
 
@@ -183,6 +201,38 @@ fn sha256_of(text: &str) -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
+/// `--ask`.
+fn asked_of(value: &str) -> Result<Asked> {
+    Ok(match value {
+        "subscribe" => Asked::Subscribe,
+        "fetch-nothing" => Asked::FetchNothing,
+        "fetch-old" => Asked::FetchOld,
+        "subscribe-own" => Asked::SubscribeOwn,
+        "fetch-live" => Asked::FetchLive,
+        other => bail!("--ask does not know {other}"),
+    })
+}
+
+/// `--cancel`.
+fn cancel_of(value: &str) -> Cancel {
+    match value {
+        "yes" => Cancel::Soon,
+        "answered" => Cancel::Answered,
+        _ => Cancel::Never,
+    }
+}
+
+/// `--publish-group <objects>x<bytes>`.
+fn group_of(value: &str) -> Result<(u64, usize)> {
+    let (objects, bytes) = value
+        .split_once('x')
+        .context("--publish-group is <objects>x<bytes>")?;
+    Ok((
+        objects.parse().context("--publish-group")?,
+        bytes.parse().context("--publish-group")?,
+    ))
+}
+
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut port, mut cert_file, mut key_file, mut quiet) = (None, None, None, None);
     let (mut url, mut cert_sha256, mut stay, mut setup) = (None, None, None, false);
@@ -191,6 +241,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut cancel, mut announce_and_refuse) = (Cancel::Never, false);
     let (mut say_each, mut stay_quiet) = (false, false);
     let mut ask_every = None;
+    let (mut group, mut next_group_after) = (None, None);
+    let (mut fetches, mut read_a_second) = (None, 0);
     while let Some(flag) = args.next() {
         let value = args
             .next()
@@ -215,29 +267,24 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                 ask_every = Some(Duration::from_millis(ms));
                 ask_per_second.get_or_insert(1);
             }
-            "--ask" => {
-                asked = match value.as_str() {
-                    "subscribe" => Asked::Subscribe,
-                    "fetch-nothing" => Asked::FetchNothing,
-                    "fetch-old" => Asked::FetchOld,
-                    "subscribe-own" => Asked::SubscribeOwn,
-                    "fetch-live" => Asked::FetchLive,
-                    other => bail!("--ask does not know {other}"),
-                };
-            }
+            "--ask" => asked = asked_of(&value)?,
             "--rendezvous-ms" => rendezvous_ms = Some(value.parse().context("--rendezvous-ms")?),
-            "--cancel" => {
-                cancel = match value.as_str() {
-                    "yes" => Cancel::Soon,
-                    "answered" => Cancel::Answered,
-                    _ => Cancel::Never,
-                };
-            }
+            "--cancel" => cancel = cancel_of(&value),
             "--say-each" => say_each = value == "yes",
             "--announce-and-stay-quiet" => {
                 (announce_and_refuse, stay_quiet) = (true, value == "yes");
             }
             "--announce-and-refuse" => announce_and_refuse = value == "yes",
+            "--publish-group" => group = Some(group_of(&value)?),
+            "--next-group-after-ms" => {
+                next_group_after = Some(Duration::from_millis(
+                    value.parse().context("--next-group-after-ms")?,
+                ));
+            }
+            "--fetch-cached" => fetches = Some(value.parse().context("--fetch-cached")?),
+            "--read-bytes-a-second" => {
+                read_a_second = value.parse().context("--read-bytes-a-second")?;
+            }
             "--hold-tracks" => hold_tracks = Some(value.parse().context("--hold-tracks")?),
             "--announce-per-second" => {
                 announce_per_second = Some(value.parse().context("--announce-per-second")?);
@@ -277,6 +324,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             }),
             announce_and_refuse,
             answers_nothing: stay_quiet,
+            publish_group: group.map(|(objects, bytes)| (objects, bytes, next_group_after)),
+            fetch_cached: fetches.map(|fetches| (fetches, read_a_second)),
         });
     }
     Ok(Args::Serve {
@@ -857,6 +906,186 @@ async fn announce_and_refuse(
     Ok(())
 }
 
+/// One Group on a subgroup stream of its own: `objects` Objects of `bytes`
+/// bytes, under the Track Alias 1.
+async fn send_group(
+    connection: &WtConnection,
+    group_id: u64,
+    objects: u64,
+    bytes: usize,
+) -> Result<()> {
+    let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
+        track_alias: 1,
+        group_id,
+        subgroup_id: SubgroupId::Zero,
+        publisher_priority: Some(0),
+        properties: false,
+        end_of_group: false,
+        first_object: true,
+    });
+    let mut stream = connection.open_uni().await?;
+    for object_id in 0..objects {
+        encoder.object(&SubgroupObject {
+            object_id,
+            properties: Vec::new(),
+            status: ObjectStatus::Normal,
+            payload: vec![0x61; bytes],
+        })?;
+        if let Err(error) = stream.write_all(&encoder.take_bytes()).await {
+            bail!("the subgroup stream could not be written: {error:?}");
+        }
+    }
+    stream.finish();
+    println!(
+        "GROUP_SENT group={group_id} bytes={}",
+        objects * u64::try_from(bytes)?
+    );
+    Ok(())
+}
+
+/// Publishes the track `big` with one Group of `objects` Objects of `bytes`
+/// bytes, and Group 1 after `next`, where that is given.
+async fn publish_group(
+    url: &str,
+    cert_sha256: [u8; 32],
+    stay: Duration,
+    (objects, bytes, next): (u64, usize, Option<Duration>),
+) -> Result<()> {
+    let (connection, _control) = connected(url, cert_sha256).await?;
+    let publish = ControlMessage::Publish(Publish {
+        request_id: 0,
+        full_track_name: FullTrackName::new(
+            TrackNamespace::new(vec![b"xmoq".to_vec()])?,
+            b"big".to_vec(),
+        )?,
+        track_alias: 1,
+        parameters: Vec::new(),
+        track_properties: Vec::new(),
+    });
+    // Kept to the end: the subscription lasts as long as its stream.
+    let (mut publication, recv) = connection.open_bi().await?;
+    send_message(&mut publication, &publish, &Trace::default(), "request").await?;
+    let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    let answer = reader.next_event().await;
+    if !matches!(
+        answer,
+        Ok(RequestStreamEvent::Message(ControlMessage::RequestOk(_)))
+    ) {
+        bail!("the PUBLISH was not accepted: {answer:?}");
+    }
+    let began = tokio::time::Instant::now();
+    send_group(&connection, 0, objects, bytes).await?;
+    if let Some(next) = next {
+        tokio::time::sleep(next).await;
+        send_group(&connection, 1, 1, 16).await?;
+    }
+    tokio::time::sleep_until(began + stay).await;
+    connection.close(0, b"");
+    Ok(())
+}
+
+/// Sends `fetches` Standalone FETCH requests for Group 0 of `big` and reads every
+/// stream the relay opens at `a_second` bytes a second.
+async fn fetch_cached(
+    url: &str,
+    cert_sha256: [u8; 32],
+    stay: Duration,
+    (fetches, a_second): (u64, usize),
+) -> Result<()> {
+    let (connection, _control) = connected(url, cert_sha256).await?;
+    let began = tokio::time::Instant::now();
+    // Kept to the end: a request stream that is let go of is reset.
+    let mut requests = Vec::new();
+    for number in 0..fetches {
+        let message = ControlMessage::Fetch(Fetch {
+            request_id: number * 2,
+            range: FetchRange::Standalone {
+                full_track_name: FullTrackName::new(
+                    TrackNamespace::new(vec![b"xmoq".to_vec()])?,
+                    b"big".to_vec(),
+                )?,
+                start: Location {
+                    group: 0,
+                    object: 0,
+                },
+                end: Location {
+                    group: 1,
+                    object: 0,
+                },
+            },
+            parameters: Vec::new(),
+        });
+        let (mut send, recv) = connection.open_bi().await?;
+        send_message(&mut send, &message, &Trace::default(), "request").await?;
+        let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+        let answer = match reader.next_event().await {
+            Ok(RequestStreamEvent::Message(ControlMessage::FetchOk(_))) => "FETCH_OK".to_string(),
+            Ok(RequestStreamEvent::Message(ControlMessage::RequestError(error))) => {
+                format!("REQUEST_ERROR {:#x}", error.error_code)
+            }
+            other => format!("{other:?}"),
+        };
+        println!("FETCH n={number} {answer}");
+        requests.push((send, reader));
+    }
+    let read = Arc::new(AtomicU64::new(0));
+    let open = Arc::new(AtomicU64::new(0));
+    let mut said = tokio::time::interval(Duration::from_secs(5));
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = connection.closed() => break,
+            () = tokio::time::sleep_until(began + stay) => break,
+            _ = said.tick() => println!(
+                "READ after_ms={} bytes={} open={}",
+                began.elapsed().as_millis(),
+                read.load(Ordering::Relaxed),
+                open.load(Ordering::Relaxed)
+            ),
+            stream = connection.accept_uni() => {
+                let Ok(mut stream) = stream else { continue };
+                let (read, open) = (Arc::clone(&read), Arc::clone(&open));
+                open.fetch_add(1, Ordering::Relaxed);
+                tasks.spawn(async move {
+                    // A tenth of a second's worth at a time.
+                    let mut buffer = vec![0u8; (a_second / 10).max(1)];
+                    let mut own = 0u64;
+                    let how = loop {
+                        if a_second == 0 {
+                            std::future::pending::<()>().await;
+                        }
+                        match stream.read(&mut buffer).await {
+                            Ok(Some(length)) => {
+                                let length = u64::try_from(length).unwrap_or(u64::MAX);
+                                own += length;
+                                read.fetch_add(length, Ordering::Relaxed);
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                            Ok(None) => break "finished".to_string(),
+                            Err(error) => break format!("{error:?}"),
+                        }
+                    };
+                    open.fetch_sub(1, Ordering::Relaxed);
+                    println!(
+                        "FETCH_STREAM_ENDED after_ms={} bytes={own} how={how}",
+                        began.elapsed().as_millis()
+                    );
+                });
+            }
+            Some(_) = tasks.join_next() => {}
+        }
+    }
+    println!(
+        "READ after_ms={} bytes={} open={}",
+        began.elapsed().as_millis(),
+        read.load(Ordering::Relaxed),
+        open.load(Ordering::Relaxed)
+    );
+    connection.close(0, b"");
+    drop(requests);
+    Ok(())
+}
+
 /// As many SUBSCRIBEs as one session may have held by the own relay.
 const HELD_PER_SESSION: u64 = 16;
 
@@ -900,6 +1129,20 @@ async fn hold(url: &str, cert_sha256: [u8; 32], stay: Duration, tracks: u64) -> 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = match parse_args(std::env::args().skip(1))? {
+        Args::Connect {
+            url,
+            cert_sha256,
+            stay,
+            publish_group: Some(group),
+            ..
+        } => return publish_group(&url, cert_sha256, stay, group).await,
+        Args::Connect {
+            url,
+            cert_sha256,
+            stay,
+            fetch_cached: Some(fetching),
+            ..
+        } => return fetch_cached(&url, cert_sha256, stay, fetching).await,
         Args::Connect {
             url,
             cert_sha256,
