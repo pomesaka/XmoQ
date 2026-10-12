@@ -177,6 +177,9 @@ pub trait SendStream: Send + 'static {
     /// when `give_up` completes is given up: the stream is reset with the
     /// code `give_up` gave. `true` when everything and the FIN got there, or
     /// when the stream ended some other way; `false` when it was reset here.
+    /// A reset can come after the peer had everything, of which this end
+    /// has not heard yet: the peer then has the whole stream, and `false`
+    /// says only that a reset was sent.
     ///
     /// WHY a default that only finishes: it is right for a transport that
     /// holds nothing between `write_all` and its peer, which the in-memory

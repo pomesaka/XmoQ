@@ -541,11 +541,19 @@ mod with_a_send_buffer {
     use super::{LOOPBACK_LIMITS, read_to_end, soon};
     use crate::{Connection, ReadError, SendStream};
 
-    /// WHY a `give_up` that is ready at once: over the loopback interface a
-    /// stream is acknowledged within a millisecond, and nothing here can
-    /// hold a packet back. At the first look the FIN has not left yet.
+    /// A stream that is given up is reset with the code, unless the peer
+    /// had all of it by then.
+    ///
+    /// WHY both ends are taken, and not the reset alone: over the loopback
+    /// interface a stream is with the peer within a millisecond, and nothing
+    /// here can hold a packet back (the library takes no more of a write
+    /// than the peer's window has room for). A `give_up` that is ready at
+    /// once comes before the FIN has left in most runs, and after it in
+    /// some: then the peer has the whole stream, and the reset that follows
+    /// says nothing to it. What must never be is a stream that ends short
+    /// without the reset, or with another code.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn finish_until_resets_a_stream_that_is_given_up_before_it_is_delivered() {
+    async fn a_stream_that_is_given_up_is_reset_with_the_code_or_was_delivered_whole() {
         let (a, b, _keep) = crate::wt::loopback(LOOPBACK_LIMITS).await;
         let mut send = soon("open_uni", a.open_uni()).await.expect("open");
         // Within the stream's window of 4096: the write is taken whole.
@@ -554,9 +562,12 @@ mod with_a_send_buffer {
         let mut recv = soon("accept_uni", b.accept_uni()).await.expect("accept");
         // DELIVERY_TIMEOUT (0x2).
         let delivered = soon("the end", send.finish_until(std::future::ready(0x2))).await;
-        assert!(!delivered);
-        let (_, end) = read_to_end(&mut recv).await;
-        assert_eq!(end, Err(ReadError::Reset(Some(0x2))));
+        let (received, end) = read_to_end(&mut recv).await;
+        match end {
+            Err(ReadError::Reset(Some(0x2))) => assert!(!delivered),
+            Ok(()) => assert_eq!(received, body),
+            other => panic!("{other:?} after {} bytes", received.len()),
+        }
     }
 }
 
