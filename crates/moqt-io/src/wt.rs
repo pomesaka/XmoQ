@@ -244,11 +244,15 @@ impl SendStream for WtSend {
         let _ = self.0.reset(code);
     }
 
-    async fn finish_within(mut self, patience: Duration, code: u32) -> bool {
+    async fn finish_until<G>(mut self, give_up: G) -> bool
+    where
+        G: Future<Output = u32> + Send,
+    {
         let _ = self.0.finish();
-        if tokio::time::timeout(patience, self.over()).await.is_ok() {
-            return true;
-        }
+        let code = tokio::select! {
+            _ = self.over() => return true,
+            code = give_up => code,
+        };
         // quinn resets a stream that is finished and not yet acknowledged,
         // and stops sending its data again (quinn-proto 0.11.19,
         // `SendStream::reset`).

@@ -99,6 +99,9 @@ struct Args {
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
     /// An experiment; without it no stream is given up.
     delivery_patience: Option<Duration>,
+    /// `--older-groups give-up`: [`HubConfig::give_up_older_groups`]. An
+    /// experiment; `keep`, or no flag, gives no Group up.
+    give_up_older_groups: bool,
     /// `--auth-key-hex`: the key requests are authorized with
     /// ([`HubConfig::auth_key`]). An experiment.
     auth_key: Option<Vec<u8>>,
@@ -116,6 +119,7 @@ fn parse_args() -> Result<Args> {
     let mut max_sessions = None;
     let mut slow_open = None;
     let mut delivery_patience = None;
+    let mut give_up_older_groups = false;
     let mut auth_key = None;
     let mut auth_setup = true;
     let mut args = std::env::args().skip(1);
@@ -153,6 +157,13 @@ fn parse_args() -> Result<Args> {
                     value.parse().context("--delivery-patience-ms")?,
                 ));
             }
+            "--older-groups" => {
+                give_up_older_groups = match value.as_str() {
+                    "give-up" => true,
+                    "keep" => false,
+                    other => bail!("--older-groups {other}: give-up or keep"),
+                };
+            }
             "--auth-key-hex" => {
                 auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
             }
@@ -175,6 +186,7 @@ fn parse_args() -> Result<Args> {
         max_sessions,
         slow_open,
         delivery_patience,
+        give_up_older_groups,
         auth_key,
         auth_setup,
     })
@@ -195,6 +207,8 @@ async fn main() -> Result<()> {
         config.slow_open = slow_open;
     }
     config.send.delivery_patience = args.delivery_patience;
+    config.send.held_until_delivered = args.give_up_older_groups;
+    config.give_up_older_groups = args.give_up_older_groups;
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);

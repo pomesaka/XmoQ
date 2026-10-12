@@ -29,7 +29,6 @@ mod tests;
 pub mod wt;
 
 use std::future::Future;
-use std::time::Duration;
 
 pub use streams::{
     Direction, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, OutgoingEvent,
@@ -175,18 +174,19 @@ pub trait SendStream: Send + 'static {
     fn reset(self, code: u32);
 
     /// Like [`Self::finish`], but what has not reached the peer's transport
-    /// `patience` later is given up: the stream is reset with `code` then.
-    /// `true` when everything and the FIN got there, or when the stream ended
-    /// some other way; `false` when it was reset here.
+    /// when `give_up` completes is given up: the stream is reset with the
+    /// code `give_up` gave. `true` when everything and the FIN got there, or
+    /// when the stream ended some other way; `false` when it was reset here.
     ///
     /// WHY a default that only finishes: a transport that cannot tell when
-    /// its peer has everything has nothing to give up by. The experiment
-    /// this is for runs over QUIC alone.
-    fn finish_within(self, patience: Duration, code: u32) -> impl Future<Output = bool> + Send
+    /// its peer has everything has nothing to give up by. The experiments
+    /// this is for run over QUIC alone.
+    fn finish_until<G>(self, give_up: G) -> impl Future<Output = bool> + Send
     where
         Self: Sized,
+        G: Future<Output = u32> + Send,
     {
-        let _ = (patience, code);
+        drop(give_up);
         self.finish();
         std::future::ready(true)
     }

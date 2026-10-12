@@ -81,6 +81,14 @@ pub struct HubConfig {
     /// milliseconds for every subscriber. On loopback a stream opens in
     /// well under a millisecond.
     pub slow_open: Duration,
+    /// An experiment, off unless asked for: when a subgroup stream of a
+    /// Group is opened towards a subscriber, the streams of the older Groups
+    /// of that track towards it that it does not have all of yet are reset
+    /// with `DELIVERY_TIMEOUT`, and the subscription goes on (§8:
+    /// "Publishers can, at their discretion, discontinue forwarding Objects
+    /// before either of the timeouts occurs"). Needs
+    /// [`SendLimits::held_until_delivered`], which `main` sets with it.
+    pub give_up_older_groups: bool,
     /// The key of the experiment in authorization (`crate::auth`). None:
     /// every request is allowed.
     pub auth_key: Option<Vec<u8>>,
@@ -127,6 +135,7 @@ impl Default for HubConfig {
             send: SendLimits::default(),
             drain_timeout: Duration::from_secs(2),
             slow_open: Duration::from_millis(10),
+            give_up_older_groups: false,
             auth_key: None,
             auth_setup: true,
             early_stream_timeout: Duration::from_secs(2),
@@ -639,6 +648,7 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
         events: events.clone(),
         sessions: HashMap::new(),
         out_streams: HashMap::new(),
+        out_groups: HashMap::new(),
         fetch_pipes: HashMap::new(),
         timers: Timers::default(),
         closing: std::collections::HashSet::new(),
@@ -660,6 +670,10 @@ struct Hub<C: Connection> {
     /// The writers of the subgroup streams that are not done, with the session
     /// each writes to.
     out_streams: HashMap<OutStreamKey, (SessionKey, OutgoingSubgroup)>,
+    /// With [`HubConfig::give_up_older_groups`]: the Track Alias and the
+    /// Group of the subgroup streams towards each session that may still be
+    /// in `out_streams`.
+    out_groups: HashMap<OutStreamKey, (SessionKey, u64, u64)>,
     /// The fetch streams that are being passed on, by the subscriber's
     /// session and the request stream of its FETCH, each with the way to cut
     /// it short. Dropping that cuts it short as well.
@@ -860,6 +874,7 @@ impl<C: Connection> Hub<C> {
                         }
                         Event::OutStreamClosed { out_stream } => {
                             self.out_streams.remove(out_stream);
+                            self.out_groups.remove(out_stream);
                         }
                         _ => {}
                     }
@@ -1402,6 +1417,9 @@ impl<C: Connection> Hub<C> {
         header: SubgroupHeader,
         pending: &mut VecDeque<Event>,
     ) {
+        if self.config.give_up_older_groups {
+            self.give_up_groups_before(session, out_stream, &header);
+        }
         let Some(handle) = self.sessions.get(&session) else {
             return;
         };
@@ -1484,6 +1502,42 @@ impl<C: Connection> Hub<C> {
             pending.push_back(Event::SendQueueFull { out_stream });
             pending.push_back(Event::OutStreamClosed { out_stream });
         }
+    }
+
+    /// Resets the streams of the Groups of the track before the one a new
+    /// stream is for, towards the same session, and notes the new one.
+    ///
+    /// WHY by the Group ID and not "every other stream of the track": a
+    /// Group can have several Subgroups, each on a stream, and a mapping
+    /// that puts every Object on a stream has many of one Group open.
+    fn give_up_groups_before(
+        &mut self,
+        session: SessionKey,
+        out_stream: OutStreamKey,
+        header: &SubgroupHeader,
+    ) {
+        let older: Vec<(OutStreamKey, u64)> = self
+            .out_groups
+            .iter()
+            .filter(|(_, (owner, alias, group))| {
+                *owner == session && *alias == header.track_alias && *group < header.group_id
+            })
+            .map(|(older, (_, _, group))| (*older, *group))
+            .collect();
+        for (older, group) in older {
+            self.out_groups.remove(&older);
+            if let Some((_, writer)) = self.out_streams.get(&older) {
+                writer.reset(stream_reset_code::DELIVERY_TIMEOUT);
+                self.log(|| {
+                    format!(
+                        "GROUP_GIVEN_UP session={} out={} group={group} for_group={}",
+                        session.0, older.0, header.group_id
+                    )
+                });
+            }
+        }
+        self.out_groups
+            .insert(out_stream, (session, header.track_alias, header.group_id));
     }
 
     /// Starts or stops the timer an action asks for.
@@ -1721,6 +1775,7 @@ impl<C: Connection> Hub<C> {
             }
             *owner != session
         });
+        self.out_groups.retain(|_, (owner, _, _)| *owner != session);
         self.timers.forget_session(session);
     }
 }
