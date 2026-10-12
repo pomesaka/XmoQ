@@ -1,0 +1,21 @@
+[package]
+name = "rust-audio"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A spike: outside the workspace (the root Cargo.toml excludes spikes/), its lints and its
+# review. Neither the decoder nor the output is a choice of the project.
+[[bin]]
+name = "opus-play"
+path = "src/main.rs"
+
+[features]
+# The decoder is libopus through the crate `opus` (needs cmake and a C compiler); without the
+# feature it is the crate `opus-decoder`, which is Rust alone.
+libopus = ["dep:opus"]
+
+[dependencies]
+cpal = "=0.18.2"
+opus-decoder = "=0.1.1"
+opus = { version = "=0.4.0", optional = true }
