@@ -44,6 +44,41 @@ pub fn picture_after_sound_us(picture_us: &[u64], sound_us: &[u64]) -> Vec<i64> 
         .collect()
 }
 
+/// The last values of a series: what is counted over a broadcast of any
+/// length without growing with it.
+#[derive(Debug, Clone)]
+pub struct Recent {
+    values: std::collections::VecDeque<i64>,
+    most: usize,
+}
+
+impl Recent {
+    /// A series of which the last `most` values are kept.
+    #[must_use]
+    pub fn new(most: usize) -> Self {
+        Self {
+            values: std::collections::VecDeque::new(),
+            most,
+        }
+    }
+
+    /// Takes a value; the oldest goes where `most` are there already.
+    pub fn push(&mut self, value: i64) {
+        if self.values.len() >= self.most {
+            self.values.pop_front();
+        }
+        if self.most > 0 {
+            self.values.push_back(value);
+        }
+    }
+
+    /// The values that are kept, the oldest first.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<i64> {
+        self.values.iter().copied().collect()
+    }
+}
+
 /// The least, the median, the 95th of a hundred and the greatest of some
 /// values; all 0 for none.
 #[must_use]
@@ -118,6 +153,22 @@ mod tests {
         for (picture, sound, apart) in cases {
             assert_eq!(picture_after_sound_us(picture, sound), apart, "{picture:?}");
         }
+    }
+
+    #[test]
+    fn of_a_series_the_last_values_are_kept() {
+        let mut recent = Recent::new(3);
+        assert_eq!(recent.to_vec(), [0i64; 0]);
+        for value in [1, 2, 3] {
+            recent.push(value);
+        }
+        assert_eq!(recent.to_vec(), [1, 2, 3]);
+        recent.push(4);
+        recent.push(5);
+        assert_eq!(recent.to_vec(), [3, 4, 5]);
+        let mut none = Recent::new(0);
+        none.push(1);
+        assert_eq!(none.to_vec(), [0i64; 0]);
     }
 
     #[test]

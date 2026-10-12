@@ -96,10 +96,11 @@ pub fn micros_since(began: Instant, at: Instant) -> u64 {
 
 impl Sound {
     /// Opens the output. Times are counted from `began`.
-    pub fn open(volume: Arc<Volume>, began: Instant) -> Result<Self> {
+    /// With `with_output` false no device is opened ([`AudioOutput::silent`]).
+    pub fn open(volume: Arc<Volume>, began: Instant, with_output: bool) -> Result<Self> {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let for_output = Arc::clone(&shared);
-        let output = AudioOutput::open(move |first, out| {
+        let fill = move |first: Instant, out: &mut [f32]| {
             let mut shared = locked(&for_output);
             shared.playout.fill(micros_since(began, first), out);
             let volume = volume.now();
@@ -109,7 +110,12 @@ impl Sound {
                 shared.level.samples += 1.0;
                 *sample *= volume;
             }
-        })?;
+        };
+        let output = if with_output {
+            AudioOutput::open(fill)?
+        } else {
+            AudioOutput::silent(fill)
+        };
         Ok(Self {
             shared,
             decoder: opus_decoder::OpusDecoder::new(RATE, 1)

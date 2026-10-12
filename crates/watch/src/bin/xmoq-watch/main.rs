@@ -17,8 +17,10 @@ mod sound;
 mod terminal;
 mod video_decoder;
 
+use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -39,14 +41,46 @@ use xmoq_moqt_io::{
 use xmoq_watch::args::{Args, Fit, Source};
 use xmoq_watch::clock::Clock;
 use xmoq_watch::keys::{Asked, Keys};
+use xmoq_watch::marks::Recent;
 use xmoq_watch::room::{self, Broadcast};
 use xmoq_watch::{marks, tracks};
 
-use crate::picture::{Frame, LINES, Screen, Seen, Under};
+use crate::picture::{
+    Frame, LINES, MOST_COUNTED, MOST_FRAMES_WAITING, Picture, Screen, Seen, Under,
+};
 use crate::room_socket::{Heard, RoomSocket};
 use crate::session::{Requests, Subscription, timestamp_of};
 use crate::sound::{Sound, Volume, micros_since};
 use crate::video_decoder::VideoDecoder;
+
+/// How long the relay gets to answer the SETUP and the requests of a
+/// broadcast, a room to take the viewer in, and either to be connected to.
+/// **Provisional**: the catalog alone is waited 5 seconds for.
+const ANSWER_WAIT: Duration = Duration::from_secs(10);
+/// How long a room gets for a token, and to take a line of the chat.
+/// **Provisional.**
+const ROOM_WAIT: Duration = Duration::from_secs(5);
+/// How long the thread of the picture gets to end. **Provisional**: it
+/// hears of the end within 20 ms unless the terminal does not take what it
+/// writes.
+const PICTURE_WAIT: Duration = Duration::from_secs(2);
+/// The least time from one try at a broadcast to the next, however often a
+/// room names another. **Provisional.**
+const BETWEEN_TRIES: Duration = Duration::from_secs(1);
+/// The most lines of the chat that are kept for the lines under the picture.
+const CHAT_KEPT: usize = 16;
+/// The most characters of a line this program writes about what a peer
+/// said: an error, the tracks of a catalog.
+const LINE_ABOUT_A_PEER: usize = 600;
+
+/// Writes a line to stderr with nothing in it a terminal would act on.
+///
+/// WHY every line goes through here or through [`Ui::note`]: a line can
+/// carry what a peer chose (a track's name in an error, a reason a relay
+/// gave), and stderr is a terminal more often than not.
+fn say(line: &str) {
+    eprintln!("{}", room::clean(line, LINE_ABOUT_A_PEER));
+}
 
 /// What the viewer shares between its parts while it runs.
 struct Ui {
@@ -65,9 +99,36 @@ impl Ui {
     /// that is no terminal. WHY not to a terminal: the picture is there.
     fn note(&mut self, line: &str) {
         if let Some(log) = &mut self.log {
-            let _ = writeln!(log, "{line}");
+            let _ = writeln!(log, "{}", room::clean(line, LINE_ABOUT_A_PEER));
         } else if !std::io::stderr().is_terminal() {
-            eprintln!("{line}");
+            say(line);
+        }
+    }
+
+    /// Waits for what a peer is to do, for no longer than `limit`, and not
+    /// at all once the viewer is told to end: `None` then.
+    ///
+    /// WHY everything a peer is waited for goes through here: a peer that
+    /// does not answer must not be what keeps `q`, Ctrl-C, a signal or
+    /// `--seconds` from ending the viewer.
+    async fn unless_ended<T>(
+        &mut self,
+        what: &str,
+        limit: Duration,
+        doing: impl Future<Output = Result<T>>,
+    ) -> Result<Option<T>> {
+        tokio::pin!(doing);
+        let late = tokio::time::sleep(limit);
+        tokio::pin!(late);
+        loop {
+            tokio::select! {
+                done = &mut doing => return done.map(Some),
+                () = &mut late => bail!("{what} took more than {} s", limit.as_secs()),
+                // A line for the chat that is typed meanwhile is let go.
+                asked = self.asked() => if !matches!(asked, Asked::Say(_)) {
+                    return Ok(None);
+                },
+            }
         }
     }
 
@@ -75,6 +136,9 @@ impl Ui {
         self.note(&format!("CHAT {line}"));
         let mut under = self.under.lock().unwrap_or_else(PoisonError::into_inner);
         under.chat.push(line);
+        // The last few are shown; a chat that goes on is not kept.
+        let beyond = under.chat.len().saturating_sub(CHAT_KEPT);
+        under.chat.drain(..beyond);
         under.version += 1;
     }
 
@@ -161,7 +225,8 @@ enum Ended {
 struct Place {
     url: String,
     cert_sha256: [u8; 32],
-    namespace: String,
+    /// The fields of the Track Namespace.
+    namespace: Vec<String>,
     token: Option<Vec<u8>>,
     /// The broadcast of the room this is, where a room said it.
     broadcast: Option<Broadcast>,
@@ -203,7 +268,8 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
             return Ok(Some(Place {
                 url: url.clone(),
                 cert_sha256: *cert_sha256,
-                namespace: namespace.clone(),
+                // The flag has the fields between slashes.
+                namespace: namespace.split('/').map(str::to_string).collect(),
                 token: None,
                 broadcast: None,
             }));
@@ -224,10 +290,17 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
     ));
     let mut token = None;
     if ask_token {
-        token = room
-            .token(&broadcast.namespace)
+        let Some(given) = ui
+            .unless_ended(
+                "the room's token",
+                ROOM_WAIT,
+                room.token(&broadcast.namespace),
+            )
             .await?
-            .map(|text| room::authorization_token(&text));
+        else {
+            return Ok(None);
+        };
+        token = given.map(|text| room::authorization_token(&text));
         ui.note(&format!(
             "ROOM_TOKEN {}",
             if token.is_some() {
@@ -240,7 +313,7 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
     Ok(Some(Place {
         url: broadcast.relay_url.clone(),
         cert_sha256: room::certificate_hash(&broadcast.cert_sha256_hex)?,
-        namespace: broadcast.namespace.join("/"),
+        namespace: broadcast.namespace.clone(),
         token,
         broadcast: Some(broadcast),
     }))
@@ -250,11 +323,19 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     // With a room: where the broadcast is, and a token, are the room's to say.
     let mut room = match &args.source {
         Source::Room {
-            address, name, say, ..
+            address,
+            name,
+            say: line,
+            ..
         } => {
-            let mut room = RoomSocket::join(address, name).await?;
-            if let Some(text) = say {
-                room.say(text).await?;
+            let joining = RoomSocket::join(address, name);
+            let Some(mut room) = ui.unless_ended("the room", ANSWER_WAIT, joining).await? else {
+                return Ok(());
+            };
+            if let Some(text) = line {
+                tokio::time::timeout(ROOM_WAIT, room.say(text))
+                    .await
+                    .map_err(|_| anyhow!("the room did not take a line for the chat"))??;
             }
             Some(room)
         }
@@ -262,14 +343,34 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     };
     let follows = room.is_some();
     let mut first = true;
+    let mut tried: Option<Instant> = None;
     loop {
         let Some(place) = place(args, &mut room, ui).await? else {
             return Ok(());
         };
+        // WHY not at once again: a room that names one broadcast after the
+        // other, or one that is gone, would have the viewer connect as fast
+        // as it can.
+        if let Some(wait) = tried.and_then(|tried| BETWEEN_TRIES.checked_sub(tried.elapsed())) {
+            let waiting = async {
+                tokio::time::sleep(wait).await;
+                Ok(())
+            };
+            if ui
+                .unless_ended("the wait", BETWEEN_TRIES * 2, waiting)
+                .await?
+                .is_none()
+            {
+                return Ok(());
+            }
+        }
+        tried = Some(Instant::now());
         let mut began = false;
         let streams = StreamConfig::default();
-        let played = match wt::connect(&place.url, place.cert_sha256, &streams).await {
-            Ok(connection) => {
+        let connecting = async { Ok(wt::connect(&place.url, place.cert_sha256, &streams).await?) };
+        let played = match ui.unless_ended("the relay", ANSWER_WAIT, connecting).await {
+            Ok(None) => return Ok(()),
+            Ok(Some(connection)) => {
                 let connection = Arc::new(connection);
                 let played = play(args, &connection, &place, &mut room, ui, &mut began).await;
                 if played.is_err()
@@ -279,14 +380,14 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
                     ui.note(&format!("SESSION_ENDED {end:?}"));
                     // To the person as well, where the note went elsewhere.
                     if !began && (ui.log.is_some() || std::io::stderr().is_terminal()) {
-                        eprintln!("SESSION_ENDED {end:?}");
+                        say(&format!("SESSION_ENDED {end:?}"));
                     }
                 }
                 connection.close(0, b"");
                 let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
                 played
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         };
         match played {
             // Without a room nothing says what comes next.
@@ -296,18 +397,21 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
             // relay that turns the viewer down is to be seen, and a
             // broadcast that broke off may come back.
             Err(error) if !follows || (first && !began) => return Err(error),
-            Err(error) => {
-                ui.note(&format!("PLAY_ENDED {error:#}"));
-                // The room may still name the broadcast that is gone: not
-                // at once again.
-                tokio::select! {
-                    () = tokio::time::sleep(Duration::from_secs(1)) => {}
-                    asked = ui.asked() => if !matches!(asked, Asked::Say(_)) { return Ok(()) },
-                }
-            }
+            Err(error) => ui.note(&format!("PLAY_ENDED {error:#}")),
         }
         first = false;
     }
+}
+
+/// The subscriptions of a broadcast.
+struct Subscribed {
+    video: Subscription,
+    audio: Subscription,
+    /// What keeps the catalog's requests open.
+    _catalog: Option<session::CatalogKept>,
+    /// What the catalog had, as a line for the log; `None` where the tracks
+    /// were named.
+    found: Option<String>,
 }
 
 /// The tracks to play: by name, or the first of each kind the catalog has.
@@ -316,10 +420,9 @@ async fn subscriptions(
     requests: &mut Requests<'_>,
     events: &mut mpsc::Receiver<UniEvent>,
     stops: &StreamStops,
-    ui: &mut Ui,
-) -> Result<(Subscription, Subscription, Option<session::CatalogKept>)> {
-    let (video, audio, kept) = if let Some((video, audio)) = &args.tracks {
-        (video.clone(), audio.clone(), None)
+) -> Result<Subscribed> {
+    let (video, audio, kept, found) = if let Some((video, audio)) = &args.tracks {
+        (video.clone(), audio.clone(), None, None)
     } else {
         let (catalog, kept) = requests.catalog(events, stops).await?;
         let chosen = tracks::choose(&catalog)?;
@@ -330,23 +433,30 @@ async fn subscriptions(
         let line = format!(
             "CATALOG tracks={} video={} codec={} size={}x{} audio={} codec={} samplerate={} channel_config={}",
             catalog.len(),
-            video.name,
-            video.codec.as_deref().unwrap_or("-"),
+            room::clean(&video.name, 60),
+            room::clean(video.codec.as_deref().unwrap_or("-"), 30),
             video.width.unwrap_or(0),
             video.height.unwrap_or(0),
-            audio.name,
-            audio.codec.as_deref().unwrap_or("-"),
+            room::clean(&audio.name, 60),
+            room::clean(audio.codec.as_deref().unwrap_or("-"), 30),
             audio
                 .samplerate
                 .map_or("-".to_string(), |rate| rate.to_string()),
-            audio.channel_config.as_deref().unwrap_or("-"),
+            room::clean(audio.channel_config.as_deref().unwrap_or("-"), 30),
         );
-        ui.note(&room::clean(&line, 4 * room::LINE_LIMIT));
-        (video.name.clone(), audio.name.clone(), Some(kept))
+        (
+            video.name.clone(),
+            audio.name.clone(),
+            Some(kept),
+            Some(line),
+        )
     };
-    let video = requests.subscribe(&video).await?;
-    let audio = requests.subscribe(&audio).await?;
-    Ok((video, audio, kept))
+    Ok(Subscribed {
+        video: requests.subscribe(&video).await?,
+        audio: requests.subscribe(&audio).await?,
+        _catalog: kept,
+        found,
+    })
 }
 
 /// The screen the picture is written to.
@@ -390,9 +500,13 @@ struct Played {
     seen: Seen,
     heard: sound::Heard,
     sound_marks_us: Vec<u64>,
-    audio_over_least_us: Vec<i64>,
-    video_over_least_us: Vec<i64>,
+    audio_over_least_us: Recent,
+    video_over_least_us: Recent,
     no_timestamp: u64,
+    /// Objects whose Timestamp was too far from the clock to be of it.
+    not_of_the_clock: u64,
+    /// Frames left out because too many waited to be drawn.
+    frames_dropped_full: u64,
     streams_reset: u64,
     /// What the sound output is ahead by, which is added to the buffer.
     output_lead_us: u64,
@@ -430,7 +544,8 @@ impl Played {
              video_after_due_ms_min/p50/p95/max={} decode_ms_a_frame={:.2} draw_ms_a_frame={:.2} \
              audio_packets={} audio_refused={} audio_played_ms={} underruns={} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} \
              peak={:.3} rms={:.3} audio_came_over_least_ms_min/p50/p95/max={} video_came_over_least_ms_min/p50/p95/max={} \
-             marks_video={} marks_audio={} picture_after_sound_ms_min/p50/p95/max={} no_timestamp={} streams_reset={}",
+             marks_video={} marks_audio={} picture_after_sound_ms_min/p50/p95/max={} no_timestamp={} not_of_the_clock={} \
+             frames_dropped_full={} pictures_too_large={} streams_reset={}",
             self.why,
             self.lasted.as_secs_f64(),
             args.buffer_ms,
@@ -457,12 +572,15 @@ impl Played {
             counts.dropped_full,
             self.heard.peak,
             self.heard.rms,
-            spread_ms(&self.audio_over_least_us),
-            spread_ms(&self.video_over_least_us),
+            spread_ms(&self.audio_over_least_us.to_vec()),
+            spread_ms(&self.video_over_least_us.to_vec()),
             seen.marks_us.len(),
             self.sound_marks_us.len(),
             spread_ms(&apart),
             self.no_timestamp,
+            self.not_of_the_clock,
+            self.frames_dropped_full,
+            seen.too_large,
             self.streams_reset,
         )
     }
@@ -493,53 +611,87 @@ async fn play(
         queue,
         |event| event,
     );
-    // §3.3: each peer opens one control stream that begins with SETUP. It
-    // stays open: closing it is a PROTOCOL_VIOLATION for the peer.
-    let mut control = connection.open_uni().await?;
-    // In ascending order of their types: the token (0x03), then the
-    // implementation (0x07).
-    let mut options = Vec::new();
-    if let Some(token) = &place.token {
+    // WHY all of it in one wait: the relay is the one that is waited for,
+    // from the SETUP to the last SUBSCRIBE_OK, and the viewer has to end
+    // when it is told to at any point of it.
+    let beginning = async {
+        // §3.3: each peer opens one control stream that begins with SETUP.
+        // It stays open: closing it is a PROTOCOL_VIOLATION for the peer.
+        let mut control = connection.open_uni().await?;
+        // In ascending order of their types: the token (0x03), then the
+        // implementation (0x07).
+        let mut options = Vec::new();
+        if let Some(token) = &place.token {
+            options.push(KeyValuePair::bytes(
+                setup_option::AUTHORIZATION_TOKEN,
+                token.clone(),
+            )?);
+        }
+        let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
         options.push(KeyValuePair::bytes(
-            setup_option::AUTHORIZATION_TOKEN,
-            token.clone(),
+            setup_option::MOQT_IMPLEMENTATION,
+            implementation.as_bytes().to_vec(),
         )?);
+        let setup = session.setup(options)?;
+        send_message(&mut control, &setup, &Trace::default(), "control").await?;
+        match events.recv().await {
+            Some(UniEvent::Control(message)) => session.on_control_message(message)?,
+            other => bail!("no SETUP from the relay: {other:?}"),
+        };
+        let namespace = TrackNamespace::new(
+            place
+                .namespace
+                .iter()
+                .map(|field| field.as_bytes().to_vec())
+                .collect(),
+        )?;
+        let mut requests = Requests {
+            connection,
+            session: &mut session,
+            namespace: &namespace,
+            token: place.token.as_deref(),
+        };
+        let subscribed = subscriptions(args, &mut requests, &mut events, &stops).await?;
+        Ok((control, subscribed))
+    };
+    let Some((control, subscribed)) = ui
+        .unless_ended("the relay's answers", ANSWER_WAIT, beginning)
+        .await?
+    else {
+        return Ok(Ended::Quit);
+    };
+    let Subscribed {
+        mut video,
+        mut audio,
+        _catalog,
+        found,
+    } = subscribed;
+    if let Some(line) = found {
+        ui.note(&line);
     }
-    let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-    options.push(KeyValuePair::bytes(
-        setup_option::MOQT_IMPLEMENTATION,
-        implementation.as_bytes().to_vec(),
-    )?);
-    let setup = session.setup(options)?;
-    send_message(&mut control, &setup, &Trace::default(), "control").await?;
-    match events.recv().await {
-        Some(UniEvent::Control(message)) => session.on_control_message(message)?,
-        other => bail!("no SETUP from the relay: {other:?}"),
-    };
-
-    let namespace = TrackNamespace::new(
-        place
-            .namespace
-            .split('/')
-            .map(|field| field.as_bytes().to_vec())
-            .collect(),
-    )?;
-    let mut requests = Requests {
-        connection,
-        session: &mut session,
-        namespace: &namespace,
-        token: place.token.as_deref(),
-    };
-    let (mut video, mut audio, _catalog) =
-        subscriptions(args, &mut requests, &mut events, &stops, ui).await?;
 
     let began = Instant::now();
-    let (frames, for_picture) = std_mpsc::channel();
-    let (screen, decoder) = (screen(args, ui)?, VideoDecoder::new()?);
+    // WHY a queue with an end: frames come at the publisher's pace, and
+    // are drawn at the terminal's.
+    let (frames, for_picture) = std_mpsc::sync_channel(MOST_FRAMES_WAITING);
     let measure = args.measure_demo_marks;
-    let picture =
-        std::thread::spawn(move || picture::run(for_picture, screen, decoder, began, measure));
-    let mut sound = Sound::open(Arc::clone(&ui.volume), began)?;
+    let stop_picture = Arc::new(AtomicBool::new(false));
+    let picture = Picture {
+        frames: for_picture,
+        screen: screen(args, ui)?,
+        decoder: VideoDecoder::new()?,
+        began,
+        measure_marks: measure,
+        stop: Arc::clone(&stop_picture),
+    };
+    // WHY its result comes over a channel and the thread is not joined: a
+    // terminal that does not take what is written holds the thread, and
+    // the viewer has to end all the same.
+    let (drew, seen) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = drew.send(picture::run(picture));
+    });
+    let mut sound = Sound::open(Arc::clone(&ui.volume), began, args.sound)?;
     ui.show();
 
     // WHY the lead of the sound output is added to the buffer, for the
@@ -555,9 +707,11 @@ async fn play(
         seen: Seen::default(),
         heard: sound.heard(),
         sound_marks_us: Vec::new(),
-        audio_over_least_us: Vec::new(),
-        video_over_least_us: Vec::new(),
+        audio_over_least_us: Recent::new(MOST_COUNTED),
+        video_over_least_us: Recent::new(MOST_COUNTED),
         no_timestamp: 0,
+        not_of_the_clock: 0,
+        frames_dropped_full: 0,
         streams_reset: 0,
         output_lead_us: lead_us,
     };
@@ -570,9 +724,14 @@ async fn play(
                     ended = Ended::Quit;
                     break "the viewer was ended";
                 };
-                if let Some(room) = room.as_mut() {
+                if let Some(joined) = room.as_mut() {
                     ui.note(&format!("SAID {}", room::clean(&text, room::LINE_LIMIT)));
-                    room.say(&text).await?;
+                    // A room that does not take the line is gone; the
+                    // broadcast is watched on without it.
+                    if !matches!(tokio::time::timeout(ROOM_WAIT, joined.say(&text)).await, Ok(Ok(()))) {
+                        ui.note("ROOM_LOST it did not take a line for the chat");
+                        *room = None;
+                    }
                 } else {
                     ui.note("SAID nothing: no room");
                 }
@@ -628,21 +787,33 @@ async fn play(
                         continue;
                     };
                     *began_playing = true;
-                    let due = clock.due(micros_since(began, Instant::now()), timestamp);
+                    let Some(due) = clock.due(micros_since(began, Instant::now()), timestamp)
+                    else {
+                        played.not_of_the_clock += 1;
+                        continue;
+                    };
                     let over_least = i64::try_from(due.over_least_us).unwrap_or(i64::MAX);
                     if header.track_alias == video.track_alias {
                         played.video_over_least_us.push(over_least);
                         let annex_b = loc::to_annex_b(&object.payload)
                             .map_err(|error| anyhow!("a video payload: {}", error.0))?;
-                        let _ = frames.send(Frame {
+                        let frame = Frame {
                             group: header.group_id,
                             object: object.object_id,
                             annex_b,
                             due: began + Duration::from_micros(due.at_us),
-                        });
+                        };
+                        // Full: the frame is left out, and the picture
+                        // goes on at the next Group.
+                        if frames.try_send(frame).is_err() {
+                            played.frames_dropped_full += 1;
+                        }
                     } else if header.track_alias == audio.track_alias {
                         played.audio_over_least_us.push(over_least);
-                        if sound.take(&object.payload, due.at_us) && measure {
+                        if sound.take(&object.payload, due.at_us)
+                            && measure
+                            && played.sound_marks_us.len() < MOST_COUNTED
+                        {
                             played.sound_marks_us.push(due.at_us);
                         }
                     }
@@ -668,10 +839,14 @@ async fn play(
     };
     sound.end();
     played.lasted = sound.began().elapsed();
+    stop_picture.store(true, Ordering::Relaxed);
     drop(frames);
-    played.seen = picture
-        .join()
-        .map_err(|_| anyhow!("the picture's thread panicked"))?;
+    played.seen = match tokio::time::timeout(PICTURE_WAIT, seen).await {
+        Ok(Ok(seen)) => seen,
+        Ok(Err(_)) => bail!("the picture's thread panicked"),
+        // The terminal holds it: what it counted is not known.
+        Err(_) => Seen::default(),
+    };
     played.heard = sound.heard();
     // WHY the control stream is not let go of here: a stream that is
     // dropped is finished, which the relay takes for a PROTOCOL_VIOLATION
@@ -680,7 +855,7 @@ async fn play(
     std::mem::forget(control);
 
     let line = played.line(args, ui);
-    eprintln!("{line}");
+    say(&line);
     if ui.log.is_some() {
         ui.note(&line);
     }
@@ -739,14 +914,15 @@ async fn main() -> ExitCode {
     let args = match xmoq_watch::args::parse(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("{error}\n{}", xmoq_watch::args::USAGE);
+            say(&error.to_string());
+            eprintln!("{}", xmoq_watch::args::USAGE);
             return ExitCode::from(2);
         }
     };
     match watch(args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Error: {error:#}");
+            say(&format!("Error: {error:#}"));
             ExitCode::FAILURE
         }
     }

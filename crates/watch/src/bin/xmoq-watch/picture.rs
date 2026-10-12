@@ -1,19 +1,44 @@
 //! The picture: frames decoded as they come, each written for the terminal
 //! at the moment it is due, on a thread of its own.
 
+use std::collections::VecDeque;
+use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use xmoq_watch::args::Medium;
+use xmoq_watch::marks::Recent;
 use xmoq_watch::{fit, kitty, marks};
 
 use crate::sound::micros_since;
-use crate::video_decoder::VideoDecoder;
+use crate::video_decoder::{Decoded, VideoDecoder};
 
 /// Lines under the picture: the last of the chat, and one for the keys.
 pub const LINES: usize = 4;
+
+/// The most frames that wait to be decoded and drawn, as the watching page
+/// holds 30. One more is left out, and the picture goes on at the next
+/// Group: a terminal that takes its frames slowly must not have them kept
+/// for it without end.
+pub const MOST_FRAMES_WAITING: usize = 30;
+
+/// The most values of a series that is counted (`Recent`): about two
+/// minutes of frames.
+pub const MOST_COUNTED: usize = 4096;
+
+/// The most files of pixels of this viewer that are there at once
+/// (`--medium file`): a second of frames. A terminal removes each when it
+/// has read it; where none does, the oldest is removed for the newest.
+const MOST_FILES: usize = 30;
+
+/// How long the thread sleeps at a time while a frame is not due, so that
+/// it hears of the end.
+const A_NAP: Duration = Duration::from_millis(20);
 
 /// What stands under the picture.
 #[derive(Default)]
@@ -41,12 +66,16 @@ pub struct Seen {
     /// Frames before the first key frame, and the rest of a Group after a
     /// frame that did not come.
     pub left_out: u64,
+    /// Frames whose picture has more pixels than are handled, and the size
+    /// of the last of them.
+    pub too_large: u64,
+    pub too_large_size: (usize, usize),
     pub decoded: u32,
     pub drawn: u32,
     pub decoding: Duration,
     pub drawing: Duration,
-    /// For every frame drawn: how long after it was due it was written, in
-    /// microseconds.
+    /// For the last frames drawn: how long after it was due each was
+    /// written, in microseconds.
     pub after_due_us: Vec<i64>,
     /// With `--measure-demo-marks`: when a frame with the white square was
     /// written after one without.
@@ -81,7 +110,11 @@ struct Writing {
     out: Vec<u8>,
     /// The version of what stands under the picture that is written.
     under: u64,
-    files: u64,
+    /// The files of pixels that may still be there, the oldest first.
+    files: VecDeque<PathBuf>,
+    written: u64,
+    /// What the names of the files cannot be guessed by.
+    secret: u64,
     bytes: u64,
     by: usize,
 }
@@ -119,22 +152,33 @@ impl Writing {
             Medium::File => {
                 // The name has to hold `tty-graphics-protocol` for the
                 // terminal to remove the file when it has read it.
-                let name = |number: u64| {
-                    std::env::temp_dir().join(format!(
-                        "tty-graphics-protocol-xmoq-{}-{number}.rgb",
-                        std::process::id()
-                    ))
-                };
-                let path = name(self.files);
-                std::fs::write(&path, rgb)?;
+                // WHY a name nobody can guess, made anew and for this user
+                // alone: the directory is everybody's, and a file that is
+                // written by its name there follows a link somebody put in
+                // its place.
+                let path = std::env::temp_dir().join(format!(
+                    "tty-graphics-protocol-xmoq-{}-{:016x}-{}.rgb",
+                    std::process::id(),
+                    self.secret,
+                    self.written
+                ));
+                self.written += 1;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)?
+                    .write_all(rgb)?;
                 self.bytes += u64::try_from(rgb.len()).unwrap_or(u64::MAX);
-                // For a run nobody watches: the file before this one is
-                // removed, as a terminal would have removed it.
-                if self.files > 0 && std::env::var_os("XMOQ_WATCH_REMOVES_FILES").is_some() {
-                    let _ = std::fs::remove_file(name(self.files - 1));
-                }
-                self.files += 1;
                 kitty::frame_file(&path.to_string_lossy(), size, cells, &mut self.out);
+                self.files.push_back(path);
+                // Where no terminal removes them (it is slow, or there is
+                // none), the oldest goes; one that is gone already is fine.
+                while self.files.len() > MOST_FILES {
+                    if let Some(oldest) = self.files.pop_front() {
+                        let _ = std::fs::remove_file(oldest);
+                    }
+                }
             }
         }
         // What stands under the picture, when it has changed. WHY with the
@@ -165,6 +209,9 @@ impl Writing {
     }
 
     fn leave(&mut self) {
+        for file in self.files.drain(..) {
+            let _ = std::fs::remove_file(file);
+        }
         if let Some((_, rows)) = self.placed {
             self.out.clear();
             kitty::leave(rows, LINES, &mut self.out);
@@ -174,15 +221,29 @@ impl Writing {
     }
 }
 
-/// Decodes and draws what comes on `frames`, until the sender is gone.
-/// Times are counted from `began`.
-pub fn run(
-    frames: mpsc::Receiver<Frame>,
-    screen: Screen,
-    mut decoder: VideoDecoder,
-    began: Instant,
-    measure_marks: bool,
-) -> Seen {
+/// What the thread of the picture is started with.
+pub struct Picture {
+    pub frames: mpsc::Receiver<Frame>,
+    pub screen: Screen,
+    pub decoder: VideoDecoder,
+    /// Times are counted from here.
+    pub began: Instant,
+    pub measure_marks: bool,
+    /// Set when the thread is to end without drawing what waits.
+    pub stop: Arc<AtomicBool>,
+}
+
+/// Decodes and draws what comes on `frames`, until the sender is gone or
+/// the thread is told to stop.
+pub fn run(picture: Picture) -> Seen {
+    let Picture {
+        frames,
+        screen,
+        mut decoder,
+        began,
+        measure_marks,
+        stop,
+    } = picture;
     let mut seen = Seen {
         by: 1,
         ..Seen::default()
@@ -193,7 +254,11 @@ pub fn run(
         shrunk: Vec::new(),
         out: Vec::new(),
         under: 0,
-        files: 0,
+        files: VecDeque::new(),
+        written: 0,
+        secret: std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish(),
         bytes: 0,
         by: 1,
     };
@@ -202,7 +267,8 @@ pub fn run(
     let mut next: Option<(u64, u64)> = None;
     let mut was_marked = false;
     let mut shown: Option<(Instant, Instant)> = None;
-    for frame in frames {
+    let mut after_due = Recent::new(MOST_COUNTED);
+    'frames: for frame in frames {
         seen.came += 1;
         let follows = next == Some((frame.group, frame.object));
         let begins = frame.object == 0 && next.is_none_or(|(group, _)| frame.group >= group);
@@ -214,11 +280,23 @@ pub fn run(
         let before = Instant::now();
         let picture = decoder.decode(&frame.annex_b, &mut rgb);
         seen.decoding += before.elapsed();
-        let Some(size) = picture else { continue };
+        let size = match picture {
+            Decoded::Picture(size) => size,
+            Decoded::TooLarge(size) => {
+                seen.too_large += 1;
+                seen.too_large_size = size;
+                continue;
+            }
+            Decoded::Nothing => continue,
+        };
         seen.decoded += 1;
         seen.size = size;
-        if let Some(wait) = frame.due.checked_duration_since(Instant::now()) {
-            std::thread::sleep(wait);
+        // WHY in naps: the end must not wait for a frame to be due.
+        while let Some(wait) = frame.due.checked_duration_since(Instant::now()) {
+            if stop.load(Ordering::Relaxed) {
+                break 'frames;
+            }
+            std::thread::sleep(wait.min(A_NAP));
         }
         let before = Instant::now();
         match writing.draw(&rgb, size) {
@@ -231,18 +309,20 @@ pub fn run(
         seen.drawing += now - before;
         seen.drawn += 1;
         shown = Some((shown.map_or(now, |(first, _)| first), now));
-        let after_due = i64::try_from(micros_since(frame.due, now)).unwrap_or(i64::MAX)
-            - i64::try_from(micros_since(now, frame.due)).unwrap_or(i64::MAX);
-        seen.after_due_us.push(after_due);
+        after_due.push(
+            i64::try_from(micros_since(frame.due, now)).unwrap_or(i64::MAX)
+                - i64::try_from(micros_since(now, frame.due)).unwrap_or(i64::MAX),
+        );
         if measure_marks {
             let marked = marks::picture_is_marked(&rgb, size);
-            if marked && !was_marked {
+            if marked && !was_marked && seen.marks_us.len() < MOST_COUNTED {
                 seen.marks_us.push(micros_since(began, now));
             }
             was_marked = marked;
         }
     }
     writing.leave();
+    seen.after_due_us = after_due.to_vec();
     seen.bytes = writing.bytes;
     seen.by = writing.by;
     seen.shown_for = shown.map_or(Duration::ZERO, |(first, last)| last - first);

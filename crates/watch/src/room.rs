@@ -51,23 +51,50 @@ impl std::fmt::Display for Invalid {
 
 impl std::error::Error for Invalid {}
 
+/// The most lines of a room's chat so far that are read from its hello.
+/// The room keeps 50.
+pub const HISTORY_LIMIT: usize = 64;
+
+/// Whether a character changes how the text around it is laid out without
+/// being seen: the marks, embeddings, overrides and isolates of the
+/// bidirectional algorithm, the separators of lines and paragraphs, and the
+/// byte order mark.
+fn lays_out(char: char) -> bool {
+    matches!(
+        char,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
+}
+
 /// A text with nothing a terminal would act on, and no longer than `most`
 /// characters.
 ///
-/// WHY: a line of the chat is anybody's text, and it is written to a
-/// terminal, where an escape code moves the cursor, changes the title or
-/// worse.
+/// WHY: a line of the chat is anybody's text, and so is a track's name and
+/// what a relay says of itself; each is written to a terminal, where an
+/// escape code moves the cursor, changes the title or worse, and a
+/// right-to-left override shows a text as another than it is.
 #[must_use]
 pub fn clean(text: &str, most: usize) -> String {
     text.chars()
-        .filter(|char| !char.is_control())
+        .filter(|char| !char.is_control() && !lays_out(*char))
         .take(most)
         .collect()
 }
 
 fn broadcast_of(value: &Value) -> Option<Broadcast> {
+    let relay_url = value.get("relayUrl")?.as_str()?;
+    // WHY https alone: it is what a relay is reached by (WebTransport), and
+    // an address of any other kind from a room is not one to hand a token to.
+    if !relay_url.starts_with("https://") {
+        return None;
+    }
     Some(Broadcast {
-        relay_url: value.get("relayUrl")?.as_str()?.to_string(),
+        relay_url: relay_url.to_string(),
         cert_sha256_hex: value.get("certSha256Hex")?.as_str()?.to_string(),
         namespace: value
             .get("namespace")?
@@ -93,8 +120,9 @@ fn chat_line(value: &Value) -> String {
 
 /// Reads one message of a room.
 ///
-/// A broadcast that lacks a field, or has one of another type, is read as
-/// no broadcast: there is nowhere to connect to.
+/// A broadcast that lacks a field, has one of another type, or names a
+/// relay by anything but `https://`, is read as no broadcast: there is
+/// nowhere to connect to.
 ///
 /// # Errors
 ///
@@ -103,16 +131,18 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
     let message: Value =
         serde_json::from_str(text).map_err(|error| Invalid(format!("no JSON: {error}")))?;
     Ok(match message.get("type").and_then(Value::as_str) {
-        Some("hello") => Said::Hello {
-            history: message
+        Some("hello") => {
+            let history = message
                 .get("history")
                 .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .map(chat_line)
-                .collect(),
-            broadcast: message.get("broadcast").and_then(broadcast_of),
-        },
+                .map_or(&[][..], Vec::as_slice);
+            // The last of them: what a room keeps beyond the limit is old.
+            let from = history.len().saturating_sub(HISTORY_LIMIT);
+            Said::Hello {
+                history: history.iter().skip(from).map(chat_line).collect(),
+                broadcast: message.get("broadcast").and_then(broadcast_of),
+            }
+        }
         Some("chat") => Said::Chat(chat_line(&message)),
         Some("broadcast") => Said::Broadcast(message.get("broadcast").and_then(broadcast_of)),
         Some("token") => Said::Token(
@@ -240,6 +270,22 @@ mod tests {
                 r#"{"type":"broadcast","broadcast":null}"#.to_string(),
                 Said::Broadcast(None),
             ),
+            // A relay that is not reached by https.
+            (
+                r#"{"type":"broadcast","broadcast":{"relayUrl":"http://h/","certSha256Hex":"00","namespace":["a"]}}"#
+                    .to_string(),
+                Said::Broadcast(None),
+            ),
+            (
+                r#"{"type":"broadcast","broadcast":{"relayUrl":"file:///etc/passwd","certSha256Hex":"00","namespace":["a"]}}"#
+                    .to_string(),
+                Said::Broadcast(None),
+            ),
+            // A right-to-left override and a line separator are taken out as well.
+            (
+                r#"{"type":"chat","seq":9,"from":"x","text":"a\u202eb\u2028c\u2066d\ufeff"}"#.to_string(),
+                chat("9 x: abcd"),
+            ),
             // A broadcast without its certificate, and one whose namespace is no strings.
             (
                 r#"{"type":"broadcast","broadcast":{"relayUrl":"https://h/","namespace":["a"]}}"#
@@ -268,6 +314,23 @@ mod tests {
             assert_eq!(read(&message), Ok(said), "{message}");
         }
         assert!(read("{").is_err());
+    }
+
+    #[test]
+    fn of_a_long_history_the_last_lines_are_read() {
+        let lines: Vec<String> = (1..=70)
+            .map(|seq| format!(r#"{{"seq":{seq},"from":"a","text":"t"}}"#))
+            .collect();
+        let message = format!(
+            r#"{{"type":"hello","history":[{}],"broadcast":null}}"#,
+            lines.join(",")
+        );
+        let Ok(Said::Hello { history, .. }) = read(&message) else {
+            panic!("a hello");
+        };
+        assert_eq!(history.len(), 64);
+        assert_eq!(history.first().map(String::as_str), Some("7 a: t"));
+        assert_eq!(history.last().map(String::as_str), Some("70 a: t"));
     }
 
     #[test]
