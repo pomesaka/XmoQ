@@ -52,3 +52,54 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 **With tokens** (an experiment; how the relay authorizes is undecided): `bun demo/serve.ts --auth` makes a key for the run and gives it to the relay and to the rooms. The relay then refuses a request without a token; the pages ask the room for one (`pub` to publish, `sub` to watch) and give it to their connection, which puts it into every request. The relay looks at the token in SETUP as well, and closes a session without one: `?token=no` on a page asks for none, and the page says that the relay closed the session as not authorized.
 
 No catalog. The times are compared on one machine, where the two pages have the same clock.
+
+## Every flag
+
+Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/shared.ts`, `demo/chat.ts`, `demo/serve.ts`). Each is a query of the page's address unless it begins with `--`. "Trial" is something tried behind the flag and not the demo's way; the sections above have what each trial showed.
+
+| Page | Flag | What it does | Without it |
+|---|---|---|---|
+| both | `room=NAME` | The room | `demo` |
+| both | `via=PORT` | The relay through another port of this machine, where something stands in between (`spikes/lossy-link`) | The relay's own port |
+| both | `token=no` | Asks the room for no token, to see a relay with `--auth` refuse | A token where the rooms give one |
+| both | `uni=N` | How many streams of the peer are read at once | The library's |
+| both | `timer=page`, `timer=slow` | The page's own timer, and that timer as a background tab has it | A worker's timer |
+| both | `diag=1` | More in the page's report, for looking into a run | |
+| publish | `size=360`, `720`, `1080` | The picture's size | 360 |
+| publish | `bitrate=N` | Bits a second of the video | The size's: 1.5, 3 and 6 Mbit/s |
+| publish | `keyint=MS` | A key frame every so many milliseconds | 1000 |
+| publish | `picture=busy` | A picture that fills the bitrate it asks for | The clock alone |
+| publish | `source=camera` | The camera and the microphone | The painted clock and a tone |
+| publish | `audio=none` | No sound | Opus, mono |
+| publish | `audioGroup=N` | Pieces of sound in a Group, and so on a stream | 10 |
+| publish | `audioPriority=N` | The Publisher Priority of the sound's streams, 0 the highest | None named (128, as the video) |
+| publish | `mapping=stream-per-object` | Every Object of the video on a stream of its own | A stream for a Group |
+| publish | `ladder=1` | Trial: a second, small version of the video | One version |
+| watch | `buffer=N`, `buffer=auto` | The playout buffer in milliseconds; `auto` (trial) follows how late Objects come | 50 |
+| watch | `autoMax=MS`, `autoShare=F` | With `buffer=auto`: its limit, and the share of the Objects it covers | 400, 0.99 |
+| watch | `audioMin=MS` | The least the sound waits where the buffer is shorter | 30 |
+| watch | `order=no` | A piece of sound that comes before its turn is not held for the ones before it | Held |
+| watch | `join=no` | No Joining FETCH for the video: the picture begins with the next key frame | A Joining FETCH of the Group under way |
+| watch | `audioJoin=1` | A Joining FETCH for the sound as well | None |
+| watch | `video=no` | The sound alone | Picture and sound |
+| watch | `videoTimeout=MS` | The delivery timeout asked for the video; 0 asks for none | 150 |
+| watch | `audioTimeout=MS` | The same for the sound | None asked |
+| watch | `videoTimeoutThen=MS`, `videoTimeoutAfter=S` | Changes the video's timeout while it plays, with a REQUEST_UPDATE, after S seconds | No change; 10 |
+| watch | `abr=1` | Trial: changes between the versions of `ladder=1` | The first version |
+| watch | `judge=try` | Trial, with `abr=1`: a higher version is received for 2 s before it is shown | Shown at once |
+| watch | `versionTimeouts=A,B` | Trial, with `abr=1`: a delivery timeout for each version | `videoTimeout` for each |
+| watch | `wait=1` | Trial: waits for the broadcast at the relay, on one session | Goes by the room's word |
+| chat | `room=NAME`, `name=N`, `peers=a,b` | The try of chat as MoQ tracks | Room `chat` |
+
+`bun demo/serve.ts`:
+
+| Flag | What it does | Without it |
+|---|---|---|
+| `--port`, `--relay-port`, `--rooms-port` | The ports of the pages, the relay and the rooms | 8080, 4443, 8787 |
+| `--auth` | Experiment: a key for this run; the relay refuses requests without a token of the rooms | No tokens |
+| `--congestion cubic\|newreno\|bbr` | The relay's congestion control | cubic |
+| `--delivery-patience-ms N` | Experiment of the relay: a Group is given up so long after its end, for viewers that asked for no timeout | Off |
+| `--older-groups give-up`, `--older-groups-grace-ms N` | Experiment of the relay: older Groups are given up when a newer one begins, after N ms | Off |
+| `--relay-log FILE` | The relay's lines, to a file | Not kept |
+| `--relay-binary FILE` | Another relay than this tree's | `target/debug/xmoq-relay` |
+

@@ -51,6 +51,13 @@ The relay gets a cache of the latest Group of each track in Phase 1; decided on 
 
 **Exit:** documented A/V demo and limitations. Reached on 2026-10-12 with [the A/V demo and its limits](av-demo.md), for one machine: a person watched it and found the sound smooth on 2026-10-12, and a run over real links waits for the hosting decision, as in Phase 1.
 
+**After the exit, on the same demo and still one machine** (2026-10-12 and 13; none of it is a roadmap item of its own, and each is a first version behind what its record says is missing):
+
+- The watching page asks the relay to give late video up (a delivery timeout of 150 ms, by default and provisional), and can change it while it plays ([timeout](experiments/2026-10-12-which-delivery-timeout-a-viewer-asks-for-on-its-video.md), [update](experiments/2026-10-12-a-viewer-changes-its-delivery-timeout-with-request-update.md)).
+- Two versions of the video and a viewer that changes between them, a trial behind flags ([try first](experiments/2026-10-12-a-try-before-going-up-that-comes-again-as-soon.md)).
+- The relay sends by priority; the sound on a narrow link is late by the link's queue all the same, and the default buffer of 50 ms is too short for it there; what the default should be is put to the project owner and not decided ([record](experiments/2026-10-13-the-sound-behind-the-video-on-a-narrow-link-and-priorities.md)).
+- A viewer can come before the publisher ([relay](experiments/2026-10-13-a-viewer-that-comes-before-the-broadcast.md), [page](experiments/2026-10-13-a-page-that-waits-for-the-broadcast-at-the-relay.md)).
+
 ## Phase 3 — Ghostty CLI
 - [x] Rust MoQ subscriber. The Rust client subscribes to a LOC video track and writes its frames as an H.264 byte stream that `ffprobe` reads, from `mlmpub` directly and from a page that encodes video, through the own relay ([record](experiments/2026-10-11-rust-subscriber-writes-loc-video-as-annex-b.md)). With `--catalog-video` it finds the track in the MSF catalog, which it reads with a SUBSCRIBE and a Joining FETCH. It writes an Opus track as packets that a spike wraps as Ogg ([record](experiments/2026-10-11-rust-subscriber-writes-opus-as-ogg.md)). It is the one-shot client of the interop runs, not a viewer.
 - [x] Video decoding and Kitty Graphics experiment. Spikes decode the client's byte stream with the `openh264` crate and write the frames as Kitty graphics, 100 of 100 frames of a page's video ([record](experiments/2026-10-11-video-in-a-terminal-with-kitty-graphics.md)). A person saw the picture of the later viewer in Ghostty on 2026-10-12; that viewer is the crate `xmoq-watch` now ([its README](../crates/watch/README.md)). Open: the video decoder is undecided.
