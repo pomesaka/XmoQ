@@ -66,6 +66,19 @@
 //                     { code: 17, reason: "no SETUP in time" }`, between
 //                     1.5 and 5 seconds after the client began.
 //
+//   relay-many-announcements
+//                     The own relay with its own limits, an own-rust
+//                     publisher and subscriber of a track, and
+//                     `xmoq-quiet-peer` as a client that sends
+//                     PUBLISH_NAMESPACE 20 times a second for 3 seconds
+//                     and withdraws each when it is answered
+//                     (`--announce-per-second 20`). The relay accepts 5 to
+//                     8 of them (five at once, and one more each second)
+//                     and refuses the others with EXCESSIVE_LOAD (`SEND
+//                     session=2 stream=S REQUEST_ERROR error_code=0x9`).
+//                     It closes no session, and the subscriber gets the
+//                     Object the publisher sends afterwards.
+//
 //   relay-idle-session
 //                     The own relay, told to let a session hold nothing
 //                     for 1.5 seconds (`--idle-session-ms`; 30 by itself),
@@ -606,9 +619,81 @@ async function relayIdleSession(): Promise<string> {
 	return `the own relay closed a session that sent its SETUP and held nothing with NO_ERROR ${after} ms after the client began (the relay's wait: ${WAIT_MS} ms), and kept the session of a publisher that had announced a namespace: ${said}`;
 }
 
+/**
+ * A session announces a namespace and withdraws it 20 times a second for 3
+ * seconds, beside a publisher and a subscriber of a track.
+ */
+async function relayManyAnnouncements(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-rust"],
+		verbose: options.verbose,
+	});
+	const payload = "616e6e6f756e6365";
+	const publisher = spawnRustClient(
+		context,
+		"pub:own-rust",
+		"own-rust",
+		"publish",
+		TRACK,
+		["--payload-hex", payload, "--timeout-secs", "60"],
+	);
+	await publisher.waitForLine(/^PUBLISHED /);
+	const subscriber = spawnRustClient(
+		context,
+		"sub:own-rust",
+		"own-rust",
+		"subscribe",
+		TRACK,
+		["--timeout-secs", "60"],
+	);
+	await subscriber.waitForLine(/^SUBSCRIBED /);
+	// The third session of the run.
+	const client = spawnQuietClient(context, "client:quiet-peer", 3000, false, [
+		"--announce-per-second",
+		"20",
+	]);
+	const [said, sent = "", ok = "", refused = "", failed = ""] =
+		await client.waitForLine(
+			/^ANNOUNCED sent=(\d+) ok=(\d+) refused=(\d+) failed=(\d+) asked=\d+ ms=\d+$/,
+		);
+	// Five at once and one more each second: 5 to 8 in 3 seconds.
+	if (
+		Number(ok) < 5 ||
+		Number(ok) > 8 ||
+		Number(failed) > 1 ||
+		Number(refused) < Number(sent) - 10
+	) {
+		throw new Error(
+			`5 to 8 of the announcements were to be accepted and the others refused: ${said}`,
+		);
+	}
+	await context.relay.waitForLine(
+		/^SEND session=2 stream=\d+ REQUEST_ERROR error_code=0x9\b/,
+	);
+	if (context.relay.hasPrinted(/^CLOSE_SESSION session=2\b/)) {
+		throw new Error("the relay was to refuse the requests, and close nothing");
+	}
+	if (client.matches(/^SESSION_ENDED /).length > 0) {
+		throw new Error("the session was to stay open to its own end");
+	}
+	publisher.child.stdin.write("send\n");
+	const [, got = ""] = await subscriber.waitForLine(
+		/^OBJECT .*payload_hex=([0-9a-f]*)$/,
+	);
+	if (got !== payload) {
+		throw new Error(
+			`the subscriber beside it was to get the Object, not ${got}`,
+		);
+	}
+	return `a session sent ${sent} PUBLISH_NAMESPACE requests in 3 s, each withdrawn when answered: the own relay accepted ${ok} (five at once and one more each second), refused ${refused} with EXCESSIVE_LOAD (0x9) and closed nothing, and the subscriber of a track beside it got its Object afterwards: ${said}`;
+}
+
 const RELAY_CASES: Record<string, () => Promise<string>> = {
 	"relay-no-setup": relayNoSetup,
 	"relay-idle-session": relayIdleSession,
+	"relay-many-announcements": relayManyAnnouncements,
 };
 
 async function main(): Promise<void> {

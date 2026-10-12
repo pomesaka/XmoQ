@@ -707,6 +707,8 @@ export function spawnQuietClient(
 	stayMs: number,
 	/** Whether it sends its SETUP, and nothing after it. */
 	sendsSetup = false,
+	/** Further flags, with which it is not quiet (`--announce-per-second`). */
+	further: string[] = [],
 ): LoggedProcess {
 	if (!existsSync(QUIET_PEER_BINARY)) {
 		throw new Error(
@@ -721,6 +723,7 @@ export function spawnQuietClient(
 		"--stay-ms",
 		String(stayMs),
 		...(sendsSetup ? ["--send-setup", "yes"] : []),
+		...further,
 	]);
 	defer(() => stopProcess(spawned, "SIGTERM"));
 	return spawned;

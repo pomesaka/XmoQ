@@ -115,6 +115,13 @@ pub struct HubConfig {
     /// Timers one session may have running at once. A timer beyond that is
     /// not started and its event is reported at once.
     pub max_timers_per_session: usize,
+    /// The time in which a session may send one `PUBLISH_NAMESPACE`: what
+    /// it used of [`Self::announcements_at_once`] comes back at this rate.
+    /// Provisional.
+    pub announcement_interval: Duration,
+    /// `xmoq_relay_core::MAX_ANNOUNCEMENTS_AT_ONCE`, where it is not the
+    /// relay's own number.
+    pub announcements_at_once: Option<u32>,
     /// How long a publisher gets to answer a SUBSCRIBE the relay sent it for
     /// a track of a namespace it announced. Then the subscribers that wait
     /// are answered with `TIMEOUT` (§10.6.2).
@@ -171,6 +178,8 @@ impl Default for HubConfig {
             request_close_timeout: Duration::from_secs(2),
             closed_read_timeout: Duration::from_secs(1),
             max_timers_per_session: 1024,
+            announcement_interval: Duration::from_secs(1),
+            announcements_at_once: None,
             upstream_timeout: Duration::from_secs(5),
             setup_timeout: Duration::from_secs(10),
             idle_session_timeout: Duration::from_secs(30),
@@ -700,6 +709,9 @@ impl<C: Connection> HubHandle<C> {
 pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>) {
     let (events, inbox) = mpsc::channel(config.event_queue_len);
     let mut relay = Relay::new(&config.implementation);
+    if let Some(announcements) = config.announcements_at_once {
+        relay.set_announcements_at_once(announcements);
+    }
     if let Some(key) = &config.auth_key {
         relay.set_authorizer(crate::auth::RoomTokens::new(key, config.auth_setup));
     }
@@ -1401,6 +1413,7 @@ impl<C: Connection> Hub<C> {
             | Action::StartEarlyTimer { .. }
             | Action::StartJoiningFetchTimer { .. }
             | Action::StartRendezvousTimer { .. }
+            | Action::StartAnnouncementTimer { .. }
             | Action::StartFetchEndTimer { .. }
             | Action::StartUpstreamTimer { .. }
             | Action::StartFetchStreamTimer { .. }
@@ -1814,6 +1827,11 @@ impl<C: Connection> Hub<C> {
                 session,
                 self.config.streams.first_bytes_timeout,
                 Event::JoiningFetchTimeout { session, stream },
+            ),
+            Action::StartAnnouncementTimer { session } => (
+                session,
+                self.config.announcement_interval,
+                Event::AnnouncementTimeout { session },
             ),
             Action::StartRendezvousTimer {
                 session,
@@ -2647,6 +2665,7 @@ fn describe(action: &Action) -> Option<String> {
         // The SUBSCRIBE it is for has its line where it was read
         // (`HOLD_REQUEST`, `Hub::feed`).
         | Action::StartRendezvousTimer { .. }
+        | Action::StartAnnouncementTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
     })
 }

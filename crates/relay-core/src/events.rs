@@ -299,6 +299,12 @@ pub enum Event {
         /// The request stream of the FETCH.
         stream: StreamKey,
     },
+    /// The session may announce one namespace more. Answers
+    /// [`Action::StartAnnouncementTimer`].
+    AnnouncementTimeout {
+        /// The session.
+        session: SessionKey,
+    },
     /// The time a SUBSCRIBE is held for a publisher to appear is over
     /// (§10.2.6). Answers [`Action::StartRendezvousTimer`].
     RendezvousTimeout {
@@ -548,6 +554,13 @@ pub enum Action {
         stream: StreamKey,
         /// The wait, in milliseconds.
         wait_ms: u64,
+    },
+    /// Report [`Event::AnnouncementTimeout`] after the time in which a
+    /// session may announce one namespace: the session has announced, and
+    /// gets back what it used of its allowance at that rate.
+    StartAnnouncementTimer {
+        /// The session.
+        session: SessionKey,
     },
     /// Report [`Event::RendezvousTimeout`] after `wait_ms`: the relay holds
     /// a SUBSCRIBE for a track nobody publishes, for as long as its

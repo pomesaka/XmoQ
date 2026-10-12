@@ -250,6 +250,10 @@ impl Peer {
     }
 }
 
+/// Longer than the second after which a session has back the announcement
+/// it used, and the timer for that is gone.
+const ANNOUNCEMENT_IS_BACK: Duration = Duration::from_millis(1100);
+
 /// The `PUBLISH_DONE` a subscriber is sent, read from its request stream.
 async fn publish_done(request: &mut OpenRequest) -> PublishDone {
     match timeout(SOON, request.reader.next_event()).await {
@@ -1371,6 +1375,9 @@ async fn the_timer_for_the_publishers_answer_goes_when_the_answer_comes() {
     let (hub, _task) = hub::spawn(HubConfig::default());
     let mut publisher = Peer::connect(&hub, true).await;
     let _namespace = publisher.publish_namespace().await;
+    // The timer that gives the announcement back is gone before the timers
+    // are counted.
+    tokio::time::sleep(ANNOUNCEMENT_IS_BACK).await;
     let mut subscriber = Peer::connect(&hub, true).await;
     let mut request = subscriber.start_subscribing().await;
     tokio::time::sleep(SOON).await;
@@ -1481,6 +1488,9 @@ async fn a_second_message_after_duplicate_subscription_does_not_end_the_wait_for
     let (hub, _task) = hub::spawn(HubConfig::default());
     let mut publisher = Peer::connect(&hub, true).await;
     let _namespace = publisher.publish_namespace().await;
+    // The timer that gives the announcement back is gone before the timers
+    // are counted.
+    tokio::time::sleep(ANNOUNCEMENT_IS_BACK).await;
     let mut subscriber = Peer::connect(&hub, true).await;
     let mut request = subscriber.start_subscribing().await;
     let (_id, mut send, _reader) = publisher.relay_subscribe().await;
@@ -1545,6 +1555,9 @@ async fn the_wait_for_an_announced_publish_ends_when_the_publish_comes() {
     let (hub, _task) = hub::spawn(HubConfig::default());
     let mut publisher = Peer::connect(&hub, true).await;
     let _namespace = publisher.publish_namespace().await;
+    // The timer that gives the announcement back is gone before the timers
+    // are counted.
+    tokio::time::sleep(ANNOUNCEMENT_IS_BACK).await;
     let mut subscriber = Peer::connect(&hub, true).await;
     let mut request = subscriber.start_subscribing().await;
     // The publisher sends its PUBLISH without having read the relay's
@@ -3889,5 +3902,80 @@ mod rendezvous {
         // It is over at 2 s, and the session that announced is asked.
         let _upstream = announcer.accept_relay_subscribe().await;
         assert_eq!(answered(&mut viewer, &mut request, SOON).await, "ok");
+    }
+
+    /// A `PUBLISH_NAMESPACE` for `(xmoq, <name>)`: "ok", or the code of the
+    /// `REQUEST_ERROR`. The request is kept open with the peer.
+    async fn announces(peer: &mut Peer, name: &[u8], kept: &mut Vec<OpenRequest>) -> String {
+        let namespace = TrackNamespace::new(vec![b"xmoq".to_vec(), name.to_vec()]).unwrap();
+        let (id, message) = peer.session.publish_namespace(namespace, vec![]).unwrap();
+        let (request, event) = peer.request(id, message).await;
+        kept.push(request);
+        match event {
+            RequestEvent::PublishNamespaceEstablished => "ok".to_string(),
+            RequestEvent::Rejected(error) => format!("{:#x}", error.error_code),
+            other => panic!("not an answer to a PUBLISH_NAMESPACE: {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_announces_five_namespaces_at_once_and_one_more_each_second() {
+        let (hub, _task) = hub::spawn(HubConfig::default());
+        let mut peer = Peer::connect(&hub, true).await;
+        let mut kept = Vec::new();
+        // (how long the test waits first, in ms; what the announcements
+        //  that follow get, one after the other)
+        let steps: [(u64, &[&str]); 5] = [
+            // Five at once, and the sixth is EXCESSIVE_LOAD (0x9).
+            (0, &["ok", "ok", "ok", "ok", "ok", "0x9", "0x9"]),
+            // Not yet a second since the first.
+            (900, &["0x9"]),
+            // One came back, and no more than one.
+            (200, &["ok", "0x9"]),
+            // Three more in three seconds: the ones refused took nothing.
+            (3_000, &["ok", "ok", "ok", "0x9"]),
+            // No more than five however long it waits.
+            (60_000, &["ok", "ok", "ok", "ok", "ok", "0x9"]),
+        ];
+        let mut name = 0u8;
+        for (wait_ms, answers) in steps {
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+            for answer in answers {
+                name += 1;
+                assert_eq!(
+                    announces(&mut peer, &[name], &mut kept).await,
+                    *answer,
+                    "after {wait_ms} ms, announcement {name}"
+                );
+            }
+        }
+        // The session goes on: another of its requests is answered.
+        let mut request = asks(&mut peer, b"nobody", None).await;
+        assert_eq!(answered(&mut peer, &mut request, SOON).await, "0x10");
+        // The others have what is theirs.
+        let mut other = Peer::connect(&hub, true).await;
+        assert_eq!(announces(&mut other, b"o", &mut kept).await, "ok");
+        // The timer that gives them back stops when all are back.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(hub.held().await.timers, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_announcement_that_is_withdrawn_and_sent_again_counts_each_time() {
+        let (hub, _task) = hub::spawn(HubConfig::default());
+        let mut peer = Peer::connect(&hub, true).await;
+        // The same name each time, withdrawn (CANCELLED, 0x1) before the
+        // next: (the answers)
+        let mut answers = Vec::new();
+        for _ in 0..7 {
+            let mut kept = Vec::new();
+            answers.push(announces(&mut peer, b"same", &mut kept).await);
+            for request in kept {
+                peer.session.cancel(request.id);
+                request.send.reset(0x1);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(answers, ["ok", "ok", "ok", "ok", "ok", "0x9", "0x9"]);
     }
 }

@@ -30,8 +30,14 @@ const UPSTREAM_ALIAS: u64 = 40;
 impl Relay {
     /// `handle`, with the I/O side reporting every stream it was asked to open
     /// as opened at once.
+    ///
+    /// WHY without the timer of an announcement: it follows every first
+    /// `PUBLISH_NAMESPACE` of a session, and the tests that compare what
+    /// the relay does about an announcement are about the rest. The test of
+    /// the limit calls `handle`.
     fn step(&mut self, event: Event) -> Vec<Action> {
-        let actions = self.handle(event);
+        let mut actions = self.handle(event);
+        actions.retain(|action| !matches!(action, Action::StartAnnouncementTimer { .. }));
         for action in &actions {
             if let Action::OpenDataStream { out_stream, .. } = action {
                 let reported = self.handle(Event::OutStreamOpened {
