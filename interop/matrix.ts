@@ -1200,6 +1200,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--case", "relay-many-announcements", "--client", "quiet-peer"],
 			relay: "own",
 		},
+		{
+			name: "own relay: quiet peer: one session that asks a publisher which answers nothing for more than its share is refused, and another viewer's SUBSCRIBEs and FETCHes reach that publisher",
+			script: "quiet-peer.ts",
+			args: [
+				"--case",
+				"relay-one-session-asks-for-much",
+				"--client",
+				"quiet-peer",
+			],
+			relay: "own",
+			mostlyWaits: true,
+		},
 		// A SUBSCRIBE that comes before its publisher (RENDEZVOUS_TIMEOUT).
 		{
 			name: "own relay: rendezvous: own-browser subscribes before anybody publishes the track, is held, and is accepted when own-rust publishes",

@@ -52,12 +52,13 @@ pub use events::{
     Action, Event, FetchPiece, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey,
     RequestEnd, SessionKey, StreamEnd, StreamKey,
 };
-pub use fetch::fetch_reset_passed_on;
+pub use fetch::{MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER, fetch_reset_passed_on};
 use requests::{Requests, Subscribed};
 pub use routing::{
     ANNOUNCEMENT_EVERY_MS, MAX_ANNOUNCEMENTS_AT_ONCE, MAX_HELD_SUBSCRIBES_PER_SESSION,
-    MAX_HELD_TRACKS, MAX_NAMESPACES_PER_SESSION, MAX_OWN_REQUESTS_PER_SESSION,
-    MAX_PASSED_ON_REASON_LEN, MAX_RENDEZVOUS_MS, MAX_WAITING_SUBSCRIBERS,
+    MAX_HELD_TRACKS, MAX_NAMESPACES_PER_SESSION, MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER,
+    MAX_OWN_REQUESTS_PER_SESSION, MAX_PASSED_ON_REASON_LEN, MAX_RENDEZVOUS_MS,
+    MAX_WAITING_SUBSCRIBERS,
 };
 use routing::{Announcement, Ask, Declined, OwnRequest, PendingTrack, Refusal, Waiter};
 use xmoq_moqt::data::{SubgroupHeader, SubgroupId, SubgroupObject};
@@ -1398,6 +1399,10 @@ pub struct Relay {
     announcements_at_once: u32,
     /// [`Self::set_announcements`].
     announcement_every_ms: u64,
+    /// [`Self::set_share_of_one_subscriber`].
+    requests_for_one: usize,
+    /// [`Self::set_share_of_one_subscriber`].
+    fetches_for_one: usize,
 }
 
 /// What a request asks to be allowed to do with a namespace.
@@ -1476,6 +1481,8 @@ impl Relay {
             authorizer: None,
             announcements_at_once: MAX_ANNOUNCEMENTS_AT_ONCE,
             announcement_every_ms: ANNOUNCEMENT_EVERY_MS,
+            requests_for_one: MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER,
+            fetches_for_one: MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER,
         }
     }
 
@@ -1486,6 +1493,15 @@ impl Relay {
     pub fn set_announcements(&mut self, at_once: u32, every_ms: u64) {
         self.announcements_at_once = at_once;
         self.announcement_every_ms = every_ms;
+    }
+
+    /// How many requests, and how many FETCH requests among them, the relay has
+    /// open on one publisher for one subscriber's session, in place of
+    /// [`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`] and
+    /// [`MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER`].
+    pub fn set_share_of_one_subscriber(&mut self, requests: usize, fetches: usize) {
+        self.requests_for_one = requests;
+        self.fetches_for_one = fetches;
     }
 
     /// A session sends a `PUBLISH_NAMESPACE`: whether it may, by how many
@@ -2010,7 +2026,7 @@ impl Relay {
                 // send a SUBSCRIBE to the publisher that sent the
                 // PUBLISH_NAMESPACE for each matching subscription."
                 for track in self.tracks.subscribed_in(&namespace) {
-                    self.ask_the_publishers(&track, Some(session), actions);
+                    self.ask_the_publishers(&track, Some(session), None, actions);
                 }
             }
         }
@@ -2067,7 +2083,7 @@ impl Relay {
             // publisher is asked must not depend on that order.
             Some(TrackPhase::Established) => {
                 self.establish(track_name, &waiter, actions);
-                self.ask_the_publishers(track_name, None, actions);
+                self.ask_the_publishers(track_name, None, None, actions);
                 return;
             }
             // Every source said PUBLISH_DONE and the track still drains: it
@@ -2097,7 +2113,7 @@ impl Relay {
                 } else {
                     let waits = self.wait_with_the_others(track_name, waiter);
                     if waits.is_ok() {
-                        self.ask_the_publishers(track_name, None, actions);
+                        self.ask_the_publishers(track_name, None, None, actions);
                     }
                     waits
                 }
@@ -2107,7 +2123,7 @@ impl Relay {
             // each publisher that has published the subscription's namespace
             // or prefix thereof."
             None => {
-                let asked = self.ask_the_publishers(track_name, None, actions);
+                let asked = self.ask_the_publishers(track_name, None, Some(session), actions);
                 // WHY not held where a publisher is there and could not be
                 // asked: one has appeared, and the code says why it is not
                 // asked.
@@ -3215,7 +3231,7 @@ impl Relay {
                 declined: Declined::default(),
             };
             self.tracks.insert_pending(track_name.clone(), pending);
-            self.ask_the_publishers(track_name, None, actions);
+            self.ask_the_publishers(track_name, None, None, actions);
         }
     }
 

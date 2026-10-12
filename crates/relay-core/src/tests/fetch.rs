@@ -756,6 +756,9 @@ fn a_fetch_stream_for_a_fetch_the_relay_gave_up_is_stopped() {
 fn a_session_has_only_so_many_fetches_open() {
     assert_eq!(crate::fetch::MAX_FETCHES_PER_SESSION, 16);
     let mut relay = relay_with_track();
+    // The limit this test is about is the one for all subscribers; one
+    // session takes all of it here.
+    relay.set_share_of_one_subscriber(64, 16);
     for index in 0..16u64 {
         let actions = relay.step(Event::RequestOpened {
             session: ALICE,
@@ -788,6 +791,9 @@ fn a_session_has_only_so_many_fetches_open() {
 fn a_publisher_is_asked_for_only_so_many_fetches_at_once() {
     assert_eq!(crate::fetch::MAX_OWN_FETCHES_PER_SESSION, 16);
     let mut relay = relay_with_track();
+    // The limit this test is about is the one for all subscribers; one
+    // session takes all of it here.
+    relay.set_share_of_one_subscriber(64, 16);
     // Eight each from Alice and Bob, all for the one publisher.
     for (session, index) in [ALICE, BOB]
         .into_iter()
@@ -819,6 +825,59 @@ fn a_publisher_is_asked_for_only_so_many_fetches_at_once() {
             },
         ]
     );
+}
+
+#[test]
+fn one_subscribers_session_has_only_so_many_of_the_relays_fetches_on_a_publisher() {
+    assert_eq!(crate::MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER, 4);
+    // A Standalone FETCH of `session` on `stream` for Groups 0 and 1 of the
+    // track "a", which the relay has not cached: "asked" where the relay
+    // opens a FETCH on the publisher, or the code it refuses with.
+    let fetches = |relay: &mut Relay, session: SessionKey, stream: u64| {
+        let actions = relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(stream),
+            first: standalone(stream * 2, b"a", (at(0, 0), at(2, 0)), vec![]),
+        });
+        actions
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenRequest { .. } => Some("asked".to_string()),
+                Action::SendRequest {
+                    message: ControlMessage::RequestError(error),
+                    ..
+                } => Some(format!(
+                    "{:#x}, retry {}",
+                    error.error_code, error.retry_interval
+                )),
+                _ => None,
+            })
+            .unwrap_or_else(|| "nothing".to_string())
+    };
+    let mut relay = relay_with_track();
+    // (who, the stream; what the relay does)
+    let steps = [
+        (ALICE, 0, "asked"),
+        (ALICE, 1, "asked"),
+        (ALICE, 2, "asked"),
+        (ALICE, 3, "asked"),
+        // Her fifth: EXCESSIVE_LOAD (0x9), to be retried after a second.
+        (ALICE, 4, "0x9, retry 1001"),
+        // Bob's are asked, though the publisher has four FETCH requests.
+        (BOB, 0, "asked"),
+        (BOB, 1, "asked"),
+        (BOB, 2, "asked"),
+        (BOB, 3, "asked"),
+        (BOB, 4, "0x9, retry 1001"),
+    ];
+    for (session, stream, expected) in steps {
+        assert_eq!(
+            fetches(&mut relay, session, stream),
+            expected,
+            "{session:?} {stream}"
+        );
+    }
+    assert_eq!(relay.counts().own_requests, 8);
 }
 
 #[test]
@@ -856,6 +915,9 @@ fn the_relays_requests_to_a_publisher_are_counted_together() {
     // not asked: EXCESSIVE_LOAD (0x9) for Alice's FETCH and for Bob's
     // SUBSCRIBE.
     let mut relay = relay_with_track();
+    // The limit this test is about is the one for all subscribers; one
+    // session takes all of it here.
+    relay.set_share_of_one_subscriber(64, 16);
     announce(&mut relay);
     for index in 0..63 {
         assert!(asked(&subscribe_to(&mut relay, index)), "SUBSCRIBE {index}");
@@ -891,6 +953,7 @@ fn the_relays_requests_to_a_publisher_are_counted_together() {
     // The other way round: 16 FETCH requests, which is all a publisher is
     // asked for, and 48 SUBSCRIBE requests. The next SUBSCRIBE is refused.
     let mut relay = relay_with_track();
+    relay.set_share_of_one_subscriber(64, 16);
     announce(&mut relay);
     for stream in 0..16 {
         assert!(asked(&fetch(&mut relay, stream)), "FETCH {stream}");
@@ -2457,6 +2520,9 @@ fn a_joining_fetch_that_waited_is_held_to_what_a_publisher_is_asked_for() {
     // which with the one that waits are all she may have, and one of the
     // other session.
     let mut relay = relay_with_a_pending_subscription(true);
+    // The limit this test is about is the one for all subscribers; one
+    // session takes all of it here.
+    relay.set_share_of_one_subscriber(64, 16);
     assert_eq!(relay.step(joining(true, 0, vec![])), []);
     let asked =
         |actions: &[Action]| matches!(actions, [Action::OpenRequest { session: BOB, .. }, _]);

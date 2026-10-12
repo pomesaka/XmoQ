@@ -47,6 +47,17 @@ pub(crate) const MAX_FETCHES_PER_SESSION: usize = 16;
 /// open no subgroup stream for anybody. Provisional.
 pub(crate) const MAX_OWN_FETCHES_PER_SESSION: usize = 16;
 
+/// Of those, how many the relay has open on one publisher for the FETCH
+/// requests of one subscriber's session. One more is answered with `EXCESSIVE_LOAD`.
+/// **Provisional.**
+///
+/// WHY: a session may have [`MAX_FETCHES_PER_SESSION`] FETCH requests open, which
+/// is all a publisher has, and one that sent 10 a second to a publisher
+/// that answered late had 12 of another viewer's 14 FETCH requests refused
+/// (measured 2026-10-13). §13.1 has a publisher "enforce limits to prevent
+/// resource exhaustion from a single subscriber or session".
+pub const MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER: usize = 4;
+
 /// How long a publisher may send nothing on a fetch stream while the
 /// subscriber can take more, when the FETCH has no `FILL_TIMEOUT`
 /// (§10.2.5: "the relay waits for an implementation specific duration").
@@ -785,13 +796,20 @@ impl Relay {
         let Some(publisher) = self.whom_to_ask(&asked.track, session) else {
             return refuse(self, request_error_code::DOES_NOT_EXIST, actions);
         };
+        let fetches_for_one = self.fetches_for_one;
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return refuse(self, request_error_code::DOES_NOT_EXIST, actions);
         };
+        let for_this_session = state
+            .own_fetches
+            .values()
+            .filter(|own| own.subscriber.0 == session)
+            .count();
         // The relay's FETCH and SUBSCRIBE requests share the publisher's
         // session, and its patience.
         if state.own_requests() >= MAX_OWN_REQUESTS_PER_SESSION
             || state.own_fetches.len() >= MAX_OWN_FETCHES_PER_SESSION
+            || for_this_session >= fetches_for_one
         {
             return refuse(self, request_error_code::EXCESSIVE_LOAD, actions);
         }

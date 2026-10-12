@@ -122,6 +122,13 @@ pub struct HubConfig {
     /// `xmoq_relay_core::MAX_ANNOUNCEMENTS_AT_ONCE`, where it is not the
     /// relay's own number.
     pub announcements_at_once: Option<u32>,
+    /// `xmoq_relay_core::MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`, where it is
+    /// not the relay's own number: how many requests the relay has open on
+    /// one publisher for one subscriber's session.
+    pub requests_for_one_subscriber: Option<usize>,
+    /// `xmoq_relay_core::MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER`, in the same
+    /// way: how many of them are FETCH requests.
+    pub fetches_for_one_subscriber: Option<usize>,
     /// How long a publisher gets to answer a SUBSCRIBE the relay sent it for
     /// a track of a namespace it announced. Then the subscribers that wait
     /// are answered with `TIMEOUT` (§10.6.2).
@@ -180,6 +187,8 @@ impl Default for HubConfig {
             max_timers_per_session: 1024,
             announcement_every_ms: None,
             announcements_at_once: None,
+            requests_for_one_subscriber: None,
+            fetches_for_one_subscriber: None,
             upstream_timeout: Duration::from_secs(5),
             setup_timeout: Duration::from_secs(10),
             idle_session_timeout: Duration::from_secs(30),
@@ -709,6 +718,14 @@ impl<C: Connection> HubHandle<C> {
 pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>) {
     let (events, inbox) = mpsc::channel(config.event_queue_len);
     let mut relay = Relay::new(&config.implementation);
+    relay.set_share_of_one_subscriber(
+        config
+            .requests_for_one_subscriber
+            .unwrap_or(xmoq_relay_core::MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER),
+        config
+            .fetches_for_one_subscriber
+            .unwrap_or(xmoq_relay_core::MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER),
+    );
     relay.set_announcements(
         config
             .announcements_at_once
