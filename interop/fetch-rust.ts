@@ -469,8 +469,8 @@ async function main(): Promise<void> {
 			// WHY a fence: the client's lines and the relay's reach the driver
 			// in no order, so what the relay printed "by now" depends on when
 			// the driver looks (harness.ts, `RelayLog`). The relay prints this
-			// line when it has written the whole fetch stream, after
-			// everything else about the FETCH.
+			// line when it has written the whole fetch stream, which is after
+			// it held the FETCH or did not.
 			const fence = {
 				line: new RegExp(
 					`^FETCH_PIPE_ENDED session=${session} stream=\\d+ finished$`,
@@ -482,9 +482,22 @@ async function main(): Promise<void> {
 			);
 			const held = hold !== undefined;
 			// A FETCH that was held is answered on the stream it was held on.
+			//
+			// WHY another fence for the answer: the publisher's FETCH_OK and
+			// its fetch stream are two streams, which the relay reads in no
+			// order, and a publisher may send its Objects before its FETCH_OK
+			// (§10.13). So the relay may have passed the whole fetch stream
+			// on, and printed the line above, before it reads the FETCH_OK
+			// and prints that it sent one. It finishes its direction of the
+			// request stream when both are done.
 			if (hold !== undefined) {
+				const answered = {
+					line: new RegExp(
+						`^FINISH_REQUEST session=${session} stream=${captureGroup(hold, 1)}$`,
+					),
+				};
 				const answers = await context.relay.linesBefore(
-					fence,
+					answered,
 					new RegExp(
 						`^SEND session=${session} stream=${captureGroup(hold, 1)} FETCH_OK$`,
 					),
