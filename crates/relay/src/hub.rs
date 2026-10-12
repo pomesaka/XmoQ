@@ -88,6 +88,13 @@ pub struct HubConfig {
     /// "Publishers can, at their discretion, discontinue forwarding Objects
     /// before either of the timeouts occurs").
     pub give_up_older_groups: bool,
+    /// With `give_up_older_groups`: how long an older Group still gets from
+    /// the moment a newer one is opened. WHY more than nothing: the last
+    /// Object of a Group is written just before the next Group begins, and
+    /// cannot be acknowledged yet over any path; without a wait every
+    /// Group is reset, and a packet of its end that is lost is not sent
+    /// again.
+    pub older_groups_grace: Duration,
     /// The key of the experiment in authorization (`crate::auth`). None:
     /// every request is allowed.
     pub auth_key: Option<Vec<u8>>,
@@ -135,6 +142,7 @@ impl Default for HubConfig {
             drain_timeout: Duration::from_secs(2),
             slow_open: Duration::from_millis(10),
             give_up_older_groups: false,
+            older_groups_grace: Duration::ZERO,
             auth_key: None,
             auth_setup: true,
             early_stream_timeout: Duration::from_secs(2),
@@ -1526,11 +1534,15 @@ impl<C: Connection> Hub<C> {
         for (older, group) in older {
             self.out_groups.remove(&older);
             if let Some((_, writer)) = self.out_streams.get(&older) {
-                writer.reset(stream_reset_code::DELIVERY_TIMEOUT);
+                let grace = self.config.older_groups_grace;
+                writer.reset_after(stream_reset_code::DELIVERY_TIMEOUT, grace);
                 self.log(|| {
                     format!(
-                        "GROUP_GIVEN_UP session={} out={} group={group} for_group={}",
-                        session.0, older.0, header.group_id
+                        "GROUP_GIVEN_UP session={} out={} group={group} for_group={} after_ms={}",
+                        session.0,
+                        older.0,
+                        header.group_id,
+                        grace.as_millis()
                     )
                 });
             }
