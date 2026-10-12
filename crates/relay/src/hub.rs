@@ -119,6 +119,14 @@ pub struct HubConfig {
     /// a track of a namespace it announced. Then the subscribers that wait
     /// are answered with `TIMEOUT` (§10.6.2).
     pub upstream_timeout: Duration,
+    /// How long a client has for its SETUP, from when its session was
+    /// taken. Then the session is closed with `CONTROL_MESSAGE_TIMEOUT`.
+    /// **Provisional**: the time the clients give a server's SETUP.
+    ///
+    /// WHY a limit: anybody can connect, and a session that says nothing
+    /// holds its place among the sessions for as long as its connection
+    /// lives, which the keep-alives of the two ends see to.
+    pub setup_timeout: Duration,
     /// Sent as `MOQT_IMPLEMENTATION`.
     pub implementation: String,
     /// Where one line about each thing the relay does goes, if anywhere.
@@ -151,6 +159,7 @@ impl Default for HubConfig {
             closed_read_timeout: Duration::from_secs(1),
             max_timers_per_session: 1024,
             upstream_timeout: Duration::from_secs(5),
+            setup_timeout: Duration::from_secs(10),
             implementation: concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"))
                 .to_string(),
             log: None,
@@ -236,6 +245,11 @@ enum Envelope<C: Connection> {
         code: TerminationCode,
         reason: &'static str,
     },
+    /// The time a client has for its SETUP is over
+    /// ([`HubConfig::setup_timeout`]).
+    SetupDue {
+        session: SessionKey,
+    },
     /// The relay is to stop: every session is closed, and the sender is
     /// answered when the closes have reached the peers.
     Stop(oneshot::Sender<()>),
@@ -281,6 +295,9 @@ enum RequestCommand {
 struct SessionHandle<C: Connection> {
     connection: Arc<C>,
     control: mpsc::Sender<ControlMessage>,
+    /// A message came on the client's control stream: its SETUP, or what
+    /// the relay closes the session for.
+    said_something: bool,
     /// The writers of the request streams the peer has open.
     requests: HashMap<StreamKey, mpsc::Sender<RequestCommand>>,
     /// The tasks of the request streams the relay has open on the session.
@@ -326,6 +343,12 @@ const CLOSE_REACHES_THE_PEER: Duration = Duration::from_secs(2);
 
 /// `NO_ERROR`: "The session is being terminated without an error" (§3.5).
 const NO_ERROR: u32 = 0x0;
+
+/// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11): The session was closed because
+/// the peer took too long to respond to a control message." What a session
+/// is closed with whose client sent no SETUP in time, as the clients of
+/// this repository close one whose server sent none.
+const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
 
 impl<C: Connection> Drop for SessionHandle<C> {
     fn drop(&mut self) {
@@ -866,6 +889,11 @@ impl<C: Connection> Hub<C> {
                     }]));
                 }
                 Envelope::Core(event) => {
+                    if let Event::ControlMessage { session, .. } = &event
+                        && let Some(handle) = self.sessions.get_mut(session)
+                    {
+                        handle.said_something = true;
+                    }
                     match &event {
                         // The peer ended the stream, or stopped the relay's
                         // direction of it; either way the peer's direction is
@@ -897,6 +925,7 @@ impl<C: Connection> Hub<C> {
                     self.close(session, code.code(), reason, &mut pending);
                     self.feed(pending);
                 }
+                Envelope::SetupDue { session } => self.setup_due(session),
                 Envelope::Stop(answer) => self.stop(answer),
                 #[cfg(test)]
                 Envelope::Inspect(answer) => {
@@ -925,6 +954,25 @@ impl<C: Connection> Hub<C> {
     fn log(&self, line: impl FnOnce() -> String) {
         if let Some(log) = &self.config.log {
             log.print(line());
+        }
+    }
+
+    /// The time a client has for its SETUP is over: a session that has
+    /// said nothing on its control stream is closed.
+    fn setup_due(&mut self, session: SessionKey) {
+        let silent = self
+            .sessions
+            .get(&session)
+            .is_some_and(|handle| !handle.said_something);
+        if silent {
+            let mut pending = VecDeque::new();
+            self.close(
+                session,
+                CONTROL_MESSAGE_TIMEOUT,
+                "no SETUP in time",
+                &mut pending,
+            );
+            self.feed(pending);
         }
     }
 
@@ -970,17 +1018,27 @@ impl<C: Connection> Hub<C> {
             self.config.log.clone(),
             self.events.clone(),
         ));
+        // Among the tasks of the session: it goes with the session.
+        let setup_due = tokio::spawn({
+            let (events, wait) = (self.events.clone(), self.config.setup_timeout);
+            async move {
+                tokio::time::sleep(wait).await;
+                // The hub is gone when this fails.
+                let _ = events.send(Envelope::SetupDue { session }).await;
+            }
+        });
         self.sessions.insert(
             session,
             SessionHandle {
                 connection,
                 control,
+                said_something: false,
                 requests: HashMap::new(),
                 own_requests: HashMap::new(),
                 stops,
                 budget: SendBudget::new(self.config.send),
                 opening: Arc::new(AtomicUsize::new(0)),
-                tasks: vec![writer, watcher],
+                tasks: vec![writer, watcher, setup_due],
                 fetch_writes: Vec::new(),
                 fetch_write_aborts: HashMap::new(),
             },

@@ -593,6 +593,8 @@ export async function startRun(setup: {
 	port: string;
 	clients: Client[];
 	verbose: boolean;
+	/** More flags for the relay, after its own. */
+	relayArgs?: string[];
 }): Promise<RunContext> {
 	const missing = missingBinaries(setup.relay, setup.clients);
 	if (missing.length > 0) {
@@ -610,7 +612,7 @@ export async function startRun(setup: {
 		spawnLogged(
 			"relay",
 			config.binary,
-			config.args(setup.port),
+			[...config.args(setup.port), ...(setup.relayArgs ?? [])],
 			setup.verbose ? config.verboseEnv : {},
 		);
 	let relay = startRelay();
@@ -690,6 +692,33 @@ export async function startQuietPeer(setup: {
 		startRelayAnew: () =>
 			Promise.reject(new Error("the quiet peer is not started anew")),
 	};
+}
+
+/**
+ * Starts `xmoq-quiet-peer` as a client of the relay of the run: it
+ * connects, sends no SETUP and opens no stream, and prints how the relay
+ * ended the session, or after `stayMs` that it did not.
+ */
+export function spawnQuietClient(
+	context: RunContext,
+	label: string,
+	stayMs: number,
+): LoggedProcess {
+	if (!existsSync(QUIET_PEER_BINARY)) {
+		throw new Error(
+			`${QUIET_PEER_BINARY} is missing: cargo build -p xmoq-quiet-peer`,
+		);
+	}
+	const spawned = spawnLogged(label, QUIET_PEER_BINARY, [
+		"--connect",
+		context.relayUrl,
+		"--cert-sha256",
+		context.certSha256Hex,
+		"--stay-ms",
+		String(stayMs),
+	]);
+	defer(() => stopProcess(spawned, "SIGTERM"));
+	return spawned;
 }
 
 const moqlivemockRoot = join(here, "peers", "moqlivemock", ".tools");

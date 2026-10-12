@@ -59,7 +59,14 @@ Added later the same day. `xmoq-quiet-peer` (`crates/quiet-peer`) is a server bu
 
 The peer does not watch whether its own direction of a request stream is stopped, so the STOP_SENDING of these is not seen here; for a SUBSCRIBE the relay's log above has it.
 
-**The relay's side was read, not run**: no timer for a client's SETUP was found in `crates/relay-core` or `crates/relay/src/hub.rs`, so a client that connects and sends none appears to stay for as long as its connection lives. No client that sends no SETUP is at hand to run it.
+**The relay's side**, run with the quiet peer as a client that connects and sends no SETUP (`xmoq-quiet-peer --connect ... --stay-ms`):
+
+| Relay | What the client printed | What the relay printed |
+|---|---|---|
+| As it was | `STAYED ms=25000`: still connected after 25 seconds | nothing after `SEND session=0 control SETUP` |
+| With the limit, `--setup-timeout-ms 1500` | `SESSION_ENDED ClosedByPeer { code: 17, reason: "no SETUP in time" }`, 1,755 ms after it began | `CLOSE_SESSION session=0 code=0x11 reason="no SETUP in time"` |
+
+The relay now gives a client 10 seconds for its SETUP, from when it took the session. The 10 seconds themselves are in a test on a clock that is moved by hand (9,999 ms open, 10,001 ms closed with 0x11).
 
 ## Not run
 

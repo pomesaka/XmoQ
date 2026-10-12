@@ -528,6 +528,45 @@ async fn a_session_over_the_limit_is_closed_at_once() {
     first.publish().await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_client_that_sends_no_setup_is_closed_when_its_time_is_over() {
+    // (the time a client has; how long the test waits; whether the session
+    //  is closed by then)
+    let cases = [
+        (10_000, 9_999, false),
+        (10_000, 10_001, true),
+        (1_500, 1_499, false),
+        (1_500, 1_501, true),
+    ];
+    for (has_ms, waits_ms, closed) in cases {
+        let config = HubConfig {
+            setup_timeout: Duration::from_millis(has_ms),
+            ..HubConfig::default()
+        };
+        let (hub, _task) = hub::spawn(config);
+        // A session and nothing on it: no control stream, no SETUP.
+        let (local, remote) = pair();
+        hub.add_session(remote).await;
+        let ended = timeout(Duration::from_millis(waits_ms), local.closed()).await;
+        assert_eq!(ended.is_ok(), closed, "{has_ms} {waits_ms}");
+        // CONTROL_MESSAGE_TIMEOUT (0x11).
+        assert_eq!(
+            local.close_info().map(|close| close.code),
+            closed.then_some(0x11),
+            "{has_ms} {waits_ms}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_that_sent_its_setup_stays_when_that_time_is_over() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut peer = Peer::connect(&hub, true).await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(peer.connection.close_info().map(|close| close.code), None);
+    peer.publish().await;
+}
+
 /// A hub that holds nothing.
 const NOTHING: Held = Held {
     sessions: 0,
