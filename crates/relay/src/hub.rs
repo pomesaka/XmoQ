@@ -1966,7 +1966,18 @@ impl<C: Connection> Hub<C> {
             ),
             _ => return,
         };
-        let limit = self.config.max_timers_per_session;
+        // WHY the timer that gives a session an announcement back is
+        // started whatever the session has running: one that is not started
+        // counts as run out at once, which is right for a wait (what it
+        // guarded is let go of) and wrong for this one, whose running out
+        // gives the session something. A session with as many timers as it
+        // may would have every announcement back at once, and the limit on
+        // announcements would not hold for it. There is one such timer for
+        // a session at most.
+        let limit = match event {
+            Event::AnnouncementTimeout { .. } => usize::MAX,
+            _ => self.config.max_timers_per_session,
+        };
         if let Some(event) = self.timers.start(session, limit, wait, event) {
             // WHY at once: see `Action::StartUpstreamTimer`. Whatever the
             // timer guarded is let go of now instead of never.
