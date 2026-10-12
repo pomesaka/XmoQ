@@ -25,7 +25,8 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 grep -q "^publish:" "$work/demo.log" || { cat "$work/demo.log" >&2; exit 1; }
-(cd "$root" && exec "$bun" "$here/publish-headless.ts" "http://localhost:$((port + 1))") > "$work/page.log" 2>&1 &
+# SIZE=720|1080: the size the page sends at (360 without it).
+(cd "$root" && PUBLISH_QUERY=${SIZE:+size=$SIZE} exec "$bun" "$here/publish-headless.ts" "http://localhost:$((port + 1))") > "$work/page.log" 2>&1 &
 page=$!
 for _ in $(seq 1 40); do
   grep -q "^PUBLISHING" "$work/page.log" && break

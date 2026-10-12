@@ -32,6 +32,10 @@ pub struct Counts {
     /// The moments a frame with the white square of the demo was drawn
     /// after one without.
     pub marks: Vec<Instant>,
+    /// What was written for the terminal, and by how much the frames were made smaller.
+    pub bytes: u64,
+    pub by: usize,
+    pub size: (usize, usize),
     pub first: Option<Instant>,
     pub last: Option<Instant>,
 }
@@ -42,7 +46,8 @@ fn start_code(bytes: &[u8], from: usize) -> Option<usize> {
 
 /// The white square of the demo (`MARK` in demo/shared.ts), by its middle.
 fn marked(rgb: &[u8], (width, height): (usize, usize)) -> bool {
-    let (x, y) = (580, 60);
+    // The page paints in the units of 640x360 and sends at any size.
+    let (x, y) = (580 * width / 640, 60 * height / 360);
     if x >= width || y >= height {
         return false;
     }
@@ -89,6 +94,7 @@ pub fn run(frames: mpsc::Receiver<Frame>, mut screen: Screen) -> Counts {
         counts.decoding += before.elapsed();
         let Some(size) = picture else { continue };
         counts.decoded += 1;
+        counts.size = size;
         if let Some(wait) = frame.due.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);
         }
@@ -113,5 +119,7 @@ pub fn run(frames: mpsc::Receiver<Frame>, mut screen: Screen) -> Counts {
         was_marked = mark;
     }
     screen.leave();
+    counts.bytes = screen.bytes;
+    counts.by = screen.by;
     counts
 }
