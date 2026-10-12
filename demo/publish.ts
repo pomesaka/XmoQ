@@ -190,6 +190,10 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	});
 }
 
+/** `?keyint=`: how long a Group is, in milliseconds; a second when left out. */
+const KEY_INTERVAL_MS = Number(
+	new URLSearchParams(location.search).get("keyint") ?? 1000,
+);
 /** `?bitrate=`: for seeing what a smaller picture does on a bad link. */
 const BITRATE = Number(
 	new URLSearchParams(location.search).get("bitrate") ?? 1_500_000,
@@ -217,7 +221,7 @@ async function main(): Promise<void> {
 				height: LOW.height,
 				bitrate: LOW.bitrate,
 				framerate: FRAMES_A_SECOND,
-				keyFrameIntervalMs: 1000,
+				keyFrameIntervalMs: KEY_INTERVAL_MS,
 			})
 		: undefined;
 	const small = new OffscreenCanvas(LOW.width, LOW.height).getContext("2d");
@@ -231,7 +235,7 @@ async function main(): Promise<void> {
 		// `?bitrate=`: for seeing what a smaller picture does on a bad link.
 		bitrate: BITRATE,
 		framerate: FRAMES_A_SECOND,
-		keyFrameIntervalMs: 1000,
+		keyFrameIntervalMs: KEY_INTERVAL_MS,
 		// `?mapping=stream-per-object` puts every Object on a stream of its own.
 		...(new URLSearchParams(location.search).get("mapping") ===
 		"stream-per-object"
