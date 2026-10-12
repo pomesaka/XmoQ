@@ -185,7 +185,10 @@ pub trait SendStream: Send + 'static {
     /// holds nothing between `write_all` and its peer, which the in-memory
     /// connection is (`memory`: what is written is in the peer's pipe).
     /// There is nothing left to give up at the FIN then. A transport with a
-    /// send buffer has to implement this.
+    /// send buffer has to implement this, and so does the in-memory pair
+    /// that holds a finished stream back until it is told
+    /// (`memory::pair_that_delivers_when_told`), which is what the relay's
+    /// tests of a stream that is not delivered run on.
     fn finish_until<G>(self, give_up: G) -> impl Future<Output = bool> + Send
     where
         Self: Sized,
