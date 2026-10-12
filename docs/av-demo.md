@@ -27,7 +27,7 @@ A page encodes a picture (a clock it paints, or a camera) as H.264, 640x360 at 3
 ## What later records took back
 
 - **"The sound falls behind on a link with delay and loss", and "ten pieces on one stream prevent it"** ([lossy link](experiments/2026-10-11-demo-over-a-lossy-link.md)): withdrawn. The sound was not late. Chromium's decoder gave the pieces times of its own count, and each piece dropped as late moved all later ones 20 ms; the player now gives each piece the time of its chunk and puts late pieces in order ([cause](experiments/2026-10-11-sound-falls-behind-on-a-link-with-delay-and-loss.md)).
-- **"BBR keeps the picture live"** holds for loss, and not for a link with too little room, where it is worse than Cubic (the row above). The relay's default is Cubic; which to use is undecided.
+- **"BBR keeps the picture live"** holds for loss, and not for a link with too little room, where it is worse than Cubic (the row above). The relay's default is Cubic and stays so (decided on 2026-10-12, [open decisions](open-questions.md)); `--congestion bbr` chooses the other.
 - **Every number of the sound's lead before 2026-10-12 is 11 ms off**: the demo's tone carried times 11 ms ahead in Chromium (about 100 ms in Firefox), which was the demo's fault and is mended ([tone](experiments/2026-10-11-demo-in-firefox-and-webkit.md)). With it, a buffer of 150 ms held a frame for 133 ms; now for 148. The delays in the table are from before.
 - **A later Group of video that waits for the one before it** was tried and not taken: no more frames at 1% loss, fewer at 5% ([record](experiments/2026-10-12-a-later-group-of-video-waits-for-the-one-before-it.md)).
 
