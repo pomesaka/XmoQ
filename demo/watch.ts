@@ -162,6 +162,8 @@ async function main(): Promise<void> {
 	let framesLate = 0;
 
 	const arrived = { video: measured(), audio: measured() };
+	/** `?diag=1`: how long after it was made every piece of sound came to be played, in milliseconds. */
+	const audioCameAll: number[] = [];
 	const played = { video: measured(), audio: measured() };
 	/** When the mark came on, by the time of the Object and by this page's clock at the play, in milliseconds. */
 	const marks: {
@@ -268,6 +270,7 @@ async function main(): Promise<void> {
 			firstAudioAfterMs ??= Math.round(performance.now() - audioSince);
 			const timeMs = piece.timestampUs / 1000;
 			arrived.audio.add(piece.now - timeMs);
+			if (query.get("diag") !== null) audioCameAll.push(Math.round(piece.now - timeMs));
 			const loud = piece.samples.some((sample) => Math.abs(sample) > 0.3);
 			if (loud && !markHeard) {
 				marks.audio.push({ time: timeMs, played: piece.due });
@@ -503,6 +506,9 @@ async function main(): Promise<void> {
 				? {}
 				: {
 						audioCame: arrived.audio.values,
+						audioCameAll,
+						audioHeld: heard?.held ?? 0,
+						audioReceived: heard?.received ?? 0,
 						firstBytes: [...firstBytes].map(([stream, first]) => [
 							stream,
 							first.at,

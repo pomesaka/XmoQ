@@ -41,17 +41,17 @@ export interface AudioChunk {
  * (docs/experiments/2026-10-11-sound-falls-behind-on-a-link-with-delay-and-loss.md).
  * The number was not decided again.
  *
- * What is known now, with the player giving each piece the time of its
- * chunk, one run of 16 s each: neither 1 nor 10 falls behind (1: 5% loss,
- * and 50 ms each way with 1%; 10: 50 ms with 1% and with 5%). 1 is 50
- * streams a second and 10 is 5. Dropped by the player because a later one
- * had come first, of about 780 chunks: with 1, 30 at 5% loss and 11 at
- * 50 ms with 1%; with 10, about 14 at 50 ms with 1% (17 of 971) and 190 at
- * 50 ms with 5%. The links differ, so this does not say which drops fewer.
- * A loss holds back the rest of its stream: up to 200 ms with 10.
+ * What is known now, measured again on 2026-10-12 with 1, 5 and 10, three
+ * to five runs each (docs/experiments/2026-10-12-one-five-or-ten-pieces-
+ * of-sound-a-group.md): without loss and at 1% loss the three cannot be
+ * told apart; on a link narrower than what is sent, and at 5% loss with a
+ * buffer of 50 ms, 1 loses fewer pieces; the relay has about a half more
+ * to do with 1 (50 streams a second for a viewer, against 5). A loss holds
+ * back the rest of its stream: up to 200 ms with 10.
  *
- * WHY NOT 1: it is the example of LOC-04 §4.1. Nothing measured stands
- * against it any more.
+ * WHY NOT 1: it is the example of LOC-04 §4.1 and what MSF-01 §6 asks.
+ * Nothing measured speaks for 10 any more; the number waits for a
+ * decision, and is not changed without one.
  */
 export const DEFAULT_AUDIO_CHUNKS_PER_GROUP = 10;
 
