@@ -96,6 +96,9 @@ struct Args {
     /// `--slow-open-ms`: [`HubConfig::slow_open`], for a run that looks at
     /// how long streams take to open; 0 logs every stream.
     slow_open: Option<Duration>,
+    /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
+    /// An experiment; without it no stream is given up.
+    delivery_patience: Option<Duration>,
     /// `--auth-key-hex`: the key requests are authorized with
     /// ([`HubConfig::auth_key`]). An experiment.
     auth_key: Option<Vec<u8>>,
@@ -112,6 +115,7 @@ fn parse_args() -> Result<Args> {
     let mut congestion = Congestion::default();
     let mut max_sessions = None;
     let mut slow_open = None;
+    let mut delivery_patience = None;
     let mut auth_key = None;
     let mut auth_setup = true;
     let mut args = std::env::args().skip(1);
@@ -144,6 +148,11 @@ fn parse_args() -> Result<Args> {
                     value.parse().context("--slow-open-ms")?,
                 ));
             }
+            "--delivery-patience-ms" => {
+                delivery_patience = Some(Duration::from_millis(
+                    value.parse().context("--delivery-patience-ms")?,
+                ));
+            }
             "--auth-key-hex" => {
                 auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
             }
@@ -165,6 +174,7 @@ fn parse_args() -> Result<Args> {
         congestion,
         max_sessions,
         slow_open,
+        delivery_patience,
         auth_key,
         auth_setup,
     })
@@ -184,6 +194,7 @@ async fn main() -> Result<()> {
     if let Some(slow_open) = args.slow_open {
         config.slow_open = slow_open;
     }
+    config.send.delivery_patience = args.delivery_patience;
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);

@@ -277,6 +277,7 @@ async fn a_subscriber_that_stops_reading_is_cut_off_alone() {
             bytes: 4 * 4 * STREAM_WINDOW,
             objects: 4096,
             streams: 256,
+            delivery_patience: None,
         },
         ..HubConfig::default()
     };

@@ -1421,6 +1421,15 @@ impl<C: Connection> Hub<C> {
                     OutgoingEvent::Closed => Event::OutStreamClosed { out_stream },
                     // For the log only: the writer resets the stream and
                     // reports it closed.
+                    OutgoingEvent::TimedOut => {
+                        if let Some(log) = &log {
+                            log.print(format!(
+                                "DELIVERY_TIMED_OUT session={} out={}",
+                                session.0, out_stream.0
+                            ));
+                        }
+                        return;
+                    }
                     OutgoingEvent::Stopped(code) => {
                         if let Some(log) = &log {
                             log.print(format!(

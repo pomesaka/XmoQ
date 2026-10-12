@@ -895,6 +895,7 @@ fn sending(objects: usize, streams: usize) -> Sending {
             bytes: 1024,
             objects,
             streams,
+            delivery_patience: None,
         }),
         reports,
         report,

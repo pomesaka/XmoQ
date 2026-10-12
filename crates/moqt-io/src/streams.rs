@@ -1448,6 +1448,13 @@ pub struct SendLimits {
     /// Subgroup streams that are not done yet: not opened, not written out, or
     /// waiting for the peer's stream limit.
     pub streams: usize,
+    /// How long after the last Object of a subgroup stream was written the
+    /// receiver may take to have all of it. A stream that is not delivered
+    /// by then is reset with `DELIVERY_TIMEOUT` and the subscription goes
+    /// on with the streams after it (§8: "Publishers can, at their
+    /// discretion, discontinue forwarding Objects before either of the
+    /// timeouts occurs"). `None`: every stream is delivered, however late.
+    pub delivery_patience: Option<Duration>,
 }
 
 impl Default for SendLimits {
@@ -1456,6 +1463,7 @@ impl Default for SendLimits {
             bytes: 4 * 1024 * 1024,
             objects: 4096,
             streams: 256,
+            delivery_patience: None,
         }
     }
 }
@@ -1547,6 +1555,9 @@ pub enum OutgoingEvent {
     /// The writer resets the stream in answer (§11.4.3). A stop that arrives
     /// while nothing is being written is not seen until the next write.
     Stopped(Option<u32>),
+    /// The stream was finished and the receiver did not have all of it
+    /// within [`SendLimits::delivery_patience`]: it was reset.
+    TimedOut,
     /// The writer is done: the stream was finished, reset, or never opened.
     /// Reported once for every writer, and last.
     Closed,
@@ -1766,8 +1777,16 @@ impl Writer {
                     }
                 }
                 Some(Command::Finish) => {
-                    if let Some(open) = send {
+                    let Some(open) = send else { return };
+                    let Some(patience) = self.share.budget.limits.delivery_patience else {
                         open.finish();
+                        return;
+                    };
+                    if !open
+                        .finish_within(patience, stream_reset_code::DELIVERY_TIMEOUT)
+                        .await
+                    {
+                        report(OutgoingEvent::TimedOut).await;
                     }
                     return;
                 }
