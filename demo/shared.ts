@@ -93,6 +93,13 @@ export interface Room {
 	readonly broadcast: Promise<Broadcast | null>;
 	/** The broadcast the room has now, as it last said; null without one, or before it said anything. */
 	current(): Broadcast | null;
+	/**
+	 * Resolves with the broadcast of the room: at once where it has one, and
+	 * else when a publisher registers one (the room says so to everybody in
+	 * it as it happens). WHY: a viewer that asked `current` every 2 seconds
+	 * had its picture up to 2 seconds after the publisher had begun.
+	 */
+	named(): Promise<Broadcast>;
 	/** Says where this page publishes; holds as long as this page is connected to the room. */
 	publish(broadcast: Broadcast): void;
 	/**
@@ -157,6 +164,8 @@ export function joinRoom(as: string): Room | undefined {
 		if (socket.readyState === WebSocket.OPEN) send();
 		else socket.addEventListener("open", send, { once: true });
 	};
+	/** The callers of `named` that wait for a publisher to register. */
+	const waiting: ((broadcast: Broadcast) => void)[] = [];
 	let first: (broadcast: Broadcast | null) => void = () => {};
 	const broadcast = new Promise<Broadcast | null>((resolve) => {
 		first = resolve;
@@ -169,6 +178,9 @@ export function joinRoom(as: string): Room | undefined {
 		}
 		if (message.type === "hello" || message.type === "broadcast") {
 			latest = message.broadcast;
+			if (latest !== null) {
+				for (const tell of waiting.splice(0)) tell(latest);
+			}
 		}
 		if (message.type === "chat") show(message);
 		if (message.type === "reaction") react(message.emoji, 1);
@@ -198,6 +210,12 @@ export function joinRoom(as: string): Room | undefined {
 	return {
 		broadcast,
 		current: () => latest,
+		named: () =>
+			latest === null
+				? new Promise((resolve) => {
+						waiting.push(resolve);
+					})
+				: Promise.resolve(latest),
 		publish(where) {
 			whenOpen(() =>
 				socket.send(JSON.stringify({ type: "broadcast", broadcast: where })),

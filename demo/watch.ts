@@ -30,6 +30,7 @@ import {
 } from "@xmoq/moqt";
 import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
 import {
+	type Broadcast,
 	connectToRelay,
 	firstBytes,
 	HERE,
@@ -617,9 +618,20 @@ async function main(): Promise<void> {
 	// the broadcast is.
 	await keepPlaying({
 		async connect() {
-			const found =
-				room === undefined ? HERE : (room.current() ?? (WAIT ? HERE : null));
-			if (found === null) return undefined;
+			// Where the room names no broadcast, the page waits for the
+			// room's word that one has begun, which comes as it happens.
+			// WHY NOT ask again after the pause, as before: the pause is 2
+			// seconds, and the picture began up to that much late.
+			let found: Broadcast;
+			if (room === undefined) found = HERE;
+			else if (WAIT) found = room.current() ?? HERE;
+			else {
+				if (room.current() === null) {
+					link = "nobody publishes in this room; waiting for the room's word";
+				}
+				found = await room.named();
+				link = "connecting";
+			}
 			const broadcast = through(found);
 			document.body.dataset.broadcast = JSON.stringify(broadcast);
 			playingNamespace = namespace(broadcast.namespace);
