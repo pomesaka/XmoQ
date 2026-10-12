@@ -11,10 +11,14 @@ import {
 	keepPublishing,
 	createVideoTrackEncoder,
 } from "@xmoq/media";
+import { createCatalogPublisher } from "@xmoq/msf";
 import {
+	AUDIO_TRACK,
 	audioTrackName,
 	connectToRelay,
+	DECODER_CODEC,
 	ENCODER_CODEC,
+	TRACK,
 	HERE,
 	MARK,
 	marked,
@@ -186,6 +190,11 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	});
 }
 
+/** `?bitrate=`: for seeing what a smaller picture does on a bad link. */
+const BITRATE = Number(
+	new URLSearchParams(location.search).get("bitrate") ?? 1_500_000,
+);
+
 async function main(): Promise<void> {
 	const encoder = await createVideoTrackEncoder({
 		trackNamespace: namespace(),
@@ -196,9 +205,7 @@ async function main(): Promise<void> {
 		width: WIDTH,
 		height: HEIGHT,
 		// `?bitrate=`: for seeing what a smaller picture does on a bad link.
-		bitrate: Number(
-			new URLSearchParams(location.search).get("bitrate") ?? 1_500_000,
-		),
+		bitrate: BITRATE,
 		framerate: FRAMES_A_SECOND,
 		keyFrameIntervalMs: 1000,
 		// `?mapping=stream-per-object` puts every Object on a stream of its own.
@@ -245,12 +252,52 @@ async function main(): Promise<void> {
 	// encoders go on, and when the session ends the page connects again
 	// after two seconds and announces anew.
 	const room = joinRoom("publisher");
+	// The catalog of MSF says which tracks the broadcast has; a viewer finds
+	// them there and is told no name. It is made before a media Object is
+	// sent (MSF §5), and stays over the sessions, as the encoders do.
+	const catalog = createCatalogPublisher({
+		namespace: namespace(),
+		catalog: {
+			version: "draft-01",
+			tracks: [
+				{
+					name: TRACK,
+					packaging: "loc",
+					isLive: true,
+					role: "video",
+					// What a decoder is configured with: the parameter sets are in the key frames.
+					codec: DECODER_CODEC,
+					bitrate: BITRATE,
+					width: WIDTH,
+					height: HEIGHT,
+					framerate: FRAMES_A_SECOND,
+				},
+				...(audio === undefined
+					? []
+					: [
+							{
+								name: AUDIO_TRACK,
+								packaging: "loc",
+								isLive: true,
+								role: "audio",
+								codec: "opus",
+								// What Chromium's encoder was seen to make without a setting.
+								bitrate: 67_000,
+							},
+						]),
+			],
+		},
+	});
 	void keepPublishing({
 		// Where the rooms give tokens, the connection carries one.
 		connect: async () =>
 			connectToRelay(through(HERE), await room?.token("pub", HERE.namespace)),
 		trackNamespace: namespace(),
-		tracks: [encoder.publisher, ...(audio === undefined ? [] : [audio.publisher])],
+		tracks: [
+			catalog,
+			encoder.publisher,
+			...(audio === undefined ? [] : [audio.publisher]),
+		],
 		onState(state) {
 			switch (state.type) {
 				case "connecting":

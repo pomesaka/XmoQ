@@ -1,4 +1,7 @@
-// What the two pages of the demo agree on without a catalog.
+// What the two pages of the demo share. Which tracks a broadcast has, and
+// their codecs, the watching page reads from the MSF catalog the publishing
+// page puts out; the namespace, the sample rate of the sound and the mark
+// are agreed on here.
 
 import { connect, type MoqtConnection } from "@xmoq/moqt";
 

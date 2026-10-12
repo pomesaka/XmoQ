@@ -5,6 +5,7 @@
 	"type": "module",
 	"dependencies": {
 		"@xmoq/media": "workspace:*",
-		"@xmoq/moqt": "workspace:*"
+		"@xmoq/moqt": "workspace:*",
+		"@xmoq/msf": "workspace:*"
 	}
 }

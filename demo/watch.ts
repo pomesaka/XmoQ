@@ -21,10 +21,10 @@ import {
 	playVideoTrack,
 	type VideoPlayback,
 } from "@xmoq/media";
+import type { MoqtConnection } from "@xmoq/moqt";
+import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
 import {
-	audioTrackName,
 	connectToRelay,
-	DECODER_CODEC,
 	firstBytes,
 	HERE,
 	MARK,
@@ -34,7 +34,6 @@ import {
 	say,
 	through,
 	why,
-	trackName,
 	every,
 	perSecond,
 } from "./shared.ts";
@@ -74,6 +73,48 @@ function measured(): {
 			return `median ${Math.round(sorted[Math.floor(sorted.length / 2)] ?? 0)} ms, at most ${Math.round(sorted.at(-1) ?? 0)} ms`;
 		},
 	};
+}
+
+/** How long the catalog of a broadcast has to come, in milliseconds. */
+const CATALOG_TIMEOUT_MS = 5000;
+
+/**
+ * Reads the MSF catalog of the broadcast and gives its first video track
+ * and its first audio track, by their `role`. The page is told no track
+ * name: what it plays is what the catalog has. Rejects where no catalog
+ * comes in time, or it has no video track.
+ */
+async function tracksOf(
+	connection: MoqtConnection,
+	catalogNamespace: Uint8Array[],
+): Promise<{ video: CatalogTrack; audio: CatalogTrack | undefined }> {
+	const follower = await followCatalog(connection, {
+		namespace: catalogNamespace,
+	});
+	const reader = follower.states.getReader();
+	const late = new Promise<never>((_, reject) => {
+		setTimeout(
+			() => reject(new Error("no catalog came within 5 s")),
+			CATALOG_TIMEOUT_MS,
+		);
+	});
+	late.catch(() => {});
+	try {
+		for (;;) {
+			const next = await Promise.race([reader.read(), late]);
+			if (next.done) throw new Error("the catalog track ended without a catalog");
+			const tracks = next.value.current?.catalog.tracks;
+			if (tracks === undefined) continue;
+			const video = tracks.find((track) => track.role === "video");
+			if (video === undefined) throw new Error("the catalog has no video track");
+			document.body.dataset.catalog = JSON.stringify(tracks);
+			return { video, audio: tracks.find((track) => track.role === "audio") };
+		}
+	} finally {
+		// The subscription to the catalog goes on with the session; a later
+		// catalog is not read.
+		reader.releaseLock();
+	}
 }
 
 async function main(): Promise<void> {
@@ -249,8 +290,6 @@ async function main(): Promise<void> {
 	slider.value = String(clock.bufferMs());
 
 	const videoOptions = {
-		trackName: trackName(),
-		codec: DECODER_CODEC,
 		joiningFetch: query.get("join") !== "no",
 		onFrame(frame: VideoFrame) {
 			firstFrameAfterMs ??= Math.round(performance.now() - began);
@@ -317,8 +356,7 @@ async function main(): Promise<void> {
 		}
 	});
 	const audioOptions = {
-		trackName: audioTrackName(),
-		codec: "opus",
+		// The catalog of @xmoq/msf has no sample rate and no channels yet: these two are the demo's.
 		sampleRate: SAMPLE_RATE,
 		numberOfChannels: 1,
 		// `?audioJoin=1` fetches the Group of audio the page comes into.
@@ -435,17 +473,22 @@ async function main(): Promise<void> {
 			);
 		},
 		async play(connection) {
-			const trackNamespace = playingNamespace;
+			// What is played, and with which codec, is what the catalog says.
+			const tracks = await tracksOf(connection, playingNamespace);
+			const utf8 = new TextEncoder();
 			// `?video=no` plays the sound alone, for looking into it.
 			const video =
 				query.get("video") === "no"
 					? undefined
 					: await playVideoTrack(connection, {
 							...videoOptions,
-							trackNamespace,
+							trackNamespace: trackNamespaceOf(tracks.video, playingNamespace),
+							trackName: utf8.encode(tracks.video.name),
+							codec: tracks.video.codec ?? "",
 						});
 			playback = video;
-			audio = await playAudioTrack(connection, {
+			const sound = tracks.audio;
+			audio = sound === undefined ? undefined : await playAudioTrack(connection, {
 				...audioOptions,
 				// An Object that comes before its turn waits for the ones
 				// before it as long as the buffer leaves, less what the
@@ -453,7 +496,9 @@ async function main(): Promise<void> {
 				...(query.get("order") === "no"
 					? {}
 					: { holdForOrderMs: clock.holdForOrderMs }),
-				trackNamespace,
+				trackNamespace: trackNamespaceOf(sound, playingNamespace),
+				trackName: utf8.encode(sound.name),
+				codec: sound.codec ?? "",
 			})
 				.then((playing) => {
 					audioSince = performance.now();
