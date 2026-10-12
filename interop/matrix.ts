@@ -1337,6 +1337,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 						relay: "own",
 					},
 					{
+						name: "own relay: catalog: an own page that reads the catalog before the broadcast begins is held, and reads it when another page publishes",
+						script: "catalog.ts" as const,
+						args: ["--catalog", "reader-first"],
+						relay: "own",
+					},
+					{
 						name: "own relay: catalog: an own page publishes an MSF catalog, which moqlivemock's subscriber reads with a Joining FETCH",
 						script: "catalog.ts" as const,
 						args: ["--catalog", "to-mlmsub"],

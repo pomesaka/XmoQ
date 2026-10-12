@@ -44,6 +44,20 @@ export interface FollowCatalogOptions {
 	maxLength?: number;
 	/** How long the Joining FETCH has, in milliseconds; 15000 when left out. */
 	fetchTimeoutMs?: number;
+	/**
+	 * The RENDEZVOUS_TIMEOUT of the SUBSCRIBE for the catalog track, in
+	 * milliseconds (draft-ietf-moq-transport-18 §10.2.6): a relay that has
+	 * no publisher of the broadcast holds the SUBSCRIBE that long for one
+	 * to appear, and `followCatalog` resolves when one has. Where none
+	 * does, it rejects with the relay's REQUEST_ERROR, which is `TIMEOUT`
+	 * (0x2) from a relay that held it. Left out, the parameter is not sent,
+	 * and a relay without a publisher refuses at once. `@xmoq/moqt` waits
+	 * for the answer that much longer than for another request.
+	 *
+	 * WHY on this SUBSCRIBE alone: once the catalog track is answered the
+	 * broadcast is there, and its tracks are subscribed to without a wait.
+	 */
+	rendezvousTimeoutMs?: number;
 }
 
 /**
@@ -118,6 +132,15 @@ export async function followCatalog(
 	// WHY here: `readCatalog` would throw it for the first Object, where
 	// nobody is left to catch it.
 	if (options.maxLength !== undefined) checkMaxLength(options.maxLength);
+	const { rendezvousTimeoutMs } = options;
+	if (
+		rendezvousTimeoutMs !== undefined &&
+		(!Number.isSafeInteger(rendezvousTimeoutMs) || rendezvousTimeoutMs < 0)
+	) {
+		throw new RangeError(
+			`rendezvousTimeoutMs is a whole number of milliseconds from 0, not ${rendezvousTimeoutMs}`,
+		);
+	}
 	signal?.throwIfAborted();
 	// The one thing that ends the reading: the caller's signal, the
 	// cancelling of `states`, and the end of the subscription all go through
@@ -130,6 +153,13 @@ export async function followCatalog(
 		subscription = await connection.subscribe({
 			trackNamespace: options.namespace,
 			trackName: CATALOG_TRACK_NAME,
+			...(options.rendezvousTimeoutMs === undefined
+				? {}
+				: {
+						parameters: {
+							rendezvousTimeout: BigInt(options.rendezvousTimeoutMs),
+						},
+					}),
 		});
 	} catch (error) {
 		signal?.removeEventListener("abort", stopBySignal);

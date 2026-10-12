@@ -23,7 +23,11 @@ import {
 	playVideoTrack,
 	type VideoPlayback,
 } from "@xmoq/media";
-import type { MoqtConnection } from "@xmoq/moqt";
+import {
+	type MoqtConnection,
+	RequestErrorCode,
+	RequestFailedError,
+} from "@xmoq/moqt";
 import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
 import {
 	connectToRelay,
@@ -82,6 +86,18 @@ const VERSION_TIMEOUTS = (query.get("versionTimeouts") ?? "")
 	.split(",")
 	.filter((each) => each !== "")
 	.map(Number);
+/**
+ * `?wait=1` (**a trial**): the page waits for the broadcast at the relay
+ * and does not go by the room's word that one has begun. Its SUBSCRIBE for
+ * the catalog carries a RENDEZVOUS_TIMEOUT of `WAIT_MS`, so the relay holds
+ * it until a publisher is there (transport §10.2.6); when the relay says
+ * that none came (`TIMEOUT`), and when what was played has ended, the page
+ * asks again on the session it has. Where the room names no broadcast the
+ * place is the demo's own (`HERE`).
+ */
+const WAIT = query.has("wait");
+/** **Provisional**: what the page asks the relay to hold its SUBSCRIBE for, which is also the most the own relay holds one. */
+const WAIT_MS = 30_000;
 const VIDEO_TIMEOUT_THEN = query.get("videoTimeoutThen");
 const VIDEO_TIMEOUT_AFTER_S = Number(query.get("videoTimeoutAfter") ?? 10);
 
@@ -125,6 +141,7 @@ const CATALOG_TIMEOUT_MS = 5000;
 async function tracksOf(
 	connection: MoqtConnection,
 	catalogNamespace: Uint8Array[],
+	signal: AbortSignal,
 ): Promise<{
 	video: CatalogTrack;
 	versions: CatalogTrack[];
@@ -132,6 +149,8 @@ async function tracksOf(
 }> {
 	const follower = await followCatalog(connection, {
 		namespace: catalogNamespace,
+		signal,
+		...(WAIT ? { rendezvousTimeoutMs: WAIT_MS } : {}),
 	});
 	const reader = follower.states.getReader();
 	const late = new Promise<never>((_, reject) => {
@@ -191,6 +210,10 @@ async function main(): Promise<void> {
 	/** What the first line under the picture says of the session. */
 	let link = "connecting";
 	let sessions = 0;
+	/** `?wait=1`: how many times the relay said that nobody publishes yet. */
+	let waits = 0;
+	/** How many connections to a relay were made. */
+	let connections = 0;
 
 	/** Of the frames that were drawn: how long each took to get here, waited for its turn, and waited for the repaint. */
 	const delay = { arrive: measured(), buffer: measured(), paint: measured() };
@@ -580,6 +603,8 @@ async function main(): Promise<void> {
 					}),
 			sessions,
 			link,
+			connections,
+			waits,
 			dropped: { video: stats.dropped, audio: heard?.dropped ?? {} },
 			arrived: { video: arrived.video.text(), audio: arrived.audio.text() },
 			played: { video: played.video.text(), audio: played.audio.text() },
@@ -592,12 +617,14 @@ async function main(): Promise<void> {
 	// the broadcast is.
 	await keepPlaying({
 		async connect() {
-			const found = room === undefined ? HERE : room.current();
+			const found =
+				room === undefined ? HERE : (room.current() ?? (WAIT ? HERE : null));
 			if (found === null) return undefined;
 			const broadcast = through(found);
 			document.body.dataset.broadcast = JSON.stringify(broadcast);
 			playingNamespace = namespace(broadcast.namespace);
 			// Where the rooms give tokens, the connection carries one.
+			connections += 1;
 			return connectToRelay(
 				broadcast,
 				await room?.token("sub", broadcast.namespace),
@@ -605,7 +632,11 @@ async function main(): Promise<void> {
 		},
 		async play(connection) {
 			// What is played, and with which codec, is what the catalog says.
-			const tracks = await tracksOf(connection, playingNamespace);
+			// With `?wait=1` what this call subscribed to is let go when it
+			// has ended, so that the next call on the session can subscribe
+			// anew. Without it the session is closed then, as before.
+			const playing = new AbortController();
+			const tracks = await tracksOf(connection, playingNamespace, playing.signal);
 			const utf8 = new TextEncoder();
 			// `?video=no` plays the sound alone, for looking into it.
 			const playVersion = (
@@ -655,6 +686,12 @@ async function main(): Promise<void> {
 			const ended = new Promise<string>((resolve) => {
 				over = resolve;
 			});
+			if (WAIT) {
+				void ended.then(() => {
+					leave.abort();
+					playing.abort();
+				});
+			}
 			void video?.ended.then((end) => {
 				if (playback === video) over(end.type);
 			});
@@ -812,6 +849,7 @@ async function main(): Promise<void> {
 			const sound = tracks.audio;
 			audio = sound === undefined ? undefined : await playAudioTrack(connection, {
 				...audioOptions,
+				...(WAIT ? { signal: playing.signal } : {}),
 				// An Object that comes before its turn waits for the ones
 				// before it as long as the buffer leaves, less what the
 				// decoder and the loudspeaker need.
@@ -846,9 +884,26 @@ async function main(): Promise<void> {
 				ended,
 			};
 		},
+		// `?wait=1`: "not yet" is the relay's TIMEOUT for a SUBSCRIBE it held,
+		// and DOES_NOT_EXIST from a relay that holds none, or for a track
+		// that has just ended.
+		...(WAIT
+			? {
+					stay: {
+						notYet: (error: unknown) =>
+							error instanceof RequestFailedError &&
+							(error.errorCode === RequestErrorCode.TIMEOUT ||
+								error.errorCode === RequestErrorCode.DOES_NOT_EXIST),
+					},
+				}
+			: {}),
 		onState(state) {
 			const at = new Date().toISOString().slice(11, 19);
 			switch (state.type) {
+				case "not-yet":
+					waits += 1;
+					link = `waiting for the broadcast on this session (asked ${waits} times)`;
+					return;
 				case "connecting":
 					link = "connecting";
 					return;
@@ -864,7 +919,9 @@ async function main(): Promise<void> {
 					link = `the session ended (${state.close.type}) at ${at}; connecting again every 2 s`;
 					return;
 				case "playing-ended":
-					link = `the video track ended (${state.end}) at ${at}; connecting again every 2 s`;
+					link = WAIT
+						? `the video track ended (${state.end}) at ${at}; waiting for it on this session`
+						: `the video track ended (${state.end}) at ${at}; connecting again every 2 s`;
 					return;
 				case "failed":
 					link = `could not play (${why(state.error)}); trying again every 2 s`;

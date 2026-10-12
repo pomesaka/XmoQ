@@ -10,7 +10,7 @@ import {
 	RequestErrorCode,
 	type SessionClose,
 } from "@xmoq/moqt";
-import { keepSession } from "../core/keep-session.ts";
+import { keepSession, stayOnSession } from "../core/keep-session.ts";
 
 /** A track that answers the requests for it: a publisher of this package. */
 export interface ServedTrack {
@@ -130,6 +130,8 @@ export type PlayingState<E> =
 	| { type: "session-ended"; close: SessionClose }
 	/** What is played ended while the session went on: its publisher went. */
 	| { type: "playing-ended"; end: E }
+	/** With `stay`: there is nothing to play yet, and it is asked for again on the session. */
+	| { type: "not-yet"; error: unknown }
 	/** No session could be made, or nothing could be played on it. */
 	| { type: "failed"; error: unknown };
 
@@ -153,6 +155,18 @@ export interface KeepPlayingOptions<E> {
 	): Promise<{ ended: Promise<E> }>;
 	/** `DEFAULT_RECONNECT_DELAY_MS` when left out. */
 	delayMs?: number;
+	/**
+	 * **A trial; left out, nothing changes.** With it the session is kept
+	 * where there is nothing to play yet (`play` rejects, and `notYet` says
+	 * so of what it rejected with) and where what was played has ended:
+	 * `play` is called again on the same connection after `againMs`
+	 * (`DEFAULT_ASK_AGAIN_DELAY_MS`). For a viewer whose requests a relay
+	 * holds until a publisher is there (RENDEZVOUS_TIMEOUT, transport
+	 * §10.2.6), where "not yet" is the relay's REQUEST_ERROR `TIMEOUT`. A
+	 * session that ends, and a `play` that fails in another way, are
+	 * followed by a new session as without it.
+	 */
+	stay?: { notYet(error: unknown): boolean; againMs?: number };
 	/** Aborting it closes the session and ends the trying. */
 	signal?: AbortSignal;
 	onState?(state: PlayingState<E>): void;
@@ -181,6 +195,30 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 			signal.addEventListener("abort", stop, { once: true });
 			try {
 				if (signal.aborted) stop();
+				const { stay } = options;
+				if (stay !== undefined) {
+					const session = sessions + 1;
+					const over = await stayOnSession<E, SessionClose>({
+						play: () => options.play(connection, signal),
+						closed: connection.closed,
+						notYet: stay.notYet,
+						wait: (ms) => waitFor(ms, signal),
+						stopped: () => signal.aborted,
+						...(stay.againMs === undefined ? {} : { againMs: stay.againMs }),
+						onPlaying() {
+							sessions = session;
+							options.onState?.({ type: "playing", session, connection });
+						},
+						onNotYet: (error) => options.onState?.({ type: "not-yet", error }),
+						onEnded: (end) => options.onState?.({ type: "playing-ended", end }),
+					});
+					// The caller stopped: its signal closes the session.
+					return over.type === "session-ended"
+						? over
+						: await connection.closed.then(
+								(close): Over => ({ type: "session-ended", close }),
+							);
+				}
 				const { ended } = await options.play(connection, signal);
 				sessions += 1;
 				options.onState?.({ type: "playing", session: sessions, connection });

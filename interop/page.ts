@@ -874,52 +874,55 @@ window.xmoqOwn = {
 		shown: [...kept.shown],
 	})),
 
-	followCatalog: withPlainErrors(async (namespace: string) => {
-		const follower = await followCatalog(connected(), {
-			namespace: namespaceTuple(namespace),
-		});
-		const reading: CatalogReading = {
-			states: [],
-			joiningFetch: undefined,
-			ended: undefined,
-		};
-		catalogReading = reading;
-		void follower.ended.then((end) => {
-			reading.ended =
-				end.type === "publish-done"
-					? `publish-done ${end.statusCode}`
-					: end.type;
-		});
-		void follower.joiningFetch.then((fetched) => {
-			reading.joiningFetch =
-				fetched.type === "not-sent"
-					? "not-sent"
-					: fetched.type === "served"
-						? `served ${fetched.objects}`
-						: `failed ${fetched.objects}: ${errorText(fetched.error)}`;
-		});
-		void (async () => {
-			const reader = follower.states.getReader();
-			for (;;) {
-				const next = await reader.read();
-				if (next.done) return;
-				const { current, outdated } = next.value;
-				reading.states.push({
-					catalog: current?.catalog ?? null,
-					at:
-						current === undefined
-							? null
-							: [current.at.group.toString(), current.at.object.toString()],
-					outdated:
-						outdated === undefined
-							? null
-							: `${outdated.because} at {${outdated.at.group}, ${outdated.at.object}}: ${outdated.detail}`,
-				});
-			}
-		})().catch((error: unknown) => {
-			console.log(`the catalog could not be read on: ${errorText(error)}`);
-		});
-	}),
+	followCatalog: withPlainErrors(
+		async (namespace: string, rendezvousTimeoutMs?: number) => {
+			const follower = await followCatalog(connected(), {
+				namespace: namespaceTuple(namespace),
+				...(rendezvousTimeoutMs === undefined ? {} : { rendezvousTimeoutMs }),
+			});
+			const reading: CatalogReading = {
+				states: [],
+				joiningFetch: undefined,
+				ended: undefined,
+			};
+			catalogReading = reading;
+			void follower.ended.then((end) => {
+				reading.ended =
+					end.type === "publish-done"
+						? `publish-done ${end.statusCode}`
+						: end.type;
+			});
+			void follower.joiningFetch.then((fetched) => {
+				reading.joiningFetch =
+					fetched.type === "not-sent"
+						? "not-sent"
+						: fetched.type === "served"
+							? `served ${fetched.objects}`
+							: `failed ${fetched.objects}: ${errorText(fetched.error)}`;
+			});
+			void (async () => {
+				const reader = follower.states.getReader();
+				for (;;) {
+					const next = await reader.read();
+					if (next.done) return;
+					const { current, outdated } = next.value;
+					reading.states.push({
+						catalog: current?.catalog ?? null,
+						at:
+							current === undefined
+								? null
+								: [current.at.group.toString(), current.at.object.toString()],
+						outdated:
+							outdated === undefined
+								? null
+								: `${outdated.because} at {${outdated.at.group}, ${outdated.at.object}}: ${outdated.detail}`,
+					});
+				}
+			})().catch((error: unknown) => {
+				console.log(`the catalog could not be read on: ${errorText(error)}`);
+			});
+		},
+	),
 
 	publishAudio: withPlainErrors(
 		async (namespace: string, trackName: string) => {

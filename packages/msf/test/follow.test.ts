@@ -408,6 +408,37 @@ describe("followCatalog", () => {
 		expect(peer.subscribed).toEqual([]);
 	});
 
+	test("`rendezvousTimeoutMs` is the RENDEZVOUS_TIMEOUT of the SUBSCRIBE for the catalog track (transport §10.2.6)", async () => {
+		const peer = fake({});
+		await followCatalog(peer.connection, {
+			namespace: NAMESPACE,
+			rendezvousTimeoutMs: 30_000,
+		});
+		expect(peer.subscribed).toEqual([
+			{
+				trackNamespace: NAMESPACE,
+				trackName: utf8("catalog"),
+				parameters: { rendezvousTimeout: 30000n },
+			},
+		]);
+	});
+
+	test.each([-1, 1.5, Number.NaN])(
+		"with a `rendezvousTimeoutMs` of %p it rejects with a RangeError, and nothing is sent",
+		async (rendezvousTimeoutMs) => {
+			const peer = fake({});
+			const outcome = await followCatalog(peer.connection, {
+				namespace: NAMESPACE,
+				rendezvousTimeoutMs,
+			}).then(
+				() => "resolved",
+				(error: unknown) => error,
+			);
+			expect(outcome).toBeInstanceOf(RangeError);
+			expect(peer.subscribed).toEqual([]);
+		},
+	);
+
 	test("with a `maxLength` that is no length it rejects with a RangeError, and nothing is sent", async () => {
 		const peer = fake({});
 		const outcome = await followCatalog(peer.connection, {

@@ -197,9 +197,10 @@ export type OwnPageExtras = {
 	/**
 	 * Starts reading the catalog track of the namespace with `followCatalog`
 	 * of `@xmoq/msf`: a SUBSCRIBE and a Joining FETCH. Resolves when the
-	 * SUBSCRIBE was accepted.
+	 * SUBSCRIBE was accepted. With `rendezvousTimeoutMs` the SUBSCRIBE
+	 * carries that RENDEZVOUS_TIMEOUT (transport §10.2.6).
 	 */
-	followCatalog(namespace: string): Promise<void>;
+	followCatalog(namespace: string, rendezvousTimeoutMs?: number): Promise<void>;
 	/**
 	 * What the reading started with `followCatalog` has given so far.
 	 * Resolves once it has `states` states at least and the Joining FETCH is

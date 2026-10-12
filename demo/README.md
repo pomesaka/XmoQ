@@ -27,6 +27,8 @@ Then, in Chromium (the pages need WebTransport and WebCodecs with H.264):
 
 **Two versions of the video (a trial)**: `/publish?ladder=1` encodes the picture a second time at 320x180 and 500 kbit/s and has both tracks in one alternate group of the catalog; `/watch?abr=1` plays the smaller one while the picture comes late and the larger one again when it has come in time for a while ([record](../docs/experiments/2026-10-12-two-versions-of-the-video-and-a-viewer-that-changes-between-them.md)). With `&judge=try` the page receives the larger one for 2 s before it shows it, and shows it only when its frames came in time ([record](../docs/experiments/2026-10-12-a-try-before-going-up-that-comes-again-as-soon.md)); `&versionTimeouts=A,B` gives each version its own delivery timeout. Without the two flags the demo is as before.
 
+**A viewer that waits at the relay (a trial)**: `/watch?wait=1` does not go by the room's word that a broadcast has begun. It connects at once, its SUBSCRIBE for the catalog asks the relay to hold it for 30 s until a publisher is there, and when none came, and when the publisher has gone, it asks again on the session it has ([record](../docs/experiments/2026-10-13-a-page-that-waits-for-the-broadcast-at-the-relay.md)). Without the flag the page is as before.
+
 `/chat?room=R&name=a&peers=a,b` is a try of chat as MoQ tracks beside the room's WebSocket, driven by a script and linked from nowhere ([record](../docs/experiments/2026-10-12-chat-as-moq-tracks-beside-the-rooms-websocket.md)).
 
 `bun demo/check.ts` checks a running demo in headless Chromium: the frames a second, and that sound leaves the watching page.
