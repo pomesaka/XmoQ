@@ -305,3 +305,12 @@ pub fn fetch_ended(request_id: u64, how: &str, code: Option<u32>, objects: u64) 
 pub fn fetch_stream_refused(request_id: u64, error: &MoqtError) {
     println!("FETCH_STREAM_REFUSED request_id={request_id} error={error}");
 }
+
+/// `--stay-after-ms`: the subscription is cancelled and the session stays.
+/// With the time, for setting it against another log.
+pub fn staying() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    println!("STAYING unix_ms={now}");
+}

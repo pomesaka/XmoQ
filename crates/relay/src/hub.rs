@@ -86,8 +86,7 @@ pub struct HubConfig {
     /// of that track towards it that it does not have all of yet are reset
     /// with `DELIVERY_TIMEOUT`, and the subscription goes on (§8:
     /// "Publishers can, at their discretion, discontinue forwarding Objects
-    /// before either of the timeouts occurs"). Needs
-    /// [`SendLimits::held_until_delivered`], which `main` sets with it.
+    /// before either of the timeouts occurs").
     pub give_up_older_groups: bool,
     /// The key of the experiment in authorization (`crate::auth`). None:
     /// every request is allowed.

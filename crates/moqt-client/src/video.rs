@@ -44,6 +44,10 @@ pub struct VideoFlags {
     /// the next; 40 without the flag. An experiment's: 20 with a file of
     /// Groups of 10 small frames has the shape of a track of audio.
     pub frame_ms: Option<u64>,
+    /// `--stay-after-ms N`: `--mode subscribe` keeps the session open that
+    /// long after it has cancelled its subscription. An experiment's: for
+    /// looking at what a relay still sends then.
+    pub stay_after: std::time::Duration,
 }
 
 impl VideoFlags {
@@ -57,6 +61,10 @@ impl VideoFlags {
                 let groups = groups_of(&bytes);
                 anyhow::ensure!(!groups.is_empty(), "--video-in {value}: no key frame");
                 self.video_in = Some(groups);
+            }
+            "--stay-after-ms" => {
+                self.stay_after =
+                    std::time::Duration::from_millis(value.parse().context("--stay-after-ms")?);
             }
             "--video-frame-ms" => self.frame_ms = Some(value.parse().context("--video-frame-ms")?),
             "--video-streams" => {
