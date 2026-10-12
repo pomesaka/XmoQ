@@ -59,6 +59,8 @@ pub struct Requests<'a> {
     pub answer_wait_ms: u64,
     /// `--open-wait-ms`.
     pub open_wait_ms: u64,
+    /// `--rendezvous-timeout-ms`: on every SUBSCRIBE.
+    pub rendezvous_ms: Option<u64>,
 }
 
 impl Requests<'_> {
@@ -103,6 +105,9 @@ impl Requests<'_> {
         }
         if let Some(timeout_ms) = timeout_ms {
             parameters.push(Parameter::SubgroupDeliveryTimeout(timeout_ms));
+        }
+        if let Some(wait_ms) = self.rendezvous_ms {
+            parameters.push(Parameter::RendezvousTimeout(wait_ms));
         }
         let wait = answer_wait_ms(self.answer_wait_ms, &parameters);
         let (request, message) = self.session.subscribe(full_name, parameters)?;
@@ -218,6 +223,8 @@ impl Requests<'_> {
                 }
             }
         };
+        // The catalog's 5 seconds begin when its SUBSCRIBE was answered,
+        // which a relay that holds it for a broadcast to come has done.
         let payload = tokio::time::timeout(CATALOG_WAIT, payload)
             .await
             .map_err(|_| anyhow!("no catalog came within 5 s"))??;

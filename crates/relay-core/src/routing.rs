@@ -44,6 +44,29 @@ pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
 /// more is refused with `EXCESSIVE_LOAD`. Provisional.
 pub const MAX_WAITING_SUBSCRIBERS: usize = 64;
 
+/// The longest the relay holds a SUBSCRIBE for a publisher to appear, in
+/// milliseconds, whatever its `RENDEZVOUS_TIMEOUT` asks (§10.2.6: "The
+/// relay MAY use a shorter timeout than requested by the subscriber. For
+/// example, a relay might limit the maximum rendezvous timeout to protect
+/// its resources"). **Provisional**: the longest it waits for a publisher
+/// to open a fetch stream, and the time a session may hold nothing.
+pub const MAX_RENDEZVOUS_MS: u64 = 30_000;
+
+/// SUBSCRIBEs of one session the relay holds for a publisher to appear.
+/// One more is not held: it is answered as one without
+/// `RENDEZVOUS_TIMEOUT`. **Provisional.**
+pub const MAX_HELD_SUBSCRIBES_PER_SESSION: usize = 16;
+
+/// Tracks without a source that the relay holds a SUBSCRIBE for, for a
+/// publisher to appear: those nobody is asked for, and those a session that
+/// announced is asked for. A SUBSCRIBE for one more is not held.
+/// **Provisional.**
+///
+/// WHY a limit of its own: each is a name a subscriber made up, kept for up
+/// to [`MAX_RENDEZVOUS_MS`], and the sessions the relay serves times
+/// [`MAX_HELD_SUBSCRIBES_PER_SESSION`] would be four times as many.
+pub const MAX_HELD_TRACKS: usize = 1_024;
+
 /// Requests the relay may have open on one session at once: its SUBSCRIBEs
 /// to a publisher. A publisher that has as many is passed over, and a
 /// subscriber for whose SUBSCRIBE nobody else could be asked is refused
@@ -190,6 +213,9 @@ pub(crate) struct Waiter {
     filter: Option<SubscriptionFilter>,
     /// What the SUBSCRIBE asked of the delivery.
     asked: Delivery,
+    /// It is held for a publisher to appear (§10.2.6), and its time for
+    /// that is not over: it is not refused because nobody has the track.
+    held: bool,
 }
 
 /// What a SUBSCRIBE asks of how its Objects are delivered.
@@ -218,6 +244,17 @@ impl Delivery {
 }
 
 impl Waiter {
+    /// The same SUBSCRIBE, held for a publisher to appear.
+    pub(crate) fn held(mut self) -> Self {
+        self.held = true;
+        self
+    }
+
+    /// Whether it is held for a publisher to appear.
+    pub(crate) fn is_held(&self) -> bool {
+        self.held
+    }
+
     /// Whether this is the SUBSCRIBE on that request stream of that session.
     pub(crate) fn is_on(&self, session: SessionKey, stream: StreamKey) -> bool {
         self.session == session && self.stream == stream
@@ -238,6 +275,7 @@ impl Waiter {
             forward,
             filter,
             asked,
+            held: false,
         }
     }
 }
@@ -294,8 +332,10 @@ pub(crate) struct Asked {
 /// Established, so the subscribers wait.
 #[derive(Debug)]
 pub(crate) struct PendingTrack {
-    /// Never empty: when the last ask is over, the waiters are refused and
-    /// the track is forgotten.
+    /// Empty only while every waiter is held for a publisher to appear
+    /// (§10.2.6) and none has: once a publisher was asked, the track is as
+    /// any other that waits, and when its last ask is over, the waiters are
+    /// refused and the track is forgotten.
     pub(crate) asks: Vec<Ask>,
     pub(crate) waiters: Vec<Waiter>,
     /// As [`Track::declined`](crate::Track), for as long as the track waits;
@@ -540,6 +580,26 @@ impl Relay {
         }
         pending.waiters.push(waiter);
         Ok(())
+    }
+
+    /// The time a SUBSCRIBE was held for a publisher to appear is over: it
+    /// is one that waits like any other from here on. Says whether nobody
+    /// is asked for the track, so that nothing is left to wait for.
+    pub(crate) fn hold_is_over(
+        &mut self,
+        track: &FullTrackName,
+        session: SessionKey,
+        stream: StreamKey,
+    ) -> bool {
+        let Some(pending) = self.tracks.pending_mut(track) else {
+            return false;
+        };
+        for waiter in &mut pending.waiters {
+            if waiter.is_on(session, stream) {
+                waiter.held = false;
+            }
+        }
+        pending.asks.is_empty()
     }
 
     /// Sends the relay's SUBSCRIBE for a track to every publisher that
@@ -1160,18 +1220,34 @@ impl Relay {
         self.tracks.forget_declined(session, |_| true);
     }
 
-    /// Answers every subscriber that waited for `track_name` with the same
-    /// `REQUEST_ERROR`, and forgets the pending track.
+    /// Answers the subscribers that waited for `track_name` with the same
+    /// `REQUEST_ERROR`, and forgets the pending track, unless a subscriber
+    /// is held for a publisher to appear: that one waits on, and the track
+    /// with it.
+    ///
+    /// WHY a held one is not refused with the others: §10.2.6 has the relay
+    /// "wait for a publisher to appear, up to the specified duration", and
+    /// a session that announced the namespace and would not serve the track
+    /// is no publisher of it. A publisher that announces first, refuses the
+    /// relay's SUBSCRIBE, and then sends its PUBLISH is what the Rust client
+    /// does.
     fn refuse_waiters(
         &mut self,
         track_name: &FullTrackName,
         refusal: &Refusal,
         actions: &mut Vec<Action>,
     ) {
-        let Some(pending) = self.tracks.take_pending(track_name) else {
+        let Some(pending) = self.tracks.pending_mut(track_name) else {
             return;
         };
-        for waiter in pending.waiters {
+        let (held, refused): (Vec<Waiter>, Vec<Waiter>) = std::mem::take(&mut pending.waiters)
+            .into_iter()
+            .partition(Waiter::is_held);
+        pending.waiters = held;
+        if pending.waiters.is_empty() {
+            self.tracks.take_pending(track_name);
+        }
+        for waiter in refused {
             self.refuse(
                 waiter.session,
                 waiter.stream,
@@ -1221,6 +1297,8 @@ impl Relay {
             forward,
             filter,
             asked,
+            // What it was held for has come.
+            held: _,
         } = *waiter;
         if let Some((subscriber, slot)) = self.accept_subscriber(
             track_name,

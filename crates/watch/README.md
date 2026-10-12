@@ -84,6 +84,7 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 | The relay's SETUP; connecting to it; a room's hello | 10 s each; without a SETUP the session is closed with `CONTROL_MESSAGE_TIMEOUT` (`0x11`) | As `@xmoq/moqt` | `main.rs` |
 | The relay's answer to a SUBSCRIBE | 10 s from when it was written (`--answer-wait-ms`); the SUBSCRIBE alone is given up, reset and stopped with `CANCELLED`, and the viewer leaves or tries again | The row "A request the peer does not answer" of [the implementation notes](../../docs/moqt-implementation-notes.md), which the page and the Rust client go by | `session.rs` |
 | A stream for a request, which the relay has to allow | 10 s (`--open-wait-ms`); the request is not sent, and the viewer leaves or tries again | The row "A request that waits for a stream" of the implementation notes | `session.rs` |
+| A broadcast that is not there yet | Refused at once; with `--rendezvous-timeout-ms N` the relay is asked to hold the viewer's SUBSCRIBEs for N ms (the own relay holds 30 s at most), and the viewer waits that much longer for each answer | The row "A SUBSCRIBE for a track nobody publishes" of the implementation notes; without a room the viewer could not come first before | `session.rs` |
 | The catalog | 5 s as a whole, as the page does | Over before the FETCH for it could be given up | `session.rs` |
 | A room's token, and its taking a line of the chat | 5 s | | `main.rs` |
 | One message of a room | 256 KiB | A hello with a full history is under 128 KiB | `room_socket.rs` |

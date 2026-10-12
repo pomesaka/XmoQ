@@ -299,6 +299,14 @@ pub enum Event {
         /// The request stream of the FETCH.
         stream: StreamKey,
     },
+    /// The time a SUBSCRIBE is held for a publisher to appear is over
+    /// (§10.2.6). Answers [`Action::StartRendezvousTimer`].
+    RendezvousTimeout {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the SUBSCRIBE.
+        stream: StreamKey,
+    },
     /// The time for the SUBSCRIBE of a Joining FETCH to come is over. Answers
     /// [`Action::StartJoiningFetchTimer`].
     JoiningFetchTimeout {
@@ -537,6 +545,17 @@ pub enum Action {
         /// The session.
         session: SessionKey,
         /// The request stream of the FETCH.
+        stream: StreamKey,
+        /// The wait, in milliseconds.
+        wait_ms: u64,
+    },
+    /// Report [`Event::RendezvousTimeout`] after `wait_ms`: the relay holds
+    /// a SUBSCRIBE for a track nobody publishes, for as long as its
+    /// `RENDEZVOUS_TIMEOUT` and the relay's own limit allow.
+    StartRendezvousTimer {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the SUBSCRIBE.
         stream: StreamKey,
         /// The wait, in milliseconds.
         wait_ms: u64,

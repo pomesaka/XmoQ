@@ -722,12 +722,18 @@ async fn play(
             token: place.token.as_deref(),
             answer_wait_ms: args.answer_wait_ms,
             open_wait_ms: args.open_wait_ms,
+            rendezvous_ms: args.rendezvous_ms,
         };
         let subscribed = subscriptions(args, &mut requests, &mut events, &stops).await?;
         Ok(subscribed)
     };
     let Some(subscribed) = ui
-        .unless_ended("the relay's answers", BEGINNING_AT_MOST, beginning)
+        // Each of the three SUBSCRIBEs may be held that much longer.
+        .unless_ended(
+            "the relay's answers",
+            BEGINNING_AT_MOST + Duration::from_millis(args.rendezvous_ms.unwrap_or(0)) * 3,
+            beginning,
+        )
         .await?
     else {
         return Ok(Ended::Quit);

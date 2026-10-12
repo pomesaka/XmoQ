@@ -235,6 +235,21 @@ pub fn forward(parameters: &[Parameter]) -> bool {
         .unwrap_or(true)
 }
 
+/// The `RENDEZVOUS_TIMEOUT` a parameter list has, in milliseconds. `None`
+/// without one and with 0: §10.2.6, "If `RENDEZVOUS_TIMEOUT` is absent, the
+/// default is 0", and "A value of 0 indicates the subscriber does not want
+/// to wait".
+#[must_use]
+pub fn rendezvous_timeout(parameters: &[Parameter]) -> Option<u64> {
+    parameters
+        .iter()
+        .find_map(|parameter| match parameter {
+            Parameter::RendezvousTimeout(milliseconds) => Some(*milliseconds),
+            _ => None,
+        })
+        .filter(|milliseconds| *milliseconds != 0)
+}
+
 /// The `SUBGROUP_DELIVERY_TIMEOUT` a parameter list sets, in milliseconds.
 /// None without the parameter and for 0 (§8: "a value of 0 means that there
 /// is no timeout set").
