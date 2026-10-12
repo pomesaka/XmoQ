@@ -10,6 +10,12 @@ export {
 	deliveryTimeoutParameters,
 } from "./core/delivery-timeout.ts";
 export {
+	ANEW_AFTER,
+	createFastestWay,
+	type FastestWay,
+	MOST_FROM_THE_FASTEST_MS,
+} from "./core/fastest-way.ts";
+export {
 	createFrameQueue,
 	DEFAULT_MAX_WAITING_FRAMES,
 	type FrameQueue,
@@ -31,6 +37,7 @@ export {
 	DEFAULT_AUTO_MAX_MS,
 	DEFAULT_AUTO_SHARE,
 	DEFAULT_PLAYOUT_BUFFER_MS,
+	MAX_LATENESS_SAMPLES,
 	ORDER_MARGIN_MS,
 	type PlayoutClock,
 	type PlayoutClockOptions,
@@ -100,6 +107,7 @@ export {
 	type AudioTrackEncoderOptions,
 	type AudioTrackEncoderStats,
 	createAudioTrackEncoder,
+	MAX_AUDIO_DECODE_QUEUE,
 	type PlayAudioTrackOptions,
 	playAudioTrack,
 } from "./web/audio-track.ts";

@@ -56,6 +56,12 @@ export interface PlayoutOptions extends PlayoutClockOptions {
 	onFrameShown?(shown: ShownFrame): void;
 	onPiece?(piece: PlayedPiece): void;
 	/**
+	 * Called with a frame or a piece that is left out because the time it
+	 * carries is not of the clock: more than 10 seconds from where the
+	 * fastest one puts it (`createFastestWay`).
+	 */
+	onStray?(kind: "video" | "audio", timestampUs: number): void;
+	/**
 	 * Connects what sounds to where it is heard; to the destination of the
 	 * context when left out. For a caller that listens to what leaves.
 	 */
@@ -130,11 +136,14 @@ export function createPlayout(options: PlayoutOptions): Playout {
 				return;
 			}
 			const now = Date.now();
-			const gone = frames.push({
-				frame,
-				base: clock.baseOf(frame.timestamp, now),
-				came: now,
-			});
+			const base = clock.baseOf(frame.timestamp, now);
+			if (base === undefined) {
+				// Not of the clock (`PlayoutClock.baseOf`): never shown.
+				options.onStray?.("video", frame.timestamp);
+				frame.close();
+				return;
+			}
+			const gone = frames.push({ frame, base, came: now });
 			for (const each of gone) each.frame.close();
 		},
 		onData(data) {
@@ -151,7 +160,12 @@ export function createPlayout(options: PlayoutOptions): Playout {
 			const [samples] = channels;
 			if (closed || samples === undefined) return;
 			const now = Date.now();
-			const due = clock.baseOf(timestampUs, now) + clock.audioBufferMs();
+			const base = clock.baseOf(timestampUs, now);
+			if (base === undefined) {
+				options.onStray?.("audio", timestampUs);
+				return;
+			}
+			const due = base + clock.audioBufferMs();
 			const told = (
 				result: PlayedPiece["result"],
 				follows = false,

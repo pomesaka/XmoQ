@@ -18,6 +18,64 @@ describe("createPlayoutClock", () => {
 	});
 
 	test.each<{
+		name: string;
+		/** `[timestampUs, now]` of each one that comes. */
+		came: [number, number][];
+		bases: (number | null)[];
+	}>([
+		{
+			name: "a time a year ahead is not of the clock, and what follows is as before it",
+			came: [
+				[1_000_000, 5000],
+				[31_536_000_000_000_000, 5020],
+				[1_040_000, 5040],
+			],
+			bases: [5000, null, 5040],
+		},
+		{
+			name: "the first is believed; one whose time is a year behind it is not of the clock",
+			came: [
+				[31_536_000_000_000_000, 5000],
+				[1_000_000, 5020],
+				[31_536_000_000_020_000, 5020],
+			],
+			bases: [5000, null, 5020],
+		},
+		{
+			name: "10 seconds late is of the clock, and a millisecond more is not",
+			came: [
+				[1_000_000, 5000],
+				[1_020_000, 15_020],
+				[1_040_000, 15_041],
+			],
+			bases: [5000, 5020, null],
+		},
+	])("$name", ({ came, bases }) => {
+		const clock = createPlayoutClock();
+		expect(
+			came.map(([timestampUs, now]) => clock.baseOf(timestampUs, now) ?? null),
+		).toEqual(bases);
+	});
+
+	test("after 30 that are not of the clock it begins anew, and forgets how late things came", () => {
+		const clock = createPlayoutClock();
+		// 60 that come 200 ms after the fastest; then the publisher's clock
+		// is an hour further on.
+		clock.baseOf(0, 1000);
+		for (let index = 1; index < 60; index++) {
+			clock.baseOf(index * 10_000, 1200 + index * 10);
+		}
+		expect(clock.lateness()).toBe(200);
+		const later = (index: number): number | undefined =>
+			clock.baseOf(3_600_000_000 + index * 10_000, 2000 + index * 10);
+		expect(Array.from({ length: 29 }, (_, index) => later(index))).toEqual(
+			Array.from({ length: 29 }, () => undefined),
+		);
+		expect(later(29)).toBe(2290);
+		expect(clock.lateness()).toBe(0);
+	});
+
+	test.each<{
 		options: PlayoutClockOptions;
 		bufferMs: number;
 		audioBufferMs: number;

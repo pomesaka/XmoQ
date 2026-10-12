@@ -104,3 +104,22 @@ test("nextRelease says when the earliest held item has waited its hold", () => {
 	order.push(60, 60, 65);
 	expect(order.nextRelease()).toBe(165);
 });
+
+test("anew gives what is held to late, and the next goes on whatever its time", () => {
+	const next: number[] = [];
+	const late: number[] = [];
+	const order = createInOrder<number>({
+		holdMs: () => 100,
+		next: (item) => next.push(item),
+		late: (item) => late.push(item),
+	});
+	// 0 and 20 go on; 80 comes after a gap and is held.
+	order.push(0, 0, 0);
+	order.push(20, 20, 1);
+	order.push(80, 80, 2);
+	order.anew();
+	// A time before everything so far: after `anew` it is the first.
+	order.push(5, 5, 3);
+	order.push(25, 25, 4);
+	expect({ next, late }).toEqual({ next: [0, 20, 5, 25], late: [80] });
+});
