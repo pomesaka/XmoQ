@@ -21,8 +21,12 @@
 //     the Rust client prints `ANSWER_TIMED_OUT request=subscribe
 //     after_ms=1500`.
 //   - Its request stream is reset, and the relay's direction of it stopped,
-//     both with CANCELLED (0x1): the relay prints `RESET_RECEIVED` and
-//     `STOP_SENDING_RECEIVED` with `code=0x1` for a stream of that session.
+//     both with CANCELLED (0x1): the relay prints `RESET_RECEIVED` or
+//     `STOP_SENDING_RECEIVED` with `code=0x1` for a stream of that session,
+//     whichever it sees first, and the other only where it came before the
+//     relay had dealt with the first. The summary says which it saw. The
+//     relay then cancels its own SUBSCRIBE to the publisher with the same
+//     code (`CANCEL_OWN_REQUEST`).
 //   - The terminal viewer (`--subscriber xmoq-watch`) does the same with
 //     the SUBSCRIBE of its video track, says that the relay did not answer
 //     it within 1500 ms, and leaves: a viewer without its picture has
@@ -84,14 +88,31 @@ async function subscribersSession(context: RunContext): Promise<string> {
 	return session;
 }
 
-/** The relay's lines about the subscriber's SUBSCRIBE: reset and stopped with CANCELLED, and not answered. */
+/**
+ * The relay's lines about the subscriber's SUBSCRIBE: given up with
+ * CANCELLED and not answered, and the relay's own SUBSCRIBE to the
+ * publisher cancelled for it. Resolves with what the relay saw of the
+ * client's stream.
+ *
+ * WHY either of the two lines, and not both: a client that cancels resets
+ * its direction and stops the relay's, and whichever the relay sees first
+ * ends the request; it then lets go of the stream and does not look at the
+ * other (`crates/relay/src/hub.rs`, at `RESET_RECEIVED`). Both were asked
+ * for at first, and one run in CI had the STOP_SENDING alone.
+ */
 async function expectCancelledAtTheRelay(
 	context: RunContext,
 	session: string,
-): Promise<void> {
-	const gone = new RegExp(
+): Promise<string> {
+	const reset = new RegExp(
 		`^RESET_RECEIVED session=${session} stream=\\d+ code=0x1$`,
 	);
+	// §5.1: "The subscriber terminates a subscription in the Pending
+	// (Subscriber) or Established states by sending STOP_SENDING."
+	const stopped = new RegExp(
+		`^STOP_SENDING_RECEIVED session=${session} stream=\\d+ code=0x1$`,
+	);
+	const gone = new RegExp(`${reset.source}|${stopped.source}`);
 	const unwanted = await context.relay.linesBefore(
 		{ line: gone },
 		new RegExp(
@@ -103,13 +124,20 @@ async function expectCancelledAtTheRelay(
 			`the relay was to answer nothing and close no session before the SUBSCRIBE was given up: ${unwanted.map((match) => match[0]).join(" | ")}`,
 		);
 	}
-	// §5.1: "The subscriber terminates a subscription in the Pending
-	// (Subscriber) or Established states by sending STOP_SENDING."
-	await context.relay.waitForLine(
-		new RegExp(
-			`^STOP_SENDING_RECEIVED session=${session} stream=\\d+ code=0x1$`,
-		),
-	);
+	// The relay asked the publisher for the track, for this subscriber
+	// alone, and gives that up with it. It prints this after it has dealt
+	// with the end of the subscriber's request, so a second line about that
+	// stream stands before it where the relay printed one.
+	const cancelled = /^CANCEL_OWN_REQUEST session=0 own=\d+ code=0x1$/;
+	const [resets, stops] = await Promise.all([
+		context.relay.linesBefore({ line: cancelled }, reset),
+		context.relay.linesBefore({ line: cancelled }, stopped),
+	]);
+	const saw = [
+		...(resets.length > 0 ? ["reset"] : []),
+		...(stops.length > 0 ? ["stopped"] : []),
+	];
+	return `the relay saw the request stream ${saw.join(" and ")} with CANCELLED and cancelled its own SUBSCRIBE to the publisher`;
 }
 
 async function withAPage(context: RunContext): Promise<string> {
@@ -149,7 +177,7 @@ async function withAPage(context: RunContext): Promise<string> {
 			`the page was to give up between ${ANSWER_WAIT_MS} and ${GIVEN_UP_BEFORE_MS} ms, not after ${after}`,
 		);
 	}
-	await expectCancelledAtTheRelay(context, session);
+	const atTheRelay = await expectCancelledAtTheRelay(context, session);
 	// The session goes on: it is open, and its next requests are answered.
 	const state = await page.evaluate(() => window.xmoqOwn.state());
 	if (!state.includes('"session":null')) {
@@ -162,7 +190,7 @@ async function withAPage(context: RunContext): Promise<string> {
 		),
 		"the page's requests after the one it gave up to be answered",
 	);
-	return `own-browser gave its SUBSCRIBE up ${after} ms after it was sent (its wait: ${ANSWER_WAIT_MS} ms), the relay saw the request stream reset and stopped with CANCELLED, and a PUBLISH_NAMESPACE and a PUBLISH on the same session were answered afterwards`;
+	return `own-browser gave its SUBSCRIBE up ${after} ms after it was sent (its wait: ${ANSWER_WAIT_MS} ms), ${atTheRelay}, and a PUBLISH_NAMESPACE and a PUBLISH on the same session were answered afterwards`;
 }
 
 async function withARustClient(context: RunContext): Promise<string> {
@@ -187,7 +215,7 @@ async function withARustClient(context: RunContext): Promise<string> {
 			`own-rust was to give up between ${ANSWER_WAIT_MS} and ${GIVEN_UP_BEFORE_MS} ms, not after ${after}`,
 		);
 	}
-	await expectCancelledAtTheRelay(context, session);
+	const atTheRelay = await expectCancelledAtTheRelay(context, session);
 	const code = await withTimeout(client.exited, "own-rust to leave");
 	if (code === 0) throw new Error("own-rust was to fail, and left with 0");
 	// It closes its session itself, with NO_ERROR: no protocol error ends it.
@@ -196,7 +224,7 @@ async function withARustClient(context: RunContext): Promise<string> {
 			`^CONNECTION_ENDED session=${session} ClosedByPeer \\{ code: 0,`,
 		),
 	);
-	return `own-rust gave its SUBSCRIBE up ${after} ms after it started (its wait: ${ANSWER_WAIT_MS} ms), the relay saw the request stream reset and stopped with CANCELLED, and the client closed its session with NO_ERROR`;
+	return `own-rust gave its SUBSCRIBE up ${after} ms after it started (its wait: ${ANSWER_WAIT_MS} ms), ${atTheRelay}, and the client closed its session with NO_ERROR`;
 }
 
 async function withTheTerminalViewer(context: RunContext): Promise<string> {
@@ -231,7 +259,7 @@ async function withTheTerminalViewer(context: RunContext): Promise<string> {
 			`xmoq-watch was to give up between ${ANSWER_WAIT_MS} and ${GIVEN_UP_BEFORE_MS} ms, not after ${after}`,
 		);
 	}
-	await expectCancelledAtTheRelay(context, session);
+	const atTheRelay = await expectCancelledAtTheRelay(context, session);
 	const code = await withTimeout(viewer.exited, "xmoq-watch to leave");
 	if (code === 0) throw new Error("xmoq-watch was to fail, and left with 0");
 	await context.relay.waitForLine(
@@ -239,7 +267,7 @@ async function withTheTerminalViewer(context: RunContext): Promise<string> {
 			`^CONNECTION_ENDED session=${session} ClosedByPeer \\{ code: 0,`,
 		),
 	);
-	return `xmoq-watch gave the SUBSCRIBE of its video up ${after} ms after it started (its wait: ${ANSWER_WAIT_MS} ms), the relay saw the request stream reset and stopped with CANCELLED, and the viewer closed its session with NO_ERROR`;
+	return `xmoq-watch gave the SUBSCRIBE of its video up ${after} ms after it started (its wait: ${ANSWER_WAIT_MS} ms), ${atTheRelay}, and the viewer closed its session with NO_ERROR`;
 }
 
 const SUBSCRIBERS: Record<string, (context: RunContext) => Promise<string>> = {
