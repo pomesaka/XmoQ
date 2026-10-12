@@ -96,6 +96,9 @@ struct Args {
     /// `--slow-open-ms`: [`HubConfig::slow_open`], for a run that looks at
     /// how long streams take to open; 0 logs every stream.
     slow_open: Option<Duration>,
+    /// `--setup-timeout-ms`: [`HubConfig::setup_timeout`], how long a
+    /// client has for its SETUP; 10 seconds where it is not said.
+    setup_timeout: Option<Duration>,
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
     /// An experiment: what a subscriber gets that set no
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
@@ -121,7 +124,7 @@ fn parse_args() -> Result<Args> {
     let mut idle_timeout = xmoq_moqt_io::wt::IDLE_TIMEOUT;
     let mut congestion = Congestion::default();
     let mut max_sessions = None;
-    let mut slow_open = None;
+    let (mut slow_open, mut setup_timeout) = (None, None);
     let mut delivery_patience = None;
     let mut give_up_older_groups = false;
     let mut older_groups_grace = Duration::ZERO;
@@ -155,6 +158,11 @@ fn parse_args() -> Result<Args> {
             "--slow-open-ms" => {
                 slow_open = Some(Duration::from_millis(
                     value.parse().context("--slow-open-ms")?,
+                ));
+            }
+            "--setup-timeout-ms" => {
+                setup_timeout = Some(Duration::from_millis(
+                    value.parse().context("--setup-timeout-ms")?,
                 ));
             }
             "--delivery-patience-ms" => {
@@ -194,6 +202,7 @@ fn parse_args() -> Result<Args> {
         congestion,
         max_sessions,
         slow_open,
+        setup_timeout,
         delivery_patience,
         give_up_older_groups,
         older_groups_grace,
@@ -215,6 +224,9 @@ async fn main() -> Result<()> {
     }
     if let Some(slow_open) = args.slow_open {
         config.slow_open = slow_open;
+    }
+    if let Some(setup_timeout) = args.setup_timeout {
+        config.setup_timeout = setup_timeout;
     }
     config.send.delivery_patience = args.delivery_patience;
     config.give_up_older_groups = args.give_up_older_groups;

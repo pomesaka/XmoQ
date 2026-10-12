@@ -3,7 +3,7 @@
 // SETUP, or answers no request. No relay is in between, and what the client
 // did is read from what the peer printed: what reached another endpoint.
 //
-// Usage: bun quiet-peer.ts --case <case> --client own-browser|own-rust|xmoq-watch [--port N]
+// Usage: bun quiet-peer.ts --case <case> --client own-browser|own-rust|xmoq-watch|quiet-peer [--port N]
 //
 // The clients' waits are set to 1.5 seconds; by themselves they are 10.
 //
@@ -31,6 +31,17 @@
 //                     failure). The terminal viewer sends a FETCH for its
 //                     catalog alone, which has 5 seconds as a whole.
 //
+//   relay-no-setup    The other way round: the own relay, told to give a
+//                     client 1.5 seconds for its SETUP
+//                     (`--setup-timeout-ms`; 10 by itself), and
+//                     `xmoq-quiet-peer` as a client that connects and
+//                     sends none (`--client quiet-peer`). The relay closes
+//                     the session with CONTROL_MESSAGE_TIMEOUT: it prints
+//                     `CLOSE_SESSION session=0 code=0x11 reason="no SETUP
+//                     in time"`, and the client `SESSION_ENDED ClosedByPeer
+//                     { code: 17, reason: "no SETUP in time" }`, between
+//                     1.5 and 5 seconds after the client began.
+//
 // Not seen here: the STOP_SENDING for the peer's direction of a request,
 // which the peer does not watch; the run with `no answer:` in its name has
 // it from the relay's log, for a SUBSCRIBE.
@@ -42,9 +53,11 @@ import {
 	openPage,
 	type RunContext,
 	runCleanups,
+	spawnQuietClient,
 	spawnRustClient,
 	spawnTerminalViewer,
 	startQuietPeer,
+	startRun,
 	stopEverythingOnExit,
 	TRACK,
 	withTimeout,
@@ -321,7 +334,44 @@ const CASES: Record<
 	"no-fetch-answer": { quiet: "requests", run: noFetchAnswer },
 };
 
+async function relayNoSetup(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: [],
+		verbose: options.verbose,
+		relayArgs: ["--setup-timeout-ms", String(WAIT_MS)],
+	});
+	const began = Date.now();
+	const client = spawnQuietClient(context, "client:quiet-peer", 20_000);
+	// 17 is 0x11, CONTROL_MESSAGE_TIMEOUT.
+	const [said] = await client.waitForLine(
+		/^SESSION_ENDED ClosedByPeer \{ code: 17, reason: "no SETUP in time" \}$/,
+	);
+	const after = Date.now() - began;
+	if (after < WAIT_MS || after > BEFORE_MS) {
+		throw new Error(
+			`the relay was to close between ${WAIT_MS} and ${BEFORE_MS} ms, not after ${after}`,
+		);
+	}
+	await context.relay.waitForLine(
+		/^CLOSE_SESSION session=0 code=0x11 reason="no SETUP in time"$/,
+	);
+	return `the own relay closed the session of a client that sent no SETUP with CONTROL_MESSAGE_TIMEOUT (0x11) ${after} ms after the client began (the relay's wait: ${WAIT_MS} ms): ${said}`;
+}
+
 async function main(): Promise<void> {
+	if (options.case === "relay-no-setup") {
+		let summary: string;
+		try {
+			summary = await relayNoSetup();
+		} finally {
+			await runCleanups();
+		}
+		log("driver", `RESULT ${JSON.stringify({ case: options.case })}`);
+		log("driver", `SUMMARY ${summary}`);
+		return;
+	}
 	const chosen = CASES[options.case];
 	if (chosen === undefined) throw new Error(`unknown --case ${options.case}`);
 	const client = options.client;

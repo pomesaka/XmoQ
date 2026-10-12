@@ -1151,6 +1151,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--case", "no-fetch-answer", "--client", "own-rust"],
 			relay: "none",
 		},
+		{
+			name: "own relay: quiet peer: the relay closes the session of a client that sends no SETUP with CONTROL_MESSAGE_TIMEOUT",
+			script: "quiet-peer.ts",
+			args: ["--case", "relay-no-setup", "--client", "quiet-peer"],
+			relay: "own",
+		},
 		// A page encodes and publishes video, and another plays it: through
 		// each relay, with each way of putting Objects onto streams.
 		// `video.ts` starts the relay itself.

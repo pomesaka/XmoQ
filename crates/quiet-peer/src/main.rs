@@ -9,6 +9,12 @@
 //! `--quiet publish`: as `requests`, but a `PUBLISH_NAMESPACE` is answered
 //! with `REQUEST_OK`.
 //!
+//! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
+//! round. It connects to a relay as a client, sends no SETUP and opens no
+//! stream, and says how the relay ended the session
+//! (`SESSION_ENDED ...`), or after that long that it did not
+//! (`STAYED ms=N`).
+//!
 //! It prints what it saw, one line each, for a driver to wait for:
 //!
 //! - `LISTENING port=P`
@@ -47,15 +53,39 @@ enum Quiet {
     Publish,
 }
 
-struct Args {
-    port: u16,
-    cert_file: String,
-    key_file: String,
-    quiet: Quiet,
+/// What the program is asked to be.
+enum Args {
+    /// A server that takes sessions.
+    Serve {
+        port: u16,
+        cert_file: String,
+        key_file: String,
+        quiet: Quiet,
+    },
+    /// A client that sends no SETUP.
+    Connect {
+        url: String,
+        cert_sha256: [u8; 32],
+        stay: Duration,
+    },
+}
+
+/// 32 bytes from 64 hexadecimal digits.
+fn sha256_of(text: &str) -> Result<[u8; 32]> {
+    let mut bytes = [0u8; 32];
+    if text.len() != 64 {
+        bail!("--cert-sha256 is 64 hexadecimal digits");
+    }
+    for (byte, index) in bytes.iter_mut().zip((0..64).step_by(2)) {
+        let digits = text.get(index..index + 2).context("--cert-sha256")?;
+        *byte = u8::from_str_radix(digits, 16).context("--cert-sha256")?;
+    }
+    Ok(bytes)
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut port, mut cert_file, mut key_file, mut quiet) = (None, None, None, None);
+    let (mut url, mut cert_sha256, mut stay) = (None, None, None);
     while let Some(flag) = args.next() {
         let value = args
             .next()
@@ -64,6 +94,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--port" => port = Some(value.parse().context("--port")?),
             "--cert-file" => cert_file = Some(value),
             "--key-file" => key_file = Some(value),
+            "--connect" => url = Some(value),
+            "--cert-sha256" => cert_sha256 = Some(sha256_of(&value)?),
+            "--stay-ms" => {
+                stay = Some(Duration::from_millis(value.parse().context("--stay-ms")?));
+            }
             "--quiet" => {
                 quiet = Some(match value.as_str() {
                     "setup" => Quiet::Setup,
@@ -75,7 +110,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             other => bail!("unknown flag {other}"),
         }
     }
-    Ok(Args {
+    if let Some(url) = url {
+        return Ok(Args::Connect {
+            url,
+            cert_sha256: cert_sha256.context("--cert-sha256 is required")?,
+            stay: stay.context("--stay-ms is required")?,
+        });
+    }
+    Ok(Args::Serve {
         port: port.context("--port is required")?,
         cert_file: cert_file.context("--cert-file is required")?,
         key_file: key_file.context("--key-file is required")?,
@@ -191,9 +233,36 @@ async fn serve(session: u64, connection: WtConnection, quiet: Quiet) -> Result<(
     Ok(())
 }
 
+/// Connects, sends nothing, and says how the session ended or that it did
+/// not.
+async fn stay_quiet(url: &str, cert_sha256: [u8; 32], stay: Duration) -> Result<()> {
+    let connection = xmoq_moqt_io::wt::connect(url, cert_sha256, &StreamConfig::default()).await?;
+    println!("CONNECTED");
+    if let Ok(end) = tokio::time::timeout(stay, connection.closed()).await {
+        println!("SESSION_ENDED {end:?}");
+    } else {
+        println!("STAYED ms={}", stay.as_millis());
+        connection.close(0, b"");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = parse_args(std::env::args().skip(1))?;
+    let args = match parse_args(std::env::args().skip(1))? {
+        Args::Connect {
+            url,
+            cert_sha256,
+            stay,
+        } => return stay_quiet(&url, cert_sha256, stay).await,
+        Args::Serve {
+            port,
+            cert_file,
+            key_file,
+            quiet,
+        } => (port, cert_file, key_file, quiet),
+    };
+    let (port, cert_file, key_file, quiet) = args;
     let streams = StreamConfig::default();
     let (max_uni_streams, max_bi_streams) = xmoq_moqt_io::wt::streams_read_at_once(&streams);
     let limits = QuicLimits {
@@ -208,8 +277,8 @@ async fn main() -> Result<()> {
         idle_timeout: Duration::from_secs(60),
         congestion: Congestion::default(),
     };
-    let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
-    println!("LISTENING port={}", args.port);
+    let server = WtServer::bind(port, &cert_file, &key_file, limits)?;
+    println!("LISTENING port={port}");
     let mut session = 0u64;
     loop {
         let Some(incoming) = server.incoming().await else {
@@ -217,7 +286,6 @@ async fn main() -> Result<()> {
         };
         let number = session;
         session += 1;
-        let quiet = args.quiet;
         tokio::spawn(async move {
             match accept(incoming).await {
                 Ok((connection, _asked)) => {
