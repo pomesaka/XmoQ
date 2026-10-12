@@ -120,7 +120,8 @@
 //                     the cache lets go of the first. The relay stops the
 //                     reader's stream with EXCESSIVE_LOAD
 //                     (`HELD_BEYOND_CACHE session=1 stream=S stopped
-//                     relay_bytes=8388608 session_bytes=8388608`, then
+//                     relay_bytes=B session_bytes=B`, with B what the
+//                     stream carries of the Group, then
 //                     `FETCH_WRITE_ENDED session=1 stream=S aborted
 //                     pieces=N code=0x9`). Another reader's FETCH for the
 //                     Group the cache has then is answered.
@@ -908,11 +909,19 @@ async function relayGroupKeptBeyondTheCache(): Promise<string> {
 	const [written] = await context.relay.waitForLine(
 		/^FETCH_WRITE_ENDED session=1 stream=\d+ (\S+) pieces=\d+ code=(0x[0-9a-f]+)$/,
 	);
-	// What the relay says it counted when it stopped the stream: the Group's
-	// 8 MiB, for the relay and for the session.
-	const [counted] = await context.relay.waitForLine(
-		/^HELD_BEYOND_CACHE session=1 stream=\d+ stopped relay_bytes=8388608 session_bytes=8388608$/,
-	);
+	// What the relay says it counted when it stopped the stream: what the
+	// stream carries of the Group, for the relay and for the session. WHY
+	// not 8,388,608 to the byte: the reader may ask while the relay has not
+	// read the whole Group, and is answered with what the cache has of it.
+	const [counted, relayBytes = "", sessionBytes = ""] =
+		await context.relay.waitForLine(
+			/^HELD_BEYOND_CACHE session=1 stream=\d+ stopped relay_bytes=(\d+) session_bytes=(\d+)$/,
+		);
+	if (relayBytes !== sessionBytes || Number(relayBytes) <= 2_000_000) {
+		throw new Error(
+			`the relay was to count the same for itself and for the session, and more than the session's 2 MB: ${counted}`,
+		);
+	}
 	if (!/ aborted pieces=\d+ code=0x9$/.test(written)) {
 		throw new Error(
 			`the relay was to stop the stream that kept the Group, with EXCESSIVE_LOAD (0x9): ${written}`,

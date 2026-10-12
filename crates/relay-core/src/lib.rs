@@ -29,9 +29,9 @@
 //! FIXME: pass a `NEW_GROUP_REQUEST` of a subscriber on to the publisher
 //! (§10.2.13, MUST for a relay). It is ignored.
 //!
-//! FIXME: enforce `OBJECT_DELIVERY_TIMEOUT` and `SUBGROUP_DELIVERY_TIMEOUT`
-//! (§8). They are ignored, as a parameter of a SUBSCRIBE and as a Track
-//! Property.
+//! FIXME: enforce `OBJECT_DELIVERY_TIMEOUT`, and both delivery timeouts as a
+//! Track Property (§8). Acted on is the `SUBGROUP_DELIVERY_TIMEOUT` of a
+//! SUBSCRIBE and of a `REQUEST_UPDATE`; the rest is ignored.
 //!
 //! FIXME: share one encoding of an Object between subscribers. Each subscriber
 //! gets its own copy of the payload today.

@@ -4020,4 +4020,27 @@ mod rendezvous {
         let held = hub.held().await;
         assert_eq!((held.relay.pending_tracks, held.timers), (0, 0));
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_that_has_as_many_timers_as_it_may_has_no_more_announcements_for_it() {
+        // Two timers for a session, where the relay has 1,024.
+        let (hub, _task) = hub::spawn(HubConfig {
+            max_timers_per_session: 2,
+            ..HubConfig::default()
+        });
+        let mut peer = Peer::connect(&hub, true).await;
+        // Two SUBSCRIBEs held for 20 seconds: the two timers.
+        let _first = asks(&mut peer, b"h0", Some(20_000)).await;
+        let _second = asks(&mut peer, b"h1", Some(20_000)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(hub.held().await.timers, 2);
+        // Five announcements at once, and the sixth and seventh are
+        // EXCESSIVE_LOAD (0x9), as for a session that has no timer running.
+        let mut kept = Vec::new();
+        let mut answers = Vec::new();
+        for name in 0..7u8 {
+            answers.push(announces(&mut peer, &[name], &mut kept).await);
+        }
+        assert_eq!(answers, ["ok", "ok", "ok", "ok", "ok", "0x9", "0x9"]);
+    }
 }
