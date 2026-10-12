@@ -16,6 +16,8 @@ export const DEFAULT_UP_AFTER_MS = 5000;
 export const DEFAULT_HOLD_MS = 2000;
 /** The most the wait before trying higher grows to (`createQualitySwitch`). */
 export const MAX_UP_AFTER_FACTOR = 8;
+/** A try that has brought no picture after this many times `tryMs` has failed. */
+export const TRY_WITHOUT_A_PICTURE_FACTOR = 3;
 
 export interface QualitySwitchOptions {
 	/** How many versions there are; 0 is the best, and `levels - 1` the one that takes the least room. */
@@ -26,6 +28,16 @@ export interface QualitySwitchOptions {
 	upLateMs?: number;
 	upAfterMs?: number;
 	holdMs?: number;
+	/**
+	 * **A trial; off when left out.** A higher version is not played at
+	 * once: it is tried for this long, in milliseconds, while the version
+	 * before goes on being played (`trying`), and played only when its
+	 * picture came in time all the while. WHY: that a higher version fits
+	 * the link is only found by taking it, and taking it on a link without
+	 * room has the picture fall behind and stand still twice, going and
+	 * coming back.
+	 */
+	tryMs?: number;
 }
 
 export interface QualitySwitch {
@@ -36,8 +48,17 @@ export interface QualitySwitch {
 	 * milliseconds, of a clock that only goes on. Called at a steady pace,
 	 * a few times a second.
 	 */
-	tick(now: number, lateMs: number | undefined): number;
+	tick(now: number, lateMs: number | undefined, triedLateMs?: number): number;
 	level(): number;
+	/**
+	 * With `tryMs`: the version the caller is to receive next to the one it
+	 * plays, without playing it, and to tell `tick` the lateness of
+	 * (`triedLateMs`, `undefined` while no picture of it came); `undefined`
+	 * when none is tried. When the try has held, `tick` says that version;
+	 * when it has not, this is `undefined` again and `tick` says the
+	 * version as before.
+	 */
+	trying(): number | undefined;
 }
 
 /**
@@ -53,6 +74,17 @@ export interface QualitySwitch {
  *   picture is in time whatever room the link has above it, so that the
  *   higher one fits is only found by trying, and a link that stays narrow
  *   would have the picture stand still every few seconds.
+ *
+ * - With `tryMs`: **up is a try first.** The higher version is received
+ *   and not played. The try fails when its picture, or that of the version
+ *   that is played, is late by more than `downLateMs`, and when no picture
+ *   of it came after `TRY_WITHOUT_A_PICTURE_FACTOR` times `tryMs`; it
+ *   holds when `tryMs` have passed since its first picture without that.
+ *   WHY `downLateMs` and not `upLateMs`: both versions are on the link
+ *   while the try runs, which is more than the higher one alone will be.
+ *   **A try that fails does not make the next one wait longer**: nobody
+ *   saw it, so it costs little to come again, and a wait that doubled
+ *   would keep the viewer low long after the link has room.
  *
  * Throws a `RangeError` for `levels` that is no whole number from 1 and a
  * `level` outside of them.
@@ -78,10 +110,38 @@ export function createQualitySwitch(
 	let inTimeSince: number | undefined;
 	/** How many times `upAfterMs` is waited before trying higher. */
 	let factor = 1;
+	/** The try that is under way: since when, and since when its picture comes. */
+	let trial: { since: number; pictureSince: number | undefined } | undefined;
+	const tryMs = options.tryMs ?? 0;
 	return {
 		level: () => level,
-		tick(now, lateMs) {
+		trying: () => (trial === undefined ? undefined : level - 1),
+		tick(now, lateMs, triedLateMs) {
 			const late = lateMs ?? Number.POSITIVE_INFINITY;
+			if (trial !== undefined) {
+				if (triedLateMs !== undefined) trial.pictureSince ??= now;
+				const failed =
+					late > downLateMs ||
+					(triedLateMs ?? 0) > downLateMs ||
+					(trial.pictureSince === undefined &&
+						now - trial.since >= tryMs * TRY_WITHOUT_A_PICTURE_FACTOR);
+				if (failed) {
+					trial = undefined;
+					// As after a change: what the try put on the link is still
+					// on its way.
+					changed = { at: now, up: false };
+					inTimeSince = undefined;
+				} else if (
+					trial.pictureSince !== undefined &&
+					now - trial.pictureSince >= tryMs
+				) {
+					trial = undefined;
+					level -= 1;
+					changed = { at: now, up: true };
+					inTimeSince = undefined;
+				}
+				return level;
+			}
 			if (late >= upLateMs) inTimeSince = undefined;
 			else inTimeSince ??= now;
 			if (changed !== undefined && now - changed.at < holdMs) return level;
@@ -100,6 +160,10 @@ export function createQualitySwitch(
 				inTimeSince !== undefined &&
 				now - inTimeSince >= upAfterMs * factor
 			) {
+				if (options.tryMs !== undefined) {
+					trial = { since: now, pictureSince: undefined };
+					return level;
+				}
 				level -= 1;
 				changed = { at: now, up: true };
 				inTimeSince = undefined;

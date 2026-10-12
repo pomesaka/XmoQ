@@ -123,3 +123,123 @@ test.each<{ levels: number; level?: number }>([
 		expect(() => createQualitySwitch(options)).toThrow(RangeError);
 	},
 );
+
+test.each<{
+	name: string;
+	/**
+	 * `[now, how late the picture is, how late the picture of the version
+	 * that is tried is]`; the last is left out where nothing is tried, and
+	 * null where no picture of it came yet.
+	 */
+	ticks: ([number, number] | [number, number, number | null])[];
+	/** What `tick` said, and what is tried after it (null: nothing). */
+	played: [number, number | null][];
+}>([
+	{
+		name: "a higher version is tried when the picture was in time for 5 s, and played when the try held for 2 s from its first picture",
+		ticks: [
+			[0, 50],
+			[5000, 50],
+			[5500, 50, null],
+			[6000, 50, 60],
+			[7900, 50, 60],
+			[8000, 50, 60],
+		],
+		played: [
+			[1, null],
+			[1, 0],
+			[1, 0],
+			[1, 0],
+			[1, 0],
+			[0, null],
+		],
+	},
+	{
+		name: "a try whose picture is late fails: the version stays, and the next try comes after the same 5 s in time",
+		ticks: [
+			[0, 50],
+			[5000, 50],
+			[6000, 50, 400],
+			// In time again from here: 5 s to the next try, not 10.
+			[6500, 50],
+			[11_400, 50],
+			[11_500, 50],
+		],
+		played: [
+			[1, null],
+			[1, 0],
+			[1, null],
+			[1, null],
+			[1, null],
+			[1, 0],
+		],
+	},
+	{
+		name: "a picture of the tried version that is late by less than the mark to go down by does not fail the try",
+		ticks: [
+			[0, 50],
+			[5000, 50],
+			[5500, 50, 250],
+			[7500, 90, 250],
+		],
+		played: [
+			[1, null],
+			[1, 0],
+			[1, 0],
+			[0, null],
+		],
+	},
+	{
+		name: "a try fails when the version that is played comes late, and when no picture of the tried one came after 6 s",
+		ticks: [
+			[0, 50],
+			[5000, 50],
+			[5500, 400, 60],
+			[6000, 50],
+			[11_000, 50],
+			[16_900, 50, null],
+			[17_000, 50, null],
+		],
+		played: [
+			[1, null],
+			[1, 0],
+			[1, null],
+			[1, null],
+			[1, 0],
+			[1, 0],
+			[1, null],
+		],
+	},
+	{
+		name: "a version that was tried and taken, and does not hold, makes the next try wait twice as long",
+		ticks: [
+			[0, 50],
+			[5000, 50],
+			[5500, 50, 60],
+			[7500, 50, 60],
+			// Played now, and late 2 s after: down again.
+			[9500, 400],
+			[12_000, 50],
+			[21_900, 50],
+			[22_000, 50],
+		],
+		played: [
+			[1, null],
+			[1, 0],
+			[1, 0],
+			[0, null],
+			[1, null],
+			[1, null],
+			[1, null],
+			[1, 0],
+		],
+	},
+])("with a try first: $name", ({ ticks, played }) => {
+	const chooser = createQualitySwitch({ levels: 2, level: 1, tryMs: 2000 });
+	expect(
+		ticks.map(([now, lateMs, triedLateMs]) => [
+			chooser.tick(now, lateMs, triedLateMs ?? undefined),
+			chooser.trying() ?? null,
+		]),
+	).toEqual(played);
+});
