@@ -15,7 +15,7 @@ xmoq-relay-core = { path = "../relay-core" }
 anyhow = "=1.0.100"
 # For the experiment in authorization (src/auth.rs): HMAC-SHA-256. Already built, under quinn.
 ring = "=0.17.14"
-tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
-tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "test-util"] }

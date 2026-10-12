@@ -203,10 +203,35 @@ async fn main() -> Result<()> {
     let (hub, hub_task) = hub::spawn(config);
     tokio::select! {
         () = accept_sessions(&server, &hub, &log) => bail!("the server stopped accepting"),
+        () = told_to_stop() => {
+            hub.stop().await;
+            Ok(())
+        }
         // WHY end the process: the hub is the one task that serves every
         // session. Without it the relay would go on accepting connections that
         // nobody answers.
         ended = hub_task => bail!("the relay's hub ended: {ended:?}"),
+    }
+}
+
+/// Completes when the process is told to end: SIGINT, and SIGTERM where
+/// there is one.
+async fn told_to_stop() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        // Without the handler the default holds: the process ends at once.
+        let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+            return std::future::pending().await;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

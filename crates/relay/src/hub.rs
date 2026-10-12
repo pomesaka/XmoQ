@@ -219,6 +219,9 @@ enum Envelope<C: Connection> {
         code: TerminationCode,
         reason: &'static str,
     },
+    /// The relay is to stop: every session is closed, and the sender is
+    /// answered when the closes have reached the peers.
+    Stop(oneshot::Sender<()>),
     /// A test asks what the hub holds.
     #[cfg(test)]
     Inspect(tokio::sync::oneshot::Sender<Held>),
@@ -303,6 +306,9 @@ fn path_now<C: Connection>(connection: &C) -> String {
 /// max(3 x RTT, 100 ms) (web-transport-quinn 0.13.2, `Session::close`), so
 /// this is a bound for a connection that does not end.
 const CLOSE_REACHES_THE_PEER: Duration = Duration::from_secs(2);
+
+/// `NO_ERROR`: "The session is being terminated without an error" (§3.5).
+const NO_ERROR: u32 = 0x0;
 
 impl<C: Connection> Drop for SessionHandle<C> {
     fn drop(&mut self) {
@@ -588,6 +594,22 @@ impl<C: Connection> HubHandle<C> {
         assert!(sent.is_ok(), "the hub is running");
     }
 
+    /// Closes every session and completes when the peers have been told,
+    /// or [`CLOSE_REACHES_THE_PEER`] later. For a relay that is about to end.
+    ///
+    /// WHY the sessions are closed and not left to the end of the process: a
+    /// connection that merely stops answering is found out by the peer's
+    /// idle timeout, seconds later, and without a code. `NO_ERROR`, "The
+    /// session is being terminated without an error" (§3.5): the draft's
+    /// way for a server that goes away is GOAWAY (§3.6), which this relay
+    /// does not send.
+    pub async fn stop(&self) {
+        let (answer, stopped) = oneshot::channel();
+        if self.events.send(Envelope::Stop(answer)).await.is_ok() {
+            let _ = stopped.await;
+        }
+    }
+
     /// Hands a connection whose handshake is done to the relay.
     pub async fn add_session(&self, connection: C) {
         // Relaxed: the numbers only have to differ.
@@ -852,6 +874,7 @@ impl<C: Connection> Hub<C> {
                     self.close(session, code.code(), reason, &mut pending);
                     self.feed(pending);
                 }
+                Envelope::Stop(answer) => self.stop(answer),
                 #[cfg(test)]
                 Envelope::Inspect(answer) => {
                     let _ = answer.send(Held {
@@ -1608,6 +1631,32 @@ impl<C: Connection> Hub<C> {
                 pending,
             );
         }
+    }
+
+    /// Closes every session, and answers when the peers have been told or
+    /// [`CLOSE_REACHES_THE_PEER`] later ([`HubHandle::stop`]).
+    fn stop(&mut self, answer: oneshot::Sender<()>) {
+        let sessions: Vec<SessionKey> = self.sessions.keys().copied().collect();
+        let connections: Vec<Arc<C>> = self
+            .sessions
+            .values()
+            .map(|handle| Arc::clone(&handle.connection))
+            .collect();
+        self.log(|| format!("STOPPING sessions={}", sessions.len()));
+        let mut pending = VecDeque::new();
+        for session in sessions {
+            self.close(session, NO_ERROR, "the relay is stopping", &mut pending);
+        }
+        self.feed(pending);
+        tokio::spawn(async move {
+            let all_closed = async {
+                for connection in &connections {
+                    connection.closed().await;
+                }
+            };
+            let _ = tokio::time::timeout(CLOSE_REACHES_THE_PEER, all_closed).await;
+            let _ = answer.send(());
+        });
     }
 
     /// Closes a session and tells the relay it is gone.
