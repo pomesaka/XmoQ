@@ -12,17 +12,7 @@ if [[ ! -f Cargo.toml ]]; then
 	exit 0
 fi
 
-# WHY here and not in the workflow: `xmoq-watch` plays sound through cpal, whose ALSA backend
-# (`alsa-sys`) asks pkg-config for the headers of ALSA when it is built for Linux. Whoever
-# runs this check needs them, in CI or not. macOS needs nothing more.
-if [[ "$(uname -s)" == Linux ]] && ! pkg-config --exists alsa 2>/dev/null; then
-	if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
-		sudo apt-get update
-		sudo apt-get install --yes --no-install-recommends libasound2-dev pkg-config
-	else
-		fail "the headers of ALSA are missing (Debian and Ubuntu: libasound2-dev and pkg-config), which xmoq-watch needs to build"
-	fi
-fi
+need_alsa_headers
 
 # WHY --workspace everywhere: spikes/ is excluded from the workspace, so these commands never
 # reach it. Spike crates pin old library versions to reproduce one experiment and are not

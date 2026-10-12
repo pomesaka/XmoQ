@@ -64,7 +64,7 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 | One message of a room | 256 KiB | A hello with a full history is under 128 KiB | `room_socket.rs` |
 | Lines of a room's history that are read; lines of the chat that are kept | 64; 16 | The room keeps 50; 3 are shown | `room`, `main.rs` |
 | What a room says while a token is waited for | 256 messages; the oldest goes | | `room_socket.rs` |
-| A line of the chat, and any line written about what a peer said | 120 and 600 characters, without control characters and without the marks that change the direction of text | A line of a terminal; an error with a name or two in it | `room::clean`, `main.rs` |
+| A line of the chat, and any line the viewer writes | 120 and 2,000 characters, without control characters and without the marks that change the direction of text | A line of a terminal; `AV_PLAYED`, the longest line, is about 1,100 | `room::clean`, `main.rs` |
 | From one try at a broadcast to the next | 1 s at least | A room that names one broadcast after the other | `main.rs` |
 | Files of pixels with `--medium file` | 30 at once, each made anew for this user alone under a name that cannot be guessed; all removed at the end | A second of frames, for a terminal that removes them late or not at all | `picture.rs` |
 | Values of each series that `AV_PLAYED` gives the spread of | The last 4,096 | About two minutes of frames | `marks::Recent` |
@@ -72,6 +72,12 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 Whatever a peer is waited for, the viewer ends when it is told to: `q`, Ctrl-C, a signal and `--seconds` are looked at during every such wait (`Ui::unless_ended`). The exception is a terminal that does not take what is written: the thread of the picture is then given 2 s, and the viewer ends without it.
 
 **What it cannot check**: a room reached over `ws://` is not authenticated, so whoever is on the path can name another relay as the broadcast, and the viewer would send its token there. A room's address is accepted as it is given; a broadcast it names has to be `https://`.
+
+## Checks
+
+`mise run interop` has two runs with the viewer (`interop/watch-rust.ts`), which CI runs on Linux: it finds its tracks in a catalog and plays them for 8 seconds with no terminal and no sound output (`--out /dev/null`, `--sound off`), of a page through the own relay and of moqlivemock's publisher. They hold what `AV_PLAYED` says against what is expected: the frames drawn, the packets of sound, the underruns, and with the page how far apart the marks of picture and sound leave the viewer.
+
+What needs a sound output, the demo with its rooms, or a terminal is under `scripts/`, and is run by hand.
 
 ## Checks that need a person's machine
 
@@ -84,7 +90,7 @@ Under `scripts/`, from the repository root; each starts a demo of its own on oth
 | `try-keys.sh` | The keys on a pseudo-terminal (`keys-on-a-pty.py`), a broadcast that ends and begins again, and the terminal's line mode after `q`, Ctrl-C and SIGTERM |
 | `try-silent-peers.sh` | A room and a relay that never answer: the viewer ends with `--seconds`, with SIGTERM, and of itself after 10 s. Needs no demo and no browser |
 
-WHY not in `interop/`: they need a sound output, which the machines of CI have none of, and the demo's pages, which the interop runs do not start. **After a panic** the terminal is put back by a hook; that was run by hand on 2026-10-12 through a switch that is no longer in the binary, and nothing checks it now.
+**After a panic** the terminal is put back by a hook; that was run by hand on 2026-10-12 through a switch that is no longer in the binary, and nothing checks it now.
 
 ## What it does not do
 
