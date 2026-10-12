@@ -29,6 +29,28 @@
 //! ms=..`, the Retry Interval being that of the refusal that came last): the
 //! measure of what a session that announces again and again costs a relay.
 //!
+//! With `--ask-per-second <n> --ask subscribe|fetch-nothing|fetch-old` it
+//! is a subscriber that asks for something else each time: that many
+//! requests a second, each for a track of `(xmoq)` whose name was not used
+//! before (`subscribe`: a SUBSCRIBE for `s0`, `s1`, ..., with a
+//! `RENDEZVOUS_TIMEOUT` where `--rendezvous-ms` gives one; `fetch-nothing`:
+//! a Standalone FETCH for Group 0 of such a track; `fetch-old`: one for
+//! Group 0 of the track `a`; `subscribe-own`: a SUBSCRIBE for `own0`,
+//! `own1`, ...; `fetch-live`: a FETCH for Group 0 of the track `live`, the
+//! same each time). With `--cancel yes` each is reset when it is answered,
+//! or 50 ms after it was sent; with `--cancel answered` when it is
+//! answered, however long that takes. With `--say-each yes` it says each
+//! answer as it comes (`ANSWER n=.. after_ms=.. ok|0x..`). At the end it
+//! says how the requests were answered (`ASKED sent=.. ok=.. refused=..
+//! [0x..=..] failed=.. unanswered=.. ms=..`).
+//!
+//! With `--announce-and-refuse yes` it is a publisher that has nothing: it
+//! announces `(xmoq)` once, refuses what the relay asks of it, and says at
+//! the end how many requests it was sent (`REFUSED asked=..`). With
+//! `--announce-and-stay-quiet yes` it publishes the track `live` as well
+//! (PUBLISH, no Object), and answers nothing the relay asks of it
+//! (`QUIET asked=..`).
+//!
 //! With `--hold-tracks <n>` it is that many viewers that came early: it
 //! opens a session for every 16 of them, and sends a SUBSCRIBE for each of
 //! the tracks `h0`, `h1`, ... of `(xmoq)` with a `RENDEZVOUS_TIMEOUT` of 30
@@ -54,10 +76,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, PublishNamespace, ReasonPhrase, RequestError, RequestOk, Subscribe,
-    setup_option,
+    ControlMessage, Fetch, FetchRange, Publish, PublishNamespace, ReasonPhrase, RequestError,
+    RequestOk, Subscribe, setup_option,
 };
-use xmoq_moqt::name::{FullTrackName, TrackNamespace};
+use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{Role, Session, Transport};
 use xmoq_moqt_io::wt::{Congestion, QuicLimits, WtConnection, WtServer, accept};
@@ -107,7 +129,43 @@ enum Args {
         announce_per_second: Option<u32>,
         /// `--hold-tracks`: it has SUBSCRIBEs for that many tracks held.
         hold_tracks: Option<u64>,
+        /// `--ask-per-second` and what belongs to it.
+        ask: Option<Ask>,
+        /// `--announce-and-refuse yes`, and `--announce-and-stay-quiet yes`.
+        announce_and_refuse: bool,
+        /// `--announce-and-stay-quiet yes`: it answers nothing.
+        answers_nothing: bool,
     },
+}
+
+/// What `--ask` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    Subscribe,
+    SubscribeOwn,
+    FetchNothing,
+    FetchOld,
+    FetchLive,
+}
+
+/// `--cancel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cancel {
+    Never,
+    /// When it is answered, or 50 ms after it was sent.
+    Soon,
+    /// When it is answered.
+    Answered,
+}
+
+/// `--ask-per-second`, `--ask`, `--rendezvous-ms` and `--cancel`.
+#[derive(Debug, Clone, Copy)]
+struct Ask {
+    per_second: u32,
+    what: Asked,
+    rendezvous_ms: Option<u64>,
+    cancel: Cancel,
+    say_each: bool,
 }
 
 /// 32 bytes from 64 hexadecimal digits.
@@ -127,6 +185,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut port, mut cert_file, mut key_file, mut quiet) = (None, None, None, None);
     let (mut url, mut cert_sha256, mut stay, mut setup) = (None, None, None, false);
     let (mut announce_per_second, mut hold_tracks) = (None, None);
+    let (mut ask_per_second, mut asked, mut rendezvous_ms) = (None, Asked::Subscribe, None);
+    let (mut cancel, mut announce_and_refuse) = (Cancel::Never, false);
+    let (mut say_each, mut stay_quiet) = (false, false);
     while let Some(flag) = args.next() {
         let value = args
             .next()
@@ -138,6 +199,32 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--connect" => url = Some(value),
             "--cert-sha256" => cert_sha256 = Some(sha256_of(&value)?),
             "--send-setup" => setup = value == "yes",
+            "--ask-per-second" => {
+                ask_per_second = Some(value.parse().context("--ask-per-second")?);
+            }
+            "--ask" => {
+                asked = match value.as_str() {
+                    "subscribe" => Asked::Subscribe,
+                    "fetch-nothing" => Asked::FetchNothing,
+                    "fetch-old" => Asked::FetchOld,
+                    "subscribe-own" => Asked::SubscribeOwn,
+                    "fetch-live" => Asked::FetchLive,
+                    other => bail!("--ask does not know {other}"),
+                };
+            }
+            "--rendezvous-ms" => rendezvous_ms = Some(value.parse().context("--rendezvous-ms")?),
+            "--cancel" => {
+                cancel = match value.as_str() {
+                    "yes" => Cancel::Soon,
+                    "answered" => Cancel::Answered,
+                    _ => Cancel::Never,
+                };
+            }
+            "--say-each" => say_each = value == "yes",
+            "--announce-and-stay-quiet" => {
+                (announce_and_refuse, stay_quiet) = (true, value == "yes");
+            }
+            "--announce-and-refuse" => announce_and_refuse = value == "yes",
             "--hold-tracks" => hold_tracks = Some(value.parse().context("--hold-tracks")?),
             "--announce-per-second" => {
                 announce_per_second = Some(value.parse().context("--announce-per-second")?);
@@ -168,6 +255,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             setup,
             announce_per_second,
             hold_tracks,
+            ask: ask_per_second.map(|per_second| Ask {
+                per_second,
+                what: asked,
+                rendezvous_ms,
+                cancel,
+                say_each,
+            }),
+            announce_and_refuse,
+            answers_nothing: stay_quiet,
         });
     }
     Ok(Args::Serve {
@@ -458,6 +554,296 @@ async fn announce(url: &str, cert_sha256: [u8; 32], stay: Duration, per_second: 
     Ok(())
 }
 
+/// How the requests of `--ask` were answered, counted by their tasks.
+#[derive(Default)]
+struct Answers {
+    ok: AtomicU64,
+    failed: AtomicU64,
+    /// By Error Code.
+    refused: std::sync::Mutex<std::collections::BTreeMap<u64, u64>>,
+}
+
+/// One request of `--ask`, with the Request ID `request_id`.
+async fn ask_once(connection: &WtConnection, number: u64, ask: Ask, answers: &Answers) {
+    let asked = async {
+        let namespace = TrackNamespace::new(vec![b"xmoq".to_vec()]).ok()?;
+        let track = |name: String| FullTrackName::new(namespace.clone(), name.into_bytes()).ok();
+        // A client's Request IDs are the even numbers (§10.1).
+        let request_id = number * 2;
+        // Group 0, whole: from (0, 0) to "the end Location, plus 1", (1, 0).
+        let group_0 = |full_track_name| FetchRange::Standalone {
+            full_track_name,
+            start: Location {
+                group: 0,
+                object: 0,
+            },
+            end: Location {
+                group: 1,
+                object: 0,
+            },
+        };
+        let message = match ask.what {
+            Asked::Subscribe => ControlMessage::Subscribe(Subscribe {
+                request_id,
+                full_track_name: track(format!("s{number}"))?,
+                parameters: ask
+                    .rendezvous_ms
+                    .map(Parameter::RendezvousTimeout)
+                    .into_iter()
+                    .collect(),
+            }),
+            Asked::FetchNothing => ControlMessage::Fetch(Fetch {
+                request_id,
+                range: group_0(track(format!("f{number}"))?),
+                parameters: Vec::new(),
+            }),
+            Asked::FetchOld => ControlMessage::Fetch(Fetch {
+                request_id,
+                range: group_0(track("a".to_string())?),
+                parameters: Vec::new(),
+            }),
+            Asked::FetchLive => ControlMessage::Fetch(Fetch {
+                request_id,
+                range: group_0(track("live".to_string())?),
+                parameters: Vec::new(),
+            }),
+            Asked::SubscribeOwn => ControlMessage::Subscribe(Subscribe {
+                request_id,
+                full_track_name: track(format!("own{number}"))?,
+                parameters: Vec::new(),
+            }),
+        };
+        let began = tokio::time::Instant::now();
+        let (mut send, recv) = connection.open_bi().await.ok()?;
+        send_message(&mut send, &message, &Trace::default(), "request")
+            .await
+            .ok()?;
+        let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+        let answer = if ask.cancel == Cancel::Soon {
+            tokio::time::timeout(Duration::from_millis(50), reader.next_event())
+                .await
+                .ok()
+        } else {
+            Some(reader.next_event().await)
+        };
+        if ask.say_each {
+            let said = match &answer {
+                Some(Ok(RequestStreamEvent::Message(ControlMessage::RequestError(error)))) => {
+                    format!("{:#x}", error.error_code)
+                }
+                Some(Ok(RequestStreamEvent::Message(_))) => "ok".to_string(),
+                _ => "nothing".to_string(),
+            };
+            println!(
+                "ANSWER n={number} after_ms={} {said}",
+                began.elapsed().as_millis()
+            );
+        }
+        if ask.cancel == Cancel::Never {
+            // WHY forgotten: a request stream that is let go of is reset,
+            // and these stay open for as long as the program runs.
+            std::mem::forget(send);
+        } else {
+            // CANCELLED (0x1).
+            send.reset(0x1);
+        }
+        Some(answer)
+    };
+    match asked.await {
+        Some(Some(Ok(RequestStreamEvent::Message(
+            ControlMessage::SubscribeOk(_) | ControlMessage::FetchOk(_),
+        )))) => {
+            answers.ok.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(Some(Ok(RequestStreamEvent::Message(ControlMessage::RequestError(error))))) => {
+            if let Ok(mut refused) = answers.refused.lock() {
+                *refused.entry(error.error_code).or_default() += 1;
+            }
+        }
+        // Cancelled before any answer.
+        Some(None) => {}
+        _ => {
+            answers.failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Connects and sends its SETUP. The control stream is to be kept.
+async fn connected(
+    url: &str,
+    cert_sha256: [u8; 32],
+) -> Result<(Arc<WtConnection>, <WtConnection as Connection>::Send)> {
+    let connection =
+        Arc::new(xmoq_moqt_io::wt::connect(url, cert_sha256, &StreamConfig::default()).await?);
+    println!("CONNECTED");
+    let mut moqt = Session::new(Role::Client, Transport::WebTransport);
+    let message = moqt.setup(vec![KeyValuePair::bytes(
+        setup_option::MOQT_IMPLEMENTATION,
+        b"xmoq-quiet-peer/0.0.0".to_vec(),
+    )?])?;
+    let mut control = connection.open_uni().await?;
+    send_message(&mut control, &message, &Trace::default(), "control").await?;
+    Ok((connection, control))
+}
+
+/// Asks for something else `ask.per_second` times a second for `stay`.
+async fn ask_again_and_again(
+    url: &str,
+    cert_sha256: [u8; 32],
+    stay: Duration,
+    ask: Ask,
+) -> Result<()> {
+    let (connection, _control) = connected(url, cert_sha256).await?;
+    let answers = Arc::new(Answers::default());
+    let began = tokio::time::Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_secs(1) / ask.per_second.max(1));
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut sent = 0u64;
+    let end = loop {
+        tokio::select! {
+            end = connection.closed() => break Some(end),
+            () = tokio::time::sleep_until(began + stay) => break None,
+            _ = tick.tick() => {
+                let (connection, answers) = (Arc::clone(&connection), Arc::clone(&answers));
+                let number = sent;
+                sent += 1;
+                tasks.spawn(async move { ask_once(&connection, number, ask, &answers).await });
+            }
+            // Done ones are taken out, so that the set does not grow.
+            Some(_) = tasks.join_next() => {}
+        }
+    };
+    let (ok, failed) = (
+        answers.ok.load(Ordering::Relaxed),
+        answers.failed.load(Ordering::Relaxed),
+    );
+    let refused = answers
+        .refused
+        .lock()
+        .map(|refused| refused.clone())
+        .unwrap_or_default();
+    let by_code: Vec<String> = refused
+        .iter()
+        .map(|(code, times)| format!("{code:#x}={times}"))
+        .collect();
+    let answered = ok + failed + refused.values().sum::<u64>();
+    println!(
+        "ASKED sent={sent} ok={ok} refused={} [{}] failed={failed} unanswered={} ms={}",
+        refused.values().sum::<u64>(),
+        by_code.join(" "),
+        sent.saturating_sub(answered),
+        began.elapsed().as_millis()
+    );
+    match end {
+        Some(end) => println!("SESSION_ENDED {end:?}"),
+        None => connection.close(0, b""),
+    }
+    Ok(())
+}
+
+/// Takes a request of the relay, and answers nothing: the stream is kept
+/// as it is.
+async fn leave_unanswered(
+    halves: (
+        <WtConnection as Connection>::Send,
+        <WtConnection as Connection>::Recv,
+    ),
+    counts: &Announced,
+) {
+    let (unanswered, recv) = halves;
+    let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    if reader.next_event().await.is_ok() {
+        counts.asked.fetch_add(1, Ordering::Relaxed);
+    }
+    // To its end, which is the relay giving the request up.
+    while let Ok(RequestStreamEvent::Message(_)) = reader.next_event().await {}
+    drop(unanswered);
+}
+
+/// Announces `(xmoq)` once and refuses what the relay asks of it, for
+/// `stay`. With `answers_nothing` it publishes the track `live` as well, and
+/// answers nothing the relay asks.
+async fn announce_and_refuse(
+    url: &str,
+    cert_sha256: [u8; 32],
+    stay: Duration,
+    answers_nothing: bool,
+) -> Result<()> {
+    let (connection, _control) = connected(url, cert_sha256).await?;
+    let counts = Arc::new(Announced::default());
+    let message = ControlMessage::PublishNamespace(PublishNamespace {
+        request_id: 0,
+        track_namespace: TrackNamespace::new(vec![b"xmoq".to_vec()])?,
+        parameters: Vec::new(),
+    });
+    // Kept to the end: the announcement lasts as long as its stream.
+    let (mut announcement, recv) = connection.open_bi().await?;
+    send_message(&mut announcement, &message, &Trace::default(), "request").await?;
+    let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    let answer = reader.next_event().await;
+    if !matches!(
+        answer,
+        Ok(RequestStreamEvent::Message(ControlMessage::RequestOk(_)))
+    ) {
+        bail!("the announcement was not accepted: {answer:?}");
+    }
+    println!("ANNOUNCED_ONCE");
+    // Kept to the end, as the announcement.
+    let mut publication = None;
+    if answers_nothing {
+        let publish = ControlMessage::Publish(Publish {
+            request_id: 2,
+            full_track_name: FullTrackName::new(
+                TrackNamespace::new(vec![b"xmoq".to_vec()])?,
+                b"live".to_vec(),
+            )?,
+            track_alias: 1,
+            parameters: Vec::new(),
+            track_properties: Vec::new(),
+        });
+        let (mut send, recv) = connection.open_bi().await?;
+        send_message(&mut send, &publish, &Trace::default(), "request").await?;
+        let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+        let answer = reader.next_event().await;
+        if !matches!(
+            answer,
+            Ok(RequestStreamEvent::Message(ControlMessage::RequestOk(_)))
+        ) {
+            bail!("the PUBLISH was not accepted: {answer:?}");
+        }
+        publication = Some((send, reader));
+        println!("PUBLISHED_LIVE");
+    }
+    let began = tokio::time::Instant::now();
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = connection.closed() => break,
+            () = tokio::time::sleep_until(began + stay) => break,
+            halves = connection.accept_bi() => {
+                let Ok(halves) = halves else { continue };
+                let counts = Arc::clone(&counts);
+                tasks.spawn(async move {
+                    if answers_nothing {
+                        leave_unanswered(halves, &counts).await;
+                    } else {
+                        refuse(halves, &counts).await;
+                    }
+                });
+            }
+            Some(_) = tasks.join_next() => {}
+        }
+    }
+    println!(
+        "{} asked={}",
+        if answers_nothing { "QUIET" } else { "REFUSED" },
+        counts.asked.load(Ordering::Relaxed)
+    );
+    drop(publication);
+    connection.close(0, b"");
+    Ok(())
+}
+
 /// As many SUBSCRIBEs as one session may have held by the own relay.
 const HELD_PER_SESSION: u64 = 16;
 
@@ -505,6 +891,21 @@ async fn main() -> Result<()> {
             url,
             cert_sha256,
             stay,
+            ask: Some(ask),
+            ..
+        } => return ask_again_and_again(&url, cert_sha256, stay, ask).await,
+        Args::Connect {
+            url,
+            cert_sha256,
+            stay,
+            announce_and_refuse: true,
+            answers_nothing,
+            ..
+        } => return announce_and_refuse(&url, cert_sha256, stay, answers_nothing).await,
+        Args::Connect {
+            url,
+            cert_sha256,
+            stay,
             hold_tracks: Some(tracks),
             ..
         } => return hold(&url, cert_sha256, stay, tracks).await,
@@ -520,8 +921,7 @@ async fn main() -> Result<()> {
             cert_sha256,
             stay,
             setup,
-            announce_per_second: None,
-            hold_tracks: None,
+            ..
         } => return stay_quiet(&url, cert_sha256, stay, setup).await,
         Args::Serve {
             port,
