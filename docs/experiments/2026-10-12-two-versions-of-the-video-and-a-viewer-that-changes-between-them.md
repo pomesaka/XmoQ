@@ -80,3 +80,20 @@ As above, with the relay's `--delivery-patience-ms 500`; two viewers with `?abr=
 - The narrow viewer's sound: 22 and 23 pieces too late and 4 and 5 breaks in 55 s; the other's 0 pieces and 0 and 1 breaks.
 
 Not done here: more viewers on either version, a viewer that leaves the small version as its last subscriber and comes back (the relay then asks the publisher anew), the relay without patience.
+
+## Later the same day: after the relay drops what a viewer no longer subscribes to
+
+Without the relay's patience, the tries upwards had cost more than a standstill: what the relay had taken of the large version still went over the link after the viewer had left it (274 and 286 of 450 frames at 1 Mbit/s, above). The relay now drops what it has not sent for a subscription that is cancelled, with no flag (#164). The same run again, one viewer, 3, 2, 1 and 3 Mbit/s, two versions. Expected, written before the runs: without a flag the part at 1 Mbit/s is as whole as it was with patience (about 400 of 450), and the sound has fewer pieces too late; with patience nothing changes.
+
+| Relay | 3 Mbit/s (450) | 2 Mbit/s (450) | 1 Mbit/s (450) | 3 Mbit/s again (900) | Stood still, in all | Sound: too late, breaks |
+|---|---|---|---|---|---|---|
+| no flag, before (two runs) | 434, 437 | 407, 397 | **274, 286** | 865, 861 | 9.1, 7.6 s | 277, 90; 59, 49 |
+| no flag, now (two runs) | 443, 444 | 401, 397 | **379, 406** | 889, 879 | 3.8, 2.9 s | 38, 40; 13, 3 |
+| patience 500 ms, before (two runs) | 443, 431 | 401, 382 | 400, 405 | 901, 908 | 3.0, 3.2 s | 18, 0; 2, 0 |
+| patience 500 ms, now (one run) | 452 | 407 | 387 | 904 | 3.3 s | 10; 10 |
+| `--older-groups give-up --older-groups-grace-ms 100` (one run) | 439 | 387 | 402 | 903 | 2.4 s | 4; 2 |
+
+- **It changed as expected**: without a flag the narrowest part shows 379 and 406 frames where it showed 274 and 286, the picture stands still for less than half as long, and the sound has 38 and 40 pieces too late where it had 277 and 90. A try upwards no longer leaves the link full after the viewer has gone back.
+- With patience the frames are as they were; the one run had 10 breaks in the sound where the two before had 2 and 0, which one run does not explain.
+- **Both runs without a flag ended on the small version**: back on the large one 15 to 16 s after the link had room, and down again 2 and 12 s later. The large version needs nearly all of 3 Mbit/s, and with nothing given up a Group that is late stays late.
+- **With the relay giving older Groups up** (100 ms of grace) the viewer went down 5 s after the link got narrow, where it took 1 to 2 s otherwise: the picture stays less than 300 ms behind for longer, which is what the change goes by. It was down, too, for 6 s at the very start. One run.
