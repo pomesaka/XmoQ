@@ -11,12 +11,13 @@ use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::kvp::Value;
 use xmoq_moqt::message::FetchRange;
 use xmoq_moqt::name::{FullTrackName, TrackNamespace};
-use xmoq_moqt::params::{GroupOrder, Parameter};
+use xmoq_moqt::params::{GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{RequestEvent, RequestId, Session};
+use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, FetchChunk, RequestReader, RequestStreamEvent, StreamStops, Trace, UniEvent,
-    send_message,
+    Connection, FetchChunk, RequestReader, RequestStreamEvent, SendStream, StreamStops, Trace,
+    UniEvent, send_message,
 };
 use xmoq_msf::CatalogTrack;
 
@@ -54,6 +55,8 @@ pub struct Requests<'a> {
     pub namespace: &'a TrackNamespace,
     /// The AUTHORIZATION TOKEN every request carries, where there is one.
     pub token: Option<&'a [u8]>,
+    /// `--answer-wait-ms`.
+    pub answer_wait_ms: u64,
 }
 
 impl Requests<'_> {
@@ -74,12 +77,25 @@ impl Requests<'_> {
         if let Some(timeout_ms) = timeout_ms {
             parameters.push(Parameter::SubgroupDeliveryTimeout(timeout_ms));
         }
+        let wait = answer_wait_ms(self.answer_wait_ms, &parameters);
         let (request, message) = self.session.subscribe(full_name, parameters)?;
         let (mut send, recv) = self.connection.open_bi().await?;
         let trace = Trace::default();
         send_message(&mut send, &message, &trace, name).await?;
         let mut reader = RequestReader::new(recv, &trace, name);
-        let RequestStreamEvent::Message(response) = reader.next_event().await? else {
+        // WHY from here, and the request alone given up: the row "A request
+        // the peer does not answer" of docs/moqt-implementation-notes.md,
+        // which the page and the Rust client go by as well. What the
+        // viewer makes of a track it did not get is its caller's.
+        let Ok(answer) =
+            tokio::time::timeout(Duration::from_millis(wait), reader.next_event()).await
+        else {
+            self.session.cancel(request);
+            send.reset(stream_reset_code::CANCELLED);
+            reader.stop(stream_reset_code::CANCELLED);
+            bail!("the relay did not answer the SUBSCRIBE of {name} within {wait} ms");
+        };
+        let RequestStreamEvent::Message(response) = answer? else {
             bail!("the relay closed the SUBSCRIBE of {name} without an answer");
         };
         match self.session.on_request_message(request, response)? {

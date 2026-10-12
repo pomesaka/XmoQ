@@ -1087,6 +1087,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--subscriber", "own-rust"],
 			relay: "own",
 		},
+		{
+			name: "own relay: no answer: the terminal viewer gives up the SUBSCRIBE of its video that is not answered in time, and closes its session itself",
+			script: "no-answer.ts",
+			args: ["--subscriber", "xmoq-watch"],
+			relay: "own",
+		},
 		// A page encodes and publishes video, and another plays it: through
 		// each relay, with each way of putting Objects onto streams.
 		// `video.ts` starts the relay itself.

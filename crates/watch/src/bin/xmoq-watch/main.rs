@@ -57,10 +57,41 @@ use crate::video_decoder::VideoDecoder;
 /// watching page's (`packages/media/src/core/playout-clock.ts`).
 const BUFFER_TICK: Duration = Duration::from_millis(500);
 
-/// How long the relay gets to answer the SETUP and the requests of a
-/// broadcast, a room to take the viewer in, and either to be connected to.
-/// **Provisional**: the catalog alone is waited 5 seconds for.
+/// How long the relay gets for its SETUP, a room to take the viewer in, and
+/// either to be connected to. **Provisional.** The answer to a request has
+/// its own time (`xmoq_moqt::params::answer_wait_ms`, in `session.rs`), and
+/// the catalog is waited 5 seconds for.
 const ANSWER_WAIT: Duration = Duration::from_secs(10);
+/// More than the waits for the relay at the beginning of a broadcast come
+/// to, each of which has its own time: the SETUP (10 s), the catalog (the
+/// answer to its SUBSCRIBE, 10 s, and the catalog itself, 5 s), and the
+/// answers to the SUBSCRIBEs of the video and of the sound (10 s each).
+const BEGINNING_AT_MOST: Duration = Duration::from_secs(60);
+
+/// What has to stay until the session is closed, on every way out of
+/// [`play`], so its caller keeps it.
+///
+/// WHY: a stream that is let go of is finished or stopped, and the close
+/// of the session takes a moment to reach the relay. A relay that sees the
+/// viewer's control stream end, or its own stopped, closes the session
+/// first, with `PROTOCOL_VIOLATION` (§3.3).
+#[derive(Default)]
+struct UntilClosed {
+    control: Option<<WtConnection as Connection>::Send>,
+    readers: Option<xmoq_moqt_io::IncomingStreams>,
+}
+
+/// The relay sent no SETUP in time.
+#[derive(Debug)]
+struct NoSetupInTime;
+
+impl std::fmt::Display for NoSetupInTime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the relay sent no SETUP within 10 s")
+    }
+}
+
+impl std::error::Error for NoSetupInTime {}
 /// How long a room gets for a token, and to take a line of the chat.
 /// **Provisional.**
 const ROOM_WAIT: Duration = Duration::from_secs(5);
@@ -377,7 +408,17 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
             Ok(None) => return Ok(()),
             Ok(Some(connection)) => {
                 let connection = Arc::new(connection);
-                let played = play(args, &connection, &place, &mut room, ui, &mut began).await;
+                let mut kept = UntilClosed::default();
+                let played = play(
+                    args,
+                    &connection,
+                    &place,
+                    &mut room,
+                    ui,
+                    &mut began,
+                    &mut kept,
+                )
+                .await;
                 if played.is_err()
                     && let Ok(end) =
                         tokio::time::timeout(Duration::from_millis(500), connection.closed()).await
@@ -388,7 +429,15 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
                         say(&format!("SESSION_ENDED {end:?}"));
                     }
                 }
-                connection.close(0, b"");
+                // §3.5: "CONTROL_MESSAGE_TIMEOUT (0x11): The session was
+                // closed because the peer took too long to respond to a
+                // control message." For the SETUP, as `@xmoq/moqt` has it; a
+                // request that is not answered is given up alone, and the
+                // viewer then leaves with NO_ERROR.
+                let no_setup = played
+                    .as_ref()
+                    .is_err_and(anyhow::Error::is::<NoSetupInTime>);
+                connection.close(if no_setup { 0x11 } else { 0 }, b"");
                 let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
                 played
             }
@@ -615,24 +664,27 @@ async fn play(
     room: &mut Option<RoomSocket>,
     ui: &mut Ui,
     began_playing: &mut bool,
+    kept: &mut UntilClosed,
 ) -> Result<Ended> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
     let (queue, mut events) = mpsc::channel(64);
-    let _streams = read_uni_streams(
+    kept.readers = Some(read_uni_streams(
         Arc::clone(connection),
         StreamConfig::default(),
         stops.clone(),
         queue,
         |event| event,
-    );
-    // WHY all of it in one wait: the relay is the one that is waited for,
-    // from the SETUP to the last SUBSCRIBE_OK, and the viewer has to end
-    // when it is told to at any point of it.
+    ));
+    let control_kept = &mut kept.control;
+    // Each wait for the relay has its own time: the SETUP 10 seconds, the
+    // answer to each SUBSCRIBE what `answer_wait_ms` says, the catalog 5.
+    // WHY all of it under `unless_ended`: the viewer has to end when it is
+    // told to at any point of it.
     let beginning = async {
         // §3.3: each peer opens one control stream that begins with SETUP.
         // It stays open: closing it is a PROTOCOL_VIOLATION for the peer.
-        let mut control = connection.open_uni().await?;
+        let control = control_kept.insert(connection.open_uni().await?);
         // In ascending order of their types: the token (0x03), then the
         // implementation (0x07).
         let mut options = Vec::new();
@@ -648,10 +700,12 @@ async fn play(
             implementation.as_bytes().to_vec(),
         )?);
         let setup = session.setup(options)?;
-        send_message(&mut control, &setup, &Trace::default(), "control").await?;
-        match events.recv().await {
-            Some(UniEvent::Control(message)) => session.on_control_message(message)?,
-            other => bail!("no SETUP from the relay: {other:?}"),
+        send_message(control, &setup, &Trace::default(), "control").await?;
+        // 10 seconds, as `@xmoq/moqt` gives the peer's SETUP.
+        match tokio::time::timeout(ANSWER_WAIT, events.recv()).await {
+            Ok(Some(UniEvent::Control(message))) => session.on_control_message(message)?,
+            Ok(other) => bail!("no SETUP from the relay: {other:?}"),
+            Err(_) => return Err(NoSetupInTime.into()),
         };
         let namespace = TrackNamespace::new(
             place
@@ -665,12 +719,13 @@ async fn play(
             session: &mut session,
             namespace: &namespace,
             token: place.token.as_deref(),
+            answer_wait_ms: args.answer_wait_ms,
         };
         let subscribed = subscriptions(args, &mut requests, &mut events, &stops).await?;
-        Ok((control, subscribed))
+        Ok(subscribed)
     };
-    let Some((control, subscribed)) = ui
-        .unless_ended("the relay's answers", ANSWER_WAIT, beginning)
+    let Some(subscribed) = ui
+        .unless_ended("the relay's answers", BEGINNING_AT_MOST, beginning)
         .await?
     else {
         return Ok(Ended::Quit);
@@ -894,11 +949,6 @@ async fn play(
         Err(_) => Seen::default(),
     };
     played.heard = sound.heard();
-    // WHY the control stream is not let go of here: a stream that is
-    // dropped is finished, which the relay takes for a PROTOCOL_VIOLATION
-    // (§3.3) before the close of the session reaches it. It goes with the
-    // connection, which the caller closes.
-    std::mem::forget(control);
 
     let line = played.line(args, ui);
     say(&line);

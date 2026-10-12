@@ -702,6 +702,22 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     })
 }
 
+/// The Message Parameters of a request this client sends on a stream of
+/// its own: what the time its answer gets goes by.
+fn parameters_of(message: &ControlMessage) -> &[Parameter] {
+    match message {
+        ControlMessage::Publish(publish) => &publish.parameters,
+        ControlMessage::PublishNamespace(namespace) => &namespace.parameters,
+        ControlMessage::Subscribe(subscribe) => &subscribe.parameters,
+        ControlMessage::Fetch(fetch) => &fetch.parameters,
+        _ => &[],
+    }
+}
+
+/// The Error Reason of the `PUBLISH_DONE` that ends a PUBLISH nobody
+/// answered; `@xmoq/moqt` sends the same.
+const NO_ANSWER_IN_TIME: &str = "no answer in time";
+
 /// Says that the answer to a request did not come in time
 /// (`ANSWER_TIMED_OUT`), and gives the error its caller fails with.
 fn not_answered(label: &str, waited_ms: u64) -> anyhow::Error {
@@ -923,7 +939,7 @@ impl Client<'_> {
             .args
             .auth
             .with(parameters.into_iter().flatten().collect());
-        let (request_id, message) = self.session.subscribe(track, parameters)?;
+        let (request_id, message) = self.session.subscribe(track, parameters.clone())?;
         let mut fetches = Fetches::new(self.args.fetch.reading);
         let joining = join.map(|join| {
             let joining_request_id = request_id.value();
@@ -944,7 +960,9 @@ impl Client<'_> {
         if let Some((range, true)) = &joining {
             self.send_fetch(&mut fetches, range.clone()).await?;
         }
-        let event = self.response(request_id, &mut stream, "subscribe").await;
+        let event = self
+            .response(request_id, &mut stream, "subscribe", &parameters)
+            .await;
         let event = match event {
             Ok(event) => event,
             Err(error) => {
@@ -1014,6 +1032,9 @@ impl Client<'_> {
         }
         // `fetches` is held meanwhile, and with it the streams it kept.
         tokio::time::sleep(self.args.fetch.stay).await;
+        if fetches.unanswered {
+            bail!("the peer did not answer a FETCH in time");
+        }
         Ok(())
     }
 
@@ -1136,14 +1157,23 @@ impl Client<'_> {
         };
         let step = fetching::step(fetch.progress, happened);
         fetch.progress = step.progress;
+        let (id, answer_wait_ms) = (fetch.id.value(), fetch.answer_wait_ms);
         match step.tell {
             Some(Tell::Cancel) => self.session.cancel(fetch.id),
             Some(Tell::StreamClosed) => self.session.on_fetch_stream_closed(fetch.id),
             None => {}
         }
-        if let Some(ended) = step.ended {
+        let ended = step.ended;
+        if let Some(ended) = ended {
             fetch.print_ended(ended);
             fetches.end(index, ended.cancel, happened == Happened::GaveUp);
+        }
+        if ended.is_some() || happened == Happened::Answered {
+            fetches.stop_answer_timer(index);
+        }
+        if ended.is_some() && happened == Happened::NotAnsweredInTime {
+            report::answer_timed_out(&format!("fetch#{id}"), answer_wait_ms);
+            fetches.unanswered = true;
         }
     }
 
@@ -1184,8 +1214,11 @@ impl Client<'_> {
         request_id: RequestId,
         stream: &mut RequestStream,
         label: &str,
+        parameters: &[Parameter],
     ) -> Result<RequestEvent> {
-        let event = self.in_time(label, &[], stream.next_event()).await??;
+        let event = self
+            .in_time(label, parameters, stream.next_event())
+            .await??;
         self.on_response(request_id, event, label)
     }
 
@@ -2020,16 +2053,23 @@ impl Client<'_> {
     ) -> Result<(RequestStream, RequestEvent)> {
         let (request_id, message, label) = request;
         let mut stream = self.open_request(request_id, message, label).await?;
-        let wait = xmoq_moqt::params::answer_wait_ms(self.args.answer_wait_ms, &[]);
+        let wait =
+            xmoq_moqt::params::answer_wait_ms(self.args.answer_wait_ms, parameters_of(message));
         let answer = tokio::time::timeout(Duration::from_millis(wait), stream.next_event());
-        let response = self
+        let Ok(event) = self
             .attending(peer_requests, serving, stdin, answer)
-            .await
-            .and_then(|event| {
-                let event = event.map_err(|_| not_answered(label, wait))?;
-                self.on_response(request_id, event?, label)
-            });
-        match response {
+            .await?
+        else {
+            let error = not_answered(label, wait);
+            if matches!(message, ControlMessage::Publish(_)) {
+                self.end_unanswered_publish(request_id, stream).await?;
+            } else {
+                self.session.cancel(request_id);
+                stream.cancel();
+            }
+            return Err(error);
+        };
+        match event.and_then(|event| self.on_response(request_id, event, label)) {
             Ok(event) => Ok((stream, event)),
             Err(error) => {
                 self.session.cancel(request_id);
@@ -2037,6 +2077,45 @@ impl Client<'_> {
                 Err(error)
             }
         }
+    }
+
+    /// Ends a PUBLISH that got no answer in time: `PUBLISH_DONE` and a FIN,
+    /// and the subscriber has the time it has after any `PUBLISH_DONE` to
+    /// end its direction; then that is stopped.
+    ///
+    /// WHY `PUBLISH_DONE`, where every other request is reset: a PUBLISH
+    /// that waits for its answer is a subscription in the state Pending
+    /// (Publisher), and §5.1 has "The publisher terminates a subscription
+    /// in the Pending (Publisher) or Established states by sending
+    /// `PUBLISH_DONE` and closing the stream"; §11.4.1: "When possible,
+    /// Publishers SHOULD send a `PUBLISH_DONE` when terminating a
+    /// subscription instead of abruptly terminating the associated control
+    /// stream".
+    /// WHY `INTERNAL_ERROR`: §10.11 has no code for a time that ran out
+    /// (`EXPIRED` is "the timeout specified in `SUBSCRIBE_OK`"), and this
+    /// one is "An implementation specific or generic error". No stream was
+    /// opened, so Stream Count is 0. `@xmoq/moqt` sends the same
+    /// (`endUnansweredPublish`).
+    async fn end_unanswered_publish(
+        &mut self,
+        request_id: RequestId,
+        mut stream: RequestStream,
+    ) -> Result<()> {
+        let done = self.session.publish_done(
+            request_id,
+            publish_done_status::INTERNAL_ERROR,
+            0,
+            ReasonPhrase::new(NO_ANSWER_IN_TIME)?,
+        )?;
+        if stream.send(&done).await.is_err() {
+            stream.cancel();
+            return Ok(());
+        }
+        // An answer that crossed the PUBLISH_DONE is the peer's to send.
+        stream
+            .finish_and_await_close(PUBLISH_DONE_ANSWER_WAIT, |_| Ok(()))
+            .await?;
+        Ok(())
     }
 
     /// Turns to one thing. `stdin` is there in the mode that serves a
@@ -2588,7 +2667,28 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmoq_moqt::message::{Publish, PublishNamespace, Subscribe};
+    use xmoq_moqt::message::{Publish, PublishDone, PublishNamespace, Subscribe};
+
+    /// `fixtures/request-answer-wait/`, which `@xmoq/moqt` reads too: what
+    /// this client ends a PUBLISH with that nobody answered.
+    #[test]
+    fn the_publish_done_of_an_unanswered_publish_is_the_shared_one() {
+        let shared: Vec<u8> = include_str!(
+            "../../../fixtures/request-answer-wait/publish-done-of-an-unanswered-publish.hex"
+        )
+        .split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect();
+        let mut sent = Vec::new();
+        ControlMessage::PublishDone(PublishDone {
+            status_code: publish_done_status::INTERNAL_ERROR,
+            stream_count: 0,
+            error_reason: ReasonPhrase::new(NO_ANSWER_IN_TIME).unwrap(),
+        })
+        .encode(&mut sent)
+        .unwrap();
+        assert_eq!(sent, shared);
+    }
 
     #[test]
     fn a_request_this_client_does_not_serve_is_refused_with_a_code_of_its_kind() {
