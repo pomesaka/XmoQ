@@ -200,7 +200,8 @@ const html = (path: string): string => `<!doctype html>
 				? "<p>no rooms: npm install in spikes/durable-objects-room, and start again</p>"
 				: `<p id="connected"></p>
 		<div id="chat" style="height: 8em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
-		<form><input size="40" placeholder="say something" /> <button>send</button></form>`
+		<form><input size="40" placeholder="say something" /> <button>send</button></form>
+		<p>${["👍", "❤️", "😂", "👏"].map((emoji) => `<button data-reaction="${emoji}">${emoji}</button>`).join(" ")} <span id="reactions"></span></p>`
 		}
 		<script type="module" src="${path}.js"></script>
 	</body>

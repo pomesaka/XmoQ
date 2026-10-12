@@ -12,7 +12,11 @@ const miniflare = new Miniflare({
 	compatibilityDate: "2026-07-01",
 	durableObjects: { ROOMS: { className: "Room", useSQLite: true } },
 	// The key the rooms share with the relay, for the tokens; none without.
-	bindings: { AUTH_KEY_HEX: process.env.AUTH_KEY_HEX ?? "" },
+	// REACTION_BATCH_MS: a trial, the reactions of that long as one message.
+	bindings: {
+		AUTH_KEY_HEX: process.env.AUTH_KEY_HEX ?? "",
+		REACTION_BATCH_MS: process.env.REACTION_BATCH_MS ?? "0",
+	},
 	host: "127.0.0.1",
 	port,
 });

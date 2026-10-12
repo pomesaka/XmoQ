@@ -15,7 +15,9 @@
 // broadcast} first, then {type: "chat", seq, from, text, at} for every
 // message of anybody, {type: "connected", connected} when the count
 // changes, and {type: "broadcast", broadcast} when the publisher registers
-// or leaves. A client sends {type: "chat", text}, and a publisher the
+// or leaves, and {type: "reaction", emoji} when somebody sent one (with
+// REACTION_BATCH_MS, {type: "reactions", counts} for all of that while).
+// A client sends {type: "reaction", emoji}, {type: "chat", text}, and a publisher the
 // message above.
 
 // **Tokens, an experiment** (how the relay authorizes is undecided): where
@@ -144,6 +146,33 @@ export class Room {
 		if (said?.type === "token-for" && (said.role === "pub" || said.role === "sub") && Array.isArray(said.namespace)) {
 			const namespace = said.namespace.map(String);
 			socket.send(JSON.stringify({ type: "token", role: said.role, namespace, token: await this.token(said.role, namespace) }));
+			return;
+		}
+		if (said?.type === "reaction" && typeof said.emoji === "string") {
+			// A reaction is shown and forgotten: it has no number and is not
+			// kept for those who come later. At most 8 UTF-16 units: an emoji
+			// with its modifiers, and no text.
+			const emoji = said.emoji.slice(0, 8);
+			const batchMs = Number(this.env.REACTION_BATCH_MS ?? 0);
+			if (!(batchMs > 0)) {
+				// As it comes, to everybody, the sender among them.
+				this.tellAll({ type: "reaction", emoji, sent: said.sent });
+				return;
+			}
+			// `REACTION_BATCH_MS` (a trial, for measuring; 0 without it): the
+			// reactions of that long go out as one message, each emoji with
+			// how many. WHY a timer and not an alarm: an alarm is a write to
+			// storage a reaction is not worth. The object stays awake for the
+			// timer, which is that long at most.
+			this.pending ??= { counts: {}, sent: [] };
+			this.pending.counts[emoji] = (this.pending.counts[emoji] ?? 0) + 1;
+			if (said.sent !== undefined) this.pending.sent.push(said.sent);
+			this.flushing ??= setTimeout(() => {
+				const { counts, sent } = this.pending;
+				this.pending = undefined;
+				this.flushing = undefined;
+				this.tellAll({ type: "reactions", counts, sent });
+			}, batchMs);
 			return;
 		}
 		if (said?.type !== "chat" || typeof said.text !== "string") return;
