@@ -95,7 +95,16 @@ fn refused(session: SessionKey, stream: u64, error: RequestError) -> [Action; 2]
 fn error(error_code: u64) -> RequestError {
     RequestError {
         error_code,
-        retry_interval: 0,
+        // What the relay gives a refusal of its own with the code: at
+        // once after TIMEOUT (0x2), after a second (1,001) with
+        // EXCESSIVE_LOAD (0x9) and DOES_NOT_EXIST (0x10), and 0 otherwise. A
+        // publisher's answer with one of these is passed on with its value,
+        // so the same message serves as what a publisher sent.
+        retry_interval: match error_code {
+            0x2 => 1,
+            0x9 | 0x10 => 1_001,
+            _ => 0,
+        },
         error_reason: ReasonPhrase::default(),
         redirect: None,
     }
@@ -410,7 +419,13 @@ fn answer_cases() -> [AnswerCase; 7] {
                 }),
             }),
             vec![finished],
-            Some(error(0x10)),
+            // With the publisher's Retry Interval, 0.
+            Some(RequestError {
+                error_code: 0x10,
+                retry_interval: 0,
+                error_reason: ReasonPhrase::default(),
+                redirect: None,
+            }),
         ),
         (
             // No answer and no stream: DOES_NOT_EXIST (0x10).
@@ -691,11 +706,17 @@ fn a_session_gets_back_one_announcement_for_each_time_its_timer_runs_out() {
             } if error.error_code == 0x9 => Some("0x9"),
             _ => None,
         });
-        let timer = actions.contains(&Action::StartAnnouncementTimer { session: PUBLISHER });
+        let timer = actions.contains(&Action::StartAnnouncementTimer {
+            session: PUBLISHER,
+            wait_ms: 1_000,
+        });
         (answer, timer)
     };
     let timeout = Event::AnnouncementTimeout { session: PUBLISHER };
-    let again = [Action::StartAnnouncementTimer { session: PUBLISHER }];
+    let again = [Action::StartAnnouncementTimer {
+        session: PUBLISHER,
+        wait_ms: 1_000,
+    }];
 
     // The first starts the one timer; the sixth is EXCESSIVE_LOAD (0x9).
     assert_eq!(announces(&mut relay, 0), (Some("ok"), true));
@@ -727,12 +748,59 @@ fn a_session_gets_back_one_announcement_for_each_time_its_timer_runs_out() {
 }
 
 #[test]
+fn a_refusal_of_the_relays_own_says_when_to_ask_again() {
+    // (Error Code, Retry Interval)
+    let cases = [
+        // INTERNAL_ERROR: not to be retried.
+        (0x0, 0),
+        // TIMEOUT: at once.
+        (0x2, 1),
+        (0x3, 0),
+        // EXCESSIVE_LOAD and DOES_NOT_EXIST: after a second.
+        (0x9, 1_001),
+        (0x10, 1_001),
+        (0x11, 0),
+        (0x19, 0),
+        (0x32, 0),
+    ];
+    for (code, retry_interval) in cases {
+        assert_eq!(
+            crate::routing::retry_interval_of(code),
+            retry_interval,
+            "{code:#x}"
+        );
+    }
+}
+
+#[test]
+fn an_announcement_too_many_is_refused_with_the_time_one_takes_to_come_back() {
+    let mut relay = Relay::new("test/0");
+    // One at once, and one more every 2.5 seconds.
+    relay.set_announcements(1, 2_500);
+    relay.step(Event::SessionOpened {
+        session: PUBLISHER,
+        role: Role::Server,
+    });
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    let too_often = RequestError {
+        error_code: 0x9,
+        retry_interval: 2_501,
+        error_reason: ReasonPhrase::default(),
+        redirect: None,
+    };
+    assert_eq!(
+        announce(&mut relay, PUBLISHER, 1, &[b"xmoq"]),
+        refused(PUBLISHER, 1, too_often)
+    );
+}
+
+#[test]
 fn only_so_many_namespaces_are_kept_for_one_session() {
     // The expectation below is spelled out for a limit of 64.
     assert_eq!(crate::MAX_NAMESPACES_PER_SESSION, 64);
     // The limit on how often a session announces is not the one looked at.
     let mut relay = Relay::new("test/0");
-    relay.set_announcements_at_once(1_000);
+    relay.set_announcements(1_000, 1_000);
     for session in [PUBLISHER, BOB] {
         relay.step(Event::SessionOpened {
             session,
@@ -2913,10 +2981,11 @@ fn a_peer_that_ends_no_stream_of_a_refused_request_is_stopped_after_a_time() {
     // direction of none of the streams. DOES_NOT_EXIST (0x10) for the first
     // 256, which the session holds; EXCESSIVE_LOAD (0x9) for the rest,
     // which it does not: that many are held.
+    // Both with a Retry Interval of 1,001: after a second.
     let refused = |code| {
         ControlMessage::RequestError(RequestError {
             error_code: code,
-            retry_interval: 0,
+            retry_interval: 1_001,
             error_reason: ReasonPhrase::default(),
             redirect: None,
         })

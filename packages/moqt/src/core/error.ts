@@ -49,6 +49,48 @@ export const RequestErrorCode = {
 	INVALID_JOINING_REQUEST_ID: 0x32n,
 } satisfies Record<string, bigint>;
 
+/** What an endpoint that refuses for its own load gives as the wait before a retry. **Provisional.** */
+const RETRY_WHEN_LOADED_MS = 1000n;
+
+/** The longest wait a caller is handed, in milliseconds: the longest delay a timer of a browser takes. */
+export const LONGEST_RETRY_WAIT_MS = 2_147_483_647;
+
+/**
+ * The Retry Interval of a REQUEST_ERROR this endpoint makes up itself, by
+ * its Error Code (`fixtures/retry-interval/made-up.tsv`, which the Rust
+ * implementation reads too). §10.6.2: "The minimum time (in milliseconds)
+ * before the request SHOULD be sent again, plus one. If the value is 0, the
+ * request SHOULD NOT be retried."
+ *
+ * WHY EXCESSIVE_LOAD alone: "The sender SHOULD use the Retry Interval to
+ * indicate when the request can be retried" is said of that code and of no
+ * other, and a limit of this endpoint is one that has room again later.
+ * For the others this endpoint does not know whether the same request can
+ * succeed later.
+ */
+export function madeUpRetryInterval(errorCode: bigint): bigint {
+	return errorCode === RequestErrorCode.EXCESSIVE_LOAD
+		? RETRY_WHEN_LOADED_MS + 1n
+		: 0n;
+}
+
+/**
+ * After how many milliseconds a request that got this Retry Interval may be
+ * sent again; `undefined` where it "SHOULD NOT be retried" (§10.6.2).
+ */
+export function retryAfterMs(retryInterval: bigint): bigint | undefined {
+	return retryInterval === 0n ? undefined : retryInterval - 1n;
+}
+
+/** The same as a wait a timer takes: no more than `LONGEST_RETRY_WAIT_MS`. */
+export function retryWaitMs(retryInterval: bigint): number | undefined {
+	const after = retryAfterMs(retryInterval);
+	if (after === undefined) return undefined;
+	return after > BigInt(LONGEST_RETRY_WAIT_MS)
+		? LONGEST_RETRY_WAIT_MS
+		: Number(after);
+}
+
 /**
  * An error that ends the session. `code` is the Session termination error
  * code to close the session with.

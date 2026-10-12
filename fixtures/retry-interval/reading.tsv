@@ -1,0 +1,7 @@
+do-not-retry	0	no	-	-
+at-once	1	yes	0	0
+after-a-millisecond	2	yes	1	1
+after-a-second	1001	yes	1000	1000
+the-longest-timer	2147483648	yes	2147483647	2147483647
+longer-than-a-timer	2147483649	yes	2147483648	2147483647
+the-largest-value	18446744073709551615	yes	18446744073709551614	2147483647

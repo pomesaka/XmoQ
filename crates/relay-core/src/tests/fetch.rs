@@ -424,7 +424,22 @@ fn fetches_that_the_publisher_cuts_short() -> Vec<Case> {
             true,
             vec![(
                 Refused(0x3),
-                vec![STOP_TIMER, FINISH_UPSTREAM, refuse(0x10), FINISH],
+                // With the publisher's Retry Interval, 0: when to ask the
+                // publisher again is the publisher's to say.
+                vec![
+                    STOP_TIMER,
+                    FINISH_UPSTREAM,
+                    send(
+                        FETCH_STREAM,
+                        ControlMessage::RequestError(RequestError {
+                            error_code: 0x10,
+                            retry_interval: 0,
+                            error_reason: ReasonPhrase::default(),
+                            redirect: None,
+                        }),
+                    ),
+                    FINISH,
+                ],
             )],
         ),
         (

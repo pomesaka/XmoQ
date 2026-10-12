@@ -9,7 +9,7 @@ use crate::kvp::KeyValuePair;
 use crate::message::{
     ControlMessage, Fetch, FetchOk, FetchRange, Publish, PublishDone, PublishNamespace,
     ReasonPhrase, RequestError, RequestOk, Subscribe, SubscribeOk, publish_done_status,
-    request_error_code,
+    request_error_code, retry_interval,
 };
 use crate::name::{FullTrackName, Location};
 use crate::params::{self, MessageKind, Parameter};
@@ -435,10 +435,7 @@ impl PeerRequests {
 fn request_error(error_code: u64) -> ControlMessage {
     ControlMessage::RequestError(RequestError {
         error_code,
-        // FIXME: give a Retry Interval where the request can succeed later.
-        // §10.6.2 has the sender of `EXCESSIVE_LOAD` say when to retry; 0 says
-        // "do not retry" for every code.
-        retry_interval: 0,
+        retry_interval: retry_interval::made_up(error_code),
         error_reason: ReasonPhrase::default(),
         redirect: None,
     })

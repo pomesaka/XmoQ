@@ -67,6 +67,13 @@ export async function keepSession<R>(
  */
 export const DEFAULT_ASK_AGAIN_DELAY_MS = 1000;
 
+/**
+ * **Provisional**: the shortest pause after a "not yet" that names its own
+ * (`StayOptions.againAfter`). WHY any: a peer that says "at once" and then
+ * refuses at once would be asked in a loop without a pause.
+ */
+export const MIN_ASK_AGAIN_DELAY_MS = 100;
+
 export interface StayOptions<E, C> {
 	/** Begins to play on the session, and resolves once it plays, with `ended` (as `KeepPlayingOptions.play`). */
 	play(): Promise<{ ended: Promise<E> }>;
@@ -79,6 +86,20 @@ export interface StayOptions<E, C> {
 	stopped(): boolean;
 	/** `DEFAULT_ASK_AGAIN_DELAY_MS` when left out. */
 	againMs?: number;
+	/**
+	 * The pause a "not yet" names itself, in milliseconds, where it names
+	 * one: a relay says with its refusal when to ask again (the Retry
+	 * Interval of a REQUEST_ERROR, transport §10.6.2). Used in place of
+	 * `againMs` for that one pause, and no shorter than
+	 * `MIN_ASK_AGAIN_DELAY_MS`. `undefined` where it names none; `againMs`
+	 * then.
+	 *
+	 * WHY asked again where the refusal says "do not retry" (a Retry
+	 * Interval of 0): whether to ask again is `notYet`'s to say. A relay
+	 * that gives every refusal a 0 (moqtail's does) would otherwise have no
+	 * viewer wait at it.
+	 */
+	againAfter?(error: unknown): number | undefined;
 	/** `play` resolved: it plays, for the `times`-th time on this session. */
 	onPlaying?(times: number): void;
 	/** `play` said "not yet", and is asked again after the pause. */
@@ -109,8 +130,10 @@ export async function stayOnSession<E, C>(
 		close,
 	}));
 	/** The pause, cut short by the end of the session. */
-	const pause = async (): Promise<Awaited<typeof over> | undefined> =>
-		Promise.race([over, options.wait(againMs).then(() => undefined)]);
+	const pause = async (
+		ms: number = againMs,
+	): Promise<Awaited<typeof over> | undefined> =>
+		Promise.race([over, options.wait(ms).then(() => undefined)]);
 	for (let times = 1; !options.stopped(); ) {
 		let ended: Promise<E>;
 		try {
@@ -119,7 +142,10 @@ export async function stayOnSession<E, C>(
 			if (options.stopped()) break;
 			if (!options.notYet(error)) throw error;
 			options.onNotYet?.(error);
-			const closed = await pause();
+			const named = options.againAfter?.(error);
+			const closed = await pause(
+				named === undefined ? againMs : Math.max(named, MIN_ASK_AGAIN_DELAY_MS),
+			);
 			if (closed !== undefined) return closed;
 			continue;
 		}

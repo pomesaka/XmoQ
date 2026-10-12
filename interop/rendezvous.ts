@@ -17,7 +17,9 @@
 //   nobody-comes      The same SUBSCRIBE with 1.5 seconds, and no publisher.
 //                     The relay answers REQUEST_ERROR with TIMEOUT (0x2)
 //                     between 1.5 and 4 seconds after the SUBSCRIBE, and
-//                     not before. The session is not closed over it.
+//                     not before, with a Retry Interval of 1 (ask again at
+//                     once), which the page's library hands on as a wait
+//                     of 0 ms. The session is not closed over it.
 //   viewer-before-the-broadcast
 //                     The terminal viewer (`xmoq-watch
 //                     --rendezvous-timeout-ms 20000`) comes first. The
@@ -27,7 +29,8 @@
 //                     the tracks and plays them (100 frames or more drawn,
 //                     100 packets of sound or more) and ends of itself.
 //   not-asked         The SUBSCRIBE without the parameter: DOES_NOT_EXIST
-//                     (0x10) at once, as before.
+//                     (0x10) at once, as before, with a Retry Interval of
+//                     1,001 (ask again after a second).
 //   publisher-returns An own-rust publisher ends its track with
 //                     PUBLISH_DONE and a Stream Count it does not know, so
 //                     that the relay waits two seconds for late streams.
@@ -281,6 +284,17 @@ async function nobodyComes(
 			`the relay was to answer REQUEST_ERROR with TIMEOUT (0x2), not ${sent}`,
 		);
 	}
+	// TIMEOUT is to be asked again at once: a Retry Interval of 1, which the
+	// page's library hands on as a wait of 0 ms.
+	const atOnce =
+		subscriber === "own-browser"
+			? /\(retry: after 0 ms\)/
+			: /retry_interval=1\b/;
+	if (!/^REQUEST_ERROR error_code=0x2\b/.test(sent) || !atOnce.test(answer)) {
+		throw new Error(
+			`the subscriber was to be told that it may ask again at once: ${answer}`,
+		);
+	}
 	if (answer === "ok" || after < 1500 || after > 5000) {
 		throw new Error(
 			`the subscriber was to be refused between 1.5 and 5 s, not "${answer}" after ${after} ms`,
@@ -308,6 +322,12 @@ async function notAsked(
 	}
 	if (context.relay.hasPrinted(/^HOLD_REQUEST /)) {
 		throw new Error("the relay was to hold nothing");
+	}
+	// To be asked again after a second: a Retry Interval of 1,001.
+	if (!/retry_interval=1001\b/.test(answer)) {
+		throw new Error(
+			`the subscriber was to be told to ask again after a second: ${answer}`,
+		);
 	}
 	return `${subscriber} subscribed to a track nobody publishes without RENDEZVOUS_TIMEOUT, and was refused with DOES_NOT_EXIST (0x10) at once: ${answer}`;
 }

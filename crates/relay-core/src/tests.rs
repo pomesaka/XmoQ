@@ -91,7 +91,16 @@ fn subscribe(request_id: u64, name: &[u8]) -> ControlMessage {
 fn request_error(error_code: u64) -> ControlMessage {
     ControlMessage::RequestError(RequestError {
         error_code,
-        retry_interval: 0,
+        // What the relay gives a refusal of its own with the code: at
+        // once after TIMEOUT (0x2), after a second (1,001) with
+        // EXCESSIVE_LOAD (0x9) and DOES_NOT_EXIST (0x10), and 0 otherwise. A
+        // publisher's answer with one of these is passed on with its value,
+        // so the same message serves as what a publisher sent.
+        retry_interval: match error_code {
+            0x2 => 1,
+            0x9 | 0x10 => 1_001,
+            _ => 0,
+        },
         error_reason: ReasonPhrase::default(),
         redirect: None,
     })

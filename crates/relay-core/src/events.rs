@@ -555,12 +555,14 @@ pub enum Action {
         /// The wait, in milliseconds.
         wait_ms: u64,
     },
-    /// Report [`Event::AnnouncementTimeout`] after the time in which a
-    /// session may announce one namespace: the session has announced, and
-    /// gets back what it used of its allowance at that rate.
+    /// Report [`Event::AnnouncementTimeout`] after `wait_ms`, the time in
+    /// which a session may announce one namespace: the session has
+    /// announced, and gets back what it used of its allowance at that rate.
     StartAnnouncementTimer {
         /// The session.
         session: SessionKey,
+        /// The wait, in milliseconds.
+        wait_ms: u64,
     },
     /// Report [`Event::RendezvousTimeout`] after `wait_ms`: the relay holds
     /// a SUBSCRIBE for a track nobody publishes, for as long as its

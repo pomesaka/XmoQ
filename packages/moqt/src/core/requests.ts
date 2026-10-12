@@ -18,6 +18,7 @@ import {
 import {
 	InactiveError,
 	MoqtError,
+	madeUpRetryInterval,
 	protocolViolation,
 	RequestErrorCode,
 	SessionErrorCode,
@@ -1073,7 +1074,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			data: encodeControlMessage({
 				type: "REQUEST_ERROR",
 				errorCode: RequestErrorCode.NOT_SUPPORTED,
-				retryInterval: 0n,
+				retryInterval: madeUpRetryInterval(RequestErrorCode.NOT_SUPPORTED),
 				errorReason: "REQUEST_UPDATE is not implemented",
 			}),
 		});
@@ -1117,7 +1118,7 @@ export function createRequests(options: RequestsOptions): Requests {
 				data: encodeControlMessage({
 					type: "REQUEST_ERROR",
 					errorCode,
-					retryInterval: 0n,
+					retryInterval: madeUpRetryInterval(errorCode),
 					errorReason,
 				}),
 			});
@@ -1820,7 +1821,7 @@ export function createRequests(options: RequestsOptions): Requests {
 			const data = encodeControlMessage({
 				type: "REQUEST_ERROR",
 				errorCode,
-				retryInterval: 0n,
+				retryInterval: madeUpRetryInterval(errorCode),
 				errorReason,
 			});
 			const out: SessionOutput[] = [];

@@ -98,6 +98,48 @@ pub mod request_error_code {
     pub const REDIRECT: u64 = 0x34;
 }
 
+/// Retry Interval (§10.6.2): "The minimum time (in milliseconds) before the
+/// request SHOULD be sent again, plus one. If the value is 0, the request
+/// SHOULD NOT be retried."
+pub mod retry_interval {
+    /// "If the value is 0, the request SHOULD NOT be retried."
+    pub const DO_NOT_RETRY: u64 = 0;
+    /// "A Retry Interval value of 1 indicates the request can be retried
+    /// immediately."
+    pub const AT_ONCE: u64 = 1;
+    /// The longest wait a caller is handed, in milliseconds: the longest
+    /// delay a timer of a browser takes, as for the waits for an answer.
+    pub const LONGEST_WAIT_MS: u64 = 2_147_483_647;
+    /// What an endpoint that refuses for its own load gives: a second.
+    /// **Provisional.**
+    const WHEN_LOADED_MS: u64 = 1_000;
+
+    /// The value that says "after `ms` milliseconds".
+    #[must_use]
+    pub const fn after_ms(ms: u64) -> u64 {
+        ms.saturating_add(1)
+    }
+
+    /// The Retry Interval of a `REQUEST_ERROR` this endpoint makes up
+    /// itself, by its Error Code (`fixtures/retry-interval/made-up.tsv`,
+    /// which `@xmoq/moqt` reads too).
+    ///
+    /// WHY `EXCESSIVE_LOAD` alone: "The sender SHOULD use the Retry Interval
+    /// to indicate when the request can be retried" is said of that code
+    /// and of no other, and a limit of this endpoint is one that has room
+    /// again later. For the others a session does not know whether the same
+    /// request can succeed later; a relay knows more, and has its own
+    /// values.
+    #[must_use]
+    pub const fn made_up(error_code: u64) -> u64 {
+        if error_code == super::request_error_code::EXCESSIVE_LOAD {
+            after_ms(WHEN_LOADED_MS)
+        } else {
+            DO_NOT_RETRY
+        }
+    }
+}
+
 /// Setup Option types (§15.4).
 pub mod setup_option {
     /// PATH: the path of the `MoQ` URI, for a client on native QUIC (§10.3.1.2).
@@ -376,6 +418,21 @@ pub struct FetchOk {
 }
 
 impl RequestError {
+    /// After how many milliseconds the request may be sent again, by the
+    /// Retry Interval; `None` where it "SHOULD NOT be retried" (§10.6.2).
+    #[must_use]
+    pub const fn retry_after_ms(&self) -> Option<u64> {
+        self.retry_interval.checked_sub(1)
+    }
+
+    /// The same as a wait a timer takes: no more than
+    /// [`retry_interval::LONGEST_WAIT_MS`].
+    #[must_use]
+    pub fn retry_wait_ms(&self) -> Option<u64> {
+        self.retry_after_ms()
+            .map(|ms| ms.min(retry_interval::LONGEST_WAIT_MS))
+    }
+
     fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
         let error_code = reader.varint()?;
         let retry_interval = reader.varint()?;
@@ -850,6 +907,59 @@ impl MessageDecoder {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// `fixtures/retry-interval/reading.tsv`, which `@xmoq/moqt` reads too.
+    #[test]
+    fn a_retry_interval_is_read_as_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/retry-interval/reading.tsv");
+        let mut rows = 0;
+        for row in table.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [name, value, retried, after, wait] = fields[..] else {
+                panic!("a row of 5 fields: {row}");
+            };
+            let ms = |field: &str| (field != "-").then(|| field.parse::<u64>().expect(field));
+            let error = RequestError {
+                error_code: request_error_code::EXCESSIVE_LOAD,
+                retry_interval: value.parse().expect(value),
+                error_reason: ReasonPhrase::default(),
+                redirect: None,
+            };
+            assert_eq!(error.retry_after_ms().is_some(), retried == "yes", "{name}");
+            assert_eq!(error.retry_after_ms(), ms(after), "{name}");
+            assert_eq!(error.retry_wait_ms(), ms(wait), "{name}");
+            if let Some(after) = ms(after) {
+                assert_eq!(
+                    retry_interval::after_ms(after),
+                    error.retry_interval,
+                    "{name}"
+                );
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 7);
+    }
+
+    /// `fixtures/retry-interval/made-up.tsv`, which `@xmoq/moqt` reads too.
+    #[test]
+    fn a_request_error_this_endpoint_makes_up_has_the_retry_interval_of_the_shared_table() {
+        let table = include_str!("../../../fixtures/retry-interval/made-up.tsv");
+        let mut rows = 0;
+        for row in table.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [name, code, value] = fields[..] else {
+                panic!("a row of 3 fields: {row}");
+            };
+            let code = u64::from_str_radix(code.trim_start_matches("0x"), 16).expect(code);
+            assert_eq!(
+                retry_interval::made_up(code),
+                value.parse::<u64>().expect(value),
+                "{name}"
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 11);
+    }
     use crate::kvp::KeyValuePair;
     use crate::name::Location;
     use crate::params::{GroupOrder, SubscriptionFilter};
