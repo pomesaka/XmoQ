@@ -464,6 +464,32 @@ describe("Session", () => {
 		expect(session.closed).toBe(false);
 	});
 
+	// §10.2.13. The bytes are written by hand: Request ID 1, one parameter,
+	// NEW_GROUP_REQUEST (0x32) with the value in the last byte.
+	test.each([
+		{ name: "0, no Group known", bytes: "02 00 04 01 01 32 00", group: 0n },
+		{
+			name: "the largest Group plus 1",
+			bytes: "02 00 04 01 01 32 07",
+			group: 7n,
+		},
+	])(
+		"accepts a REQUEST_UPDATE with NEW_GROUP_REQUEST for its PUBLISH and reports it: $name",
+		({ bytes, group }) => {
+			const session = withRequests();
+			session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
+			const outputs = session.receiveRequestStreamData(2, hex(bytes), false);
+			expect(outputs).toEqual([
+				{ type: "send", stream: 2, data: hex("07 00 01 00") },
+				{
+					type: "event",
+					event: { type: "new-group-request", requestId: 2n, group },
+				},
+			]);
+			expect(session.closed).toBe(false);
+		},
+	);
+
 	test("REQUEST_ERROR ends the request and finishes its stream", () => {
 		const session = started();
 		session.subscribe(TRACK);

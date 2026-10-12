@@ -26,9 +26,6 @@
 //! Filter on, and of an `AbsoluteRange` filter those up to its End Group
 //! (§5.1.2; `routing::filter_start`, `routing::filter_end_group`).
 //!
-//! FIXME: pass a `NEW_GROUP_REQUEST` of a subscriber on to the publisher
-//! (§10.2.13, MUST for a relay). It is ignored.
-//!
 //! FIXME: enforce `OBJECT_DELIVERY_TIMEOUT`, and both delivery timeouts as a
 //! Track Property (§8). Acted on is the `SUBGROUP_DELIVERY_TIMEOUT` of a
 //! SUBSCRIBE and of a `REQUEST_UPDATE`; the rest is ignored.
@@ -680,6 +677,9 @@ struct Source {
     /// such a Subgroup "inherits the Publisher Priority specified in the
     /// control message that established the subscription").
     default_priority: u8,
+    /// Its PUBLISH or `SUBSCRIBE_OK` had `DYNAMIC_GROUPS` with the value 1
+    /// (§12.6): it may be sent a `NEW_GROUP_REQUEST`.
+    dynamic_groups: bool,
 }
 
 impl Source {
@@ -713,6 +713,11 @@ struct Track {
     /// begins at 0 again). What outlives a track, a fetch stream the relay
     /// still writes, tells by this which track's Group it carries.
     born: u32,
+    /// The `NEW_GROUP_REQUEST` the relay sent a publisher of the track and
+    /// that is outstanding: §10.2.13, "After sending a `NEW_GROUP_REQUEST`
+    /// upstream, the request is considered outstanding until the Largest
+    /// Group increases."
+    new_group_asked: Option<u64>,
     /// Never empty: a track whose last source is over is taken out of
     /// [`Tracks`]. No more than [`MAX_SOURCES`], at most one of a session
     /// and a Track Alias, and at most one of a session that does not drain;
@@ -834,8 +839,10 @@ impl Track {
                 draining: false,
                 wait: None,
                 default_priority: default_publisher_priority(&properties),
+                dynamic_groups: dynamic_groups(&properties),
             }],
             born: 0,
+            new_group_asked: None,
             had_several_sources: false,
             asks: Vec::new(),
             declined: Declined::default(),
@@ -996,7 +1003,8 @@ enum TrackPhase {
 #[derive(Debug)]
 enum TrackEntry {
     Pending(PendingTrack),
-    Live(Track),
+    // Boxed: a track with a source is several times the size of one without.
+    Live(Box<Track>),
 }
 
 /// Every track the relay knows, by name.
@@ -1105,6 +1113,7 @@ impl Tracks {
                 draining: false,
                 wait: None,
                 default_priority: default_publisher_priority(&properties),
+                dynamic_groups: dynamic_groups(&properties),
             };
             let (session, track_alias) = new.session_and_alias();
             // The same session under the same alias: the alias is the new
@@ -1168,7 +1177,8 @@ impl Tracks {
             // Not a track with a source: that was the case above.
             Some(TrackEntry::Live(_)) | None => Vec::new(),
         };
-        self.0.insert(name.clone(), TrackEntry::Live(track));
+        self.0
+            .insert(name.clone(), TrackEntry::Live(Box::new(track)));
         Ok(Added {
             waiters,
             replaced: None,
@@ -1177,7 +1187,8 @@ impl Tracks {
 
     /// Puts back a track that [`Self::take_live`] took out.
     fn put_live(&mut self, name: &FullTrackName, track: Track) {
-        self.0.insert(name.clone(), TrackEntry::Live(track));
+        self.0
+            .insert(name.clone(), TrackEntry::Live(Box::new(track)));
     }
 
     /// Puts a track without a source under a name that has no entry.
@@ -1190,7 +1201,7 @@ impl Tracks {
     fn take_live(&mut self, name: &FullTrackName) -> Option<Track> {
         self.live(name)?;
         match self.0.remove(name)? {
-            TrackEntry::Live(track) => Some(track),
+            TrackEntry::Live(track) => Some(*track),
             TrackEntry::Pending(_) => None,
         }
     }
@@ -1270,7 +1281,7 @@ impl Tracks {
 
     fn all_live(&self) -> impl Iterator<Item = (&FullTrackName, &Track)> {
         self.0.iter().filter_map(|(name, entry)| match entry {
-            TrackEntry::Live(track) => Some((name, track)),
+            TrackEntry::Live(track) => Some((name, &**track)),
             TrackEntry::Pending(_) => None,
         })
     }
@@ -2170,7 +2181,9 @@ impl Relay {
             // each publisher that has published the subscription's namespace
             // or prefix thereof."
             None => {
-                let asked = self.ask_the_publishers(track_name, None, Some(session), actions);
+                let new_group = routing::Delivery::of(&subscribe.parameters).new_group_request;
+                let asked =
+                    self.ask_the_publishers(track_name, None, Some((session, new_group)), actions);
                 // WHY not held where a publisher is there and could not be
                 // asked: one has appeared, and the code says why it is not
                 // asked.
@@ -2612,6 +2625,7 @@ impl Relay {
             PeerRequestEvent::SubscriptionUpdated {
                 response,
                 subgroup_delivery_timeout,
+                new_group_request,
             } => {
                 // §10.9: "MUST respond with exactly one REQUEST_OK or
                 // REQUEST_ERROR".
@@ -2622,8 +2636,11 @@ impl Relay {
                 });
                 // §10.9: a parameter that is not in the update "remains
                 // unchanged".
-                if let (Some(milliseconds), Some(track)) = (subgroup_delivery_timeout, track) {
-                    self.set_delivery_timeout(&track, session, milliseconds, actions);
+                if let (Some(milliseconds), Some(track)) = (subgroup_delivery_timeout, &track) {
+                    self.set_delivery_timeout(track, session, milliseconds, actions);
+                }
+                if let (Some(group), Some(track)) = (new_group_request, &track) {
+                    self.ask_for_a_new_group(track, group, actions);
                 }
             }
             // For a FETCH that has its FETCH_OK. Nothing of it changes.
@@ -2633,7 +2650,87 @@ impl Relay {
                 message: response,
             }),
             PeerRequestEvent::UpdateHeld => self.on_fetch_update_held(session, stream, actions),
-            PeerRequestEvent::UpdateAlreadyRefused | PeerRequestEvent::LateMessage => {}
+            // The first two: the answer to a NEW_GROUP_REQUEST the relay
+            // passed on. Nothing hangs on it: a publisher that refused ends
+            // the subscription with PUBLISH_DONE next (§10.9.1), as it ends
+            // any other.
+            PeerRequestEvent::OwnUpdateAccepted { .. }
+            | PeerRequestEvent::OwnUpdateFailed(_)
+            | PeerRequestEvent::UpdateAlreadyRefused
+            | PeerRequestEvent::LateMessage => {}
+        }
+    }
+
+    /// A subscriber sent a `NEW_GROUP_REQUEST` for a track with a source,
+    /// in its SUBSCRIBE or in a `REQUEST_UPDATE` (§10.2.13): "A relay that
+    /// receives a `NEW_GROUP_REQUEST` for an Established subscription with a
+    /// value of 0 or a value larger than the Largest Group MUST send a
+    /// `REQUEST_UPDATE` including the `NEW_GROUP_REQUEST` to the publisher
+    /// unless: 1. The Track does not support dynamic Groups 2. There is
+    /// already an outstanding `NEW_GROUP_REQUEST` from this Relay with a
+    /// greater or equal value".
+    ///
+    /// WHY to every source that has `DYNAMIC_GROUPS`, where a track has
+    /// several: the draft speaks of one publisher, and each of them is an
+    /// Original Publisher's way to the relay.
+    ///
+    /// FIXME: send it on the relay's own SUBSCRIBE as well. It goes to the
+    /// sources that came with a PUBLISH; a source the relay subscribed to
+    /// is not asked, and has what the relay's SUBSCRIBE carried
+    /// (`routing::ask`).
+    fn ask_for_a_new_group(
+        &mut self,
+        track_name: &FullTrackName,
+        group: u64,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(track) = self.tracks.live(track_name) else {
+            return;
+        };
+        // "If a relay receives a NEW_GROUP_REQUEST with a non-zero value
+        // less than or equal to the Largest Group, it does not send a
+        // NEW_GROUP_REQUEST upstream."
+        let known_already =
+            group != 0 && track.largest.is_some_and(|largest| group <= largest.group);
+        let asked_already = track.new_group_asked.is_some_and(|asked| asked >= group);
+        if known_already || asked_already {
+            return;
+        }
+        let publishes: Vec<(SessionKey, StreamKey)> = track
+            .sources()
+            .filter(|source| source.dynamic_groups && !source.draining)
+            .filter_map(|source| match source.from {
+                TrackSource::Publisher {
+                    session, stream, ..
+                } => Some((session, stream)),
+                TrackSource::Subscription { .. } => None,
+            })
+            .collect();
+        let mut sent = false;
+        for (session, stream) in publishes {
+            let Some(state) = self.sessions.get_mut(&session) else {
+                continue;
+            };
+            let Some(RequestSlot::Publish { request, .. }) = state.requests.get(stream) else {
+                continue;
+            };
+            // An error: 16 updates of the relay wait for the publisher's
+            // answer. One more would not be read either.
+            let Ok(message) = state
+                .moqt
+                .update_published(*request, vec![Parameter::NewGroupRequest(group)])
+            else {
+                continue;
+            };
+            actions.push(Action::SendRequest {
+                session,
+                stream,
+                message,
+            });
+            sent = true;
+        }
+        if sent && let Some(track) = self.tracks.live_mut(track_name) {
+            track.new_group_asked = Some(group);
         }
     }
 
@@ -3016,6 +3113,12 @@ impl Relay {
             return;
         }
         if track.largest.is_none_or(|largest| location > largest) {
+            if track
+                .largest
+                .is_none_or(|largest| location.group > largest.group)
+            {
+                track.new_group_asked = None;
+            }
             track.largest = Some(location);
         }
 
@@ -3992,6 +4095,20 @@ fn default_publisher_priority(properties: &[KeyValuePair]) -> u8 {
             Value::Bytes(_) => None,
         })
         .unwrap_or(DEFAULT_PUBLISHER_PRIORITY)
+}
+
+const DYNAMIC_GROUPS_PROPERTY: u64 = 0x30;
+
+/// Whether the Track Properties of a PUBLISH or a `SUBSCRIBE_OK` say that
+/// the Original Publisher starts a new Group on request (§12.6: "The
+/// allowed values are 0 or 1 ... If omitted, the value is 0").
+///
+/// FIXME: close the session for a value above 1 (§12.6, MUST). It counts
+/// as 0 here and is passed on as it came.
+fn dynamic_groups(properties: &[KeyValuePair]) -> bool {
+    properties.iter().any(|property| {
+        property.ty() == DYNAMIC_GROUPS_PROPERTY && *property.value() == Value::Varint(1)
+    })
 }
 
 /// The `LARGEST_OBJECT` among the parameters of a PUBLISH or a

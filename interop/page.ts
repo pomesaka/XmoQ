@@ -776,7 +776,32 @@ const connectAnew = (
 		],
 	});
 
+/** What the handler of `publishDynamicTrack` was called with. */
+const newGroupsAsked: string[] = [];
+
 window.xmoqOwn = {
+	publishDynamicTrack: withPlainErrors(
+		async (namespace: string, trackName: string) => {
+			const moq = connected();
+			const trackNamespace = namespaceFromPath(namespace);
+			await moq.publishNamespace(trackNamespace);
+			published = await moq.publish({
+				trackNamespace,
+				trackName: utf8.encode(trackName),
+				trackAlias: PUBLISH_TRACK_ALIAS,
+				parameters: { forward: true },
+				// DYNAMIC_GROUPS (transport §12.6).
+				trackProperties: [{ type: 0x30n, value: 1n }],
+			});
+			published.onNewGroupRequest((group) => {
+				newGroupsAsked.push(group.toString());
+				console.log(`new group requested: ${group}`);
+			});
+		},
+	),
+
+	newGroupRequests: () => Promise.resolve([...newGroupsAsked]),
+
 	keepVideoPublished: withPlainErrors(
 		async (
 			relayUrl: string,

@@ -16,7 +16,7 @@ Served as well: a Standalone FETCH of the peer, which a relay sends a publisher 
 
 An AUTHORIZATION TOKEN (§10.2.2) is given to a connection once, `authorizationToken` of `connect`, as the bytes of the Token structure: the connection puts it into every PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE and FETCH it sends, before the tokens a request has of its own. It goes into SETUP as well, as the AUTHORIZATION TOKEN Setup Option (§10.3.1.4, Option Type 0x03), so that a relay can turn a connection down before any request. It is carried and not read, and no alias is registered. Without the option nothing is added.
 
-Not implemented: the server role, the other requests opened by the peer (refused), acting on a REQUEST_UPDATE (one for a subscription this endpoint serves is answered with REQUEST_OK when it carries nothing but delivery timeouts, and refused otherwise), GOAWAY, serving a Joining FETCH, namespace subscription, datagrams, the content of authorization tokens and delivery timeouts. [The experiment record](../../docs/experiments/2026-10-10-own-ts-client-vs-moqtail.md) has the full list and what the runs exercised.
+Not implemented: the server role, the other requests opened by the peer (refused), acting on a REQUEST_UPDATE (one for a subscription this endpoint serves is answered with REQUEST_OK when it carries nothing but delivery timeouts and NEW_GROUP_REQUEST, which is handed to the application, and refused otherwise), GOAWAY, serving a Joining FETCH, namespace subscription, datagrams, the content of authorization tokens and delivery timeouts. [The experiment record](../../docs/experiments/2026-10-10-own-ts-client-vs-moqtail.md) has the full list and what the runs exercised.
 
 ## Entries
 
@@ -24,6 +24,8 @@ Not implemented: the server role, the other requests opened by the peer (refused
 |---|---|
 | `@xmoq/moqt` | `connect`, and the types and errors of a connection, a published Track and a subscription. `createSubgroupStreamDecoder`, the decoder of one subgroup stream as bytes, which a connection uses itself: **exported for tests outside this package that read a captured stream** (`@xmoq/media` reads the one of `moqlivemock` in `fixtures/moqt-18/`), not as a second way to receive Objects |
 | `@xmoq/moqt/diagnostics` | The types of the logging hooks in `ConnectOptions.diagnostics`. They show the session's internal events, which can change with the implementation |
+
+`PublishedTrack.onNewGroupRequest(handler)` names what is called when the subscriber of a track this endpoint publishes asks for a new Group with a REQUEST_UPDATE (§10.2.13). The request is answered with REQUEST_OK first; whether a Group begins is the application's. A publisher that wants such requests sets the Track Property DYNAMIC_GROUPS (`{ type: 0x30n, value: 1n }`) on its PUBLISH.
 
 `Subscription.update(parameters)` sends a REQUEST_UPDATE for a subscription this endpoint made with SUBSCRIBE (§10.9) and resolves with the parameters of the REQUEST_OK; a parameter that is left out stays as it was. A publisher that refuses ends the subscription (§10.9.1): the call rejects with `RequestFailedError`, and `ended` has the PUBLISH_DONE. At most 16 updates of a subscription wait for their answer (provisional), and one that gets none within `answerTimeoutMs` rejects while the subscription goes on. Not for a FETCH, a PUBLISH_NAMESPACE, or a subscription a PUBLISH of the peer made.
 

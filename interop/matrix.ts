@@ -44,7 +44,8 @@ interface Pairing {
 		| "watch-rust.ts"
 		| "no-answer.ts"
 		| "quiet-peer.ts"
-		| "rendezvous.ts";
+		| "rendezvous.ts"
+		| "new-group.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -1262,6 +1263,17 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--case", "not-asked", "--subscriber", "own-rust"],
 			relay: "own",
 		},
+		// §10.2.13: the relay passes a subscriber's NEW_GROUP_REQUEST on to
+		// the publisher of a track with DYNAMIC_GROUPS, on the stream of its
+		// PUBLISH.
+		...["own-rust", "own-browser"].map(
+			(publisher): RelayPairing => ({
+				name: `own relay: new group: own-rust subscribes with NEW_GROUP_REQUEST, and ${publisher}, which published the track with DYNAMIC_GROUPS, is asked with a REQUEST_UPDATE, answers it and goes on`,
+				script: "new-group.ts",
+				args: ["--publisher", publisher],
+				relay: "own",
+			}),
+		),
 		{
 			name: "own relay: rendezvous: own-browser subscribes while the relay waits for the late streams of a track that ended, is held, and is accepted when own-rust publishes anew",
 			script: "rendezvous.ts",

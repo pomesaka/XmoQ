@@ -220,6 +220,9 @@ pub enum RequestEvent {
         /// The `SUBGROUP_DELIVERY_TIMEOUT` of the update in milliseconds,
         /// 0 for no timeout; `None` when the update had none.
         subgroup_delivery_timeout: Option<u64>,
+        /// The `NEW_GROUP_REQUEST` of the update (§10.2.13); `None` when
+        /// the update had none.
+        new_group_request: Option<u64>,
     },
     /// `REQUEST_UPDATE` from the subscriber of a track this endpoint publishes
     /// that carries any other parameter. The caller sends `response`, a
@@ -614,12 +617,11 @@ impl Session {
                 if *state == PublishState::Established =>
             {
                 self.peer.take_id(update.request_id)?;
-                if let Some(peer::AppliedUpdate(subgroup_delivery_timeout)) =
-                    peer::only_the_subgroup_timeout(&update.parameters)
-                {
+                if let Some(applied) = peer::only_the_subgroup_timeout(&update.parameters) {
                     return Ok(RequestEvent::SubscriptionUpdated {
                         response: ControlMessage::RequestOk(RequestOk::default()),
-                        subgroup_delivery_timeout,
+                        subgroup_delivery_timeout: applied.subgroup_delivery_timeout,
+                        new_group_request: applied.new_group_request,
                     });
                 }
                 *state = PublishState::UpdateRefused;
@@ -1892,10 +1894,21 @@ mod tests {
         // (the parameters of the update; the timeout that is reported, or
         // `Err` where the update is refused).
         let cases = [
-            (vec![], Ok(None)),
-            (vec![Parameter::SubgroupDeliveryTimeout(250)], Ok(Some(250))),
-            (vec![Parameter::SubgroupDeliveryTimeout(0)], Ok(Some(0))),
-            (vec![Parameter::ObjectDeliveryTimeout(250)], Ok(None)),
+            (vec![], Ok((None, None))),
+            (
+                vec![Parameter::SubgroupDeliveryTimeout(250)],
+                Ok((Some(250), None)),
+            ),
+            (
+                vec![Parameter::SubgroupDeliveryTimeout(0)],
+                Ok((Some(0), None)),
+            ),
+            (
+                vec![Parameter::ObjectDeliveryTimeout(250)],
+                Ok((None, None)),
+            ),
+            (vec![Parameter::NewGroupRequest(0)], Ok((None, Some(0)))),
+            (vec![Parameter::NewGroupRequest(12)], Ok((None, Some(12)))),
             (
                 vec![
                     Parameter::SubgroupDeliveryTimeout(250),
@@ -1921,7 +1934,8 @@ mod tests {
                 RequestEvent::SubscriptionUpdated {
                     response: ControlMessage::RequestOk(_),
                     subgroup_delivery_timeout,
-                } => Ok(subgroup_delivery_timeout),
+                    new_group_request,
+                } => Ok((subgroup_delivery_timeout, new_group_request)),
                 RequestEvent::UpdateRefused { .. } => Err(()),
                 other => panic!("{parameters:?}: {other:?}"),
             };

@@ -494,6 +494,58 @@ fn the_publishers_answer_is_the_answer_to_everyone_who_waited() {
     }
 }
 
+/// §10.2.13: "A relay that receives a `NEW_GROUP_REQUEST` for a Track
+/// without an Established subscription MUST include the `NEW_GROUP_REQUEST`
+/// when subscribing upstream."
+#[test]
+fn the_relays_subscribe_carries_the_new_group_request_of_the_subscriber_it_is_sent_for() {
+    // (the parameters of the subscriber's SUBSCRIBE; those of the relay's)
+    let cases = [
+        (vec![], vec![]),
+        (
+            vec![Parameter::NewGroupRequest(0)],
+            vec![Parameter::NewGroupRequest(0)],
+        ),
+        (
+            vec![Parameter::NewGroupRequest(9)],
+            vec![Parameter::NewGroupRequest(9)],
+        ),
+        // Nothing else of it is copied.
+        (
+            vec![
+                Parameter::SubscriberPriority(3),
+                Parameter::NewGroupRequest(9),
+            ],
+            vec![Parameter::NewGroupRequest(9)],
+        ),
+    ];
+    for (parameters, expected) in cases {
+        let case = format!("{parameters:?}");
+        let mut relay = relay();
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first: ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: track_in(&[b"xmoq", b"a"]),
+                parameters,
+            }),
+        });
+        let sent: Vec<&Vec<Parameter>> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::OpenRequest {
+                    message: ControlMessage::Subscribe(subscribe),
+                    ..
+                } => Some(&subscribe.parameters),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [&expected], "{case}");
+    }
+}
+
 #[test]
 fn objects_of_a_routed_track_reach_the_subscriber() {
     let mut relay = relay_with_routed_track();

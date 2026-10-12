@@ -117,6 +117,8 @@ struct Args {
     /// `--answer-wait-ms`, `--setup-wait-ms`, `--open-wait-ms` and
     /// `--rendezvous-timeout-ms`.
     waits: Waits,
+    /// `--new-group-request`, `--dynamic-groups`.
+    new_groups: NewGroups,
     /// `--update-subgroup-timeout-ms`: `--mode subscribe` sends a
     /// `REQUEST_UPDATE` with this `SUBGROUP_DELIVERY_TIMEOUT` once its
     /// SUBSCRIBE is accepted (§10.9), and prints `UPDATE_ACCEPTED` or
@@ -663,6 +665,60 @@ impl Waits {
     }
 }
 
+/// What this client says and asks of new Groups on request (§10.2.13,
+/// §12.6).
+#[derive(Default)]
+struct NewGroups {
+    /// `--new-group-request <n>`: the `NEW_GROUP_REQUEST` of the SUBSCRIBEs
+    /// this client sends. Without the flag the parameter is left out.
+    ask: Option<u64>,
+    /// `--dynamic-groups yes`: the PUBLISH of this client has the Track
+    /// Property `DYNAMIC_GROUPS` with the value 1. WHY the client then only
+    /// prints the requests it gets (`NEW_GROUP_REQUESTED`) and begins no
+    /// Group for them: it publishes what its driver tells it to, and a
+    /// driver reads the line.
+    dynamic: bool,
+}
+
+impl NewGroups {
+    /// Takes the flag where it is one of these.
+    fn read(&mut self, flag: &str, value: &str) -> Result<bool> {
+        match flag {
+            "--new-group-request" => self.ask = Some(value.parse().context("--new-group-request")?),
+            "--dynamic-groups" => self.dynamic = value == "yes",
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// The Track Properties of a PUBLISH of this client.
+    fn track_properties(&self) -> Result<Vec<KeyValuePair>> {
+        if !self.dynamic {
+            return Ok(Vec::new());
+        }
+        // DYNAMIC_GROUPS (0x30) = 1.
+        Ok(vec![KeyValuePair::varint(0x30, 1)?])
+    }
+}
+
+/// Answers an update of a subscription this client publishes that its
+/// session applied, and says what it asked for.
+async fn answer_update(publish_stream: &mut io::RequestStream, update: RequestEvent) -> Result<()> {
+    let RequestEvent::SubscriptionUpdated {
+        response,
+        new_group_request,
+        ..
+    } = update
+    else {
+        bail!("not an update that was applied: {update:?}");
+    };
+    publish_stream.send(&response).await?;
+    if let Some(group) = new_group_request {
+        report::new_group_requested(group);
+    }
+    Ok(())
+}
+
 /// The value of a flag that takes milliseconds.
 fn millis(flag: &str, value: &str) -> Result<u64> {
     value.parse().with_context(|| flag.to_string())
@@ -674,7 +730,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut url, mut cert_sha256) = (None, None);
     let (mut namespace, mut track_name) = (None, None);
     let (mut timeout_secs, mut publish_delay_ms, mut update_ms) = (20, 0, None);
-    let mut waits = Waits::default();
+    let (mut waits, mut new_groups) = (Waits::default(), NewGroups::default());
     let (mut subgroup_id, mut first_group) = (SubgroupId::Zero, 0);
     let mut publisher_priority = Some(0);
     let mut object_properties = Vec::new();
@@ -731,7 +787,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                 if !(fetch.read(other, &value)?
                     || video.read(other, &value)?
                     || auth.read(other, &value)?
-                    || waits.read(other, &value)?)
+                    || waits.read(other, &value)?
+                    || new_groups.read(other, &value)?)
                 {
                     bail!("unknown flag {other}");
                 }
@@ -752,6 +809,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         catalog_video,
         timeout_secs,
         waits,
+        new_groups,
         update_subgroup_timeout_ms: update_ms,
         publish_delay: Duration::from_millis(publish_delay_ms),
         subgroup_id,
@@ -1010,6 +1068,7 @@ impl Client<'_> {
             Some(self.args.waits.rendezvous)
                 .filter(|wait| *wait > 0)
                 .map(Parameter::RendezvousTimeout),
+            self.args.new_groups.ask.map(Parameter::NewGroupRequest),
         ];
         let parameters = self
             .args
@@ -1625,7 +1684,7 @@ impl Client<'_> {
             self.args.full_track_name()?,
             PUBLISH_TRACK_ALIAS,
             self.args.auth.with(vec![Parameter::Forward(true)]),
-            vec![],
+            self.args.new_groups.track_properties()?,
         )?;
         let (publish_stream, event) = self
             .request_attending(
@@ -1843,8 +1902,8 @@ impl Client<'_> {
                             // §10.9: the REQUEST_OK. WHY nothing else: this
                             // client acts on no delivery timeout, that of a
                             // PUBLISH_OK or a SUBSCRIBE included.
-                            RequestEvent::SubscriptionUpdated { response, .. } => {
-                                publish_stream.send(&response).await?;
+                            update @ RequestEvent::SubscriptionUpdated { .. } => {
+                                answer_update(&mut publish_stream, update).await?;
                             }
                             other => bail!("unexpected message on the publish stream: {other:?}"),
                         }

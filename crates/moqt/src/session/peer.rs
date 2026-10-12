@@ -3,13 +3,16 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::fetch::ends_before;
-use super::{Request, RequestId, Role, Session, check_own_parameters, first_request_id};
+use super::{
+    MAX_UNANSWERED_UPDATES, Request, RequestEvent, RequestId, Role, Session, check_own_parameters,
+    first_request_id,
+};
 use crate::aliases::SubscribedAlias;
 use crate::kvp::KeyValuePair;
 use crate::message::{
     ControlMessage, Fetch, FetchOk, FetchRange, Publish, PublishDone, PublishNamespace,
-    ReasonPhrase, RequestError, RequestOk, Subscribe, SubscribeOk, publish_done_status,
-    request_error_code, retry_interval,
+    ReasonPhrase, RequestError, RequestOk, RequestUpdate, Subscribe, SubscribeOk,
+    publish_done_status, request_error_code, retry_interval,
 };
 use crate::name::{FullTrackName, Location};
 use crate::params::{self, MessageKind, Parameter};
@@ -118,21 +121,38 @@ pub enum AfterRefusal {
 /// SUBSCRIBE that sets it is accepted the same way, and a parameter that
 /// is taken at first and ends the subscription when it is sent again
 /// would be the worse of the two.
+///
+/// WHY `NEW_GROUP_REQUEST` is let by as well (§10.2.13): it changes nothing
+/// of the subscription, so a `REQUEST_OK` for it promises nothing that then
+/// does not happen ("The Original Publisher MAY delay the
+/// `NEW_GROUP_REQUEST`", and one that "does not support dynamic Groups ...
+/// ignores the parameter"). The session does not know whether its track has
+/// the `DYNAMIC_GROUPS` property; the caller, which set it, decides what
+/// the value is for.
 pub(super) fn only_the_subgroup_timeout(parameters: &[Parameter]) -> Option<AppliedUpdate> {
-    let mut subgroup = None;
+    let mut applied = AppliedUpdate {
+        subgroup_delivery_timeout: None,
+        new_group_request: None,
+    };
     for parameter in parameters {
         match parameter {
-            Parameter::SubgroupDeliveryTimeout(milliseconds) => subgroup = Some(*milliseconds),
+            Parameter::SubgroupDeliveryTimeout(milliseconds) => {
+                applied.subgroup_delivery_timeout = Some(*milliseconds);
+            }
+            Parameter::NewGroupRequest(group) => applied.new_group_request = Some(*group),
             Parameter::ObjectDeliveryTimeout(_) => {}
             _ => return None,
         }
     }
-    Some(AppliedUpdate(subgroup))
+    Some(applied)
 }
 
-/// The `SUBGROUP_DELIVERY_TIMEOUT` of an update that is applied, if it has
-/// one.
-pub(super) struct AppliedUpdate(pub(super) Option<u64>);
+/// What an update that is applied carries of the two parameters a caller
+/// acts on.
+pub(super) struct AppliedUpdate {
+    pub(super) subgroup_delivery_timeout: Option<u64>,
+    pub(super) new_group_request: Option<u64>,
+}
 
 /// What a later message on a request stream of the peer means.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +183,10 @@ pub enum PeerRequestEvent {
         /// (§10.2.3), 0 for no timeout (§8); `None` when the update had
         /// none, and the one before stands (§10.9).
         subgroup_delivery_timeout: Option<u64>,
+        /// The `NEW_GROUP_REQUEST` of the update (§10.2.13): the largest
+        /// Group ID the subscriber knows plus 1, 0 where it knows none;
+        /// `None` when the update had none.
+        new_group_request: Option<u64>,
     },
     /// `REQUEST_UPDATE` that this crate does not apply: one that carries any
     /// other parameter, or one for a request that is not an Established
@@ -175,6 +199,17 @@ pub enum PeerRequestEvent {
         /// What §10.9.1 requires next.
         then: AfterRefusal,
     },
+    /// The publisher accepted a `REQUEST_UPDATE` this endpoint sent for a
+    /// subscription its PUBLISH made ([`Session::update_published`]), with
+    /// the parameters of its `REQUEST_OK`.
+    OwnUpdateAccepted {
+        /// `EXPIRES` and `LARGEST_OBJECT`, where the publisher sent them.
+        parameters: Vec<Parameter>,
+    },
+    /// The publisher refused such a `REQUEST_UPDATE`. The subscription is
+    /// still there: its `PUBLISH_DONE` with `UPDATE_FAILED` follows
+    /// (§10.9.1) and ends it as any other.
+    OwnUpdateFailed(RequestError),
     /// Another `REQUEST_UPDATE` after one was refused. Nothing is sent (§10.9.1).
     UpdateAlreadyRefused,
     /// `REQUEST_UPDATE` for a FETCH that was answered. The caller sends
@@ -230,6 +265,9 @@ enum PeerRequestState {
         full_track_name: FullTrackName,
         track_alias: u64,
         established: bool,
+        /// `REQUEST_UPDATE`s this endpoint sent for it that have no answer
+        /// yet ([`Session::update_published`]).
+        updates: u32,
     },
     PublishNamespace {
         established: bool,
@@ -549,6 +587,7 @@ impl Session {
                     full_track_name: message.full_track_name.clone(),
                     track_alias: message.track_alias,
                     established: false,
+                    updates: 0,
                 };
                 (state, PeerRequest::Publish(message))
             }
@@ -820,6 +859,50 @@ impl Session {
         }))
     }
 
+    /// Asks the publisher to change parameters of an Established
+    /// subscription its PUBLISH made (§10.9: "A subscriber can also send
+    /// `REQUEST_UPDATE` to modify parameters of a subscription established
+    /// with PUBLISH."). Returns the
+    /// `REQUEST_UPDATE` to send on the stream of that PUBLISH. The answer
+    /// comes as [`PeerRequestEvent::OwnUpdateAccepted`] or
+    /// [`PeerRequestEvent::OwnUpdateFailed`], in the order the updates were
+    /// sent.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a request that is not a PUBLISH this endpoint accepted,
+    /// when a parameter may not appear in `REQUEST_UPDATE`, when
+    /// [`MAX_UNANSWERED_UPDATES`] updates wait for their answer, and when
+    /// the Request IDs are used up (§10.1: an update consumes one).
+    pub fn update_published(
+        &mut self,
+        request: PeerRequestId,
+        parameters: Vec<Parameter>,
+    ) -> Result<ControlMessage, UsageError> {
+        check_own_parameters(&parameters, MessageKind::RequestUpdate)?;
+        let request_id = self.next_request_id;
+        let Some(PeerRequestState::Publish {
+            established: true,
+            updates,
+            ..
+        }) = self.peer_request_mut(request)?
+        else {
+            return Err(UsageError("not an established subscription of a PUBLISH"));
+        };
+        if *updates >= MAX_UNANSWERED_UPDATES {
+            return Err(UsageError("too many updates wait for their answer"));
+        }
+        let next = request_id
+            .checked_add(2)
+            .ok_or(UsageError("request ids are exhausted"))?;
+        *updates += 1;
+        self.next_request_id = next;
+        Ok(ControlMessage::RequestUpdate(RequestUpdate {
+            request_id,
+            parameters,
+        }))
+    }
+
     /// Feeds a message read from a request stream of the peer, after the first.
     ///
     /// # Errors
@@ -865,6 +948,31 @@ impl Session {
             }
             ControlMessage::RequestUpdate(update) => {
                 Ok(self.answer_update(request.id, &update.parameters))
+            }
+            // §10.9: "The receiver of a REQUEST_UPDATE MUST respond with
+            // exactly one REQUEST_OK or REQUEST_ERROR", on the stream of
+            // the PUBLISH the update was sent on.
+            answer @ (ControlMessage::RequestOk(_) | ControlMessage::RequestError(_)) => {
+                let Some(PeerRequestState::Publish {
+                    established: true,
+                    updates,
+                    ..
+                }) = self.peer.live.get_mut(&request.id)
+                else {
+                    return Err(not_allowed.into());
+                };
+                if *updates == 0 {
+                    return Err(not_allowed.into());
+                }
+                match super::update_answered(updates, answer)? {
+                    RequestEvent::UpdateFailed(error) => {
+                        Ok(PeerRequestEvent::OwnUpdateFailed(error))
+                    }
+                    RequestEvent::UpdateAccepted { parameters } => {
+                        Ok(PeerRequestEvent::OwnUpdateAccepted { parameters })
+                    }
+                    _ => Err(not_allowed.into()),
+                }
             }
             ControlMessage::PublishDone(done) => {
                 let Some(PeerRequestState::Publish {
@@ -1047,12 +1155,11 @@ impl Session {
                 // would have the subscriber wait for Objects that do not
                 // come, or pay for ones it asked to stop.
                 SubscribePhase::Established { track_alias } => {
-                    if let Some(AppliedUpdate(subgroup_delivery_timeout)) =
-                        only_the_subgroup_timeout(parameters)
-                    {
+                    if let Some(applied) = only_the_subgroup_timeout(parameters) {
                         PeerRequestEvent::SubscriptionUpdated {
                             response: ControlMessage::RequestOk(RequestOk::default()),
-                            subgroup_delivery_timeout,
+                            subgroup_delivery_timeout: applied.subgroup_delivery_timeout,
+                            new_group_request: applied.new_group_request,
                         }
                     } else {
                         *phase = SubscribePhase::UpdateRefused { track_alias };
@@ -2864,6 +2971,60 @@ mod tests {
     }
 
     #[test]
+    fn a_subscriber_of_a_publish_updates_it_and_reads_the_answers_in_order() {
+        let update = |request_id, group| {
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id,
+                parameters: vec![Parameter::NewGroupRequest(group)],
+            })
+        };
+        let ask = |session: &mut Session, request, group| {
+            session.update_published(request, vec![Parameter::NewGroupRequest(group)])
+        };
+        let ok = || ControlMessage::RequestOk(RequestOk::default());
+        let mut session = server();
+        let request = opened(&mut session, publish(0, b"a", 7));
+        // Not before the PUBLISH is accepted.
+        assert!(ask(&mut session, request, 0).is_err());
+        session.accept_publish(request, vec![]).unwrap();
+        // An answer nobody waits for is no message of this stream.
+        assert!(session.on_peer_request_message(request, ok()).is_err());
+
+        let mut session = server();
+        let request = opened(&mut session, publish(0, b"a", 7));
+        session.accept_publish(request, vec![]).unwrap();
+        // The server's Request IDs are odd, and each update uses one (§10.1).
+        assert_eq!(ask(&mut session, request, 0), Ok(update(1, 0)));
+        assert_eq!(ask(&mut session, request, 5), Ok(update(3, 5)));
+        assert_eq!(
+            session.on_peer_request_message(request, ok()),
+            Ok(PeerRequestEvent::OwnUpdateAccepted { parameters: vec![] })
+        );
+        // A refusal answers all that wait (§10.9.1), and PUBLISH_DONE ends
+        // the subscription as any other.
+        let refusal = RequestError {
+            error_code: 0x3,
+            retry_interval: 0,
+            error_reason: ReasonPhrase::default(),
+            redirect: None,
+        };
+        assert_eq!(
+            session.on_peer_request_message(request, ControlMessage::RequestError(refusal.clone())),
+            Ok(PeerRequestEvent::OwnUpdateFailed(refusal))
+        );
+        assert!(session.on_peer_request_message(request, ok()).is_err());
+
+        // 16 may wait for their answer, and the 17th is not made.
+        let mut session = server();
+        let request = opened(&mut session, publish(0, b"a", 7));
+        session.accept_publish(request, vec![]).unwrap();
+        for sent in 0..16 {
+            assert!(ask(&mut session, request, 0).is_ok(), "{sent}");
+        }
+        assert!(ask(&mut session, request, 0).is_err());
+    }
+
+    #[test]
     fn an_update_of_an_established_subscription_is_applied_when_it_only_sets_the_subgroup_timeout()
     {
         let with = |request_id, parameters| {
@@ -2872,25 +3033,47 @@ mod tests {
                 parameters,
             })
         };
-        // (the parameters of the update; the timeout that is reported, or
-        // `Err` where the update is refused).
+        // (the parameters of the update; the timeout and the
+        // NEW_GROUP_REQUEST that are reported, or `Err` where the update is
+        // refused).
         let cases = [
-            (vec![], Ok(None)),
-            (vec![Parameter::SubgroupDeliveryTimeout(250)], Ok(Some(250))),
+            (vec![], Ok((None, None))),
+            (
+                vec![Parameter::SubgroupDeliveryTimeout(250)],
+                Ok((Some(250), None)),
+            ),
             // §8: 0 is "no timeout", which is a change like another.
-            (vec![Parameter::SubgroupDeliveryTimeout(0)], Ok(Some(0))),
+            (
+                vec![Parameter::SubgroupDeliveryTimeout(0)],
+                Ok((Some(0), None)),
+            ),
             // Taken as a SUBSCRIBE that sets it is; nothing acts on it.
-            (vec![Parameter::ObjectDeliveryTimeout(250)], Ok(None)),
+            (
+                vec![Parameter::ObjectDeliveryTimeout(250)],
+                Ok((None, None)),
+            ),
             (
                 vec![
                     Parameter::ObjectDeliveryTimeout(250),
                     Parameter::SubgroupDeliveryTimeout(120),
                 ],
-                Ok(Some(120)),
+                Ok((Some(120), None)),
             ),
             (vec![Parameter::Forward(false)], Err(())),
             (vec![Parameter::SubscriberPriority(3)], Err(())),
-            (vec![Parameter::NewGroupRequest(0)], Err(())),
+            // §10.2.13: 0 is "no Group information", a request like another.
+            (vec![Parameter::NewGroupRequest(0)], Ok((None, Some(0)))),
+            (
+                vec![
+                    Parameter::NewGroupRequest(7),
+                    Parameter::SubgroupDeliveryTimeout(250),
+                ],
+                Ok((Some(250), Some(7))),
+            ),
+            (
+                vec![Parameter::NewGroupRequest(7), Parameter::Forward(true)],
+                Err(()),
+            ),
             (
                 vec![
                     Parameter::SubgroupDeliveryTimeout(250),
@@ -2910,7 +3093,8 @@ mod tests {
                 PeerRequestEvent::SubscriptionUpdated {
                     response: ControlMessage::RequestOk(_),
                     subgroup_delivery_timeout,
-                } => Ok(subgroup_delivery_timeout),
+                    new_group_request,
+                } => Ok((subgroup_delivery_timeout, new_group_request)),
                 PeerRequestEvent::UpdateRefused {
                     then: AfterRefusal::PublishDone,
                     ..

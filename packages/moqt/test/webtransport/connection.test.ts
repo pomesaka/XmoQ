@@ -1376,3 +1376,21 @@ describe("connectOver", () => {
 		expect(objects).toBe(5);
 	});
 });
+
+test("a NEW_GROUP_REQUEST of the subscriber reaches the handler of the published track, the one before a handler was named too", async () => {
+	const { request, track } = await published();
+	// REQUEST_UPDATE with Request ID 1 and NEW_GROUP_REQUEST (0x32) = 7.
+	await request.reply.write(hex("02 00 04 01 01 32 07"));
+	expect(await sentHex(request.sent)).toBe("07 00 01 00");
+	// The event follows the write of the answer.
+	const afterTheWrite = () => new Promise((resolve) => setTimeout(resolve, 0));
+	await afterTheWrite();
+	const seen: bigint[] = [];
+	track.onNewGroupRequest((group) => seen.push(group));
+	expect(seen).toEqual([7n]);
+	// Request ID 3, and 9.
+	await request.reply.write(hex("02 00 04 03 01 32 09"));
+	expect(await sentHex(request.sent)).toBe("07 00 01 00");
+	await afterTheWrite();
+	expect(seen).toEqual([7n, 9n]);
+});
