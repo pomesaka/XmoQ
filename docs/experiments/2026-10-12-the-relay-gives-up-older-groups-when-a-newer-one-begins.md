@@ -1,5 +1,7 @@
 # The relay gives up the older Groups when a newer one begins
 
+> **2026-10-13: the relay's flags `--older-groups give-up` and `--older-groups-grace-ms` were removed. The runs here that use them cannot be run again as they were.** The record is left as written.
+
 - Date: 2026-10-12
 - Commit SHA: the commit that adds this record
 - Roadmap item: Phase 1, the relay (latency); open question on whether a slow subscriber loses whole old Groups and stays subscribed

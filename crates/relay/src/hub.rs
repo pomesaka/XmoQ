@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
+use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchHeader, FetchObject, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::params::GroupOrder;
@@ -81,21 +81,6 @@ pub struct HubConfig {
     /// milliseconds for every subscriber. On loopback a stream opens in
     /// well under a millisecond.
     pub slow_open: Duration,
-    /// An experiment, off unless asked for: when a subgroup stream of a
-    /// Group is opened towards a subscriber, the streams of the older Groups
-    /// of that track towards it that it does not have all of yet are reset
-    /// with `DELIVERY_TIMEOUT`, and the subscription goes on (§8:
-    /// "Publishers can, at their discretion, discontinue forwarding Objects
-    /// before either of the timeouts occurs"). For every subscription,
-    /// whatever delivery timeout it set.
-    pub give_up_older_groups: bool,
-    /// With `give_up_older_groups`: how long an older Group still gets from
-    /// the moment a newer one is opened. WHY more than nothing: the last
-    /// Object of a Group is written just before the next Group begins, and
-    /// cannot be acknowledged yet over any path; without a wait every
-    /// Group is reset, and a packet of its end that is lost is not sent
-    /// again.
-    pub older_groups_grace: Duration,
     /// The key of the experiment in authorization (`crate::auth`). None:
     /// every request is allowed.
     pub auth_key: Option<Vec<u8>>,
@@ -210,8 +195,6 @@ impl Default for HubConfig {
             send: SendLimits::default(),
             drain_timeout: Duration::from_secs(2),
             slow_open: Duration::from_millis(10),
-            give_up_older_groups: false,
-            older_groups_grace: Duration::ZERO,
             auth_key: None,
             auth_setup: true,
             early_stream_timeout: Duration::from_secs(2),
@@ -807,7 +790,6 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
         events: events.clone(),
         sessions: HashMap::new(),
         out_streams: HashMap::new(),
-        out_groups: HashMap::new(),
         fetch_pipes: HashMap::new(),
         timers: Timers::default(),
         idle_moments: 0,
@@ -830,10 +812,6 @@ struct Hub<C: Connection> {
     /// The writers of the subgroup streams that are not done, with the session
     /// each writes to.
     out_streams: HashMap<OutStreamKey, (SessionKey, OutgoingSubgroup)>,
-    /// With [`HubConfig::give_up_older_groups`]: the Track Alias and the
-    /// Group of the subgroup streams towards each session that may still be
-    /// in `out_streams`.
-    out_groups: HashMap<OutStreamKey, (SessionKey, u64, u64)>,
     /// The fetch streams that are being passed on, by the subscriber's
     /// session and the request stream of its FETCH, each with the way to cut
     /// it short. Dropping that cuts it short as well.
@@ -1090,7 +1068,6 @@ impl<C: Connection> Hub<C> {
                         }
                         Event::OutStreamClosed { out_stream } => {
                             self.out_streams.remove(out_stream);
-                            self.out_groups.remove(out_stream);
                         }
                         _ => {}
                     }
@@ -1779,13 +1756,6 @@ impl<C: Connection> Hub<C> {
             return;
         };
         let delivery_timeout = asked.map(Duration::from_millis);
-        // WHY for every subscription, whatever delivery timeout it set: a
-        // timeout says how long a subscriber is willing to wait, and a rule
-        // that held only for those who set one would cut a subscriber that
-        // asks for ten minutes sooner than one that asks for nothing.
-        if self.config.give_up_older_groups {
-            self.give_up_groups_before(session, out_stream, &header);
-        }
         let Some(handle) = self.sessions.get(&session) else {
             return;
         };
@@ -1869,46 +1839,6 @@ impl<C: Connection> Hub<C> {
             pending.push_back(Event::SendQueueFull { out_stream });
             pending.push_back(Event::OutStreamClosed { out_stream });
         }
-    }
-
-    /// Resets the streams of the Groups of the track before the one a new
-    /// stream is for, towards the same session, and notes the new one.
-    ///
-    /// WHY by the Group ID and not "every other stream of the track": a
-    /// Group can have several Subgroups, each on a stream, and a mapping
-    /// that puts every Object on a stream has many of one Group open.
-    fn give_up_groups_before(
-        &mut self,
-        session: SessionKey,
-        out_stream: OutStreamKey,
-        header: &SubgroupHeader,
-    ) {
-        let older: Vec<(OutStreamKey, u64)> = self
-            .out_groups
-            .iter()
-            .filter(|(_, (owner, alias, group))| {
-                *owner == session && *alias == header.track_alias && *group < header.group_id
-            })
-            .map(|(older, (_, _, group))| (*older, *group))
-            .collect();
-        for (older, group) in older {
-            self.out_groups.remove(&older);
-            if let Some((_, writer)) = self.out_streams.get(&older) {
-                let grace = self.config.older_groups_grace;
-                writer.reset_after(stream_reset_code::DELIVERY_TIMEOUT, grace);
-                self.log(|| {
-                    format!(
-                        "GROUP_GIVEN_UP session={} out={} group={group} for_group={} after_ms={}",
-                        session.0,
-                        older.0,
-                        header.group_id,
-                        grace.as_millis()
-                    )
-                });
-            }
-        }
-        self.out_groups
-            .insert(out_stream, (session, header.track_alias, header.group_id));
     }
 
     /// Starts or stops the timer an action asks for.
@@ -2175,7 +2105,6 @@ impl<C: Connection> Hub<C> {
             }
             *owner != session
         });
-        self.out_groups.retain(|_, (owner, _, _)| *owner != session);
         self.timers.forget_session(session);
     }
 }

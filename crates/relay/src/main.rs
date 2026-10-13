@@ -129,11 +129,6 @@ struct Args {
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
     /// gets. Without it only a subscriber's own timeout gives a stream up.
     delivery_patience: Option<Duration>,
-    /// `--older-groups give-up`: [`HubConfig::give_up_older_groups`]. An
-    /// experiment; `keep`, or no flag, gives no Group up.
-    give_up_older_groups: bool,
-    /// `--older-groups-grace-ms`: [`HubConfig::older_groups_grace`].
-    older_groups_grace: Duration,
     /// `--auth-key-hex`: the key requests are authorized with
     /// ([`HubConfig::auth_key`]). An experiment.
     auth_key: Option<Vec<u8>>,
@@ -177,8 +172,6 @@ fn parse_args() -> Result<Args> {
     let mut cached_fetch = (None, None);
     let mut held_beyond_cache = None;
     let mut delivery_patience = None;
-    let mut give_up_older_groups = false;
-    let mut older_groups_grace = Duration::ZERO;
     let mut auth_key = None;
     let mut auth_setup = true;
     let mut args = std::env::args().skip(1);
@@ -217,17 +210,6 @@ fn parse_args() -> Result<Args> {
             "--announce-at-once" => announce_at_once = Some(small(&flag, &value)?),
             "--idle-session-ms" => idle_session = Some(millis(&flag, &value)?),
             "--delivery-patience-ms" => delivery_patience = Some(millis(&flag, &value)?),
-            "--older-groups-grace-ms" => {
-                older_groups_grace =
-                    Duration::from_millis(value.parse().context("--older-groups-grace-ms")?);
-            }
-            "--older-groups" => {
-                give_up_older_groups = match value.as_str() {
-                    "give-up" => true,
-                    "keep" => false,
-                    other => bail!("--older-groups {other}: give-up or keep"),
-                };
-            }
             "--auth-key-hex" => {
                 auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
             }
@@ -257,8 +239,6 @@ fn parse_args() -> Result<Args> {
         cached_fetch,
         held_beyond_cache,
         delivery_patience,
-        give_up_older_groups,
-        older_groups_grace,
         auth_key,
         auth_setup,
     })
@@ -298,8 +278,6 @@ async fn main() -> Result<()> {
         config.cached_fetch_least_kbps = least_kbps;
     }
     config.send.delivery_patience = args.delivery_patience;
-    config.give_up_older_groups = args.give_up_older_groups;
-    config.older_groups_grace = args.older_groups_grace;
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);

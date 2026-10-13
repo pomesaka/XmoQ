@@ -82,7 +82,6 @@ The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop
 | `--held-beyond-cache-bytes` | How many bytes the fetch streams it writes may keep alive of Groups its cache has let go of; a session has an eighth | 268,435,456 |
 | `--cached-fetch-least-kbps` | The rate it has to take such a stream at, at the least: a larger Group has as long as it takes at that rate | 500 |
 | `--delivery-patience-ms` | Experiment: what a subscriber gets that asked for no delivery timeout | Off |
-| `--older-groups give-up`, `--older-groups-grace-ms` | Experiment: older Groups are given up when a newer one begins, after so long | `keep`; 0 |
 | `--auth-key-hex`, `--auth-setup off` | Experiment: the key tokens are checked with, and whether SETUP is asked for one | No tokens; on with a key |
 | `--slow-open-ms` | For a run that looks at how long streams take to open; 0 logs every stream | Not logged |
 
