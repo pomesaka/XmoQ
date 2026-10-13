@@ -57,11 +57,6 @@ export {
 	type QualitySwitchOptions,
 } from "./core/quality-switch.ts";
 export {
-	createStamp,
-	type Stamp,
-	type StampClock,
-} from "./core/stamp.ts";
-export {
 	createVideoReceiver,
 	DEFAULT_MAX_HELD_BYTES,
 	DEFAULT_MAX_HELD_OBJECTS,

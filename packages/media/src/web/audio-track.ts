@@ -15,7 +15,6 @@ import {
 } from "../core/delivery-timeout.ts";
 import { createFastestWay } from "../core/fastest-way.ts";
 import { createInOrder } from "../core/in-order.ts";
-import { createStamp, type StampClock } from "../core/stamp.ts";
 import {
 	type AudioTrackPublisher,
 	createAudioTrackPublisher,
@@ -32,8 +31,6 @@ export interface AudioTrackEncoderOptions {
 	numberOfChannels: number;
 	/** Bits a second; the encoder's own choice when left out. */
 	bitrate?: number;
-	/** How the times of the audio are laid onto the wall clock (`StampClock`); `"first"` when left out. */
-	clock?: StampClock;
 	/** `AudioTrackPublisherOptions.chunksPerGroup`. */
 	chunksPerGroup?: number;
 	/** `AudioTrackPublisherOptions.publisherPriority`. */
@@ -72,8 +69,7 @@ export interface AudioTrackEncoder {
  *
  * The time of an Object is the wall-clock time at which the first audio
  * came plus the time since then as the `AudioData` say it, as for video
- * (`createVideoTrackEncoder`), or by `clock: "least"` the times of the
- * `AudioData` moved to follow the wall clock (`StampClock`).
+ * (`createVideoTrackEncoder`).
  */
 export async function createAudioTrackEncoder(
 	options: AudioTrackEncoderOptions,
@@ -117,14 +113,11 @@ export async function createAudioTrackEncoder(
 		descriptionLength: undefined,
 		encoderError: undefined,
 	};
-	const stamp = createStamp(options.clock ?? "first");
-	/** The time of the first `AudioData`, and how many frames of audio were handed to the encoder since. */
-	let handed: { firstUs: number; frames: number } | undefined;
+	let first: { timestamp: number; sinceEpoch: number } | undefined;
 	let closed = false;
 	const encoder = new AudioEncoder({
 		output: (chunk, metadata) => {
-			const wall = stamp.of(chunk.timestamp);
-			if (wall === undefined) return;
+			if (first === undefined) return;
 			const description = metadata?.decoderConfig?.description;
 			if (stats.encoded === 0) {
 				stats.descriptionLength =
@@ -135,8 +128,7 @@ export async function createAudioTrackEncoder(
 			stats.encoded += 1;
 			stats.encodedBytes += data.length;
 			publisher.push({
-				// Not below 0, where the clock was set back since `epoch`.
-				timestamp: Math.max(0, Math.round(wall - Number(epoch))),
+				timestamp: chunk.timestamp - first.timestamp + first.sinceEpoch,
 				data,
 			});
 		},
@@ -151,18 +143,10 @@ export async function createAudioTrackEncoder(
 		encode(data) {
 			try {
 				if (closed) return;
-				handed ??= { firstUs: data.timestamp, frames: 0 };
-				// WHY counted and not `data.timestamp`: the encoder numbers
-				// its chunks from the first time by the samples it was given
-				// (Chromium 156, seen 2026-10-13: a source whose times ran
-				// 1,000 ppm fast had chunks whose times did not), and it is
-				// the chunks' times that are stamped. A microphone's times
-				// and its samples need not keep the same pace.
-				stamp.take(
-					handed.firstUs + (handed.frames * 1_000_000) / data.sampleRate,
-					Date.now(),
-				);
-				handed.frames += data.numberOfFrames;
+				first ??= {
+					timestamp: data.timestamp,
+					sinceEpoch: Math.max(0, Number(BigInt(Date.now()) * 1000n - epoch)),
+				};
 				encoder.encode(data);
 				stats.submitted += 1;
 			} catch (error) {

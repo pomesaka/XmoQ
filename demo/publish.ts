@@ -58,14 +58,6 @@ declare class MediaStreamTrackProcessor {
  * was. Piece `n` is the 20 ms that begin `n * 20` ms after the first, and
  * as many are made as the clock has passed.
  */
-/**
- * `?toneSkewPpm=N` (for measuring): the tone makes its pieces N parts in a
- * million faster than this machine's clock passes (slower with a negative
- * N), as a microphone does whose samples are counted by a clock of its own.
- */
-const TONE_PACE =
-	1 + Number(new URLSearchParams(location.search).get("toneSkewPpm") ?? 0) / 1_000_000;
-
 function tone(onData: (data: AudioData) => void): void {
 	const frames = SAMPLE_RATE / 50;
 	// WHY the clock begins with the first tick, and not here: the timer is a
@@ -80,7 +72,7 @@ function tone(onData: (data: AudioData) => void): void {
 	let level = 0;
 	every(10, () => {
 		began ??= Date.now();
-		while (piece * 20 <= (Date.now() - began) * TONE_PACE) {
+		while (piece * 20 <= Date.now() - began) {
 			const loud = marked(began + piece * 20);
 			const samples = new Float32Array(frames);
 			for (let index = 0; index < frames; index++) {
@@ -187,37 +179,15 @@ const BUSY = new URLSearchParams(location.search).get("picture") === "busy";
  * do against its viewer's. Not for the camera and the microphone, whose
  * times are the devices'.
  */
-/**
- * `?stamp=least` (for measuring): both encoders lay their source's times
- * onto the wall clock by the least of the last minute (`StampClock` of
- * @xmoq/media) and not by the first frame alone.
- */
-const STAMP =
-	new URLSearchParams(location.search).get("stamp") === "least"
-		? ("least" as const)
-		: ("first" as const);
-/**
- * `?canvasClock=performance` (for measuring): the painted clock is timed
- * by `performance.now()` while the tone is by `Date.now()`, which is a
- * broadcast whose two tracks count by two clocks.
- */
-const canvasNow =
-	new URLSearchParams(location.search).get("canvasClock") === "performance"
-		? () => performance.now()
-		: () => Date.now();
 const CLOCK_SKEW =
 	1 + Number(new URLSearchParams(location.search).get("clockSkewPpm") ?? 0) / 1_000_000;
 
 function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
-	// WHY `Date.now()` and not `performance.now()`: the tone counts its
-	// pieces by `Date.now()`, and the two clocks move against each other
-	// (60 ms in an hour on one machine, 2026-10-13). A viewer has one clock
-	// for both tracks, so the picture came later and later against the sound.
-	const began = canvasNow();
+	const began = performance.now();
 	let painted = 0;
 	every(1000 / FRAMES_A_SECOND, () => {
 		if (context === null || context === undefined) return;
-		const elapsed = canvasNow() - began;
+		const elapsed = performance.now() - began;
 		// Painted in the units of the smallest size, and scaled to the one
 		// that is sent.
 		context.setTransform(SIZE.width / WIDTH, 0, 0, SIZE.height / HEIGHT, 0, 0);
@@ -285,7 +255,6 @@ async function main(): Promise<void> {
 				bitrate: LOW.bitrate,
 				framerate: FRAMES_A_SECOND,
 				keyFrameIntervalMs: KEY_INTERVAL_MS,
-				clock: STAMP,
 			})
 		: undefined;
 	const small = new OffscreenCanvas(LOW.width, LOW.height).getContext("2d");
@@ -302,7 +271,6 @@ async function main(): Promise<void> {
 		bitrate: BITRATE,
 		framerate: FRAMES_A_SECOND,
 		keyFrameIntervalMs: KEY_INTERVAL_MS,
-		clock: STAMP,
 		// `?mapping=stream-per-object` puts every Object on a stream of its own.
 		...(new URLSearchParams(location.search).get("mapping") ===
 		"stream-per-object"
@@ -323,7 +291,6 @@ async function main(): Promise<void> {
 			codec: "opus",
 			sampleRate: SAMPLE_RATE,
 			numberOfChannels: 1,
-			clock: STAMP,
 			// `?audioPriority=N`: the Publisher Priority of the sound's streams
 			// (0 the highest); without it, the default of `@xmoq/media`.
 			...(new URLSearchParams(location.search).has("audioPriority")

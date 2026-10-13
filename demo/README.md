@@ -77,9 +77,6 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | both | `timer=page`, `timer=slow` | The page's own timer, and that timer as a background tab has it | A worker's timer |
 | both | `diag=1` | More in the page's report, for looking into a run | |
 | publish | `clockSkewPpm=N` | For measuring: the painted clock's times run N parts in a million faster than the machine's clock (the tone's do not follow: the encoder counts samples), as a camera's against a microphone's | 0 |
-| publish | `toneSkewPpm=N` | For measuring: the tone makes its pieces N parts in a million faster than the machine's clock passes, as a microphone whose samples are counted by a clock of its own | 0 |
-| publish | `canvasClock=performance` | For measuring: the painted clock is timed by `performance.now()` and the tone by `Date.now()`, two clocks that move apart by themselves (60 ms in an hour on one machine) | `Date.now()` for both |
-| publish | `stamp=least` | Both encoders lay their source's times onto the wall clock by the least of the last minute (`clock: "least"` of `@xmoq/media`), which holds a source whose clock is not the wall's | The wall clock is read with the first frame only |
 | watch | `clockBehindMs=N` | For measuring: the page's clock is N ms behind for its first 5 seconds, which puts the fastest way N ms too fast until those seconds are forgotten, a minute later | 0 |
 | watch | `clockSkewPpm=N` | For measuring: the page's clock runs N parts in a million faster, as a viewer's on another machine against its publisher's | 0 |
 | publish | `size=360`, `720`, `1080` | The picture's size | 360 |
