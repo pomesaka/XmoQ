@@ -8,7 +8,7 @@ A page encodes a picture (a clock it paints, or a camera) as H.264, 640x360 at 3
 
 ## What was measured
 
-**The sound was ten pieces a Group and a stream in every run below, unless the row says otherwise.** Since 2026-10-13 it is a piece a Group (decided; `DEFAULT_AUDIO_CHUNKS_PER_GROUP`), and the demo was not measured again with that: where 1 and 10 were run side by side ([record](experiments/2026-10-12-one-five-or-ten-pieces-of-sound-a-group.md)) they could not be told apart without loss and at 1% loss, 1 lost fewer pieces on a narrow link and at 5% loss with 50 ms, and the relay had about a half more to do.
+**The sound was ten pieces a Group and a stream in every run below, unless the row says otherwise.** Since 2026-10-13 it is a piece a Group (decided; `DEFAULT_AUDIO_CHUNKS_PER_GROUP`), and the demo was not measured again with that: where 1 and 10 were run side by side ([record](experiments/2026-10-12-one-five-or-ten-pieces-of-sound-a-group.md)) they could not be told apart without loss and at 1% loss, 1 lost fewer pieces on a narrow link and at 5% loss with 50 ms, and the relay had about a half more to do. Measured again on 2026-10-14 beside ten ([record](experiments/2026-10-14-a-piece-of-sound-a-stream-measured-again.md)): alike on a clean link and with 150 ms; at 1% loss with 50 ms as many pieces too late and more breaks (54 to 62 in 20 s against 30 to 46); the relay's CPU 6.3 to 7.7% of a core against 4.0 to 5.0% with one viewer.
 
 | What | What was seen | Record | Not measured |
 |---|---|---|---|
