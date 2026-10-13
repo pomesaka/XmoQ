@@ -30,30 +30,27 @@ export interface AudioChunk {
 }
 
 /**
- * Ten chunks of audio (200 ms of Opus at 20 ms a chunk) share a Group and a
- * stream. Decided by the owner on 2026-10-11.
+ * Every chunk of audio is a Group of its own, on a stream of its own.
+ * Decided by the owner on 2026-10-13.
  *
- * WHY 10: the owner's decision. **What it was decided on did not hold**:
- * the measurement said that with a stream a chunk Chromium falls behind
- * for good once packets are lost. The chunks were on time; the times that
- * Chromium's decoder gave its output were early, by 20 ms for each chunk
- * that the player had dropped
- * (docs/experiments/2026-10-11-sound-falls-behind-on-a-link-with-delay-and-loss.md).
- * The number was not decided again.
+ * WHY 1: it is what the drafts say (the example of LOC-04 §4.1, and what
+ * MSF-01 §6 asks); nothing measured speaks for more; and on a link
+ * narrower than what is sent, and at 5% loss with a buffer of 50 ms, 1
+ * lost fewer pieces in every run. Measured on 2026-10-12 with 1, 5 and 10,
+ * three to five runs each (docs/experiments/2026-10-12-one-five-or-ten-
+ * pieces-of-sound-a-group.md); without loss and at 1% loss the three could
+ * not be told apart. A loss holds back the rest of its stream, and with 1
+ * there is no rest.
  *
- * What is known now, measured again on 2026-10-12 with 1, 5 and 10, three
- * to five runs each (docs/experiments/2026-10-12-one-five-or-ten-pieces-
- * of-sound-a-group.md): without loss and at 1% loss the three cannot be
- * told apart; on a link narrower than what is sent, and at 5% loss with a
- * buffer of 50 ms, 1 loses fewer pieces; the relay has about a half more
- * to do with 1 (50 streams a second for a viewer, against 5). A loss holds
- * back the rest of its stream: up to 200 ms with 10.
- *
- * WHY NOT 1: it is the example of LOC-04 §4.1 and what MSF-01 §6 asks.
- * Nothing measured speaks for 10 any more; the number waits for a
- * decision, and is not changed without one.
+ * WHY NOT 10, which it was from 2026-10-11 until then: what that was
+ * decided on did not hold (the sound was not late with a stream a chunk;
+ * the times Chromium's decoder gave its output were early,
+ * docs/experiments/2026-10-11-sound-falls-behind-on-a-link-with-delay-
+ * and-loss.md). What 1 costs, and is paid: ten times the streams (50 a
+ * second for a viewer, against 5), and about a half more for the relay to
+ * do. `chunksPerGroup` asks for another number.
  */
-export const DEFAULT_AUDIO_CHUNKS_PER_GROUP = 10;
+export const DEFAULT_AUDIO_CHUNKS_PER_GROUP = 1;
 
 export interface AudioTrackPublisherOptions {
 	trackNamespace: readonly Uint8Array[];
