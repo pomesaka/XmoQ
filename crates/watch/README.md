@@ -2,7 +2,7 @@
 
 A viewer for the terminal: it subscribes to the video and the audio track of a broadcast on one MoQ Transport session, and plays both by the Timestamps of LOC: the picture with the Kitty graphics protocol (Ghostty, kitty), the sound on the machine's output. With a room it learns from the room where the broadcast is, gets a token for the relay there, shows the room's chat under the picture, and follows a broadcast that ends and begins again.
 
-**Provisional throughout.** The video decoder and the sound output are not decided ([open questions](../../docs/open-questions.md)); the crate is built so that each can be changed in one file. **It is for Unix alone**: it sets the terminal's line mode with `termios`, and does not build for Windows. On macOS it was run; **on Linux it has only been built by CI, and nothing of it was run there.**
+**Provisional throughout.** The video decoder is decided (`openh264`, 2026-10-13) and the sound output is not ([open questions](../../docs/open-questions.md)); the crate is built so that each can be changed in one file. **It is for Unix alone**: it sets the terminal's line mode with `termios`, and does not build for Windows. On macOS it was run; **on Linux it has only been built by CI, and nothing of it was run there.**
 
 ```sh
 mise run watch -- --room http://127.0.0.1:8787/rooms/demo      # next to `mise run demo`, with its rooms
