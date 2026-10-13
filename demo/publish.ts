@@ -334,7 +334,7 @@ async function main(): Promise<void> {
 					}
 				: {}),
 			// `?audioGroup=N` puts N chunks of audio into a Group, on one stream;
-			// without it, the default of `@xmoq/media`.
+			// without it, the default of `@xmoq/media` (1).
 			...(new URLSearchParams(location.search).has("audioGroup")
 				? {
 						chunksPerGroup: Number(

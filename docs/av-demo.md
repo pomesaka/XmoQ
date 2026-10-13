@@ -8,6 +8,8 @@ A page encodes a picture (a clock it paints, or a camera) as H.264, 640x360 at 3
 
 ## What was measured
 
+**The sound was ten pieces a Group and a stream in every run below, unless the row says otherwise.** Since 2026-10-13 it is a piece a Group (decided; `DEFAULT_AUDIO_CHUNKS_PER_GROUP`), and the demo was not measured again with that: where 1 and 10 were run side by side ([record](experiments/2026-10-12-one-five-or-ten-pieces-of-sound-a-group.md)) they could not be told apart without loss and at 1% loss, 1 lost fewer pieces on a narrow link and at 5% loss with 50 ms, and the relay had about a half more to do.
+
 | What | What was seen | Record | Not measured |
 |---|---|---|---|
 | Rate | 30 frames a second shown and 50 pieces of sound a second to the loudspeaker; `bun demo/check.ts` checks both, and that what leaves is no silence | [background tab](experiments/2026-10-11-demo-in-a-background-tab.md) | Longer than a minute; CPU of the watching page |
