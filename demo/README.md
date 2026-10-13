@@ -28,7 +28,7 @@ With `mise run demo` up; each line is one thing to open, and what nobody has jud
 
 **On a link that loses packets** the relay's congestion control decides whether the picture stays live: `bun demo/serve.ts --congestion bbr` (the relay's default is cubic; [record](../docs/experiments/2026-10-11-the-demo-over-a-lossy-link-with-bbr.md)). `/publish?picture=busy&bitrate=2500000` is a picture that fills its bitrate, and `--relay-log FILE` keeps the relay's lines.
 
-**On a link with less room than the video** `bun demo/serve.ts --delivery-patience-ms 500` starts the relay with its experiment of giving up a Group a viewer does not have in time: the picture then stays about half a second behind and does not fall further, and the page shows more frames than without ([record](../docs/experiments/2026-10-12-a-page-behind-a-link-with-too-little-room-and-a-relay-that-gives-groups-up.md)). `--older-groups give-up` (with `--older-groups-grace-ms N`) starts the relay with its other experiment, which gives up the older Groups of a track when a newer one begins ([record](../docs/experiments/2026-10-12-the-relay-gives-up-older-groups-when-a-newer-one-begins.md)); no page was run with it.
+**On a link with less room than the video** `bun demo/serve.ts --delivery-patience-ms 500` starts the relay with its experiment of giving up a Group a viewer does not have in time: the picture then stays about half a second behind and does not fall further, and the page shows more frames than without ([record](../docs/experiments/2026-10-12-a-page-behind-a-link-with-too-little-room-and-a-relay-that-gives-groups-up.md)).
 
 `/publish?size=720` and `size=1080` send 1280x720 and 1920x1080 where the page otherwise sends 640x360, at 3 and 6 Mbit/s unless `?bitrate=` says otherwise, and ask a camera for that size ([record](../docs/experiments/2026-10-12-the-demo-at-720-and-1080-lines.md)).
 
@@ -117,7 +117,6 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | `--auth` | Experiment: a key for this run; the relay refuses requests without a token of the rooms | No tokens |
 | `--congestion cubic\|newreno\|bbr` | The relay's congestion control | cubic |
 | `--delivery-patience-ms N` | Experiment of the relay: a Group is given up so long after its end, for viewers that asked for no timeout | Off |
-| `--older-groups give-up`, `--older-groups-grace-ms N` | Experiment of the relay: older Groups are given up when a newer one begins, after N ms | Off |
 | `--relay-log FILE` | The relay's lines, to a file | Not kept |
 | `--relay-binary FILE` | Another relay than this tree's | `target/debug/xmoq-relay` |
 

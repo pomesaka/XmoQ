@@ -1,5 +1,7 @@
 # The relay follows the delivery timeout a viewer asks for
 
+> **2026-10-13: the relay's flags `--older-groups give-up` and `--older-groups-grace-ms` were removed. The runs here that use them cannot be run again as they were.** The record is left as written.
+
 - Date: 2026-10-12
 - Commit SHA: the commit that adds this record
 - Roadmap item: Phase 2, a viewer whose link has less room than the video; the open decisions on what the relay gives up for a slow subscriber and on how many pieces of sound share a Group.

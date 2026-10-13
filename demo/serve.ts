@@ -1,6 +1,6 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--older-groups give-up [--older-groups-grace-ms N]]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N]
 //
 // `--auth` (an experiment; how the relay authorizes is undecided): a key
 // is made for this run and given to the relay and to the rooms. The relay
@@ -35,10 +35,6 @@ const { values: options } = parseArgs({
 		// An experiment of the relay: a Group a viewer does not have this many
 		// milliseconds after it was written is given up (its stream is reset).
 		"delivery-patience-ms": { type: "string" },
-		// The relay's other experiment: the older Groups of a track are given
-		// up when a newer one begins (`give-up`), after so many milliseconds.
-		"older-groups": { type: "string" },
-		"older-groups-grace-ms": { type: "string" },
 		// A file for the relay's lines, for looking into a run.
 		"relay-log": { type: "string" },
 		port: { type: "string", default: "8080" },
@@ -119,12 +115,6 @@ const relay = spawn(
 		...(options["delivery-patience-ms"] === undefined
 			? []
 			: ["--delivery-patience-ms", options["delivery-patience-ms"]]),
-		...(options["older-groups"] === undefined
-			? []
-			: ["--older-groups", options["older-groups"]]),
-		...(options["older-groups-grace-ms"] === undefined
-			? []
-			: ["--older-groups-grace-ms", options["older-groups-grace-ms"]]),
 	],
 	// Its lines, one for each thing it does, are not shown; `--relay-log`
 	// writes them to a file, with how long every stream took to open.

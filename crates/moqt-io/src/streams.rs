@@ -1765,25 +1765,6 @@ impl OutgoingSubgroup {
     pub fn reset(&self, code: u32) {
         self.reset.send_replace(Some(code));
     }
-
-    /// [`Self::reset`], `after` from now, whatever becomes of this handle
-    /// meanwhile. A stream that is over by then is not touched.
-    pub fn reset_after(&self, code: u32, after: Duration) {
-        if after.is_zero() {
-            return self.reset(code);
-        }
-        let reset = self.reset.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(after).await;
-            // An earlier reset keeps its code.
-            reset.send_if_modified(|asked| {
-                asked.is_none() && {
-                    *asked = Some(code);
-                    true
-                }
-            });
-        });
-    }
 }
 
 /// The smaller of two times, and the one that is there where the other is

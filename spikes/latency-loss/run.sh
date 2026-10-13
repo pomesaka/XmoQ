@@ -31,13 +31,10 @@ node=$(command -v node || (cd interop && mise which bun))
 # PATIENCE_MS: the relay gives up a Group a viewer does not have that long after its last Object
 # (--delivery-patience-ms). Without it no Group is given up.
 patience=${PATIENCE_MS:+--delivery-patience-ms $PATIENCE_MS}
-# OLDER_GROUPS=give-up: the relay resets the streams of a track's older Groups when it opens one
-# of a newer Group towards a viewer (--older-groups).
-older="${OLDER_GROUPS:+--older-groups $OLDER_GROUPS} ${GRACE_MS:+--older-groups-grace-ms $GRACE_MS}"
 # CONGESTION=cubic|newreno|bbr: the congestion control of the relay (cubic without it).
 # --slow-open-ms 0: a line for every stream the relay opens, with its congestion window.
 target/release/xmoq-relay --port "$port" --cert-file "$cert" --key-file interop/.cert/key.pem \
-  --congestion "${CONGESTION:-cubic}" --slow-open-ms 0 $patience $older > "$logs/relay.log" 2>&1 &
+  --congestion "${CONGESTION:-cubic}" --slow-open-ms 0 $patience > "$logs/relay.log" 2>&1 &
 relay=$!
 "$node" spikes/lossy-link/proxy.mjs --listen "$link" --to "$port" --control "$control" > "$logs/link.log" 2>&1 &
 proxy=$!

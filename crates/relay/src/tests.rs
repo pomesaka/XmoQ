@@ -3343,41 +3343,6 @@ mod delivery_timeouts {
             assert_eq!(hub.held().await.out_streams, held_at_550, "{case}");
         }
     }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_older_group_is_given_up_when_a_newer_one_begins_whatever_timeout_was_set() {
-        // (`--older-groups-grace-ms`, how long after Group 1 began Group 0
-        // is reset), for a subscriber that set no delivery timeout.
-        for (grace, reset_after) in [(0, 0), (100, 100)] {
-            let case = format!("grace {grace}");
-            let config = HubConfig {
-                give_up_older_groups: true,
-                older_groups_grace: Duration::from_millis(grace),
-                ..HubConfig::default()
-            };
-            let mut scene = scene(config, None).await;
-            scene
-                .publisher
-                .send_group(0, &[object(0, 3)])
-                .await
-                .finish();
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            assert_eq!(ended(&mut scene.viewer), [], "{case}");
-            scene
-                .publisher
-                .send_group(1, &[object(0, 3)])
-                .await
-                .finish();
-            if reset_after > 0 {
-                tokio::time::sleep(Duration::from_millis(reset_after - 50)).await;
-                assert_eq!(ended(&mut scene.viewer), [], "{case}");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            } else {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            assert_eq!(ended(&mut scene.viewer), [(0, TIMED_OUT)], "{case}");
-        }
-    }
 }
 
 /// SUBSCRIBEs that are held for a publisher to appear (§10.2.6).
