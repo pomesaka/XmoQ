@@ -21,6 +21,13 @@
 //                     {0, 0} to {1, 0}: the latest Group, which a relay
 //                     that keeps it answers itself.
 //   absent-track      A Standalone FETCH for a track nobody published.
+//   other-publisher   The own Rust client, which refuses a FETCH, sends
+//                     Group 0 with PUBLISH. Then an own page announces the
+//                     namespace; it has Object 0 of Groups 100 to 102 and
+//                     never sent them ("serve-unsent"). The page that
+//                     fetches asks for {100, 0} to {102, 1}: the relay asks
+//                     the Rust client first, and the page after its
+//                     refusal. Own relay only.
 //
 // The cases that begin with `page-` have an own page as the publisher,
 // which announced the namespace, serves the track when the relay asks for
@@ -147,6 +154,7 @@ const CASES = [
 	"publisher-refuses",
 	"latest-group",
 	"absent-track",
+	"other-publisher",
 	"page-standalone",
 	"page-joining",
 	"page-nothing-there",
@@ -164,6 +172,7 @@ const PUBLISHERS: Record<Case, Client | "moqtail-test"> = {
 	"publisher-refuses": "own-rust",
 	"latest-group": "own-rust",
 	"absent-track": "own-rust",
+	"other-publisher": "own-rust",
 	"page-standalone": "own-browser",
 	"page-joining": "own-browser",
 	"page-nothing-there": "own-browser",
@@ -225,6 +234,13 @@ const FETCHES: Record<Case, PageFetch> = {
 		trackName: "nobody-published-this",
 		start: ["0", "0"],
 		end: ["1", "0"],
+	},
+	"other-publisher": {
+		type: "Standalone",
+		namespace: NAMESPACE,
+		trackName: TRACK,
+		start: ["100", "0"],
+		end: ["102", "1"],
 	},
 	"page-standalone": {
 		type: "Standalone",
@@ -326,6 +342,12 @@ const LAST_OBJECT = "18446744073709551615";
  * a Standalone FETCH is asked of", "With neither: REQUEST_ERROR
  * `DOES_NOT_EXIST`". The moqtail relay: run 11 of its record.
  *
+ * `other-publisher`, own relay: the notes, "Whom a Standalone FETCH is asked
+ * of": a publisher that refuses, or leaves before it answers, is followed by
+ * the next one there is. The page that announced answers as in
+ * `page-unsent`: FETCH_OK with {102, 1}, the Location after its Largest
+ * Object {102, 0} (§10.13), and its three Objects.
+ *
  * The `page-` cases, own relay. The publishing page has Object 0 of Groups
  * 0 to 2, and of Group 3 by the time of the FETCH. It answers FETCH_OK with
  * the End Location it was asked with where it has an Object at or after the
@@ -396,6 +418,7 @@ const ANSWERED_BY: Partial<Record<Case, "relay" | "publisher">> = {
 	"publisher-refuses": "publisher",
 	// The one Group there is, whole: Object 0, and the range ends beyond it.
 	"latest-group": "relay",
+	"other-publisher": "publisher",
 	"page-standalone": "publisher",
 	"page-joining": "publisher",
 	"page-nothing-there": "publisher",
@@ -450,6 +473,11 @@ const EXPECTED: Record<string, Partial<Record<Case, Expected>>> = {
 			items: ["{0, 0}"],
 		},
 		"absent-track": { answer: "REQUEST_ERROR", errorCode: "16" },
+		"other-publisher": {
+			answer: "FETCH_OK",
+			endLocation: ["102", "1"],
+			items: ["{100, 0}", "{101, 0}", "{102, 0}"],
+		},
 		"page-standalone": {
 			answer: "FETCH_OK",
 			endLocation: ["2", "1"],
@@ -1145,6 +1173,17 @@ async function main(): Promise<void> {
 			);
 			await page.object(
 				await withTimeout(second.send(), "the second publisher to send"),
+			);
+		}
+		if (which === "other-publisher") {
+			await startPublisher(
+				"own-browser",
+				{ context, payloadHex: sentHex },
+				{
+					label: "pub2:own-browser",
+					servesWhenAsked: "at-once",
+					servesFetches: "serve-unsent",
+				},
 			);
 		}
 		report = await page.fetch(

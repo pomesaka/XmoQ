@@ -263,6 +263,12 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		args: ["--fetch", "absent-track"],
 		relays: ["moqtail", "own"],
 	},
+	{
+		name: "own-browser fetches what own-rust, the first publisher, refuses; the relay asks an own page that announced the namespace, which answers",
+		script: "fetch.ts",
+		args: ["--fetch", "other-publisher"],
+		relays: ["own"],
+	},
 	// The publisher is an own page that only announced: it serves the track
 	// when the relay asks, and answers a FETCH from what it has sent (`serve`
 	// of `@xmoq/moqt`).
