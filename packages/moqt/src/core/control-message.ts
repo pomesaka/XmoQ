@@ -386,6 +386,28 @@ function decodeEndOfTrack(value: number): boolean {
 	}
 }
 
+/** The Track Property DYNAMIC_GROUPS (§12.6). */
+const DYNAMIC_GROUPS = 0x30n;
+
+/**
+ * The Track Properties that end SUBSCRIBE_OK, PUBLISH, REQUEST_OK and
+ * FETCH_OK. §12.6: "If an endpoint receives a value larger than 1, it MUST
+ * close the session with PROTOCOL_VIOLATION." WHY NOT inside Immutable
+ * Properties (§12.7) as well: this package does not look into that property.
+ * The Rust implementation checks the same.
+ */
+function decodeTrackProperties(reader: ByteReader): KeyValuePair[] {
+	const properties = decodeKeyValuePairs(reader);
+	for (const { type, value } of properties) {
+		if (type === DYNAMIC_GROUPS && typeof value === "bigint" && value > 1n) {
+			throw protocolViolation(
+				`DYNAMIC_GROUPS value ${value} is neither 0 nor 1`,
+			);
+		}
+	}
+	return properties;
+}
+
 function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 	switch (name) {
 		case "SETUP":
@@ -407,7 +429,7 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 		case "SUBSCRIBE_OK": {
 			const trackAlias = reader.varint();
 			const parameters = decodeMessageParameters(reader, name);
-			const trackProperties = decodeKeyValuePairs(reader);
+			const trackProperties = decodeTrackProperties(reader);
 			return { type: name, trackAlias, parameters, trackProperties };
 		}
 		case "PUBLISH": {
@@ -415,7 +437,7 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 			const fullTrackName = decodeFullTrackName(reader);
 			const trackAlias = reader.varint();
 			const parameters = decodeMessageParameters(reader, name);
-			const trackProperties = decodeKeyValuePairs(reader);
+			const trackProperties = decodeTrackProperties(reader);
 			return {
 				type: name,
 				requestId,
@@ -433,7 +455,7 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 		}
 		case "REQUEST_OK": {
 			const parameters = decodeMessageParameters(reader, name);
-			const trackProperties = decodeKeyValuePairs(reader);
+			const trackProperties = decodeTrackProperties(reader);
 			return { type: name, parameters, trackProperties };
 		}
 		case "REQUEST_ERROR": {
@@ -462,7 +484,7 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 			const endOfTrack = decodeEndOfTrack(reader.uint8());
 			const endLocation = decodeLocation(reader);
 			const parameters = decodeMessageParameters(reader, name);
-			const trackProperties = decodeKeyValuePairs(reader);
+			const trackProperties = decodeTrackProperties(reader);
 			return {
 				type: name,
 				endOfTrack,

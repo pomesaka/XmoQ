@@ -232,6 +232,16 @@ const HAND_ENCODED: { name: string; bytes: string; message: ControlMessage }[] =
 			},
 		},
 		{
+			name: "SUBSCRIBE_OK with DYNAMIC_GROUPS 1, the largest value (§12.6)",
+			bytes: "04 00 04 00 00 30 01",
+			message: {
+				type: "SUBSCRIBE_OK",
+				trackAlias: 0n,
+				parameters: {},
+				trackProperties: [{ type: 0x30n, value: 1n }],
+			},
+		},
+		{
 			name: "FETCH_OK with End Of Track and a Track Property, as in the Rust tests",
 			bytes: "18 00 06 01 02 03 00 0e 05",
 			message: {
@@ -399,6 +409,26 @@ describe("decodeControlMessage", () => {
 		{
 			name: "FETCH_OK with End Of Track 2 (§10.13)",
 			bytes: "18 00 04 02 01 02 00",
+			code: 3,
+		},
+		{
+			name: "DYNAMIC_GROUPS 2 in SUBSCRIBE_OK (§12.6)",
+			bytes: "04 00 04 00 00 30 02",
+			code: 3,
+		},
+		{
+			name: "DYNAMIC_GROUPS 2 in a PUBLISH of a/t (§12.6)",
+			bytes: "1d 00 0a 00 01 01 61 01 74 00 00 30 02",
+			code: 3,
+		},
+		{
+			name: "DYNAMIC_GROUPS 2 in REQUEST_OK (§12.6)",
+			bytes: "07 00 03 00 30 02",
+			code: 3,
+		},
+		{
+			name: "DYNAMIC_GROUPS 2 in FETCH_OK (§12.6)",
+			bytes: "18 00 06 00 01 02 00 30 02",
 			code: 3,
 		},
 		{

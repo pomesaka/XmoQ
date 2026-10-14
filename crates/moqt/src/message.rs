@@ -54,6 +54,26 @@ const PUBLISH_OK: u64 = 0x1e;
 const SUBSCRIBE_NAMESPACE: u64 = 0x50;
 const SUBSCRIBE_TRACKS: u64 = 0x51;
 
+/// The Track Property `DYNAMIC_GROUPS` (§12.6).
+const DYNAMIC_GROUPS: u64 = 0x30;
+
+/// Decodes the Track Properties that end `SUBSCRIBE_OK`, `PUBLISH`, `REQUEST_OK`
+/// and `FETCH_OK`.
+///
+/// §12.6: "If an endpoint receives a value larger than 1, it MUST close the
+/// session with `PROTOCOL_VIOLATION`." WHY NOT inside Immutable Properties
+/// (§12.7) as well: this crate does not look into that property.
+fn decode_track_properties(reader: &mut Reader<'_>) -> ReadResult<Vec<KeyValuePair>> {
+    let properties = kvp::decode_all(reader)?;
+    if properties.iter().any(|property| {
+        property.ty() == DYNAMIC_GROUPS
+            && matches!(property.value(), kvp::Value::Varint(value) if *value > 1)
+    }) {
+        return Err(Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1").into());
+    }
+    Ok(properties)
+}
+
 /// `REQUEST_ERROR` Error Codes (§15.10.2).
 pub mod request_error_code {
     /// `INTERNAL_ERROR`: an implementation specific or generic error.
@@ -549,7 +569,7 @@ impl FetchOk {
             end_of_track,
             end_location,
             parameters,
-            track_properties: kvp::decode_all(reader)?,
+            track_properties: decode_track_properties(reader)?,
         })
     }
 }
@@ -783,7 +803,7 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
             ControlMessage::SubscribeOk(SubscribeOk {
                 track_alias,
                 parameters,
-                track_properties: kvp::decode_all(reader)?,
+                track_properties: decode_track_properties(reader)?,
             })
         }
         PUBLISH => {
@@ -797,7 +817,7 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
                 full_track_name,
                 track_alias,
                 parameters,
-                track_properties: kvp::decode_all(reader)?,
+                track_properties: decode_track_properties(reader)?,
             })
         }
         PUBLISH_NAMESPACE => {
@@ -813,7 +833,7 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
         }
         REQUEST_OK => ControlMessage::RequestOk(RequestOk {
             parameters: params::decode_all(reader)?,
-            track_properties: kvp::decode_all(reader)?,
+            track_properties: decode_track_properties(reader)?,
         }),
         REQUEST_ERROR => ControlMessage::RequestError(RequestError::decode(reader)?),
         PUBLISH_DONE => ControlMessage::PublishDone(PublishDone {
@@ -1287,6 +1307,16 @@ pub(crate) mod tests {
                     track_properties: vec![KeyValuePair::varint(2, 1).unwrap()],
                 }),
             ),
+            // SUBSCRIBE_OK with DYNAMIC_GROUPS (0x30) = 1, the largest value
+            // §12.6 allows.
+            (
+                &[0x04, 0x00, 0x04, 0x00, 0x00, 0x30, 0x01],
+                ControlMessage::SubscribeOk(SubscribeOk {
+                    track_alias: 0,
+                    parameters: vec![],
+                    track_properties: vec![KeyValuePair::varint(0x30, 1).unwrap()],
+                }),
+            ),
             // REQUEST_UPDATE with Request ID 4 and FORWARD = 0.
             (
                 &[0x02, 0x00, 0x04, 0x04, 0x01, 0x10, 0x00],
@@ -1613,6 +1643,26 @@ pub(crate) mod tests {
             (
                 &[0x18, 0x00, 0x06, 0x00, 0x01, 0x02, 0x01, 0x08, 0x05],
                 Error::ProtocolViolation("parameter not allowed in this message"),
+            ),
+            // DYNAMIC_GROUPS (0x30) = 2 in each message that carries Track
+            // Properties: SUBSCRIBE_OK, PUBLISH of "a"/"t", REQUEST_OK, FETCH_OK.
+            (
+                &[0x04, 0x00, 0x04, 0x00, 0x00, 0x30, 0x02],
+                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
+            ),
+            (
+                &[
+                    0x1d, 0x00, 0x0a, 0x00, 0x01, 0x01, 0x61, 0x01, 0x74, 0x00, 0x00, 0x30, 0x02,
+                ],
+                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
+            ),
+            (
+                &[0x07, 0x00, 0x03, 0x00, 0x30, 0x02],
+                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
+            ),
+            (
+                &[0x18, 0x00, 0x06, 0x00, 0x01, 0x02, 0x00, 0x30, 0x02],
+                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
             ),
             // REQUEST_ERROR with a 1025-byte Reason Phrase announced.
             (

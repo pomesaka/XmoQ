@@ -4112,10 +4112,8 @@ const DYNAMIC_GROUPS_PROPERTY: u64 = 0x30;
 
 /// Whether the Track Properties of a PUBLISH or a `SUBSCRIBE_OK` say that
 /// the Original Publisher starts a new Group on request (§12.6: "The
-/// allowed values are 0 or 1 ... If omitted, the value is 0").
-///
-/// FIXME: close the session for a value above 1 (§12.6, MUST). It counts
-/// as 0 here and is passed on as it came.
+/// allowed values are 0 or 1 ... If omitted, the value is 0"). A larger
+/// value never gets here: the decoder of `xmoq-moqt` closes the session.
 fn dynamic_groups(properties: &[KeyValuePair]) -> bool {
     properties.iter().any(|property| {
         property.ty() == DYNAMIC_GROUPS_PROPERTY && *property.value() == Value::Varint(1)
