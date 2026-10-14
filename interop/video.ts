@@ -1221,10 +1221,26 @@ async function reconnect(): Promise<string> {
 		"own-browser",
 	);
 	const viewer = await openConnectedPage(context, "viewer", "own-browser");
+	/** WHY each with its name: an `evaluate` on a page that crashed says only "Target crashed". */
+	const reportOf = async (
+		who: "publisher" | "viewer",
+		page: typeof publisher,
+	): Promise<PageKeptReport> => {
+		try {
+			return await withTimeout(
+				page.evaluate(() => window.xmoqOwn.keptReport()),
+				`the ${who}'s report`,
+			);
+		} catch (error) {
+			throw new Error(
+				`the ${who}'s report: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	};
 	const kept = async (): Promise<PageKeptReport> => {
 		const [published, played] = await Promise.all([
-			publisher.evaluate(() => window.xmoqOwn.keptReport()),
-			viewer.evaluate(() => window.xmoqOwn.keptReport()),
+			reportOf("publisher", publisher),
+			reportOf("viewer", viewer),
 		]);
 		return {
 			publishing: published.publishing,
