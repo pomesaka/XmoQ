@@ -1,6 +1,6 @@
 //! FETCH through the relay (§9.4, §10.12): a Standalone FETCH of a
-//! subscriber is asked of one publisher, and the publisher's fetch stream is
-//! passed on as it is.
+//! subscriber is asked of one publisher at a time, and the fetch stream of
+//! the one that answers is passed on as it is.
 //!
 //! A FETCH whose range lies wholly in what the relay has cached of the
 //! track, its latest Group, is answered from there (`crate::cache`), and
@@ -157,6 +157,13 @@ pub(crate) struct RelayedFetch {
     joins: Option<StreamKey>,
     /// [`AskedRange::send_order`].
     send_order: i32,
+    /// The range and the parameters the publisher was asked with, for the
+    /// next one ([`Relay::ask_the_next_or_fail`]).
+    start: Location,
+    end: Location,
+    parameters: Vec<Parameter>,
+    /// The publishers asked so far, the one asked last among them.
+    asked: Vec<SessionKey>,
 }
 
 /// What a Joining FETCH that is held waits for. WHY two kinds and not one
@@ -893,54 +900,24 @@ impl Relay {
             let answer = (end, pieces, asked.send_order);
             return self.write_answer(session, stream, request, &asked.track, answer, actions);
         }
-        let Some(publisher) = self.whom_to_ask(&asked.track, session) else {
-            return refuse(self, request_error_code::DOES_NOT_EXIST, actions);
-        };
-        let fetches_for_one = self.fetches_for_one;
-        let Some(state) = self.sessions.get_mut(&publisher) else {
-            return refuse(self, request_error_code::DOES_NOT_EXIST, actions);
-        };
-        let for_this_session = state
-            .own_fetches
-            .values()
-            .filter(|own| own.subscriber.0 == session)
-            .count();
-        // The relay's FETCH and SUBSCRIBE requests share the publisher's
-        // session, and its patience.
-        if state.own_requests() >= MAX_OWN_REQUESTS_PER_SESSION
-            || state.own_fetches.len() >= MAX_OWN_FETCHES_PER_SESSION
-            || for_this_session >= fetches_for_one
-        {
-            return refuse(self, request_error_code::EXCESSIVE_LOAD, actions);
-        }
-        let range = FetchRange::Standalone {
-            full_track_name: asked.track.clone(),
-            start: asked.start,
-            end: asked.end,
-        };
-        let Ok((id, message)) = state.moqt.fetch(range, upstream_parameters(parameters)) else {
-            // The range and the parameters passed the session's checks when
-            // they came in, or were made here.
-            return refuse(self, request_error_code::INTERNAL_ERROR, actions);
-        };
-        let own = OwnRequestKey(self.next_own_request);
-        self.next_own_request = self.next_own_request.saturating_add(1);
-        state.own_fetches.insert(
-            own,
-            OwnFetch {
-                id,
-                subscriber: (session, stream),
-            },
+        let parameters = upstream_parameters(parameters);
+        let mut asked_of = Vec::new();
+        let range = (asked.start, asked.end);
+        let found = self.ask_in_turn(
+            (session, stream),
+            &asked.track,
+            range,
+            &parameters,
+            &mut asked_of,
+            actions,
         );
-        actions.push(Action::OpenRequest {
-            session: publisher,
-            request: own,
-            message,
-        });
-        actions.push(Action::StartUpstreamTimer {
-            session: publisher,
-            request: own,
-        });
+        let (publisher, own) = match found {
+            Ok(found) => found,
+            Err(code) => {
+                let code = code.unwrap_or(request_error_code::DOES_NOT_EXIST);
+                return refuse(self, code, actions);
+            }
+        };
         self.fetches.relay(
             (session, stream),
             RelayedFetch {
@@ -956,8 +933,153 @@ impl Relay {
                 held_updates: 0,
                 joins: asked.joins,
                 send_order: asked.send_order,
+                start: asked.start,
+                end: asked.end,
+                parameters,
+                asked: asked_of,
             },
         );
+    }
+
+    /// Asks the publishers of the track one after another, those in `asked`
+    /// left out, until one can be sent the FETCH. Returns that publisher and
+    /// the relay's request; or, where none could, the code of the last
+    /// refusal the relay made itself, and `None` where there was nobody to
+    /// ask. Each publisher tried is added to `asked`.
+    fn ask_in_turn(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        track: &FullTrackName,
+        range: (Location, Location),
+        parameters: &[Parameter],
+        asked: &mut Vec<SessionKey>,
+        actions: &mut Vec<Action>,
+    ) -> Result<(SessionKey, OwnRequestKey), Option<u64>> {
+        let mut refused = None;
+        while let Some(publisher) = self.whom_to_ask(track, subscriber.0, asked) {
+            asked.push(publisher);
+            match self.ask_one(subscriber, publisher, track, range, parameters, actions) {
+                Ok(own) => return Ok((publisher, own)),
+                Err(code) => refused = Some(code),
+            }
+        }
+        Err(refused)
+    }
+
+    /// Sends one publisher the relay's FETCH for a subscriber's, or says
+    /// with which code the relay refuses to.
+    fn ask_one(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        publisher: SessionKey,
+        track: &FullTrackName,
+        (start, end): (Location, Location),
+        parameters: &[Parameter],
+        actions: &mut Vec<Action>,
+    ) -> Result<OwnRequestKey, u64> {
+        let fetches_for_one = self.fetches_for_one;
+        let Some(state) = self.sessions.get_mut(&publisher) else {
+            return Err(request_error_code::DOES_NOT_EXIST);
+        };
+        let for_this_session = state
+            .own_fetches
+            .values()
+            .filter(|own| own.subscriber.0 == subscriber.0)
+            .count();
+        // The relay's FETCH and SUBSCRIBE requests share the publisher's
+        // session, and its patience.
+        if state.own_requests() >= MAX_OWN_REQUESTS_PER_SESSION
+            || state.own_fetches.len() >= MAX_OWN_FETCHES_PER_SESSION
+            || for_this_session >= fetches_for_one
+        {
+            return Err(request_error_code::EXCESSIVE_LOAD);
+        }
+        let range = FetchRange::Standalone {
+            full_track_name: track.clone(),
+            start,
+            end,
+        };
+        let Ok((id, message)) = state.moqt.fetch(range, parameters.to_vec()) else {
+            // The range and the parameters passed the session's checks when
+            // they came in, or were made here.
+            return Err(request_error_code::INTERNAL_ERROR);
+        };
+        let own = OwnRequestKey(self.next_own_request);
+        self.next_own_request = self.next_own_request.saturating_add(1);
+        state.own_fetches.insert(own, OwnFetch { id, subscriber });
+        actions.push(Action::OpenRequest {
+            session: publisher,
+            request: own,
+            message,
+        });
+        actions.push(Action::StartUpstreamTimer {
+            session: publisher,
+            request: own,
+        });
+        Ok(own)
+    }
+
+    /// The publisher a FETCH was asked of refused it, or went, before it
+    /// answered: the next publisher of the track is asked
+    /// ([`Self::whom_to_ask`]). Where there is none, the subscriber is
+    /// refused with `refusal`. A FETCH that was answered, or whose fetch
+    /// stream has come, fails as [`Self::fail_fetch`] has it.
+    ///
+    /// WHY NOT also after a publisher that did not answer in time: each
+    /// publisher gets the whole wait, and a subscriber would wait as many
+    /// times as there are publishers. A refusal or a session that ends comes
+    /// at once.
+    fn ask_the_next_or_fail(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        refusal: &Refusal,
+        pipe_code: u32,
+        actions: &mut Vec<Action>,
+    ) {
+        let unanswered = self
+            .fetches
+            .relayed(&subscriber)
+            .is_some_and(|fetch| !fetch.answered && fetch.pipe == Pipe::NotOpen);
+        if !unanswered {
+            return self.fail_fetch(subscriber, refusal, pipe_code, actions);
+        }
+        let Some(mut fetch) = self.fetches.take_relayed(&subscriber) else {
+            return;
+        };
+        self.cancel_upstream(&fetch, actions);
+        let track = fetch.track.clone();
+        let parameters = std::mem::take(&mut fetch.parameters);
+        let range = (fetch.start, fetch.end);
+        let found = self.ask_in_turn(
+            subscriber,
+            &track,
+            range,
+            &parameters,
+            &mut fetch.asked,
+            actions,
+        );
+        fetch.parameters = parameters;
+        match found {
+            Ok((publisher, own)) => {
+                fetch.publisher = publisher;
+                fetch.own = own;
+                self.fetches.relay(subscriber, fetch);
+            }
+            Err(Some(code)) => {
+                let (session, stream) = subscriber;
+                self.refuse(
+                    session,
+                    stream,
+                    fetch.request,
+                    &Refusal::code(code),
+                    actions,
+                );
+            }
+            Err(None) => {
+                let (session, stream) = subscriber;
+                self.refuse(session, stream, fetch.request, refusal, actions);
+            }
+        }
     }
 
     /// The SUBSCRIBE on `subscribe` has come: the Joining FETCH requests that
@@ -1115,26 +1237,31 @@ impl Relay {
             .collect()
     }
 
-    /// The one publisher a FETCH for the track is sent to (§9.5: "the Relay
-    /// MAY send the FETCH to any of them"): the first source of the track
-    /// that is not on its way out, and without one the first publisher that
-    /// announced a matching namespace.
+    /// The publisher a FETCH for the track is sent to next (§9.5: "When
+    /// more than one publisher is available, the Relay MAY send the FETCH to
+    /// any of them"): the first source of the track that is not on its way
+    /// out, then the first publisher that announced a matching namespace;
+    /// neither the subscriber nor one in `asked`.
     ///
-    /// WHY NOT ask another when that one refuses: the relay cannot tell a
-    /// refusal that another publisher would not repeat from one it would,
-    /// and a FETCH that goes the round of four publishers holds the
-    /// subscriber for four times the wait.
-    fn whom_to_ask(&self, track: &FullTrackName, subscriber: SessionKey) -> Option<SessionKey> {
+    /// WHY the next one after a refusal, where the draft has only the first
+    /// ask: the sources of one track can differ in what they keep and in
+    /// whether they serve a FETCH at all (the own Rust client serves none),
+    /// and a subscriber that is refused while another publisher has the
+    /// Objects cannot reach that one by itself.
+    fn whom_to_ask(
+        &self,
+        track: &FullTrackName,
+        subscriber: SessionKey,
+        asked: &[SessionKey],
+    ) -> Option<SessionKey> {
+        let left = |session: &SessionKey| *session != subscriber && !asked.contains(session);
         let source = self.tracks.live(track).and_then(|live| {
             live.sources()
                 .filter(|source| !source.draining)
                 .map(|source| source.session_and_alias().0)
-                .find(|session| *session != subscriber)
+                .find(left)
         });
-        source.or_else(|| {
-            self.matching_publishers(track)
-                .find(|session| *session != subscriber)
-        })
+        source.or_else(|| self.matching_publishers(track).find(left))
     }
 
     /// A FETCH with `FILL_TIMEOUT` 0 (§10.2.5): "the relay MUST NOT wait for
@@ -1174,7 +1301,7 @@ impl Relay {
             // not published or received any Objects in the Track"), and
             // §10.12.3 has `INVALID_RANGE` for that.
             None if self.tracks.live(track).is_some() => Some(request_error_code::INVALID_RANGE),
-            None if self.whom_to_ask(track, session).is_none() => {
+            None if self.whom_to_ask(track, session, &[]).is_none() => {
                 Some(request_error_code::DOES_NOT_EXIST)
             }
             // A publisher of the namespace, of which the relay knows nothing
@@ -1775,7 +1902,7 @@ impl Relay {
                 // §10.12.3: "If the upstream FETCH fails, the relay sends a
                 // REQUEST_ERROR and can reset the unidirectional stream."
                 let unknown = stream_reset_code::UNKNOWN_OBJECT_STATUS;
-                self.fail_fetch(
+                self.ask_the_next_or_fail(
                     subscriber,
                     &Refusal::passed_on(&error, OwnRequestKind::Fetch),
                     unknown,
@@ -1884,7 +2011,7 @@ impl Relay {
         }
         let gone = Refusal::code(request_error_code::DOES_NOT_EXIST);
         let unknown = stream_reset_code::UNKNOWN_OBJECT_STATUS;
-        self.fail_fetch(subscriber, &gone, unknown, actions);
+        self.ask_the_next_or_fail(subscriber, &gone, unknown, actions);
     }
 
     /// The publisher did not answer the relay's FETCH in time, or answered
@@ -2150,7 +2277,7 @@ impl Relay {
         // As for a SUBSCRIBE whose publisher left before it answered.
         let gone = Refusal::code(request_error_code::DOES_NOT_EXIST);
         for subscriber in as_publisher {
-            self.fail_fetch(
+            self.ask_the_next_or_fail(
                 subscriber,
                 &gone,
                 stream_reset_code::UNKNOWN_OBJECT_STATUS,

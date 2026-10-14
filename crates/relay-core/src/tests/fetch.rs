@@ -732,6 +732,110 @@ fn a_publisher_that_goes_takes_its_fetches_with_it() {
     assert_eq!(relay.counts().fetches, 0);
 }
 
+/// [`fetching`], and Bob has announced the namespace since: a second
+/// publisher of the track "a".
+fn fetching_with_a_second_publisher() -> Relay {
+    let mut relay = fetching();
+    relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: StreamKey(0),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 0,
+            track_namespace: namespace(),
+            parameters: vec![],
+        }),
+    });
+    relay
+}
+
+/// The relay's FETCH to Bob among `actions`, for the range of [`fetching`].
+fn asked_of_bob(actions: &[Action]) -> Option<OwnRequestKey> {
+    actions.iter().find_map(|action| match action {
+        Action::OpenRequest {
+            session: BOB,
+            request,
+            message:
+                ControlMessage::Fetch(Fetch {
+                    range: FetchRange::Standalone { start, end, .. },
+                    ..
+                }),
+        } if (*start, *end) == (at(0, 0), at(2, 0)) => Some(*request),
+        _ => None,
+    })
+}
+
+#[test]
+fn the_next_publisher_is_asked_when_one_refuses_or_goes_before_it_answers() {
+    // What happens to the first publisher's FETCH, whether Bob is asked
+    // then, and what Alice is sent at that step.
+    let cases: [(&str, Happens, bool, Vec<Action>); 4] = [
+        ("NOT_SUPPORTED", Happens::Refused(0x3), true, vec![]),
+        ("INVALID_RANGE", Happens::Refused(0x11), true, vec![]),
+        (
+            "the publisher goes",
+            Happens::Closed(PUBLISHER),
+            true,
+            vec![],
+        ),
+        // TIMEOUT (0x2), and nobody else is asked.
+        (
+            "no answer in time",
+            Happens::TimedOut,
+            false,
+            vec![refuse(0x2), FINISH],
+        ),
+    ];
+    for (name, what, bob_asked, to_alice) in cases {
+        let mut relay = fetching_with_a_second_publisher();
+        let actions = happen(&mut relay, &what);
+        assert_eq!(
+            asked_of_bob(&actions).is_some(),
+            bob_asked,
+            "{name}: {actions:?}"
+        );
+        let alice: Vec<Action> = actions
+            .into_iter()
+            .filter(|action| match action {
+                Action::SendRequest { session, .. }
+                | Action::FinishRequest { session, .. }
+                | Action::ResetRequest { session, .. } => *session == ALICE,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(alice, to_alice, "{name}");
+    }
+}
+
+#[test]
+fn a_fetch_that_every_publisher_refuses_gets_the_last_refusal() {
+    let mut relay = fetching_with_a_second_publisher();
+    let actions = happen(&mut relay, &Happens::Refused(0x11));
+    let bob = asked_of_bob(&actions).expect("Bob is asked");
+    // Bob refuses with NOT_SUPPORTED, which reaches Alice as DOES_NOT_EXIST
+    // (0x10), and nobody is left to ask.
+    let actions = relay.step(Event::OwnRequestMessage {
+        session: BOB,
+        request: bob,
+        message: request_error(0x3),
+    });
+    assert_eq!(
+        actions,
+        [
+            Action::StopUpstreamTimer {
+                session: BOB,
+                request: bob,
+            },
+            Action::FinishOwnRequest {
+                session: BOB,
+                request: bob,
+            },
+            refuse(0x10),
+            FINISH,
+        ]
+    );
+    assert_eq!(relay.counts().fetches, 0);
+}
+
 #[test]
 fn a_fetch_stream_for_a_fetch_the_relay_gave_up_is_stopped() {
     let mut relay = fetching();
