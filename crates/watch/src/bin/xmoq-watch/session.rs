@@ -9,7 +9,7 @@ use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::kvp::Value;
-use xmoq_moqt::message::FetchRange;
+use xmoq_moqt::message::{ControlMessage, FetchRange, RequestError};
 use xmoq_moqt::name::{FullTrackName, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{RequestEvent, RequestId, Session};
@@ -37,7 +37,17 @@ pub struct Subscription {
     pub request: RequestId,
     pub track_alias: u64,
     pub reader: RequestReader<Recv>,
-    _send: Send,
+    send: Send,
+}
+
+impl Subscription {
+    /// Gives the subscription up on the stream: a reset of this side and
+    /// `STOP_SENDING` for the other, with `CANCELLED` (§3.3.2). The session's
+    /// half is `Session::cancel`.
+    pub fn cancel(self) {
+        self.send.reset(stream_reset_code::CANCELLED);
+        self.reader.stop(stream_reset_code::CANCELLED);
+    }
 }
 
 /// What has to stay open for as long as the session after the catalog was
@@ -63,37 +73,145 @@ pub struct Requests<'a> {
     pub rendezvous_ms: Option<u64>,
 }
 
-impl Requests<'_> {
-    /// Opens the stream of a request, within the time the relay has to
-    /// allow one more. Nothing was sent when it fails, and what the session
-    /// has of the request is the caller's to let go of with the session.
-    ///
-    /// WHY a time: a relay that allows no stream would hold the viewer at
-    /// "connecting" for good. The page and the Rust client give a request
-    /// the same time (the row "A request that waits for a stream" of
-    /// docs/moqt-implementation-notes.md).
-    async fn open_stream(
-        &self,
-        what: &str,
-    ) -> Result<(
-        <WtConnection as Connection>::Send,
-        <WtConnection as Connection>::Recv,
-    )> {
-        let wait = Duration::from_millis(self.open_wait_ms);
-        let Ok(opened) = tokio::time::timeout(wait, self.connection.open_bi()).await else {
-            bail!(
-                "the relay allowed no stream for {what} within {} ms",
-                self.open_wait_ms
-            );
-        };
-        Ok(opened?)
-    }
+/// Opens the stream of a request, within the time the relay has to allow
+/// one more. Nothing was sent when it fails, and what the session has of
+/// the request is the caller's to let go of.
+///
+/// WHY a time: a relay that allows no stream would hold the viewer at
+/// "connecting" for good. The page and the Rust client give a request the
+/// same time (the row "A request that waits for a stream" of
+/// docs/moqt-implementation-notes.md).
+async fn open_stream(
+    connection: &WtConnection,
+    open_wait_ms: u64,
+    what: &str,
+) -> Result<(Send, Recv)> {
+    let wait = Duration::from_millis(open_wait_ms);
+    let Ok(opened) = tokio::time::timeout(wait, connection.open_bi()).await else {
+        bail!("the relay allowed no stream for {what} within {open_wait_ms} ms");
+    };
+    Ok(opened?)
+}
 
+/// A SUBSCRIBE the session made and that is not sent yet.
+pub struct Asked {
+    name: String,
+    request: RequestId,
+    message: ControlMessage,
+    /// How long its answer is waited for.
+    wait_ms: u64,
+}
+
+/// A SUBSCRIBE that was sent, and the first thing that came on its stream,
+/// or nothing within its time.
+pub struct Sent {
+    send: Send,
+    reader: RequestReader<Recv>,
+    answer: Option<Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>>,
+}
+
+/// Why a SUBSCRIBE gave no subscription.
+pub enum NotSubscribed {
+    /// The relay refused it.
+    Refused(RequestError),
+    /// It was not sent, not answered in time, or answered with something
+    /// else.
+    Failed(anyhow::Error),
+}
+
+/// Sends `asked` and waits for its answer. Needs no session, so that what
+/// is played goes on meanwhile; [`settle`] hands the answer to the session.
+pub async fn send_subscribe(
+    connection: &WtConnection,
+    open_wait_ms: u64,
+    asked: &Asked,
+) -> Result<Sent> {
+    let (mut send, recv) = open_stream(connection, open_wait_ms, &asked.name).await?;
+    let trace = Trace::default();
+    send_message(&mut send, &asked.message, &trace, &asked.name).await?;
+    let mut reader = RequestReader::new(recv, &trace, &asked.name);
+    // WHY from here, and the request alone given up: the row "A request
+    // the peer does not answer" of docs/moqt-implementation-notes.md,
+    // which the page and the Rust client go by as well. What the viewer
+    // makes of a track it did not get is its caller's.
+    let answer = tokio::time::timeout(Duration::from_millis(asked.wait_ms), reader.next_event())
+        .await
+        .ok();
+    Ok(Sent {
+        send,
+        reader,
+        answer,
+    })
+}
+
+/// Hands what came of a SUBSCRIBE to the session: a subscription, or why
+/// there is none. A request that got no answer, or could not be sent, is
+/// let go of in the session.
+pub fn settle(
+    session: &mut Session,
+    asked: &Asked,
+    sent: Result<Sent>,
+) -> Result<Subscription, NotSubscribed> {
+    let (request, name) = (asked.request, &asked.name);
+    let failed = |error: anyhow::Error| NotSubscribed::Failed(error);
+    let mut sent = match sent {
+        Ok(sent) => sent,
+        Err(error) => {
+            session.cancel(request);
+            return Err(failed(error));
+        }
+    };
+    let Some(answer) = sent.answer.take() else {
+        session.cancel(request);
+        sent.send.reset(stream_reset_code::CANCELLED);
+        sent.reader.stop(stream_reset_code::CANCELLED);
+        return Err(failed(anyhow!(
+            "the relay did not answer the SUBSCRIBE of {name} within {} ms",
+            asked.wait_ms
+        )));
+    };
+    let RequestStreamEvent::Message(response) = answer.map_err(|error| failed(error.into()))?
+    else {
+        return Err(failed(anyhow!(
+            "the relay closed the SUBSCRIBE of {name} without an answer"
+        )));
+    };
+    match session
+        .on_request_message(request, response)
+        .map_err(|error| failed(error.into()))?
+    {
+        RequestEvent::SubscribeEstablished { track_alias, .. } => Ok(Subscription {
+            request,
+            track_alias,
+            reader: sent.reader,
+            send: sent.send,
+        }),
+        RequestEvent::Rejected(error) => Err(NotSubscribed::Refused(error)),
+        other => Err(failed(anyhow!(
+            "SUBSCRIBE of {name} was answered with {other:?}"
+        ))),
+    }
+}
+
+impl Requests<'_> {
     /// Subscribes to a track of the namespace. With `timeout_ms` the
     /// SUBSCRIBE carries a `SUBGROUP_DELIVERY_TIMEOUT` (§10.2.3): the
     /// publisher gives up a Subgroup that is not delivered that long after
     /// its last Object (§8).
     pub async fn subscribe(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<Subscription> {
+        let asked = self.ask(name, timeout_ms)?;
+        let sent = send_subscribe(self.connection, self.open_wait_ms, &asked).await;
+        settle(self.session, &asked, sent).map_err(|not| match not {
+            NotSubscribed::Refused(error) => {
+                anyhow!("SUBSCRIBE of {name} was refused: {error:?}")
+            }
+            NotSubscribed::Failed(error) => error,
+        })
+    }
+
+    /// The SUBSCRIBE for a track of the namespace, made by the session and
+    /// not sent yet ([`send_subscribe`]).
+    pub fn ask(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<Asked> {
         let full_name = FullTrackName::new(self.namespace.clone(), name.as_bytes().to_vec())?;
         let mut parameters = vec![
             Parameter::Forward(true),
@@ -109,38 +227,15 @@ impl Requests<'_> {
         if let Some(wait_ms) = self.rendezvous_ms {
             parameters.push(Parameter::RendezvousTimeout(wait_ms));
         }
-        let wait = answer_wait_ms(self.answer_wait_ms, &parameters);
+        let wait_ms = answer_wait_ms(self.answer_wait_ms, &parameters);
         let (request, message) = self.session.subscribe(full_name, parameters)?;
-        let (mut send, recv) = self.open_stream(name).await?;
-        let trace = Trace::default();
-        send_message(&mut send, &message, &trace, name).await?;
-        let mut reader = RequestReader::new(recv, &trace, name);
-        // WHY from here, and the request alone given up: the row "A request
-        // the peer does not answer" of docs/moqt-implementation-notes.md,
-        // which the page and the Rust client go by as well. What the
-        // viewer makes of a track it did not get is its caller's.
-        let Ok(answer) =
-            tokio::time::timeout(Duration::from_millis(wait), reader.next_event()).await
-        else {
-            self.session.cancel(request);
-            send.reset(stream_reset_code::CANCELLED);
-            reader.stop(stream_reset_code::CANCELLED);
-            bail!("the relay did not answer the SUBSCRIBE of {name} within {wait} ms");
-        };
-        let RequestStreamEvent::Message(response) = answer? else {
-            bail!("the relay closed the SUBSCRIBE of {name} without an answer");
-        };
-        match self.session.on_request_message(request, response)? {
-            RequestEvent::SubscribeEstablished { track_alias, .. } => Ok(Subscription {
-                request,
-                track_alias,
-                reader,
-                _send: send,
-            }),
-            other => bail!("SUBSCRIBE of {name} was refused: {other:?}"),
-        }
+        Ok(Asked {
+            name: name.to_string(),
+            request,
+            message,
+            wait_ms,
+        })
     }
-
     /// Reads the catalog of the namespace: its tracks.
     ///
     /// WHY a Joining FETCH: the catalog is one Object that was published
@@ -163,7 +258,8 @@ impl Requests<'_> {
             .into_iter()
             .collect();
         let (fetch, message) = self.session.fetch(range, parameters)?;
-        let (mut send, recv) = self.open_stream("the catalog's FETCH").await?;
+        let (mut send, recv) =
+            open_stream(self.connection, self.open_wait_ms, "the catalog's FETCH").await?;
         let trace = Trace::default();
         send_message(&mut send, &message, &trace, "fetch").await?;
         let mut answers = Some(RequestReader::new(recv, &trace, "fetch"));

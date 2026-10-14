@@ -122,6 +122,11 @@ pub struct Args {
     /// negative number), as that of a viewer on another machine does
     /// against its publisher's. 0 where it is not said.
     pub clock_skew_ppm: i64,
+    /// `--cut-sound-s`: for measuring. The viewer cancels its subscription
+    /// to the sound so long after it was made, once, and the sound is asked
+    /// for again as when a relay ends it; the watching page has the same
+    /// (`/watch?cutSound=N`).
+    pub cut_sound_s: Option<u64>,
 }
 
 /// The value of `xmoq_moqt::params::ANSWER_WAIT_MS`, which this library
@@ -174,6 +179,8 @@ xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line
                                     white square and the beep leave the viewer (off)
   --clock-skew-ppm <n>              for measuring: the viewer's clock runs n parts in a million
                                     faster than the machine's (0)
+  --cut-sound-s <n>                 for measuring: the sound's subscription is cancelled once, n s
+                                    after it was made, and asked for again
 Keys: q or Ctrl-C ends, + and - the volume, m mutes, t or Enter begins a line for the chat.";
 
 fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, Invalid> {
@@ -275,6 +282,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         sound: true,
         measure_demo_marks: false,
         clock_skew_ppm: 0,
+        cut_sound_s: None,
     };
     while let Some(flag) = given.next() {
         let value = given
@@ -344,6 +352,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--fit" => args.fit = fit(&value)?,
             "--out" => args.out = Some(value),
             "--seconds" => args.seconds = Some(number(&flag, &value)?),
+            "--cut-sound-s" => args.cut_sound_s = Some(number(&flag, &value)?),
             "--log" => args.log = Some(value),
             "--sound" => args.sound = one_of(&flag, &value, &[("on", true), ("off", false)])?,
             "--measure-demo-marks" => {
@@ -425,6 +434,7 @@ mod tests {
             sound: true,
             measure_demo_marks: false,
             clock_skew_ppm: 0,
+            cut_sound_s: None,
         }
     }
 
@@ -453,7 +463,7 @@ mod tests {
             parsed(
                 "--room http://h/rooms/a --name me --say hello --token no --video v --audio a \
                  --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --rendezvous-timeout-ms 4500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
-                 --seconds 20 --log l --sound off --measure-demo-marks on"
+                 --seconds 20 --log l --sound off --measure-demo-marks on --cut-sound-s 5"
             ),
             Ok(Args {
                 source: Source::Room {
@@ -481,6 +491,7 @@ mod tests {
                 sound: false,
                 measure_demo_marks: true,
                 clock_skew_ppm: 0,
+                cut_sound_s: Some(5),
             })
         );
         assert_eq!(

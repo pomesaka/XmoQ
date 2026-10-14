@@ -10,6 +10,7 @@
 //! mean ([`args`]). Each is given
 //! its times and its bytes, and none reads a clock, a terminal or a socket.
 
+pub mod again;
 pub mod args;
 pub mod clock;
 pub mod fit;

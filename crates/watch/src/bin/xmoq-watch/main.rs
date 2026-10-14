@@ -38,6 +38,7 @@ use xmoq_moqt_io::{
     Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
     read_uni_streams, send_message,
 };
+use xmoq_watch::again::AskAgain;
 use xmoq_watch::args::{Args, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
 use xmoq_watch::keys::{Asked, Keys};
@@ -49,7 +50,7 @@ use crate::picture::{
     Frame, LINES, MOST_COUNTED, MOST_FRAMES_WAITING, Picture, Screen, Seen, Under,
 };
 use crate::room_socket::{Heard, RoomSocket};
-use crate::session::{Requests, Subscription, timestamp_of};
+use crate::session::{NotSubscribed, Requests, Sent, Subscription, timestamp_of};
 use crate::sound::{Sound, Volume, micros_since};
 use crate::video_decoder::VideoDecoder;
 
@@ -461,6 +462,8 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
 struct Subscribed {
     video: Subscription,
     audio: Subscription,
+    /// The name of the sound's track, to ask for it again.
+    audio_name: String,
     /// What keeps the catalog's requests open.
     _catalog: Option<session::CatalogKept>,
     /// What the catalog had, as a line for the log; `None` where the tracks
@@ -511,6 +514,7 @@ async fn subscriptions(
         // for; the sound's are 200 ms and small, and losing one is heard.
         video: requests.subscribe(&video, args.video_timeout_ms).await?,
         audio: requests.subscribe(&audio, None).await?,
+        audio_name: audio,
         _catalog: kept,
         found,
     })
@@ -650,6 +654,9 @@ impl Played {
     }
 }
 
+/// A SUBSCRIBE for the sound that was sent again, on its way to its answer.
+type Answer = std::pin::Pin<Box<dyn Future<Output = (session::Asked, Result<Sent>)> + Send>>;
+
 /// Plays one broadcast until it ends, moves, or the viewer is ended.
 /// `began_playing` is set when its first Object came.
 #[expect(
@@ -677,6 +684,13 @@ async fn play(
         |event| event,
     ));
     let control_kept = &mut kept.control;
+    let namespace = TrackNamespace::new(
+        place
+            .namespace
+            .iter()
+            .map(|field| field.as_bytes().to_vec())
+            .collect(),
+    )?;
     // Each wait for the relay has its own time: the SETUP 10 seconds, the
     // answer to each SUBSCRIBE what `answer_wait_ms` says, the catalog 5.
     // WHY all of it under `unless_ended`: the viewer has to end when it is
@@ -708,13 +722,6 @@ async fn play(
             Ok(other) => bail!("no SETUP from the relay: {other:?}"),
             Err(_) => return Err(NoSetupInTime(args.setup_wait_ms).into()),
         };
-        let namespace = TrackNamespace::new(
-            place
-                .namespace
-                .iter()
-                .map(|field| field.as_bytes().to_vec())
-                .collect(),
-        )?;
         let mut requests = Requests {
             connection,
             session: &mut session,
@@ -740,10 +747,24 @@ async fn play(
     };
     let Subscribed {
         mut video,
-        mut audio,
+        audio,
+        audio_name,
         _catalog,
         found,
     } = subscribed;
+    // WHY the sound is asked for again on this session, and the picture
+    // goes on: a relay may end the sound's subscription alone (it ends the
+    // one that falls behind), and a new session would stop the picture for
+    // the sake of the sound. The watching page does the same
+    // (`keepTrackOnSession` of `@xmoq/media`), by the same rule
+    // (`xmoq_watch::again`).
+    let mut audio = Some(audio);
+    let mut again = AskAgain::default();
+    let mut ask_at: Option<tokio::time::Instant> = None;
+    let mut asking: Option<Answer> = None;
+    let mut cut_at = args
+        .cut_sound_s
+        .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
     if let Some(line) = found {
         ui.note(&line);
     }
@@ -861,15 +882,106 @@ async fn play(
                 }
                 break "the video track ended";
             }
-            event = audio.reader.next_event() => {
-                match event {
-                    Ok(RequestStreamEvent::Message(message)) => {
-                        session.on_request_message(audio.request, message)?;
-                    }
-                    Ok(RequestStreamEvent::Closed(_)) => {}
-                    Err(error) => failed = Some(error.into()),
+            event = async {
+                match audio.as_mut() {
+                    Some(audio) => audio.reader.next_event().await,
+                    None => std::future::pending().await,
                 }
-                break "the audio track ended";
+            } => {
+                let Some(ended) = audio.take() else { continue };
+                let how = match event {
+                    Ok(RequestStreamEvent::Message(message)) => {
+                        let line = format!("{message:?}");
+                        session.on_request_message(ended.request, message)?;
+                        line
+                    }
+                    // Without PUBLISH_DONE the session still has the
+                    // subscription, which would stand in the way of the
+                    // next SUBSCRIBE for the track.
+                    Ok(RequestStreamEvent::Closed(closed)) => {
+                        session.cancel(ended.request);
+                        format!("closed {closed:?}")
+                    }
+                    Err(error) => {
+                        session.cancel(ended.request);
+                        format!("{error}")
+                    }
+                };
+                let pause = again.after_end();
+                ui.note(&format!("AUDIO_ENDED {how}; asking again in {pause} ms"));
+                ask_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause));
+            }
+            () = async {
+                match cut_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                cut_at = None;
+                if let Some(cut) = audio.take() {
+                    session.cancel(cut.request);
+                    // Dropping it resets the request stream (`cancel` above
+                    // is the session's half).
+                    cut.cancel();
+                    let pause = again.after_end();
+                    ui.note(&format!("AUDIO_ENDED cut; asking again in {pause} ms"));
+                    ask_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause));
+                }
+            }
+            () = async {
+                match ask_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                ask_at = None;
+                let mut requests = Requests {
+                    connection,
+                    session: &mut session,
+                    namespace: &namespace,
+                    token: place.token.as_deref(),
+                    answer_wait_ms: args.answer_wait_ms,
+                    open_wait_ms: args.open_wait_ms,
+                    rendezvous_ms: args.rendezvous_ms,
+                };
+                match requests.ask(&audio_name, None) {
+                    Ok(asked) => {
+                        let connection = Arc::clone(connection);
+                        let open_wait_ms = args.open_wait_ms;
+                        asking = Some(Box::pin(async move {
+                            let sent = session::send_subscribe(&connection, open_wait_ms, &asked).await;
+                            (asked, sent)
+                        }));
+                    }
+                    Err(error) => ui.note(&format!("AUDIO_GIVEN_UP {error:#}")),
+                }
+            }
+            (asked, sent) = async {
+                match asking.as_mut() {
+                    Some(answer) => answer.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                asking = None;
+                match session::settle(&mut session, &asked, sent) {
+                    Ok(subscription) => {
+                        again.subscribed();
+                        ui.note(&format!("AUDIO_AGAIN track_alias={}", subscription.track_alias));
+                        audio = Some(subscription);
+                    }
+                    Err(NotSubscribed::Refused(error)) => {
+                        let pause = again.after_refusal(error.retry_wait_ms());
+                        ui.note(&format!(
+                            "AUDIO_REFUSED error_code={:#x}; asking again in {pause} ms",
+                            error.error_code
+                        ));
+                        ask_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause));
+                    }
+                    // As the page: not asked for again on this session.
+                    Err(NotSubscribed::Failed(error)) => {
+                        ui.note(&format!("AUDIO_GIVEN_UP {error:#}"));
+                    }
+                }
             }
             event = events.recv() => match event {
                 Some(UniEvent::Object { header, object, .. }) => {
@@ -877,7 +989,10 @@ async fn play(
                     // subscribed: a catalog that comes again is not read.
                     let of_video = header.track_alias == video.track_alias;
                     if object.status != ObjectStatus::Normal
-                        || !(of_video || header.track_alias == audio.track_alias)
+                        || !(of_video
+                            || audio
+                                .as_ref()
+                                .is_some_and(|audio| audio.track_alias == header.track_alias))
                     {
                         continue;
                     }
