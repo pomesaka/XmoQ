@@ -1543,6 +1543,10 @@ struct Share {
     budget: Arc<SendBudget>,
     bytes: AtomicUsize,
     objects: AtomicUsize,
+    /// Payload bytes ever queued on the stream, written out or not: what the
+    /// stream carries towards the receiver while it is not done
+    /// ([`OutgoingSubgroup::carried`]).
+    carried: AtomicUsize,
     /// The writer is done and gave everything back. Its handle may live on;
     /// what is sent through it after that is dropped and counts for nothing.
     released: AtomicBool,
@@ -1555,6 +1559,7 @@ impl Share {
         }
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
         self.objects.fetch_add(1, Ordering::Relaxed);
+        self.carried.fetch_add(bytes, Ordering::Relaxed);
         self.budget.bytes.fetch_add(bytes, Ordering::Relaxed);
         self.budget.objects.fetch_add(1, Ordering::Relaxed);
     }
@@ -1677,6 +1682,7 @@ impl OutgoingSubgroup {
             budget: Arc::clone(budget),
             bytes: AtomicUsize::new(0),
             objects: AtomicUsize::new(0),
+            carried: AtomicUsize::new(0),
             released: AtomicBool::new(false),
         });
         // The channel has no bound of its own; `send` keeps the budget.
@@ -1718,6 +1724,22 @@ impl OutgoingSubgroup {
     /// under it (docs/moqt-implementation-notes.md, **provisional**).
     pub fn set_delivery_timeout(&self, delivery_timeout: Option<Duration>) {
         self.asked.send_replace(delivery_timeout);
+    }
+
+    /// Payload bytes the stream has carried since it was started, written
+    /// out or still queued; 0 once the writer is done. For choosing, when the
+    /// receiver's budget is used up, the subscription that holds the most.
+    ///
+    /// WHY not the bytes still queued alone: a stream that is written out
+    /// and not yet acknowledged holds a place among the receiver's streams
+    /// and queues nothing, and a sound of one piece a stream has hundreds of
+    /// those behind a video that holds the transport.
+    #[must_use]
+    pub fn carried(&self) -> usize {
+        if self.share.released.load(Ordering::Relaxed) {
+            return 0;
+        }
+        self.share.carried.load(Ordering::Relaxed)
     }
 
     /// Queues an Object.

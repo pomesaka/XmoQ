@@ -998,6 +998,9 @@ async fn the_budget_is_shared_by_the_streams_of_a_receiver() {
     // not started, although no single stream is anywhere near full.
     assert!(sending.open(3).is_err());
     assert_eq!(sending.budget.in_use(), (768, 3, 3));
+    // What each stream carries, for choosing whom to cut.
+    let carried: Vec<usize> = writers.iter().map(OutgoingSubgroup::carried).collect();
+    assert_eq!(carried, [256, 256, 256]);
 
     // Finished writers can still be reset, which gives everything back.
     for out in &writers {
@@ -1008,6 +1011,8 @@ async fn the_budget_is_shared_by_the_streams_of_a_receiver() {
         while sending.report().await.1 != OutgoingEvent::Closed {}
     }
     assert_eq!(sending.budget.in_use(), (0, 0, 0));
+    let carried: Vec<usize> = writers.iter().map(OutgoingSubgroup::carried).collect();
+    assert_eq!(carried, [0, 0, 0]);
     assert!(sending.open(4).is_ok());
 }
 

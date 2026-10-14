@@ -934,6 +934,7 @@ fn a_subscriber_that_falls_behind_loses_its_subscription_alone() {
     assert_eq!(
         relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(0),
+            carried: vec![],
         }),
         expected
     );
@@ -942,11 +943,116 @@ fn a_subscriber_that_falls_behind_loses_its_subscription_alone() {
     assert_eq!(
         relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(2),
+            carried: vec![],
         }),
         []
     );
     assert_eq!(object_arrived(&mut relay, 7, 0), [send_object(1, 0)]);
     assert_eq!(held(&relay), (3, 1, 1, 2, 2));
+}
+
+/// Alice subscribed to two tracks: "a" of the publisher on her stream 0,
+/// standing for a sound, and "v" of Bob on her stream 2, standing for a
+/// video. Each has one stream open towards her: out stream 0 for "a", 1 for
+/// "v".
+fn alice_with_a_sound_and_a_video() -> Relay {
+    let mut relay = relay_with_track();
+    relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: StreamKey(0),
+        first: publish(0, b"v"),
+    });
+    subscribe_to_track(&mut relay, ALICE);
+    relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(2),
+        first: subscribe(2, b"v"),
+    });
+    data_stream_opened(&mut relay, 7);
+    relay.step(Event::DataStreamOpened {
+        session: BOB,
+        stream: StreamKey(8),
+        header: header_of_group(UPSTREAM_ALIAS, 8),
+    });
+    relay
+}
+
+/// (case, the stream that went over, what each stream carried, what the
+/// relay does)
+type FullQueueCase = (&'static str, u64, Vec<(u64, usize)>, Vec<Action>);
+
+#[test]
+fn the_subscription_that_carries_the_most_is_the_one_that_falls_behind() {
+    let ended = |request: StreamKey, out_stream: u64| {
+        vec![
+            Action::ResetDataStream {
+                out_stream: OutStreamKey(out_stream),
+                code: 0x5,
+            },
+            Action::SendRequest {
+                session: ALICE,
+                stream: request,
+                message: publish_done(0x5, 1),
+            },
+            Action::FinishRequest {
+                session: ALICE,
+                stream: request,
+            },
+        ]
+    };
+    let cases: [FullQueueCase; 4] = [
+        (
+            "the sound goes over, the video carries more: the video ends, and \
+             the sound's stream that went over is reset",
+            0,
+            vec![(0, 2_000), (1, 900_000)],
+            [
+                vec![Action::ResetDataStream {
+                    out_stream: OutStreamKey(0),
+                    code: 0x5,
+                }],
+                ended(StreamKey(2), 1),
+            ]
+            .concat(),
+        ),
+        (
+            "the video goes over and carries more: the video ends",
+            1,
+            vec![(0, 2_000), (1, 900_000)],
+            ended(StreamKey(2), 1),
+        ),
+        (
+            "the video goes over, the sound carries more: the sound ends",
+            1,
+            vec![(0, 900_000), (1, 2_000)],
+            [
+                vec![Action::ResetDataStream {
+                    out_stream: OutStreamKey(1),
+                    code: 0x5,
+                }],
+                ended(StreamKey(0), 0),
+            ]
+            .concat(),
+        ),
+        (
+            "the two carry the same: the one that went over ends",
+            0,
+            vec![(0, 5_000), (1, 5_000)],
+            ended(StreamKey(0), 0),
+        ),
+    ];
+    for (name, full, carried, expected) in cases {
+        let mut relay = alice_with_a_sound_and_a_video();
+        let carried = carried
+            .into_iter()
+            .map(|(out_stream, bytes)| (OutStreamKey(out_stream), bytes))
+            .collect();
+        let actions = relay.step(Event::SendQueueFull {
+            out_stream: OutStreamKey(full),
+            carried,
+        });
+        assert_eq!(actions, expected, "{name}");
+    }
 }
 
 #[test]
@@ -1290,6 +1396,7 @@ fn events_for_what_the_relay_let_go_are_ignored() {
         },
         Event::SendQueueFull {
             out_stream: OutStreamKey(9),
+            carried: vec![],
         },
         Event::DrainTimeout {
             session: PUBLISHER,
@@ -1463,6 +1570,7 @@ fn a_stream_that_may_never_have_been_opened_makes_the_count_unknown() {
     assert_eq!(
         relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(0),
+            carried: vec![],
         }),
         expected
     );
@@ -1495,6 +1603,7 @@ fn a_finished_stream_that_is_not_written_out_is_reset_with_its_subscription() {
     assert_eq!(
         relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(3),
+            carried: vec![],
         }),
         expected
     );

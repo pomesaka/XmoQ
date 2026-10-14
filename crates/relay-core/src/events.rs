@@ -269,8 +269,12 @@ pub enum Event {
     /// What waits to be written to the subscriber of this stream is over its
     /// limit: the subscriber does not keep up.
     SendQueueFull {
-        /// The stream.
+        /// The stream whose Object, or whose opening, went over the limit.
         out_stream: OutStreamKey,
+        /// For each stream to the same subscriber session that is not done,
+        /// the payload bytes it has carried. The relay ends the subscription
+        /// whose streams carry the most.
+        carried: Vec<(OutStreamKey, usize)>,
     },
     /// The time to wait for the last Objects of a track after `PUBLISH_DONE` is
     /// over. Answers [`Action::StartDrainTimer`].

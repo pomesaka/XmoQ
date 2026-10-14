@@ -1417,8 +1417,27 @@ impl<C: Connection> Hub<C> {
             .get(&out_stream)
             .is_some_and(|(_, writer)| writer.send(object).is_err());
         if full {
-            pending.push_back(Event::SendQueueFull { out_stream });
+            let session = self
+                .out_streams
+                .get(&out_stream)
+                .map(|(session, _)| *session);
+            let carried = session.map_or_else(Vec::new, |session| self.carried_to(session));
+            pending.push_back(Event::SendQueueFull {
+                out_stream,
+                carried,
+            });
         }
+    }
+
+    /// What each stream not done to `session` has carried
+    /// ([`OutgoingSubgroup::carried`]), for the core to choose which
+    /// subscription to end.
+    fn carried_to(&self, session: SessionKey) -> Vec<(OutStreamKey, usize)> {
+        self.out_streams
+            .iter()
+            .filter(|(_, (of, _))| *of == session)
+            .map(|(key, (_, writer))| (*key, writer.carried()))
+            .collect()
     }
 
     fn execute(&mut self, action: Action, pending: &mut VecDeque<Event>) {
@@ -1844,7 +1863,11 @@ impl<C: Connection> Hub<C> {
         } else {
             // Too many streams of this subscriber are not written out. No
             // writer was started, so the hub says what one would have said.
-            pending.push_back(Event::SendQueueFull { out_stream });
+            let carried = self.carried_to(session);
+            pending.push_back(Event::SendQueueFull {
+                out_stream,
+                carried,
+            });
             pending.push_back(Event::OutStreamClosed { out_stream });
         }
     }
