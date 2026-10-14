@@ -2293,6 +2293,7 @@ impl Ending {
                 },
                 Event::SendQueueFull {
                     out_stream: OutStreamKey(0),
+                    carried: vec![],
                 },
             ],
             Self::UpdateRefused => vec![Event::RequestMessage {

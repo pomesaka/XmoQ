@@ -1704,14 +1704,13 @@ impl Relay {
             Event::TrackMalformed { session, stream } => {
                 self.on_track_malformed(session, stream, &mut actions);
             }
-            Event::OutStreamOpened { out_stream } => {
-                if let Some(out) = self.out_streams.get_mut(&out_stream) {
-                    out.opened = true;
-                }
-            }
+            Event::OutStreamOpened { out_stream } => self.out_stream_opened(out_stream),
             Event::OutStreamClosed { out_stream } => self.forget_out_stream(out_stream),
-            Event::SendQueueFull { out_stream } => {
-                self.on_send_queue_full(out_stream, &mut actions);
+            Event::SendQueueFull {
+                out_stream,
+                carried,
+            } => {
+                self.on_send_queue_full(out_stream, &carried, &mut actions);
             }
             Event::DrainTimeout {
                 session,
@@ -1738,16 +1737,80 @@ impl Relay {
         actions
     }
 
-    fn on_send_queue_full(&mut self, out_stream: OutStreamKey, actions: &mut Vec<Action>) {
+    fn out_stream_opened(&mut self, out_stream: OutStreamKey) {
+        if let Some(out) = self.out_streams.get_mut(&out_stream) {
+            out.opened = true;
+        }
+    }
+
+    /// The subscriber session of `out_stream` is over its limit. The
+    /// subscription of that session whose streams carry the most bytes ends
+    /// (`carried`, from the I/O side), the one of `out_stream` where none
+    /// carries more.
+    ///
+    /// WHY end one subscription: its queue is the only place the delay can
+    /// go without holding back the publisher and the other subscribers (§8
+    /// names `TOO_FAR_BEHIND` for it). WHY the one that carries the most, and
+    /// not the one that went over: the limit is the session's, and the one
+    /// that went over is as often a small track that comes often, the sound
+    /// behind its own video, as the track that fills it; a viewer behind a
+    /// link of 2 Mbit/s lost its sound so in one run of two
+    /// (docs/experiments/2026-10-14-three-minutes-behind-a-narrow-link-and-the-relays-limit-for-one-viewer.md).
+    /// WHY bytes and not streams: a sound of one piece a stream holds more
+    /// streams than its video.
+    ///
+    /// Where another subscription ends, `out_stream` itself is reset with
+    /// `TOO_FAR_BEHIND`: the Object that did not fit was not queued, and a
+    /// stream without it would carry a Subgroup with a hole.
+    fn on_send_queue_full(
+        &mut self,
+        out_stream: OutStreamKey,
+        carried: &[(OutStreamKey, usize)],
+        actions: &mut Vec<Action>,
+    ) {
         let Some(out) = self.out_streams.get(&out_stream) else {
             return;
         };
-        let (track, subscriber) = (out.track.clone(), out.session);
-        // WHY end the one subscription: its queue is the only place the delay
-        // can go without holding back the publisher and the other subscribers
-        // (§8 names TOO_FAR_BEHIND for it).
+        let (full_track, subscriber) = (out.track.clone(), out.session);
+        let mut by_track: Vec<(FullTrackName, usize)> = vec![(full_track.clone(), 0)];
+        for (stream, bytes) in carried {
+            let Some(out) = self.out_streams.get(stream) else {
+                continue;
+            };
+            if out.session != subscriber {
+                continue;
+            }
+            if let Some(entry) = by_track.iter_mut().find(|(track, _)| *track == out.track) {
+                entry.1 = entry.1.saturating_add(*bytes);
+            } else {
+                by_track.push((out.track.clone(), *bytes));
+            }
+        }
+        // The first of the largest: the track of `out_stream` where it ties.
+        let ended = by_track
+            .iter()
+            .fold(None::<&(FullTrackName, usize)>, |most, entry| match most {
+                Some(most) if most.1 >= entry.1 => Some(most),
+                _ => Some(entry),
+            })
+            .map_or_else(|| full_track.clone(), |(track, _)| track.clone());
+        if ended != full_track {
+            let subscriber_entry = self.tracks.live_mut(&full_track).and_then(|track| {
+                track
+                    .subscribers
+                    .iter_mut()
+                    .find(|entry| entry.session == subscriber)
+            });
+            reset_out_stream(
+                &mut self.out_streams,
+                subscriber_entry,
+                out_stream,
+                stream_reset_code::TOO_FAR_BEHIND,
+                actions,
+            );
+        }
         self.end_subscription(
-            &track,
+            &ended,
             subscriber,
             publish_done_status::TOO_FAR_BEHIND,
             stream_reset_code::TOO_FAR_BEHIND,
