@@ -67,6 +67,8 @@ interface Pairing {
 	 * says only that the client exited. The whole log is searched then.
 	 */
 	reasonIsInAClientLine?: boolean;
+	/** More environment for the driver, beside this process's own. */
+	env?: Record<string, string>;
 }
 
 function transfers(): Pairing[] {
@@ -973,7 +975,12 @@ async function runPairing(
 			"--port",
 			String(port),
 		],
-		{ cwd: here, stdout: "pipe", stderr: "pipe" },
+		{
+			cwd: here,
+			env: { ...process.env, ...pairing.env },
+			stdout: "pipe",
+			stderr: "pipe",
+		},
 	);
 	running.add(child);
 	let timedOut = false;
@@ -1407,6 +1414,15 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 						script: "video.ts" as const,
 						args: ["--video", "reconnect"],
 						relay: "own",
+						// WHY: in CI a page of this run crashed now and then,
+						// on Linux alone, and no reason was left
+						// (docs/experiments/2026-10-14-the-page-that-crashed-when-the-relay-came-back.md).
+						// playwright-core 1.64.0 passes on what Chromium prints
+						// to stderr only with this; a renderer that crashes
+						// prints its signal there ("Received signal 11", seen
+						// on macOS with chrome://crash). WHY this run alone:
+						// Chromium prints a great deal there.
+						env: { DEBUG: "pw:browser" },
 					},
 					{
 						name: "own relay: video: an own page whose key frames are all over what it sends is told so",
