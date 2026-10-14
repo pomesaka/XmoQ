@@ -93,8 +93,11 @@ export {
 export {
 	type KeepPlayingOptions,
 	type KeepPublishingOptions,
+	type KeepTrackOnSessionOptions,
+	type KeptTrackState,
 	keepPlaying,
 	keepPublishing,
+	keepTrackOnSession,
 	type PlayingState,
 	type PublishingState,
 	type ServedTrack,

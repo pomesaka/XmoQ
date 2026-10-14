@@ -104,6 +104,7 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | watch | `video=no` | The sound alone | Picture and sound |
 | watch | `videoTimeout=MS` | The delivery timeout asked for the video; 0 asks for none | 150 |
 | watch | `audioTimeout=MS` | The same for the sound | None asked |
+| watch | `cutSound=S` | For trying: the first subscription of the sound is cancelled after `S` seconds; the page subscribes to the sound again on the session, and the picture goes on ([record](../docs/experiments/2026-10-14-the-sound-subscribed-to-again-alone.md)) | Not cancelled |
 | watch | `videoTimeoutThen=MS`, `videoTimeoutAfter=S` | Changes the video's timeout while it plays, with a REQUEST_UPDATE, after S seconds | No change; 10 |
 | watch | `abr=1` | Trial: changes between the versions of `ladder=1` | The first version |
 | watch | `judge=try` | Trial, with `abr=1`: a higher version is received for 2 s before it is shown | Shown at once |
