@@ -1156,6 +1156,11 @@ impl Tracks {
             track.never_cached |= !cache::may_be_cached(&properties);
             track.properties = properties;
             track.largest = track.largest.max(largest);
+            // WHY forgotten: the new source was not asked, and a request of
+            // 0 would else not reach it until it passes the Largest Group of
+            // the sources before (§10.2.13 has a request outstanding "until
+            // the Largest Group increases").
+            track.new_group_asked = None;
             // The publisher they were held for has come.
             return Ok(Added {
                 waiters: std::mem::take(&mut track.held),
@@ -2672,12 +2677,9 @@ impl Relay {
     ///
     /// WHY to every source that has `DYNAMIC_GROUPS`, where a track has
     /// several: the draft speaks of one publisher, and each of them is an
-    /// Original Publisher's way to the relay.
-    ///
-    /// FIXME: send it on the relay's own SUBSCRIBE as well. It goes to the
-    /// sources that came with a PUBLISH; a source the relay subscribed to
-    /// is not asked, and has what the relay's SUBSCRIBE carried
-    /// (`routing::ask`).
+    /// Original Publisher's way to the relay. A source that came with a
+    /// PUBLISH is asked on the stream of its PUBLISH, one the relay
+    /// subscribed to on the stream of the relay's SUBSCRIBE.
     fn ask_for_a_new_group(
         &mut self,
         track_name: &FullTrackName,
@@ -2696,38 +2698,47 @@ impl Relay {
         if known_already || asked_already {
             return;
         }
-        let publishes: Vec<(SessionKey, StreamKey)> = track
+        let sources: Vec<TrackSource> = track
             .sources()
             .filter(|source| source.dynamic_groups && !source.draining)
-            .filter_map(|source| match source.from {
-                TrackSource::Publisher {
-                    session, stream, ..
-                } => Some((session, stream)),
-                TrackSource::Subscription { .. } => None,
-            })
+            .map(|source| source.from)
             .collect();
         let mut sent = false;
-        for (session, stream) in publishes {
-            let Some(state) = self.sessions.get_mut(&session) else {
-                continue;
-            };
-            let Some(RequestSlot::Publish { request, .. }) = state.requests.get(stream) else {
-                continue;
-            };
+        for source in sources {
+            let parameters = vec![Parameter::NewGroupRequest(group)];
             // An error: 16 updates of the relay wait for the publisher's
             // answer. One more would not be read either.
-            let Ok(message) = state
-                .moqt
-                .update_published(*request, vec![Parameter::NewGroupRequest(group)])
-            else {
-                continue;
+            let action = match source {
+                TrackSource::Publisher {
+                    session, stream, ..
+                } => self.sessions.get_mut(&session).and_then(|state| {
+                    let Some(RequestSlot::Publish { request, .. }) = state.requests.get(stream)
+                    else {
+                        return None;
+                    };
+                    let message = state.moqt.update_published(*request, parameters).ok()?;
+                    Some(Action::SendRequest {
+                        session,
+                        stream,
+                        message,
+                    })
+                }),
+                TrackSource::Subscription {
+                    session, request, ..
+                } => self.sessions.get_mut(&session).and_then(|state| {
+                    let id = state.own.get(&request)?.id;
+                    let message = state.moqt.update_subscription(id, parameters).ok()?;
+                    Some(Action::SendOwnRequest {
+                        session,
+                        request,
+                        message,
+                    })
+                }),
             };
-            actions.push(Action::SendRequest {
-                session,
-                stream,
-                message,
-            });
-            sent = true;
+            if let Some(action) = action {
+                actions.push(action);
+                sent = true;
+            }
         }
         if sent && let Some(track) = self.tracks.live_mut(track_name) {
             track.new_group_asked = Some(group);
@@ -4147,6 +4158,7 @@ impl Action {
             | Self::StartFetchEndTimer { session, .. }
             | Self::StopRequest { session, .. }
             | Self::OpenRequest { session, .. }
+            | Self::SendOwnRequest { session, .. }
             | Self::FinishOwnRequest { session, .. }
             | Self::CancelOwnRequest { session, .. }
             | Self::StartUpstreamTimer { session, .. }

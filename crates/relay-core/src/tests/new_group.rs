@@ -238,3 +238,85 @@ fn a_new_group_request_is_passed_on_to_the_publisher_as_the_draft_has_it() {
         assert_eq!(passed_on(&actions), expected, "{case}");
     }
 }
+
+/// A request that is outstanding with a source that went is not one with
+/// the source that comes after it: a request of 0 reaches the new one.
+#[test]
+fn a_new_source_of_a_draining_track_is_asked_anew() {
+    const NEXT_PUBLISHER: SessionKey = SessionKey(9);
+    let mut relay = relay_with_a_track_of(Some(1));
+    relay.step(Event::DataStreamOpened {
+        session: PUBLISHER,
+        stream: StreamKey(105),
+        header: header_of_group(UPSTREAM_ALIAS, 5),
+    });
+    relay.step(Event::Object {
+        session: PUBLISHER,
+        stream: StreamKey(105),
+        object: object(0),
+    });
+    let first = subscribes(&mut relay, ALICE, vec![Parameter::NewGroupRequest(0)]);
+    assert_eq!(passed_on(&first), [(1, 0)]);
+    // The stream of Group 5 is still open: the source drains.
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: ControlMessage::PublishDone(PublishDone {
+            status_code: 0x2,
+            stream_count: 1,
+            error_reason: ReasonPhrase::default(),
+        }),
+    });
+    relay.step(Event::SessionOpened {
+        session: NEXT_PUBLISHER,
+        role: Role::Server,
+    });
+    relay.step(Event::RequestOpened {
+        session: NEXT_PUBLISHER,
+        stream: StreamKey(0),
+        first: ControlMessage::Publish(Publish {
+            request_id: 0,
+            full_track_name: track(b"a"),
+            track_alias: UPSTREAM_ALIAS,
+            parameters: vec![],
+            track_properties: vec![KeyValuePair::varint(DYNAMIC_GROUPS, 1).unwrap()],
+        }),
+    });
+    let second = subscribes(&mut relay, BOB, vec![Parameter::NewGroupRequest(0)]);
+    let to_the_next: Vec<(u64, Vec<Parameter>)> = second
+        .iter()
+        .filter_map(|action| match action {
+            Action::SendRequest {
+                session: NEXT_PUBLISHER,
+                message: ControlMessage::RequestUpdate(update),
+                ..
+            } => Some((update.request_id, update.parameters.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(to_the_next, [(1, vec![Parameter::NewGroupRequest(0)])]);
+    // Nothing goes to the source that drains.
+    assert_eq!(passed_on(&second), []);
+}
+
+/// A subscriber that asks again and again with a larger value has each
+/// passed on (§10.2.13 has no other bound), until 16 updates of the relay
+/// wait for the publisher's answer: the session sends no more.
+#[test]
+fn no_more_than_sixteen_requests_wait_for_the_publishers_answer() {
+    let mut relay = relay_with_a_track_of(Some(1));
+    subscribes(&mut relay, ALICE, vec![]);
+    let mut sent = Vec::new();
+    for group in 1..=17 {
+        let actions = relay.step(Event::RequestMessage {
+            session: ALICE,
+            stream: StreamKey(0),
+            message: ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: group * 2,
+                parameters: vec![Parameter::NewGroupRequest(group)],
+            }),
+        });
+        sent.extend(passed_on(&actions).into_iter().map(|(_, value)| value));
+    }
+    assert_eq!(sent, (1..=16).collect::<Vec<u64>>());
+}

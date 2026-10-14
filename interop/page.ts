@@ -654,6 +654,7 @@ interface VideoPlaying {
 	frames: PageVideoReport["frames"];
 	/** How the playing ended; absent while it goes on. */
 	ended: string | undefined;
+	firstFrameAfterMs(): number | null;
 }
 let videoPlaying: VideoPlaying | undefined;
 
@@ -1112,6 +1113,9 @@ window.xmoqOwn = {
 				bitrate: setup.bitrate,
 				keyFrameIntervalMs: setup.keyFrameIntervalMs,
 				mapping: setup.mapping,
+				...(setup.shortestGroupMs === undefined
+					? {}
+					: { dynamicGroups: { shortestGroupMs: setup.shortestGroupMs } }),
 			});
 			const catalog = createCatalogPublisher({
 				namespace: trackNamespace,
@@ -1212,6 +1216,8 @@ window.xmoqOwn = {
 			keyChunksNotSent: [...videoPublishing.keyChunksNotSent],
 			written: sent.written,
 			writeFailures: sent.writeFailures,
+			newGroupsAskedFor: sent.newGroupsAskedFor,
+			newGroupsBegun: sent.newGroupsBegun,
 		};
 	}),
 
@@ -1476,18 +1482,22 @@ window.xmoqOwn = {
 			readNumbers = false,
 			joiningFetch = false,
 			deliveryTimeoutMs?: number,
+			newGroupRequest = false,
 		) => {
+			const asked = performance.now();
 			const reading = readNumbers
 				? new OffscreenCanvas(1, 1).getContext("2d", {
 						willReadFrequently: true,
 					})
 				: null;
 			const frames: PageVideoReport["frames"] = [];
+			let firstFrameAt: number | undefined;
 			const playback = await playVideoTrack(connected(), {
 				trackNamespace: namespaceTuple(namespace),
 				trackName: utf8.encode(trackName),
 				codec,
 				joiningFetch,
+				newGroupRequest,
 				...(deliveryTimeoutMs === undefined
 					? {}
 					: {
@@ -1497,6 +1507,7 @@ window.xmoqOwn = {
 							},
 						}),
 				onFrame(frame) {
+					firstFrameAt ??= performance.now();
 					frames.push({
 						timestamp: frame.timestamp,
 						width: frame.displayWidth,
@@ -1507,7 +1518,13 @@ window.xmoqOwn = {
 					frame.close();
 				},
 			});
-			const playing: VideoPlaying = { playback, frames, ended: undefined };
+			const playing: VideoPlaying = {
+				playback,
+				frames,
+				ended: undefined,
+				firstFrameAfterMs: () =>
+					firstFrameAt === undefined ? null : Math.round(firstFrameAt - asked),
+			};
 			videoPlaying = playing;
 			void playback.ended.then((end) => {
 				playing.ended =
@@ -1561,6 +1578,7 @@ window.xmoqOwn = {
 						joiningFetch: stats.joiningFetch,
 					},
 					ended: playing.ended ?? null,
+					firstFrameAfterMs: playing.firstFrameAfterMs(),
 				};
 			}
 			await new Promise((resolve) => setTimeout(resolve, 20));

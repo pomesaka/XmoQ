@@ -84,18 +84,20 @@ fn every_file_a_library_wrote_is_read_by_a_test() {
     assert_eq!(names_on_disk("moqt-18-from-libraries"), read);
 }
 
-/// The `REQUEST_UPDATE` messages written by hand, and the Request ID each
-/// has; no parameters. `fixtures/peer-subscribe/` names them as what a
-/// server sent before the bytes of a row.
-pub(crate) const REQUEST_UPDATES_BY_HAND: [(&str, u64); 2] = [
-    ("request-update-request-id-3", 3),
-    ("request-update-request-id-5", 5),
+/// The `REQUEST_UPDATE` messages written by hand, the Request ID each has,
+/// and its `NEW_GROUP_REQUEST`, where it has one; no other parameters.
+/// `fixtures/peer-subscribe/` names the first two as what a server sent
+/// before the bytes of a row.
+pub(crate) const REQUEST_UPDATES_BY_HAND: [(&str, u64, Option<u64>); 3] = [
+    ("request-update-request-id-3", 3, None),
+    ("request-update-request-id-5", 5, None),
+    ("request-update-new-group-request", 3, Some(7)),
 ];
 
 #[test]
 fn every_file_written_by_hand_is_read_by_a_test() {
     let mut read = crate::fetch::tests::names_of_files_written_by_hand();
-    read.extend(REQUEST_UPDATES_BY_HAND.map(|(name, _)| name));
+    read.extend(REQUEST_UPDATES_BY_HAND.map(|(name, _, _)| name));
     read.sort_unstable();
 
     assert_eq!(names_on_disk("moqt-18-by-hand"), read);

@@ -70,6 +70,15 @@ export interface PlayVideoTrackOptions {
 	 * playing goes on as without it.
 	 */
 	joiningFetch?: boolean;
+	/**
+	 * Whether the SUBSCRIBE asks for a new Group, with NEW_GROUP_REQUEST 0
+	 * (transport §5.1.3.1, §10.2.13), so that the picture begins with a key
+	 * frame the sender makes now and not with the one it would make next.
+	 * **False when left out; provisional.** A sender without dynamic Groups
+	 * takes no notice of it. With a relay that has the track already, the
+	 * relay asks the sender with a REQUEST_UPDATE.
+	 */
+	newGroupRequest?: boolean;
 	/** `DEFAULT_MAX_DECODE_QUEUE` when left out. */
 	maxDecodeQueue?: number;
 	/** `DEFAULT_MAX_DECODER_FAILURES` when left out. */
@@ -342,7 +351,10 @@ export async function playVideoTrack(
 		subscription = await connection.subscribe({
 			trackNamespace: options.trackNamespace,
 			trackName: options.trackName,
-			parameters,
+			parameters:
+				options.newGroupRequest === true
+					? { ...parameters, newGroupRequest: 0n }
+					: parameters,
 		});
 	} catch (error) {
 		decoder.close();

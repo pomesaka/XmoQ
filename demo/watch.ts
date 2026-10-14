@@ -462,6 +462,8 @@ async function main(): Promise<void> {
 	} = { level: 0, track: "", changes: [], tries: [] };
 	const videoOptions = {
 		joiningFetch: query.get("join") !== "no",
+		// `?newgroup=1`: a trial. The SUBSCRIBE asks the sender for a new Group.
+		newGroupRequest: query.get("newgroup") === "1",
 		onFrame(frame: VideoFrame) {
 			firstFrameAfterMs ??= Math.round(performance.now() - began);
 			const took = Date.now() - frame.timestamp / 1000;

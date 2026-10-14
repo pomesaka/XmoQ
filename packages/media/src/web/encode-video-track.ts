@@ -80,6 +80,11 @@ export interface VideoTrackEncoderOptions {
 	/** `DEFAULT_MAX_ENCODE_QUEUE` when left out. */
 	maxEncodeQueue?: number;
 	/**
+	 * A subscriber may ask for a new Group (`VideoTrackPublisherOptions.dynamicGroups`):
+	 * the next frame is then a key frame. None when left out.
+	 */
+	dynamicGroups?: { shortestGroupMs?: number };
+	/**
 	 * Called when `maxUnsentKeyChunks` key chunks in a row could not be
 	 * sent for what they are: too long, mostly (`too-large`). **Nothing of
 	 * the track reaches anybody then**: every Group begins with its key
@@ -206,7 +211,7 @@ export interface VideoTrackEncoder {
  * - **A key frame** is asked of the encoder for the first frame, for a
  *   frame `keyFrameIntervalMs` or more after the last key frame, and for
  *   the next frame after the publisher asked for one (a Group that was cut
- *   short, a subscriber that came).
+ *   short, a subscriber that came, a subscriber that asked for a new Group).
  * - **A frame that comes while more than `maxEncodeQueue` wait in the
  *   encoder is not encoded.** WHY dropped before the encoder and not after:
  *   a frame that was never encoded is missed by no later one, so no Group
@@ -257,6 +262,9 @@ export async function createVideoTrackEncoder(
 		...(options.maxPayloadLength === undefined
 			? {}
 			: { maxPayloadLength: options.maxPayloadLength }),
+		...(options.dynamicGroups === undefined
+			? {}
+			: { dynamicGroups: options.dynamicGroups }),
 		endTimeoutMs,
 	});
 	if (typeof VideoEncoder === "undefined") {

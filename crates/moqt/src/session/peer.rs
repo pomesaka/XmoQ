@@ -2194,15 +2194,22 @@ mod tests {
     /// written the same.
     #[test]
     fn the_request_updates_written_by_hand_say_what_they_were_meant_to() {
-        for (name, request_id) in REQUEST_UPDATES_BY_HAND {
+        for (name, request_id, new_group) in REQUEST_UPDATES_BY_HAND {
             let bytes = fixture_by_hand(name);
+            let message = ControlMessage::RequestUpdate(RequestUpdate {
+                request_id,
+                parameters: new_group
+                    .map(Parameter::NewGroupRequest)
+                    .into_iter()
+                    .collect(),
+            });
             assert_eq!(
                 ControlMessage::decode(&bytes),
-                Ok(Some((update(request_id), bytes.len()))),
+                Ok(Some((message.clone(), bytes.len()))),
                 "{name}"
             );
             let mut encoded = Vec::new();
-            update(request_id).encode(&mut encoded).unwrap();
+            message.encode(&mut encoded).unwrap();
             assert_eq!(encoded, bytes, "{name}");
         }
     }

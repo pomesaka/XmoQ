@@ -216,6 +216,8 @@ describe("createVideoTrackPublisher: what is written to the subscription", () =>
 			skipped: {},
 			writeFailures: 0,
 			pendingObjects: 0,
+			newGroupsAskedFor: 0,
+			newGroupsBegun: 0,
 		});
 	});
 
@@ -793,5 +795,127 @@ describe("createVideoTrackPublisher: options", () => {
 		},
 	])("$name is a RangeError", ({ more }) => {
 		expect(() => publisherOf("stream-per-group", more)).toThrow(RangeError);
+	});
+});
+
+describe("createVideoTrackPublisher: a subscriber that asks for a new Group", () => {
+	/** "k300" a key chunk and "d300" a delta chunk at the encoder's time 300 ms; "ask6" a NEW_GROUP_REQUEST of 6. */
+	const step = (
+		publisher: ReturnType<typeof publisherOf>,
+		track: Awaited<ReturnType<typeof subscribed>>["track"],
+		token: string,
+	): string => {
+		const value = Number(token.replace(/^[a-z]+/, ""));
+		if (token.startsWith("ask")) {
+			track.askForNewGroup(BigInt(value));
+			return "";
+		}
+		const result = publisher.push({
+			...chunkOf(token[0] ?? ""),
+			timestamp: value * 1000,
+		});
+		return `${result.skipped ?? ""}${result.askForKeyFrame ? "+key" : ""}`;
+	};
+
+	test.each<{
+		name: string;
+		dynamicGroups: VideoTrackPublisherOptions["dynamicGroups"];
+		steps: string[];
+		expected: string[];
+		asked: number;
+		begun: number;
+	}>([
+		{
+			name: "0 asks for a key chunk once the Group is 500 ms long",
+			dynamicGroups: {},
+			steps: ["k0", "d100", "ask0", "d200", "d400", "d500", "d600"],
+			expected: ["", "", "", "", "", "+key", ""],
+			asked: 1,
+			begun: 1,
+		},
+		{
+			name: "with a shortest Group of 0, at the next chunk",
+			dynamicGroups: { shortestGroupMs: 0 },
+			steps: ["k0", "d100", "ask0", "d200"],
+			expected: ["", "", "", "+key"],
+			asked: 1,
+			begun: 1,
+		},
+		{
+			name: "a value that is the Group being sent asks for nothing",
+			dynamicGroups: {},
+			steps: ["k0", "ask5", "d600"],
+			expected: ["", "", ""],
+			asked: 0,
+			begun: 0,
+		},
+		{
+			name: "a value larger than the Group being sent asks",
+			dynamicGroups: {},
+			steps: ["k0", "ask6", "d600"],
+			expected: ["", "", "+key"],
+			asked: 1,
+			begun: 1,
+		},
+		{
+			name: "a key chunk that comes first meets the request",
+			dynamicGroups: {},
+			steps: ["k0", "ask0", "d100", "k200", "d700"],
+			expected: ["", "", "", "", ""],
+			asked: 1,
+			begun: 0,
+		},
+		{
+			name: "a request before the first chunk is met by it",
+			dynamicGroups: {},
+			steps: ["ask0", "k0", "d600"],
+			expected: ["", "", ""],
+			asked: 1,
+			begun: 0,
+		},
+		{
+			name: "without dynamic Groups a request does nothing",
+			dynamicGroups: undefined,
+			steps: ["k0", "ask0", "d600"],
+			expected: ["", "", ""],
+			asked: 0,
+			begun: 0,
+		},
+	])("$name", async ({ dynamicGroups, steps, expected, asked, begun }) => {
+		const { publisher, track } = await subscribed(
+			"stream-per-group",
+			dynamicGroups === undefined ? {} : { dynamicGroups },
+		);
+		expect(steps.map((token) => step(publisher, track, token))).toEqual(
+			expected,
+		);
+		const { newGroupsAskedFor, newGroupsBegun } = publisher.stats();
+		expect([newGroupsAskedFor, newGroupsBegun]).toEqual([asked, begun]);
+	});
+
+	test.each<{
+		name: string;
+		dynamicGroups: VideoTrackPublisherOptions["dynamicGroups"];
+		answer: string;
+	}>([
+		{
+			name: "with dynamic Groups the SUBSCRIBE_OK has DYNAMIC_GROUPS = 1",
+			dynamicGroups: {},
+			answer: "SUBSCRIBE_OK largest none property 48=1",
+		},
+		{
+			name: "without, no Track Property",
+			dynamicGroups: undefined,
+			answer: "SUBSCRIBE_OK largest none",
+		},
+	])("$name", async ({ dynamicGroups, answer }) => {
+		const publisher = publisherOf(
+			"stream-per-group",
+			dynamicGroups === undefined ? {} : { dynamicGroups },
+		);
+		const subscribe = fakeSubscribe(NAMESPACE, "video");
+		publisher.subscribe(subscribe.request);
+		await settle();
+		expect(subscribe.answers).toEqual([answer]);
 	});
 });

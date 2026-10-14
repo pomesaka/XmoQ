@@ -190,6 +190,28 @@
 //     - 30 frames or more, each with a later number than the one before it
 //       and that many times 40,000 microseconds after it.
 //
+//   late-viewer-new-group
+//                 The same, but the track has dynamic Groups (DYNAMIC_GROUPS,
+//                 a Group 500 ms long at least) and a key frame every 10
+//                 seconds by itself, and the second page sends no Joining
+//                 FETCH: its SUBSCRIBE has NEW_GROUP_REQUEST 0 (transport
+//                 §5.1.3.1). The relay's subscription to the publisher is
+//                 Established, so the relay is to send the publisher a
+//                 REQUEST_UPDATE on the stream of its own SUBSCRIBE
+//                 (§10.2.13). Written before the first run:
+//
+//     - **The relay sends it**: a line `SEND_OWN_REQUEST ... REQUEST_UPDATE`.
+//     - **The publisher takes it and begins a Group for it**: one request
+//       taken, one key chunk asked for (`newGroupsAskedFor` 1,
+//       `newGroupsBegun` 1).
+//     - **The second viewer's first frame was made after it came, and came
+//       within 1,000 ms of its SUBSCRIBE**. Without the request the next
+//       key frame would come up to 8 seconds later (the viewer comes
+//       about 1.6 seconds into a Group of 10).
+//     - It dropped nothing but what came before that key frame
+//       (`no-key-frame`) or for a decoder that was behind; 30 frames or
+//       more, in order, as above.
+//
 //   audio         A page makes a 440 Hz tone, half of full scale, encodes it
 //                 as Opus (48,000 Hz, mono) and publishes it with
 //                 `createAudioTrackEncoder` of `@xmoq/media`, a Group and a
@@ -224,6 +246,7 @@ import {
 	log,
 	openConnectedPage,
 	pollFor,
+	type RunContext,
 	runCleanups,
 	spawnMlmsub,
 	startMoqlivemockPublisher,
@@ -860,6 +883,17 @@ async function toMlmsub(): Promise<string> {
 }
 
 async function lateViewer(): Promise<string> {
+	return await viewerInTheMiddle("joining-fetch");
+}
+
+async function lateViewerNewGroup(): Promise<string> {
+	return await viewerInTheMiddle("new-group");
+}
+
+/** `late-viewer` and `late-viewer-new-group`: how the second viewer comes to the start of a Group. */
+async function viewerInTheMiddle(
+	by: "joining-fetch" | "new-group",
+): Promise<string> {
 	const context = await startRun({
 		relay: "own",
 		port: options.port,
@@ -874,10 +908,16 @@ async function lateViewer(): Promise<string> {
 	await withTimeout(
 		publisher.evaluate(
 			([namespace, setup]) => window.xmoqOwn.publishVideo(namespace, setup),
-			[PAGE_NAMESPACE, { ...BARS, mapping: "stream-per-group" }] satisfies [
-				string,
-				PageVideoSetup,
-			],
+			[
+				PAGE_NAMESPACE,
+				{
+					...BARS,
+					mapping: "stream-per-group",
+					...(by === "new-group"
+						? { keyFrameIntervalMs: 10_000, shortestGroupMs: 500 }
+						: {}),
+				},
+			] satisfies [string, PageVideoSetup],
 		),
 		"the page to publish its video",
 	);
@@ -885,11 +925,20 @@ async function lateViewer(): Promise<string> {
 		page: Awaited<ReturnType<typeof openConnectedPage>>,
 		joiningFetch: boolean,
 		frames: number,
+		newGroup = false,
 	): Promise<PageVideoReport> =>
 		withTimeout(
 			page.evaluate(
-				async ([namespace, name, codec, join, count, timeoutMs]) => {
-					await window.xmoqOwn.playVideo(namespace, name, codec, true, join);
+				async ([namespace, name, codec, join, count, timeoutMs, ask]) => {
+					await window.xmoqOwn.playVideo(
+						namespace,
+						name,
+						codec,
+						true,
+						join,
+						undefined,
+						ask,
+					);
 					return window.xmoqOwn.videoReport(count, timeoutMs);
 				},
 				[
@@ -899,7 +948,8 @@ async function lateViewer(): Promise<string> {
 					joiningFetch,
 					frames,
 					PLAY_TIMEOUT_MS,
-				] satisfies [string, string, string, boolean, number, number],
+					newGroup,
+				] satisfies [string, string, string, boolean, number, number, boolean],
 			),
 			"a viewer to report on its playing",
 			PLAY_TIMEOUT_MS + 5_000,
@@ -909,9 +959,17 @@ async function lateViewer(): Promise<string> {
 	await play(first, false, 40);
 	const late = await openConnectedPage(context, "viewer-2", "own-browser");
 	const before = Date.now() * 1000;
-	const report = await play(late, true, 30);
+	const report = await play(
+		late,
+		by === "joining-fetch",
+		30,
+		by === "new-group",
+	);
 	const seen = JSON.stringify({ ...report, frames: report.frames.slice(0, 3) });
 	log("driver", `REPORT ${seen}`);
+	if (by === "new-group") {
+		return await checkNewGroup(context, publisher, report, before, seen);
+	}
 	const { frames, stats } = report;
 	const served = /^served (\d+)$/.exec(stats.joiningFetch);
 	if (served === null || Number(served[1]) < 1) {
@@ -928,14 +986,33 @@ async function lateViewer(): Promise<string> {
 			`the first frame was to be one made before the viewer came (${before}); it has the time ${firstFrame.timestamp}: ${seen}`,
 		);
 	}
-	const others = Object.keys(stats.dropped).filter(
-		(reason) => reason !== "late" && reason !== "decoder-behind",
+	checkDropped(report, ["late", "decoder-behind"], seen);
+	checkInOrder(frames, seen);
+	await withTimeout(
+		publisher.evaluate(() => window.xmoqOwn.stopVideo()),
+		"the publisher to end its track",
 	);
-	if (others.length > 0 || stats.decoderFailures !== 0) {
+	return `a viewer that came in the middle of a Group fetched ${served[1]} Objects of it from the relay and had its first frame from ${Math.round((before - firstFrame.timestamp) / 1000)} ms before it came; ${frames.length} frames in order, dropped ${JSON.stringify(stats.dropped)}`;
+}
+
+/** The viewer dropped nothing for another reason than these, and its decoder did not fail. */
+function checkDropped(
+	report: PageVideoReport,
+	reasons: string[],
+	seen: string,
+): void {
+	const others = Object.keys(report.stats.dropped).filter(
+		(reason) => !reasons.includes(reason),
+	);
+	if (others.length > 0 || report.stats.decoderFailures !== 0) {
 		throw new Error(
-			`the viewer was to drop nothing but what came twice or for a decoder that was behind, and its decoder was not to fail: ${seen}`,
+			`the viewer was to drop nothing but as ${reasons.join(", ")}, and its decoder was not to fail: ${seen}`,
 		);
 	}
+}
+
+/** Every frame shows a later number than the one before it, and is 40,000 microseconds after it for each. */
+function checkInOrder(frames: PageVideoReport["frames"], seen: string): void {
 	frames.forEach((frame, index) => {
 		const prior = frames[index - 1];
 		if (prior === undefined) return;
@@ -949,11 +1026,53 @@ async function lateViewer(): Promise<string> {
 			);
 		}
 	});
+}
+
+/** `late-viewer-new-group`, from the second viewer's report on. */
+async function checkNewGroup(
+	context: RunContext,
+	publisher: Awaited<ReturnType<typeof openConnectedPage>>,
+	report: PageVideoReport,
+	before: number,
+	seen: string,
+): Promise<string> {
+	const [sent] = await context.relay.waitForLine(
+		/^SEND_OWN_REQUEST session=\d+ own=\d+ REQUEST_UPDATE/,
+		5_000,
+	);
+	const sentBy = await withTimeout(
+		publisher.evaluate(() => window.xmoqOwn.videoPublishReport()),
+		"the publisher to report",
+	);
+	log("driver", `PUBLISHER ${JSON.stringify(sentBy)}`);
+	if (sentBy.newGroupsAskedFor !== 1 || sentBy.newGroupsBegun !== 1) {
+		throw new Error(
+			`the publisher was to take one NEW_GROUP_REQUEST and ask its encoder for one key frame for it: ${JSON.stringify(sentBy)}`,
+		);
+	}
+	const { frames } = report;
+	const [firstFrame] = frames;
+	if (frames.length < 30 || firstFrame === undefined) {
+		throw new Error(`${frames.length} frames were decoded, not 30: ${seen}`);
+	}
+	if (firstFrame.timestamp < before) {
+		throw new Error(
+			`the first frame was to be one made after the viewer came (${before}); it has the time ${firstFrame.timestamp}: ${seen}`,
+		);
+	}
+	const after = report.firstFrameAfterMs;
+	if (after === null || after > 1_000) {
+		throw new Error(
+			`the first frame was to come within 1000 ms of the SUBSCRIBE, not after ${after}: ${seen}`,
+		);
+	}
+	checkDropped(report, ["no-key-frame", "decoder-behind"], seen);
+	checkInOrder(frames, seen);
 	await withTimeout(
 		publisher.evaluate(() => window.xmoqOwn.stopVideo()),
 		"the publisher to end its track",
 	);
-	return `a viewer that came in the middle of a Group fetched ${served[1]} Objects of it from the relay and had its first frame from ${Math.round((before - firstFrame.timestamp) / 1000)} ms before it came; ${frames.length} frames in order, dropped ${JSON.stringify(stats.dropped)}`;
+	return `a viewer that came in the middle of a Group of 10 seconds asked for a new Group in its SUBSCRIBE; the relay passed it on (${sent}), the publisher began one, and the viewer's first frame came ${after} ms after it asked; ${frames.length} frames in order, dropped ${JSON.stringify(report.stats.dropped)}`;
 }
 
 async function audio(): Promise<string> {
@@ -1197,6 +1316,7 @@ async function reconnect(): Promise<string> {
 const CASES: Record<string, () => Promise<string>> = {
 	audio,
 	"late-viewer": lateViewer,
+	"late-viewer-new-group": lateViewerNewGroup,
 	"to-mlmsub": toMlmsub,
 	"from-mlmpub": fromMlmpub,
 	"key-frames-too-large": keyFramesTooLarge,

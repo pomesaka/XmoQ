@@ -92,6 +92,7 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | publish | `audioPriority=N` | The Publisher Priority of the sound's streams, 0 the highest | None named (128, as the video) |
 | publish | `mapping=stream-per-object` | Every Object of the video on a stream of its own | A stream for a Group |
 | publish | `ladder=1` | Trial: a second, small version of the video | One version |
+| publish | `dynamic=MS` | Trial: the video has dynamic Groups, the shortest MS long; a viewer that asks for a new Group gets one | No dynamic Groups |
 | watch | `buffer=N`, `buffer=auto` | The playout buffer in milliseconds; `auto` (trial) follows how late Objects come | 50 |
 | watch | `autoMax=MS`, `autoShare=F` | With `buffer=auto`: its limit, and the share of the Objects it covers | 400, 0.99 |
 | watch | `autoDown=quarter`, `autoWindow=MS` | Trials, with `buffer=auto`: it comes down a quarter of the way at a time, and looks back so far | 10 ms at a time; 10000 |
@@ -99,6 +100,7 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | watch | `order=no` | A piece of sound that comes before its turn is not held for the ones before it | Held |
 | watch | `join=no` | No Joining FETCH for the video: the picture begins with the next key frame | A Joining FETCH of the Group under way |
 | watch | `audioJoin=1` | A Joining FETCH for the sound as well | None |
+| watch | `newgroup=1` | Trial: the video's SUBSCRIBE asks the sender for a new Group (NEW_GROUP_REQUEST 0); with `join=no`, the picture begins with the key frame it makes for that | Not asked |
 | watch | `video=no` | The sound alone | Picture and sound |
 | watch | `videoTimeout=MS` | The delivery timeout asked for the video; 0 asks for none | 150 |
 | watch | `audioTimeout=MS` | The same for the sound | None asked |

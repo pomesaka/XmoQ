@@ -36,6 +36,11 @@ export interface FakeTrack {
 	failNextWrite(error: Error): void;
 	/** The next `openSubgroup` fails with this. */
 	failNextOpen(error: Error): void;
+	/**
+	 * The subscriber sends a NEW_GROUP_REQUEST. As the real one, a request
+	 * that comes before a handler is named is kept for it, the last one.
+	 */
+	askForNewGroup(group: bigint): void;
 }
 
 const turns = async (count: number): Promise<void> => {
@@ -78,6 +83,8 @@ export function fakeTrack(): FakeTrack {
 	let openFailure: Error | undefined;
 	let over: PublishEnd | undefined;
 	let open = 0;
+	let newGroupHandler: ((group: bigint) => void) | undefined;
+	let keptRequest: bigint | undefined;
 	const finish = (how: PublishEnd): void => {
 		over = how;
 		open = 0;
@@ -88,8 +95,13 @@ export function fakeTrack(): FakeTrack {
 		trackAlias: 0n,
 		parameters: {},
 		ended,
-		// No test asks this fake for a new Group.
-		onNewGroupRequest: () => {},
+		onNewGroupRequest: (handler) => {
+			newGroupHandler = handler;
+			if (keptRequest === undefined) return;
+			const group = keptRequest;
+			keptRequest = undefined;
+			handler(group);
+		},
 		openSubgroup: async (options) => {
 			if (over !== undefined) throw new PublishEndedError(over);
 			if (openFailure !== undefined) {
@@ -193,6 +205,10 @@ export function fakeTrack(): FakeTrack {
 		failNextOpen: (error) => {
 			openFailure = error;
 		},
+		askForNewGroup: (group) => {
+			if (newGroupHandler === undefined) keptRequest = group;
+			else newGroupHandler(group);
+		},
 	};
 }
 
@@ -227,8 +243,11 @@ export function fakeSubscribe(
 			await options.acceptWaits;
 			if (options.acceptFails !== undefined) throw options.acceptFails;
 			const largest = answer?.parameters?.largestObject;
+			const properties = (answer?.trackProperties ?? []).map(
+				(property) => ` property ${property.type}=${property.value}`,
+			);
 			answers.push(
-				`SUBSCRIBE_OK largest ${largest === undefined ? "none" : `{${largest.group}, ${largest.object}}`}`,
+				`SUBSCRIBE_OK largest ${largest === undefined ? "none" : `{${largest.group}, ${largest.object}}`}${properties.join("")}`,
 			);
 			return accepted.track;
 		},

@@ -19,7 +19,7 @@ use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchHeader, FetchObject, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::params::GroupOrder;
-use xmoq_moqt::session::MAX_PEER_REQUESTS;
+use xmoq_moqt::session::{MAX_PEER_REQUESTS, MAX_UNANSWERED_UPDATES};
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
     Connection, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, OutgoingEvent,
@@ -337,8 +337,10 @@ pub struct Held {
 }
 
 /// What the hub asks the task of a request stream the relay opened to do.
-/// Either ends the task.
+/// `Finish` and `Cancel` end the task.
 enum OwnRequestCommand {
+    /// A message after the request: a `REQUEST_UPDATE` of a SUBSCRIBE.
+    Send(ControlMessage),
     Finish,
     Cancel(u32),
 }
@@ -1516,6 +1518,7 @@ impl<C: Connection> Hub<C> {
             } => self.close(session, code, &reason, pending),
             // Taken by `execute_upstream` above.
             Action::OpenRequest { .. }
+            | Action::SendOwnRequest { .. }
             | Action::FinishOwnRequest { .. }
             | Action::CancelOwnRequest { .. }
             | Action::PipeFetch { .. }
@@ -1539,6 +1542,11 @@ impl<C: Connection> Hub<C> {
                 request,
                 message,
             } => self.open_request(session, request, message),
+            Action::SendOwnRequest {
+                session,
+                request,
+                message,
+            } => self.send_own_request(session, request, message),
             Action::FinishOwnRequest { session, request } => {
                 self.own_request(session, request, OwnRequestCommand::Finish);
             }
@@ -1954,8 +1962,10 @@ impl<C: Connection> Hub<C> {
         let Some(handle) = self.sessions.get_mut(&session) else {
             return;
         };
-        // Room for the one command that ends the task.
-        let (commands, command_inbox) = mpsc::channel(1);
+        // Room for the updates the session lets wait for their answer, and
+        // the one command that ends the task.
+        let room = usize::try_from(MAX_UNANSWERED_UPDATES).map_or(usize::MAX, |n| n + 1);
+        let (commands, command_inbox) = mpsc::channel(room);
         let task = tokio::spawn(run_own_request(
             session,
             request,
@@ -1968,6 +1978,33 @@ impl<C: Connection> Hub<C> {
         handle.own_requests.insert(request, commands);
         handle.tasks.retain(|task| !task.is_finished());
         handle.tasks.push(task);
+    }
+
+    /// Hands one more message to the task of a request the relay opened.
+    fn send_own_request(
+        &mut self,
+        session: SessionKey,
+        request: OwnRequestKey,
+        message: ControlMessage,
+    ) {
+        let Some(commands) = self
+            .sessions
+            .get(&session)
+            .and_then(|handle| handle.own_requests.get(&request))
+        else {
+            return;
+        };
+        // Full: the task is stuck writing what came before, and the session
+        // lets no more updates wait than there is room for. Closed: the task
+        // ended by itself, with the stream.
+        if commands.try_send(OwnRequestCommand::Send(message)).is_err() {
+            self.log(|| {
+                format!(
+                    "OWN_REQUEST_NOT_SENT session={} own={}",
+                    session.0, request.0
+                )
+            });
+        }
     }
 
     /// Ends the task of a request the relay opened, and the timer for its
@@ -2401,7 +2438,17 @@ async fn run_own_request<C: Connection>(
     let (mut reading, mut watching) = (true, true);
     let command = loop {
         tokio::select! {
-            command = commands.recv() => break command,
+            command = commands.recv() => match command {
+                // WHY waited for here, and the peer's messages not read
+                // meanwhile: a `REQUEST_UPDATE` is short, and a write in a
+                // task of its own would let a `Finish` overtake it.
+                Some(OwnRequestCommand::Send(message)) => {
+                    if send_message(&mut send, &message, &trace, &label).await.is_err() {
+                        break None;
+                    }
+                }
+                command => break command,
+            },
             event = reader.next_event(), if reading => match event {
                 Ok(RequestStreamEvent::Message(message)) => {
                     let event = Event::OwnRequestMessage { session, request, message };
@@ -2693,27 +2740,10 @@ fn describe(action: &Action) -> Option<String> {
             "STOP_REQUEST session={} stream={} code={code:#x}",
             session.0, stream.0
         ),
-        Action::OpenRequest {
-            session,
-            request,
-            message,
-        } => format!(
-            "OPEN_REQUEST session={} own={} {}",
-            session.0,
-            request.0,
-            name(message)
-        ),
-        Action::FinishOwnRequest { session, request } => {
-            format!("FINISH_OWN_REQUEST session={} own={}", session.0, request.0)
-        }
-        Action::CancelOwnRequest {
-            session,
-            request,
-            code,
-        } => format!(
-            "CANCEL_OWN_REQUEST session={} own={} code={code:#x}",
-            session.0, request.0
-        ),
+        Action::OpenRequest { .. }
+        | Action::SendOwnRequest { .. }
+        | Action::FinishOwnRequest { .. }
+        | Action::CancelOwnRequest { .. } => return describe_own_request(action),
         Action::PipeFetch { .. }
         | Action::AbortFetchPipe { .. }
         | Action::WriteFetchStream { .. }
@@ -2733,6 +2763,44 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartRendezvousTimer { .. }
         | Action::StartAnnouncementTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
+    })
+}
+
+/// The lines for the requests the relay opens.
+fn describe_own_request(action: &Action) -> Option<String> {
+    Some(match action {
+        Action::OpenRequest {
+            session,
+            request,
+            message,
+        } => format!(
+            "OPEN_REQUEST session={} own={} {}",
+            session.0,
+            request.0,
+            name(message)
+        ),
+        Action::SendOwnRequest {
+            session,
+            request,
+            message,
+        } => format!(
+            "SEND_OWN_REQUEST session={} own={} {}",
+            session.0,
+            request.0,
+            name(message)
+        ),
+        Action::FinishOwnRequest { session, request } => {
+            format!("FINISH_OWN_REQUEST session={} own={}", session.0, request.0)
+        }
+        Action::CancelOwnRequest {
+            session,
+            request,
+            code,
+        } => format!(
+            "CANCEL_OWN_REQUEST session={} own={} code={code:#x}",
+            session.0, request.0
+        ),
+        _ => return None,
     })
 }
 

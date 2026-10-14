@@ -636,6 +636,16 @@ pub enum Action {
         /// The request.
         message: ControlMessage,
     },
+    /// Send one more message on a request stream the relay opened, after the
+    /// request: a `REQUEST_UPDATE` of its SUBSCRIBE.
+    SendOwnRequest {
+        /// The session.
+        session: SessionKey,
+        /// The request.
+        request: OwnRequestKey,
+        /// The message.
+        message: ControlMessage,
+    },
     /// Finish the relay's direction of a request stream it opened, and stop
     /// reading the peer's.
     FinishOwnRequest {

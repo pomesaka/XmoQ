@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { decodeControlMessage } from "../../src/core/control-message.ts";
+import {
+	type ControlMessage,
+	decodeControlMessage,
+	encodeControlMessage,
+} from "../../src/core/control-message.ts";
+import type { MessageParameters } from "../../src/core/parameters.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
 import {
@@ -424,25 +429,40 @@ describe("a request that is kept is not one that is yet to come, also when its I
 });
 
 describe("fixtures/moqt-18-by-hand: the REQUEST_UPDATE messages written by hand", () => {
-	test("the two files are the ones the tests read", () => {
+	test("the three files are the ones the tests read", () => {
 		expect([...BY_HAND_CONTROL_MESSAGES]).toEqual([
 			"request-update-request-id-3",
 			"request-update-request-id-5",
+			"request-update-new-group-request",
 		]);
 	});
 
-	test.each([
-		{ file: "request-update-request-id-3", requestId: 3n },
-		{ file: "request-update-request-id-5", requestId: 5n },
-	])(
-		"$file is a REQUEST_UPDATE with that Request ID and no parameters",
-		({ file, requestId }) => {
+	test.each<{ file: string; requestId: bigint; parameters: MessageParameters }>(
+		[
+			{ file: "request-update-request-id-3", requestId: 3n, parameters: {} },
+			{ file: "request-update-request-id-5", requestId: 5n, parameters: {} },
+			// §10.2.13: Parameter Type 0x32, a varint.
+			{
+				file: "request-update-new-group-request",
+				requestId: 3n,
+				parameters: { newGroupRequest: 7n },
+			},
+		],
+	)(
+		"$file is a REQUEST_UPDATE with that Request ID and those parameters, and is written the same",
+		({ file, requestId, parameters }) => {
 			const bytes = hex(byHand(file));
+			const message: ControlMessage = {
+				type: "REQUEST_UPDATE",
+				requestId,
+				parameters,
+			};
 			expect(decodeControlMessage(bytes)).toEqual({
 				status: "ok",
-				value: { type: "REQUEST_UPDATE", requestId, parameters: {} },
+				value: message,
 				bytesRead: bytes.length,
 			});
+			expect(encodeControlMessage(message)).toEqual(bytes);
 		},
 	);
 });
