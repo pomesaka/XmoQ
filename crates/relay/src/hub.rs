@@ -107,6 +107,9 @@ pub struct HubConfig {
     /// `xmoq_relay_core::MAX_ANNOUNCEMENTS_AT_ONCE`, where it is not the
     /// relay's own number.
     pub announcements_at_once: Option<u32>,
+    /// For measuring: every so often, a line for each session of what its
+    /// transport and its subgroup streams have (`STATS`). None: no line.
+    pub stats_every: Option<Duration>,
     /// How long a subscriber has for the whole of a fetch stream the relay
     /// writes from its cache, at the least. Provisional.
     pub cached_fetch_whole_ms: u64,
@@ -203,6 +206,7 @@ impl Default for HubConfig {
             max_timers_per_session: 1024,
             announcement_every_ms: None,
             announcements_at_once: None,
+            stats_every: None,
             cached_fetch_whole_ms: 30_000,
             cached_fetch_least_kbps: 500,
             held_beyond_cache_bytes: None,
@@ -1020,9 +1024,19 @@ impl Timers {
 
 impl<C: Connection> Hub<C> {
     async fn run(mut self, mut inbox: mpsc::Receiver<Envelope<C>>) {
+        let mut stats = self.config.stats_every.map(tokio::time::interval);
         loop {
             let envelope = tokio::select! {
                 envelope = inbox.recv() => envelope,
+                _ = async {
+                    match stats.as_mut() {
+                        Some(stats) => stats.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.log_stats();
+                    continue;
+                }
                 () = self.timers.due() => {
                     let events = self.timers.take_due();
                     self.feed(events);
@@ -1108,6 +1122,28 @@ impl<C: Connection> Hub<C> {
                     });
                 }
             }
+        }
+    }
+
+    /// One `STATS` line for each session, in the order of their numbers:
+    /// what its transport says of the path and has sent, and what its
+    /// subgroup streams have handed to the transport, wait to write, and
+    /// wait to open.
+    fn log_stats(&self) {
+        let mut sessions: Vec<_> = self.sessions.iter().collect();
+        sessions.sort_unstable_by_key(|(session, _)| session.0);
+        for (session, handle) in sessions {
+            let (handed, writing) = handle.budget.traffic();
+            let (bytes, objects, streams) = handle.budget.in_use();
+            let sent = handle.connection.path().map_or(0, |path| path.sent_bytes);
+            self.log(|| {
+                format!(
+                    "STATS session={}{} sent_bytes={sent} handed_bytes={handed} writing={writing} waiting_bytes={bytes} waiting_objects={objects} streams_not_done={streams} opening={}",
+                    session.0,
+                    path_now(&*handle.connection),
+                    handle.opening.load(Ordering::Relaxed),
+                )
+            });
         }
     }
 

@@ -3,7 +3,7 @@
 //! Section numbers refer to `draft-ietf-moq-transport-18`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1512,6 +1512,10 @@ pub struct SendBudget {
     bytes: AtomicUsize,
     objects: AtomicUsize,
     streams: AtomicUsize,
+    /// Bytes the transport took from the subgroup streams, for logs.
+    handed: AtomicU64,
+    /// Writes to the transport that wait for it to take them now, for logs.
+    writing: AtomicUsize,
 }
 
 impl SendBudget {
@@ -1523,7 +1527,21 @@ impl SendBudget {
             bytes: AtomicUsize::new(0),
             objects: AtomicUsize::new(0),
             streams: AtomicUsize::new(0),
+            handed: AtomicU64::new(0),
+            writing: AtomicUsize::new(0),
         })
+    }
+
+    /// `(bytes, writes)`: the bytes the transport has taken from the
+    /// subgroup streams so far, and the writes that wait for it to take
+    /// them now. For logs: a transport whose send window is full holds
+    /// every writer, whatever its priority.
+    #[must_use]
+    pub fn traffic(&self) -> (u64, usize) {
+        (
+            self.handed.load(Ordering::Relaxed),
+            self.writing.load(Ordering::Relaxed),
+        )
     }
 
     /// `(bytes, objects, streams)` that wait, for tests and logs.
@@ -1789,6 +1807,30 @@ impl OutgoingSubgroup {
     }
 }
 
+/// A write of `bytes` to the transport, counted in `budget` while it waits
+/// and when it is taken ([`SendBudget::traffic`]), also where it is
+/// dropped before it is done.
+async fn counted<T, E>(
+    budget: &SendBudget,
+    bytes: &[u8],
+    write: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    struct Waiting<'a>(&'a AtomicUsize);
+    impl Drop for Waiting<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    budget.writing.fetch_add(1, Ordering::Relaxed);
+    let _waiting = Waiting(&budget.writing);
+    let written = write.await;
+    if written.is_ok() {
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        budget.handed.fetch_add(len, Ordering::Relaxed);
+    }
+    written
+}
+
 /// The smaller of two times, and the one that is there where the other is
 /// not.
 fn smaller_of(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
@@ -1919,7 +1961,7 @@ impl Writer {
                         }
                         Some((code, true))
                     }
-                    written = open.write_all(&bytes) => match written {
+                    written = counted(&self.share.budget, &bytes, open.write_all(&bytes)) => match written {
                         Ok(()) => None,
                         // §11.4.3: "The publisher SHOULD respond with a reset"
                         // to a STOP_SENDING.

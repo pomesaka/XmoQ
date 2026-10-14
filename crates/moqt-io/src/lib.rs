@@ -299,4 +299,6 @@ pub struct PathNow {
     pub lost_packets: u64,
     /// Times the congestion control was told of congestion so far.
     pub congestion_events: u64,
+    /// UDP payload bytes sent so far, packets of every kind.
+    pub sent_bytes: u64,
 }

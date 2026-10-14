@@ -129,6 +129,8 @@ struct Args {
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
     /// gets. Without it only a subscriber's own timeout gives a stream up.
     delivery_patience: Option<Duration>,
+    /// `--stats-every-ms`: [`HubConfig::stats_every`]. For measuring.
+    stats_every: Option<Duration>,
     /// `--auth-key-hex`: the key requests are authorized with
     /// ([`HubConfig::auth_key`]). An experiment.
     auth_key: Option<Vec<u8>>,
@@ -172,6 +174,7 @@ fn parse_args() -> Result<Args> {
     let mut cached_fetch = (None, None);
     let mut held_beyond_cache = None;
     let mut delivery_patience = None;
+    let mut stats_every = None;
     let mut auth_key = None;
     let mut auth_setup = true;
     let mut args = std::env::args().skip(1);
@@ -210,6 +213,7 @@ fn parse_args() -> Result<Args> {
             "--announce-at-once" => announce_at_once = Some(small(&flag, &value)?),
             "--idle-session-ms" => idle_session = Some(millis(&flag, &value)?),
             "--delivery-patience-ms" => delivery_patience = Some(millis(&flag, &value)?),
+            "--stats-every-ms" => stats_every = Some(millis(&flag, &value)?),
             "--auth-key-hex" => {
                 auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
             }
@@ -239,6 +243,7 @@ fn parse_args() -> Result<Args> {
         cached_fetch,
         held_beyond_cache,
         delivery_patience,
+        stats_every,
         auth_key,
         auth_setup,
     })
@@ -278,6 +283,7 @@ async fn main() -> Result<()> {
         config.cached_fetch_least_kbps = least_kbps;
     }
     config.send.delivery_patience = args.delivery_patience;
+    config.stats_every = args.stats_every;
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);

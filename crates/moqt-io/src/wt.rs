@@ -406,12 +406,14 @@ impl Connection for WtConnection {
         // has less; the one of the QUIC connection is behind it
         // (web-transport-quinn 0.13.2, `session.rs`).
         let connection: &quinn::Connection = &self.session;
-        let path = connection.stats().path;
+        let stats = connection.stats();
+        let path = stats.path;
         Some(crate::PathNow {
             cwnd: path.cwnd,
             rtt: path.rtt,
             lost_packets: path.lost_packets,
             congestion_events: path.congestion_events,
+            sent_bytes: stats.udp_tx.bytes,
         })
     }
 
