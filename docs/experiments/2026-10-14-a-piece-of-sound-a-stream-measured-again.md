@@ -43,3 +43,5 @@ Three runs each; in each cell, the runs in order. Of 1,000 pieces of sound and 6
 - **On the narrow link with 50 ms one a stream lost fewer** (270 to 346 sounded, against 217 to 251); both lose most of the sound there, and with 150 ms both are whole.
 - The picture is the same with both, but at 1% loss with 50 ms, where fewer frames were shown with one a stream (518 to 562 against 559 to 573). Not looked into.
 - **The expectation was wrong for the narrow link with 50 ms**: "whole with both" was taken from the record of 2026-10-12, whose viewer had a buffer of 150 ms; with 50 ms three of four pieces are too late, as [the record of the default buffer](2026-10-13-the-default-playout-buffer.md) had. It was also wrong in "fewer too late with one at 1% loss": as many.
+
+**Later the same day**, three more runs of one a stream at 1% loss with 50 ms, on the same code and link, had 18 to 66 too late and 24 to 39 breaks ([record](2026-10-14-a-buffer-of-100-ms-beside-50-150-and-the-automatic-one.md)), as few as ten a stream had here. The more breaks of one a stream above are therefore within what runs of it scatter, and not shown to come from one a stream.
