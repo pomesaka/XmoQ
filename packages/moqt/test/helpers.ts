@@ -71,6 +71,7 @@ export function fixtureNames(): string[] {
 export const BY_HAND_CONTROL_MESSAGES = [
 	"request-update-request-id-3",
 	"request-update-request-id-5",
+	"request-update-new-group-request",
 ] as const;
 
 /** The names `byHand` accepts: every `.hex` file of `fixtures/moqt-18-by-hand/`. */

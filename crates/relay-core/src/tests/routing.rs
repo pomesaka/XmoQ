@@ -546,6 +546,89 @@ fn the_relays_subscribe_carries_the_new_group_request_of_the_subscriber_it_is_se
     }
 }
 
+/// §10.2.13: "A relay that receives a `NEW_GROUP_REQUEST` for an Established
+/// subscription ... MUST send a `REQUEST_UPDATE` including the
+/// `NEW_GROUP_REQUEST` to the publisher", also where the relay's
+/// subscription is one it made with SUBSCRIBE: the update goes on the
+/// stream of that SUBSCRIBE.
+#[test]
+fn a_new_group_request_reaches_a_publisher_the_relay_subscribed_to() {
+    // (the Track Properties of the publisher's SUBSCRIBE_OK; the
+    // NEW_GROUP_REQUESTs of Bob and then Carol, who come after Alice; the
+    // REQUEST_UPDATEs the relay sends on its SUBSCRIBE: Request ID, value)
+    type Case = (Vec<KeyValuePair>, [u64; 2], Vec<(u64, u64)>);
+    let cases: [Case; 4] = [
+        (
+            vec![KeyValuePair::varint(0x30, 1).unwrap()],
+            [0, 0],
+            vec![(3, 0)],
+        ),
+        (
+            vec![KeyValuePair::varint(0x30, 1).unwrap()],
+            [4, 5],
+            vec![(3, 4), (5, 5)],
+        ),
+        (vec![KeyValuePair::varint(0x30, 0).unwrap()], [0, 0], vec![]),
+        (vec![], [0, 0], vec![]),
+    ];
+    for (track_properties, asks, expected) in cases {
+        let case = format!("{track_properties:?} {asks:?}");
+        let mut relay = relay();
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+        relay.step(upstream(
+            PUBLISHER,
+            0,
+            ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: UPSTREAM_ALIAS,
+                parameters: vec![],
+                track_properties,
+            }),
+        ));
+        let mut sent = Vec::new();
+        for (session, group) in [BOB, CAROL].into_iter().zip(asks) {
+            let actions = relay.step(Event::RequestOpened {
+                session,
+                stream: StreamKey(0),
+                first: ControlMessage::Subscribe(Subscribe {
+                    request_id: 0,
+                    full_track_name: track_in(&[b"xmoq"]),
+                    parameters: vec![Parameter::NewGroupRequest(group)],
+                }),
+            });
+            sent.extend(actions.into_iter().filter_map(|action| match action {
+                Action::SendOwnRequest {
+                    session: PUBLISHER,
+                    request: OwnRequestKey(0),
+                    message:
+                        ControlMessage::RequestUpdate(xmoq_moqt::message::RequestUpdate {
+                            request_id,
+                            parameters,
+                        }),
+                } => match parameters[..] {
+                    [Parameter::NewGroupRequest(group)] => Some((request_id, group)),
+                    _ => panic!("{parameters:?}"),
+                },
+                Action::SendOwnRequest { .. } => panic!("{action:?}"),
+                _ => None,
+            }));
+        }
+        assert_eq!(sent, expected, "{case}");
+        // The publisher's REQUEST_OK changes nothing.
+        if !expected.is_empty() {
+            assert_eq!(
+                relay.step(upstream(
+                    PUBLISHER,
+                    0,
+                    ControlMessage::RequestOk(RequestOk::default())
+                )),
+                [],
+                "{case}"
+            );
+        }
+    }
+}
+
 #[test]
 fn objects_of_a_routed_track_reach_the_subscriber() {
     let mut relay = relay_with_routed_track();

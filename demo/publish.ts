@@ -257,6 +257,12 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 const KEY_INTERVAL_MS = Number(
 	new URLSearchParams(location.search).get("keyint") ?? 1000,
 );
+/**
+ * `?dynamic=N`: a trial. The video track has dynamic Groups, the shortest N
+ * milliseconds long: a viewer that asks for a new Group gets one (transport
+ * §10.2.13). Off when left out.
+ */
+const SHORTEST_GROUP_MS = new URLSearchParams(location.search).get("dynamic");
 /** `?bitrate=`: for seeing what a smaller picture does on a bad link; the size's own when left out. */
 const BITRATE = Number(
 	new URLSearchParams(location.search).get("bitrate") ?? SIZE.bitrate,
@@ -303,6 +309,9 @@ async function main(): Promise<void> {
 		framerate: FRAMES_A_SECOND,
 		keyFrameIntervalMs: KEY_INTERVAL_MS,
 		clock: STAMP,
+		...(SHORTEST_GROUP_MS === null
+			? {}
+			: { dynamicGroups: { shortestGroupMs: Number(SHORTEST_GROUP_MS) } }),
 		// `?mapping=stream-per-object` puts every Object on a stream of its own.
 		...(new URLSearchParams(location.search).get("mapping") ===
 		"stream-per-object"
@@ -493,7 +502,7 @@ async function main(): Promise<void> {
 					: cameraToEncoderMs.length === 0
 						? " · from the camera to the encoder: the browser does not say"
 						: ` · from the camera to the encoder: median ${Math.round([...cameraToEncoderMs].sort((a, b) => a - b)[Math.floor(cameraToEncoderMs.length / 2)] ?? 0)} ms (not in the viewer's numbers)`
-			}${low === undefined ? "" : `\nvideo-low (${LOW.width}x${LOW.height}, ${LOW.bitrate / 1000} kbit/s): encoded ${low.stats().encoded} frames (${low.stats().keyChunks} key), ${Math.round(low.stats().encodedBytes / 1024)} KiB; sent ${low.publisher.stats().written} Objects`}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects; not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
+			}${low === undefined ? "" : `\nvideo-low (${LOW.width}x${LOW.height}, ${LOW.bitrate / 1000} kbit/s): encoded ${low.stats().encoded} frames (${low.stats().keyChunks} key), ${Math.round(low.stats().encodedBytes / 1024)} KiB; sent ${low.publisher.stats().written} Objects`}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects;${SHORTEST_GROUP_MS === null ? "" : ` new Groups asked for ${sent.newGroupsAskedFor}, begun ${sent.newGroupsBegun};`} not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
 		);
 	});
 	void encoder.failed.then((error) => say(`the encoder failed: ${String(error)}`));

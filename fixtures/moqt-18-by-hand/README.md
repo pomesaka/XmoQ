@@ -20,6 +20,7 @@ Control messages, one a file:
 |---|---|---|
 | `request-update-request-id-3` | REQUEST_UPDATE, Request ID 3, no parameters | §10.9, Figure 12: Type `0x2`, a Length of 16 bits, Request ID, Number of Parameters. No capture of a REQUEST_UPDATE exists: `moqtail`'s clients send none |
 | `request-update-request-id-5` | The same with Request ID 5 | The same |
+| `request-update-new-group-request` | REQUEST_UPDATE, Request ID 3, NEW_GROUP_REQUEST 7 | §10.2.13: "The NEW_GROUP_REQUEST parameter (Parameter Type 0x32) is a varint"; §10.2, Figure 4: the first parameter's Type Delta is its Type. `02 00 04 03 01 32 07`: a Length of 4, Request ID 3, one parameter, Type 0x32, value 7. `moqtail`'s clients send no NEW_GROUP_REQUEST |
 
 `02 00 02 03 00`: the type, a Length of 2 for the two bytes that follow, Request ID 3, no parameters. [`fixtures/peer-subscribe/`](../peer-subscribe/README.md) has what the two are sent for.
 

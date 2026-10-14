@@ -23,6 +23,18 @@ import {
 
 /** PUBLISH_DONE Status Code TRACK_ENDED (transport draft 18 §10.11). */
 const TRACK_ENDED = 0x2n;
+/** The Track Property DYNAMIC_GROUPS (transport §12.6). */
+const DYNAMIC_GROUPS = 0x30n;
+
+/**
+ * How long a Group lasts at least before a NEW_GROUP_REQUEST begins the
+ * next one, in milliseconds of the chunks' time. **Provisional, not
+ * chosen**: transport §10.2.13 lets the publisher delay a request "for
+ * example, achieving a minimum duration for each Group". WHY a least
+ * length at all: every new Group costs a key frame, and viewers that come
+ * one after the other would else have one each.
+ */
+export const DEFAULT_SHORTEST_GROUP_MS = 500;
 
 /**
  * How many Objects may wait to be written before the Group is cut short.
@@ -56,6 +68,15 @@ export interface VideoTrackPublisherOptions {
 	maxPendingBytes?: number;
 	/** How long `end` waits for what is queued to be written; 3000 ms when left out. */
 	endTimeoutMs?: number;
+	/**
+	 * With it, the SUBSCRIBE_OK says DYNAMIC_GROUPS = 1 (transport §12.6),
+	 * and a NEW_GROUP_REQUEST of the subscriber (§10.2.13) makes `push` ask
+	 * for a key chunk, which begins a Group: once the Group that is being
+	 * sent is `shortestGroupMs` long (`DEFAULT_SHORTEST_GROUP_MS` when left
+	 * out). **Left out, the track has no dynamic Groups** and a request is
+	 * taken without effect, as §10.2.13 has it of such a publisher.
+	 */
+	dynamicGroups?: { shortestGroupMs?: number };
 }
 
 /** Why a chunk was not sent, besides the reasons of the sender. */
@@ -77,7 +98,9 @@ export interface VideoPushResult {
 	 * subscriber that stays behind does not get a key frame every frame.
 	 *
 	 * True as well, once, with the first chunk after a subscriber came that
-	 * is no key chunk: the subscriber gets nothing before one.
+	 * is no key chunk: the subscriber gets nothing before one. And once for
+	 * a NEW_GROUP_REQUEST, with `dynamicGroups`, when the Group is long
+	 * enough.
 	 *
 	 * **Never true while nobody is subscribed**: a key frame would be for
 	 * nobody. So it is once for each subscription at least, where a Group
@@ -95,6 +118,10 @@ export interface VideoTrackPublisherStats {
 	writeFailures: number;
 	/** Objects that wait to be written now. */
 	pendingObjects: number;
+	/** NEW_GROUP_REQUESTs of the subscriber that asked for a Group after the one being sent. */
+	newGroupsAskedFor: number;
+	/** Of them, those for which a key chunk was asked for; the others were met by a key chunk that came first. */
+	newGroupsBegun: number;
 }
 
 export interface VideoTrackPublisher {
@@ -226,10 +253,15 @@ export function createVideoTrackPublisher(
 		options.maxPendingObjects ?? DEFAULT_MAX_PENDING_OBJECTS;
 	const maxPendingBytes = options.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES;
 	const endTimeoutMs = options.endTimeoutMs ?? DEFAULT_END_TIMEOUT_MS;
+	const shortestGroupMs =
+		options.dynamicGroups === undefined
+			? undefined
+			: (options.dynamicGroups.shortestGroupMs ?? DEFAULT_SHORTEST_GROUP_MS);
 	for (const [name, value, least] of [
 		["maxPendingObjects", maxPendingObjects, 1],
 		["maxPendingBytes", maxPendingBytes, 1],
 		["endTimeoutMs", endTimeoutMs, 0],
+		["dynamicGroups.shortestGroupMs", shortestGroupMs ?? 0, 0],
 	] as const) {
 		if (!Number.isInteger(value) || value < least || value > 2 ** 31 - 1) {
 			throw new RangeError(
@@ -253,6 +285,8 @@ export function createVideoTrackPublisher(
 		written: 0,
 		skipped: {},
 		writeFailures: 0,
+		newGroupsAskedFor: 0,
+		newGroupsBegun: 0,
 	};
 	/** The one subscription, while there is one. */
 	let subscriber: Subscriber | undefined;
@@ -262,6 +296,10 @@ export function createVideoTrackPublisher(
 	let needsKey = false;
 	/** The encoder was asked for the key chunk that `needsKey` waits for. */
 	let asked = false;
+	/** The subscriber asked for a new Group, and none has begun since. */
+	let newGroupWanted = false;
+	/** The time of the key chunk the Group that is being sent began with. */
+	let groupBegan: number | undefined;
 	/** A SUBSCRIBE is being answered, and has the one place; settles when that is done with. */
 	let answer: Promise<void> | undefined;
 	let ended: Promise<void> | undefined;
@@ -429,13 +467,16 @@ export function createVideoTrackPublisher(
 			// From here on, so that a second SUBSCRIBE that comes while this
 			// one is answered is refused.
 			const answered = request
-				.accept(
+				.accept({
 					// §10.2.11: a publisher that has published Objects of the
 					// Track says how far it is.
-					largest === undefined
+					...(largest === undefined
 						? {}
-						: { parameters: { largestObject: largest } },
-				)
+						: { parameters: { largestObject: largest } }),
+					...(shortestGroupMs === undefined
+						? {}
+						: { trackProperties: [{ type: DYNAMIC_GROUPS, value: 1n }] }),
+				})
 				.then(
 					(track) => {
 						// The track ended while the answer was sent.
@@ -455,8 +496,23 @@ export function createVideoTrackPublisher(
 							queue: Promise.resolve(),
 						};
 						subscriber = accepted;
+						if (shortestGroupMs !== undefined) {
+							track.onNewGroupRequest((group) => {
+								if (subscriber !== accepted) return;
+								// §10.2.13: "a value of 0 or a value larger than the
+								// current Group" asks for a new one; a smaller one
+								// was met already.
+								const current = needsKey ? undefined : largest?.group;
+								if (group !== 0n && current !== undefined && group <= current)
+									return;
+								stats.newGroupsAskedFor += 1;
+								newGroupWanted = true;
+							});
+						}
 						void track.ended.then(() => {
-							if (subscriber === accepted) subscriber = undefined;
+							if (subscriber !== accepted) return;
+							subscriber = undefined;
+							newGroupWanted = false;
 						});
 					},
 					(error: unknown) => {
@@ -514,6 +570,8 @@ export function createVideoTrackPublisher(
 						if (step.objectId === 0n) {
 							needsKey = false;
 							asked = false;
+							newGroupWanted = false;
+							groupBegan = chunk.timestamp;
 							if (to !== undefined) to.started = true;
 						}
 						if (to === undefined || to.silent || !to.started) {
@@ -545,7 +603,21 @@ export function createVideoTrackPublisher(
 			const toStart =
 				to !== undefined && !to.silent && !to.started && !to.askedToStart;
 			if (toStart) to.askedToStart = true;
-			const askForKeyFrame = afterACut || toStart;
+			// WHY not where a Group was cut or the subscriber has not started:
+			// a key chunk is asked for then anyway. WHY counted in the chunks'
+			// time: it is the length of the Group, however late the encoder.
+			const newGroup =
+				newGroupWanted &&
+				!needsKey &&
+				to?.started === true &&
+				shortestGroupMs !== undefined &&
+				(groupBegan === undefined ||
+					chunk.timestamp - groupBegan >= shortestGroupMs * 1000);
+			if (newGroup) {
+				newGroupWanted = false;
+				stats.newGroupsBegun += 1;
+			}
+			const askForKeyFrame = afterACut || toStart || newGroup;
 			// The key chunk that is asked for a subscriber that came is the
 			// one a Group that was cut waits for as well.
 			if (askForKeyFrame && needsKey) asked = true;

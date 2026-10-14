@@ -1004,7 +1004,11 @@ impl Relay {
             }
             RequestEvent::Rejected(error) => self.on_upstream_refusal(&own, &error, actions),
             RequestEvent::SubscriptionDone(_) => self.on_upstream_done(&own, actions),
-            // Nothing else answers a SUBSCRIBE; the session has dealt with it.
+            // Nothing else answers a SUBSCRIBE; the session has dealt with
+            // it. The answer to a NEW_GROUP_REQUEST the relay passed on
+            // (`ask_for_a_new_group`) is among it: nothing hangs on it, and a
+            // publisher that refused ends the subscription with PUBLISH_DONE
+            // next (§10.9.1).
             _ => {}
         }
     }

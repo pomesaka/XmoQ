@@ -89,6 +89,8 @@ In four of the others, **an own page encodes frames it paints and publishes them
 
 **A viewer that comes late** (`--video late-viewer`, own relay): one page watches already; a second comes in the middle of a Group and plays with the Joining FETCH of `playVideoTrack`. The relay answers from the Group it keeps, and the second viewer's first frame is one that was made before it came (about 740 ms before, in the runs here), with nothing dropped as `no-key-frame`.
 
+**A viewer that comes late and asks for a new Group** (`--video late-viewer-new-group`, own relay): the same, with a track that has dynamic Groups and a key frame every 10 seconds, and a second viewer that sends no Joining FETCH and has NEW_GROUP_REQUEST 0 in its SUBSCRIBE. The relay passes the request on as a REQUEST_UPDATE on the stream of its own SUBSCRIBE to the page, the page begins a Group, and the viewer's first frame comes within a second.
+
 **Audio** (`--video audio`, own relay; `audio:` in its name): a page makes a 440 Hz tone, encodes it as Opus and publishes it with `createAudioTrackEncoder` of `@xmoq/media`, and another decodes it with `playAudioTrack`: 100 pieces of 20 ms, one after the other, with wall-clock times, and not silence (a sample of 0.5 of full scale). Nothing is sounded.
 
 **A page whose key frames are all over what it sends** (`--video key-frames-too-large`, own relay, nobody viewing): with payloads of 100 bytes at most, the page is told once, at the third key chunk in a row that was not sent (`onKeyChunksNotSent`), and goes on encoding.

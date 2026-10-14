@@ -247,6 +247,8 @@ export type OwnPageExtras = {
 		joiningFetch?: boolean,
 		/** Sent with the SUBSCRIBE as SUBGROUP_DELIVERY_TIMEOUT and OBJECT_DELIVERY_TIMEOUT, in milliseconds; neither when left out. */
 		deliveryTimeoutMs?: number,
+		/** Sends NEW_GROUP_REQUEST 0 with the SUBSCRIBE (`newGroupRequest` of `playVideoTrack`); not when left out. */
+		newGroupRequest?: boolean,
 	): Promise<void>;
 	/**
 	 * Publishes a catalog with one video track and the track itself, with
@@ -481,6 +483,8 @@ export type PageVideoReport = {
 		/** `VideoPlaybackStats.joiningFetch`. */
 		joiningFetch: string;
 	};
+	/** Milliseconds from the call of `playVideo` to the first frame of the decoder, or null before one. */
+	firstFrameAfterMs: number | null;
 	/** How the playing ended, or null while it goes on: "subscription-ended <type>", "decoder-failed <error>" or "failed <error>". */
 	ended: string | null;
 };
@@ -572,6 +576,8 @@ export type PageVideoSetup = {
 	 * the number stay in the upper half.
 	 */
 	noise: boolean;
+	/** The track has dynamic Groups, with this shortest Group (`dynamicGroups` of `createVideoTrackEncoder`); none when left out. */
+	shortestGroupMs?: number;
 };
 
 /** What `createVideoTrackEncoder` of `@xmoq/media` counted on a page. */
@@ -592,6 +598,9 @@ export type PageVideoPublishReport = {
 	/** Of the publisher: Objects handed to the transport, and writes that failed. */
 	written: number;
 	writeFailures: number;
+	/** Of the publisher: NEW_GROUP_REQUESTs taken, and those a key chunk was asked for. */
+	newGroupsAskedFor: number;
+	newGroupsBegun: number;
 };
 
 /** What `followCatalog` of `@xmoq/msf` gave a page, in values that survive `page.evaluate`. */

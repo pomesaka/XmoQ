@@ -1391,6 +1391,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 						relay: "own",
 					},
 					{
+						name: "own relay: video: a viewer that comes in the middle of a Group asks for a new one, the relay passes the request on its own SUBSCRIBE, and the publishing page begins one",
+						script: "video.ts" as const,
+						args: ["--video", "late-viewer-new-group"],
+						relay: "own",
+					},
+					{
 						name: "own relay: audio: an own page encodes a tone as Opus and publishes it, and another decodes it",
 						script: "video.ts" as const,
 						args: ["--video", "audio"],
