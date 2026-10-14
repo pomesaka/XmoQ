@@ -15,6 +15,7 @@ import {
 	createPlayout,
 	createQualitySwitch,
 	keepPlaying,
+	keepTrackOnSession,
 	DEFAULT_AUDIO_MIN_MS,
 	DEFAULT_AUTO_MAX_MS,
 	DEFAULT_AUTO_SHARE,
@@ -278,6 +279,8 @@ async function main(): Promise<void> {
 	/** The namespace of the broadcast the page last connected to. */
 	let playingNamespace: Uint8Array[] = namespace();
 	let audio: AudioPlayback | undefined;
+	/** How many times the sound was subscribed to, on all sessions, and how it stands (`keepTrackOnSession`). */
+	const soundTrack = { subscriptions: 0, state: "none" };
 
 	let tooLate = 0;
 	/** Frames and pieces that were left out because their time was not of the clock. */
@@ -572,7 +575,7 @@ async function main(): Promise<void> {
 				`${link} · ${framesShown.rate()} frames a second shown, ${framesDecoded.rate()} decoded${document.visibilityState === "hidden" ? " (this tab is in the background: nothing is drawn)" : ""} · buffer ${bufferMs} ms${bufferMs < AUDIO_MIN_MS ? ` (the sound waits ${AUDIO_MIN_MS} ms at least: it is ${AUDIO_MIN_MS - bufferMs} ms behind the picture)` : ""}${auto ? ` (auto, ${AUTO_MAX_MS} ms at most: ${Math.round(AUTO_SHARE * 100)} of 100 came within ${Math.round(lateness99())} ms of the fastest in the last ${AUTO_WINDOW_MS / 1000} s, and ${AUTO_MARGIN_MS} more)` : ""}`,
 				`delay of the picture: ${played.video.median()} ms = ${delay.arrive.median()} to get here (encoder, link, relay, decoder) + ${delay.buffer.median()} waiting in the buffer + ${delay.paint.median()} for the next repaint (medians of the last 200 frames; ${framesLate} frames came after their turn). Not in it: from the camera to the encoder, and from the repaint to the screen`,
 				`video: ${stats.decoded} frames, first after ${firstFrameAfterMs ?? "?"} ms; came ${arrived.video.text()} after it was made, shown ${played.video.text()} after; dropped ${JSON.stringify(stats.dropped)}; joining FETCH ${stats.joiningFetch}; ${VIDEO_TIMEOUT_MS > 0 ? `the relay is asked to give a Group up ${VIDEO_TIMEOUT_MS} ms after its end` : "no delivery timeout is asked for"}`,
-				`audio: ${heard === undefined ? "none" : `${heard.decoded} pieces; came ${arrived.audio.text()} after it was made, sounded ${played.audio.text()} after; ${tooLate} too late; dropped ${JSON.stringify(heard.dropped)}`}`,
+				`audio (subscribed ${soundTrack.subscriptions} times, ${soundTrack.state}): ${heard === undefined ? "none" : `${heard.decoded} pieces; came ${arrived.audio.text()} after it was made, sounded ${played.audio.text()} after; ${tooLate} too late; dropped ${JSON.stringify(heard.dropped)}`}`,
 				`sound: ${
 					sound === undefined
 						? "off — click “sound” to hear it"
@@ -597,6 +600,7 @@ async function main(): Promise<void> {
 				paint: delay.paint.median(),
 			},
 			framesLate,
+			soundTrack,
 			videoFrames: stats.decoded,
 			decoderFailures: playback?.stats().decoderFailures ?? 0,
 			videoTimeoutMs: VIDEO_TIMEOUT_MS,
@@ -900,38 +904,57 @@ async function main(): Promise<void> {
 				void connection.closed.then(() => clearInterval(ticking));
 			}
 			const sound = tracks.audio;
-			audio = sound === undefined ? undefined : await playAudioTrack(connection, {
-				...audioOptions,
-				...(WAIT ? { signal: playing.signal } : {}),
-				// An Object that comes before its turn waits for the ones
-				// before it as long as the buffer leaves, less what the
-				// decoder and the loudspeaker need.
-				...(query.get("order") === "no"
-					? {}
-					: { holdForOrderMs: clock.holdForOrderMs }),
-				trackNamespace: trackNamespaceOf(sound, playingNamespace),
-				trackName: utf8.encode(sound.name),
-				codec: sound.codec ?? "",
-				// From the catalog; the demo's own where a catalog has none.
-				sampleRate: sound.samplerate ?? SAMPLE_RATE,
-				numberOfChannels: Number(sound.channelConfig ?? 1),
-				// `?audioTimeout=N`: the same for the sound.
-				...(query.get("audioTimeout") === null
-					? {}
-					: {
-							deliveryTimeouts: {
-								subgroupMs: Number(query.get("audioTimeout")),
-							},
-						}),
-			})
-				.then((playing) => {
-					audioSince = performance.now();
-					return playing;
-				})
-				.catch((error: unknown) => {
-					console.log(`no audio: ${String(error)}`);
-					return undefined;
+			// `?cutSound=S` (for trying): the first subscription of the sound is
+			// cancelled after S seconds, as a relay may end it.
+			const cutAfterS = query.get("cutSound");
+			// The sound alone is subscribed to again when its subscription
+			// ends, and the video goes on (`keepTrackOnSession`).
+			if (sound !== undefined) {
+				void keepTrackOnSession({
+					connection,
+					signal: playing.signal,
+					async play() {
+						const cut = new AbortController();
+						if (cutAfterS !== null && soundTrack.subscriptions === 0) {
+							setTimeout(() => cut.abort(), Number(cutAfterS) * 1000);
+						}
+						const played = await playAudioTrack(connection, {
+							...audioOptions,
+							signal: AbortSignal.any([playing.signal, cut.signal]),
+							// An Object that comes before its turn waits for the ones
+							// before it as long as the buffer leaves, less what the
+							// decoder and the loudspeaker need.
+							...(query.get("order") === "no"
+								? {}
+								: { holdForOrderMs: clock.holdForOrderMs }),
+							trackNamespace: trackNamespaceOf(sound, playingNamespace),
+							trackName: utf8.encode(sound.name),
+							codec: sound.codec ?? "",
+							// From the catalog; the demo's own where a catalog has none.
+							sampleRate: sound.samplerate ?? SAMPLE_RATE,
+							numberOfChannels: Number(sound.channelConfig ?? 1),
+							// `?audioTimeout=N`: the same for the sound.
+							...(query.get("audioTimeout") === null
+								? {}
+								: {
+										deliveryTimeouts: {
+											subgroupMs: Number(query.get("audioTimeout")),
+										},
+									}),
+						});
+						audio = played;
+						soundTrack.subscriptions += 1;
+						if (soundTrack.subscriptions === 1) audioSince = performance.now();
+						return played;
+					},
+					onState(state) {
+						soundTrack.state = state.type;
+						if (state.type === "refused" || state.type === "failed") {
+							console.log(`no audio (${state.type}): ${String(state.error)}`);
+						}
+					},
 				});
+			}
 			return {
 				// Without video, the session's end is the end.
 				ended,
