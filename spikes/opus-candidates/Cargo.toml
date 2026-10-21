@@ -1,0 +1,28 @@
+[package]
+name = "opus-candidates"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A spike: outside the workspace (the root Cargo.toml excludes spikes/), its lints and its
+# review. It sets Opus decoders in Rust against libopus, sample by sample, on the packets
+# spikes/opus-compare/capture.sh takes.
+[dependencies]
+opus-decoder = "=0.1.1"
+opus-rs = "=0.1.39"
+rusty-opus = "=1.0.2"
+opus-pure = "=0.2.2"
+ruopus = { version = "=0.1.2", default-features = false, features = ["std"] }
+ropus = "=0.12.18"
+unsafe-libopus = "=0.2.0"
+mousiki = "=0.2.1"
+# libopus, which `opusic-sys` carries and builds: needs cmake and a C compiler.
+opus = "=0.4.0"
+# The CPU time of the thread (`clock_gettime(CLOCK_THREAD_CPUTIME_ID)`).
+libc = "0.2"
+
+# `cargo build --profile checked`: optimized as a release build, with the checks for overflow
+# of a debug build.
+[profile.checked]
+inherits = "release"
+overflow-checks = true
