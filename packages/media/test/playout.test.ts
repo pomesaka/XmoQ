@@ -155,7 +155,7 @@ describe("createPlayoutClock", () => {
 		audioBufferMs: number;
 		holdForOrderMs: number;
 	}>([
-		{ options: {}, bufferMs: 50, audioBufferMs: 50, holdForOrderMs: 30 },
+		{ options: {}, bufferMs: 150, audioBufferMs: 150, holdForOrderMs: 130 },
 		{
 			options: { bufferMs: 0 },
 			bufferMs: 0,

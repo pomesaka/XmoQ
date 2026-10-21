@@ -4,8 +4,19 @@
 
 import { createFastestWay } from "./fastest-way.ts";
 
-/** **Provisional**: on one machine 99 of 100 frames and pieces came within 17 to 24 ms of the fastest, and with 50 ms none was late (docs/experiments/2026-10-11-where-the-delay-of-the-demo-comes-from.md). */
-export const DEFAULT_PLAYOUT_BUFFER_MS = 50;
+/**
+ * Decided on 2026-10-21. WHY 150: with 1 % loss the sound broke 1 to 2
+ * times in a run, and behind a link narrower than the video no piece was
+ * too late; the first picture on a good link comes after about 208 ms
+ * (docs/experiments/2026-10-14-a-buffer-of-100-ms-beside-50-150-and-the-automatic-one.md).
+ * WHY NOT 50: 24 to 39 breaks at 1 % loss, and about three of four pieces
+ * of the sound too late behind the narrow link. WHY NOT 100: 14 to 26
+ * breaks, and 2 to 12 pieces too late behind the narrow link. WHY NOT the
+ * automatic buffer: it settles at 40 ms on a good link, rose to its limit
+ * of 400 ms in one run with loss, and nobody has listened to the sound it
+ * plays at a changed speed.
+ */
+export const DEFAULT_PLAYOUT_BUFFER_MS = 150;
 /**
  * The sound waits at least this long, also where the buffer is less. WHY:
  * a piece is given to the loudspeaker for a time, and with no buffer that
