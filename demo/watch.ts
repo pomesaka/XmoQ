@@ -88,8 +88,8 @@ const AUTO_SHARE = Number(query.get("autoShare") ?? DEFAULT_AUTO_SHARE);
  * track. `?videoTimeout=N` for another, and `?videoTimeout=0` to ask for
  * nothing. Nothing is asked for the sound (`?audioTimeout=N` asks).
  *
- * **Provisional**, decided on 2026-10-12 for the demo alone
- * (`playVideoTrack` asks for nothing unless told). WHY 150: on a link
+ * Decided on 2026-10-21 for this page (`playVideoTrack` asks for nothing
+ * unless told, and whether it should is open). WHY 150: on a link
  * narrower than the video, any timeout from 50 to 150 ms showed three times
  * the frames of none at 10, 50 and 100 ms each way, and the three were
  * alike; under loss none of them was worse than no timeout; 150 is the one

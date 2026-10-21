@@ -46,7 +46,7 @@ pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
 /// of these, which comes back after the time the I/O side has for it (a
 /// second), one at a time; with none left the request is refused with
 /// `EXCESSIVE_LOAD`, with the time one takes to come back as its Retry
-/// Interval. **Provisional.**
+/// Interval. Decided on 2026-10-21.
 ///
 /// WHY a limit on these and no other request: an announcement makes the
 /// relay send that session a SUBSCRIBE for every track of the namespace
@@ -60,7 +60,7 @@ pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
 pub const MAX_ANNOUNCEMENTS_AT_ONCE: u32 = 5;
 
 /// The time after which a session has back one of the announcements it
-/// used, in milliseconds. **Provisional.**
+/// used, in milliseconds. Decided on 2026-10-21.
 pub const ANNOUNCEMENT_EVERY_MS: u64 = 1_000;
 
 /// Subscribers that may wait for one upstream SUBSCRIBE to be answered. One
@@ -112,7 +112,7 @@ pub const MAX_OWN_REQUESTS_PER_SESSION: usize = 64;
 /// Of those, how many the relay has open on one publisher for the
 /// SUBSCRIBEs of one subscriber's session. A publisher that has as many for
 /// that session is passed over for its next SUBSCRIBE, as one that has
-/// [`MAX_OWN_REQUESTS_PER_SESSION`] in all is for everybody's. **Provisional.**
+/// [`MAX_OWN_REQUESTS_PER_SESSION`] in all is for everybody's. Decided on 2026-10-21.
 ///
 /// A request of the relay counts for the session whose SUBSCRIBE waits
 /// first for the track it asks for: the one that made the relay ask, or,

@@ -49,7 +49,7 @@ pub(crate) const MAX_OWN_FETCHES_PER_SESSION: usize = 16;
 
 /// Of those, how many the relay has open on one publisher for the FETCH
 /// requests of one subscriber's session. One more is answered with `EXCESSIVE_LOAD`.
-/// **Provisional.**
+/// Decided on 2026-10-21.
 ///
 /// WHY: a session may have [`MAX_FETCHES_PER_SESSION`] FETCH requests open, which
 /// is all a publisher has, and one that sent 10 a second to a publisher

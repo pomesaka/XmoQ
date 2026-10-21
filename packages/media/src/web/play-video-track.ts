@@ -65,7 +65,7 @@ export interface PlayVideoTrackOptions {
 	 * Whether the Group the viewer comes into is fetched from its start (a
 	 * Relative Joining FETCH with Joining Start 0, transport §10.12.2), so
 	 * that the picture begins at once and not with the next key frame.
-	 * **True when left out; provisional.** A relay that keeps the latest
+	 * **True when left out; decided on 2026-10-21.** A relay that keeps the latest
 	 * Group answers it; where nobody does, the FETCH is refused and the
 	 * playing goes on as without it.
 	 */
@@ -74,7 +74,7 @@ export interface PlayVideoTrackOptions {
 	 * Whether the SUBSCRIBE asks for a new Group, with NEW_GROUP_REQUEST 0
 	 * (transport §5.1.3.1, §10.2.13), so that the picture begins with a key
 	 * frame the sender makes now and not with the one it would make next.
-	 * **False when left out; provisional.** A sender without dynamic Groups
+	 * **False when left out; decided on 2026-10-21.** A sender without dynamic Groups
 	 * takes no notice of it. With a relay that has the track already, the
 	 * relay asks the sender with a REQUEST_UPDATE.
 	 */

@@ -28,9 +28,9 @@ const DYNAMIC_GROUPS = 0x30n;
 
 /**
  * How long a Group lasts at least before a NEW_GROUP_REQUEST begins the
- * next one, in milliseconds of the chunks' time. **Provisional, not
- * chosen**: transport §10.2.13 lets the publisher delay a request "for
- * example, achieving a minimum duration for each Group". WHY a least
+ * next one, in milliseconds of the chunks' time. Decided on 2026-10-21.
+ * Transport §10.2.13 lets the publisher delay a request "for example,
+ * achieving a minimum duration for each Group". WHY a least
  * length at all: every new Group costs a key frame, and viewers that come
  * one after the other would else have one each.
  */

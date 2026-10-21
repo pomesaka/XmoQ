@@ -133,9 +133,10 @@ pub struct Args {
 /// does not depend on. **Provisional.**
 const DEFAULT_ANSWER_WAIT_MS: u64 = 10_000;
 
-/// The default of `--buffer-ms`, as the watching page of the demo has it.
-/// **Provisional.**
-pub const DEFAULT_BUFFER_MS: u64 = 50;
+/// The default of `--buffer-ms`, the watching page's default
+/// (`DEFAULT_PLAYOUT_BUFFER_MS` of `@xmoq/media`, where the reasons are).
+/// Decided on 2026-10-21.
+pub const DEFAULT_BUFFER_MS: u64 = 150;
 
 /// What is wrong with the flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,8 +159,8 @@ xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line
                                     which version of the video of the catalog: the first (first), the
                                     one of that name, or the largest of at most so many pixels of
                                     height or bits a second (the smallest where none is within it)
-  --buffer-ms <ms>|auto             how long an Object is held beyond the fastest way (50);
-                                    auto: it follows how late Objects come, from 50 up to 400 (a trial)
+  --buffer-ms <ms>|auto             how long an Object is held beyond the fastest way (150);
+                                    auto: it follows how late Objects come, from 150 up to 400 (a trial)
   --answer-wait-ms <ms>             how long the relay gets to answer a request (10000)
   --setup-wait-ms <ms>              how long the relay gets for its SETUP (10000)
   --rendezvous-timeout-ms <ms>      ask the relay to hold the viewer's SUBSCRIBEs that long for a
@@ -417,7 +418,7 @@ mod tests {
             source,
             tracks: None,
             video_version: VideoVersion::First,
-            buffer_ms: 50,
+            buffer_ms: 150,
             buffer_auto: false,
             video_timeout_ms: None,
             answer_wait_ms: 10_000,
@@ -519,7 +520,7 @@ mod tests {
         assert_eq!(
             parsed("--room http://h/rooms/a --buffer-ms 300 --buffer-ms auto")
                 .map(|args| (args.buffer_ms, args.buffer_auto)),
-            Ok((50, true))
+            Ok((150, true))
         );
         assert_eq!(
             parsed("--room http://h/rooms/a --buffer-ms auto --buffer-ms 300")
