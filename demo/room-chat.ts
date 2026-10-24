@@ -1,12 +1,10 @@
-// The chat under the picture of both pages, by two ways at once while the
-// chat moves from the room's WebSocket to MoQ tracks (decided on
-// 2026-10-24): a line typed is sent on both, and the lines of both are
-// shown, each marked with the way it came, "track" or "ws".
+// The chat under the picture of both pages, over MoQ tracks alone (Q36
+// and Q49, decided on 2026-10-24; the room's WebSocket carries no chat).
 //
-// Over the tracks the page is a participant (`joinChat` of `@xmoq/chat`):
-// it announces `xmoq/chat/<room>/<name>`, says its lines on `said`, and
-// reads the room's `lines` from the gatherer (`xmoq-chat`, which `serve.ts`
-// starts), with the newest 16 by a Joining FETCH when it comes.
+// The page is a participant (`joinChat` of `@xmoq/chat`): it announces
+// `xmoq/chat/<room>/<name>`, says its lines on `said`, and reads the
+// room's `lines` from the gatherer (`xmoq-chat`, which `serve.ts` starts),
+// with the newest 16 by a Joining FETCH when it comes.
 
 import {
 	type ChatLimits,
@@ -14,25 +12,14 @@ import {
 	chatLimits,
 	joinChat,
 	type KeptBack,
-	keepBack,
-	RateWindow,
 	type SayOutcome,
 } from "@xmoq/chat";
 import type { MoqtConnection } from "@xmoq/moqt";
 
 declare const XMOQ_DEMO: { chatTracks: boolean };
 
-/** A line of the room's WebSocket (`spikes/durable-objects-room/worker.js`). */
-export interface SocketLine {
-	seq: number;
-	from: string;
-	text: string;
-	/** The room's clock when it took the line; the history before 2026-10-24 has none. */
-	at?: number;
-}
-
 /**
- * How many lines the page shows, of both ways together; the oldest go.
+ * How many lines the page shows; the oldest go.
  * Not a flag: what a page holds is bounded whatever the address says.
  */
 const SHOWN_LINES = 200;
@@ -67,32 +54,30 @@ const KEPT_BACK: Record<KeptBack, (limits: ChatLimits) => string> = {
 /**
  * The time shown with a line, HH:MM:SS by this page's clock.
  *
- * WHY the time the line was taken (the gatherer's `at`, and the room's
- * `at` for a line of the WebSocket) and not the sender's `sentAt`: the
- * lines are shown in the order they were taken, which is the one order
- * every viewer sees, and the times taken go up with it. `sentAt` is the
+ * WHY the time the line was taken (the gatherer's `at`) and not the
+ * sender's `sentAt`: the lines are shown in the order they were taken,
+ * which is the one order every viewer sees, and the times taken go up with it. `sentAt` is the
  * sender's clock, which nobody checks: a sender whose clock is wrong, or
  * who writes another time, would put a line hours away from the ones beside
  * it, and two lines out of the order of their times. WHY NOT both: the
  * difference is the sender's clock against the gatherer's plus the way
  * there, which a person reading the chat cannot tell apart.
  */
-const shownTime = (at: number | undefined): string =>
-	at === undefined ? "--:--:--" : new Date(at).toTimeString().slice(0, 8);
+const shownTime = (at: number): string => new Date(at).toTimeString().slice(0, 8);
 
 /**
- * Shows the chat of the room `room` as `name`, and sends what is typed in
- * the form, on the WebSocket with `sendOnSocket` and on a connection of
- * `connectForChat`. Returns what shows a line of the room's WebSocket.
+ * Shows the chat of the room `room` as `name`, and says what is typed in
+ * the form, on a connection of `connectForChat`. Does nothing where the
+ * page has no chat (`serve.ts` runs no gatherer).
  */
 export function startChat(
 	room: string,
 	name: string,
-	sendOnSocket: (text: string) => void,
 	connectForChat: () => Promise<MoqtConnection>,
-): { showSocketLine(line: SocketLine): void } {
+): void {
 	const log = document.getElementById("chat");
 	const note = document.getElementById("chat-note");
+	if (!XMOQ_DEMO.chatTracks || log === null) return;
 	const say = (text: string): void => {
 		if (note !== null) note.textContent = text;
 	};
@@ -104,25 +89,16 @@ export function startChat(
 		limits = chatLimits();
 	}
 
-	const add = (
-		path: "track" | "ws",
-		line: { name: string; text: string; at: number | undefined; number: string; how: string },
-	): void => {
-		if (log === null) return;
+	const add = (line: { name: string; text: string; at: number; number: bigint; how: string }): void => {
 		const shown = document.createElement("div");
-		shown.dataset.path = path;
-		shown.dataset.number = line.number;
+		shown.dataset.number = line.number.toString();
 		shown.dataset.how = line.how;
-		shown.textContent = `${shownTime(line.at)} [${path}] ${line.number} ${line.name}: ${line.text}`;
-		// The lines of the tracks are placed by their number among the
-		// lines of the tracks: the history of the Joining FETCH can come
-		// after a line said meanwhile. A line of the WebSocket comes last.
-		const after =
-			path === "track"
-				? [...log.querySelectorAll<HTMLElement>('div[data-path="track"]')].find(
-						(other) => BigInt(other.dataset.number ?? "0") > BigInt(line.number),
-					)
-				: undefined;
+		shown.textContent = `${shownTime(line.at)} ${line.number} ${line.name}: ${line.text}`;
+		// A line is placed by its number: the history of the Joining FETCH
+		// can come after a line said meanwhile.
+		const after = [...log.querySelectorAll<HTMLElement>("div[data-number]")].find(
+			(other) => BigInt(other.dataset.number ?? "0") > line.number,
+		);
 		log.insertBefore(shown, after ?? null);
 		while (log.childElementCount > SHOWN_LINES) log.firstElementChild?.remove();
 		if (after === undefined) log.scrollTop = log.scrollHeight;
@@ -130,23 +106,16 @@ export function startChat(
 	};
 
 	let participant: ChatParticipant | undefined;
-	if (XMOQ_DEMO.chatTracks) {
-		void keepInTheRoom(
-			connectForChat,
-			{ room, name, limits },
-			(joined) => {
-				participant = joined;
-			},
-			(line) => add("track", { ...line, number: line.number.toString() }),
-			say,
-		);
-	} else {
-		say("chat over the room's WebSocket alone: no gatherer runs (with --auth it has no token)");
-	}
+	void keepInTheRoom(
+		connectForChat,
+		{ room, name, limits },
+		(joined) => {
+			participant = joined;
+		},
+		add,
+		say,
+	);
 
-	// The rate of a page whose chat goes over the WebSocket alone, counted
-	// as the participant counts its own.
-	const window = new RateWindow(limits.linesPerSecond);
 	const form = document.querySelector("form");
 	form?.addEventListener("submit", (event) => {
 		event.preventDefault();
@@ -154,41 +123,24 @@ export function startChat(
 		if (input === null || input.value === "") return;
 		const text = input.value;
 		void (async () => {
-			const outcome: SayOutcome | undefined = await participant?.say(text);
-			const kept =
-				outcome === undefined
-					? keepBack(text, limits, window, Date.now())
-					: outcome.type === "kept-back"
-						? outcome.why
-						: undefined;
-			if (kept !== undefined) {
-				// The text stays in the field, to be cut and sent again.
-				say(KEPT_BACK[kept](limits));
+			// The text stays in the field where it was not sent, to be sent again.
+			if (participant === undefined) {
+				say("not sent: not in the room's chat yet");
 				return;
 			}
-			sendOnSocket(text);
+			const outcome: SayOutcome = await participant.say(text);
+			if (outcome.type === "kept-back") {
+				say(KEPT_BACK[outcome.why](limits));
+				return;
+			}
+			if (outcome.type === "not-sent") {
+				say(`not sent: ${outcome.why}`);
+				return;
+			}
 			input.value = "";
-			say(
-				outcome === undefined
-					? "sent on the ws"
-					: outcome.type === "sent"
-						? "sent on the track and the ws"
-						: `sent on the ws; not on the track: ${outcome.why}`,
-			);
+			say("sent");
 		})();
 	});
-
-	return {
-		showSocketLine(line) {
-			add("ws", {
-				name: line.from,
-				text: line.text,
-				at: line.at,
-				number: String(line.seq),
-				how: "ws",
-			});
-		},
-	};
 }
 
 /**

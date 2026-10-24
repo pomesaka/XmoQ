@@ -20,7 +20,7 @@ With `mise run demo` up; each line is one thing to open, and what nobody has jud
 - <http://localhost:8080/publish?source=camera&size=720> (or `size=1080`): the camera at a larger picture.
 - <http://localhost:8080/publish?ladder=1> with <http://localhost:8080/watch?abr=1&judge=try>: two versions of the video, and a viewer that changes between them (a trial; it shows on a narrow link).
 - <http://localhost:8080/watch?wait=1>, opened **before** the publishing page: the viewer waits at the relay and plays half a second after the broadcast begins (a trial).
-- `mise run watch -- --room http://127.0.0.1:8787/rooms/demo`, in Ghostty or Kitty: the same broadcast in the terminal, with the room's chat under the picture.
+- `mise run watch -- --room http://127.0.0.1:8787/rooms/demo`, in Ghostty or Kitty: the same broadcast in the terminal, with the chat of the room under the picture.
 
 **The publishing page may be a tab in the background**: its clock runs in a worker, which a browser does not slow down as it does the timers of a page nobody looks at. (Before, a publisher in a background tab sent one frame a second, and no sound that was in time.) The first line under each picture has the frames a second, and the watching page a line on the sound: what goes to the loudspeaker, and how loud.
 
@@ -42,9 +42,9 @@ With `mise run demo` up; each line is one thing to open, and what nobody has jud
 
 **A viewer that waits at the relay (a trial)**: `/watch?wait=1` does not go by the room's word that a broadcast has begun. It connects at once, its SUBSCRIBE for the catalog asks the relay to hold it for 30 s until a publisher is there, and when none came, and when the publisher has gone, it asks again on the session it has ([record](../docs/experiments/2026-10-13-a-page-that-waits-for-the-broadcast-at-the-relay.md)). Without the flag the page is as before.
 
-**The chat goes by two ways at once** while it moves from the room's WebSocket to MoQ tracks (decided on 2026-10-24): `mise run demo` starts the gatherer of the chat (`xmoq-chat`) beside the relay, with its store in `demo/.chat/chat.sqlite3` (not committed; `--chat-store FILE` for another), and each page is a participant over a connection of its own (`joinChat` of [`@xmoq/chat`](../packages/chat/README.md)). A line typed is sent on the track and on the WebSocket, and every line shows the way it came, `[track]` or `[ws]`, with the time it was taken (the gatherer's or the room's) and its number in the room. A page that comes has the newest 16 lines of the track by a Joining FETCH, and the room's history on the WebSocket. A line longer than 512 bytes, or the sixth in a second, is not sent on either way, and the line under the form says so (`?chatTextBytes=N`, `?chatLinesPerSecond=N` for other limits; set them as the gatherer is run). With `--auth` the gatherer is not started, as it has no token, and the chat goes over the WebSocket alone ([record](../docs/experiments/2026-10-24-demo-chat-over-tracks.md)). Two pages with the same name (two publishing pages are both `publisher`) announce the same namespace and publish the same track `said`; what the relay and the gatherer make of the two was not tried.
+**The chat goes over MoQ tracks** (decided on 2026-10-24; the room's WebSocket carries none): `mise run demo` starts the gatherer of the chat (`xmoq-chat`) beside the relay, with its store in `demo/.chat/chat.sqlite3` (not committed; `--chat-store FILE` for another), and each page is a participant over a connection of its own (`joinChat` of [`@xmoq/chat`](../packages/chat/README.md)). Every line shows the time the gatherer took it and its number in the room. A page that comes has the newest 16 lines by a Joining FETCH. A line longer than 512 bytes, or the sixth in a second, is not sent, and the line under the form says so (`?chatTextBytes=N`, `?chatLinesPerSecond=N` for other limits; set them as the gatherer is run). Where the gatherer is not built, the pages have no chat ([records](../docs/experiments/2026-10-24-demo-chat-over-tracks.md), [and](../docs/experiments/2026-10-24-the-chat-off-the-rooms-websocket.md)). Two pages with the same name (two publishing pages are both `publisher`) announce the same namespace and publish the same track `said`; what the relay and the gatherer make of the two was not tried.
 
-`/chat?room=R&name=a&peers=a,b` is the try of 2026-10-12 of chat as MoQ tracks beside the room's WebSocket, in another shape (a track `chat` for every participant, read by every other), driven by a script and linked from nowhere ([record](../docs/experiments/2026-10-12-chat-as-moq-tracks-beside-the-rooms-websocket.md)).
+**With `--auth` there is no chat.** The gatherer is not started, and the pages' connections for the chat carry no token. The relay takes a token for one namespace and one role (`crates/relay/src/auth.rs`); the gatherer subscribes to the namespace of every participant it finds, so it would need a token for any namespace under `xmoq/chat`, and who may get one is not decided ([open decisions](../docs/open-questions.md), authorization tokens).
 
 `bun demo/check.ts` checks a running demo in headless Chromium: the frames a second, and that sound leaves the watching page.
 
@@ -56,9 +56,9 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 **Picture and sound are played together, by the times their Objects carry.** The playing is `createPlayout` of `@xmoq/media`; the page draws, counts and shows. The watching page holds each frame and each piece of audio for 150 ms, counted from the fastest one that came (`/watch?buffer=N` for another time, in milliseconds; 0 plays each as it comes, and then most of the audio is too late to be sounded). Every 2 seconds the publishing page shows a white square and sounds a beep at the same moment, for 200 ms; the lines under the picture say how far apart the two came out, and how long a frame and a piece took from the publisher's clock to this page.
 
-**Reactions**: four buttons under the chat; an emoji somebody presses stands on every page of the room for two seconds ([record](../docs/experiments/2026-10-12-reactions-over-the-rooms-websocket.md)).
+**Reactions** (over the room's WebSocket): four buttons under the chat; an emoji somebody presses stands on every page of the room for two seconds ([record](../docs/experiments/2026-10-12-reactions-over-the-rooms-websocket.md)).
 
-**A room** comes with it: the spike in `spikes/durable-objects-room`, a Durable Object run locally with Miniflare (`mise run demo` installs it there the first time). Under the picture are a chat and how many are connected, and the watching page learns from the room where the broadcast is; `?room=NAME` on both pages is another room. The broadcast is known to the room as long as the publishing page is open.
+**A room** comes with it: the spike in `spikes/durable-objects-room`, a Durable Object run locally with Miniflare (`mise run demo` installs it there the first time). Under the picture is how many are connected, and the watching page learns from the room where the broadcast is; `?room=NAME` on both pages is another room. The broadcast is known to the room as long as the publishing page is open.
 
 **A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again every 2 seconds (`keepPublishing` and `keepPlaying` of `@xmoq/media`).
 
@@ -68,7 +68,7 @@ No catalog. The times are compared on one machine, where the two pages have the 
 
 ## Every flag
 
-Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/shared.ts`, `demo/chat.ts`, `demo/serve.ts`). Each is a query of the page's address unless it begins with `--`. "Trial" is something tried behind the flag and not the demo's way; the sections above have what each trial showed.
+Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/shared.ts`, `demo/serve.ts`). Each is a query of the page's address unless it begins with `--`. "Trial" is something tried behind the flag and not the demo's way; the sections above have what each trial showed.
 
 | Page | Flag | What it does | Without it |
 |---|---|---|---|
@@ -113,7 +113,6 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | watch | `versionTimeouts=A,B` | Trial, with `abr=1`: a delivery timeout for each version | `videoTimeout` for each |
 | watch | `wait=1` | Trial: waits for the broadcast at the relay, on one session | Goes by the room's word |
 | both | `chatTextBytes=N`, `chatLinesPerSecond=N` | The limits of a line of the chat, which the page keeps to before it sends: 1 to 8,192 bytes, 1 to 1,000 lines a second | 512, 5: the gatherer's |
-| chat | `room=NAME`, `name=N`, `peers=a,b` | The try of chat as MoQ tracks | Room `chat` |
 
 `bun demo/serve.ts`:
 

@@ -4,7 +4,7 @@ What the demo (`mise run demo`, `demo/`) was seen to do by 2026-10-12, and what 
 
 ## What it is
 
-A page encodes a picture (a clock it paints, or a camera) as H.264, 640x360 at 30 frames a second with a key frame a second (1280x720 and 1920x1080 with `/publish?size=720` and `1080`, which ran on one machine: [record](experiments/2026-10-12-the-demo-at-720-and-1080-lines.md); everything measured below is 640x360), and a tone (or a microphone) as Opus, 48,000 Hz mono, and publishes both through the own relay with an MSF catalog. Other pages find the tracks in the catalog and play picture and sound by one clock. A room (a Durable Object in Miniflare) says where the broadcast is and carries a chat. The parts are `@xmoq/moqt`, `@xmoq/loc`, `@xmoq/msf` and `@xmoq/media`; the demo's pages draw, count and show.
+A page encodes a picture (a clock it paints, or a camera) as H.264, 640x360 at 30 frames a second with a key frame a second (1280x720 and 1920x1080 with `/publish?size=720` and `1080`, which ran on one machine: [record](experiments/2026-10-12-the-demo-at-720-and-1080-lines.md); everything measured below is 640x360), and a tone (or a microphone) as Opus, 48,000 Hz mono, and publishes both through the own relay with an MSF catalog. Other pages find the tracks in the catalog and play picture and sound by one clock. A room (a Durable Object in Miniflare) says where the broadcast is; the chat goes over MoQ tracks through a gatherer beside the relay. The parts are `@xmoq/moqt`, `@xmoq/loc`, `@xmoq/msf` and `@xmoq/media`; the demo's pages draw, count and show.
 
 ## What was measured
 

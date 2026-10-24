@@ -8,8 +8,8 @@
 <path d="M660 255 H475" class="line" marker-end="url(#arr)"/><text x="567" y="246" class="desc" text-anchor="middle">Subscribe</text>
 <path d="M475 305 H660" class="line" marker-end="url(#arr)"/><text x="567" y="296" class="desc" text-anchor="middle">Media Objects</text>
 <path d="M475 355 H660" class="line" marker-end="url(#arr)"/><text x="567" y="346" class="desc" text-anchor="middle">Further Objects</text>
-<path d="M475 405 H845" class="dashed" marker-end="url(#amb)"/><text x="660" y="396" class="desc" text-anchor="middle">Room / chat integration TBD</text>
-<text x="54" y="448" class="tag" fill="#b9a3f2">CHAT ON TRACKS · THE GATHERER, THE DEMO'S PAGES AND THE TERMINAL VIEWER; THE ROOM'S WEBSOCKET CHAT IS STILL KEPT BESIDE IT</text>
+<path d="M475 405 H845" class="dashed" marker-end="url(#amb)"/><text x="660" y="396" class="desc" text-anchor="middle">Room integration TBD</text>
+<text x="54" y="448" class="tag" fill="#b9a3f2">CHAT ON TRACKS · THE GATHERER, THE DEMO'S PAGES AND THE TERMINAL VIEWER; THE ROOM'S WEBSOCKET CARRIES NO CHAT</text>
 <path d="M105 480 H475" class="chat" marker-end="url(#vio)"/><text x="290" y="471" class="desc" text-anchor="middle">SUBSCRIBE_NAMESPACE xmoq/chat</text>
 <path d="M660 525 H475" class="chat" marker-end="url(#vio)"/><text x="567" y="516" class="desc" text-anchor="middle">PUBLISH_NAMESPACE …/&lt;room&gt;/&lt;name&gt;</text>
 <path d="M475 570 H105" class="chat" marker-end="url(#vio)"/><text x="290" y="561" class="desc" text-anchor="middle">NAMESPACE; it subscribes to said</text>

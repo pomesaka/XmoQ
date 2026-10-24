@@ -1,5 +1,5 @@
-// Checks the room Worker that run.mjs serves: the broadcast of a room, the
-// chat (order, history for one who comes later), and the count.
+// Checks the room Worker that run.mjs serves: the broadcast of a room, a
+// token, the count, and that it carries no chat.
 //
 // Usage: node check.mjs [http://127.0.0.1:8787]
 const origin = process.argv[2] ?? "http://127.0.0.1:8787";
@@ -11,9 +11,9 @@ const fail = (what) => {
 };
 
 /** A client of the room's WebSocket that keeps what it was sent. */
-function join(name) {
+function join() {
 	const got = [];
-	const socket = new WebSocket(`${origin.replace("http", "ws")}/rooms/${room}/ws?name=${name}`);
+	const socket = new WebSocket(`${origin.replace("http", "ws")}/rooms/${room}/ws`);
 	socket.addEventListener("message", (event) => got.push(JSON.parse(event.data)));
 	const opened = new Promise((resolve, reject) => {
 		socket.addEventListener("open", resolve);
@@ -26,7 +26,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 1. The broadcast of a room: there while its publisher's socket is.
 say("before:", await (await fetch(`${origin}/rooms/${room}`)).json());
 const broadcast = { relayUrl: "https://127.0.0.1:4443/", namespace: ["xmoq", "demo"], certSha256Hex: "ab".repeat(32) };
-const publisher = join("publisher");
+const publisher = join();
 await publisher.opened;
 publisher.socket.send(JSON.stringify({ type: "broadcast", broadcast }));
 await wait(300);
@@ -41,7 +41,7 @@ if (gone.broadcast !== null || gone.connected !== 0) fail("the broadcast outlive
 
 // 1b. A token, where the rooms have a key: the text the relay checks.
 {
-	const asker = join("asker");
+	const asker = join();
 	await asker.opened;
 	asker.socket.send(JSON.stringify({ type: "token-for", role: "sub", namespace: ["xmoq", "demo"] }));
 	await wait(300);
@@ -53,34 +53,24 @@ if (gone.broadcast !== null || gone.connected !== 0) fail("the broadcast outlive
 	await wait(200);
 }
 
-// 2. Chat: two send at once, 20 messages each; both see one order.
-const a = join("a");
-const b = join("b");
+// 2. No chat (it is on MoQ tracks): a {type: "chat"} message goes to
+// nobody, and one who comes later is told no history.
+const a = join();
+const b = join();
 await Promise.all([a.opened, b.opened]);
-for (let index = 0; index < 20; index++) {
-	a.socket.send(JSON.stringify({ type: "chat", text: `a${index}` }));
-	b.socket.send(JSON.stringify({ type: "chat", text: `b${index}` }));
-}
-await wait(1000);
-const chats = (client) => client.got.filter((message) => message.type === "chat");
-const order = (client) => chats(client).map((chat) => `${chat.seq}:${chat.text}`).join(" ");
-say("a saw:", order(a).slice(0, 120));
-if (chats(a).length !== 40 || order(a) !== order(b)) fail("the two do not see the same 40 messages in the same order");
-if (chats(a).some((chat, index) => chat.seq !== index + 1)) fail("the numbers are not 1 to 40 without a gap");
-for (const name of ["a", "b"]) {
-	const own = chats(a).filter((chat) => chat.from === name).map((chat) => chat.text).join(" ");
-	if (own !== Array.from({ length: 20 }, (_unused, index) => `${name}${index}`).join(" ")) fail(`the messages of ${name} are not in the order it sent them`);
-}
-
-// 3. One who comes later gets the last 50 at most, and the count.
-for (let index = 0; index < 30; index++) a.socket.send(JSON.stringify({ type: "chat", text: `more${index}` }));
+a.socket.send(JSON.stringify({ type: "chat", text: "hello" }));
 await wait(500);
-const late = join("late");
+const late = join();
 await late.opened;
 await wait(300);
+const carried = [a, b, late].flatMap((client) => client.got).filter((message) => message.type === "chat");
+say("chat messages anybody got:", carried.length);
+if (carried.length !== 0) fail("the room carried a chat message");
 const hello = late.got.find((message) => message.type === "hello");
-say("the late one's hello:", { history: hello?.history?.length, first: hello?.history?.[0]?.seq, last: hello?.history?.at(-1)?.seq, connected: hello?.connected });
-if (hello?.history?.length !== 50 || hello.history[0].seq !== 21 || hello.history.at(-1).seq !== 70) fail("the history is not the last 50 messages, 21 to 70");
+say("the late one's hello:", hello);
+if (hello === undefined || "history" in hello) fail("the late one's hello is missing or has a history");
+
+// 3. The count: the late one is told that 3 are connected.
 if (hello?.connected !== 3) fail("the late one is not told that 3 are connected");
 say("the count, as a was told:", a.got.filter((message) => message.type === "connected").map((message) => message.connected));
 
