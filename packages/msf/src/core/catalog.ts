@@ -223,9 +223,52 @@ function checkTrack(value: unknown, where: string): CatalogTrack {
  * What a parsed JSON value is as a catalog. The one place the rules of the
  * draft are applied: what is read and what is written both pass it.
  */
+/**
+ * §5.4.1: "Variables are denoted by enclosing the variable name in percent
+ * characters (%). Variable names MUST consist of alphanumeric characters,
+ * hyphens, and underscores", and "The percent character (%) MUST NOT appear
+ * in catalog field values except as part of a variable reference". A string
+ * of nothing but other characters and such references. WHY "alphanumeric"
+ * is ASCII: the draft says no more, and a reference is made to be put in
+ * place of. WHY a name of no characters (`%%`) is none: "consist of" names
+ * no empty one. `crates/msf` reads the same.
+ */
+const OF_VARIABLES = /^(?:[^%]|%[A-Za-z0-9_-]+%)*$/;
+
+/**
+ * The first string value of the document that holds a `%` outside a
+ * variable reference (`OF_VARIABLES`), or undefined. Every value is looked at,
+ * those of fields that are not read among them; keys are no field values.
+ */
+function stringWithPercent(value: unknown): string | undefined {
+	if (typeof value === "string") {
+		return OF_VARIABLES.test(value) ? undefined : value;
+	}
+	const inside = Array.isArray(value)
+		? value
+		: isObject(value)
+			? Object.values(value)
+			: [];
+	for (const each of inside) {
+		const found = stringWithPercent(each);
+		if (found !== undefined) return found;
+	}
+	return undefined;
+}
+
 function check(value: unknown): CatalogRead {
 	if (!isObject(value)) {
 		return { type: "invalid", reason: "the catalog is not a JSON object" };
+	}
+	// Before anything else of the document, so that both readers turn down
+	// the same documents for it (`crates/msf`). Variables are not put in place
+	// of: a reference is read as it is.
+	const percent = stringWithPercent(value);
+	if (percent !== undefined) {
+		return {
+			type: "invalid",
+			reason: `the catalog: ${JSON.stringify(percent.slice(0, 40))} has a "%" outside a variable reference (§5.4.1)`,
+		};
 	}
 	// §5.1.6: "If this field is present, the catalog represents a delta (or
 	// partial) update", and its JSON type is an Array. Before the version,

@@ -62,6 +62,45 @@ impl std::fmt::Display for Invalid {
 
 impl std::error::Error for Invalid {}
 
+/// Whether a string is of nothing but characters other than `%` and
+/// variable references (§5.4.1: "Variables are denoted by enclosing the
+/// variable name in percent characters (%). Variable names MUST consist of
+/// alphanumeric characters, hyphens, and underscores", and "The percent
+/// character (%) MUST NOT appear in catalog field values except as part of a
+/// variable reference"). ASCII alphanumeric, and a name of at least one
+/// character, as `OF_VARIABLES` of `@xmoq/msf` has it.
+fn of_variables(value: &str) -> bool {
+    let mut rest = value;
+    while let Some(open) = rest.find('%') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('%') else {
+            return false;
+        };
+        let name = &after[..close];
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return false;
+        }
+        rest = &after[close + 1..];
+    }
+    true
+}
+
+/// The first string value of the document that is not [`of_variables`].
+/// Every value is looked at, those of fields that are not read among them;
+/// keys are no field values.
+fn string_with_percent(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(text) => (!of_variables(text)).then_some(text.as_str()),
+        Value::Array(values) => values.iter().find_map(string_with_percent),
+        Value::Object(fields) => fields.values().find_map(string_with_percent),
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
+}
+
 /// The tracks of a catalog, in the order the document has them. Fields
 /// that are not read are ignored (§5: "A parser MUST ignore fields it does
 /// not understand").
@@ -70,11 +109,18 @@ impl std::error::Error for Invalid {}
 ///
 /// [`Invalid`] for bytes that are no JSON object, another version than
 /// [`MSF_VERSION`], no array of tracks, a track without a name or a
-/// packaging, and a `samplerate` that is no number or a `channelConfig`
-/// that is no string, as in `@xmoq/msf`.
+/// packaging, a `samplerate` that is no number or a `channelConfig` that is
+/// no string, and a string value with a `%` outside a variable reference
+/// (§5.4.1), as in `@xmoq/msf`.
 pub fn read_catalog(payload: &[u8]) -> Result<Vec<CatalogTrack>, Invalid> {
     let document: Value =
         serde_json::from_slice(payload).map_err(|error| Invalid(format!("no JSON: {error}")))?;
+    // Before anything else of the document, as in `@xmoq/msf`.
+    if let Some(value) = string_with_percent(&document) {
+        return Err(Invalid(format!(
+            "{value:?} has a \"%\" outside a variable reference (§5.4.1)"
+        )));
+    }
     let version = document.get("version").and_then(Value::as_str);
     if version != Some(MSF_VERSION) {
         return Err(Invalid(format!(
@@ -225,6 +271,27 @@ mod tests {
         let hevc = first_video_track(&tracks, "hev1").unwrap();
         assert_eq!(hevc.name, "video_400kbps_hevc");
         assert_eq!(first_video_track(&tracks, "vp9"), None);
+    }
+
+    /// The rows of `fixtures/msf-01/catalogs.tsv` on `%` (§5.4.1), which
+    /// `@xmoq/msf` reads as well: a row read as a catalog is read here, and
+    /// one read as invalid is turned down.
+    #[test]
+    fn a_percent_outside_a_variable_reference_is_turned_down_as_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/msf-01/catalogs.tsv");
+        let rows: Vec<(&str, &str, &str)> = table
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                Some((fields.next()?, fields.next()?, fields.next()?))
+            })
+            .filter(|(name, _, _)| name.starts_with("percent-"))
+            .collect();
+        assert_eq!(rows.len(), 6);
+        for (name, expected, document) in &rows {
+            let read = read_catalog(document.as_bytes());
+            assert_eq!(read.is_ok(), *expected == "catalog", "{name}: {read:?}");
+        }
     }
 
     /// The rows of `fixtures/msf-01/catalogs.tsv` on the sample rate and
