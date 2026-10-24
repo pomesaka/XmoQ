@@ -142,6 +142,7 @@ pub(crate) fn track_properties_refusal(properties: &[KeyValuePair]) -> Option<Tr
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::coding::parse_exact;
     use crate::data::object_properties_fault;

@@ -22,7 +22,7 @@ test.each([
 	],
 	["no Timestamp anywhere", [inside()], "ok none"],
 	[
-		"Immutable Properties inside Immutable Properties: read as it came",
+		"Immutable Properties inside Immutable Properties: read for what is outside",
 		[{ type: 0x10n, value: 7n }, inside(0x0b, 0x00)],
 		"ok 7",
 	],

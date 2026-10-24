@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
+use xmoq_moqt::immutable::{Of, searched_properties};
 use xmoq_moqt::kvp::Value;
 use xmoq_moqt::message::{ControlMessage, FetchRange, GoAway, RequestError, request_error_code};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
@@ -453,13 +454,17 @@ impl Requests<'_> {
 /// its own, which is not handled: the demo has none (wall-clock
 /// microseconds).
 pub fn timestamp_of(object: &SubgroupObject) -> Option<u64> {
-    let timing = loc::read_timing(object.properties.iter().map(|pair| {
-        let value = match pair.value() {
-            Value::Varint(value) => Some(*value),
-            Value::Bytes(_) => None,
-        };
-        (pair.ty(), value)
-    }))
+    let timing = loc::read_timing(
+        searched_properties(&object.properties, Of::Object)
+            .iter()
+            .map(|pair| {
+                let value = match pair.value() {
+                    Value::Varint(value) => Some(*value),
+                    Value::Bytes(_) => None,
+                };
+                (pair.ty(), value)
+            }),
+    )
     .ok()??;
     timing.timescale.is_none().then_some(timing.timestamp)
 }
