@@ -39,8 +39,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HANDSHAKES: usize = 64;
 
 /// How long the relay waits after its GOAWAY before it closes the sessions
-/// that are left, where `--goaway-timeout-ms` does not say. Provisional: the
-/// 10 seconds `moqtail`'s relay waits (relay@0.15.0, read on 2026-10-24).
+/// that are left, where `--goaway-timeout-ms` does not say. Decided on
+/// 2026-10-24 (Q47): the 10 seconds `moqtail`'s relay waits (relay@0.15.0,
+/// read on 2026-10-24).
 const GOAWAY_TIMEOUT_MS: u64 = 10_000;
 
 /// `GOAWAY_TIMEOUT` (§3.5): "The session was closed because the peer took
