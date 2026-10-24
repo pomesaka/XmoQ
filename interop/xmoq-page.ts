@@ -330,6 +330,18 @@ export type OwnPageExtras = {
 	/** What `publishBroadcast` has made so far. */
 	broadcastReport(): Promise<PageBroadcastReport>;
 	/**
+	 * Publishes a broadcast of sound alone, on the one connection of the
+	 * page: the catalog of MSF with the Opus track `VOICE.audio`, whose sound
+	 * is a voice and then `VOICE.pauseMs` of silence, over and over. `voice`
+	 * is the samples of the voice in base64: 16-bit little-endian, one
+	 * channel at 16,000 Hz, which the page makes 48,000 Hz by drawing lines
+	 * between them. Each Object has the page's clock as its Timestamp, as in
+	 * `publishBroadcast`.
+	 */
+	publishVoice(namespace: string, voice: string): Promise<void>;
+	/** What `publishVoice` has made so far. */
+	voiceReport(): Promise<PageVoiceReport>;
+	/**
 	 * As `publishTrack` of the page, with the Track Property DYNAMIC_GROUPS
 	 * = 1 (transport §12.6) on the PUBLISH, and a handler for the
 	 * NEW_GROUP_REQUESTs of the subscriber. `sendObject` then sends on this
@@ -600,6 +612,22 @@ export const BROADCAST: {
 	height: 360,
 	framerate: 30,
 	bitrate: 1_000_000,
+};
+
+/** What `publishVoice` publishes. */
+export const VOICE: { audio: string; pauseMs: number } = {
+	audio: "audio",
+	pauseMs: 1500,
+};
+
+/** What `publishVoice` made on a page. */
+export type PageVoiceReport = {
+	/** Pieces of sound of 20 ms made, and the voices begun among them. */
+	made: number;
+	voices: number;
+	audioEncoderError: string | null;
+	/** Pieces of sound handed to the transport. */
+	audioWritten: number;
 };
 
 /** What `publishBroadcast` made on a page. */

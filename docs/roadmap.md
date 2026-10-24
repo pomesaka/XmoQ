@@ -80,9 +80,9 @@ The relay gets a cache of the latest Group of each track in Phase 1; decided on 
 Decided on 2026-10-25: an agent such as Claude takes part in a broadcast through a CLI that writes what the tracks carry to stdout or to files ([vision](vision.md)). This phase comes before Phase 6; how both stand to the items left open in Phases 3 and 4 was not said.
 
 - [ ] A CLI (`xmoq-agent`, `crates/agent`) subscribes to a broadcast and the room's chat and writes them where an agent reads them. What it writes and in what form is [open](open-questions.md).
-- [ ] The broadcast's sound is transcribed with whisper.cpp on the agent's machine.
+- [x] The broadcast's sound is transcribed with whisper.cpp by a transcriber beside the relay (`xmoq-transcriber`, `crates/transcriber`), which publishes the words as a track for the agent and any viewer. Run through the own relay on one machine ([record](experiments/2026-10-25-the-transcriber-reads-a-voice.md)).
 - [ ] The agent says lines in the room's chat, text alone.
-- [ ] Measure the time from a word being said to its text being written, and what the transcription takes of the machine.
+- [ ] Measure the time from a word being said to its text being written, and what the transcription takes of the machine. The time to the transcript's track was measured for one voice ([record](experiments/2026-10-25-the-transcriber-reads-a-voice.md)); what it takes of the machine was not.
 
 **Exit (proposed):** an agent follows what is said and written in a broadcast and answers in its chat, reproducibly, on one machine.
 

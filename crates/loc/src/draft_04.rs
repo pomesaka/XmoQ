@@ -75,6 +75,19 @@ pub fn read_timing(
     }
 }
 
+/// The Timestamp of an Object as wall-clock microseconds (§2.3.1.1:
+/// without a Timescale): what the terminal viewer plays by and the
+/// transcriber cuts by. `None` for an Object without a Timestamp, with
+/// properties that are invalid ([`read_timing`]), or with a Timescale of its
+/// own, which neither handles: the demo's publishers send none.
+#[must_use]
+pub fn wall_clock_timestamp(
+    properties: impl IntoIterator<Item = (u64, Option<u64>)>,
+) -> Option<u64> {
+    let timing = read_timing(properties).ok()??;
+    timing.timescale.is_none().then_some(timing.timestamp)
+}
+
 /// Makes a start code of every length prefix of a video payload (§2.1.3,
 /// §2.1.4). A payload that has start codes already comes out with the same
 /// bytes: "A length value of 1 SHOULD be interpreted as a start code rather

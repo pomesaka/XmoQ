@@ -1,0 +1,21 @@
+a piece	0	{"from":["xmoq","demo"],"text":"Hello everyone.","startUs":1761350400000000,"endUs":1761350402500000,"at":1761350403700}	["xmoq","demo"]	"Hello everyone."	1761350400000000	1761350402500000	1761350403700	-	yes
+Japanese, and quotes in the text	7	{"from":["xmoq","meet","r","alice"],"text":"「配信」は\"live\"です","startUs":20000,"endUs":20000,"at":5}	["xmoq","meet","r","alice"]	"「配信」は\"live\"です"	20000	20000	5	-	yes
+empty text	1	{"from":["a"],"text":"","startUs":0,"endUs":0,"at":0}	["a"]	""	0	0	0	-	yes
+other members are passed over	2	{"from":["a"],"text":"x","startUs":1,"endUs":2,"at":3,"lang":"en"}	["a"]	"x"	1	2	3	-	no
+members in another order	3	{"at":3,"endUs":2,"startUs":1,"text":"x","from":["a"]}	["a"]	"x"	1	2	3	-	no
+the largest numbers	4	{"from":["a"],"text":"x","startUs":9007199254740991,"endUs":9007199254740991,"at":9007199254740991}	["a"]	"x"	9007199254740991	9007199254740991	9007199254740991	-	yes
+not JSON	5	from a	-	-	-	-	-	not-an-object	-
+an array	5	[1]	-	-	-	-	-	not-an-object	-
+no from	5	{"text":"x","startUs":1,"endUs":2,"at":3}	-	-	-	-	-	from	-
+from empty	5	{"from":[],"text":"x","startUs":1,"endUs":2,"at":3}	-	-	-	-	-	from	-
+from a string	5	{"from":"xmoq/demo","text":"x","startUs":1,"endUs":2,"at":3}	-	-	-	-	-	from	-
+an empty field of from	5	{"from":["xmoq",""],"text":"x","startUs":1,"endUs":2,"at":3}	-	-	-	-	-	from	-
+a number in from	5	{"from":["xmoq",1],"text":"x","startUs":1,"endUs":2,"at":3}	-	-	-	-	-	from	-
+no text	5	{"from":["a"],"startUs":1,"endUs":2,"at":3}	-	-	-	-	-	text	-
+text a number	5	{"from":["a"],"text":1,"startUs":1,"endUs":2,"at":3}	-	-	-	-	-	text	-
+startUs with a fraction	5	{"from":["a"],"text":"x","startUs":1.5,"endUs":2,"at":3}	-	-	-	-	-	start-us	-
+startUs below 0	5	{"from":["a"],"text":"x","startUs":-1,"endUs":2,"at":3}	-	-	-	-	-	start-us	-
+startUs past 2^53 - 1	5	{"from":["a"],"text":"x","startUs":9007199254740992,"endUs":9007199254740992,"at":3}	-	-	-	-	-	start-us	-
+endUs before startUs	5	{"from":["a"],"text":"x","startUs":2,"endUs":1,"at":3}	-	-	-	-	-	end-us	-
+endUs a string	5	{"from":["a"],"text":"x","startUs":1,"endUs":"2","at":3}	-	-	-	-	-	end-us	-
+no at	5	{"from":["a"],"text":"x","startUs":1,"endUs":2}	-	-	-	-	-	at	-

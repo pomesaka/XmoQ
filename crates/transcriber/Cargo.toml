@@ -1,0 +1,22 @@
+[package]
+name = "xmoq-transcriber"
+version = "0.0.0"
+description = "The transcriber: listens to the audio tracks of the broadcasts announced under a prefix, reads their words with whisper.cpp, and publishes them as one track a prefix."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-again = { path = "../again" }
+xmoq-loc = { path = "../loc" }
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+xmoq-msf = { path = "../msf" }
+xmoq-room-token = { path = "../room-token" }
+xmoq-speech = { path = "../speech" }
+xmoq-track-serving = { path = "../track-serving" }
+xmoq-transcript-tracks = { path = "../transcript-tracks" }
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

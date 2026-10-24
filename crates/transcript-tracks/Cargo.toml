@@ -1,0 +1,13 @@
+[package]
+name = "xmoq-transcript-tracks"
+version = "0.0.0"
+description = "The tracks of the transcripts: the names of their namespaces and tracks, and the payload of what was said. Without I/O."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-moqt = { path = "../moqt" }
+serde_json = "=1.0.152"

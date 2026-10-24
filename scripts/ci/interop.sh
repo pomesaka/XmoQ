@@ -77,9 +77,13 @@ fi
 
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
 need_alsa_headers
+need_libclang
 cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat -p xmoq-agent
-# WHY --release for this one: interop/harness.ts, at `TERMINAL_VIEWER_BINARY`.
-cargo build --locked --release -p xmoq-watch
+# WHY --release for these: interop/harness.ts, at `TERMINAL_VIEWER_BINARY` and `TRANSCRIBER_BINARY`.
+cargo build --locked --release -p xmoq-watch -p xmoq-transcriber
+# The model the transcriber's runs read with (`transcriberModel` of interop/harness.ts); fetched
+# once, and checked by its sha256.
+crates/speech/scripts/fetch-model.sh tiny
 
 bun install --frozen-lockfile
 
