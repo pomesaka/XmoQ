@@ -215,6 +215,8 @@ export interface FakePeer {
 	untakenUniStreams(): number;
 	/** The same for the streams made by `openBidi`. */
 	untakenBidiStreams(): number;
+	/** The `sendOrder` of each unidirectional stream the client asked for, in order. */
+	uniSendOrders(): number[];
 }
 
 /**
@@ -290,6 +292,7 @@ export function createFakePeer(
 	} = {},
 ): FakePeer {
 	let bidisAsked = 0;
+	const uniSendOrders: number[] = [];
 	const clientUnis = handover<ReadableStreamDefaultReader<Uint8Array>>();
 	const clientBidis = handover<PeerBidiStream>();
 	const incomingUni = new TransformStream<
@@ -342,7 +345,8 @@ export function createFakePeer(
 			incomingUnidirectionalStreams: incomingUni.readable,
 			incomingBidirectionalStreams: incomingBidi.readable,
 			datagrams: { readable: datagrams.readable },
-			createUnidirectionalStream() {
+			createUnidirectionalStream({ sendOrder }) {
+				uniSendOrders.push(sendOrder);
 				const failure = options.failUni?.();
 				if (failure !== undefined) return Promise.reject(failure);
 				if (options.stallWrites !== undefined) {
@@ -415,6 +419,7 @@ export function createFakePeer(
 			setTimeout(() => rejectClosed(error), 0);
 		},
 		closeInfo: () => closeInfo,
+		uniSendOrders: () => [...uniSendOrders],
 		// The client locks a stream when it starts to read it.
 		untakenUniStreams: () =>
 			openedUnis.filter((readable) => !readable.locked).length,

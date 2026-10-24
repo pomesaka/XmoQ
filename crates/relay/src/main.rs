@@ -68,21 +68,35 @@ const GOAWAY_TIMEOUT: u32 = 0x10;
 /// streams, where the stream handling reads 64 at once.
 ///
 /// The windows bound what the QUIC layer holds for one peer; `HubConfig` adds
-/// them up with the rest.
+/// them up with the rest. The receive window of the connection is what the
+/// peer's unidirectional streams can hold, filled to their window and not
+/// read, and 1 MiB beyond it for the request streams
+/// (`QuicLimits::leaves_room_for_control_streams`, §11.4.2): 67 streams of
+/// 128 KiB and 1 MiB, 9.375 MiB with the 64 streams read at once.
+///
+/// WHY 128 KiB a stream, provisional: one stream carries at most its window
+/// in a round trip, and a Group of video goes on one stream; 128 KiB is
+/// about 10 Mbit/s at 100 ms, room for the demo's 2.65 Mbit/s and for a
+/// 720p video of 2.5 Mbit/s. WHY NOT 48 KiB with the connection's 4 MiB of
+/// before: about 3.9 Mbit/s at 100 ms leaves no room for those. WHY NOT the
+/// 256 KiB of before: the connection would need about 18 MiB, some 4.5 GiB
+/// for 256 sessions; with 128 KiB the worst is about 2.4 GiB.
 fn quic_limits(
     streams: &StreamConfig,
     idle_timeout: Duration,
     congestion: Congestion,
 ) -> QuicLimits {
-    const STREAM_RECEIVE_WINDOW: u32 = 256 * 1024;
-    const RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
+    const STREAM_RECEIVE_WINDOW: u32 = 128 * 1024;
     const SEND_WINDOW: u32 = 4 * 1024 * 1024;
     let (max_uni_streams, max_bi_streams) = xmoq_moqt_io::wt::streams_read_at_once(streams);
     QuicLimits {
         max_uni_streams,
         max_bi_streams,
         stream_receive_window: STREAM_RECEIVE_WINDOW,
-        receive_window: RECEIVE_WINDOW,
+        receive_window: xmoq_moqt_io::wt::receive_window_for(
+            max_uni_streams,
+            STREAM_RECEIVE_WINDOW,
+        ),
         send_window: SEND_WINDOW,
         idle_timeout,
         congestion,

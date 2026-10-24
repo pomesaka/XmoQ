@@ -1,0 +1,17 @@
+[package]
+name = "xmoq-send-order-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Spike only: a WebTransport server with a small connection window that reads
+# the client's unidirectional streams slowly and its bidirectional stream at
+# once, to see whether Chromium gives the credit it frees by `sendOrder`.
+# Built on its own; the root workspace excludes `spikes/`.
+[workspace]
+
+[dependencies]
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "time"] }
+# The library and version the own relay runs on.
+web-transport-quinn = { version = "=0.13.2", default-features = false, features = ["ring"] }

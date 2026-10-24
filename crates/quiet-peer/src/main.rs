@@ -1474,6 +1474,39 @@ async fn hold(url: &str, cert_sha256: [u8; 32], stay: Duration, tracks: u64) -> 
     Ok(())
 }
 
+/// The QUIC limits of the peer for `quiet`, with the windows the relay has.
+fn quic_limits(quiet: Quiet, streams: &StreamConfig) -> QuicLimits {
+    let (max_uni_streams, max_bi_streams) = xmoq_moqt_io::wt::streams_read_at_once(streams);
+    let max_uni_streams = if quiet == Quiet::Subgroups {
+        1
+    } else {
+        max_uni_streams
+    };
+    // As the relay has them (§11.4.2): the streams of the peer leave room
+    // for its requests.
+    let stream_receive_window = 128 * 1024;
+    QuicLimits {
+        max_uni_streams,
+        // The stream the session itself is on is allowed beside these.
+        max_bi_streams: if quiet == Quiet::Streams {
+            0
+        } else {
+            max_bi_streams
+        },
+        stream_receive_window,
+        receive_window: xmoq_moqt_io::wt::receive_window_for(
+            max_uni_streams,
+            stream_receive_window,
+        ),
+        send_window: 4 * 1024 * 1024,
+        // WHY a minute, where the relay has 6 seconds: the clients are to
+        // give up by their own clocks, and the connection is not to go
+        // first.
+        idle_timeout: Duration::from_secs(60),
+        congestion: Congestion::default(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = match parse_args(std::env::args().skip(1))? {
@@ -1537,28 +1570,7 @@ async fn main() -> Result<()> {
     };
     let (port, cert_file, key_file, quiet) = args;
     let streams = StreamConfig::default();
-    let (max_uni_streams, max_bi_streams) = xmoq_moqt_io::wt::streams_read_at_once(&streams);
-    let limits = QuicLimits {
-        max_uni_streams: if quiet == Quiet::Subgroups {
-            1
-        } else {
-            max_uni_streams
-        },
-        // The stream the session itself is on is allowed beside these.
-        max_bi_streams: if quiet == Quiet::Streams {
-            0
-        } else {
-            max_bi_streams
-        },
-        stream_receive_window: 256 * 1024,
-        receive_window: 4 * 1024 * 1024,
-        send_window: 4 * 1024 * 1024,
-        // WHY a minute, where the relay has 6 seconds: the clients are to
-        // give up by their own clocks, and the connection is not to go
-        // first.
-        idle_timeout: Duration::from_secs(60),
-        congestion: Congestion::default(),
-    };
+    let limits = quic_limits(quiet, &streams);
     let server = WtServer::bind(port, &cert_file, &key_file, limits)?;
     println!("LISTENING port={port}");
     let mut session = 0u64;

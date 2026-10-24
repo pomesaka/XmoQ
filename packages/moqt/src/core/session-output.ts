@@ -255,6 +255,22 @@ export type SessionEvent =
 			errorCode: bigint;
 	  };
 
+/**
+ * Where a unidirectional stream this endpoint opens stands among its
+ * streams (`sendOrder` of the W3C WebTransport API: the larger first). The
+ * control stream has the default, 0; a data stream, a subgroup or a fetch
+ * stream, stands below it. WHY: §11.4.2 has "endpoints MUST allocate
+ * connection flow control to the control streams before allocating it to
+ * any data streams", and the bidirectional request streams have the
+ * default as well. Chromium 156 was not seen to give the connection's
+ * credit by this order: a request behind 16 data streams took as long with
+ * it as without (docs/experiments/2026-10-25-send-order-of-data-streams-in-chromium.md).
+ * Kept: it costs nothing, and another browser may follow it.
+ */
+export const CONTROL_STREAM_SEND_ORDER = 0;
+/** See `CONTROL_STREAM_SEND_ORDER`. */
+export const DATA_STREAM_SEND_ORDER = -1;
+
 /** The two kinds of streams the peer opens. A `peerStream` number names one stream of either kind. */
 export type PeerStreamKind = "uni" | "bidi";
 
@@ -264,7 +280,13 @@ export type PeerStreamKind = "uni" | "bidi";
  * streams the peer opened and are allocated by the I/O layer.
  */
 export type SessionOutput =
-	| { type: "open-uni-stream"; stream: number; data: Bytes }
+	| {
+			type: "open-uni-stream";
+			stream: number;
+			data: Bytes;
+			/** `CONTROL_STREAM_SEND_ORDER` or `DATA_STREAM_SEND_ORDER`. */
+			sendOrder: number;
+	  }
 	| { type: "open-bidi-stream"; stream: number; data: Bytes }
 	| { type: "send"; stream: number; data: Bytes }
 	/** Close the send side with a FIN. */

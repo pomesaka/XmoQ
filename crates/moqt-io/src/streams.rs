@@ -858,16 +858,12 @@ impl<E, T> Sink<E, T> {
 /// peer that sends faster than the consumer takes is slowed by flow control
 /// instead of growing memory.
 ///
-/// FIXME: give connection flow control to the request streams before the
-/// data streams (§11.4.2, MUST, "to prevent deadlocks"). With quinn's defaults
-/// only per-stream windows fill up, because the connection-level receive
-/// window is unlimited (`receive_window: VarInt::MAX` in
-/// `TransportConfig::default`, quinn-proto 0.11.19; read 2026-10-10). A
-/// server that bounds that window, as the relay does, can have it taken up by
-/// subgroup streams whose readers wait here, and the request streams of the
-/// same session then wait as well. The deadlock the draft names does not
-/// arise here: a stream whose Track Alias is unknown is read and held within
-/// limits, not left unread until its PUBLISH comes.
+/// What these readers hold back is held in the connection's receive window
+/// as well: a server keeps room in it for the request streams by its
+/// windows (`wt::QuicLimits::leaves_room_for_control_streams`, §11.4.2). The
+/// deadlock the draft names does not arise here either: a stream whose Track
+/// Alias is unknown is read and held within limits, not left unread until
+/// its PUBLISH comes.
 pub fn read_uni_streams<C: Connection, T: Send + 'static>(
     connection: Arc<C>,
     config: StreamConfig,

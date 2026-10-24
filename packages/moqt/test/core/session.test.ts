@@ -101,7 +101,8 @@ describe("Session", () => {
 		"start() opens the control stream with SETUP: $name",
 		({ implementation, bytes }) => {
 			expect(createSession({ implementation }).start()).toEqual([
-				{ type: "open-uni-stream", stream: 0, data: hex(bytes) },
+				// The control stream: CONTROL_STREAM_SEND_ORDER, 0.
+				{ type: "open-uni-stream", stream: 0, data: hex(bytes), sendOrder: 0 },
 			]);
 		},
 	);
@@ -330,6 +331,9 @@ describe("Session", () => {
 					type: "open-uni-stream",
 					stream: 3,
 					data: hex("5c ff 0a d2 0b 51 39 c4 21 d5 00 00 00"),
+					// A data stream: DATA_STREAM_SEND_ORDER, below the control
+					// stream.
+					sendOrder: -1,
 				},
 			],
 		});

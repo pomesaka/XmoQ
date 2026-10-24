@@ -4206,3 +4206,21 @@ mod rendezvous {
         assert_eq!(answers, ["ok", "ok", "ok", "ok", "ok", "0x9", "0x9"]);
     }
 }
+
+/// §11.4.2: the peer's unidirectional streams, filled and not read, leave the
+/// request streams room in the connection's receive window, with the
+/// streams the relay reads at once (`quic_limits`).
+#[test]
+fn the_relay_leaves_its_request_streams_room_in_the_connection_window() {
+    let limits = crate::quic_limits(
+        &xmoq_moqt_io::StreamConfig::default(),
+        Duration::from_secs(6),
+        xmoq_moqt_io::wt::Congestion::default(),
+    );
+    assert!(limits.leaves_room_for_control_streams(), "{limits:?}");
+    // 67 streams of 128 KiB, and 1 MiB: 9.375 MiB.
+    assert_eq!(
+        (limits.stream_receive_window, limits.receive_window),
+        (131_072, 9_830_400)
+    );
+}

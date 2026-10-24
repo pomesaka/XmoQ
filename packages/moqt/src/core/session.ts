@@ -28,10 +28,11 @@ import {
 	type SubscribeRequest,
 	type TrackStatusRequest,
 } from "./requests.ts";
-import type {
-	PeerStreamKind,
-	SessionOutput,
-	SessionResult,
+import {
+	CONTROL_STREAM_SEND_ORDER,
+	type PeerStreamKind,
+	type SessionOutput,
+	type SessionResult,
 } from "./session-output.ts";
 import { isSubgroupHeaderType } from "./subgroup.ts";
 
@@ -519,6 +520,7 @@ export function createSession(options: SessionOptions = {}): Session {
 					type: "open-uni-stream",
 					stream: controlStreamNumber,
 					data: encodeControlMessage({ type: "SETUP", setupOptions }),
+					sendOrder: CONTROL_STREAM_SEND_ORDER,
 				},
 			];
 		},
