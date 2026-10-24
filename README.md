@@ -7,7 +7,7 @@
 > [!IMPORTANT]
 > **Early implementation.** No working streaming implementation is claimed. No media has been sent. What exists is an own MoQ Transport implementation: a client in Rust and in TypeScript and a minimal relay in Rust, which exchange single Objects with each other and with `moqtail` peers.
 
-XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCodecs, a Rust relay and terminal CLI, and Cloudflare Durable Objects for application state. Future directions include bidirectional media and integration with events in a separately developed SNS; neither is committed for the MVP.
+XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCodecs, a Rust relay and terminal CLI, and Cloudflare Durable Objects for application state. Its purpose is to let an agent such as Claude take part in a broadcast, and later in a meeting of up to 49 people: a CLI subscribes and writes what the tracks carry where the agent reads it ([vision](docs/vision.md)). Integration with events in a separately developed SNS is a future direction, not committed.
 
 ## Architecture at a glance
 
@@ -20,6 +20,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Vision](docs/vision.md)
 - [Requirements](docs/requirements.md)
 - [Architecture and broadcast flow](docs/architecture.md)
+- [Scaling a broadcast and meetings: a design draft](docs/scale-and-meetings.md)
 - [Protocol layers](docs/protocols.md)
 - [MoQ Transport implementation notes](docs/moqt-implementation-notes.md)
 - [Wire fixtures captured from moqtail](fixtures/moqt-18/README.md)

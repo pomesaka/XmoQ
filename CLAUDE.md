@@ -82,6 +82,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | docs/assets/ | README | 文書に埋め込むSVG図 |
 | docs/moq-libraries.md | 仕様書 | ライブラリ調査の記録（終了済み） |
 | docs/moqt-implementation-notes.md | 仕様書 | draftが黙っている箇所と矛盾している箇所で、2つの実装がそろえる挙動。既知の不足 |
+| docs/scale-and-meetings.md | 仕様書 | 1つの配信をリレーを増やして10,000人に広げる形と、49人までの会議の形の設計の案（proposed） |
 | fixtures/moqt-18/README.md | 仕様書 | moqtailから採った実バイト列の出どころと復号後の値 |
 | fixtures/webtransport-close/README.md | 仕様書 | セッションを閉じるときの理由の切り方。Chromiumが送った実バイト列の出どころ |
 | fixtures/moqt-18-by-hand/README.md | 仕様書 | draft 18の本文から手で書いたバイト列。相手から採ったもの（`fixtures/moqt-18/`）とは分けて置く |
