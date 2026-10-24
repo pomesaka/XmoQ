@@ -147,6 +147,52 @@ const ANNOUNCE_ONLY: Pairing[] = ["moqtail-rust", "own-rust"].map(
 );
 
 /**
+ * Two relays, the run's above an own one (`--upstream` of the own relay,
+ * `docs/scale-and-meetings.md`): the publisher is at the run's relay, the
+ * subscribers at the own relay below it, which asks the one above for the
+ * track. "edge: " lets `--only` pick these runs alone.
+ */
+const THROUGH_AN_EDGE: Pairing[] = [
+	{
+		name: "edge: own-browser to 2 own-browser at an own relay below, then PUBLISH_DONE",
+		script: "run.ts",
+		args: [
+			"--publisher",
+			"own-browser",
+			"--subscriber",
+			"own-browser",
+			"--subscribers",
+			"2",
+			"--through-edge",
+			"--await-publish-done",
+		],
+	},
+	{
+		name: "edge: own-browser only announces the namespace, and serves own-rust at an own relay below",
+		script: "run.ts",
+		args: [
+			"--publisher",
+			"own-browser",
+			"--subscriber",
+			"own-rust",
+			"--announce-only",
+			"--through-edge",
+		],
+	},
+	{
+		name: "edge: own-browser to moqtail-rust at an own relay below",
+		script: "run.ts",
+		args: [
+			"--publisher",
+			"own-browser",
+			"--subscriber",
+			"moqtail-rust",
+			"--through-edge",
+		],
+	},
+];
+
+/**
  * One publisher and three subscribers: every subscriber has to get the Object
  * and then see PUBLISH_DONE. One row per own client as the subscribers.
  */
@@ -1160,6 +1206,7 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 				...ANNOUNCE_ONLY,
 				...ONE_TO_MANY,
 				...REFUSALS,
+				...THROUGH_AN_EDGE,
 			].map((pairing) => named(relay, pairing)),
 		),
 		// "fetch: " lets `--only` pick these runs alone.

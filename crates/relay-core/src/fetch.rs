@@ -1065,6 +1065,11 @@ impl Relay {
                 Err(code) => refused = Some(code),
             }
         }
+        if asked.is_empty() {
+            // The FETCH is refused all the same (known gap): the session
+            // with the upstream is for the next request.
+            self.waits_for_upstream(track, actions);
+        }
         Err(refused)
     }
 

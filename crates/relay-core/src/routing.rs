@@ -385,7 +385,8 @@ pub(crate) struct Asked {
 #[derive(Debug)]
 pub(crate) struct PendingTrack {
     /// Empty only while every waiter is held for a publisher to appear
-    /// (§10.2.6) and none has: once a publisher was asked, the track is as
+    /// (§10.2.6) and none has, or while the relay connects to the upstream
+    /// relay that is to be asked ([`Relay::waits_for_upstream`]): once a publisher was asked, the track is as
     /// any other that waits, and when its last ask is over, the waiters are
     /// refused and the track is forgotten.
     pub(crate) asks: Vec<Ask>,
@@ -483,6 +484,15 @@ impl Refusal {
             error_code,
             retry_interval: retry_interval_of(error_code),
             reason: ReasonPhrase::default(),
+        }
+    }
+
+    /// With all three fields given.
+    pub(crate) fn new(error_code: u64, retry_interval: u64, reason: ReasonPhrase) -> Self {
+        Self {
+            error_code,
+            retry_interval,
+            reason,
         }
     }
 
@@ -639,7 +649,8 @@ impl Relay {
     }
 
     /// The sessions that announced a namespace the track is in, in the order
-    /// they announced it.
+    /// they announced it; where none did, the upstream relay when it takes
+    /// the track and its session is open ([`Relay::set_upstream`]).
     ///
     /// §9.5: Namespace Prefix Matching, field by field. §9.5 also has a
     /// publisher announce a namespace explicitly to get subscriptions routed
@@ -652,6 +663,7 @@ impl Relay {
             .iter()
             .filter(|entry| entry.namespace.is_prefix_of(track.namespace()))
             .map(|entry| entry.session)
+            .chain(self.upstream_for(track))
     }
 
     /// Lets one more subscriber wait for the answer to an upstream SUBSCRIBE
@@ -1491,7 +1503,7 @@ impl Relay {
     /// is no publisher of it. A publisher that announces first, refuses the
     /// relay's SUBSCRIBE, and then sends its PUBLISH is what the Rust client
     /// does.
-    fn refuse_waiters(
+    pub(crate) fn refuse_waiters(
         &mut self,
         track_name: &FullTrackName,
         refusal: &Refusal,

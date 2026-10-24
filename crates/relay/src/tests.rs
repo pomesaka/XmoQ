@@ -4224,3 +4224,115 @@ fn the_relay_leaves_its_request_streams_room_in_the_connection_window() {
         (131_072, 9_830_400)
     );
 }
+
+/// A relay with another relay above it (`xmoq-relay-core`'s `upstream.rs`),
+/// both on in-memory connections.
+mod upstream {
+    use super::*;
+
+    /// An edge whose upstream is `origin`: each session the edge asks for is
+    /// a new connection to it, of which the edge is the client.
+    fn edge_of(origin: &HubHandle<MemoryConnection>) -> HubHandle<MemoryConnection> {
+        let origin = origin.clone();
+        let connect: hub::Connect<MemoryConnection> = Arc::new(move || {
+            let origin = origin.clone();
+            Box::pin(async move {
+                let (local, remote) = pair();
+                origin.add_session(remote).await;
+                Ok(local)
+            })
+        });
+        let upstream = hub::Upstream {
+            namespace: TrackNamespace::new(vec![]).unwrap(),
+            connect,
+        };
+        hub::spawn_with_upstream(HubConfig::default(), Some(upstream)).0
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn objects_of_a_publisher_at_the_origin_reach_the_subscribers_of_the_edge() {
+        let (origin, _task) = hub::spawn(HubConfig::default());
+        let edge = edge_of(&origin);
+        let mut publisher = Peer::connect(&origin, true).await;
+        let _namespace = publisher.publish_namespace().await;
+        let mut alice = Peer::connect(&edge, true).await;
+        let mut alice_request = alice.start_subscribing().await;
+        let mut bob = Peer::connect(&edge, true).await;
+        let mut bob_request = bob.start_subscribing().await;
+
+        // One SUBSCRIBE reaches the publisher, from the origin, for the edge's
+        // one subscription (§9.4).
+        let upstream = publisher.accept_relay_subscribe().await;
+        assert!(
+            timeout(SOON, publisher.connection.accept_bi())
+                .await
+                .is_err()
+        );
+        let RequestEvent::SubscribeEstablished {
+            track_alias: alice_alias,
+            ..
+        } = alice.answer(&mut alice_request).await
+        else {
+            panic!("Alice was not accepted");
+        };
+        let RequestEvent::SubscribeEstablished {
+            track_alias: bob_alias,
+            ..
+        } = bob.answer(&mut bob_request).await
+        else {
+            panic!("Bob was not accepted");
+        };
+
+        publisher
+            .send_group_as(upstream.track_alias, 0, &[object(0, 3), object(1, 3)])
+            .await
+            .finish();
+        assert_eq!(alice.receive_stream(alice_alias).await, [0, 1]);
+        assert_eq!(bob.receive_stream(bob_alias).await, [0, 1]);
+        // The publisher and the edge at the origin; Alice, Bob and the origin
+        // at the edge.
+        assert_eq!(
+            (origin.held().await.sessions, edge.held().await.sessions),
+            (2, 3)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_edge_that_held_nothing_connects_again_for_its_next_subscriber() {
+        let (origin, _task) = hub::spawn(HubConfig::default());
+        let edge = edge_of(&origin);
+        let mut publisher = Peer::connect(&origin, true).await;
+        let _namespace = publisher.publish_namespace().await;
+        let mut alice = Peer::connect(&edge, true).await;
+        let mut request = alice.start_subscribing().await;
+        let (id, mut send, _reader) = publisher.relay_subscribe().await;
+        let (_, ok) = publisher
+            .session
+            .accept_subscribe(id, vec![], vec![])
+            .unwrap();
+        send_message(&mut send, &ok, &Trace::default(), "relay")
+            .await
+            .unwrap();
+        alice.answer(&mut request).await;
+
+        alice.connection.close(0, b"");
+        // The time a session may hold nothing (30 seconds), at both ends of
+        // the session between the relays.
+        tokio::time::sleep(Duration::from_secs(35)).await;
+        assert_eq!(
+            (origin.held().await.sessions, edge.held().await.sessions),
+            (1, 0)
+        );
+        // The origin cancelled its SUBSCRIBE with its last subscriber.
+        publisher.session.on_peer_request_closed(id);
+
+        let mut bob = Peer::connect(&edge, true).await;
+        let mut request = bob.start_subscribing().await;
+        let _upstream = publisher.accept_relay_subscribe().await;
+        let event = bob.answer(&mut request).await;
+        assert!(
+            matches!(event, RequestEvent::SubscribeEstablished { .. }),
+            "{event:?}"
+        );
+    }
+}

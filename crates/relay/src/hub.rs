@@ -8,6 +8,8 @@
 //! instead of holding up the others.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -18,6 +20,7 @@ use tokio::time::Instant;
 use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchHeader, FetchObject, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
+use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::session::{MAX_PEER_REQUESTS, MAX_UNANSWERED_UPDATES};
 use xmoq_moqt::{TerminationCode, stream_reset_code};
@@ -303,6 +306,8 @@ enum Envelope<C: Connection> {
         first: ControlMessage,
     },
     Core(Event),
+    /// What came of [`Action::ConnectUpstream`].
+    Upstream(Result<Arc<C>, String>),
     /// The session cannot go on, for a reason found on the I/O side.
     Broken {
         session: SessionKey,
@@ -853,13 +858,39 @@ impl<C: Connection> HubHandle<C> {
     }
 }
 
+/// Makes a connection to the upstream relay, or says why it could not.
+pub type Connect<C> =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<C, String>> + Send>> + Send + Sync>;
+
+/// The relay above this one ([`spawn_with_upstream`]).
+pub struct Upstream<C> {
+    /// The tracks it is asked for ([`Relay::set_upstream`]).
+    pub namespace: TrackNamespace,
+    /// Called each time a session with it is wanted.
+    pub connect: Connect<C>,
+}
+
 /// Starts the hub of a relay. The returned task ends only if the hub panics,
 /// since handles to it are held by the hub itself; whoever starts the hub
 /// watches the task and does not go on accepting sessions without it.
+#[cfg(test)]
 #[must_use]
 pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>) {
+    spawn_with_upstream(config, None)
+}
+
+/// Starts the hub of a relay, as `spawn` of the tests does, for a relay that
+/// asks `upstream` for the tracks none of its own sessions announced.
+#[must_use]
+pub fn spawn_with_upstream<C: Connection>(
+    config: HubConfig,
+    upstream: Option<Upstream<C>>,
+) -> (HubHandle<C>, JoinHandle<()>) {
     let (events, inbox) = mpsc::channel(config.event_queue_len);
     let mut relay = Relay::new(&config.implementation);
+    if let Some(upstream) = &upstream {
+        relay.set_upstream(upstream.namespace.clone());
+    }
     if let Some(bytes) = config.held_beyond_cache_bytes {
         // An eighth for one session, as of the relay's own number.
         relay.set_held_beyond_the_cache(bytes, bytes / 8);
@@ -886,9 +917,12 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
     if let Some(key) = &config.auth_key {
         relay.set_authorizer(crate::auth::RoomTokens::new(key, config.auth_setup));
     }
+    let next_session = Arc::new(AtomicU64::new(0));
     let hub = Hub {
         relay,
         config,
+        upstream,
+        next_session: Arc::clone(&next_session),
         events: events.clone(),
         sessions: HashMap::new(),
         drained: None,
@@ -901,7 +935,7 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
     let task = tokio::spawn(hub.run(inbox));
     let handle = HubHandle {
         events,
-        next_session: Arc::new(AtomicU64::new(0)),
+        next_session,
     };
     (handle, task)
 }
@@ -909,6 +943,10 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
 struct Hub<C: Connection> {
     relay: Relay,
     config: HubConfig,
+    upstream: Option<Upstream<C>>,
+    /// Shared with [`HubHandle`]: the hub names its session with the
+    /// upstream from the same numbers.
+    next_session: Arc<AtomicU64>,
     /// For the tasks the hub starts, which report back through it.
     events: mpsc::Sender<Envelope<C>>,
     sessions: HashMap<SessionKey, SessionHandle<C>>,
@@ -1206,7 +1244,8 @@ impl<C: Connection> Hub<C> {
                 Envelope::NewSession {
                     session,
                     connection,
-                } => self.add_session(session, connection),
+                } => self.add_session(session, connection, Role::Server),
+                Envelope::Upstream(connected) => self.upstream_connected(connected),
                 Envelope::RequestOpened {
                     session,
                     stream,
@@ -1264,25 +1303,30 @@ impl<C: Connection> Hub<C> {
                 Envelope::Stop(stopping) => self.stop(stopping),
                 #[cfg(test)]
                 Envelope::Inspect(answer) => {
-                    let _ = answer.send(Held {
-                        sessions: self.sessions.len(),
-                        request_writers: self
-                            .sessions
-                            .values()
-                            .map(|handle| handle.requests.len())
-                            .sum(),
-                        out_streams: self.out_streams.len(),
-                        own_requests: self
-                            .sessions
-                            .values()
-                            .map(|handle| handle.own_requests.len())
-                            .sum(),
-                        fetch_pipes: self.fetch_pipes.len(),
-                        timers: self.timers.len(),
-                        relay: self.relay.counts(),
-                    });
+                    let _ = answer.send(self.held());
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    fn held(&self) -> Held {
+        Held {
+            sessions: self.sessions.len(),
+            request_writers: self
+                .sessions
+                .values()
+                .map(|handle| handle.requests.len())
+                .sum(),
+            out_streams: self.out_streams.len(),
+            own_requests: self
+                .sessions
+                .values()
+                .map(|handle| handle.own_requests.len())
+                .sum(),
+            fetch_pipes: self.fetch_pipes.len(),
+            timers: self.timers.len(),
+            relay: self.relay.counts(),
         }
     }
 
@@ -1376,8 +1420,43 @@ impl<C: Connection> Hub<C> {
         }
     }
 
-    fn add_session(&mut self, session: SessionKey, connection: Arc<C>) {
-        if self.sessions.len() >= self.config.max_sessions {
+    /// Starts the connection [`Action::ConnectUpstream`] asks for. The relay
+    /// is told [`Event::UpstreamFailed`] at once where it has no upstream.
+    fn connect_upstream(&mut self, pending: &mut VecDeque<Event>) {
+        let Some(upstream) = &self.upstream else {
+            pending.push_back(Event::UpstreamFailed);
+            return;
+        };
+        let (connect, events) = (Arc::clone(&upstream.connect), self.events.clone());
+        // WHY not among the tasks of a session: it is of none yet. It ends
+        // by itself, within the time the connection has to be made.
+        tokio::spawn(async move {
+            let connected = connect().await.map(Arc::new);
+            // The hub is gone when this fails.
+            let _ = events.send(Envelope::Upstream(connected)).await;
+        });
+    }
+
+    /// What came of [`Self::connect_upstream`].
+    fn upstream_connected(&mut self, connected: Result<Arc<C>, String>) {
+        match connected {
+            Ok(connection) => {
+                let session = SessionKey(self.next_session.fetch_add(1, Ordering::Relaxed));
+                self.log(|| format!("UPSTREAM_CONNECTED session={}", session.0));
+                self.add_session(session, connection, Role::Client);
+            }
+            Err(reason) => {
+                self.log(|| format!("UPSTREAM_FAILED {reason}"));
+                self.feed(VecDeque::from([Event::UpstreamFailed]));
+            }
+        }
+    }
+
+    /// `role` is the relay's: [`Role::Client`] for its session with the
+    /// upstream relay, which is not refused for [`HubConfig::max_sessions`],
+    /// since without it nobody of this relay gets the tracks it carries.
+    fn add_session(&mut self, session: SessionKey, connection: Arc<C>, role: Role) {
+        if role == Role::Server && self.sessions.len() >= self.config.max_sessions {
             self.log(|| format!("SESSION_REFUSED session={} too many sessions", session.0));
             connection.close(TerminationCode::InternalError.code(), b"too many sessions");
             return;
@@ -1444,10 +1523,7 @@ impl<C: Connection> Hub<C> {
                 fetch_write_controls: HashMap::new(),
             },
         );
-        self.feed(VecDeque::from([Event::SessionOpened {
-            session,
-            role: Role::Server,
-        }]));
+        self.feed(VecDeque::from([Event::SessionOpened { session, role }]));
     }
 
     fn add_request(&mut self, session: SessionKey, stream: StreamKey, send: C::Send) {
@@ -1754,6 +1830,7 @@ impl<C: Connection> Hub<C> {
                 code,
                 reason,
             } => self.close(session, code, &reason, pending),
+            Action::ConnectUpstream => self.connect_upstream(pending),
             // Taken by `execute_upstream` above.
             Action::OpenRequest { .. }
             | Action::SendOwnRequest { .. }
@@ -3209,6 +3286,7 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartAnnouncementTimer { .. }
         | Action::StartCheckTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
+        Action::ConnectUpstream => "CONNECT_UPSTREAM".to_string(),
     })
 }
 

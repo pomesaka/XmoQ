@@ -23,8 +23,9 @@ use xmoq_room_token::unhex;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::Semaphore;
+use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt_io::StreamConfig;
-use xmoq_moqt_io::wt::{Congestion, QuicLimits, WtConnection, WtServer, accept};
+use xmoq_moqt_io::wt::{self, Congestion, QuicLimits, WtConnection, WtServer, accept};
 
 use crate::hub::{HubConfig, HubHandle, Log};
 
@@ -172,6 +173,48 @@ struct Args {
     /// relay waits before it closes the sessions that are left
     /// ([`GOAWAY_TIMEOUT_MS`] where it is not said).
     goaway_timeout_ms: u64,
+    /// `--upstream`, `--upstream-cert-sha256`, `--upstream-namespace`: the
+    /// relay above this one, which is asked for the tracks of that
+    /// namespace nobody announced here ([`hub::Upstream`]).
+    upstream: Option<UpstreamArgs>,
+}
+
+struct UpstreamArgs {
+    url: String,
+    /// The SHA-256 of its certificate, which is pinned.
+    cert_sha256: [u8; 32],
+    /// Every namespace where `--upstream-namespace` is not said; its fields
+    /// are separated by `/`.
+    namespace: TrackNamespace,
+}
+
+/// The upstream flags, all or none of the first two.
+fn upstream_args(
+    url: Option<String>,
+    cert_sha256: Option<String>,
+    namespace: Option<String>,
+) -> Result<Option<UpstreamArgs>> {
+    let (url, cert_sha256) = match (url, cert_sha256) {
+        (None, None) if namespace.is_none() => return Ok(None),
+        (Some(url), Some(cert_sha256)) => (url, cert_sha256),
+        _ => bail!("--upstream and --upstream-cert-sha256 go together"),
+    };
+    let cert_sha256 = unhex(&cert_sha256)
+        .context("--upstream-cert-sha256 is not hex")?
+        .try_into()
+        .map_err(|_| anyhow!("--upstream-cert-sha256 must be 32 bytes"))?;
+    let fields = namespace
+        .unwrap_or_default()
+        .split('/')
+        .filter(|field| !field.is_empty())
+        .map(|field| field.as_bytes().to_vec())
+        .collect();
+    let namespace = TrackNamespace::new(fields).context("--upstream-namespace")?;
+    Ok(Some(UpstreamArgs {
+        url,
+        cert_sha256,
+        namespace,
+    }))
 }
 
 /// The number a flag gives.
@@ -187,6 +230,15 @@ fn number(flag: &str, value: &str) -> Result<u64> {
 /// The number a flag gives.
 fn count(flag: &str, value: &str) -> Result<usize> {
     value.parse().with_context(|| flag.to_string())
+}
+
+/// What a flag of `on` or `off` gives.
+fn on_or_off(flag: &str, value: &str) -> Result<bool> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => bail!("{flag} {other}: on or off"),
+    }
 }
 
 /// The milliseconds a flag gives.
@@ -215,6 +267,7 @@ fn parse_args() -> Result<Args> {
     let mut auth_setup = true;
     let mut redirect_uri = Vec::new();
     let mut goaway_timeout_ms = GOAWAY_TIMEOUT_MS;
+    let (mut upstream, mut upstream_cert, mut upstream_namespace) = (None, None, None);
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -252,25 +305,16 @@ fn parse_args() -> Result<Args> {
             "--idle-session-ms" => idle_session = Some(millis(&flag, &value)?),
             "--delivery-patience-ms" => delivery_patience = Some(millis(&flag, &value)?),
             "--stats-every-ms" => stats_every = Some(millis(&flag, &value)?),
-            "--log-arrivals" => {
-                log_arrivals = match value.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    other => bail!("--log-arrivals {other}: on or off"),
-                };
-            }
+            "--log-arrivals" => log_arrivals = on_or_off(&flag, &value)?,
             "--auth-key-hex" => {
                 auth_key = Some(unhex(&value).context("--auth-key-hex is not hex")?);
             }
-            "--auth-setup" => {
-                auth_setup = match value.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    other => bail!("--auth-setup {other}: on or off"),
-                };
-            }
+            "--auth-setup" => auth_setup = on_or_off(&flag, &value)?,
             "--redirect-uri" => redirect_uri = value.into_bytes(),
             "--goaway-timeout-ms" => goaway_timeout_ms = number(&flag, &value)?,
+            "--upstream" => upstream = Some(value),
+            "--upstream-cert-sha256" => upstream_cert = Some(value),
+            "--upstream-namespace" => upstream_namespace = Some(value),
             other => bail!("unknown flag {other}"),
         }
     }
@@ -296,6 +340,7 @@ fn parse_args() -> Result<Args> {
         auth_setup,
         redirect_uri,
         goaway_timeout_ms,
+        upstream: upstream_args(upstream, upstream_cert, upstream_namespace)?,
     })
 }
 
@@ -340,7 +385,23 @@ async fn main() -> Result<()> {
     let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
-    let (hub, mut hub_task) = hub::spawn(config);
+    let upstream = args.upstream.map(|upstream| {
+        let streams = config.streams.clone();
+        let (url, cert_sha256) = (Arc::new(upstream.url), upstream.cert_sha256);
+        let connect: hub::Connect<WtConnection> = Arc::new(move || {
+            let (url, streams) = (Arc::clone(&url), streams.clone());
+            Box::pin(async move {
+                wt::connect(&url, cert_sha256, &streams)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        });
+        hub::Upstream {
+            namespace: upstream.namespace,
+            connect,
+        }
+    });
+    let (hub, mut hub_task) = hub::spawn_with_upstream(config, upstream);
     tokio::select! {
         () = accept_sessions(&server, &hub, &log) => bail!("the server stopped accepting"),
         () = told_to_stop() => {}

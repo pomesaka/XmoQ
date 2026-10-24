@@ -29,9 +29,11 @@ import {
 	DISCONNECT_TIMEOUT_MS,
 	isOwnClient,
 	log,
+	MOQLIVEMOCK_SIDE_PORT_OFFSET,
 	parseClient,
 	runCleanups,
 	startRun,
+	startSecondOwnRelay,
 	stopEverythingOnExit,
 	TRACK,
 	withTimeout,
@@ -57,6 +59,11 @@ const { values: options } = parseArgs({
 		// with a REQUEST_UPDATE once it is subscribed, and the relay has to
 		// accept it before the Object is sent.
 		"update-subgroup-timeout-ms": { type: "string", default: "" },
+		// The subscribers connect to a second relay, the own one, whose
+		// upstream is the relay of the run (`--upstream`), on the run's port
+		// plus MOQLIVEMOCK_SIDE_PORT_OFFSET; the publisher stays with the
+		// relay of the run.
+		"through-edge": { type: "boolean", default: false },
 		verbose: { type: "boolean", default: false },
 	},
 });
@@ -163,6 +170,16 @@ async function transferOneObject(
 		...(withProperties ? { properties: OBJECT_PROPERTIES } : {}),
 		...(announceOnly ? { servesWhenAsked: "at-once" } : {}),
 	});
+	const edge = options["through-edge"]
+		? await startSecondOwnRelay(
+				String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+				context,
+			)
+		: undefined;
+	const subscribersRun =
+		edge === undefined
+			? run
+			: { context: { ...context, relayUrl: edge.url }, payloadHex };
 	// The subscribers are live before the Object is sent: the Largest Object
 	// filter does not replay what was published earlier.
 	const subscribing = [];
@@ -172,7 +189,7 @@ async function transferOneObject(
 				? `sub:${subscriber}`
 				: `sub${index + 1}:${subscriber}`;
 		subscribing.push(
-			await startSubscriber(subscriber, label, run, {
+			await startSubscriber(subscriber, label, subscribersRun, {
 				track: subscribeTrack,
 				// A subscriber that is not asked how its subscription ended leaves
 				// once it has the Object.
