@@ -10,7 +10,7 @@ use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::kvp::Value;
 use xmoq_moqt::message::{ControlMessage, FetchRange, GoAway, RequestError, request_error_code};
-use xmoq_moqt::name::{FullTrackName, TrackNamespace};
+use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{ControlEvent, RequestEvent, RequestId, Session};
 use xmoq_moqt::stream_reset_code;
@@ -36,6 +36,8 @@ const CATALOG_LIMIT: usize = 1024 * 1024;
 pub struct Subscription {
     pub request: RequestId,
     pub track_alias: u64,
+    /// The `LARGEST_OBJECT` of its `SUBSCRIBE_OK`, where it had one.
+    pub largest: Option<Location>,
     pub reader: RequestReader<Recv>,
     send: Send,
 }
@@ -205,9 +207,17 @@ pub fn settle(
         .on_request_message(request, response)
         .map_err(|error| failed(error.into()))?
     {
-        RequestEvent::SubscribeEstablished { track_alias, .. } => Ok(Subscription {
+        RequestEvent::SubscribeEstablished {
+            track_alias,
+            parameters,
+            ..
+        } => Ok(Subscription {
             request,
             track_alias,
+            largest: parameters.iter().find_map(|parameter| match parameter {
+                Parameter::LargestObject(location) => Some(*location),
+                _ => None,
+            }),
             reader: sent.reader,
             send: sent.send,
         }),

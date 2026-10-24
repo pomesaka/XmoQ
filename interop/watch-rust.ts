@@ -101,6 +101,21 @@
 //     b1`), which `wa` shows as well.
 //   - Each line is shown once, and both leave with 0 at the end of their
 //     `--seconds`.
+//
+// `--watch chat --relay moqtail`: the same through moqtail's relay@0.15.0.
+// The viewers name the tracks (`--video`, `--audio`) and read no catalog:
+// through that relay the catalog does not come (the `goaway` runs of
+// `video.ts`). Written before the first run: that relay does not hold a
+// SUBSCRIBE for a track nobody publishes, so `wa`'s first SUBSCRIBE to
+// `lines` is refused (`CHAT_TRACKS_LINES_REFUSED`), and asked for again it
+// is taken once the gatherer has published the room; the lines are as
+// through the own relay. In the first runs: refused in 1 of 4, taken in the
+// others, as the gatherer published the room before or after the SUBSCRIBE
+// came, which is not held against the run (the summary counts it). And the
+// first run failed: `wb`'s Joining FETCH, then Relative with Joining Start
+// 15, was refused by that relay for a room of 2 lines, and `wb` showed no
+// line (docs/moqt-implementation-notes.md, "Other observations"); the
+// viewer has asked with an Absolute Joining FETCH since.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -441,8 +456,14 @@ async function goAway(): Promise<string> {
 }
 
 /** The flags of a viewer of room `r` that says `say`, with no terminal and no sound output, for `seconds`. */
-function chatViewer(name: string, say: string, seconds: number): string[] {
+function chatViewer(
+	name: string,
+	say: string,
+	seconds: number,
+	tracks: string[],
+): string[] {
 	return [
+		...tracks,
 		"--namespace",
 		NAMESPACE,
 		"--seconds",
@@ -465,10 +486,11 @@ function chatViewer(name: string, say: string, seconds: number): string[] {
 }
 
 async function chat(): Promise<string> {
+	const relay = options.relay === "moqtail" ? "moqtail" : "own";
 	const directory = mkdtempSync(join(tmpdir(), "xmoq-watch-chat-"));
 	try {
 		const context = await startRun({
-			relay: "own",
+			relay,
 			port: options.port,
 			clients: ["own-browser"],
 			verbose: options.verbose,
@@ -491,16 +513,21 @@ async function chat(): Promise<string> {
 			),
 			"the page to publish its broadcast",
 		);
+		// Through moqtail's relay the catalog does not come: the tracks by name.
+		const tracks =
+			relay === "moqtail"
+				? ["--video", BROADCAST.video, "--audio", BROADCAST.audio]
+				: [];
 		const a = spawnTerminalViewer(
 			context,
 			"viewer:wa",
-			chatViewer("wa", "a1", 16),
+			chatViewer("wa", "a1", 16, tracks),
 		);
 		await a.waitForLine(/^CHAT moq 0 wa: a1$/, 20_000);
 		const b = spawnTerminalViewer(
 			context,
 			"viewer:wb",
-			chatViewer("wb", "b1", 8),
+			chatViewer("wb", "b1", 8, tracks),
 		);
 		await b.waitForLine(/^CHAT moq 0 wa: a1$/, 20_000);
 		await b.waitForLine(/^CHAT moq 1 wb: b1$/, 20_000);
@@ -527,7 +554,8 @@ async function chat(): Promise<string> {
 		if (wrong.length > 0) {
 			throw new Error(`the chat on tracks: ${wrong.join("; ")}`);
 		}
-		return `two terminal viewers said a line each on said through the gatherer: wa, which came first, showed ${once.join(" and ")} live, and wb, which came later, got the first by its Joining FETCH`;
+		const refused = a.matches(/^CHAT_TRACKS_LINES_REFUSED /).length;
+		return `through ${relay}'s relay, two terminal viewers said a line each on said through the gatherer (wa's SUBSCRIBE to lines refused ${refused} times first): wa, which came first, showed ${once.join(" and ")} live, and wb, which came later, got the first by its Joining FETCH`;
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
