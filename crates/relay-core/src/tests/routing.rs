@@ -338,6 +338,47 @@ fn a_subscribe_goes_to_every_publisher_of_a_matching_namespace() {
     }
 }
 
+/// §10.4: "Upon receiving a GOAWAY on the control stream, an endpoint SHOULD
+/// NOT initiate new requests to the peer". A publisher that sent one is
+/// passed over, and one that did not is asked.
+#[test]
+fn a_publisher_that_sent_goaway_is_not_asked() {
+    let fields: &[&[u8]] = &[b"xmoq"];
+    // (who sent GOAWAY, what Alice's SUBSCRIBE leads to)
+    let cases = [
+        (vec![PUBLISHER], refused(ALICE, 0, error(0x10)).to_vec()),
+        (vec![BOB], asked(PUBLISHER, 0, 1, fields).to_vec()),
+    ];
+    for (going, expected) in cases {
+        let mut relay = relay();
+        announce(&mut relay, PUBLISHER, 0, fields);
+        for session in &going {
+            for message in [
+                ControlMessage::Setup(Setup::default()),
+                ControlMessage::GoAway(xmoq_moqt::message::GoAway {
+                    new_session_uri: vec![],
+                    timeout_ms: 0,
+                    request_id: Some(1),
+                }),
+            ] {
+                assert_eq!(
+                    relay.step(Event::ControlMessage {
+                        session: *session,
+                        message,
+                    }),
+                    [],
+                    "{going:?}"
+                );
+            }
+        }
+        assert_eq!(
+            subscribe_to(&mut relay, ALICE, 0, fields),
+            expected,
+            "{going:?}"
+        );
+    }
+}
+
 /// What comes from the publisher, what the relay does to its own request
 /// first, and what Alice and Bob get; `None`: `SUBSCRIBE_OK`.
 type AnswerCase = (&'static str, Event, Vec<Action>, Option<RequestError>);

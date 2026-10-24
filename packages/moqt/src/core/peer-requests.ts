@@ -2,7 +2,7 @@ import { concatBytes } from "./bytes.ts";
 import {
 	decodeControlMessage,
 	decodeRequestStart,
-	drainControlMessages,
+	drainRequestMessages,
 	encodeControlMessage,
 	FETCH_MESSAGE_TYPE,
 	type Fetch,
@@ -347,7 +347,7 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 		data: Uint8Array,
 		fin: boolean,
 	): void => {
-		kept.inbound = drainControlMessages(kept.inbound, data, (message) => {
+		kept.inbound = drainRequestMessages(kept.inbound, data, (message) => {
 			if (message.type === "REQUEST_UPDATE") {
 				checkRequestId(message.requestId);
 			}

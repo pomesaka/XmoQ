@@ -9,10 +9,10 @@ use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::kvp::Value;
-use xmoq_moqt::message::{ControlMessage, FetchRange, RequestError};
+use xmoq_moqt::message::{ControlMessage, FetchRange, GoAway, RequestError, request_error_code};
 use xmoq_moqt::name::{FullTrackName, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, answer_wait_ms};
-use xmoq_moqt::session::{RequestEvent, RequestId, Session};
+use xmoq_moqt::session::{ControlEvent, RequestEvent, RequestId, Session};
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
@@ -119,6 +119,31 @@ pub enum NotSubscribed {
     Failed(anyhow::Error),
 }
 
+/// A SUBSCRIBE the relay refused with `GOING_AWAY` (§10.4): it has sent
+/// GOAWAY, which may come after the refusal on the control stream.
+#[derive(Debug)]
+pub struct GoingAway(pub String);
+
+impl std::fmt::Display for GoingAway {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "SUBSCRIBE of {} was refused: GOING_AWAY", self.0)
+    }
+}
+
+impl std::error::Error for GoingAway {}
+
+/// The relay's GOAWAY, read before the viewer came to play.
+#[derive(Debug)]
+pub struct GoneAway(pub GoAway);
+
+impl std::fmt::Display for GoneAway {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "the relay sent GOAWAY")
+    }
+}
+
+impl std::error::Error for GoneAway {}
+
 /// Sends `asked` and waits for its answer. Needs no session, so that what
 /// is played goes on meanwhile; [`settle`] hands the answer to the session.
 pub async fn send_subscribe(
@@ -202,6 +227,9 @@ impl Requests<'_> {
         let asked = self.ask(name, timeout_ms)?;
         let sent = send_subscribe(self.connection, self.open_wait_ms, &asked).await;
         settle(self.session, &asked, sent).map_err(|not| match not {
+            NotSubscribed::Refused(error) if error.error_code == request_error_code::GOING_AWAY => {
+                GoingAway(name.to_string()).into()
+            }
             NotSubscribed::Refused(error) => {
                 anyhow!("SUBSCRIBE of {name} was refused: {error:?}")
             }
@@ -314,6 +342,13 @@ impl Requests<'_> {
                             session.on_data_stream_closed(header.track_alias);
                         }
                         UniEvent::Failed(error) => return Err(error.into()),
+                        // §10.4. A GOAWAY that breaks its rules is an error
+                        // of the session, as in `play`.
+                        UniEvent::Control(message) => {
+                            if let ControlEvent::GoAway(go_away) = session.on_control_message(message)? {
+                                return Err(GoneAway(go_away).into());
+                            }
+                        }
                         _ => {}
                     },
                 }

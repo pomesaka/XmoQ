@@ -915,6 +915,9 @@ impl Session {
         request: PeerRequestId,
         message: ControlMessage,
     ) -> Result<PeerRequestEvent, RequestFault> {
+        if matches!(message, ControlMessage::GoAway(_)) {
+            return Err(super::go_away_on_a_request_stream().into());
+        }
         let Some(state) = self.peer_request_mut(request)? else {
             return Err(Error::ProtocolViolation("message after the request ended").into());
         };

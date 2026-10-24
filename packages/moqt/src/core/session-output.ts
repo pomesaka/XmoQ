@@ -38,6 +38,19 @@ export type RequestClosedReason =
 export type SessionEvent =
 	/** The peer's SETUP arrived. */
 	| { type: "setup"; setupOptions: KeyValuePair[] }
+	/**
+	 * The peer's GOAWAY (§10.4): it means to close the session. No request is
+	 * opened after it ("SHOULD NOT initiate new requests to the peer"); what
+	 * is open stays as it is ("The GOAWAY message does not impact
+	 * subscription state").
+	 */
+	| {
+			type: "go-away";
+			/** Where to continue; empty where the current URI is reused. */
+			newSessionUri: string;
+			/** Milliseconds the peer waits before it closes; 0 for no particular time. */
+			timeout: bigint;
+	  }
 	| { type: "publish-namespace-ok"; requestId: bigint }
 	| { type: "publish-ok"; requestId: bigint; parameters: MessageParameters }
 	| {

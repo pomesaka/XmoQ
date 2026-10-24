@@ -335,7 +335,7 @@ describe("decodeControlMessage", () => {
 			bytes: "1e 00 01 00",
 			code: 1,
 		},
-		{ name: "GOAWAY, not implemented", bytes: "10 00 02 00 00", code: 1 },
+		{ name: "GOAWAY without its Timeout", bytes: "10 00 01 00", code: 3 },
 		{
 			name: "REQUEST_OK whose Track Properties end inside a pair",
 			bytes: "07 00 02 00 01",

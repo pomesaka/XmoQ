@@ -55,6 +55,24 @@
 //                     its PUBLISH_DONE has the Stream Count of the streams
 //                     it did open. (The row "A subgroup stream the peer
 //                     allows no room for".)
+//   goaway            The peer refuses the first request of its first
+//                     session with GOING_AWAY and then sends GOAWAY, naming
+//                     the URI
+//                     `https://127.0.0.1:<port>/moved` of itself, and
+//                     answers SUBSCRIBE on its later sessions (§3.6, §10.4; the row "GOAWAY" of
+//                     docs/moqt-implementation-notes.md). Every client
+//                     closes that session with NO_ERROR: the peer prints
+//                     `SESSION_ENDED session=0 ClosedByPeer { code: 0,`.
+//                     own-browser (`keepPlaying` of `@xmoq/media`) and the
+//                     terminal viewer then connect to that URI (`SESSION
+//                     session=1 path=/moved`); own-rust prints `GOAWAY ...`
+//                     and leaves with 0. The peer refuses every request of
+//                     that session with GOING_AWAY, as §10.4 has it, and the
+//                     client reads the refusal before the GOAWAY.
+//   goaway-publisher  The same, with the page as a publisher
+//                     (`keepPublishing`): its PUBLISH_NAMESPACE is refused,
+//                     and it announces on the URI (`REQUEST session=1
+//                     stream=N PUBLISH_NAMESPACE`, then `publishing 1`).
 //   relay-no-setup    The other way round: the own relay, told to give a
 //                     client 1.5 seconds for its SETUP
 //                     (`--setup-timeout-ms`; 10 by itself), and
@@ -149,6 +167,7 @@ import {
 	log,
 	NAMESPACE,
 	openPage,
+	pollFor,
 	type RunContext,
 	runCleanups,
 	spawnQuietClient,
@@ -585,10 +604,164 @@ async function noSubgroupStream(
 	return `${client} did not send a Subgroup the peer allowed no stream for, said so, and its session went on: ${said}`;
 }
 
+/**
+ * A GOAWAY of the peer (§3.6, §10.4) on the first session, with the New
+ * Session URI `/moved` of the same peer. The page (`keepPlaying` of
+ * `@xmoq/media`) and the terminal viewer close that session with NO_ERROR
+ * and connect to that URI; own-rust closes it with NO_ERROR and leaves with
+ * 0. The peer answers their SUBSCRIBEs, so that each is playing when it
+ * reads the GOAWAY.
+ */
+async function goAway(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	const sent = context.relay.waitForLine(/^GOAWAY_SENT session=0 uri=(\S+)$/);
+	let said = "";
+	switch (client) {
+		case "own-browser": {
+			const page = await openPage(context, "client:own-browser", "own-browser");
+			await withTimeout(
+				page.evaluate(
+					([url, hash, namespace, track]) =>
+						window.xmoqOwn.keepVideoPlayed(
+							url,
+							hash,
+							namespace,
+							track,
+							"avc1.42001f",
+						),
+					[
+						context.relayUrl,
+						context.certSha256Hex,
+						NAMESPACE,
+						TRACK,
+					] satisfies [string, string, string, string],
+				),
+				"the page to begin playing",
+			);
+			const report = async () =>
+				(await page.evaluate(() => window.xmoqOwn.keptReport())).playing;
+			await context.relay.waitForLine(/^SESSION session=1 path=\/moved$/);
+			// On the new session the peer answers the SUBSCRIBE, and the page plays.
+			await pollFor(
+				async () => ((await report()).includes("playing 1") ? true : undefined),
+				"the page to play on the new session",
+			);
+			said = `its states: ${(await report()).join(", ")}`;
+			break;
+		}
+		case "own-rust": {
+			const rust = spawnRustClient(
+				context,
+				"client:own-rust",
+				client,
+				"subscribe",
+				TRACK,
+			);
+			const [line] = await rust.waitForLine(
+				/^GOAWAY uri=\S+\/moved timeout_ms=5000 request_id=0$/,
+			);
+			const code = await withTimeout(rust.exited, "own-rust to leave");
+			if (code !== 0)
+				throw new Error(`own-rust was to leave with 0, not ${code}`);
+			said = `${line}, and it left with 0`;
+			break;
+		}
+		case "xmoq-watch": {
+			const viewer = spawnTerminalViewer(
+				context,
+				"client:xmoq-watch",
+				VIEWER_ARGS,
+			);
+			const [line] = await viewer.waitForLine(/MOVED https:\/\/\S+\/moved/);
+			said = line;
+			break;
+		}
+	}
+	const [, uri] = await sent;
+	// 0 is NO_ERROR (§3.5).
+	await context.relay.waitForLine(
+		/^SESSION_ENDED session=0 ClosedByPeer \{ code: 0,/,
+	);
+	if (client === "own-rust") {
+		if (context.relay.hasPrinted(/^SESSION session=1 /)) {
+			throw new Error("own-rust was to connect once");
+		}
+		return `own-rust closed its session with NO_ERROR when the peer sent GOAWAY naming ${uri}: ${said}`;
+	}
+	await context.relay.waitForLine(/^SESSION session=1 path=\/moved$/);
+	return `${client} closed its session with NO_ERROR when the peer sent GOAWAY, and connected to the URI it named (${uri}): ${said}`;
+}
+
+/**
+ * The same peer, and the page as a publisher (`keepPublishing` of
+ * `@xmoq/media`): its PUBLISH_NAMESPACE is refused with GOING_AWAY on the
+ * first session, it closes that session with NO_ERROR, and announces on the
+ * URI the GOAWAY names.
+ */
+async function goAwayPublisher(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	if (client !== "own-browser") {
+		throw new Error("only the page publishes with keepPublishing");
+	}
+	const page = await openPage(context, "client:own-browser", "own-browser");
+	await withTimeout(
+		page.evaluate(
+			([url, hash, namespace, track]) =>
+				window.xmoqOwn.keepVideoPublished(url, hash, namespace, {
+					trackName: track,
+					codec: "avc1.42E01F",
+					catalogCodec: "avc3.42E01F",
+					width: 320,
+					height: 180,
+					framerate: 25,
+					bitrate: 500_000,
+					keyFrameIntervalMs: 1000,
+					firstTimestamp: 5_000_000,
+					noise: false,
+					mapping: "stream-per-group",
+				}),
+			[context.relayUrl, context.certSha256Hex, NAMESPACE, TRACK] satisfies [
+				string,
+				string,
+				string,
+				string,
+			],
+		),
+		"the page to begin publishing",
+	);
+	const [, uri] = await context.relay.waitForLine(
+		/^GOAWAY_SENT session=0 uri=(\S+)$/,
+	);
+	await context.relay.waitForLine(
+		/^SESSION_ENDED session=0 ClosedByPeer \{ code: 0,/,
+	);
+	await context.relay.waitForLine(/^SESSION session=1 path=\/moved$/);
+	await context.relay.waitForLine(
+		/^REQUEST session=1 stream=\d+ PUBLISH_NAMESPACE$/,
+	);
+	const states = await pollFor(async () => {
+		const { publishing } = await page.evaluate(() =>
+			window.xmoqOwn.keptReport(),
+		);
+		return publishing.includes("publishing 1") ? publishing : undefined;
+	}, "the page to publish on the new session");
+	return `own-browser closed its session with NO_ERROR when the peer refused its PUBLISH_NAMESPACE with GOING_AWAY and sent GOAWAY, and announced on the URI it named (${uri}): its states: ${states.join(", ")}`;
+}
+
 const CASES: Record<
 	string,
 	{
-		quiet: "setup" | "requests" | "publish" | "streams" | "subgroups";
+		quiet:
+			| "setup"
+			| "requests"
+			| "publish"
+			| "streams"
+			| "subgroups"
+			| "goaway";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
@@ -597,6 +770,8 @@ const CASES: Record<
 	"no-fetch-answer": { quiet: "requests", run: noFetchAnswer },
 	"no-stream": { quiet: "streams", run: noStream },
 	"no-subgroup-stream": { quiet: "subgroups", run: noSubgroupStream },
+	goaway: { quiet: "goaway", run: goAway },
+	"goaway-publisher": { quiet: "goaway", run: goAwayPublisher },
 };
 
 async function relayNoSetup(): Promise<string> {

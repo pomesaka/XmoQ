@@ -37,6 +37,11 @@ export const RequestErrorCode = {
 	 */
 	TIMEOUT: 0x2n,
 	NOT_SUPPORTED: 0x3n,
+	/**
+	 * The peer sent GOAWAY, or received one, and takes no new request
+	 * (§10.4, §10.6.2). Not sent by the library.
+	 */
+	GOING_AWAY: 0x6n,
 	/** Too many requests of the peer are open (§10.6.2). */
 	EXCESSIVE_LOAD: 0x9n,
 	/** The Track is not one this endpoint has (§10.6.2). Not sent by the library; for an application that refuses a request. */

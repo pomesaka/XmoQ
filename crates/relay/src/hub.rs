@@ -2944,6 +2944,7 @@ fn name(message: &ControlMessage) -> String {
         ),
         ControlMessage::Fetch(_) => "FETCH".to_string(),
         ControlMessage::FetchOk(_) => "FETCH_OK".to_string(),
+        ControlMessage::GoAway(go_away) => format!("GOAWAY timeout_ms={}", go_away.timeout_ms),
         ControlMessage::UnsupportedRequest { message_type, .. } => {
             format!("unsupported request {message_type:#x}")
         }
