@@ -777,13 +777,8 @@ fn the_next_publisher_is_asked_when_one_refuses_or_goes_before_it_answers() {
             true,
             vec![],
         ),
-        // TIMEOUT (0x2), and nobody else is asked.
-        (
-            "no answer in time",
-            Happens::TimedOut,
-            false,
-            vec![refuse(0x2), FINISH],
-        ),
+        // 5 s of Alice's 10 are left (§9.5).
+        ("no answer in time", Happens::TimedOut, true, vec![]),
     ];
     for (name, what, bob_asked, to_alice) in cases {
         let mut relay = fetching_with_a_second_publisher();
@@ -803,6 +798,48 @@ fn the_next_publisher_is_asked_when_one_refuses_or_goes_before_it_answers() {
             })
             .collect();
         assert_eq!(alice, to_alice, "{name}");
+    }
+}
+
+/// A publisher whose answer does not come in time uses up that much of the
+/// time Alice waits for hers: 10 s for a FETCH without `FILL_TIMEOUT`
+/// (`fixtures/request-answer-wait/`). Bob is asked while some of it is left;
+/// once none is, or nobody is left to ask, Alice is refused with TIMEOUT
+/// (0x2).
+#[test]
+fn a_fetch_not_answered_in_time_is_asked_of_the_next_publisher_while_the_subscriber_waits() {
+    // (how long the relay waits for an answer, in ms; whether Bob is asked
+    // when the first publisher's time is over; what Alice gets then; what
+    // she gets when Bob's is over too)
+    let cases = [
+        (5_000, true, vec![], vec![refuse(0x2), FINISH]),
+        (9_999, true, vec![], vec![refuse(0x2), FINISH]),
+        (10_000, false, vec![refuse(0x2), FINISH], vec![]),
+    ];
+    let to_alice = |actions: Vec<Action>| -> Vec<Action> {
+        actions
+            .into_iter()
+            .filter(|action| match action {
+                Action::SendRequest { session, .. }
+                | Action::FinishRequest { session, .. }
+                | Action::ResetRequest { session, .. } => *session == ALICE,
+                _ => false,
+            })
+            .collect()
+    };
+    for (wait_ms, bob_asked, first, second) in cases {
+        let mut relay = fetching_with_a_second_publisher();
+        relay.set_upstream_answer_wait_ms(wait_ms);
+        let actions = happen(&mut relay, &Happens::TimedOut);
+        let bob = asked_of_bob(&actions);
+        assert_eq!(bob.is_some(), bob_asked, "{wait_ms}: {actions:?}");
+        assert_eq!(to_alice(actions), first, "{wait_ms}");
+        let Some(bob) = bob else { continue };
+        let actions = relay.step(Event::UpstreamTimeout {
+            session: BOB,
+            request: bob,
+        });
+        assert_eq!(to_alice(actions), second, "{wait_ms}");
     }
 }
 

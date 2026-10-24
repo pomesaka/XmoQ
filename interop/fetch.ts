@@ -44,6 +44,17 @@
 //                     sent, so that a relay has to ask the page for them.
 //                     The page sends Groups 103, 104 and 105 here.
 //                     Through the moqtail relay as well.
+//   silent-publisher-first
+//                     As page-unsent, with a publisher before the page that
+//                     answers nothing: `xmoq-quiet-peer`, which published
+//                     the track first with PUBLISH and sends no Object
+//                     (`--announce-and-stay-quiet yes --quiet-track`). The
+//                     relay asks it first, the first source of the track
+//                     (the page becomes the second when the relay
+//                     subscribes to it); its answer does not come in 5 s, and
+//                     the relay, with 5 s of the 10 the page that fetches
+//                     waits left, asks the page (added on 2026-10-24,
+//                     written before its first run). Own relay only.
 //   page-cancelled    The publisher accepts and writes nothing; the page
 //                     that fetches gives the FETCH up after a second.
 //   page-refuses      The publisher refuses with DOES_NOT_EXIST.
@@ -117,6 +128,7 @@ import {
 	type RunContext,
 	runCleanups,
 	STEP_TIMEOUT_MS,
+	spawnQuietClient,
 	startRun,
 	stopEverythingOnExit,
 	TRACK,
@@ -145,6 +157,9 @@ stopEverythingOnExit();
 
 /** The FETCH is cancelled when it is not over by then, and the report says so. */
 const FETCH_TIMEOUT_MS = 5_000;
+
+/** `silent-publisher-first`: the page waits as long as its library does, 10 s (`fixtures/request-answer-wait/`). */
+const SILENT_FETCH_TIMEOUT_MS = 10_000;
 /** The page gives the FETCH of `cancelled` up after this long, well inside the 5 seconds the own relay waits for a publisher's answer. */
 const CANCEL_AFTER_MS = 1_000;
 const CASES = [
@@ -159,6 +174,7 @@ const CASES = [
 	"page-joining",
 	"page-nothing-there",
 	"page-unsent",
+	"silent-publisher-first",
 	"page-cancelled",
 	"page-refuses",
 ] as const;
@@ -177,6 +193,7 @@ const PUBLISHERS: Record<Case, Client | "moqtail-test"> = {
 	"page-joining": "own-browser",
 	"page-nothing-there": "own-browser",
 	"page-unsent": "own-browser",
+	"silent-publisher-first": "own-browser",
 	"page-cancelled": "own-browser",
 	"page-refuses": "own-browser",
 };
@@ -187,6 +204,7 @@ const PAGE_SERVES: Partial<Record<Case, PageFetchServing>> = {
 	"page-joining": "serve",
 	"page-nothing-there": "serve",
 	"page-unsent": "serve-unsent",
+	"silent-publisher-first": "serve-unsent",
 	"page-cancelled": "stall",
 	"page-refuses": "refuse",
 };
@@ -258,6 +276,13 @@ const FETCHES: Record<Case, PageFetch> = {
 		end: ["0", "0"],
 	},
 	"page-unsent": {
+		type: "Standalone",
+		namespace: NAMESPACE,
+		trackName: TRACK,
+		start: ["100", "0"],
+		end: ["102", "1"],
+	},
+	"silent-publisher-first": {
 		type: "Standalone",
 		namespace: NAMESPACE,
 		trackName: TRACK,
@@ -423,6 +448,7 @@ const ANSWERED_BY: Partial<Record<Case, "relay" | "publisher">> = {
 	"page-joining": "publisher",
 	"page-nothing-there": "publisher",
 	"page-unsent": "publisher",
+	"silent-publisher-first": "publisher",
 	"page-cancelled": "publisher",
 	"page-refuses": "publisher",
 };
@@ -431,6 +457,21 @@ const ANSWERED_BY: Partial<Record<Case, "relay" | "publisher">> = {
 const GROUPS_BEFORE: Partial<Record<Case, number>> = {
 	"publisher-refuses": 2,
 };
+
+/** `silent-publisher-first`: the own relay sent the FETCH to two sessions, the silent one and the page, and cancelled the first. */
+async function expectAskedTwice(context: RunContext): Promise<void> {
+	const asked = (
+		await context.relay.waitForLines(
+			/^OPEN_REQUEST session=(\d+) own=\d+ FETCH/,
+			2,
+		)
+	).map((match) => captureGroup(match, 1));
+	if (asked[0] === asked[1]) {
+		throw new Error(
+			`the relay was to ask two sessions for the FETCH, one after the other, not ${asked.join(", ") || "none"}`,
+		);
+	}
+}
 
 /** Throws unless the own relay's log says that the one who is to answer the FETCH of the case did. */
 async function expectAnsweredBy(
@@ -494,6 +535,11 @@ const EXPECTED: Record<string, Partial<Record<Case, Expected>>> = {
 			items: [`NonExistent to {0, ${LAST_OBJECT}}`],
 		},
 		"page-unsent": {
+			answer: "FETCH_OK",
+			endLocation: ["102", "1"],
+			items: ["{100, 0}", "{101, 0}", "{102, 0}"],
+		},
+		"silent-publisher-first": {
 			answer: "FETCH_OK",
 			endLocation: ["102", "1"],
 			items: ["{100, 0}", "{101, 0}", "{102, 0}"],
@@ -1139,6 +1185,15 @@ async function main(): Promise<void> {
 						],
 			verbose: options.verbose,
 		});
+		if (which === "silent-publisher-first") {
+			const silent = spawnQuietClient(context, "silent", 30_000, false, [
+				"--announce-and-stay-quiet",
+				"yes",
+				"--quiet-track",
+				`${NAMESPACE}/${TRACK}`,
+			]);
+			await silent.waitForLine(/^PUBLISHED_QUIET /);
+		}
 		const publisher =
 			served === undefined
 				? await publish(which, context, sentHex)
@@ -1190,7 +1245,9 @@ async function main(): Promise<void> {
 			FETCHES[which],
 			which === "cancelled" || which === "page-cancelled"
 				? CANCEL_AFTER_MS
-				: FETCH_TIMEOUT_MS,
+				: which === "silent-publisher-first"
+					? SILENT_FETCH_TIMEOUT_MS
+					: FETCH_TIMEOUT_MS,
 		);
 		log("driver", `REPORT ${JSON.stringify(report)}`);
 		if (!reportOnly) compare(report, expected, payloadHex);
@@ -1200,6 +1257,9 @@ async function main(): Promise<void> {
 		}
 		if (which === "cancelled" && !reportOnly) {
 			await expectUpstreamCancelled(context);
+		}
+		if (which === "silent-publisher-first" && !reportOnly) {
+			await expectAskedTwice(context);
 		}
 		if (
 			which === "page-cancelled" &&

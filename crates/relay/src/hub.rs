@@ -218,7 +218,7 @@ impl Default for HubConfig {
             held_beyond_cache_bytes: None,
             requests_for_one_subscriber: None,
             fetches_for_one_subscriber: None,
-            upstream_timeout: Duration::from_secs(5),
+            upstream_timeout: Duration::from_millis(xmoq_relay_core::UPSTREAM_ANSWER_WAIT_MS),
             setup_timeout: Duration::from_secs(10),
             idle_session_timeout: Duration::from_secs(30),
             implementation: concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"))
@@ -840,6 +840,9 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
         config
             .announcement_every_ms
             .unwrap_or(xmoq_relay_core::ANNOUNCEMENT_EVERY_MS),
+    );
+    relay.set_upstream_answer_wait_ms(
+        u64::try_from(config.upstream_timeout.as_millis()).unwrap_or(u64::MAX),
     );
     if let Some(key) = &config.auth_key {
         relay.set_authorizer(crate::auth::RoomTokens::new(key, config.auth_setup));
