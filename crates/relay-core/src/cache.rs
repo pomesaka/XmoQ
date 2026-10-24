@@ -143,6 +143,54 @@ struct Group {
 }
 
 impl Group {
+    /// The Object `again` came once more, the same as the one kept under
+    /// its Object ID but for its Object Properties, which the kept one takes
+    /// (§2.5: "If a Track or Object arrives with a different set of unknown
+    /// properties than previously cached, the most recent set SHOULD replace
+    /// any cached values, removing any unknown values not present in the new
+    /// set"). The whole set is taken: the gaps it may change were held
+    /// against the Group before (`Cache::insert`). A set that does not fit
+    /// the limits gives the Group up, as an Object that does not fit does.
+    ///
+    /// WHY Immutable Properties that differ keep the first set: §12.7 has
+    /// "This Property MUST NOT be modified or removed", so one of the two
+    /// broke that, and which one the relay cannot tell. WHY NOT a malformed
+    /// track: §2.4.2 has no such example, and that would end every
+    /// subscription of the track over one property.
+    fn take_properties_of(&mut self, again: CachedObject, in_use: &mut usize) {
+        let object_id = again.object.object_id;
+        let Some(kept) = self.objects.get(&object_id) else {
+            return;
+        };
+        let immutable = |object: &CachedObject| -> Vec<KeyValuePair> {
+            object
+                .object
+                .properties
+                .iter()
+                .filter(|property| property.ty() == IMMUTABLE_PROPERTIES)
+                .cloned()
+                .collect()
+        };
+        if kept.object.properties == again.object.properties || immutable(kept) != immutable(&again)
+        {
+            return;
+        }
+        let (old, new) = (kept.size(), again.size());
+        let bytes = self.bytes.saturating_sub(old).saturating_add(new);
+        let total = in_use.saturating_sub(old).saturating_add(new);
+        if bytes > MAX_CACHED_BYTES_OF_A_TRACK || total > MAX_CACHED_BYTES {
+            self.give_up(in_use);
+            return;
+        }
+        let taken = CachedObject {
+            object: again.object,
+            ..kept.clone()
+        };
+        self.bytes = bytes;
+        *in_use = total;
+        self.objects.insert(object_id, taken);
+    }
+
     fn give_up(&mut self, in_use: &mut usize) {
         *in_use = in_use.saturating_sub(self.bytes);
         self.objects.clear();
@@ -175,8 +223,7 @@ impl Cache {
     ///   different Forwarding Preference, Subgroup ID, Priority or Payload
     ///   MUST treat the track as Malformed"). With other Object Properties
     ///   it is not ("Object Properties can be added, removed or updated"),
-    ///   and the one that came first stays ("Relays MAY ignore subsequently
-    ///   received Objects").
+    ///   and the kept Object takes them ([`Group::take_properties_of`]).
     /// * An Object after the End of Group (§2.4.2: "An Object is received in
     ///   a Group whose Object ID is larger than the final Object in the
     ///   Group"), an Object, and not a status, inside a gap that a later
@@ -252,11 +299,11 @@ impl Cache {
                 let same = (!subgroups_compare || there.subgroup_id == cached.subgroup_id)
                     && there.publisher_priority == cached.publisher_priority
                     && there.object.payload == cached.object.payload;
-                return if same {
-                    Verdict::Fine
-                } else {
-                    Verdict::Malformed
-                };
+                if !same {
+                    return Verdict::Malformed;
+                }
+                group.take_properties_of(cached, in_use);
+                return Verdict::Fine;
             }
             // A status where an Object is, an Object where an End of Group
             // is, or the same status again.
@@ -1132,6 +1179,51 @@ mod tests {
     }
 
     #[test]
+    fn an_object_that_comes_again_with_other_properties_is_kept_with_them() {
+        let with = |properties: Vec<KeyValuePair>| CachedObject {
+            object: Arc::new(SubgroupObject {
+                properties,
+                ..(*object(5, 0, 0).object).clone()
+            }),
+            ..object(5, 0, 0)
+        };
+        // An unknown Type (0x0C), and Immutable Properties (0x0B) whose
+        // value is the pair 0x0C = 1, or 2.
+        let unknown = |value| KeyValuePair::varint(0x0c, value).unwrap();
+        let immutable = |value| KeyValuePair::bytes(0x0b, vec![0x0c, value]).unwrap();
+        // (the properties of the Object that came first; of the one that
+        //  came again; those kept)
+        let cases = [
+            (vec![], vec![unknown(1)], vec![unknown(1)]),
+            // The values not in the new set go (§2.5).
+            (vec![unknown(1)], vec![], vec![]),
+            (
+                vec![immutable(1)],
+                vec![immutable(1), unknown(3)],
+                vec![immutable(1), unknown(3)],
+            ),
+            // Immutable Properties that differ: the first set stays (§12.7).
+            (
+                vec![immutable(1)],
+                vec![immutable(2), unknown(3)],
+                vec![immutable(1)],
+            ),
+            (vec![immutable(1)], vec![], vec![immutable(1)]),
+        ];
+        for (first, again, kept) in cases {
+            let (mut cache, mut in_use) = cache_of(vec![with(first.clone())]);
+            assert_eq!(
+                cache.insert(with(again.clone()), true, &mut in_use),
+                Verdict::Fine
+            );
+            let answer = cache.answer(at(5, 0), at(5, 0)).unwrap();
+            assert_eq!(answer[0].object.properties, kept, "{first:?} {again:?}");
+            // What is counted is what is kept.
+            assert_eq!(in_use, with(kept.clone()).size(), "{first:?} {again:?}");
+        }
+    }
+
+    #[test]
     fn an_end_of_track_after_the_end_of_a_group_is_not_held_against_the_track() {
         // Object 0 and End of Group at 1; then End of Track at 2 (§11.2.1.1:
         // each of the two says that nothing exists from it on).
@@ -1221,9 +1313,18 @@ mod tests {
                 verdict,
                 "{comes:?}"
             );
-            // The one that came first is the one that is kept.
+            // The one that came first is the one that is kept, with the
+            // Object Properties of the one that came again (§2.5).
             let kept = cache.answer(at(5, 1), at(5, 1)).unwrap();
-            assert_eq!(kept, [first()], "{comes:?}");
+            let expected = if verdict == Verdict::Fine {
+                CachedObject {
+                    object: Arc::clone(&comes.object),
+                    ..first()
+                }
+            } else {
+                first()
+            };
+            assert_eq!(kept, [expected], "{comes:?}");
         }
         // Nothing is compared with a Group that is not kept: an earlier
         // one, and one that was given up.
