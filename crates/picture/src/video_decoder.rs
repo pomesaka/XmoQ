@@ -7,10 +7,10 @@
 //! macOS): faster, and written once for each system. WHY NOT a pipe to
 //! ffmpeg: it reads anything, and the user's machine then needs ffmpeg.
 
-use anyhow::{Result, anyhow};
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
-use xmoq_watch::fit::too_large;
+
+use crate::fit::too_large;
 
 /// A decoder of H.264 that gives pictures of 3 bytes a pixel.
 pub struct VideoDecoder(Decoder);
@@ -21,11 +21,23 @@ pub enum Decoded {
     /// A picture of this size, in the buffer that was given.
     Picture((usize, usize)),
     /// A picture of more pixels than are handled
-    /// (`xmoq_watch::fit::MOST_PIXELS`); the buffer is as it was.
+    /// ([`crate::fit::MOST_PIXELS`]); the buffer is as it was.
     TooLarge((usize, usize)),
     /// No picture.
     Nothing,
 }
+
+/// The decoder could not be made.
+#[derive(Debug)]
+pub struct NoDecoder(String);
+
+impl std::fmt::Display for NoDecoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the decoder of openh264: {}", self.0)
+    }
+}
+
+impl std::error::Error for NoDecoder {}
 
 /// Where the next start code of three bytes begins, from `from` on.
 fn start_code(bytes: &[u8], from: usize) -> Option<usize> {
@@ -38,10 +50,14 @@ fn start_code(bytes: &[u8], from: usize) -> Option<usize> {
 
 impl VideoDecoder {
     /// A decoder with nothing decoded yet.
-    pub fn new() -> Result<Self> {
-        Ok(Self(Decoder::new().map_err(|error| {
-            anyhow!("the decoder of openh264: {error}")
-        })?))
+    ///
+    /// # Errors
+    ///
+    /// [`NoDecoder`] where `openh264` does not make one.
+    pub fn new() -> Result<Self, NoDecoder> {
+        Ok(Self(
+            Decoder::new().map_err(|error| NoDecoder(error.to_string()))?,
+        ))
     }
 
     /// Decodes one frame, a byte stream with start codes, into `rgb`.

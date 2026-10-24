@@ -42,6 +42,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Between a video track and a decoder, `@xmoq/media`](packages/media/README.md)
 - [A participant of the chat over MoQ tracks, `@xmoq/chat`](packages/chat/README.md)
 - [The viewer for the terminal, `xmoq-watch`](crates/watch/README.md)
+- [Pictures of a video track as PNG, `xmoq-picture`](crates/picture/README.md)
 - [The gatherer of the chat, `xmoq-chat`](crates/chat/README.md)
 - [The tracks of the chat, `xmoq-chat-tracks`](crates/chat-tracks/README.md)
 - [The payloads of the chat's tracks, shared by the implementations](fixtures/chat-tracks/README.md)

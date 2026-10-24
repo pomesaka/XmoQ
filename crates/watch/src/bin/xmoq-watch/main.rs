@@ -16,7 +16,6 @@ mod room_socket;
 mod session;
 mod sound;
 mod terminal;
-mod video_decoder;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -41,6 +40,7 @@ use xmoq_moqt_io::{
     Connection, PeerRequestStreamEvent, RequestStreamEvent, SendStream, StreamConfig, StreamEnd,
     StreamStops, Trace, UniEvent, read_request_streams, read_uni_streams, send_message,
 };
+use xmoq_picture::video_decoder::VideoDecoder;
 use xmoq_watch::args::{Args, Chat, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
 use xmoq_watch::keys::{Asked, Keys};
@@ -57,7 +57,6 @@ use crate::session::{
     Events, GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, timestamp_of,
 };
 use crate::sound::{Sound, Volume, micros_since};
-use crate::video_decoder::VideoDecoder;
 
 /// How often the automatic buffer is moved: twice a second, as the
 /// watching page's (`packages/media/src/core/playout-clock.ts`).

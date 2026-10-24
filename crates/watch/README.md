@@ -21,7 +21,7 @@ The library (`src/*.rs`) decides, and does no input or output: it is given its t
 | `args` | What the flags mean |
 | `clock` | When an Object is due, from its Timestamp of LOC |
 | `playout` | Which sample the sound output gets next |
-| `fit` | By how much a picture is made smaller for a terminal, and the picture that is |
+| `fit` | The cells of a terminal a picture takes. The decoder, which frames it is given, and by how much a picture is made smaller are [`xmoq-picture`](../picture/README.md)'s |
 | `kitty` | The bytes written to the terminal |
 | `tracks` | Which tracks of a catalog are played |
 | `keys` | What a key asks for |
@@ -29,7 +29,7 @@ The library (`src/*.rs`) decides, and does no input or output: it is given its t
 | `chat_track` | The chat on MoQ tracks: the room of an address, the Groups of `said` and the lines that wait for the gatherer, which lines of `lines` are shown and in what order, and how a line is shown. The names and the JSON are `xmoq-chat-tracks`'s |
 | `marks` | For measuring with the demo's publisher (`--measure-demo-marks`). `--clock-skew-ppm <n>`, also for measuring, has the viewer's clock run n parts in a million faster (`sound.rs`, `micros_since`) |
 
-The binary (`src/bin/xmoq-watch/`) does the input and output, one kind a file: `session.rs` (the requests on the MoQ Transport session), `room_socket.rs` (the room's WebSocket), `terminal.rs` (line mode, keys, the window's size), `picture.rs` (the thread that decodes and writes frames), `sound.rs` (the Opus decoder and the queue of the output), `chat_tracks.rs` (the chat on MoQ tracks), and the two files below.
+The binary (`src/bin/xmoq-watch/`) does the input and output, one kind a file: `session.rs` (the requests on the MoQ Transport session), `room_socket.rs` (the room's WebSocket), `terminal.rs` (line mode, keys, the window's size), `picture.rs` (the thread that decodes and writes frames), `sound.rs` (the Opus decoder and the queue of the output), `chat_tracks.rs` (the chat on MoQ tracks), and `audio_output.rs` below.
 
 ## Dependencies that are not decided, and what they need
 
@@ -37,7 +37,7 @@ Read in the crates' manifests and build scripts at the versions of `Cargo.lock`,
 
 | Crate | Used for | In | License | Needs to build |
 |---|---|---|---|---|
-| `openh264` 0.9.8 (`openh264-sys2`) | Decoding H.264 | `video_decoder.rs` alone | BSD-2-Clause; it builds Cisco's OpenH264 from the source it carries (BSD-2-Clause) | A C++ compiler (`cc`). `nasm` is used for the assembly where it is found, and left out where it is not |
+| `openh264` 0.9.8 (`openh264-sys2`), through `xmoq-picture` | Decoding H.264 | `crates/picture/src/video_decoder.rs` alone | BSD-2-Clause; it builds Cisco's OpenH264 from the source it carries (BSD-2-Clause) | A C++ compiler (`cc`). `nasm` is used for the assembly where it is found, and left out where it is not |
 | `cpal` 0.18.2 | The sound output | `audio_output.rs` alone | Apache-2.0 | macOS: nothing more (CoreAudio through `coreaudio-rs` and the `objc2` crates). Linux: the headers of ALSA and `pkg-config` (`alsa-sys` 0.4.0 probes `alsa`; Debian and Ubuntu: `libasound2-dev`), which `scripts/ci/check-rust.sh` installs in CI and asks for elsewhere |
 | `opus-rs` 0.1.39 (decided on 2026-10-24; why, in `sound.rs`) | Decoding Opus | `sound.rs` | BSD-3-Clause; a port of libopus 1.6 | Nothing but Rust. **Much `unsafe` of its own** (181 blocks and 71 functions in its `src/`, counted on 2026-10-21, not read), and a 0.x crate with 37 releases in eight months, whose API can change from one to the next: the version is pinned (`=0.1.39`) |
 | `tokio-tungstenite` 0.30.0 | The room's WebSocket | `room_socket.rs` | MIT | Nothing but Rust. Without TLS: a room is reached over `ws://` alone |
@@ -80,7 +80,7 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 | `--buffer-ms` | 10,000; `auto` goes to 400 ms | The same 10 s; the page's limit | `args`, `clock` |
 | Arrivals the automatic buffer goes by | 1,600, the newest | The page's: 10 seconds of 30 frames and 50 packets, twice over | `clock` |
 | Frames that wait to be decoded and drawn | 30; one more is left out, and the picture goes on at the next Group | What the watching page holds | `picture.rs` |
-| The pixels of a decoded picture | 3840x2160; a larger one is not drawn (`pictures_too_large` in `AV_PLAYED`) | Four times the largest the demo sends. What the decoder holds itself for such a picture is not bounded here | `fit`, `video_decoder.rs` |
+| The pixels of a decoded picture | 3840x2160; a larger one is not drawn (`pictures_too_large` in `AV_PLAYED`) | Four times the largest the demo sends. What the decoder holds itself for such a picture is not bounded here | `xmoq-picture` |
 | Packets of sound that wait | 100 (2 s); the oldest goes | | `playout` |
 | The relay's SETUP; connecting to it; a room's hello | 10 s each; without a SETUP the session is closed with `CONTROL_MESSAGE_TIMEOUT` (`0x11`) | As `@xmoq/moqt` | `main.rs` |
 | The relay's answer to a SUBSCRIBE | 10 s from when it was written (`--answer-wait-ms`); the SUBSCRIBE alone is given up, reset and stopped with `CANCELLED`, and the viewer leaves or tries again | The row "A request the peer does not answer" of [the implementation notes](../../docs/moqt-implementation-notes.md), which the page and the Rust client go by | `session.rs` |
