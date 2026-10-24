@@ -21,6 +21,10 @@
 //! first one a GOAWAY on the stream of the first SUBSCRIBE, after its
 //! answer, naming the same URI (`REQUEST_GOAWAY_SENT session=0 stream=0
 //! uri=..`).
+//! `--quiet request-id-parity`: when the client's SETUP has come, it sends the
+//! client a SUBSCRIBE with the Request ID 0, a client's (§10.1).
+//! `--quiet request-id-again`: a SUBSCRIBE with the Request ID 1, and after
+//! its answer a `REQUEST_UPDATE` on its stream with the same Request ID.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -102,7 +106,8 @@ use xmoq_moqt::data::{
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, GoAway, Publish, PublishNamespace, ReasonPhrase,
-    RequestError, RequestOk, Subscribe, SubscribeOk, request_error_code, setup_option,
+    RequestError, RequestOk, RequestUpdate, Subscribe, SubscribeOk, request_error_code,
+    setup_option,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
@@ -147,6 +152,14 @@ enum Quiet {
     /// later sessions: a SUBSCRIBE is answered with `SUBSCRIBE_OK`, a
     /// `PUBLISH_NAMESPACE` with `REQUEST_OK`.
     RequestGoAway,
+    /// When the client's SETUP has come, a SUBSCRIBE to the client with the
+    /// Request ID 0, which is of a client's parity (§10.1), and nothing else.
+    PeerRequestIdOfTheWrongParity,
+    /// When the client's SETUP has come, a SUBSCRIBE to the client with the
+    /// Request ID 1, and after its answer a `REQUEST_UPDATE` on its stream
+    /// with the same Request ID (§10.1: "Each ... `REQUEST_UPDATE` ...
+    /// consumes a Request ID").
+    PeerRequestIdAgain,
 }
 
 /// What the program is asked to be.
@@ -361,8 +374,10 @@ fn quiet_of(value: &str) -> Result<Quiet> {
         "subgroups" => Quiet::Subgroups,
         "goaway" => Quiet::GoAway,
         "goaway-request" => Quiet::RequestGoAway,
+        "request-id-parity" => Quiet::PeerRequestIdOfTheWrongParity,
+        "request-id-again" => Quiet::PeerRequestIdAgain,
         other => bail!(
-            "--quiet is setup, requests, publish, streams, subgroups, goaway or goaway-request, not {other}"
+            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity or request-id-again, not {other}"
         ),
     })
 }
@@ -506,6 +521,57 @@ async fn read_request(
     std::future::pending::<()>().await;
 }
 
+/// Sends the client a SUBSCRIBE with `request_id` for the track `t` of
+/// `(xmoq)`, prints its answer (`ANSWERED session=N ...`), and with `again`
+/// sends a `REQUEST_UPDATE` with the same Request ID on its stream
+/// (`UPDATE_SENT session=N request_id=..`). The stream is kept until the
+/// session ends.
+async fn subscribe_to_the_client(
+    connection: Arc<WtConnection>,
+    session: u64,
+    request_id: u64,
+    again: bool,
+) {
+    let Ok((mut send, recv)) = connection.open_bi().await else {
+        return;
+    };
+    let Ok(namespace) = TrackNamespace::new(vec![b"xmoq".to_vec()]) else {
+        return;
+    };
+    let Ok(full_track_name) = FullTrackName::new(namespace, b"t".to_vec()) else {
+        return;
+    };
+    let subscribe = ControlMessage::Subscribe(Subscribe {
+        request_id,
+        full_track_name,
+        parameters: vec![],
+    });
+    if send_message(&mut send, &subscribe, &Trace::default(), "request")
+        .await
+        .is_err()
+    {
+        return;
+    }
+    println!("SUBSCRIBE_SENT session={session} request_id={request_id}");
+    let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    if let Ok(event) = reader.next_event().await {
+        println!("ANSWERED session={session} {event:?}");
+    }
+    if again {
+        let update = ControlMessage::RequestUpdate(RequestUpdate {
+            request_id,
+            parameters: vec![],
+        });
+        if send_message(&mut send, &update, &Trace::default(), "request")
+            .await
+            .is_ok()
+        {
+            println!("UPDATE_SENT session={session} request_id={request_id}");
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
 async fn serve(
     session: u64,
     connection: WtConnection,
@@ -550,6 +616,8 @@ async fn serve(
     }
     let mut requests = tokio::task::JoinSet::new();
     let mut streams = 0u64;
+    // The requests this peer opens towards the client.
+    let mut asked = tokio::task::JoinSet::new();
     // A request of the first session that was refused with GOING_AWAY.
     let (refusal, mut refused) = tokio::sync::mpsc::channel::<()>(1);
     let mut went_away = false;
@@ -559,6 +627,20 @@ async fn serve(
             event = events.recv() => {
                 if let Some(UniEvent::Control(ControlMessage::Setup(_))) = event {
                     println!("SETUP_RECEIVED session={session}");
+                    let request_id = match quiet {
+                        Quiet::PeerRequestIdOfTheWrongParity => Some(0),
+                        Quiet::PeerRequestIdAgain => Some(1),
+                        _ => None,
+                    };
+                    if let Some(request_id) = request_id {
+                        let again = quiet == Quiet::PeerRequestIdAgain;
+                        asked.spawn(subscribe_to_the_client(
+                            Arc::clone(&connection),
+                            session,
+                            request_id,
+                            again,
+                        ));
+                    }
                 }
             }
             // WHY after the first refusal and not before it: the client then
@@ -590,6 +672,7 @@ async fn serve(
     // What the requests' tasks still print is of streams that ended with
     // the session.
     requests.abort_all();
+    asked.abort_all();
     println!("SESSION_ENDED session={session} {end:?}");
     drop(control);
     Ok(())

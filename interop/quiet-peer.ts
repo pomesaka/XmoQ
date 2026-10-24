@@ -75,6 +75,15 @@
 //                     close the session with NO_ERROR and connect to the
 //                     URI; own-rust prints `REQUEST_GOAWAY ...` and leaves
 //                     with 0.
+//   request-id-parity The peer sends the client a SUBSCRIBE with the Request
+//                     ID 0, a client's (§10.1). own-browser and own-rust
+//                     close the session with INVALID_REQUEST_ID: the peer
+//                     prints `SESSION_ENDED session=0 ClosedByPeer { code:
+//                     4,`, and own-rust `CLOSED_FOR_A_REQUEST_OF_THE_PEER
+//                     code=0x4 ...`.
+//   request-id-again  The same, with a SUBSCRIBE of the Request ID 1, which
+//                     the client refuses, and then a REQUEST_UPDATE with the
+//                     same Request ID on its stream.
 //   goaway-publisher  The same, with the page as a publisher
 //                     (`keepPublishing`): its PUBLISH_NAMESPACE is refused,
 //                     and it announces on the URI (`REQUEST session=1
@@ -875,6 +884,49 @@ async function goAwayPublisher(
 	return `own-browser closed its session with NO_ERROR when the peer refused its PUBLISH_NAMESPACE with GOING_AWAY and sent GOAWAY, and announced on the URI it named (${uri}): its states: ${states.join(", ")}`;
 }
 
+/**
+ * A request the peer opens towards the client with a Request ID §10.1 does
+ * not allow: of a client's parity (`request-id-parity`), or used again by a
+ * REQUEST_UPDATE on the stream of a request the client refused
+ * (`request-id-again`). The client closes the session with
+ * INVALID_REQUEST_ID (0x4). own-rust refuses the peer's requests in its
+ * `subscribe` mode, and the page does so for want of `serve`.
+ */
+async function peerRequestId(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	let said = "";
+	switch (client) {
+		case "own-browser": {
+			const page = await connectedPage(context);
+			said = await withTimeout(page.connect, "the page to connect");
+			break;
+		}
+		case "own-rust": {
+			const rust = spawnRustClient(
+				context,
+				"client:own-rust",
+				client,
+				"subscribe",
+				TRACK,
+			);
+			const [line] = await rust.waitForLine(
+				/^CLOSED_FOR_A_REQUEST_OF_THE_PEER code=0x4 /,
+			);
+			said = line;
+			break;
+		}
+		case "xmoq-watch":
+			throw new Error("the terminal viewer reads no request of the peer");
+	}
+	// 4 is INVALID_REQUEST_ID (§3.5).
+	const [line] = await context.relay.waitForLine(
+		/^SESSION_ENDED session=0 ClosedByPeer \{ code: 4,.*$/,
+	);
+	return `${client} closed its session with INVALID_REQUEST_ID: the peer printed ${line}; ${said}`;
+}
+
 const CASES: Record<
 	string,
 	{
@@ -885,7 +937,9 @@ const CASES: Record<
 			| "streams"
 			| "subgroups"
 			| "goaway"
-			| "goaway-request";
+			| "goaway-request"
+			| "request-id-parity"
+			| "request-id-again";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
@@ -897,6 +951,8 @@ const CASES: Record<
 	goaway: { quiet: "goaway", run: goAway },
 	"goaway-publisher": { quiet: "goaway", run: goAwayPublisher },
 	"goaway-request": { quiet: "goaway-request", run: goAwayOnARequest },
+	"request-id-parity": { quiet: "request-id-parity", run: peerRequestId },
+	"request-id-again": { quiet: "request-id-again", run: peerRequestId },
 };
 
 async function relayNoSetup(): Promise<string> {

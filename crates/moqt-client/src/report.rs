@@ -24,6 +24,12 @@ pub fn setup_ok(peer_setup: &Setup) {
     println!("SETUP_OK server_setup={peer_setup:?}");
 }
 
+/// The session closed because a request of the peer broke the protocol, in a
+/// mode that refuses the peer's requests.
+pub fn closed_for_a_request_of_the_peer(code: u32, error: &MoqtError) {
+    println!("CLOSED_FOR_A_REQUEST_OF_THE_PEER code={code:#x} error={error:?}");
+}
+
 pub fn request_go_away(go_away: &GoAway) {
     println!(
         "REQUEST_GOAWAY uri={} timeout_ms={}",

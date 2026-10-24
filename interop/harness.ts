@@ -664,7 +664,9 @@ export async function startQuietPeer(setup: {
 		| "streams"
 		| "subgroups"
 		| "goaway"
-		| "goaway-request";
+		| "goaway-request"
+		| "request-id-parity"
+		| "request-id-again";
 	clients: Client[];
 }): Promise<RunContext> {
 	if (!existsSync(QUIET_PEER_BINARY)) {
