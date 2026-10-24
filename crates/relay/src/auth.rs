@@ -16,8 +16,10 @@
 //!
 //! where the mac is HMAC-SHA-256 with the shared key over the text before
 //! the last `|`. A token allows one operation (`pub`: PUBLISH and
-//! `PUBLISH_NAMESPACE`; `sub`: SUBSCRIBE and a Standalone FETCH) in exactly
-//! that namespace, until its expiry.
+//! `PUBLISH_NAMESPACE`; `sub`: SUBSCRIBE and a Standalone FETCH) in that
+//! namespace, until its expiry: in exactly that namespace, or, where its
+//! last field is `*`, in those under the fields before it
+//! ([`namespace_fits`], decided as Q50).
 //!
 //! The relay wants such a token in the SETUP of a client as well (the Setup
 //! Option of the same number, §10.3.1.4), and closes a session without
@@ -149,12 +151,8 @@ impl Authorizer for RoomTokens {
                     (role, operation),
                     ("pub", Operation::Publish) | ("sub", Operation::Subscribe)
                 );
-                let namespace_fits = namespace.is_none_or(|asked| {
-                    let asked: Vec<&[u8]> = asked.fields().iter().map(Vec::as_slice).collect();
-                    let named: Vec<&[u8]> = named.split('/').map(str::as_bytes).collect();
-                    asked == named
-                });
-                if role_fits && namespace_fits {
+                let fits = namespace.is_none_or(|asked| namespace_fits(asked, named));
+                if role_fits && fits {
                     Ok(())
                 } else {
                     Err(code::UNAUTHORIZED)
@@ -222,6 +220,30 @@ impl Authorizer for RoomTokens {
             seen = true;
         }
         if self.setup { verdict } else { Ok(()) }
+    }
+}
+
+/// Whether the namespace a token names, its fields joined with `/`, allows
+/// the namespace `asked`: the same fields, or, where the last field of the
+/// token is `*`, the fields before it, followed by any or none. Field by
+/// field, not as text: `xmoq/chat/*` allows `xmoq/chat` and
+/// `xmoq/chat/blue/a`, and not `xmoq/chatter`. Decided as Q50, for the chat
+/// of a room.
+///
+/// WHY also the namespace before the `*` itself (decided on 2026-10-24): the
+/// gatherer asks for the participants with a `SUBSCRIBE_NAMESPACE` whose
+/// prefix is `xmoq/chat` itself (`crates/chat-tracks`), which is checked as
+/// `sub` of that namespace, and the room's `lines` are a track of
+/// `xmoq/chat/<room>`. WHY NOT one field or more, as `bucket/*` of AWS IAM
+/// and `foo.>` of NATS have it: each of those would take a second token,
+/// whole, for the same grant. WHY NOT a `*` in another field: nothing asks
+/// for it; such a field is the text `*`, as before.
+fn namespace_fits(asked: &TrackNamespace, named: &str) -> bool {
+    let asked: Vec<&[u8]> = asked.fields().iter().map(Vec::as_slice).collect();
+    let named: Vec<&[u8]> = named.split('/').map(str::as_bytes).collect();
+    match named.split_last() {
+        Some((&b"*", before)) => asked.starts_with(before),
+        _ => asked == named,
     }
 }
 
@@ -345,6 +367,26 @@ mod tests {
                 true,
                 request(0x4),
             ),
+            // A star allows what is under it and the namespace itself, and
+            // nothing shorter.
+            (
+                vec![token(KEY, "v1|rooms/*|sub|1800000060")],
+                Subscribe,
+                true,
+                Ok(()),
+            ),
+            (
+                vec![token(KEY, "v1|rooms/blue/*|sub|1800000060")],
+                Subscribe,
+                true,
+                Ok(()),
+            ),
+            (
+                vec![token(KEY, "v1|rooms/blue/red/*|sub|1800000060")],
+                Subscribe,
+                true,
+                request(0x1),
+            ),
             // One of two tokens allows it.
             (
                 vec![token(KEY, "v1|rooms/red|sub|1800000060"), token(KEY, GOOD)],
@@ -354,6 +396,41 @@ mod tests {
             ),
         ];
         check(cases);
+    }
+
+    #[test]
+    fn a_token_whose_last_field_is_a_star_allows_the_namespaces_under_it() {
+        // (the namespace of the token; the namespace asked; allowed)
+        // A namespace has one field at least (§2.4.1), so `*` alone allows
+        // every one.
+        let cases = [
+            ("xmoq/chat/blue", "xmoq/chat/blue", true),
+            ("xmoq/chat/blue", "xmoq/chat/blue/a", false),
+            ("xmoq/chat/blue/*", "xmoq/chat/blue/a", true),
+            ("xmoq/chat/blue/*", "xmoq/chat/blue/a/b", true),
+            ("xmoq/chat/blue/*", "xmoq/chat/blue", true),
+            ("xmoq/chat/*", "xmoq/chat", true),
+            ("xmoq/chat/*", "xmoq/chatter", false),
+            ("xmoq/chat/blue/*", "xmoq/chat/blueberry/a", false),
+            ("xmoq/chat/blue/*", "xmoq/chat/red/a", false),
+            ("xmoq/chat/blue/*", "xmoq/chat", false),
+            ("*", "xmoq", true),
+            // Elsewhere a star is a field like any other.
+            ("xmoq/*/blue", "xmoq/chat/blue", false),
+            ("xmoq/*/blue", "xmoq/*/blue", true),
+        ];
+        for (named, asked, allowed) in cases {
+            let fields = asked
+                .split('/')
+                .map(|field| field.as_bytes().to_vec())
+                .collect();
+            let asked_namespace = TrackNamespace::new(fields).unwrap();
+            assert_eq!(
+                namespace_fits(&asked_namespace, named),
+                allowed,
+                "{named} {asked}"
+            );
+        }
     }
 
     #[test]
