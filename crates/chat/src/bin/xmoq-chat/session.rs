@@ -56,6 +56,7 @@ use xmoq_chat_tracks::names::{self, Person, lines_track, person_of, room_of_line
 use xmoq_chat_tracks::payloads::Line;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::fetch::{FetchObject, RangeEnd};
+use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, ReasonPhrase, RequestOk, publish_done_status,
@@ -1124,7 +1125,21 @@ impl Gathering<'_> {
                     *token = None;
                 }
             }
-            (_, RequestEvent::UnsupportedTrack { .. } | RequestEvent::TooManyNamespaces { .. }) => {
+            (
+                _,
+                RequestEvent::TrackNotProcessed {
+                    refusal: TrackRefusal::Malformed,
+                    ..
+                },
+            ) => {
+                // §2.4.2: "it MUST cancel any corresponding subscription".
+                self.let_go(token, Command::Cancel(stream_reset_code::MALFORMED_TRACK));
+                self.request_over(token, purpose, "the track is malformed");
+            }
+            (
+                _,
+                RequestEvent::TrackNotProcessed { .. } | RequestEvent::TooManyNamespaces { .. },
+            ) => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
                 self.request_over(token, purpose, "the session could not take its answer");
             }

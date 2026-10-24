@@ -1259,6 +1259,47 @@ fn a_fetch_ok_that_says_end_of_track_ends_the_track_where_it_agrees() {
     }
 }
 
+/// A publisher's `FETCH_OK` whose Track Properties keep the track from being
+/// processed: the relay's FETCH is cancelled, and Alice's refused, with
+/// `UNSUPPORTED_EXTENSION` (0x33) and `CANCELLED` (0x1) for a Mandatory Track
+/// Property (§2.5.1), with `MALFORMED_TRACK` (0x12) for Immutable Properties
+/// inside Immutable Properties (§12.7, §2.4.2, §10.6).
+#[test]
+fn a_fetch_ok_whose_track_cannot_be_processed_is_refused() {
+    let cases = [
+        (KeyValuePair::varint(0x4000, 1).unwrap(), 0x1, 0x33),
+        (
+            KeyValuePair::bytes(0x0b, vec![0x0b, 0x00]).unwrap(),
+            0x12,
+            0x12,
+        ),
+    ];
+    for (property, cancel, refused) in cases {
+        let mut relay = fetching();
+        let actions = relay.step(Event::OwnRequestMessage {
+            session: PUBLISHER,
+            request: OWN,
+            message: ControlMessage::FetchOk(FetchOk {
+                end_of_track: false,
+                end_location: at(2, 0),
+                parameters: vec![],
+                track_properties: vec![property.clone()],
+            }),
+        });
+        let expected = [
+            STOP_TIMER,
+            Action::CancelOwnRequest {
+                session: PUBLISHER,
+                request: OWN,
+                code: cancel,
+            },
+            refuse(refused),
+            FINISH,
+        ];
+        assert_eq!(actions, expected, "{property:?}");
+    }
+}
+
 #[test]
 fn a_joining_fetch_of_a_track_found_malformed_is_refused_as_that() {
     // Alice's Joining FETCH for the track "b" is asked of the publisher.

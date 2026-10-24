@@ -7,6 +7,7 @@
 use crate::coding::{
     ReadError, ReadResult, Reader, ReceiveBuffer, parse_exact, put_length_prefixed,
 };
+use crate::immutable;
 use crate::kvp::{self, KeyValuePair, Value};
 use crate::{Error, UsageError, varint};
 
@@ -216,19 +217,39 @@ pub enum SubgroupEvent {
 }
 
 /// What makes the Properties of one Object break the track, as far as the Object
-/// alone shows it. Both the decoder and the encoder apply it, so the encoder
-/// cannot produce a stream the decoder rejects.
+/// alone shows it: [`Error::MalformedTrack`]. Both the decoder and the encoder
+/// apply it, so the encoder cannot produce a stream the decoder rejects. What
+/// is checked is looked for inside Immutable Properties as well (§12.7), so a
+/// Prior Object ID Gap outside and one inside are two instances.
+///
+/// # Errors
+///
+/// [`Error::MalformedTrack`], and what reading Immutable Properties fails with
+/// otherwise ([`crate::immutable`]): a `PROTOCOL_VIOLATION`, and
+/// [`Error::TooManyObjectProperties`] for a sequence inside over the local
+/// limit, which ends only the stream, as one outside does.
 pub(crate) fn object_properties_fault(
-    properties: &[KeyValuePair],
+    object_properties: &[KeyValuePair],
     group_id: u64,
     object_id: u64,
-) -> Option<&'static str> {
+) -> Result<(), Error> {
+    let properties = match immutable::properties_to_search(object_properties, immutable::Of::Object)
+    {
+        Ok(Ok(properties)) => properties,
+        Ok(Err(why)) => return Err(Error::MalformedTrack(why)),
+        Err(Error::TooManyKeyValuePairs { limit }) => {
+            return Err(Error::TooManyObjectProperties { limit });
+        }
+        Err(error) => return Err(error),
+    };
     // §2.5.1: a Mandatory Track Property on an Object is malformed.
     if properties
         .iter()
         .any(KeyValuePair::is_mandatory_track_property)
     {
-        return Some("mandatory track property on an object");
+        return Err(Error::MalformedTrack(
+            "mandatory track property on an object",
+        ));
     }
     // §12.8 and §12.9: at most one instance, and a gap cannot reach below 0.
     for (ty, id, repeated, too_large) in [
@@ -250,13 +271,28 @@ pub(crate) fn object_properties_fault(
             continue;
         };
         if gaps.next().is_some() {
-            return Some(repeated);
+            return Err(Error::MalformedTrack(repeated));
         }
         if matches!(gap.value(), Value::Varint(gap) if *gap > id) {
-            return Some(too_large);
+            return Err(Error::MalformedTrack(too_large));
         }
     }
-    None
+    Ok(())
+}
+
+/// What the encoder of an Object refuses: what [`object_properties_fault`]
+/// finds, as a [`UsageError`].
+pub(crate) fn object_properties_usage_fault(
+    properties: &[KeyValuePair],
+    group_id: u64,
+    object_id: u64,
+) -> Result<(), UsageError> {
+    object_properties_fault(properties, group_id, object_id).map_err(|error| {
+        UsageError(match error {
+            Error::MalformedTrack(why) | Error::ProtocolViolation(why) => why,
+            _ => "more key-value pairs inside immutable properties than a receiver takes",
+        })
+    })
 }
 
 /// What is wrong with a datagram the peer sent, by its type alone: `None`
@@ -468,9 +504,7 @@ impl SubgroupStreamDecoder {
         // so there is no reason to buffer its payload first. A stream that ends
         // inside that payload is then a malformed track too, not a stream cut
         // short.
-        if let Some(fault) = object_properties_fault(&properties, header.group_id, object_id) {
-            return Err(Error::MalformedTrack(fault).into());
-        }
+        object_properties_fault(&properties, header.group_id, object_id)?;
 
         let payload_len = self.announced_length(reader)?;
         if let Some(limit) = self.payload_limit
@@ -555,7 +589,7 @@ impl SubgroupStreamEncoder {
     ///
     /// Fails, encoding nothing, when the Object ID does not increase, when the
     /// Object has properties the header did not announce or properties that
-    /// break the track (§2.5.1, §12.8, §12.9), when an Object that is not Normal
+    /// break the track (§2.5.1, §12.7, §12.8, §12.9), when an Object that is not Normal
     /// has a payload or properties, or when an End of Group or End of Track
     /// Object was already encoded.
     pub fn object(&mut self, object: &SubgroupObject) -> Result<(), UsageError> {
@@ -582,11 +616,7 @@ impl SubgroupStreamEncoder {
                 "only a Normal object carries a payload or properties",
             ));
         }
-        if let Some(fault) =
-            object_properties_fault(&object.properties, self.group_id, object.object_id)
-        {
-            return Err(UsageError(fault));
-        }
+        object_properties_usage_fault(&object.properties, self.group_id, object.object_id)?;
 
         varint::encode(delta, &mut self.bytes);
         if self.has_properties {

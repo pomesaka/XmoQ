@@ -17,6 +17,7 @@ mod coding;
 pub mod data;
 mod error;
 pub mod fetch;
+pub mod immutable;
 pub mod kvp;
 pub mod message;
 pub mod name;

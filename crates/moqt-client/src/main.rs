@@ -25,6 +25,7 @@ use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
 use xmoq_moqt::fetch::{FetchHeader, FetchObject};
+use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, GoAway, ReasonPhrase, RequestError, RequestOk,
@@ -1195,16 +1196,29 @@ impl Client<'_> {
         };
         let track_alias = match event {
             RequestEvent::SubscribeEstablished { track_alias, .. } => track_alias,
-            RequestEvent::UnsupportedTrack {
-                property_type,
+            RequestEvent::TrackNotProcessed {
+                refusal,
                 track_alias,
             } => {
-                // §2.5.1: the session already ended the request; the stream is
-                // cancelled to tell the publisher, and so are the subgroup
-                // streams it may have opened already.
+                // §2.5.1 and §12.7: the session already ended the request;
+                // the stream is cancelled to tell the publisher, and so are
+                // the subgroup streams it may have opened already.
                 self.stop_streams_of(track_alias);
-                stream.cancel();
-                bail!("the track needs property {property_type:#x}, which this client lacks");
+                match refusal {
+                    TrackRefusal::Unsupported(property_type) => {
+                        stream.cancel();
+                        bail!(
+                            "the track needs property {property_type:#x}, which this client lacks"
+                        );
+                    }
+                    // §2.4.2: "it MUST cancel any corresponding subscription".
+                    TrackRefusal::Malformed => {
+                        stream.cancel_with(stream_reset_code::MALFORMED_TRACK);
+                        bail!(
+                            "the immutable properties of the SUBSCRIBE_OK make the track malformed"
+                        );
+                    }
+                }
             }
             other => {
                 stream.cancel();
@@ -1389,9 +1403,14 @@ impl Client<'_> {
                         report::fetch_refused(id, error.error_code);
                         Happened::Refused
                     }
-                    // §2.5.1: the session ended the request; the streams are
-                    // cancelled to tell the publisher.
-                    RequestEvent::UnsupportedFetch { .. } => Happened::UnsupportedTrackProperty,
+                    // §2.5.1 and §12.7: the session ended the request; the
+                    // streams are cancelled to tell the publisher.
+                    RequestEvent::FetchNotProcessed {
+                        refusal: TrackRefusal::Unsupported(_),
+                    } => Happened::UnsupportedTrackProperty,
+                    RequestEvent::FetchNotProcessed {
+                        refusal: TrackRefusal::Malformed,
+                    } => Happened::MalformedTrack,
                     other => bail!("unexpected message on a fetch request stream: {other:?}"),
                 };
                 (index, happened)
@@ -1444,7 +1463,15 @@ impl Client<'_> {
         let ended = step.ended;
         if let Some(ended) = ended {
             fetch.print_ended(ended);
-            fetches.end(index, ended.cancel, happened == Happened::GaveUp);
+            let code = match happened {
+                Happened::MalformedTrack => stream_reset_code::MALFORMED_TRACK,
+                _ => stream_reset_code::CANCELLED,
+            };
+            fetches.end(
+                index,
+                ended.cancel.then_some(code),
+                happened == Happened::GaveUp,
+            );
         }
         if ended.is_some() || happened == Happened::Answered {
             fetches.stop_answer_timer(index);

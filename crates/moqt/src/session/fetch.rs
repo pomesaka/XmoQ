@@ -2,6 +2,7 @@
 //! fetch streams that answer them (§11.4.4).
 
 use super::{Request, RequestEvent, RequestId, Session, check_own_parameters};
+use crate::immutable::track_properties_refusal;
 use crate::message::{ControlMessage, Fetch, FetchOk, FetchRange};
 use crate::name::Location;
 use crate::params::{MessageKind, Parameter};
@@ -173,14 +174,9 @@ impl Session {
                 "FETCH_OK ends before the FETCH starts",
             ));
         }
-        if let Some(property) = ok
-            .track_properties
-            .iter()
-            .find(|property| property.is_mandatory_track_property())
-        {
-            let property_type = property.ty();
+        if let Some(refusal) = track_properties_refusal(&ok.track_properties) {
             self.end_request(request);
-            return Ok(RequestEvent::UnsupportedFetch { property_type });
+            return Ok(RequestEvent::FetchNotProcessed { refusal });
         }
         fetch.answered = true;
         if fetch.is_over() {
@@ -572,8 +568,8 @@ mod tests {
         let properties = vec![KeyValuePair::varint(0x4000, 1).unwrap()];
         assert_eq!(
             session.on_request_message(request, fetch_ok(at(3, 0), properties)),
-            Ok(RequestEvent::UnsupportedFetch {
-                property_type: 0x4000
+            Ok(RequestEvent::FetchNotProcessed {
+                refusal: crate::immutable::TrackRefusal::Unsupported(0x4000)
             })
         );
         assert_eq!(

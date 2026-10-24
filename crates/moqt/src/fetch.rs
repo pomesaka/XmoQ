@@ -8,7 +8,9 @@
 use crate::coding::{
     ReadError, ReadResult, Reader, ReceiveBuffer, parse_exact, put_length_prefixed,
 };
-use crate::data::{STREAM_TYPE_FETCH_HEADER, object_properties_fault};
+use crate::data::{
+    STREAM_TYPE_FETCH_HEADER, object_properties_fault, object_properties_usage_fault,
+};
 use crate::kvp::{self, KeyValuePair};
 use crate::name::Location;
 use crate::params::GroupOrder;
@@ -355,9 +357,7 @@ impl FetchStreamDecoder {
                 Error::TooManyKeyValuePairs { limit } => Error::TooManyObjectProperties { limit },
                 error => error,
             })?;
-        if let Some(fault) = object_properties_fault(&properties, group_id, object_id) {
-            return Err(Error::MalformedTrack(fault).into());
-        }
+        object_properties_fault(&properties, group_id, object_id)?;
         Ok(FetchObject {
             group_id,
             subgroup_id,
@@ -436,13 +436,9 @@ impl FetchStreamEncoder {
     /// Fails, encoding nothing, when the Object does not come after what was
     /// encoded before it: an earlier Group by the Group Order, or the same
     /// Group and no larger Object ID; and when its properties break the
-    /// track (§2.5.1, §12.8, §12.9).
+    /// track (§2.5.1, §12.7, §12.8, §12.9).
     pub fn object(&mut self, object: &FetchObject) -> Result<(), UsageError> {
-        if let Some(fault) =
-            object_properties_fault(&object.properties, object.group_id, object.object_id)
-        {
-            return Err(UsageError(fault));
-        }
+        object_properties_usage_fault(&object.properties, object.group_id, object.object_id)?;
         let mut flags = 0;
         let mut fields = Vec::new();
 

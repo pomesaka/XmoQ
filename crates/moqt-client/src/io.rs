@@ -117,8 +117,14 @@ impl RequestStream {
     /// Cancels the request: resets the send half and stops the receive half,
     /// both with CANCELLED (§3.3.2).
     pub fn cancel(self) {
-        self.send.reset(stream_reset_code::CANCELLED);
-        self.reader.stop(stream_reset_code::CANCELLED);
+        self.cancel_with(stream_reset_code::CANCELLED);
+    }
+
+    /// Cancels the request with `code`: `MALFORMED_TRACK` where its Track is
+    /// malformed (§2.4.2).
+    pub fn cancel_with(self, code: u32) {
+        self.send.reset(code);
+        self.reader.stop(code);
     }
 
     /// Like [`Self::next_event`], and also reports the stream closed when the
