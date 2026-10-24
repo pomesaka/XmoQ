@@ -13,6 +13,7 @@ import {
 	protocolViolation,
 	SessionErrorCode,
 } from "./error.ts";
+import { propertiesToSearch } from "./immutable-properties.ts";
 import {
 	decodeKeyValuePairs,
 	encodeKeyValuePairs,
@@ -439,13 +440,18 @@ const DYNAMIC_GROUPS = 0x30n;
 /**
  * The Track Properties that end SUBSCRIBE_OK, PUBLISH, REQUEST_OK and
  * FETCH_OK. §12.6: "If an endpoint receives a value larger than 1, it MUST
- * close the session with PROTOCOL_VIOLATION." WHY NOT inside Immutable
- * Properties (§12.7) as well: this package does not look into that property.
- * The Rust implementation checks the same.
+ * close the session with PROTOCOL_VIOLATION." Inside Immutable Properties as
+ * well (§12.7: "processors MUST search both"). Immutable Properties that make
+ * the Track malformed are handed on as they are: the session cancels the
+ * request (`requests.ts`), and a malformed Track does not end the session.
+ * The properties are handed on as they came, Immutable Properties as one
+ * property with its bytes: §12.7 has their serialization left as it is.
  */
 function decodeTrackProperties(reader: ByteReader): KeyValuePair[] {
 	const properties = decodeKeyValuePairs(reader);
-	for (const { type, value } of properties) {
+	const reading = propertiesToSearch(properties, "Track");
+	if ("malformed" in reading) return properties;
+	for (const { type, value } of reading.properties) {
 		if (type === DYNAMIC_GROUPS && typeof value === "bigint" && value > 1n) {
 			throw protocolViolation(
 				`DYNAMIC_GROUPS value ${value} is neither 0 nor 1`,

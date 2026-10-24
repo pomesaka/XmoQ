@@ -1306,6 +1306,9 @@ export async function connectOver(
 			case "unsupported-track-property":
 				aborted({ type: "unsupported-track-property" });
 				break;
+			case "malformed-track":
+				aborted({ type: "malformed-track" });
+				break;
 			case "cancelled":
 			case "no-answer-in-time":
 			case "not-sent-in-time":
@@ -2098,7 +2101,14 @@ export async function connectOver(
 				return;
 			}
 			case "malformed-track":
+				// Also on SUBSCRIBE_OK and FETCH_OK, whose Immutable Properties
+				// can make the Track malformed (§12.7).
+				rejectPending(
+					requestId,
+					new RequestAbortedError({ type: "malformed-track" }),
+				);
 				endSubscription(requestId, { type: "malformed-track" });
+				endFetch(requestId, { type: "malformed-track" });
 				return;
 			case "publish-done": {
 				const subscription = subscriptions.get(requestId);

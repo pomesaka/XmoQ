@@ -33,6 +33,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [When picture and sound are played: what the page and the terminal viewer agree on](fixtures/playout/README.md)
 - [How long a request waits for its answer](fixtures/request-answer-wait/README.md)
 - [The Retry Interval of a REQUEST_ERROR](fixtures/retry-interval/README.md)
+- [What a receiver makes of Immutable Properties](fixtures/immutable-properties/README.md)
 - [A LOC video stream of another implementation](fixtures/loc-04/README.md)
 - [Browser client library `@xmoq/moqt`](packages/moqt/README.md)
 - [The Low Overhead Media Container in TypeScript, `@xmoq/loc`](packages/loc/README.md)

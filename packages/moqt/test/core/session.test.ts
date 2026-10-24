@@ -669,6 +669,29 @@ describe("Session", () => {
 		]);
 	});
 
+	test("cancels a subscription whose SUBSCRIBE_OK has Immutable Properties inside Immutable Properties, with MALFORMED_TRACK (§12.7, §2.4.2)", () => {
+		const session = started();
+		session.subscribe(TRACK);
+		// Track Property 0xB whose value is another 0xB, empty.
+		expect(
+			session.receiveRequestStreamData(
+				1,
+				hex("04 00 06 09 00 0b 02 0b 00"),
+				false,
+			),
+		).toEqual([
+			{
+				type: "event",
+				event: {
+					type: "request-closed",
+					requestId: 0n,
+					reason: "malformed-track",
+				},
+			},
+			{ type: "reset", stream: 1, code: 18 },
+		]);
+	});
+
 	test("cancels a subscription whose Object carries a Mandatory Track Property, with MALFORMED_TRACK (§2.4.2, §3.3.3)", () => {
 		const session = subscribed();
 		expect(
