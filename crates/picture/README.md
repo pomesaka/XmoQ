@@ -28,6 +28,8 @@ All the values are provisional.
 
 A picture that is asked for before the first key frame came is given by the `take` of the first frame that decodes. How long that is waited for is the caller's: `forgo` gives it up. A frame missing from a Group leaves the rest of that Group out (`order`), and the picture is that of the frame before the gap; `Taken::of` says which frame a picture is of.
 
+`begin_again` is for another track or another session: the decoder, the order of the frames and the latest picture are made anew, and the files kept, their numbers and the counts go on, so that `most_kept` bounds the files of every session a reader has and no name is given twice. A publisher in place of another can have smaller Group IDs, whose frames one `Frames` would otherwise leave out as older.
+
 ## Dependencies
 
 Read in `Cargo.lock` and the crates' manifests on 2026-10-25.
