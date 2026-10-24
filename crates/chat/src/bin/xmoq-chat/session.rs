@@ -435,6 +435,10 @@ pub async fn gather(
         Ok(Some(UniEvent::Control(message))) => {
             gathering.session.on_control_message(message)?;
         }
+        // WHY the error itself, not a line about it: the session is closed
+        // with its code, as a datagram of an unknown type that comes before
+        // the SETUP has it (§11).
+        Ok(Some(UniEvent::Failed(error))) => return Err(error.into()),
         Ok(other) => bail!("no SETUP from the relay: {other:?}"),
         Err(_) => return Err(NoSetupInTime.into()),
     }

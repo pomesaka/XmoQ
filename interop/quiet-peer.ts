@@ -95,6 +95,14 @@
 //                     reads its streams' events while it waits since
 //                     2026-10-24; before, it closed with NO_ERROR when the
 //                     answer did not come in 10 s).
+//   datagram-before-setup
+//                     The same datagram, from a peer that sends no SETUP
+//                     (added on 2026-10-24, written before its first run):
+//                     the clients have it while they wait for the SETUP, and
+//                     close the session with PROTOCOL_VIOLATION all the same.
+//                     Under load the datagram of `datagram` came first as
+//                     well, and the terminal viewer closed with NO_ERROR then
+//                     (1 of a run of the interop on 2026-10-24).
 //   request-id-again  The same, with a SUBSCRIBE of the Request ID 1, which
 //                     the client refuses, and then a REQUEST_UPDATE with the
 //                     same Request ID on its stream.
@@ -965,7 +973,8 @@ const CASES: Record<
 			| "goaway-request"
 			| "request-id-parity"
 			| "request-id-again"
-			| "datagram";
+			| "datagram"
+			| "datagram-before-setup";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
@@ -980,6 +989,10 @@ const CASES: Record<
 	"request-id-parity": { quiet: "request-id-parity", run: peerRequestId },
 	"request-id-again": { quiet: "request-id-again", run: peerRequestId },
 	datagram: { quiet: "datagram", run: unknownDatagram },
+	"datagram-before-setup": {
+		quiet: "datagram-before-setup",
+		run: unknownDatagram,
+	},
 };
 
 /**
