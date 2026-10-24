@@ -785,9 +785,16 @@ const newGroupsAsked: string[] = [];
 /** The participant of `joinChat`, and what it had. */
 const chat: {
 	participant: ChatParticipant | undefined;
+	/** Stops the participant: its `signal`. */
+	stop: AbortController;
 	lines: PageChatReport["lines"];
 	malformed: string[];
-} = { participant: undefined, lines: [], malformed: [] };
+} = {
+	participant: undefined,
+	stop: new AbortController(),
+	lines: [],
+	malformed: [],
+};
 
 window.xmoqOwn = {
 	publishDynamicTrack: withPlainErrors(
@@ -940,6 +947,7 @@ window.xmoqOwn = {
 		chat.participant = await joinChat(connected(), {
 			room,
 			name,
+			signal: chat.stop.signal,
 			onLine(line) {
 				console.log(
 					`CHAT_LINE number=${line.number} name=${line.name} how=${line.how}`,
@@ -972,6 +980,10 @@ window.xmoqOwn = {
 		return JSON.stringify(outcome, (_key, value: unknown) =>
 			typeof value === "bigint" ? value.toString() : value,
 		);
+	}),
+
+	chatLeave: withPlainErrors(async () => {
+		chat.stop.abort();
 	}),
 
 	chatReport: withPlainErrors(async () => {

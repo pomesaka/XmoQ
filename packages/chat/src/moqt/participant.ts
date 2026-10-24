@@ -129,7 +129,12 @@ export interface JoinChatOptions {
 	onMalformed?(number: bigint, why: Malformed): void;
 	/** Called when `status()` changes. */
 	onStatus?(status: ChatStatus): void;
-	/** Stops the participant: the subscription to `lines` is cancelled, and no SUBSCRIBE for `said` is accepted after. */
+	/**
+	 * Stops the participant: the namespace is withdrawn, the subscription to
+	 * `lines` is cancelled, and no SUBSCRIBE for `said` is accepted after.
+	 * Before the namespace is announced, `joinChat` then rejects with
+	 * `RequestAbortedError` of `cancelled`.
+	 */
 	signal?: AbortSignal;
 	/** The wall clock, in milliseconds since the Unix epoch: `sentAt`, and the rate. `Date.now` when left out. */
 	now?: () => number;
@@ -258,7 +263,10 @@ export async function joinChat(
 			.catch(() => {});
 	};
 	connection.serve({ subscribe: answer });
-	await connection.publishNamespace(ours);
+	// Withdrawn when the participant stops (§6.2): the relay tells the
+	// gatherer NAMESPACE_DONE, and the gatherer ends its SUBSCRIBE for
+	// `said`, which ends `listener`.
+	await connection.publishNamespace(ours, undefined, { signal: stop.signal });
 
 	const seen = new SeenLines(SEEN_LINES);
 	const take = (

@@ -51,6 +51,7 @@ export type {
 	PeerFetch,
 	PeerSubscribe,
 	PublishedTrack,
+	PublishNamespaceCallOptions,
 	ReceivedObject,
 	ServeHandlers,
 	SessionConnectOptions,

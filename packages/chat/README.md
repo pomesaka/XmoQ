@@ -13,7 +13,7 @@ const participant = await joinChat(connection, {
 const outcome = await participant.say("hello"); // sent, kept-back (too-long, too-fast), or not-sent
 ```
 
-`joinChat` announces `xmoq/chat/<room>/<name>` (PUBLISH_NAMESPACE), accepts the relay's SUBSCRIBE for `said` there, and subscribes to `lines` of `xmoq/chat/<room>`. **It names the `serve` handlers of the connection**, so it wants a connection of its own: a SUBSCRIBE for another track, and every FETCH, are refused.
+`joinChat` announces `xmoq/chat/<room>/<name>` (PUBLISH_NAMESPACE), accepts the relay's SUBSCRIBE for `said` there, and subscribes to `lines` of `xmoq/chat/<room>`. **It names the `serve` handlers of the connection**, so it wants a connection of its own: a SUBSCRIBE for another track, and every FETCH, are refused. When its `signal` aborts, the participant withdraws its namespace (§6.2), and the relay tells the gatherer with NAMESPACE_DONE, which has the gatherer end its SUBSCRIBE for `said`; the session stays open.
 
 ## What it does
 
@@ -49,5 +49,4 @@ WHY a package and not a part of `demo/`: the reader of the payloads is a second 
 
 - Lines said while nobody has subscribed to `said` (before the gatherer is there, or while it is away) are not sent and not kept for later.
 - A line between the newest 16 and what a page last had, after the subscription was made again, is not fetched: the FETCH asks for the newest 16 every time.
-- The namespace is not withdrawn when the participant stops; that happens when the session closes.
 - No authorization: the gatherer sends no token, and a relay that asks for tokens refuses it.

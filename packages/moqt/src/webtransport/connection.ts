@@ -562,6 +562,36 @@ export interface FetchCallOptions {
 	signal?: AbortSignal;
 }
 
+export interface PublishNamespaceCallOptions {
+	/**
+	 * Withdraws the namespace when it aborts (§6.2: "A PUBLISH_NAMESPACE is
+	 * withdrawn by cancelling the request"): both directions of the request
+	 * stream are given up with CANCELLED (§3.3.2), and the session forgets
+	 * the announcement, so that the same namespace can be announced again.
+	 * The session stays open.
+	 *
+	 * | When it aborts | What happens |
+	 * |---|---|
+	 * | Before the call | nothing is sent, and `publishNamespace` rejects with its reason |
+	 * | Before the answer | the request is cancelled, and `publishNamespace` rejects with `RequestAbortedError` of `cancelled` |
+	 * | After the answer | the request is cancelled |
+	 * | After the request ended otherwise (refused, ended by the peer, or the session closed) | nothing |
+	 *
+	 * The subscriptions the peer made for Tracks of the namespace, which the
+	 * application serves (`ServeHandlers.subscribe`), are requests of their
+	 * own and go on, as they do where the PUBLISH_NAMESPACE ends otherwise.
+	 * §9.5 has a publisher withdraw "to stop new subscriptions", and the own
+	 * relay keeps the subscriptions it has there. Ending them is the
+	 * application's, or the subscriber's.
+	 *
+	 * WHY a signal, and not a handle with a method as a FETCH has: the call
+	 * resolves with nothing once the namespace is announced, and a handle
+	 * would come only then; a signal reaches a request that waits for its
+	 * answer as well, and the calls that already announce do not change.
+	 */
+	signal?: AbortSignal;
+}
+
 /**
  * A SUBSCRIBE of the peer, to be answered once with `accept` or `reject`.
  *
@@ -833,6 +863,7 @@ export interface MoqtConnection {
 	publishNamespace(
 		trackNamespace: TrackNamespace,
 		parameters?: MessageParameters,
+		options?: PublishNamespaceCallOptions,
 	): Promise<void>;
 	publish(request: PublishRequest): Promise<PublishedTrack>;
 	subscribe(request: SubscribeRequest): Promise<Subscription>;
@@ -1088,6 +1119,11 @@ export async function connectOver(
 	/** The requests of this endpoint whose answer the session has read, until their response is given. */
 	const answered = new Set<bigint>();
 	const pendingNamespaces = new Map<bigint, Deferred<void>>();
+	/**
+	 * PUBLISH_NAMESPACEs given a signal, until they end: what lets go of the
+	 * signal. Kept after the answer, since the signal withdraws then too.
+	 */
+	const withdrawals = new Map<bigint, () => void>();
 	const pendingPublishes = new Map<bigint, Deferred<PublishedTrack>>();
 	const pendingSubscribes = new Map<bigint, Deferred<Subscription>>();
 	/** Track Alias of each PUBLISH that is waiting for its response. */
@@ -1292,7 +1328,15 @@ export async function connectOver(
 		fetch.ended.resolve(end);
 	};
 
+	/**
+	 * Fails the call that waits for the answer of a request of this endpoint.
+	 * Every ending of such a request that the connection learns of comes
+	 * here, also after the answer (a PUBLISH_NAMESPACE the peer reset), so a
+	 * PUBLISH_NAMESPACE lets go of its signal here as well.
+	 */
 	const rejectPending = (requestId: bigint, error: Error): void => {
+		withdrawals.get(requestId)?.();
+		withdrawals.delete(requestId);
 		pendingNamespaces.get(requestId)?.reject(error);
 		pendingPublishes.get(requestId)?.reject(error);
 		pendingSubscribes.get(requestId)?.reject(error);
@@ -1312,6 +1356,7 @@ export async function connectOver(
 		io.clear();
 		peerSetup.reject(error);
 		for (const requestId of [
+			...withdrawals.keys(),
 			...pendingNamespaces.keys(),
 			...pendingPublishes.keys(),
 			...pendingSubscribes.keys(),
@@ -1662,6 +1707,29 @@ export async function connectOver(
 		// The session agrees: cancelling after the end does nothing.
 		if (sessionClose !== undefined) return Promise.resolve();
 		return applyVoid((s) => s.cancelRequest(requestId));
+	};
+
+	/**
+	 * Has `signal` withdraw the PUBLISH_NAMESPACE `requestId` (§6.2): the
+	 * call that waits for its answer fails, and the session cancels the
+	 * request, which resets the stream and stops the peer's direction with
+	 * CANCELLED (§3.3.2) and forgets it. The connection keeps nothing else of
+	 * an announcement. A request the session has ended already is not
+	 * cancelled again: the session does nothing for it.
+	 */
+	const withdrawOnAbort = (requestId: bigint, signal: AbortSignal): void => {
+		const withdraw = (): void => {
+			rejectPending(requestId, new RequestAbortedError({ type: "cancelled" }));
+			if (sessionClose !== undefined) return;
+			// WHY the rejection is dropped: a reset that could not be written
+			// ends the session, and `closed` reports that. Nobody holds a
+			// promise of this.
+			applyVoid((s) => s.cancelRequest(requestId)).catch(() => {});
+		};
+		signal.addEventListener("abort", withdraw, { once: true });
+		withdrawals.set(requestId, () =>
+			signal.removeEventListener("abort", withdraw),
+		);
 	};
 
 	/** Registers a FETCH the session has just taken, so that what comes for it finds it. */
@@ -2476,13 +2544,19 @@ export async function connectOver(
 		peerSetupOptions,
 		closed: closed.promise,
 		goAway: goAway.promise,
-		publishNamespace(trackNamespace, parameters) {
-			return request(pendingNamespaces, parameters, (s) =>
-				s.publishNamespace({
+		publishNamespace(trackNamespace, parameters, callOptions = {}) {
+			const { signal } = callOptions;
+			if (signal?.aborted) return Promise.reject(signal.reason);
+			return request(pendingNamespaces, parameters, (s) => {
+				const result = s.publishNamespace({
 					trackNamespace,
 					parameters: authorized(parameters),
-				}),
-			);
+				});
+				// Registered with the request, before it is sent, so that an
+				// ending that comes at once lets go of the signal.
+				if (signal !== undefined) withdrawOnAbort(result.value, signal);
+				return result;
+			});
 		},
 		publish(asked) {
 			const publishRequest = {

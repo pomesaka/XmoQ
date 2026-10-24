@@ -165,7 +165,7 @@ export type RequestAbort =
 	| { type: "peer-reset"; code: number | undefined }
 	/** §2.5.1: the SUBSCRIBE_OK or FETCH_OK had a Mandatory Track Property this endpoint does not understand, so it cancelled. */
 	| { type: "unsupported-track-property" }
-	/** This endpoint cancelled the request before it was answered. Only a FETCH is handed out before its answer. */
+	/** This endpoint cancelled the request before it was answered: a FETCH, or a PUBLISH_NAMESPACE whose signal aborted. */
 	| { type: "cancelled" }
 	/**
 	 * The peer did not answer in time (`answerTimeoutMs` of the connect
