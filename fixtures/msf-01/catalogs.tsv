@@ -49,9 +49,10 @@ namespace-with-half-a-surrogate-pair	invalid	{"version":"draft-01","tracks":[{"n
 role-with-half-a-surrogate-pair	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"role":"\ud800"}]}
 codec-with-half-a-surrogate-pair	invalid	{"version":"draft-01","tracks":[{"name":"t","packaging":"x","isLive":true,"codec":"\ud800"}]}
 encryption-scheme-with-half-a-surrogate-pair	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"encryptionScheme":"\ud800"}]}
-half-a-surrogate-pair-in-a-field-that-is-not-read	catalog	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"label":"\ud800"}]}
-half-a-surrogate-pair-in-a-key	catalog	{"version":"draft-01","\ud800":1,"tracks":[]}
+half-a-surrogate-pair-in-a-field-that-is-not-read	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"label":"\ud800"}]}
+half-a-surrogate-pair-in-a-key	invalid	{"version":"draft-01","\ud800":1,"tracks":[]}
 width-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"width":1e999}]}
+number-too-large-in-a-field-that-is-not-read	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"x-custom":1e999}]}
 height-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"height":1e999}]}
 framerate-too-large-for-a-number	invalid	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"framerate":1e999}]}
 audio-track-with-samplerate-and-channel-config	catalog	{"version":"draft-01","tracks":[{"name":"audio","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":67000,"samplerate":48000,"channelConfig":"1"}]}

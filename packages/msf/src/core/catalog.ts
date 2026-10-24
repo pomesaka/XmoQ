@@ -445,11 +445,39 @@ export function readCatalog(
 	}
 	let value: unknown;
 	try {
-		value = JSON.parse(utf8Decoder.decode(payload));
-	} catch {
+		value = JSON.parse(utf8Decoder.decode(payload), refuseWhatParsersDiffOn);
+	} catch (error) {
+		if (error instanceof Refused) {
+			return { type: "invalid", reason: error.message };
+		}
 		return { type: "invalid", reason: "the payload is not JSON in UTF-8" };
 	}
 	return check(value);
+}
+
+/**
+ * A reviver of `JSON.parse` that refuses, anywhere in the document, a key or
+ * a string with half of a surrogate pair and a number too large for a
+ * double. WHY: RFC 8259 §8.2 has "the behavior of software that receives
+ * JSON texts containing such values is unpredictable" of a string like
+ * that, and §6 a number beyond a double as one that does not interoperate:
+ * parsers differ on both, and serde_json, which `crates/msf` reads with,
+ * refuses the whole document for either. A document that one reader of
+ * ours reads and the other does not is worse than one both refuse. WHY NOT
+ * read such a document in Rust as `JSON.parse` does: that would take a
+ * JSON parser of our own there.
+ */
+function refuseWhatParsersDiffOn(key: string, value: unknown): unknown {
+	if (HALF_A_PAIR.test(key)) {
+		throw new Refused("a key has half of a surrogate pair");
+	}
+	if (typeof value === "string" && HALF_A_PAIR.test(value)) {
+		throw new Refused("a string has half of a surrogate pair");
+	}
+	if (typeof value === "number" && !Number.isFinite(value)) {
+		throw new Refused("a number is too large for a double");
+	}
+	return value;
 }
 
 /**

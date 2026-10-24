@@ -1,6 +1,6 @@
 # Catalogs of draft-ietf-moq-msf-01
 
-What `@xmoq/msf` reads a catalog as. `crates/msf` reads `catalog-moqlivemock.json` as well, for the fields a viewer chooses a track by, and of `catalogs.tsv` the rows on `samplerate` and `channelConfig` and the rows on `%` (§5.4.1); it does not read the rest of the table yet, and turns down less than `@xmoq/msf` does.
+What `@xmoq/msf` and `crates/msf` read a catalog as. Both read `catalog-moqlivemock.json` and every row of `catalogs.tsv`.
 
 ## `catalog-moqlivemock.json`: what another implementation sent
 
@@ -33,7 +33,7 @@ No track has `namespace`, `initRef` or `timescale`, and the catalog has no `init
 
 **Nobody's implementation wrote these documents.** They were written by hand from the text of the draft, one for each thing the check of `@xmoq/msf` looks at, and the person who read the draft wrote down what each is read as. They are no check against another implementation; they keep two implementations of ours from reading one document in two ways.
 
-75 rows, tab-separated, a newline after each:
+76 rows, tab-separated, a newline after each:
 
 | Column | |
 |---|---|
@@ -41,6 +41,6 @@ No track has `namespace`, `initRef` or `timescale`, and the catalog has no `init
 | 2 | What the document is read as: `catalog`, `delta-update`, `unsupported-version` or `invalid` |
 | 3 | The document: the bytes of the payload, as UTF-8. No row has a tab or a newline in it |
 
-**Not every row follows from the draft.** These are choices of `@xmoq/msf` where the draft, and JSON, leave one, written down so that a second implementation of ours makes the same one: the rows about `null`, about a number too large for a double (`1e999`), about half of a surrogate pair (refused in a field that is read; not noticed in a key or in a field that is not read), about a key that comes twice (`version-twice`: the later one is read), `percent-around-no-name` (§5.4.1 has variable names "consist of" alphanumeric characters, hyphens and underscores; a name of none is taken for no name, and "alphanumeric" for ASCII), `samplerate-that-is-no-whole-number` (kept as it is: §5.2.28 has a JSON Number and no more; both readers are tested for the value 44100.5), and `byte-order-mark`, whose document begins with the bytes `ef bb bf`. A parser that is not `JSON.parse` can differ on each of them, and the Rust reader that will read this table has to be made to agree, or the row changed for both.
+**Not every row follows from the draft.** These are choices of `@xmoq/msf` where the draft, and JSON, leave one, written down so that a second implementation of ours makes the same one: the rows about `null`, about a number too large for a double (`1e999`, refused anywhere in the document), about half of a surrogate pair (refused anywhere, in a key as well), about a key that comes twice (`version-twice`: the later one is read), `percent-around-no-name` (§5.4.1 has variable names "consist of" alphanumeric characters, hyphens and underscores; a name of none is taken for no name, and "alphanumeric" for ASCII), `samplerate-that-is-no-whole-number` (kept as it is: §5.2.28 has a JSON Number and no more; both readers are tested for the value 44100.5), and `byte-order-mark`, whose document begins with the bytes `ef bb bf`. A parser that is not `JSON.parse` can differ on each of them. Where `serde_json`, which `crates/msf` reads with, refuses a document `JSON.parse` takes (half of a surrogate pair, a number too large for a double), `@xmoq/msf` refuses it as well, wherever in the document it is; the reasons are in the README of `@xmoq/msf`.
 
 Where each outcome comes from in the draft is in the [README of `@xmoq/msf`](../../packages/msf/README.md), "How the draft is read". The rows `an-array`, `a-string`, `no-json` and `null` are no JSON object, and the row `no-json` is no JSON at all.

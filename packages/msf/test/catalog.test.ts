@@ -104,9 +104,9 @@ describe("fixtures/msf-01/catalogs.tsv: what a payload is read as", () => {
 			return { name, outcome, json };
 		});
 
-	test("the table has 75 rows, each with a name of its own", () => {
-		expect(rows.length).toBe(75);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(75);
+	test("the table has 76 rows, each with a name of its own", () => {
+		expect(rows.length).toBe(76);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(76);
 	});
 
 	// §5.2.28 has a JSON Number and no more; `crates/msf` reads the same
@@ -184,14 +184,14 @@ describe("readCatalog", () => {
 		});
 	});
 
-	test("a number that is too large for a double is no number of a catalog", () => {
+	test("a number that is too large for a double makes the document no catalog", () => {
 		expect(
 			readCatalog(
 				utf8('{"version":"draft-01","generatedAt":1e999,"tracks":[]}'),
 			),
 		).toEqual({
 			type: "invalid",
-			reason: 'the catalog: "generatedAt" is not a number',
+			reason: "a number is too large for a double",
 		});
 	});
 
@@ -236,14 +236,14 @@ describe("readCatalog", () => {
 		expect(readCatalog(utf8(json))).toEqual({ type: "invalid", reason });
 	});
 
-	test("half of a surrogate pair in a name is no string, and a whole pair is", () => {
+	test("half of a surrogate pair in a name makes the document no catalog, and a whole pair does not", () => {
 		const named = (name: string): Uint8Array =>
 			utf8(
 				`{"version":"draft-01","tracks":[{"name":"${name}","packaging":"x","isLive":true}]}`,
 			);
 		expect(readCatalog(named("\\udc00x"))).toEqual({
 			type: "invalid",
-			reason: 'track 0: "name" is not a string',
+			reason: "a string has half of a surrogate pair",
 		});
 		expect(readCatalog(named("\\ud83d\\ude00")).type).toBe("catalog");
 	});
