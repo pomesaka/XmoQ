@@ -103,6 +103,19 @@
 //                     Under load the datagram of `datagram` came first as
 //                     well, and the terminal viewer closed with NO_ERROR then
 //                     (1 of a run of the interop on 2026-10-24).
+//   silent-subgroup   The peer answers the client's SUBSCRIBE and opens a
+//                     subgroup stream of the track with its Subgroup Header
+//                     and nothing after it. The client, given an idle time
+//                     of 1 second (own-rust `--idle-subgroup-stream-ms`, the
+//                     page `idleSubgroupStreamTimeoutMs`; 30 by themselves),
+//                     stops that stream alone: the peer prints
+//                     `STOP_SENDING_RECEIVED session=0 code=0x0 after_ms=N`
+//                     with N from 1,000 to 5,000, and a second later the
+//                     session is open at both ends (own-rust has printed
+//                     `STREAM_ABORTED uni#N` and not left; the page's state
+//                     has no end of its session). own-browser and own-rust.
+//                     (The row "A subgroup stream of the peer that sends
+//                     nothing after its header".)
 //   request-id-again  The same, with a SUBSCRIBE of the Request ID 1, which
 //                     the client refuses, and then a REQUEST_UPDATE with the
 //                     same Request ID on its stream.
@@ -974,7 +987,8 @@ const CASES: Record<
 			| "request-id-parity"
 			| "request-id-again"
 			| "datagram"
-			| "datagram-before-setup";
+			| "datagram-before-setup"
+			| "silent-subgroup";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
@@ -993,7 +1007,107 @@ const CASES: Record<
 		quiet: "datagram-before-setup",
 		run: unknownDatagram,
 	},
+	"silent-subgroup": { quiet: "silent-subgroup", run: silentSubgroup },
 };
+
+/** The idle time the clients are given in `silent-subgroup`; 30 seconds by themselves. */
+const IDLE_MS = 1000;
+
+/**
+ * The peer answers the client's SUBSCRIBE and opens a subgroup stream of the
+ * track that sends its Subgroup Header and nothing after it (`--quiet
+ * silent-subgroup`). The client, given an idle time of `IDLE_MS`, stops that
+ * stream alone with INTERNAL_ERROR (0x0), and its session goes on.
+ */
+async function silentSubgroup(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	let said: string;
+	let stillThere: () => Promise<string>;
+	switch (client) {
+		case "own-browser": {
+			const page = await openPage(context, "client:own-browser", "own-browser");
+			await withTimeout(
+				page.evaluate(
+					([url, hash, idle]) =>
+						window.xmoq.connect(
+							url,
+							hash,
+							undefined,
+							undefined,
+							undefined,
+							undefined,
+							idle,
+						),
+					[context.relayUrl, context.certSha256Hex, IDLE_MS] satisfies [
+						string,
+						string,
+						number,
+					],
+				),
+				"the page to connect",
+			);
+			said = await withTimeout(
+				page.evaluate(
+					([namespace, track]) => window.xmoq.subscribe(namespace, track),
+					[NAMESPACE, TRACK] satisfies [string, string],
+				),
+				"the page's SUBSCRIBE to be answered",
+			);
+			stillThere = async () => {
+				const state = await page.evaluate(() => window.xmoqOwn.state());
+				if (!state.includes('"session":null')) {
+					throw new Error(`the page's session was to stay open: ${state}`);
+				}
+				return state;
+			};
+			break;
+		}
+		case "own-rust": {
+			const rust = spawnRustClient(
+				context,
+				"client:own-rust",
+				client,
+				"subscribe",
+				TRACK,
+				["--idle-subgroup-stream-ms", String(IDLE_MS)],
+			);
+			stillThere = async () => {
+				const [line] = await rust.waitForLine(/^STREAM_ABORTED uni#\d+$/);
+				const left = await Promise.race([
+					rust.exited.then((code) => `it left with ${code}`),
+					new Promise<null>((resolve) => setTimeout(() => resolve(null), 0)),
+				]);
+				if (left !== null) throw new Error(`own-rust was to stay: ${left}`);
+				return line;
+			};
+			said = "own-rust subscribed";
+			break;
+		}
+		case "xmoq-watch":
+			throw new Error("the terminal viewer has no flag for the idle time");
+	}
+	const [line, code, afterMs] = await context.relay.waitForLine(
+		/^STOP_SENDING_RECEIVED session=0 code=(\S+) after_ms=(\d+)$/,
+	);
+	if (code !== "0x0") {
+		throw new Error(`the stream was to be stopped with 0x0: ${line}`);
+	}
+	const after = Number(afterMs);
+	if (after < IDLE_MS || after > BEFORE_MS) {
+		throw new Error(
+			`the stream was to be stopped between ${IDLE_MS} and ${BEFORE_MS} ms after its header: ${line}`,
+		);
+	}
+	// The session goes on: a while later it is still open at both ends.
+	await new Promise((resolve) => setTimeout(resolve, IDLE_MS));
+	const there = await stillThere();
+	if (context.relay.hasPrinted(/^SESSION_ENDED /)) {
+		throw new Error("the peer was to see the session go on");
+	}
+	return `${client} stopped a subgroup stream that sent nothing after its header ${after} ms after it (its idle time: ${IDLE_MS} ms), with STOP_SENDING 0x0, and its session went on: ${line}; ${said}; ${there}`;
+}
 
 /**
  * The peer sends a datagram of an unknown type (`--quiet datagram`): the

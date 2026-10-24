@@ -694,7 +694,8 @@ export async function startQuietPeer(setup: {
 		| "request-id-parity"
 		| "request-id-again"
 		| "datagram"
-		| "datagram-before-setup";
+		| "datagram-before-setup"
+		| "silent-subgroup";
 	clients: Client[];
 }): Promise<RunContext> {
 	if (!existsSync(QUIET_PEER_BINARY)) {

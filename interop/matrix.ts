@@ -1443,6 +1443,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "none",
 		},
 		{
+			name: "no relay: quiet peer: own-rust stops a subgroup stream that says nothing after its header with INTERNAL_ERROR, and its session goes on",
+			script: "quiet-peer.ts",
+			args: ["--case", "silent-subgroup", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-browser stops a subgroup stream that says nothing after its header with INTERNAL_ERROR, and its session goes on",
+			script: "quiet-peer.ts",
+			args: ["--case", "silent-subgroup", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
 			name: "own relay: quiet peer: the relay closes a session that sent its SETUP and holds nothing, and keeps one that announced",
 			script: "quiet-peer.ts",
 			args: ["--case", "relay-idle-session", "--client", "quiet-peer"],

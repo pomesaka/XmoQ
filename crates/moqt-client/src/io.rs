@@ -14,9 +14,9 @@ use xmoq_moqt::session::{PeerRequestId, Role, Session, Transport};
 use xmoq_moqt::{RequestFault, TerminationCode, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, IncomingStreams, PeerRequestStreamEvent, RequestClose, RequestReader,
-    RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace, UniEvent, WriteError,
-    read_request_streams, read_uni_streams, send_message,
+    Connection, IdleSubgroupStreamTimeout, IncomingStreams, PeerRequestStreamEvent, RequestClose,
+    RequestReader, RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace, UniEvent,
+    WriteError, read_request_streams, read_uni_streams, send_message,
 };
 
 type Send = <WtConnection as Connection>::Send;
@@ -334,19 +334,22 @@ fn refuse_requests(
 /// to.
 ///
 /// §3.3 lets Objects arrive before the control stream; they wait in the data
-/// queue until asked for.
+/// queue until asked for. A subgroup stream of the peer that says nothing
+/// for `idle_subgroup_stream_timeout` after its header is stopped.
 pub fn start_readers(
     connection: Arc<WtConnection>,
     trace: Trace,
     stops: StreamStops,
     serve: bool,
     answer_delay: Duration,
+    idle_subgroup_stream_timeout: IdleSubgroupStreamTimeout,
 ) -> (SessionInbox, DataInbox, Option<PeerRequests>, Readers) {
     let (all, mut incoming) = mpsc::channel(EVENT_QUEUE);
     let (session, session_events) = mpsc::channel(EVENT_QUEUE);
     let (data, data_events) = mpsc::channel(EVENT_QUEUE);
     let config = StreamConfig {
         trace,
+        idle_subgroup_stream_timeout,
         ..StreamConfig::default()
     };
     let (requests, refuser, peer_requests) = if serve {

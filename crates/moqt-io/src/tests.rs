@@ -15,10 +15,10 @@ use xmoq_moqt::message::{ControlMessage, RequestOk, Setup};
 
 use crate::memory::{MemoryConnection, MemorySend, STREAM_WINDOW, pair};
 use crate::{
-    Connection, FetchBody, FetchChunk, IncomingStreams, OutgoingEvent, OutgoingSubgroup,
-    PeerRequestClose, PeerRequestStreamEvent, QueueFull, ReadError, RecvStream, RequestReader,
-    RequestStreamEvent, SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops,
-    Trace, UniEvent, WriteError, read_request_streams, read_uni_streams,
+    Connection, FetchBody, FetchChunk, IdleSubgroupStreamTimeout, IncomingStreams, OutgoingEvent,
+    OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent, QueueFull, ReadError, RecvStream,
+    RequestReader, RequestStreamEvent, SendBudget, SendLimits, SendStream, StreamConfig, StreamEnd,
+    StreamStops, Trace, UniEvent, WriteError, read_request_streams, read_uni_streams,
 };
 
 const SOON: Duration = Duration::from_secs(1);
@@ -205,8 +205,14 @@ async fn a_full_queue_holds_the_sender_back() {
 
 #[tokio::test(start_paused = true)]
 async fn at_most_the_configured_number_of_streams_is_read_at_once() {
+    // WHY the longest idle time: the first stream says nothing after its
+    // header while the test waits, and would be stopped after the default.
     let config = StreamConfig {
         max_uni_streams: 1,
+        idle_subgroup_stream_timeout: IdleSubgroupStreamTimeout::from_millis(
+            IdleSubgroupStreamTimeout::MAX_MS,
+        )
+        .unwrap(),
         ..StreamConfig::default()
     };
     let mut reading = reading(config, 8);
@@ -470,6 +476,152 @@ async fn streams_that_never_say_what_they_are() {
         );
         assert!(reading.stops.is_empty(), "{name}");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subgroup_stream_that_sends_nothing_after_its_header_is_stopped_after_the_idle_time() {
+    // (name, the idle time in ms, Objects written after the header at these
+    //  ms, when the stream is stopped in ms)
+    let cases: [(&str, u64, &[u64], u64); 3] = [
+        ("the default, from the header", 30_000, &[], 30_000),
+        (
+            "the default, from the last bytes",
+            30_000,
+            &[20_000],
+            50_000,
+        ),
+        ("a time that was set lower", 500, &[300, 700], 1_200),
+    ];
+    for (name, idle_ms, writes, stopped_at_ms) in cases {
+        let config = StreamConfig {
+            idle_subgroup_stream_timeout: IdleSubgroupStreamTimeout::from_millis(idle_ms).unwrap(),
+            ..StreamConfig::default()
+        };
+        let mut reading = reading(config, 8);
+        let start = tokio::time::Instant::now();
+        let mut send = open_with(&reading.peer, &subgroup_bytes(&[])).await;
+        let stream = reading.opened().await;
+        for (object_id, at_ms) in (0..).zip(writes.iter().copied()) {
+            tokio::time::sleep_until(start + Duration::from_millis(at_ms)).await;
+            // An Object of one byte: Object ID delta, Payload Length, payload.
+            send.write_all(&[0x00, 0x01, 0x61]).await.unwrap();
+            assert_eq!(
+                reading.next().await,
+                UniEvent::Object {
+                    stream,
+                    header: header(),
+                    object: object(object_id, 1),
+                },
+                "{name}"
+            );
+        }
+        // A millisecond before the time, the stream is still read.
+        tokio::time::sleep_until(start + Duration::from_millis(stopped_at_ms - 1)).await;
+        assert!(reading.events.try_recv().is_err(), "{name}");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(
+            reading.next().await,
+            UniEvent::SubgroupClosed {
+                stream,
+                header: header(),
+                end: StreamEnd::Aborted(None),
+            },
+            "{name}"
+        );
+        // STOP_SENDING with INTERNAL_ERROR (0x0), and the slot is free.
+        assert_eq!(
+            send.stopped().await,
+            WriteError::Stopped(Some(0x0)),
+            "{name}"
+        );
+        assert!(reading.stops.is_empty(), "{name}");
+        // The session goes on: another stream is read as usual.
+        let _other = open_with(&reading.peer, &subgroup_bytes(&[])).await;
+        reading.opened().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_time_a_full_queue_holds_a_subgroup_stream_back_is_not_idle() {
+    // One event fits in the queue: the reader waits with Object 0 in hand.
+    let mut reading = reading(StreamConfig::default(), 1);
+    let mut send = open_with(
+        &reading.peer,
+        &subgroup_bytes(&[object(0, 1), object(1, 1)]),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    let stream = reading.opened().await;
+    for object_id in [0, 1] {
+        assert_eq!(
+            reading.next().await,
+            UniEvent::Object {
+                stream,
+                header: header(),
+                object: object(object_id, 1),
+            }
+        );
+    }
+    // The stream was not stopped while it was held back.
+    send.write_all(&[0x00, 0x01, 0x61]).await.unwrap();
+    assert_eq!(
+        reading.next().await,
+        UniEvent::Object {
+            stream,
+            header: header(),
+            object: object(2, 1),
+        }
+    );
+    // Once it is read, its idle time runs.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(
+        reading.next().await,
+        UniEvent::SubgroupClosed {
+            stream,
+            header: header(),
+            end: StreamEnd::Aborted(None),
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn streams_that_are_not_subgroup_streams_have_no_idle_time() {
+    // (name, the bytes that say what the stream is)
+    let cases: [(&str, Vec<u8>); 3] = [
+        ("control", message_bytes(&setup())),
+        ("fetch", FETCH_HEADER_BYTES.to_vec()),
+        ("padding", vec![0xf0, 0x13, 0x2b, 0x3e, 0x28]),
+    ];
+    for (name, bytes) in cases {
+        let reading = reading(StreamConfig::default(), 8);
+        let mut send = open_with(&reading.peer, &bytes).await;
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        assert!(timeout(SOON, send.stopped()).await.is_err(), "{name}");
+        assert_eq!(reading.stops.len(), 1, "{name}");
+    }
+}
+
+#[test]
+fn the_idle_time_of_a_subgroup_stream_is_from_1_ms_to_2_to_the_31_minus_1() {
+    // (milliseconds, the time, or None where it is refused)
+    let cases: [(u64, Option<Duration>); 5] = [
+        (0, None),
+        (1, Some(Duration::from_millis(1))),
+        (30_000, Some(Duration::from_secs(30))),
+        (2_147_483_647, Some(Duration::from_millis(2_147_483_647))),
+        (2_147_483_648, None),
+    ];
+    for (ms, expected) in cases {
+        assert_eq!(
+            IdleSubgroupStreamTimeout::from_millis(ms).map(IdleSubgroupStreamTimeout::get),
+            expected,
+            "{ms}"
+        );
+    }
+    assert_eq!(
+        IdleSubgroupStreamTimeout::default().get(),
+        Duration::from_secs(30)
+    );
 }
 
 #[tokio::test(start_paused = true)]

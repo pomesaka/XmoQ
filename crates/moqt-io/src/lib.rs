@@ -32,12 +32,12 @@ pub mod wt;
 use std::future::Future;
 
 pub use streams::{
-    Direction, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, OutgoingEvent,
-    OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent, QueueFull, RequestClose,
-    RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendError, SendLimits,
-    StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, open_fetch_stream,
-    open_fetch_stream_in_order, open_fetch_stream_without_header, read_request_streams,
-    read_uni_streams, send_message,
+    Direction, FetchBody, FetchChunk, FetchStreamWriter, IdleSubgroupStreamTimeout,
+    IncomingStreams, OutgoingEvent, OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent,
+    QueueFull, RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendBudget,
+    SendError, SendLimits, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
+    open_fetch_stream, open_fetch_stream_in_order, open_fetch_stream_without_header,
+    read_request_streams, read_uni_streams, send_message,
 };
 
 /// Why reading from a stream stopped short of a FIN.

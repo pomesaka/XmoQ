@@ -45,6 +45,8 @@ export type XmoqPage = {
 		setupTimeoutMs?: number,
 		/** Own page: how long a request may wait for its stream to be opened (`openStreamTimeoutMs` of `@xmoq/moqt`); the library's 10 seconds when left out. */
 		openStreamTimeoutMs?: number,
+		/** Own page: how long a subgroup stream of the peer may send nothing after its header (`idleSubgroupStreamTimeoutMs` of `@xmoq/moqt`); the library's 30 seconds when left out. */
+		idleSubgroupStreamTimeoutMs?: number,
 	): Promise<void>;
 	publishTrack(namespace: string, trackName: string): Promise<string>;
 	sendObject(payloadHex: string): Promise<void> | void;
