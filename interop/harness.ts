@@ -109,6 +109,10 @@ const RELAYS: Record<string, Relay> = {
 	},
 	own: {
 		binary: join(here, "..", "target", "debug", "xmoq-relay"),
+		// WHY a GOAWAY Timeout of 0: every run stops the relay with SIGINT,
+		// at which it sends GOAWAY and waits that long for its sessions to
+		// leave; pages the runs keep open do not, and every run would wait
+		// for it. A run about the GOAWAY gives its own after this one.
 		args: (port) => [
 			"--port",
 			port,
@@ -116,6 +120,8 @@ const RELAYS: Record<string, Relay> = {
 			certFile,
 			"--key-file",
 			keyFile,
+			"--goaway-timeout-ms",
+			"0",
 		],
 		ready: /^LISTENING (\S+) port=/,
 		// It always prints one line for each thing it does.

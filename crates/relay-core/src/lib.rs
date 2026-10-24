@@ -47,7 +47,7 @@ use std::sync::Arc;
 
 pub use cache::CachedObject;
 pub use events::{
-    Action, Event, FetchPiece, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey,
+    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, OutStreamKey, OwnRequestEnd, OwnRequestKey,
     RequestEnd, SessionKey, StreamEnd, StreamKey,
 };
 pub use fetch::{
@@ -1479,6 +1479,9 @@ pub struct Relay {
     /// Says whether a session and a request are allowed
     /// ([`Self::set_authorizer`]). None: all of them are.
     authorizer: Option<Authorization>,
+    /// The New Session URI and the Timeout of the GOAWAY every session gets,
+    /// once the relay is to stop ([`Event::GoingAway`]).
+    going_away: Option<GoingAway>,
     /// [`Self::set_announcements`].
     announcements_at_once: u32,
     /// [`Self::set_announcements`].
@@ -1572,6 +1575,7 @@ impl Relay {
             next_drain_wait: 0,
             next_own_request: 0,
             authorizer: None,
+            going_away: None,
             announcements_at_once: MAX_ANNOUNCEMENTS_AT_ONCE,
             announcement_every_ms: ANNOUNCEMENT_EVERY_MS,
             requests_for_one: MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER,
@@ -1702,18 +1706,7 @@ impl Relay {
                 session,
                 stream,
                 how,
-            } => match how {
-                RequestEnd::Fin => self.on_request_half_closed(session, stream, &mut actions),
-                RequestEnd::Aborted => {
-                    // §5.2: a FETCH is cancelled by its request stream. One
-                    // the relay is still writing the answer of ends there.
-                    // WHY here and not where a request is over: a subscriber
-                    // that only finishes its direction has given nothing up,
-                    // and ends up there as well.
-                    self.cancel_written_fetch(session, stream, &mut actions);
-                    self.on_request_closed(session, stream, true, &mut actions);
-                }
-            },
+            } => self.on_peer_request_stream_ended(session, stream, how, &mut actions),
             Event::OwnRequestMessage {
                 session,
                 request,
@@ -1781,6 +1774,7 @@ impl Relay {
                 self.fail_session(session, &error, &mut actions);
             }
             Event::SessionClosed { session } => self.drop_session(session, &mut actions),
+            Event::GoingAway(going_away) => self.on_going_away(going_away, &mut actions),
         }
         actions
     }
@@ -2014,6 +2008,63 @@ impl Relay {
                 announcement_timer: false,
             },
         );
+        self.go_away(session, actions);
+    }
+
+    /// [`Event::RequestClosed`]: the peer's direction of a request stream
+    /// ended, with a FIN or by a reset.
+    fn on_peer_request_stream_ended(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        how: RequestEnd,
+        actions: &mut Vec<Action>,
+    ) {
+        match how {
+            RequestEnd::Fin => self.on_request_half_closed(session, stream, actions),
+            RequestEnd::Aborted => {
+                // §5.2: a FETCH is cancelled by its request stream. One the
+                // relay is still writing the answer of ends there. WHY here
+                // and not where a request is over: a subscriber that only
+                // finishes its direction has given nothing up, and ends up
+                // there as well.
+                self.cancel_written_fetch(session, stream, actions);
+                self.on_request_closed(session, stream, true, actions);
+            }
+        }
+    }
+
+    /// [`Event::GoingAway`]: every session is sent its GOAWAY, in the order
+    /// of their numbers, once.
+    fn on_going_away(&mut self, going_away: GoingAway, actions: &mut Vec<Action>) {
+        if self.going_away.is_some() {
+            return;
+        }
+        self.going_away = Some(going_away);
+        let mut sessions: Vec<SessionKey> = self.sessions.keys().copied().collect();
+        sessions.sort_unstable();
+        for session in sessions {
+            self.go_away(session, actions);
+        }
+    }
+
+    /// Sends the session its GOAWAY, once the relay is to stop
+    /// ([`Event::GoingAway`]). From then on the session refuses every
+    /// request of the peer with `GOING_AWAY` (§10.4).
+    fn go_away(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
+        let (Some(going_away), Some(state)) = (&self.going_away, self.sessions.get_mut(&session))
+        else {
+            return;
+        };
+        let uri = match state.moqt.role() {
+            Role::Server => going_away.new_session_uri.clone(),
+            Role::Client => Vec::new(),
+        };
+        // It fails for a second GOAWAY alone: the relay sent SETUP when the
+        // session opened, and a client's GOAWAY has no URI.
+        if let Ok(message) = state.moqt.go_away(uri, going_away.timeout_ms) {
+            actions.push(Action::SendControl { session, message });
+        }
     }
 
     /// From now on a session and a request are asked of `authorizer`

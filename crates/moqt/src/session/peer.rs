@@ -349,6 +349,11 @@ impl PeerRequests {
 
     /// §10.1: an ID of the wrong parity or a repeated one closes the session
     /// with `INVALID_REQUEST_ID`.
+    /// The smallest Request ID of the peer not seen yet.
+    pub(super) fn lowest_unseen(&self) -> u64 {
+        self.lowest_unseen
+    }
+
     pub(super) fn take_id(&mut self, id: u64) -> Result<(), Error> {
         let duplicate = id < self.lowest_unseen
             || self.seen_ahead.contains(&id)
@@ -496,6 +501,25 @@ fn request_error(error_code: u64) -> ControlMessage {
     })
 }
 
+/// The Request ID of the first message of a request stream.
+///
+/// # Errors
+///
+/// A protocol error for a message that is not a request (§3.3).
+fn request_id_of(first: &ControlMessage) -> Result<u64, Error> {
+    match first {
+        ControlMessage::Subscribe(message) => Ok(message.request_id),
+        ControlMessage::Publish(message) => Ok(message.request_id),
+        ControlMessage::PublishNamespace(message) => Ok(message.request_id),
+        ControlMessage::Fetch(message) => Ok(message.request_id),
+        ControlMessage::SubscribeNamespace(message) => Ok(message.request_id),
+        ControlMessage::UnsupportedRequest { request_id, .. } => Ok(*request_id),
+        _ => Err(Error::ProtocolViolation(
+            "request stream did not begin with a request",
+        )),
+    }
+}
+
 const NOT_PENDING: UsageError = UsageError("the request is not waiting for a response");
 
 impl Session {
@@ -536,24 +560,19 @@ impl Session {
         &mut self,
         first: ControlMessage,
     ) -> Result<PeerRequestOpened, Error> {
-        let request_id = match &first {
-            ControlMessage::Subscribe(message) => message.request_id,
-            ControlMessage::Publish(message) => message.request_id,
-            ControlMessage::PublishNamespace(message) => message.request_id,
-            ControlMessage::Fetch(message) => message.request_id,
-            ControlMessage::SubscribeNamespace(message) => message.request_id,
-            ControlMessage::UnsupportedRequest { request_id, .. } => *request_id,
-            _ => {
-                return Err(Error::ProtocolViolation(
-                    "request stream did not begin with a request",
-                ));
-            }
-        };
+        let request_id = request_id_of(&first)?;
         self.peer.take_id(request_id)?;
         let id = PeerRequestId {
             session: self.tag,
             id: request_id,
         };
+        // §10.4: "Requests with a Request ID equal to or greater than the
+        // indicated value, as well as any requests that arrive after the
+        // GOAWAY, MUST be rejected with REQUEST_ERROR using error code
+        // GOING_AWAY." Every request read now came after it.
+        if self.go_aways.sent {
+            return Ok(self.refuse_opened(id, request_error_code::GOING_AWAY));
+        }
 
         let (state, request) = match first {
             ControlMessage::Subscribe(message) => {

@@ -812,6 +812,15 @@ impl WtServer {
 /// A connection attempt whose handshake is still to be done.
 pub struct Incoming(quinn::Incoming);
 
+impl Incoming {
+    /// Refuses the attempt at once: QUIC's `CONNECTION_REFUSED`, read in quinn
+    /// 0.11.12 (`Incoming::refuse`, "Reject this incoming connection
+    /// attempt").
+    pub fn refuse(self) {
+        self.0.refuse();
+    }
+}
+
 /// What the client asked for when it opened the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRequest {

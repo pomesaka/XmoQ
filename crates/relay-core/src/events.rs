@@ -355,6 +355,20 @@ pub enum Event {
         /// The session.
         session: SessionKey,
     },
+    /// The relay is to stop: every session is told with GOAWAY (§3.6, §10.4),
+    /// and a session that opens later is told after its SETUP. A session of
+    /// which the relay is the client gets an empty New Session URI (§10.4: "A
+    /// client MUST send a zero-length New Session URI").
+    GoingAway(GoingAway),
+}
+
+/// What the GOAWAY of a relay that is to stop says ([`Event::GoingAway`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoingAway {
+    /// Where the clients continue; empty for the URI they used.
+    pub new_session_uri: Vec<u8>,
+    /// How long the relay waits before it closes the sessions.
+    pub timeout_ms: u64,
 }
 
 /// Something for the I/O side to do.

@@ -38,6 +38,15 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// connections, each with a task, for the length of the timeout.
 const MAX_HANDSHAKES: usize = 64;
 
+/// How long the relay waits after its GOAWAY before it closes the sessions
+/// that are left, where `--goaway-timeout-ms` does not say. Provisional: the
+/// 10 seconds `moqtail`'s relay waits (relay@0.15.0, read on 2026-10-24).
+const GOAWAY_TIMEOUT_MS: u64 = 10_000;
+
+/// `GOAWAY_TIMEOUT` (§3.5): "The session was closed because the peer took
+/// too long to close the session in response to a GOAWAY".
+const GOAWAY_TIMEOUT: u32 = 0x10;
+
 /// The QUIC limits that go with the limits of the relay. Provisional.
 ///
 /// Three limits act on the requests a peer opens, and this is the one place
@@ -139,6 +148,14 @@ struct Args {
     /// `--auth-setup off`: with a key, the SETUP of a client is not asked
     /// for a token ([`HubConfig::auth_setup`]). On with a key otherwise.
     auth_setup: bool,
+    /// `--redirect-uri`: the New Session URI of the GOAWAY the relay sends
+    /// when it is told to stop; empty where it is not said, for the URI the
+    /// client used (§10.4). The name is `moqtail`'s relay's.
+    redirect_uri: Vec<u8>,
+    /// `--goaway-timeout-ms`: the Timeout of that GOAWAY, and how long the
+    /// relay waits before it closes the sessions that are left
+    /// ([`GOAWAY_TIMEOUT_MS`] where it is not said).
+    goaway_timeout_ms: u64,
 }
 
 /// The number a flag gives.
@@ -180,6 +197,8 @@ fn parse_args() -> Result<Args> {
     let mut log_arrivals = false;
     let mut auth_key = None;
     let mut auth_setup = true;
+    let mut redirect_uri = Vec::new();
+    let mut goaway_timeout_ms = GOAWAY_TIMEOUT_MS;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -234,6 +253,8 @@ fn parse_args() -> Result<Args> {
                     other => bail!("--auth-setup {other}: on or off"),
                 };
             }
+            "--redirect-uri" => redirect_uri = value.into_bytes(),
+            "--goaway-timeout-ms" => goaway_timeout_ms = number(&flag, &value)?,
             other => bail!("unknown flag {other}"),
         }
     }
@@ -257,6 +278,8 @@ fn parse_args() -> Result<Args> {
         log_arrivals,
         auth_key,
         auth_setup,
+        redirect_uri,
+        goaway_timeout_ms,
     })
 }
 
@@ -301,17 +324,36 @@ async fn main() -> Result<()> {
     let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
-    let (hub, hub_task) = hub::spawn(config);
+    let (hub, mut hub_task) = hub::spawn(config);
     tokio::select! {
         () = accept_sessions(&server, &hub, &log) => bail!("the server stopped accepting"),
-        () = told_to_stop() => {
-            hub.stop().await;
-            Ok(())
-        }
+        () = told_to_stop() => {}
         // WHY end the process: the hub is the one task that serves every
         // session. Without it the relay would go on accepting connections that
         // nobody answers.
-        ended = hub_task => bail!("the relay's hub ended: {ended:?}"),
+        ended = &mut hub_task => bail!("the relay's hub ended: {ended:?}"),
+    }
+    // §3.6: GOAWAY to every session, and the sessions that are left are
+    // closed with GOAWAY_TIMEOUT when its Timeout is over. WHY a connection
+    // that comes meanwhile is refused, and not taken and told: a client sent
+    // to the URI it used would come back to this relay at once, again and
+    // again, until it ends; refused, it waits and tries again, and finds the
+    // relay that takes this one's place.
+    let timeout = Duration::from_millis(args.goaway_timeout_ms);
+    tokio::select! {
+        () = refuse_sessions(&server) => {}
+        _ = tokio::time::timeout(timeout, hub.go_away(args.redirect_uri, args.goaway_timeout_ms)) => {}
+        _ = &mut hub_task => return Ok(()),
+    }
+    hub.stop_with(GOAWAY_TIMEOUT, "the GOAWAY's time is over")
+        .await;
+    Ok(())
+}
+
+/// Refuses every connection attempt, for a relay that has sent its GOAWAY.
+async fn refuse_sessions(server: &WtServer) {
+    while let Some(incoming) = server.incoming().await {
+        incoming.refuse();
     }
 }
 
