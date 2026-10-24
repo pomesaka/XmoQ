@@ -249,7 +249,7 @@ describe("a SUBSCRIBE of the peer", () => {
 		);
 		expect(
 			briefly(
-				session.receivePeerBidiStreamData(9, hex("0d 00 02 03 00"), false),
+				session.receivePeerBidiStreamData(9, hex("51 00 02 03 00"), false),
 			).at(-1),
 		).toBe("close 4");
 	});
@@ -566,7 +566,7 @@ describe("what is kept for a SUBSCRIBE of the peer", () => {
 		// Another request with Request ID 3, the one of the update.
 		expect(
 			briefly(
-				session.receivePeerBidiStreamData(9, hex("0d 00 02 03 00"), false),
+				session.receivePeerBidiStreamData(9, hex("51 00 02 03 00"), false),
 			).at(-1),
 		).toBe("close 4");
 	});
@@ -608,12 +608,12 @@ describe("what the session answers by itself", () => {
 		const session = started();
 		// Request ID 1 never comes, so 3 stays remembered above the gap.
 		session.receivePeerBidiStreamData(0, subscribeBytes(3), false);
-		// 1,100 further requests, each the start of a TRACK_STATUS whose
+		// 1,100 further requests, each the start of a SUBSCRIBE_TRACKS whose
 		// Request ID is written as a varint of 9 bytes: more than the 1,024
 		// IDs that are remembered, so the 3 is pushed out.
 		for (let index = 0; index < 1100; index++) {
 			const requestId = (5 + index * 2).toString(16).padStart(16, "0");
-			const bytes = `0d 00 09 ff ${requestId.match(/../g)?.join(" ")}`;
+			const bytes = `51 00 09 ff ${requestId.match(/../g)?.join(" ")}`;
 			session.receivePeerBidiStreamData(1 + index, hex(bytes), true);
 		}
 		expect(session.closed).toBe(false);

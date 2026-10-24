@@ -923,13 +923,13 @@ describe("Session", () => {
 		]);
 	});
 
-	// A TRACK_STATUS, which has the format of a SUBSCRIBE and another type
-	// (§10.14). A SUBSCRIBE is handed to the application
-	// (session-peer-subscribe.test.ts).
+	// A SUBSCRIBE_TRACKS (§10.19), which is not implemented. A SUBSCRIBE and a
+	// TRACK_STATUS are handed to the application
+	// (session-peer-subscribe.test.ts, session-track-status.test.ts).
 	test("answers a request the peer opens, and that is not served, with REQUEST_ERROR NOT_SUPPORTED", () => {
 		const session = started();
 		const [respond, event] = said(
-			session.receivePeerBidiStreamData(0, hex("0d 00 1f 01"), false),
+			session.receivePeerBidiStreamData(0, hex("51 00 1f 01"), false),
 		);
 		if (respond?.type !== "respond") {
 			throw new Error("the first output is not a response");
@@ -942,7 +942,7 @@ describe("Session", () => {
 			type: "event",
 			event: {
 				type: "peer-request-rejected",
-				messageType: 13n,
+				messageType: 81n,
 				requestId: 1n,
 				errorCode: 3n,
 			},
@@ -1010,7 +1010,7 @@ describe("Session", () => {
 		// The Request ID is used up.
 		expect(
 			said(
-				session.receivePeerBidiStreamData(1, hex("0d 00 02 01 00"), false),
+				session.receivePeerBidiStreamData(1, hex("51 00 02 01 00"), false),
 			).at(-1),
 		).toMatchObject({ type: "close-session", code: 4 });
 	});
@@ -1078,7 +1078,10 @@ describe("Session", () => {
 	// treated as that, as in the Rust implementation.
 	test.each([
 		{ name: "a FETCH", bytes: "16 00 05 01 02 00" },
-		{ name: "a TRACK_STATUS, after its Request ID", bytes: "0d 00 09 01 00" },
+		{
+			name: "a SUBSCRIBE_TRACKS, after its Request ID",
+			bytes: "51 00 09 01 00",
+		},
 		{ name: "a SUBSCRIBE, inside its Request ID", bytes: "03 00 1f 80" },
 		{ name: "a request, after its Message Type", bytes: "03" },
 	])(
@@ -1092,9 +1095,9 @@ describe("Session", () => {
 
 	test("closes the session when a request that was refused on its start ends before it is whole", () => {
 		const session = started();
-		// A TRACK_STATUS of 31 bytes, of which one has come: it is refused.
+		// A SUBSCRIBE_TRACKS of 31 bytes, of which one has come: it is refused.
 		expect(
-			said(session.receivePeerBidiStreamData(0, hex("0d 00 1f 01"), false)).map(
+			said(session.receivePeerBidiStreamData(0, hex("51 00 1f 01"), false)).map(
 				(output) => output.type,
 			),
 		).toEqual(["respond", "event"]);
@@ -1119,12 +1122,12 @@ describe("Session", () => {
 	test.each([
 		{
 			name: "an even Request ID from the server (§10.1)",
-			requests: ["0d 00 1f 02"],
+			requests: ["51 00 1f 02"],
 			code: 4,
 		},
 		{
 			name: "a duplicate Request ID (§10.1)",
-			requests: ["0d 00 1f 01", "0d 00 02 01 00"],
+			requests: ["51 00 1f 01", "51 00 02 01 00"],
 			code: 4,
 		},
 	])("closes the session on $name", ({ requests, code }) => {
@@ -1141,19 +1144,19 @@ describe("Session", () => {
 	test("a gap in the peer's Request IDs never closes the session (§10.1)", () => {
 		const session = started();
 		// Request ID 1 never arrives; 3, 5, ... do, 1,100 of them. Each is the
-		// start of a TRACK_STATUS whose Request ID is written as a 9-byte
+		// start of a SUBSCRIBE_TRACKS whose Request ID is written as a 9-byte
 		// varint. WHY not a FETCH, the other request that is not served: a
 		// FETCH is decoded whole before it is refused, and these are not whole.
 		for (let index = 0; index < 1100; index++) {
 			const requestId = (3 + index * 2).toString(16).padStart(16, "0");
-			const bytes = `0d 00 09 ff ${requestId.match(/../g)?.join(" ")}`;
+			const bytes = `51 00 09 ff ${requestId.match(/../g)?.join(" ")}`;
 			said(session.receivePeerBidiStreamData(index, hex(bytes), true));
 		}
 		expect(session.closed).toBe(false);
 		// The late request with Request ID 1 is still a new request.
 		expect(
 			said(
-				session.receivePeerBidiStreamData(2000, hex("0d 00 02 01 00"), true),
+				session.receivePeerBidiStreamData(2000, hex("51 00 02 01 00"), true),
 			).map((output) => output.type),
 			// The refusal, that it was refused, and that the peer has ended
 			// its direction.
@@ -1171,7 +1174,7 @@ describe("Session", () => {
 		// Its Request ID was used all the same: a request that uses it again is a duplicate.
 		expect(
 			said(
-				session.receivePeerBidiStreamData(0, hex("0d 00 02 01 00"), false),
+				session.receivePeerBidiStreamData(0, hex("51 00 02 01 00"), false),
 			).at(-1),
 		).toMatchObject({ type: "close-session", code: 4 });
 	});

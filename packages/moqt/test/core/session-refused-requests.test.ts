@@ -50,9 +50,9 @@ function fetchBytes(
 const update = (requestId: number): Uint8Array =>
 	hex(`02 00 02 ${requestId.toString(16).padStart(2, "0")} 00`);
 
-/** The start of a TRACK_STATUS with a Request ID: a request that is not implemented, whole. */
-const trackStatus = (requestId: number): Uint8Array =>
-	hex(`0d 00 02 ${requestId.toString(16).padStart(2, "0")} 00`);
+/** The start of a SUBSCRIBE_TRACKS with a Request ID: a request that is not implemented, whole. */
+const subscribeTracks = (requestId: number): Uint8Array =>
+	hex(`51 00 02 ${requestId.toString(16).padStart(2, "0")} 00`);
 
 function started(maxPeerRequests?: number): Session {
 	const session = createSession({
@@ -125,7 +125,7 @@ const REFUSED: {
 	{
 		name: "a request the session does not implement (NOT_SUPPORTED)",
 		refuse: (session) => {
-			session.receivePeerBidiStreamData(0, trackStatus(1), false);
+			session.receivePeerBidiStreamData(0, subscribeTracks(1), false);
 		},
 	},
 	{
@@ -150,7 +150,7 @@ describe("a request of the peer that was refused is kept until its stream is gon
 			).toEqual([]);
 			// The next request cannot have the Request ID 3.
 			expect(
-				said(session.receivePeerBidiStreamData(1, trackStatus(3), false)),
+				said(session.receivePeerBidiStreamData(1, subscribeTracks(3), false)),
 			).toEqual(["close 4"]);
 		},
 	);
@@ -244,20 +244,20 @@ describe("a request of the peer that was refused is kept until its stream is gon
 		const session = started();
 		session.receivePeerBidiStreamData(
 			0,
-			new Uint8Array([...trackStatus(1), ...update(3)]),
+			new Uint8Array([...subscribeTracks(1), ...update(3)]),
 			false,
 		);
 		expect(
-			said(session.receivePeerBidiStreamData(1, trackStatus(3), false)),
+			said(session.receivePeerBidiStreamData(1, subscribeTracks(3), false)),
 		).toEqual(["close 4"]);
 	});
 
 	test("a request that was refused on its start has the rest of its first message skipped, and what follows read", () => {
 		const session = started();
-		// A TRACK_STATUS of 6 bytes of payload, of which the Request ID has
+		// A SUBSCRIBE_TRACKS of 6 bytes of payload, of which the Request ID has
 		// come: it is refused.
 		expect(
-			said(session.receivePeerBidiStreamData(0, hex("0d 00 06 01"), false)),
+			said(session.receivePeerBidiStreamData(0, hex("51 00 06 01"), false)),
 		).toEqual(["REQUEST_ERROR 3"]);
 		// The other 5 bytes, which are not looked at, and a REQUEST_UPDATE.
 		session.receivePeerBidiStreamData(
@@ -267,7 +267,7 @@ describe("a request of the peer that was refused is kept until its stream is gon
 		);
 		expect(session.closed).toBe(false);
 		expect(
-			said(session.receivePeerBidiStreamData(1, trackStatus(3), false)),
+			said(session.receivePeerBidiStreamData(1, subscribeTracks(3), false)),
 		).toEqual(["close 4"]);
 	});
 });
@@ -275,8 +275,8 @@ describe("a request of the peer that was refused is kept until its stream is gon
 describe("a request of the peer that was refused counts among the ones the peer may have open", () => {
 	test("a rejected request holds its place until its stream is gone", () => {
 		const session = started(2);
-		session.receivePeerBidiStreamData(0, trackStatus(1), false);
-		session.receivePeerBidiStreamData(1, trackStatus(3), false);
+		session.receivePeerBidiStreamData(0, subscribeTracks(1), false);
+		session.receivePeerBidiStreamData(1, subscribeTracks(3), false);
 		// Two are kept: a SUBSCRIBE finds no room.
 		expect(
 			said(session.receivePeerBidiStreamData(2, subscribeBytes(5), false)),
@@ -320,21 +320,21 @@ describe("a request of the peer that was refused counts among the ones the peer 
 		).toEqual(["REQUEST_ERROR 9"]);
 		session.receivePeerBidiStreamData(1, update(5), false);
 		expect(
-			said(session.receivePeerBidiStreamData(2, trackStatus(5), false)),
+			said(session.receivePeerBidiStreamData(2, subscribeTracks(5), false)),
 		).toEqual(["close 4"]);
 	});
 
 	// The one request that is not kept: as many are kept as may be.
 	test("a request refused while that many are kept is not kept: what follows is dropped, and no Request ID is used", () => {
 		const session = started(1);
-		session.receivePeerBidiStreamData(0, trackStatus(1), false);
-		// EXCESSIVE_LOAD for a SUBSCRIBE, NOT_SUPPORTED for a TRACK_STATUS:
+		session.receivePeerBidiStreamData(0, subscribeTracks(1), false);
+		// EXCESSIVE_LOAD for a SUBSCRIBE, NOT_SUPPORTED for a SUBSCRIBE_TRACKS:
 		// neither is kept.
 		expect(
 			said(session.receivePeerBidiStreamData(1, subscribeBytes(3), false)),
 		).toEqual(["REQUEST_ERROR 9"]);
 		expect(
-			said(session.receivePeerBidiStreamData(2, trackStatus(5), false)),
+			said(session.receivePeerBidiStreamData(2, subscribeTracks(5), false)),
 		).toEqual(["REQUEST_ERROR 3"]);
 		for (const peerStream of [1, 2]) {
 			// A REQUEST_UPDATE, and bytes that do not decode: dropped.
@@ -345,7 +345,7 @@ describe("a request of the peer that was refused counts among the ones the peer 
 		// The Request ID 0x21 was not used.
 		session.receivePeerBidiStreamData(0, new Uint8Array(0), true);
 		expect(
-			said(session.receivePeerBidiStreamData(3, trackStatus(0x21), false)),
+			said(session.receivePeerBidiStreamData(3, subscribeTracks(0x21), false)),
 		).toEqual(["REQUEST_ERROR 3"]);
 	});
 });
@@ -357,7 +357,7 @@ describe("the Request ID of a request that is kept is a duplicate, also when it 
 			const requestId = (from + index * 2).toString(16).padStart(16, "0");
 			session.receivePeerBidiStreamData(
 				100 + index,
-				hex(`0d 00 09 ff ${requestId.match(/../g)?.join(" ")}`),
+				hex(`51 00 09 ff ${requestId.match(/../g)?.join(" ")}`),
 				true,
 			);
 		}
@@ -374,7 +374,7 @@ describe("the Request ID of a request that is kept is a duplicate, also when it 
 		{
 			name: "a request the session refused, its stream still open",
 			keep: (session: Session) => {
-				session.receivePeerBidiStreamData(0, trackStatus(3), false);
+				session.receivePeerBidiStreamData(0, subscribeTracks(3), false);
 			},
 		},
 	])("$name", ({ keep }) => {
@@ -384,7 +384,7 @@ describe("the Request ID of a request that is kept is a duplicate, also when it 
 		pushOut(session, 5);
 		expect(session.closed).toBe(false);
 		expect(
-			said(session.receivePeerBidiStreamData(5000, trackStatus(3), false)),
+			said(session.receivePeerBidiStreamData(5000, subscribeTracks(3), false)),
 		).toEqual(["close 4"]);
 	});
 });
@@ -404,7 +404,7 @@ describe("a request that is kept is not one that is yet to come, also when its I
 		for (let id = 5; id <= 2203; id += 2) {
 			session.receivePeerBidiStreamData(
 				id,
-				hex(["0d", "00", "09", ...nine(id)].join(" ")),
+				hex(["51", "00", "09", ...nine(id)].join(" ")),
 				true,
 			);
 		}
@@ -501,7 +501,7 @@ describe("a refused request, what follows it and the FIN: in one read as in seve
 		{
 			name: "a request that is not implemented",
 			setup: (_session: Session) => {},
-			request: trackStatus(1),
+			request: subscribeTracks(1),
 			first: "REQUEST_ERROR 3",
 		},
 		{
@@ -552,11 +552,11 @@ describe("a refused request, what follows it and the FIN: in one read as in seve
 		const session = started();
 		session.receivePeerBidiStreamData(
 			0,
-			new Uint8Array([...trackStatus(1), ...update(3)]),
+			new Uint8Array([...subscribeTracks(1), ...update(3)]),
 			true,
 		);
 		expect(
-			said(session.receivePeerBidiStreamData(1, trackStatus(3), false)),
+			said(session.receivePeerBidiStreamData(1, subscribeTracks(3), false)),
 		).toEqual(["close 4"]);
 	});
 });
@@ -717,7 +717,9 @@ describe("the wait for the peer to end its direction after a refusal", () => {
 	test("a request that was refused with its FIN in the same read is reported as ended at once", () => {
 		const session = started();
 		expect(
-			stopsAndEnds(session.receivePeerBidiStreamData(0, trackStatus(1), true)),
+			stopsAndEnds(
+				session.receivePeerBidiStreamData(0, subscribeTracks(1), true),
+			),
 		).toEqual(["ended 1 fin"]);
 	});
 
@@ -737,9 +739,9 @@ describe("the wait for the peer to end its direction after a refusal", () => {
 		"$how of the peer after a request that is not kept is reported as well, so that its wait ends",
 		({ end, ended }) => {
 			const session = started(1);
-			session.receivePeerBidiStreamData(0, trackStatus(1), false);
+			session.receivePeerBidiStreamData(0, subscribeTracks(1), false);
 			// As many are kept as may be: this one is not.
-			session.receivePeerBidiStreamData(1, trackStatus(3), false);
+			session.receivePeerBidiStreamData(1, subscribeTracks(3), false);
 			expect(stopsAndEnds(end(session))).toEqual([ended]);
 			expect(session.expirePeerEnd(3n)).toEqual([]);
 		},
@@ -751,32 +753,32 @@ describe("the wait for the peer to end its direction after a refusal", () => {
 	test("the Request ID of a request that is not kept is not held on to once it is no longer remembered", () => {
 		const session = started(1);
 		// Request ID 1 never comes, so 3 and 5 stay above the gap.
-		session.receivePeerBidiStreamData(0, trackStatus(3), false);
-		session.receivePeerBidiStreamData(1, trackStatus(5), false);
+		session.receivePeerBidiStreamData(0, subscribeTracks(3), false);
+		session.receivePeerBidiStreamData(1, subscribeTracks(5), false);
 		// 1,100 requests, each whole and ended: more than the 1,024 IDs that
 		// are remembered, so 3 and 5 are pushed out.
 		for (let index = 0; index < 1100; index++) {
 			const requestId = (7 + index * 2).toString(16).padStart(16, "0");
 			session.receivePeerBidiStreamData(
 				100 + index,
-				hex(`0d 00 09 ff ${requestId.match(/../g)?.join(" ")}`),
+				hex(`51 00 09 ff ${requestId.match(/../g)?.join(" ")}`),
 				true,
 			);
 		}
 		expect(session.closed).toBe(false);
 		// 3 is kept, and still a duplicate; 5 is not kept, and reads as new.
 		expect(
-			said(session.receivePeerBidiStreamData(5000, trackStatus(5), true)),
+			said(session.receivePeerBidiStreamData(5000, subscribeTracks(5), true)),
 		).toEqual(["REQUEST_ERROR 3"]);
 		expect(
-			said(session.receivePeerBidiStreamData(5001, trackStatus(3), true)),
+			said(session.receivePeerBidiStreamData(5001, subscribeTracks(3), true)),
 		).toEqual(["close 4"]);
 	});
 
 	test("a request that is not kept, for as many being kept as may be, is stopped the same when the wait is over", () => {
 		const session = started(1);
-		session.receivePeerBidiStreamData(0, trackStatus(1), false);
-		session.receivePeerBidiStreamData(1, trackStatus(3), false);
+		session.receivePeerBidiStreamData(0, subscribeTracks(1), false);
+		session.receivePeerBidiStreamData(1, subscribeTracks(3), false);
 		expect(stopsAndEnds(session.expirePeerEnd(3n))).toEqual([
 			"abandon peer stream 1, 1",
 		]);
@@ -816,13 +818,15 @@ describe("the wait after a refusal, where the request, what follows it and the F
 			const one = ends(
 				inOne.receivePeerBidiStreamData(
 					0,
-					new Uint8Array([...trackStatus(1), ...after]),
+					new Uint8Array([...subscribeTracks(1), ...after]),
 					true,
 				),
 			);
 			const inThree = started();
 			const three = [
-				...ends(inThree.receivePeerBidiStreamData(0, trackStatus(1), false)),
+				...ends(
+					inThree.receivePeerBidiStreamData(0, subscribeTracks(1), false),
+				),
 				...ends(inThree.receivePeerBidiStreamData(0, after, false)),
 				...ends(inThree.receivePeerBidiStreamData(0, new Uint8Array(0), true)),
 			];
@@ -842,7 +846,7 @@ describe("the wait after a refusal, where the request, what follows it and the F
 		({ cut }) => {
 			const session = started();
 			const before = session.heldStreams();
-			session.receivePeerBidiStreamData(0, trackStatus(1), false);
+			session.receivePeerBidiStreamData(0, subscribeTracks(1), false);
 			session.expirePeerEnd(1n);
 			const bad = hex("3f 00 00");
 			const outputs = cut

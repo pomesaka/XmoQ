@@ -621,11 +621,11 @@ fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
     }
     // (first message; REQUEST_ERROR code)
     let cases = [
-        // TRACK_STATUS, which the session does not decode and refuses by
+        // SUBSCRIBE_TRACKS, which the session does not decode and refuses by
         // itself: NOT_SUPPORTED.
         (
             ControlMessage::UnsupportedRequest {
-                message_type: 0x0d,
+                message_type: 0x51,
                 request_id: 0,
             },
             0x3,

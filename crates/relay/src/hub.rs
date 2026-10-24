@@ -3257,6 +3257,7 @@ fn name(message: &ControlMessage) -> String {
         ControlMessage::Setup(_) => "SETUP".to_string(),
         ControlMessage::RequestUpdate(_) => "REQUEST_UPDATE".to_string(),
         ControlMessage::Subscribe(_) => "SUBSCRIBE".to_string(),
+        ControlMessage::TrackStatus(_) => "TRACK_STATUS".to_string(),
         ControlMessage::SubscribeOk(ok) => format!("SUBSCRIBE_OK track_alias={}", ok.track_alias),
         ControlMessage::Publish(_) => "PUBLISH".to_string(),
         ControlMessage::PublishNamespace(_) => "PUBLISH_NAMESPACE".to_string(),

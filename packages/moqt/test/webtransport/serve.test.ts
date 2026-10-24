@@ -834,7 +834,7 @@ describe("serve: an accepted SUBSCRIBE that the subscriber ends", () => {
 		// A second request waits in the transport while the first stream is
 		// read.
 		const second = peer.openBidi();
-		await second.reply.write(hex("0d 00 02 03 00"));
+		await second.reply.write(hex("51 00 02 03 00"));
 		await settle();
 		expect(peer.untakenBidiStreams()).toBe(1);
 		await first.reply.close();

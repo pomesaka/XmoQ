@@ -235,6 +235,28 @@ const FIXTURES: {
 			trackProperties: [],
 		},
 	},
+	{
+		name: "TRACK_STATUS without parameters, which the relay sent on to a publisher",
+		source: "moqtail relay 0.15.0",
+		file: "track-status-moqtail-relay",
+		message: {
+			type: "TRACK_STATUS",
+			requestId: 1n,
+			trackNamespace: [utf8("xmoq"), utf8("phase0")],
+			trackName: utf8("nobody-published-this"),
+			parameters: {},
+		},
+	},
+	{
+		name: "REQUEST_OK with LARGEST_OBJECT (TRACK_STATUS_OK)",
+		source: "moqtail relay 0.15.0",
+		file: "request-ok-track-status-moqtail-relay",
+		message: {
+			type: "REQUEST_OK",
+			parameters: { largestObject: { group: 0n, object: 0n } },
+			trackProperties: [],
+		},
+	},
 ];
 
 /** An Object of moqtail's test client in a fetch stream: Subgroup 1, priority 128. */

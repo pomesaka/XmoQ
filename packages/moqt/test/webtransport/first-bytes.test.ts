@@ -60,7 +60,7 @@ describe("a stream of the peer that does not say what it is", () => {
 	);
 
 	test.each([
-		{ name: "half of its Request ID", bytes: "0d 00 05 80" },
+		{ name: "half of its Request ID", bytes: "51 00 05 80" },
 		{ name: "a FETCH that is not whole", bytes: "16 00 05 01 02" },
 	])(
 		"a request that sent $name is given up after 10 seconds, in both directions",
@@ -87,8 +87,8 @@ describe("a stream of the peer that does not say what it is", () => {
 	test("a request that was refused on its Request ID and never comes whole is stopped, after its answer", async () => {
 		const { peer, connection } = await connected();
 		const request = peer.openBidi();
-		// A TRACK_STATUS of 5 bytes of payload, of which two came.
-		await request.reply.write(hex("0d 00 05 01 00"));
+		// A SUBSCRIBE_TRACKS of 5 bytes of payload, of which two came.
+		await request.reply.write(hex("51 00 05 01 00"));
 		await flush();
 		// REQUEST_ERROR, and the end of this endpoint's direction.
 		expect((await request.sent.read()).value?.[0]).toBe(0x05);
@@ -135,7 +135,7 @@ describe("a stream of the peer that does not say what it is", () => {
 	test("a request that came whole and was refused keeps its stream for the time its peer has to end its direction, and no longer", async () => {
 		const { peer, connection } = await connected();
 		const request = peer.openBidi();
-		await request.reply.write(hex("0d 00 02 01 00"));
+		await request.reply.write(hex("51 00 02 01 00"));
 		await pass(2_999);
 		expect(await state(request.reply.closed)).toBe("pending");
 		await pass(1);
@@ -263,7 +263,7 @@ describe("a stream of the peer that does not say what it is", () => {
 			name: "a request has come whole and its peer has ended its direction",
 			act: async (peer) => {
 				const request = peer.openBidi();
-				await request.reply.write(hex("0d 00 02 01 00"));
+				await request.reply.write(hex("51 00 02 01 00"));
 				await flush();
 				await request.reply.close();
 			},
@@ -272,7 +272,7 @@ describe("a stream of the peer that does not say what it is", () => {
 			name: "a request was refused and its peer has reset its direction",
 			act: async (peer) => {
 				const request = peer.openBidi();
-				await request.reply.write(hex("0d 00 02 01 00"));
+				await request.reply.write(hex("51 00 02 01 00"));
 				await flush();
 				await request.reply.abort(fakeStreamError(1, "reset"));
 			},
@@ -295,7 +295,7 @@ describe("a stream of the peer that does not say what it is", () => {
 		{
 			name: "a request was refused and the session has ended",
 			act: async (peer, connection) => {
-				await peer.openBidi().reply.write(hex("0d 00 02 01 00"));
+				await peer.openBidi().reply.write(hex("51 00 02 01 00"));
 				await flush();
 				connection.close();
 			},

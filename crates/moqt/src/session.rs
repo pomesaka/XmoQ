@@ -129,6 +129,8 @@ enum Request {
         named: HashSet<TrackNamespace>,
     },
     Fetch(fetch::OwnFetch),
+    /// A `TRACK_STATUS`, which its one answer ends (§10.14).
+    TrackStatus,
 }
 
 /// The namespaces a `SUBSCRIBE_NAMESPACE` of this endpoint keeps, that the
@@ -160,6 +162,7 @@ impl Request {
             Self::PublishNamespace { established }
             | Self::SubscribeNamespace { established, .. } => *established,
             Self::Fetch(fetch) => fetch.answered,
+            Self::TrackStatus => false,
         }
     }
 }
@@ -234,6 +237,16 @@ pub enum RequestEvent {
     FetchNotProcessed {
         /// Why.
         refusal: TrackRefusal,
+    },
+    /// `TRACK_STATUS_OK` (§10.14, a `REQUEST_OK`): what the peer would have
+    /// set in a `SUBSCRIBE_OK`. The request is Terminated; the peer closes
+    /// its stream with a FIN.
+    TrackStatusAnswered {
+        /// Message Parameters: `LARGEST_OBJECT` where Objects have been
+        /// published (§10.2.11).
+        parameters: Vec<Parameter>,
+        /// Track Properties (§10.5).
+        track_properties: Vec<KeyValuePair>,
     },
     /// `REQUEST_ERROR`: the peer rejected the request, which is now Terminated.
     Rejected(RequestError),
@@ -709,6 +722,49 @@ impl Session {
         Ok((request_id, message))
     }
 
+    /// `TRACK_STATUS_OK`: `LARGEST_OBJECT` is the one parameter it may carry
+    /// (§10.2.11), and its Track Properties are the track's (§10.5).
+    fn on_track_status_ok(
+        &mut self,
+        request: RequestId,
+        ok: RequestOk,
+    ) -> Result<RequestEvent, Error> {
+        if !params::all_allowed(&ok.parameters, MessageKind::TrackStatusOk) {
+            return Err(Error::ProtocolViolation(
+                "parameter not allowed in this message",
+            ));
+        }
+        self.end_request(request);
+        Ok(RequestEvent::TrackStatusAnswered {
+            parameters: ok.parameters,
+            track_properties: ok.track_properties,
+        })
+    }
+
+    /// Opens a `TRACK_STATUS` (§10.14) for `full_track_name`. Returns the
+    /// request handle and the message to send on a new request stream; the
+    /// answer is [`RequestEvent::TrackStatusAnswered`] or
+    /// [`RequestEvent::Rejected`].
+    ///
+    /// # Errors
+    ///
+    /// Fails for a parameter that may not appear in `TRACK_STATUS`: any but
+    /// `AUTHORIZATION_TOKEN`.
+    pub fn track_status(
+        &mut self,
+        full_track_name: FullTrackName,
+        parameters: Vec<Parameter>,
+    ) -> Result<(RequestId, ControlMessage), UsageError> {
+        check_own_parameters(&parameters, MessageKind::TrackStatus)?;
+        let request_id = self.open(Request::TrackStatus)?;
+        let message = ControlMessage::TrackStatus(Subscribe {
+            request_id: request_id.0,
+            full_track_name,
+            parameters,
+        });
+        Ok((request_id, message))
+    }
+
     /// The state of a request, or `None` for a handle this session never issued.
     #[must_use]
     pub fn request_state(&self, request: RequestId) -> Option<RequestState> {
@@ -864,23 +920,7 @@ impl Session {
                 if *state == PublishState::Established =>
             {
                 self.peer.take_id(update.request_id)?;
-                if let Some(applied) = peer::only_the_subgroup_timeout(&update.parameters) {
-                    return Ok(RequestEvent::SubscriptionUpdated {
-                        response: ControlMessage::RequestOk(RequestOk::default()),
-                        subgroup_delivery_timeout: applied.subgroup_delivery_timeout,
-                        new_group_request: applied.new_group_request,
-                    });
-                }
-                *state = PublishState::UpdateRefused;
-                Ok(RequestEvent::UpdateRefused {
-                    response: ControlMessage::RequestError(RequestError {
-                        error_code: request_error_code::NOT_SUPPORTED,
-                        // 0: retrying the same update will not help.
-                        retry_interval: 0,
-                        error_reason: ReasonPhrase::default(),
-                        redirect: None,
-                    }),
-                })
+                Ok(answer_update_of_publish(state, &update))
             }
             (
                 Request::Publish {
@@ -909,6 +949,9 @@ impl Session {
             }
             (Request::Fetch(_), ControlMessage::FetchOk(ok)) if !established => {
                 self.on_fetch_ok(request, ok)
+            }
+            (Request::TrackStatus, ControlMessage::RequestOk(ok)) => {
+                self.on_track_status_ok(request, ok)
             }
             // §5.1 and §6.2: exactly one response per request, and every other
             // message decoded here either opens a request or answers a different
@@ -1122,7 +1165,8 @@ impl Session {
                 Request::Subscribe { .. }
                 | Request::PublishNamespace { .. }
                 | Request::SubscribeNamespace { .. }
-                | Request::Fetch(_),
+                | Request::Fetch(_)
+                | Request::TrackStatus,
             )
             | None => {}
         }
@@ -1297,6 +1341,29 @@ fn check_request_ok(
         ));
     }
     Ok(())
+}
+
+/// What becomes of a `REQUEST_UPDATE` the subscriber of an established
+/// PUBLISH of this endpoint sent: the one update that is applied, the
+/// `SUBGROUP_DELIVERY_TIMEOUT`, is accepted, and any other refused.
+fn answer_update_of_publish(state: &mut PublishState, update: &RequestUpdate) -> RequestEvent {
+    if let Some(applied) = peer::only_the_subgroup_timeout(&update.parameters) {
+        return RequestEvent::SubscriptionUpdated {
+            response: ControlMessage::RequestOk(RequestOk::default()),
+            subgroup_delivery_timeout: applied.subgroup_delivery_timeout,
+            new_group_request: applied.new_group_request,
+        };
+    }
+    *state = PublishState::UpdateRefused;
+    RequestEvent::UpdateRefused {
+        response: ControlMessage::RequestError(RequestError {
+            error_code: request_error_code::NOT_SUPPORTED,
+            // 0: retrying the same update will not help.
+            retry_interval: 0,
+            error_reason: ReasonPhrase::default(),
+            redirect: None,
+        }),
+    }
 }
 
 /// The answer to a `REQUEST_UPDATE` of a subscription. §10.9: "The receiver
@@ -2288,6 +2355,72 @@ mod tests {
         run_steps(
             |session| session.publish_namespace(namespace(), vec![]).unwrap().0,
             cases,
+        );
+    }
+
+    #[test]
+    fn track_status_transitions() {
+        let largest = Parameter::LargestObject(Location {
+            group: 4,
+            object: 1,
+        });
+        let property = KeyValuePair::varint(2, 5).unwrap();
+        let cases: Vec<(&str, Vec<Step>)> = vec![
+            (
+                "answered with the largest Location and a Track Property",
+                vec![
+                    (
+                        ControlMessage::RequestOk(RequestOk {
+                            parameters: vec![largest.clone()],
+                            track_properties: vec![property.clone()],
+                        }),
+                        Ok(RequestEvent::TrackStatusAnswered {
+                            parameters: vec![largest],
+                            track_properties: vec![property],
+                        }),
+                        RequestState::Terminated,
+                    ),
+                    (request_ok(vec![]), Err(ENDED), RequestState::Terminated),
+                ],
+            ),
+            (
+                "rejected",
+                vec![(
+                    ControlMessage::RequestError(request_error()),
+                    Ok(RequestEvent::Rejected(request_error())),
+                    RequestState::Terminated,
+                )],
+            ),
+            // §10.2.11: LARGEST_OBJECT alone may appear in it.
+            (
+                "TRACK_STATUS_OK with another parameter",
+                vec![(
+                    request_ok(vec![Parameter::Expires(1)]),
+                    Err(Error::ProtocolViolation(
+                        "parameter not allowed in this message",
+                    )),
+                    RequestState::Pending,
+                )],
+            ),
+            (
+                "SUBSCRIBE_OK",
+                vec![(
+                    subscribe_ok(1, vec![]),
+                    Err(NOT_ALLOWED),
+                    RequestState::Pending,
+                )],
+            ),
+        ];
+        run_steps(
+            |session| session.track_status(track(b"a"), vec![]).unwrap().0,
+            cases,
+        );
+        // §10.2.2: AUTHORIZATION_TOKEN is the one parameter it carries.
+        assert_eq!(
+            client()
+                .track_status(track(b"a"), vec![Parameter::RendezvousTimeout(1)])
+                .map(|_| ()),
+            Err(UsageError("parameter not allowed in this message"))
         );
     }
 

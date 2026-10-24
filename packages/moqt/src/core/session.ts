@@ -26,6 +26,7 @@ import {
 	type Requests,
 	type SubscribeAnswer,
 	type SubscribeRequest,
+	type TrackStatusRequest,
 } from "./requests.ts";
 import type {
 	PeerStreamKind,
@@ -56,7 +57,8 @@ export interface SessionOptions {
  * they are misused.
  *
  * Not implemented: the server role, requests opened by the peer other than
- * SUBSCRIBE (they are answered with REQUEST_ERROR), REQUEST_UPDATE, GOAWAY,
+ * SUBSCRIBE, a Standalone FETCH and TRACK_STATUS (they are answered with
+ * REQUEST_ERROR), REQUEST_UPDATE, GOAWAY,
  * delivering Object Datagrams (their type is checked, `receiveDatagram`),
  * namespace subscription and timers. Of a FETCH this endpoint
  * sends, the fetch stream is handed on as bytes; `fetch.ts` decodes them for
@@ -72,6 +74,8 @@ export interface Session {
 	subscribe(request: SubscribeRequest): SessionResult<bigint>;
 	/** Sends a FETCH (§10.12). `Requests.fetch` has when the request is over. */
 	fetch(request: FetchRequest): SessionResult<bigint>;
+	/** Sends a TRACK_STATUS (§10.14). `Requests.trackStatus` has its answer. */
+	trackStatus(request: TrackStatusRequest): SessionResult<bigint>;
 	/** Cancels a request this endpoint made (§3.3.2). */
 	cancelRequest(requestId: bigint): SessionOutput[];
 	/** `Requests.updateSubscription`: a REQUEST_UPDATE for an Established SUBSCRIBE of this endpoint (§10.9). */
@@ -93,6 +97,16 @@ export interface Session {
 		requestId: bigint,
 		answer: SubscribeAnswer,
 	): SessionResult<bigint>;
+	/**
+	 * Answers a TRACK_STATUS of the peer that the event `peer-track-status`
+	 * reported: REQUEST_OK and a FIN (§10.14). Throws an `InactiveError` for
+	 * a request that does not wait for its answer, and a `RangeError` for a
+	 * parameter other than LARGEST_OBJECT (§10.2.11).
+	 */
+	acceptTrackStatus(
+		requestId: bigint,
+		answer: SubscribeAnswer,
+	): SessionOutput[];
 	/**
 	 * Refuses a request of the peer that waits for its answer: REQUEST_ERROR
 	 * and a FIN (§3.3.2). Throws an `InactiveError` for a request that does
@@ -321,6 +335,8 @@ export function createSession(options: SessionOptions = {}): Session {
 			requests.peerSubscribeOpened(message, peerStream, out),
 		fetch: (message, peerStream, out) =>
 			requests.peerFetchOpened(message, peerStream, out),
+		trackStatus: (message, peerStream, out) =>
+			requests.peerTrackStatusOpened(message, peerStream, out),
 		isOpenSubscribe: (requestId) => requests.isOpenPeerSubscribe(requestId),
 		holdsRequestId: (requestId) => requests.holdsPeerRequestId(requestId),
 		heldRequests: () => requests.heldPeerRequests(),
@@ -514,8 +530,11 @@ export function createSession(options: SessionOptions = {}): Session {
 		publish: (request) => opening(() => requests.publish(request)),
 		subscribe: (request) => opening(() => requests.subscribe(request)),
 		fetch: (request) => opening(() => requests.fetch(request)),
+		trackStatus: (request) => opening(() => requests.trackStatus(request)),
 		acceptSubscribe: (requestId, answer) =>
 			whileOpen(() => requests.acceptSubscribe(requestId, answer)),
+		acceptTrackStatus: (requestId, answer) =>
+			whileOpen(() => requests.acceptTrackStatus(requestId, answer)),
 		rejectPeerRequest: (requestId, errorCode, errorReason) =>
 			whileOpen(() =>
 				requests.rejectPeerRequest(requestId, errorCode, errorReason),

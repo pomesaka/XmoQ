@@ -104,6 +104,9 @@ enum Mode {
     /// (§6.1, §10.18) and prints each NAMESPACE and `NAMESPACE_DONE`, until
     /// stdin ends.
     SubscribeNamespace,
+    /// Sends one `TRACK_STATUS` for the track (§10.14), prints its answer
+    /// (`TRACK_STATUS_OK ...` or `TRACK_STATUS_REFUSED ...`), and leaves.
+    TrackStatus,
 }
 
 struct Args {
@@ -634,6 +637,7 @@ fn read_mode(
             payload: payload()?,
         },
         "subscribe-namespace" => Mode::SubscribeNamespace,
+        "track-status" => Mode::TrackStatus,
         other => bail!("unknown --mode {other}"),
     })
 }
@@ -1006,9 +1010,11 @@ fn fetch_to_answer(answering: Option<Pace>, request: &PeerRequest) -> Option<&Fe
 /// none, and said so with this code before it asked its session about them.
 fn refusal_code(serves: bool, request: &PeerRequest) -> u64 {
     match request {
-        PeerRequest::Fetch(_) | PeerRequest::SubscribeNamespace(_) => {
-            request_error_code::NOT_SUPPORTED
-        }
+        // TRACK_STATUS: the client answers none (decided on 2026-10-24),
+        // and a relay passes the refusal on.
+        PeerRequest::Fetch(_)
+        | PeerRequest::SubscribeNamespace(_)
+        | PeerRequest::TrackStatus(_) => request_error_code::NOT_SUPPORTED,
         _ if !serves => request_error_code::NOT_SUPPORTED,
         PeerRequest::Subscribe(_) => request_error_code::DOES_NOT_EXIST,
         PeerRequest::Publish(_) | PeerRequest::PublishNamespace(_) => {
@@ -1070,6 +1076,32 @@ impl Client<'_> {
     /// namespace of `--namespace` as the prefix, and what comes on its stream,
     /// until stdin ends; then the request is ended with a FIN (§6.1: "can be
     /// cancelled by closing the stream with either a FIN or `RESET_STREAM`").
+    /// The mode `track-status`: one `TRACK_STATUS`, whose answer ends it.
+    /// The peer closes the stream with a FIN after its answer (§10.14), and
+    /// this client finishes its own direction.
+    async fn track_status(&mut self) -> Result<()> {
+        let parameters = self.args.auth.with(vec![]);
+        let (request_id, message) = self
+            .session
+            .track_status(self.args.full_track_name()?, parameters.clone())?;
+        let mut stream = self
+            .open_request(request_id, &message, "track-status")
+            .await?;
+        let answer = self
+            .response(request_id, &mut stream, "track-status", &parameters)
+            .await?;
+        stream.finish();
+        match answer {
+            RequestEvent::TrackStatusAnswered {
+                parameters,
+                track_properties,
+            } => report::track_status_ok(&parameters, &track_properties),
+            RequestEvent::Rejected(error) => report::track_status_refused(error.error_code),
+            other => return Err(refused("TRACK_STATUS", other)),
+        }
+        Ok(())
+    }
+
     async fn watch_namespaces(&mut self) -> Result<()> {
         let parameters = self.args.auth.with(vec![]);
         let (request_id, message) = self
@@ -2886,6 +2918,7 @@ impl Client<'_> {
             Mode::Publish { payload } => self.publish(payload).await,
             Mode::PublishNamespace { payload } => self.serve(payload).await,
             Mode::SubscribeNamespace => self.watch_namespaces().await,
+            Mode::TrackStatus => self.track_status().await,
         }
     }
 }

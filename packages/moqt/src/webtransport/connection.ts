@@ -2322,6 +2322,28 @@ export async function connectOver(
 			case "peer-fetch":
 				handOver(peerFetchFrom(event), serveHandlers.fetch, "FETCH");
 				return undefined;
+			case "peer-track-status": {
+				// WHY refused, and not handed to `serve`: this is a client, and
+				// none of its callers is a relay or a publisher that answers what
+				// a SUBSCRIBE would get (§10.14). NOT_SUPPORTED, as before the
+				// session decoded TRACK_STATUS. Through `answer` for the reason
+				// in `handOver`: the request can be gone by now.
+				const { requestId } = event;
+				pendingPeerRequest(requestId)
+					.answer((s) => ({
+						value: undefined,
+						outputs: s.rejectPeerRequest(
+							requestId,
+							RequestErrorCode.NOT_SUPPORTED,
+							"this endpoint serves no TRACK_STATUS",
+						),
+					}))
+					.catch(() => {});
+				return undefined;
+			}
+			// No method of this connection sends a TRACK_STATUS.
+			case "track-status-ok":
+				return undefined;
 			case "peer-request-rejected":
 				awaitPeerEndAfterRefusal(event.requestId);
 				return undefined;

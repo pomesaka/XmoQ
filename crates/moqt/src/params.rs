@@ -154,6 +154,14 @@ pub enum MessageKind {
     FetchOk,
     /// `SUBSCRIBE_NAMESPACE`: `AUTHORIZATION_TOKEN` alone (§10.2.2).
     SubscribeNamespace,
+    /// `TRACK_STATUS`: `AUTHORIZATION_TOKEN` alone (§10.2.2). §10.14 has its
+    /// format "identical to the SUBSCRIBE message", "but subscriber
+    /// parameters related to Track delivery ... are not included", and no
+    /// other parameter of §10.2 names it.
+    TrackStatus,
+    /// `REQUEST_OK` answering `TRACK_STATUS`: `LARGEST_OBJECT` alone
+    /// (§10.2.11).
+    TrackStatusOk,
 }
 
 impl Parameter {
@@ -180,7 +188,7 @@ impl Parameter {
     fn allowed_in(&self, kind: MessageKind) -> bool {
         use MessageKind::{
             Fetch, FetchUpdate, NamespaceUpdate, Publish, PublishNamespace, PublishOk,
-            RequestUpdate, Subscribe, SubscribeNamespace, SubscribeOk,
+            RequestUpdate, Subscribe, SubscribeNamespace, SubscribeOk, TrackStatus, TrackStatusOk,
         };
         // WHY `FetchUpdate` in three lists only: §10.2.2, §10.2.3 and §10.2.4
         // name `REQUEST_UPDATE` without saying of which request, and §10.2.7
@@ -200,10 +208,11 @@ impl Parameter {
                 PublishNamespace,
                 Fetch,
                 SubscribeNamespace,
+                TrackStatus,
             ],
             Self::RendezvousTimeout(_) => &[Subscribe],
             Self::Expires(_) => &[SubscribeOk, Publish, PublishOk],
-            Self::LargestObject(_) => &[SubscribeOk, Publish],
+            Self::LargestObject(_) => &[SubscribeOk, Publish, TrackStatusOk],
             Self::FillTimeout(_) => &[Fetch],
             Self::Forward(_) => &[Subscribe, RequestUpdate, Publish, PublishOk],
             Self::SubscriberPriority(_) => {

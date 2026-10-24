@@ -1060,13 +1060,15 @@ export function spawnRustClient(
 	// the namespace and serves the track when it is asked for it.
 	// "fetch" is the own Rust client's as well: it sends a Standalone FETCH.
 	// "subscribe-namespace" is the own Rust client's as well: it sends
-	// SUBSCRIBE_NAMESPACE and prints what it is told.
+	// SUBSCRIBE_NAMESPACE and prints what it is told. "track-status" too: it
+	// sends one TRACK_STATUS and prints its answer.
 	mode:
 		| "publish"
 		| "publish-namespace"
 		| "subscribe"
 		| "fetch"
-		| "subscribe-namespace",
+		| "subscribe-namespace"
+		| "track-status",
 	track: string,
 	extraArgs: string[] = [],
 ): LoggedProcess {

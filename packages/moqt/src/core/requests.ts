@@ -16,6 +16,8 @@ import {
 	SUBSCRIBE_MESSAGE_TYPE,
 	type Subscribe,
 	type SubscribeOk,
+	TRACK_STATUS_MESSAGE_TYPE,
+	type TrackStatus,
 } from "./control-message.ts";
 import {
 	InactiveError,
@@ -101,6 +103,11 @@ export interface FetchRequest {
 	parameters?: MessageParameters;
 }
 
+/** What a TRACK_STATUS asks about (§10.14). AUTHORIZATION_TOKEN is the one parameter it may carry (§10.2.2). */
+export interface TrackStatusRequest extends FullTrackName {
+	parameters?: MessageParameters;
+}
+
 /** What a fetch stream that arrived belongs to. */
 export type FetchStreamOpened =
 	/** A FETCH that is open: the bytes of the stream are its response. */
@@ -113,7 +120,12 @@ export type FetchStreamOpened =
 	 */
 	| "ended";
 
-/** What the application answers a SUBSCRIBE of the peer with (§10.8). */
+/**
+ * What the application answers a SUBSCRIBE of the peer with (§10.8), and a
+ * TRACK_STATUS: "the same parameters and Track Properties it would have set
+ * in a SUBSCRIBE_OK" (§10.14), of which LARGEST_OBJECT alone may appear in
+ * its REQUEST_OK (§10.2.11).
+ */
 export interface SubscribeAnswer {
 	/**
 	 * Parameters of the SUBSCRIBE_OK. LARGEST_OBJECT is where a publisher
@@ -189,6 +201,14 @@ export interface Requests {
 	 * endpoint that is Pending or Established (§10.12.2).
 	 */
 	fetch(request: FetchRequest): SessionResult<bigint>;
+	/**
+	 * Asks what a SUBSCRIBE of the Track would be answered with (§10.14).
+	 * The one answer ends the request: the event `track-status-ok`, or
+	 * `request-error`. Throws a `RangeError`, and sends nothing, for a
+	 * parameter that may not appear in TRACK_STATUS: any but
+	 * AUTHORIZATION_TOKEN (§10.2.2).
+	 */
+	trackStatus(request: TrackStatusRequest): SessionResult<bigint>;
 	/**
 	 * What the Request ID of a FETCH_HEADER refers to (§11.4.4), on the
 	 * stream `peerStream`. The stream may come before the FETCH_OK (§10.13).
@@ -274,6 +294,28 @@ export interface Requests {
 		peerStream: number,
 		out: SessionOutput[],
 	): PeerSubscribeOpened;
+	/**
+	 * A TRACK_STATUS of the peer, whole, with a Request ID that was checked.
+	 * Like `peerSubscribeOpened`: refused here, or its stream is adopted and
+	 * it waits for `acceptTrackStatus` or `rejectPeerRequest`.
+	 */
+	peerTrackStatusOpened(
+		message: TrackStatus,
+		peerStream: number,
+		out: SessionOutput[],
+	): PeerSubscribeOpened;
+	/**
+	 * Answers a TRACK_STATUS of the peer with REQUEST_OK (TRACK_STATUS_OK)
+	 * and a FIN: "The bidi stream is closed with
+	 * a FIN after TRACK_STATUS_OK or REQUEST_ERROR are sent" (§10.14). How the
+	 * peer then ends its direction is reported as after a refusal
+	 * (`peer-direction-ended`). Throws a `RangeError`, and leaves the request
+	 * waiting, for a parameter other than LARGEST_OBJECT (§10.2.11).
+	 */
+	acceptTrackStatus(
+		requestId: bigint,
+		answer: SubscribeAnswer,
+	): SessionOutput[];
 	/**
 	 * Accepts a FETCH of the peer: sends FETCH_OK, then a REQUEST_OK for each
 	 * REQUEST_UPDATE that came before, and opens the fetch stream with its
@@ -472,13 +514,25 @@ interface PeerFetchEntry extends RequestCommon {
 	served: boolean;
 }
 
+/** A TRACK_STATUS of this endpoint, which its one answer ends (§10.14). */
+interface TrackStatusEntry extends RequestCommon {
+	kind: "TRACK_STATUS";
+}
+
+/** A TRACK_STATUS of the peer that waits for the application's answer. */
+interface PeerTrackStatusEntry extends RequestCommon {
+	kind: "PEER_TRACK_STATUS";
+}
+
 type RequestEntry =
 	| NamespaceEntry
 	| PublishEntry
 	| PeerSubscribeEntry
 	| PeerFetchEntry
+	| PeerTrackStatusEntry
 	| SubscribeEntry
-	| FetchEntry;
+	| FetchEntry
+	| TrackStatusEntry;
 
 /** §10.2.12: FORWARD defaults to 1 wherever it is omitted, except in REQUEST_UPDATE. */
 const DEFAULT_FORWARD = true;
@@ -510,6 +564,16 @@ const MAX_HELD_FETCH_UPDATES = 64;
  * every call.
  */
 export const MAX_UNANSWERED_UPDATES = 16;
+
+/** The Message Type that opened each kind of request of the peer that waits for its answer. */
+const PEER_REQUEST_MESSAGE_TYPES: Record<
+	(PeerSubscribeEntry | PeerFetchEntry | PeerTrackStatusEntry)["kind"],
+	bigint
+> = {
+	PEER_SUBSCRIBE: SUBSCRIBE_MESSAGE_TYPE,
+	PEER_FETCH: FETCH_MESSAGE_TYPE,
+	PEER_TRACK_STATUS: TRACK_STATUS_MESSAGE_TYPE,
+};
 
 /** PUBLISH_DONE status code UPDATE_FAILED (§10.11). */
 const UPDATE_FAILED = 0x8n;
@@ -591,6 +655,7 @@ export function createRequests(options: RequestsOptions): Requests {
 	const openedByThePeer = (request: RequestEntry): boolean =>
 		request.kind === "PEER_SUBSCRIBE" ||
 		request.kind === "PEER_FETCH" ||
+		request.kind === "PEER_TRACK_STATUS" ||
 		(request.kind === "PUBLISH" && request.openedBy === "peer");
 
 	/**
@@ -968,6 +1033,44 @@ export function createRequests(options: RequestsOptions): Requests {
 		incoming.resolveHeld(out);
 	};
 
+	/**
+	 * TRACK_STATUS_OK (§10.14, a REQUEST_OK): what the peer would have set in
+	 * a SUBSCRIBE_OK. LARGEST_OBJECT is the one parameter it may carry
+	 * (§10.2.11), and its Track Properties are the Track's (§10.5). The
+	 * request is over; the peer closes its stream with a FIN.
+	 */
+	const onTrackStatusOk = (
+		request: TrackStatusEntry,
+		message: RequestOk,
+		out: SessionOutput[],
+	): void => {
+		const outside = parametersOutsideScope(
+			message.parameters,
+			"TRACK_STATUS_OK",
+		);
+		if (outside.length > 0) {
+			throw protocolViolation(
+				`${outside.join(", ")} not allowed in TRACK_STATUS_OK`,
+			);
+		}
+		endRequest(request, out, () => {
+			out.push({
+				type: "event",
+				event: {
+					type: "track-status-ok",
+					requestId: request.requestId,
+					parameters: message.parameters,
+					trackProperties: message.trackProperties,
+				},
+			});
+			// WHY only now, where nothing was to be sent after the
+			// TRACK_STATUS ("the first and only message", §10.14): this
+			// package reads a FIN of a request's sender as its end (§11.4.1),
+			// and a peer may read it so as well.
+			finishSend(request, out);
+		});
+	};
+
 	/** A FETCH whose FETCH_OK came and whose fetch stream ended has nothing more to come. */
 	const endFetchIfServed = (
 		request: FetchEntry,
@@ -1258,6 +1361,7 @@ export function createRequests(options: RequestsOptions): Requests {
 	const ownRequest = (request: RequestEntry): boolean =>
 		request.kind === "SUBSCRIBE" ||
 		request.kind === "FETCH" ||
+		request.kind === "TRACK_STATUS" ||
 		request.kind === "PUBLISH_NAMESPACE" ||
 		(request.kind === "PUBLISH" && request.openedBy === "self");
 	/** The requests the peer sent a GOAWAY on the stream of (§10.4). */
@@ -1313,6 +1417,12 @@ export function createRequests(options: RequestsOptions): Requests {
 			onUpdateOfPeerFetch(request, message, out);
 			return;
 		}
+		// §10.14: TRACK_STATUS is "the first and only message", and "the
+		// subscriber cannot send REQUEST_UPDATE". WHY the session is closed
+		// for one, as for any message a request of its kind does not take:
+		// the draft names no consequence, and an update of a request that
+		// creates no state has nothing to apply to. As in the Rust session.
+		if (request.kind === "PEER_TRACK_STATUS") throw unexpected;
 		// §10.9: "The receiver of a REQUEST_UPDATE MUST respond with exactly
 		// one REQUEST_OK or REQUEST_ERROR". Responses carry no Request ID, so
 		// they answer the updates in the order sent.
@@ -1337,6 +1447,10 @@ export function createRequests(options: RequestsOptions): Requests {
 					request.kind === "FETCH"
 				) {
 					throw unexpected;
+				}
+				if (request.kind === "TRACK_STATUS") {
+					onTrackStatusOk(request, message, out);
+					return;
 				}
 				onRequestOk(request, message, out);
 				return;
@@ -1425,6 +1539,43 @@ export function createRequests(options: RequestsOptions): Requests {
 		return request;
 	};
 
+	const pendingPeerTrackStatus = (requestId: bigint): PeerTrackStatusEntry => {
+		const request = requests.get(requestId);
+		if (request?.kind !== "PEER_TRACK_STATUS") {
+			throw new InactiveError(
+				`Request ID ${requestId} is not a TRACK_STATUS of the peer that waits for its answer`,
+			);
+		}
+		return request;
+	};
+
+	/**
+	 * Sends the one answer of a request of the peer that waits for it, and a
+	 * FIN: the request is over. `announce` adds what tells the application.
+	 */
+	const answerPeerRequest = (
+		request: PeerSubscribeEntry | PeerFetchEntry | PeerTrackStatusEntry,
+		data: Bytes,
+		announce: (out: SessionOutput[]) => void,
+	): SessionOutput[] => {
+		const out: SessionOutput[] = [];
+		// What the peer sent before it saw the answer still arrives, and
+		// gets none.
+		request.endedLocally = true;
+		endRequest(request, out, () => {
+			out.push({ type: "send", stream: request.stream, data });
+			announce(out);
+			finishSend(request, out);
+		});
+		// The subscriber had finished its direction already; nothing more
+		// comes on the stream.
+		if (request.peerFinished) {
+			requestStreams.delete(request.stream);
+			reportPeerEnd(request, "fin", undefined, out);
+		}
+		return out;
+	};
+
 	/** A FETCH of the peer in the state named: waiting for its answer, or being served. */
 	const peerFetch = (
 		requestId: bigint,
@@ -1463,8 +1614,11 @@ export function createRequests(options: RequestsOptions): Requests {
 	const outlivesPeerFin = (request: RequestEntry): boolean =>
 		(request.kind === "PUBLISH" && request.state === "Established") ||
 		(request.kind === "PEER_SUBSCRIBE" && request.state === "Pending") ||
-		// The subscriber of a FETCH has said everything with the FETCH.
-		(request.kind === "PEER_FETCH" && request.state !== "Terminated");
+		// The subscriber of a FETCH has said everything with the FETCH, and
+		// that of a TRACK_STATUS with it (§10.14: "the first and only
+		// message").
+		((request.kind === "PEER_FETCH" || request.kind === "PEER_TRACK_STATUS") &&
+			request.state !== "Terminated");
 
 	return {
 		incoming,
@@ -1596,6 +1750,19 @@ export function createRequests(options: RequestsOptions): Requests {
 					type: "FETCH",
 					requestId: common.requestId,
 					range,
+					parameters: request.parameters ?? {},
+				},
+			}));
+		},
+
+		trackStatus(request) {
+			return openRequest((common) => ({
+				entry: { ...common, kind: "TRACK_STATUS" },
+				message: {
+					type: "TRACK_STATUS",
+					requestId: common.requestId,
+					trackNamespace: request.trackNamespace,
+					trackName: request.trackName,
 					parameters: request.parameters ?? {},
 				},
 			}));
@@ -1773,6 +1940,56 @@ export function createRequests(options: RequestsOptions): Requests {
 			return { stream: entry.stream };
 		},
 
+		peerTrackStatusOpened(message, peerStream, out) {
+			if (peerRequestsAreFull()) {
+				return { refused: RequestErrorCode.EXCESSIVE_LOAD };
+			}
+			const entry: PeerTrackStatusEntry = {
+				requestId: message.requestId,
+				stream: options.allocateStream(),
+				state: "Pending",
+				inbound: new Uint8Array(0),
+				sendClosed: false,
+				endedLocally: false,
+				peerFinished: false,
+				kind: "PEER_TRACK_STATUS",
+			};
+			requests.set(entry.requestId, entry);
+			requestStreams.set(entry.stream, entry);
+			out.push({ type: "adopt-peer-stream", peerStream, stream: entry.stream });
+			out.push({
+				type: "event",
+				event: {
+					type: "peer-track-status",
+					requestId: message.requestId,
+					trackNamespace: message.trackNamespace,
+					trackName: message.trackName,
+					parameters: message.parameters,
+				},
+			});
+			return { stream: entry.stream };
+		},
+
+		acceptTrackStatus(requestId, answer) {
+			const request = pendingPeerTrackStatus(requestId);
+			const parameters = answer.parameters ?? {};
+			// The codec takes in a REQUEST_OK what any of its kinds may carry.
+			const outside = parametersOutsideScope(parameters, "TRACK_STATUS_OK");
+			if (outside.length > 0) {
+				throw new RangeError(
+					`${outside.join(", ")} not allowed in TRACK_STATUS_OK (§10.2.11)`,
+				);
+			}
+			// Before anything changes: a value that does not fit its field
+			// throws here.
+			const data = encodeControlMessage({
+				type: "REQUEST_OK",
+				parameters,
+				trackProperties: answer.trackProperties ?? [],
+			});
+			return answerPeerRequest(request, data, () => {});
+		},
+
 		acceptFetch(requestId, answer) {
 			const request = peerFetch(requestId, "Pending");
 			if (endsBefore(request.start, answer.endLocation)) {
@@ -1926,40 +2143,27 @@ export function createRequests(options: RequestsOptions): Requests {
 			const request =
 				waiting?.kind === "PEER_FETCH"
 					? peerFetch(requestId, "Pending")
-					: pendingPeerSubscribe(requestId);
+					: waiting?.kind === "PEER_TRACK_STATUS"
+						? pendingPeerTrackStatus(requestId)
+						: pendingPeerSubscribe(requestId);
 			const data = encodeControlMessage({
 				type: "REQUEST_ERROR",
 				errorCode,
 				retryInterval: madeUpRetryInterval(errorCode),
 				errorReason,
 			});
-			const out: SessionOutput[] = [];
-			// What the peer sent before it saw the answer still arrives, and
-			// gets none.
-			request.endedLocally = true;
-			endRequest(request, out, () => {
-				out.push({ type: "send", stream: request.stream, data });
+			const messageType = PEER_REQUEST_MESSAGE_TYPES[request.kind];
+			return answerPeerRequest(request, data, (out) => {
 				out.push({
 					type: "event",
 					event: {
 						type: "peer-request-rejected",
-						messageType:
-							request.kind === "PEER_FETCH"
-								? FETCH_MESSAGE_TYPE
-								: SUBSCRIBE_MESSAGE_TYPE,
+						messageType,
 						requestId,
 						errorCode,
 					},
 				});
-				finishSend(request, out);
 			});
-			// The subscriber had finished its direction already; nothing more
-			// comes on the stream.
-			if (request.peerFinished) {
-				requestStreams.delete(request.stream);
-				reportPeerEnd(request, "fin", undefined, out);
-			}
-			return out;
 		},
 
 		// §5.1: "The publisher terminates a subscription in the Pending
