@@ -380,6 +380,33 @@ export type OwnPageExtras = {
 	): Promise<void>;
 	/** What the two have seen so far. */
 	keptReport(): Promise<PageKeptReport>;
+	/**
+	 * Joins the room as a participant of the chat with `joinChat` of
+	 * `@xmoq/chat`, on the connection of `connect`, whose `serve` handlers
+	 * it then names. Resolves once the namespace is announced.
+	 */
+	joinChat(room: string, name: string): Promise<void>;
+	/** Says one line with `ChatParticipant.say`: what became of it, as JSON of `SayOutcome` with the Group in decimal. */
+	chatSay(text: string): Promise<string>;
+	/** What the participant has had so far, in the order it came, and its status. */
+	chatReport(): Promise<PageChatReport>;
+};
+
+/** What a participant of the chat had, in values that survive `page.evaluate`. */
+export type PageChatReport = {
+	/** The lines, in the order they came; `number` in decimal. */
+	lines: {
+		number: string;
+		name: string;
+		text: string;
+		how: "live" | "history";
+	}[];
+	/** Objects of `lines` that were no line: "<Group> <why>". */
+	malformed: string[];
+	/** `ChatParticipant.status()`. */
+	heard: boolean;
+	following: boolean;
+	lastEnd: string | null;
 };
 
 /** How long a page that keeps publishing or playing waits before it connects again, in the interop run. */

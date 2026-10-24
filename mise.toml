@@ -55,8 +55,8 @@ description = "The gatherer of the chat: mise run chat -- --url https://host:por
 run = "cargo run --locked -p xmoq-chat --"
 
 [tasks.demo]
-description = "Start the own relay and the pages of the demo: one publishes video, others watch"
-run = "cargo build --locked -p xmoq-relay && bun install --frozen-lockfile && (test -d spikes/durable-objects-room/node_modules || npm ci --prefix spikes/durable-objects-room --no-audit --no-fund) && bun demo/serve.ts"
+description = "Start the own relay, the gatherer of the chat and the pages of the demo: one publishes video, others watch"
+run = "cargo build --locked -p xmoq-relay -p xmoq-chat && bun install --frozen-lockfile && (test -d spikes/durable-objects-room/node_modules || npm ci --prefix spikes/durable-objects-room --no-audit --no-fund) && bun demo/serve.ts"
 
 [tasks.fmt]
 description = "Apply formatting and safe lint fixes"

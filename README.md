@@ -38,6 +38,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [The Low Overhead Media Container in TypeScript, `@xmoq/loc`](packages/loc/README.md)
 - [The MOQT Streaming Format in TypeScript, `@xmoq/msf`](packages/msf/README.md)
 - [Between a video track and a decoder, `@xmoq/media`](packages/media/README.md)
+- [A participant of the chat over MoQ tracks, `@xmoq/chat`](packages/chat/README.md)
 - [The viewer for the terminal, `xmoq-watch`](crates/watch/README.md)
 - [The gatherer of the chat, `xmoq-chat`](crates/chat/README.md)
 - [The tracks of the chat, `xmoq-chat-tracks`](crates/chat-tracks/README.md)

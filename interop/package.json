@@ -7,6 +7,7 @@
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.page.json"
 	},
 	"dependencies": {
+		"@xmoq/chat": "workspace:*",
 		"@xmoq/media": "workspace:*",
 		"@xmoq/moqt": "workspace:*",
 		"@xmoq/msf": "workspace:*",

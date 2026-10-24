@@ -3,6 +3,7 @@
 // same shape as the moqtail-ts page in peers/moqtail/browser so the driver can
 // swap one for the other.
 
+import { type ChatParticipant, joinChat } from "@xmoq/chat";
 import {
 	type AudioPlayback,
 	type AudioTrackEncoder,
@@ -44,6 +45,7 @@ import type {
 	PageAudioReport,
 	PageBroadcastReport,
 	PageCatalogReport,
+	PageChatReport,
 	PageFetch,
 	PageFetchReport,
 	PageFetchServing,
@@ -780,6 +782,13 @@ const connectAnew = (
 /** What the handler of `publishDynamicTrack` was called with. */
 const newGroupsAsked: string[] = [];
 
+/** The participant of `joinChat`, and what it had. */
+const chat: {
+	participant: ChatParticipant | undefined;
+	lines: PageChatReport["lines"];
+	malformed: string[];
+} = { participant: undefined, lines: [], malformed: [] };
+
 window.xmoqOwn = {
 	publishDynamicTrack: withPlainErrors(
 		async (namespace: string, trackName: string) => {
@@ -926,6 +935,55 @@ window.xmoqOwn = {
 		playing: [...kept.playing],
 		shown: [...kept.shown],
 	})),
+
+	joinChat: withPlainErrors(async (room: string, name: string) => {
+		chat.participant = await joinChat(connected(), {
+			room,
+			name,
+			onLine(line) {
+				console.log(
+					`CHAT_LINE number=${line.number} name=${line.name} how=${line.how}`,
+				);
+				// WHY a bound: a run sends a few lines; this keeps a page from
+				// holding a room's worth.
+				if (chat.lines.length < 1_000) {
+					chat.lines.push({
+						number: line.number.toString(),
+						name: line.name,
+						text: line.text,
+						how: line.how,
+					});
+				}
+			},
+			onMalformed(number, why) {
+				chat.malformed.push(`${number} ${why}`);
+			},
+			onStatus(status) {
+				console.log(
+					`CHAT_STATUS heard=${status.heard} following=${status.following} last_end=${status.lastEnd ?? "none"}`,
+				);
+			},
+		});
+	}),
+
+	chatSay: withPlainErrors(async (text: string) => {
+		if (chat.participant === undefined) throw new Error("joinChat() first");
+		const outcome = await chat.participant.say(text);
+		return JSON.stringify(outcome, (_key, value: unknown) =>
+			typeof value === "bigint" ? value.toString() : value,
+		);
+	}),
+
+	chatReport: withPlainErrors(async () => {
+		const status = chat.participant?.status();
+		return {
+			lines: [...chat.lines],
+			malformed: [...chat.malformed],
+			heard: status?.heard ?? false,
+			following: status?.following ?? false,
+			lastEnd: status?.lastEnd ?? null,
+		};
+	}),
 
 	followCatalog: withPlainErrors(
 		async (namespace: string, rendezvousTimeoutMs?: number) => {

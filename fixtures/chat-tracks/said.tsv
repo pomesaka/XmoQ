@@ -14,3 +14,14 @@ a text that is a number	{"text":5,"sentAt":5}	-	-	text	-
 no text	{"sentAt":5}	-	-	text	-
 an array	["x",5]	-	-	not-an-object	-
 not JSON	hi	-	-	not-an-object	-
+a time of minus 0	{"text":"x","sentAt":-0}	-	-	sent-at	-
+a time with a fraction of 0	{"text":"x","sentAt":1.0}	-	-	sent-at	-
+a lone surrogate in the text	{"text":"\ud800","sentAt":5}	-	-	not-an-object	-
+a pair of surrogates in the text	{"text":"\ud83d\ude00","sentAt":5}	"😀"	5	-	no
+a member twice: the last counts	{"text":"a","text":"b","sentAt":5}	"b"	5	-	no
+spaces around	 { "text" : "x" , "sentAt" : 5 } 	"x"	5	-	no
+a comma after the last member	{"text":"x","sentAt":5,}	-	-	not-an-object	-
+something after the object	{"text":"x","sentAt":5} x	-	-	not-an-object	-
+a number too large for a double, in a member more	{"text":"x","sentAt":5,"z":1e400}	-	-	not-an-object	-
+a member more 127 deep	{"text":"x","sentAt":5,"z":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}	"x"	5	-	no
+a member more 128 deep	{"text":"x","sentAt":5,"z":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}	-	-	not-an-object	-
