@@ -152,6 +152,10 @@ impl Relay {
             let left =
                 |publisher: &SessionKey| *publisher != subscriber.0 && !asked.contains(publisher);
             let Some(publisher) = self.matching_publishers(track).find(left) else {
+                if asked.is_empty() {
+                    // Refused all the same (known gap), as a FETCH is.
+                    self.waits_for_upstream(track, actions);
+                }
                 return Err(refused);
             };
             asked.push(publisher);

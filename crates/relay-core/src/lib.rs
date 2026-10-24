@@ -42,6 +42,7 @@ mod routing;
 #[cfg(test)]
 mod tests;
 mod track_status;
+mod upstream;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -1839,6 +1840,8 @@ pub struct Relay {
     cache_let_go: bool,
     /// [`Self::set_upstream_answer_wait_ms`].
     upstream_answer_wait_ms: u64,
+    /// [`Self::set_upstream`].
+    upstream: Option<upstream::Upstream>,
 }
 
 /// How long the I/O side waits for a publisher's answer to a request of the
@@ -1933,6 +1936,7 @@ impl Relay {
                 / fetch::SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE,
             cache_let_go: false,
             upstream_answer_wait_ms: UPSTREAM_ANSWER_WAIT_MS,
+            upstream: None,
         }
     }
 
@@ -2125,6 +2129,7 @@ impl Relay {
                 self.fail_session(session, &error, &mut actions);
             }
             Event::SessionClosed { session } => self.drop_session(session, &mut actions),
+            Event::UpstreamFailed => self.upstream_failed(&mut actions),
             Event::GoingAway(going_away) => self.on_going_away(going_away, &mut actions),
         }
         actions
@@ -2411,6 +2416,11 @@ impl Relay {
                 announcement_timer: false,
             },
         );
+        // The relay is the client of none but the upstream relay
+        // ([`Action::ConnectUpstream`]).
+        if role == Role::Client {
+            self.upstream_opened(session, actions);
+        }
         self.go_away(session, actions);
     }
 
@@ -2754,7 +2764,7 @@ impl Relay {
                 // is asked for it: a subscriber waits there by its own
                 // RENDEZVOUS_TIMEOUT or not at all (§10.2.6, as below).
                 let nobody_yet = self.tracks.asks(track_name).is_empty();
-                if nobody_yet && hold.is_none() {
+                if nobody_yet && hold.is_none() && !self.waits_for_upstream(track_name, actions) {
                     Err(request_error_code::DOES_NOT_EXIST)
                 } else {
                     let waits = self.wait_with_the_others(track_name, waiter);
@@ -2776,7 +2786,10 @@ impl Relay {
                 // asked: one has appeared, and the code says why it is not
                 // asked.
                 let holds = hold.is_some() && asked.nobody_because.is_none();
-                if asked.asks.is_empty() && holds {
+                // The upstream is asked once its session is there.
+                let for_upstream =
+                    asked.nobody_because.is_none() && self.waits_for_upstream(track_name, actions);
+                if asked.asks.is_empty() && (holds || for_upstream) {
                     let pending = PendingTrack {
                         asks: Vec::new(),
                         waiters: vec![waiter],
@@ -4599,6 +4612,7 @@ impl Relay {
         if self.sessions.remove(&session).is_none() {
             return;
         }
+        self.upstream_gone(session);
         let own_streams: HashSet<OutStreamKey> = self
             .out_streams
             .iter()
@@ -4637,7 +4651,7 @@ impl Relay {
         actions.retain(|action| match action.target() {
             Target::Session(target) => target != session,
             Target::OutStream(out_stream) => !own_streams.contains(&out_stream),
-            Target::Closing => true,
+            Target::Closing | Target::Relay => true,
         });
         self.out_streams.retain(|_, out| out.session != session);
     }
@@ -4984,6 +4998,8 @@ enum Target {
     /// The action closes a session, which is still to be done after the relay
     /// forgot the session.
     Closing,
+    /// The action is of no session.
+    Relay,
 }
 
 impl Action {
@@ -5026,6 +5042,7 @@ impl Action {
             | Self::FinishDataStream { out_stream }
             | Self::ResetDataStream { out_stream, .. } => Target::OutStream(*out_stream),
             Self::CloseSession { .. } => Target::Closing,
+            Self::ConnectUpstream => Target::Relay,
         }
     }
 }

@@ -391,6 +391,9 @@ pub enum Event {
         /// The session.
         session: SessionKey,
     },
+    /// No session with the upstream relay came of
+    /// [`Action::ConnectUpstream`].
+    UpstreamFailed,
     /// The relay is to stop: every session is told with GOAWAY (§3.6, §10.4),
     /// and a session that opens later is told after its SETUP. A session of
     /// which the relay is the client gets an empty New Session URI (§10.4: "A
@@ -842,4 +845,9 @@ pub enum Action {
         /// Why, for the log and for the peer.
         reason: String,
     },
+    /// Connect to the upstream relay ([`Relay::set_upstream`](crate::Relay::set_upstream)).
+    /// The I/O side reports [`Event::SessionOpened`] with [`Role::Client`]
+    /// once the session is there, or [`Event::UpstreamFailed`]. It is asked
+    /// for again only after one of the two.
+    ConnectUpstream,
 }
