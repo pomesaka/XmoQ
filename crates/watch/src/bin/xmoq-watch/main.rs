@@ -54,7 +54,7 @@ use crate::picture::{
 };
 use crate::room_socket::RoomSocket;
 use crate::session::{
-    GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, timestamp_of,
+    Events, GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, timestamp_of,
 };
 use crate::sound::{Sound, Volume, micros_since};
 use crate::video_decoder::VideoDecoder;
@@ -504,7 +504,7 @@ struct Subscribed {
 async fn subscriptions(
     args: &Args,
     requests: &mut Requests<'_>,
-    events: &mut mpsc::Receiver<UniEvent>,
+    events: &mut Events,
     stops: &StreamStops,
 ) -> Result<Subscribed> {
     let (video, audio, kept, found) = if let Some((video, audio)) = &args.tracks {
@@ -541,8 +541,12 @@ async fn subscriptions(
         // WHY the video alone: a Group of it is a second of frames that
         // depend on each other, and one that is late is not worth waiting
         // for; the sound's are 200 ms and small, and losing one is heard.
-        video: requests.subscribe(&video, args.video_timeout_ms).await?,
-        audio: requests.subscribe(&audio, None).await?,
+        video: events
+            .while_waiting(requests.subscribe(&video, args.video_timeout_ms))
+            .await??,
+        audio: events
+            .while_waiting(requests.subscribe(&audio, None))
+            .await??,
         audio_name: audio,
         _catalog: kept,
         found,
@@ -704,7 +708,8 @@ async fn play(
 ) -> Result<Ended> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
-    let (queue, mut events) = mpsc::channel(64);
+    let (queue, received) = mpsc::channel(64);
+    let mut events = Events::new(received);
     kept.readers = Some(read_uni_streams(
         Arc::clone(connection),
         StreamConfig::default(),
@@ -1347,7 +1352,7 @@ fn new_url(go_away: &GoAway) -> Option<String> {
 /// sends none. `@xmoq/media` waits the same.
 async fn go_away_behind(
     session: &mut Session,
-    events: &mut mpsc::Receiver<UniEvent>,
+    events: &mut Events,
     wait_ms: u64,
 ) -> Result<Option<GoAway>> {
     let waiting = async {

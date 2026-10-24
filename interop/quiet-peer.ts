@@ -89,12 +89,12 @@
 //                     terminal viewer close the session with
 //                     PROTOCOL_VIOLATION: the peer prints `SESSION_ENDED
 //                     session=0 ClosedByPeer { code: 3,`, and own-browser
-//                     too, whose `@xmoq/moqt` reads every datagram. The first
-//                     run of the terminal viewer failed: it closed with
-//                     NO_ERROR when its SUBSCRIBE got no answer in 10 s, as
-//                     it reads nothing else while it waits for one; the
-//                     peer answers SUBSCRIBEs in this case since, so that it
-//                     comes to play.
+//                     too, whose `@xmoq/moqt` reads every datagram. The peer
+//                     answers no request: the clients close while they wait
+//                     for the answer to their SUBSCRIBE (the terminal viewer
+//                     reads its streams' events while it waits since
+//                     2026-10-24; before, it closed with NO_ERROR when the
+//                     answer did not come in 10 s).
 //   request-id-again  The same, with a SUBSCRIBE of the Request ID 1, which
 //                     the client refuses, and then a REQUEST_UPDATE with the
 //                     same Request ID on its stream.
