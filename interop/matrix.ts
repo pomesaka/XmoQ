@@ -1116,6 +1116,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 		},
 		{
+			name: "own relay: watch: two terminal viewers chat on MoQ tracks through the gatherer: the first is held for the room's lines, and the later one gets the earlier line by its Joining FETCH",
+			script: "watch-rust.ts",
+			args: ["--watch", "chat"],
+			relay: "own",
+		},
+		{
 			name: "no relay: watch: the terminal viewer finds a video and an audio track in the catalog of moqlivemock's publisher and plays them",
 			script: "watch-rust.ts",
 			args: ["--watch", "from-mlmpub"],

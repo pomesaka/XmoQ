@@ -4,7 +4,7 @@
 // the Timestamps of LOC, with no terminal and no sound output
 // (`--out /dev/null`, `--sound off`).
 //
-// Usage: bun watch-rust.ts [--watch page|from-mlmpub|goaway] [--port N] [--verbose]
+// Usage: bun watch-rust.ts [--watch page|from-mlmpub|goaway|chat] [--port N] [--verbose]
 //
 // What has to be seen, written before the first run.
 //
@@ -86,7 +86,25 @@
 //     its Timeout (`STOPPING sessions=0`); either is held to the same time.
 //     The viewer's first session ends with its own `AV_PLAYED`, "the relay
 //     sent GOAWAY".
+//
+// `--watch chat`. The chat on MoQ tracks (Q36), through the own relay with
+// the gatherer (`xmoq-chat`) beside it, while a page publishes the broadcast
+// as in `--watch page`. Two viewers of room `r`, each with `--chat-room r`
+// and a line to say (`--say`). Written before the first run:
+//
+//   - Viewer `wa` comes first, when the gatherer has published no `lines` of
+//     the room yet: its SUBSCRIBE to `lines` is held by the relay
+//     (RENDEZVOUS_TIMEOUT) until the gatherer, told of `wa`, publishes the
+//     room. Its line `a1` is line 0, and `wa` shows `CHAT moq 0 wa: a1`.
+//   - Viewer `wb` comes then, and gets line 0 by its Joining FETCH
+//     (`CHAT moq 0 wa: a1`), and its own `b1` as line 1 (`CHAT moq 1 wb:
+//     b1`), which `wa` shows as well.
+//   - Each line is shown once, and both leave with 0 at the end of their
+//     `--seconds`.
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import {
 	type LoggedProcess,
@@ -95,6 +113,7 @@ import {
 	openConnectedPage,
 	pollFor,
 	runCleanups,
+	spawnChatGatherer,
 	spawnTerminalViewer,
 	startMoqlivemockPublisher,
 	startRun,
@@ -421,10 +440,104 @@ async function goAway(): Promise<string> {
 	return `the own relay sent GOAWAY at SIGTERM naming another; xmoq-watch moved there, named the same catalog, and drew ${drawn} frames and played ${played} ms of sound there; the relay ended with 0`;
 }
 
+/** The flags of a viewer of room `r` that says `say`, with no terminal and no sound output, for `seconds`. */
+function chatViewer(name: string, say: string, seconds: number): string[] {
+	return [
+		"--namespace",
+		NAMESPACE,
+		"--seconds",
+		String(seconds),
+		"--sound",
+		"off",
+		"--out",
+		"/dev/null",
+		"--medium",
+		"direct",
+		"--fit",
+		"none",
+		"--chat-room",
+		"r",
+		"--name",
+		name,
+		"--say",
+		say,
+	];
+}
+
+async function chat(): Promise<string> {
+	const directory = mkdtempSync(join(tmpdir(), "xmoq-watch-chat-"));
+	try {
+		const context = await startRun({
+			relay: "own",
+			port: options.port,
+			clients: ["own-browser"],
+			verbose: options.verbose,
+		});
+		const gatherer = spawnChatGatherer(
+			context,
+			"gatherer",
+			join(directory, "chat.sqlite3"),
+		);
+		await gatherer.waitForLine(/^WATCHING prefix=xmoq\/chat$/);
+		const publisher = await openConnectedPage(
+			context,
+			"publisher",
+			"own-browser",
+		);
+		await withTimeout(
+			publisher.evaluate(
+				([namespace]) => window.xmoqOwn.publishBroadcast(namespace),
+				[NAMESPACE] satisfies [string],
+			),
+			"the page to publish its broadcast",
+		);
+		const a = spawnTerminalViewer(
+			context,
+			"viewer:wa",
+			chatViewer("wa", "a1", 16),
+		);
+		await a.waitForLine(/^CHAT moq 0 wa: a1$/, 20_000);
+		const b = spawnTerminalViewer(
+			context,
+			"viewer:wb",
+			chatViewer("wb", "b1", 8),
+		);
+		await b.waitForLine(/^CHAT moq 0 wa: a1$/, 20_000);
+		await b.waitForLine(/^CHAT moq 1 wb: b1$/, 20_000);
+		await a.waitForLine(/^CHAT moq 1 wb: b1$/, 20_000);
+		const codes = await Promise.all([
+			withTimeout(a.exited, "wa to leave", 30_000),
+			withTimeout(b.exited, "wb to leave", 30_000),
+		]);
+		const shown = (viewer: LoggedProcess): string[] =>
+			viewer.matches(/^CHAT (moq .*)$/).map((match) => match[1] ?? "");
+		const wrong: string[] = [];
+		if (codes.some((code) => code !== 0)) {
+			wrong.push(`they left with ${codes.join(" and ")}`);
+		}
+		const once = ["moq 0 wa: a1", "moq 1 wb: b1"];
+		for (const [name, viewer] of [
+			["wa", a],
+			["wb", b],
+		] as const) {
+			if (JSON.stringify(shown(viewer)) !== JSON.stringify(once)) {
+				wrong.push(`${name} showed ${JSON.stringify(shown(viewer))}`);
+			}
+		}
+		if (wrong.length > 0) {
+			throw new Error(`the chat on tracks: ${wrong.join("; ")}`);
+		}
+		return `two terminal viewers said a line each on said through the gatherer: wa, which came first, showed ${once.join(" and ")} live, and wb, which came later, got the first by its Joining FETCH`;
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+}
+
 const RUNS: Record<string, () => Promise<string>> = {
 	page: fromPage,
 	"from-mlmpub": fromMlmpub,
 	goaway: goAway,
+	chat,
 };
 
 async function main(): Promise<void> {

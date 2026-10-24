@@ -12,6 +12,7 @@
 
 pub mod again;
 pub mod args;
+pub mod chat_track;
 pub mod clock;
 pub mod fit;
 pub mod keys;

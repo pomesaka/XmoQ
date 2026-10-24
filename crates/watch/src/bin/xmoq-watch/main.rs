@@ -10,6 +10,7 @@
 //! output; the files here do the input and output, each one kind of it.
 
 mod audio_output;
+mod chat_tracks;
 mod picture;
 mod room_socket;
 mod session;
@@ -47,6 +48,7 @@ use xmoq_watch::marks::Recent;
 use xmoq_watch::room::{self, Broadcast};
 use xmoq_watch::{marks, tracks};
 
+use crate::chat_tracks::{ChatTracks, Out as ChatOut};
 use crate::picture::{
     Frame, LINES, MOST_COUNTED, MOST_FRAMES_WAITING, Picture, Screen, Seen, Under,
 };
@@ -831,6 +833,48 @@ async fn play(
     if let Some(line) = found {
         ui.note(&line);
     }
+    // The chat on tracks, beside the room's WebSocket (Q36): what fails of
+    // it is said, and the broadcast plays on without it.
+    let mut chat = match &args.chat {
+        Some(chat) => {
+            let begun = async {
+                let room = xmoq_chat_tracks::names::room_namespace(&chat.room)?;
+                let requests = Requests {
+                    connection,
+                    session: &mut session,
+                    namespace: &namespace,
+                    token: place.token.as_deref(),
+                    answer_wait_ms: args.answer_wait_ms,
+                    open_wait_ms: args.open_wait_ms,
+                    rendezvous_ms: None,
+                };
+                ChatTracks::begin(requests, connection, chat, room).await
+            };
+            match begun.await {
+                Ok(mut tracks) => {
+                    ui.note(&format!(
+                        "CHAT_TRACKS room={} name={}",
+                        room::clean(&chat.room, room::LINE_LIMIT),
+                        room::clean(&chat.name, room::LINE_LIMIT)
+                    ));
+                    if let Some(text) = &chat.say {
+                        let taken = tracks.say(connection, text.clone());
+                        ui.note(&format!(
+                            "SAID_ON_TRACK {} {}",
+                            if taken { "sent" } else { "not-sent" },
+                            room::clean(text, room::LINE_LIMIT)
+                        ));
+                    }
+                    Some(tracks)
+                }
+                Err(error) => {
+                    ui.note(&format!("CHAT_TRACKS_FAILED {error:#}"));
+                    None
+                }
+            }
+        }
+        None => None,
+    };
 
     let began = Instant::now();
     // WHY a queue with an end: frames come at the publisher's pace, and
@@ -902,6 +946,14 @@ async fn play(
                     ended = Ended::Quit;
                     break "the viewer was ended";
                 };
+                if let Some(tracks) = chat.as_mut() {
+                    let taken = tracks.say(connection, text.clone());
+                    ui.note(&format!(
+                        "SAID_ON_TRACK {} {}",
+                        if taken { "sent" } else { "not-sent" },
+                        room::clean(&text, room::LINE_LIMIT)
+                    ));
+                }
                 if let Some(joined) = room.as_mut() {
                     ui.note(&format!("SAID {}", room::clean(&text, room::LINE_LIMIT)));
                     // A room that does not take the line is gone; the
@@ -910,7 +962,7 @@ async fn play(
                         ui.note("ROOM_LOST it did not take a line for the chat");
                         *room = None;
                     }
-                } else {
+                } else if chat.is_none() {
                     ui.note("SAID nothing: no room");
                 }
             }
@@ -920,6 +972,10 @@ async fn play(
                     None => std::future::pending().await,
                 }
             } => match heard {
+                // With the chat on tracks beside it, each line says its way.
+                Ok(Heard::Chat(line)) if args.chat.is_some() => {
+                    ui.chat(xmoq_watch::chat_track::shown_from_room(&line));
+                }
                 Ok(Heard::Chat(line)) => ui.chat(line),
                 Ok(Heard::Broadcast(broadcast)) => {
                     if broadcast.is_some() && broadcast != place.broadcast {
@@ -1068,9 +1124,36 @@ async fn play(
                 }
             }
             Some(event) = asked.recv() => {
-                refuse_a_request_of_the_peer(&mut session, &mut refused, event).await?;
+                let event = match chat.as_mut() {
+                    Some(tracks) => tracks.on_peer_request(&mut session, connection, event).await?,
+                    None => Some(event),
+                };
+                if let Some(event) = event {
+                    refuse_a_request_of_the_peer(&mut session, &mut refused, event).await?;
+                }
+            }
+            came = async {
+                match chat.as_mut() {
+                    Some(tracks) => tracks.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(tracks) = chat.as_mut() else { continue };
+                for out in tracks.on(&mut session, came).await {
+                    match out {
+                        ChatOut::Show(line) => ui.chat(line),
+                        ChatOut::Note(line) => ui.note(&line),
+                    }
+                }
             }
             event = events.recv() => match event {
+                Some(UniEvent::Object { header, object, .. })
+                    if chat.as_ref().and_then(ChatTracks::lines_alias) == Some(header.track_alias) =>
+                {
+                    if let Some(line) = chat.as_mut().and_then(|tracks| tracks.live(header.group_id, &object.payload)) {
+                        ui.chat(line);
+                    }
+                }
                 Some(UniEvent::Object { header, object, .. }) => {
                     // An Object of the catalog's track, which stays
                     // subscribed: a catalog that comes again is not read.
@@ -1134,6 +1217,14 @@ async fn play(
                 // on its subscription first (moqlivemock's publisher sends
                 // it both ways): it is not read, and letting go of its body
                 // stops it.
+                Some(UniEvent::FetchOpened { stream, header })
+                    if chat.as_ref().and_then(ChatTracks::fetch_request_id) == Some(header.request_id) =>
+                {
+                    session.on_fetch_stream(header.request_id)?;
+                    if let Some(tracks) = chat.as_ref() {
+                        tracks.read_fetch(&stops, stream, header);
+                    }
+                }
                 Some(UniEvent::FetchOpened { stream, header }) => {
                     session.on_fetch_stream(header.request_id)?;
                     drop(stops.take_fetch_body(stream));
