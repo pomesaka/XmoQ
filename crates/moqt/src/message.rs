@@ -32,7 +32,7 @@ const UNSUPPORTED: &[u64] = &[PUBLISH_BLOCKED, PUBLISH_OK];
 /// Requests the draft defines and this crate does not implement. Only their
 /// Request ID is read, so that the request can be answered with `REQUEST_ERROR`
 /// `NOT_SUPPORTED` instead of ending the session.
-const UNSUPPORTED_REQUESTS: &[u64] = &[TRACK_STATUS, SUBSCRIBE_TRACKS];
+const UNSUPPORTED_REQUESTS: &[u64] = &[SUBSCRIBE_TRACKS];
 const NAMESPACE: u64 = 0x08;
 const TRACK_STATUS: u64 = 0x0d;
 const NAMESPACE_DONE: u64 = 0x0e;
@@ -271,6 +271,26 @@ pub struct Subscribe {
 }
 
 impl Subscribe {
+    /// The payload of a SUBSCRIBE or a `TRACK_STATUS` (`kind`), whose
+    /// parameters are checked as of that kind.
+    fn decode(reader: &mut Reader<'_>, kind: MessageKind) -> ReadResult<Self> {
+        let request_id = reader.varint()?;
+        let full_track_name = FullTrackName::decode(reader)?;
+        let parameters = params::decode_all(reader)?;
+        check_parameters(&parameters, kind)?;
+        Ok(Self {
+            request_id,
+            full_track_name,
+            parameters,
+        })
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), UsageError> {
+        varint::encode(self.request_id, out);
+        self.full_track_name.encode(out);
+        params::encode_all(&self.parameters, out)
+    }
+
     /// The Track Namespace field.
     #[must_use]
     pub fn track_namespace(&self) -> &TrackNamespace {
@@ -699,8 +719,10 @@ pub enum ControlMessage {
     /// `NAMESPACE_DONE`, type 0xE (§10.17), with the Track Namespace Suffix
     /// as NAMESPACE has it.
     NamespaceDone(TrackNamespace),
-    /// A request this crate does not implement: `TRACK_STATUS` (0xD),
-    /// `SUBSCRIBE_NAMESPACE` (0x50) or `SUBSCRIBE_TRACKS` (0x51). Only
+    /// `TRACK_STATUS`, type 0xD (§10.14): what a SUBSCRIBE would be answered
+    /// with, without a subscription. Answered with `REQUEST_OK` (§10.5).
+    TrackStatus(Subscribe),
+    /// A request this crate does not implement: `SUBSCRIBE_TRACKS` (0x51). Only
     /// the Request ID, their first field, is decoded; the rest of the payload
     /// is skipped unchecked. It cannot be encoded.
     UnsupportedRequest {
@@ -770,12 +792,8 @@ impl ControlMessage {
                 params::encode_all(&message.parameters, out)?;
                 REQUEST_UPDATE
             }
-            Self::Subscribe(message) => {
-                varint::encode(message.request_id, out);
-                message.full_track_name.encode(out);
-                params::encode_all(&message.parameters, out)?;
-                SUBSCRIBE
-            }
+            Self::Subscribe(message) => message.encode(out).map(|()| SUBSCRIBE)?,
+            Self::TrackStatus(message) => message.encode(out).map(|()| TRACK_STATUS)?,
             Self::SubscribeOk(message) => {
                 varint::encode(message.track_alias, out);
                 params::encode_all(&message.parameters, out)?;
@@ -874,7 +892,7 @@ fn check_type(ty: u64) -> Result<(), Error> {
     match ty {
         SETUP | REQUEST_UPDATE | SUBSCRIBE | SUBSCRIBE_OK | REQUEST_ERROR | PUBLISH_NAMESPACE
         | REQUEST_OK | PUBLISH_DONE | PUBLISH | FETCH | FETCH_OK | GOAWAY | SUBSCRIBE_NAMESPACE
-        | NAMESPACE | NAMESPACE_DONE => Ok(()),
+        | NAMESPACE | NAMESPACE_DONE | TRACK_STATUS => Ok(()),
         ty if UNSUPPORTED_REQUESTS.contains(&ty) => Ok(()),
         ty if UNSUPPORTED.contains(&ty) => Err(Error::UnsupportedMessageType(ty)),
         // Includes the types Table 5 marks RESERVED (0x01, 0x20, 0x21, 0x40,
@@ -916,16 +934,11 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
                 parameters,
             })
         }
-        SUBSCRIBE => {
-            let request_id = reader.varint()?;
-            let full_track_name = FullTrackName::decode(reader)?;
-            let parameters = params::decode_all(reader)?;
-            check_parameters(&parameters, MessageKind::Subscribe)?;
-            ControlMessage::Subscribe(Subscribe {
-                request_id,
-                full_track_name,
-                parameters,
-            })
+        // §10.14: "The TRACK_STATUS message format is identical to the
+        // SUBSCRIBE message".
+        SUBSCRIBE => ControlMessage::Subscribe(Subscribe::decode(reader, MessageKind::Subscribe)?),
+        TRACK_STATUS => {
+            ControlMessage::TrackStatus(Subscribe::decode(reader, MessageKind::TrackStatus)?)
         }
         SUBSCRIBE_OK => {
             let track_alias = reader.varint()?;
@@ -1156,7 +1169,39 @@ pub(crate) mod tests {
         let mut messages = moqtail_publish_side();
         messages.extend(moqtail_subscribe_side());
         messages.extend(moqtail_fetch_side());
+        messages.extend(moqtail_track_status_side());
         messages
+    }
+
+    /// What moqtail's relay sent for a `TRACK_STATUS` (§10.14): the one it
+    /// passed on to the publisher of the namespace for a track it did not
+    /// have, and its answer for a track it had. The `LARGEST_OBJECT` {0, 0}
+    /// came also before the publisher had sent an Object.
+    fn moqtail_track_status_side() -> Vec<(&'static str, ControlMessage)> {
+        vec![
+            (
+                "track-status-moqtail-relay",
+                ControlMessage::TrackStatus(Subscribe {
+                    request_id: 1,
+                    full_track_name: FullTrackName::new(
+                        xmoq_namespace(),
+                        b"nobody-published-this".to_vec(),
+                    )
+                    .unwrap(),
+                    parameters: vec![],
+                }),
+            ),
+            (
+                "request-ok-track-status-moqtail-relay",
+                ControlMessage::RequestOk(RequestOk {
+                    parameters: vec![Parameter::LargestObject(Location {
+                        group: 0,
+                        object: 0,
+                    })],
+                    track_properties: vec![],
+                }),
+            ),
+        ]
     }
 
     fn moqtail_publish_side() -> Vec<(&'static str, ControlMessage)> {
@@ -2011,30 +2056,60 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn requests_this_crate_does_not_implement_yield_their_request_id() {
-        // (bytes, message type, Request ID). Only the Request ID is decoded;
-        // the rest of the payload (0x01, 0x02) is skipped.
-        let cases: [(&[u8], u64, u64); 2] = [
-            (&[0x0d, 0x00, 0x03, 0x06, 0x01, 0x02], 0x0d, 6),
-            (&[0x51, 0x00, 0x03, 0x06, 0x01, 0x02], 0x51, 6),
+    fn a_request_this_crate_does_not_implement_yields_its_request_id() {
+        // SUBSCRIBE_TRACKS with the Request ID 6. Only the Request ID is
+        // decoded; the rest of the payload (0x01, 0x02) is skipped.
+        let bytes = [0x51, 0x00, 0x03, 0x06, 0x01, 0x02];
+        let message = ControlMessage::UnsupportedRequest {
+            message_type: 0x51,
+            request_id: 6,
+        };
+        assert_eq!(
+            ControlMessage::decode(&bytes),
+            Ok(Some((message.clone(), bytes.len())))
+        );
+        assert_eq!(
+            message.encode(&mut Vec::new()),
+            Err(UsageError(
+                "this crate does not send requests it does not implement"
+            ))
+        );
+    }
+
+    /// §10.14: the format of SUBSCRIBE; of the parameters of §10.2,
+    /// `AUTHORIZATION_TOKEN` alone may appear in it (§10.2.2), and
+    /// `LARGEST_OBJECT` alone in its `REQUEST_OK` (§10.2.11). Written by hand
+    /// from the draft; the bytes of `moqtail` are in `fixtures/moqt-18/`.
+    #[test]
+    fn a_track_status_takes_an_authorization_token_and_nothing_else() {
+        // TRACK_STATUS 0xD, Request ID 2, namespace (a), name b, then the
+        // parameters.
+        let message = |parameters: &[u8]| -> Vec<u8> {
+            let payload = [&[0x02, 0x01, 0x01, b'a', 0x01, b'b'][..], parameters].concat();
+            [
+                &[0x0d][..],
+                &u16::try_from(payload.len()).unwrap().to_be_bytes(),
+                &payload,
+            ]
+            .concat()
+        };
+        // (the parameters; whether the message is taken)
+        let cases: [(&[u8], bool); 3] = [
+            (&[0x00], true),
+            // AUTHORIZATION_TOKEN (0x3): USE_VALUE (0x3), Token Type 0, "t".
+            (&[0x01, 0x03, 0x03, 0x03, 0x00, b't'], true),
+            // RENDEZVOUS_TIMEOUT (0x4) = 1, which only a SUBSCRIBE may carry.
+            (&[0x01, 0x04, 0x01], false),
         ];
-        for (bytes, message_type, request_id) in cases {
-            let message = ControlMessage::UnsupportedRequest {
-                message_type,
-                request_id,
-            };
-            assert_eq!(
-                ControlMessage::decode(bytes),
-                Ok(Some((message.clone(), bytes.len()))),
-                "{bytes:02x?}"
-            );
-            assert_eq!(
-                message.encode(&mut Vec::new()),
-                Err(UsageError(
-                    "this crate does not send requests it does not implement"
-                )),
-                "{bytes:02x?}"
-            );
+        for (parameters, taken) in cases {
+            let bytes = message(parameters);
+            let decoded = ControlMessage::decode(&bytes);
+            assert_eq!(decoded.is_ok(), taken, "{parameters:02x?}: {decoded:?}");
+            if let Ok(Some((decoded, _))) = decoded {
+                let mut encoded = Vec::new();
+                decoded.encode(&mut encoded).unwrap();
+                assert_eq!(encoded, bytes, "{parameters:02x?}");
+            }
         }
     }
 
@@ -2077,7 +2152,7 @@ pub(crate) mod tests {
             &[0x07, 0x00],
             // FETCH: a length of 5, and 3 bytes of the payload.
             &[0x16, 0x00, 0x05, 0x01, 0x02, 0x00],
-            // TRACK_STATUS, which is not decoded: a length of 9, and 2 bytes.
+            // TRACK_STATUS: a length of 9, and 2 bytes.
             &[0x0d, 0x00, 0x09, 0x01, 0x00],
             // SUBSCRIBE: a length of 31, and 1 byte.
             &[0x03, 0x00, 0x1f, 0x80],

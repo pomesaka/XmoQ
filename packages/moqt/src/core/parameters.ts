@@ -100,6 +100,15 @@ export type ParameterScope =
 	| "PUBLISH_NAMESPACE_OK"
 	/** SUBSCRIBE_NAMESPACE: AUTHORIZATION_TOKEN alone (§10.2.2). */
 	| "SUBSCRIBE_NAMESPACE"
+	/**
+	 * TRACK_STATUS: AUTHORIZATION_TOKEN alone (§10.2.2). §10.14 has its
+	 * format "identical to the SUBSCRIBE message", "but subscriber
+	 * parameters related to Track delivery ... are not included", and no
+	 * other parameter of §10.2 names it. As in the Rust implementation.
+	 */
+	| "TRACK_STATUS"
+	/** The REQUEST_OK answering TRACK_STATUS: LARGEST_OBJECT alone (§10.2.11). */
+	| "TRACK_STATUS_OK"
 	| "REQUEST_OK"
 	/** REQUEST_UPDATE for a subscription (§10.9.1). */
 	| "REQUEST_UPDATE"
@@ -126,6 +135,7 @@ export type ParameterScope =
 const REQUEST_OK_KINDS: readonly ParameterScope[] = [
 	"PUBLISH_OK",
 	"PUBLISH_NAMESPACE_OK",
+	"TRACK_STATUS_OK",
 ];
 
 type WriteValue = (writer: ByteWriter) => void;
@@ -276,6 +286,7 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 			"FETCH",
 			"REQUEST_UPDATE_OF_FETCH",
 			"SUBSCRIBE_NAMESPACE",
+			"TRACK_STATUS",
 		],
 		repeatable: true,
 		read: (reader, parameters) => {
@@ -340,7 +351,7 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 	{
 		name: "LARGEST_OBJECT",
 		type: 0x09n,
-		scopes: ["SUBSCRIBE_OK", "PUBLISH"],
+		scopes: ["SUBSCRIBE_OK", "PUBLISH", "TRACK_STATUS_OK"],
 		repeatable: false,
 		read: (reader, parameters) => {
 			parameters.largestObject = decodeLocation(reader);

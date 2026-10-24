@@ -78,6 +78,10 @@ pub enum PeerRequest {
     /// caller accepts with [`Session::accept_subscribe_namespace`] and sends
     /// the NAMESPACE and `NAMESPACE_DONE` messages on the stream itself.
     SubscribeNamespace(SubscribeNamespace),
+    /// The peer asks what a SUBSCRIBE for a track would be answered with
+    /// (§10.14). The caller answers with [`Session::accept_track_status`] or
+    /// [`Session::reject`], and closes the stream with a FIN after it.
+    TrackStatus(Subscribe),
 }
 
 /// What the first message on a request stream of the peer led to.
@@ -301,6 +305,10 @@ enum PeerRequestState {
         established: bool,
     },
     Fetch(FetchPhase),
+    /// A `TRACK_STATUS`; `answered` once its `REQUEST_OK` was made.
+    TrackStatus {
+        answered: bool,
+    },
     /// `REQUEST_ERROR` was sent, by the caller or by the session itself; the
     /// stream is not yet reported gone. What the peer sent before it saw
     /// the answer still arrives, and gets none. WHY kept: a `REQUEST_UPDATE`
@@ -524,7 +532,9 @@ fn request_error(error_code: u64) -> ControlMessage {
 /// A protocol error for a message that is not a request (§3.3).
 fn request_id_of(first: &ControlMessage) -> Result<u64, Error> {
     match first {
-        ControlMessage::Subscribe(message) => Ok(message.request_id),
+        ControlMessage::Subscribe(message) | ControlMessage::TrackStatus(message) => {
+            Ok(message.request_id)
+        }
         ControlMessage::Publish(message) => Ok(message.request_id),
         ControlMessage::PublishNamespace(message) => Ok(message.request_id),
         ControlMessage::Fetch(message) => Ok(message.request_id),
@@ -688,6 +698,10 @@ impl Session {
                 });
                 (state, PeerRequest::Fetch(message))
             }
+            ControlMessage::TrackStatus(message) => (
+                PeerRequestState::TrackStatus { answered: false },
+                PeerRequest::TrackStatus(message),
+            ),
             // The types `request_id` was read from above, less the ones handled.
             _ => return Ok(self.refuse_opened(id, request_error_code::NOT_SUPPORTED)),
         };
@@ -823,6 +837,40 @@ impl Session {
         Ok(ControlMessage::RequestOk(RequestOk::default()))
     }
 
+    /// Answers a `TRACK_STATUS` of the peer with the `REQUEST_OK` to send
+    /// (`TRACK_STATUS_OK`): "the same parameters and Track Properties it would
+    /// have set in a `SUBSCRIBE_OK`" (§10.14), of which `LARGEST_OBJECT` alone
+    /// may appear in it (§10.2.11). The caller closes the stream with a FIN
+    /// after it: "The bidi stream is closed with a FIN after `TRACK_STATUS_OK`
+    /// or `REQUEST_ERROR` are sent."
+    ///
+    /// # Errors
+    ///
+    /// Fails unless `request` is a `TRACK_STATUS` without an answer, and for
+    /// a parameter other than `LARGEST_OBJECT`.
+    pub fn accept_track_status(
+        &mut self,
+        request: PeerRequestId,
+        parameters: Vec<Parameter>,
+        track_properties: Vec<KeyValuePair>,
+    ) -> Result<ControlMessage, UsageError> {
+        if !params::all_allowed(&parameters, MessageKind::TrackStatusOk) {
+            return Err(UsageError("parameter not allowed in this message"));
+        }
+        let Some(PeerRequestState::TrackStatus { answered }) = self.peer_request_mut(request)?
+        else {
+            return Err(NOT_PENDING);
+        };
+        if *answered {
+            return Err(NOT_PENDING);
+        }
+        *answered = true;
+        Ok(ControlMessage::RequestOk(RequestOk {
+            parameters,
+            track_properties,
+        }))
+    }
+
     /// Accepts a FETCH of the peer. Returns the `FETCH_OK` to send, and the
     /// number of `REQUEST_UPDATE`s that came before it: the caller sends
     /// that many `REQUEST_OK` messages (`RequestOk::default()`) after the
@@ -913,6 +961,7 @@ impl Session {
             Some(PeerRequestState::Fetch(phase)) => {
                 matches!(phase, FetchPhase::Pending { .. })
             }
+            Some(PeerRequestState::TrackStatus { answered }) => !*answered,
             Some(PeerRequestState::Rejected) | None => false,
         };
         if !pending {
@@ -1109,6 +1158,18 @@ impl Session {
         }
         if ended {
             return Ok(PeerRequestEvent::LateMessage);
+        }
+        // §10.14: "the subscriber cannot send REQUEST_UPDATE". WHY the
+        // session is closed, as for any message a request of its kind does
+        // not take: the draft names no consequence, and an update of a
+        // request that creates no state has nothing to apply to.
+        if matches!(message, ControlMessage::RequestUpdate(_))
+            && matches!(
+                self.peer_request_mut(request)?,
+                Some(PeerRequestState::TrackStatus { .. })
+            )
+        {
+            return Err(not_allowed.into());
         }
         match message {
             ControlMessage::RequestUpdate(update)
@@ -1318,9 +1379,11 @@ impl Session {
                 }
             }
             // Sorted out before this is called.
-            Some(PeerRequestState::Rejected | PeerRequestState::Fetch(FetchPhase::Over)) => {
-                PeerRequestEvent::LateMessage
-            }
+            Some(
+                PeerRequestState::Rejected
+                | PeerRequestState::Fetch(FetchPhase::Over)
+                | PeerRequestState::TrackStatus { .. },
+            ) => PeerRequestEvent::LateMessage,
             Some(PeerRequestState::Subscribe { phase, .. }) => match *phase {
                 // The one update that is applied. WHY the others are
                 // refused and not accepted without effect: a REQUEST_OK for
@@ -1426,6 +1489,7 @@ impl Session {
             | PeerRequestState::PublishNamespace { .. }
             | PeerRequestState::SubscribeNamespace { .. }
             | PeerRequestState::Fetch(_)
+            | PeerRequestState::TrackStatus { .. }
             | PeerRequestState::Rejected => {}
         }
     }
@@ -2419,11 +2483,11 @@ mod tests {
                 session.publish(track(b"a"), 1, vec![], vec![]).unwrap();
                 by_the_session(&mut session, subscribe(0, b"a"))
             }
-            // TRACK_STATUS: NOT_SUPPORTED.
+            // SUBSCRIBE_TRACKS: NOT_SUPPORTED.
             "a request the session does not implement" => by_the_session(
                 &mut session,
                 ControlMessage::UnsupportedRequest {
-                    message_type: 0x0d,
+                    message_type: 0x51,
                     request_id: 0,
                 },
             ),
@@ -2653,11 +2717,11 @@ mod tests {
     #[test]
     fn requests_this_crate_does_not_implement_are_refused_not_fatal() {
         let mut session = server();
-        // TRACK_STATUS, with Request ID 0.
+        // SUBSCRIBE_TRACKS, with Request ID 0.
         assert_eq!(
             refusal(
                 session.on_peer_request_opened(ControlMessage::UnsupportedRequest {
-                    message_type: 0x0d,
+                    message_type: 0x51,
                     request_id: 0,
                 })
             ),
@@ -3244,6 +3308,69 @@ mod tests {
         assert_eq!(
             session.on_peer_request_opened(publish(2, b"b", 7)),
             Err(Error::DuplicateTrackAlias(7))
+        );
+    }
+
+    fn track_status(request_id: u64) -> ControlMessage {
+        ControlMessage::TrackStatus(Subscribe {
+            request_id,
+            full_track_name: track(b"a"),
+            parameters: vec![],
+        })
+    }
+
+    /// §10.14: a `TRACK_STATUS` gets one answer, `REQUEST_OK` with what a
+    /// `SUBSCRIBE_OK` would have had or `REQUEST_ERROR`, and "the subscriber
+    /// cannot send `REQUEST_UPDATE`".
+    #[test]
+    fn a_track_status_of_the_peer_is_answered_once() {
+        let largest = Parameter::LargestObject(Location {
+            group: 4,
+            object: 1,
+        });
+        let property = KeyValuePair::varint(2, 5).unwrap();
+        let mut session = server();
+        let request = opened(&mut session, track_status(0));
+        assert_eq!(
+            session.accept_track_status(request, vec![Parameter::Expires(1)], vec![]),
+            Err(UsageError("parameter not allowed in this message"))
+        );
+        assert_eq!(
+            session.accept_track_status(request, vec![largest.clone()], vec![property.clone()]),
+            Ok(ControlMessage::RequestOk(RequestOk {
+                parameters: vec![largest.clone()],
+                track_properties: vec![property],
+            }))
+        );
+        assert_eq!(
+            session.accept_track_status(request, vec![largest], vec![]),
+            Err(NOT_PENDING)
+        );
+        assert_eq!(
+            session.reject(request, 0x10, 0, ReasonPhrase::default()),
+            Err(NOT_PENDING)
+        );
+
+        let mut session = server();
+        let request = opened(&mut session, track_status(0));
+        assert_eq!(
+            session.reject(request, 0x10, 0, ReasonPhrase::default()),
+            Ok(request_error(0x10))
+        );
+
+        let mut session = server();
+        let request = opened(&mut session, track_status(0));
+        assert_eq!(
+            session.on_peer_request_message(
+                request,
+                ControlMessage::RequestUpdate(RequestUpdate {
+                    request_id: 2,
+                    parameters: vec![],
+                }),
+            ),
+            Err(RequestFault::Peer(Error::ProtocolViolation(
+                "message not allowed in this request state"
+            )))
         );
     }
 

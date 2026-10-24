@@ -2152,7 +2152,7 @@ impl Relay {
             return Ok(());
         };
         let (operation, namespace, parameters) = match request {
-            PeerRequest::Subscribe(subscribe) => (
+            PeerRequest::Subscribe(subscribe) | PeerRequest::TrackStatus(subscribe) => (
                 Operation::Subscribe,
                 Some(subscribe.full_track_name.namespace()),
                 &subscribe.parameters,
@@ -2282,6 +2282,11 @@ impl Relay {
         }
         match peer_request {
             PeerRequest::Fetch(fetch) => self.on_fetch(session, stream, request, &fetch, actions),
+            // FIXME: answer it (§4, §10.14), as decided on 2026-10-24.
+            PeerRequest::TrackStatus(_) => {
+                let not_supported = Refusal::code(request_error_code::NOT_SUPPORTED);
+                self.refuse(session, stream, request, &not_supported, actions);
+            }
             PeerRequest::Subscribe(subscribe) => {
                 self.on_subscribe(session, stream, request, &subscribe, actions);
             }

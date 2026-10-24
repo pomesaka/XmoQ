@@ -11,6 +11,8 @@ import {
 	SUBSCRIBE_MESSAGE_TYPE,
 	SUBSCRIBE_NAMESPACE_MESSAGE_TYPE,
 	type Subscribe,
+	TRACK_STATUS_MESSAGE_TYPE,
+	type TrackStatus,
 } from "./control-message.ts";
 import {
 	MoqtError,
@@ -41,6 +43,12 @@ export interface PeerRequestsOptions {
 	 */
 	fetch(
 		message: Fetch,
+		peerStream: number,
+		out: SessionOutput[],
+	): PeerSubscribeOpened;
+	/** A TRACK_STATUS of the peer, whole, with its Request ID checked. Like `subscribe`. */
+	trackStatus(
+		message: TrackStatus,
 		peerStream: number,
 		out: SessionOutput[],
 	): PeerSubscribeOpened;
@@ -235,7 +243,8 @@ const SUBSCRIBE_REFUSALS = new Map<bigint, string>([
 
 /**
  * Requests the peer opens, until it is known what becomes of them. A
- * SUBSCRIBE is handed on (`PeerRequestsOptions.subscribe`). Every other
+ * SUBSCRIBE and a TRACK_STATUS are handed on (`PeerRequestsOptions.subscribe`,
+ * `PeerRequestsOptions.trackStatus`). Every other
  * request is answered here with REQUEST_ERROR after its Request ID is
  * checked: NOT_SUPPORTED, or for a FETCH, which is decoded first, what
  * `fetchRefusal` has.
@@ -364,6 +373,21 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 		}
 	};
 
+	const handOn = (
+		message: Subscribe | Fetch | TrackStatus,
+		peerStream: number,
+		out: SessionOutput[],
+	): PeerSubscribeOpened => {
+		switch (message.type) {
+			case "SUBSCRIBE":
+				return options.subscribe(message, peerStream, out);
+			case "FETCH":
+				return options.fetch(message, peerStream, out);
+			case "TRACK_STATUS":
+				return options.trackStatus(message, peerStream, out);
+		}
+	};
+
 	return {
 		checkRequestId,
 		receive(peerStream, data, fin, out) {
@@ -426,24 +450,25 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// FIXME: serve a FETCH (§10.12). It is refused below, like a request
 			// that is not decoded.
 			//
-			// WHY a FETCH, a SUBSCRIBE and a SUBSCRIBE_NAMESPACE are decoded
-			// whole first, where the others are refused on their Request ID: a
-			// FETCH with a Fetch Type other than 1 to 3, a SUBSCRIBE_NAMESPACE
-			// whose prefix has more than 32 fields (§10.18), and any of them
-			// with a parameter that is unknown or not for its message, closes
-			// the session (§10.12, §10.2.1), and the Rust implementation, which
-			// decodes them, does. Refusing such a
+			// WHY a FETCH, a SUBSCRIBE, a TRACK_STATUS and a
+			// SUBSCRIBE_NAMESPACE are decoded whole first, where the others are
+			// refused on their Request ID: a FETCH with a Fetch Type other than
+			// 1 to 3, a SUBSCRIBE_NAMESPACE whose prefix has more than 32
+			// fields (§10.18), and any of them with a parameter that is unknown
+			// or not for its message, closes the session (§10.12, §10.2.1), and
+			// the Rust implementation, which decodes them, does. Refusing such a
 			// request would be another answer to the same bytes. WHY before the
 			// Request ID is checked: the Rust implementation decodes first, so
 			// a request that is wrong in both ways ends the session with the
 			// same code in both.
 			let refusal = NOT_SUPPORTED;
 			let handedOn:
-				| { message: Subscribe | Fetch; bytesRead: number }
+				| { message: Subscribe | Fetch | TrackStatus; bytesRead: number }
 				| undefined;
 			if (
 				messageType === FETCH_MESSAGE_TYPE ||
 				messageType === SUBSCRIBE_MESSAGE_TYPE ||
+				messageType === TRACK_STATUS_MESSAGE_TYPE ||
 				messageType === SUBSCRIBE_NAMESPACE_MESSAGE_TYPE
 			) {
 				const whole = decodeControlMessage(buffer);
@@ -473,7 +498,10 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 					if (refused !== undefined) refusal = refused;
 					else handedOn = { message: whole.value, bytesRead: whole.bytesRead };
 				}
-				if (whole.value.type === "SUBSCRIBE") {
+				if (
+					whole.value.type === "SUBSCRIBE" ||
+					whole.value.type === "TRACK_STATUS"
+				) {
 					handedOn = { message: whole.value, bytesRead: whole.bytesRead };
 				}
 			} else {
@@ -484,10 +512,7 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// stops has not said what it is, as in the Rust implementation.
 			if (missing === 0) out.push(identified(peerStream));
 			if (handedOn !== undefined) {
-				const opened =
-					handedOn.message.type === "FETCH"
-						? options.fetch(handedOn.message, peerStream, out)
-						: options.subscribe(handedOn.message, peerStream, out);
+				const opened = handOn(handedOn.message, peerStream, out);
 				if ("stream" in opened) {
 					streams.delete(peerStream);
 					return {

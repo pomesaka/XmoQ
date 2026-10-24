@@ -5,6 +5,7 @@ import {
 	decodeRequestStart,
 	encodeControlMessage,
 } from "../../src/core/control-message.ts";
+import type { MessageParameters } from "../../src/core/parameters.ts";
 import { hex, toHex, utf8 } from "../helpers.ts";
 
 // Bytes in this file are derived by hand from the message formats of draft 18.
@@ -498,11 +499,60 @@ describe("decodeControlMessage", () => {
 			code: 3,
 		},
 		{ name: "Setup Option cut short", bytes: "af 00 00 02 07 05", code: 3 },
+		// TRACK_STATUS 0xD, Request ID 2, namespace (a), name b: only a
+		// SUBSCRIBE may carry these (§10.2.1, §10.2.2, §10.14).
+		{
+			name: "RENDEZVOUS_TIMEOUT in TRACK_STATUS (§10.2.1)",
+			bytes: "0d 00 09 02 01 01 61 01 62 01 04 01",
+			code: 3,
+		},
+		{
+			name: "SUBSCRIBER_PRIORITY in TRACK_STATUS (§10.14)",
+			bytes: "0d 00 09 02 01 01 61 01 62 01 20 80",
+			code: 3,
+		},
 	])("rejects $name", ({ bytes, code }) => {
 		const result = decodeControlMessage(hex(bytes));
 		expect(result.status).toBe("error");
 		if (result.status === "error") expect(result.error.code).toBe(code);
 	});
+});
+
+// §10.14: the format of SUBSCRIBE; of the parameters of §10.2,
+// AUTHORIZATION_TOKEN alone may appear in it (§10.2.2). Written by hand from
+// the draft, as the Rust test `a_track_status_takes_an_authorization_token_and_nothing_else`;
+// the bytes of moqtail are in moqtail-fixtures.test.ts.
+describe("TRACK_STATUS", () => {
+	test.each([
+		{
+			name: "no parameter",
+			bytes: "0d 00 07 02 01 01 61 01 62 00",
+			parameters: {},
+		},
+		{
+			// AUTHORIZATION_TOKEN (0x3): USE_VALUE (0x3), Token Type 0, "t".
+			name: "an AUTHORIZATION_TOKEN",
+			bytes: "0d 00 0c 02 01 01 61 01 62 01 03 03 03 00 74",
+			parameters: { authorizationToken: [hex("03 00 74")] },
+		},
+	] satisfies { name: string; bytes: string; parameters: MessageParameters }[])(
+		"with $name is decoded, and encoded again to the same bytes",
+		({ bytes, parameters }) => {
+			const message: ControlMessage = {
+				type: "TRACK_STATUS",
+				requestId: 2n,
+				trackNamespace: [utf8("a")],
+				trackName: utf8("b"),
+				parameters,
+			};
+			expect(decodeControlMessage(hex(bytes))).toEqual({
+				status: "ok",
+				value: message,
+				bytesRead: hex(bytes).length,
+			});
+			expect(toHex(encodeControlMessage(message))).toBe(bytes);
+		},
+	);
 });
 
 describe("local limits of decodeControlMessage", () => {

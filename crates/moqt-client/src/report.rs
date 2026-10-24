@@ -11,10 +11,33 @@ use xmoq_moqt::fetch::{FetchObject, RangeEnd};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{GoAway, PublishDone, Setup};
 use xmoq_moqt::name::{Location, TrackNamespace};
+use xmoq_moqt::params::Parameter;
 
 use xmoq_moqt_io::{Direction, RequestClose};
 
 use crate::hex;
+
+/// `largest` is the `LARGEST_OBJECT` of the answer as `group,object`, or
+/// `none`; `track_properties` how many Track Properties it has.
+pub fn track_status_ok(parameters: &[Parameter], track_properties: &[KeyValuePair]) {
+    let largest = parameters
+        .iter()
+        .find_map(|parameter| match parameter {
+            Parameter::LargestObject(location) => {
+                Some(format!("{},{}", location.group, location.object))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "none".to_string());
+    println!(
+        "TRACK_STATUS_OK largest={largest} track_properties={}",
+        track_properties.len()
+    );
+}
+
+pub fn track_status_refused(error_code: u64) {
+    println!("TRACK_STATUS_REFUSED error_code={error_code:#x}");
+}
 
 pub fn namespaces_subscribed() {
     println!("NAMESPACES_SUBSCRIBED");

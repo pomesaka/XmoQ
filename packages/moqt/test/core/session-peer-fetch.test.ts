@@ -375,10 +375,10 @@ describe("a Standalone FETCH of the peer", () => {
 	])("a REQUEST_UPDATE $name uses up its Request ID (§10.1)", ({ session }) => {
 		const prepared = session();
 		prepared.receivePeerBidiStreamData(0, updateBytes(3, "00"), false);
-		// Another request with Request ID 3: the start of a TRACK_STATUS.
+		// Another request with Request ID 3: the start of a SUBSCRIBE_TRACKS.
 		expect(
 			briefly(
-				prepared.receivePeerBidiStreamData(9, hex("0d 00 02 03 00"), false),
+				prepared.receivePeerBidiStreamData(9, hex("51 00 02 03 00"), false),
 			).at(-1),
 		).toBe("close 4");
 	});
@@ -1014,10 +1014,10 @@ describe("fixtures/joining-request-id: whether the SUBSCRIBE of a Joining FETCH 
 		const session = started();
 		let peerStream = 0;
 		for (let id = 3; id <= lastUsed; id += 2) {
-			// The start of a TRACK_STATUS, whole: refused, and its stream over.
+			// The start of a SUBSCRIBE_TRACKS, whole: refused, and its stream over.
 			session.receivePeerBidiStreamData(
 				peerStream,
-				hex(["0d", "00", "09", ...nine(id)].join(" ")),
+				hex(["51", "00", "09", ...nine(id)].join(" ")),
 				true,
 			);
 			peerStream += 1;

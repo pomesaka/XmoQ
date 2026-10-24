@@ -222,6 +222,31 @@ export type SessionEvent =
 			endLocation: Location;
 			parameters: MessageParameters;
 	  }
+	/**
+	 * The peer asks what a SUBSCRIBE of a Track would be answered with
+	 * (TRACK_STATUS, §10.14). The caller answers with `acceptTrackStatus` or
+	 * `rejectPeerRequest`; `request-closed` for the same Request ID says that
+	 * the request went, by the peer's doing, before it was answered.
+	 */
+	| {
+			type: "peer-track-status";
+			requestId: bigint;
+			trackNamespace: TrackNamespace;
+			trackName: Uint8Array;
+			/** AUTHORIZATION_TOKEN, where it came: the one parameter it may carry (§10.2.2). */
+			parameters: MessageParameters;
+	  }
+	/**
+	 * TRACK_STATUS_OK (§10.14): what the peer would have set in a
+	 * SUBSCRIBE_OK. The TRACK_STATUS of this endpoint is over with it.
+	 */
+	| {
+			type: "track-status-ok";
+			requestId: bigint;
+			/** LARGEST_OBJECT where Objects have been published (§10.2.11). */
+			parameters: MessageParameters;
+			trackProperties: KeyValuePair[];
+	  }
 	/** A request the peer opened was answered with REQUEST_ERROR, with this code. */
 	| {
 			type: "peer-request-rejected";

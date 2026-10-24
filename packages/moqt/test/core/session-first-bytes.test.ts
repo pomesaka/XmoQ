@@ -138,14 +138,14 @@ describe("a stream of the peer has said what it is", () => {
 		{
 			name: "a request that is refused on its Request ID, when the message is whole",
 			kind: "bidi",
-			// A TRACK_STATUS of 5 bytes of payload, Request ID 1.
-			chunks: ["0d 00 05 01", "00 00", "00 00"],
+			// A SUBSCRIBE_TRACKS of 5 bytes of payload, Request ID 1.
+			chunks: ["51 00 05 01", "00 00", "00 00"],
 			expected: [[], [], ["identified bidi 7"]],
 		},
 		{
 			name: "a request that comes whole in one read",
 			kind: "bidi",
-			chunks: ["0d 00 02 01 00"],
+			chunks: ["51 00 02 01 00"],
 			expected: [["identified bidi 7"]],
 		},
 		{
@@ -158,7 +158,7 @@ describe("a stream of the peer has said what it is", () => {
 		{
 			name: "what follows the first message says nothing more",
 			kind: "bidi",
-			chunks: ["0d 00 02 01 00", "aa bb"],
+			chunks: ["51 00 02 01 00", "aa bb"],
 			expected: [["identified bidi 7"], []],
 		},
 	])("$name", ({ kind, chunks, expected }) => {
@@ -207,13 +207,13 @@ describe("the time a stream of the peer has to say what it is runs out", () => {
 		{
 			name: "one that sent half of its Request ID",
 			kind: "bidi",
-			before: ["0d 00 05 80"],
+			before: ["51 00 05 80"],
 			expected: ["abandon bidi 7 code 1", "timed out bidi 7"],
 		},
 		{
 			name: "a request that was refused on its Request ID and is not whole",
 			kind: "bidi",
-			before: ["0d 00 05 01 00"],
+			before: ["51 00 05 01 00"],
 			expected: ["abandon bidi 7 code 1", "timed out bidi 7"],
 		},
 		{
@@ -389,7 +389,7 @@ describe("the time a stream of the peer has to say what it is runs out", () => {
 			name: "a request that was answered and has ended",
 			kind: "bidi",
 			arrange: (session) => {
-				session.receivePeerBidiStreamData(7, hex("0d 00 02 01 00"), true);
+				session.receivePeerBidiStreamData(7, hex("51 00 02 01 00"), true);
 			},
 		},
 		{
@@ -404,7 +404,7 @@ describe("the time a stream of the peer has to say what it is runs out", () => {
 			name: "a request that was reset inside its first message",
 			kind: "bidi",
 			arrange: (session) => {
-				session.receivePeerBidiStreamData(7, hex("0d 00 05 80"), false);
+				session.receivePeerBidiStreamData(7, hex("51 00 05 80"), false);
 				session.peerBidiStreamReset(7);
 			},
 		},
@@ -420,7 +420,7 @@ describe("the time a stream of the peer has to say what it is runs out", () => {
 			name: "a request that was given up for its time already",
 			kind: "bidi",
 			arrange: (session) => {
-				session.receivePeerBidiStreamData(7, hex("0d 00 05 80"), false);
+				session.receivePeerBidiStreamData(7, hex("51 00 05 80"), false);
 				session.peerStreamTimedOut("bidi", 7);
 			},
 		},
@@ -471,7 +471,7 @@ describe("the time a stream of the peer has to say what it is runs out", () => {
 		{
 			name: "a request that was refused and is whole",
 			kind: "bidi",
-			before: ["0d 00 02 01 00"],
+			before: ["51 00 02 01 00"],
 		},
 	])("nothing is done to $name", ({ kind, before }) => {
 		const session = started();

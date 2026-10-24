@@ -54,6 +54,17 @@ export interface Subscribe extends FullTrackName {
 	parameters: MessageParameters;
 }
 
+/**
+ * TRACK_STATUS (§10.14): what a SUBSCRIBE of the Track would be answered
+ * with, without a subscription. "The TRACK_STATUS message format is
+ * identical to the SUBSCRIBE message". Answered with REQUEST_OK (§10.5).
+ */
+export interface TrackStatus extends FullTrackName {
+	type: "TRACK_STATUS";
+	requestId: bigint;
+	parameters: MessageParameters;
+}
+
 export interface SubscribeOk {
 	type: "SUBSCRIBE_OK";
 	trackAlias: bigint;
@@ -77,8 +88,8 @@ export interface PublishNamespace {
 }
 
 /**
- * REQUEST_OK of §10.5. The draft calls it PUBLISH_OK or PUBLISH_NAMESPACE_OK
- * after the request it answers; the wire message is the same.
+ * REQUEST_OK of §10.5. The draft calls it PUBLISH_OK, PUBLISH_NAMESPACE_OK or
+ * TRACK_STATUS_OK after the request it answers; the wire message is the same.
  */
 export interface RequestOk {
 	type: "REQUEST_OK";
@@ -210,6 +221,7 @@ export type ControlMessage =
 	| NamespaceDone
 	| RequestUpdate
 	| Subscribe
+	| TrackStatus
 	| SubscribeOk
 	| Publish
 	| PublishNamespace
@@ -238,6 +250,7 @@ const MESSAGE_TYPES: Record<MessageName, bigint> = {
 	SUBSCRIBE_NAMESPACE: 0x50n,
 	NAMESPACE: 0x8n,
 	NAMESPACE_DONE: 0xen,
+	TRACK_STATUS: 0xdn,
 };
 
 /**
@@ -250,7 +263,6 @@ const MESSAGE_TYPES: Record<MessageName, bigint> = {
  * sends it has not left the draft.
  */
 const UNIMPLEMENTED_MESSAGE_TYPES = {
-	TRACK_STATUS: 0xdn,
 	PUBLISH_BLOCKED: 0xfn,
 	PUBLISH_OK: 0x1en,
 	SUBSCRIBE_TRACKS: 0x51n,
@@ -258,7 +270,7 @@ const UNIMPLEMENTED_MESSAGE_TYPES = {
 
 /** §3.3: the seven message types a request stream can begin with. */
 const REQUEST_MESSAGE_TYPES: ReadonlySet<bigint> = new Set([
-	UNIMPLEMENTED_MESSAGE_TYPES.TRACK_STATUS,
+	MESSAGE_TYPES.TRACK_STATUS,
 	MESSAGE_TYPES.SUBSCRIBE,
 	MESSAGE_TYPES.PUBLISH,
 	MESSAGE_TYPES.FETCH,
@@ -274,6 +286,8 @@ export const FETCH_MESSAGE_TYPE = MESSAGE_TYPES.FETCH;
 export const SUBSCRIBE_MESSAGE_TYPE = MESSAGE_TYPES.SUBSCRIBE;
 export const SUBSCRIBE_NAMESPACE_MESSAGE_TYPE =
 	MESSAGE_TYPES.SUBSCRIBE_NAMESPACE;
+/** The Message Type of TRACK_STATUS, which is decoded whole and handed to the application. */
+export const TRACK_STATUS_MESSAGE_TYPE = MESSAGE_TYPES.TRACK_STATUS;
 
 /**
  * WHY SETUP has one value in two tables: Table 3 (stream types, §3.4) and
@@ -487,7 +501,10 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 			const parameters = decodeMessageParameters(reader, "ANY_REQUEST_UPDATE");
 			return { type: name, requestId, parameters };
 		}
-		case "SUBSCRIBE": {
+		// §10.14: "The TRACK_STATUS message format is identical to the
+		// SUBSCRIBE message"; its parameters are held to their own scope.
+		case "SUBSCRIBE":
+		case "TRACK_STATUS": {
 			const requestId = reader.varint();
 			const fullTrackName = decodeFullTrackName(reader);
 			const parameters = decodeMessageParameters(reader, name);
@@ -765,6 +782,7 @@ function encodePayload(writer: ByteWriter, message: ControlMessage): void {
 			encodeMessageParameters(writer, message.parameters, message.type);
 			break;
 		case "SUBSCRIBE":
+		case "TRACK_STATUS":
 			writer.varint(message.requestId);
 			encodeFullTrackName(writer, message);
 			encodeMessageParameters(writer, message.parameters, message.type);

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
+import { decodeControlMessage } from "../../src/core/control-message.ts";
 import {
 	connectOver,
 	type MoqtConnection,
@@ -28,9 +29,9 @@ function fetchBytes(requestId: number): Uint8Array {
 	return hex(pairs.join(" "));
 }
 
-/** A TRACK_STATUS as far as its Request ID, whole: a request that is not implemented. */
-const trackStatus = (requestId: number): Uint8Array =>
-	hex(`0d 00 02 ${requestId.toString(16).padStart(2, "0")} 00`);
+/** A SUBSCRIBE_TRACKS as far as its Request ID, whole: a request that is not implemented. */
+const subscribeTracks = (requestId: number): Uint8Array =>
+	hex(`51 00 02 ${requestId.toString(16).padStart(2, "0")} 00`);
 
 // The time is the default, 3 seconds, on a clock that is moved by hand.
 beforeEach(() => {
@@ -76,12 +77,16 @@ const REFUSED: {
 		bytes: subscribeBytes(1),
 	},
 	{
+		name: "a TRACK_STATUS, which the connection answers none of",
+		bytes: hex(fixture("track-status-moqtail-relay")),
+	},
+	{
 		name: "a request the session does not implement",
-		bytes: trackStatus(1),
+		bytes: subscribeTracks(1),
 	},
 	{
 		name: "a request that was refused on its start and does not come whole",
-		bytes: hex("0d 00 05 01 00"),
+		bytes: hex("51 00 05 01 00"),
 	},
 	{
 		name: "a SUBSCRIBE that a REQUEST_UPDATE before its answer ended",
@@ -89,6 +94,25 @@ const REFUSED: {
 		bytes: new Uint8Array([...subscribeBytes(1), ...hex("02 00 02 03 00")]),
 	},
 ];
+
+// WHY NOT_SUPPORTED: the connection is a client, and answers what a
+// SUBSCRIBE would get for no Track (§10.14), whatever it serves.
+test("a TRACK_STATUS of the peer is refused with NOT_SUPPORTED, and a FIN", async () => {
+	const { peer, connection } = await connected();
+	connection.serve({ subscribe: () => {} });
+	const request = peer.openBidi();
+	await request.reply.write(hex(fixture("track-status-moqtail-relay")));
+	await flush();
+	const answer = (await request.sent.read()).value;
+	expect(
+		answer === undefined ? undefined : decodeControlMessage(answer),
+	).toMatchObject({
+		status: "ok",
+		value: { type: "REQUEST_ERROR", errorCode: 0x3n },
+	});
+	expect(await request.sent.read()).toEqual({ done: true, value: undefined });
+	expect(await state(connection.closed)).toBe("pending");
+});
 
 describe("a request of the peer that was refused, whose peer does not end its direction", () => {
 	test.each(REFUSED)(
@@ -125,7 +149,7 @@ describe("a request of the peer that was refused, whose peer does not end its di
 			await flush();
 			// A second request waits in the transport.
 			const second = peer.openBidi();
-			await second.reply.write(trackStatus(5));
+			await second.reply.write(subscribeTracks(5));
 			await pass(2_999);
 			expect(peer.untakenBidiStreams()).toBe(1);
 			await pass(1);
@@ -137,9 +161,9 @@ describe("a request of the peer that was refused, whose peer does not end its di
 	test("a request that is not kept, for as many being kept as may be, is stopped as well", async () => {
 		const { peer } = await connected({ limits: { maxPeerRequests: 1 } });
 		const first = peer.openBidi();
-		await first.reply.write(trackStatus(1));
+		await first.reply.write(subscribeTracks(1));
 		const second = peer.openBidi();
-		await second.reply.write(trackStatus(3));
+		await second.reply.write(subscribeTracks(3));
 		await pass(2_999);
 		expect(await state(second.reply.closed)).toBe("pending");
 		await pass(1);
@@ -153,9 +177,9 @@ describe("a request of the peer that was refused, whose peer does not end its di
 	test("a request that is not kept leaves no timer when its peer has ended its direction", async () => {
 		const { peer } = await connected({ limits: { maxPeerRequests: 1 } });
 		const first = peer.openBidi();
-		await first.reply.write(trackStatus(1));
+		await first.reply.write(subscribeTracks(1));
 		const second = peer.openBidi();
-		await second.reply.write(trackStatus(3));
+		await second.reply.write(subscribeTracks(3));
 		await flush();
 		expect(jest.getTimerCount()).toBe(2);
 		await second.reply.close();
