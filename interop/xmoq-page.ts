@@ -339,6 +339,15 @@ export type OwnPageExtras = {
 	/** The values of the NEW_GROUP_REQUESTs the handler was called with, in order. */
 	newGroupRequests(): Promise<string[]>;
 	/**
+	 * Sends a TRACK_STATUS (transport §10.14) on the connection of `connect`
+	 * and resolves with the line the Rust client prints for its answer
+	 * (`--mode track-status`): `TRACK_STATUS_OK largest=<group>,<object>`
+	 * or `largest=none`, then ` track_properties=<count>`; or
+	 * `TRACK_STATUS_REFUSED error_code=0x<hex>` for a REQUEST_ERROR. Rejects
+	 * for any other end.
+	 */
+	trackStatus(namespace: string, trackName: string): Promise<string>;
+	/**
 	 * Whether the browser has a decoder for the codec, for Annex B without a
 	 * description: "supported", "not supported", or "no VideoDecoder".
 	 */

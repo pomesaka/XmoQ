@@ -49,7 +49,8 @@ interface Pairing {
 		| "chat-pages.ts"
 		| "chat-tokens.ts"
 		| "rendezvous.ts"
-		| "new-group.ts";
+		| "new-group.ts"
+		| "track-status.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -218,6 +219,26 @@ const REFUSALS: Pairing[] = [
 		],
 		expectedFailure: /SUBSCRIBE rejected: error_code=0x10/,
 		reasonIsInAClientLine: true,
+	},
+];
+
+/**
+ * TRACK_STATUS (§10.14): what each relay answers for a track it has, before
+ * and after an Object, for one that only an announcement may serve, and for
+ * one nobody has (`track-status.ts`).
+ */
+const TRACK_STATUSES: (Pairing & { relays: string[] })[] = [
+	{
+		name: "own-rust asks for the status of a track with a source, before and after an Object, of one only announced, and of one nobody has",
+		script: "track-status.ts",
+		args: ["--client", "own-rust"],
+		relays: ["moqtail", "own"],
+	},
+	{
+		name: "own-browser asks for the status of a track with a source, before and after an Object, of one only announced, and of one nobody has",
+		script: "track-status.ts",
+		args: ["--client", "own-browser"],
+		relays: ["moqtail", "own"],
 	},
 ];
 
@@ -1089,6 +1110,13 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			FETCHES.filter((pairing) => pairing.relays.includes(relay)).map(
 				({ relays: _where, ...pairing }) =>
 					named(relay, { ...pairing, name: `fetch: ${pairing.name}` }),
+			),
+		),
+		// "track status: " lets `--only` pick these runs alone.
+		...relays.flatMap((relay) =>
+			TRACK_STATUSES.filter((pairing) => pairing.relays.includes(relay)).map(
+				({ relays: _where, ...pairing }) =>
+					named(relay, { ...pairing, name: `track status: ${pairing.name}` }),
 			),
 		),
 		// A publisher that is a server: no relay is in between, so the run is

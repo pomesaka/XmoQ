@@ -27,6 +27,7 @@ import type {
 	PublishRequest,
 	SubscribeAnswer,
 	SubscribeRequest,
+	TrackStatusRequest,
 } from "../core/requests.ts";
 import { createSession, type Session } from "../core/session.ts";
 import type {
@@ -111,7 +112,8 @@ function isAnswer(event: SessionEvent): event is Extract<
 			| "publish-ok"
 			| "subscribe-ok"
 			| "request-error"
-			| "fetch-ok";
+			| "fetch-ok"
+			| "track-status-ok";
 	}
 > {
 	switch (event.type) {
@@ -120,6 +122,7 @@ function isAnswer(event: SessionEvent): event is Extract<
 		case "subscribe-ok":
 		case "request-error":
 		case "fetch-ok":
+		case "track-status-ok":
 			return true;
 		default:
 			return false;
@@ -197,7 +200,8 @@ export interface SessionConnectOptions {
 	/**
 	 * An AUTHORIZATION TOKEN for the whole connection: the Token structure as
 	 * bytes (§10.2.2). **It is put into every request this connection sends
-	 * that can carry one**: PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE and FETCH,
+	 * that can carry one**: PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE, FETCH and
+	 * TRACK_STATUS,
 	 * which are the ones of §10.2.2 ("It MAY appear in a PUBLISH, SUBSCRIBE,
 	 * REQUEST_UPDATE, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS,
 	 * PUBLISH_NAMESPACE, TRACK_STATUS or FETCH message") that this library
@@ -626,6 +630,33 @@ export interface PublishNamespaceCallOptions {
 }
 
 /**
+ * TRACK_STATUS_OK (§10.14, a REQUEST_OK): what the peer would have set in a
+ * SUBSCRIBE_OK for the Track.
+ */
+export interface TrackStatusOk {
+	/**
+	 * LARGEST_OBJECT (§10.2.11), the one parameter it may carry: "If Objects
+	 * have been published on this Track the Publisher MUST include this
+	 * parameter". `undefined` where the peer left it out.
+	 */
+	largestObject: Location | undefined;
+	/** As they came, Immutable Properties among them as one property (§12.7). */
+	trackProperties: KeyValuePair[];
+}
+
+export interface TrackStatusCallOptions {
+	/**
+	 * Gives the TRACK_STATUS up when it aborts before the answer: the request
+	 * stream is reset and the peer's direction stopped, both with CANCELLED
+	 * (§3.3.2), and `trackStatus` rejects with `RequestAbortedError` of
+	 * `cancelled`. With a signal that has aborted already nothing is sent,
+	 * and `trackStatus` rejects with its reason. After the answer it does
+	 * nothing: the request is over.
+	 */
+	signal?: AbortSignal;
+}
+
+/**
  * A SUBSCRIBE of the peer, to be answered once with `accept` or `reject`.
  *
  * Nothing limits how long the answer takes. A relay gives up on a
@@ -910,6 +941,21 @@ export interface MoqtConnection {
 	 */
 	fetch(request: FetchRequest, options?: FetchCallOptions): Promise<Fetch>;
 	/**
+	 * Sends a TRACK_STATUS (§10.14) and resolves with its TRACK_STATUS_OK.
+	 * The answer ends the request, and the connection keeps nothing of it.
+	 * AUTHORIZATION_TOKEN is the one parameter it may carry (§10.2.2); with
+	 * another, it rejects with a `RangeError` and sends nothing. Otherwise it
+	 * rejects as the requests above do: with `RequestFailedError` for a
+	 * REQUEST_ERROR, with `RequestAbortedError` where the peer ends the stream
+	 * before it answers, where no answer comes within `answerTimeoutMs`
+	 * (`no-answer-in-time`; the request is then cancelled) and where the
+	 * signal aborts, and with `SessionClosedError`.
+	 */
+	trackStatus(
+		request: TrackStatusRequest,
+		options?: TrackStatusCallOptions,
+	): Promise<TrackStatusOk>;
+	/**
 	 * Closes the session (§3.5). `code` is a Session Termination Error Code,
 	 * NO_ERROR when left out; a value that is not a whole number from 0 to
 	 * 2^32 - 1 throws a `RangeError` and leaves the session open. The draft
@@ -1159,12 +1205,15 @@ export async function connectOver(
 	const answered = new Set<bigint>();
 	const pendingNamespaces = new Map<bigint, Deferred<void>>();
 	/**
-	 * PUBLISH_NAMESPACEs given a signal, until they end: what lets go of the
-	 * signal. Kept after the answer, since the signal withdraws then too.
+	 * PUBLISH_NAMESPACEs and TRACK_STATUSes given a signal, until they end:
+	 * what lets go of the signal. A PUBLISH_NAMESPACE keeps it after the
+	 * answer, since the signal withdraws then too; a TRACK_STATUS is over
+	 * with its answer.
 	 */
 	const withdrawals = new Map<bigint, () => void>();
 	const pendingPublishes = new Map<bigint, Deferred<PublishedTrack>>();
 	const pendingSubscribes = new Map<bigint, Deferred<Subscription>>();
+	const pendingTrackStatuses = new Map<bigint, Deferred<TrackStatusOk>>();
 	/** Track Alias of each PUBLISH that is waiting for its response. */
 	const pendingPublishAliases = new Map<bigint, bigint>();
 	const subscriptions = new Map<bigint, ActiveSubscription>();
@@ -1383,9 +1432,11 @@ export async function connectOver(
 		pendingNamespaces.get(requestId)?.reject(error);
 		pendingPublishes.get(requestId)?.reject(error);
 		pendingSubscribes.get(requestId)?.reject(error);
+		pendingTrackStatuses.get(requestId)?.reject(error);
 		pendingNamespaces.delete(requestId);
 		pendingPublishes.delete(requestId);
 		pendingSubscribes.delete(requestId);
+		pendingTrackStatuses.delete(requestId);
 		pendingPublishAliases.delete(requestId);
 		earlyGoAways.delete(requestId);
 	};
@@ -1403,6 +1454,7 @@ export async function connectOver(
 			...pendingNamespaces.keys(),
 			...pendingPublishes.keys(),
 			...pendingSubscribes.keys(),
+			...pendingTrackStatuses.keys(),
 		]) {
 			rejectPending(requestId, error);
 		}
@@ -1753,14 +1805,15 @@ export async function connectOver(
 	};
 
 	/**
-	 * Has `signal` withdraw the PUBLISH_NAMESPACE `requestId` (§6.2): the
-	 * call that waits for its answer fails, and the session cancels the
+	 * Has `signal` cancel the request `requestId`: a PUBLISH_NAMESPACE, which
+	 * is withdrawn so (§6.2), or a TRACK_STATUS that waits for its answer.
+	 * The call that waits for the answer fails, and the session cancels the
 	 * request, which resets the stream and stops the peer's direction with
 	 * CANCELLED (§3.3.2) and forgets it. The connection keeps nothing else of
-	 * an announcement. A request the session has ended already is not
-	 * cancelled again: the session does nothing for it.
+	 * either. A request the session has ended already is not cancelled
+	 * again: the session does nothing for it.
 	 */
-	const withdrawOnAbort = (requestId: bigint, signal: AbortSignal): void => {
+	const cancelOnAbort = (requestId: bigint, signal: AbortSignal): void => {
 		const withdraw = (): void => {
 			rejectPending(requestId, new RequestAbortedError({ type: "cancelled" }));
 			if (sessionClose !== undefined) return;
@@ -2188,7 +2241,7 @@ export async function connectOver(
 					earlyGoAways.set(event.requestId, notice);
 				}
 				// WHY nothing for the other requests (PUBLISH, PUBLISH_NAMESPACE,
-				// FETCH): no caller of this package moves one, and the peer
+				// FETCH, TRACK_STATUS): no caller of this package moves one, and the peer
 				// ends it after its Timeout (§10.4) as it ends any.
 				return undefined;
 			}
@@ -2341,9 +2394,17 @@ export async function connectOver(
 					.catch(() => {});
 				return undefined;
 			}
-			// No method of this connection sends a TRACK_STATUS.
-			case "track-status-ok":
+			case "track-status-ok": {
+				const { requestId } = event;
+				withdrawals.get(requestId)?.();
+				withdrawals.delete(requestId);
+				pendingTrackStatuses.get(requestId)?.resolve({
+					largestObject: event.parameters.largestObject,
+					trackProperties: event.trackProperties,
+				});
+				pendingTrackStatuses.delete(requestId);
 				return undefined;
+			}
 			case "peer-request-rejected":
 				awaitPeerEndAfterRefusal(event.requestId);
 				return undefined;
@@ -2644,7 +2705,7 @@ export async function connectOver(
 				});
 				// Registered with the request, before it is sent, so that an
 				// ending that comes at once lets go of the signal.
-				if (signal !== undefined) withdrawOnAbort(result.value, signal);
+				if (signal !== undefined) cancelOnAbort(result.value, signal);
 				return result;
 			});
 		},
@@ -2711,6 +2772,19 @@ export async function connectOver(
 				if (signal.aborted) onAbort();
 			}
 			return handle;
+		},
+		trackStatus(asked, callOptions = {}) {
+			const { signal } = callOptions;
+			if (signal?.aborted) return Promise.reject(signal.reason);
+			return request(pendingTrackStatuses, asked.parameters, (s) => {
+				const result = s.trackStatus({
+					...asked,
+					parameters: authorized(asked.parameters),
+				});
+				// As for PUBLISH_NAMESPACE: registered before it is sent.
+				if (signal !== undefined) cancelOnAbort(result.value, signal);
+				return result;
+			});
 		},
 		close(code = SessionErrorCode.NO_ERROR, reason = "") {
 			// Before the session is touched: a code that cannot be sent leaves it
