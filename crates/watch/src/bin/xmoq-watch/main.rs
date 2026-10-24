@@ -388,8 +388,16 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     let follows = room.is_some();
     let mut first = true;
     let mut tried: Option<Instant> = None;
-    // Where the last relay said to go with its GOAWAY.
-    let mut moved_to: Option<String> = None;
+    // The last GOAWAY: the URL the viewer was told to leave, and where to go
+    // instead. It holds for every try while the place is still the one left.
+    // WHY not for the next try alone: the relay that sent it is going away
+    // and refuses what comes (`GOING_AWAY`); a viewer that went back to it
+    // after one failure at the new URL was left there (`keepPlaying` of
+    // `@xmoq/media`, an interop run, 2026-10-24). WHY not where a room names
+    // another place: the room knows where the broadcast went.
+    let mut moved: Option<(String, String)> = None;
+    // Whether the last session ended with a GOAWAY.
+    let mut just_moved = false;
     // Whether the last try was made without the wait.
     let mut went_at_once = false;
     loop {
@@ -400,9 +408,10 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
         // provided." WHY the same certificate hash: the viewer has no other
         // for it; a relay elsewhere with another certificate turns the
         // connection down, and the viewer goes on as after any failure.
-        let moved = moved_to.take();
-        if let Some(url) = &moved {
-            place.url.clone_from(url);
+        match &moved {
+            Some((left, to)) if *left == place.url => place.url.clone_from(to),
+            Some(_) => moved = None,
+            None => {}
         }
         // WHY not at once again: a room that names one broadcast after the
         // other, or one that is gone, would have the viewer connect as fast
@@ -410,7 +419,8 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
         // picture stands still until the next session plays, and a relay
         // that sends GOAWAY on every session would have it connect as fast
         // as it can. `keepPlaying` of `@xmoq/media` does the same.
-        let at_once = moved.is_some() && !went_at_once;
+        let at_once = just_moved && !went_at_once;
+        just_moved = false;
         went_at_once = at_once;
         if !at_once && !waited_between_tries(ui, tried).await? {
             return Ok(());
@@ -461,7 +471,12 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
                     "MOVED {}",
                     url.as_deref().unwrap_or("to the same URL")
                 ));
-                moved_to = Some(url.unwrap_or_else(|| place.url.clone()));
+                // The place as the room or the flags gave it, before a move.
+                let left = moved
+                    .as_ref()
+                    .map_or_else(|| place.url.clone(), |(left, _)| left.clone());
+                moved = Some((left, url.unwrap_or_else(|| place.url.clone())));
+                just_moved = true;
             }
             // Without a room nothing says what comes next.
             Ok(Ended::Again) if follows => {}

@@ -578,6 +578,8 @@ export type PageVideoSetup = {
 	noise: boolean;
 	/** The track has dynamic Groups, with this shortest Group (`dynamicGroups` of `createVideoTrackEncoder`); none when left out. */
 	shortestGroupMs?: number;
+	/** `keepVideoPublished`: how long it waits before every `connect` after a GOAWAY, so that a viewer that moves too comes to the new relay before it; none when left out. */
+	moveDelayMs?: number;
 };
 
 /** What `createVideoTrackEncoder` of `@xmoq/media` counted on a page. */
