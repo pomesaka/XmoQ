@@ -3,11 +3,21 @@ summary of the relay's STATS lines and resets."""
 import collections, os, re, statistics, sys
 
 logs, viewers, video, frames, pieces = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
-cpu, rss = [], []
-samples = [tuple(map(float, line.split())) for line in open(f"{logs}/relay.ticks") if len(line.split()) == 3]
-for (t0, k0, _), (t1, k1, r1) in zip(samples, samples[1:]):
-    cpu.append((k1 - k0) / (t1 - t0))  # ticks of 1/100 s a second: percent of a core
-    rss.append(int(r1))
+cpu, rss, video_cpu, sound_cpu, busy = [], [], [], [], []
+# time, relay ticks, relay RSS, video viewers' ticks, sound viewers' ticks, machine idle ticks
+samples = [tuple(map(float, line.split())) for line in open(f"{logs}/relay.ticks") if len(line.split()) == 6]
+CORES = os.cpu_count() or 1
+# The seconds while the viewers of the video ran: after they end their ticks read 0.
+for a, b in zip(samples, samples[1:]):
+    if a[3] <= 0 or b[3] <= 0:
+        continue
+    span = b[0] - a[0]
+    cpu.append((b[1] - a[1]) / span)  # ticks of 1/100 s a second: percent of a core
+    rss.append(int(b[2]))
+    video_cpu.append((b[3] - a[3]) / span)
+    sound_cpu.append(max(b[4] - a[4], 0) / span)
+    busy.append(100 * CORES - (b[5] - a[5]) / span)
+relay_seconds = (samples[-1][1] - samples[0][1]) / 100 if len(samples) > 1 else 0
 used = [int(x) for x in open(f"{logs}/used.mb").read().split()] if os.path.exists(f"{logs}/used.mb") else []
 ms = lambda us: f"{us / 1000:.1f}"
 
@@ -35,9 +45,13 @@ def fanout(label, viewers_log, publisher_log, wanted):
         ms(statistics.median(p50)) if p50 else "-", ms(max(p99)) if p99 else "-", ms(max(mx)) if mx else "-"))
 
 
-print("RELAY video=%s relay_cpu_mean=%.0f%% relay_cpu_max=%.0f%% relay_rss_max_mb=%.0f machine_used_mb_max=%s samples=%d" % (
-    video.split("/")[-1], statistics.mean(cpu) if cpu else 0, max(cpu, default=0), max(rss, default=0) / 1024,
-    max(used, default="-"), len(cpu)))
+mean = lambda xs: statistics.mean(xs) if xs else 0
+print("RELAY video=%s relay_cpu_mean=%.0f%% relay_cpu_max=%.0f%% relay_cpu_seconds=%.1f relay_rss_max_mb=%.0f "
+      "video_viewers_cpu_mean/max=%.0f/%.0f%% sound_viewers_cpu_mean/max=%.0f/%.0f%% machine_busy_mean/max=%.0f/%.0f%%_of_%d00 "
+      "machine_used_mb_max=%s samples=%d" % (
+    video.split("/")[-1], mean(cpu), max(cpu, default=0), relay_seconds, max(rss, default=0) / 1024,
+    mean(video_cpu), max(video_cpu, default=0), mean(sound_cpu), max(sound_cpu, default=0),
+    mean(busy), max(busy, default=0), CORES, max(used, default="-"), len(cpu)))
 fanout("video", f"{logs}/viewers.log", f"{logs}/publisher.log", frames)
 if os.path.exists(f"{logs}/sound-viewers.log"):
     fanout("sound", f"{logs}/sound-viewers.log", f"{logs}/sound-publisher.log", pieces)

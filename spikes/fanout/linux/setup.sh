@@ -18,9 +18,15 @@ mkdir -p "$work/media" "$work/cert"
 "$podman" build -q -t "localhost/$name-linux" -f "$here/Containerfile" "$here"
 "$podman" volume exists "$name-target" || "$podman" volume create "$name-target"
 "$podman" volume exists "$name-cargo" || "$podman" volume create "$name-cargo"
+# WHY line tables: perf (PROFILE=1 of run.sh) names the lines of the relay with them; they
+# change what is in the file, not the code that runs.
 "$podman" run --rm --name "$name-build" --memory 3g -v "$root:/src:ro" -v "$name-target:/target" \
-  -v "$name-cargo:/usr/local/cargo/registry" -e CARGO_TARGET_DIR=/target -w /src "localhost/$name-linux" \
+  -v "$name-cargo:/usr/local/cargo/registry" -e CARGO_TARGET_DIR=/target \
+  -e CARGO_PROFILE_RELEASE_DEBUG=line-tables-only -w /src "localhost/$name-linux" \
   cargo build --release --locked -j 4 -p xmoq-relay -p xmoq-moqt-client -p xmoq-watch
+# rustfilt demangles the relay's names for perf-groups.py (PROFILE=1).
+"$podman" run --rm --name "$name-tools" -v "$name-target:/target" -v "$name-cargo:/usr/local/cargo/registry" \
+  "localhost/$name-linux" sh -c '[ -x /target/tools/bin/rustfilt ] || cargo install --quiet --locked --root /target/tools rustfilt@0.2.1'
 
 ff="mise exec ffmpeg@8.1 -- ffmpeg -hide_banner -loglevel error -y"
 $ff -f lavfi -i testsrc2=size=320x180:rate=25 -frames:v 100 -c:v h264_videotoolbox -profile:v baseline -b:v 513k -g 25 -bsf:v h264_mp4toannexb -f h264 "$work/media/small.h264"
