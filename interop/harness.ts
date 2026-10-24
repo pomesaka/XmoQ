@@ -1034,6 +1034,32 @@ export function spawnTerminalViewer(
 	return spawned;
 }
 
+/** The reader of a room for an agent (`crates/agent`), a debug build as the Rust client is. */
+const AGENT_BINARY = join(here, "..", "target", "debug", "xmoq-agent");
+
+/**
+ * Starts `xmoq-agent` towards the relay of the run. It is stopped with the
+ * run, and its stdin is open for lines to say.
+ */
+export function spawnAgent(
+	context: RunContext,
+	label: string,
+	extraArgs: string[],
+): LoggedProcess {
+	if (!existsSync(AGENT_BINARY)) {
+		throw new Error(`${AGENT_BINARY} is missing: cargo build -p xmoq-agent`);
+	}
+	const spawned = spawnLogged(label, AGENT_BINARY, [
+		"--url",
+		context.relayUrl,
+		"--cert-sha256",
+		context.certSha256Hex,
+		...extraArgs,
+	]);
+	defer(() => stopProcess(spawned, "SIGTERM"));
+	return spawned;
+}
+
 /** The gatherer of the chat (`crates/chat`), a debug build as the Rust client is. */
 const CHAT_GATHERER_BINARY = join(here, "..", "target", "debug", "xmoq-chat");
 

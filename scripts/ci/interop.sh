@@ -77,7 +77,7 @@ fi
 
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
 need_alsa_headers
-cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat
+cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat -p xmoq-agent
 # WHY --release for this one: interop/harness.ts, at `TERMINAL_VIEWER_BINARY`.
 cargo build --locked --release -p xmoq-watch
 

@@ -1,7 +1,7 @@
 //! The requests of a viewer on its session: SUBSCRIBE, and the catalog of
 //! MSF by a Joining FETCH.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -10,16 +10,18 @@ use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::immutable::{Of, searched_properties};
-use xmoq_moqt::kvp::Value;
-use xmoq_moqt::message::{ControlMessage, FetchRange, GoAway, RequestError, request_error_code};
+use xmoq_moqt::kvp::{KeyValuePair, Value};
+use xmoq_moqt::message::{
+    ControlMessage, FetchRange, GoAway, RequestError, request_error_code, setup_option,
+};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, answer_wait_ms};
-use xmoq_moqt::session::{ControlEvent, RequestEvent, RequestId, Session};
+use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, RequestId, Session};
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, FetchChunk, RequestReader, RequestStreamEvent, SendStream, StreamStops, Trace,
-    UniEvent, send_message,
+    Connection, FetchChunk, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream,
+    StreamStops, Trace, UniEvent, send_message,
 };
 use xmoq_msf::CatalogTrack;
 
@@ -49,6 +51,8 @@ pub struct Events {
 }
 
 impl Events {
+    /// The events of `received`, from the session's readers.
+    #[must_use]
     pub fn new(received: mpsc::Receiver<UniEvent>) -> Self {
         Self {
             received,
@@ -75,6 +79,10 @@ impl Events {
     /// to be closed for it then, with its code, and not when the wait is
     /// over. WHY the rest is kept and not let go of: an Object of a track
     /// can be read before the answer that subscribes to it.
+    ///
+    /// # Errors
+    ///
+    /// The error of an event that fails the session.
     pub async fn while_waiting<T>(&mut self, answer: impl Future<Output = T>) -> Result<T> {
         // Boxed: the requests it waits for are large futures, and the
         // viewer's own future would grow by each.
@@ -97,10 +105,13 @@ impl Events {
 /// A subscription: its request stream, kept open for as long as the track
 /// is wanted.
 pub struct Subscription {
+    /// The session's handle of the SUBSCRIBE.
     pub request: RequestId,
+    /// What its Objects come with.
     pub track_alias: u64,
     /// The `LARGEST_OBJECT` of its `SUBSCRIBE_OK`, where it had one.
     pub largest: Option<Location>,
+    /// What the relay says on its stream after the answer: `PUBLISH_DONE`.
     pub reader: RequestReader<Recv>,
     send: Send,
 }
@@ -125,8 +136,11 @@ pub struct CatalogKept {
 
 /// What the requests of a session are sent with.
 pub struct Requests<'a> {
+    /// Where the streams of the requests are opened.
     pub connection: &'a WtConnection,
+    /// What makes the requests and reads their answers.
     pub session: &'a mut Session,
+    /// The namespace of the tracks asked for.
     pub namespace: &'a TrackNamespace,
     /// The AUTHORIZATION TOKEN every request carries, where there is one.
     pub token: Option<&'a [u8]>,
@@ -211,6 +225,11 @@ impl std::error::Error for GoneAway {}
 
 /// Sends `asked` and waits for its answer. Needs no session, so that what
 /// is played goes on meanwhile; [`settle`] hands the answer to the session.
+///
+/// # Errors
+///
+/// A stream the relay does not allow in time, and one that breaks before
+/// the SUBSCRIBE is written.
 pub async fn send_subscribe(
     connection: &WtConnection,
     open_wait_ms: u64,
@@ -237,6 +256,10 @@ pub async fn send_subscribe(
 /// Hands what came of a SUBSCRIBE to the session: a subscription, or why
 /// there is none. A request that got no answer, or could not be sent, is
 /// let go of in the session.
+///
+/// # Errors
+///
+/// [`NotSubscribed`].
 pub fn settle(
     session: &mut Session,
     asked: &Asked,
@@ -296,6 +319,11 @@ impl Requests<'_> {
     /// SUBSCRIBE carries a `SUBGROUP_DELIVERY_TIMEOUT` (§10.2.3): the
     /// publisher gives up a Subgroup that is not delivered that long after
     /// its last Object (§8).
+    ///
+    /// # Errors
+    ///
+    /// A SUBSCRIBE that is refused ([`GoingAway`] for `GOING_AWAY`), not
+    /// sent, or not answered in time.
     pub async fn subscribe(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<Subscription> {
         let asked = self.ask(name, timeout_ms)?;
         let sent = send_subscribe(self.connection, self.open_wait_ms, &asked).await;
@@ -312,6 +340,11 @@ impl Requests<'_> {
 
     /// The SUBSCRIBE for a track of the namespace, made by the session and
     /// not sent yet ([`send_subscribe`]).
+    ///
+    /// # Errors
+    ///
+    /// A name that makes no Full Track Name, and a session that can make no
+    /// more requests.
     pub fn ask(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<Asked> {
         let full_name = FullTrackName::new(self.namespace.clone(), name.as_bytes().to_vec())?;
         let mut parameters = vec![
@@ -343,6 +376,11 @@ impl Requests<'_> {
     /// before the viewer came, so a SUBSCRIBE alone does not bring it
     /// (§10.12.2: the latest Group of the track the SUBSCRIBE is for), as
     /// `followCatalog` of `@xmoq/msf` does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::subscribe`]; a catalog that does not come within 5 s or
+    /// cannot be read; a session the peer broke meanwhile; [`GoneAway`].
     pub async fn catalog(
         &mut self,
         events: &mut Events,
@@ -449,10 +487,145 @@ impl Requests<'_> {
     }
 }
 
+/// The relay sent no SETUP in so many milliseconds.
+#[derive(Debug)]
+pub struct NoSetupInTime(pub u64);
+
+impl std::fmt::Display for NoSetupInTime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "the relay sent no SETUP within {} ms", self.0)
+    }
+}
+
+impl std::error::Error for NoSetupInTime {}
+
+/// Opens the control stream, sends SETUP with `token` where there is one
+/// and `implementation` as `MOQT_IMPLEMENTATION`, and hands the relay's
+/// SETUP to the session. The control stream goes into `control` as soon as
+/// it is open, also where what follows fails: it is to stay open until the
+/// session is closed, since a relay that sees it end closes the session
+/// with `PROTOCOL_VIOLATION` first (§3.3).
+///
+/// # Errors
+///
+/// A stream that does not open, a SETUP that cannot be sent, the error of
+/// an event that fails the session before the relay's SETUP (closed with its
+/// code, as a datagram of an unknown type that comes first has it, §11),
+/// something else first, and [`NoSetupInTime`].
+pub async fn setup(
+    connection: &WtConnection,
+    session: &mut Session,
+    events: &mut Events,
+    control: &mut Option<Send>,
+    token: Option<&[u8]>,
+    implementation: &str,
+    setup_wait_ms: u64,
+) -> Result<()> {
+    let control = control.insert(connection.open_uni().await?);
+    // In ascending order of their types: the token (0x03), then the
+    // implementation (0x07).
+    let mut options = Vec::new();
+    if let Some(token) = token {
+        options.push(KeyValuePair::bytes(
+            setup_option::AUTHORIZATION_TOKEN,
+            token.to_vec(),
+        )?);
+    }
+    options.push(KeyValuePair::bytes(
+        setup_option::MOQT_IMPLEMENTATION,
+        implementation.as_bytes().to_vec(),
+    )?);
+    let setup = session.setup(options)?;
+    send_message(control, &setup, &Trace::default(), "control").await?;
+    match tokio::time::timeout(Duration::from_millis(setup_wait_ms), events.recv()).await {
+        Ok(Some(UniEvent::Control(message))) => {
+            session.on_control_message(message)?;
+        }
+        Ok(Some(UniEvent::Failed(error))) => return Err(error.into()),
+        Ok(other) => bail!("no SETUP from the relay: {other:?}"),
+        Err(_) => return Err(NoSetupInTime(setup_wait_ms).into()),
+    }
+    Ok(())
+}
+
+/// The code to close the session with after `error` (§3.5):
+/// `CONTROL_MESSAGE_TIMEOUT` for a SETUP that did not come, as `@xmoq/moqt`
+/// has it, the one a protocol error of the relay asks for (a GOAWAY that
+/// breaks the rules of §10.4 among them), and `NO_ERROR` for everything
+/// else, also a request that is given up alone.
+#[must_use]
+pub fn termination_code(error: &anyhow::Error) -> u32 {
+    if error.is::<NoSetupInTime>() {
+        return 0x11;
+    }
+    // WHY the chain: `context` wraps the cause.
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
+        .and_then(xmoq_moqt::Error::termination_code)
+        .map_or(0, xmoq_moqt::TerminationCode::code)
+}
+
+/// What the peer does on a request stream it opened, where none is served:
+/// each is refused (`Session::refuse_peer_request`: `NOT_SUPPORTED` and a
+/// FIN, §3.3.2), as the Rust client does in its modes that serve none. What
+/// still comes on a refused stream goes to the session, which checks the
+/// Request ID of a `REQUEST_UPDATE` among it (§10.1).
+///
+/// # Errors
+///
+/// An error of the session, to be closed with its code
+/// ([`termination_code`]), and a reader that panicked.
+pub async fn refuse_peer_request<S: std::hash::BuildHasher>(
+    session: &mut Session,
+    refused: &mut HashMap<u64, PeerRequestId, S>,
+    event: PeerRequestStreamEvent<Send>,
+) -> Result<()> {
+    match event {
+        PeerRequestStreamEvent::Opened {
+            stream,
+            mut send,
+            first,
+        } => {
+            let (response, request) = session.refuse_peer_request(first)?;
+            if let Some(request) = request {
+                refused.insert(stream, request);
+            }
+            // An error means the peer is gone or stopped the stream.
+            let _ = send_message(&mut send, &response, &Trace::default(), "request").await;
+            send.finish();
+        }
+        PeerRequestStreamEvent::Message { stream, message } => {
+            // None where the session keeps nothing of it (`MAX_PEER_REQUESTS`).
+            if let Some(request) = refused.get(&stream) {
+                session.on_peer_request_message(*request, message)?;
+            }
+        }
+        PeerRequestStreamEvent::Closed { stream, .. } => {
+            if let Some(request) = refused.remove(&stream) {
+                session.on_peer_request_closed(request);
+            }
+        }
+        PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
+        PeerRequestStreamEvent::ReaderPanicked => bail!("a reader of a request stream panicked"),
+    }
+    Ok(())
+}
+
+/// Where a GOAWAY says to go: its New Session URI, or `None` for the URL of
+/// the session (§10.4: "If the URI is zero bytes long, the current URI is
+/// reused instead").
+#[must_use]
+pub fn new_url(go_away: &GoAway) -> Option<String> {
+    (!go_away.new_session_uri.is_empty())
+        .then(|| String::from_utf8_lossy(&go_away.new_session_uri).into_owned())
+}
+
 /// The Timestamp of LOC of an Object, in microseconds. `None` for an
 /// Object without one, with one that is invalid, or with a Timescale of
 /// its own, which is not handled: the demo has none (wall-clock
 /// microseconds).
+#[must_use]
 pub fn timestamp_of(object: &SubgroupObject) -> Option<u64> {
     let timing = loc::read_timing(
         searched_properties(&object.properties, Of::Object)

@@ -1,6 +1,7 @@
 //! The flags of the viewer.
 
-use crate::room::certificate_hash;
+use xmoq_viewer::room::certificate_hash;
+
 use crate::tracks::VideoVersion;
 
 /// How a frame gets to the terminal.
@@ -47,7 +48,7 @@ pub enum Source {
     },
 }
 
-/// The chat on `MoQ` tracks ([`crate::chat_track`]): the room and the
+/// The chat on `MoQ` tracks ([`xmoq_viewer::chat_track`]): the room and the
 /// viewer's name in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chat {
@@ -60,8 +61,8 @@ pub struct Chat {
     pub say: Option<String>,
     /// `--chat-catch-up-lines`: how many of the lines it missed are fetched
     /// when the subscription to `lines` is made again
-    /// ([`crate::chat_track::history_to_fetch`]); 1 to
-    /// [`crate::chat_track::CATCH_UP_LINES_MOST`].
+    /// ([`xmoq_viewer::chat_track::history_to_fetch`]); 1 to
+    /// [`xmoq_viewer::chat_track::CATCH_UP_LINES_MOST`].
     pub catch_up: u64,
 }
 
@@ -276,7 +277,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
     let (mut room, mut name, mut say, mut ask_token) = (None, "terminal".to_string(), None, true);
     let (mut video, mut audio) = (None, None);
     let mut chat_room = None;
-    let mut catch_up = crate::chat_track::CATCH_UP_LINES;
+    let mut catch_up = xmoq_viewer::chat_track::CATCH_UP_LINES;
     let mut args = Args {
         // Replaced below: a source is asked for.
         source: Source::Room {
@@ -324,11 +325,13 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                 catch_up = value
                     .parse()
                     .ok()
-                    .filter(|lines| (1..=crate::chat_track::CATCH_UP_LINES_MOST).contains(lines))
+                    .filter(|lines| {
+                        (1..=xmoq_viewer::chat_track::CATCH_UP_LINES_MOST).contains(lines)
+                    })
                     .ok_or_else(|| {
                         Invalid(format!(
                             "--chat-catch-up-lines is a whole number from 1 to {}, not {value}",
-                            crate::chat_track::CATCH_UP_LINES_MOST
+                            xmoq_viewer::chat_track::CATCH_UP_LINES_MOST
                         ))
                     })?;
             }
@@ -407,12 +410,14 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         }
     }
     args.chat = match (&room, chat_room) {
-        (Some(address), None) => crate::chat_track::room_of_address(address).map(|room| Chat {
-            room: room.to_string(),
-            name: name.clone(),
-            say: say.clone(),
-            catch_up,
-        }),
+        (Some(address), None) => {
+            xmoq_viewer::chat_track::room_of_address(address).map(|room| Chat {
+                room: room.to_string(),
+                name: name.clone(),
+                say: say.clone(),
+                catch_up,
+            })
+        }
         (None, Some(room)) => Some(Chat {
             room,
             name: name.clone(),

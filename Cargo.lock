@@ -2533,6 +2533,24 @@ name = "xmoq-again"
 version = "0.0.0"
 
 [[package]]
+name = "xmoq-agent"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "xmoq-again",
+ "xmoq-chat-tracks",
+ "xmoq-loc",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
+ "xmoq-msf",
+ "xmoq-picture",
+ "xmoq-viewer",
+ "xmoq-viewer-io",
+]
+
+[[package]]
 name = "xmoq-chat"
 version = "0.0.0"
 dependencies = [
@@ -2641,15 +2659,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "xmoq-watch"
+name = "xmoq-viewer"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "xmoq-viewer-io"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "cpal",
  "futures-util",
- "opus-rs",
- "rustix",
- "serde_json",
  "tokio",
  "tokio-tungstenite",
  "xmoq-again",
@@ -2658,7 +2679,28 @@ dependencies = [
  "xmoq-moqt",
  "xmoq-moqt-io",
  "xmoq-msf",
+ "xmoq-viewer",
+]
+
+[[package]]
+name = "xmoq-watch"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "cpal",
+ "opus-rs",
+ "rustix",
+ "serde_json",
+ "tokio",
+ "xmoq-again",
+ "xmoq-chat-tracks",
+ "xmoq-loc",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
+ "xmoq-msf",
  "xmoq-picture",
+ "xmoq-viewer",
+ "xmoq-viewer-io",
 ]
 
 [[package]]

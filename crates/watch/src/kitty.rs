@@ -82,7 +82,7 @@ pub fn frame_file(path: &str, size: (usize, usize), cells: (usize, usize), out: 
 }
 
 /// The lines under a picture of `rows` rows, written anew. The lines are
-/// to be without control characters ([`crate::room::clean`]).
+/// to be without control characters ([`xmoq_viewer::room::clean`]).
 pub fn lines_under<'a>(rows: usize, lines: impl IntoIterator<Item = &'a str>, out: &mut Vec<u8>) {
     out.extend_from_slice(format!("\x1b8\x1b[{rows}B").as_bytes());
     for line in lines {
