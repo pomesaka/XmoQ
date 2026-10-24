@@ -579,6 +579,8 @@ export type PageBroadcastReport = {
 	videoWriteFailures: number;
 	/** Pieces of sound handed to the transport. */
 	audioWritten: number;
+	/** Pieces of sound not sent, by the reason (`AudioTrackPublisherStats.skipped`), for a run that fails. */
+	audioSkipped: Record<string, number>;
 };
 
 /** What `publishVideo` is started with. */

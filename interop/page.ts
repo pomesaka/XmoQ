@@ -1559,6 +1559,7 @@ window.xmoqOwn = {
 			audioEncoderError: audio.stats().encoderError ?? null,
 			videoWriteFailures: video.publisher.stats().writeFailures,
 			audioWritten: audio.publisher.stats().written,
+			audioSkipped: { ...audio.publisher.stats().skipped },
 		};
 	}),
 
