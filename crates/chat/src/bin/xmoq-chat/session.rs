@@ -42,8 +42,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use xmoq_chat::args::Rooms as Taken;
-use xmoq_chat::backoff::Backoff;
-use xmoq_chat::fetch::Held;
 use xmoq_chat::gather::Left;
 use xmoq_chat::said_again::{Over, SaidAgain, Settings as AskAgain};
 use xmoq_moqt::params::SubscriptionFilter;
@@ -51,12 +49,10 @@ use xmoq_moqt::params::SubscriptionFilter;
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
-use xmoq_chat::fetch::plan;
 use xmoq_chat::gather::{Admitted, Gatherer};
 use xmoq_chat_tracks::names::{self, Person, lines_track, person_of, room_of_lines, said_track};
 use xmoq_chat_tracks::payloads::Line;
 use xmoq_moqt::data::ObjectStatus;
-use xmoq_moqt::fetch::{FetchObject, RangeEnd};
 use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
@@ -79,11 +75,15 @@ use xmoq_moqt_io::{
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 
-use crate::storage::Store;
-use crate::streams::{
-    Answer, Answered, Answering, Command, Heard, LineToSend, Piece, RequestTask, Sending, Waits,
-    answer_fetch, open_request, send_line,
+use xmoq_track_serving::backoff::Backoff;
+use xmoq_track_serving::fetch::{Held, payload_bytes, pieces_of, plan};
+use xmoq_track_serving::streams::{
+    Answer, Answered, Answering, Command, GroupToSend, Heard, RequestTask, Sending, Waits,
+    answer_fetch, open_request, send_group,
 };
+use xmoq_track_serving::{shown, sleep_until};
+
+use crate::storage::Store;
 
 type Send = <WtConnection as Connection>::Send;
 
@@ -134,6 +134,19 @@ const LINES_BEING_SENT: usize = 256;
 /// not counted; what bounds those is the session, which keeps no more than
 /// 256 requests of the relay (`MAX_PEER_REQUESTS`). Provisional.
 const FETCHES_AT_ONCE: usize = 32;
+
+/// The most bytes of payload the answers to FETCH requests that are being
+/// written hold together ([`Held`]).
+///
+/// Not a flag: with `--fetch-lines` and `--text-bytes` at their most, one
+/// answer could be 100,000 lines of 49 KiB, and 32 are answered at once.
+/// WHY 64 MiB: a thousand lines of the default 512 bytes are under 1 MiB,
+/// so 64 answers of that size fit, and it is a quarter of what the own relay
+/// lets the fetch streams it writes keep (`MAX_BYTES_HELD_BEYOND_THE_CACHE`).
+/// The lines are read from the store one by one and the reading stops at
+/// the bound, so no more than that is read for an answer that is refused.
+/// **Provisional.**
+const MAX_BYTES_HELD: usize = 64 * 1024 * 1024;
 
 /// How long a room whose PUBLISH failed waits before it is published
 /// again, on the next line that comes for it. Provisional.
@@ -296,44 +309,6 @@ struct Gathering<'a> {
     began: Instant,
 }
 
-/// What the fetch stream of a FETCH carries: the lines, in the order they
-/// are sent, and the End of Unknown Range indicator for those left out, before
-/// or after them ([`xmoq_chat::fetch`]).
-fn pieces_of(lines: &[Line], left_out: Option<(Location, bool)>) -> Vec<Piece> {
-    let mut pieces: Vec<Piece> = lines
-        .iter()
-        .map(|line| {
-            Piece::Object(FetchObject {
-                group_id: line.number,
-                subgroup_id: Some(0),
-                object_id: 0,
-                // §12.4: the default, which the subgroup streams of the
-                // lines leave to the track.
-                publisher_priority: 128,
-                properties: vec![],
-                payload: line.payload(),
-            })
-        })
-        .collect();
-    match left_out {
-        Some((location, true)) => pieces.insert(0, Piece::EndOfRange(RangeEnd::Unknown, location)),
-        Some((location, false)) => pieces.push(Piece::EndOfRange(RangeEnd::Unknown, location)),
-        None => {}
-    }
-    pieces
-}
-
-/// The bytes of payload the pieces of an answer hold.
-fn payload_bytes(pieces: &[Piece]) -> usize {
-    pieces
-        .iter()
-        .map(|piece| match piece {
-            Piece::Object(object) => object.payload.len(),
-            Piece::EndOfRange(..) => 0,
-        })
-        .sum()
-}
-
 /// The gatherer's clock since the epoch, in milliseconds.
 fn wall_ms() -> u64 {
     SystemTime::now()
@@ -350,17 +325,6 @@ fn fault(fault: RequestFault) -> anyhow::Error {
         RequestFault::Peer(error) => error.into(),
         RequestFault::Usage(error) => anyhow!("the gatherer used its session wrongly: {error}"),
     }
-}
-
-/// A namespace for the log: its fields between slashes, each shown as Rust
-/// shows a string.
-fn shown(namespace: &TrackNamespace) -> String {
-    let fields: Vec<String> = namespace
-        .fields()
-        .iter()
-        .map(|field| String::from_utf8_lossy(field).escape_debug().to_string())
-        .collect();
-    fields.join("/")
 }
 
 /// The prefixes of the `SUBSCRIBE_NAMESPACE` requests for the rooms taken.
@@ -429,7 +393,7 @@ pub async fn gather(
         refused: HashMap::new(),
         fetches: HashMap::new(),
         fetch_done,
-        held: Held::default(),
+        held: Held::new(MAX_BYTES_HELD),
         ending: HashMap::new(),
         drained,
         watches: prefixes(rooms_taken)?
@@ -624,7 +588,7 @@ impl Gathering<'_> {
     /// WHY no command is ever dropped: among them are the answers to the
     /// relay's `REQUEST_UPDATE`s, and §10.9 has "The receiver of a
     /// `REQUEST_UPDATE` MUST respond with exactly one `REQUEST_OK` or
-    /// `REQUEST_ERROR`". Where the queue is full ([`crate::streams::COMMAND_QUEUE`]),
+    /// `REQUEST_ERROR`". Where the queue is full ([`xmoq_track_serving::streams::COMMAND_QUEUE`]),
     /// the relay takes nothing on the stream and sends more than it reads:
     /// the request is cancelled with `EXCESSIVE_LOAD` (§3.3.3), as the own
     /// relay ends a FETCH with too many updates waiting.
@@ -1053,9 +1017,9 @@ impl Gathering<'_> {
             );
             return Ok(());
         }
-        let sending = LineToSend {
+        let sending = GroupToSend {
             track_alias: entry.track_alias,
-            number: line.number,
+            group_id: line.number,
             payload: line.payload(),
             opened: Arc::clone(&entry.opened),
         };
@@ -1064,8 +1028,8 @@ impl Gathering<'_> {
         let room = room.to_string();
         self.sends.spawn(async move {
             let _counted = counted;
-            let number = sending.number;
-            if let Err(why) = send_line(connection, sending).await {
+            let number = sending.group_id;
+            if let Err(why) = send_group(connection, sending).await {
                 println!("LINE_NOT_SENT room={room:?} number={number} why={why:?}");
             }
         });
@@ -1456,7 +1420,7 @@ impl Gathering<'_> {
                 return self.refuse(stream, send, request, code);
             }
         };
-        let lines = match planned.lines {
+        let lines = match planned.groups {
             Some(range) => self.store.lines(&room, range, self.held.room()),
             None => Ok(Some(Vec::new())),
         };
@@ -1477,7 +1441,10 @@ impl Gathering<'_> {
             lines.reverse();
         }
         let count = lines.len();
-        let pieces = pieces_of(&lines, planned.left_out);
+        let pieces = pieces_of(
+            lines.iter().map(|line| (line.number, line.payload())),
+            planned.left_out,
+        );
         drop(lines);
         let bytes = payload_bytes(&pieces);
         // The store gave no more than there is room for.
@@ -1617,13 +1584,5 @@ impl Gathering<'_> {
             self.fetches.remove(&stream);
             self.session.on_peer_request_closed(request);
         }
-    }
-}
-
-/// Completes at `at`; never without it.
-async fn sleep_until(at: Option<Instant>) {
-    match at {
-        Some(at) => tokio::time::sleep_until(at.into()).await,
-        None => std::future::pending().await,
     }
 }

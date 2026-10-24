@@ -2563,6 +2563,7 @@ dependencies = [
  "xmoq-moqt",
  "xmoq-moqt-io",
  "xmoq-room-token",
+ "xmoq-track-serving",
 ]
 
 [[package]]
@@ -2656,6 +2657,15 @@ version = "0.0.0"
 dependencies = [
  "ring",
  "xmoq-moqt",
+]
+
+[[package]]
+name = "xmoq-track-serving"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
 ]
 
 [[package]]

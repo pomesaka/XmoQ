@@ -48,6 +48,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [The tracks of the chat, `xmoq-chat-tracks`](crates/chat-tracks/README.md)
 - [The payloads of the chat's tracks, shared by the implementations](fixtures/chat-tracks/README.md)
 - [When a track is asked for again on the same session, `xmoq-again`](crates/again/README.md)
+- [Serving tracks of one Object a Group and answering FETCH, `xmoq-track-serving`](crates/track-serving/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
 - [MoQ library candidates](docs/moq-libraries.md)
 - [The audio and video demo: what it does and where it ends](docs/av-demo.md)

@@ -1,9 +1,10 @@
-//! How long the gatherer waits before it asks again: for a session after
-//! one ended, and for its `SUBSCRIBE_NAMESPACE` after the request ended
-//! while the session goes on.
+//! How long a client that serves tracks waits before it asks again: for a
+//! session after one ended, and for its `SUBSCRIBE_NAMESPACE` after the
+//! request ended while the session goes on. The gatherer of the chat waits
+//! by it.
 //!
 //! WHY a wait that grows: a relay that ends either at once every time (one
-//! that tells more namespaces than the gatherer keeps, one that refuses it)
+//! that tells more namespaces than the client keeps, one that refuses it)
 //! would otherwise have it ask again every second for good. WHY it comes
 //! back to the first wait: after a session or a request that went well for
 //! a while, the next end is one of its own and not the same one again.

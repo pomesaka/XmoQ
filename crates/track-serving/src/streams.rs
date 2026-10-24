@@ -1,11 +1,12 @@
-//! The streams of the session, each written by a task of its own: the
-//! request streams the gatherer opens, the subgroup stream of each line it
-//! publishes, and the answer to each FETCH the relay sends it.
+//! The streams of a session of a client that serves tracks, each written by
+//! a task of its own: the request streams the client opens, the subgroup
+//! stream of each Group it publishes, and the answer to each FETCH the
+//! relay sends it.
 //!
 //! WHY tasks: a relay that takes nothing on one stream must not hold up the
-//! gatherer, which goes on taking the lines of everybody else. The session
-//! (`xmoq_moqt::session::Session`) stays with the loop of `session.rs`;
-//! these tasks say what happened, and are told what to send.
+//! client, which goes on with every other track. The session
+//! (`xmoq_moqt::session::Session`) stays with the client's loop; these tasks
+//! say what happened, and are told what to send.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,9 +16,10 @@ use tokio::sync::{mpsc, oneshot};
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
-use xmoq_moqt::fetch::{FetchHeader, FetchObject, FetchStreamEncoder, RangeEnd};
+use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
-use xmoq_moqt::name::Location;
+
+use crate::fetch::Piece;
 use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
@@ -31,41 +33,42 @@ type Send = <WtConnection as Connection>::Send;
 /// Messages for one request stream that its task has not sent yet: among
 /// them the answers to the relay's `REQUEST_UPDATE`s, of which §10.9 has
 /// "MUST respond with exactly one `REQUEST_OK` or `REQUEST_ERROR`". None is
-/// dropped: where one more does not fit, the loop ends the request instead,
-/// with `EXCESSIVE_LOAD` (`session.rs`, `tell`). WHY 64: what the own relay
+/// dropped: where one more does not fit, the client's loop ends the request
+/// instead, with `EXCESSIVE_LOAD` (`tell` of `crates/chat/src/bin/xmoq-chat/session.rs`). WHY 64: what the own relay
 /// holds of the updates of one FETCH that wait for their answer
 /// (`MAX_HELD_FETCH_UPDATES`), before it ends that FETCH the same way.
 /// **Provisional.**
 pub const COMMAND_QUEUE: usize = 64;
 
 /// How long the relay gets to end its direction of a request stream after
-/// the gatherer finished its own, before it is stopped. The time the Rust
+/// the client finished its own, before it is stopped. The time the Rust
 /// client and the relay wait (`PEER_END_WAIT` of
 /// `crates/moqt-client/src/serving.rs`). Provisional.
 pub const PEER_END_WAIT: Duration = Duration::from_secs(3);
 
-/// How long the line on a subgroup stream may wait for the relay to take
+/// How long the Object on a subgroup stream may wait for the relay to take
 /// its bytes; then the stream is reset with `CANCELLED`. WHY a limit: the
-/// `PUBLISH_DONE` of a room waits for every stream of the room to be closed
+/// `PUBLISH_DONE` of a track waits for every stream of it to be closed
 /// (§10.11), and a relay that takes nothing would hold it for good.
 /// **Provisional.**
-const LINE_WRITE_WAIT: Duration = Duration::from_secs(5);
+const GROUP_WRITE_WAIT: Duration = Duration::from_secs(5);
 
-/// How long the subgroup stream of a line may wait for the relay to allow
-/// one more stream. Then the line is not sent live; it is in the store, and
-/// a FETCH gets it. **Provisional**: long against the moment a stream takes
-/// where there is room, short against a person waiting for a line.
-const LINE_OPEN_WAIT: Duration = Duration::from_secs(1);
+/// How long the subgroup stream of a Group may wait for the relay to allow
+/// one more stream. Then the Group is not sent live; the publishers here
+/// keep it, and a FETCH gets it. **Provisional**: long against the moment a
+/// stream takes where there is room, short against a person waiting for a
+/// line.
+const GROUP_OPEN_WAIT: Duration = Duration::from_secs(1);
 
 /// What the loop tells the task of one of its request streams.
 #[derive(Debug)]
 pub enum Command {
     /// Send this message.
     Say(ControlMessage),
-    /// Finish the gatherer's direction, and wait [`PEER_END_WAIT`] for the
+    /// Finish the client's direction, and wait [`PEER_END_WAIT`] for the
     /// relay to end its own.
     Finish,
-    /// Reset the gatherer's direction and stop the relay's with this code
+    /// Reset the client's direction and stop the relay's with this code
     /// (§3.3.2: a request is cancelled so).
     Cancel(u32),
 }
@@ -83,7 +86,7 @@ pub enum Heard {
     NotAnswered,
     /// The relay's direction is over.
     Closed(RequestClose),
-    /// The relay sent `STOP_SENDING` for the gatherer's direction.
+    /// The relay sent `STOP_SENDING` for the client's direction.
     Stopped(Option<u32>),
     /// The relay's bytes break the protocol, or the connection went.
     Failed(RequestReadError),
@@ -92,11 +95,13 @@ pub enum Heard {
 /// The waits of a request: for its stream, and for its first answer.
 #[derive(Debug, Clone, Copy)]
 pub struct Waits {
+    /// For the relay to allow the stream.
     pub open: Duration,
+    /// For the first message of the relay on it.
     pub answer: Duration,
 }
 
-/// What the loop keeps of the task of one of its request streams.
+/// What the client's loop keeps of the task of one of its request streams.
 pub struct RequestTask {
     /// What it is told, in order.
     pub commands: mpsc::Sender<Command>,
@@ -253,7 +258,7 @@ async fn request(
     }
 }
 
-/// Cancels a request on its stream (§3.3.2): a reset of the gatherer's
+/// Cancels a request on its stream (§3.3.2): a reset of the client's
 /// direction, and `STOP_SENDING` for the relay's where it is not over.
 fn cancel(
     send: Option<Send>,
@@ -283,23 +288,31 @@ async fn stopped(send: Option<&mut Send>) -> WriteError {
     }
 }
 
-/// A line to send on its own subgroup stream: Object 0 of the Group whose
-/// ID is its number (decided on 2026-10-24).
-pub struct LineToSend {
+/// A Group of one Object to send on its own subgroup stream: Object 0 of
+/// Subgroup 0, as a line of the chat is sent (decided on 2026-10-24).
+pub struct GroupToSend {
+    /// The Track Alias of the PUBLISH.
     pub track_alias: u64,
-    pub number: u64,
+    /// The Group ID.
+    pub group_id: u64,
+    /// The payload of its Object 0.
     pub payload: Vec<u8>,
     /// Counts the streams of the subscription that were opened, for its
     /// `PUBLISH_DONE` (§10.11: Stream Count).
     pub opened: Arc<AtomicU64>,
 }
 
-/// Sends a line. What becomes of it is no more than a word for the log:
-/// the line is in the store either way, and a FETCH gets it.
-pub async fn send_line(connection: Arc<WtConnection>, line: LineToSend) -> Result<(), String> {
+/// Sends a Group. What becomes of it is no more than a word for the log:
+/// the publishers that use it keep the Group either way, and a FETCH gets
+/// it.
+///
+/// # Errors
+///
+/// Why it was not sent, for the log.
+pub async fn send_group(connection: Arc<WtConnection>, group: GroupToSend) -> Result<(), String> {
     let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
-        track_alias: line.track_alias,
-        group_id: line.number,
+        track_alias: group.track_alias,
+        group_id: group.group_id,
         subgroup_id: SubgroupId::Zero,
         // Left out: the track's default, 128 (§12.4), which a FETCH says too.
         publisher_priority: None,
@@ -313,22 +326,22 @@ pub async fn send_line(connection: Arc<WtConnection>, line: LineToSend) -> Resul
             object_id: 0,
             properties: vec![],
             status: ObjectStatus::Normal,
-            payload: line.payload,
+            payload: group.payload,
         })
         .map_err(|error| error.to_string())?;
-    let mut data = match tokio::time::timeout(LINE_OPEN_WAIT, connection.open_uni()).await {
+    let mut data = match tokio::time::timeout(GROUP_OPEN_WAIT, connection.open_uni()).await {
         Ok(Ok(data)) => data,
         Ok(Err(lost)) => return Err(lost.to_string()),
         Err(_) => {
             return Err(format!(
                 "no stream within {} ms",
-                LINE_OPEN_WAIT.as_millis()
+                GROUP_OPEN_WAIT.as_millis()
             ));
         }
     };
-    line.opened.fetch_add(1, Ordering::Relaxed);
+    group.opened.fetch_add(1, Ordering::Relaxed);
     let written =
-        tokio::time::timeout(LINE_WRITE_WAIT, data.write_all(&encoder.take_bytes())).await;
+        tokio::time::timeout(GROUP_WRITE_WAIT, data.write_all(&encoder.take_bytes())).await;
     match written {
         // §11.4.3: every Object of the Subgroup was written, so a FIN.
         Ok(Ok(())) => {
@@ -345,19 +358,20 @@ pub async fn send_line(connection: Arc<WtConnection>, line: LineToSend) -> Resul
             data.reset(stream_reset_code::CANCELLED);
             Err(format!(
                 "not taken within {} ms",
-                LINE_WRITE_WAIT.as_millis()
+                GROUP_WRITE_WAIT.as_millis()
             ))
         }
     }
 }
 
-/// Counts a line being sent on a stream of its room until it is dropped,
+/// Counts a Group being sent on a stream of its track until it is dropped,
 /// also where its task is ended from outside: what the `PUBLISH_DONE` of
-/// the room waits for (§10.11).
-pub struct Sending(pub tokio::sync::watch::Sender<usize>);
+/// the track waits for (§10.11).
+pub struct Sending(tokio::sync::watch::Sender<usize>);
 
 impl Sending {
-    /// One more line of the room is being sent.
+    /// One more Group of the track is being sent.
+    #[must_use]
     pub fn begin(count: &tokio::sync::watch::Sender<usize>) -> Self {
         count.send_modify(|count| *count += 1);
         Self(count.clone())
@@ -370,20 +384,16 @@ impl Drop for Sending {
     }
 }
 
-/// What the answer to a FETCH carries after its header, in order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Piece {
-    Object(FetchObject),
-    EndOfRange(RangeEnd, Location),
-}
-
 /// A FETCH that was accepted, to be answered on its streams.
 pub struct Answer {
     /// `FETCH_OK`, and a `REQUEST_OK` for every `REQUEST_UPDATE` that came
     /// before it.
     pub messages: Vec<ControlMessage>,
+    /// The Request ID of the FETCH, for the header of the fetch stream.
     pub request_id: u64,
+    /// The order the pieces are in.
     pub group_order: GroupOrder,
+    /// What the fetch stream carries.
     pub pieces: Vec<Piece>,
 }
 
@@ -396,11 +406,14 @@ pub enum Answered {
     Stopped,
     /// The fetch stream could not be opened or written.
     Failed,
-    /// After [`Self::Written`]: the gatherer's direction of the request
+    /// After [`Self::Written`]: the client's direction of the request
     /// stream is over, finished or, where the relay stopped it meanwhile,
     /// reset; `peer_ended` says whether the relay's direction had ended by
     /// then.
-    RequestOver { peer_ended: bool },
+    RequestOver {
+        /// Whether the relay's direction had ended.
+        peer_ended: bool,
+    },
 }
 
 /// What the loop keeps of a FETCH that is answered.
@@ -488,7 +501,7 @@ pub fn answer_fetch(
                     Piece::Object(object) => {
                         if encoder.object(&object).is_err() {
                             // An Object that cannot be encoded is the
-                            // gatherer's mistake: the stream cannot go on.
+                            // client's mistake: the stream cannot go on.
                             writer.reset(stream_reset_code::INTERNAL_ERROR);
                             return Answered::Failed;
                         }
