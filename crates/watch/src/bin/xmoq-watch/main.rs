@@ -769,6 +769,10 @@ async fn play(
         let setup_wait = Duration::from_millis(args.setup_wait_ms);
         match tokio::time::timeout(setup_wait, events.recv()).await {
             Ok(Some(UniEvent::Control(message))) => session.on_control_message(message)?,
+            // WHY the error itself, not a line about it: the session is
+            // closed with its code (`termination_code`), as a datagram of an
+            // unknown type that comes before the SETUP has it (§11).
+            Ok(Some(UniEvent::Failed(error))) => return Err(error.into()),
             Ok(other) => bail!("no SETUP from the relay: {other:?}"),
             Err(_) => return Err(NoSetupInTime(args.setup_wait_ms).into()),
         };

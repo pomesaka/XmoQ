@@ -29,7 +29,8 @@
 //! client's SUBSCRIBEs as in `request-id-parity`.
 //! `--quiet datagram`: when the client's SETUP has come, a datagram of the
 //! type 0x30, which is no `OBJECT_DATAGRAM` (§11.3.1), and no answer to a
-//! request.
+//! request. `--quiet datagram-before-setup`: the same datagram, and no SETUP,
+//! so that the client has it while it waits for the SETUP.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -130,6 +131,9 @@ use xmoq_moqt_io::{
 enum Quiet {
     /// Its SETUP, and everything after it.
     Setup,
+    /// Its SETUP; when the client's SETUP has come, a datagram of the type
+    /// 0x30, as [`Quiet::Datagram`].
+    DatagramBeforeSetup,
     /// Its answers to requests.
     Requests,
     /// Room for a request: it sends its SETUP and allows the client no
@@ -411,8 +415,9 @@ fn quiet_of(value: &str) -> Result<Quiet> {
         "request-id-parity" => Quiet::PeerRequestIdOfTheWrongParity,
         "request-id-again" => Quiet::PeerRequestIdAgain,
         "datagram" => Quiet::Datagram,
+        "datagram-before-setup" => Quiet::DatagramBeforeSetup,
         other => bail!(
-            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity, request-id-again or datagram, not {other}"
+            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity, request-id-again, datagram or datagram-before-setup, not {other}"
         ),
     })
 }
@@ -643,7 +648,7 @@ async fn serve(
     // Kept to the end: a control stream that is let go of is finished,
     // which closes the session for the client (§3.3).
     let mut control = None;
-    if quiet != Quiet::Setup {
+    if !matches!(quiet, Quiet::Setup | Quiet::DatagramBeforeSetup) {
         let mut moqt = Session::new(Role::Server, Transport::WebTransport);
         let setup = moqt.setup(vec![KeyValuePair::bytes(
             setup_option::MOQT_IMPLEMENTATION,
@@ -665,7 +670,7 @@ async fn serve(
             event = events.recv() => {
                 if let Some(UniEvent::Control(ControlMessage::Setup(_))) = event {
                     println!("SETUP_RECEIVED session={session}");
-                    if quiet == Quiet::Datagram {
+                    if matches!(quiet, Quiet::Datagram | Quiet::DatagramBeforeSetup) {
                         connection.send_datagram(&[0x30])?;
                         println!("DATAGRAM_SENT session={session} type=0x30");
                     }
