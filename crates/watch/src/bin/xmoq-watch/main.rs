@@ -52,7 +52,7 @@ use crate::chat_tracks::{ChatTracks, Out as ChatOut};
 use crate::picture::{
     Frame, LINES, MOST_COUNTED, MOST_FRAMES_WAITING, Picture, Screen, Seen, Under,
 };
-use crate::room_socket::{Heard, RoomSocket};
+use crate::room_socket::RoomSocket;
 use crate::session::{
     GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, timestamp_of,
 };
@@ -99,7 +99,7 @@ impl std::fmt::Display for NoSetupInTime {
 }
 
 impl std::error::Error for NoSetupInTime {}
-/// How long a room gets for a token, and to take a line of the chat.
+/// How long a room gets for a token.
 /// **Provisional.**
 const ROOM_WAIT: Duration = Duration::from_secs(5);
 /// How long the thread of the picture gets to end. **Provisional**: it
@@ -286,12 +286,16 @@ async fn broadcast_of(room: &mut RoomSocket, ui: &mut Ui) -> Result<Option<Broad
             return Ok(Some(broadcast));
         }
         tokio::select! {
-            heard = room.next() => match heard? {
-                Heard::Chat(line) => ui.chat(line),
-                Heard::Broadcast(_) => {}
-            },
+            heard = room.next() => {
+                heard?;
+            }
             asked = ui.asked() => match asked {
-                Asked::Say(text) => room.say(&text).await?,
+                // The chat is on the broadcast's session, which there is
+                // none of yet.
+                Asked::Say(text) => ui.note(&format!(
+                    "SAID nothing: no broadcast yet ({})",
+                    room::clean(&text, room::LINE_LIMIT)
+                )),
                 _ => return Ok(None),
             },
         }
@@ -368,21 +372,11 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
 async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     // With a room: where the broadcast is, and a token, are the room's to say.
     let mut room = match &args.source {
-        Source::Room {
-            address,
-            name,
-            say: line,
-            ..
-        } => {
+        Source::Room { address, name, .. } => {
             let joining = RoomSocket::join(address, name);
-            let Some(mut room) = ui.unless_ended("the room", ANSWER_WAIT, joining).await? else {
+            let Some(room) = ui.unless_ended("the room", ANSWER_WAIT, joining).await? else {
                 return Ok(());
             };
-            if let Some(text) = line {
-                tokio::time::timeout(ROOM_WAIT, room.say(text))
-                    .await
-                    .map_err(|_| anyhow!("the room did not take a line for the chat"))??;
-            }
             Some(room)
         }
         Source::Relay { .. } => None,
@@ -953,17 +947,8 @@ async fn play(
                         if taken { "sent" } else { "not-sent" },
                         room::clean(&text, room::LINE_LIMIT)
                     ));
-                }
-                if let Some(joined) = room.as_mut() {
-                    ui.note(&format!("SAID {}", room::clean(&text, room::LINE_LIMIT)));
-                    // A room that does not take the line is gone; the
-                    // broadcast is watched on without it.
-                    if !matches!(tokio::time::timeout(ROOM_WAIT, joined.say(&text)).await, Ok(Ok(()))) {
-                        ui.note("ROOM_LOST it did not take a line for the chat");
-                        *room = None;
-                    }
-                } else if chat.is_none() {
-                    ui.note("SAID nothing: no room");
+                } else {
+                    ui.note("SAID nothing: no chat");
                 }
             }
             heard = async {
@@ -972,12 +957,7 @@ async fn play(
                     None => std::future::pending().await,
                 }
             } => match heard {
-                // With the chat on tracks beside it, each line says its way.
-                Ok(Heard::Chat(line)) if args.chat.is_some() => {
-                    ui.chat(xmoq_watch::chat_track::shown_from_room(&line));
-                }
-                Ok(Heard::Chat(line)) => ui.chat(line),
-                Ok(Heard::Broadcast(broadcast)) => {
+                Ok(broadcast) => {
                     if broadcast.is_some() && broadcast != place.broadcast {
                         break "the room has another broadcast";
                     }

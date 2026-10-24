@@ -1,11 +1,10 @@
-//! The chat on `MoQ` tracks, beside the room's WebSocket until that is taken
-//! away (Q36): what the viewer says on its track `said`, and which lines of
-//! the room's track `lines` it shows, and in what order.
+//! The chat on `MoQ` tracks (Q36; the room's WebSocket carries none since
+//! Q49): what the viewer says on its track `said`, and which lines of the
+//! room's track `lines` it shows, and in what order.
 //!
 //! Decided on 2026-10-24: on the session of the broadcast; with a room, its
 //! name and the viewer's name in the chat, without one only with
-//! `--chat-room`; the lines of both ways shown, each with a mark of its way;
-//! the 16 latest lines by a Joining FETCH.
+//! `--chat-room`; the 16 latest lines by a Joining FETCH.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -46,17 +45,11 @@ pub fn room_of_address(address: &str) -> Option<&str> {
     (!name.is_empty() && path.contains('/')).then_some(name)
 }
 
-/// A line of the chat as it is shown, with the mark of its way: `moq` for
-/// `lines`, with its number in the room.
+/// A line of `lines` as it is shown: its number in the room, who said it,
+/// and what, made safe for a terminal.
 #[must_use]
-pub fn shown_from_track(number: u64, name: &str, text: &str) -> String {
-    room::clean(&format!("moq {number} {name}: {text}"), room::LINE_LIMIT)
-}
-
-/// A line of the room's WebSocket as it is shown beside them: `ws`.
-#[must_use]
-pub fn shown_from_room(line: &str) -> String {
-    room::clean(&format!("ws {line}"), room::LINE_LIMIT)
+pub fn shown(number: u64, name: &str, text: &str) -> String {
+    room::clean(&format!("{number} {name}: {text}"), room::LINE_LIMIT)
 }
 
 /// What becomes of a line the viewer says.
@@ -223,12 +216,11 @@ mod tests {
     }
 
     #[test]
-    fn a_line_shows_its_way() {
+    fn a_line_shows_its_number_and_who_said_it() {
         let cases = [
-            (shown_from_track(7, "ann", "hi"), "moq 7 ann: hi"),
-            (shown_from_room("3 ann: hi"), "ws 3 ann: hi"),
-            // Made safe for a terminal, as a line of the room is.
-            (shown_from_track(1, "x\u{1b}[2J", "y"), "moq 1 x[2J: y"),
+            (shown(7, "ann", "hi"), "7 ann: hi"),
+            // Made safe for a terminal.
+            (shown(1, "x\u{1b}[2J", "y"), "1 x[2J: y"),
         ];
         for (shown, expected) in cases {
             assert_eq!(shown, expected);

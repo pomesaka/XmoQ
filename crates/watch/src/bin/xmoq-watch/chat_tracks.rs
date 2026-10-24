@@ -30,7 +30,7 @@ use xmoq_moqt_io::{
 };
 use xmoq_watch::again::AskAgain;
 use xmoq_watch::args::Chat;
-use xmoq_watch::chat_track::{Say, Saying, Shown, fetch_start, shown_from_track};
+use xmoq_watch::chat_track::{Say, Saying, Shown, fetch_start, shown};
 
 use crate::session::{Asked, NotSubscribed, Requests, Sent, Subscription, send_subscribe, settle};
 
@@ -478,7 +478,7 @@ impl ChatTracks {
         self.shown
             .fetch_ended()
             .into_iter()
-            .map(|(number, line)| Out::Show(shown_from_track(number, &line.name, &line.text)))
+            .map(|(number, line)| Out::Show(shown(number, &line.name, &line.text)))
             .collect()
     }
 
@@ -486,14 +486,14 @@ impl ChatTracks {
     fn fetched(&mut self, number: u64, payload: &[u8]) -> Option<Out> {
         let line = read_line(number, payload).ok()?;
         let (number, line) = self.shown.fetched(number, line)?;
-        Some(Out::Show(shown_from_track(number, &line.name, &line.text)))
+        Some(Out::Show(shown(number, &line.name, &line.text)))
     }
 
     /// An Object of `lines`: the line to show, if it is shown.
     pub fn live(&mut self, number: u64, payload: &[u8]) -> Option<String> {
         let line = read_line(number, payload).ok()?;
         let (number, line) = self.shown.live(number, line)?;
-        Some(shown_from_track(number, &line.name, &line.text))
+        Some(shown(number, &line.name, &line.text))
     }
 
     /// A line the viewer says. `false` where it is not sent: too long, or

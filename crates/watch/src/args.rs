@@ -42,8 +42,6 @@ pub enum Source {
         address: String,
         /// `--name`: what the viewer is called in the chat.
         name: String,
-        /// `--say`: a line for the chat when the viewer has joined.
-        say: Option<String>,
         /// `--token no` asks the room for none.
         ask_token: bool,
     },
@@ -59,7 +57,6 @@ pub struct Chat {
     /// `--name`.
     pub name: String,
     /// `--say`: a line said on `said` once the chat on tracks has begun.
-    /// With `--room` the same line goes to the room's WebSocket as well.
     pub say: Option<String>,
 }
 
@@ -279,7 +276,6 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         source: Source::Room {
             address: String::new(),
             name: String::new(),
-            say: None,
             ask_token: true,
         },
         chat: None,
@@ -420,7 +416,6 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         (None, Some(address)) => Source::Room {
             address,
             name,
-            say,
             ask_token,
         },
         (None, None) => return Err(Invalid("--url or --room is needed".to_string())),
@@ -534,7 +529,6 @@ mod tests {
         Source::Room {
             address: "http://h/rooms/a".to_string(),
             name: "terminal".to_string(),
-            say: None,
             ask_token: true,
         }
     }
@@ -561,7 +555,6 @@ mod tests {
                 source: Source::Room {
                     address: "http://h/rooms/a".to_string(),
                     name: "me".to_string(),
-                    say: Some("hello".to_string()),
                     ask_token: false,
                 },
                 chat: Some(Chat {
