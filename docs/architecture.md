@@ -28,6 +28,6 @@ This sequence is conceptual. Connection setup, session authentication, MoQ draft
 
 Each client uses its own connection to the relay. MoQ Track is a logical data series, not a QUIC stream. WebCodecs does not provide a complete jitter buffer or A/V synchronization pipeline.
 
-Future multiple publishers should not be structurally excluded, but bidirectional media is **not** an initial implementation requirement.
+Meetings of 49 participants at most are in scope since 2026-10-25, after an agent can follow a broadcast; how they would sit on the relay, the room and the chat is a [proposed design](scale-and-meetings.md), not implemented.
 
 See [protocol layers](protocols.md), [validation](validation.md) and [open decisions](open-questions.md).

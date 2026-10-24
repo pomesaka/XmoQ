@@ -75,10 +75,32 @@ The relay gets a cache of the latest Group of each track in Phase 1; decided on 
 
 **Exit:** managed room with verified browser/CLI interactions.
 
-## Phase 5 — Future
-- [ ] Relay scale/load testing. Done so far: one track to up to 1,000 viewers on one Mac ([record](experiments/2026-10-11-one-video-track-to-many-viewers.md)); on Linux in a VM of 5 cores, 1,000 viewers of 1280x720 at 2.5 Mbit/s got every frame, the relay at 0.7 core at the highest, and with a second track of the shape of the demo's sound (an Object a stream, a viewer two sessions) 500 viewers got everything and 1,000 fell seconds behind ([record](experiments/2026-10-24-one-video-track-to-many-viewers-on-linux.md)). Against the goal of 2026-10-24 (500 ms, 10 rooms of 100, on more than one relay if need be): one relay on that VM took 500 viewers in all and not 10 rooms of 100 ([record](experiments/2026-10-24-ten-rooms-of-a-hundred-viewers.md)); the rooms split over relays may reach it, and were not measured. Open: more than one machine, real links, both tracks on one session.
+## Phase 5 — An agent follows a broadcast
+
+Decided on 2026-10-25: an agent such as Claude takes part in a broadcast through a CLI that writes what the tracks carry to stdout or to files ([vision](vision.md)). This phase comes before Phase 6; how both stand to the items left open in Phases 3 and 4 was not said.
+
+- [ ] A CLI (`xmoq-agent`, `crates/agent`) subscribes to a broadcast and the room's chat and writes them where an agent reads them. What it writes and in what form is [open](open-questions.md).
+- [ ] The broadcast's sound is transcribed with whisper.cpp on the agent's machine.
+- [ ] The agent says lines in the room's chat, text alone.
+- [ ] Measure the time from a word being said to its text being written, and what the transcription takes of the machine.
+
+**Exit (proposed):** an agent follows what is said and written in a broadcast and answers in its chat, reproducibly, on one machine.
+
+## Phase 6 — Meetings
+
+Decided on 2026-10-25: meetings, many to many, of 49 participants at most, after Phase 5. How they are built is a [proposed design](scale-and-meetings.md); its choices are undecided.
+
+- [ ] Decide the choices of the [design draft](scale-and-meetings.md).
+- [ ] Participants find each other and subscribe to each other through the relay.
+- [ ] Each participant receives the video it shows and the sound of those who speak, within its link.
+- [ ] An agent takes part in a meeting as in a broadcast.
+- [ ] Measure a meeting of 49 on one relay: what each participant receives, the relay's load, the delay from mouth to ear.
+
+**Exit (proposed):** a meeting of 49 participants with an agent among them, measured on one relay.
+
+## Phase 7 — Future
+- [ ] Relay scale/load testing. Decided on 2026-10-25: one relay serves 500 viewers of a broadcast, and relays are added to build a broadcast of 10,000; how is a [proposed design](scale-and-meetings.md). Done so far: one track to up to 1,000 viewers on one Mac ([record](experiments/2026-10-11-one-video-track-to-many-viewers.md)); on Linux in a VM of 5 cores, 1,000 viewers of 1280x720 at 2.5 Mbit/s got every frame, the relay at 0.7 core at the highest, and with a second track of the shape of the demo's sound (an Object a stream, a viewer two sessions) 500 viewers got everything and 1,000 fell seconds behind ([record](experiments/2026-10-24-one-video-track-to-many-viewers-on-linux.md)). Against the goal of 2026-10-24 (500 ms, 10 rooms of 100, on more than one relay if need be): one relay on that VM took 500 viewers in all and not 10 rooms of 100 ([record](experiments/2026-10-24-ten-rooms-of-a-hundred-viewers.md)); the rooms split over relays may reach it, and were not measured. Open: more than one machine, real links, both tracks on one session.
 - [ ] SNS event integration contract.
-- [ ] Revisit multi-publisher and bidirectional requirements.
 
 **Exit:** evidence-based design decisions, not assumed launch.
 
