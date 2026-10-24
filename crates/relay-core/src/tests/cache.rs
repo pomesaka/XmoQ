@@ -1171,3 +1171,82 @@ fn a_priority_in_an_update_moves_the_stream_the_relay_writes() {
         assert_eq!(relay.step(priority.clone()), expected, "{between:?}");
     }
 }
+
+#[test]
+fn a_fetch_that_waits_for_nothing_gets_what_the_cache_has_of_its_range() {
+    let fetch_with = |start, end, parameters| Event::RequestOpened {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        first: ControlMessage::Fetch(Fetch {
+            request_id: 2,
+            range: FetchRange::Standalone {
+                full_track_name: track(b"a"),
+                start,
+                end,
+            },
+            parameters,
+        }),
+    };
+    let unknown = |group, object| {
+        FetchPiece::EndOfRange(xmoq_moqt::fetch::RangeEnd::Unknown, at(group, object))
+    };
+    let descending = Parameter::GroupOrder(xmoq_moqt::params::GroupOrder::Descending);
+    // The track "a" has the Objects 0, 1 and 2 of Group 3. (the range; the
+    // GROUP_ORDER; what the stream carries)
+    let cases = [
+        (
+            (at(2, 0), at(3, 2)),
+            None,
+            vec![unknown(2, u64::MAX), cached(3, 0), cached(3, 1)],
+        ),
+        // Descending and reaching Group 2: one indicator for the range.
+        (
+            (at(2, 0), at(3, 2)),
+            Some(descending.clone()),
+            vec![unknown(3, 1)],
+        ),
+        // Descending within Group 3: its Objects.
+        (
+            (at(3, 0), at(3, 2)),
+            Some(descending),
+            vec![cached(3, 0), cached(3, 1)],
+        ),
+    ];
+    for (range, order, pieces) in cases {
+        let mut relay = relay_with_three_objects();
+        let parameters = [Some(Parameter::FillTimeout(0)), order.clone()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let actions = relay.step(fetch_with(range.0, range.1, parameters));
+        let properties = vec![KeyValuePair::varint(2, 5).unwrap()];
+        assert_eq!(
+            actions,
+            answered(at(3, 2), properties, pieces),
+            "{range:?} {order:?}"
+        );
+    }
+
+    // Where the session keeps its share beyond the cache: EXCESSIVE_LOAD
+    // (0x9), as for a FETCH the cache answers whole.
+    let mut relay = relay_with_three_objects();
+    relay.set_held_beyond_the_cache(24, 3);
+    assert_eq!(fetches_group(&mut relay, ALICE, 9, 3), "written");
+    assert_eq!(the_cache_moves_on_to(&mut relay, 8), []);
+    // Group 8 has Object 0.
+    let actions = relay.step(fetch_with(
+        at(8, 0),
+        at(8, 1),
+        vec![Parameter::FillTimeout(0)],
+    ));
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            Action::SendRequest {
+                message: ControlMessage::RequestError(error),
+                ..
+            } if error.error_code == 0x9
+        )),
+        "{actions:?}"
+    );
+}

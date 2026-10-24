@@ -18,6 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
+use xmoq_moqt::fetch::RangeEnd;
+
+use crate::FetchPiece;
 use xmoq_moqt::immutable::{Of, searched_properties};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::name::Location;
@@ -436,6 +439,141 @@ impl Cache {
                 .collect(),
         )
     }
+
+    /// What a FETCH that waits for nothing (`FILL_TIMEOUT` 0) gets of the
+    /// range from `start` to `last`, both included, in the order of an
+    /// Ascending fetch stream: the Objects the Group it keeps has, and an
+    /// End of Unknown Range indicator for each stretch it does not know
+    /// (§10.2.5: "the relay MUST NOT wait for upstream delivery and MUST
+    /// report any unavailable Objects as Unknown gaps"). `None` where it can
+    /// say nothing of the Objects in the range: no Group is kept, it was
+    /// given up, it has an Object whose Subgroup ID a fetch stream could not
+    /// state (see [`Self::answer`]), or the range does not reach it.
+    ///
+    /// An Object ID that is not here is one the relay knows not to exist,
+    /// as [`Self::answer`] has it, or unknown. Nothing is said of the first
+    /// kind: what a fetch stream leaves out reads as not existing
+    /// (§10.12.3). An indicator covers what lies "between the last
+    /// serialized Object, if any, and this Location, inclusive" (§11.4.4.2),
+    /// so it is put at the last unknown Object ID before the next Object,
+    /// and may cover Object IDs that are known not to exist as well, which
+    /// it then says less of than the relay knows. The Groups of the range
+    /// before the kept one are unknown: their indicator is at the kept
+    /// Group less one and the largest Object ID there is, which stands for
+    /// the end of that Group. Those after it are unknown as well, unless an
+    /// End of Track says there are none (§11.2.1.1).
+    pub(crate) fn immediately_available(
+        &self,
+        start: Location,
+        last: Location,
+    ) -> Option<Vec<FetchPiece>> {
+        let group = self.0.as_deref().filter(|group| !group.given_up)?;
+        if !group.unsure_of_subgroup.is_empty()
+            || start > last
+            || start.group > group.id
+            || last.group < group.id
+        {
+            return None;
+        }
+        let at = |object| Location {
+            group: group.id,
+            object,
+        };
+        let unknown = |location| FetchPiece::EndOfRange(RangeEnd::Unknown, location);
+        // From here on nothing exists in the Group, and after it for an End
+        // of Track.
+        let end = group
+            .objects
+            .iter()
+            .find(|(_, cached)| ends_the_group(cached.object.status))
+            .map(|(id, cached)| (*id, cached.object.status == ObjectStatus::EndOfTrack));
+        // The Object IDs a later Object's Prior Object ID Gap says do not
+        // exist, as half-open ranges (§12.9).
+        let gaps: Vec<(u64, u64)> = group
+            .objects
+            .iter()
+            .map(|(id, cached)| (id.saturating_sub(cached.prior_gap()), *id))
+            .filter(|(from, to)| from < to)
+            .collect();
+        // The largest Object ID from `from` to `to`, both included, that is
+        // not known not to exist.
+        let last_unknown = |from: u64, to: u64| {
+            let mut candidate = to;
+            loop {
+                if candidate < from {
+                    return None;
+                }
+                match gaps
+                    .iter()
+                    .find(|(gap_from, gap_to)| (*gap_from..*gap_to).contains(&candidate))
+                {
+                    Some((gap_from, _)) => candidate = gap_from.checked_sub(1)?,
+                    None => return Some(candidate),
+                }
+            }
+        };
+        let first = if start.group == group.id {
+            start.object
+        } else {
+            0
+        };
+        let last_here = if last.group == group.id {
+            last.object
+        } else {
+            u64::MAX
+        };
+        let before_this = unknown(Location {
+            group: group.id.saturating_sub(1),
+            object: u64::MAX,
+        });
+        let mut pieces = Vec::new();
+        // The Groups of the range before this one, not said yet.
+        let mut before = start.group < group.id;
+        // The first Object ID after the last Object written; `None` past
+        // the largest there is.
+        let mut next = Some(first);
+        let objects = group
+            .objects
+            .range(first..=last_here)
+            .filter(|(id, cached)| {
+                cached.object.status == ObjectStatus::Normal
+                    && end.is_none_or(|(end, _)| **id < end)
+            });
+        for (id, cached) in objects {
+            let up_to = id.checked_sub(1);
+            match next
+                .zip(up_to)
+                .and_then(|(from, to)| last_unknown(from, to))
+            {
+                Some(object) => pieces.push(unknown(at(object))),
+                None if before => pieces.push(before_this.clone()),
+                None => {}
+            }
+            before = false;
+            pieces.push(FetchPiece::Object(cached.clone()));
+            next = id.checked_add(1);
+        }
+        // What is left of the range after the last Object: the Groups after
+        // this one are unknown unless the track ends in it, and of this one
+        // the Object IDs up to the end of the range or of the Group.
+        let rest = if last.group > group.id && !end.is_some_and(|(_, of_track)| of_track) {
+            Some(last)
+        } else {
+            let up_to = match end {
+                Some((end, _)) => end.checked_sub(1).map(|before| before.min(last_here)),
+                None => Some(last_here),
+            };
+            next.zip(up_to)
+                .and_then(|(from, to)| last_unknown(from, to))
+                .map(at)
+        };
+        match rest {
+            Some(location) => pieces.push(unknown(location)),
+            None if before => pieces.push(before_this),
+            None => {}
+        }
+        Some(pieces)
+    }
 }
 
 /// Whether no Object of the Group is from an Object with `status` on
@@ -503,6 +641,123 @@ mod tests {
             cache.insert(object, true, &mut in_use);
         }
         (cache, in_use)
+    }
+
+    /// What [`Cache::immediately_available`] gives, written short: `o3` for
+    /// the Object 3 of Group 5, `?4/9` for an End of Unknown Range at
+    /// {4, 9}, and `max` for the largest Object ID there is.
+    fn written_short(pieces: Option<Vec<FetchPiece>>) -> Option<Vec<String>> {
+        let id = |object: u64| {
+            if object == u64::MAX {
+                "max".to_string()
+            } else {
+                object.to_string()
+            }
+        };
+        pieces.map(|pieces| {
+            pieces
+                .iter()
+                .map(|piece| match piece {
+                    FetchPiece::Object(cached) => format!("o{}", cached.object.object_id),
+                    FetchPiece::EndOfRange(_, at) => format!("?{}/{}", at.group, id(at.object)),
+                })
+                .collect()
+        })
+    }
+
+    /// What came of a Group, the range of a FETCH, and what is written.
+    type FillCase = (
+        Vec<CachedObject>,
+        (Location, Location),
+        Option<&'static [&'static str]>,
+    );
+
+    #[test]
+    fn a_fetch_that_waits_for_nothing_gets_the_objects_of_the_kept_group_and_unknown_for_the_rest()
+    {
+        let end = |object_id, of: ObjectStatus| status(5, object_id, of);
+        // (what came of Group 5, as (Object ID, Prior Object ID Gap) or a
+        //  status; the range; what is written)
+        let cases: [FillCase; 14] = [
+            (
+                vec![object(5, 0, 0), object(5, 1, 0), object(5, 2, 0)],
+                (at(5, 0), at(5, 2)),
+                Some(&["o0", "o1", "o2"]),
+            ),
+            // Object 1 did not come: unknown.
+            (
+                vec![object(5, 0, 0), object(5, 2, 0)],
+                (at(5, 0), at(5, 2)),
+                Some(&["o0", "?5/1", "o2"]),
+            ),
+            // Object 3 says that 1 and 2 do not exist (§12.9): nothing is
+            // said of them.
+            (
+                vec![object(5, 0, 0), object(5, 3, 2)],
+                (at(5, 0), at(5, 3)),
+                Some(&["o0", "o3"]),
+            ),
+            (
+                vec![object(5, 1, 0), object(5, 2, 0)],
+                (at(5, 0), at(5, 2)),
+                Some(&["?5/0", "o1", "o2"]),
+            ),
+            // From an earlier Group: unknown to the end of Group 4.
+            (
+                vec![object(5, 0, 0), object(5, 1, 0)],
+                (at(3, 0), at(5, 1)),
+                Some(&["?4/max", "o0", "o1"]),
+            ),
+            // Unknown from Group 3 to {5, 1}, in one.
+            (
+                vec![object(5, 2, 0)],
+                (at(3, 0), at(5, 2)),
+                Some(&["?5/1", "o2"]),
+            ),
+            (vec![object(5, 1, 0)], (at(3, 0), at(5, 0)), Some(&["?5/0"])),
+            // Past the last Object, the end of the Group not known.
+            (
+                vec![object(5, 0, 0)],
+                (at(5, 0), at(5, 3)),
+                Some(&["o0", "?5/3"]),
+            ),
+            // An Object later than the range says that 2 and 3 do not exist.
+            (
+                vec![object(5, 0, 0), object(5, 4, 2)],
+                (at(5, 0), at(5, 3)),
+                Some(&["o0", "?5/1"]),
+            ),
+            // End of Group at 1: nothing after it exists.
+            (
+                vec![object(5, 0, 0), end(1, ObjectStatus::EndOfGroup)],
+                (at(5, 0), at(5, 3)),
+                Some(&["o0"]),
+            ),
+            // Later Groups are unknown...
+            (
+                vec![object(5, 0, 0), end(1, ObjectStatus::EndOfGroup)],
+                (at(5, 0), at(6, u64::MAX)),
+                Some(&["o0", "?6/max"]),
+            ),
+            // ... unless the track ends in this one (§11.2.1.1).
+            (
+                vec![object(5, 0, 0), end(1, ObjectStatus::EndOfTrack)],
+                (at(5, 0), at(6, u64::MAX)),
+                Some(&["o0"]),
+            ),
+            // The range does not reach the kept Group.
+            (vec![object(5, 0, 0)], (at(3, 0), at(4, u64::MAX)), None),
+            (vec![], (at(5, 0), at(5, 3)), None),
+        ];
+        for (came, (start, last), expected) in cases {
+            let (cache, _) = cache_of(came.clone());
+            let expected = expected.map(|pieces| pieces.iter().map(ToString::to_string).collect());
+            assert_eq!(
+                written_short(cache.immediately_available(start, last)),
+                expected,
+                "{came:?} {start:?} {last:?}"
+            );
+        }
     }
 
     /// The Objects of a Group that came, as (Object ID, Prior Object ID
