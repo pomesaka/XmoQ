@@ -47,4 +47,4 @@ spikes/fanout/linux/outside.sh out-10x50 10 50    # 10 rooms of 50 viewers
 
 ## Decision or next action
 
-None. This does not tell whether one relay alone keeps 10 rooms of 100 within 500 ms: with the viewers outside the VM the path through `gvproxy` and the Mac fall behind before the relay does. Telling it needs a second machine for the viewers, on a real network to the relay's.
+None. This does not tell whether one relay alone keeps 10 rooms of 100 within 500 ms: with the viewers outside the VM the path through `gvproxy` and the Mac fall behind before the relay does. Telling it needs a second machine for the viewers, on a real network to the relay's. Read against the goal as decided later the same day (the rooms may be split over relays): one relay took 500 viewers in all; the goal may be reached with the rooms split over relays, which was not measured.
