@@ -41,11 +41,12 @@ def fanout(label, viewers_log, publisher_log, wanted):
     # `skipped` of VIDEO_STATS: Objects that came, but not in the order the writer takes them
     # (AnnexBWriter in crates/moqt-client/src/video.rs); lateness is of those it took.
     print("FANOUT %s viewers=%d kbit_per_group=%d viewers_with_all_in_order=%d viewers_ended_ok=%s viewers_failed=%s "
-          "taken=%d before_a_key_frame=%d came_out_of_order=%d late_ms_median_of_p50=%s late_ms_worst_p99=%s late_ms_max=%s" % (
+          "taken=%d before_a_key_frame=%d came_out_of_order=%d late_ms_median_of_p50=%s late_ms_worst_p99=%s late_ms_max=%s viewers_p99_over_500ms=%d" % (
         label, viewers, sent * 8 // 1000 // max(sends, 1), whole,
         sum(int(ok) for ok, _ in ended) if ended else "?", sum(int(failed) for _, failed in ended) if ended else "?",
         sum(got), sum(before), sum(int(s["skipped"]) for s in stats),
-        ms(statistics.median(p50)) if p50 else "-", ms(max(p99)) if p99 else "-", ms(max(mx)) if mx else "-"))
+        ms(statistics.median(p50)) if p50 else "-", ms(max(p99)) if p99 else "-", ms(max(mx)) if mx else "-",
+        sum(1 for us in p99 if us > 500_000)))
 
 
 mean = lambda xs: statistics.mean(xs) if xs else 0

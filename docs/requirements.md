@@ -17,7 +17,7 @@
 | Multiple publishers / bidirectional calls | Future possibility |
 | Reactions | Proposed; delivery undecided |
 | Video codec | Decided for Phase 1: H.264 in Annex B format. Profile, level and key frame interval are undecided ([open decisions](open-questions.md)) |
-| Latency, capacity | Undecided. Measured on one machine ([summary](av-demo.md)): [delay](experiments/2026-10-11-where-the-delay-of-the-demo-comes-from.md), [delay and loss](experiments/2026-10-12-video-over-a-link-that-delays-and-loses.md), [viewers](experiments/2026-10-11-one-video-track-to-many-viewers.md) |
+| Latency, capacity | Decided on 2026-10-24: **a delay of 500 ms at most, 100 viewers a room, 10 rooms open at once.** The delay is the one the records measure: from a frame being made at the publisher to its being shown at a viewer (where a run has no screen, as with the Rust client's viewers, to its arriving there). Read for now as the 99th percentile of the viewers' frames, and as one relay serving all 10 rooms; neither is decided. Validation required: the goal on one machine ([record](experiments/2026-10-24-ten-rooms-of-a-hundred-viewers.md)), and over real links. Measured on one machine ([summary](av-demo.md)): [delay](experiments/2026-10-11-where-the-delay-of-the-demo-comes-from.md), [delay and loss](experiments/2026-10-12-video-over-a-link-that-delays-and-loses.md), [viewers](experiments/2026-10-11-one-video-track-to-many-viewers.md) |
 | Authentication, privacy, recording | A token of the room that the relay checks is decided and implemented ([record](experiments/2026-10-11-authorization-tokens-of-a-room-checked-by-the-relay.md)); who may get one is undecided, as are privacy and recording |
 | License and contribution policy | Undecided |
 
