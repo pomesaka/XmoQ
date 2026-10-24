@@ -1254,8 +1254,21 @@ fn early_streams_are_held_up_to_a_limit() {
     for object_id in 0..32 {
         assert_eq!(object_arrived(&mut relay, 0, object_id), []);
     }
-    // The 33rd Object costs its stream.
-    assert_eq!(object_arrived(&mut relay, 1, 0), stopped(1));
+    // The 33rd Object costs its stream, and its timer is dropped.
+    assert_eq!(
+        object_arrived(&mut relay, 1, 0),
+        [
+            Action::StopEarlyTimer {
+                session: PUBLISHER,
+                stream: StreamKey(1),
+            },
+            Action::StopDataStream {
+                session: PUBLISHER,
+                stream: StreamKey(1),
+                code: 0x0,
+            }
+        ]
+    );
 }
 
 #[test]
@@ -1787,11 +1800,17 @@ fn early_objects_are_held_up_to_a_number_of_bytes() {
     // The second one takes the session over 1 MiB.
     assert_eq!(
         relay.step(large(1)),
-        [Action::StopDataStream {
-            session: PUBLISHER,
-            stream: StreamKey(7),
-            code: 0x0,
-        }]
+        [
+            Action::StopEarlyTimer {
+                session: PUBLISHER,
+                stream: StreamKey(7),
+            },
+            Action::StopDataStream {
+                session: PUBLISHER,
+                stream: StreamKey(7),
+                code: 0x0,
+            }
+        ]
     );
 }
 
@@ -1908,11 +1927,17 @@ fn early_objects_count_with_their_properties() {
     // The second one takes the session over 1 MiB.
     assert_eq!(
         relay.step(heavy(1)),
-        [Action::StopDataStream {
-            session: PUBLISHER,
-            stream: StreamKey(7),
-            code: 0x0,
-        }]
+        [
+            Action::StopEarlyTimer {
+                session: PUBLISHER,
+                stream: StreamKey(7),
+            },
+            Action::StopDataStream {
+                session: PUBLISHER,
+                stream: StreamKey(7),
+                code: 0x0,
+            }
+        ]
     );
 }
 

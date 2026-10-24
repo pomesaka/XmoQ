@@ -651,9 +651,9 @@ impl Relay {
     ) {
         match change {
             Joinable::Unchanged => {}
-            Joinable::Arrived => self.subscribe_has_come(session, subscribe),
+            Joinable::Arrived => self.subscribe_has_come(session, subscribe, actions),
             Joinable::Established => {
-                self.subscribe_has_come(session, subscribe);
+                self.subscribe_has_come(session, subscribe, actions);
                 self.release_held_fetches(session, subscribe, actions);
             }
             Joinable::Over => self.subscribe_is_over(session, subscribe, actions),
@@ -1089,7 +1089,12 @@ impl Relay {
 
     /// The SUBSCRIBE on `subscribe` has come: the Joining FETCH requests that
     /// were read before it wait for its answer from here on.
-    fn subscribe_has_come(&mut self, session: SessionKey, subscribe: StreamKey) {
+    fn subscribe_has_come(
+        &mut self,
+        session: SessionKey,
+        subscribe: StreamKey,
+        actions: &mut Vec<Action>,
+    ) {
         let request_id = self
             .sessions
             .get(&session)
@@ -1108,6 +1113,7 @@ impl Relay {
         for stream in early {
             if let Some(held) = self.fetches.held_mut(&(session, stream)) {
                 held.joins = Awaited::Answer(subscribe);
+                actions.push(Action::StopJoiningFetchTimer { session, stream });
             }
         }
     }
@@ -1147,10 +1153,31 @@ impl Relay {
             .collect();
         let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
         for stream in missed {
-            if let Some(held) = self.fetches.take_held(&(session, stream)) {
+            // The one whose time ran out has no timer left to drop.
+            let held = if timed_out == Some(stream) {
+                self.fetches.take_held(&(session, stream))
+            } else {
+                self.let_go_of_held(&(session, stream), actions)
+            };
+            if let Some(held) = held {
                 self.refuse(session, stream, held.request, &gone, actions);
             }
         }
+    }
+
+    /// Takes a held FETCH out of the relay's hands; the timer of one that
+    /// still waited for its SUBSCRIBE to come is dropped with it.
+    fn let_go_of_held(
+        &mut self,
+        subscriber: &(SessionKey, StreamKey),
+        actions: &mut Vec<Action>,
+    ) -> Option<HeldFetch> {
+        let held = self.fetches.take_held(subscriber)?;
+        if matches!(held.joins, Awaited::Subscribe(_)) {
+            let (session, stream) = *subscriber;
+            actions.push(Action::StopJoiningFetchTimer { session, stream });
+        }
+        Some(held)
     }
 
     /// The SUBSCRIBE on `subscribe` was accepted: the Joining FETCH requests that
@@ -2193,7 +2220,7 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let (session, stream) = subscriber;
-        let request = if let Some(held) = self.fetches.take_held(&subscriber) {
+        let request = if let Some(held) = self.let_go_of_held(&subscriber, actions) {
             held.request
         } else if let Some(fetch) = self.fetches.take_relayed(&subscriber) {
             if fetch.pipe == Pipe::Running {
@@ -2231,7 +2258,7 @@ impl Relay {
         if let Some(held) = self.fetches.held_mut(&subscriber) {
             held.held_updates = held.held_updates.saturating_add(1);
             if held.held_updates > MAX_HELD_FETCH_UPDATES
-                && let Some(held) = self.fetches.take_held(&subscriber)
+                && let Some(held) = self.let_go_of_held(&subscriber, actions)
             {
                 self.refuse(session, stream, held.request, &too_many, actions);
             }

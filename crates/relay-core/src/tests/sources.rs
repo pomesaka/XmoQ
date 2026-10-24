@@ -454,6 +454,10 @@ fn a_track_takes_only_so_many_sources() {
     assert_eq!(
         publishes_a(&mut relay, fifth, UPSTREAM_ALIAS),
         [
+            Action::StopEarlyTimer {
+                session: fifth,
+                stream: StreamKey(5),
+            },
             stopped(fifth, 5),
             Action::SendRequest {
                 session: fifth,

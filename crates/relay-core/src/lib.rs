@@ -282,6 +282,10 @@ impl SessionState {
             if early.header.track_alias != track_alias {
                 return true;
             }
+            actions.push(Action::StopEarlyTimer {
+                session,
+                stream: early.stream,
+            });
             if early.end.is_none() {
                 actions.push(Action::StopDataStream {
                     session,
@@ -2717,6 +2721,10 @@ impl Relay {
             .partition(|early| early.header.track_alias == track_alias);
         state.early = waiting;
         for early in ready {
+            actions.push(Action::StopEarlyTimer {
+                session,
+                stream: early.stream,
+            });
             self.on_data_stream_opened(session, early.stream, early.header, actions);
             for object in early.objects {
                 self.on_object(session, early.stream, object, actions);
@@ -4233,6 +4241,7 @@ fn hold_early_object(
         objects >= MAX_EARLY_OBJECTS || bytes.saturating_add(held_size(&object)) > MAX_EARLY_BYTES;
     if over {
         state.early.remove(position);
+        actions.push(Action::StopEarlyTimer { session, stream });
         actions.push(Action::StopDataStream {
             session,
             stream,
@@ -4341,6 +4350,8 @@ impl Action {
             | Self::StopDataStream { session, .. }
             | Self::StartDrainTimer { session, .. }
             | Self::StopDrainTimer { session, .. }
+            | Self::StopEarlyTimer { session, .. }
+            | Self::StopJoiningFetchTimer { session, .. }
             | Self::StartEarlyTimer { session, .. }
             | Self::StartJoiningFetchTimer { session, .. }
             | Self::StartRendezvousTimer { session, .. }

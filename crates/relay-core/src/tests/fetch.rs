@@ -2083,7 +2083,17 @@ fn a_request_id_used_on_the_stream_of_a_refused_request_settles_a_held_fetch_at_
             parameters: vec![],
         }),
     });
-    assert_eq!(used, [send(FETCH_STREAM, request_error(0x32)), FINISH]);
+    assert_eq!(
+        used,
+        [
+            Action::StopJoiningFetchTimer {
+                session: ALICE,
+                stream: FETCH_STREAM,
+            },
+            send(FETCH_STREAM, request_error(0x32)),
+            FINISH
+        ]
+    );
     assert_eq!(relay.counts().fetches, 0);
 }
 
@@ -2099,10 +2109,18 @@ fn a_joining_fetch_that_was_read_first_waits_on_with_its_subscribe() {
         stream: StreamKey(0),
         first: subscribe(0, b"c"),
     });
+    // The FETCH's time for its SUBSCRIBE to come is dropped.
     assert!(
         matches!(
             asked.as_slice(),
-            [Action::OpenRequest { session: BOB, .. }, _]
+            [
+                Action::OpenRequest { session: BOB, .. },
+                _,
+                Action::StopJoiningFetchTimer {
+                    session: ALICE,
+                    stream: FETCH_STREAM
+                }
+            ]
         ),
         "{asked:?}"
     );
