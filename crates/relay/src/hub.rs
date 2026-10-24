@@ -919,6 +919,11 @@ struct Timers {
     /// the number of the wait, so that it can be dropped when the source
     /// is over before it.
     drain: HashMap<(SessionKey, u64), (Instant, u64)>,
+    /// Where the timer of a stream held for its Track Alias is, and that of
+    /// a Joining FETCH held for its SUBSCRIBE to come, so that they can be
+    /// dropped when what they waited for is settled.
+    early: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
+    joining: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
     next: u64,
 }
 
@@ -956,6 +961,12 @@ impl Timers {
             }
             Event::DrainTimeout { session, wait, .. } => {
                 self.drain.insert((session, wait), at);
+            }
+            Event::EarlyStreamTimeout { session, stream } => {
+                self.early.insert((session, stream), at);
+            }
+            Event::JoiningFetchTimeout { session, stream } => {
+                self.joining.insert((session, stream), at);
             }
             _ => {}
         }
@@ -1008,6 +1019,29 @@ impl Timers {
         }
     }
 
+    /// Drops the timer of a stream held for its Track Alias.
+    fn stop_early(&mut self, session: SessionKey, stream: StreamKey) {
+        let at = self.early.remove(&(session, stream));
+        self.drop_pending(session, at);
+    }
+
+    /// Drops the timer of a Joining FETCH held for its SUBSCRIBE to come.
+    fn stop_joining(&mut self, session: SessionKey, stream: StreamKey) {
+        let at = self.joining.remove(&(session, stream));
+        self.drop_pending(session, at);
+    }
+
+    /// Drops the timer due `at`, where there is one, and counts it out of
+    /// its session's.
+    fn drop_pending(&mut self, session: SessionKey, at: Option<(Instant, u64)>) {
+        if let Some(at) = at
+            && self.pending.remove(&at).is_some()
+            && let Some(running) = self.per_session.get_mut(&session)
+        {
+            *running = running.saturating_sub(1);
+        }
+    }
+
     fn stop_request_close(&mut self, session: SessionKey, stream: StreamKey) {
         let Some(at) = self.request_close.remove(&(session, stream)) else {
             return;
@@ -1052,6 +1086,12 @@ impl Timers {
                 Event::DrainTimeout { session, wait, .. } => {
                     self.drain.remove(&(session, wait));
                 }
+                Event::EarlyStreamTimeout { session, stream } => {
+                    self.early.remove(&(session, stream));
+                }
+                Event::JoiningFetchTimeout { session, stream } => {
+                    self.joining.remove(&(session, stream));
+                }
                 _ => {}
             }
             events.push_back(event);
@@ -1066,6 +1106,8 @@ impl Timers {
         self.request_close.retain(|(owner, _), _| *owner != session);
         self.rendezvous.retain(|(owner, _), _| *owner != session);
         self.drain.retain(|(owner, _), _| *owner != session);
+        self.early.retain(|(owner, _), _| *owner != session);
+        self.joining.retain(|(owner, _), _| *owner != session);
     }
 
     #[cfg(test)]
@@ -1629,6 +1671,8 @@ impl<C: Connection> Hub<C> {
             }
             Action::StartDrainTimer { .. }
             | Action::StopDrainTimer { .. }
+            | Action::StopEarlyTimer { .. }
+            | Action::StopJoiningFetchTimer { .. }
             | Action::StartEarlyTimer { .. }
             | Action::StartJoiningFetchTimer { .. }
             | Action::StartRendezvousTimer { .. }
@@ -1988,6 +2032,14 @@ impl<C: Connection> Hub<C> {
             }
             Action::StopDrainTimer { session, wait } => {
                 self.timers.stop_drain(session, wait);
+                return;
+            }
+            Action::StopEarlyTimer { session, stream } => {
+                self.timers.stop_early(session, stream);
+                return;
+            }
+            Action::StopJoiningFetchTimer { session, stream } => {
+                self.timers.stop_joining(session, stream);
                 return;
             }
             Action::StartDrainTimer {
@@ -3012,6 +3064,8 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartFetchStreamTimer { .. }
         | Action::StopUpstreamTimer { .. }
         | Action::StopDrainTimer { .. }
+        | Action::StopEarlyTimer { .. }
+        | Action::StopJoiningFetchTimer { .. }
         | Action::SendObject { .. }
         | Action::SetDeliveryTimeout { .. }
         | Action::StartFetchEndTimer { .. }
@@ -3310,6 +3364,63 @@ mod timer_tests {
         );
         timers.stop_request_close(SessionKey(1), StreamKey(7));
         assert_eq!((timers.len(), timers.remembered()), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_waits_of_an_early_stream_and_of_a_held_joining_fetch_are_dropped_when_settled() {
+        // The expectations below are spelled out for a limit of 1024.
+        let early = |stream| Event::EarlyStreamTimeout {
+            session: SessionKey(1),
+            stream: StreamKey(stream),
+        };
+        let joining = |stream| Event::JoiningFetchTimeout {
+            session: SessionKey(1),
+            stream: StreamKey(stream),
+        };
+        let mut timers = Timers::default();
+        let wait = Duration::from_secs(2);
+        // A publisher whose early streams are all settled, and a subscriber
+        // whose Joining FETCH requests all see their SUBSCRIBE come, hold no
+        // timer, however many come in the 2 seconds.
+        for stream in 0..2048 {
+            assert!(
+                timers
+                    .start(SessionKey(1), 1024, wait, early(stream))
+                    .is_none(),
+                "{stream}"
+            );
+            timers.stop_early(SessionKey(1), StreamKey(stream));
+            assert!(
+                timers
+                    .start(SessionKey(1), 1024, wait, joining(stream))
+                    .is_none(),
+                "{stream}"
+            );
+            timers.stop_joining(SessionKey(1), StreamKey(stream));
+        }
+        assert_eq!(
+            (timers.len(), timers.early.len(), timers.joining.len()),
+            (0, 0, 0)
+        );
+        // One that is not settled runs out, and is not remembered after.
+        assert!(timers.start(SessionKey(1), 1024, wait, early(7)).is_none());
+        assert!(
+            timers
+                .start(SessionKey(1), 1024, wait, joining(8))
+                .is_none()
+        );
+        tokio::time::sleep(wait).await;
+        assert_eq!(timers.take_due(), [early(7), joining(8)]);
+        assert_eq!(
+            (timers.len(), timers.early.len(), timers.joining.len()),
+            (0, 0, 0)
+        );
+        // A stop after it ran out takes nothing from another timer.
+        assert!(timers.start(SessionKey(1), 1, wait, early(9)).is_none());
+        timers.stop_early(SessionKey(1), StreamKey(7));
+        timers.stop_joining(SessionKey(1), StreamKey(8));
+        assert_eq!(timers.len(), 1);
+        assert!(timers.start(SessionKey(1), 1, wait, early(10)).is_some());
     }
 
     #[tokio::test(start_paused = true)]

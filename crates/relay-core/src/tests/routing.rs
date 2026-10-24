@@ -890,6 +890,10 @@ fn a_stream_that_overtakes_subscribe_ok_belongs_to_the_routed_track() {
         [
             answered(),
             subscribe_ok(ALICE, None),
+            Action::StopEarlyTimer {
+                session: PUBLISHER,
+                stream: StreamKey(7),
+            },
             open_data_stream(ALICE, 0, header(0)),
             send_object(0, 0),
         ]
@@ -1748,6 +1752,10 @@ fn an_answer_that_comes_when_the_track_has_all_its_sources_is_cancelled() {
                 request: OwnRequestKey(0),
                 code: 0x1,
             },
+            Action::StopEarlyTimer {
+                session: PUBLISHER,
+                stream: StreamKey(5),
+            },
             Action::StopDataStream {
                 session: PUBLISHER,
                 stream: StreamKey(5),
@@ -2589,7 +2597,12 @@ fn a_crossing_publish_brings_its_largest_object_properties_and_early_streams() {
             // §9.6, §10.2.11: the Track Properties and the LARGEST_OBJECT of
             // the PUBLISH, as for a subscriber that comes after it.
             subscribe_ok(ALICE, Some(UPSTREAM_LARGEST)),
-            // The held stream follows the SUBSCRIBE_OK, whole.
+            // The held stream follows the SUBSCRIBE_OK, whole, and its
+            // timer is dropped.
+            Action::StopEarlyTimer {
+                session: PUBLISHER,
+                stream: StreamKey(7),
+            },
             open_data_stream(ALICE, 0, header(0)),
             send_object(0, 0),
             Action::FinishDataStream {

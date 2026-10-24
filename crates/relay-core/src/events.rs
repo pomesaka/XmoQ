@@ -591,6 +591,25 @@ pub enum Action {
         /// be stopped, and it must not end a later one.
         wait: u64,
     },
+    /// Drop the timer of [`Action::StartEarlyTimer`] for this stream: it is
+    /// not held any longer (its PUBLISH came or was refused, or it was given
+    /// up). WHY, as for [`Action::StopDrainTimer`]: the timer counts among
+    /// those its session may have until it runs out.
+    StopEarlyTimer {
+        /// The session.
+        session: SessionKey,
+        /// The stream.
+        stream: StreamKey,
+    },
+    /// Drop the timer of [`Action::StartJoiningFetchTimer`] for this FETCH:
+    /// its SUBSCRIBE came, or the FETCH is over. WHY: as for
+    /// [`Action::StopEarlyTimer`].
+    StopJoiningFetchTimer {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH.
+        stream: StreamKey,
+    },
     /// Report [`Event::EarlyStreamTimeout`] after the time a stream is held
     /// for a Track Alias that is not known yet.
     StartEarlyTimer {
