@@ -33,14 +33,14 @@ if [ -n "${RELAY_CPUS:-}" ]; then on_relay="taskset -c $RELAY_CPUS"; fi
 if [ -n "${CLIENTS_CPUS:-}" ]; then on_clients="taskset -c $CLIENTS_CPUS"; fi
 # shellcheck disable=SC2086
 $on_relay "$bin/xmoq-relay" --port "$port" --cert-file "$cert" --key-file /spike/work/cert/key.pem \
-  --max-sessions "${MAX_SESSIONS:-256}" --stats-every-ms 1000 ${RELAY_FLAGS:-} > "$logs/relay.log" 2>&1 &
+  --max-sessions "${MAX_SESSIONS:-256}" --stats-every-ms 1000 ${RELAY_FLAGS:-} > "$logs/relay.log" 2> "$logs/relay.err" &
 relay=$!
 trap 'for p in ${publisher:-} ${sound:-} ${sampler:-} ${sound_viewers:-} ${video_viewers:-} ${profiler:-} $relay; do case "$p" in ""|0|*[!0-9]*) ;; *) kill "$p" 2>/dev/null || true;; esac; done' EXIT
 sleep 1
 # shellcheck disable=SC2086
 ( sleep 2; n=0; while [ "$n" -lt "$seconds" ]; do echo send; n=$((n + 1)); sleep 1; done ) |
   $on_clients "$bin/xmoq-moqt-client" $common --track video --mode publish --payload-hex 00 --video-in "$video" \
-  --timeout-secs $((seconds + 10)) > "$logs/publisher.log" 2>&1 &
+  --timeout-secs $((seconds + 10)) ${PUBLISHER_FLAGS:-} > "$logs/publisher.log" 2> "$logs/publisher.err" &
 publisher=$!
 if [ "${SOUND:-0}" = 1 ]; then
   # A Group of 10 pieces every 200 ms: one line, one Group.
@@ -48,7 +48,7 @@ if [ "${SOUND:-0}" = 1 ]; then
   ( sleep 2; n=0; while [ "$n" -lt $((seconds * 5)) ]; do echo send; n=$((n + 1)); sleep 0.2; done ) |
     $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode publish --payload-hex 00 \
     --video-in /spike/work/media/sound-shaped.h264 --video-frame-ms 20 --video-streams object \
-    --timeout-secs $((seconds + 10)) > "$logs/sound-publisher.log" 2>&1 &
+    --timeout-secs $((seconds + 10)) ${PUBLISHER_FLAGS:-} > "$logs/sound-publisher.log" 2> "$logs/sound-publisher.err" &
   sound=$!
 fi
 sleep 3
@@ -92,6 +92,9 @@ ticks() {
     sleep 1
   done ) &
 sampler=$!
+# The UDP counters of the container's network (RcvbufErrors: datagrams the kernel dropped
+# for a full receive buffer), before the viewers and after.
+grep '^Udp:' /proc/net/snmp > "$logs/udp-before.txt"
 # How long the machine itself stops (stalls.py), while the viewers run.
 python3 /spike/stalls.py "$seconds" > "$logs/stalls.txt" 2>&1 &
 # The threads of the relay and of the viewers' processes, five times a second apart, once
@@ -107,6 +110,7 @@ if [ "${PROFILE:-0}" = 1 ]; then
   profiler=$!
 fi
 for p in $video_viewers; do wait "$p" || true; done
+grep '^Udp:' /proc/net/snmp > "$logs/udp-after.txt"
 if [ -n "${profiler:-}" ]; then
   wait "$profiler" || true
   # What each function takes itself, and with what it calls (the hub's own work is under

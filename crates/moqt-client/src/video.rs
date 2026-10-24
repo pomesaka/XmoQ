@@ -48,6 +48,12 @@ pub struct VideoFlags {
     /// long after it has cancelled its subscription. An experiment's: for
     /// looking at what a relay still sends then.
     pub stay_after: std::time::Duration,
+    /// `--log-written on`: with `--video-in`, a `WRITTEN` line on stderr for
+    /// every Object, with its Timestamp and when its stream was open and
+    /// its bytes were taken by the transport. For measuring where an
+    /// Object's time goes on the way to the relay (`--log-arrivals` of the
+    /// relay is the other end).
+    pub log_written: bool,
 }
 
 impl VideoFlags {
@@ -67,6 +73,13 @@ impl VideoFlags {
                     std::time::Duration::from_millis(value.parse().context("--stay-after-ms")?);
             }
             "--video-frame-ms" => self.frame_ms = Some(value.parse().context("--video-frame-ms")?),
+            "--log-written" => {
+                self.log_written = match value {
+                    "on" => true,
+                    "off" => false,
+                    other => anyhow::bail!("--log-written {other}: on or off"),
+                };
+            }
             "--video-streams" => {
                 self.stream_per_object = match value {
                     "object" => true,
@@ -125,7 +138,14 @@ pub async fn send_group<C: Connection>(
     let frames = groups.get(index).map_or(&[][..], Vec::as_slice);
     let every = std::time::Duration::from_millis(flags.frame_ms.unwrap_or(40));
     if flags.stream_per_object {
-        return send_objects(connection, track_alias, group_id, frames, every).await;
+        return send_objects(
+            connection,
+            (track_alias, group_id),
+            frames,
+            every,
+            flags.log_written,
+        )
+        .await;
     }
     let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
         track_alias,
@@ -137,15 +157,13 @@ pub async fn send_group<C: Connection>(
         first_object: true,
     });
     let mut data = connection.open_uni().await?;
+    let opened = micros_now();
     let mut bytes = 0;
     let mut next = tokio::time::Instant::now();
     for (object_id, frame) in (0u64..).zip(frames) {
         tokio::time::sleep_until(next).await;
         next += every;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let now = u64::try_from(now.as_micros()).unwrap_or(u64::MAX);
+        let now = micros_now();
         encoder.object(&SubgroupObject {
             object_id,
             // The Timestamp of LOC-04 (0x10), without a Timescale.
@@ -157,6 +175,14 @@ pub async fn send_group<C: Connection>(
         if let Err(error) = data.write_all(&encoder.take_bytes()).await {
             anyhow::bail!("could not write the subgroup stream: {error:?}");
         }
+        if flags.log_written {
+            log_written(
+                (track_alias, group_id, object_id),
+                now,
+                opened.min(now),
+                connection.path(),
+            );
+        }
     }
     data.finish();
     println!(
@@ -166,24 +192,53 @@ pub async fn send_group<C: Connection>(
     Ok(())
 }
 
+/// The microseconds since 1970 on this machine's clock.
+fn micros_now() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    u64::try_from(now.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// `--log-written on`: one Object written, with how the connection's path
+/// stood then. WHY stderr: stdout has the lines the interop runs read, and
+/// this is for measuring alone.
+fn log_written(
+    (track_alias, group_id, object_id): (u64, u64, u64),
+    timestamp: u64,
+    opened: u64,
+    path: Option<xmoq_moqt_io::PathNow>,
+) {
+    let path = path.map_or_else(String::new, |path| {
+        format!(
+            " cwnd={} rtt_ms={} lost_packets={} sent_bytes={}",
+            path.cwnd,
+            path.rtt.as_millis(),
+            path.lost_packets,
+            path.sent_bytes
+        )
+    });
+    eprintln!(
+        "WRITTEN alias={track_alias} group={group_id} object={object_id} timestamp_us={timestamp} opened_us={opened} written_us={}{path}",
+        micros_now()
+    );
+}
+
 /// `--video-streams object`: the frames of one Group, each on a stream of
 /// its own, at the same pace.
 async fn send_objects<C: Connection>(
     connection: &C,
-    track_alias: u64,
-    group_id: u64,
+    (track_alias, group_id): (u64, u64),
     frames: &[Vec<u8>],
     every: std::time::Duration,
+    log: bool,
 ) -> Result<()> {
     let mut bytes = 0;
     let mut next = tokio::time::Instant::now();
     for (object_id, frame) in (0u64..).zip(frames) {
         tokio::time::sleep_until(next).await;
         next += every;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let now = u64::try_from(now.as_micros()).unwrap_or(u64::MAX);
+        let now = micros_now();
         // §11.4.2: each stream is a Subgroup of its own, with the Object ID
         // as its Subgroup ID.
         let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
@@ -203,10 +258,19 @@ async fn send_objects<C: Connection>(
         })?;
         bytes += frame.len();
         let mut data = connection.open_uni().await?;
+        let opened = micros_now();
         if let Err(error) = data.write_all(&encoder.take_bytes()).await {
             anyhow::bail!("could not write the subgroup stream: {error:?}");
         }
         data.finish();
+        if log {
+            log_written(
+                (track_alias, group_id, object_id),
+                now,
+                opened,
+                connection.path(),
+            );
+        }
     }
     println!(
         "SENT group={group_id} objects={} payload_len={bytes}",

@@ -131,6 +131,8 @@ struct Args {
     delivery_patience: Option<Duration>,
     /// `--stats-every-ms`: [`HubConfig::stats_every`]. For measuring.
     stats_every: Option<Duration>,
+    /// `--log-arrivals on`: [`HubConfig::log_arrivals`]. For measuring.
+    log_arrivals: bool,
     /// `--auth-key-hex`: the key requests are authorized with
     /// ([`HubConfig::auth_key`]). An experiment.
     auth_key: Option<Vec<u8>>,
@@ -175,6 +177,7 @@ fn parse_args() -> Result<Args> {
     let mut held_beyond_cache = None;
     let mut delivery_patience = None;
     let mut stats_every = None;
+    let mut log_arrivals = false;
     let mut auth_key = None;
     let mut auth_setup = true;
     let mut args = std::env::args().skip(1);
@@ -214,6 +217,13 @@ fn parse_args() -> Result<Args> {
             "--idle-session-ms" => idle_session = Some(millis(&flag, &value)?),
             "--delivery-patience-ms" => delivery_patience = Some(millis(&flag, &value)?),
             "--stats-every-ms" => stats_every = Some(millis(&flag, &value)?),
+            "--log-arrivals" => {
+                log_arrivals = match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => bail!("--log-arrivals {other}: on or off"),
+                };
+            }
             "--auth-key-hex" => {
                 auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
             }
@@ -244,6 +254,7 @@ fn parse_args() -> Result<Args> {
         held_beyond_cache,
         delivery_patience,
         stats_every,
+        log_arrivals,
         auth_key,
         auth_setup,
     })
@@ -284,6 +295,7 @@ async fn main() -> Result<()> {
     }
     config.send.delivery_patience = args.delivery_patience;
     config.stats_every = args.stats_every;
+    config.log_arrivals = args.log_arrivals;
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);
