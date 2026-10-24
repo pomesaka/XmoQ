@@ -6,14 +6,13 @@
 //! broadcast that ends and begins again. `xmoq_watch::args::USAGE` has the
 //! flags and the keys.
 //!
-//! What it decides is in the library of this crate, without input or
-//! output; the files here do the input and output, each one kind of it.
+//! What it decides is in the library of this crate and in `xmoq-viewer`,
+//! without input or output; the files here do the input and output, each
+//! one kind of it, and `xmoq-viewer-io` does what `xmoq-agent` does as well
+//! (the room, the requests, the chat on tracks).
 
 mod audio_output;
-mod chat_tracks;
 mod picture;
-mod room_socket;
-mod session;
 mod sound;
 mod terminal;
 
@@ -29,32 +28,34 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use xmoq_again::AskAgain;
+use xmoq_chat_tracks::names::Person;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
-use xmoq_moqt::kvp::KeyValuePair;
-use xmoq_moqt::message::{GoAway, setup_option};
+use xmoq_moqt::message::GoAway;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, Role, Session, Transport};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, PeerRequestStreamEvent, RequestStreamEvent, SendStream, StreamConfig, StreamEnd,
-    StreamStops, Trace, UniEvent, read_request_streams, read_uni_streams, send_message,
+    Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent,
+    read_request_streams, read_uni_streams,
 };
 use xmoq_picture::video_decoder::VideoDecoder;
+use xmoq_viewer::chat_track::{shown, shown_gap};
+use xmoq_viewer::room::{self, Broadcast};
+use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
+use xmoq_viewer_io::room_socket::{ChatTokens, RoomSocket};
+use xmoq_viewer_io::session::{
+    self, Events, GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, new_url,
+    timestamp_of,
+};
 use xmoq_watch::args::{Args, Chat, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
 use xmoq_watch::keys::{Asked, Keys};
 use xmoq_watch::marks::Recent;
-use xmoq_watch::room::{self, Broadcast};
 use xmoq_watch::{marks, tracks};
 
-use crate::chat_tracks::{ChatTracks, Out as ChatOut};
 use crate::picture::{
     Frame, LINES, MOST_COUNTED, MOST_FRAMES_WAITING, Picture, Screen, Seen, Under,
-};
-use crate::room_socket::RoomSocket;
-use crate::session::{
-    Events, GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, timestamp_of,
 };
 use crate::sound::{Sound, Volume, micros_since};
 
@@ -87,17 +88,6 @@ struct UntilClosed {
     requests: Option<xmoq_moqt_io::IncomingStreams>,
 }
 
-/// The relay sent no SETUP in so many milliseconds.
-#[derive(Debug)]
-struct NoSetupInTime(u64);
-
-impl std::fmt::Display for NoSetupInTime {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "the relay sent no SETUP within {} ms", self.0)
-    }
-}
-
-impl std::error::Error for NoSetupInTime {}
 /// How long a room gets for a token.
 /// **Provisional.**
 const ROOM_WAIT: Duration = Duration::from_secs(5);
@@ -270,14 +260,6 @@ enum Ended {
     Moved(Option<String>),
 }
 
-/// The tokens of a room for the chat on tracks ([`chat_tokens_of`]), each
-/// as an AUTHORIZATION TOKEN; none where the room gave none.
-#[derive(Default)]
-struct ChatTokens {
-    publish: Option<Vec<u8>>,
-    subscribe: Option<Vec<u8>>,
-}
-
 /// Where one broadcast is played from.
 struct Place {
     url: String,
@@ -380,7 +362,7 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
             .unless_ended(
                 "the room's tokens for the chat",
                 ROOM_WAIT,
-                chat_tokens_of(room, chat),
+                room.chat_tokens(&person_of(chat)),
             )
             .await?
         else {
@@ -398,27 +380,12 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
     }))
 }
 
-/// The two tokens the chat on tracks needs of a room: `pub` in the
-/// viewer's namespace `xmoq/chat/<room>/<name>`, for its `PUBLISH_NAMESPACE`,
-/// and `sub` in `xmoq/chat/<room>`, for its SUBSCRIBE and FETCH of `lines`.
-///
-/// WHY tokens of their own on the chat's requests, and not the session's
-/// token as well: that one is `sub` in the broadcast's namespace, which
-/// allows none of them, and the SETUP carries it already.
-async fn chat_tokens_of(room: &mut RoomSocket, chat: &Chat) -> Result<ChatTokens> {
-    let prefix = xmoq_chat_tracks::names::PREFIX.map(str::to_string);
-    let room_fields: Vec<String> = prefix.into_iter().chain([chat.room.clone()]).collect();
-    let mine: Vec<String> = room_fields
-        .iter()
-        .cloned()
-        .chain([chat.name.clone()])
-        .collect();
-    let publish = room.token(room::TokenRole::Pub, &mine).await?;
-    let subscribe = room.token(room::TokenRole::Sub, &room_fields).await?;
-    Ok(ChatTokens {
-        publish: publish.map(|text| room::authorization_token(&text)),
-        subscribe: subscribe.map(|text| room::authorization_token(&text)),
-    })
+/// Who the viewer is in the chat on tracks.
+fn person_of(chat: &Chat) -> Person {
+    Person {
+        room: chat.room.clone(),
+        name: chat.name.clone(),
+    }
 }
 
 async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
@@ -770,7 +737,7 @@ async fn play(
         |event| event,
     ));
     // The requests the peer opens: none is served, and each is refused
-    // (`refuse_a_request_of_the_peer`). They are read from here on and
+    // (`session::refuse_peer_request`). They are read from here on and
     // answered once the broadcast plays; until then they wait in the queue.
     let (asks, mut asked) = mpsc::channel(16);
     kept.requests = Some(read_request_streams(
@@ -795,35 +762,18 @@ async fn play(
     // told to at any point of it.
     let beginning = async {
         // §3.3: each peer opens one control stream that begins with SETUP.
-        // It stays open: closing it is a PROTOCOL_VIOLATION for the peer.
-        let control = control_kept.insert(connection.open_uni().await?);
-        // In ascending order of their types: the token (0x03), then the
-        // implementation (0x07).
-        let mut options = Vec::new();
-        if let Some(token) = &place.token {
-            options.push(KeyValuePair::bytes(
-                setup_option::AUTHORIZATION_TOKEN,
-                token.clone(),
-            )?);
-        }
         let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-        options.push(KeyValuePair::bytes(
-            setup_option::MOQT_IMPLEMENTATION,
-            implementation.as_bytes().to_vec(),
-        )?);
-        let setup = session.setup(options)?;
-        send_message(control, &setup, &Trace::default(), "control").await?;
         // 10 seconds, as `@xmoq/moqt` gives the peer's SETUP.
-        let setup_wait = Duration::from_millis(args.setup_wait_ms);
-        match tokio::time::timeout(setup_wait, events.recv()).await {
-            Ok(Some(UniEvent::Control(message))) => session.on_control_message(message)?,
-            // WHY the error itself, not a line about it: the session is
-            // closed with its code (`termination_code`), as a datagram of an
-            // unknown type that comes before the SETUP has it (§11).
-            Ok(Some(UniEvent::Failed(error))) => return Err(error.into()),
-            Ok(other) => bail!("no SETUP from the relay: {other:?}"),
-            Err(_) => return Err(NoSetupInTime(args.setup_wait_ms).into()),
-        };
+        session::setup(
+            connection,
+            &mut session,
+            &mut events,
+            control_kept,
+            place.token.as_deref(),
+            implementation,
+            args.setup_wait_ms,
+        )
+        .await?;
         let mut requests = Requests {
             connection,
             session: &mut session,
@@ -893,7 +843,6 @@ async fn play(
     let mut chat = match &args.chat {
         Some(chat) => {
             let begun = async {
-                let room = xmoq_chat_tracks::names::room_namespace(&chat.room)?;
                 let requests = Requests {
                     connection,
                     session: &mut session,
@@ -909,8 +858,8 @@ async fn play(
                     publish,
                     connection,
                     &stops,
-                    chat,
-                    room,
+                    &person_of(chat),
+                    chat.catch_up,
                     ui.chat_had,
                 )
                 .await
@@ -1180,7 +1129,7 @@ async fn play(
                     None => Some(event),
                 };
                 if let Some(event) = event {
-                    refuse_a_request_of_the_peer(&mut session, &mut refused, event).await?;
+                    session::refuse_peer_request(&mut session, &mut refused, event).await?;
                 }
             }
             came = async {
@@ -1192,7 +1141,11 @@ async fn play(
                 let Some(tracks) = chat.as_mut() else { continue };
                 for out in tracks.on(&mut session, came).await {
                     match out {
-                        ChatOut::Show(line) => ui.chat(line),
+                        ChatOut::Line(line) => ui.chat(shown(line.number, &line.name, &line.text)),
+                        ChatOut::Gap(gap) => {
+                            ui.note(&format!("CHAT_GAP after={} before={}", gap.after, gap.before));
+                            ui.chat(shown_gap(gap));
+                        }
                         ChatOut::Note(line) => ui.note(&line),
                     }
                 }
@@ -1203,7 +1156,7 @@ async fn play(
                     if chat.as_ref().and_then(ChatTracks::lines_alias) == Some(header.track_alias) =>
                 {
                     if let Some(line) = chat.as_mut().and_then(|tracks| tracks.live(header.group_id, &object.payload)) {
-                        ui.chat(line);
+                        ui.chat(shown(line.number, &line.name, &line.text));
                     }
                     ui.chat_had = chat.as_ref().and_then(ChatTracks::last_shown);
                 }
@@ -1330,21 +1283,9 @@ async fn play(
     }
 }
 
-/// The code to close the session with (§3.5): `CONTROL_MESSAGE_TIMEOUT` for
-/// a SETUP that did not come, the one a protocol error of the relay asks
-/// for (a GOAWAY that breaks the rules of §10.4 among them), and `NO_ERROR`
-/// for everything else, also a request that is given up alone.
+/// The code to close the session with (`session::termination_code`).
 fn termination_code(played: &Result<Ended>) -> u32 {
-    let Err(error) = played else { return 0 };
-    if error.is::<NoSetupInTime>() {
-        return 0x11;
-    }
-    // WHY the chain: `context` wraps the cause.
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
-        .and_then(xmoq_moqt::Error::termination_code)
-        .map_or(0, xmoq_moqt::TerminationCode::code)
+    played.as_ref().err().map_or(0, session::termination_code)
 }
 
 /// Waits what is left of [`BETWEEN_TRIES`] since `tried`; false where the
@@ -1361,56 +1302,6 @@ async fn waited_between_tries(ui: &mut Ui, tried: Option<Instant>) -> Result<boo
         .unless_ended("the wait", BETWEEN_TRIES * 2, waiting)
         .await?
         .is_some())
-}
-
-/// What the peer does on a request stream it opened: the viewer serves no
-/// request, and refuses each (`Session::refuse_peer_request`: `NOT_SUPPORTED`
-/// and a FIN, §3.3.2), as the Rust client does in its modes that serve
-/// none. What still comes on a refused stream goes to the session, which
-/// checks the Request ID of a `REQUEST_UPDATE` among it (§10.1). An error is
-/// one of the session, and is closed with its code (`termination_code`).
-async fn refuse_a_request_of_the_peer(
-    session: &mut Session,
-    refused: &mut HashMap<u64, PeerRequestId>,
-    event: PeerRequestStreamEvent<<WtConnection as Connection>::Send>,
-) -> Result<()> {
-    match event {
-        PeerRequestStreamEvent::Opened {
-            stream,
-            mut send,
-            first,
-        } => {
-            let (response, request) = session.refuse_peer_request(first)?;
-            if let Some(request) = request {
-                refused.insert(stream, request);
-            }
-            // An error means the peer is gone or stopped the stream.
-            let _ = send_message(&mut send, &response, &Trace::default(), "request").await;
-            send.finish();
-        }
-        PeerRequestStreamEvent::Message { stream, message } => {
-            // None where the session keeps nothing of it (`MAX_PEER_REQUESTS`).
-            if let Some(request) = refused.get(&stream) {
-                session.on_peer_request_message(*request, message)?;
-            }
-        }
-        PeerRequestStreamEvent::Closed { stream, .. } => {
-            if let Some(request) = refused.remove(&stream) {
-                session.on_peer_request_closed(request);
-            }
-        }
-        PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
-        PeerRequestStreamEvent::ReaderPanicked => bail!("a reader of a request stream panicked"),
-    }
-    Ok(())
-}
-
-/// Where a GOAWAY says to go: its New Session URI, or `None` for the URL of
-/// the session (§10.4: "If the URI is zero bytes long, the current URI is
-/// reused instead").
-fn new_url(go_away: &GoAway) -> Option<String> {
-    (!go_away.new_session_uri.is_empty())
-        .then(|| String::from_utf8_lossy(&go_away.new_session_uri).into_owned())
 }
 
 /// The GOAWAY behind a SUBSCRIBE refused with `GOING_AWAY` (§10.4), which

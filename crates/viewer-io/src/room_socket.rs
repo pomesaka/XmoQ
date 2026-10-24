@@ -1,4 +1,4 @@
-//! A room over its WebSocket (`xmoq_watch::room` has what is said on it).
+//! A room over its WebSocket (`xmoq_viewer::room` has what is said on it).
 
 use std::collections::VecDeque;
 
@@ -6,7 +6,18 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use xmoq_watch::room::{self, Broadcast, Said};
+use xmoq_chat_tracks::names::Person;
+use xmoq_viewer::room::{self, Broadcast, Said};
+
+/// The tokens of a room for the chat on tracks ([`RoomSocket::chat_tokens`]),
+/// each as an AUTHORIZATION TOKEN; none where the room gave none.
+#[derive(Debug, Default, Clone)]
+pub struct ChatTokens {
+    /// `pub` in `xmoq/chat/<room>/<name>`.
+    pub publish: Option<Vec<u8>>,
+    /// `sub` in `xmoq/chat/<room>`.
+    pub subscribe: Option<Vec<u8>>,
+}
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -19,6 +30,7 @@ const KEPT: usize = 256;
 /// 128 KiB.
 const MOST_A_MESSAGE: usize = 256 * 1024;
 
+/// A room joined over its WebSocket, and the broadcast it has.
 pub struct RoomSocket {
     socket: Socket,
     /// The broadcasts the room said while something else was waited for.
@@ -29,6 +41,11 @@ pub struct RoomSocket {
 impl RoomSocket {
     /// Joins the room at `address` (`http://host:port/rooms/<name>`) as
     /// `name`.
+    ///
+    /// # Errors
+    ///
+    /// An address that is no room's, a WebSocket that does not open, and a
+    /// room that does not begin with hello.
     pub async fn join(address: &str, name: &str) -> Result<Self> {
         let address = room::websocket_address(address, name)?;
         // WHY a limit of its own: the library's is 64 MiB a message, and
@@ -85,6 +102,10 @@ impl RoomSocket {
 
     /// A token for `role` in the namespace, or `None` where the room gives
     /// none.
+    ///
+    /// # Errors
+    ///
+    /// A WebSocket that closes or breaks, and a message that is no JSON.
     pub async fn token(
         &mut self,
         role: room::TokenRole,
@@ -109,8 +130,40 @@ impl RoomSocket {
         }
     }
 
+    /// The two tokens the chat on tracks needs of the room: `pub` in the
+    /// person's namespace `xmoq/chat/<room>/<name>`, for its
+    /// `PUBLISH_NAMESPACE`, and `sub` in `xmoq/chat/<room>`, for its SUBSCRIBE
+    /// and FETCH of `lines` (and the reader's `SUBSCRIBE_NAMESPACE`).
+    ///
+    /// WHY tokens of their own on the chat's requests, and not the session's
+    /// token as well: that one is `sub` in the broadcast's namespace, which
+    /// allows none of them, and the SETUP carries it already.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::token`].
+    pub async fn chat_tokens(&mut self, person: &Person) -> Result<ChatTokens> {
+        let prefix = xmoq_chat_tracks::names::PREFIX.map(str::to_string);
+        let room_fields: Vec<String> = prefix.into_iter().chain([person.room.clone()]).collect();
+        let mine: Vec<String> = room_fields
+            .iter()
+            .cloned()
+            .chain([person.name.clone()])
+            .collect();
+        let publish = self.token(room::TokenRole::Pub, &mine).await?;
+        let subscribe = self.token(room::TokenRole::Sub, &room_fields).await?;
+        Ok(ChatTokens {
+            publish: publish.map(|text| room::authorization_token(&text)),
+            subscribe: subscribe.map(|text| room::authorization_token(&text)),
+        })
+    }
+
     /// The next broadcast the room says it has: the publisher left
     /// (`None`), or another came.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::token`].
     pub async fn next(&mut self) -> Result<Option<Broadcast>> {
         loop {
             if let Some(heard) = self.kept.pop_front() {

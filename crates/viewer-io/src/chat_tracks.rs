@@ -1,5 +1,5 @@
 //! The chat on `MoQ` tracks, on the session of the broadcast
-//! (`xmoq_watch::chat_track` decides): the viewer announces its namespace
+//! (`xmoq_viewer::chat_track` decides): the viewer announces its namespace
 //! and publishes `said` to the gatherer that subscribes to it, and takes the
 //! room's `lines` by SUBSCRIBE and its latest lines by a Joining FETCH.
 //! Nothing of it ends the session: what fails is said, and the broadcast
@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 use xmoq_again::AskAgain;
 use xmoq_chat_tracks::limits::TEXT_BYTES;
-use xmoq_chat_tracks::names::{LINES, SAID, person_namespace};
+use xmoq_chat_tracks::names::{LINES, Person, SAID, person_namespace, room_namespace};
 use xmoq_chat_tracks::payloads::{Line, Said, read_line};
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
@@ -29,8 +29,7 @@ use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream,
     StreamStops, Trace, send_message,
 };
-use xmoq_watch::args::Chat;
-use xmoq_watch::chat_track::{Say, Saying, Shown, history_to_fetch, shown, shown_gap};
+use xmoq_viewer::chat_track::{LinesGap, Say, Saying, Shown, history_to_fetch};
 
 use crate::session::{Asked, NotSubscribed, Requests, Sent, Subscription, send_subscribe, settle};
 
@@ -78,10 +77,14 @@ pub enum Came {
     Lines(Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>),
 }
 
-/// What the loop is to do with what came: a line to show, or a line for
-/// `--log`.
+/// What the loop is to do with what came. How a line is shown is the
+/// program's: the terminal and the agent's file show it differently.
 pub enum Out {
-    Show(String),
+    /// A line of the room, each once, in the order of its number.
+    Line(Line),
+    /// Lines that were not fetched, told before the lines after them.
+    Gap(LinesGap),
+    /// A line for the program's log, about the chat on tracks itself.
     Note(String),
 }
 
@@ -152,14 +155,22 @@ impl ChatTracks {
     /// relay that refuses it is said at once. `lines` is asked for from the
     /// loop ([`Came::AskNow`]), where the broadcast plays meanwhile. `had` is
     /// the newest line shown on the sessions before, so that what was
-    /// missed between them is fetched (`history_to_fetch`).
+    /// missed between them is fetched (`history_to_fetch`), `catch_up` of
+    /// them at the most. `requests` carries the `sub` token of the room's
+    /// namespace.
+    ///
+    /// # Errors
+    ///
+    /// A room or name that makes no namespace, a stream the relay does not
+    /// allow in time, and a `PUBLISH_NAMESPACE` that is refused or not
+    /// answered in time.
     pub async fn begin(
         requests: Requests<'_>,
         publish_token: Option<&[u8]>,
         connection: &Arc<WtConnection>,
         stops: &StreamStops,
-        chat: &Chat,
-        room: TrackNamespace,
+        person: &Person,
+        catch_up: u64,
         had: Option<u64>,
     ) -> Result<Self> {
         let Requests {
@@ -173,7 +184,8 @@ impl ChatTracks {
             .map(|token| Parameter::AuthorizationToken(token.to_vec()))
             .into_iter()
             .collect();
-        let mine = person_namespace(&chat.room, &chat.name)?;
+        let room = room_namespace(&person.room)?;
+        let mine = person_namespace(&person.room, &person.name)?;
         let said = FullTrackName::new(mine.clone(), SAID.as_bytes().to_vec())?;
         let (announce, message) = session.publish_namespace(mine, tokens)?;
         let (announce_send, mut answers) =
@@ -201,7 +213,7 @@ impl ChatTracks {
             said,
             saying: Saying::default(),
             shown: Shown::fetching_after(had),
-            catch_up: chat.catch_up,
+            catch_up,
             lines: None,
             asking: None,
             ask_at: Some(tokio::time::Instant::now()),
@@ -351,11 +363,7 @@ impl ChatTracks {
         };
         // Told before the lines after it come.
         if let Some(gap) = gap {
-            out.push(Out::Note(format!(
-                "CHAT_GAP after={} before={}",
-                gap.after, gap.before
-            )));
-            out.push(Out::Show(shown_gap(gap)));
+            out.push(Out::Gap(gap));
         }
         let range = FetchRange::AbsoluteJoining {
             joining_request_id,
@@ -518,22 +526,23 @@ impl ChatTracks {
         self.shown
             .fetch_ended()
             .into_iter()
-            .map(|(number, line)| Out::Show(shown(number, &line.name, &line.text)))
+            .map(|(_, line)| Out::Line(line))
             .collect()
     }
 
     /// A line of the FETCH: the line to show, if it is shown.
     fn fetched(&mut self, number: u64, payload: &[u8]) -> Option<Out> {
         let line = read_line(number, payload).ok()?;
-        let (number, line) = self.shown.fetched(number, line)?;
-        Some(Out::Show(shown(number, &line.name, &line.text)))
+        let (_, line) = self.shown.fetched(number, line)?;
+        Some(Out::Line(line))
     }
 
-    /// An Object of `lines`: the line to show, if it is shown.
-    pub fn live(&mut self, number: u64, payload: &[u8]) -> Option<String> {
+    /// An Object of `lines`, the Group `number`: the line to show, if it is
+    /// shown.
+    pub fn live(&mut self, number: u64, payload: &[u8]) -> Option<Line> {
         let line = read_line(number, payload).ok()?;
-        let (number, line) = self.shown.live(number, line)?;
-        Some(shown(number, &line.name, &line.text))
+        let (_, line) = self.shown.live(number, line)?;
+        Some(line)
     }
 
     /// A line the viewer says. `false` where it is not sent: too long, or
@@ -603,6 +612,11 @@ impl ChatTracks {
     /// A request stream the peer opened. The gatherer's SUBSCRIBE to `said`
     /// is taken, and what is said waits no more; anything else is handed
     /// back, for the viewer to refuse.
+    ///
+    /// # Errors
+    ///
+    /// What the session takes as an error of the peer, and a `SUBSCRIBE_OK`
+    /// that cannot be sent.
     pub async fn on_peer_request(
         &mut self,
         session: &mut Session,

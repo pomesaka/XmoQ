@@ -1,0 +1,23 @@
+[package]
+name = "xmoq-viewer-io"
+version = "0.0.0"
+description = "What a viewer of a room does on its sockets, for xmoq-watch and xmoq-agent: the room's WebSocket, the requests of a session, the catalog, and the chat on tracks."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-again = { path = "../again" }
+xmoq-chat-tracks = { path = "../chat-tracks" }
+xmoq-loc = { path = "../loc" }
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+xmoq-msf = { path = "../msf" }
+xmoq-viewer = { path = "../viewer" }
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+# The room's WebSocket. No TLS: the rooms are a Worker run locally (ws://).
+tokio-tungstenite = "=0.30.0"
+futures-util = "=0.3.31"

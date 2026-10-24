@@ -6,17 +6,16 @@
 //! ([`clock`]), which sample the output gets next ([`playout`]), how a
 //! picture is made to fit a terminal ([`fit`]) and written for it
 //! ([`kitty`]), which tracks of a catalog are played ([`tracks`]), what a
-//! key asks for ([`keys`]), what a room says ([`room`]), and what the flags
-//! mean ([`args`]). Each is given
-//! its times and its bytes, and none reads a clock, a terminal or a socket.
+//! key asks for ([`keys`]), and what the flags mean ([`args`]). Each is
+//! given its times and its bytes, and none reads a clock, a terminal or a
+//! socket. What a room says and which lines of its chat are shown are
+//! `xmoq-viewer`'s, which `xmoq-agent` shares.
 
 pub mod args;
-pub mod chat_track;
 pub mod clock;
 pub mod fit;
 pub mod keys;
 pub mod kitty;
 pub mod marks;
 pub mod playout;
-pub mod room;
 pub mod tracks;

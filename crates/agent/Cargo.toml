@@ -1,0 +1,24 @@
+[package]
+name = "xmoq-agent"
+version = "0.0.0"
+description = "A reader of a room for an agent: what happens in the room as lines of JSON, on stdout and in a file, and lines of stdin said in its chat."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-again = { path = "../again" }
+xmoq-chat-tracks = { path = "../chat-tracks" }
+xmoq-loc = { path = "../loc" }
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+xmoq-msf = { path = "../msf" }
+# The video decoder (`openh264`) and the PNG writer are there.
+xmoq-picture = { path = "../picture" }
+xmoq-viewer = { path = "../viewer" }
+xmoq-viewer-io = { path = "../viewer-io" }
+anyhow = "=1.0.100"
+serde_json = "=1.0.152"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

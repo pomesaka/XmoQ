@@ -49,6 +49,7 @@ interface Pairing {
 		| "chat.ts"
 		| "chat-pages.ts"
 		| "chat-tokens.ts"
+		| "agent.ts"
 		| "rendezvous.ts"
 		| "new-group.ts"
 		| "track-status.ts";
@@ -1365,6 +1366,14 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		{
 			name: "own relay: chat: with tokens, pages announce with pub and read with sub, lines go through the gatherer with the relay's key, and a pub token for another name, none, or pub alone are refused",
 			script: "chat-tokens.ts",
+			args: [],
+			relay: "own",
+		},
+		// The reader of a room for an agent (`crates/agent`), through the
+		// gatherer.
+		{
+			name: "own relay: agent: xmoq-agent writes who joins and leaves and the lines of the chat as JSON, and says its stdin lines in the chat, which a page has",
+			script: "agent.ts",
 			args: [],
 			relay: "own",
 		},
