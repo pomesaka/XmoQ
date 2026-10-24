@@ -1,4 +1,7 @@
 /target/
+# The Rust spikes are built each on its own (the workspace excludes spikes/),
+# into a target/ of their own, some below a directory of the spike.
+/spikes/**/target/
 node_modules/
 /demo/.cert/
 /.claude/tmp/
