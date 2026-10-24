@@ -5,7 +5,7 @@
 //! count. A receiver therefore has to know every type it is sent.
 
 use crate::coding::{ReadResult, Reader, parse_exact, put_count, put_length_prefixed};
-use crate::name::Location;
+use crate::name::{Location, TrackNamespace};
 use crate::{Error, UsageError, varint};
 
 const OBJECT_DELIVERY_TIMEOUT: u64 = 0x02;
@@ -117,6 +117,9 @@ pub enum Parameter {
     GroupOrder(GroupOrder),
     /// 0x32, the largest Group ID the subscriber knows plus 1 (§10.2.13).
     NewGroupRequest(u64),
+    /// 0x34, the new Track Namespace Prefix of a `SUBSCRIBE_NAMESPACE` or
+    /// `SUBSCRIBE_TRACKS` (§10.2.14).
+    TrackNamespacePrefix(TrackNamespace),
 }
 
 /// The messages whose parameters this crate checks. `PublishOk` and
@@ -142,10 +145,15 @@ pub enum MessageKind {
     /// `REQUEST_UPDATE` for a FETCH. The decoder cannot tell it from the one
     /// for a subscription; the session checks it where it knows the request.
     FetchUpdate,
+    /// `REQUEST_UPDATE` for a `SUBSCRIBE_NAMESPACE`, checked by the session as
+    /// `FetchUpdate` is.
+    NamespaceUpdate,
     /// FETCH.
     Fetch,
     /// `FETCH_OK`. No parameter of the draft lists it.
     FetchOk,
+    /// `SUBSCRIBE_NAMESPACE`: `AUTHORIZATION_TOKEN` alone (§10.2.2).
+    SubscribeNamespace,
 }
 
 impl Parameter {
@@ -163,6 +171,7 @@ impl Parameter {
             Self::SubscriptionFilter(_) => SUBSCRIPTION_FILTER,
             Self::GroupOrder(_) => GROUP_ORDER,
             Self::NewGroupRequest(_) => NEW_GROUP_REQUEST,
+            Self::TrackNamespacePrefix(_) => TRACK_NAMESPACE_PREFIX,
         }
     }
 
@@ -170,8 +179,8 @@ impl Parameter {
     /// appear in (§10.2.2 to §10.2.13).
     fn allowed_in(&self, kind: MessageKind) -> bool {
         use MessageKind::{
-            Fetch, FetchUpdate, Publish, PublishNamespace, PublishOk, RequestUpdate, Subscribe,
-            SubscribeOk,
+            Fetch, FetchUpdate, NamespaceUpdate, Publish, PublishNamespace, PublishOk,
+            RequestUpdate, Subscribe, SubscribeNamespace, SubscribeOk,
         };
         // WHY `FetchUpdate` in three lists only: §10.2.2, §10.2.3 and §10.2.4
         // name `REQUEST_UPDATE` without saying of which request, and §10.2.7
@@ -187,8 +196,10 @@ impl Parameter {
                 Subscribe,
                 RequestUpdate,
                 FetchUpdate,
+                NamespaceUpdate,
                 PublishNamespace,
                 Fetch,
+                SubscribeNamespace,
             ],
             Self::RendezvousTimeout(_) => &[Subscribe],
             Self::Expires(_) => &[SubscribeOk, Publish, PublishOk],
@@ -202,6 +213,9 @@ impl Parameter {
             // §10.2.8 lists SUBSCRIBE, PUBLISH_OK and FETCH, and no update.
             Self::GroupOrder(_) => &[Subscribe, PublishOk, Fetch],
             Self::NewGroupRequest(_) => &[PublishOk, Subscribe, RequestUpdate],
+            // §10.2.14: "MAY appear in REQUEST_UPDATE for a SUBSCRIBE_NAMESPACE
+            // or SUBSCRIBE_TRACKS request".
+            Self::TrackNamespacePrefix(_) => &[NamespaceUpdate],
         };
         allowed.contains(&kind)
     }
@@ -220,6 +234,23 @@ pub fn all_allowed(parameters: &[Parameter], kind: MessageKind) -> bool {
     parameters
         .iter()
         .all(|parameter| parameter.allowed_in(kind))
+}
+
+/// Whether every parameter of a `REQUEST_UPDATE` may appear in the update of
+/// some request: what the decoder can check without knowing which request
+/// the update is for. The session checks the rest (`MessageKind::FetchUpdate`,
+/// `MessageKind::NamespaceUpdate`).
+#[must_use]
+pub fn allowed_in_some_update(parameters: &[Parameter]) -> bool {
+    parameters.iter().all(|parameter| {
+        [
+            MessageKind::RequestUpdate,
+            MessageKind::FetchUpdate,
+            MessageKind::NamespaceUpdate,
+        ]
+        .into_iter()
+        .any(|kind| parameter.allowed_in(kind))
+    })
 }
 
 /// The Forward State a parameter list sets. FORWARD omitted means 1 in every
@@ -341,14 +372,13 @@ fn decode_value(ty: u64, reader: &mut Reader<'_>) -> ReadResult<Parameter> {
         // (`FillTimeout` in `src/model/parameter/message_parameter.rs` of the
         // crate, read 2026-10-11).
         FILL_TIMEOUT => Parameter::FillTimeout(reader.varint()?),
-        // Defined by the draft, but out of place in every message this crate
-        // decodes (§10.2.1): TRACK_NAMESPACE_PREFIX belongs to a
-        // REQUEST_UPDATE of a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS
-        // (§10.2.14), while the only REQUEST_UPDATE decoded here is one to a
-        // subscription.
-        TRACK_NAMESPACE_PREFIX => {
-            return Err(Error::ProtocolViolation("parameter not allowed in this message").into());
-        }
+        // §10.2.14: "uses the Track Namespace encoding described in Section
+        // 2.4.1", with no length before it. WHY NOT a length first, as the
+        // moqtail crate 0.15.0 writes it (`KeyValuePair::Bytes` in
+        // `libs/moqtail-rs/src/model/parameter/message_parameter.rs` at tag
+        // `relay@0.15.0`, read 2026-10-24): §10.2 names "Length-prefixed" as an
+        // encoding of its own, and this definition does not use it.
+        TRACK_NAMESPACE_PREFIX => Parameter::TrackNamespacePrefix(TrackNamespace::decode(reader)?),
         unknown => return Err(Error::UnknownParameter(unknown).into()),
     })
 }
@@ -449,6 +479,7 @@ pub(crate) fn encode_all(parameters: &[Parameter], out: &mut Vec<u8>) -> Result<
                 put_length_prefixed(&encoded, out);
             }
             Parameter::GroupOrder(order) => out.push(order.code()),
+            Parameter::TrackNamespacePrefix(prefix) => prefix.encode(out),
         }
     }
     Ok(())
@@ -590,6 +621,23 @@ mod tests {
             encode_all(parameters, &mut out).unwrap();
             assert_eq!(out.as_slice(), *bytes, "{parameters:?}");
         }
+    }
+
+    /// §10.2.14: the value of `TRACK_NAMESPACE_PREFIX` is a Track Namespace
+    /// (§2.4.1), with no length before it: one parameter, Type 0x34, one
+    /// field of 4 bytes, `xmoq`. Written from the draft's text; the moqtail
+    /// crate 0.15.0 puts a length before it.
+    #[test]
+    fn a_track_namespace_prefix_is_a_track_namespace() {
+        let bytes = [0x01, 0x34, 0x01, 0x04, b'x', b'm', b'o', b'q'];
+        let prefix = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
+        assert_eq!(
+            decode(&bytes),
+            Ok(vec![Parameter::TrackNamespacePrefix(prefix.clone())])
+        );
+        let mut out = Vec::new();
+        encode_all(&[Parameter::TrackNamespacePrefix(prefix)], &mut out).unwrap();
+        assert_eq!(out, bytes);
     }
 
     #[test]

@@ -379,6 +379,184 @@ fn a_publisher_that_sent_goaway_is_not_asked() {
     }
 }
 
+/// §6.1, §9.5, §10.18: Alice asks for the namespaces under (`xmoq`). She is
+/// told of a namespace the publisher announced before, of one Bob announces
+/// after, once for a namespace two sessions announce, and of each one's end
+/// when the last announcer withdraws it; a namespace outside the prefix is
+/// not told.
+#[test]
+fn a_subscribe_namespace_is_told_of_the_namespaces_under_its_prefix() {
+    let suffix = |fields: &[&[u8]]| namespace_of(fields);
+    let told = |message: ControlMessage| Action::SendRequest {
+        session: ALICE,
+        stream: StreamKey(0),
+        message,
+    };
+    let mut relay = relay();
+    announce(&mut relay, PUBLISHER, 0, &[b"xmoq", b"a"]);
+    assert_eq!(
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first: ControlMessage::SubscribeNamespace(xmoq_moqt::message::SubscribeNamespace {
+                request_id: 0,
+                track_namespace_prefix: namespace_of(&[b"xmoq"]),
+                parameters: vec![],
+            }),
+        }),
+        [
+            told(ControlMessage::RequestOk(RequestOk::default())),
+            told(ControlMessage::Namespace(suffix(&[b"a"]))),
+        ]
+    );
+    // Another prefix is not Alice's; the same namespace again is told once.
+    announce(&mut relay, BOB, 0, &[b"other"]);
+    assert_eq!(
+        announce(&mut relay, BOB, 1, &[b"xmoq", b"b"]).last(),
+        Some(&told(ControlMessage::Namespace(suffix(&[b"b"]))))
+    );
+    assert!(
+        !announce(&mut relay, CAROL, 0, &[b"xmoq", b"a"])
+            .iter()
+            .any(|action| matches!(action, Action::SendRequest { session: ALICE, .. }))
+    );
+    // (`xmoq`, `a`) is withdrawn by one of its two announcers: still there.
+    let closed = |relay: &mut Relay, session| {
+        relay.step(Event::RequestClosed {
+            session,
+            stream: StreamKey(0),
+            how: RequestEnd::Aborted,
+        })
+    };
+    assert!(
+        !closed(&mut relay, PUBLISHER)
+            .iter()
+            .any(|action| matches!(action, Action::SendRequest { session: ALICE, .. }))
+    );
+    assert!(
+        closed(&mut relay, CAROL).contains(&told(ControlMessage::NamespaceDone(suffix(&[b"a"]))))
+    );
+    // Bob goes: (`xmoq`, `b`) is done; Alice ends her request, and is told
+    // nothing more.
+    assert!(
+        relay
+            .step(Event::SessionClosed { session: BOB })
+            .contains(&told(ControlMessage::NamespaceDone(suffix(&[b"b"]))))
+    );
+    relay.step(Event::RequestClosed {
+        session: ALICE,
+        stream: StreamKey(0),
+        how: RequestEnd::Fin,
+    });
+    assert!(
+        !announce(&mut relay, PUBLISHER, 1, &[b"xmoq", b"c"])
+            .iter()
+            .any(|action| matches!(action, Action::SendRequest { session: ALICE, .. }))
+    );
+}
+
+/// A watch under which many namespaces are announced is told of them as the
+/// I/O side writes what it was sent (`NAMESPACE_WINDOW` at a time), each
+/// once. §10.6.2, §10.18: a prefix under which more are announced than the
+/// relay tells of (`MAX_NAMESPACES_OF_A_WATCH`) is refused with
+/// `NAMESPACE_TOO_LARGE`; a watch that grows past it later has its stream
+/// reset with `EXCESSIVE_LOAD`, and is told nothing more.
+#[test]
+fn a_subscribe_namespace_is_told_of_many_namespaces_as_they_are_written_and_refused_or_reset_past_the_limit()
+ {
+    let limit = crate::discovery::MAX_NAMESPACES_OF_A_WATCH;
+    let window = crate::discovery::NAMESPACE_WINDOW;
+    let watch = |relay: &mut Relay| {
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first: ControlMessage::SubscribeNamespace(xmoq_moqt::message::SubscribeNamespace {
+                request_id: 0,
+                track_namespace_prefix: namespace_of(&[b"xmoq"]),
+                parameters: vec![],
+            }),
+        })
+    };
+    // Each on a session of its own: a session announces few namespaces.
+    let announce_nth = |relay: &mut Relay, n: usize| {
+        let session = SessionKey(100 + u64::try_from(n).unwrap());
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+        let field = n.to_string().into_bytes();
+        announce(relay, session, 0, &[b"xmoq", &field])
+    };
+    let named = |actions: &[Action]| {
+        actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    Action::SendRequest {
+                        session: ALICE,
+                        message: ControlMessage::Namespace(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let written = |relay: &mut Relay| {
+        relay.step(Event::NamespaceWritten {
+            session: ALICE,
+            stream: StreamKey(0),
+        })
+    };
+    // 100 under the prefix: the window first, the rest as it is written.
+    let mut some = relay();
+    for n in 0..100 {
+        announce_nth(&mut some, n);
+    }
+    assert_eq!(named(&watch(&mut some)), window);
+    let mut later = 0;
+    for _ in 0..100 {
+        later += named(&written(&mut some));
+    }
+    assert_eq!(later, 100 - window);
+    // One more than the relay tells of: refused.
+    let mut too_many = relay();
+    for n in 0..=limit {
+        announce_nth(&mut too_many, n);
+    }
+    let refused = watch(&mut too_many);
+    assert!(
+        refused.iter().any(|action| matches!(
+            action,
+            Action::SendRequest {
+                session: ALICE,
+                message: ControlMessage::RequestError(RequestError {
+                    error_code: 0x31,
+                    ..
+                }),
+                ..
+            }
+        )),
+        "{refused:?}"
+    );
+    // As many as it tells of: accepted, and reset at one more.
+    let mut relay = relay();
+    for n in 0..limit {
+        announce_nth(&mut relay, n);
+    }
+    assert_eq!(named(&watch(&mut relay)), window);
+    let grown = announce_nth(&mut relay, limit);
+    assert!(
+        grown.contains(&Action::ResetRequest {
+            session: ALICE,
+            stream: StreamKey(0),
+            code: 0x9,
+        }),
+        "{grown:?}"
+    );
+    assert_eq!(named(&written(&mut relay)), 0);
+}
+
 /// What comes from the publisher, what the relay does to its own request
 /// first, and what Alice and Bob get; `None`: `SUBSCRIBE_OK`.
 type AnswerCase = (&'static str, Event, Vec<Action>, Option<RequestError>);

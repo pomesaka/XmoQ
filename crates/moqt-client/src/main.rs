@@ -98,6 +98,10 @@ enum Mode {
     /// the track is published to whoever sends SUBSCRIBE for it, which is how
     /// a relay asks for a track of an announced namespace (§9.5).
     PublishNamespace { payload: Vec<u8> },
+    /// Asks with `SUBSCRIBE_NAMESPACE` for the namespaces under `--namespace`
+    /// (§6.1, §10.18) and prints each NAMESPACE and `NAMESPACE_DONE`, until
+    /// stdin ends.
+    SubscribeNamespace,
 }
 
 struct Args {
@@ -627,6 +631,7 @@ fn read_mode(
         "publish-namespace" => Mode::PublishNamespace {
             payload: payload()?,
         },
+        "subscribe-namespace" => Mode::SubscribeNamespace,
         other => bail!("unknown --mode {other}"),
     })
 }
@@ -986,7 +991,9 @@ fn fetch_to_answer(answering: Option<Pace>, request: &PeerRequest) -> Option<&Fe
 /// none, and said so with this code before it asked its session about them.
 fn refusal_code(serves: bool, request: &PeerRequest) -> u64 {
     match request {
-        PeerRequest::Fetch(_) => request_error_code::NOT_SUPPORTED,
+        PeerRequest::Fetch(_) | PeerRequest::SubscribeNamespace(_) => {
+            request_error_code::NOT_SUPPORTED
+        }
         _ if !serves => request_error_code::NOT_SUPPORTED,
         PeerRequest::Subscribe(_) => request_error_code::DOES_NOT_EXIST,
         PeerRequest::Publish(_) | PeerRequest::PublishNamespace(_) => {
@@ -1044,6 +1051,61 @@ async fn stopped(serving: &mut Option<Serving>) -> Option<u32> {
 impl Client<'_> {
     /// `--mode subscribe`: to the track of `--track`, or with
     /// `--catalog-video` to the video track its catalog names.
+    /// The mode `subscribe-namespace`: `SUBSCRIBE_NAMESPACE` for the
+    /// namespace of `--namespace` as the prefix, and what comes on its stream,
+    /// until stdin ends; then the request is ended with a FIN (§6.1: "can be
+    /// cancelled by closing the stream with either a FIN or `RESET_STREAM`").
+    async fn watch_namespaces(&mut self) -> Result<()> {
+        let parameters = self.args.auth.with(vec![]);
+        let (request_id, message) = self
+            .session
+            .subscribe_namespace(self.args.track_namespace()?, parameters.clone())?;
+        let mut stream = self
+            .open_request(request_id, &message, "subscribe-namespace")
+            .await?;
+        match self
+            .response(request_id, &mut stream, "subscribe-namespace", &parameters)
+            .await?
+        {
+            RequestEvent::NamespacesSubscribed => report::namespaces_subscribed(),
+            other => {
+                stream.cancel();
+                return Err(refused("SUBSCRIBE_NAMESPACE", other));
+            }
+        }
+        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+        loop {
+            tokio::select! {
+                line = stdin.next_line() => if line?.is_none() {
+                    stream.finish();
+                    return Ok(());
+                },
+                event = stream.next_event() => match event? {
+                    RequestStreamEvent::Message(message) => {
+                        match on_request(&mut self.session, request_id, message)? {
+                            RequestEvent::Namespace(namespace) => report::namespace(&namespace),
+                            RequestEvent::NamespaceDone(namespace) => {
+                                report::namespace_done(&namespace);
+                            }
+                            RequestEvent::TooManyNamespaces { limit } => {
+                                stream.cancel();
+                                bail!("named more than {limit} namespaces");
+                            }
+                            other => bail!("unexpected on the SUBSCRIBE_NAMESPACE stream: {other:?}"),
+                        }
+                    }
+                    // §10.18: "When a subscriber receives a stream reset or FIN
+                    // on a SUBSCRIBE_NAMESPACE response stream, it SHOULD treat
+                    // this as though each active namespace received a
+                    // NAMESPACE_DONE."
+                    RequestStreamEvent::Closed(how) => {
+                        bail!("the peer ended the SUBSCRIBE_NAMESPACE stream: {how}")
+                    }
+                },
+            }
+        }
+    }
+
     async fn subscribe(&mut self, wanted: u64) -> Result<()> {
         let join = self.args.fetch.join;
         if !self.args.catalog_video {
@@ -2762,6 +2824,7 @@ impl Client<'_> {
             Mode::Fetch { start, end } => self.fetch(*start, *end).await,
             Mode::Publish { payload } => self.publish(payload).await,
             Mode::PublishNamespace { payload } => self.serve(payload).await,
+            Mode::SubscribeNamespace => self.watch_namespaces().await,
         }
     }
 }

@@ -15,5 +15,9 @@ Variable-length integers are those of §1.4.1: `80 fa` is 250 and `81 f4` is 500
 | `goaway-new-session-uri-moqtail-ts` | moqtail npm 0.13.0, `new GoAway("https://relay.example:4443/", 5000n, 3n).serialize()`, run with Bun on 2026-10-24 | GOAWAY, New Session URI `https://relay.example:4443/` (27 bytes), Timeout 5000, Request ID 3 |
 | `goaway-same-uri-moqtail-ts` | The same with `new GoAway(undefined, 0n, 1n)` | GOAWAY, an empty New Session URI (the current URI is reused), Timeout 0, Request ID 1 |
 | `goaway-request-stream-moqtail-ts` | The same with `new GoAway("https://relay.example:4443/", 2000n)`, which leaves the Request ID out, as on a request stream | GOAWAY, New Session URI `https://relay.example:4443/`, Timeout 2000, no Request ID |
+| `subscribe-namespace-moqtail-ts` | moqtail npm 0.13.0, `new SubscribeNamespace(1n, Tuple.fromUtf8Path("xmoq/chat"), []).serialize()`, run with Bun on 2026-10-24 | SUBSCRIBE_NAMESPACE, Request ID 1, Track Namespace Prefix (`xmoq`, `chat`), no parameter |
+| `subscribe-namespace-every-namespace-moqtail-ts` | The same with `new SubscribeNamespace(3n, Tuple.fromUtf8Path(""), [])` | SUBSCRIBE_NAMESPACE, Request ID 3, a Track Namespace Prefix of no field (§6.1: "interested in all namespaces"), no parameter |
+| `namespace-moqtail-ts` | moqtail npm 0.13.0, `new Namespace(Tuple.fromUtf8Path("room/alice")).serialize()`, run with Bun on 2026-10-24 | NAMESPACE, Track Namespace Suffix (`room`, `alice`) |
+| `namespace-done-moqtail-ts` | The same with `new NamespaceDone(...)` | NAMESPACE_DONE, Track Namespace Suffix (`room`, `alice`) |
 
 The parameters come out in ascending order of their types whatever order the library is given them in (seen with the two swapped), as §10.2 asks.

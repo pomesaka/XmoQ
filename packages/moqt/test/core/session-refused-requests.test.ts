@@ -857,3 +857,64 @@ describe("the wait after a refusal, where the request, what follows it and the F
 		},
 	);
 });
+
+// A SUBSCRIBE_NAMESPACE of the peer is decoded whole before it is refused, as
+// in the Rust implementation, which decodes every request (§10.18, §10.2.1).
+// The first is `fixtures/moqt-18-from-libraries/subscribe-namespace-moqtail-ts.hex`
+// (Request ID 1, prefix (xmoq, chat)); the others are written by hand from it.
+// `said` is what the peer is told: a refusal, or the end of the session with
+// PROTOCOL_VIOLATION (0x3).
+const ONE_FIELD_33_TIMES = Array.from({ length: 33 }, () => "01 61").join(" ");
+
+describe("a SUBSCRIBE_NAMESPACE of the peer is decoded whole before it is refused", () => {
+	test.each([
+		{
+			name: "one whose prefix has 2 fields",
+			bytes: "50 00 0d 01 02 04 78 6d 6f 71 04 63 68 61 74 00",
+			said: ["REQUEST_ERROR 3"],
+		},
+		{
+			name: "one whose prefix has 33 fields",
+			bytes: `50 00 45 01 21 ${ONE_FIELD_33_TIMES} 00`,
+			said: ["close 3"],
+		},
+		{
+			name: "one with FORWARD, which §10.2.12 does not list for it",
+			bytes: "50 00 0f 01 02 04 78 6d 6f 71 04 63 68 61 74 01 10 01",
+			said: ["close 3"],
+		},
+	])("$name", ({ bytes, said: expected }) => {
+		const session = started();
+		expect(
+			said(session.receivePeerBidiStreamData(0, hex(bytes), false)),
+		).toEqual([...expected]);
+	});
+});
+
+// TRACK_NAMESPACE_PREFIX (§10.2.14), written by hand: a REQUEST_UPDATE with
+// the Request ID 3 and the new prefix (xmoq), as a Track Namespace with no
+// length before it.
+const UPDATE_WITH_A_PREFIX = "02 00 09 03 01 34 01 04 78 6d 6f 71";
+
+describe("a REQUEST_UPDATE with TRACK_NAMESPACE_PREFIX", () => {
+	test.each([
+		{
+			name: "on the stream of a refused SUBSCRIBE_NAMESPACE is not answered",
+			first: hex("50 00 0d 01 02 04 78 6d 6f 71 04 63 68 61 74 00"),
+			said: [],
+		},
+		{
+			name: "for a SUBSCRIBE that waits for its answer closes the session (§10.2.1)",
+			first: subscribeBytes(1),
+			said: ["close 3"],
+		},
+	])("$name", ({ first, said: expected }) => {
+		const session = started();
+		session.receivePeerBidiStreamData(0, first, false);
+		expect(
+			said(
+				session.receivePeerBidiStreamData(0, hex(UPDATE_WITH_A_PREFIX), false),
+			),
+		).toEqual([...expected]);
+	});
+});

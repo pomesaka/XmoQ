@@ -10,11 +10,34 @@ use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
 use xmoq_moqt::fetch::{FetchObject, RangeEnd};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{GoAway, PublishDone, Setup};
-use xmoq_moqt::name::Location;
+use xmoq_moqt::name::{Location, TrackNamespace};
 
 use xmoq_moqt_io::{Direction, RequestClose};
 
 use crate::hex;
+
+pub fn namespaces_subscribed() {
+    println!("NAMESPACES_SUBSCRIBED");
+}
+
+/// A namespace as `NAMESPACE`, `NAMESPACE_DONE` print it: its fields, as
+/// text, joined by `/`.
+fn fields(namespace: &TrackNamespace) -> String {
+    namespace
+        .fields()
+        .iter()
+        .map(|field| String::from_utf8_lossy(field).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub fn namespace(namespace: &TrackNamespace) {
+    println!("NAMESPACE namespace={}", fields(namespace));
+}
+
+pub fn namespace_done(namespace: &TrackNamespace) {
+    println!("NAMESPACE_DONE namespace={}", fields(namespace));
+}
 
 pub fn connected(url: &str) {
     println!("CONNECTED url={url}");

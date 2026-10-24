@@ -9,6 +9,7 @@ import {
 	type Fetch,
 	type FetchRange,
 	SUBSCRIBE_MESSAGE_TYPE,
+	SUBSCRIBE_NAMESPACE_MESSAGE_TYPE,
 	type Subscribe,
 } from "./control-message.ts";
 import {
@@ -428,11 +429,13 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// FIXME: serve a FETCH (§10.12). It is refused below, like a request
 			// that is not decoded.
 			//
-			// WHY a FETCH and a SUBSCRIBE are decoded whole first, where the
-			// others are refused on their Request ID: a FETCH with a Fetch Type
-			// other than 1 to 3, and either with a parameter that is unknown or
-			// not for its message, closes the session (§10.12, §10.2.1), and
-			// the Rust implementation, which decodes them, does. Refusing such a
+			// WHY a FETCH, a SUBSCRIBE and a SUBSCRIBE_NAMESPACE are decoded
+			// whole first, where the others are refused on their Request ID: a
+			// FETCH with a Fetch Type other than 1 to 3, a SUBSCRIBE_NAMESPACE
+			// whose prefix has more than 32 fields (§10.18), and any of them
+			// with a parameter that is unknown or not for its message, closes
+			// the session (§10.12, §10.2.1), and the Rust implementation, which
+			// decodes them, does. Refusing such a
 			// request would be another answer to the same bytes. WHY before the
 			// Request ID is checked: the Rust implementation decodes first, so
 			// a request that is wrong in both ways ends the session with the
@@ -443,7 +446,8 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 				| undefined;
 			if (
 				messageType === FETCH_MESSAGE_TYPE ||
-				messageType === SUBSCRIBE_MESSAGE_TYPE
+				messageType === SUBSCRIBE_MESSAGE_TYPE ||
+				messageType === SUBSCRIBE_NAMESPACE_MESSAGE_TYPE
 			) {
 				const whole = decodeControlMessage(buffer);
 				if (whole.status === "error") throw whole.error;

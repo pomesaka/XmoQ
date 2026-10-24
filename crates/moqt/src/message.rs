@@ -27,11 +27,11 @@ pub(crate) const GOAWAY: u64 = 0x10;
 
 /// Types Table 5 defines and this crate does not decode. Receiving one ends the
 /// session with `INTERNAL_ERROR`, although the peer did nothing wrong.
-const UNSUPPORTED: &[u64] = &[NAMESPACE, NAMESPACE_DONE, PUBLISH_BLOCKED, PUBLISH_OK];
+const UNSUPPORTED: &[u64] = &[PUBLISH_BLOCKED, PUBLISH_OK];
 /// Requests the draft defines and this crate does not implement. Only their
 /// Request ID is read, so that the request can be answered with `REQUEST_ERROR`
 /// `NOT_SUPPORTED` instead of ending the session.
-const UNSUPPORTED_REQUESTS: &[u64] = &[TRACK_STATUS, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS];
+const UNSUPPORTED_REQUESTS: &[u64] = &[TRACK_STATUS, SUBSCRIBE_TRACKS];
 const NAMESPACE: u64 = 0x08;
 const TRACK_STATUS: u64 = 0x0d;
 const NAMESPACE_DONE: u64 = 0x0e;
@@ -107,6 +107,13 @@ pub mod request_error_code {
     pub const UNSUPPORTED_EXTENSION: u64 = 0x33;
     /// REDIRECT: the one code that carries a Redirect.
     pub const REDIRECT: u64 = 0x34;
+    /// `PREFIX_OVERLAP`: "the namespace prefix shares a common prefix with
+    /// another subscription of the same type in the same session" (§10.6.2).
+    pub const PREFIX_OVERLAP: u64 = 0x30;
+    /// `NAMESPACE_TOO_LARGE`: the prefix of a `SUBSCRIBE_NAMESPACE` or
+    /// `SUBSCRIBE_TRACKS` matches more publishers than the responder is
+    /// willing to enumerate (§10.6.2).
+    pub const NAMESPACE_TOO_LARGE: u64 = 0x31;
 }
 
 /// Retry Interval (§10.6.2): "The minimum time (in milliseconds) before the
@@ -312,6 +319,26 @@ pub struct PublishNamespace {
     pub track_namespace: TrackNamespace,
     /// Message Parameters.
     pub parameters: Vec<Parameter>,
+}
+
+/// `SUBSCRIBE_NAMESPACE` (§10.18): the namespaces under a prefix, now and as
+/// they come and go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscribeNamespace {
+    /// Request ID (§10.1).
+    pub request_id: u64,
+    /// Track Namespace Prefix: 0 to 32 fields (§10.18).
+    pub track_namespace_prefix: TrackNamespace,
+    /// Message Parameters.
+    pub parameters: Vec<Parameter>,
+}
+
+impl SubscribeNamespace {
+    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), UsageError> {
+        varint::encode(self.request_id, out);
+        self.track_namespace_prefix.encode(out);
+        params::encode_all(&self.parameters, out)
+    }
 }
 
 /// `REQUEST_OK` (§10.5). Which parameters it may carry depends on the request it
@@ -636,6 +663,15 @@ pub enum ControlMessage {
     FetchOk(FetchOk),
     /// GOAWAY, type 0x10.
     GoAway(GoAway),
+    /// `SUBSCRIBE_NAMESPACE`, type 0x50.
+    SubscribeNamespace(SubscribeNamespace),
+    /// NAMESPACE, type 0x8 (§10.16): a namespace under the prefix of a
+    /// `SUBSCRIBE_NAMESPACE`, as its Track Namespace Suffix: "only the
+    /// namespace tuples after the 'Track Namespace Prefix' are included".
+    Namespace(TrackNamespace),
+    /// `NAMESPACE_DONE`, type 0xE (§10.17), with the Track Namespace Suffix
+    /// as NAMESPACE has it.
+    NamespaceDone(TrackNamespace),
     /// A request this crate does not implement: `TRACK_STATUS` (0xD),
     /// `SUBSCRIBE_NAMESPACE` (0x50) or `SUBSCRIBE_TRACKS` (0x51). Only
     /// the Request ID, their first field, is decoded; the rest of the payload
@@ -773,6 +809,18 @@ impl ControlMessage {
                 message.encode_payload(out)?;
                 FETCH_OK
             }
+            Self::SubscribeNamespace(message) => {
+                message.encode_payload(out)?;
+                SUBSCRIBE_NAMESPACE
+            }
+            Self::Namespace(suffix) | Self::NamespaceDone(suffix) => {
+                suffix.encode(out);
+                if matches!(self, Self::Namespace(_)) {
+                    NAMESPACE
+                } else {
+                    NAMESPACE_DONE
+                }
+            }
             Self::GoAway(message) => {
                 if message.new_session_uri.len() > MAX_NEW_SESSION_URI_LEN {
                     return Err(UsageError("New Session URI longer than 8192 bytes"));
@@ -798,7 +846,8 @@ fn split_frame<'a>(reader: &mut Reader<'a>) -> ReadResult<(u64, &'a [u8])> {
 fn check_type(ty: u64) -> Result<(), Error> {
     match ty {
         SETUP | REQUEST_UPDATE | SUBSCRIBE | SUBSCRIBE_OK | REQUEST_ERROR | PUBLISH_NAMESPACE
-        | REQUEST_OK | PUBLISH_DONE | PUBLISH | FETCH | FETCH_OK | GOAWAY => Ok(()),
+        | REQUEST_OK | PUBLISH_DONE | PUBLISH | FETCH | FETCH_OK | GOAWAY | SUBSCRIBE_NAMESPACE
+        | NAMESPACE | NAMESPACE_DONE => Ok(()),
         ty if UNSUPPORTED_REQUESTS.contains(&ty) => Ok(()),
         ty if UNSUPPORTED.contains(&ty) => Err(Error::UnsupportedMessageType(ty)),
         // Includes the types Table 5 marks RESERVED (0x01, 0x20, 0x21, 0x40,
@@ -827,7 +876,14 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
         REQUEST_UPDATE => {
             let request_id = reader.varint()?;
             let parameters = params::decode_all(reader)?;
-            check_parameters(&parameters, MessageKind::RequestUpdate)?;
+            // §10.2.1, as far as it can be told here: which parameters an
+            // update may carry depends on its request, which the session
+            // knows.
+            if !params::allowed_in_some_update(&parameters) {
+                return Err(
+                    Error::ProtocolViolation("parameter not allowed in this message").into(),
+                );
+            }
             ControlMessage::RequestUpdate(RequestUpdate {
                 request_id,
                 parameters,
@@ -892,6 +948,23 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
         FETCH => ControlMessage::Fetch(Fetch::decode(reader)?),
         FETCH_OK => ControlMessage::FetchOk(FetchOk::decode(reader)?),
         GOAWAY => ControlMessage::GoAway(GoAway::decode(reader)?),
+        SUBSCRIBE_NAMESPACE => {
+            let request_id = reader.varint()?;
+            // §10.18: "If an endpoint receives a Track Namespace Prefix
+            // consisting of greater than 32 Track Namespace Fields, it MUST
+            // close the session with a PROTOCOL_VIOLATION", which decoding a
+            // Track Namespace does.
+            let track_namespace_prefix = TrackNamespace::decode(reader)?;
+            let parameters = params::decode_all(reader)?;
+            check_parameters(&parameters, MessageKind::SubscribeNamespace)?;
+            ControlMessage::SubscribeNamespace(SubscribeNamespace {
+                request_id,
+                track_namespace_prefix,
+                parameters,
+            })
+        }
+        NAMESPACE => ControlMessage::Namespace(TrackNamespace::decode(reader)?),
+        NAMESPACE_DONE => ControlMessage::NamespaceDone(TrackNamespace::decode(reader)?),
         ty if UNSUPPORTED_REQUESTS.contains(&ty) => {
             let request_id = reader.varint()?;
             reader.skip_rest();
@@ -1305,6 +1378,38 @@ pub(crate) mod tests {
                     timeout_ms: 0,
                     request_id: Some(1),
                 }),
+            ),
+            (
+                "subscribe-namespace-moqtail-ts",
+                ControlMessage::SubscribeNamespace(SubscribeNamespace {
+                    request_id: 1,
+                    track_namespace_prefix: TrackNamespace::new(vec![
+                        b"xmoq".to_vec(),
+                        b"chat".to_vec(),
+                    ])
+                    .unwrap(),
+                    parameters: vec![],
+                }),
+            ),
+            (
+                "subscribe-namespace-every-namespace-moqtail-ts",
+                ControlMessage::SubscribeNamespace(SubscribeNamespace {
+                    request_id: 3,
+                    track_namespace_prefix: TrackNamespace::new(vec![]).unwrap(),
+                    parameters: vec![],
+                }),
+            ),
+            (
+                "namespace-moqtail-ts",
+                ControlMessage::Namespace(
+                    TrackNamespace::new(vec![b"room".to_vec(), b"alice".to_vec()]).unwrap(),
+                ),
+            ),
+            (
+                "namespace-done-moqtail-ts",
+                ControlMessage::NamespaceDone(
+                    TrackNamespace::new(vec![b"room".to_vec(), b"alice".to_vec()]).unwrap(),
+                ),
             ),
             (
                 "goaway-request-stream-moqtail-ts",
@@ -1865,9 +1970,8 @@ pub(crate) mod tests {
     fn requests_this_crate_does_not_implement_yield_their_request_id() {
         // (bytes, message type, Request ID). Only the Request ID is decoded;
         // the rest of the payload (0x01, 0x02) is skipped.
-        let cases: [(&[u8], u64, u64); 3] = [
+        let cases: [(&[u8], u64, u64); 2] = [
             (&[0x0d, 0x00, 0x03, 0x06, 0x01, 0x02], 0x0d, 6),
-            (&[0x50, 0x00, 0x03, 0x06, 0x01, 0x02], 0x50, 6),
             (&[0x51, 0x00, 0x03, 0x06, 0x01, 0x02], 0x51, 6),
         ];
         for (bytes, message_type, request_id) in cases {

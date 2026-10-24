@@ -44,6 +44,7 @@ interface Pairing {
 		| "watch-rust.ts"
 		| "no-answer.ts"
 		| "quiet-peer.ts"
+		| "namespaces.ts"
 		| "rendezvous.ts"
 		| "new-group.ts";
 	/** The arguments of the driver, without the relay and the port. */
@@ -1131,6 +1132,21 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			name: "own relay: no answer: the terminal viewer gives up the SUBSCRIBE of its video that is not answered in time, and closes its session itself",
 			script: "no-answer.ts",
 			args: ["--subscriber", "xmoq-watch"],
+			relay: "own",
+		},
+		// Namespace discovery (§6.1, §10.18): an own-rust client asks for the
+		// namespaces under a prefix and is told of one as it is announced and
+		// withdrawn.
+		{
+			name: "moqtail relay: namespaces: own-rust is told with NAMESPACE and NAMESPACE_DONE of a namespace own-rust announces and withdraws under its prefix",
+			script: "namespaces.ts",
+			args: [],
+			relay: "moqtail",
+		},
+		{
+			name: "own relay: namespaces: own-rust is told with NAMESPACE and NAMESPACE_DONE of a namespace own-rust announces and withdraws under its prefix",
+			script: "namespaces.ts",
+			args: [],
 			relay: "own",
 		},
 		// The own clients against a peer that sends no SETUP, or answers no

@@ -20,8 +20,8 @@ use crate::aliases::SubscribedAliases;
 use crate::kvp::KeyValuePair;
 use crate::message::{
     ControlMessage, GoAway, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError,
-    RequestOk, RequestUpdate, Setup, Subscribe, SubscribeOk, publish_done_status,
-    request_error_code, setup_option,
+    RequestOk, RequestUpdate, Setup, Subscribe, SubscribeNamespace, SubscribeOk,
+    publish_done_status, request_error_code, setup_option,
 };
 use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
@@ -119,8 +119,26 @@ enum Request {
     PublishNamespace {
         established: bool,
     },
+    /// The namespaces the peer named on its stream (NAMESPACE) and has not
+    /// withdrawn (`NAMESPACE_DONE`), by their suffix. At most
+    /// [`MAX_NAMESPACES_OF_A_SUBSCRIPTION`].
+    SubscribeNamespace {
+        prefix: TrackNamespace,
+        established: bool,
+        named: HashSet<TrackNamespace>,
+    },
     Fetch(fetch::OwnFetch),
 }
+
+/// The namespaces a `SUBSCRIBE_NAMESPACE` of this endpoint keeps, that the
+/// peer named and has not withdrawn. One more ends the request
+/// ([`RequestEvent::TooManyNamespaces`]). **Provisional.** WHY a limit: each is kept
+/// for its `NAMESPACE_DONE` (§10.18: "If a subscriber receives a
+/// `NAMESPACE_DONE` before the corresponding NAMESPACE, it MUST close the
+/// session"), and the peer says how many there are. WHY 4,096: as many as the
+/// relay tells one request of (`MAX_NAMESPACES_OF_A_WATCH` of
+/// `xmoq-relay-core`).
+pub const MAX_NAMESPACES_OF_A_SUBSCRIPTION: usize = 4096;
 
 /// Where a PUBLISH this endpoint sent stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +156,8 @@ impl Request {
         match self {
             Self::Subscribe { track_alias, .. } => track_alias.is_some(),
             Self::Publish { state, .. } => *state != PublishState::Pending,
-            Self::PublishNamespace { established } => *established,
+            Self::PublishNamespace { established }
+            | Self::SubscribeNamespace { established, .. } => *established,
             Self::Fetch(fetch) => fetch.answered,
         }
     }
@@ -176,6 +195,24 @@ pub enum RequestEvent {
     },
     /// `PUBLISH_NAMESPACE_OK`: the peer accepted the namespace.
     PublishNamespaceEstablished,
+    /// The `REQUEST_OK` of a `SUBSCRIBE_NAMESPACE` (§10.18): the namespaces
+    /// follow.
+    NamespacesSubscribed,
+    /// NAMESPACE (§10.16) on the stream of a `SUBSCRIBE_NAMESPACE`: a
+    /// namespace under its prefix, whole (the prefix and the suffix).
+    Namespace(TrackNamespace),
+    /// `NAMESPACE_DONE` (§10.17): the namespace is withdrawn, whole.
+    NamespaceDone(TrackNamespace),
+    /// A NAMESPACE named one namespace more than a `SUBSCRIBE_NAMESPACE` keeps
+    /// ([`MAX_NAMESPACES_OF_A_SUBSCRIPTION`]). The request is over in the
+    /// session, and the caller has to cancel its stream (§6.1: "can be
+    /// cancelled by closing the stream with either a FIN or `RESET_STREAM`").
+    /// WHY the request alone, and not the session: nothing else of the
+    /// session depends on what that request was told.
+    TooManyNamespaces {
+        /// The cap, in namespaces.
+        limit: usize,
+    },
     /// `FETCH_OK`: the peer serves the FETCH.
     FetchEstablished {
         /// Whether the End Location is the last Object of the track.
@@ -553,6 +590,36 @@ impl Session {
         Ok((request_id, message))
     }
 
+    /// Asks the peer for the namespaces under `prefix`, now and as they come
+    /// and go (§6.1, §10.18). Returns the handle of the request and the
+    /// `SUBSCRIBE_NAMESPACE` to send first on a new bidirectional stream.
+    /// The answer comes as [`RequestEvent::NamespacesSubscribed`] or
+    /// [`RequestEvent::Rejected`], and the namespaces as
+    /// [`RequestEvent::Namespace`] and [`RequestEvent::NamespaceDone`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when a parameter may not appear in `SUBSCRIBE_NAMESPACE`, when
+    /// the peer sent GOAWAY, and when the Request IDs are used up.
+    pub fn subscribe_namespace(
+        &mut self,
+        prefix: TrackNamespace,
+        parameters: Vec<Parameter>,
+    ) -> Result<(RequestId, ControlMessage), UsageError> {
+        check_own_parameters(&parameters, MessageKind::SubscribeNamespace)?;
+        let request_id = self.open(Request::SubscribeNamespace {
+            prefix: prefix.clone(),
+            established: false,
+            named: HashSet::new(),
+        })?;
+        let message = ControlMessage::SubscribeNamespace(SubscribeNamespace {
+            request_id: request_id.0,
+            track_namespace_prefix: prefix,
+            parameters,
+        });
+        Ok((request_id, message))
+    }
+
     /// Announces a namespace. Returns the handle of the request and the
     /// `PUBLISH_NAMESPACE` to send first on a new bidirectional stream.
     ///
@@ -674,6 +741,7 @@ impl Session {
             }
             return Err(Error::ProtocolViolation("message after the request ended"));
         };
+        check_update_of_publish(live, &message)?;
         let established = live.is_established();
         match (live, message) {
             (live, ControlMessage::RequestError(error)) if !established => {
@@ -768,6 +836,9 @@ impl Session {
                 *established = true;
                 Ok(RequestEvent::PublishNamespaceEstablished)
             }
+            (Request::SubscribeNamespace { .. }, message) => {
+                self.on_subscribe_namespace_message(request, message)
+            }
             (Request::Fetch(_), ControlMessage::FetchOk(ok)) if !established => {
                 self.on_fetch_ok(request, ok)
             }
@@ -778,6 +849,34 @@ impl Session {
                 "message not allowed in this request state",
             )),
         }
+    }
+
+    /// A message on the stream of a `SUBSCRIBE_NAMESPACE` of this endpoint: its
+    /// `REQUEST_OK` (a `REQUEST_ERROR` is taken before), and then NAMESPACE
+    /// and `NAMESPACE_DONE`.
+    fn on_subscribe_namespace_message(
+        &mut self,
+        request: RequestId,
+        message: ControlMessage,
+    ) -> Result<RequestEvent, Error> {
+        let not_allowed = Error::ProtocolViolation("message not allowed in this request state");
+        let Some(Request::SubscribeNamespace {
+            prefix,
+            established,
+            named,
+        }) = self.requests.get_mut(&request.0)
+        else {
+            return Err(not_allowed);
+        };
+        let event = match message {
+            ControlMessage::RequestOk(ok) if !*established => answered_namespaces(established, &ok),
+            message if *established => on_namespace(prefix, named, message),
+            _ => Err(not_allowed),
+        }?;
+        if matches!(event, RequestEvent::TooManyNamespaces { .. }) {
+            self.end_request(request);
+        }
+        Ok(event)
     }
 
     /// The `PUBLISH_DONE` that ends a subscription this endpoint opened with
@@ -957,7 +1056,10 @@ impl Session {
                 self.published_aliases.remove(&track_alias);
             }
             Some(
-                Request::Subscribe { .. } | Request::PublishNamespace { .. } | Request::Fetch(_),
+                Request::Subscribe { .. }
+                | Request::PublishNamespace { .. }
+                | Request::SubscribeNamespace { .. }
+                | Request::Fetch(_),
             )
             | None => {}
         }
@@ -1006,6 +1108,76 @@ impl Session {
         let first = first_request_id(self.role);
         request.0 < self.next_request_id && request.0 % 2 == first
     }
+}
+
+/// §10.2.1, with what §10.2 lets the update of a subscription carry, for a
+/// `REQUEST_UPDATE` on the stream of a PUBLISH of this endpoint: the decoder
+/// let through what the update of any request may carry.
+fn check_update_of_publish(live: &Request, message: &ControlMessage) -> Result<(), Error> {
+    if let (Request::Publish { .. }, ControlMessage::RequestUpdate(update)) = (live, message)
+        && !params::all_allowed(&update.parameters, MessageKind::RequestUpdate)
+    {
+        return Err(Error::ProtocolViolation(
+            "parameter not allowed in this message",
+        ));
+    }
+    Ok(())
+}
+
+/// The `REQUEST_OK` of a `SUBSCRIBE_NAMESPACE` of this endpoint. No parameter
+/// of §10.2 lists it, and no Track Property belongs to one.
+fn answered_namespaces(established: &mut bool, ok: &RequestOk) -> Result<RequestEvent, Error> {
+    if !ok.parameters.is_empty() || !ok.track_properties.is_empty() {
+        return Err(Error::ProtocolViolation(
+            "a REQUEST_OK of SUBSCRIBE_NAMESPACE with parameters or properties",
+        ));
+    }
+    *established = true;
+    Ok(RequestEvent::NamespacesSubscribed)
+}
+
+/// A NAMESPACE or `NAMESPACE_DONE` on the stream of a `SUBSCRIBE_NAMESPACE`
+/// of this endpoint whose prefix is `prefix` (§10.16, §10.17, §10.18).
+fn on_namespace(
+    prefix: &TrackNamespace,
+    named: &mut HashSet<TrackNamespace>,
+    message: ControlMessage,
+) -> Result<RequestEvent, Error> {
+    let (suffix, done) = match message {
+        ControlMessage::Namespace(suffix) => (suffix, false),
+        ControlMessage::NamespaceDone(suffix) => (suffix, true),
+        _ => {
+            return Err(Error::ProtocolViolation(
+                "message not allowed in this request state",
+            ));
+        }
+    };
+    let mut fields = prefix.fields().to_vec();
+    fields.extend(suffix.fields().iter().cloned());
+    // A namespace longer than §2.4.1 allows breaks the rule for any
+    // namespace.
+    let whole = TrackNamespace::new(fields)
+        .map_err(|_| Error::ProtocolViolation("a namespace of NAMESPACE that is too long"))?;
+    if done {
+        // §10.18: "If a subscriber receives a NAMESPACE_DONE before the
+        // corresponding NAMESPACE, it MUST close the session with a
+        // 'PROTOCOL_VIOLATION'."
+        if !named.remove(&suffix) {
+            return Err(Error::ProtocolViolation(
+                "NAMESPACE_DONE before the corresponding NAMESPACE",
+            ));
+        }
+        return Ok(RequestEvent::NamespaceDone(whole));
+    }
+    // WHY a NAMESPACE for a namespace named before is taken as it is: the
+    // draft does not make it an error, and it changes nothing here.
+    if !named.contains(&suffix) && named.len() >= MAX_NAMESPACES_OF_A_SUBSCRIPTION {
+        return Ok(RequestEvent::TooManyNamespaces {
+            limit: MAX_NAMESPACES_OF_A_SUBSCRIPTION,
+        });
+    }
+    named.insert(suffix);
+    Ok(RequestEvent::Namespace(whole))
 }
 
 fn first_request_id(role: Role) -> u64 {
@@ -1445,6 +1617,88 @@ mod tests {
             timeout_ms: 5000,
             request_id,
         })
+    }
+
+    /// §10.16 to §10.18: what the stream of a `SUBSCRIBE_NAMESPACE` of this
+    /// endpoint may carry, and what the session makes of it. The prefix is
+    /// (`xmoq`); a NAMESPACE names (`a`) under it.
+    #[test]
+    fn a_subscribe_namespace_is_answered_and_told_of_namespaces() {
+        let ns = |fields: &[&[u8]]| {
+            TrackNamespace::new(fields.iter().map(|field| field.to_vec()).collect()).unwrap()
+        };
+        let named = || ControlMessage::Namespace(ns(&[b"a"]));
+        let done = || ControlMessage::NamespaceDone(ns(&[b"a"]));
+        // (what comes, what the last of it leads to)
+        let cases: [(Vec<ControlMessage>, Result<RequestEvent, Error>); 5] = [
+            (
+                vec![request_ok(vec![])],
+                Ok(RequestEvent::NamespacesSubscribed),
+            ),
+            (
+                vec![request_ok(vec![]), named()],
+                Ok(RequestEvent::Namespace(ns(&[b"xmoq", b"a"]))),
+            ),
+            (
+                vec![request_ok(vec![]), named(), done()],
+                Ok(RequestEvent::NamespaceDone(ns(&[b"xmoq", b"a"]))),
+            ),
+            (
+                vec![request_ok(vec![]), done()],
+                Err(Error::ProtocolViolation(
+                    "NAMESPACE_DONE before the corresponding NAMESPACE",
+                )),
+            ),
+            (
+                vec![named()],
+                Err(Error::ProtocolViolation(
+                    "message not allowed in this request state",
+                )),
+            ),
+        ];
+        for (messages, expected) in cases {
+            let mut session = set_up(Role::Client);
+            let (request, _) = session.subscribe_namespace(ns(&[b"xmoq"]), vec![]).unwrap();
+            let mut last = Ok(RequestEvent::LateMessage);
+            for message in messages {
+                last = session.feed(request, message);
+            }
+            assert_eq!(last, expected);
+        }
+    }
+
+    /// One NAMESPACE more than [`MAX_NAMESPACES_OF_A_SUBSCRIPTION`] ends the
+    /// request, and the session goes on: what comes after on the stream is a
+    /// message after the request ended.
+    #[test]
+    fn a_namespace_past_what_a_subscribe_namespace_keeps_ends_the_request() {
+        let ns = |field: Vec<u8>| TrackNamespace::new(vec![field]).unwrap();
+        let mut session = set_up(Role::Client);
+        let (request, _) = session
+            .subscribe_namespace(ns(b"xmoq".to_vec()), vec![])
+            .unwrap();
+        session.feed(request, request_ok(vec![])).unwrap();
+        for index in 0..MAX_NAMESPACES_OF_A_SUBSCRIPTION {
+            let named = ControlMessage::Namespace(ns(index.to_string().into_bytes()));
+            assert!(matches!(
+                session.feed(request, named),
+                Ok(RequestEvent::Namespace(_))
+            ));
+        }
+        let one_more = || ControlMessage::Namespace(ns(b"one more".to_vec()));
+        assert_eq!(
+            session.feed(request, one_more()),
+            Ok(RequestEvent::TooManyNamespaces { limit: 4096 })
+        );
+        assert_eq!(
+            session.feed(request, one_more()),
+            Err(Error::ProtocolViolation("message after the request ended"))
+        );
+        assert!(
+            session
+                .subscribe_namespace(ns(b"other".to_vec()), vec![])
+                .is_ok()
+        );
     }
 
     /// §10.4: what a GOAWAY on the control stream may hold.
