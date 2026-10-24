@@ -62,6 +62,7 @@ pub use routing::{
 };
 use routing::{Announcement, Ask, Declined, OwnRequest, PendingTrack, Refusal, Waiter};
 use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject};
+use xmoq_moqt::immutable::{Of, searched_properties};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{
     ControlMessage, Publish, ReasonPhrase, Subscribe, publish_done_status, request_error_code,
@@ -4394,11 +4395,13 @@ const DEFAULT_PUBLISHER_PRIORITY: u8 = 128;
 
 /// The Publisher Priority of the Subgroups of a subscription that carry
 /// none, from the Track Properties of the PUBLISH or `SUBSCRIBE_OK` that
-/// established it. A value above 255 never gets here: the decoder of
-/// `xmoq-moqt` closes the session. Of two such properties in one message the
-/// first counts; nothing refuses a second.
+/// established it, outside Immutable Properties or inside (§12.7: "When
+/// looking for the value of a property, processors MUST search both").
+/// A value above 255 never gets here: the decoder of `xmoq-moqt` closes the
+/// session. Of two such properties the first searched counts, the ones
+/// outside before the ones inside; nothing refuses a second.
 fn default_publisher_priority(properties: &[KeyValuePair]) -> u8 {
-    properties
+    searched_properties(properties, Of::Track)
         .iter()
         .find(|property| property.ty() == DEFAULT_PUBLISHER_PRIORITY_PROPERTY)
         .and_then(|property| match property.value() {
@@ -4414,10 +4417,13 @@ const DYNAMIC_GROUPS_PROPERTY: u64 = 0x30;
 /// the Original Publisher starts a new Group on request (§12.6: "The
 /// allowed values are 0 or 1 ... If omitted, the value is 0"). A larger
 /// value never gets here: the decoder of `xmoq-moqt` closes the session.
+/// Inside Immutable Properties as well (§12.7).
 fn dynamic_groups(properties: &[KeyValuePair]) -> bool {
-    properties.iter().any(|property| {
-        property.ty() == DYNAMIC_GROUPS_PROPERTY && *property.value() == Value::Varint(1)
-    })
+    searched_properties(properties, Of::Track)
+        .iter()
+        .any(|property| {
+            property.ty() == DYNAMIC_GROUPS_PROPERTY && *property.value() == Value::Varint(1)
+        })
 }
 
 /// The `LARGEST_OBJECT` among the parameters of a PUBLISH or a

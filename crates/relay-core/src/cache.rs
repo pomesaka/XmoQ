@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
+use xmoq_moqt::immutable::{Of, searched_properties};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::name::Location;
 
@@ -60,9 +61,10 @@ const IMMUTABLE_PROPERTIES: u64 = 0x0b;
 /// WHY not with Immutable Properties either: "When looking for the value of
 /// a property, processors MUST search both the mutable properties and the
 /// contents of Immutable Properties" (§12.7), so a `MAX_CACHE_DURATION` can
-/// be in there, and the relay does not read what Immutable Properties
-/// contain. Provisional as well: it keeps a publisher that uses them for
-/// anything from being cached.
+/// be in there. WHY NOT leave out only a track with one inside, which
+/// `searched_properties` could tell: that is the decision docs/open-questions.md
+/// has as provisional. It keeps a publisher that uses them for anything from
+/// being cached.
 pub(crate) fn may_be_cached(track_properties: &[KeyValuePair]) -> bool {
     !track_properties
         .iter()
@@ -101,10 +103,9 @@ impl CachedObject {
 
     /// The Object IDs before this one that it says do not exist (§12.9:
     /// "the number of Objects prior to the current Object that do not and
-    /// will never exist").
+    /// will never exist"), outside Immutable Properties or inside (§12.7).
     fn prior_gap(&self) -> u64 {
-        self.object
-            .properties
+        searched_properties(&self.object.properties, Of::Object)
             .iter()
             .find_map(|property| match property.value() {
                 Value::Varint(gap) if property.ty() == PRIOR_OBJECT_ID_GAP => Some(*gap),
@@ -846,6 +847,32 @@ mod tests {
                     "{kept:?} {comes:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_prior_object_id_gap_inside_immutable_properties_counts_as_one_outside() {
+        // Object 5 says that 3 and 4 do not exist, and 4 came (§12.9): the
+        // track is malformed, wherever the gap is said (§12.7). Immutable
+        // Properties (0x0B) hold a sequence of their own, whose first Type
+        // counts from 0: 0x3E = 2 is `3e 02`.
+        let outside = vec![KeyValuePair::varint(PRIOR_OBJECT_ID_GAP, 2).unwrap()];
+        let inside = vec![KeyValuePair::bytes(0x0b, vec![0x3e, 0x02]).unwrap()];
+        for properties in [outside, inside] {
+            let (mut cache, mut in_use) = cache_of(vec![object(5, 4, 0)]);
+            let saying = CachedObject {
+                object: Arc::new(SubgroupObject {
+                    properties: properties.clone(),
+                    ..(*object(5, 5, 0).object).clone()
+                }),
+                ..object(5, 5, 0)
+            };
+            assert_eq!(saying.prior_gap(), 2, "{properties:?}");
+            assert_eq!(
+                cache.insert(saying, true, &mut in_use),
+                Verdict::Malformed,
+                "{properties:?}"
+            );
         }
     }
 
