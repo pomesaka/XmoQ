@@ -1173,6 +1173,30 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "none",
 		},
 		{
+			name: "no relay: quiet peer: own-browser closes its session with INVALID_REQUEST_ID for a request of the peer with a Request ID of a client's parity",
+			script: "quiet-peer.ts",
+			args: ["--case", "request-id-parity", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust closes its session with INVALID_REQUEST_ID for a request of the peer with a Request ID of a client's parity",
+			script: "quiet-peer.ts",
+			args: ["--case", "request-id-parity", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-browser closes its session with INVALID_REQUEST_ID for a REQUEST_UPDATE that uses the Request ID of a request it refused",
+			script: "quiet-peer.ts",
+			args: ["--case", "request-id-again", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust closes its session with INVALID_REQUEST_ID for a REQUEST_UPDATE that uses the Request ID of a request it refused",
+			script: "quiet-peer.ts",
+			args: ["--case", "request-id-again", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
 			name: "no relay: quiet peer: own-rust closes its session with NO_ERROR at a GOAWAY",
 			script: "quiet-peer.ts",
 			args: ["--case", "goaway", "--client", "own-rust"],

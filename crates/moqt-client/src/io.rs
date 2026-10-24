@@ -1,11 +1,8 @@
 //! What this client adds to `xmoq-moqt-io`: a request stream as one value, and
 //! the split of incoming events into the ones that concern the session and the
 //! ones that carry data.
-//!
-//! FIXME: check the Request IDs of requests the peer opens (§10.1). This client
-//! serves none: every request is answered with `REQUEST_ERROR` `NOT_SUPPORTED`
-//! without going through the session, which is where the IDs are checked.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +12,8 @@ use tokio::task::JoinHandle;
 use xmoq_moqt::message::{
     ControlMessage, ReasonPhrase, RequestError, request_error_code, retry_interval,
 };
-use xmoq_moqt::stream_reset_code;
+use xmoq_moqt::session::{PeerRequestId, PeerRequestOpened, Role, Session, Transport};
+use xmoq_moqt::{RequestFault, TerminationCode, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, IncomingStreams, PeerRequestStreamEvent, RequestClose, RequestReader,
@@ -249,6 +247,15 @@ impl Drop for Readers {
 /// Answers every request the peer opens with `REQUEST_ERROR` `NOT_SUPPORTED`
 /// and a FIN (§3.3.2), after `delay`: this client serves no requests, and
 /// leaving one unanswered would keep the peer waiting.
+///
+/// The requests go through a session of their own, which checks their
+/// Request IDs (§10.1) and reads what still comes on a refused stream (a
+/// `REQUEST_UPDATE` uses up one more); a fault there closes the session with
+/// its code. WHY a session of its own, and not the client's: the client's
+/// is held by the mode while it runs. WHY that is enough: in the modes that
+/// refuse (`subscribe` and `fetch`), the peer's Request IDs come on nothing
+/// but these streams, since this client publishes nothing the peer could
+/// update.
 fn refuse_requests(
     connection: Arc<WtConnection>,
     config: StreamConfig,
@@ -257,31 +264,94 @@ fn refuse_requests(
 ) -> (IncomingStreams, JoinHandle<()>) {
     let (queue, mut requests) = mpsc::channel(EVENT_QUEUE);
     let trace = config.trace.clone();
-    let streams = read_request_streams(connection, config, stops, queue, |event| event);
+    let streams =
+        read_request_streams(Arc::clone(&connection), config, stops, queue, |event| event);
     let refuser = tokio::spawn(async move {
-        let not_supported = ControlMessage::RequestError(RequestError {
-            error_code: request_error_code::NOT_SUPPORTED,
-            retry_interval: retry_interval::made_up(request_error_code::NOT_SUPPORTED),
-            error_reason: ReasonPhrase::default(),
-            redirect: None,
-        });
+        let mut session = Session::new(Role::Client, Transport::WebTransport);
+        // The requests the session keeps as refused, by the reader's name of
+        // their stream.
+        let mut refused: HashMap<u64, PeerRequestId> = HashMap::new();
         while let Some(event) = requests.recv().await {
-            // What follows on a refused stream, and how it ends, is of no
-            // interest. A stream that breaks the protocol is left to the peer's
-            // own streams to show: this task has no way to close the session.
-            if let PeerRequestStreamEvent::Opened {
-                stream, mut send, ..
-            } = event
-            {
-                let label = format!("bi#{stream}");
-                tokio::time::sleep(delay).await;
-                // An error means the peer is gone or stopped the stream.
-                let _ = send_message(&mut send, &not_supported, &trace, &label).await;
-                send.finish();
+            let fault = match event {
+                PeerRequestStreamEvent::Opened {
+                    stream,
+                    mut send,
+                    first,
+                } => match refuse(&mut session, first) {
+                    Ok((response, request)) => {
+                        if let Some(request) = request {
+                            refused.insert(stream, request);
+                        }
+                        let label = format!("bi#{stream}");
+                        tokio::time::sleep(delay).await;
+                        // An error means the peer is gone or stopped the stream.
+                        let _ = send_message(&mut send, &response, &trace, &label).await;
+                        send.finish();
+                        None
+                    }
+                    Err(error) => Some(error),
+                },
+                PeerRequestStreamEvent::Message { stream, message } => {
+                    match refused.get(&stream) {
+                        Some(request) => match session.on_peer_request_message(*request, message) {
+                            Err(RequestFault::Peer(error)) => Some(error),
+                            // The session's own request: never another's.
+                            Err(RequestFault::Usage(_)) | Ok(_) => None,
+                        },
+                        // The session keeps nothing of it (`MAX_PEER_REQUESTS`).
+                        None => None,
+                    }
+                }
+                PeerRequestStreamEvent::Closed { stream, .. } => {
+                    if let Some(request) = refused.remove(&stream) {
+                        session.on_peer_request_closed(request);
+                    }
+                    None
+                }
+                // A stream that breaks the protocol in its bytes is shown by
+                // the peer's own streams as well; this one is left to them.
+                _ => None,
+            };
+            if let Some(error) = fault {
+                let code = error.termination_code().map_or(0, TerminationCode::code);
+                crate::report::closed_for_a_request_of_the_peer(code, &error);
+                connection.close(code, error.to_string().as_bytes());
+                return;
             }
         }
     });
     (streams, refuser)
+}
+
+/// The answer to a request the peer opened, and the request where the session
+/// keeps it: `NOT_SUPPORTED`, or the session's own refusal.
+fn refuse(
+    session: &mut Session,
+    first: ControlMessage,
+) -> Result<(ControlMessage, Option<PeerRequestId>), xmoq_moqt::Error> {
+    match session.on_peer_request_opened(first)? {
+        PeerRequestOpened::Refused { response, request } => Ok((response, request)),
+        PeerRequestOpened::Request(request, _) => {
+            let response = session
+                .reject(
+                    request,
+                    request_error_code::NOT_SUPPORTED,
+                    retry_interval::made_up(request_error_code::NOT_SUPPORTED),
+                    ReasonPhrase::default(),
+                )
+                // A request the session has just handed over is one it can
+                // reject.
+                .unwrap_or_else(|_| {
+                    ControlMessage::RequestError(RequestError {
+                        error_code: request_error_code::NOT_SUPPORTED,
+                        retry_interval: retry_interval::made_up(request_error_code::NOT_SUPPORTED),
+                        error_reason: ReasonPhrase::default(),
+                        redirect: None,
+                    })
+                });
+            Ok((response, Some(request)))
+        }
+    }
 }
 
 /// Starts reading the peer's streams. With `serve`, the requests the peer
