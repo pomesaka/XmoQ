@@ -538,6 +538,10 @@ enum PublisherLine {
     PublishDone,
     /// `publish-anew`, `publish-anew-same-alias`: the new PUBLISH after it.
     PublishAnew { same_alias: bool },
+    /// `end-of-track`: Object 0 of the next Group with the status
+    /// `END_OF_TRACK` and no payload (§2.1), as the other Objects are sent;
+    /// what is sent after it is past the end of the track (§2.4.2).
+    EndOfTrack,
 }
 
 impl PublisherLine {
@@ -548,7 +552,22 @@ impl PublisherLine {
             "publish-done" => Self::PublishDone,
             "publish-anew" => Self::PublishAnew { same_alias: false },
             "publish-anew-same-alias" => Self::PublishAnew { same_alias: true },
+            "end-of-track" => Self::EndOfTrack,
             _ => Self::Send,
+        }
+    }
+
+    /// The Object a line sends, as `Client::send_attending` takes it: the
+    /// payload of the client for `Send`, none for `EndOfTrack` (§2.1).
+    fn object(
+        self,
+        track_alias: u64,
+        group_id: u64,
+        payload: &[u8],
+    ) -> (u64, u64, &[u8], ObjectStatus) {
+        match self {
+            Self::EndOfTrack => (track_alias, group_id, &[], ObjectStatus::EndOfTrack),
+            _ => (track_alias, group_id, payload, ObjectStatus::Normal),
         }
     }
 }
@@ -1733,7 +1752,7 @@ impl Client<'_> {
         args: &Args,
         track_alias: u64,
         group_id: u64,
-        payload: &[u8],
+        (payload, status): (&[u8], ObjectStatus),
     ) -> Result<bool> {
         if args.video.video_in.is_some() {
             // FIXME: a Group of `--video-in` still waits for its stream
@@ -1758,7 +1777,7 @@ impl Client<'_> {
         encoder.object(&SubgroupObject {
             object_id: 0,
             properties: args.object_properties.clone(),
-            status: ObjectStatus::Normal,
+            status,
             payload: payload.to_vec(),
         })?;
         // WHY a stream the peer allows no room for is not waited for, as a
@@ -1875,11 +1894,11 @@ impl Client<'_> {
                     Some(PublisherLine::PublishAnew { .. }) => {
                         bail!("publish-anew without a publish-done before it")
                     }
-                    Some(PublisherLine::Send) => {
+                    Some(line @ (PublisherLine::Send | PublisherLine::EndOfTrack)) => {
                         // Each Object is a Group of its own. The Groups go on
                         // through a `republish`: it is the same track.
                         let group_id = self.args.first_group + sent;
-                        let object = (track_alias, group_id, payload);
+                        let object = line.object(track_alias, group_id, payload);
                         // §10.11: the streams that were opened are counted.
                         if self.send_attending(&mut peer_requests, &mut None, None, object).await? {
                             stream_count += 1;
@@ -2129,7 +2148,7 @@ impl Client<'_> {
                         // subscription gets while the stream is under way
                         // (an update that is refused) counts it.
                         served.streams += 1;
-                        let object = (served.track_alias, group_id, payload);
+                        let object = (served.track_alias, group_id, payload, ObjectStatus::Normal);
                         let opened = self
                             .send_attending(&mut peer_requests, &mut serving, Some(&mut stdin), object)
                             .await?;
@@ -2260,9 +2279,10 @@ impl Client<'_> {
         }
     }
 
-    /// Notes an Object (its Track Alias, its Group and its payload) as
-    /// published and sends it with [`Self::send_object`], answering the peer
-    /// while it is under way.
+    /// Notes an Object (its Track Alias, its Group, its payload and its
+    /// status; one that is not `Normal` has no payload, §2.1) as published
+    /// and sends it with [`Self::send_object`], answering the peer while it
+    /// is under way.
     ///
     /// WHY noted before it is sent: §5.1.2 has "Largest Object updates when
     /// the first byte of an Object with a Location larger than the previous
@@ -2277,10 +2297,16 @@ impl Client<'_> {
         peer_requests: &mut io::PeerRequests,
         serving: &mut Option<Serving>,
         stdin: Option<&mut DriverLines>,
-        (track_alias, group_id, payload): (u64, u64, &[u8]),
+        (track_alias, group_id, payload, status): (u64, u64, &[u8], ObjectStatus),
     ) -> Result<bool> {
         self.sent(group_id, payload);
-        let sending = Self::send_object(self.connection, self.args, track_alias, group_id, payload);
+        let sending = Self::send_object(
+            self.connection,
+            self.args,
+            track_alias,
+            group_id,
+            (payload, status),
+        );
         self.attending(peer_requests, serving, stdin, sending)
             .await?
     }
@@ -3241,6 +3267,7 @@ mod tests {
                 PublisherLine::Republish { same_alias: true },
             ),
             ("publish-done", PublisherLine::PublishDone),
+            ("end-of-track", PublisherLine::EndOfTrack),
             (
                 "publish-anew",
                 PublisherLine::PublishAnew { same_alias: false },

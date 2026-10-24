@@ -46,6 +46,11 @@
 //     sends the Group the first has sent; with one, own-browser, it sends
 //     the Group again itself. Where the priorities differ the track ends as
 //     malformed; where they are the same the second stream is only stopped.
+//   end-of-track            --publisher own-rust --subscriber <own client>...
+//     The publisher sends a Group, then an Object with the status
+//     END_OF_TRACK, then another Group: past the end of the track (§2.4.2,
+//     the fifth example). The relay ends the track as malformed: PUBLISH_DONE
+//     MALFORMED_TRACK to the subscribers, the PUBLISH cancelled with 0x12.
 //   publish-anew            --publisher own-rust --subscriber <client>... [--same-alias]
 //     The publisher sends a Group, says PUBLISH_DONE and publishes the track
 //     anew on the same session, under the next Track Alias or the same, and
@@ -226,6 +231,7 @@ const SCENARIOS = [
 	"publish-anew",
 	"ask-all",
 	"subgroup-priorities",
+	"end-of-track",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
 type OptionOfTwoSources =
@@ -2044,6 +2050,63 @@ async function subgroupPriorities(run: Run): Promise<ScenarioResult> {
 	};
 }
 
+/**
+ * An Object past the end of the track (§2.4.2: "An Object is received whose
+ * Group and Object ID are larger than the final Object in the Track. The
+ * final Object in a Track is the Object with Status END_OF_TRACK"): the relay
+ * ends the track as malformed, as for a Subgroup that comes again with
+ * another priority (`subgroupPriorities`).
+ */
+async function endOfTrack(run: Run): Promise<ScenarioResult> {
+	const kind = onePublisherKind();
+	if (kind !== "own-rust") {
+		throw new Error(
+			`--scenario end-of-track needs own-rust, the one client that sends END_OF_TRACK, not ${kind}`,
+		);
+	}
+	const subscriberKinds = options.subscriber.map((value) =>
+		parseClient("subscriber", value),
+	);
+	const passing = subscriberKinds.find((each) => !isOwnClient(each));
+	if (passing !== undefined) {
+		throw new Error(
+			`--scenario end-of-track needs own subscribers, which say how their subscription ended, not ${passing}`,
+		);
+	}
+	const publisher = await joinAsPublisher(kind, run, {
+		label: `pub:${kind}`,
+		payloadHex: run.payloadHex,
+	});
+	if (publisher.sendEndOfTrack === undefined) {
+		throw new Error(`${publisher.label} cannot send END_OF_TRACK`);
+	}
+	const subscribers = await joinAsSubscribers(subscriberKinds, "sub", run);
+	const group = await publisher.send();
+	await allReceive(subscribers, group, publisher);
+	const end = await publisher.sendEndOfTrack();
+	const past = await publisher.send();
+	const ended = await outcomes(subscribers);
+	for (const { subscriber, outcome } of ended) {
+		expectPublishDone(subscriber, outcome, { statusCode: MALFORMED_TRACK });
+	}
+	const session = sessionOf(publisher, run);
+	const code = captureGroup(
+		await run.context.relay.waitForLine(requestCancelled(session)),
+		1,
+	);
+	if (code !== "0x12") {
+		throw new Error(
+			`the relay cancelled the PUBLISH of ${publisher.label} with ${code}, not 0x12`,
+		);
+	}
+	const cancelled = await publisher.publishCancelledWith();
+	return {
+		summary: `the relay ended the track as malformed when ${publisher.label} sent Group ${past} after END_OF_TRACK in Group ${end}: PUBLISH_DONE 0x12 to the subscribers, the PUBLISH cancelled with ${code} (${publisher.label} saw ${cancelled})`,
+		subscriptions: subscriptionsOf(ended),
+		measured: {},
+	};
+}
+
 const ASK_WAYS = [
 	"two-announcers",
 	"announcer-and-publisher",
@@ -2556,6 +2619,7 @@ const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"publish-anew": publishAnew,
 	"ask-all": askAll,
 	"subgroup-priorities": subgroupPriorities,
+	"end-of-track": endOfTrack,
 };
 
 async function main(): Promise<void> {

@@ -149,6 +149,11 @@ export interface Publisher {
 	/** Sends `count` Objects like `send`, one after the other, and resolves with their Groups. */
 	sendBatch(count: number): Promise<number[]>;
 	/**
+	 * own-rust: sends Object 0 of the next Group with the status END_OF_TRACK
+	 * and no payload, as `send` sends one, and resolves with the Group.
+	 */
+	sendEndOfTrack?(): Promise<number>;
+	/**
 	 * own-browser: sends the next Group as `objects` Objects of `bytes` bytes
 	 * each, on one stream, and resolves with the Group.
 	 */
@@ -362,6 +367,10 @@ async function startRustPublisher(
 		sendsSeveral: kind === "own-rust",
 		send() {
 			client.child.stdin.write("send\n");
+			return sent();
+		},
+		sendEndOfTrack() {
+			client.child.stdin.write("end-of-track\n");
 			return sent();
 		},
 		async sendBatch(count) {

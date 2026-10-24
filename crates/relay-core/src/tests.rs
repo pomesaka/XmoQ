@@ -1124,6 +1124,59 @@ fn a_malformed_track_is_cancelled_upstream_and_ended_downstream() {
     assert_eq!(held(&relay), (3, 0, 0, 0, 0));
 }
 
+/// The Objects of a case: stream, Object ID, whether it has the status
+/// `END_OF_TRACK`.
+type Objects = &'static [(u64, u64, bool)];
+
+/// §2.4.2, the fifth example: an Object larger than the one with the status
+/// `END_OF_TRACK` makes the track malformed, whichever of the two the relay
+/// reads first; the relay cancels the source with `MALFORMED_TRACK` (0x12).
+#[test]
+fn an_object_past_the_end_of_the_track_makes_it_malformed() {
+    let end_of_track = |object_id: u64| SubgroupObject {
+        object_id,
+        properties: vec![],
+        status: ObjectStatus::EndOfTrack,
+        payload: vec![],
+    };
+    // (the Objects in the order they come: stream, Object ID, whether it is
+    // the end of the track; whether the track is malformed)
+    let cases: [(Objects, bool); 5] = [
+        (&[(7, 0, false), (7, 1, true)], false),
+        (&[(7, 0, false), (7, 1, true), (7, 2, false)], true),
+        (&[(7, 0, false), (7, 1, true), (9, 0, false)], true),
+        (&[(9, 0, false), (7, 1, true)], true),
+        (&[(7, 1, true), (7, 0, false)], false),
+    ];
+    for (objects, malformed) in cases {
+        let mut relay = relay_with_track();
+        subscribe_to_track(&mut relay, ALICE);
+        let mut opened = Vec::new();
+        let mut cancelled = false;
+        for &(stream, object_id, end) in objects {
+            if !opened.contains(&stream) {
+                data_stream_opened(&mut relay, stream);
+                opened.push(stream);
+            }
+            let actions = relay.step(Event::Object {
+                session: PUBLISHER,
+                stream: StreamKey(stream),
+                object: if end {
+                    end_of_track(object_id)
+                } else {
+                    object(object_id)
+                },
+            });
+            cancelled |= actions.contains(&Action::ResetRequest {
+                session: PUBLISHER,
+                stream: StreamKey(0),
+                code: 0x12,
+            });
+        }
+        assert_eq!(cancelled, malformed, "{objects:?}");
+    }
+}
+
 #[test]
 fn a_stream_that_arrives_before_its_publish_is_held() {
     let mut relay = Relay::new("test/0");
