@@ -1378,6 +1378,24 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 		},
 		{
+			name: "own relay: quiet peer: the relay closes the session of a client that sends a datagram of an unknown type with PROTOCOL_VIOLATION",
+			script: "quiet-peer.ts",
+			args: ["--case", "relay-unknown-datagram", "--client", "quiet-peer"],
+			relay: "own",
+		},
+		{
+			name: "no relay: quiet peer: own-rust closes its session with PROTOCOL_VIOLATION at a datagram of an unknown type",
+			script: "quiet-peer.ts",
+			args: ["--case", "datagram", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: the terminal viewer closes its session with PROTOCOL_VIOLATION at a datagram of an unknown type",
+			script: "quiet-peer.ts",
+			args: ["--case", "datagram", "--client", "xmoq-watch"],
+			relay: "none",
+		},
+		{
 			name: "own relay: quiet peer: the relay closes a session that sent its SETUP and holds nothing, and keeps one that announced",
 			script: "quiet-peer.ts",
 			args: ["--case", "relay-idle-session", "--client", "quiet-peer"],

@@ -15,9 +15,10 @@
 //! test that passes there says something about a real connection. An
 //! implementation over another library has to keep to it as well.
 //!
-//! FIXME: read datagrams. Nothing here does, so an `OBJECT_DATAGRAM` is lost and
-//! an unknown datagram type does not close the session, which §11 of
-//! `draft-ietf-moq-transport-18` requires.
+//! Datagrams are read for their type alone ([`read_uni_streams`]): one of an
+//! unknown type closes the session (§11 of `draft-ietf-moq-transport-18`).
+//! FIXME: hand an `OBJECT_DATAGRAM` on. Nothing here does, so its Object is
+//! lost.
 
 #[cfg(test)]
 mod contract;
@@ -258,6 +259,11 @@ pub trait Connection: Send + Sync + 'static {
     fn accept_bi(
         &self,
     ) -> impl Future<Output = Result<(Self::Send, Self::Recv), ConnectionLost>> + Send;
+
+    /// The next datagram of the session the peer sent, without what the
+    /// transport put before it. Fails once the connection is gone. Datagrams
+    /// that were not read in time may be lost, as datagrams may be on the way.
+    fn read_datagram(&self) -> impl Future<Output = Result<Vec<u8>, ConnectionLost>> + Send;
 
     /// Closes the session with a Session Termination Error Code and a reason,
     /// which reach the peer: its [`Self::closed`] completes with

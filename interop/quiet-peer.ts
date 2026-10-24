@@ -82,6 +82,19 @@
 //                     prints `SESSION_ENDED session=0 ClosedByPeer { code:
 //                     4,`, and own-rust `CLOSED_FOR_A_REQUEST_OF_THE_PEER
 //                     code=0x4 ...`.
+//   datagram          The peer sends the client, once its SETUP has come, a
+//                     datagram of the type 0x30, which is no
+//                     OBJECT_DATAGRAM (§11, §11.3.1: "MUST close the
+//                     session with a PROTOCOL_VIOLATION"). own-rust and the
+//                     terminal viewer close the session with
+//                     PROTOCOL_VIOLATION: the peer prints `SESSION_ENDED
+//                     session=0 ClosedByPeer { code: 3,`. Not own-browser:
+//                     `@xmoq/moqt` does not read datagrams yet. The first
+//                     run of the terminal viewer failed: it closed with
+//                     NO_ERROR when its SUBSCRIBE got no answer in 10 s, as
+//                     it reads nothing else while it waits for one; the
+//                     peer answers SUBSCRIBEs in this case since, so that it
+//                     comes to play.
 //   request-id-again  The same, with a SUBSCRIBE of the Request ID 1, which
 //                     the client refuses, and then a REQUEST_UPDATE with the
 //                     same Request ID on its stream.
@@ -951,7 +964,8 @@ const CASES: Record<
 			| "goaway"
 			| "goaway-request"
 			| "request-id-parity"
-			| "request-id-again";
+			| "request-id-again"
+			| "datagram";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
@@ -965,7 +979,51 @@ const CASES: Record<
 	"goaway-request": { quiet: "goaway-request", run: goAwayOnARequest },
 	"request-id-parity": { quiet: "request-id-parity", run: peerRequestId },
 	"request-id-again": { quiet: "request-id-again", run: peerRequestId },
+	datagram: { quiet: "datagram", run: unknownDatagram },
 };
+
+/**
+ * The peer sends a datagram of an unknown type (`--quiet datagram`): the
+ * client closes the session with PROTOCOL_VIOLATION (0x3).
+ */
+async function unknownDatagram(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	let said = "";
+	switch (client) {
+		case "own-rust": {
+			const rust = spawnRustClient(
+				context,
+				"client:own-rust",
+				client,
+				"subscribe",
+				TRACK,
+			);
+			const code = await withTimeout(rust.exited, "own-rust to leave");
+			said = `own-rust left with ${code}`;
+			break;
+		}
+		case "xmoq-watch": {
+			const viewer = spawnTerminalViewer(
+				context,
+				"client:xmoq-watch",
+				VIEWER_ARGS,
+			);
+			const code = await withTimeout(viewer.exited, "xmoq-watch to leave");
+			said = `xmoq-watch left with ${code}`;
+			break;
+		}
+		case "own-browser":
+			throw new Error("@xmoq/moqt does not read datagrams yet");
+	}
+	await context.relay.waitForLine(/^DATAGRAM_SENT session=0 type=0x30$/);
+	// 3 is PROTOCOL_VIOLATION (§3.5).
+	const [line] = await context.relay.waitForLine(
+		/^SESSION_ENDED session=0 ClosedByPeer \{ code: 3,.*$/,
+	);
+	return `${client} closed its session with PROTOCOL_VIOLATION at a datagram of an unknown type: the peer printed ${line}; ${said}`;
+}
 
 async function relayNoSetup(): Promise<string> {
 	const context = await startRun({
@@ -991,6 +1049,33 @@ async function relayNoSetup(): Promise<string> {
 		/^CLOSE_SESSION session=0 code=0x11 reason="no SETUP in time"$/,
 	);
 	return `the own relay closed the session of a client that sent no SETUP with CONTROL_MESSAGE_TIMEOUT (0x11) ${after} ms after the client began (the relay's wait: ${WAIT_MS} ms): ${said}`;
+}
+
+/**
+ * The other way round: `xmoq-quiet-peer` as a client sends the own relay a
+ * datagram of the type 0x30 after its SETUP. The relay closes the session
+ * with PROTOCOL_VIOLATION (0x3): `CLOSE_SESSION session=0 code=0x3`, and the
+ * client `SESSION_ENDED ClosedByPeer { code: 3, ... }`.
+ */
+async function relayUnknownDatagram(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: [],
+		verbose: options.verbose,
+	});
+	const client = spawnQuietClient(context, "client:quiet-peer", 20_000, true, [
+		"--send-datagram-hex",
+		"30",
+	]);
+	await client.waitForLine(/^DATAGRAM_SENT /);
+	const [said] = await client.waitForLine(
+		/^SESSION_ENDED ClosedByPeer \{ code: 3,.*$/,
+	);
+	const [closed] = await context.relay.waitForLine(
+		/^CLOSE_SESSION session=0 code=0x3 .*$/,
+	);
+	return `the own relay closed the session of a client that sent a datagram of an unknown type with PROTOCOL_VIOLATION: ${closed}; the client: ${said}`;
 }
 
 async function relayIdleSession(): Promise<string> {
@@ -1328,6 +1413,7 @@ async function relayGroupKeptBeyondTheCache(): Promise<string> {
 
 const RELAY_CASES: Record<string, () => Promise<string>> = {
 	"relay-no-setup": relayNoSetup,
+	"relay-unknown-datagram": relayUnknownDatagram,
 	"relay-idle-session": relayIdleSession,
 	"relay-many-announcements": relayManyAnnouncements,
 	"relay-one-session-asks-for-much": relayOneSessionAsksForMuch,

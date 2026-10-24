@@ -27,13 +27,17 @@
 //! `--quiet request-id-again`: a SUBSCRIBE with the Request ID 1, and after
 //! its answer a `REQUEST_UPDATE` on its stream with the same Request ID; the
 //! client's SUBSCRIBEs as in `request-id-parity`.
+//! `--quiet datagram`: when the client's SETUP has come, a datagram of the
+//! type 0x30, which is no `OBJECT_DATAGRAM` (§11.3.1); the client's
+//! SUBSCRIBEs as in `request-id-parity`.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
 //! stream (with `--send-setup yes` it sends its SETUP first, and nothing
 //! after it), and says how the relay ended the session
 //! (`SESSION_ENDED ...`), or after that long that it did not
-//! (`STAYED ms=N`).
+//! (`STAYED ms=N`). With `--send-datagram-hex <hex>` it sends that datagram
+//! after its SETUP (`DATAGRAM_SENT bytes=..`).
 //!
 //! With `--announce-per-second <n>` as well it is not quiet: it sends its
 //! SETUP, and then, that many times a second for as long as it stays, a
@@ -90,6 +94,7 @@
 //! - `LISTENING port=P`
 //! - `SESSION session=N path=P`: P is the path the client asked for
 //! - `SETUP_RECEIVED session=N`
+//! - `DATAGRAM_SENT session=N type=0x30`
 //! - `REQUEST session=N stream=M <the message>`: a message on a request
 //!   stream, `PUBLISH_DONE` among them, with its fields.
 //! - `REQUEST_CLOSED session=N stream=M how=FIN` or `how=reset, code 0x..`:
@@ -164,6 +169,10 @@ enum Quiet {
     /// with the same Request ID (§10.1: "Each ... `REQUEST_UPDATE` ...
     /// consumes a Request ID").
     PeerRequestIdAgain,
+    /// When the client's SETUP has come, a datagram of the type 0x30, which
+    /// is no `OBJECT_DATAGRAM` (§11.3.1). A SUBSCRIBE of the client is
+    /// answered as in `RequestGoAway`, so that a viewer comes to play.
+    Datagram,
 }
 
 /// What the program is asked to be.
@@ -182,6 +191,8 @@ enum Args {
         stay: Duration,
         /// `--send-setup yes`: it sends its SETUP, and nothing after it.
         setup: bool,
+        /// `--send-datagram-hex`: after its SETUP, it sends that datagram.
+        datagram: Option<Vec<u8>>,
         /// `--announce-per-second`: it announces and withdraws that often.
         announce_per_second: Option<u32>,
         /// `--hold-tracks`: it has SUBSCRIBEs for that many tracks held.
@@ -243,6 +254,20 @@ fn sha256_of(text: &str) -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
+/// Bytes from hexadecimal digits, two a byte.
+fn hex(text: &str) -> Result<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        bail!("an odd number of hexadecimal digits");
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|index| {
+            let digits = text.get(index..index + 2).context("not hexadecimal")?;
+            Ok(u8::from_str_radix(digits, 16)?)
+        })
+        .collect()
+}
+
 /// `--ask`.
 fn asked_of(value: &str) -> Result<Asked> {
     Ok(match value {
@@ -278,6 +303,7 @@ fn group_of(value: &str) -> Result<(u64, usize)> {
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut port, mut cert_file, mut key_file, mut quiet) = (None, None, None, None);
     let (mut url, mut cert_sha256, mut stay, mut setup) = (None, None, None, false);
+    let mut datagram = None;
     let (mut announce_per_second, mut hold_tracks) = (None, None);
     let (mut ask_per_second, mut asked, mut rendezvous_ms) = (None, Asked::Subscribe, None);
     let (mut cancel, mut announce_and_refuse) = (Cancel::Never, false);
@@ -296,6 +322,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--connect" => url = Some(value),
             "--cert-sha256" => cert_sha256 = Some(sha256_of(&value)?),
             "--send-setup" => setup = value == "yes",
+            "--send-datagram-hex" => {
+                datagram = Some(hex(&value).context("--send-datagram-hex is hex")?);
+            }
             "--ask-per-second" => {
                 ask_per_second = Some(value.parse().context("--ask-per-second")?);
             }
@@ -345,6 +374,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             cert_sha256: cert_sha256.context("--cert-sha256 is required")?,
             stay: stay.context("--stay-ms is required")?,
             setup,
+            datagram,
             announce_per_second,
             hold_tracks,
             ask: ask_per_second.map(|per_second: u32| Ask {
@@ -380,8 +410,9 @@ fn quiet_of(value: &str) -> Result<Quiet> {
         "goaway-request" => Quiet::RequestGoAway,
         "request-id-parity" => Quiet::PeerRequestIdOfTheWrongParity,
         "request-id-again" => Quiet::PeerRequestIdAgain,
+        "datagram" => Quiet::Datagram,
         other => bail!(
-            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity or request-id-again, not {other}"
+            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity, request-id-again or datagram, not {other}"
         ),
     })
 }
@@ -454,14 +485,16 @@ async fn read_request(
                     let ok = ControlMessage::RequestOk(RequestOk::default());
                     let _ = send_message(&mut unanswered, &ok, &Trace::default(), "request").await;
                 }
-                // The two that send the client a request of their own answer
+                // The ones that send the client something of their own answer
                 // its SUBSCRIBE as well, so that a viewer comes to play,
-                // where it reads the peer's requests.
+                // where it reads what the peer sent: the terminal viewer reads
+                // nothing else while it waits for an answer.
                 if matches!(
                     quiet,
                     Quiet::RequestGoAway
                         | Quiet::PeerRequestIdOfTheWrongParity
                         | Quiet::PeerRequestIdAgain
+                        | Quiet::Datagram
                 ) {
                     let answer = an_answer_that_plays(&message, stream);
                     let subscribe = matches!(message, ControlMessage::Subscribe(_));
@@ -634,6 +667,10 @@ async fn serve(
             event = events.recv() => {
                 if let Some(UniEvent::Control(ControlMessage::Setup(_))) = event {
                     println!("SETUP_RECEIVED session={session}");
+                    if quiet == Quiet::Datagram {
+                        connection.send_datagram(&[0x30])?;
+                        println!("DATAGRAM_SENT session={session} type=0x30");
+                    }
                     let request_id = match quiet {
                         Quiet::PeerRequestIdOfTheWrongParity => Some(0),
                         Quiet::PeerRequestIdAgain => Some(1),
@@ -687,7 +724,13 @@ async fn serve(
 
 /// Connects, sends nothing, and says how the session ended or that it did
 /// not.
-async fn stay_quiet(url: &str, cert_sha256: [u8; 32], stay: Duration, setup: bool) -> Result<()> {
+async fn stay_quiet(
+    url: &str,
+    cert_sha256: [u8; 32],
+    stay: Duration,
+    setup: bool,
+    datagram: Option<Vec<u8>>,
+) -> Result<()> {
     let connection = xmoq_moqt_io::wt::connect(url, cert_sha256, &StreamConfig::default()).await?;
     println!("CONNECTED");
     // Kept to the end: a control stream that is let go of is finished.
@@ -701,6 +744,10 @@ async fn stay_quiet(url: &str, cert_sha256: [u8; 32], stay: Duration, setup: boo
         let stream = control.insert(connection.open_uni().await?);
         send_message(stream, &message, &Trace::default(), "control").await?;
         println!("SETUP_SENT");
+    }
+    if let Some(datagram) = datagram {
+        connection.send_datagram(&datagram)?;
+        println!("DATAGRAM_SENT bytes={datagram:02x?}");
     }
     if let Ok(end) = tokio::time::timeout(stay, connection.closed()).await {
         println!("SESSION_ENDED {end:?}");
@@ -1396,8 +1443,9 @@ async fn main() -> Result<()> {
             cert_sha256,
             stay,
             setup,
+            datagram,
             ..
-        } => return stay_quiet(&url, cert_sha256, stay, setup).await,
+        } => return stay_quiet(&url, cert_sha256, stay, setup, datagram).await,
         Args::Serve {
             port,
             cert_file,
