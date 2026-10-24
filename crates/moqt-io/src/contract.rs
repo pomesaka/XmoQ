@@ -87,6 +87,64 @@ pub(crate) async fn bytes_arrive_in_order_and_the_fin_after_them<C: Connection>(
     assert_eq!(read_to_end(&mut peer_recv).await, (vec![], Ok(())));
 }
 
+/// A subgroup stream whose writer's task panics is reset with
+/// `INTERNAL_ERROR` (0x0), and does not end with a FIN that would make the
+/// Subgroup look complete: on either connection. The writer is made to panic
+/// in its trace, after it wrote the header and before it writes the Object.
+/// WHY after the header: over WebTransport a stream reset before its first
+/// byte never reaches the peer, which cannot tell it is a WebTransport stream.
+pub(crate) async fn a_subgroup_stream_whose_writer_panics_is_reset<C: Connection>(a: C, b: C) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject};
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupId::Zero,
+        publisher_priority: Some(128),
+        properties: false,
+        end_of_group: false,
+        first_object: true,
+    };
+    let budget = crate::SendBudget::new(crate::SendLimits::default());
+    let traced = AtomicUsize::new(0);
+    let trace = crate::Trace::new(move |_, _, _| {
+        // The first write is the header.
+        assert_eq!(
+            traced.fetch_add(1, Ordering::Relaxed),
+            0,
+            "the writer's task panics here"
+        );
+    });
+    // Kept here: the task holds the other reference, and the connection
+    // would close with it.
+    let a = std::sync::Arc::new(a);
+    let writer = crate::OutgoingSubgroup::spawn(
+        std::sync::Arc::clone(&a),
+        header,
+        (None, 0),
+        &budget,
+        |_| std::future::ready(()),
+        trace,
+        "subgroup".to_string(),
+    )
+    .expect("a stream is allowed");
+    let mut recv = timeout(A_WHILE, b.accept_uni())
+        .await
+        .expect("the stream arrives")
+        .expect("accept");
+    writer
+        .send(std::sync::Arc::new(SubgroupObject {
+            object_id: 0,
+            properties: vec![],
+            status: ObjectStatus::Normal,
+            payload: b"abc".to_vec(),
+        }))
+        .expect("room in the budget");
+    writer.finish();
+    let (_, end) = read_to_end(&mut recv).await;
+    assert_eq!(end, Err(ReadError::Reset(Some(0x0))));
+}
+
 /// A fetch stream whose writer is dropped without being finished is reset,
 /// with `CANCELLED` (0x1), and does not end with a FIN: on either connection,
 /// whatever that connection makes of a sending half that is merely dropped.
@@ -587,6 +645,7 @@ macro_rules! contract_tests {
                 a_stream_that_ends_alone_is_not_read_as_a_lost_connection,
                 dropping_a_read_loses_nothing,
                 a_fetch_stream_writer_that_is_dropped_resets_its_stream,
+                a_subgroup_stream_whose_writer_panics_is_reset,
                 stopped_waits_until_the_peer_stops,
                 what_arrived_outlives_the_connection,
                 a_stream_that_was_not_accepted_may_go_with_the_connection,

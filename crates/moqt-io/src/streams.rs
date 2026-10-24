@@ -1840,6 +1840,26 @@ fn smaller_of(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
     }
 }
 
+/// The sending half of a subgroup stream while its writer has it: reset with
+/// `INTERNAL_ERROR` where it is dropped neither finished nor reset, as when
+/// the writer's task panics.
+///
+/// WHY: a sending half that is merely dropped ends with a FIN on a real
+/// connection (quinn 0.11.12; `a_sending_half_that_is_merely_dropped_ends_with_a_fin_here`
+/// in `wt.rs`), and a Subgroup cut short would then look complete to the
+/// receiver; a stream that ends early is reset (§11.4.3). The writer of a
+/// fetch stream has the same guard ([`FetchStreamWriter`]). Where the
+/// connection is gone the reset does nothing.
+struct Unfinished<S: SendStream>(Option<S>);
+
+impl<S: SendStream> Drop for Unfinished<S> {
+    fn drop(&mut self) {
+        if let Some(send) = self.0.take() {
+            send.reset(stream_reset_code::INTERNAL_ERROR);
+        }
+    }
+}
+
 struct Writer {
     share: Arc<Share>,
     /// When `finish` was called on the handle, and how long after it the
@@ -1929,25 +1949,27 @@ impl Writer {
             }
             stream = connection.open_uni() => stream,
         };
-        let Ok(mut send) = stream else { return };
-        // Before the first byte this crate writes. Not before the first
-        // byte of the stream: web-transport-quinn 0.13.2 has written the
-        // stream's type of WebTransport by then, with the highest priority
-        // there is (`Session::open_uni`), and that is on its way.
-        send.set_send_order(self.send_order);
+        let Ok(send) = stream else { return };
+        // `None` once a write failed: the peer has stopped the stream or is
+        // gone. What is queued after that is taken and dropped, so that it
+        // does not count against the receiver's budget and get it cut off as
+        // too slow.
+        let mut send = Unfinished(Some(send));
+        if let Some(open) = &mut send.0 {
+            // Before the first byte this crate writes. Not before the first
+            // byte of the stream: web-transport-quinn 0.13.2 has written the
+            // stream's type of WebTransport by then, with the highest
+            // priority there is (`Session::open_uni`), and that is on its way.
+            open.set_send_order(self.send_order);
+        }
         report(OutgoingEvent::Opened).await;
 
         let mut encoder = SubgroupStreamEncoder::new(&header);
         // The payload lengths of the Objects in `encoder` that are not written.
         let mut unwritten = Vec::new();
-        // `None` once a write failed: the peer has stopped the stream or is
-        // gone. What is queued after that is taken and dropped, so that it
-        // does not count against the receiver's budget and get it cut off as
-        // too slow.
-        let mut send = Some(send);
         loop {
             let bytes = encoder.take_bytes();
-            if let Some(open) = &mut send
+            if let Some(open) = &mut send.0
                 && !bytes.is_empty()
             {
                 self.trace.bytes(Direction::Send, &self.label, &bytes);
@@ -1975,7 +1997,7 @@ impl Writer {
                     },
                 };
                 if let Some((code, given_up)) = cut_short {
-                    if let Some(open) = send.take() {
+                    if let Some(open) = send.0.take() {
                         open.reset(code);
                     }
                     // Nothing more is taken for a stream that was given up;
@@ -1991,7 +2013,7 @@ impl Writer {
             let command = tokio::select! {
                 biased;
                 (code, timed_out) = self.given_up() => {
-                    if let Some(open) = send {
+                    if let Some(open) = send.0.take() {
                         open.reset(code);
                     }
                     if timed_out {
@@ -2004,7 +2026,7 @@ impl Writer {
             match command {
                 Some(Command::Object(object)) => {
                     let len = object.payload.len();
-                    if send.is_some() && encoder.object(&object).is_ok() {
+                    if send.0.is_some() && encoder.object(&object).is_ok() {
                         unwritten.push(len);
                         continue;
                     }
@@ -2012,12 +2034,12 @@ impl Writer {
                     // An Object the encoder refuses cannot follow the ones
                     // already written; the Subgroup is cut short, which calls
                     // for a reset (§11.4.3).
-                    if let Some(open) = send.take() {
+                    if let Some(open) = send.0.take() {
                         open.reset(stream_reset_code::INTERNAL_ERROR);
                     }
                 }
                 Some(Command::Finish) => {
-                    let Some(open) = send else { return };
+                    let Some(open) = send.0.take() else { return };
                     // WHY the stream is kept after its FIN, until the receiver's
                     // transport has all of it: what is written and not yet
                     // delivered waits in the transport, megabytes of it for a
@@ -2043,7 +2065,7 @@ impl Writer {
                 // The handle is gone without `finish`: the Subgroup is cut
                 // short.
                 None => {
-                    if let Some(open) = send {
+                    if let Some(open) = send.0.take() {
                         open.reset(stream_reset_code::CANCELLED);
                     }
                     return;
