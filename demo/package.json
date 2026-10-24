@@ -4,6 +4,7 @@
 	"private": true,
 	"type": "module",
 	"dependencies": {
+		"@xmoq/chat": "workspace:*",
 		"@xmoq/media": "workspace:*",
 		"@xmoq/moqt": "workspace:*",
 		"@xmoq/msf": "workspace:*"

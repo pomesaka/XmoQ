@@ -260,10 +260,22 @@ mod tests {
         }
     }
 
-    /// Bytes that are not UTF-8, which the tables, being text, cannot hold.
+    /// Bytes that are not UTF-8, a byte order mark, and a control character
+    /// as it is in a string, which the tables, being text, cannot hold. The
+    /// TypeScript reader has the same cases (`packages/chat/test/payloads.test.ts`).
     #[test]
-    fn a_payload_that_is_not_utf_8_is_no_line() {
-        let cases: [(&str, &[u8], Malformed); 2] = [
+    fn a_payload_the_tables_cannot_hold_is_no_line() {
+        let cases: [(&str, &[u8], Malformed); 4] = [
+            (
+                "said",
+                b"\xef\xbb\xbf{\"text\":\"x\",\"sentAt\":5}",
+                Malformed::NotAnObject,
+            ),
+            (
+                "said",
+                b"{\"text\":\"a\tb\",\"sentAt\":5}",
+                Malformed::NotAnObject,
+            ),
             (
                 "said",
                 b"{\"text\":\"\xff\",\"sentAt\":5}",

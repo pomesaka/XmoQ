@@ -4,6 +4,7 @@
 // are agreed on here.
 
 import { connect, type MoqtConnection } from "@xmoq/moqt";
+import { type SocketLine, startChat } from "./room-chat.ts";
 
 export const NAMESPACE = ["xmoq", "demo"];
 export const TRACK = "video";
@@ -75,19 +76,13 @@ export const HERE: Broadcast = {
 
 /** What a room says on its WebSocket (`spikes/durable-objects-room/worker.js`). */
 type RoomMessage =
-	| { type: "hello"; history: Chat[]; connected: number; broadcast: Broadcast | null }
-	| ({ type: "chat" } & Chat)
+	| { type: "hello"; history: SocketLine[]; connected: number; broadcast: Broadcast | null }
+	| ({ type: "chat" } & SocketLine)
 	| { type: "connected"; connected: number }
 	| { type: "reaction"; emoji: string }
 	| { type: "reactions"; counts: Record<string, number> }
 	| { type: "token"; role: string; namespace: string[]; token: string | null }
 	| { type: "broadcast"; broadcast: Broadcast | null };
-interface Chat {
-	seq: number;
-	from: string;
-	text: string;
-}
-
 export interface Room {
 	/** Resolves with the broadcast the room has when this page comes, or null. */
 	readonly broadcast: Promise<Broadcast | null>;
@@ -122,17 +117,15 @@ export function joinRoom(as: string): Room | undefined {
 	const socket = new WebSocket(
 		`${XMOQ_DEMO.roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(name)}/ws?name=${encodeURIComponent(as)}`,
 	);
-	const log = document.getElementById("chat");
 	const count = document.getElementById("connected");
-	const show = (chat: Chat): void => {
-		if (log === null) return;
-		const line = document.createElement("div");
-		line.textContent = `${chat.seq} ${chat.from}: ${chat.text}`;
-		log.append(line);
-		// The newest 200 lines: how many are said is the room's to decide.
-		while (log.childElementCount > 200) log.firstElementChild?.remove();
-		log.scrollTop = log.scrollHeight;
-	};
+	// The chat, over this WebSocket and over the tracks of the chat.
+	const chat = startChat(
+		name,
+		as,
+		(text) => socket.send(JSON.stringify({ type: "chat", text })),
+		() => connectToRelay(HERE),
+	);
+	const show = (line: SocketLine): void => chat.showSocketLine(line);
 	// Reactions: an emoji somebody pressed is shown to everybody for two
 	// seconds, and counted for a script that looks at the page.
 	const reactions = document.getElementById("reactions");
@@ -199,14 +192,6 @@ export function joinRoom(as: string): Room | undefined {
 		}
 	});
 	socket.addEventListener("error", () => first(null));
-	const form = document.querySelector("form");
-	form?.addEventListener("submit", (event) => {
-		event.preventDefault();
-		const input = form.querySelector("input");
-		if (input === null || input.value === "") return;
-		socket.send(JSON.stringify({ type: "chat", text: input.value }));
-		input.value = "";
-	});
 	return {
 		broadcast,
 		current: () => latest,

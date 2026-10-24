@@ -9,3 +9,6 @@ a sentAt with a fraction	1	{"name":"n","text":"t","sentAt":1.5,"at":2}	-	-	-	-	s
 no at	1	{"name":"n","text":"t","sentAt":1}	-	-	-	-	at	-
 an at too large	1	{"name":"n","text":"t","sentAt":1,"at":9007199254740992}	-	-	-	-	at	-
 an array	1	["n","t",1,2]	-	-	-	-	not-an-object	-
+the largest Group ID	18446744073709551615	{"name":"n","text":"t","sentAt":1,"at":2}	"n"	"t"	1	2	-	yes
+an at with an exponent	1	{"name":"n","text":"t","sentAt":1,"at":2e0}	-	-	-	-	at	-
+a name that is null	1	{"name":null,"text":"t","sentAt":1,"at":2}	-	-	-	-	name	-

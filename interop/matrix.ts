@@ -46,6 +46,7 @@ interface Pairing {
 		| "quiet-peer.ts"
 		| "namespaces.ts"
 		| "chat.ts"
+		| "chat-pages.ts"
 		| "rendezvous.ts"
 		| "new-group.ts";
 	/** The arguments of the driver, without the relay and the port. */
@@ -1201,6 +1202,22 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--restart", "no"],
 			relay: "moqtail",
 			expectedFailure: /told of unknown lines up to: none, not 2/,
+		},
+		// Own pages as participants of the chat (`joinChat` of `@xmoq/chat`,
+		// which the demo's pages use), with the gatherer, through both relays.
+		// The gatherer is not started again: through moqtail's relay that
+		// is what did not always work (above).
+		{
+			name: "own relay: chat: own pages say lines on their tracks and have the room's lines from the gatherer, live and, for a page that comes later, the newest 16 by a Joining FETCH, each line marked with the way it came",
+			script: "chat-pages.ts",
+			args: [],
+			relay: "own",
+		},
+		{
+			name: "moqtail relay: chat: own pages say lines on their tracks and have the room's lines from the gatherer, live and, for a page that comes later, the newest 16 by a Joining FETCH, each line marked with the way it came",
+			script: "chat-pages.ts",
+			args: [],
+			relay: "moqtail",
 		},
 		// The own clients against a peer that sends no SETUP, or answers no
 		// request (`crates/quiet-peer`): what reached the peer is what counts.

@@ -1,6 +1,6 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--stats-every-ms N]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--stats-every-ms N] [--chat-store FILE]
 //
 // `--auth` (an experiment; how the relay authorizes is undecided): a key
 // is made for this run and given to the relay and to the rooms. The relay
@@ -14,13 +14,19 @@
 // that directory has its dependencies (`npm install` there); without them
 // the demo runs without a room.
 //
+// The gatherer of the chat (`xmoq-chat`) starts beside the relay, where it
+// is built, and keeps the lines in `--chat-store` (demo/.chat/chat.sqlite3,
+// which is not committed). The pages then chat over its tracks as well as
+// over the room's WebSocket. Not with `--auth`: the gatherer sends no
+// token, and the relay would refuse it.
+//
 // Open http://localhost:8080/publish in Chromium, then /watch in one or
 // more other tabs. Ctrl-C stops the relay as well.
 
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
 const { values: options } = parseArgs({
@@ -40,6 +46,8 @@ const { values: options } = parseArgs({
 		"stats-every-ms": { type: "string" },
 		// A file for the relay's lines, for looking into a run.
 		"relay-log": { type: "string" },
+		// The gatherer's store: one file for one gatherer, which holds it alone.
+		"chat-store": { type: "string" },
 		port: { type: "string", default: "8080" },
 	},
 });
@@ -136,6 +144,9 @@ const relay = spawn(
 );
 relay.on("exit", (code) => {
 	console.log(`the relay exited with ${code}`);
+	// The gatherer would otherwise stay, connecting again to nobody, and
+	// hold its store.
+	chat?.kill("SIGINT");
 	process.exit(code ?? 1);
 });
 // The rooms, where the spike is installed.
@@ -149,9 +160,36 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 	: undefined;
 const roomsUrl =
 	rooms === undefined ? null : `http://127.0.0.1:${options["rooms-port"]}/`;
+// The gatherer of the chat, where it is built and the relay asks for no token.
+const chatBinary = join(here, "..", "target", "debug", "xmoq-chat");
+const chatStore = options["chat-store"] ?? join(here, ".chat", "chat.sqlite3");
+const chat =
+	authKeyHex === undefined && existsSync(chatBinary)
+		? (() => {
+				mkdirSync(dirname(chatStore), { recursive: true });
+				return spawn(
+					chatBinary,
+					[
+						"--url",
+						`https://127.0.0.1:${options["relay-port"]}/`,
+						"--cert-sha256",
+						certSha256Hex,
+						"--store",
+						chatStore,
+					],
+					// Its lines, one for each thing it does, are not shown.
+					{ stdio: ["ignore", "ignore", "inherit"] },
+				);
+			})()
+		: undefined;
+chat?.on("exit", (code) => {
+	// The pages chat over the room's WebSocket without it; the run goes on.
+	console.log(`the gatherer of the chat exited with ${code}`);
+});
 const stop = (): void => {
 	relay.kill("SIGINT");
 	rooms?.kill("SIGINT");
+	chat?.kill("SIGINT");
 };
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
@@ -171,6 +209,7 @@ for (const [path, entry] of Object.entries(PAGES)) {
 		define: {
 			XMOQ_DEMO: JSON.stringify({
 				roomsUrl,
+				chatTracks: chat !== undefined,
 				relayUrl: `https://127.0.0.1:${options["relay-port"]}/`,
 				certSha256Hex,
 			}),
@@ -207,6 +246,7 @@ const html = (path: string): string => `<!doctype html>
 				: `<p id="connected"></p>
 		<div id="chat" style="height: 8em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
 		<form><input size="40" placeholder="say something" /> <button>send</button></form>
+		<p id="chat-note"></p>
 		<p>${["👍", "❤️", "😂", "👏"].map((emoji) => `<button data-reaction="${emoji}">${emoji}</button>`).join(" ")} <span id="reactions"></span></p>`
 		}
 		<script type="module" src="${path}.js"></script>
@@ -237,6 +277,13 @@ const server = Bun.serve({
 console.log(`publish: http://localhost:${server.port}/publish`);
 console.log(`watch:   http://localhost:${server.port}/watch`);
 console.log(roomsUrl === null ? "rooms:   none" : `rooms:   ${roomsUrl}`);
+console.log(
+	chat !== undefined
+		? `chat:    over the room's WebSocket and the tracks; the gatherer keeps the lines in ${chatStore}`
+		: authKeyHex !== undefined
+			? "chat:    over the room's WebSocket alone: the gatherer has no token for --auth"
+			: `chat:    over the room's WebSocket alone: ${chatBinary} is missing (cargo build -p xmoq-chat)`,
+);
 if (authKeyHex !== undefined) {
 	console.log(
 		rooms === undefined

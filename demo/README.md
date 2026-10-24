@@ -42,11 +42,13 @@ With `mise run demo` up; each line is one thing to open, and what nobody has jud
 
 **A viewer that waits at the relay (a trial)**: `/watch?wait=1` does not go by the room's word that a broadcast has begun. It connects at once, its SUBSCRIBE for the catalog asks the relay to hold it for 30 s until a publisher is there, and when none came, and when the publisher has gone, it asks again on the session it has ([record](../docs/experiments/2026-10-13-a-page-that-waits-for-the-broadcast-at-the-relay.md)). Without the flag the page is as before.
 
-`/chat?room=R&name=a&peers=a,b` is a try of chat as MoQ tracks beside the room's WebSocket, driven by a script and linked from nowhere ([record](../docs/experiments/2026-10-12-chat-as-moq-tracks-beside-the-rooms-websocket.md)).
+**The chat goes by two ways at once** while it moves from the room's WebSocket to MoQ tracks (decided on 2026-10-24): `mise run demo` starts the gatherer of the chat (`xmoq-chat`) beside the relay, with its store in `demo/.chat/chat.sqlite3` (not committed; `--chat-store FILE` for another), and each page is a participant over a connection of its own (`joinChat` of [`@xmoq/chat`](../packages/chat/README.md)). A line typed is sent on the track and on the WebSocket, and every line shows the way it came, `[track]` or `[ws]`, with the time it was taken (the gatherer's or the room's) and its number in the room. A page that comes has the newest 16 lines of the track by a Joining FETCH, and the room's history on the WebSocket. A line longer than 512 bytes, or the sixth in a second, is not sent on either way, and the line under the form says so (`?chatTextBytes=N`, `?chatLinesPerSecond=N` for other limits; set them as the gatherer is run). With `--auth` the gatherer is not started, as it has no token, and the chat goes over the WebSocket alone ([record](../docs/experiments/2026-10-24-demo-chat-over-tracks.md)). Two pages with the same name (two publishing pages are both `publisher`) announce the same namespace and publish the same track `said`; what the relay and the gatherer make of the two was not tried.
+
+`/chat?room=R&name=a&peers=a,b` is the try of 2026-10-12 of chat as MoQ tracks beside the room's WebSocket, in another shape (a track `chat` for every participant, read by every other), driven by a script and linked from nowhere ([record](../docs/experiments/2026-10-12-chat-as-moq-tracks-beside-the-rooms-websocket.md)).
 
 `bun demo/check.ts` checks a running demo in headless Chromium: the frames a second, and that sound leaves the watching page.
 
-Ctrl-C stops the web server and the relay. `bun demo/serve.ts --port N --relay-port M` chooses other ports.
+Ctrl-C stops the web server, the relay and the gatherer. `bun demo/serve.ts --port N --relay-port M` chooses other ports.
 
 The publishing page sends a second track with sound, Opus: a quiet tone that goes up and down (`?audio=mic` takes the microphone, `?audio=none` sends none). On the watching page, click "sound" to hear it: a browser lets a page make sound only after a click.
 
@@ -110,6 +112,7 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | watch | `judge=try` | Trial, with `abr=1`: a higher version is received for 2 s before it is shown | Shown at once |
 | watch | `versionTimeouts=A,B` | Trial, with `abr=1`: a delivery timeout for each version | `videoTimeout` for each |
 | watch | `wait=1` | Trial: waits for the broadcast at the relay, on one session | Goes by the room's word |
+| both | `chatTextBytes=N`, `chatLinesPerSecond=N` | The limits of a line of the chat, which the page keeps to before it sends: 1 to 8,192 bytes, 1 to 1,000 lines a second | 512, 5: the gatherer's |
 | chat | `room=NAME`, `name=N`, `peers=a,b` | The try of chat as MoQ tracks | Room `chat` |
 
 `bun demo/serve.ts`:
@@ -122,4 +125,5 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | `--delivery-patience-ms N` | Experiment of the relay: a Group is given up so long after its end, for viewers that asked for no timeout | Off |
 | `--relay-log FILE` | The relay's lines, to a file | Not kept |
 | `--relay-binary FILE` | Another relay than this tree's | `target/debug/xmoq-relay` |
+| `--chat-store FILE` | The gatherer's store; one gatherer holds a file alone | `demo/.chat/chat.sqlite3` |
 

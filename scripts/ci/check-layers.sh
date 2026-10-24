@@ -124,7 +124,8 @@ check_spike_deps() {
 package_layer() {
 	case "$1" in
 	@xmoq/moqt | @xmoq/loc) echo 0 ;;
-	@xmoq/msf) echo 1 ;;
+	# The chat is built on the transport alone, as the streaming format is.
+	@xmoq/msf | @xmoq/chat) echo 1 ;;
 	@xmoq/media) echo 2 ;;
 	*) echo "" ;;
 	esac

@@ -101,3 +101,5 @@ The binary (`src/bin/xmoq-chat/`): `session.rs` (the requests and the answers on
 ## Checks
 
 `interop/chat.ts` (`mise run interop`, the pairings `<relay> relay: chat: ...`): two participants of a room, a live viewer and a late one, a line too long, lines too fast, and a FETCH cut to its limit, through the own relay and through `moqtail`'s; through the own relay also a restart on the same store with `--room r`, a participant of another room that is not taken, and the end of the room when everybody has left ([record](../../docs/experiments/2026-10-24-chat-gatherer.md)).
+
+`interop/chat-pages.ts` (the pairings `<relay> relay: chat: own pages ...`): own pages as participants with `joinChat` of [`@xmoq/chat`](../../packages/chat/README.md), which the demo's pages use, through both relays; a page that comes later gets the newest 16 lines by a Joining FETCH, which the own relay passes to the gatherer and moqtail's 0.15.0 answered from what it held, without asking the gatherer ([record](../../docs/experiments/2026-10-24-demo-chat-over-tracks.md)).

@@ -1,0 +1,21 @@
+{
+	"name": "@xmoq/chat",
+	"version": "0.0.0",
+	"description": "A participant of the chat over MoQ tracks: the tracks said and lines of the gatherer xmoq-chat",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.core.json"
+	},
+	"dependencies": {
+		"@xmoq/moqt": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.2",
+		"typescript": "6.0.3"
+	}
+}
