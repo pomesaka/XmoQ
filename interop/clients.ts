@@ -154,6 +154,14 @@ export interface Publisher {
 	 */
 	sendEndOfTrack?(): Promise<number>;
 	/**
+	 * own-rust: sends the next Group on a stream that ends with a FIN, then
+	 * the same Subgroup on a second such stream with one Object more
+	 * (`longer`) or one fewer (`subgroup-again-longer`,
+	 * `subgroup-again-shorter`), and resolves with the Group once both were
+	 * sent.
+	 */
+	sendSubgroupAgain?(longer: boolean): Promise<number>;
+	/**
 	 * own-browser: sends the next Group as `objects` Objects of `bytes` bytes
 	 * each, on one stream, and resolves with the Group.
 	 */
@@ -372,6 +380,18 @@ async function startRustPublisher(
 		sendEndOfTrack() {
 			client.child.stdin.write("end-of-track\n");
 			return sent();
+		},
+		async sendSubgroupAgain(longer) {
+			client.child.stdin.write(
+				longer ? "subgroup-again-longer\n" : "subgroup-again-shorter\n",
+			);
+			const group = await sent();
+			const twice = new RegExp(`^SENT group=${group} `);
+			await pollFor(
+				() => (client.matches(twice).length >= 2 ? true : undefined),
+				`${label} to send Group ${group} on its second stream`,
+			);
+			return group;
 		},
 		async sendBatch(count) {
 			// One write: the client sends them as fast as the relay takes them.

@@ -2524,9 +2524,14 @@ fn a_stream_has_the_default_priority_of_the_subscription_it_came_on() {
         if malformed {
             assert_eq!(relay.counts().tracks, 0, "{first:?}");
         } else {
-            // Left like any second stream for a Subgroup that was delivered
-            // whole.
-            assert_eq!(actions, [stopped(PUBLISHER, 8)], "{first:?}");
+            // Read for the check alone, like any second stream of the
+            // publisher for a Subgroup it delivered whole.
+            let checked = Action::StartCheckTimer {
+                session: PUBLISHER,
+                stream: StreamKey(8),
+                wait_ms: crate::CHECKED_STREAM_WAIT_MS,
+            };
+            assert_eq!(actions, [checked], "{first:?}");
             assert_eq!(relay.counts().tracks, 1, "{first:?}");
         }
     }

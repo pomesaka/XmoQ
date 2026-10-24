@@ -1667,13 +1667,7 @@ impl<C: Connection> Hub<C> {
                 session,
                 stream,
                 code,
-            } => {
-                self.request(session, stream, RequestCommand::Reset(code), pending);
-                if let Some(handle) = self.sessions.get_mut(&session) {
-                    handle.requests.remove(&stream);
-                    handle.stops.stop(stream.0, code);
-                }
-            }
+            } => self.reset_request(session, stream, code, pending),
             opening @ Action::OpenDataStream { .. } => self.open_data_stream(&opening, pending),
             Action::SetDeliveryTimeout {
                 out_stream,
@@ -1714,6 +1708,7 @@ impl<C: Connection> Hub<C> {
             | Action::StopEarlyTimer { .. }
             | Action::StopJoiningFetchTimer { .. }
             | Action::StartEarlyTimer { .. }
+            | Action::StartCheckTimer { .. }
             | Action::StartJoiningFetchTimer { .. }
             | Action::StartRendezvousTimer { .. }
             | Action::StartAnnouncementTimer { .. }
@@ -2079,25 +2074,45 @@ impl<C: Connection> Hub<C> {
         }
     }
 
-    /// Starts or stops the timer an action asks for.
-    fn set_timer(&mut self, action: &Action, pending: &mut VecDeque<Event>) {
-        let (session, wait, event) = match *action {
+    /// Resets a request stream of the peer in both directions, and forgets
+    /// it.
+    fn reset_request(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        code: u32,
+        pending: &mut VecDeque<Event>,
+    ) {
+        self.request(session, stream, RequestCommand::Reset(code), pending);
+        if let Some(handle) = self.sessions.get_mut(&session) {
+            handle.requests.remove(&stream);
+            handle.stops.stop(stream.0, code);
+        }
+    }
+
+    /// Stops the timer an action asks to stop. Says whether it was such an
+    /// action.
+    fn stop_timer(&mut self, action: &Action) -> bool {
+        match *action {
             Action::StopUpstreamTimer { session, request } => {
                 self.timers.stop_upstream(session, request);
-                return;
             }
-            Action::StopDrainTimer { session, wait } => {
-                self.timers.stop_drain(session, wait);
-                return;
-            }
-            Action::StopEarlyTimer { session, stream } => {
-                self.timers.stop_early(session, stream);
-                return;
-            }
+            Action::StopDrainTimer { session, wait } => self.timers.stop_drain(session, wait),
+            Action::StopEarlyTimer { session, stream } => self.timers.stop_early(session, stream),
             Action::StopJoiningFetchTimer { session, stream } => {
                 self.timers.stop_joining(session, stream);
-                return;
             }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Starts or stops the timer an action asks for.
+    fn set_timer(&mut self, action: &Action, pending: &mut VecDeque<Event>) {
+        if self.stop_timer(action) {
+            return;
+        }
+        let (session, wait, event) = match *action {
             Action::StartDrainTimer {
                 session,
                 track_alias,
@@ -2115,6 +2130,15 @@ impl<C: Connection> Hub<C> {
                 session,
                 self.config.early_stream_timeout,
                 Event::EarlyStreamTimeout { session, stream },
+            ),
+            Action::StartCheckTimer {
+                session,
+                stream,
+                wait_ms,
+            } => (
+                session,
+                Duration::from_millis(wait_ms),
+                Event::CheckStreamTimeout { session, stream },
             ),
             // The time the peer gets to end its half of a request stream
             // the relay finished its own half of.
@@ -3129,6 +3153,7 @@ fn describe(action: &Action) -> Option<String> {
         // Its SUBSCRIBE has a line where it was read (`HOLD_REQUEST`).
         | Action::StartRendezvousTimer { .. }
         | Action::StartAnnouncementTimer { .. }
+        | Action::StartCheckTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
     })
 }

@@ -51,6 +51,16 @@
 //     END_OF_TRACK, then another Group: past the end of the track (§2.4.2,
 //     the fifth example). The relay ends the track as malformed: PUBLISH_DONE
 //     MALFORMED_TRACK to the subscribers, the PUBLISH cancelled with 0x12.
+//   subgroup-again          --again longer|shorter --publisher own-rust --subscriber <own client>...
+//     The publisher sends a Group, then the next Group on a stream that ends
+//     with a FIN, then the same Subgroup again on a second stream that ends
+//     with a FIN, with one Object more (Objects 0, then 0 and 1) or one fewer
+//     (0 and 1, then 0): an Object past the final Object of the Subgroup, or
+//     two FINs after different final Objects (§2.4.2, the second and the
+//     third example). The relay reads the second stream for the check alone
+//     and ends the track as malformed: PUBLISH_DONE MALFORMED_TRACK to the
+//     subscribers, the PUBLISH cancelled with 0x12. Written before the first
+//     run (2026-10-25).
 //   publish-anew            --publisher own-rust --subscriber <client>... [--same-alias]
 //     The publisher sends a Group, says PUBLISH_DONE and publishes the track
 //     anew on the same session, under the next Track Alias or the same, and
@@ -232,6 +242,7 @@ const SCENARIOS = [
 	"ask-all",
 	"subgroup-priorities",
 	"end-of-track",
+	"subgroup-again",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
 type OptionOfTwoSources =
@@ -268,6 +279,9 @@ const { values: options } = parseArgs({
 		// second stream of the Subgroup, as "0,1" or "128,default".
 		priorities: { type: "string" },
 		"second-joins": { type: "string" },
+		// subgroup-again: whether the second stream has one Object more or
+		// one fewer than the first.
+		again: { type: "string" },
 		port: { type: "string", default: "24340" },
 		verbose: { type: "boolean", default: false },
 	},
@@ -2107,6 +2121,71 @@ async function endOfTrack(run: Run): Promise<ScenarioResult> {
 	};
 }
 
+/**
+ * A Subgroup on a second stream after it was delivered whole, with one
+ * Object more or one fewer (§2.4.2, the second and the third example): the
+ * relay ends the track as malformed, as for an Object past the end of the
+ * track (`endOfTrack`).
+ */
+async function subgroupAgain(run: Run): Promise<ScenarioResult> {
+	const again = options.again;
+	if (again !== "longer" && again !== "shorter") {
+		throw new Error(
+			`--scenario subgroup-again needs --again longer or shorter, not ${again}`,
+		);
+	}
+	const kind = onePublisherKind();
+	if (kind !== "own-rust") {
+		throw new Error(
+			`--scenario subgroup-again needs own-rust, the one client that sends a Subgroup again, not ${kind}`,
+		);
+	}
+	const subscriberKinds = options.subscriber.map((value) =>
+		parseClient("subscriber", value),
+	);
+	const passing = subscriberKinds.find((each) => !isOwnClient(each));
+	if (passing !== undefined) {
+		throw new Error(
+			`--scenario subgroup-again needs own subscribers, which say how their subscription ended, not ${passing}`,
+		);
+	}
+	const publisher = await joinAsPublisher(kind, run, {
+		label: `pub:${kind}`,
+		payloadHex: run.payloadHex,
+	});
+	if (publisher.sendSubgroupAgain === undefined) {
+		throw new Error(`${publisher.label} cannot send a Subgroup again`);
+	}
+	const subscribers = await joinAsSubscribers(subscriberKinds, "sub", run);
+	const group = await publisher.send();
+	await allReceive(subscribers, group, publisher);
+	const twice = await publisher.sendSubgroupAgain(again === "longer");
+	const ended = await outcomes(subscribers);
+	for (const { subscriber, outcome } of ended) {
+		expectPublishDone(subscriber, outcome, { statusCode: MALFORMED_TRACK });
+	}
+	const session = sessionOf(publisher, run);
+	const code = captureGroup(
+		await run.context.relay.waitForLine(requestCancelled(session)),
+		1,
+	);
+	if (code !== "0x12") {
+		throw new Error(
+			`the relay cancelled the PUBLISH of ${publisher.label} with ${code}, not 0x12`,
+		);
+	}
+	const cancelled = await publisher.publishCancelledWith();
+	const what =
+		again === "longer"
+			? "an Object past the final one on its second stream"
+			: "its second stream ended with a FIN after another final Object";
+	return {
+		summary: `the relay ended the track as malformed when ${publisher.label} sent Group ${twice} again after it was delivered whole and ${what}: PUBLISH_DONE 0x12 to the subscribers, the PUBLISH cancelled with ${code} (${publisher.label} saw ${cancelled})`,
+		subscriptions: subscriptionsOf(ended),
+		measured: {},
+	};
+}
+
 const ASK_WAYS = [
 	"two-announcers",
 	"announcer-and-publisher",
@@ -2620,6 +2699,7 @@ const RUNNERS: Record<Scenario, (run: Run) => Promise<ScenarioResult>> = {
 	"ask-all": askAll,
 	"subgroup-priorities": subgroupPriorities,
 	"end-of-track": endOfTrack,
+	"subgroup-again": subgroupAgain,
 };
 
 async function main(): Promise<void> {

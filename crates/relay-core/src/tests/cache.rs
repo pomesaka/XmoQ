@@ -888,13 +888,13 @@ fn the_cache_keeps_what_the_relay_passes_on_and_lets_go_of_it_with_the_track() {
         at(3, 0),
         at(3, 0)
     ))));
-    // A second stream for a Subgroup that was delivered is left by the
-    // relay, and what it carries is not kept: the Object 5 of Group 4 does
-    // not get in that way.
+    // A second stream for a Subgroup that was delivered is read for the
+    // check alone, and what it carries is not kept.
     data_stream_closed(&mut relay, 4, StreamEnd::Fin);
     data_stream_opened(&mut relay, 4);
-    object_arrived(&mut relay, 4, 5);
+    object_arrived(&mut relay, 4, 0);
     assert_eq!(relay.counts().cached_bytes, 1);
+    assert_eq!(relay.counts().tracks, 1);
     // The track ends with its publisher, and its cache with it.
     relay.step(Event::SessionClosed { session: PUBLISHER });
     assert_eq!(relay.counts().cached_bytes, 0);
