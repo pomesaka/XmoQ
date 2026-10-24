@@ -29,6 +29,15 @@ fn stopped(stream: u64) -> Action {
     }
 }
 
+/// The stream is read for the check of §2.4.2 alone.
+fn checked(stream: u64) -> Action {
+    Action::StartCheckTimer {
+        session: PUBLISHER,
+        stream: StreamKey(stream),
+        wait_ms: crate::CHECKED_STREAM_WAIT_MS,
+    }
+}
+
 fn reset(out_stream: u64, code: u32) -> Action {
     Action::ResetDataStream {
         out_stream: OutStreamKey(out_stream),
@@ -181,9 +190,12 @@ fn a_second_stream_of_a_subgroup_from_the_same_publisher() {
             vec![],
             2,
         ),
-        // The Subgroup was delivered whole. A second stream for it is what
-        // §2.2 forbids, towards Alice as well.
-        (First::Finished, vec![stopped(8)], vec![], vec![], 1),
+        // The Subgroup was delivered whole: the second stream is read for
+        // the check alone, and nothing of it reaches Alice (§2.2). Object 1
+        // on it is past the final Object, Object 0, and ends the track
+        // (`a_second_stream_of_a_subgroup_delivered_whole_is_read_for_the_check`);
+        // here Object 0 comes again.
+        (First::Finished, vec![checked(8)], vec![], vec![], 1),
     ];
     for (first, at_the_second, object_on_the_second, object_on_the_first, streams) in cases {
         let mut relay = relay_with_track();
@@ -204,8 +216,9 @@ fn a_second_stream_of_a_subgroup_from_the_same_publisher() {
             at_the_second,
             "{first:?}"
         );
+        let again = u64::from(!matches!(first, First::Finished));
         assert_eq!(
-            object_arrived(&mut relay, 8, 1),
+            object_arrived(&mut relay, 8, again),
             object_on_the_second,
             "{first:?}"
         );
@@ -257,9 +270,16 @@ fn a_track_that_ends_does_not_stop_a_stream_it_has_stopped_already() {
     let mut relay = relay_with_track();
     data_stream_opened(&mut relay, 7);
     data_stream_closed(&mut relay, 7, StreamEnd::Fin);
-    // Left, and stopped for it.
+    // Read for the check, until its time is over; then stopped.
     assert_eq!(
         stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS)),
+        [checked(8)]
+    );
+    assert_eq!(
+        relay.step(Event::CheckStreamTimeout {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+        }),
         [stopped(8)]
     );
     data_stream_opened(&mut relay, 9);
@@ -289,8 +309,9 @@ fn subgroups_are_remembered_for_the_newest_groups_only() {
     // (the newest Group seen since Group 0 was delivered whole; what the
     //  relay does with a second stream for Group 0)
     let cases = [
-        // Seven Groups on: remembered, so the stream is left.
-        (7, vec![stopped(100)]),
+        // Seven Groups on: remembered, so the stream is read for the check
+        // alone.
+        (7, vec![checked(100)]),
         // Eight Groups on: forgotten. The stream passes, as it has to for a
         // publisher that sends an old Group late.
         (8, vec![open_data_stream(ALICE, 9, header_of_group(0, 0))]),
@@ -341,7 +362,7 @@ fn only_so_many_subgroups_are_remembered() {
             "{delivered} {again}"
         );
         let header = header_with(UPSTREAM_ALIAS, SubgroupId::Explicit(again));
-        let expected = if left { vec![stopped(5000)] } else { vec![] };
+        let expected = if left { vec![checked(5000)] } else { vec![] };
         assert_eq!(
             stream_opened(&mut relay, 5000, header),
             expected,
@@ -397,13 +418,15 @@ fn a_first_object_that_names_a_subgroup_that_was_delivered_whole_is_left() {
     object_arrived(&mut relay, 7, 0);
     data_stream_closed(&mut relay, 7, StreamEnd::Fin);
     // Stream 8 leaves the Subgroup ID to its first Object, which is Object 0:
-    // only then is it known to be of that Subgroup, and it is stopped.
+    // only then is it known to be of that Subgroup, and it is read for the
+    // check alone. It ends at the same final Object, and nothing of it
+    // reaches Alice.
     let header = header_with(UPSTREAM_ALIAS, SubgroupId::FirstObjectId);
     assert_eq!(stream_opened(&mut relay, 8, header), []);
-    assert_eq!(object_arrived(&mut relay, 8, 0), [stopped(8)]);
-    assert_eq!(object_arrived(&mut relay, 8, 1), []);
+    assert_eq!(object_arrived(&mut relay, 8, 0), [checked(8)]);
     assert_eq!(data_stream_closed(&mut relay, 8, StreamEnd::Fin), []);
     assert_eq!(relay.counts().in_streams, 0);
+    assert_eq!(relay.counts().tracks, 1);
 }
 
 #[test]
@@ -562,14 +585,14 @@ fn a_stream_that_took_the_place_of_another_and_ends_without_an_object() {
     stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS));
     // The new stream is finished with nothing on it. Alice's stream for it
     // is finished the same way, and the Subgroup counts as delivered whole:
-    // a third stream for it is left.
+    // a third stream for it is read for the check alone.
     assert_eq!(
         data_stream_closed(&mut relay, 8, StreamEnd::Fin),
         [finished(1)]
     );
     assert_eq!(
         stream_opened(&mut relay, 9, header(UPSTREAM_ALIAS)),
-        [stopped(9)]
+        [checked(9)]
     );
 }
 
@@ -668,7 +691,7 @@ fn a_stream_that_takes_the_place_of_another_while_an_old_subgroup_is_forgotten()
 fn the_publishers_stream_count_has_the_streams_the_relay_did_not_pass_on() {
     // (the Stream Count of the publisher's PUBLISH_DONE; tracks left after
     //  it). The publisher sent three streams: one that was passed on, one the
-    //  relay stopped, and one that named no Subgroup. §10.11 counts all
+    //  relay read for the check alone, and one that named no Subgroup. §10.11 counts all
     //  three ("including streams that contained no Objects"), so with 3 the
     //  relay waits for nothing, and with 4 it waits for one more.
     let cases = [(3, 0), (4, 1)];
@@ -680,7 +703,7 @@ fn the_publishers_stream_count_has_the_streams_the_relay_did_not_pass_on() {
         data_stream_closed(&mut relay, 7, StreamEnd::Fin);
         assert_eq!(
             stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS)),
-            [stopped(8)]
+            [checked(8)]
         );
         data_stream_closed(&mut relay, 8, StreamEnd::Aborted(None));
         let unnamed = header_with(UPSTREAM_ALIAS, SubgroupId::FirstObjectId);
@@ -744,4 +767,204 @@ fn a_subscriber_whose_stream_is_closed_gets_another_for_the_same_subgroup() {
             send_object(1, 1),
         ]
     );
+}
+
+/// What a second stream of the publisher carries for Subgroup 0 of Group 3,
+/// which it delivered whole before.
+#[derive(Debug, Clone, Copy)]
+enum Second {
+    Object(u64),
+    Fin,
+    Reset,
+}
+
+#[test]
+fn a_second_stream_of_a_subgroup_delivered_whole_is_read_for_the_check() {
+    use Second::{Fin, Object, Reset};
+    // (the Objects of the first stream, which ends with a FIN; what comes on
+    //  the second; whether the track is malformed after it, §2.4.2)
+    let cases: [(&str, &[u64], &[Second], bool); 7] = [
+        (
+            "the same Objects again",
+            &[0, 1],
+            &[Object(0), Object(1), Fin],
+            false,
+        ),
+        (
+            "an Object past the final one (the second example)",
+            &[0, 1],
+            &[Object(0), Object(1), Object(2)],
+            true,
+        ),
+        (
+            "a FIN after another last Object (the third example)",
+            &[0, 1],
+            &[Object(0), Fin],
+            true,
+        ),
+        (
+            "cut short before the final Object",
+            &[0, 1],
+            &[Object(0), Reset],
+            false,
+        ),
+        ("a FIN with no Object on it", &[0, 1], &[Fin], false),
+        (
+            "a first stream with no Object has no final Object",
+            &[],
+            &[Object(0), Object(5), Fin],
+            false,
+        ),
+        (
+            "a smaller last Object",
+            &[0, 1, 2],
+            &[Object(0), Object(1), Fin],
+            true,
+        ),
+    ];
+    for (name, first, second, malformed) in cases {
+        let mut relay = relay_with_track();
+        subscribe_to_track(&mut relay, ALICE);
+        data_stream_opened(&mut relay, 7);
+        for object in first {
+            object_arrived(&mut relay, 7, *object);
+        }
+        data_stream_closed(&mut relay, 7, StreamEnd::Fin);
+        assert_eq!(
+            stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS)),
+            [checked(8)],
+            "{name}"
+        );
+        let mut actions = Vec::new();
+        for step in second {
+            actions.extend(match *step {
+                Object(object) => object_arrived(&mut relay, 8, object),
+                Fin => data_stream_closed(&mut relay, 8, StreamEnd::Fin),
+                Reset => data_stream_closed(&mut relay, 8, StreamEnd::Aborted(Some(0x2))),
+            });
+        }
+        // Nothing of the second stream goes to Alice.
+        let towards_alice = actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::SendObject { .. } | Action::OpenDataStream { .. }
+            )
+        });
+        assert!(!towards_alice, "{name}: {actions:?}");
+        assert_eq!(relay.counts().tracks, usize::from(!malformed), "{name}");
+        if malformed {
+            assert!(
+                actions.contains(&done_actions(ALICE, 0x12, 1)[0]),
+                "{name}: {actions:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_object_past_the_final_one_stops_its_stream_with_malformed_track() {
+    let mut relay = relay_with_track();
+    data_stream_opened(&mut relay, 7);
+    object_arrived(&mut relay, 7, 0);
+    data_stream_closed(&mut relay, 7, StreamEnd::Fin);
+    stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS));
+    let actions = object_arrived(&mut relay, 8, 1);
+    assert_eq!(
+        actions.first(),
+        Some(&Action::StopDataStream {
+            session: PUBLISHER,
+            stream: StreamKey(8),
+            code: 0x12,
+        })
+    );
+    assert_eq!(relay.counts().tracks, 0);
+}
+
+#[test]
+fn only_so_many_streams_of_a_track_are_read_for_the_check_at_once() {
+    // The expectations below are spelled out for 4 streams.
+    assert_eq!(crate::MAX_CHECKED_STREAMS_PER_TRACK, 4);
+    let mut relay = relay_with_track();
+    for subgroup in 0..5 {
+        let header = header_with(UPSTREAM_ALIAS, SubgroupId::Explicit(subgroup));
+        stream_opened(&mut relay, 10 + subgroup, header);
+        data_stream_closed(&mut relay, 10 + subgroup, StreamEnd::Fin);
+    }
+    let again: Vec<Vec<Action>> = (0..5)
+        .map(|subgroup| {
+            let header = header_with(UPSTREAM_ALIAS, SubgroupId::Explicit(subgroup));
+            stream_opened(&mut relay, 20 + subgroup, header)
+        })
+        .collect();
+    assert_eq!(
+        again,
+        [
+            vec![checked(20)],
+            vec![checked(21)],
+            vec![checked(22)],
+            vec![checked(23)],
+            vec![stopped(24)],
+        ]
+    );
+    // One that ends makes room for the next.
+    data_stream_closed(&mut relay, 20, StreamEnd::Aborted(None));
+    let header = header_with(UPSTREAM_ALIAS, SubgroupId::Explicit(0));
+    assert_eq!(stream_opened(&mut relay, 30, header), [checked(30)]);
+}
+
+#[test]
+fn a_stream_read_for_the_check_is_stopped_when_its_time_is_over() {
+    let mut relay = relay_with_track();
+    data_stream_opened(&mut relay, 7);
+    object_arrived(&mut relay, 7, 0);
+    data_stream_closed(&mut relay, 7, StreamEnd::Fin);
+    stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS));
+    let timeout = Event::CheckStreamTimeout {
+        session: PUBLISHER,
+        stream: StreamKey(8),
+    };
+    assert_eq!(relay.step(timeout.clone()), [stopped(8)]);
+    // What still arrives on it is not looked at, and a second timeout of
+    // the same stream does nothing.
+    assert_eq!(object_arrived(&mut relay, 8, 1), []);
+    assert_eq!(relay.step(timeout), []);
+    assert_eq!(relay.counts().tracks, 1);
+}
+
+#[test]
+fn a_status_is_the_final_object_it_ends_on() {
+    let end_of_group = SubgroupObject {
+        status: ObjectStatus::EndOfGroup,
+        payload: vec![],
+        ..object(2)
+    };
+    // (what the second stream carries before its FIN; whether the track is
+    //  malformed). The first stream has Object 0 and an End of Group at 2.
+    let cases: [(&[u64], bool); 2] = [(&[0], true), (&[0, 2], false)];
+    for (second, malformed) in cases {
+        let mut relay = relay_with_track();
+        data_stream_opened(&mut relay, 7);
+        object_arrived(&mut relay, 7, 0);
+        relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            object: end_of_group.clone(),
+        });
+        data_stream_closed(&mut relay, 7, StreamEnd::Fin);
+        stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS));
+        for object_id in second {
+            let object = if *object_id == 2 {
+                end_of_group.clone()
+            } else {
+                object(*object_id)
+            };
+            relay.step(Event::Object {
+                session: PUBLISHER,
+                stream: StreamKey(8),
+                object,
+            });
+        }
+        data_stream_closed(&mut relay, 8, StreamEnd::Fin);
+        assert_eq!(relay.counts().tracks, usize::from(!malformed), "{second:?}");
+    }
 }

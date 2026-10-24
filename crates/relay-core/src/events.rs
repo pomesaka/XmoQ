@@ -310,6 +310,14 @@ pub enum Event {
         /// The stream.
         stream: StreamKey,
     },
+    /// The time to read a stream for the check alone is over. Answers
+    /// [`Action::StartCheckTimer`].
+    CheckStreamTimeout {
+        /// The session.
+        session: SessionKey,
+        /// The stream.
+        stream: StreamKey,
+    },
     /// The time a subscriber had to end its direction of the request stream
     /// of a FETCH that was served is over. Answers
     /// [`Action::StartFetchEndTimer`].
@@ -610,6 +618,18 @@ pub enum Action {
         /// Alias is used again, the timer of an earlier wait under it cannot
         /// be stopped, and it must not end a later one.
         wait: u64,
+    },
+    /// Report [`Event::CheckStreamTimeout`] after `wait_ms`. WHY no action
+    /// to stop it: a track has [`crate::MAX_CHECKED_STREAMS_PER_TRACK`] such
+    /// streams at once, so few such timers run, and one that runs out after
+    /// its stream ended does nothing.
+    StartCheckTimer {
+        /// The session.
+        session: SessionKey,
+        /// The stream.
+        stream: StreamKey,
+        /// How long, in milliseconds.
+        wait_ms: u64,
     },
     /// Drop the timer of [`Action::StartEarlyTimer`] for this stream: it is
     /// not held any longer (its PUBLISH came or was refused, or it was given

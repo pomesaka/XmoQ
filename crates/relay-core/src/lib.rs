@@ -116,6 +116,17 @@ pub const MAX_REMEMBERED_GROUPS: u64 = 8;
 /// or not. Provisional.
 pub const MAX_REMEMBERED_SUBGROUPS: usize = 256;
 
+/// Second streams of a source for a Subgroup it delivered whole that one
+/// track reads at once ([`Passage::Checked`]). Past it such a stream is
+/// stopped unread, and what it would have shown is not found.
+/// **Provisional.** WHY a limit: such a stream is read for nothing but the
+/// check, and a source could open as many as it likes.
+pub const MAX_CHECKED_STREAMS_PER_TRACK: usize = 4;
+
+/// How long such a stream is read at the most, in milliseconds; then it is
+/// stopped, and what it would have shown is not found. **Provisional.**
+pub const CHECKED_STREAM_WAIT_MS: u64 = 10_000;
+
 /// Sources one track has at most: publishers whose PUBLISH the relay
 /// accepted, and publishers that accepted the relay's SUBSCRIBE.
 /// Provisional.
@@ -389,8 +400,14 @@ enum Passage {
     Undetermined,
     /// It is the stream its Subgroup is taken from.
     Passed,
+    /// A second stream of the source for a Subgroup it delivered whole: read
+    /// for the check of §2.4.2 alone ([`Subgroups`]), and nothing of it goes
+    /// downstream or into the cache.
+    Checked,
     /// Its Subgroup is taken from another stream, or was delivered whole
-    /// already. It was stopped, and what still arrives on it is dropped; it
+    /// already by another source, or it was not to be read for the check, or
+    /// longer than it may be ([`MAX_CHECKED_STREAMS_PER_TRACK`],
+    /// [`CHECKED_STREAM_WAIT_MS`]). It was stopped, and what still arrives on it is dropped; it
     /// is kept until it is reported closed, because it counts as a stream of
     /// the source's subscription (§10.11, Stream Count).
     Discarded,
@@ -410,6 +427,8 @@ struct InStream {
     /// [`Relay::on_data_stream_opened`].
     priority: Option<u8>,
     passage: Passage,
+    /// The Object ID of the last Object read on it, a status among them.
+    last_object: Option<u64>,
     /// Whether an Object was forwarded. A subscriber that joins after that
     /// gets a stream that does not start with the Subgroup's first Object.
     started: bool,
@@ -461,9 +480,9 @@ enum TakenFrom {
     /// The stream, of that source, ended without a FIN: the Subgroup may
     /// have more Objects.
     CutShort(SourceId),
-    /// The stream ended with a FIN: the Subgroup was delivered whole
-    /// (§11.4.3).
-    Whole,
+    /// The stream, of that source, ended with a FIN: the Subgroup was
+    /// delivered whole (§11.4.3).
+    Whole(SourceId),
 }
 
 /// A Subgroup the relay has taken from a stream.
@@ -472,6 +491,10 @@ struct Taken {
     from: TakenFrom,
     /// The Publisher Priority of that stream ([`InStream::priority`]).
     priority: Option<u8>,
+    /// Once the stream ended with a FIN: the Object ID of the last Object
+    /// on it, the final Object of the Subgroup (§2.4.2). `None` before, and
+    /// where it had no Object.
+    final_object: Option<u64>,
 }
 
 /// What became of a stream that arrived for a Subgroup of a track.
@@ -481,8 +504,22 @@ enum Taking {
     Taken,
     /// It was stopped: the Subgroup is taken from elsewhere.
     Left,
+    /// It is read for the check alone ([`Passage::Checked`]).
+    Checked,
     /// It makes the track malformed; ending the track is the caller's.
     Malformed,
+}
+
+impl Taking {
+    /// What the stream is from now on. One that makes the track malformed
+    /// is left: the track ends.
+    const fn passage(self) -> Passage {
+        match self {
+            Self::Taken => Passage::Passed,
+            Self::Checked => Passage::Checked,
+            Self::Left | Self::Malformed => Passage::Discarded,
+        }
+    }
 }
 
 /// What to do with a stream that arrives for a Subgroup.
@@ -492,9 +529,12 @@ enum Admission {
     Pass,
     /// Take the Subgroup from it, in place of this stream that is still open.
     Replace(InStreamKey),
-    /// Leave it: the Subgroup was delivered whole, is another source's, or
-    /// is of a Group that is too old to tell.
+    /// Leave it: the Subgroup was delivered whole by another source, is
+    /// another source's, or is of a Group that is too old to tell.
     Discard,
+    /// Read it for the check alone: the same source delivered the Subgroup
+    /// whole.
+    Check,
     /// The track is malformed: the Subgroup came before with another
     /// Publisher Priority (§2.4.2).
     Malformed,
@@ -522,17 +562,18 @@ enum Admission {
 ///   reset downstream before a new one is opened, so that no subscriber has
 ///   two streams for the Subgroup of which neither was reset (§2.2), nor two
 ///   open at a time with the same header (§11.4).
-/// * After the first ended with a FIN: it is left. The Subgroup was delivered
-///   whole (§11.4.3: "An MOQT implementation that processes a stream FIN is
-///   assured it has received all objects in a subgroup"), and a second
-///   stream for it downstream is what §2.2 forbids. A first stream that was
+/// * After the first ended with a FIN: nothing of it goes downstream, and it
+///   is read for the check below. The Subgroup was delivered whole (§11.4.3:
+///   "An MOQT implementation that processes a stream FIN is assured it has
+///   received all objects in a subgroup"), and a second stream for it
+///   downstream is what §2.2 forbids. A first stream that was
 ///   finished without an Object counts the same: the relay passed the FIN
 ///   on, and §11.4.3 has "If a sender closes the stream before delivering all
 ///   such objects to the QUIC stream, it MUST reset the stream", so a later
 ///   stream that passed would make the FIN the relay sent untrue.
 ///
 /// A stream of another source than the one the Subgroup was taken from is
-/// left in all three cases: first come, first taken.
+/// left, and stopped unread, in all three cases: first come, first taken.
 ///
 /// * While the first is open: the same Subgroup from two sources is what
 ///   several publishers of a track send, and one of the two is enough. WHY
@@ -554,10 +595,35 @@ enum Admission {
 /// a publisher need not give (§11.4.2), `PROPERTIES` says how the Objects
 /// are laid out, and what the Objects hold is not compared at all.
 ///
-/// FIXME: detect an Object past the last one of a Subgroup that ended with a
-/// FIN, and a Subgroup that comes on two streams that end with a FIN with
-/// different last Objects (§2.4.2, the second and third example of a
-/// malformed track). A stream that is left or replaced is stopped unread.
+/// A second stream of the same source for a Subgroup it delivered whole is
+/// read, and nothing of it goes on ([`Passage::Checked`]): the track is
+/// malformed where an Object on it is larger than the final Object, or it
+/// ends with a FIN after another last Object (§2.4.2, the second and third
+/// example: "An Object is received whose Object ID is larger than the final
+/// Object in the Subgroup. The final Object in a Subgroup is the last Object
+/// received on a Subgroup stream before a FIN", "A Subgroup is received over
+/// multiple transport streams terminated by FIN with different final
+/// Objects"). A first stream that ended with a FIN and no Object has no
+/// final Object, and nothing is held against a stream after it. The final
+/// Object is a status as well, which has an Object ID.
+///
+/// WHY the same source alone, and a stream of another source still stopped
+/// unread (decided on 2026-10-25): the stop spares the relay the upstream of
+/// a source that is there for redundancy, which reading every such stream to
+/// its FIN would give up, for as many sources as a track has; and a
+/// redundant source whose Subgroup ends one Object apart from the other's
+/// would end the track for every subscriber, which is what a second source
+/// is there to keep from happening. WHY NOT in the clients as well: the own
+/// relay never sends a second stream after a FIN, so a client behind it never
+/// sees either example; a client would find them only with a peer that is
+/// not ours, and both `xmoq-moqt` and `@xmoq/moqt` would have to remember the
+/// Subgroups of every subscription for it.
+///
+/// What is not found: a second stream whose header is read before the FIN
+/// of the first takes the place of the first, as any second stream of the
+/// same source while the first is open (above), and nothing is compared; a
+/// stream past [`MAX_CHECKED_STREAMS_PER_TRACK`] or [`CHECKED_STREAM_WAIT_MS`];
+/// and a Subgroup that is forgotten.
 #[derive(Debug, Default)]
 struct Subgroups {
     /// By Group ID and Subgroup ID.
@@ -617,15 +683,22 @@ impl Subgroups {
                 Admission::Replace(open)
             }
             Some(TakenFrom::CutShort(by)) if by == source => Admission::Pass,
-            // From another source, or delivered whole.
-            Some(TakenFrom::Open(..) | TakenFrom::CutShort(_) | TakenFrom::Whole) => {
+            Some(TakenFrom::Whole(by)) if by == source => return Admission::Check,
+            // From another source.
+            Some(TakenFrom::Open(..) | TakenFrom::CutShort(_) | TakenFrom::Whole(_)) => {
                 return Admission::Discard;
             }
             None => Admission::Pass,
         };
         let from = TakenFrom::Open(stream, track_alias);
-        self.taken
-            .insert((group, subgroup), Taken { from, priority });
+        self.taken.insert(
+            (group, subgroup),
+            Taken {
+                from,
+                priority,
+                final_object: None,
+            },
+        );
         while let Some(((oldest, _), _)) = self.taken.first_key_value()
             && (forgotten(*oldest) || self.taken.len() > MAX_REMEMBERED_SUBGROUPS)
         {
@@ -634,18 +707,36 @@ impl Subgroups {
         admission
     }
 
-    /// The stream a Subgroup is taken from ended, with a FIN or without.
-    fn ended(&mut self, group: u64, subgroup: u64, stream: InStreamKey, fin: bool) {
+    /// The stream a Subgroup is taken from ended, with a FIN or without;
+    /// `last_object` is the Object ID of the last Object on it.
+    fn ended(
+        &mut self,
+        (group, subgroup): (u64, u64),
+        stream: InStreamKey,
+        fin: bool,
+        last_object: Option<u64>,
+    ) {
         if let Some(taken) = self.taken.get_mut(&(group, subgroup))
             && let TakenFrom::Open(open, track_alias) = taken.from
             && open == stream
         {
-            taken.from = if fin {
-                TakenFrom::Whole
+            let source = (stream.0, track_alias);
+            if fin {
+                taken.from = TakenFrom::Whole(source);
+                taken.final_object = last_object;
             } else {
-                TakenFrom::CutShort((stream.0, track_alias))
-            };
+                taken.from = TakenFrom::CutShort(source);
+            }
         }
+    }
+
+    /// The final Object of a Subgroup a source delivered whole, where it is
+    /// remembered and had an Object.
+    fn final_object(&self, group: u64, subgroup: u64) -> Option<u64> {
+        self.taken
+            .get(&(group, subgroup))
+            .filter(|taken| matches!(taken.from, TakenFrom::Whole(_)))
+            .and_then(|taken| taken.final_object)
     }
 }
 
@@ -996,7 +1087,16 @@ impl Track {
         {
             Admission::Pass => Taking::Taken,
             Admission::Malformed => Taking::Malformed,
-            Admission::Discard => {
+            Admission::Check if self.checked_streams() < MAX_CHECKED_STREAMS_PER_TRACK => {
+                let (session, stream) = stream;
+                actions.push(Action::StartCheckTimer {
+                    session,
+                    stream,
+                    wait_ms: CHECKED_STREAM_WAIT_MS,
+                });
+                Taking::Checked
+            }
+            Admission::Discard | Admission::Check => {
                 actions.push(stop(stream));
                 Taking::Left
             }
@@ -1022,6 +1122,35 @@ impl Track {
         }
     }
 
+    /// The streams read for the check alone ([`Passage::Checked`]).
+    fn checked_streams(&self) -> usize {
+        self.in_streams
+            .values()
+            .filter(|in_stream| in_stream.passage == Passage::Checked)
+            .count()
+    }
+
+    /// Whether a stream read for the check alone that ended with a FIN
+    /// makes the track malformed: its last Object is another than the final
+    /// Object of the Subgroup (§2.4.2, the third example). One that is
+    /// larger was found when it came ([`Relay::on_object`]).
+    fn ends_apart(&self, stream: InStreamKey, end: StreamEnd) -> bool {
+        let Some(in_stream) = self.in_streams.get(&stream) else {
+            return false;
+        };
+        let (Passage::Checked, StreamEnd::Fin, Some(subgroup), Some(last)) = (
+            in_stream.passage,
+            end,
+            in_stream.subgroup_id,
+            in_stream.last_object,
+        ) else {
+            return false;
+        };
+        self.subgroups
+            .final_object(in_stream.header.group_id, subgroup)
+            .is_some_and(|final_object| final_object != last)
+    }
+
     /// A stream of a source is over: the Subgroup it carried ends for the
     /// subscribers as the stream did, and the track forgets the stream.
     fn in_stream_ended(
@@ -1035,9 +1164,10 @@ impl Track {
             return;
         };
         if let (Passage::Passed, Some(subgroup_id)) = (in_stream.passage, in_stream.subgroup_id) {
-            let group = in_stream.header.group_id;
+            let subgroup = (in_stream.header.group_id, subgroup_id);
+            let fin = end == StreamEnd::Fin;
             self.subgroups
-                .ended(group, subgroup_id, stream, end == StreamEnd::Fin);
+                .ended(subgroup, stream, fin, in_stream.last_object);
         }
         for subscriber in &mut self.subscribers {
             let Some(out_stream) = in_stream.outs.get(&subscriber.session).copied() else {
@@ -1774,6 +1904,9 @@ impl Relay {
         let Some(event) = self.on_track_status_event(event, &mut actions) else {
             return actions;
         };
+        let Some(event) = self.on_data_event(event, &mut actions) else {
+            return actions;
+        };
         match event {
             Event::SessionOpened { session, role } => {
                 self.open_session(session, role, &mut actions);
@@ -1809,30 +1942,19 @@ impl Relay {
             Event::UpstreamTimeout { session, request } => {
                 self.on_upstream_timeout(session, request, &mut actions);
             }
-            // Taken by `on_fetch_event` above.
+            // Taken by `on_fetch_event` and `on_data_event` above.
             Event::FetchStreamOpened { .. }
             | Event::FetchPipeEnded { .. }
             | Event::JoiningFetchTimeout { .. }
             | Event::FetchEndTimeout { .. }
-            | Event::FetchStreamWritten { .. } => {}
-            Event::DataStreamOpened {
-                session,
-                stream,
-                header,
-            } => self.on_data_stream_opened(session, stream, header, &mut actions),
-            Event::Object {
-                session,
-                stream,
-                object,
-            } => self.on_object(session, stream, object, &mut actions),
-            Event::DataStreamClosed {
-                session,
-                stream,
-                end,
-            } => self.on_data_stream_closed(session, stream, end, &mut actions),
-            Event::TrackMalformed { session, stream } => {
-                self.on_track_malformed(session, stream, &mut actions);
-            }
+            | Event::FetchStreamWritten { .. }
+            | Event::DataStreamOpened { .. }
+            | Event::Object { .. }
+            | Event::DataStreamClosed { .. }
+            | Event::TrackMalformed { .. }
+            | Event::EarlyStreamTimeout { .. }
+            | Event::CheckStreamTimeout { .. } => {}
+
             Event::OutStreamOpened { out_stream } => self.out_stream_opened(out_stream),
             Event::OutStreamStopped { out_stream } => self.out_stream_stopped(out_stream),
             Event::OutStreamClosed { out_stream } => self.forget_out_stream(out_stream),
@@ -1845,9 +1967,6 @@ impl Relay {
                 track_alias,
                 wait,
             } => self.on_drain_timeout(session, track_alias, wait, &mut actions),
-            Event::EarlyStreamTimeout { session, stream } => {
-                self.on_early_stream_timeout(session, stream, &mut actions);
-            }
             Event::NamespaceWritten { session, stream } => {
                 self.on_namespace_written(session, stream, &mut actions);
             }
@@ -1867,6 +1986,39 @@ impl Relay {
             Event::GoingAway(going_away) => self.on_going_away(going_away, &mut actions),
         }
         actions
+    }
+
+    /// The events of the subgroup streams of the sources: taken here, or
+    /// handed back for the others.
+    fn on_data_event(&mut self, event: Event, actions: &mut Vec<Action>) -> Option<Event> {
+        match event {
+            Event::DataStreamOpened {
+                session,
+                stream,
+                header,
+            } => self.on_data_stream_opened(session, stream, header, actions),
+            Event::Object {
+                session,
+                stream,
+                object,
+            } => self.on_object(session, stream, object, actions),
+            Event::DataStreamClosed {
+                session,
+                stream,
+                end,
+            } => self.on_data_stream_closed(session, stream, end, actions),
+            Event::TrackMalformed { session, stream } => {
+                self.on_track_malformed(session, stream, actions);
+            }
+            Event::EarlyStreamTimeout { session, stream } => {
+                self.on_early_stream_timeout(session, stream, actions);
+            }
+            Event::CheckStreamTimeout { session, stream } => {
+                self.on_check_timeout(session, stream, actions);
+            }
+            other => return Some(other),
+        }
+        None
     }
 
     fn out_stream_opened(&mut self, out_stream: OutStreamKey) {
@@ -1999,6 +2151,19 @@ impl Relay {
         else {
             return;
         };
+        self.track_malformed_by(&track, (session, stream), actions);
+    }
+
+    /// A stream of a track showed it to be malformed: as
+    /// [`Self::on_track_malformed`], for a stream the session may have let
+    /// go of already.
+    fn track_malformed_by(
+        &mut self,
+        track: &FullTrackName,
+        (session, stream): InStreamKey,
+        actions: &mut Vec<Action>,
+    ) {
+        let track = track.clone();
         let in_stream = self
             .tracks
             .live(&track)
@@ -3288,28 +3453,25 @@ impl Relay {
         // which a relay that remembers 8 Groups does not promise anyway.
         let of_the_source = (!draining).then_some(default_priority);
         let priority = header.publisher_priority.or(of_the_source);
-        let mut malformed = false;
-        let passage = match subgroup_id {
-            None => Passage::Undetermined,
-            Some(id) => {
-                let subgroup = (header.group_id, id);
-                let key = (session, stream);
-                let of = (header.track_alias, priority);
-                match track.admit(subgroup, key, of, &mut self.out_streams, actions) {
-                    Taking::Taken => Passage::Passed,
-                    Taking::Left => Passage::Discarded,
-                    Taking::Malformed => {
-                        malformed = true;
-                        Passage::Discarded
-                    }
-                }
-            }
-        };
+        let taking = subgroup_id.map(|id| {
+            let subgroup = (header.group_id, id);
+            let of = (header.track_alias, priority);
+            track.admit(
+                subgroup,
+                (session, stream),
+                of,
+                &mut self.out_streams,
+                actions,
+            )
+        });
+        let malformed = taking == Some(Taking::Malformed);
+        let passage = taking.map_or(Passage::Undetermined, Taking::passage);
         let mut in_stream = InStream {
             header,
             subgroup_id,
             priority,
             passage,
+            last_object: None,
             started: false,
             of_the_subscription_before: false,
             outs: HashMap::new(),
@@ -3363,11 +3525,12 @@ impl Relay {
             return;
         };
         let key = (session, stream);
-        let (group, of, known) = match track.in_streams.get(&key) {
+        let (group, of, known, checked) = match track.in_streams.get(&key) {
             Some(in_stream) if in_stream.passage != Passage::Discarded => (
                 in_stream.header.group_id,
                 (in_stream.header.track_alias, in_stream.priority),
                 in_stream.subgroup_id,
+                in_stream.passage == Passage::Checked,
             ),
             _ => return,
         };
@@ -3376,7 +3539,9 @@ impl Relay {
         // first Object on this stream, whatever FIRST_OBJECT says: it is the
         // one reading a subscriber can follow from the stream alone, and the
         // header goes downstream as it came, so both arrive at the same ID.
-        let taking = if track.past_its_end(group, &object) {
+        let taking = if checked {
+            Taking::Checked
+        } else if track.past_its_end(group, &object) {
             Taking::Malformed
         } else if known.is_some() {
             Taking::Taken
@@ -3393,12 +3558,18 @@ impl Relay {
                 in_stream.passage = Passage::Discarded;
                 return;
             }
+            Taking::Checked => {
+                in_stream.passage = Passage::Checked;
+                self.on_checked_object(session, stream, object.object_id, actions);
+                return;
+            }
             Taking::Malformed => {
                 self.on_track_malformed(session, stream, actions);
                 return;
             }
         }
         in_stream.passage = Passage::Passed;
+        in_stream.last_object = Some(object.object_id);
         let location = Location {
             group: in_stream.header.group_id,
             object: object.object_id,
@@ -3424,15 +3595,7 @@ impl Relay {
             self.on_track_malformed(session, stream, actions);
             return;
         }
-        if track.largest.is_none_or(|largest| location > largest) {
-            if track
-                .largest
-                .is_none_or(|largest| location.group > largest.group)
-            {
-                track.new_group_asked = None;
-            }
-            track.largest = Some(location);
-        }
+        note_largest(&mut track.largest, &mut track.new_group_asked, location);
 
         // A subscriber that came after the stream started gets a stream of its
         // own from here on. Its header must not repeat two things that are
@@ -3472,6 +3635,84 @@ impl Relay {
         }
     }
 
+    /// An Object on a stream read for the check alone ([`Passage::Checked`]):
+    /// the track is malformed where it is larger than the final Object of its
+    /// Subgroup (§2.4.2, the second example). It goes nowhere else: not
+    /// downstream, not into the cache, and it is not counted as the track's
+    /// largest ("Object(s) triggering Malformed Track status MUST NOT be
+    /// cached").
+    fn on_checked_object(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        object_id: u64,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(track_name) = self
+            .sessions
+            .get(&session)
+            .and_then(|state| state.in_streams.get(&stream))
+        else {
+            return;
+        };
+        let Some(track) = self.tracks.live_mut(track_name) else {
+            return;
+        };
+        let Some(in_stream) = track.in_streams.get_mut(&(session, stream)) else {
+            return;
+        };
+        in_stream.last_object = Some(object_id);
+        // §11.4.2, mode 0b01, as for a stream that passes.
+        in_stream.subgroup_id.get_or_insert(object_id);
+        let past_the_end = in_stream.subgroup_id.is_some_and(|subgroup| {
+            track
+                .subgroups
+                .final_object(in_stream.header.group_id, subgroup)
+                .is_some_and(|final_object| object_id > final_object)
+        });
+        if past_the_end {
+            // WHY stopped here: what ends the track stops the streams it
+            // took Objects from, and not this one.
+            actions.push(Action::StopDataStream {
+                session,
+                stream,
+                code: stream_reset_code::MALFORMED_TRACK,
+            });
+            self.on_track_malformed(session, stream, actions);
+        }
+    }
+
+    /// The time a stream read for the check alone had is over: it is stopped,
+    /// and what it would have shown is not found.
+    fn on_check_timeout(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(track_name) = self
+            .sessions
+            .get(&session)
+            .and_then(|state| state.in_streams.get(&stream))
+        else {
+            return;
+        };
+        let Some(in_stream) = self
+            .tracks
+            .live_mut(track_name)
+            .and_then(|track| track.in_streams.get_mut(&(session, stream)))
+            .filter(|in_stream| in_stream.passage == Passage::Checked)
+        else {
+            return;
+        };
+        in_stream.passage = Passage::Discarded;
+        actions.push(Action::StopDataStream {
+            session,
+            stream,
+            code: stream_reset_code::CANCELLED,
+        });
+    }
+
     fn on_data_stream_closed(
         &mut self,
         session: SessionKey,
@@ -3488,6 +3729,13 @@ impl Relay {
             }
             return;
         };
+        let Some(track) = self.tracks.live_mut(&track_name) else {
+            return;
+        };
+        if track.ends_apart((session, stream), end) {
+            self.track_malformed_by(&track_name, (session, stream), actions);
+            return;
+        }
         let Some(track) = self.tracks.live_mut(&track_name) else {
             return;
         };
@@ -4493,6 +4741,7 @@ impl Action {
             | Self::StopEarlyTimer { session, .. }
             | Self::StopJoiningFetchTimer { session, .. }
             | Self::StartEarlyTimer { session, .. }
+            | Self::StartCheckTimer { session, .. }
             | Self::StartJoiningFetchTimer { session, .. }
             | Self::StartRendezvousTimer { session, .. }
             | Self::StartAnnouncementTimer { session, .. }
@@ -4517,6 +4766,23 @@ impl Action {
             | Self::ResetDataStream { out_stream, .. } => Target::OutStream(*out_stream),
             Self::CloseSession { .. } => Target::Closing,
         }
+    }
+}
+
+/// An Object at `location` of a track was taken: it is the track's largest
+/// ([`Track::largest`]) where none larger came, and a new Group lets go of
+/// the `NEW_GROUP_REQUEST` asked for ([`Track::new_group_asked`]). WHY not a
+/// method of [`Track`]: the caller holds one of its streams meanwhile.
+fn note_largest(
+    largest: &mut Option<Location>,
+    new_group_asked: &mut Option<u64>,
+    location: Location,
+) {
+    if largest.is_none_or(|largest| location > largest) {
+        if largest.is_none_or(|largest| location.group > largest.group) {
+            *new_group_asked = None;
+        }
+        *largest = Some(location);
     }
 }
 

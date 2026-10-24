@@ -807,6 +807,32 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
+		name: "an own-rust publisher sends a Subgroup it delivered whole again with one Object more; the track ends as malformed",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"subgroup-again",
+			"--again",
+			"longer",
+			"--publisher",
+			"own-rust",
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
+		name: "an own-rust publisher sends a Subgroup it delivered whole again with one Object fewer; the track ends as malformed",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"subgroup-again",
+			"--again",
+			"shorter",
+			"--publisher",
+			"own-rust",
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
 		name: "two own-rust publishers send the same Group with Publisher Priority 0 and 1; the track ends as malformed",
 		script: "disconnect.ts",
 		args: [

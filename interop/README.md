@@ -195,7 +195,7 @@ What a scenario counts in the relay's log, or expects not to be there, it counts
 
 | Option of `disconnect.ts` | Values |
 |---|---|
-| `--scenario` | `publisher-killed`, `last-object-then-close`, `subscriber-leaves`, `slow-subscriber`, `same-group-twice`, `second-source`, `publish-while-asked`, `publish-anew`, `ask-all`, `subgroup-priorities` |
+| `--scenario` | `publisher-killed`, `last-object-then-close`, `subscriber-leaves`, `slow-subscriber`, `same-group-twice`, `second-source`, `publish-while-asked`, `publish-anew`, `ask-all`, `subgroup-priorities`, `end-of-track`, `subgroup-again` |
 | `--publisher` | A client, `own-rust` by default. `same-group-twice`, `second-source` and `publish-while-asked` take it twice, the first publisher and the second (in `publish-while-asked` the first is the one that is asked and has to be `own-rust`); the other scenarios take one and refuse more |
 | `--subscriber` | A client; give it once per subscriber. Used by every scenario but `subscriber-leaves` |
 | `--leaver` | `subscriber-leaves` only, once per subscriber that leaves: `<client>:cancel` (the subscription ends, the session stays), `<client>:close` (the client closes its session in order) or `<client>:kill` (the process is killed, or the page closed) |
@@ -204,6 +204,7 @@ What a scenario counts in the relay's log, or expects not to be there, it counts
 | `--same-alias` | `publish-anew` only: the new PUBLISH has the Track Alias of the first. Without it, the next one |
 | `--ask` | `ask-all` only: `two-announcers`, `announcer-and-publisher`, `late-announcer` or `refusing-announcer`. The announcers are `own-rust` (the page, where it refuses); `--publisher` is the one that sends PUBLISH, in the last three |
 | `--priorities` | `subgroup-priorities` only: `<first>,<second>`, the Publisher Priority of the first and of the second stream of the Subgroup, each 0 to 255 or `default` for a header that leaves it out. With one `--publisher`, which has to be `own-browser`, it sends the Group twice itself |
+| `--again` | `subgroup-again` only: `longer` or `shorter`, whether the own-rust publisher sends the Subgroup it delivered whole again with one Object more (the client's line `subgroup-again-longer`) or one fewer (`subgroup-again-shorter`) |
 | `--slow` | `slow-subscriber` only: `stopped-own-rust` (default), an own-rust client whose process is stopped, or `unread-own-browser`, a page that subscribes and never reads |
 | `--first-sends` | `same-group-twice` and `second-source`: how many Groups the first publisher sends before the second sends; 1 by default. In `same-group-twice`, above 1 the two publishers send different payloads |
 | `--second-resends` | `second-source` only: the second publisher starts at Group 0 and sends every Group of the first again before it sends the next one |

@@ -535,6 +535,17 @@ fn first_group_of(value: &str) -> Result<u64> {
     u64::try_from(since_1970.as_millis()).context("--first-group now")
 }
 
+/// The line that has to come after `publish-done`: whether it is
+/// `publish-anew-same-alias`.
+async fn next_publish_anew(stdin: &mut DriverLines) -> Result<bool> {
+    match stdin.next_line().await?.as_deref().map(PublisherLine::read) {
+        Some(PublisherLine::PublishAnew { same_alias }) => Ok(same_alias),
+        other => {
+            bail!("after publish-done comes publish-anew or publish-anew-same-alias, not {other:?}")
+        }
+    }
+}
+
 /// A line of the driver on a publisher's stdin.
 #[derive(Debug, PartialEq, Eq)]
 enum PublisherLine {
@@ -551,6 +562,12 @@ enum PublisherLine {
     /// `END_OF_TRACK` and no payload (§2.1), as the other Objects are sent;
     /// what is sent after it is past the end of the track (§2.4.2).
     EndOfTrack,
+    /// `subgroup-again-longer`, `subgroup-again-shorter`: the next Group on
+    /// a stream that ends with a FIN, then the same Subgroup on a second
+    /// stream that ends with a FIN, with one Object more or one fewer: Objects
+    /// 0, then 0 and 1; or 0 and 1, then 0. The second and the third example
+    /// of a malformed track (§2.4.2), for the interop run.
+    SubgroupAgain { longer: bool },
 }
 
 impl PublisherLine {
@@ -562,6 +579,8 @@ impl PublisherLine {
             "publish-anew" => Self::PublishAnew { same_alias: false },
             "publish-anew-same-alias" => Self::PublishAnew { same_alias: true },
             "end-of-track" => Self::EndOfTrack,
+            "subgroup-again-longer" => Self::SubgroupAgain { longer: true },
+            "subgroup-again-shorter" => Self::SubgroupAgain { longer: false },
             _ => Self::Send,
         }
     }
@@ -573,10 +592,10 @@ impl PublisherLine {
         track_alias: u64,
         group_id: u64,
         payload: &[u8],
-    ) -> (u64, u64, &[u8], ObjectStatus) {
+    ) -> (u64, u64, &[u8], ObjectStatus, u64) {
         match self {
-            Self::EndOfTrack => (track_alias, group_id, &[], ObjectStatus::EndOfTrack),
-            _ => (track_alias, group_id, payload, ObjectStatus::Normal),
+            Self::EndOfTrack => (track_alias, group_id, &[], ObjectStatus::EndOfTrack, 1),
+            _ => (track_alias, group_id, payload, ObjectStatus::Normal, 1),
         }
     }
 }
@@ -1866,7 +1885,8 @@ impl Client<'_> {
         Ok((namespace_stream, publish_request, publish_stream))
     }
 
-    /// Sends one Object as Object 0 of a new Group, on a new subgroup stream.
+    /// Sends one Object as Object 0 of a new Group, on a new subgroup stream;
+    /// with `objects` more than 1, the same as Objects 0 to `objects` - 1.
     ///
     /// A `STOP_SENDING` for the stream is not an error, whenever it comes:
     /// §11.4.3 has "A subscriber MAY send a QUIC `STOP_SENDING` frame for a
@@ -1887,7 +1907,7 @@ impl Client<'_> {
         args: &Args,
         track_alias: u64,
         group_id: u64,
-        (payload, status): (&[u8], ObjectStatus),
+        (payload, status, objects): (&[u8], ObjectStatus, u64),
     ) -> Result<bool> {
         if args.video.video_in.is_some() {
             // FIXME: a Group of `--video-in` still waits for its stream
@@ -1909,12 +1929,14 @@ impl Client<'_> {
             end_of_group: true,
             first_object: true,
         });
-        encoder.object(&SubgroupObject {
-            object_id: 0,
-            properties: args.object_properties.clone(),
-            status,
-            payload: payload.to_vec(),
-        })?;
+        for object_id in 0..objects {
+            encoder.object(&SubgroupObject {
+                object_id,
+                properties: args.object_properties.clone(),
+                status,
+                payload: payload.to_vec(),
+            })?;
+        }
         // WHY a stream the peer allows no room for is not waited for, as a
         // request's is: what goes on it is a Subgroup of a live track, and
         // one that is sent late is worth less than the next. The Subgroup
@@ -2006,14 +2028,7 @@ impl Client<'_> {
                         // Nothing is read from the first PUBLISH stream
                         // meanwhile: how the peer ends it is read after the
                         // new PUBLISH, as in `publish_anew`.
-                        let next = stdin.next_line().await?;
-                        let same_alias = match next.as_deref().map(PublisherLine::read) {
-                            Some(PublisherLine::PublishAnew { same_alias }) => same_alias,
-                            other => bail!(
-                                "after publish-done comes publish-anew or publish-anew-same-alias, not {other:?}"
-                            ),
-                        };
-                        if !same_alias {
+                        if !next_publish_anew(&mut stdin).await? {
                             track_alias += 1;
                         }
                         (publish_request, publish_stream) = self
@@ -2028,6 +2043,13 @@ impl Client<'_> {
                     }
                     Some(PublisherLine::PublishAnew { .. }) => {
                         bail!("publish-anew without a publish-done before it")
+                    }
+                    Some(PublisherLine::SubgroupAgain { longer }) => {
+                        let group = (track_alias, self.args.first_group + sent);
+                        stream_count += self
+                            .send_subgroup_twice(&mut peer_requests, group, payload, longer)
+                            .await?;
+                        sent += 1;
                     }
                     Some(line @ (PublisherLine::Send | PublisherLine::EndOfTrack)) => {
                         // Each Object is a Group of its own. The Groups go on
@@ -2292,7 +2314,7 @@ impl Client<'_> {
                         // subscription gets while the stream is under way
                         // (an update that is refused) counts it.
                         served.streams += 1;
-                        let object = (served.track_alias, group_id, payload, ObjectStatus::Normal);
+                        let object = (served.track_alias, group_id, payload, ObjectStatus::Normal, 1);
                         let opened = self
                             .send_attending(&mut peer_requests, &mut serving, Some(&mut stdin), object)
                             .await?;
@@ -2461,7 +2483,7 @@ impl Client<'_> {
         peer_requests: &mut io::PeerRequests,
         serving: &mut Option<Serving>,
         stdin: Option<&mut DriverLines>,
-        (track_alias, group_id, payload, status): (u64, u64, &[u8], ObjectStatus),
+        (track_alias, group_id, payload, status, objects): (u64, u64, &[u8], ObjectStatus, u64),
     ) -> Result<bool> {
         self.sent(group_id, payload);
         let sending = Self::send_object(
@@ -2469,10 +2491,44 @@ impl Client<'_> {
             self.args,
             track_alias,
             group_id,
-            (payload, status),
+            (payload, status, objects),
         );
         self.attending(peer_requests, serving, stdin, sending)
             .await?
+    }
+
+    /// `subgroup-again-longer` and `subgroup-again-shorter`
+    /// ([`PublisherLine::SubgroupAgain`]): the Group on two streams one
+    /// after the other. Returns how many streams were opened.
+    async fn send_subgroup_twice(
+        &mut self,
+        peer_requests: &mut io::PeerRequests,
+        (track_alias, group_id): (u64, u64),
+        payload: &[u8],
+        longer: bool,
+    ) -> Result<u64> {
+        let (first, again) = if longer { (1, 2) } else { (2, 1) };
+        let mut opened = 0;
+        // WHY one after the other: the second stream is to open after the
+        // first ended with its FIN, which `send_object` waits for; one that
+        // opened before would take the place of the first at the own relay
+        // (§11.4).
+        for objects in [first, again] {
+            let object = (
+                track_alias,
+                group_id,
+                payload,
+                ObjectStatus::Normal,
+                objects,
+            );
+            if self
+                .send_attending(peer_requests, &mut None, None, object)
+                .await?
+            {
+                opened += 1;
+            }
+        }
+        Ok(opened)
     }
 
     /// Sends a request on a new stream and returns the event its response
@@ -3452,6 +3508,14 @@ mod tests {
             ),
             ("publish-done", PublisherLine::PublishDone),
             ("end-of-track", PublisherLine::EndOfTrack),
+            (
+                "subgroup-again-longer",
+                PublisherLine::SubgroupAgain { longer: true },
+            ),
+            (
+                "subgroup-again-shorter",
+                PublisherLine::SubgroupAgain { longer: false },
+            ),
             (
                 "publish-anew",
                 PublisherLine::PublishAnew { same_alias: false },
