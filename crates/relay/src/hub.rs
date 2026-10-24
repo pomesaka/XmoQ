@@ -195,6 +195,9 @@ impl Default for HubConfig {
                 // EXCESSIVE_LOAD. With fewer readers than requests it would
                 // wait unanswered instead.
                 max_request_streams: MAX_PEER_REQUESTS + 8,
+                // The relay counts an Object as received from its first
+                // byte (§5.1.2): `Event::ObjectBegun`.
+                report_objects_begun: true,
                 ..StreamConfig::default()
             },
             max_sessions: 256,
@@ -963,6 +966,9 @@ struct Timers {
     /// dropped when what they waited for is settled.
     early: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
     joining: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
+    /// Where the timer of a FETCH held for an Object the relay is
+    /// receiving is, so that it can be dropped when the FETCH is let go of.
+    receipt: HashMap<(SessionKey, StreamKey), (Instant, u64)>,
     next: u64,
 }
 
@@ -1006,6 +1012,9 @@ impl Timers {
             }
             Event::JoiningFetchTimeout { session, stream } => {
                 self.joining.insert((session, stream), at);
+            }
+            Event::ReceiptTimeout { session, stream } => {
+                self.receipt.insert((session, stream), at);
             }
             _ => {}
         }
@@ -1070,6 +1079,12 @@ impl Timers {
         self.drop_pending(session, at);
     }
 
+    /// Drops the timer of a FETCH held for an Object the relay is receiving.
+    fn stop_receipt(&mut self, session: SessionKey, stream: StreamKey) {
+        let at = self.receipt.remove(&(session, stream));
+        self.drop_pending(session, at);
+    }
+
     /// Drops the timer due `at`, where there is one, and counts it out of
     /// its session's.
     fn drop_pending(&mut self, session: SessionKey, at: Option<(Instant, u64)>) {
@@ -1131,6 +1146,9 @@ impl Timers {
                 Event::JoiningFetchTimeout { session, stream } => {
                     self.joining.remove(&(session, stream));
                 }
+                Event::ReceiptTimeout { session, stream } => {
+                    self.receipt.remove(&(session, stream));
+                }
                 _ => {}
             }
             events.push_back(event);
@@ -1147,6 +1165,7 @@ impl Timers {
         self.drain.retain(|(owner, _), _| *owner != session);
         self.early.retain(|(owner, _), _| *owner != session);
         self.joining.retain(|(owner, _), _| *owner != session);
+        self.receipt.retain(|(owner, _), _| *owner != session);
     }
 
     #[cfg(test)]
@@ -1466,6 +1485,7 @@ impl<C: Connection> Hub<C> {
             may_have_changed |= !matches!(
                 event,
                 Event::Object { .. }
+                    | Event::ObjectBegun { .. }
                     | Event::DataStreamOpened { .. }
                     | Event::OutStreamOpened { .. }
                     | Event::OutStreamStopped { .. }
@@ -1629,6 +1649,30 @@ impl<C: Connection> Hub<C> {
             .collect()
     }
 
+    /// Hands a control message to the writer of the session's control
+    /// stream.
+    fn send_control(
+        &mut self,
+        session: SessionKey,
+        message: ControlMessage,
+        pending: &mut VecDeque<Event>,
+    ) {
+        let Some(handle) = self.sessions.get(&session) else {
+            return;
+        };
+        // Full: the session does not take its control messages.
+        // Closed: its control stream could not be written, which the
+        // writer has reported or is about to.
+        if handle.control.try_send(message).is_err() {
+            self.close(
+                session,
+                TerminationCode::InternalError.code(),
+                "control messages cannot be sent",
+                pending,
+            );
+        }
+    }
+
     fn execute(&mut self, action: Action, pending: &mut VecDeque<Event>) {
         self.log_action(&action);
         let Some(action) = self.execute_upstream(action, pending) else {
@@ -1636,20 +1680,7 @@ impl<C: Connection> Hub<C> {
         };
         match action {
             Action::SendControl { session, message } => {
-                let Some(handle) = self.sessions.get(&session) else {
-                    return;
-                };
-                // Full: the session does not take its control messages.
-                // Closed: its control stream could not be written, which the
-                // writer has reported or is about to.
-                if handle.control.try_send(message).is_err() {
-                    self.close(
-                        session,
-                        TerminationCode::InternalError.code(),
-                        "control messages cannot be sent",
-                        pending,
-                    );
-                }
+                self.send_control(session, message, pending);
             }
             Action::SendRequest {
                 session,
@@ -1710,6 +1741,8 @@ impl<C: Connection> Hub<C> {
             | Action::StartEarlyTimer { .. }
             | Action::StartCheckTimer { .. }
             | Action::StartJoiningFetchTimer { .. }
+            | Action::StartReceiptTimer { .. }
+            | Action::StopReceiptTimer { .. }
             | Action::StartRendezvousTimer { .. }
             | Action::StartAnnouncementTimer { .. }
             | Action::StartFetchEndTimer { .. }
@@ -2102,6 +2135,9 @@ impl<C: Connection> Hub<C> {
             Action::StopJoiningFetchTimer { session, stream } => {
                 self.timers.stop_joining(session, stream);
             }
+            Action::StopReceiptTimer { session, stream } => {
+                self.timers.stop_receipt(session, stream);
+            }
             _ => return false,
         }
         true
@@ -2154,6 +2190,15 @@ impl<C: Connection> Hub<C> {
                 session,
                 self.config.streams.first_bytes_timeout,
                 Event::JoiningFetchTimeout { session, stream },
+            ),
+            Action::StartReceiptTimer {
+                session,
+                stream,
+                wait_ms,
+            } => (
+                session,
+                Duration::from_millis(wait_ms),
+                Event::ReceiptTimeout { session, stream },
             ),
             Action::StartAnnouncementTimer { session, wait_ms } => (
                 session,
@@ -2490,6 +2535,13 @@ fn uni_envelope<C: Connection>(session: SessionKey, event: UniEvent) -> Envelope
             session,
             stream: StreamKey(stream),
             object,
+        },
+        UniEvent::ObjectBegun {
+            stream, object_id, ..
+        } => Event::ObjectBegun {
+            session,
+            stream: StreamKey(stream),
+            object_id,
         },
         UniEvent::TrackMalformed { stream, .. } => Event::TrackMalformed {
             session,
@@ -3136,6 +3188,7 @@ fn describe(action: &Action) -> Option<String> {
         | Action::AbortFetchPipe { .. }
         | Action::WriteFetchStream { .. }
         | Action::StartJoiningFetchTimer { .. }
+        | Action::StartReceiptTimer { .. }
         | Action::NoteHeldBeyondCache { .. }
         | Action::SetFetchSendOrder { .. }
         | Action::AbortFetchWrite { .. } => return describe_fetch(action),
@@ -3147,6 +3200,7 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StopDrainTimer { .. }
         | Action::StopEarlyTimer { .. }
         | Action::StopJoiningFetchTimer { .. }
+        | Action::StopReceiptTimer { .. }
         | Action::SendObject { .. }
         | Action::SetDeliveryTimeout { .. }
         | Action::StartFetchEndTimer { .. }
@@ -3204,6 +3258,19 @@ fn describe_fetch(action: &Action) -> Option<String> {
         // waits for a publisher (`Hub::feed`).
         Action::StartJoiningFetchTimer { session, stream } => format!(
             "HOLD_REQUEST session={} stream={} FETCH",
+            session.0, stream.0
+        ),
+        // The relay holds a FETCH for an Object of its range that it is
+        // receiving (`ReceiptWait` of `xmoq-relay-core`). WHY a word of its
+        // own: the lines of `HOLD_REQUEST` are waited for by the interop
+        // scenes of the Joining FETCH, and this one comes whenever a key
+        // frame is on the way.
+        Action::StartReceiptTimer {
+            session,
+            stream,
+            wait_ms,
+        } => format!(
+            "HOLD_FETCH_FOR_OBJECT session={} stream={} wait_ms={wait_ms}",
             session.0, stream.0
         ),
         Action::PipeFetch {

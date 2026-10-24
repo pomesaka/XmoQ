@@ -236,6 +236,19 @@ pub enum Event {
         /// opened of it was reset with the same.
         given_up: Option<u32>,
     },
+    /// The fields of an Object before its payload arrived on a subgroup
+    /// stream, and its payload is still on the way: its first byte is
+    /// received (§5.1.2). [`Event::Object`] of the same Object follows once
+    /// it is whole, and does not where the stream ends first. Not reported
+    /// for an Object that is whole when its fields are read.
+    ObjectBegun {
+        /// The session.
+        session: SessionKey,
+        /// The stream.
+        stream: StreamKey,
+        /// The Object ID of the Object.
+        object_id: u64,
+    },
     /// An Object arrived on a subgroup stream.
     Object {
         /// The session.
@@ -347,6 +360,14 @@ pub enum Event {
         /// The session.
         session: SessionKey,
         /// The request stream of the Joining FETCH.
+        stream: StreamKey,
+    },
+    /// The time a FETCH is held for an Object the relay is receiving is over.
+    /// Answers [`Action::StartReceiptTimer`].
+    ReceiptTimeout {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH.
         stream: StreamKey,
     },
     /// The time a peer gets to end its direction of a request stream that
@@ -698,6 +719,25 @@ pub enum Action {
         /// The session.
         session: SessionKey,
         /// The request stream of the Joining FETCH.
+        stream: StreamKey,
+    },
+    /// Report [`Event::ReceiptTimeout`] after `wait_ms`: the relay holds a
+    /// FETCH whose range has an Object it is receiving, until the Object is
+    /// whole and the cache can answer.
+    StartReceiptTimer {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH.
+        stream: StreamKey,
+        /// The wait, in milliseconds.
+        wait_ms: u64,
+    },
+    /// Drop the timer of [`Action::StartReceiptTimer`] for this FETCH: it is
+    /// not held any longer. WHY: as for [`Action::StopEarlyTimer`].
+    StopReceiptTimer {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the FETCH.
         stream: StreamKey,
     },
     /// Tell the peer to stop sending on a request stream (`STOP_SENDING`),

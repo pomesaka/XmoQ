@@ -145,6 +145,100 @@ pub(crate) async fn a_subgroup_stream_whose_writer_panics_is_reset<C: Connection
     assert_eq!(end, Err(ReadError::Reset(Some(0x0))));
 }
 
+/// A reader that is asked for it (`StreamConfig::report_objects_begun`)
+/// reports an Object whose payload is on its way as begun, once, before the
+/// Object; one whose stream is reset inside its payload is begun and never
+/// whole: on either connection. WHY on a real one as well: what is begun is
+/// decided by how the bytes come apart into reads, which the in-memory
+/// connection does not do as QUIC does.
+pub(crate) async fn an_object_whose_payload_is_on_its_way_is_reported_begun<C: Connection>(
+    a: C,
+    b: C,
+) {
+    use xmoq_moqt::data::{
+        ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
+    };
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 5,
+        subgroup_id: SubgroupId::Zero,
+        publisher_priority: Some(128),
+        properties: false,
+        end_of_group: false,
+        first_object: true,
+    };
+    let object = |object_id| SubgroupObject {
+        object_id,
+        properties: vec![],
+        status: ObjectStatus::Normal,
+        payload: vec![0x61; 100],
+    };
+    let mut encoder = SubgroupStreamEncoder::new(&header);
+    let header_len = encoder.take_bytes().len();
+    let mut encoder = SubgroupStreamEncoder::new(&header);
+    encoder.object(&object(0)).expect("an Object");
+    encoder.object(&object(1)).expect("an Object");
+    let bytes = encoder.take_bytes();
+    // Each Object: its Object ID Delta (1 byte), its Payload Length (2
+    // bytes for 100) and the payload. The first write ends 40 bytes into
+    // the payload of Object 0, the second 40 bytes into that of Object 1.
+    let first = header_len + 3 + 40;
+    let second = first + 103;
+
+    let config = crate::StreamConfig {
+        report_objects_begun: true,
+        ..crate::StreamConfig::default()
+    };
+    let (queue, mut events) = tokio::sync::mpsc::channel(8);
+    let _readers = crate::read_uni_streams(
+        std::sync::Arc::new(b),
+        config,
+        crate::StreamStops::default(),
+        queue,
+        |event| event,
+    );
+    let mut next = async || {
+        soon("an event", events.recv())
+            .await
+            .expect("the readers are running")
+    };
+    let mut send = soon("open_uni", a.open_uni()).await.expect("open");
+    soon("a write", send.write_all(&bytes[..first]))
+        .await
+        .expect("write");
+    let crate::UniEvent::SubgroupOpened { stream, .. } = next().await else {
+        panic!("the stream opens first");
+    };
+    let begun = |object_id| crate::UniEvent::ObjectBegun {
+        stream,
+        header,
+        object_id,
+    };
+    assert_eq!(next().await, begun(0));
+    soon("a write", send.write_all(&bytes[first..second]))
+        .await
+        .expect("write");
+    assert_eq!(
+        next().await,
+        crate::UniEvent::Object {
+            stream,
+            header,
+            object: object(0),
+        }
+    );
+    assert_eq!(next().await, begun(1));
+    // DELIVERY_TIMEOUT (0x3).
+    send.reset(0x3);
+    assert_eq!(
+        next().await,
+        crate::UniEvent::SubgroupClosed {
+            stream,
+            header,
+            end: crate::StreamEnd::Aborted(Some(0x3)),
+        }
+    );
+}
+
 /// A fetch stream whose writer is dropped without being finished is reset,
 /// with `CANCELLED` (0x1), and does not end with a FIN: on either connection,
 /// whatever that connection makes of a sending half that is merely dropped.
@@ -646,6 +740,7 @@ macro_rules! contract_tests {
                 dropping_a_read_loses_nothing,
                 a_fetch_stream_writer_that_is_dropped_resets_its_stream,
                 a_subgroup_stream_whose_writer_panics_is_reset,
+                an_object_whose_payload_is_on_its_way_is_reported_begun,
                 stopped_waits_until_the_peer_stops,
                 what_arrived_outlives_the_connection,
                 a_stream_that_was_not_accepted_may_go_with_the_connection,

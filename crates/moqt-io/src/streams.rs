@@ -102,6 +102,14 @@ pub struct StreamConfig {
     /// may send nothing while it is read; see
     /// [`IdleSubgroupStreamTimeout`].
     pub idle_subgroup_stream_timeout: IdleSubgroupStreamTimeout,
+    /// Whether [`UniEvent::ObjectBegun`] is passed on. A relay sets it, and
+    /// the default does not.
+    ///
+    /// WHY a switch, and not passed on to every receiver: only a relay counts
+    /// an Object from its first byte (§5.1.2, §10.2.11), and the clients and
+    /// the terminal viewer, which take whole Objects, would have one more event
+    /// to let go of on every stream.
+    pub report_objects_begun: bool,
     /// Where the raw bytes go.
     pub trace: Trace,
 }
@@ -115,6 +123,7 @@ impl Default for StreamConfig {
             session_buffer_limit: 4 * 1024 * 1024,
             first_bytes_timeout: Duration::from_secs(10),
             idle_subgroup_stream_timeout: IdleSubgroupStreamTimeout::default(),
+            report_objects_begun: false,
             trace: Trace::default(),
         }
     }
@@ -765,6 +774,19 @@ pub enum UniEvent {
         /// The Object.
         object: SubgroupObject,
     },
+    /// The fields of an Object before its payload were read, and its payload
+    /// is still on the way: once for an Object, before its
+    /// [`UniEvent::Object`], which does not come when the stream ends first.
+    /// Only with [`StreamConfig::report_objects_begun`], and not for an Object
+    /// read whole in one go.
+    ObjectBegun {
+        /// The stream.
+        stream: u64,
+        /// The header of the stream.
+        header: SubgroupHeader,
+        /// The Object ID of the Object.
+        object_id: u64,
+    },
     /// The track of a stream broke the object model (§2.4.2). The stream was
     /// stopped; [`UniEvent::SubgroupClosed`] follows. The subscription has to
     /// be cancelled; the session stays open.
@@ -1338,6 +1360,9 @@ async fn read_subgroup_stream<R: RecvStream, T>(
 ) {
     let stream = reader.stream();
     let mut decoder = SubgroupStreamDecoder::new(config.subgroup_buffer_limit);
+    if config.report_objects_begun {
+        decoder.report_begun();
+    }
     let mut undecoded = Held { budget, bytes: 0 };
     let mut pushed = decoder.push(head);
     // What ends the stream without a FIN, and the code to stop it with.
@@ -1461,6 +1486,16 @@ async fn deliver_decoded<R: RecvStream, T>(
                     stream,
                     header,
                     object,
+                }
+            }
+            Some(SubgroupEvent::ObjectBegun { object_id, .. }) => {
+                let Some(header) = decoder.header().copied() else {
+                    return Ok(());
+                };
+                UniEvent::ObjectBegun {
+                    stream,
+                    header,
+                    object_id,
                 }
             }
             None => return Ok(()),

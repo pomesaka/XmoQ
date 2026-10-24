@@ -92,6 +92,23 @@
 //! (`READ bytes=.. open=..`), and how each stream ended
 //! (`FETCH_STREAM_ENDED after_ms=.. bytes=.. how=..`).
 //!
+//! With `--quiet half-object --then finish|reset --hold-ms <n>` it
+//! publishes the track `half` of `(xmoq, phase0)`, the namespace of the
+//! interop runs, sends Object 0 of Group 0 whole
+//! on a stream of its own, then writes the Subgroup Header of Group 1, the
+//! fields of its Object 0 and half of that Object's payload of 512 KiB
+//! (`HALF_OBJECT_SENT group=1 object=0`). After `--hold-ms` it writes the
+//! rest, Object 1 of 16 bytes after it, and finishes the stream (`then
+//! finish`); or it resets the stream with `CANCELLED` and sends Object 0 of
+//! Group 2, 16 bytes, on a stream of its own (`then reset`). It says which
+//! (`HALF_OBJECT_ENDED how=..`). The Object after it is what a subscriber
+//! that joined while the Object was on its way gets on its subscription.
+//! What the relay asks of it meanwhile, a FETCH for the Object among it,
+//! is refused with `DOES_NOT_EXIST` (`REFUSED asked=..` at the end): the
+//! relay that holds a viewer's FETCH for an Object it is receiving can be
+//! watched to hold it, to answer it from its cache when the Object is
+//! whole, and to ask the publisher when it is not.
+//!
 //! With `--hold-tracks <n>` it is that many viewers that came early: it
 //! opens a session for every 16 of them, and sends a SUBSCRIBE for each of
 //! the tracks `h0`, `h1`, ... of `(xmoq)` with a `RENDEZVOUS_TIMEOUT` of 30
@@ -228,6 +245,16 @@ enum Args {
         /// `--fetch-cached`, `--read-bytes-a-second` and `--fetch-group`.
         fetch_cached: Option<(u64, usize, u64)>,
     },
+}
+
+/// `--then`: what becomes of the Object that `--quiet half-object` sends
+/// half of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// The rest is written, and the stream finished.
+    Finish,
+    /// The stream is reset.
+    Reset,
 }
 
 /// What `--ask` asks for.
@@ -386,6 +413,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--stay-ms" => {
                 stay = Some(Duration::from_millis(value.parse().context("--stay-ms")?));
             }
+            // Read by `half_object_of`.
+            "--then" | "--hold-ms" => {}
+            "--quiet" if value == "half-object" => {}
             "--quiet" => quiet = Some(quiet_of(&value)?),
             other => bail!("unknown flag {other}"),
         }
@@ -418,6 +448,25 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         key_file: key_file.context("--key-file is required")?,
         quiet: quiet.context("--quiet is required")?,
     })
+}
+
+/// `--quiet half-object` with its `--then` and `--hold-ms`, where the
+/// arguments have it: a client's mode, where the other values of `--quiet`
+/// are a server's.
+fn half_object_of(args: &[String]) -> Result<Option<(Then, Duration)>> {
+    let (mut half_object, mut then, mut hold) = (false, Then::Finish, Duration::ZERO);
+    for pair in args.chunks(2) {
+        let [flag, value] = pair else { break };
+        match (flag.as_str(), value.as_str()) {
+            ("--quiet", "half-object") => half_object = true,
+            ("--then", "finish") => then = Then::Finish,
+            ("--then", "reset") => then = Then::Reset,
+            ("--then", other) => bail!("--then is finish or reset, not {other}"),
+            ("--hold-ms", ms) => hold = Duration::from_millis(ms.parse().context("--hold-ms")?),
+            _ => {}
+        }
+    }
+    Ok(half_object.then_some((then, hold)))
 }
 
 /// The value of `--quiet`.
@@ -1335,6 +1384,113 @@ async fn publish_group(
     Ok(())
 }
 
+/// The payload of the Object `--quiet half-object` sends half of: half of
+/// the relay's 1 MiB for an Object, and more than a read brings at once.
+const HALF_OBJECT_BYTES: usize = 512 * 1024;
+
+/// Publishes the track `half` and sends half of an Object of it, as
+/// `--quiet half-object` has it.
+async fn half_object(
+    url: &str,
+    cert_sha256: [u8; 32],
+    stay: Duration,
+    (then, hold): (Then, Duration),
+) -> Result<()> {
+    let (connection, _control) = connected(url, cert_sha256).await?;
+    let publish = ControlMessage::Publish(Publish {
+        request_id: 0,
+        full_track_name: FullTrackName::new(
+            TrackNamespace::new(vec![b"xmoq".to_vec(), b"phase0".to_vec()])?,
+            b"half".to_vec(),
+        )?,
+        track_alias: 1,
+        parameters: Vec::new(),
+        track_properties: Vec::new(),
+    });
+    // Kept to the end: the subscription lasts as long as its stream.
+    let (mut publication, recv) = connection.open_bi().await?;
+    send_message(&mut publication, &publish, &Trace::default(), "request").await?;
+    let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    let answer = reader.next_event().await;
+    if !matches!(
+        answer,
+        Ok(RequestStreamEvent::Message(ControlMessage::RequestOk(_)))
+    ) {
+        bail!("the PUBLISH was not accepted: {answer:?}");
+    }
+    let began = tokio::time::Instant::now();
+    send_group(&connection, 0, 1, 16).await?;
+    let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
+        track_alias: 1,
+        group_id: 1,
+        subgroup_id: SubgroupId::Zero,
+        publisher_priority: Some(0),
+        properties: false,
+        end_of_group: false,
+        first_object: true,
+    });
+    encoder.object(&SubgroupObject {
+        object_id: 0,
+        properties: Vec::new(),
+        status: ObjectStatus::Normal,
+        payload: vec![0x61; HALF_OBJECT_BYTES],
+    })?;
+    let bytes = encoder.take_bytes();
+    let (first, rest) = bytes.split_at(bytes.len() - HALF_OBJECT_BYTES / 2);
+    let mut stream = connection.open_uni().await?;
+    if let Err(error) = stream.write_all(first).await {
+        bail!("the subgroup stream could not be written: {error:?}");
+    }
+    println!("HALF_OBJECT_SENT group=1 object=0");
+    let counts = Arc::new(Announced::default());
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut unended = Some(stream);
+    let rest_due = tokio::time::sleep(hold);
+    tokio::pin!(rest_due);
+    loop {
+        tokio::select! {
+            _ = connection.closed() => break,
+            () = tokio::time::sleep_until(began + stay) => break,
+            () = &mut rest_due, if unended.is_some() => {
+                let Some(mut stream) = unended.take() else { continue };
+                match then {
+                    Then::Finish => {
+                        encoder.object(&SubgroupObject {
+                            object_id: 1,
+                            properties: Vec::new(),
+                            status: ObjectStatus::Normal,
+                            payload: vec![0x62; 16],
+                        })?;
+                        let next = encoder.take_bytes();
+                        for bytes in [rest, next.as_slice()] {
+                            if let Err(error) = stream.write_all(bytes).await {
+                                bail!("the subgroup stream could not be written: {error:?}");
+                            }
+                        }
+                        stream.finish();
+                        println!("HALF_OBJECT_ENDED how=finish");
+                    }
+                    Then::Reset => {
+                        stream.reset(xmoq_moqt::stream_reset_code::CANCELLED);
+                        println!("HALF_OBJECT_ENDED how=reset");
+                        send_group(&connection, 2, 1, 16).await?;
+                    }
+                }
+            }
+            halves = connection.accept_bi() => {
+                let Ok(halves) = halves else { continue };
+                let counts = Arc::clone(&counts);
+                tasks.spawn(async move { refuse(halves, &counts).await });
+            }
+            Some(_) = tasks.join_next() => {}
+        }
+    }
+    println!("REFUSED asked={}", counts.asked.load(Ordering::Relaxed));
+    drop(publication);
+    connection.close(0, b"");
+    Ok(())
+}
+
 /// Sends `fetches` Standalone FETCH requests for the Group `group` of `big` and reads every
 /// stream the relay opens at `a_second` bytes a second.
 async fn fetch_cached(
@@ -1509,7 +1665,15 @@ fn quic_limits(quiet: Quiet, streams: &StreamConfig) -> QuicLimits {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = match parse_args(std::env::args().skip(1))? {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let half = half_object_of(&args)?;
+    let args = match parse_args(args.into_iter())? {
+        Args::Connect {
+            url,
+            cert_sha256,
+            stay,
+            ..
+        } if let Some(half) = half => return half_object(&url, cert_sha256, stay, half).await,
         Args::Connect {
             url,
             cert_sha256,
@@ -1569,9 +1733,14 @@ async fn main() -> Result<()> {
         } => (port, cert_file, key_file, quiet),
     };
     let (port, cert_file, key_file, quiet) = args;
+    serve_all(port, &cert_file, &key_file, quiet).await
+}
+
+/// Takes sessions on `port`, and is quiet in each as `quiet` has it.
+async fn serve_all(port: u16, cert_file: &str, key_file: &str, quiet: Quiet) -> Result<()> {
     let streams = StreamConfig::default();
     let limits = quic_limits(quiet, &streams);
-    let server = WtServer::bind(port, &cert_file, &key_file, limits)?;
+    let server = WtServer::bind(port, cert_file, key_file, limits)?;
     println!("LISTENING port={port}");
     let mut session = 0u64;
     loop {

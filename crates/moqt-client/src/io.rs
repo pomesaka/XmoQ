@@ -381,6 +381,7 @@ pub fn start_readers(
                 UniEvent::FetchOpened { .. }
                 | UniEvent::SubgroupOpened { .. }
                 | UniEvent::Object { .. }
+                | UniEvent::ObjectBegun { .. }
                 | UniEvent::TrackMalformed { .. }
                 | UniEvent::SubgroupClosed { .. } => &data,
             };

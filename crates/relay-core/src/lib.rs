@@ -449,9 +449,49 @@ struct InStream {
     /// WHY by Track Alias as well: a later subscription of the same session
     /// has another alias and asked for the track anew.
     stopped: HashSet<(SessionKey, u64)>,
+    /// The Object whose first byte arrived and that is not whole yet
+    /// ([`Event::ObjectBegun`]).
+    receiving: Option<Receiving>,
+}
+
+/// An Object of a stream of a source that the relay is receiving.
+#[derive(Debug)]
+struct Receiving {
+    object_id: u64,
+    /// The subscriptions without a filter, by session and Track Alias, that
+    /// were accepted while it was received: they do not get it.
+    ///
+    /// WHY: §5.1.2 has "Subscriptions without a filter pass all Objects
+    /// published or received via upstream subscriptions", and the relay
+    /// counts an Object as received from its first byte, as it does for the
+    /// Largest Object in `SUBSCRIBE_OK` that a Joining FETCH ends at
+    /// (§10.12.2.1: "contiguous and non-overlapping"). A subscriber that
+    /// joins with a FETCH gets the Object from the FETCH, and would get it
+    /// twice. What is lost: a subscriber without a filter that sends no
+    /// FETCH does not get it, as it does not get an Object that was whole
+    /// just before it came. No more than the subscriptions of the track.
+    accepted_during: HashSet<(SessionKey, u64)>,
 }
 
 impl InStream {
+    /// The header of a stream opened downstream for this one, whose
+    /// Subgroup is `subgroup_id`, at the Object that is passed on now.
+    ///
+    /// A subscriber that came after the stream started gets a stream of its
+    /// own from here on. Its header must not repeat two things that are only
+    /// true of the Subgroup's first Object: the mode that derives the
+    /// Subgroup ID from it, and `FIRST_OBJECT` (§11.4.2).
+    fn header_downstream(&self, subgroup_id: u64) -> SubgroupHeader {
+        if !self.started {
+            return self.header;
+        }
+        SubgroupHeader {
+            subgroup_id: SubgroupId::Explicit(subgroup_id),
+            first_object: false,
+            ..self.header
+        }
+    }
+
     /// Whether the subscriber has no stream for this one and may be given
     /// one: it did not stop the one it had ([`Self::stopped`]).
     fn lacks_a_stream_for(&self, subscriber: &Subscriber) -> bool {
@@ -935,6 +975,35 @@ struct Track {
     never_cached: bool,
 }
 
+/// An Object at `location` of a track was received, from its first byte on
+/// (§5.1.2: "Largest Object updates when the first byte of an Object with a
+/// Location larger than the previous value is published or received through
+/// a subscription"): the largest Location of the track ([`Track::largest`])
+/// is raised to it where it is larger. A later Group answers the
+/// `NEW_GROUP_REQUEST` that was outstanding ([`Track::new_group_asked`],
+/// §10.2.13).
+///
+/// WHY never lowered, also for an Object that does not arrive whole: the
+/// draft has no rule that lowers it, the publisher has sent the Object, and
+/// the value is the largest the relay has observed (§10.2.11), as one a
+/// source says in its answer is, ahead of what the relay has.
+///
+/// WHY the fields of the track and not the track: a stream of the track is
+/// held while this is done.
+fn raise_largest(
+    largest: &mut Option<Location>,
+    new_group_asked: &mut Option<u64>,
+    location: Location,
+) {
+    if largest.is_some_and(|largest| location <= largest) {
+        return;
+    }
+    if largest.is_none_or(|largest| location.group > largest.group) {
+        *new_group_asked = None;
+    }
+    *largest = Some(location);
+}
+
 /// Puts an Object of `in_stream` that the relay is about to pass on into the
 /// cache of its track, unless the track has none (`never_cached`), and says
 /// what the Object shows of the track there.
@@ -1034,6 +1103,38 @@ impl Track {
         past
     }
 
+    /// Whether a Normal Object at `location` would make the track malformed
+    /// by its Location alone: past the final Object of the track, after the
+    /// End of Group of what the cache keeps, or in a gap a later Object
+    /// announced (`cache::Cache::insert`). Nothing is decided by it: the
+    /// track is found malformed where the Object is whole.
+    fn malformed_at(&self, location: Location) -> bool {
+        self.final_object.is_some_and(|end| location > end)
+            || self.cache.refuses_an_object_at(location)
+    }
+
+    /// The Locations of the Objects the relay is receiving on the streams
+    /// of the track it takes Subgroups from.
+    fn receiving(&self) -> impl Iterator<Item = Location> + '_ {
+        self.in_streams.values().filter_map(|in_stream| {
+            let receiving = in_stream.receiving.as_ref()?;
+            (in_stream.passage == Passage::Passed).then_some(Location {
+                group: in_stream.header.group_id,
+                object: receiving.object_id,
+            })
+        })
+    }
+
+    /// A subscription without a filter was accepted: it does not get the
+    /// Objects the relay is receiving now ([`Receiving::accepted_during`]).
+    fn accepted_without_a_filter(&mut self, subscription: (SessionKey, u64)) {
+        for in_stream in self.in_streams.values_mut() {
+            if let Some(receiving) = &mut in_stream.receiving {
+                receiving.accepted_during.insert(subscription);
+            }
+        }
+    }
+
     /// A `FETCH_OK` with End Of Track 1 said the track ends at `last`, its
     /// End Location less one (§10.13: "the End Location is the final Object
     /// in the Track"). Says whether that agrees with what is known; where it
@@ -1055,6 +1156,41 @@ impl Track {
             self.final_object = Some(last);
         }
         agrees
+    }
+
+    /// What becomes of the stream `key` for `object`, which came whole on it:
+    /// `None` for a stream that was stopped (`Passage::Discarded`).
+    ///
+    /// §11.4.2, mode 0b01: "the Subgroup ID is the Object ID of the first
+    /// Object transmitted in this Subgroup". The relay reads that as the
+    /// first Object on this stream, whatever `FIRST_OBJECT` says: it is the
+    /// one reading a subscriber can follow from the stream alone, and the
+    /// header goes downstream as it came, so both arrive at the same ID.
+    fn taking_of_whole(
+        &mut self,
+        key: InStreamKey,
+        object: &SubgroupObject,
+        out_streams: &mut HashMap<OutStreamKey, OutStream>,
+        actions: &mut Vec<Action>,
+    ) -> Option<Taking> {
+        let (group, of, known, checked) = match self.in_streams.get(&key) {
+            Some(in_stream) if in_stream.passage != Passage::Discarded => (
+                in_stream.header.group_id,
+                (in_stream.header.track_alias, in_stream.priority),
+                in_stream.subgroup_id,
+                in_stream.passage == Passage::Checked,
+            ),
+            _ => return None,
+        };
+        Some(if checked {
+            Taking::Checked
+        } else if self.past_its_end(group, object) {
+            Taking::Malformed
+        } else if known.is_some() {
+            Taking::Taken
+        } else {
+            self.admit((group, object.object_id), key, of, out_streams, actions)
+        })
     }
 
     /// A stream of a source turned out to be of this Subgroup. Says whether
@@ -1665,6 +1801,10 @@ pub struct Relay {
     watches: Vec<discovery::NamespaceWatch>,
     /// FETCH requests of subscribers.
     fetches: fetch::Fetches,
+    /// Of those, the ones held for an Object the relay is receiving
+    /// (`fetch::ReceiptWait`), with the range they wait on: one entry for
+    /// each such FETCH, so no more than the FETCH requests there are.
+    awaiting_receipt: BTreeMap<(SessionKey, StreamKey), fetch::AwaitedRange>,
     /// The subscribers' `TRACK_STATUS` requests asked of a publisher.
     track_statuses: track_status::TrackStatuses,
     /// Bytes the caches of all tracks hold ([`cache::MAX_CACHED_BYTES`]).
@@ -1777,6 +1917,7 @@ impl Relay {
             watches: Vec::new(),
             fetches: fetch::Fetches::default(),
             track_statuses: track_status::TrackStatuses::default(),
+            awaiting_receipt: BTreeMap::new(),
             cached_bytes: 0,
             fetch_ends: BTreeSet::new(),
             next_drain_wait: 0,
@@ -1946,15 +2087,16 @@ impl Relay {
             Event::FetchStreamOpened { .. }
             | Event::FetchPipeEnded { .. }
             | Event::JoiningFetchTimeout { .. }
+            | Event::ReceiptTimeout { .. }
             | Event::FetchEndTimeout { .. }
             | Event::FetchStreamWritten { .. }
             | Event::DataStreamOpened { .. }
+            | Event::ObjectBegun { .. }
             | Event::Object { .. }
             | Event::DataStreamClosed { .. }
             | Event::TrackMalformed { .. }
             | Event::EarlyStreamTimeout { .. }
             | Event::CheckStreamTimeout { .. } => {}
-
             Event::OutStreamOpened { out_stream } => self.out_stream_opened(out_stream),
             Event::OutStreamStopped { out_stream } => self.out_stream_stopped(out_stream),
             Event::OutStreamClosed { out_stream } => self.forget_out_stream(out_stream),
@@ -1997,6 +2139,11 @@ impl Relay {
                 stream,
                 header,
             } => self.on_data_stream_opened(session, stream, header, actions),
+            Event::ObjectBegun {
+                session,
+                stream,
+                object_id,
+            } => self.on_object_begun(session, stream, object_id, actions),
             Event::Object {
                 session,
                 stream,
@@ -3476,6 +3623,7 @@ impl Relay {
             of_the_subscription_before: false,
             outs: HashMap::new(),
             stopped: HashSet::new(),
+            receiving: None,
         };
         // Where the header gives the Subgroup ID, every subscriber gets a
         // stream now, also for a Subgroup that turns out to hold no Object: a
@@ -3525,29 +3673,9 @@ impl Relay {
             return;
         };
         let key = (session, stream);
-        let (group, of, known, checked) = match track.in_streams.get(&key) {
-            Some(in_stream) if in_stream.passage != Passage::Discarded => (
-                in_stream.header.group_id,
-                (in_stream.header.track_alias, in_stream.priority),
-                in_stream.subgroup_id,
-                in_stream.passage == Passage::Checked,
-            ),
-            _ => return,
-        };
-        // §11.4.2, mode 0b01: "the Subgroup ID is the Object ID of the first
-        // Object transmitted in this Subgroup". The relay reads that as the
-        // first Object on this stream, whatever FIRST_OBJECT says: it is the
-        // one reading a subscriber can follow from the stream alone, and the
-        // header goes downstream as it came, so both arrive at the same ID.
-        let taking = if checked {
-            Taking::Checked
-        } else if track.past_its_end(group, &object) {
-            Taking::Malformed
-        } else if known.is_some() {
-            Taking::Taken
-        } else {
-            let subgroup = (group, object.object_id);
-            track.admit(subgroup, key, of, &mut self.out_streams, actions)
+        let Some(taking) = track.taking_of_whole(key, &object, &mut self.out_streams, actions)
+        else {
+            return;
         };
         let Some(in_stream) = track.in_streams.get_mut(&key) else {
             return;
@@ -3595,24 +3723,27 @@ impl Relay {
             self.on_track_malformed(session, stream, actions);
             return;
         }
-        note_largest(&mut track.largest, &mut track.new_group_asked, location);
+        // An Object that was whole when its fields were read is received
+        // here; one that was not, at its first byte (`Self::on_object_begun`).
+        let receiving = in_stream
+            .receiving
+            .take()
+            .filter(|receiving| receiving.object_id == object.object_id);
+        raise_largest(&mut track.largest, &mut track.new_group_asked, location);
 
-        // A subscriber that came after the stream started gets a stream of its
-        // own from here on. Its header must not repeat two things that are
-        // only true of the Subgroup's first Object: the mode that derives the
-        // Subgroup ID from it, and FIRST_OBJECT (§11.4.2).
-        let late_header = SubgroupHeader {
-            subgroup_id: SubgroupId::Explicit(subgroup_id),
-            first_object: false,
-            ..in_stream.header
-        };
-        let header = if in_stream.started {
-            late_header
-        } else {
-            in_stream.header
+        let header = in_stream.header_downstream(subgroup_id);
+        let accepted_during = |subscriber: &Subscriber| {
+            receiving.as_ref().is_some_and(|receiving| {
+                receiving
+                    .accepted_during
+                    .contains(&(subscriber.session, subscriber.track_alias))
+            })
         };
         for subscriber in &mut track.subscribers {
-            if in_stream.lacks_a_stream_for(subscriber) && subscriber.passes(location) {
+            if in_stream.lacks_a_stream_for(subscriber)
+                && subscriber.passes(location)
+                && !accepted_during(subscriber)
+            {
                 let out = OutStreamAllocator {
                     next: &mut self.next_out_stream,
                     out_streams: &mut self.out_streams,
@@ -3633,6 +3764,116 @@ impl Relay {
                 });
             }
         }
+        // What was held for it can be answered from the cache now.
+        if receiving.is_some() {
+            let track_name = track_name.clone();
+            self.receipt_ended(&track_name, location, true, actions);
+        }
+    }
+
+    /// The first byte of an Object arrived, and its payload is still on the
+    /// way ([`Event::ObjectBegun`]): the Object is received from here on
+    /// (§5.1.2), and raises the largest Location of the track. A FETCH that
+    /// asks for it waits for it to be whole (`fetch::ReceiptWait`).
+    ///
+    /// WHY at the first byte and not when the Object is whole (decided on
+    /// 2026-10-25): §5.1.2 has the Largest Object update "when the first
+    /// byte of an Object ... is ... received", and §10.2.11 has a relay
+    /// "MUST set `LARGEST_OBJECT` to the largest of" what its upstream said
+    /// and "The largest Location of an Object received on an upstream
+    /// subscription"; draft 18 changed that so that relays do not lie about
+    /// `LARGEST_OBJECT` (#1621). WHY NOT raise it and ask a publisher for a
+    /// FETCH that reaches the Object: a viewer that comes while a key frame
+    /// is received gets its FETCH refused where the publisher serves none
+    /// (the browser's), its subscription starts after the key frame, and it
+    /// has no picture until the next Group.
+    ///
+    /// Nothing that makes a track malformed by the Location alone is decided
+    /// here; an Object that would is not counted until it is whole, where it
+    /// is decided (`Track::malformed_at`). WHY: two places that decide would
+    /// make what happens depend on which of the two did. A stream that
+    /// leaves its Subgroup ID to its first Object is admitted here: §11.4.2
+    /// has it from "the first Object transmitted", which is known once its
+    /// Object ID is read, and the largest Location is not to be raised for a
+    /// stream that turns out to be left.
+    fn on_object_begun(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        object_id: u64,
+        actions: &mut Vec<Action>,
+    ) {
+        // A stream of a Track Alias that is not known yet is not of a
+        // subscription yet: its Objects count when they are let go of
+        // (`hold_early_object`), whole.
+        let Some(track_name) = self
+            .sessions
+            .get(&session)
+            .and_then(|state| state.in_streams.get(&stream))
+        else {
+            return;
+        };
+        let Some(track) = self.tracks.live_mut(track_name) else {
+            return;
+        };
+        let key = (session, stream);
+        let (group, of, known) = match track.in_streams.get(&key) {
+            // A stream that was stopped carries nothing that counts
+            // (§11.4.3, and `Passage::Discarded`); one read for the check
+            // alone (`Passage::Checked`) carries a Subgroup taken from
+            // another stream, and what begins on it is compared when it is
+            // whole (`Self::on_checked_object`).
+            Some(in_stream)
+                if in_stream.passage != Passage::Discarded
+                    && in_stream.passage != Passage::Checked =>
+            {
+                (
+                    in_stream.header.group_id,
+                    (in_stream.header.track_alias, in_stream.priority),
+                    in_stream.subgroup_id,
+                )
+            }
+            _ => return,
+        };
+        let location = Location {
+            group,
+            object: object_id,
+        };
+        if track.malformed_at(location) {
+            return;
+        }
+        let taking = if known.is_some() {
+            Taking::Taken
+        } else {
+            track.admit((group, object_id), key, of, &mut self.out_streams, actions)
+        };
+        let Some(in_stream) = track.in_streams.get_mut(&key) else {
+            return;
+        };
+        match taking {
+            Taking::Taken => {}
+            Taking::Left => {
+                in_stream.passage = Passage::Discarded;
+                return;
+            }
+            // Read for the check alone: the Subgroup is another stream's,
+            // and this Object raises nothing.
+            Taking::Checked => {
+                in_stream.passage = Passage::Checked;
+                return;
+            }
+            Taking::Malformed => {
+                self.on_track_malformed(session, stream, actions);
+                return;
+            }
+        }
+        in_stream.passage = Passage::Passed;
+        in_stream.subgroup_id.get_or_insert(object_id);
+        in_stream.receiving = Some(Receiving {
+            object_id,
+            accepted_during: HashSet::new(),
+        });
+        raise_largest(&mut track.largest, &mut track.new_group_asked, location);
     }
 
     /// An Object on a stream read for the check alone ([`Passage::Checked`]):
@@ -3748,8 +3989,24 @@ impl Relay {
                 .moqt
                 .on_data_stream_closed(in_stream.header.track_alias);
         }
+        // An Object it ended inside of: nothing of it is cached (§9.1, "A
+        // cache MUST store all fields of an Object"), and the largest
+        // Location stays (`raise_largest`).
+        let cut_inside = track
+            .in_streams
+            .get(&(session, stream))
+            .and_then(|in_stream| {
+                let receiving = in_stream.receiving.as_ref()?;
+                (in_stream.passage == Passage::Passed).then_some(Location {
+                    group: in_stream.header.group_id,
+                    object: receiving.object_id,
+                })
+            });
         track.in_stream_ended((session, stream), end, &mut self.out_streams, actions);
         self.retire_drained_sources(&track_name, actions);
+        if let Some(location) = cut_inside {
+            self.receipt_ended(&track_name, location, false, actions);
+        }
     }
 
     /// The I/O side is done with a stream: nothing more is to be said about
@@ -3978,6 +4235,8 @@ impl Relay {
         for subscriber in &track.subscribers {
             self.send_publish_done(subscriber, status_code, actions);
         }
+        // A FETCH held for an Object of the track has nothing to wait for.
+        self.receipts_of_a_gone_track(track_name, actions);
         // The SUBSCRIBEs that were held while the track drained wait on
         // under its name, for what is left of their time: the track has no
         // source, and the publishers of its namespace are asked as for any
@@ -4743,6 +5002,8 @@ impl Action {
             | Self::StartEarlyTimer { session, .. }
             | Self::StartCheckTimer { session, .. }
             | Self::StartJoiningFetchTimer { session, .. }
+            | Self::StartReceiptTimer { session, .. }
+            | Self::StopReceiptTimer { session, .. }
             | Self::StartRendezvousTimer { session, .. }
             | Self::StartAnnouncementTimer { session, .. }
             | Self::StartFetchEndTimer { session, .. }
@@ -4766,23 +5027,6 @@ impl Action {
             | Self::ResetDataStream { out_stream, .. } => Target::OutStream(*out_stream),
             Self::CloseSession { .. } => Target::Closing,
         }
-    }
-}
-
-/// An Object at `location` of a track was taken: it is the track's largest
-/// ([`Track::largest`]) where none larger came, and a new Group lets go of
-/// the `NEW_GROUP_REQUEST` asked for ([`Track::new_group_asked`]). WHY not a
-/// method of [`Track`]: the caller holds one of its streams meanwhile.
-fn note_largest(
-    largest: &mut Option<Location>,
-    new_group_asked: &mut Option<u64>,
-    location: Location,
-) {
-    if largest.is_none_or(|largest| location > largest) {
-        if largest.is_none_or(|largest| location.group > largest.group) {
-            *new_group_asked = None;
-        }
-        *largest = Some(location);
     }
 }
 

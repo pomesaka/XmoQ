@@ -1118,7 +1118,8 @@ impl Gathering<'_> {
                 self.session.on_fetch_stream(header.request_id)?;
                 drop(self.stops.take_fetch_body(stream));
             }
-            UniEvent::SubgroupOpened { .. } => {}
+            // Not asked for (`StreamConfig::report_objects_begun`).
+            UniEvent::SubgroupOpened { .. } | UniEvent::ObjectBegun { .. } => {}
             UniEvent::Failed(error) => return Err(error.into()),
             UniEvent::ReaderPanicked => bail!("a reader of a stream panicked"),
         }

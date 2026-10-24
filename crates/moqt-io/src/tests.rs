@@ -171,6 +171,46 @@ async fn control_messages_and_objects_are_delivered_in_order() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_object_begun_is_passed_on_only_where_it_is_asked_for() {
+    // Under the window of the in-memory stream (64 bytes), so that the
+    // whole of it can come in one read.
+    let bytes = subgroup_bytes(&[object(0, 30)]);
+    // The header (3 bytes), the Object ID Delta, the Payload Length and 10
+    // bytes of the payload.
+    let half = 3 + 2 + 10;
+    // (whether asked for; the bytes of the first write, the rest after it;
+    //  the events after each write)
+    let cases: [(bool, usize, &[&[&str]]); 3] = [
+        (true, half, &[&["opened", "begun 0"], &["object 0"]]),
+        (false, half, &[&["opened"], &["object 0"]]),
+        // The Object is whole in one read: it is begun and whole at once.
+        (true, bytes.len(), &[&["opened", "object 0"], &[]]),
+    ];
+    for (asked, chunk_len, expected) in cases {
+        let config = StreamConfig {
+            report_objects_begun: asked,
+            ..StreamConfig::default()
+        };
+        let mut reading = reading(config, 8);
+        let mut send = reading.peer.open_uni().await.unwrap();
+        let (first, rest) = bytes.split_at(chunk_len);
+        for (chunk, after) in [first, rest].into_iter().zip(expected) {
+            send.write_all(chunk).await.unwrap();
+            let mut seen = Vec::new();
+            for _ in 0..after.len() {
+                seen.push(match reading.next().await {
+                    UniEvent::SubgroupOpened { .. } => "opened".to_string(),
+                    UniEvent::ObjectBegun { object_id, .. } => format!("begun {object_id}"),
+                    UniEvent::Object { object, .. } => format!("object {}", object.object_id),
+                    other => format!("{other:?}"),
+                });
+            }
+            assert_eq!(seen, *after, "{asked} {chunk_len}");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_full_queue_holds_the_sender_back() {
     // One event fits in the queue; the reader waits with the next one in hand.
     let mut reading = reading(StreamConfig::default(), 1);

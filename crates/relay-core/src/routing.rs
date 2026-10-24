@@ -1569,6 +1569,9 @@ impl Relay {
             actions,
         ) && let Some(track) = self.tracks.live_mut(track_name)
         {
+            if filter.is_none() {
+                track.accepted_without_a_filter((subscriber.session, subscriber.track_alias));
+            }
             track.subscribers.push(subscriber);
             // After the subscriber is in the track: a Joining FETCH that
             // waited is let go by the slot, and reads its Joining Location
@@ -1599,6 +1602,9 @@ impl Relay {
         // and where a Joining FETCH ends (§5.1.2: "Largest Object is
         // communicated in SUBSCRIBE_OK"; §10.12.2.1: "contiguous and
         // non-overlapping"). The relay has to count from the same Location.
+        // It counts an Object from its first byte (`Relay::on_object_begun`),
+        // and a subscription without a filter, which passes from {0, 0}, does
+        // not get the Objects it was receiving then (`Receiving`).
         let joining = track.largest;
         let start = filter_start(filter, joining);
         let end_group = filter_end_group(filter);

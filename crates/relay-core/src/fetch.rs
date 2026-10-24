@@ -94,6 +94,13 @@ pub(crate) const SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE: usize = 8;
 /// Provisional.
 pub(crate) const FETCH_UPSTREAM_WAIT_MS: u64 = 5_000;
 
+/// How long the relay holds a FETCH whose range has an Object it is
+/// receiving, for that Object to be whole, before it asks a publisher for
+/// the range ([`ReceiptWait`]); shorter where the FETCH has a
+/// `FILL_TIMEOUT` that is. **Provisional**, the same as a publisher's
+/// answer gets (`docs/open-questions.md`).
+pub(crate) const FETCH_RECEIPT_WAIT_MS: u64 = 5_000;
+
 /// The longest the relay waits that way, whatever `FILL_TIMEOUT` says
 /// (§10.2.5: "the relay MAY use a shorter timeout without informing the
 /// subscriber"). Provisional.
@@ -184,9 +191,55 @@ enum Awaited {
     /// The SUBSCRIBE with this Request ID, which has not come yet: the two
     /// travel on streams of their own, and this FETCH was read first.
     Subscribe(u64),
+    /// An Object in its range that the relay is receiving
+    /// ([`ReceiptWait`]). For a Joining FETCH, the request stream of the
+    /// SUBSCRIBE it names, which is Established.
+    Receipt(Option<StreamKey>),
+}
+
+/// Whether [`Relay::ask_for`] may hold a FETCH whose range has an Object
+/// the relay is receiving, until the Object is whole and the cache can
+/// answer for the range (§9.4: a relay without what it needs for `FETCH_OK`
+/// "MUST withhold sending `FETCH_OK` until it does").
+///
+/// WHY hold: the relay raises the Largest Object at the first byte of an
+/// Object (§5.1.2), and a Joining FETCH ends at that Location (§10.12.2.1),
+/// so the Object a viewer that comes while a key frame is received asks for
+/// is the one that is not whole yet. Asked of a publisher instead, the FETCH
+/// fails where the publisher serves none (the browser's), and the viewer has
+/// no picture until the next Group. WHY NOT send what the cache has and
+/// leave the Object out as unknown: without `FILL_TIMEOUT` the relay "MUST
+/// pause subsequent delivery until it has confirmed the object's status
+/// upstream" (§10.12.3), and it puts nothing of its own and of a publisher's
+/// on one stream. WHY NOT pass the Object on as it arrives: the relay sends
+/// whole Objects (the known gap on §5.1 "SHOULD begin sending incomplete
+/// objects", in `docs/moqt-implementation-notes.md`); a relay that does is
+/// what would take the place of this hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiptWait {
+    /// It may, and the time it is held for starts.
+    Start,
+    /// It may, and the time it is held for runs already: an Object it was
+    /// held for is whole, and another one in the range may still be on the
+    /// way.
+    Running,
+    /// It may not: the time is over, or an Object in the range did not
+    /// arrive whole, and nothing of it is cached.
+    Over,
+}
+
+/// The range a FETCH held for a receipt waits on: of which track, and from
+/// which Location to which, both included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AwaitedRange {
+    track: FullTrackName,
+    start: Location,
+    last: Location,
 }
 
 /// A Joining FETCH that waits for its SUBSCRIBE: to come, or to be answered.
+/// Or a FETCH that waits for an Object the relay is receiving
+/// ([`Awaited::Receipt`]).
 #[derive(Debug)]
 pub(crate) struct HeldFetch {
     request: PeerRequestId,
@@ -610,6 +663,9 @@ impl Relay {
             Event::JoiningFetchTimeout { session, stream } => {
                 self.settle_early_fetches(session, Some(stream), actions);
             }
+            Event::ReceiptTimeout { session, stream } => {
+                self.ask_again_after_receipt((session, stream), ReceiptWait::Over, actions);
+            }
             Event::FetchEndTimeout { session, stream } => {
                 self.on_fetch_end_timeout(session, stream, actions);
             }
@@ -689,19 +745,9 @@ impl Relay {
         };
         self.put_slot(session, stream, slot, actions);
         match &fetch.range {
-            FetchRange::Standalone {
-                full_track_name,
-                start,
-                end,
-            } => {
-                let asked = AskedRange {
-                    track: full_track_name.clone(),
-                    start: *start,
-                    end: *end,
-                    joins: None,
-                    send_order: fetch_send_order(&fetch.parameters),
-                };
-                self.ask_for(session, stream, request, &asked, &fetch.parameters, actions);
+            FetchRange::Standalone { .. } => {
+                let start = ReceiptWait::Start;
+                self.ask_standalone((session, stream), request, fetch, start, actions);
             }
             FetchRange::RelativeJoining {
                 joining_request_id, ..
@@ -717,6 +763,34 @@ impl Relay {
                 actions,
             ),
         }
+    }
+
+    /// Asks for the range of a Standalone FETCH.
+    fn ask_standalone(
+        &mut self,
+        (session, stream): (SessionKey, StreamKey),
+        request: PeerRequestId,
+        fetch: &Fetch,
+        wait: ReceiptWait,
+        actions: &mut Vec<Action>,
+    ) {
+        let FetchRange::Standalone {
+            full_track_name,
+            start,
+            end,
+        } = &fetch.range
+        else {
+            return;
+        };
+        let asked = AskedRange {
+            track: full_track_name.clone(),
+            start: *start,
+            end: *end,
+            joins: None,
+            send_order: fetch_send_order(&fetch.parameters),
+        };
+        let held = (fetch, wait);
+        self.ask_for(session, stream, request, &asked, held, actions);
     }
 
     /// A Joining FETCH (§10.12.2). The session has seen to it that it names
@@ -739,7 +813,8 @@ impl Relay {
         });
         match joined {
             Some((subscribe, Subscribed::Accepted)) => {
-                self.join(session, stream, request, subscribe, fetch, actions);
+                let held = (fetch, ReceiptWait::Start);
+                self.join((session, stream), request, subscribe, held, actions);
             }
             // §10.12.2: "if that subscription has not yet been established,
             // the Publisher receiving the Joining Fetch buffers the pending
@@ -809,11 +884,10 @@ impl Relay {
     /// would send another range.
     fn join(
         &mut self,
-        session: SessionKey,
-        stream: StreamKey,
+        (session, stream): (SessionKey, StreamKey),
         request: PeerRequestId,
         subscribe: StreamKey,
-        fetch: &Fetch,
+        (fetch, wait): (&Fetch, ReceiptWait),
         actions: &mut Vec<Action>,
     ) {
         let subscription = self.sessions.get(&session).and_then(|state| {
@@ -856,19 +930,22 @@ impl Relay {
             joins: Some(subscribe),
             send_order: fetch_send_order(&fetch.parameters),
         };
-        self.ask_for(session, stream, request, &asked, &fetch.parameters, actions);
+        self.ask_for(session, stream, request, &asked, (fetch, wait), actions);
     }
 
-    /// Asks a publisher for a range of a track, for a FETCH of a subscriber.
+    /// Asks a publisher for a range of a track, for a FETCH of a subscriber;
+    /// or answers it from the cache, or holds it for an Object in the range
+    /// that the relay is receiving ([`ReceiptWait`]).
     fn ask_for(
         &mut self,
         session: SessionKey,
         stream: StreamKey,
         request: PeerRequestId,
         asked: &AskedRange,
-        parameters: &[Parameter],
+        (fetch, wait): (&Fetch, ReceiptWait),
         actions: &mut Vec<Action>,
     ) {
+        let parameters = fetch.parameters.as_slice();
         let refuse = |relay: &mut Self, error_code, actions: &mut Vec<Action>| {
             relay.refuse(
                 session,
@@ -897,6 +974,31 @@ impl Relay {
             let pieces = objects.into_iter().map(FetchPiece::Object).collect();
             let answer = (end, pieces, asked.send_order);
             return self.write_answer(session, stream, request, &asked.track, answer, actions);
+        }
+        if wait != ReceiptWait::Over
+            && let Some(awaited) = self.awaits_a_receipt(asked)
+        {
+            if wait == ReceiptWait::Start {
+                let wait_ms = fill_timeout
+                    .unwrap_or(FETCH_RECEIPT_WAIT_MS)
+                    .min(FETCH_RECEIPT_WAIT_MS);
+                actions.push(Action::StartReceiptTimer {
+                    session,
+                    stream,
+                    wait_ms,
+                });
+            }
+            self.fetches.hold(
+                (session, stream),
+                HeldFetch {
+                    request,
+                    joins: Awaited::Receipt(asked.joins),
+                    fetch: fetch.clone(),
+                    held_updates: 0,
+                },
+            );
+            self.awaiting_receipt.insert((session, stream), awaited);
+            return;
         }
         let answer_left_ms = answer_wait_ms(ANSWER_WAIT_MS, parameters);
         let parameters = upstream_parameters(parameters);
@@ -1169,9 +1271,16 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) -> Option<HeldFetch> {
         let held = self.fetches.take_held(subscriber)?;
-        if matches!(held.joins, Awaited::Subscribe(_)) {
-            let (session, stream) = *subscriber;
-            actions.push(Action::StopJoiningFetchTimer { session, stream });
+        let (session, stream) = *subscriber;
+        match held.joins {
+            Awaited::Subscribe(_) => {
+                actions.push(Action::StopJoiningFetchTimer { session, stream });
+            }
+            Awaited::Receipt(_) => {
+                self.awaiting_receipt.remove(subscriber);
+                actions.push(Action::StopReceiptTimer { session, stream });
+            }
+            Awaited::Answer(_) => {}
         }
         Some(held)
     }
@@ -1185,19 +1294,148 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         for (stream, held) in self.take_held(session, subscribe) {
-            self.join(
-                session,
-                stream,
-                held.request,
-                subscribe,
-                &held.fetch,
-                actions,
-            );
-            // The updates that came while it waited go on waiting, for the
-            // publisher's answer.
-            if let Some(fetch) = self.fetches.relayed_mut(&(session, stream)) {
-                fetch.held_updates = held.held_updates;
+            self.ask_held_anew((session, stream), held, ReceiptWait::Start, actions);
+        }
+    }
+
+    /// Asks for the range of a FETCH that was held, as when it came:
+    /// `wait` says whether it may be held again for a receipt.
+    fn ask_held_anew(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        held: HeldFetch,
+        wait: ReceiptWait,
+        actions: &mut Vec<Action>,
+    ) {
+        let HeldFetch {
+            request,
+            joins,
+            fetch,
+            held_updates,
+        } = held;
+        match joins {
+            Awaited::Answer(subscribe) | Awaited::Receipt(Some(subscribe)) => {
+                self.join(subscriber, request, subscribe, (&fetch, wait), actions);
             }
+            Awaited::Receipt(None) => {
+                self.ask_standalone(subscriber, request, &fetch, wait, actions);
+            }
+            // Released when the SUBSCRIBE has come (`subscribe_has_come`).
+            Awaited::Subscribe(_) => return,
+        }
+        // The updates that came while it waited go on waiting, for the
+        // publisher's answer, or for the cache once more.
+        match self.fetches.get_mut(&subscriber) {
+            Some(Standing::Relayed(fetch)) => fetch.held_updates = held_updates,
+            Some(Standing::Held(again)) => again.held_updates = held_updates,
+            Some(Standing::Written { .. }) | None => {}
+        }
+    }
+
+    /// Whether the range of a FETCH has an Object the relay is receiving, on
+    /// a stream of the track it takes the Objects from: the range to wait on
+    /// where it does. The range is the one the cache would answer for
+    /// (`Self::cached`). `None` for a track whose Objects are not cached:
+    /// nothing comes of waiting.
+    fn awaits_a_receipt(&self, asked: &AskedRange) -> Option<AwaitedRange> {
+        let live = self.tracks.live(&asked.track)?;
+        let largest = live.largest?;
+        if live.never_cached {
+            return None;
+        }
+        let last = last_location(end_location(asked.end, largest));
+        let start = asked.start;
+        live.receiving()
+            .any(|location| start <= location && location <= last)
+            .then(|| AwaitedRange {
+                track: asked.track.clone(),
+                start,
+                last,
+            })
+    }
+
+    /// An Object of `track` at `location` that the relay was receiving is
+    /// whole (`whole`), or its stream ended before it was. The FETCH
+    /// requests held for it are asked for anew: answered from the cache, or
+    /// held for another Object of their range that is still on the way;
+    /// where it did not arrive whole, asked of a publisher (§10.12.3: a
+    /// relay that does not know an Object's status confirms it upstream).
+    pub(crate) fn receipt_ended(
+        &mut self,
+        track: &FullTrackName,
+        location: Location,
+        whole: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        if self.awaiting_receipt.is_empty() {
+            return;
+        }
+        let wait = if whole {
+            ReceiptWait::Running
+        } else {
+            ReceiptWait::Over
+        };
+        let waiting: Vec<(SessionKey, StreamKey)> = self
+            .awaiting_receipt
+            .iter()
+            .filter(|(_, awaited)| {
+                awaited.track == *track && awaited.start <= location && location <= awaited.last
+            })
+            .map(|(subscriber, _)| *subscriber)
+            .collect();
+        for subscriber in waiting {
+            self.ask_again_after_receipt(subscriber, wait, actions);
+        }
+    }
+
+    /// The track is gone: what was held for an Object of it is asked of a
+    /// publisher, or refused.
+    pub(crate) fn receipts_of_a_gone_track(
+        &mut self,
+        track: &FullTrackName,
+        actions: &mut Vec<Action>,
+    ) {
+        let waiting: Vec<(SessionKey, StreamKey)> = self
+            .awaiting_receipt
+            .iter()
+            .filter(|(_, awaited)| awaited.track == *track)
+            .map(|(subscriber, _)| *subscriber)
+            .collect();
+        for subscriber in waiting {
+            self.ask_again_after_receipt(subscriber, ReceiptWait::Over, actions);
+        }
+    }
+
+    /// A FETCH held for a receipt is asked for anew. `Running`: the time it
+    /// is held for goes on where it is held again. `Over`: it is asked of a
+    /// publisher, or refused. The timer of one that is not held again is
+    /// dropped; after [`Event::ReceiptTimeout`] there is none, and the hub
+    /// takes the stop of a timer it does not have for nothing.
+    fn ask_again_after_receipt(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        wait: ReceiptWait,
+        actions: &mut Vec<Action>,
+    ) {
+        self.awaiting_receipt.remove(&subscriber);
+        let for_a_receipt = self
+            .fetches
+            .held_mut(&subscriber)
+            .is_some_and(|held| matches!(held.joins, Awaited::Receipt(_)));
+        if !for_a_receipt {
+            return;
+        }
+        let Some(held) = self.fetches.take_held(&subscriber) else {
+            return;
+        };
+        self.ask_held_anew(subscriber, held, wait, actions);
+        let held_again = self
+            .fetches
+            .held_mut(&subscriber)
+            .is_some_and(|held| matches!(held.joins, Awaited::Receipt(_)));
+        if !held_again {
+            let (session, stream) = subscriber;
+            actions.push(Action::StopReceiptTimer { session, stream });
         }
     }
 
@@ -1226,6 +1464,18 @@ impl Relay {
         let gone = Refusal::code(request_error_code::INVALID_JOINING_REQUEST_ID);
         for (stream, held) in self.take_held(session, subscribe) {
             self.refuse(session, stream, held.request, &gone, actions);
+        }
+        // Those held for an Object of the subscription's track.
+        let for_a_receipt: Vec<StreamKey> = self
+            .fetches
+            .held_of(session)
+            .filter(|(_, held)| held.joins == Awaited::Receipt(Some(subscribe)))
+            .map(|(stream, _)| stream)
+            .collect();
+        for stream in for_a_receipt {
+            if let Some(held) = self.let_go_of_held(&(session, stream), actions) {
+                self.refuse(session, stream, held.request, &gone, actions);
+            }
         }
         let mut joined: Vec<StreamKey> = self
             .fetches
@@ -1784,6 +2034,18 @@ impl Relay {
                 stream_reset_code::MALFORMED_TRACK,
                 actions,
             );
+        }
+        // Those held for an Object of the track, which is not to come.
+        let held: Vec<(SessionKey, StreamKey)> = self
+            .awaiting_receipt
+            .iter()
+            .filter(|(_, awaited)| awaited.track == *track)
+            .map(|(subscriber, _)| *subscriber)
+            .collect();
+        for (session, stream) in held {
+            if let Some(held) = self.let_go_of_held(&(session, stream), actions) {
+                self.refuse(session, stream, held.request, &malformed, actions);
+            }
         }
         // The ones the relay answers from its cache have their `FETCH_OK`;
         // their streams are reset, the request stream when the I/O side
@@ -2501,6 +2763,8 @@ impl Relay {
     /// What a session that is gone leaves of relayed FETCH requests.
     pub(crate) fn drop_fetches_of(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
         self.fetches.forget_idle_of(session);
+        self.awaiting_receipt
+            .retain(|(subscriber, _), _| *subscriber != session);
         self.fetch_ends.retain(|(of, _)| *of != session);
         // By key, so that the same events lead to the same actions.
         let mut as_subscriber: Vec<(SessionKey, StreamKey)> = self

@@ -38,6 +38,7 @@ interface Pairing {
 		| "disconnect.ts"
 		| "fetch.ts"
 		| "fetch-rust.ts"
+		| "half-object.ts"
 		| "catalog.ts"
 		| "video.ts"
 		| "video-rust.ts"
@@ -395,6 +396,33 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		name: "own-rust sends its SUBSCRIBE and a Joining FETCH at once; the relay answers the FETCH whichever it reads first",
 		script: "fetch-rust.ts",
 		args: ["--fetch", "page-join-at-once"],
+		relays: ["own"],
+	},
+	// The publisher is the quiet peer, which sends half of an Object and
+	// holds the rest back. What each has to show is at the top of
+	// half-object.ts.
+	{
+		name: "own-rust subscribes while the relay receives an Object and sends a Joining FETCH; the relay holds it until the Object is whole",
+		script: "half-object.ts",
+		args: ["--case", "rust-finish"],
+		relays: ["own"],
+	},
+	{
+		name: "own-rust subscribes with the Largest Object filter while the relay receives an Object, and sends a Joining FETCH; the relay holds it until the Object is whole",
+		script: "half-object.ts",
+		args: ["--case", "rust-largest"],
+		relays: ["own"],
+	},
+	{
+		name: "own-rust sends a Joining FETCH for an Object the relay receives, whose stream is then reset; the relay asks the publisher",
+		script: "half-object.ts",
+		args: ["--case", "rust-reset"],
+		relays: ["own"],
+	},
+	{
+		name: "own-browser subscribes while the relay receives an Object and sends a Joining FETCH; the relay holds it until the Object is whole",
+		script: "half-object.ts",
+		args: ["--case", "page-finish"],
 		relays: ["own"],
 	},
 ];
