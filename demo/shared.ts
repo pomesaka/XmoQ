@@ -118,7 +118,6 @@ export function joinRoom(as: string): Room | undefined {
 		`${XMOQ_DEMO.roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(name)}/ws`,
 	);
 	const count = document.getElementById("connected");
-	startChat(name, as, () => connectToRelay(HERE));
 	// Reactions: an emoji somebody pressed is shown to everybody for two
 	// seconds, and counted for a script that looks at the page.
 	const reactions = document.getElementById("reactions");
@@ -181,6 +180,45 @@ export function joinRoom(as: string): Room | undefined {
 		}
 	});
 	socket.addEventListener("error", () => first(null));
+	const token: Room["token"] = async (role, namespace) => {
+		if (new URLSearchParams(location.search).get("token") === "no") {
+			return undefined;
+		}
+		// The room says nothing for a namespace with a `*` or a `/` in a
+		// field (`spikes/durable-objects-room/worker.js`), and the answers
+		// are matched to the askers by their order: one asked for and never
+		// answered would have every later asker take the answer of the one
+		// before it.
+		if (namespace.some((field) => field.includes("*") || field.includes("/"))) {
+			return undefined;
+		}
+		const text = await new Promise<string | null>((resolve) => {
+			tokens.push(resolve);
+			whenOpen(() =>
+				socket.send(JSON.stringify({ type: "token-for", role, namespace })),
+			);
+		});
+		if (text === null) return undefined;
+		// §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value.
+		return new Uint8Array([0x03, 0x00, ...new TextEncoder().encode(text)]);
+	};
+	// Two tokens each time it connects for the chat, as the participant
+	// needs them (`publishNamespaceToken` of `joinChat`): `sub` for the
+	// room's `lines`, which the connection carries, and `pub` for its own
+	// namespace, which only its PUBLISH_NAMESPACE carries. WHY asked again
+	// each time: a token runs out (10 minutes), and the relay checks the
+	// SETUP of the new connection. Without --auth the room gives none, and
+	// both are undefined.
+	startChat(name, as, async () => {
+		const [sub, pub] = await Promise.all([
+			token("sub", ["xmoq", "chat", name]),
+			token("pub", ["xmoq", "chat", name, as]),
+		]);
+		return {
+			connection: await connectToRelay(HERE, sub),
+			publishNamespaceToken: pub,
+		};
+	});
 	return {
 		broadcast,
 		current: () => latest,
@@ -195,20 +233,7 @@ export function joinRoom(as: string): Room | undefined {
 				socket.send(JSON.stringify({ type: "broadcast", broadcast: where })),
 			);
 		},
-		async token(role, namespace) {
-			if (new URLSearchParams(location.search).get("token") === "no") {
-				return undefined;
-			}
-			const text = await new Promise<string | null>((resolve) => {
-				tokens.push(resolve);
-				whenOpen(() =>
-					socket.send(JSON.stringify({ type: "token-for", role, namespace })),
-				);
-			});
-			if (text === null) return undefined;
-			// §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value.
-			return new Uint8Array([0x03, 0x00, ...new TextEncoder().encode(text)]);
-		},
+		token,
 	};
 }
 

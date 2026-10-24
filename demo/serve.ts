@@ -17,12 +17,13 @@
 // The gatherer of the chat (`xmoq-chat`) starts beside the relay, where it
 // is built, and keeps the lines in `--chat-store` (demo/.chat/chat.sqlite3,
 // which is not committed). The pages chat over its tracks, and have no chat
-// without it. Not with `--auth`: the gatherer and the pages' connections
-// for the chat send no token, and the relay would refuse them. WHY NOT a
-// token for them: the relay takes a token for one namespace and one role,
-// and the gatherer asks for the namespace of every participant it finds,
-// so a token for it is one for any namespace under `xmoq/chat`, and who may
-// get that is not decided (the open decision on authorization tokens).
+// without it. With `--auth`, the gatherer is given the relay's key
+// (`--auth-key-hex`) and makes its own tokens, and each page asks the room
+// for two whenever it connects for the chat (`demo/shared.ts`). WHY the key
+// for the gatherer, and not a token of the room: the room gives a token to
+// whoever asks, and the gatherer needs one for every namespace under
+// `xmoq/chat`. A gatherer built without that flag exits at once with
+// "unknown flag", which is shown as any other exit of the gatherer.
 //
 // Open http://localhost:8080/publish in Chromium, then /watch in one or
 // more other tabs. Ctrl-C stops the relay as well.
@@ -164,11 +165,12 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 	: undefined;
 const roomsUrl =
 	rooms === undefined ? null : `http://127.0.0.1:${options["rooms-port"]}/`;
-// The gatherer of the chat, where it is built and the relay asks for no token.
+// The gatherer of the chat, where it is built, with the relay's key under
+// `--auth`.
 const chatBinary = join(here, "..", "target", "debug", "xmoq-chat");
 const chatStore = options["chat-store"] ?? join(here, ".chat", "chat.sqlite3");
 const chat =
-	authKeyHex === undefined && existsSync(chatBinary)
+	existsSync(chatBinary)
 		? (() => {
 				mkdirSync(dirname(chatStore), { recursive: true });
 				return spawn(
@@ -180,6 +182,7 @@ const chat =
 						certSha256Hex,
 						"--store",
 						chatStore,
+						...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
 					],
 					// Its lines, one for each thing it does, are not shown.
 					{ stdio: ["ignore", "ignore", "inherit"] },
@@ -191,10 +194,7 @@ chat?.on("exit", (code) => {
 	console.log(`the gatherer of the chat exited with ${code}`);
 });
 /** Why the pages have no chat, where they have none. */
-const noChat =
-	authKeyHex !== undefined
-		? "no chat: the gatherer has no token for --auth"
-		: `no chat: ${chatBinary} is missing (cargo build -p xmoq-chat)`;
+const noChat = `no chat: ${chatBinary} is missing (cargo build -p xmoq-chat)`;
 const stop = (): void => {
 	relay.kill("SIGINT");
 	rooms?.kill("SIGINT");

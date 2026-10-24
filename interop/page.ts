@@ -800,6 +800,22 @@ const chat: {
 };
 
 window.xmoqOwn = {
+	connectWithToken: withPlainErrors(
+		async (relayUrl: string, certSha256Hex: string, tokenHex: string) => {
+			connection = await connect(relayUrl, {
+				implementation: "xmoq-moqt/0.0.0",
+				authorizationToken: fromHex(tokenHex),
+				serverCertificateHashes: [
+					{ algorithm: "sha-256", value: fromHex(certSha256Hex) },
+				],
+				diagnostics,
+			});
+			console.log(
+				`connected: peer_setup_options=${describe(connection.peerSetupOptions)}`,
+			);
+		},
+	),
+
 	publishDynamicTrack: withPlainErrors(
 		async (namespace: string, trackName: string) => {
 			const moq = connected();
@@ -947,13 +963,21 @@ window.xmoqOwn = {
 	})),
 
 	joinChat: withPlainErrors(
-		async (room: string, name: string, catchUp?: PageChatCatchUp) => {
+		async (
+			room: string,
+			name: string,
+			catchUp?: PageChatCatchUp,
+			publishNamespaceTokenHex?: string,
+		) => {
 			// A page that left joins again with a participant of its own.
 			if (chat.stop.signal.aborted) chat.stop = new AbortController();
 			chat.participant = await joinChat(connected(), {
 				room,
 				name,
 				signal: chat.stop.signal,
+				...(publishNamespaceTokenHex === undefined
+					? {}
+					: { publishNamespaceToken: fromHex(publishNamespaceTokenHex) }),
 				...(catchUp?.catchUpLines === undefined
 					? {}
 					: { catchUpLines: catchUp.catchUpLines }),
