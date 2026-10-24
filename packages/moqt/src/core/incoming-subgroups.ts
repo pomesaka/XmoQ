@@ -45,8 +45,17 @@ export interface IncomingSubgroups {
 	 * by two Established subscriptions, and one that received PUBLISH_DONE is
 	 * Terminated for its publisher (§5.1), which may use the alias again at
 	 * once (§5.1.1).
+	 *
+	 * `maxObjectPayloadLength` is the subscription's limit, at most the
+	 * connection's; it applies to each Object of the alias's streams whose
+	 * Object Payload Length is read from now on.
 	 */
-	establish(trackAlias: bigint, requestId: bigint, out: SessionOutput[]): void;
+	establish(
+		trackAlias: bigint,
+		requestId: bigint,
+		maxObjectPayloadLength: number,
+		out: SessionOutput[],
+	): void;
 	/**
 	 * Remembers a free Track Alias as one whose streams are to be dropped,
 	 * without ever binding it (§11.1).
@@ -109,6 +118,8 @@ interface SubgroupStream {
 /** What is known about the subscription a Track Alias belongs to. */
 interface AliasBinding {
 	requestId: bigint;
+	/** The longest Object Payload Length taken for the subscription. */
+	maxObjectPayloadLength: number;
 	/** Streams of this subscription that ended, however they ended. */
 	streamsEnded: bigint;
 	/** PUBLISH_DONE arrived. */
@@ -385,7 +396,7 @@ export function createIncomingSubgroups(
 			return binding.draining ? "draining" : "established";
 		},
 
-		establish(trackAlias, requestId, out) {
+		establish(trackAlias, requestId, maxObjectPayloadLength, out) {
 			const existing = bindings.get(trackAlias);
 			if (existing !== undefined) {
 				options.onDrained(existing.requestId, out);
@@ -394,6 +405,7 @@ export function createIncomingSubgroups(
 			retired.delete(trackAlias);
 			bindings.set(trackAlias, {
 				requestId,
+				maxObjectPayloadLength,
 				// Streams that ended before this SUBSCRIBE_OK count too (§10.11).
 				streamsEnded: earlyClosed.get(trackAlias) ?? 0n,
 				draining: false,
@@ -418,7 +430,21 @@ export function createIncomingSubgroups(
 
 		open(peerStream) {
 			streams.set(peerStream, {
-				decoder: createSubgroupStreamDecoder(limits),
+				// WHY looked up for each Object and not once for the stream: the
+				// stream is opened before its header says its Track Alias, and the
+				// alias can be bound after that, by a SUBSCRIBE_OK that comes
+				// while the stream is read. Until it is, the connection's limit
+				// holds. WHY NOT also a check of the subscription's limit on the
+				// Objects taken before: they are already collected, and the ones
+				// held are bounded by `maxHeldSubgroupBytes`, so refusing them
+				// would hold no less; the limit is there to stop collecting a
+				// payload, which only a check where its length is read does.
+				decoder: createSubgroupStreamDecoder(
+					limits,
+					({ trackAlias }) =>
+						bindings.get(trackAlias)?.maxObjectPayloadLength ??
+						limits.maxObjectPayloadLength,
+				),
 				header: undefined,
 				subgroupId: undefined,
 				requestId: undefined,

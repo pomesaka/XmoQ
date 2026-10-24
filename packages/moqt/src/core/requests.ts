@@ -77,6 +77,25 @@ export interface PublishRequest extends FullTrackName {
 
 export interface SubscribeRequest extends FullTrackName {
 	parameters?: MessageParameters;
+	/**
+	 * The longest Object Payload Length taken on the subgroup streams of
+	 * this subscription, in bytes: a whole number from 1. Nothing of this
+	 * goes on the wire; it is a limit of this endpoint, like
+	 * `limits.maxObjectPayloadLength`, and an Object over it ends its stream
+	 * in the same way (`subgroup-abandoned`, STOP_SENDING with
+	 * INTERNAL_ERROR), while the subscription goes on. Left out, or above
+	 * the connection's limit, the connection's limit is the one.
+	 *
+	 * WHY above it is the connection's and not a `RangeError`: the
+	 * connection's limit bounds every stream anyway, so a larger number asks
+	 * for nothing that could be given, and a caller that is handed a
+	 * connection (`@xmoq/msf`, `@xmoq/chat`) does not know its limit.
+	 *
+	 * It applies from the SUBSCRIBE_OK on. An Object whose Object Payload
+	 * Length was read before then, while the Track Alias of its stream was
+	 * unknown, was taken under the connection's limit and is delivered.
+	 */
+	maxObjectPayloadLength?: number;
 }
 
 export interface FetchRequest {
@@ -149,6 +168,10 @@ export interface Requests {
 	readonly outgoing: OutgoingSubgroups;
 	publishNamespace(request: PublishNamespaceRequest): SessionResult<bigint>;
 	publish(request: PublishRequest): SessionResult<bigint>;
+	/**
+	 * Throws a `RangeError`, and sends nothing, for a `maxObjectPayloadLength`
+	 * that is not a whole number from 1.
+	 */
 	subscribe(request: SubscribeRequest): SessionResult<bigint>;
 	/**
 	 * Asks for a range of a track (§10.12).
@@ -411,6 +434,8 @@ interface SubscribeEntry extends RequestCommon {
 	kind: "SUBSCRIBE";
 	/** Set by SUBSCRIBE_OK. */
 	trackAlias: bigint | undefined;
+	/** `SubscribeRequest.maxObjectPayloadLength`, resolved against the connection's limit. */
+	maxObjectPayloadLength: number;
 	/** REQUEST_UPDATEs this endpoint sent that have no answer yet (`updateSubscription`). */
 	updates: number;
 }
@@ -923,7 +948,12 @@ export function createRequests(options: RequestsOptions): Requests {
 			abandonRequest(request, "unsupported-track-property", out);
 			return;
 		}
-		incoming.establish(message.trackAlias, request.requestId, out);
+		incoming.establish(
+			message.trackAlias,
+			request.requestId,
+			request.maxObjectPayloadLength,
+			out,
+		);
 		request.trackAlias = message.trackAlias;
 		request.state = "Established";
 		out.push({
@@ -1496,11 +1526,23 @@ export function createRequests(options: RequestsOptions): Requests {
 		},
 
 		subscribe(request) {
+			const asked = request.maxObjectPayloadLength;
+			if (asked !== undefined && !(Number.isSafeInteger(asked) && asked >= 1)) {
+				throw new RangeError(
+					`maxObjectPayloadLength is a whole number of bytes from 1, not ${asked}`,
+				);
+			}
+			const connectionLimit = options.limits.maxObjectPayloadLength;
+			const maxObjectPayloadLength =
+				asked === undefined
+					? connectionLimit
+					: Math.min(asked, connectionLimit);
 			return openRequest((common) => ({
 				entry: {
 					...common,
 					kind: "SUBSCRIBE",
 					trackAlias: undefined,
+					maxObjectPayloadLength,
 					updates: 0,
 				},
 				message: {

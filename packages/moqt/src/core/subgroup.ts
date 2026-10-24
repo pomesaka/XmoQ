@@ -397,10 +397,13 @@ export interface SubgroupStreamDecoder {
  *
  * Memory is bounded by the limits: outside an Object payload it holds at most
  * one incomplete header or Object prefix, and a payload is collected only up
- * to `maxObjectPayloadLength`.
+ * to `maxObjectPayloadLength`, or to what `payloadLimitOf` says for the
+ * stream's header when it is given. That is asked each time an Object
+ * Payload Length is read, so the answer can change while the stream is read.
  */
 export function createSubgroupStreamDecoder(
 	limits: SubgroupStreamLimits,
+	payloadLimitOf?: (header: SubgroupHeader) => number,
 ): SubgroupStreamDecoder {
 	/** Bytes of an incomplete header or Object prefix. */
 	let pending: Uint8Array = new Uint8Array(0);
@@ -435,7 +438,7 @@ export function createSubgroupStreamDecoder(
 
 		const payloadLength = readObjectFieldLength(
 			reader,
-			limits.maxObjectPayloadLength,
+			payloadLimitOf?.(streamHeader) ?? limits.maxObjectPayloadLength,
 			"Object Payload Length",
 		);
 		// §11.4.2: Object Status is present only when Object Payload Length is zero.

@@ -230,9 +230,6 @@ const SUBSCRIBE_REFUSALS = new Map<bigint, string>([
 		RequestErrorCode.DUPLICATE_SUBSCRIPTION,
 		"this endpoint is already the publisher of a subscription to the Track",
 	],
-	// FIXME: give a Retry Interval. §10.6.2 has the sender of EXCESSIVE_LOAD
-	// say when to retry, and 0, which every refusal here carries, says "do
-	// not retry". The Rust session has the same.
 	[RequestErrorCode.EXCESSIVE_LOAD, "too many requests of the peer are open"],
 ]);
 

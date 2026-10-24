@@ -249,7 +249,11 @@ describe("followCatalog", () => {
 		const reader = follower.states.getReader();
 		expect(line((await reader.read()).value ?? {})).toBe("a at {5, 0}");
 		expect(peer.subscribed).toEqual([
-			{ trackNamespace: NAMESPACE, trackName: utf8("catalog") },
+			{
+				trackNamespace: NAMESPACE,
+				trackName: utf8("catalog"),
+				maxObjectPayloadLength: 1048576,
+			},
 		]);
 		expect(peer.fetched).toEqual([
 			{
@@ -420,6 +424,7 @@ describe("followCatalog", () => {
 			{
 				trackNamespace: NAMESPACE,
 				trackName: utf8("catalog"),
+				maxObjectPayloadLength: 1048576,
 				parameters: { rendezvousTimeout: 30000n },
 			},
 		]);
@@ -438,6 +443,26 @@ describe("followCatalog", () => {
 			);
 			expect(outcome).toBeInstanceOf(RangeError);
 			expect(peer.subscribed).toEqual([]);
+		},
+	);
+
+	// What `readCatalog` would not read is not collected on the subscription
+	// either. 0 is a `maxLength`, and `@xmoq/moqt` takes a limit from 1.
+	test.each([
+		{ maxLength: undefined, limit: 1048576 },
+		{ maxLength: 10, limit: 10 },
+		{ maxLength: 0, limit: 1 },
+	])(
+		"with a `maxLength` of $maxLength the subscription takes Objects of up to $limit bytes",
+		async ({ maxLength, limit }) => {
+			const peer = fake({});
+			await followCatalog(peer.connection, {
+				namespace: NAMESPACE,
+				...(maxLength === undefined ? {} : { maxLength }),
+			});
+			expect(
+				peer.subscribed.map((asked) => asked.maxObjectPayloadLength),
+			).toEqual([limit]);
 		},
 	);
 
