@@ -1,6 +1,11 @@
 //! The decoder of the picture: H.264 with the crate `openh264`. The one
-//! file that names that crate; which decoder the viewer uses is not decided
-//! (`docs/open-questions.md`).
+//! file that names that crate, so that it can be changed.
+//!
+//! WHY `openh264` (decided on 2026-10-13): it decodes a frame of 1080 lines
+//! in 4 ms and keeps up, and a person saw its picture in Ghostty on
+//! 2026-10-12. WHY NOT the operating system's decoder (`VideoToolbox` on
+//! macOS): faster, and written once for each system. WHY NOT a pipe to
+//! ffmpeg: it reads anything, and the user's machine then needs ffmpeg.
 
 use anyhow::{Result, anyhow};
 use openh264::decoder::Decoder;
