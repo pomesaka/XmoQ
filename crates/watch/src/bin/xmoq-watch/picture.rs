@@ -11,12 +11,13 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use xmoq_picture::order::InOrder;
+use xmoq_picture::video_decoder::{Decoded, VideoDecoder};
 use xmoq_watch::args::Medium;
 use xmoq_watch::marks::Recent;
 use xmoq_watch::{fit, kitty, marks};
 
 use crate::sound::micros_since;
-use crate::video_decoder::{Decoded, VideoDecoder};
 
 /// Lines under the picture: the last of the chat, and one for the keys.
 pub const LINES: usize = 4;
@@ -122,10 +123,13 @@ struct Writing {
 impl Writing {
     /// Writes one frame over the one before. Whether it was written.
     fn draw(&mut self, rgb: &[u8], full: (usize, usize)) -> std::io::Result<bool> {
-        self.by = self.screen.fit.map_or(1, |most| fit::by(full, most));
+        self.by = self
+            .screen
+            .fit
+            .map_or(1, |most| xmoq_picture::fit::by(full, most));
         let mut shrunk = std::mem::take(&mut self.shrunk);
         let (rgb, size) = if self.by > 1 {
-            let size = fit::shrink(rgb, full, self.by, &mut shrunk);
+            let size = xmoq_picture::fit::shrink(rgb, full, self.by, &mut shrunk);
             (shrunk.as_slice(), size)
         } else {
             (rgb, full)
@@ -263,20 +267,16 @@ pub fn run(picture: Picture) -> Seen {
         by: 1,
     };
     let mut rgb = Vec::new();
-    // The Object the decoder can take next.
-    let mut next: Option<(u64, u64)> = None;
+    let mut order = InOrder::default();
     let mut was_marked = false;
     let mut shown: Option<(Instant, Instant)> = None;
     let mut after_due = Recent::new(MOST_COUNTED);
     'frames: for frame in frames {
         seen.came += 1;
-        let follows = next == Some((frame.group, frame.object));
-        let begins = frame.object == 0 && next.is_none_or(|(group, _)| frame.group >= group);
-        if !follows && !begins {
+        if !order.take(frame.group, frame.object) {
             seen.left_out += 1;
             continue;
         }
-        next = Some((frame.group, frame.object + 1));
         let before = Instant::now();
         let picture = decoder.decode(&frame.annex_b, &mut rgb);
         seen.decoding += before.elapsed();

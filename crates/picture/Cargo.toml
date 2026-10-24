@@ -1,0 +1,18 @@
+[package]
+name = "xmoq-picture"
+version = "0.0.0"
+description = "Pictures of a video track: H.264 decoded to RGB, made smaller, and written as PNG; which frames are decoded and which are kept."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Each is used in one file, named in the README.
+openh264 = "=0.9.8"
+png = "=0.18.1"
+
+[dev-dependencies]
+# The payloads of `fixtures/loc-04/` that have lengths for start codes.
+xmoq-loc = { path = "../loc" }
