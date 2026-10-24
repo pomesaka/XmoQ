@@ -1228,10 +1228,10 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		},
 		// The tokens of a participant (`publishNamespaceToken` of `joinChat`)
 		// through the own relay with `--auth-key-hex`, the one relay that
-		// checks tokens. A page stands in for the gatherer, which sends no
-		// token in this tree.
+		// checks tokens, and the gatherer with the same key, as in the demo
+		// with `--auth`.
 		{
-			name: "own relay: chat: with tokens, a page announces its name with pub on the PUBLISH_NAMESPACE and reads the room with sub on its connection, and a pub token for another name, none, or pub alone are refused",
+			name: "own relay: chat: with tokens, pages announce with pub and read with sub, lines go through the gatherer with the relay's key, and a pub token for another name, none, or pub alone are refused",
 			script: "chat-tokens.ts",
 			args: [],
 			relay: "own",
