@@ -210,6 +210,6 @@ mod tests {
             );
             read += 1;
         }
-        assert_eq!(read, 21);
+        assert_eq!(read, 25);
     }
 }

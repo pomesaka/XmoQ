@@ -432,6 +432,26 @@ describe("decodeControlMessage", () => {
 			code: 3,
 		},
 		{
+			name: "DEFAULT PUBLISHER PRIORITY 256 in SUBSCRIBE_OK (§12.4)",
+			bytes: "04 00 05 00 00 0e 81 00",
+			code: 3,
+		},
+		{
+			name: "DEFAULT PUBLISHER PRIORITY 256 in a PUBLISH of a/t (§12.4)",
+			bytes: "1d 00 0b 00 01 01 61 01 74 00 00 0e 81 00",
+			code: 3,
+		},
+		{
+			name: "DEFAULT PUBLISHER PRIORITY 256 in REQUEST_OK (§12.4)",
+			bytes: "07 00 04 00 0e 81 00",
+			code: 3,
+		},
+		{
+			name: "DEFAULT PUBLISHER PRIORITY 256 in FETCH_OK (§12.4)",
+			bytes: "18 00 07 00 01 02 00 0e 81 00",
+			code: 3,
+		},
+		{
 			name: "EXPIRES in FETCH_OK: no parameter lists FETCH_OK (§10.2.1)",
 			bytes: "18 00 06 00 01 02 01 08 05",
 			code: 3,
