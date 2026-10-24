@@ -24,7 +24,7 @@
 // the Worker has the key it shares with the relay (`AUTH_KEY_HEX`), a
 // client sends {type: "token-for", role: "pub" | "sub", namespace: [...]}
 // and gets {type: "token", role, namespace, token}, or token null where
-// there is no key. The token is the text the relay checks
+// there is no key; nothing for a namespace with a `*` or a `/` in a field. The token is the text the relay checks
 // (crates/relay/src/auth.rs): `v1|<namespace>|<role>|<expiry>|<mac>`, the
 // mac HMAC-SHA-256 over what stands before it. **Anybody who asks gets
 // one**: who may publish in a room, and who may watch, is what would be
@@ -140,6 +140,12 @@ export class Room {
 		}
 		if (said?.type === "token-for" && (said.role === "pub" || said.role === "sub") && Array.isArray(said.namespace)) {
 			const namespace = said.namespace.map(String);
+			// The relay reads a last field `*` as every namespace under the
+			// ones before it (Q50), and the token joins the fields with `/`,
+			// so that ["xmoq/chat", "blue"] would sign xmoq/chat/blue: the
+			// room makes neither for anybody who asks, and leaves the asking
+			// unanswered.
+			if (namespace.some((field) => field.includes("*") || field.includes("/"))) return;
 			socket.send(JSON.stringify({ type: "token", role: said.role, namespace, token: await this.token(said.role, namespace) }));
 			return;
 		}
