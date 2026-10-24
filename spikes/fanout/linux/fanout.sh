@@ -52,34 +52,52 @@ if [ "${SOUND:-0}" = 1 ]; then
   sound=$!
 fi
 sleep 3
-if [ "${SOUND:-0}" = 1 ]; then
+# VIEWER_PROCS=k: the viewers of each track in k processes of viewers/k sessions each (the
+# logs of the others are viewers-2.log ...). VIEWER_FLAGS: more flags of the viewers.
+procs=${VIEWER_PROCS:-1}
+each=$((viewers / procs))
+sound_viewers=; video_viewers=
+k=1
+while [ "$k" -le "$procs" ]; do
+  suffix=; [ "$k" -gt 1 ] && suffix="-$k"
+  if [ "${SOUND:-0}" = 1 ]; then
+    # shellcheck disable=SC2086
+    $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode subscribe --viewers "$each" --objects "$pieces" \
+      --timeout-secs $((seconds + 5)) ${VIEWER_FLAGS:-} > "$logs/sound-viewers$suffix.log" 2>&1 &
+    sound_viewers="$sound_viewers $!"
+  fi
   # shellcheck disable=SC2086
-  $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode subscribe --viewers "$viewers" --objects "$pieces" \
-    --timeout-secs $((seconds + 5)) > "$logs/sound-viewers.log" 2>&1 &
-  sound_viewers=$!
-fi
-# shellcheck disable=SC2086
-$on_clients "$bin/xmoq-moqt-client" $common --track video --mode subscribe --viewers "$viewers" --objects "$frames" \
-  --timeout-secs $((seconds + 5)) > "$logs/viewers.log" 2>&1 &
-video_viewers=$!
+  $on_clients "$bin/xmoq-moqt-client" $common --track video --mode subscribe --viewers "$each" --objects "$frames" \
+    --timeout-secs $((seconds + 5)) ${VIEWER_FLAGS:-} > "$logs/viewers$suffix.log" 2>&1 &
+  video_viewers="$video_viewers $!"
+  k=$((k + 1))
+done
 # WHY /proc and not ps: the %cpu of Linux's ps is over the whole life of the process, where
 # macOS's is of the last moments. Every second: the time, utime+stime in ticks (100 a second)
 # of the relay, the viewers of the video and those of the sound, the relay's RSS in KiB, and
 # the ticks the machine's cores were idle (/proc/stat), which tell whether the 5 were all busy.
-ticks() { awk '{print $14 + $15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
+# The ticks of the processes named, summed; 0 once the first of them is gone.
+ticks() {
+  [ -e "/proc/${1%% *}/stat" ] || { echo 0; return; }
+  sum=0
+  for p in $1; do sum=$((sum + $(awk '{print $14 + $15}' "/proc/$p/stat" 2>/dev/null || echo 0))); done
+  echo "$sum"
+}
 ( while :; do
     [ -e "/proc/$relay/stat" ] || exit 0
     rss=$(awk '/^VmRSS/ {print $2}' "/proc/$relay/status")
     idle=$(awk '/^cpu / {print $5}' /proc/stat)
-    echo "$(date +%s.%N) $(ticks "$relay") $rss $(ticks "$video_viewers") $(ticks "${sound_viewers:-0}") $idle" >> "$logs/relay.ticks"
+    echo "$(date +%s.%N) $(ticks "$relay") $rss $(ticks "${video_viewers# }") $(ticks "${sound_viewers# }") $idle" >> "$logs/relay.ticks"
     free -m | awk '/^Mem/ {print $3}' >> "$logs/used.mb"
     sleep 1
   done ) &
 sampler=$!
+# How long the machine itself stops (stalls.py), while the viewers run.
+python3 /spike/stalls.py "$seconds" > "$logs/stalls.txt" 2>&1 &
 # The threads of the relay and of the viewers' processes, five times a second apart, once
 # the viewers have all begun: whether one of them is busy all the time.
 ( sleep $((viewers / 100 + 2))
-  top -H -b -d 1 -n 5 -w 120 -p "$relay,$video_viewers${sound_viewers:+,$sound_viewers}" > "$logs/threads.txt" 2>&1 ) &
+  top -H -b -d 1 -n 5 -w 120 -p "$(echo "$relay $video_viewers $sound_viewers" | tr -s ' ' ',' | sed 's/,$//')" > "$logs/threads.txt" 2>&1 ) &
 if [ "${PROFILE:-0}" = 1 ]; then
   # PROFILE=1: perf samples the relay for 10 s once the viewers have all begun (they begin
   # 10 ms apart), the user space alone (perf_event_paranoid 2 of podman's machine).
@@ -88,7 +106,7 @@ if [ "${PROFILE:-0}" = 1 ]; then
       > "$logs/perf-record.log" 2>&1 ) &
   profiler=$!
 fi
-wait "$video_viewers" || true
+for p in $video_viewers; do wait "$p" || true; done
 if [ -n "${profiler:-}" ]; then
   wait "$profiler" || true
   # What each function takes itself, and with what it calls (the hub's own work is under
@@ -99,6 +117,6 @@ if [ -n "${profiler:-}" ]; then
   perf script -i "$logs/perf.data" -F ip,sym --no-inline 2>/dev/null | /target/tools/bin/rustfilt > "$logs/perf.demangled"
   python3 /spike/perf-groups.py < "$logs/perf.demangled" > "$logs/perf-groups.txt"
 fi
-if [ -n "${sound_viewers:-}" ]; then wait "$sound_viewers" || true; fi
+for p in $sound_viewers; do wait "$p" || true; done
 kill "$sampler" 2>/dev/null || true
 python3 /spike/summary.py "$logs" "$viewers" "$video" "$frames" "$pieces"
