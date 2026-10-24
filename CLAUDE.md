@@ -87,7 +87,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 | fixtures/moqt-18-by-hand/README.md | 仕様書 | draft 18の本文から手で書いたバイト列。相手から採ったもの（`fixtures/moqt-18/`）とは分けて置く |
 | fixtures/moqt-18-from-libraries/README.md | 仕様書 | 相手のライブラリがスクリプトの中で組み立てたバイト列。回線を流れたものとは分けて置く |
 | fixtures/first-bytes/README.md | 仕様書 | 相手の開いたストリームが「何であるかを言った」と見なす時点の表。2つの実装が読む |
-| fixtures/ のほかのディレクトリのREADME | 仕様書 | 2つ以上の実装が同じ場面で同じ動きをすることを確かめる共有の表（`joining-request-id`、`peer-subscribe`、`peer-fetch`、`published-fetch`、再生のバッファ、いちばん速く届いたものを覚える窓、音の継ぎ目の`playout`、答えを待つ時間の`request-answer-wait`、断りが言う「いつ出し直せるか」の読み方と付け方の`retry-interval`）と、相手から採ったLOCとMSFの実データ（`loc-04`、`msf-01`） |
+| fixtures/ のほかのディレクトリのREADME | 仕様書 | 2つ以上の実装が同じ場面で同じ動きをすることを確かめる共有の表（`joining-request-id`、`peer-subscribe`、`peer-fetch`、`published-fetch`、再生のバッファ、いちばん速く届いたものを覚える窓、音の継ぎ目の`playout`、答えを待つ時間の`request-answer-wait`、断りが言う「いつ出し直せるか」の読み方と付け方の`retry-interval`、チャットを購読し直したときにどの行を取り寄せるかの`chat-history`）と、相手から採ったLOCとMSFの実データ（`loc-04`、`msf-01`） |
 | packages/moqt/README.md | 仕様書 | ブラウザ用クライアントライブラリの範囲、層の決まり、公開API |
 | packages/loc/README.md | 仕様書 | LOCのどの版を実装しているか、プロパティの番号、draftが言っていない所の読み方 |
 | packages/msf/README.md | 仕様書 | MSFのカタログを読む・追う・出す部品の範囲と、draftに届いていない所 |

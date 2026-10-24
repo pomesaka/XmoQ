@@ -135,6 +135,10 @@ struct Ui {
     /// Becomes true when the process is told to end.
     stop: tokio::sync::watch::Receiver<bool>,
     deadline: Option<tokio::time::Instant>,
+    /// The number of the newest line of the chat on tracks shown, kept
+    /// from one session to the next, so that a session that comes after
+    /// another fetches what was missed (`lastHad` of `@xmoq/chat`).
+    chat_had: Option<u64>,
 }
 
 impl Ui {
@@ -847,7 +851,7 @@ async fn play(
                     open_wait_ms: args.open_wait_ms,
                     rendezvous_ms: None,
                 };
-                ChatTracks::begin(requests, connection, &stops, chat, room).await
+                ChatTracks::begin(requests, connection, &stops, chat, room, ui.chat_had).await
             };
             match begun.await {
                 Ok(mut tracks) => {
@@ -1130,6 +1134,7 @@ async fn play(
                         ChatOut::Note(line) => ui.note(&line),
                     }
                 }
+                ui.chat_had = tracks.last_shown();
             }
             event = events.recv() => match event {
                 Some(UniEvent::Object { header, object, .. })
@@ -1138,6 +1143,7 @@ async fn play(
                     if let Some(line) = chat.as_mut().and_then(|tracks| tracks.live(header.group_id, &object.payload)) {
                         ui.chat(line);
                     }
+                    ui.chat_had = chat.as_ref().and_then(ChatTracks::last_shown);
                 }
                 Some(UniEvent::Object { header, object, .. }) => {
                     // An Object of the catalog's track, which stays
@@ -1414,6 +1420,7 @@ async fn watch(args: Args) -> Result<()> {
         deadline: args
             .seconds
             .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds)),
+        chat_had: None,
     };
     run(&args, &mut ui).await
 }

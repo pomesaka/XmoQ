@@ -4,7 +4,8 @@
 //!
 //! Decided on 2026-10-24: on the session of the broadcast; with a room, its
 //! name and the viewer's name in the chat, without one only with
-//! `--chat-room`; the 16 latest lines by a Joining FETCH.
+//! `--chat-room`; the 16 latest lines by a Joining FETCH, and the lines
+//! missed when the subscription is made again ([`history_to_fetch`]).
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -18,10 +19,64 @@ pub const RECENT_LINES: u64 = 16;
 /// it. **Provisional.**
 pub const SAID_WAITING: usize = 16;
 
-/// The Group an Absolute Joining FETCH for the [`RECENT_LINES`] latest lines
-/// starts with, from the Group of the `LARGEST_OBJECT` of the subscription's
-/// `SUBSCRIBE_OK` (its Joining Location); `None` where it had none, and no
-/// line is there to fetch.
+/// How many of the lines it missed the viewer asks for when its
+/// subscription to `lines` is made again, where `--chat-catch-up-lines`
+/// does not say: as many as it keeps under the picture, so that it fills
+/// what it keeps and no more, as the page's 200 are what it shows. Decided
+/// on 2026-10-24. **Provisional** as a number.
+pub const CATCH_UP_LINES: u64 = 16;
+
+/// The most `--chat-catch-up-lines` may be: the lines one FETCH of the
+/// gatherer gets by default (`--fetch-lines`), as `CATCH_UP_LINES_MOST` of
+/// `@xmoq/chat`.
+pub const CATCH_UP_LINES_MOST: u64 = 1000;
+
+/// Lines that were not fetched: those after `after` and before `before`,
+/// the first line fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinesGap {
+    /// The last line had.
+    pub after: u64,
+    /// The first line fetched.
+    pub before: u64,
+}
+
+/// What to ask for of the lines before a subscription to `lines`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryPlan {
+    /// The numbers had are to be forgotten: the room was numbered anew.
+    pub forget: bool,
+    /// The first Group of the Absolute Joining FETCH, which ends at the
+    /// Joining Location, and the gap before it; `None` where nothing is to
+    /// be fetched.
+    pub fetch: Option<(u64, Option<LinesGap>)>,
+}
+
+/// The first Group of the newest `lines` lines, a line a Group, the Group
+/// of the `LARGEST_OBJECT` among them.
+fn newest(largest: u64, lines: u64) -> u64 {
+    largest.saturating_sub(lines.saturating_sub(1))
+}
+
+/// What to fetch for a subscription to `lines` whose `SUBSCRIBE_OK` said
+/// `largest` (the Group of its `LARGEST_OBJECT`), where the viewer had lines
+/// up to `had`, catching up `catch_up` of the lines it missed at the most.
+/// The rule of `historyToFetch` of `@xmoq/chat`; both read the rows of
+/// `fixtures/chat-history/`.
+///
+/// - Nothing had: the newest [`RECENT_LINES`].
+/// - Lines had: from the line after `had` to `largest`; where they are more
+///   than `catch_up`, the newest `catch_up` and a gap before them. Nothing
+///   where `had` is `largest` already: an Absolute Joining FETCH that starts
+///   above the Largest Object is refused with `INVALID_RANGE` (§10.12.3).
+/// - `largest` below `had`, or none where lines were had: the room was
+///   numbered anew, and it is as if nothing was had (`forget`). WHY: the
+///   gatherer numbers a room on from what its store holds and keeps every
+///   line (`crates/chat/README.md`), so its Groups only go up; a smaller one
+///   comes of a gatherer with another store, whose numbers name other lines.
+///   WHY NOT go on with what was had: its new lines under that number would
+///   be passed over as shown, and the room would look silent until it
+///   passed the old number.
 ///
 /// WHY Absolute, with the Group worked out here: the Relative form leaves
 /// the relay to work out "{Joining Location.Group - Joining Start, 0}"
@@ -29,10 +84,54 @@ pub const SAID_WAITING: usize = 16;
 /// subtracted, and a room has fewer lines than 16 at first. The own relay
 /// starts at Group 0 then; `moqtail`'s relay@0.15.0 refuses the FETCH
 /// ("Joining fetch start location is larger than the track's largest
-/// location", seen on 2026-10-24). The range is the same either way.
+/// location", seen on 2026-10-24).
 #[must_use]
-pub fn fetch_start(largest_group: Option<u64>) -> Option<u64> {
-    largest_group.map(|group| group.saturating_sub(RECENT_LINES - 1))
+pub fn history_to_fetch(had: Option<u64>, largest: Option<u64>, catch_up: u64) -> HistoryPlan {
+    let (Some(had), Some(largest)) = (had, largest) else {
+        return HistoryPlan {
+            forget: had.is_some(),
+            fetch: largest.map(|largest| (newest(largest, RECENT_LINES), None)),
+        };
+    };
+    if largest < had {
+        return HistoryPlan {
+            forget: true,
+            fetch: Some((newest(largest, RECENT_LINES), None)),
+        };
+    }
+    if largest == had {
+        return HistoryPlan {
+            forget: false,
+            fetch: None,
+        };
+    }
+    let start = newest(largest, catch_up);
+    let fetch = if start <= had.saturating_add(1) {
+        (had + 1, None)
+    } else {
+        (
+            start,
+            Some(LinesGap {
+                after: had,
+                before: start,
+            }),
+        )
+    };
+    HistoryPlan {
+        forget: false,
+        fetch: Some(fetch),
+    }
+}
+
+/// The line shown where lines were not fetched.
+#[must_use]
+pub fn shown_gap(gap: LinesGap) -> String {
+    format!(
+        "{} lines not fetched ({} to {})",
+        gap.before - gap.after - 1,
+        gap.after + 1,
+        gap.before - 1
+    )
 }
 
 /// The name of the room of an address of a room, `http://host:port/rooms/<name>`:
@@ -144,6 +243,30 @@ impl<T> Shown<T> {
         self.held.clear();
     }
 
+    /// The number of the newest line shown, if any.
+    #[must_use]
+    pub fn last(&self) -> Option<u64> {
+        self.last
+    }
+
+    /// Before the FETCH of a session whose viewer showed lines up to `had`
+    /// on the session before (`lastHad` of `@xmoq/chat`).
+    #[must_use]
+    pub fn fetching_after(had: Option<u64>) -> Self {
+        Self {
+            fetching: true,
+            held: BTreeMap::new(),
+            last: had,
+        }
+    }
+
+    /// The room was numbered anew ([`history_to_fetch`]): what was shown
+    /// says nothing of the numbers from now on.
+    pub fn forget(&mut self) {
+        self.last = None;
+        self.held.clear();
+    }
+
     /// A line of the FETCH: shown unless one with its number or a later
     /// one was.
     pub fn fetched(&mut self, number: u64, line: T) -> Option<(u64, T)> {
@@ -199,20 +322,45 @@ mod tests {
         }
     }
 
+    /// The rows of `fixtures/chat-history/`, which `@xmoq/chat` reads as
+    /// well.
     #[test]
-    fn the_joining_fetch_reaches_back_sixteen_lines() {
-        // (the Group of the Joining Location; the Group the FETCH starts with)
-        let cases = [
-            (None, None),
-            (Some(0), Some(0)),
-            (Some(3), Some(0)),
-            (Some(15), Some(0)),
-            (Some(16), Some(1)),
-            (Some(100), Some(85)),
-        ];
-        for (largest, start) in cases {
-            assert_eq!(fetch_start(largest), start, "{largest:?}");
+    fn what_is_fetched_for_a_subscription_to_lines() {
+        let rows = include_str!("../../../fixtures/chat-history/history-to-fetch.tsv");
+        let number = |field: &str| (field != "-").then(|| field.parse::<u64>().unwrap());
+        let mut read = 0;
+        for row in rows.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [name, had, largest, catch_up, forget, start, after, before] = fields[..] else {
+                panic!("a row of eight fields: {row}");
+            };
+            let gap = match (number(after), number(before)) {
+                (Some(after), Some(before)) => Some(LinesGap { after, before }),
+                _ => None,
+            };
+            let expected = HistoryPlan {
+                forget: forget == "yes",
+                fetch: number(start).map(|start| (start, gap)),
+            };
+            assert_eq!(
+                history_to_fetch(number(had), number(largest), catch_up.parse().unwrap()),
+                expected,
+                "{name}"
+            );
+            read += 1;
         }
+        assert_eq!(read, 14);
+    }
+
+    #[test]
+    fn a_gap_says_which_lines_were_not_fetched() {
+        assert_eq!(
+            shown_gap(LinesGap {
+                after: 50,
+                before: 52
+            }),
+            "1 lines not fetched (51 to 51)"
+        );
     }
 
     #[test]
@@ -317,6 +465,17 @@ mod tests {
             .collect();
         numbers.extend(shown.fetch_ended().into_iter().map(|(n, ())| n));
         assert_eq!(numbers, [5, 6, 7]);
+    }
+
+    #[test]
+    fn a_session_after_another_goes_on_from_what_was_shown() {
+        let mut shown = Shown::fetching_after(Some(5));
+        assert_eq!(shown.fetched(5, ()), None);
+        assert_eq!(shown.fetched(6, ()), Some((6, ())));
+        // Numbered anew: what was shown says nothing any more.
+        shown.forget();
+        assert_eq!(shown.last(), None);
+        assert_eq!(shown.fetched(2, ()), Some((2, ())));
     }
 
     #[test]
