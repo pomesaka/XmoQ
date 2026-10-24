@@ -102,7 +102,7 @@ export type PublishingState =
 	| { type: "failed"; error: unknown };
 
 export interface KeepPublishingOptions {
-	/** Makes a connection; called anew for every session, with the GOAWAY that ended the one before (as `KeepPlayingOptions.connect`). */
+	/** Makes a connection; called anew for every session, with the last GOAWAY that ended one (as `KeepPlayingOptions.connect`). */
 	connect(goAway?: GoAwayNotice): Promise<MoqtConnection>;
 	trackNamespace: Uint8Array[];
 	/** The tracks of the namespace. **They go on between sessions**: the encoders are the caller's and are not stopped here. */
@@ -135,14 +135,12 @@ export function keepPublishing(options: KeepPublishingOptions): Promise<void> {
 	type Over =
 		| { type: "session-ended"; close: SessionClose }
 		| { type: "moved"; goAway: GoAwayNotice };
-	/** The GOAWAY that ended the session before, for the next `connect`. */
+	/** The last GOAWAY that ended a session, for every `connect` until another comes (as `keepPlaying`). */
 	let movedBy: GoAwayNotice | undefined;
 	const pause = createMovePause();
 	return keepSession<Over>({
 		async run() {
-			const goAway = movedBy;
-			movedBy = undefined;
-			const connection = await options.connect(goAway);
+			const connection = await options.connect(movedBy);
 			const stop = (): void => connection.close();
 			signal.addEventListener("abort", stop, { once: true });
 			try {
@@ -299,9 +297,13 @@ export interface KeepPlayingOptions<E> {
 	 * Makes a connection; called anew for every session, so that a caller
 	 * can ask anew where the broadcast is. Undefined where there is nothing
 	 * to connect to now: it is asked again after the pause. `goAway` is the
-	 * GOAWAY that ended the session before: transport §10.4 has "The client
-	 * MUST use this URI for the new session if provided" (`newSessionUri`,
-	 * empty where the current one is reused).
+	 * last GOAWAY that ended a session: transport §10.4 has "The client MUST
+	 * use this URI for the new session if provided" (`newSessionUri`, empty
+	 * where the current one is reused). **It stays the same for every try
+	 * until another GOAWAY comes**, also after a session or a try on the new
+	 * URI failed. WHY: the relay that sent it is going away and refuses what
+	 * comes (`GOING_AWAY`); a viewer that went back to it after one failure
+	 * at the new URI was left there (an interop run, 2026-10-24).
 	 */
 	connect(goAway?: GoAwayNotice): Promise<MoqtConnection | undefined>;
 	/**
@@ -369,14 +371,12 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 		| { type: "session-ended"; close: SessionClose }
 		| { type: "moved"; goAway: GoAwayNotice }
 		| { type: "playing-ended"; end: E };
-	/** The GOAWAY that ended the session before, for the next `connect`. */
+	/** The last GOAWAY that ended a session, for every `connect` until another comes (`KeepPlayingOptions.connect`). */
 	let movedBy: GoAwayNotice | undefined;
 	const pause = createMovePause();
 	return keepSession<Over>({
 		async run() {
-			const goAway = movedBy;
-			movedBy = undefined;
-			const connection = await options.connect(goAway);
+			const connection = await options.connect(movedBy);
 			if (connection === undefined) return { type: "nothing-to-play" };
 			/** Resolved when what was played ended for a GOAWAY on its stream. */
 			let trackMoved: (notice: GoAwayNotice) => void = () => {};

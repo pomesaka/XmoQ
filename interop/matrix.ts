@@ -1467,6 +1467,31 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			],
 			relay,
 		})),
+		// moqtail's relay sends GOAWAY to every session at SIGTERM, naming the
+		// URI of its --redirect-uri: here the own relay, which `video.ts`
+		// starts on the run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET.
+		...(relays.includes("moqtail")
+			? [
+					{
+						name: "moqtail relay: goaway: moqtail's relay is sent SIGTERM and sends GOAWAY, and the own pages that publish and play move to the relay it names and go on",
+						script: "video.ts" as const,
+						args: ["--video", "goaway-from-moqtail"],
+						relay: "moqtail",
+					},
+					{
+						name: "moqtail relay: goaway: the viewer comes to the relay it names before the publisher, is refused there, and tries that relay again and plays",
+						script: "video.ts" as const,
+						args: ["--video", "goaway-from-moqtail-viewer-first"],
+						relay: "moqtail",
+					},
+					{
+						name: "moqtail relay: goaway: moqtail's relay is sent SIGTERM and sends GOAWAY, and own-rust, which subscribes, takes it and leaves with 0",
+						script: "video.ts" as const,
+						args: ["--video", "goaway-from-moqtail-rust"],
+						relay: "moqtail",
+					},
+				]
+			: []),
 		...(relays.includes("own")
 			? [
 					{

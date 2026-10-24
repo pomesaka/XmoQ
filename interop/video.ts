@@ -240,17 +240,54 @@
 //     - Whether the encoder gave a `description` is said, and not judged:
 //       none is sent, and whether one is to be is undecided.
 //
+//   goaway-from-moqtail, goaway-from-moqtail-viewer-first, goaway-from-moqtail-rust
+//                 Through moqtail's relay (relay@0.15.0), started with
+//                 `--redirect-uri` naming the own relay on the run's port
+//                 plus `MOQLIVEMOCK_SIDE_PORT_OFFSET`. Once the clients
+//                 play, moqtail's relay is sent SIGTERM: it sends every
+//                 session a GOAWAY on the control stream with that URI, a
+//                 Timeout of 10,000 ms and Request ID 0, refuses new
+//                 requests with GOING_AWAY, and exits after 10 s
+//                 (`apps/relay/src/server.rs`, `broadcast_goaway`). Written
+//                 before the first run:
+//
+//     - `goaway-from-moqtail`: a page publishes the bars with
+//       `keepPublishing` and another plays them with `keepPlaying`. **Both
+//       move to the own relay** (states `moved https://127.0.0.1:<port>`,
+//       then `publishing 2` and `playing 2`) **and the viewer shows 25
+//       frames on each session**, in order, as in `reconnect`. Each closes
+//       its session with moqtail's relay with NO_ERROR before (the own
+//       relay is not told that; moqtail's log is not read).
+//     - `goaway-from-moqtail-viewer-first`: the same, with the publishing
+//       page waiting 3 s before it connects after the GOAWAY. The viewer
+//       comes to the own relay first, is refused there (state `failed`
+//       after `moved`), **tries the own relay again and not moqtail's**, and
+//       plays once the publisher is there.
+//     - `goaway-from-moqtail-rust`: own-rust subscribes to the bars of the
+//       publishing page and **prints `GOAWAY uri=https://127.0.0.1:<port>
+//       timeout_ms=10000 request_id=0` and leaves with 0**, connecting to
+//       nothing else.
+//     - The terminal viewer is not run so: it reads the catalog with a
+//       Joining FETCH, and moqtail's relay asks a page's publisher for
+//       Group 0 there, where the page's Groups are numbered by the clock;
+//       the FETCH is empty and no catalog comes (2026-10-24, the record of
+//       that day on GOAWAY and moqtail).
+//
 import { parseArgs } from "node:util";
 import {
 	captureGroup,
 	log,
+	MOQLIVEMOCK_SIDE_PORT_OFFSET,
+	NAMESPACE,
 	openConnectedPage,
 	pollFor,
 	type RunContext,
 	runCleanups,
 	spawnMlmsub,
+	spawnRustClient,
 	startMoqlivemockPublisher,
 	startRun,
+	startSecondOwnRelay,
 	stopEverythingOnExit,
 	withTimeout,
 } from "./harness.ts";
@@ -1329,7 +1366,207 @@ async function reconnect(): Promise<string> {
 	return `the relay was stopped and started anew: the publisher published on a second session after ${failed(back.publishing)} tries that failed, and the viewer showed ${first} frames before and ${second} after, after ${failed(back.playing)} tries that failed`;
 }
 
+/** How moqtail's relay@0.15.0 says GOAWAY at SIGTERM: its `DRAIN_TIMEOUT_MS`, and Request ID 0. */
+const MOQTAIL_GOAWAY = { timeoutMs: 10_000, requestId: 0 };
+
+/**
+ * moqtail's relay on the run's port, naming the own relay on the port plus
+ * `MOQLIVEMOCK_SIDE_PORT_OFFSET` in its GOAWAY, and that relay.
+ */
+async function moqtailThatSendsAway(
+	clients: Parameters<typeof startRun>[0]["clients"],
+): Promise<{
+	context: Awaited<ReturnType<typeof startRun>>;
+	second: Awaited<ReturnType<typeof startSecondOwnRelay>>;
+}> {
+	const second = await startSecondOwnRelay(
+		String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+	);
+	const context = await startRun({
+		relay: "moqtail",
+		port: options.port,
+		clients,
+		verbose: options.verbose,
+		relayArgs: ["--redirect-uri", second.url],
+	});
+	return { context, second };
+}
+
+/**
+ * `viewerFirst`: the publishing page waits 3 s before it connects after the
+ * GOAWAY, so that the viewer comes to the new relay first, is refused there
+ * and tries again: it is to try the new relay again, not the one that sent
+ * the GOAWAY (that order failed in CI once, with the GOAWAY handed to the
+ * next `connect` alone).
+ */
+async function goAwayFromMoqtail(viewerFirst: boolean): Promise<string> {
+	const { context, second } = await moqtailThatSendsAway(["own-browser"]);
+	const publisher = await openConnectedPage(
+		context,
+		"publisher",
+		"own-browser",
+	);
+	const viewer = await openConnectedPage(context, "viewer", "own-browser");
+	const kept = async (): Promise<PageKeptReport> => {
+		const [published, played] = await Promise.all([
+			withTimeout(
+				publisher.evaluate(() => window.xmoqOwn.keptReport()),
+				"the publisher's report",
+			),
+			withTimeout(
+				viewer.evaluate(() => window.xmoqOwn.keptReport()),
+				"the viewer's report",
+			),
+		]);
+		return {
+			publishing: published.publishing,
+			playing: played.playing,
+			shown: played.shown,
+		};
+	};
+	const until = (
+		what: string,
+		reached: (report: PageKeptReport) => boolean,
+	): Promise<PageKeptReport> =>
+		pollFor(async () => {
+			const report = await kept();
+			return reached(report) ? report : undefined;
+		}, what);
+	const shownOn = (report: PageKeptReport, session: number): number =>
+		report.shown.filter((each) => each.session === session).length;
+
+	await withTimeout(
+		publisher.evaluate(
+			([url, hash, namespace, setup]) =>
+				window.xmoqOwn.keepVideoPublished(url, hash, namespace, setup),
+			[
+				context.relayUrl,
+				context.certSha256Hex,
+				PAGE_NAMESPACE,
+				{
+					...BARS,
+					mapping: "stream-per-group",
+					...(viewerFirst ? { moveDelayMs: 3000 } : {}),
+				},
+			] satisfies [string, string, string, PageVideoSetup],
+		),
+		"the page to begin publishing",
+	);
+	await until("the publisher to publish on its first session", (report) =>
+		report.publishing.includes("publishing 1"),
+	);
+	await withTimeout(
+		viewer.evaluate(
+			([url, hash, namespace, name, codec]) =>
+				window.xmoqOwn.keepVideoPlayed(url, hash, namespace, name, codec),
+			[
+				context.relayUrl,
+				context.certSha256Hex,
+				PAGE_NAMESPACE,
+				BARS.trackName,
+				BARS.catalogCodec,
+			] satisfies [string, string, string, string, string],
+		),
+		"the page to begin playing",
+	);
+	await until(
+		`the viewer to show ${SHOWN_A_SESSION} frames on its first session`,
+		(report) => shownOn(report, 1) >= SHOWN_A_SESSION,
+	);
+
+	context.signalRelay("SIGTERM");
+	const moved = `moved ${second.url}`;
+	const back = await until(
+		`both pages to move to ${second.url} and the viewer to show ${SHOWN_A_SESSION} frames there`,
+		(report) =>
+			report.publishing.includes("publishing 2") &&
+			shownOn(report, 2) >= SHOWN_A_SESSION,
+	);
+	for (const [who, states] of [
+		["publisher", back.publishing],
+		["viewer", back.playing],
+	] as const) {
+		if (!states.includes(moved)) {
+			throw new Error(
+				`the ${who} was to be moved by moqtail's GOAWAY to ${second.url}: ${JSON.stringify(states)}`,
+			);
+		}
+	}
+	// The order this run is for: the viewer tried the new relay before the
+	// publisher was there, failed, and tried it again.
+	const afterTheMove = back.playing.slice(back.playing.indexOf(moved));
+	if (viewerFirst && !afterTheMove.includes("failed")) {
+		throw new Error(
+			`the viewer was to come to ${second.url} before the publisher and fail there first: ${JSON.stringify(back.playing)}`,
+		);
+	}
+	const first = checkShown(back, 1);
+	const after = checkShown(back, 2);
+	return `moqtail's relay sent GOAWAY at SIGTERM, naming the own relay; ${viewerFirst ? "the publisher came 3 s after the viewer; " : ""}both pages moved there (publisher: ${back.publishing.join(", ")}; viewer: ${back.playing.join(", ")}), and the viewer showed ${first} frames before and ${after} after`;
+}
+
+async function goAwayFromMoqtailRust(): Promise<string> {
+	const { context, second } = await moqtailThatSendsAway([
+		"own-browser",
+		"own-rust",
+	]);
+	const publisher = await openConnectedPage(
+		context,
+		"publisher",
+		"own-browser",
+	);
+	await withTimeout(
+		publisher.evaluate(
+			([url, hash, namespace, setup]) =>
+				window.xmoqOwn.keepVideoPublished(url, hash, namespace, setup),
+			[
+				context.relayUrl,
+				context.certSha256Hex,
+				NAMESPACE,
+				{ ...BARS, mapping: "stream-per-group" },
+			] satisfies [string, string, string, PageVideoSetup],
+		),
+		"the page to begin publishing",
+	);
+	await pollFor(
+		async () =>
+			(
+				await publisher.evaluate(() => window.xmoqOwn.keptReport())
+			).publishing.includes("publishing 1")
+				? true
+				: undefined,
+		"the publisher to publish on its first session",
+	);
+	const rust = spawnRustClient(
+		context,
+		"client:own-rust",
+		"own-rust",
+		"subscribe",
+		BARS.trackName,
+		["--objects", "100000", "--timeout-secs", "60"],
+	);
+	await rust.waitForLine(/^OBJECT /);
+	context.signalRelay("SIGTERM");
+	const [line] = await rust.waitForLine(
+		new RegExp(
+			`^GOAWAY uri=${second.url.replaceAll(".", "\\.")} timeout_ms=${MOQTAIL_GOAWAY.timeoutMs} request_id=${MOQTAIL_GOAWAY.requestId}$`,
+		),
+	);
+	const code = await withTimeout(rust.exited, "own-rust to leave");
+	if (code !== 0) throw new Error(`own-rust was to leave with 0, not ${code}`);
+	// WHY its own lines and not the own relay's: the publishing page moves
+	// there as well.
+	const connected = rust.matches(/^CONNECTED /).length;
+	if (connected !== 1) {
+		throw new Error(`own-rust was to connect once, not ${connected} times`);
+	}
+	return `own-rust took moqtail's GOAWAY at SIGTERM (${line}) and left with 0`;
+}
+
 const CASES: Record<string, () => Promise<string>> = {
+	"goaway-from-moqtail": () => goAwayFromMoqtail(false),
+	"goaway-from-moqtail-viewer-first": () => goAwayFromMoqtail(true),
+	"goaway-from-moqtail-rust": goAwayFromMoqtailRust,
 	audio,
 	"late-viewer": lateViewer,
 	"late-viewer-new-group": lateViewerNewGroup,

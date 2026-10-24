@@ -841,8 +841,14 @@ window.xmoqOwn = {
 			}, 1000 / setup.framerate);
 			void keepPublishing({
 				// As `keepVideoPlayed`: to the URI of a GOAWAY where it named one.
-				connect: (goAway) =>
-					connectAnew(goAway?.newSessionUri || relayUrl, certSha256Hex),
+				async connect(goAway) {
+					if (goAway !== undefined && setup.moveDelayMs !== undefined) {
+						await new Promise((resolve) =>
+							setTimeout(resolve, setup.moveDelayMs),
+						);
+					}
+					return connectAnew(goAway?.newSessionUri || relayUrl, certSha256Hex);
+				},
 				trackNamespace,
 				tracks: [encoder.publisher],
 				delayMs: KEPT_DELAY_MS,

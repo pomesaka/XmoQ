@@ -570,6 +570,8 @@ export interface RunContext {
 	verbose: boolean;
 	/** Stops the relay. Its sessions end, and its port is free. */
 	stopRelay(): Promise<void>;
+	/** Sends the relay a signal and does not wait for it to exit: moqtail's relay sends GOAWAY to every session at SIGTERM and exits 10 s later. */
+	signalRelay(signal: "SIGTERM"): void;
 	/** Starts the relay anew on the same port, with the same certificate; `relay` is the new one from then on. */
 	startRelayAnew(): Promise<void>;
 }
@@ -630,6 +632,9 @@ export async function startRun(setup: {
 		pages,
 		verbose: setup.verbose,
 		stopRelay: () => stopProcess(relay, "SIGINT"),
+		signalRelay(signal) {
+			relay.child.kill(signal);
+		},
 		async startRelayAnew() {
 			relay = startRelay();
 			context.relay = relay;
@@ -637,6 +642,21 @@ export async function startRun(setup: {
 		},
 	};
 	return context;
+}
+
+/**
+ * A second relay, the own one, on `port` and with the certificate of the
+ * run: where a GOAWAY of the run's relay sends its clients. Stopped by
+ * `runCleanups`.
+ */
+export async function startSecondOwnRelay(
+	port: string,
+): Promise<{ url: string; relay: RelayLog }> {
+	const config = relayNamed("own");
+	const relay = spawnLogged("relay:second", config.binary, config.args(port));
+	defer(() => stopProcess(relay, "SIGINT"));
+	await relay.waitForLine(config.ready);
+	return { url: `https://127.0.0.1:${port}`, relay };
 }
 
 const QUIET_PEER_BINARY = join(
@@ -699,6 +719,9 @@ export async function startQuietPeer(setup: {
 		verbose: false,
 		// Not a relay: no run stops it and starts it anew.
 		stopRelay: () => Promise.reject(new Error("the quiet peer is not stopped")),
+		signalRelay: () => {
+			throw new Error("the quiet peer is not signalled");
+		},
 		startRelayAnew: () =>
 			Promise.reject(new Error("the quiet peer is not started anew")),
 	};
@@ -805,6 +828,9 @@ export async function startMoqlivemockPublisher(setup: {
 		verbose: setup.verbose,
 		// Not a relay: no run stops it and starts it anew.
 		stopRelay: () => Promise.reject(new Error("mlmpub is not stopped")),
+		signalRelay: () => {
+			throw new Error("mlmpub is not signalled");
+		},
 		startRelayAnew: () =>
 			Promise.reject(new Error("mlmpub is not started anew")),
 	};
