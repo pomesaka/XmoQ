@@ -1886,6 +1886,17 @@ impl Relay {
                 end_location,
                 track_properties,
             } => {
+                if end_of_track && !self.ends_the_track(subscriber, end_location) {
+                    actions.push(Action::StopUpstreamTimer {
+                        session,
+                        request: own,
+                    });
+                    // §10.6: "MALFORMED_TRACK: In response to a FETCH, a
+                    // relay publisher detected the track was malformed".
+                    let malformed = Refusal::code(request_error_code::MALFORMED_TRACK);
+                    let reset = stream_reset_code::MALFORMED_TRACK;
+                    return self.fail_fetch(subscriber, &malformed, reset, actions);
+                }
                 // WHY the timer goes on where no fetch stream has opened yet:
                 // the answer promises one, and a publisher that never opens
                 // it would leave the subscriber waiting with its FETCH_OK for
@@ -1974,6 +1985,23 @@ impl Relay {
             // (`routing.rs`): the FETCH goes on until the publisher ends it.
             _ => {}
         }
+    }
+
+    /// A publisher's `FETCH_OK` with End Of Track 1 for the FETCH of
+    /// `subscriber` said the track ends before `end_location`: whether that
+    /// agrees with what is known of the track (`Track::ends_at`). A track
+    /// the relay does not have is not looked at.
+    fn ends_the_track(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        end_location: Location,
+    ) -> bool {
+        let Some(fetch) = self.fetches.relayed(&subscriber) else {
+            return true;
+        };
+        self.tracks
+            .live_mut(&fetch.track.clone())
+            .is_none_or(|track| track.ends_at(last_location(end_location)))
     }
 
     /// The publisher said `FETCH_OK`: the subscriber gets one with the same
