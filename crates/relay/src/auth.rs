@@ -38,7 +38,6 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ring::hmac;
 use xmoq_moqt::TerminationCode;
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::request_error_code as code;
@@ -46,13 +45,14 @@ use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::token::Token;
 use xmoq_relay_core::{Authorizer, Denied, Operation};
+use xmoq_room_token::{Fault, Grant, RoomKey, namespace_fits};
 
 /// The Setup Option AUTHORIZATION TOKEN (§10.3.1.4).
 const SETUP_AUTHORIZATION_TOKEN: u64 = 0x03;
 
 /// The relay's check of the tokens a room made with `key`.
 pub struct RoomTokens {
-    key: hmac::Key,
+    key: RoomKey,
     /// A client's SETUP has to carry a token as well; not with
     /// `--auth-setup off`.
     setup: bool,
@@ -63,7 +63,7 @@ pub struct RoomTokens {
 impl RoomTokens {
     pub fn new(key: &[u8], setup: bool) -> Self {
         Self {
-            key: hmac::Key::new(hmac::HMAC_SHA256, key),
+            key: RoomKey::new(key),
             setup,
             now: || {
                 SystemTime::now()
@@ -77,28 +77,19 @@ impl RoomTokens {
     /// borne it out: the namespace and the role. Else the code of the
     /// `REQUEST_ERROR` it is turned down with.
     fn read<'a>(&self, token_type: u64, value: &'a [u8]) -> Result<(&'a str, &'a str), u64> {
-        let malformed = code::MALFORMED_AUTH_TOKEN;
         // §10.2.2: "a well-formed Token structure but otherwise invalid
         // AUTHORIZATION TOKEN parameter" is turned down as malformed.
         if token_type != 0 {
-            return Err(malformed);
+            return Err(code::MALFORMED_AUTH_TOKEN);
         }
-        let value = std::str::from_utf8(value).map_err(|_| malformed)?;
-        let (signed, mac) = value.rsplit_once('|').ok_or(malformed)?;
-        let mut fields = signed.split('|');
-        let (Some("v1"), Some(namespace), Some(role), Some(expiry), None) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-        ) else {
-            return Err(malformed);
-        };
-        let expiry: u64 = expiry.parse().map_err(|_| malformed)?;
-        let mac = unhex(mac).ok_or(malformed)?;
-        // Before anything the token says is believed.
-        hmac::verify(&self.key, signed.as_bytes(), &mac).map_err(|_| code::UNAUTHORIZED)?;
+        let Grant {
+            namespace,
+            role,
+            expiry,
+        } = self.key.read(value).map_err(|fault| match fault {
+            Fault::Malformed => code::MALFORMED_AUTH_TOKEN,
+            Fault::NotOfTheKey => code::UNAUTHORIZED,
+        })?;
         if expiry <= (self.now)() {
             return Err(code::EXPIRED_AUTH_TOKEN);
         }
@@ -223,42 +214,10 @@ impl Authorizer for RoomTokens {
     }
 }
 
-/// Whether the namespace a token names, its fields joined with `/`, allows
-/// the namespace `asked`: the same fields, or, where the last field of the
-/// token is `*`, the fields before it, followed by any or none. Field by
-/// field, not as text: `xmoq/chat/*` allows `xmoq/chat` and
-/// `xmoq/chat/blue/a`, and not `xmoq/chatter`. Decided as Q50, for the chat
-/// of a room.
-///
-/// WHY also the namespace before the `*` itself (decided on 2026-10-24): the
-/// gatherer asks for the participants with a `SUBSCRIBE_NAMESPACE` whose
-/// prefix is `xmoq/chat` itself (`crates/chat-tracks`), which is checked as
-/// `sub` of that namespace, and the room's `lines` are a track of
-/// `xmoq/chat/<room>`. WHY NOT one field or more, as `bucket/*` of AWS IAM
-/// and `foo.>` of NATS have it: each of those would take a second token,
-/// whole, for the same grant. WHY NOT a `*` in another field: nothing asks
-/// for it; such a field is the text `*`, as before.
-fn namespace_fits(asked: &TrackNamespace, named: &str) -> bool {
-    let asked: Vec<&[u8]> = asked.fields().iter().map(Vec::as_slice).collect();
-    let named: Vec<&[u8]> = named.split('/').map(str::as_bytes).collect();
-    match named.split_last() {
-        Some((&b"*", before)) => asked.starts_with(before),
-        _ => asked == named,
-    }
-}
-
-/// The bytes a text of hexadecimal digits stands for.
-pub fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len() / 2)
-        .map(|at| u8::from_str_radix(text.get(at * 2..at * 2 + 2)?, 16).ok())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use ring::hmac;
+
     use super::*;
 
     const KEY: &[u8] = b"a key of the room";
@@ -396,41 +355,6 @@ mod tests {
             ),
         ];
         check(cases);
-    }
-
-    #[test]
-    fn a_token_whose_last_field_is_a_star_allows_the_namespaces_under_it() {
-        // (the namespace of the token; the namespace asked; allowed)
-        // A namespace has one field at least (§2.4.1), so `*` alone allows
-        // every one.
-        let cases = [
-            ("xmoq/chat/blue", "xmoq/chat/blue", true),
-            ("xmoq/chat/blue", "xmoq/chat/blue/a", false),
-            ("xmoq/chat/blue/*", "xmoq/chat/blue/a", true),
-            ("xmoq/chat/blue/*", "xmoq/chat/blue/a/b", true),
-            ("xmoq/chat/blue/*", "xmoq/chat/blue", true),
-            ("xmoq/chat/*", "xmoq/chat", true),
-            ("xmoq/chat/*", "xmoq/chatter", false),
-            ("xmoq/chat/blue/*", "xmoq/chat/blueberry/a", false),
-            ("xmoq/chat/blue/*", "xmoq/chat/red/a", false),
-            ("xmoq/chat/blue/*", "xmoq/chat", false),
-            ("*", "xmoq", true),
-            // Elsewhere a star is a field like any other.
-            ("xmoq/*/blue", "xmoq/chat/blue", false),
-            ("xmoq/*/blue", "xmoq/*/blue", true),
-        ];
-        for (named, asked, allowed) in cases {
-            let fields = asked
-                .split('/')
-                .map(|field| field.as_bytes().to_vec())
-                .collect();
-            let asked_namespace = TrackNamespace::new(fields).unwrap();
-            assert_eq!(
-                namespace_fits(&asked_namespace, named),
-                allowed,
-                "{named} {asked}"
-            );
-        }
     }
 
     #[test]

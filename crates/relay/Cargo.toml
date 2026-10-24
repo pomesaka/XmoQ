@@ -12,10 +12,11 @@ workspace = true
 xmoq-moqt = { path = "../moqt" }
 xmoq-moqt-io = { path = "../moqt-io" }
 xmoq-relay-core = { path = "../relay-core" }
+xmoq-room-token = { path = "../room-token" }
 anyhow = "=1.0.100"
-# For the experiment in authorization (src/auth.rs): HMAC-SHA-256. Already built, under quinn.
-ring = "=0.17.14"
 tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
+# The tests sign texts that are no token of the room's form as well.
+ring = "=0.17.14"
 tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "test-util"] }

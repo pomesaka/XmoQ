@@ -155,6 +155,7 @@ impl ChatTracks {
     /// missed between them is fetched (`history_to_fetch`).
     pub async fn begin(
         requests: Requests<'_>,
+        publish_token: Option<&[u8]>,
         connection: &Arc<WtConnection>,
         stops: &StreamStops,
         chat: &Chat,
@@ -168,7 +169,7 @@ impl ChatTracks {
             open_wait_ms,
             ..
         } = requests;
-        let tokens: Vec<Parameter> = token
+        let tokens: Vec<Parameter> = publish_token
             .map(|token| Parameter::AuthorizationToken(token.to_vec()))
             .into_iter()
             .collect();

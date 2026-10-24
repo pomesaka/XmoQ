@@ -127,10 +127,23 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
     })
 }
 
-/// The message that asks a room for a token to watch in a namespace.
+/// What a token of a room allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenRole {
+    /// Watching, and the room's chat lines.
+    Sub,
+    /// The viewer's own chat namespace.
+    Pub,
+}
+
+/// The message that asks a room for a token for `role` in a namespace.
 #[must_use]
-pub fn ask_for_a_token(namespace: &[String]) -> String {
-    json!({"type": "token-for", "role": "sub", "namespace": namespace}).to_string()
+pub fn ask_for_a_token(role: TokenRole, namespace: &[String]) -> String {
+    let role = match role {
+        TokenRole::Sub => "sub",
+        TokenRole::Pub => "pub",
+    };
+    json!({"type": "token-for", "role": role, "namespace": namespace}).to_string()
 }
 
 /// The address of a room's WebSocket, from the address of the room
@@ -292,8 +305,12 @@ mod tests {
     #[test]
     fn what_is_said_to_a_room() {
         assert_eq!(
-            ask_for_a_token(&["xmoq".to_string(), "demo".to_string()]),
+            ask_for_a_token(TokenRole::Sub, &["xmoq".to_string(), "demo".to_string()]),
             r#"{"namespace":["xmoq","demo"],"role":"sub","type":"token-for"}"#
+        );
+        assert_eq!(
+            ask_for_a_token(TokenRole::Pub, &["xmoq".to_string(), "chat".to_string()]),
+            r#"{"namespace":["xmoq","chat"],"role":"pub","type":"token-for"}"#
         );
     }
 

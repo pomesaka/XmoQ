@@ -90,7 +90,7 @@ The binary (`src/bin/xmoq-chat/`): `session.rs` (the requests and the answers on
 
 ## Not done
 
-- **No authorization.** The gatherer sends no token, and nothing checks who announces `xmoq/chat/<room>/<name>`.
+- **Authorization for the demo alone** (Q51, provisional). With `--auth-key-hex <hex>`, the key the relay is given under the same flag, the gatherer makes tokens of the room's form itself (`xmoq-room-token`): `sub` in `xmoq/chat/*` for its SETUP, its SUBSCRIBE_NAMESPACE and its SUBSCRIBEs, `pub` in `xmoq/chat/*` for its PUBLISHes, each made anew for its request and good for 600 s, as the room's. Without the flag it sends no token. A gatherer of a real service would not hold the relay's key. Who may announce `xmoq/chat/<room>/<name>` is the relay's check of the participant's token.
 - **The own relay keeps 256 requests of one session** (`MAX_PEER_REQUESTS` of `xmoq-moqt`): one gatherer follows about 250 participants through it. Ten rooms of a hundred take a gatherer a room (above). Not measured.
 - **A `PUBLISH_OK` with Forward State 0** (§9.5: a relay "MAY respond with PUBLISH_OK in Forward State=0 until there are known subscribers") leaves the room not live for good: its lines wait (64 at the most) and are not sent, and a `REQUEST_UPDATE` with FORWARD 1 is refused as any update that carries more than delivery timeouts, which ends the PUBLISH. The own relay answers with Forward State 1; moqtail's 0.15.0 did in every run here. A FETCH still gets the lines.
 - Lines said while the gatherer is away are lost: it does not FETCH what it missed when it subscribes again.

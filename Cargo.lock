@@ -2465,6 +2465,7 @@ dependencies = [
  "xmoq-chat-tracks",
  "xmoq-moqt",
  "xmoq-moqt-io",
+ "xmoq-room-token",
 ]
 
 [[package]]
@@ -2533,12 +2534,21 @@ dependencies = [
  "xmoq-moqt",
  "xmoq-moqt-io",
  "xmoq-relay-core",
+ "xmoq-room-token",
 ]
 
 [[package]]
 name = "xmoq-relay-core"
 version = "0.0.0"
 dependencies = [
+ "xmoq-moqt",
+]
+
+[[package]]
+name = "xmoq-room-token"
+version = "0.0.0"
+dependencies = [
+ "ring",
  "xmoq-moqt",
 ]
 
