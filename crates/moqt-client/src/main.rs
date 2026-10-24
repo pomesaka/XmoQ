@@ -33,8 +33,9 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
 use xmoq_moqt::session::{
-    FetchStreamOpened, PeerRequest, PeerRequestEvent, PeerRequestId, PeerRequestOpened,
-    RequestEvent, RequestId, RequestState, Role, Session, SubscribedAlias, Transport,
+    ControlEvent, FetchStreamOpened, PeerRequest, PeerRequestEvent, PeerRequestId,
+    PeerRequestOpened, RequestEvent, RequestId, RequestState, Role, Session, SubscribedAlias,
+    Transport,
 };
 
 use xmoq_moqt::{ErrorScope, stream_reset_code};
@@ -856,6 +857,11 @@ fn not_answered(label: &str, waited_ms: u64) -> anyhow::Error {
 /// What a response other than the expected one means for the caller.
 fn refused(what: &str, event: RequestEvent) -> anyhow::Error {
     match event {
+        RequestEvent::Rejected(RequestError { error_code, .. })
+            if error_code == request_error_code::GOING_AWAY =>
+        {
+            GoingAway(what.to_string()).into()
+        }
         RequestEvent::Rejected(RequestError {
             error_code,
             retry_interval,
@@ -2790,7 +2796,9 @@ async fn run_session(
     else {
         return Err(NoSetupInTime(args.waits.setup).into());
     };
-    let peer_setup = session.on_control_message(first?)?;
+    let ControlEvent::Setup(peer_setup) = session.on_control_message(first?)? else {
+        bail!("the session took a first control message that is not SETUP");
+    };
     report::setup_ok(&peer_setup);
 
     let mut client = Client {
@@ -2811,14 +2819,36 @@ async fn run_session(
     // The session inbox is watched for the rest of the session: it reports a
     // closed control stream, a failed stream reader and any further control
     // message, each of which ends the session.
-    let unexpected = tokio::select! {
-        result = client.run_mode() => return result,
+    let later = tokio::select! {
+        result = client.run_mode() => match result {
+            // The GOAWAY behind the refusal, which travels on another
+            // stream and may be read after it. WHY a limit, the time an
+            // answer gets: GOING_AWAY also comes from a peer that received a
+            // GOAWAY (§10.6.2) and sends none. `@xmoq/media` waits the same.
+            Err(error) if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) => {
+                let wait = Duration::from_millis(client.args.waits.answer);
+                match tokio::time::timeout(wait, session_inbox.next_control_message()).await {
+                    Ok(event) => event?,
+                    Err(_) => return Err(error),
+                }
+            }
+            other => return other,
+        },
         event = session_inbox.next_control_message() => event?,
     };
-    // After SETUP no message this crate decodes belongs on the control stream,
-    // so this returns the protocol error to close with.
-    client.session.on_control_message(unexpected)?;
-    bail!("the session accepted a second control message")
+    // A GOAWAY ends the session with NO_ERROR, and its mode with it; any
+    // other message is a protocol error to close with. WHY NOT go on with
+    // the mode, which §3.6 recommends ("waits until there are no more
+    // Established subscriptions before closing"): the mode holds the
+    // session while it runs, and the GOAWAY can be taken only once it has
+    // been dropped. This client connects to one URL and does not move.
+    match client.session.on_control_message(later)? {
+        ControlEvent::GoAway(go_away) => {
+            report::go_away(&go_away);
+            Ok(())
+        }
+        ControlEvent::Setup(_) => bail!("the session accepted a second SETUP"),
+    }
 }
 
 /// The code to close the session with (§3.5): the one the protocol error asks
@@ -2866,6 +2896,19 @@ const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
 /// The peer sent no SETUP in so many milliseconds.
 #[derive(Debug)]
 struct NoSetupInTime(u64);
+
+/// A request refused with `GOING_AWAY` (§10.4): the peer has sent GOAWAY,
+/// which may come after the refusal on the control stream.
+#[derive(Debug)]
+struct GoingAway(String);
+
+impl std::fmt::Display for GoingAway {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} rejected: GOING_AWAY", self.0)
+    }
+}
+
+impl std::error::Error for GoingAway {}
 
 impl std::fmt::Display for NoSetupInTime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -452,6 +452,12 @@ export function createSession(options: SessionOptions = {}): Session {
 		if (closed) throw new Error("the session is closed");
 		return action();
 	};
+	/** As `whileOpen`, for a call that opens a request (§10.4). */
+	const opening = <T>(action: () => T): T =>
+		whileOpen(() => {
+			if (controlStream.peerGoingAway) throw new Error("the peer sent GOAWAY");
+			return action();
+		});
 
 	return {
 		get closed() {
@@ -488,10 +494,10 @@ export function createSession(options: SessionOptions = {}): Session {
 		// §3.3: requests may be sent before the peer's SETUP arrives, so none of
 		// these waits for it.
 		publishNamespace: (request) =>
-			whileOpen(() => requests.publishNamespace(request)),
-		publish: (request) => whileOpen(() => requests.publish(request)),
-		subscribe: (request) => whileOpen(() => requests.subscribe(request)),
-		fetch: (request) => whileOpen(() => requests.fetch(request)),
+			opening(() => requests.publishNamespace(request)),
+		publish: (request) => opening(() => requests.publish(request)),
+		subscribe: (request) => opening(() => requests.subscribe(request)),
+		fetch: (request) => opening(() => requests.fetch(request)),
 		acceptSubscribe: (requestId, answer) =>
 			whileOpen(() => requests.acceptSubscribe(requestId, answer)),
 		rejectPeerRequest: (requestId, errorCode, errorReason) =>

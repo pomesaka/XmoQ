@@ -778,6 +778,14 @@ export interface ServeHandlers {
 	fetch?(request: PeerFetch): void;
 }
 
+/** What a GOAWAY of the peer said (§10.4). */
+export interface GoAwayNotice {
+	/** Where to continue; empty where the current URI is reused. */
+	newSessionUri: string;
+	/** Milliseconds the peer waits before it closes the session; 0 for no particular time. */
+	timeoutMs: number;
+}
+
 export interface MoqtConnection {
 	/**
 	 * Says how the requests the peer opens are answered, from the next one
@@ -790,6 +798,16 @@ export interface MoqtConnection {
 	readonly peerSetupOptions: readonly KeyValuePair[];
 	/** Resolves once the session has ended, with how. Never rejects. */
 	readonly closed: Promise<SessionClose>;
+	/**
+	 * Resolves when the peer sends GOAWAY (§10.4), and never where it does
+	 * not. From then on the requests below reject with an `Error` and send
+	 * nothing ("SHOULD NOT initiate new requests to the peer"); what is open
+	 * goes on. Where to go, and when to close this session, is the caller's:
+	 * §3.6 has the client connect anew, to `newSessionUri` where it is not
+	 * empty, and close this session with NO_ERROR once nothing it subscribed
+	 * to is left.
+	 */
+	readonly goAway: Promise<GoAwayNotice>;
 	/**
 	 * The three requests reject with `RequestFailedError`,
 	 * `RequestAbortedError` or `SessionClosedError`.
@@ -1075,6 +1093,7 @@ export async function connectOver(
 	let sessionClose: SessionClose | undefined;
 	const closed = deferred<SessionClose>();
 	const peerSetup = deferred<KeyValuePair[]>();
+	const goAway = deferred<GoAwayNotice>();
 	// The session can end before anything awaits this promise; the failure is
 	// reported by the `await` below when it is reached, and by `closed`.
 	peerSetup.promise.catch(() => {});
@@ -2016,6 +2035,14 @@ export async function connectOver(
 			case "setup":
 				peerSetup.resolve(event.setupOptions);
 				return undefined;
+			case "go-away":
+				goAway.resolve({
+					newSessionUri: event.newSessionUri,
+					// WHY no bound: a time in milliseconds that is past what a
+					// Number holds whole is no time anybody waits for.
+					timeoutMs: Number(event.timeout),
+				});
+				return undefined;
 			case "publish-namespace-ok":
 				pendingNamespaces.get(event.requestId)?.resolve();
 				pendingNamespaces.delete(event.requestId);
@@ -2409,6 +2436,7 @@ export async function connectOver(
 		},
 		peerSetupOptions,
 		closed: closed.promise,
+		goAway: goAway.promise,
 		publishNamespace(trackNamespace, parameters) {
 			return request(pendingNamespaces, parameters, (s) =>
 				s.publishNamespace({

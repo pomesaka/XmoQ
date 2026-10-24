@@ -9,7 +9,7 @@ use xmoq_moqt::Error as MoqtError;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
 use xmoq_moqt::fetch::{FetchObject, RangeEnd};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
-use xmoq_moqt::message::{PublishDone, Setup};
+use xmoq_moqt::message::{GoAway, PublishDone, Setup};
 use xmoq_moqt::name::Location;
 
 use xmoq_moqt_io::{Direction, RequestClose};
@@ -22,6 +22,17 @@ pub fn connected(url: &str) {
 
 pub fn setup_ok(peer_setup: &Setup) {
     println!("SETUP_OK server_setup={peer_setup:?}");
+}
+
+pub fn go_away(go_away: &GoAway) {
+    println!(
+        "GOAWAY uri={} timeout_ms={} request_id={}",
+        String::from_utf8_lossy(&go_away.new_session_uri),
+        go_away.timeout_ms,
+        go_away
+            .request_id
+            .map_or("none".to_string(), |id| id.to_string())
+    );
 }
 
 /// The track `--catalog-video` chose.

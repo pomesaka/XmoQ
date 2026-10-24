@@ -12,5 +12,8 @@ Variable-length integers are those of §1.4.1: `80 fa` is 250 and `81 f4` is 500
 | `subscribe-subgroup-delivery-timeout-moqtail-ts` | The same with `[new SubgroupDeliveryTimeout(500n)]` | The same without OBJECT_DELIVERY_TIMEOUT |
 | `request-update-subgroup-delivery-timeout-moqtail-ts` | moqtail npm 0.13.0, `new RequestUpdate(2n, [new SubgroupDeliveryTimeout(250n)]).serialize()`, run with Bun on 2026-10-12 | REQUEST_UPDATE, Request ID 2, SUBGROUP_DELIVERY_TIMEOUT = 250 |
 | `request-update-no-subgroup-delivery-timeout-moqtail-ts` | The same with `new SubgroupDeliveryTimeout(0n)` | REQUEST_UPDATE, Request ID 2, SUBGROUP_DELIVERY_TIMEOUT = 0 (§8: no timeout) |
+| `goaway-new-session-uri-moqtail-ts` | moqtail npm 0.13.0, `new GoAway("https://relay.example:4443/", 5000n, 3n).serialize()`, run with Bun on 2026-10-24 | GOAWAY, New Session URI `https://relay.example:4443/` (27 bytes), Timeout 5000, Request ID 3 |
+| `goaway-same-uri-moqtail-ts` | The same with `new GoAway(undefined, 0n, 1n)` | GOAWAY, an empty New Session URI (the current URI is reused), Timeout 0, Request ID 1 |
+| `goaway-request-stream-moqtail-ts` | The same with `new GoAway("https://relay.example:4443/", 2000n)`, which leaves the Request ID out, as on a request stream | GOAWAY, New Session URI `https://relay.example:4443/`, Timeout 2000, no Request ID |
 
 The parameters come out in ascending order of their types whatever order the library is given them in (seen with the two swapped), as §10.2 asks.

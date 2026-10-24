@@ -22,20 +22,12 @@ const PUBLISH_NAMESPACE: u64 = 0x06;
 const REQUEST_OK: u64 = 0x07;
 const PUBLISH_DONE: u64 = 0x0b;
 const PUBLISH: u64 = 0x1d;
+/// GOAWAY (§10.4).
+pub(crate) const GOAWAY: u64 = 0x10;
 
 /// Types Table 5 defines and this crate does not decode. Receiving one ends the
 /// session with `INTERNAL_ERROR`, although the peer did nothing wrong.
-///
-/// FIXME: decode GOAWAY and hand it to the caller. A relay may send it at any
-/// time (§10.4) and it does not touch the state of any request, so ending the
-/// session over it is the worst of these.
-const UNSUPPORTED: &[u64] = &[
-    NAMESPACE,
-    NAMESPACE_DONE,
-    PUBLISH_BLOCKED,
-    GOAWAY,
-    PUBLISH_OK,
-];
+const UNSUPPORTED: &[u64] = &[NAMESPACE, NAMESPACE_DONE, PUBLISH_BLOCKED, PUBLISH_OK];
 /// Requests the draft defines and this crate does not implement. Only their
 /// Request ID is read, so that the request can be answered with `REQUEST_ERROR`
 /// `NOT_SUPPORTED` instead of ending the session.
@@ -44,7 +36,6 @@ const NAMESPACE: u64 = 0x08;
 const TRACK_STATUS: u64 = 0x0d;
 const NAMESPACE_DONE: u64 = 0x0e;
 const PUBLISH_BLOCKED: u64 = 0x0f;
-const GOAWAY: u64 = 0x10;
 const FETCH: u64 = 0x16;
 const FETCH_OK: u64 = 0x18;
 /// Table 5 lists `PUBLISH_OK` as 0x1E, while §10.5 says a PUBLISH is answered
@@ -380,6 +371,50 @@ pub struct PublishDone {
     pub error_reason: ReasonPhrase,
 }
 
+/// The longest New Session URI of a GOAWAY (§10.4): "The maximum length of
+/// the New Session URI is 8,192 bytes. If an endpoint receives a length
+/// exceeding the maximum, it MUST close the session with a
+/// `PROTOCOL_VIOLATION`."
+pub const MAX_NEW_SESSION_URI_LEN: usize = 8_192;
+
+/// GOAWAY (§10.4): the sender means to close the session soon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoAway {
+    /// Where a client continues the session; empty where the current URI is
+    /// reused. A client sends it empty.
+    pub new_session_uri: Vec<u8>,
+    /// How long, in milliseconds, the sender waits before it closes the
+    /// session; 0 for no particular time.
+    pub timeout_ms: u64,
+    /// "The smallest peer Request ID that was not or might not have been
+    /// processed": present exactly on the control stream.
+    pub request_id: Option<u64>,
+}
+
+impl GoAway {
+    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+        let uri_len = reader.length()?;
+        if uri_len > MAX_NEW_SESSION_URI_LEN {
+            return Err(Error::ProtocolViolation("New Session URI longer than 8192 bytes").into());
+        }
+        let new_session_uri = reader.bytes(uri_len)?.to_vec();
+        let timeout_ms = reader.varint()?;
+        // WHY by what is left: the Request ID is the last field and is there
+        // only on the control stream, which the payload does not say; the
+        // Message Length bounds it.
+        let request_id = if reader.is_empty() {
+            None
+        } else {
+            Some(reader.varint()?)
+        };
+        Ok(Self {
+            new_session_uri,
+            timeout_ms,
+            request_id,
+        })
+    }
+}
+
 /// Which Objects a FETCH asks for (§10.12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchRange {
@@ -599,6 +634,8 @@ pub enum ControlMessage {
     Fetch(Fetch),
     /// `FETCH_OK`, type 0x18.
     FetchOk(FetchOk),
+    /// GOAWAY, type 0x10.
+    GoAway(GoAway),
     /// A request this crate does not implement: `TRACK_STATUS` (0xD),
     /// `SUBSCRIBE_NAMESPACE` (0x50) or `SUBSCRIBE_TRACKS` (0x51). Only
     /// the Request ID, their first field, is decoded; the rest of the payload
@@ -736,6 +773,17 @@ impl ControlMessage {
                 message.encode_payload(out)?;
                 FETCH_OK
             }
+            Self::GoAway(message) => {
+                if message.new_session_uri.len() > MAX_NEW_SESSION_URI_LEN {
+                    return Err(UsageError("New Session URI longer than 8192 bytes"));
+                }
+                put_length_prefixed(&message.new_session_uri, out);
+                varint::encode(message.timeout_ms, out);
+                if let Some(request_id) = message.request_id {
+                    varint::encode(request_id, out);
+                }
+                GOAWAY
+            }
         })
     }
 }
@@ -750,7 +798,7 @@ fn split_frame<'a>(reader: &mut Reader<'a>) -> ReadResult<(u64, &'a [u8])> {
 fn check_type(ty: u64) -> Result<(), Error> {
     match ty {
         SETUP | REQUEST_UPDATE | SUBSCRIBE | SUBSCRIBE_OK | REQUEST_ERROR | PUBLISH_NAMESPACE
-        | REQUEST_OK | PUBLISH_DONE | PUBLISH | FETCH | FETCH_OK => Ok(()),
+        | REQUEST_OK | PUBLISH_DONE | PUBLISH | FETCH | FETCH_OK | GOAWAY => Ok(()),
         ty if UNSUPPORTED_REQUESTS.contains(&ty) => Ok(()),
         ty if UNSUPPORTED.contains(&ty) => Err(Error::UnsupportedMessageType(ty)),
         // Includes the types Table 5 marks RESERVED (0x01, 0x20, 0x21, 0x40,
@@ -843,6 +891,7 @@ fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage
         }),
         FETCH => ControlMessage::Fetch(Fetch::decode(reader)?),
         FETCH_OK => ControlMessage::FetchOk(FetchOk::decode(reader)?),
+        GOAWAY => ControlMessage::GoAway(GoAway::decode(reader)?),
         ty if UNSUPPORTED_REQUESTS.contains(&ty) => {
             let request_id = reader.varint()?;
             reader.skip_rest();
@@ -1241,7 +1290,60 @@ pub(crate) mod tests {
                     parameters: vec![Parameter::SubgroupDeliveryTimeout(0)],
                 }),
             ),
+            (
+                "goaway-new-session-uri-moqtail-ts",
+                ControlMessage::GoAway(GoAway {
+                    new_session_uri: b"https://relay.example:4443/".to_vec(),
+                    timeout_ms: 5000,
+                    request_id: Some(3),
+                }),
+            ),
+            (
+                "goaway-same-uri-moqtail-ts",
+                ControlMessage::GoAway(GoAway {
+                    new_session_uri: vec![],
+                    timeout_ms: 0,
+                    request_id: Some(1),
+                }),
+            ),
+            (
+                "goaway-request-stream-moqtail-ts",
+                ControlMessage::GoAway(GoAway {
+                    new_session_uri: b"https://relay.example:4443/".to_vec(),
+                    timeout_ms: 2000,
+                    request_id: None,
+                }),
+            ),
         ]
+    }
+
+    /// §10.4: "If an endpoint receives a length exceeding the maximum, it
+    /// MUST close the session with a `PROTOCOL_VIOLATION`."
+    #[test]
+    fn a_new_session_uri_longer_than_8192_bytes_is_a_protocol_violation() {
+        // (URI length, whether it decodes)
+        let cases = [
+            (8_192, Ok(true)),
+            (
+                8_193,
+                Err(Error::ProtocolViolation(
+                    "New Session URI longer than 8192 bytes",
+                )),
+            ),
+        ];
+        for (len, expected) in cases {
+            let mut payload = Vec::new();
+            put_length_prefixed(&vec![b'a'; len], &mut payload);
+            varint::encode(0, &mut payload);
+            varint::encode(1, &mut payload);
+            let mut bytes = Vec::new();
+            varint::encode(GOAWAY, &mut bytes);
+            bytes.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+            bytes.extend_from_slice(&payload);
+            let decoded = ControlMessage::decode(&bytes)
+                .map(|decoded| matches!(decoded, Some((ControlMessage::GoAway(_), _))));
+            assert_eq!(decoded, expected, "{len}");
+        }
     }
 
     pub(crate) fn names_of_files_a_library_wrote() -> Vec<&'static str> {
@@ -1570,9 +1672,13 @@ pub(crate) mod tests {
             (&[0x3f, 0x00, 0x00], Error::UnknownMessageType(0x3f)),
             // An unknown type is refused before its payload arrives.
             (&[0x3f], Error::UnknownMessageType(0x3f)),
-            // GOAWAY and the PUBLISH_OK of Table 5 are in the draft, not in this crate.
-            (&[0x10, 0x00, 0x00], Error::UnsupportedMessageType(0x10)),
+            // The PUBLISH_OK of Table 5 is in the draft, not in this crate.
             (&[0x1e, 0x00, 0x00], Error::UnsupportedMessageType(0x1e)),
+            // A GOAWAY without its Timeout.
+            (
+                &[0x10, 0x00, 0x01, 0x00],
+                Error::ProtocolViolation("length is shorter than the fields it holds"),
+            ),
             // SUBSCRIBE_OK whose length covers one byte more than its fields: the
             // extra byte is read as a truncated Track Property.
             (

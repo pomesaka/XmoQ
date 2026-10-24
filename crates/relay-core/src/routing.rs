@@ -868,6 +868,12 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
+        // §10.4: "Upon receiving a GOAWAY on the control stream, an
+        // endpoint SHOULD NOT initiate new requests to the peer". It is passed
+        // over as a publisher that is not there.
+        if state.moqt.peer_going_away() {
+            return Err(request_error_code::DOES_NOT_EXIST);
+        }
         if state.own_requests() >= MAX_OWN_REQUESTS_PER_SESSION {
             return Err(request_error_code::EXCESSIVE_LOAD);
         }

@@ -64,6 +64,34 @@ const FILES: { file: string; message: ControlMessage }[] = [
 			parameters: { subgroupDeliveryTimeout: 0n },
 		},
 	},
+	// GOAWAY (§10.4), which the same package serializes and no peer of the
+	// interop runs sends. The last has no Request ID, as on a request stream.
+	{
+		file: "goaway-new-session-uri-moqtail-ts",
+		message: {
+			type: "GOAWAY",
+			newSessionUri: "https://relay.example:4443/",
+			timeout: 5000n,
+			requestId: 3n,
+		},
+	},
+	{
+		file: "goaway-same-uri-moqtail-ts",
+		message: {
+			type: "GOAWAY",
+			newSessionUri: "",
+			timeout: 0n,
+			requestId: 1n,
+		},
+	},
+	{
+		file: "goaway-request-stream-moqtail-ts",
+		message: {
+			type: "GOAWAY",
+			newSessionUri: "https://relay.example:4443/",
+			timeout: 2000n,
+		},
+	},
 ];
 
 test("every file a library wrote is read here", () => {

@@ -104,6 +104,43 @@ describe("Session", () => {
 		},
 	);
 
+	// §10.4: "Upon receiving a GOAWAY on the control stream, an endpoint
+	// SHOULD NOT initiate new requests to the peer", and "The GOAWAY message
+	// does not impact subscription state".
+	test("a GOAWAY is reported, opens no request after it, and leaves what is open", () => {
+		const session = subscribed();
+		expect(
+			said(
+				session.receivePeerUniStreamData(
+					0,
+					hex("af 00 00 00 10 00 03 00 00 02"),
+					false,
+				),
+			),
+		).toEqual([
+			{ type: "event", event: { type: "setup", setupOptions: [] } },
+			{
+				type: "event",
+				event: { type: "go-away", newSessionUri: "", timeout: 0n },
+			},
+		]);
+		expect(() => session.subscribe({ ...TRACK, trackName: utf8("b") })).toThrow(
+			"the peer sent GOAWAY",
+		);
+		expect(() =>
+			session.publishNamespace({ trackNamespace: NAMESPACE }),
+		).toThrow("the peer sent GOAWAY");
+		expect(
+			said(
+				session.receivePeerUniStreamData(
+					4,
+					hex("14 09 00 00 00 00 01 61"),
+					true,
+				),
+			),
+		).toEqual([OBJECT_ON_ALIAS_9]);
+	});
+
 	test("subscribes with the bytes the moqtail crate sends and reads the relay's answers", () => {
 		const session = started();
 
@@ -1360,10 +1397,32 @@ describe("Session", () => {
 			fin: true,
 			code: 3,
 		},
+		// §10.4, a GOAWAY on the control stream.
 		{
-			name: "GOAWAY, not implemented",
+			name: "a GOAWAY without a Request ID",
 			on: "peer-uni",
 			bytes: "af 00 00 00 10 00 02 00 00",
+			fin: false,
+			code: 3,
+		},
+		{
+			name: "a GOAWAY with the odd Request ID of a server",
+			on: "peer-uni",
+			bytes: "af 00 00 00 10 00 03 00 00 01",
+			fin: false,
+			code: 4,
+		},
+		{
+			name: "a second GOAWAY",
+			on: "peer-uni",
+			bytes: "af 00 00 00 10 00 03 00 00 02 10 00 03 00 00 02",
+			fin: false,
+			code: 3,
+		},
+		{
+			name: "a GOAWAY on a request stream, not implemented",
+			on: "subscribe",
+			bytes: "10 00 02 00 00",
 			fin: false,
 			code: 1,
 		},

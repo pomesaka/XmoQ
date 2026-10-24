@@ -840,7 +840,9 @@ window.xmoqOwn = {
 				painted += 1;
 			}, 1000 / setup.framerate);
 			void keepPublishing({
-				connect: () => connectAnew(relayUrl, certSha256Hex),
+				// As `keepVideoPlayed`: to the URI of a GOAWAY where it named one.
+				connect: (goAway) =>
+					connectAnew(goAway?.newSessionUri || relayUrl, certSha256Hex),
 				trackNamespace,
 				tracks: [encoder.publisher],
 				delayMs: KEPT_DELAY_MS,
@@ -848,7 +850,9 @@ window.xmoqOwn = {
 					const said =
 						state.type === "publishing"
 							? `publishing ${state.session}`
-							: state.type;
+							: state.type === "moved"
+								? `moved ${state.goAway.newSessionUri}`
+								: state.type;
 					kept.publishing.push(said);
 					console.log(
 						`kept publishing: ${said}${state.type === "failed" ? ` ${errorText(state.error)}` : ""}`,
@@ -879,7 +883,10 @@ window.xmoqOwn = {
 				},
 			});
 			void keepPlaying({
-				connect: () => connectAnew(relayUrl, certSha256Hex),
+				// §10.4: "The client MUST use this URI for the new session if
+				// provided"; the certificate is the one of the run.
+				connect: (goAway) =>
+					connectAnew(goAway?.newSessionUri || relayUrl, certSha256Hex),
 				async play(connection) {
 					const playback = await playVideoTrack(connection, {
 						trackNamespace: namespaceTuple(namespace),
@@ -893,7 +900,11 @@ window.xmoqOwn = {
 				onState(state) {
 					if (state.type === "playing") session = state.session;
 					const said =
-						state.type === "playing" ? `playing ${state.session}` : state.type;
+						state.type === "playing"
+							? `playing ${state.session}`
+							: state.type === "moved"
+								? `moved ${state.goAway.newSessionUri}`
+								: state.type;
 					kept.playing.push(said);
 					console.log(
 						`kept playing: ${said}${state.type === "failed" ? ` ${errorText(state.error)}` : ""}`,

@@ -986,6 +986,11 @@ impl Relay {
             .values()
             .filter(|own| own.subscriber.0 == subscriber.0)
             .count();
+        // §10.4: no new request to a peer that sent GOAWAY, as for a
+        // SUBSCRIBE of the relay (`Relay::ask`).
+        if state.moqt.peer_going_away() {
+            return Err(request_error_code::DOES_NOT_EXIST);
+        }
         // The relay's FETCH and SUBSCRIBE requests share the publisher's
         // session, and its patience.
         if state.own_requests() >= MAX_OWN_REQUESTS_PER_SESSION

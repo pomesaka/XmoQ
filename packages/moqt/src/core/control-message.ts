@@ -163,8 +163,23 @@ export interface FetchOk {
 	trackProperties: KeyValuePair[];
 }
 
+/** GOAWAY (§10.4): the sender means to close the session soon. */
+export interface GoAway {
+	type: "GOAWAY";
+	/** Where a client continues the session; empty where the current URI is reused. */
+	newSessionUri: string;
+	/** Milliseconds the sender waits before it closes the session; 0 for no particular time. */
+	timeout: bigint;
+	/**
+	 * "The smallest peer Request ID that was not or might not have been
+	 * processed": present exactly on the control stream.
+	 */
+	requestId?: bigint;
+}
+
 export type ControlMessage =
 	| Setup
+	| GoAway
 	| RequestUpdate
 	| Subscribe
 	| SubscribeOk
@@ -191,6 +206,7 @@ const MESSAGE_TYPES: Record<MessageName, bigint> = {
 	FETCH: 0x16n,
 	FETCH_OK: 0x18n,
 	PUBLISH: 0x1dn,
+	GOAWAY: 0x10n,
 };
 
 /**
@@ -207,10 +223,6 @@ const UNIMPLEMENTED_MESSAGE_TYPES = {
 	TRACK_STATUS: 0xdn,
 	NAMESPACE_DONE: 0xen,
 	PUBLISH_BLOCKED: 0xfn,
-	// FIXME: GOAWAY is a legitimate message (§10.4) and closing the session on
-	// it turns a planned migration into an error. Decode it and report it to
-	// the application.
-	GOAWAY: 0x10n,
 	PUBLISH_OK: 0x1en,
 	SUBSCRIBE_NAMESPACE: 0x50n,
 	SUBSCRIBE_TRACKS: 0x51n,
@@ -285,6 +297,12 @@ const REDIRECT = 0x34n;
 
 /** §1.4.4 */
 const MAX_REASON_PHRASE_LENGTH = 1024;
+/**
+ * §10.4: "The maximum length of the New Session URI is 8,192 bytes. If an
+ * endpoint receives a length exceeding the maximum, it MUST close the session
+ * with a PROTOCOL_VIOLATION."
+ */
+const MAX_NEW_SESSION_URI_LENGTH = 8192;
 /** Message Length is a 16-bit field (§10). */
 const MAX_MESSAGE_PAYLOAD_LENGTH = 0xffff;
 
@@ -480,6 +498,23 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 			const parameters = decodeMessageParameters(reader, name);
 			return { type: name, requestId, range, parameters };
 		}
+		case "GOAWAY": {
+			const uriLength = reader.varint();
+			if (uriLength > BigInt(MAX_NEW_SESSION_URI_LENGTH)) {
+				throw protocolViolation(
+					`New Session URI of ${uriLength} bytes, longer than ${MAX_NEW_SESSION_URI_LENGTH}`,
+				);
+			}
+			const newSessionUri = utf8Decoder.decode(reader.take(Number(uriLength)));
+			const timeout = reader.varint();
+			// WHY by what is left: the Request ID is the last field and is there
+			// only on the control stream, which the payload does not say; the
+			// Message Length bounds it. The Rust implementation reads it the same.
+			if (reader.remaining === 0) {
+				return { type: name, newSessionUri, timeout };
+			}
+			return { type: name, newSessionUri, timeout, requestId: reader.varint() };
+		}
 		case "FETCH_OK": {
 			const endOfTrack = decodeEndOfTrack(reader.uint8());
 			const endLocation = decodeLocation(reader);
@@ -594,6 +629,28 @@ export function drainControlMessages(
 }
 
 /**
+ * `drainControlMessages` for a request stream. §10.4: "A GOAWAY MAY also be
+ * sent on a request stream to initiate migration of that individual request."
+ *
+ * FIXME: move the request: send it again to the URI, or to this session where
+ * there is none, and end it here. Until then the session ends with
+ * INTERNAL_ERROR, as for a message this package does not implement; the Rust
+ * implementation does the same.
+ */
+export function drainRequestMessages(
+	buffer: Uint8Array,
+	data: Uint8Array,
+	onMessage: (message: ControlMessage) => void,
+): Uint8Array {
+	return drainControlMessages(buffer, data, (message) => {
+		if (message.type === "GOAWAY") {
+			throw new NotImplementedError("GOAWAY on a request stream");
+		}
+		onMessage(message);
+	});
+}
+
+/**
  * Reads the start of the first message on a bidirectional stream the peer
  * opened: its Message Type and its Request ID. Every message a request stream
  * can begin with has Request ID as its first field (Figures 10, 13, 17 and
@@ -703,6 +760,17 @@ function encodePayload(writer: ByteWriter, message: ControlMessage): void {
 			encodeFetchRange(writer, message.range);
 			encodeMessageParameters(writer, message.parameters, message.type);
 			break;
+		case "GOAWAY": {
+			const uri = utf8Encoder.encode(message.newSessionUri);
+			if (uri.length > MAX_NEW_SESSION_URI_LENGTH) {
+				throw new RangeError(
+					`New Session URI exceeds ${MAX_NEW_SESSION_URI_LENGTH} bytes`,
+				);
+			}
+			writer.varint(uri.length).bytes(uri).varint(message.timeout);
+			if (message.requestId !== undefined) writer.varint(message.requestId);
+			break;
+		}
 		case "FETCH_OK":
 			writer.uint8(message.endOfTrack ? 1 : 0);
 			encodeLocation(writer, message.endLocation);

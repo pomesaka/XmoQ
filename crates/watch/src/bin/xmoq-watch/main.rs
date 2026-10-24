@@ -30,9 +30,9 @@ use tokio::sync::mpsc;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::kvp::KeyValuePair;
-use xmoq_moqt::message::setup_option;
+use xmoq_moqt::message::{GoAway, setup_option};
 use xmoq_moqt::name::TrackNamespace;
-use xmoq_moqt::session::{Role, Session, Transport};
+use xmoq_moqt::session::{ControlEvent, Role, Session, Transport};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
     Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
@@ -50,7 +50,9 @@ use crate::picture::{
     Frame, LINES, MOST_COUNTED, MOST_FRAMES_WAITING, Picture, Screen, Seen, Under,
 };
 use crate::room_socket::{Heard, RoomSocket};
-use crate::session::{NotSubscribed, Requests, Sent, Subscription, timestamp_of};
+use crate::session::{
+    GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, timestamp_of,
+};
 use crate::sound::{Sound, Volume, micros_since};
 use crate::video_decoder::VideoDecoder;
 
@@ -256,6 +258,9 @@ enum Ended {
     Quit,
     /// The broadcast ended or moved: the room says what comes next.
     Again,
+    /// The relay sent GOAWAY (§3.6): the viewer connects again, to the URL
+    /// it named, or to the same one where it named none.
+    Moved(Option<String>),
 }
 
 /// Where one broadcast is played from.
@@ -381,10 +386,19 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     let follows = room.is_some();
     let mut first = true;
     let mut tried: Option<Instant> = None;
+    // Where the last relay said to go with its GOAWAY.
+    let mut moved_to: Option<String> = None;
     loop {
-        let Some(place) = place(args, &mut room, ui).await? else {
+        let Some(mut place) = place(args, &mut room, ui).await? else {
             return Ok(());
         };
+        // §10.4: "The client MUST use this URI for the new session if
+        // provided." WHY the same certificate hash: the viewer has no other
+        // for it; a relay elsewhere with another certificate turns the
+        // connection down, and the viewer goes on as after any failure.
+        if let Some(url) = moved_to.take() {
+            place.url = url;
+        }
         // WHY not at once again: a room that names one broadcast after the
         // other, or one that is gone, would have the viewer connect as fast
         // as it can.
@@ -434,17 +448,21 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
                 // closed because the peer took too long to respond to a
                 // control message." For the SETUP, as `@xmoq/moqt` has it; a
                 // request that is not answered is given up alone, and the
-                // viewer then leaves with NO_ERROR.
-                let no_setup = played
-                    .as_ref()
-                    .is_err_and(anyhow::Error::is::<NoSetupInTime>);
-                connection.close(if no_setup { 0x11 } else { 0 }, b"");
+                // viewer then leaves with NO_ERROR (`termination_code`).
+                connection.close(termination_code(&played), b"");
                 let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
                 played
             }
             Err(error) => Err(error),
         };
         match played {
+            Ok(Ended::Moved(url)) => {
+                ui.note(&format!(
+                    "MOVED {}",
+                    url.as_deref().unwrap_or("to the same URL")
+                ));
+                moved_to = Some(url.unwrap_or_else(|| place.url.clone()));
+            }
             // Without a room nothing says what comes next.
             Ok(Ended::Again) if follows => {}
             Ok(Ended::Quit | Ended::Again) => return Ok(()),
@@ -734,16 +752,34 @@ async fn play(
         let subscribed = subscriptions(args, &mut requests, &mut events, &stops).await?;
         Ok(subscribed)
     };
-    let Some(subscribed) = ui
+    let beginning_ended = ui
         // Each of the three SUBSCRIBEs may be held that much longer.
         .unless_ended(
             "the relay's answers",
             BEGINNING_AT_MOST + Duration::from_millis(args.rendezvous_ms.unwrap_or(0)) * 3,
             beginning,
         )
-        .await?
-    else {
-        return Ok(Ended::Quit);
+        .await;
+    let subscribed = match beginning_ended {
+        Ok(Some(subscribed)) => subscribed,
+        Ok(None) => return Ok(Ended::Quit),
+        Err(error) => {
+            if let Some(GoneAway(go_away)) = error.chain().find_map(|cause| cause.downcast_ref()) {
+                ui.note(&format!("GOAWAY timeout_ms={}", go_away.timeout_ms));
+                return Ok(Ended::Moved(new_url(go_away)));
+            }
+            if error.chain().any(<dyn std::error::Error>::is::<GoingAway>)
+                && let Some(go_away) =
+                    go_away_behind(&mut session, &mut events, args.answer_wait_ms).await?
+            {
+                ui.note(&format!(
+                    "GOAWAY timeout_ms={} after GOING_AWAY",
+                    go_away.timeout_ms
+                ));
+                return Ok(Ended::Moved(new_url(&go_away)));
+            }
+            return Err(error);
+        }
     };
     let Subscribed {
         mut video,
@@ -1055,6 +1091,19 @@ async fn play(
                     failed = Some(error.into());
                     break "the session failed";
                 }
+                // WHY the subscriptions end at once, where §3.6 recommends
+                // waiting until none is Established: the picture would stand
+                // still while the old session ends anyway, and the new one is
+                // opened as soon as this one is closed with NO_ERROR. §10.4:
+                // "A subscriber SHOULD individually UNSUBSCRIBE for each
+                // existing subscription", which leaving `play` does.
+                Some(UniEvent::Control(message)) => {
+                    if let ControlEvent::GoAway(go_away) = session.on_control_message(message)? {
+                        ui.note(&format!("GOAWAY timeout_ms={}", go_away.timeout_ms));
+                        ended = Ended::Moved(new_url(&go_away));
+                        break "the relay sent GOAWAY";
+                    }
+                }
                 Some(other) => bail!("not expected of the relay: {other:?}"),
                 None => {
                     failed = Some(anyhow!("the connection is gone"));
@@ -1083,6 +1132,60 @@ async fn play(
     match failed {
         Some(error) => Err(error),
         None => Ok(ended),
+    }
+}
+
+/// The code to close the session with (§3.5): `CONTROL_MESSAGE_TIMEOUT` for
+/// a SETUP that did not come, the one a protocol error of the relay asks
+/// for (a GOAWAY that breaks the rules of §10.4 among them), and `NO_ERROR`
+/// for everything else, also a request that is given up alone.
+fn termination_code(played: &Result<Ended>) -> u32 {
+    let Err(error) = played else { return 0 };
+    if error.is::<NoSetupInTime>() {
+        return 0x11;
+    }
+    // WHY the chain: `context` wraps the cause.
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
+        .and_then(xmoq_moqt::Error::termination_code)
+        .map_or(0, xmoq_moqt::TerminationCode::code)
+}
+
+/// Where a GOAWAY says to go: its New Session URI, or `None` for the URL of
+/// the session (§10.4: "If the URI is zero bytes long, the current URI is
+/// reused instead").
+fn new_url(go_away: &GoAway) -> Option<String> {
+    (!go_away.new_session_uri.is_empty())
+        .then(|| String::from_utf8_lossy(&go_away.new_session_uri).into_owned())
+}
+
+/// The GOAWAY behind a SUBSCRIBE refused with `GOING_AWAY` (§10.4), which
+/// travels on the control stream and may be read after the refusal; `None`
+/// where none comes within `wait_ms`. WHY a limit, the time an answer gets:
+/// `GOING_AWAY` also comes from a peer that received a GOAWAY (§10.6.2) and
+/// sends none. `@xmoq/media` waits the same.
+async fn go_away_behind(
+    session: &mut Session,
+    events: &mut mpsc::Receiver<UniEvent>,
+    wait_ms: u64,
+) -> Result<Option<GoAway>> {
+    let waiting = async {
+        loop {
+            match events.recv().await {
+                Some(UniEvent::Control(message)) => {
+                    if let ControlEvent::GoAway(go_away) = session.on_control_message(message)? {
+                        return Ok::<_, anyhow::Error>(go_away);
+                    }
+                }
+                Some(_) => {}
+                None => bail!("the connection is gone"),
+            }
+        }
+    };
+    match tokio::time::timeout(Duration::from_millis(wait_ms), waiting).await {
+        Ok(go_away) => Ok(Some(go_away?)),
+        Err(_) => Ok(None),
     }
 }
 

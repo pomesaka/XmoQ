@@ -1143,6 +1143,30 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "none",
 		},
 		{
+			name: "no relay: quiet peer: own-browser closes its session with NO_ERROR at a GOAWAY and connects to the URI it names",
+			script: "quiet-peer.ts",
+			args: ["--case", "goaway", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-browser as a publisher closes its session with NO_ERROR at a GOAWAY and announces on the URI it names",
+			script: "quiet-peer.ts",
+			args: ["--case", "goaway-publisher", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust closes its session with NO_ERROR at a GOAWAY",
+			script: "quiet-peer.ts",
+			args: ["--case", "goaway", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: the terminal viewer closes its session with NO_ERROR at a GOAWAY and connects to the URI it names",
+			script: "quiet-peer.ts",
+			args: ["--case", "goaway", "--client", "xmoq-watch"],
+			relay: "none",
+		},
+		{
 			name: "no relay: quiet peer: own-browser ends a PUBLISH nobody answers with PUBLISH_DONE and a FIN",
 			script: "quiet-peer.ts",
 			args: ["--case", "no-publish-answer", "--client", "own-browser"],

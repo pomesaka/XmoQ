@@ -12,6 +12,12 @@
 //! `--quiet subgroups`: it answers a `PUBLISH_NAMESPACE` and a PUBLISH with
 //! `REQUEST_OK` and allows the client no unidirectional stream beyond its
 //! control stream, so that no subgroup stream can be opened.
+//! `--quiet goaway`: on its first session it refuses every request with
+//! `GOING_AWAY`, and after the first refusal sends a GOAWAY with the New
+//! Session URI `https://127.0.0.1:<port>/moved` (`GOAWAY_SENT session=0
+//! uri=..`). On later
+//! sessions it answers a SUBSCRIBE with `SUBSCRIBE_OK` and sends nothing on
+//! it, and a `PUBLISH_NAMESPACE` with `REQUEST_OK`.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -73,7 +79,7 @@
 //! It prints what it saw, one line each, for a driver to wait for:
 //!
 //! - `LISTENING port=P`
-//! - `SESSION session=N`
+//! - `SESSION session=N path=P`: P is the path the client asked for
 //! - `SETUP_RECEIVED session=N`
 //! - `REQUEST session=N stream=M <the message>`: a message on a request
 //!   stream, `PUBLISH_DONE` among them, with its fields.
@@ -92,8 +98,8 @@ use xmoq_moqt::data::{
 };
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, Fetch, FetchRange, Publish, PublishNamespace, ReasonPhrase, RequestError,
-    RequestOk, Subscribe, setup_option,
+    ControlMessage, Fetch, FetchRange, GoAway, Publish, PublishNamespace, ReasonPhrase,
+    RequestError, RequestOk, Subscribe, SubscribeOk, request_error_code, setup_option,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
@@ -123,6 +129,14 @@ enum Quiet {
     /// its `REQUEST_OK`: a client that announces before it publishes then
     /// comes to its PUBLISH.
     Publish,
+    /// On the first session, every request refused with `GOING_AWAY`, and
+    /// after the first refusal a GOAWAY that names the path `/moved` of this
+    /// peer (§10.4). The next sessions get no
+    /// GOAWAY: a SUBSCRIBE is answered with `SUBSCRIBE_OK`, under the number
+    /// of its stream as the Track Alias, with nothing sent on it, and a
+    /// `PUBLISH_NAMESPACE` with `REQUEST_OK`; other requests are not
+    /// answered.
+    GoAway,
 }
 
 /// What the program is asked to be.
@@ -301,6 +315,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                     "publish" => Quiet::Publish,
                     "streams" => Quiet::Streams,
                     "subgroups" => Quiet::Subgroups,
+                    "goaway" => Quiet::GoAway,
                     other => bail!(
                         "--quiet is setup, requests, publish, streams or subgroups, not {other}"
                     ),
@@ -366,6 +381,7 @@ async fn read_request(
         <WtConnection as Connection>::Send,
         <WtConnection as Connection>::Recv,
     ),
+    refusal: tokio::sync::mpsc::Sender<()>,
 ) {
     let (mut unanswered, recv) = halves;
     let mut reader = RequestReader::new(recv, &Trace::default(), "request");
@@ -387,6 +403,42 @@ async fn read_request(
                     let ok = ControlMessage::RequestOk(RequestOk::default());
                     let _ = send_message(&mut unanswered, &ok, &Trace::default(), "request").await;
                 }
+                if quiet == Quiet::GoAway {
+                    let answer = match &message {
+                        // §10.4: "Requests with a Request ID equal to or
+                        // greater than the indicated value, as well as any
+                        // requests that arrive after the GOAWAY, MUST be
+                        // rejected with REQUEST_ERROR using error code
+                        // GOING_AWAY". The GOAWAY says 0: every request.
+                        _ if session == 0 => Some(ControlMessage::RequestError(RequestError {
+                            error_code: request_error_code::GOING_AWAY,
+                            retry_interval: 0,
+                            error_reason: ReasonPhrase::default(),
+                            redirect: None,
+                        })),
+                        ControlMessage::Subscribe(_) => {
+                            Some(ControlMessage::SubscribeOk(SubscribeOk {
+                                track_alias: stream,
+                                parameters: vec![],
+                                track_properties: vec![],
+                            }))
+                        }
+                        ControlMessage::PublishNamespace(_) => {
+                            Some(ControlMessage::RequestOk(RequestOk::default()))
+                        }
+                        _ => None,
+                    };
+                    let refused = matches!(answer, Some(ControlMessage::RequestError(_)));
+                    if let Some(answer) = answer {
+                        let _ =
+                            send_message(&mut unanswered, &answer, &Trace::default(), "request")
+                                .await;
+                    }
+                    if refused {
+                        // Full: the GOAWAY is under way already.
+                        let _ = refusal.try_send(());
+                    }
+                }
             }
             Ok(RequestStreamEvent::Closed(how)) => {
                 println!("REQUEST_CLOSED session={session} stream={stream} how={how}");
@@ -404,9 +456,15 @@ async fn read_request(
     std::future::pending::<()>().await;
 }
 
-async fn serve(session: u64, connection: WtConnection, quiet: Quiet) -> Result<()> {
+async fn serve(
+    session: u64,
+    connection: WtConnection,
+    quiet: Quiet,
+    port: u16,
+    path: &str,
+) -> Result<()> {
     let connection = Arc::new(connection);
-    println!("SESSION session={session}");
+    println!("SESSION session={session} path={path}");
     let (queue, mut events) = tokio::sync::mpsc::channel(64);
     // WHY one stream is read where no subgroup stream is to have room: a
     // stream that is not taken keeps its place among the streams the
@@ -442,6 +500,9 @@ async fn serve(session: u64, connection: WtConnection, quiet: Quiet) -> Result<(
     }
     let mut requests = tokio::task::JoinSet::new();
     let mut streams = 0u64;
+    // A request of the first session that was refused with GOING_AWAY.
+    let (refusal, mut refused) = tokio::sync::mpsc::channel::<()>(1);
+    let mut went_away = false;
     let end = loop {
         tokio::select! {
             end = connection.closed() => break end,
@@ -450,9 +511,28 @@ async fn serve(session: u64, connection: WtConnection, quiet: Quiet) -> Result<(
                     println!("SETUP_RECEIVED session={session}");
                 }
             }
+            // WHY after the first refusal and not before it: the client then
+            // reads the refusal first, as it may from a relay, since QUIC keeps
+            // no order between the two streams, and has to wait for the
+            // GOAWAY behind it.
+            Some(()) = refused.recv(), if quiet == Quiet::GoAway && !went_away => {
+                went_away = true;
+                if let Some(stream) = control.as_mut() {
+                    let uri = format!("https://127.0.0.1:{port}/moved");
+                    // §10.4: "If no requests have been processed, this is 0
+                    // (at a server)".
+                    let go_away = ControlMessage::GoAway(GoAway {
+                        new_session_uri: uri.clone().into_bytes(),
+                        timeout_ms: 5000,
+                        request_id: Some(0),
+                    });
+                    send_message(stream, &go_away, &Trace::default(), "control").await?;
+                    println!("GOAWAY_SENT session={session} uri={uri}");
+                }
+            }
             halves = connection.accept_bi() => {
                 let Ok(halves) = halves else { continue };
-                requests.spawn(read_request(session, streams, quiet, halves));
+                requests.spawn(read_request(session, streams, quiet, halves, refusal.clone()));
                 streams += 1;
             }
         }
@@ -1220,8 +1300,8 @@ async fn main() -> Result<()> {
         session += 1;
         tokio::spawn(async move {
             match accept(incoming).await {
-                Ok((connection, _asked)) => {
-                    if let Err(error) = serve(number, connection, quiet).await {
+                Ok((connection, asked)) => {
+                    if let Err(error) = serve(number, connection, quiet, port, &asked.path).await {
                         println!("SESSION_FAILED session={number} {error:#}");
                     }
                 }

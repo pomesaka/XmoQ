@@ -19,9 +19,9 @@ pub use crate::aliases::SubscribedAlias;
 use crate::aliases::SubscribedAliases;
 use crate::kvp::KeyValuePair;
 use crate::message::{
-    ControlMessage, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError, RequestOk,
-    RequestUpdate, Setup, Subscribe, SubscribeOk, publish_done_status, request_error_code,
-    setup_option,
+    ControlMessage, GoAway, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError,
+    RequestOk, RequestUpdate, Setup, Subscribe, SubscribeOk, publish_done_status,
+    request_error_code, setup_option,
 };
 use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
@@ -244,6 +244,19 @@ pub enum RequestEvent {
     LateMessage,
 }
 
+/// What a message on the peer's control stream was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlEvent {
+    /// The peer's SETUP, the first message.
+    Setup(Setup),
+    /// The peer's GOAWAY (§10.4): it means to close the session. The session
+    /// opens no request after it (§10.4: "Upon receiving a GOAWAY on the
+    /// control stream, an endpoint SHOULD NOT initiate new requests to the
+    /// peer"); what is open stays as it is ("The GOAWAY message does not
+    /// impact subscription state"). Where to go next is the caller's.
+    GoAway(GoAway),
+}
+
 /// The state of one MOQT session, as far as the endpoint that opens requests
 /// needs it: the SETUP exchange, Request IDs, Track Aliases and open requests.
 #[derive(Debug)]
@@ -252,6 +265,8 @@ pub struct Session {
     transport: Transport,
     setup_sent: bool,
     peer_setup_received: bool,
+    /// Whether the peer sent GOAWAY on its control stream.
+    peer_going_away: bool,
     next_request_id: u64,
     /// Requests that are Pending or Established, by Request ID.
     requests: HashMap<u64, Request>,
@@ -279,6 +294,7 @@ impl Session {
             transport,
             setup_sent: false,
             peer_setup_received: false,
+            peer_going_away: false,
             // §10.1: the client uses even Request IDs from 0, the server odd from 1.
             next_request_id: first_request_id(role),
             requests: HashMap::new(),
@@ -334,21 +350,32 @@ impl Session {
         self.setup_sent && self.peer_setup_received
     }
 
-    /// Feeds a message read from the peer's control stream and returns the
-    /// peer's SETUP.
+    /// Whether the peer sent GOAWAY on its control stream. Requests are not
+    /// opened after it.
+    #[must_use]
+    pub fn peer_going_away(&self) -> bool {
+        self.peer_going_away
+    }
+
+    /// Feeds a message read from the peer's control stream: its SETUP first,
+    /// and a GOAWAY after it.
     ///
     /// # Errors
     ///
     /// A protocol error when the first message is not SETUP, when the SETUP holds
-    /// an option its sender may not use, or for any message after the SETUP. The
-    /// session then has to be closed with [`Error::termination_code`].
-    pub fn on_control_message(&mut self, message: ControlMessage) -> Result<Setup, Error> {
+    /// an option its sender may not use, for a GOAWAY that breaks a rule of
+    /// §10.4, and for any other message after the SETUP. The session then has
+    /// to be closed with [`Error::termination_code`].
+    pub fn on_control_message(&mut self, message: ControlMessage) -> Result<ControlEvent, Error> {
         if self.peer_setup_received {
-            // After SETUP only GOAWAY belongs on a control stream (Table 5), and
-            // the decoder does not produce it.
-            return Err(Error::ProtocolViolation(
-                "message not allowed on the control stream",
-            ));
+            // After SETUP only GOAWAY belongs on a control stream (Table 5).
+            let ControlMessage::GoAway(go_away) = message else {
+                return Err(Error::ProtocolViolation(
+                    "message not allowed on the control stream",
+                ));
+            };
+            self.on_go_away(&go_away)?;
+            return Ok(ControlEvent::GoAway(go_away));
         }
         let ControlMessage::Setup(setup) = message else {
             return Err(Error::ProtocolViolation(
@@ -370,7 +397,34 @@ impl Session {
         // unknown options MUST be allowed. Message Parameters are different:
         // §10.2 tells receivers to check them.
         self.peer_setup_received = true;
-        Ok(setup)
+        Ok(ControlEvent::Setup(setup))
+    }
+
+    /// The rules §10.4 sets for a GOAWAY on the control stream.
+    fn on_go_away(&mut self, go_away: &GoAway) -> Result<(), Error> {
+        // "The endpoint MUST close the session with a PROTOCOL_VIOLATION if
+        // it receives more than one GOAWAY on the control stream".
+        if self.peer_going_away {
+            return Err(Error::ProtocolViolation("a second GOAWAY"));
+        }
+        // "If a server receives a GOAWAY with a non-zero New Session URI
+        // Length it MUST close the session with a PROTOCOL_VIOLATION."
+        if self.role == Role::Server && !go_away.new_session_uri.is_empty() {
+            return Err(Error::ProtocolViolation("a GOAWAY of a client with a URI"));
+        }
+        // "Request ID: Present only when sent on the control stream." WHY a
+        // violation where it is missing: without it the receiver cannot tell
+        // which of its requests the peer took (§10.4).
+        let Some(request_id) = go_away.request_id else {
+            return Err(Error::ProtocolViolation("a GOAWAY without a Request ID"));
+        };
+        // "If the parity of the Request ID does not match the receiver's
+        // parity, the endpoint MUST close the session with INVALID_REQUEST_ID."
+        if request_id % 2 != first_request_id(self.role) {
+            return Err(Error::InvalidRequestId(request_id));
+        }
+        self.peer_going_away = true;
+        Ok(())
     }
 
     /// Opens a subscription to a track. Returns the handle of the request and the
@@ -538,6 +592,9 @@ impl Session {
         message: ControlMessage,
     ) -> Result<RequestEvent, RequestFault> {
         self.check_own(request)?;
+        if matches!(message, ControlMessage::GoAway(_)) {
+            return Err(go_away_on_a_request_stream().into());
+        }
         Ok(self.on_own_request_message(request, message)?)
     }
 
@@ -822,6 +879,9 @@ impl Session {
     }
 
     fn open(&mut self, request: Request) -> Result<RequestId, UsageError> {
+        if self.peer_going_away {
+            return Err(UsageError("the peer sent GOAWAY"));
+        }
         let request_id = self.next_request_id;
         self.next_request_id = request_id
             .checked_add(2)
@@ -892,6 +952,16 @@ impl Session {
         let first = first_request_id(self.role);
         request.0 < self.next_request_id && request.0 % 2 == first
     }
+}
+
+/// A GOAWAY on a request stream (§10.4: "A GOAWAY MAY also be sent on a
+/// request stream to initiate migration of that individual request").
+///
+/// FIXME: move the request: send it again to the URI, or to this session
+/// where there is none, and end it here. Until then the session ends with
+/// `INTERNAL_ERROR`, as for a message this crate does not implement.
+fn go_away_on_a_request_stream() -> Error {
+    Error::UnsupportedMessageType(crate::message::GOAWAY)
 }
 
 fn first_request_id(role: Role) -> u64 {
@@ -1188,7 +1258,7 @@ mod tests {
         };
         assert_eq!(
             session.on_control_message(ControlMessage::Setup(peer_setup.clone())),
-            Ok(peer_setup.clone())
+            Ok(ControlEvent::Setup(peer_setup.clone()))
         );
         assert!(session.is_established());
         assert_eq!(
@@ -1313,6 +1383,112 @@ mod tests {
         }
     }
 
+    /// A session of `role` that has exchanged SETUP.
+    fn set_up(role: Role) -> Session {
+        let mut session = Session::new(role, Transport::WebTransport);
+        session.setup(vec![]).unwrap();
+        session
+            .on_control_message(ControlMessage::Setup(Setup {
+                setup_options: vec![],
+            }))
+            .unwrap();
+        session
+    }
+
+    fn go_away(new_session_uri: &[u8], request_id: Option<u64>) -> ControlMessage {
+        ControlMessage::GoAway(GoAway {
+            new_session_uri: new_session_uri.to_vec(),
+            timeout_ms: 5000,
+            request_id,
+        })
+    }
+
+    /// §10.4: what a GOAWAY on the control stream may hold.
+    #[test]
+    fn a_goaway_is_taken_by_the_rules_of_its_fields() {
+        let uri: &[u8] = b"https://relay.example/";
+        let empty: &[u8] = b"";
+        // (the receiver's role, New Session URI, Request ID, what the session says)
+        let cases = [
+            (Role::Client, uri, Some(0), Ok(())),
+            (Role::Client, empty, Some(4), Ok(())),
+            (Role::Server, empty, Some(1), Ok(())),
+            (
+                Role::Server,
+                uri,
+                Some(1),
+                Err(Error::ProtocolViolation("a GOAWAY of a client with a URI")),
+            ),
+            (
+                Role::Client,
+                uri,
+                None,
+                Err(Error::ProtocolViolation("a GOAWAY without a Request ID")),
+            ),
+            (Role::Client, uri, Some(1), Err(Error::InvalidRequestId(1))),
+            (
+                Role::Server,
+                empty,
+                Some(2),
+                Err(Error::InvalidRequestId(2)),
+            ),
+        ];
+        for (role, uri, request_id, expected) in cases {
+            let mut session = set_up(role);
+            let taken = session
+                .on_control_message(go_away(uri, request_id))
+                .map(|event| assert!(matches!(event, ControlEvent::GoAway(_))));
+            assert_eq!(taken, expected, "{role:?} {request_id:?}");
+            assert_eq!(
+                session.peer_going_away(),
+                expected.is_ok(),
+                "{role:?} {request_id:?}"
+            );
+        }
+    }
+
+    /// §10.4: "Upon receiving a GOAWAY on the control stream, an endpoint
+    /// SHOULD NOT initiate new requests to the peer", and "MUST close the
+    /// session with a `PROTOCOL_VIOLATION` ... if it receives more than one
+    /// GOAWAY on the control stream".
+    #[test]
+    fn after_a_goaway_no_request_is_opened_and_a_second_goaway_is_a_violation() {
+        let mut session = set_up(Role::Client);
+        let (open, _) = session.subscribe(track(b"before"), vec![]).unwrap();
+        session.on_control_message(go_away(b"", Some(2))).unwrap();
+        assert_eq!(
+            session.subscribe(track(b"after"), vec![]).map(|_| ()),
+            Err(UsageError("the peer sent GOAWAY"))
+        );
+        assert_eq!(
+            session.publish_namespace(namespace(), vec![]).map(|_| ()),
+            Err(UsageError("the peer sent GOAWAY"))
+        );
+        // What was open stays so ("The GOAWAY message does not impact
+        // subscription state").
+        assert_eq!(session.request_state(open), Some(RequestState::Pending));
+        assert_eq!(
+            session.feed(open, subscribe_ok(0, vec![])).map(|_| ()),
+            Ok(())
+        );
+        assert_eq!(
+            session.on_control_message(go_away(b"", Some(2))),
+            Err(Error::ProtocolViolation("a second GOAWAY"))
+        );
+    }
+
+    /// A GOAWAY on a request stream is not taken yet: the session ends as for a
+    /// message this crate does not implement.
+    #[test]
+    fn a_goaway_on_a_request_stream_is_not_implemented() {
+        let mut session = set_up(Role::Client);
+        let (open, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        assert_eq!(
+            session.feed(open, go_away(b"", None)),
+            Err(Error::UnsupportedMessageType(0x10))
+        );
+    }
+
     #[test]
     fn a_received_setup_may_repeat_an_option() {
         let implementation = || KeyValuePair::bytes(0x07, b"relay".to_vec()).unwrap();
@@ -1321,7 +1497,7 @@ mod tests {
         };
         assert_eq!(
             client().on_control_message(ControlMessage::Setup(setup.clone())),
-            Ok(setup)
+            Ok(ControlEvent::Setup(setup))
         );
     }
 

@@ -1,7 +1,7 @@
 import type { Bytes } from "./bytes.ts";
 import {
 	type ControlMessage,
-	drainControlMessages,
+	drainRequestMessages,
 	encodeControlMessage,
 	FETCH_MESSAGE_TYPE,
 	type Fetch,
@@ -1944,7 +1944,7 @@ export function createRequests(options: RequestsOptions): Requests {
 		receiveStreamData(stream, data, fin, out) {
 			const request = requestStreams.get(stream);
 			if (request === undefined) return;
-			request.inbound = drainControlMessages(
+			request.inbound = drainRequestMessages(
 				request.inbound,
 				data,
 				(message) => {
