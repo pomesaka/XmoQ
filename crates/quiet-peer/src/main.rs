@@ -31,6 +31,12 @@
 //! type 0x30, which is no `OBJECT_DATAGRAM` (§11.3.1), and no answer to a
 //! request. `--quiet datagram-before-setup`: the same datagram, and no SETUP,
 //! so that the client has it while it waits for the SETUP.
+//! `--quiet silent-subgroup`: it answers a SUBSCRIBE with `SUBSCRIBE_OK` and
+//! a `PUBLISH_NAMESPACE` with `REQUEST_OK`, and after the `SUBSCRIBE_OK`
+//! opens a subgroup stream of the track, writes its Subgroup Header and
+//! nothing more, and keeps it open until the client stops it
+//! (`SUBGROUP_HEADER_SENT ..`, then `STOP_SENDING_RECEIVED session=N
+//! code=0x.. after_ms=M`). The session stays.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -125,7 +131,7 @@ use xmoq_moqt::session::{Role, Session, Transport};
 use xmoq_moqt_io::wt::{Congestion, QuicLimits, WtConnection, WtServer, accept};
 use xmoq_moqt_io::{
     Connection, RecvStream, RequestReader, RequestStreamEvent, SendStream, StreamConfig,
-    StreamStops, Trace, UniEvent, read_uni_streams, send_message,
+    StreamStops, Trace, UniEvent, WriteError, read_uni_streams, send_message,
 };
 
 /// What the peer leaves out.
@@ -179,6 +185,12 @@ enum Quiet {
     /// is no `OBJECT_DATAGRAM` (§11.3.1), and no answer to a request: the
     /// client is to close the session while it waits for one.
     Datagram,
+    /// A SUBSCRIBE is answered with `SUBSCRIBE_OK`, under the number of its
+    /// stream as the Track Alias, and a `PUBLISH_NAMESPACE` with
+    /// `REQUEST_OK`; after the `SUBSCRIBE_OK`, a subgroup stream of that
+    /// alias with its Subgroup Header and nothing after it, kept open until
+    /// the client stops it.
+    SilentSubgroup,
 }
 
 /// What the program is asked to be.
@@ -422,8 +434,9 @@ fn quiet_of(value: &str) -> Result<Quiet> {
         "request-id-again" => Quiet::PeerRequestIdAgain,
         "datagram" => Quiet::Datagram,
         "datagram-before-setup" => Quiet::DatagramBeforeSetup,
+        "silent-subgroup" => Quiet::SilentSubgroup,
         other => bail!(
-            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity, request-id-again, datagram or datagram-before-setup, not {other}"
+            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity, request-id-again, datagram, datagram-before-setup or silent-subgroup, not {other}"
         ),
     })
 }
@@ -475,6 +488,7 @@ async fn read_request(
     ),
     refusal: tokio::sync::mpsc::Sender<()>,
     port: u16,
+    connection: Arc<WtConnection>,
 ) {
     let (mut unanswered, recv) = halves;
     let mut reader = RequestReader::new(recv, &Trace::default(), "request");
@@ -527,6 +541,16 @@ async fn read_request(
                         println!("REQUEST_GOAWAY_SENT session={session} stream={stream} uri={uri}");
                     }
                 }
+                if quiet == Quiet::SilentSubgroup {
+                    if let Some(answer) = an_answer_that_plays(&message, stream) {
+                        let _ =
+                            send_message(&mut unanswered, &answer, &Trace::default(), "request")
+                                .await;
+                    }
+                    if matches!(message, ControlMessage::Subscribe(_)) {
+                        say_nothing_on_a_subgroup(&connection, session, stream).await;
+                    }
+                }
                 if quiet == Quiet::GoAway {
                     let answer = match &message {
                         // §10.4: "Requests with a Request ID equal to or
@@ -568,6 +592,42 @@ async fn read_request(
     // a client reads as the end of the request, and the half is to stay as
     // it is until the session is gone.
     std::future::pending::<()>().await;
+}
+
+/// Opens a subgroup stream under `track_alias`, writes its Subgroup Header
+/// and nothing after it (`SUBGROUP_HEADER_SENT session=N track_alias=A`),
+/// and keeps it open until the client stops it: then it prints the code and
+/// how long after the header that was (`STOP_SENDING_RECEIVED session=N
+/// code=0x.. after_ms=M`, `code=none` where it carried none).
+async fn say_nothing_on_a_subgroup(connection: &WtConnection, session: u64, track_alias: u64) {
+    let Ok(mut send) = connection.open_uni().await else {
+        return;
+    };
+    let header = SubgroupHeader {
+        track_alias,
+        group_id: 0,
+        subgroup_id: SubgroupId::Zero,
+        publisher_priority: Some(0),
+        properties: false,
+        end_of_group: false,
+        first_object: true,
+    };
+    if send
+        .write_all(&SubgroupStreamEncoder::new(&header).take_bytes())
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let began = tokio::time::Instant::now();
+    println!("SUBGROUP_HEADER_SENT session={session} track_alias={track_alias}");
+    if let WriteError::Stopped(code) = send.stopped().await {
+        let code = code.map_or_else(|| "none".to_string(), |code| format!("{code:#x}"));
+        println!(
+            "STOP_SENDING_RECEIVED session={session} code={code} after_ms={}",
+            began.elapsed().as_millis()
+        );
+    }
 }
 
 /// Sends the client a SUBSCRIBE with `request_id` for the track `t` of
@@ -717,7 +777,7 @@ async fn serve(
             }
             halves = connection.accept_bi() => {
                 let Ok(halves) = halves else { continue };
-                requests.spawn(read_request(session, streams, quiet, halves, refusal.clone(), port));
+                requests.spawn(read_request(session, streams, quiet, halves, refusal.clone(), port, Arc::clone(&connection)));
                 streams += 1;
             }
         }

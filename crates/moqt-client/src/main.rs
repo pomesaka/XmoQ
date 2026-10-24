@@ -42,8 +42,9 @@ use xmoq_moqt::session::{
 use xmoq_moqt::{ErrorScope, stream_reset_code};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, ConnectionEnd, Direction, PeerRequestStreamEvent, RequestClose, RequestStreamEvent,
-    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
+    Connection, ConnectionEnd, Direction, IdleSubgroupStreamTimeout, PeerRequestStreamEvent,
+    RequestClose, RequestStreamEvent, SendStream, StreamConfig, StreamEnd, StreamStops, Trace,
+    UniEvent,
 };
 
 use crate::fetching::{BodyEnd, Fetches, Happened, Note, Reading, StreamEnded, Tell};
@@ -120,8 +121,8 @@ struct Args {
     /// catalog it reads there.
     catalog_video: bool,
     timeout_secs: u64,
-    /// `--answer-wait-ms`, `--setup-wait-ms`, `--open-wait-ms` and
-    /// `--rendezvous-timeout-ms`.
+    /// `--answer-wait-ms`, `--setup-wait-ms`, `--open-wait-ms`,
+    /// `--rendezvous-timeout-ms` and `--idle-subgroup-stream-ms`.
     waits: Waits,
     /// `--new-group-request`, `--dynamic-groups`.
     new_groups: NewGroups,
@@ -663,6 +664,11 @@ struct Waits {
     /// publisher to appear. 0, and without the flag: the parameter is left
     /// out.
     rendezvous: u64,
+    /// `--idle-subgroup-stream-ms`: how long a subgroup stream of the peer
+    /// may send nothing after its header while it is read
+    /// ([`xmoq_moqt_io::IdleSubgroupStreamTimeout`]). Then it alone is
+    /// stopped with `INTERNAL_ERROR`.
+    idle_subgroup_stream: IdleSubgroupStreamTimeout,
 }
 
 impl Default for Waits {
@@ -672,6 +678,7 @@ impl Default for Waits {
             setup: SETUP_WAIT_MS,
             open: STREAM_OPEN_WAIT_MS,
             rendezvous: 0,
+            idle_subgroup_stream: IdleSubgroupStreamTimeout::default(),
         }
     }
 }
@@ -679,6 +686,13 @@ impl Default for Waits {
 impl Waits {
     /// Takes the flag where it is one of these.
     fn read(&mut self, flag: &str, value: &str) -> Result<bool> {
+        if flag == "--idle-subgroup-stream-ms" {
+            self.idle_subgroup_stream =
+                IdleSubgroupStreamTimeout::from_millis(millis(flag, value)?).with_context(
+                    || format!("{flag} is from 1 to {}", IdleSubgroupStreamTimeout::MAX_MS),
+                )?;
+            return Ok(true);
+        }
         let wait = match flag {
             "--answer-wait-ms" => &mut self.answer,
             "--setup-wait-ms" => &mut self.setup,
@@ -2911,6 +2925,7 @@ async fn run_session(
         stops.clone(),
         serve,
         args.answer_delay,
+        args.waits.idle_subgroup_stream,
     );
     kept.readers = Some(readers);
 
@@ -3183,6 +3198,32 @@ mod tests {
         assert!(first_group_of("now").unwrap() >= now);
         assert!(first_group_of("soon").is_err());
         assert!(first_group_of("-1").is_err());
+    }
+
+    #[test]
+    fn the_idle_time_of_a_subgroup_stream_is_taken_from_1_ms_and_never_0() {
+        // (the value of --idle-subgroup-stream-ms; the time, or None where it
+        //  is refused)
+        let cases: [(&str, Option<Duration>); 5] = [
+            ("1", Some(Duration::from_millis(1))),
+            ("1500", Some(Duration::from_millis(1_500))),
+            ("2147483647", Some(Duration::from_millis(2_147_483_647))),
+            ("0", None),
+            ("2147483648", None),
+        ];
+        for (value, expected) in cases {
+            let mut waits = Waits::default();
+            let read = waits.read("--idle-subgroup-stream-ms", value);
+            assert_eq!(
+                read.ok().map(|_| waits.idle_subgroup_stream.get()),
+                expected,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            Waits::default().idle_subgroup_stream.get(),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]

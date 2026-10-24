@@ -98,6 +98,10 @@ pub struct StreamConfig {
     /// above for as long as the session lasts, and 64 of them would keep every
     /// later stream of the peer from being read.
     pub first_bytes_timeout: Duration,
+    /// How long a subgroup stream of the peer whose Subgroup Header is whole
+    /// may send nothing while it is read; see
+    /// [`IdleSubgroupStreamTimeout`].
+    pub idle_subgroup_stream_timeout: IdleSubgroupStreamTimeout,
     /// Where the raw bytes go.
     pub trace: Trace,
 }
@@ -110,8 +114,54 @@ impl Default for StreamConfig {
             subgroup_buffer_limit: 1024 * 1024,
             session_buffer_limit: 4 * 1024 * 1024,
             first_bytes_timeout: Duration::from_secs(10),
+            idle_subgroup_stream_timeout: IdleSubgroupStreamTimeout::default(),
             trace: Trace::default(),
         }
+    }
+}
+
+/// How long a subgroup stream of the peer whose Subgroup Header is whole may
+/// send nothing, counted from its last bytes (or from its header) and only
+/// while this endpoint waits on a read of it. Then it is stopped with
+/// `INTERNAL_ERROR` and ends as [`StreamEnd::Aborted`] without a code; the
+/// subscription and the session go on. Fetch, control and padding streams do
+/// not have this time. As `idleSubgroupStreamTimeoutMs` of `@xmoq/moqt`
+/// (`docs/moqt-implementation-notes.md`, "A subgroup stream of the peer that
+/// sends nothing after its header"). Provisional.
+///
+/// WHY a time at all: §11.4 and §11.4.3 say nothing of a subgroup stream
+/// left open without bytes, and §13.6 advises timeouts against "a peer that
+/// does not send expected data within an expected time"; without one, such a
+/// stream holds one of the slots of [`StreamConfig::max_uni_streams`] for as
+/// long as the session lasts. WHY only while read: a stream held back by this
+/// endpoint's own queue has not been silent. WHY a type that cannot be zero:
+/// the time can be raised, and not switched off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdleSubgroupStreamTimeout(Duration);
+
+impl IdleSubgroupStreamTimeout {
+    /// The most milliseconds, 2^31 - 1, as `@xmoq/moqt` takes them.
+    pub const MAX_MS: u64 = 2_147_483_647;
+
+    /// The time of `ms` milliseconds, or `None` outside 1 to [`Self::MAX_MS`].
+    #[must_use]
+    pub fn from_millis(ms: u64) -> Option<Self> {
+        (1..=Self::MAX_MS)
+            .contains(&ms)
+            .then(|| Self(Duration::from_millis(ms)))
+    }
+
+    /// The time.
+    #[must_use]
+    pub fn get(self) -> Duration {
+        self.0
+    }
+}
+
+impl Default for IdleSubgroupStreamTimeout {
+    /// 30 seconds.
+    fn default() -> Self {
+        Self(Duration::from_secs(30))
     }
 }
 
@@ -1315,6 +1365,14 @@ async fn read_subgroup_stream<R: RecvStream, T>(
                 limit: budget.limit,
             });
         }
+        // Once the header is whole, the idle time runs from here, for this
+        // read alone: it starts anew for each read, after the bytes of the
+        // last one were put in the queue, so the time a full queue held the
+        // stream back is not counted ([`IdleSubgroupStreamTimeout`]). Before
+        // that, the deadline for the first bytes stays.
+        if decoder.header().is_some() {
+            reader.deadline = Some(Instant::now() + config.idle_subgroup_stream_timeout.get());
+        }
         pushed = match reader.step().await {
             Step::Bytes(len) => decoder.push(reader.received(len)),
             Step::Fin => match decoder.finish() {
@@ -1337,8 +1395,12 @@ async fn read_subgroup_stream<R: RecvStream, T>(
                 close_subgroup(&decoder, stream, StreamEnd::Aborted(None), sink).await;
                 return;
             }
+            // The time for the first bytes, or the idle time after the
+            // header; INTERNAL_ERROR for both, as no code of §3.3.3 is for
+            // it. Only a stream that was announced is reported closed.
             Step::TimedOut => {
                 reader.recv.stop(stream_reset_code::INTERNAL_ERROR);
+                close_subgroup(&decoder, stream, StreamEnd::Aborted(None), sink).await;
                 return;
             }
         };
@@ -1388,8 +1450,9 @@ async fn deliver_decoded<R: RecvStream, T>(
         }
         let event = match decoder.next_event().map_err(Some)? {
             Some(SubgroupEvent::Header(header)) => {
-                // The stream has said what it is; from here on, how long it
-                // stays open is the publisher's business.
+                // The stream has said what it is; from here on it has the
+                // idle time, which `read_subgroup_stream` sets before each
+                // read.
                 reader.deadline = None;
                 UniEvent::SubgroupOpened { stream, header }
             }

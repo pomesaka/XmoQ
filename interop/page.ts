@@ -547,12 +547,16 @@ window.xmoq = {
 			answerTimeoutMs?: number,
 			setupTimeoutMs?: number,
 			openStreamTimeoutMs?: number,
+			idleSubgroupStreamTimeoutMs?: number,
 		) => {
 			connection = await connect(relayUrl, {
 				implementation: "xmoq-moqt/0.0.0",
 				...(answerTimeoutMs === undefined ? {} : { answerTimeoutMs }),
 				...(setupTimeoutMs === undefined ? {} : { setupTimeoutMs }),
 				...(openStreamTimeoutMs === undefined ? {} : { openStreamTimeoutMs }),
+				...(idleSubgroupStreamTimeoutMs === undefined
+					? {}
+					: { idleSubgroupStreamTimeoutMs }),
 				...(maxObjectPayloadLength === undefined
 					? {}
 					: { limits: { maxObjectPayloadLength } }),

@@ -24,10 +24,10 @@ use xmoq_moqt_io::memory::{
     MemoryConnection, MemoryRecv, MemorySend, STREAM_WINDOW, pair, pair_that_delivers_when_told,
 };
 use xmoq_moqt_io::{
-    Connection, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, ReadError, RecvStream,
-    RequestClose, RequestReader, RequestStreamEvent, SendLimits, SendStream, StreamConfig,
-    StreamEnd, StreamStops, Trace, UniEvent, WriteError, open_fetch_stream, read_uni_streams,
-    send_message,
+    Connection, FetchBody, FetchChunk, FetchStreamWriter, IdleSubgroupStreamTimeout,
+    IncomingStreams, ReadError, RecvStream, RequestClose, RequestReader, RequestStreamEvent,
+    SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError,
+    open_fetch_stream, read_uni_streams, send_message,
 };
 use xmoq_relay_core::{Counts, Event, FetchPipeEnd, SessionKey, StreamKey};
 
@@ -117,9 +117,20 @@ impl Peer {
         let stops = StreamStops::default();
         let data = reads.then(|| {
             let (queue, events) = mpsc::channel(64);
+            // WHY the longest idle time: these peers stand for viewers of
+            // the relay, and some tests hold a stream of the relay
+            // undelivered for longer than the default 30 seconds; what a
+            // viewer does with a silent stream is tested in xmoq-moqt-io.
+            let config = StreamConfig {
+                idle_subgroup_stream_timeout: IdleSubgroupStreamTimeout::from_millis(
+                    IdleSubgroupStreamTimeout::MAX_MS,
+                )
+                .unwrap(),
+                ..StreamConfig::default()
+            };
             let readers = read_uni_streams(
                 Arc::clone(&connection),
-                StreamConfig::default(),
+                config,
                 stops.clone(),
                 queue,
                 |event| event,
