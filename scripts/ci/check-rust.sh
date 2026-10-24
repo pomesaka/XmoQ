@@ -13,6 +13,7 @@ if [[ ! -f Cargo.toml ]]; then
 fi
 
 need_alsa_headers
+need_libclang
 
 # WHY --workspace everywhere: spikes/ is excluded from the workspace, so these commands never
 # reach it. Spike crates pin old library versions to reproduce one experiment and are not

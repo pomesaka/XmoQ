@@ -50,6 +50,7 @@ interface Pairing {
 		| "chat-pages.ts"
 		| "chat-tokens.ts"
 		| "agent.ts"
+		| "transcriber.ts"
 		| "rendezvous.ts"
 		| "new-group.ts"
 		| "track-status.ts";
@@ -1374,6 +1375,15 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		{
 			name: "own relay: agent: xmoq-agent writes who joins and leaves and the lines of the chat as JSON, and says its stdin lines in the chat, which a page has",
 			script: "agent.ts",
+			args: [],
+			relay: "own",
+		},
+		// The transcriber through the own relay: a page's voice, read with the
+		// smallest model of whisper.cpp, reaches a reader of the transcript live
+		// and by a FETCH.
+		{
+			name: "own relay: transcriber: a page's voice is read by whisper.cpp and its words reach a reader of the transcript live and by a FETCH",
+			script: "transcriber.ts",
 			args: [],
 			relay: "own",
 		},

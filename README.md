@@ -49,6 +49,11 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [The payloads of the chat's tracks, shared by the implementations](fixtures/chat-tracks/README.md)
 - [When a track is asked for again on the same session, `xmoq-again`](crates/again/README.md)
 - [Serving tracks of one Object a Group and answering FETCH, `xmoq-track-serving`](crates/track-serving/README.md)
+- [The transcriber, `xmoq-transcriber`](crates/transcriber/README.md)
+- [Cutting sound and reading it with whisper.cpp, `xmoq-speech`](crates/speech/README.md)
+- [The tracks of the transcripts, `xmoq-transcript-tracks`](crates/transcript-tracks/README.md)
+- [The payload of a transcript, shared by the implementations](fixtures/transcript-tracks/README.md)
+- [A voice for the transcriber's interop run](fixtures/speech/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
 - [MoQ library candidates](docs/moq-libraries.md)
 - [The audio and video demo: what it does and where it ends](docs/av-demo.md)
@@ -72,6 +77,8 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run demo` | Starts the own relay and a web server; a page publishes video (a painted clock or the camera) and other pages watch it, in Chromium. See [`demo/README.md`](demo/README.md). Outside lint and type checking |
 | `mise run watch -- <flags>` | The viewer for the terminal, `xmoq-watch`: the picture of a broadcast in Ghostty or kitty, its sound, and the chat of its room. `-- --room http://127.0.0.1:8787/rooms/demo` next to `mise run demo`. See [`crates/watch/README.md`](crates/watch/README.md) |
 | `mise run chat -- <flags>` | The gatherer of the chat, `xmoq-chat`: numbers the lines of every room, keeps them in a SQLite file and publishes them as one track a room. See [`crates/chat/README.md`](crates/chat/README.md) |
+| `mise run transcriber -- <flags>` | The transcriber, `xmoq-transcriber`: reads the voices of the broadcasts under a prefix with whisper.cpp and publishes their words as one track a prefix. See [`crates/transcriber/README.md`](crates/transcriber/README.md) |
+| `mise run speech-model [-- <model>]` | Fetches a model of whisper.cpp into `~/.cache/xmoq/whisper/` and checks its sha256. See [`crates/speech/README.md`](crates/speech/README.md) |
 | `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
 | `mise run fmt` | Apply formatting and safe fixes |
 

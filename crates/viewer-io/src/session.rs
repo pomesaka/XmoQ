@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
-use xmoq_moqt::immutable::{Of, searched_properties};
-use xmoq_moqt::kvp::{KeyValuePair, Value};
+use xmoq_moqt::immutable::{Of, searched_integers};
+use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, FetchRange, GoAway, RequestError, request_error_code, setup_option,
 };
@@ -627,19 +627,7 @@ pub fn new_url(go_away: &GoAway) -> Option<String> {
 /// microseconds).
 #[must_use]
 pub fn timestamp_of(object: &SubgroupObject) -> Option<u64> {
-    let timing = loc::read_timing(
-        searched_properties(&object.properties, Of::Object)
-            .iter()
-            .map(|pair| {
-                let value = match pair.value() {
-                    Value::Varint(value) => Some(*value),
-                    Value::Bytes(_) => None,
-                };
-                (pair.ty(), value)
-            }),
-    )
-    .ok()??;
-    timing.timescale.is_none().then_some(timing.timestamp)
+    loc::wall_clock_timestamp(searched_integers(&object.properties, Of::Object))
 }
 
 #[cfg(test)]

@@ -52,6 +52,23 @@ pub fn searched_properties(properties: &[KeyValuePair], of: Of) -> Cow<'_, [KeyV
     }
 }
 
+/// [`searched_properties`] as a format above `MoQ` Transport reads them
+/// (the Timestamp of LOC): each property's type and, for one that carries
+/// an integer, its value; `None` for one that carries bytes.
+#[must_use]
+pub fn searched_integers(properties: &[KeyValuePair], of: Of) -> Vec<(u64, Option<u64>)> {
+    searched_properties(properties, of)
+        .iter()
+        .map(|pair| {
+            let value = match pair.value() {
+                crate::kvp::Value::Varint(value) => Some(*value),
+                crate::kvp::Value::Bytes(_) => None,
+            };
+            (pair.ty(), value)
+        })
+        .collect()
+}
+
 /// The properties §12.7 has a processor search: those without Immutable
 /// Properties, in the order they came, followed by the pairs inside each
 /// Immutable Properties. `Ok(Err(why))` where the Track is malformed (§2.4.2).

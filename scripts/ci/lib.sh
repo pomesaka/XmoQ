@@ -51,3 +51,20 @@ need_alsa_headers() {
 		fail "the headers of ALSA are missing (Debian and Ubuntu: libasound2-dev and pkg-config), which xmoq-watch needs to build"
 	fi
 }
+
+# WHY here and not in the workflow: `xmoq-speech` builds whisper.cpp through `whisper-rs-sys`
+# 0.15.0, whose build script has bindgen 0.72.1 load libclang, and fails without it ("Unable to
+# find libclang", `ensure_libclang_is_loaded`). WHY NOT the bindings the crate carries
+# (`WHISPER_DONT_GENERATE_BINDINGS`): crates/speech/README.md. On macOS libclang is in the
+# Command Line Tools. cmake comes from mise.toml.
+need_libclang() {
+	if [[ "$(uname -s)" != Linux ]] || compgen -G "/usr/lib/llvm-*/lib/libclang*.so*" >/dev/null || ldconfig -p 2>/dev/null | grep -q "libclang"; then
+		return
+	fi
+	if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+		sudo apt-get update
+		sudo apt-get install --yes --no-install-recommends libclang-dev
+	else
+		fail "libclang is missing (Debian and Ubuntu: libclang-dev), which xmoq-speech needs to build whisper.cpp"
+	fi
+}

@@ -56,9 +56,10 @@ import type {
 	PageVideoPublishReport,
 	PageVideoReport,
 	PageVideoSetup,
+	PageVoiceReport,
 	SubscriptionReport,
 } from "./xmoq-page.ts";
-import { BROADCAST, KEPT_DELAY_MS } from "./xmoq-page.ts";
+import { BROADCAST, KEPT_DELAY_MS, VOICE } from "./xmoq-page.ts";
 
 /** Provisional: any value works, the relay maps it to its own alias per subscriber. */
 const PUBLISH_TRACK_ALIAS = 1n;
@@ -690,6 +691,40 @@ let broadcastPublishing:
 			made: number;
 	  }
 	| undefined;
+
+/** What `publishVoice` started. */
+let voicePublishing:
+	| {
+			audio: AudioTrackEncoder;
+			/** Samples of one round: the voice, then the pause. */
+			round: number;
+			/** Pieces of 20 ms made, counted by the timer. */
+			counted: { made: number };
+	  }
+	| undefined;
+
+/**
+ * The samples of `voice` (base64 of 16-bit little-endian samples at 16,000
+ * Hz) at 48,000 Hz: two more between each two, on the line between them.
+ */
+function voiceAt48kHz(voice: string): Float32Array {
+	const bytes = Uint8Array.from(atob(voice), (character) =>
+		character.charCodeAt(0),
+	);
+	const view = new DataView(bytes.buffer);
+	const count = Math.floor(bytes.length / 2);
+	const at = (index: number): number =>
+		view.getInt16(Math.min(index, count - 1) * 2, true) / 32768;
+	const samples = new Float32Array(count * 3);
+	for (let index = 0; index < count; index++) {
+		const from = at(index);
+		const to = at(index + 1);
+		for (let step = 0; step < 3; step++) {
+			samples[index * 3 + step] = from + ((to - from) * step) / 3;
+		}
+	}
+	return samples;
+}
 
 /** What `publishVideo` started. */
 interface VideoPublishing {
@@ -1609,6 +1644,98 @@ window.xmoqOwn = {
 			});
 		},
 	),
+
+	publishVoice: withPlainErrors(async (namespace: string, voice: string) => {
+		const moq = connected();
+		const trackNamespace = namespaceTuple(namespace);
+		const sampleRate = 48_000;
+		const audio = await createAudioTrackEncoder({
+			trackNamespace,
+			trackName: utf8.encode(VOICE.audio),
+			firstGroup: BigInt(Date.now()),
+			codec: "opus",
+			sampleRate,
+			numberOfChannels: 1,
+		});
+		const catalog = createCatalogPublisher({
+			namespace: trackNamespace,
+			catalog: {
+				version: "draft-01",
+				tracks: [
+					{
+						name: VOICE.audio,
+						packaging: "loc",
+						isLive: true,
+						role: "audio",
+						codec: "opus",
+						bitrate: 32_000,
+						samplerate: sampleRate,
+						channelConfig: "1",
+					},
+				],
+			},
+		});
+		moq.serve({
+			subscribe(request) {
+				if (catalog.subscribe(request)) return;
+				if (audio.publisher.subscribe(request)) return;
+				request
+					.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+					.catch(() => {});
+			},
+			fetch(request) {
+				if (catalog.fetch(request)) return;
+				if (audio.publisher.fetch(request)) return;
+				request
+					.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+					.catch(() => {});
+			},
+		});
+		const spoken = voiceAt48kHz(voice);
+		const round = new Float32Array(
+			spoken.length + (VOICE.pauseMs * sampleRate) / 1000,
+		);
+		round.set(spoken);
+		const frames = 960;
+		const counted = { made: 0 };
+		// Every piece is 20 ms after the one before it, whenever its timer
+		// came, as in `publishBroadcast`.
+		setInterval(() => {
+			const piece = counted.made;
+			counted.made += 1;
+			const samples = new Float32Array(frames);
+			for (let index = 0; index < frames; index++) {
+				samples[index] = round[(piece * frames + index) % round.length] ?? 0;
+			}
+			audio.encode(
+				new AudioData({
+					format: "f32",
+					sampleRate,
+					numberOfFrames: frames,
+					numberOfChannels: 1,
+					timestamp: piece * 20_000,
+					data: samples,
+				}),
+			);
+		}, 20);
+		voicePublishing = { audio, round: round.length, counted };
+		await moq.publishNamespace(trackNamespace);
+		console.log("voice published");
+	}),
+
+	voiceReport: withPlainErrors(async (): Promise<PageVoiceReport> => {
+		if (voicePublishing === undefined) {
+			throw new Error("publishVoice() has not completed");
+		}
+		const { audio, counted, round } = voicePublishing;
+		const { made } = counted;
+		return {
+			made,
+			voices: Math.ceil((made * 960) / round),
+			audioEncoderError: audio.stats().encoderError ?? null,
+			audioWritten: audio.publisher.stats().written,
+		};
+	}),
 
 	broadcastReport: withPlainErrors(async (): Promise<PageBroadcastReport> => {
 		if (broadcastPublishing === undefined) {

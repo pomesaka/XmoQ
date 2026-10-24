@@ -138,6 +138,14 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+      # The model of whisper.cpp the transcriber's pairing reads with (74 MiB). The script that
+      # fetches it names it and its sha256, so it changes only with the script.
+      - name: Cache the model of the transcriber's pairing
+        if: steps.scope.outputs.run != 'false'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/xmoq/whisper
+          key: whisper-model-${{ hashFiles('crates/speech/scripts/fetch-model.sh') }}
       - if: steps.scope.outputs.run != 'false'
         run: mise run interop
       - name: Save the moqtail relay

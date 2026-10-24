@@ -9,6 +9,7 @@ import {
 } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Browser, chromium, type Page } from "playwright-core";
 import type { XmoqPage } from "./xmoq-page.ts";
@@ -1054,6 +1055,61 @@ export function spawnAgent(
 		context.relayUrl,
 		"--cert-sha256",
 		context.certSha256Hex,
+		...extraArgs,
+	]);
+	defer(() => stopProcess(spawned, "SIGTERM"));
+	return spawned;
+}
+
+/**
+ * The transcriber (`crates/transcriber`). WHY a release build, as the
+ * terminal viewer's: unoptimized, whisper.cpp reads a piece many times
+ * slower than it lasts, and the pieces would be dropped as they wait.
+ */
+const TRANSCRIBER_BINARY = join(
+	here,
+	"..",
+	"target",
+	"release",
+	"xmoq-transcriber",
+);
+
+/**
+ * The model the runs read with: the smallest (`mise run speech-model --
+ * tiny`, which `scripts/ci/interop.sh` runs), where `xmoq-speech` puts it.
+ * WHY the smallest: it reads the voice of the runs right, and CI fetches it
+ * and keeps it between runs.
+ */
+export function transcriberModel(): string {
+	const cache = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
+	return join(cache, "xmoq", "whisper", "ggml-tiny.bin");
+}
+
+/**
+ * Starts `xmoq-transcriber` towards the relay of the run, with the model of
+ * `transcriberModel`. It is stopped with the run.
+ */
+export function spawnTranscriber(
+	context: RunContext,
+	label: string,
+	extraArgs: string[],
+): LoggedProcess {
+	if (!existsSync(TRANSCRIBER_BINARY)) {
+		throw new Error(
+			`${TRANSCRIBER_BINARY} is missing: cargo build --release -p xmoq-transcriber`,
+		);
+	}
+	const model = transcriberModel();
+	if (!existsSync(model)) {
+		throw new Error(`${model} is missing: mise run speech-model -- tiny`);
+	}
+	const spawned = spawnLogged(label, TRANSCRIBER_BINARY, [
+		"--url",
+		context.relayUrl,
+		"--cert-sha256",
+		context.certSha256Hex,
+		"--model",
+		model,
 		...extraArgs,
 	]);
 	defer(() => stopProcess(spawned, "SIGTERM"));

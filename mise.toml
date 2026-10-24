@@ -9,6 +9,9 @@ biome = "2.5.15"
 # 30050, read on 2026-10-11); see
 # docs/experiments/2026-10-11-bun-test-each-loses-its-table.md.
 bun = "1.3.14"
+# xmoq-speech builds whisper.cpp with cmake (the build script of whisper-rs-sys 0.15.0). Pinned
+# here so that CI, where mise-action installs these tools, builds with the same one.
+cmake = "4.4.4"
 # The interop run builds moqlivemock, a publisher written in Go, from a tag (scripts/ci/interop.sh);
 # its go.mod asks for this version.
 go = "1.26.0"
@@ -53,6 +56,14 @@ run = "cargo run --release --locked -p xmoq-watch --"
 [tasks.chat]
 description = "The gatherer of the chat: mise run chat -- --url https://host:port/ --cert-sha256 <hex> --store chat.sqlite3"
 run = "cargo run --locked -p xmoq-chat --"
+
+[tasks.transcriber]
+description = "The transcriber: mise run transcriber -- --url https://host:port/ --cert-sha256 <hex> --namespace xmoq/demo"
+run = "cargo run --release --locked -p xmoq-transcriber --"
+
+[tasks.speech-model]
+description = "Fetch a model of whisper.cpp for xmoq-speech into ~/.cache/xmoq/whisper: mise run speech-model -- [tiny|small-q5_1|large-v3-turbo-q5_0] [--dir <dir>]"
+run = "crates/speech/scripts/fetch-model.sh"
 
 [tasks.demo]
 description = "Start the own relay, the gatherer of the chat and the pages of the demo: one publishes video, others watch"
