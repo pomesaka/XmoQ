@@ -9,6 +9,10 @@ import {
 } from "./bytes.ts";
 import { MoqtError, protocolViolation } from "./error.ts";
 import {
+	type PropertiesToSearch,
+	propertiesToSearch,
+} from "./immutable-properties.ts";
+import {
 	decodeKeyValuePairs,
 	encodeKeyValuePairs,
 	isMandatoryTrackProperty,
@@ -138,7 +142,9 @@ export function encodeSubgroupHeader(header: SubgroupHeader): Bytes {
  * Throws, for an encoder, when the Object Properties would make a receiver
  * take the Track for malformed: a Mandatory Track Property (§2.5.1), and a
  * Prior Group ID Gap or Prior Object ID Gap that is there twice or is larger
- * than the ID it counts back from (§12.8, §12.9).
+ * than the ID it counts back from (§12.8, §12.9), and Immutable Properties
+ * that the decoder refuses (§12.7), inside of which all of these are looked
+ * for as well.
  *
  * WHY the same check as the decoder's: what this endpoint's decoder refuses,
  * its encoder does not write. The Rust implementation holds its encoders to
@@ -152,8 +158,16 @@ export function refuseObjectPropertiesThatBreakTheTrack(
 	try {
 		checkObjectProperties(properties, groupId, objectId);
 	} catch (error) {
-		if (error instanceof DecodeStop && error.failure.scope === "track") {
-			throw new RangeError(`${error.failure.reason} (§2.5.1, §12.8, §12.9)`);
+		if (error instanceof DecodeStop) {
+			const reason =
+				error.failure.scope === "session"
+					? error.failure.error.message
+					: error.failure.reason;
+			throw new RangeError(`${reason} (§2.5.1, §12.7, §12.8, §12.9)`);
+		}
+		// A PROTOCOL_VIOLATION of §1.4.3 inside Immutable Properties.
+		if (error instanceof MoqtError) {
+			throw new RangeError(`${error.message} (§1.4.3, §12.7)`);
 		}
 		throw error;
 	}
@@ -296,13 +310,20 @@ function gapOf(
 /**
  * Stops decoding when the properties of one Object show its Track to be
  * malformed (§2.4.2). Only what a single Object can show is checked here; the
- * conditions of §12.8 and §12.9 that compare Objects are not.
+ * conditions of §12.8 and §12.9 that compare Objects are not. What is checked
+ * is looked for inside Immutable Properties as well (§12.7), so a Prior
+ * Object ID Gap outside and one inside are two instances.
  */
 export function checkObjectProperties(
-	properties: readonly KeyValuePair[],
+	objectProperties: readonly KeyValuePair[],
 	groupId: bigint,
 	objectId: bigint,
 ): void {
+	const reading = readObjectProperties(objectProperties);
+	if ("malformed" in reading) {
+		throw new DecodeStop({ scope: "track", reason: reading.malformed });
+	}
+	const { properties } = reading;
 	// §2.5.1: "An Object received with a Mandatory Track Property as an Object
 	// Property is malformed."
 	const mandatory = properties.find(({ type }) =>
@@ -331,6 +352,20 @@ export function checkObjectProperties(
 			scope: "track",
 			reason: `Prior Object ID Gap ${objectGap} is larger than Object ID ${objectId}`,
 		});
+	}
+}
+
+/** `propertiesToSearch` of an Object, with a sequence over the local limit ending only the stream, as it does outside. */
+function readObjectProperties(
+	properties: readonly KeyValuePair[],
+): PropertiesToSearch {
+	try {
+		return propertiesToSearch(properties, "Object");
+	} catch (error) {
+		if (error instanceof TooManyEntriesError) {
+			throw new DecodeStop({ scope: "stream", reason: error.message });
+		}
+		throw error;
 	}
 }
 

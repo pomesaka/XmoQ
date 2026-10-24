@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { KeyValuePair } from "../../src/core/key-value-pair.ts";
 import {
 	createSubgroupStreamDecoder,
 	encodeSubgroupHeader,
@@ -363,7 +364,31 @@ describe("Object Properties that break the track", () => {
 			objectId: 0n,
 			properties: [{ type: 0x3cn, value: 1n }],
 		},
-	])("encodeSubgroupObject refuses $name", ({ objectId, properties }) => {
+		{
+			name: "a Prior Object ID Gap inside Immutable Properties larger than the Object ID (§12.7)",
+			objectId: 0n,
+			properties: [{ type: 0x0bn, value: Uint8Array.from([0x3e, 0x01]) }],
+		},
+		{
+			name: "Immutable Properties inside Immutable Properties (§12.7)",
+			objectId: 0n,
+			properties: [{ type: 0x0bn, value: Uint8Array.from([0x0b, 0x00]) }],
+		},
+		{
+			name: "a Type over 2^64 - 1 inside Immutable Properties (§1.4.3)",
+			objectId: 0n,
+			properties: [
+				{
+					type: 0x0bn,
+					value: hex("ff ff ff ff ff ff ff ff fe 00 02 00"),
+				},
+			],
+		},
+	] satisfies {
+		name: string;
+		objectId: bigint;
+		properties: KeyValuePair[];
+	}[])("encodeSubgroupObject refuses $name", ({ objectId, properties }) => {
 		expect(() =>
 			encodeSubgroupObject({ properties: true, groupId: 0n }, undefined, {
 				objectId,

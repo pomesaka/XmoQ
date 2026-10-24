@@ -363,6 +363,11 @@ describe("connectOver", () => {
 			act: (request) => request.reply.write(hex("04 00 06 09 00 c0 40 00 01")),
 			abort: { type: "unsupported-track-property" },
 		},
+		{
+			name: "a SUBSCRIBE_OK with Immutable Properties inside Immutable Properties (§12.7)",
+			act: (request) => request.reply.write(hex("04 00 06 09 00 0b 02 0b 00")),
+			abort: { type: "malformed-track" },
+		},
 	] satisfies {
 		name: string;
 		act: (request: PeerBidiStream) => Promise<void>;

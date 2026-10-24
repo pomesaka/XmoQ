@@ -57,6 +57,8 @@ export type FetchEnd =
 	| { type: "peer-reset"; code: number | undefined }
 	/** §2.5.1: the FETCH_OK had a Mandatory Track Property this endpoint does not understand, so it cancelled. */
 	| { type: "unsupported-track-property" }
+	/** §12.7: the Immutable Properties of the FETCH_OK made the Track malformed, so this endpoint cancelled it (§2.4.2). */
+	| { type: "malformed-track" }
 	/** This endpoint cancelled it: `cancel()`, the `signal` of the call, or a reader that cancelled `body`. */
 	| { type: "cancelled" }
 	/** No answer came in time (`answerTimeoutMs` of the connect options), so this endpoint cancelled it. The session stays open. */
@@ -165,6 +167,8 @@ export type RequestAbort =
 	| { type: "peer-reset"; code: number | undefined }
 	/** §2.5.1: the SUBSCRIBE_OK or FETCH_OK had a Mandatory Track Property this endpoint does not understand, so it cancelled. */
 	| { type: "unsupported-track-property" }
+	/** §12.7: the Immutable Properties of the SUBSCRIBE_OK or FETCH_OK made the Track malformed, so this endpoint cancelled it (§2.4.2). */
+	| { type: "malformed-track" }
 	/** This endpoint cancelled the request before it was answered: a FETCH, or a PUBLISH_NAMESPACE whose signal aborted. */
 	| { type: "cancelled" }
 	/**

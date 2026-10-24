@@ -32,14 +32,12 @@ import {
 	type FetchStreamEncoder,
 	type RangeEnd,
 } from "./fetch.ts";
+import { trackPropertiesRefusal } from "./immutable-properties.ts";
 import {
 	createIncomingSubgroups,
 	type IncomingSubgroups,
 } from "./incoming-subgroups.ts";
-import {
-	isMandatoryTrackProperty,
-	type KeyValuePair,
-} from "./key-value-pair.ts";
+import type { KeyValuePair } from "./key-value-pair.ts";
 import type { SessionLimits } from "./limits.ts";
 import {
 	createOutgoingSubgroups,
@@ -936,16 +934,16 @@ export function createRequests(options: RequestsOptions): Requests {
 				`Track Alias ${message.trackAlias} is in use by another subscription`,
 			);
 		}
-		// No Mandatory Track Property is implemented, so each one is unknown
-		// (§2.5.1: "MUST NOT process ... that track"). A SUBSCRIBE_OK that is not
-		// processed does not take the alias: a draining subscription keeps it,
-		// and a free alias is only remembered, so that streams the publisher
-		// opens for it are dropped at once (§11.1).
-		if (
-			message.trackProperties.some(({ type }) => isMandatoryTrackProperty(type))
-		) {
+		// A Mandatory Track Property (§2.5.1: "MUST NOT process ... that
+		// track"), and a Track that Immutable Properties make malformed (§12.7;
+		// §2.4.2: "it MUST cancel any corresponding subscription"). A
+		// SUBSCRIBE_OK that is not processed does not take the alias: a
+		// draining subscription keeps it, and a free alias is only remembered,
+		// so that streams the publisher opens for it are dropped at once (§11.1).
+		const refusal = trackPropertiesRefusal(message.trackProperties);
+		if (refusal !== undefined) {
 			if (aliasState === "free") incoming.retire(message.trackAlias);
-			abandonRequest(request, "unsupported-track-property", out);
+			abandonRequest(request, refusal, out);
 			return;
 		}
 		incoming.establish(
@@ -998,12 +996,11 @@ export function createRequests(options: RequestsOptions): Requests {
 		) {
 			throw protocolViolation("FETCH_OK ends before the FETCH starts");
 		}
-		// §2.5.1, as for SUBSCRIBE_OK: no Mandatory Track Property is
-		// understood, so the track is not processed.
-		if (
-			message.trackProperties.some(({ type }) => isMandatoryTrackProperty(type))
-		) {
-			abandonRequest(request, "unsupported-track-property", out);
+		// §2.5.1 and §12.7, as for SUBSCRIBE_OK: the track is not processed,
+		// and a malformed one has its FETCH cancelled (§2.4.2).
+		const refusal = trackPropertiesRefusal(message.trackProperties);
+		if (refusal !== undefined) {
+			abandonRequest(request, refusal, out);
 			return;
 		}
 		request.state = "Established";

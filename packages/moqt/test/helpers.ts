@@ -245,3 +245,100 @@ export function firstBytesFixtures(): FirstBytesFixture[] {
 	if (rows.length === 0) throw new Error(`${path} has no rows`);
 	return rows;
 }
+
+/** One row of `fixtures/immutable-properties/properties.tsv`. */
+export interface ImmutablePropertiesFixture {
+	name: string;
+	of: "object" | "track";
+	/** The Group ID and Object ID of an `object` row. */
+	location: { groupId: bigint; objectId: bigint } | undefined;
+	/** The Properties, in the form `hex` reads. */
+	propertiesHex: string;
+	outcome:
+		| "ok"
+		| "malformed-track"
+		| "protocol-violation"
+		| "unsupported-track";
+	/** The properties searched, as column 6 writes them; `-` where the outcome is not `ok`. */
+	searched: string;
+}
+
+const IMMUTABLE_OUTCOMES = [
+	"ok",
+	"malformed-track",
+	"protocol-violation",
+	"unsupported-track",
+] as const;
+
+function immutableOutcome(
+	value: string | undefined,
+): ImmutablePropertiesFixture["outcome"] | undefined {
+	return IMMUTABLE_OUTCOMES.find((outcome) => outcome === value);
+}
+
+/**
+ * The rows of `fixtures/immutable-properties/properties.tsv`: Properties of an
+ * Object or a Track with Immutable Properties (§12.7), and what a receiver
+ * makes of them. The file is shared with the Rust implementation; its README
+ * has the columns and where the bytes come from.
+ */
+export function immutablePropertiesFixtures(): ImmutablePropertiesFixture[] {
+	const path = join(FIXTURES, "immutable-properties", "properties.tsv");
+	const table = readFileSync(path, "utf8");
+	if (!table.endsWith("\n")) {
+		throw new Error(`${path}: the last row does not end with a line feed`);
+	}
+	const rows = table
+		.slice(0, -1)
+		.split("\n")
+		.map((line): ImmutablePropertiesFixture => {
+			const refuse = (what: string): never => {
+				throw new Error(
+					`a row of the Immutable Properties fixture ${what}: ${line}`,
+				);
+			};
+			const columns = line.split("\t");
+			const [name, of, at, properties, outcomeColumn, searched] = columns;
+			if (
+				columns.length !== 6 ||
+				name === undefined ||
+				at === undefined ||
+				properties === undefined ||
+				searched === undefined
+			) {
+				return refuse("does not have six columns");
+			}
+			if (name === "") return refuse("has no name");
+			if (of !== "object" && of !== "track") {
+				return refuse("is neither for an object nor for a track");
+			}
+			const ids = /^(\d+)\/(\d+)$/.exec(at);
+			if ((of === "object") !== (ids !== null)) {
+				return refuse("has a Group ID and Object ID that do not fit its kind");
+			}
+			if (of === "track" && at !== "-") {
+				return refuse("is for a track and has no - in column 3");
+			}
+			if (!HEX_BYTES.test(properties)) {
+				return refuse("has Properties that are not whole bytes in hexadecimal");
+			}
+			const outcome = immutableOutcome(outcomeColumn);
+			if (outcome === undefined) return refuse("has an unknown outcome");
+			if ((outcome === "ok") === (searched === "-")) {
+				return refuse("has a column 6 that does not fit its outcome");
+			}
+			return {
+				name,
+				of,
+				location:
+					ids === null
+						? undefined
+						: { groupId: BigInt(ids[1] ?? ""), objectId: BigInt(ids[2] ?? "") },
+				propertiesHex: spaced(properties),
+				outcome,
+				searched,
+			};
+		});
+	if (rows.length === 0) throw new Error(`${path} has no rows`);
+	return rows;
+}

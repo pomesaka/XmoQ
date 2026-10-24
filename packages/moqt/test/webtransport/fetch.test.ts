@@ -381,6 +381,28 @@ describe("MoqtConnection.fetch", () => {
 		expect(peer.closeInfo()).toBeUndefined();
 	});
 
+	test("a FETCH_OK whose Immutable Properties cannot be parsed ends the FETCH with MALFORMED_TRACK and not the session (§12.7, §2.4.2)", async () => {
+		const { peer, request, fetch } = await fetching();
+		await request.reply.write(
+			encodeControlMessage({
+				type: "FETCH_OK",
+				endOfTrack: false,
+				endLocation: { group: 3n, object: 0n },
+				parameters: {},
+				// Type 0x11 with a Length of 5 and one byte.
+				trackProperties: [{ type: 0x0bn, value: hex("11 05 61") }],
+			}),
+		);
+		expect(await fetch.ended).toEqual({ type: "malformed-track" });
+		expect(await rejection(fetch.response)).toMatchObject({
+			abort: { type: "malformed-track" },
+		});
+		expect(await rejection(request.sent.read())).toMatchObject({
+			streamErrorCode: 18,
+		});
+		expect(peer.closeInfo()).toBeUndefined();
+	});
+
 	// A `body` that ends with the session says so by the class of its error.
 	test.each<{
 		name: string;
