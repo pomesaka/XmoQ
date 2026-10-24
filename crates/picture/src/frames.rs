@@ -116,7 +116,8 @@ pub struct Counts {
     /// More pixels than are handled ([`fit::MOST_PIXELS`]).
     pub too_large: u64,
     /// Held frames that were let go undecoded: those of a Group that a
-    /// newer one began before they were asked for.
+    /// newer one began before they were asked for, and those held at
+    /// [`Frames::begin_again`].
     pub passed_over: u64,
     /// Pictures that were taken.
     pub taken: u64,
@@ -172,7 +173,33 @@ impl Frames {
         })
     }
 
-    /// What was done so far.
+    /// Begins again with another track, or the same one on another session:
+    /// the decoder, the order of the frames, the frames held and the latest
+    /// picture are made anew. The files kept, their numbers, the counts and
+    /// a picture that was asked for go on.
+    ///
+    /// WHY not a new [`Frames`]: [`Settings::most_kept`] bounds the files
+    /// of every track a reader is given, and the names of a new one would
+    /// be those of the files that are there. WHY the order anew: a
+    /// publisher in place of another can have smaller Group IDs, whose
+    /// frames would be left out as older.
+    ///
+    /// # Errors
+    ///
+    /// [`NoDecoder`] where the decoder cannot be made; nothing is changed
+    /// then.
+    pub fn begin_again(&mut self) -> Result<(), NoDecoder> {
+        self.decoder = VideoDecoder::new()?;
+        self.order = InOrder::default();
+        self.counts.passed_over += u64::try_from(self.held.len()).unwrap_or(u64::MAX);
+        self.held.clear();
+        self.held_bytes = 0;
+        self.picture = None;
+        self.last_taken_us = None;
+        Ok(())
+    }
+
+    /// What was done so far, since [`Frames::new`].
     #[must_use]
     pub fn counts(&self) -> Counts {
         self.counts

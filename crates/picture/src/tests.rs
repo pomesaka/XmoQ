@@ -225,6 +225,116 @@ fn the_oldest_files_are_removed_beyond_the_most_kept() {
     );
 }
 
+/// A step of a reader of [`Frames`].
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// The key frame of Chromium, as the first Object of this Group.
+    KeyFrame(u64),
+    Ask,
+    BeginAgain,
+}
+
+#[test]
+fn beginning_again_goes_on_with_the_files_their_numbers_and_the_most_kept() {
+    type Case = (
+        &'static [Step],
+        &'static [Option<(&'static str, &'static [&'static str])>],
+    );
+    use Step::{Ask, BeginAgain, KeyFrame};
+    // (the steps; for each, the file taken and those removed for it), with
+    // 2 files kept
+    let cases: [Case; 4] = [
+        // Without beginning again, a smaller Group is left out as older.
+        (
+            &[KeyFrame(5), Ask, KeyFrame(1), Ask],
+            &[
+                None,
+                Some(("000001-g5-o0.png", &[])),
+                None,
+                Some(("000002-g5-o0.png", &[])),
+            ],
+        ),
+        // After it, the smaller Group is taken, the numbers go on, and the
+        // files of before count towards the 2.
+        (
+            &[KeyFrame(5), Ask, BeginAgain, KeyFrame(1), Ask, Ask],
+            &[
+                None,
+                Some(("000001-g5-o0.png", &[])),
+                None,
+                None,
+                Some(("000002-g1-o0.png", &[])),
+                Some(("000003-g1-o0.png", &["000001-g5-o0.png"])),
+            ],
+        ),
+        // The picture of before is not given after it.
+        (&[KeyFrame(5), BeginAgain, Ask], &[None, None, None]),
+        // A picture asked for before it is given by the first key frame after.
+        (
+            &[KeyFrame(5), Ask, Ask, BeginAgain, Ask, KeyFrame(0)],
+            &[
+                None,
+                Some(("000001-g5-o0.png", &[])),
+                Some(("000002-g5-o0.png", &[])),
+                None,
+                None,
+                Some(("000003-g0-o0.png", &["000001-g5-o0.png"])),
+            ],
+        ),
+    ];
+    let (key, _) = chromium();
+    for (steps, expected) in cases {
+        let mut frames = Frames::new(Settings {
+            most_kept: 2,
+            ..Settings::default()
+        })
+        .unwrap();
+        let got: Vec<Option<(String, Vec<String>)>> = steps
+            .iter()
+            .map(|step| {
+                let taken = match step {
+                    KeyFrame(group) => frames.take(object(*group, 0, 0, &key)),
+                    Ask => frames.ask(),
+                    BeginAgain => {
+                        frames.begin_again().unwrap();
+                        None
+                    }
+                };
+                taken.map(|taken| (taken.file_name, taken.removed))
+            })
+            .collect();
+        let expected: Vec<Option<(String, Vec<String>)>> = expected
+            .iter()
+            .map(|taken| {
+                taken.map(|(name, removed)| {
+                    (
+                        name.to_string(),
+                        removed.iter().map(ToString::to_string).collect(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(got, expected, "{steps:?}");
+    }
+}
+
+#[test]
+fn frames_held_when_beginning_again_are_passed_over() {
+    let (key, delta) = chromium();
+    let mut frames = Frames::new(Settings::default()).unwrap();
+    frames.take(object(5, 0, 0, &key));
+    frames.take(object(5, 1, 0, &delta));
+    frames.begin_again().unwrap();
+    assert_eq!(
+        frames.counts(),
+        Counts {
+            given: 2,
+            passed_over: 2,
+            ..Counts::default()
+        }
+    );
+}
+
 #[test]
 fn frames_are_decoded_only_when_a_picture_is_asked_for() {
     let (key, delta) = chromium();
