@@ -810,8 +810,9 @@ impl Relay {
     }
 
     /// How many requests the relay has open on each publisher for the
-    /// SUBSCRIBEs of `subscriber` ([`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`]).
-    fn asked_for(&self, subscriber: SessionKey) -> HashMap<SessionKey, usize> {
+    /// SUBSCRIBEs and `TRACK_STATUS` requests of `subscriber`
+    /// ([`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`]).
+    pub(crate) fn asked_for(&self, subscriber: SessionKey) -> HashMap<SessionKey, usize> {
         let mut asked: HashMap<SessionKey, usize> = HashMap::new();
         let of_the_subscriber = self.tracks.all_pending().filter(|(_, pending)| {
             pending
@@ -822,6 +823,16 @@ impl Relay {
         for (_, pending) in of_the_subscriber {
             for ask in &pending.asks {
                 *asked.entry(ask.publisher).or_default() += 1;
+            }
+        }
+        for (publisher, state) in &self.sessions {
+            let of_the_subscriber = state
+                .own_track_statuses
+                .values()
+                .filter(|own| own.subscriber.0 == subscriber)
+                .count();
+            if of_the_subscriber > 0 {
+                *asked.entry(*publisher).or_default() += of_the_subscriber;
             }
         }
         asked
