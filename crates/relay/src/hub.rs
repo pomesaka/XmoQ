@@ -41,7 +41,7 @@ use xmoq_relay_core::{
 ///
 /// | Held | Bound |
 /// |---|---|
-/// | QUIC: received on its streams and not read yet | 4 MiB (`receive_window`) |
+/// | QUIC: received on its streams and not read yet | 9.375 MiB (`receive_window`) |
 /// | QUIC: written to its streams and not acknowledged | 4 MiB (`send_window`) |
 /// | QUIC: datagrams it sent, which nothing reads | 1500 bytes |
 /// | Read buffers of its streams | 64 + 264 streams of 16 KiB: about 5 MiB |
@@ -50,7 +50,7 @@ use xmoq_relay_core::{
 /// | Objects waiting to be written to it | 4 MiB (`send.bytes`) |
 /// | Messages waiting to be written to it | 256 a stream |
 ///
-/// That is about 22 MiB a session and 5.6 GiB for 256 sessions, plus what the
+/// That is about 27 MiB a session and 6.9 GiB for 256 sessions, plus what the
 /// events that wait for the hub hold (shared, 1024 events). Without the QUIC
 /// limits the first two rows are those of the transport library, which for
 /// quinn's defaults are far larger than everything else here.

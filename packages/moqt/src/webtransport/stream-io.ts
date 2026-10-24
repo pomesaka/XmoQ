@@ -507,7 +507,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 							// was not sent. Any other failure to make a stream is
 							// the transport's, and the session's end.
 							const writable = await transport
-								.createUnidirectionalStream()
+								.createUnidirectionalStream({ sendOrder: output.sendOrder })
 								.catch((error: unknown) => {
 									if (refusedForNow(error)) throw new StreamNotOpenedError();
 									fatal(toError(error));

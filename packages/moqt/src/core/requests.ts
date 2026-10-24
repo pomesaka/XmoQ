@@ -53,10 +53,11 @@ import {
 	type MessageParameters,
 	parametersOutsideScope,
 } from "./parameters.ts";
-import type {
-	RequestClosedReason,
-	SessionOutput,
-	SessionResult,
+import {
+	DATA_STREAM_SEND_ORDER,
+	type RequestClosedReason,
+	type SessionOutput,
+	type SessionResult,
 } from "./session-output.ts";
 import {
 	type FullTrackName,
@@ -2024,7 +2025,12 @@ export function createRequests(options: RequestsOptions): Requests {
 			// the FETCH_OK: a relay that has the FETCH_OK waits a limited time
 			// for the stream to open, and the application then has nothing to
 			// do in time.
-			out.push({ type: "open-uni-stream", stream, data: encoder.header });
+			out.push({
+				type: "open-uni-stream",
+				stream,
+				data: encoder.header,
+				sendOrder: DATA_STREAM_SEND_ORDER,
+			});
 			return out;
 		},
 

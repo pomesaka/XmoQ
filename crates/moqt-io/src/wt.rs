@@ -138,6 +138,26 @@ pub enum Congestion {
     Bbr,
 }
 
+/// Connection flow control a server keeps for its control and request
+/// streams beyond what the peer's unidirectional streams can hold at once
+/// ([`QuicLimits::leaves_room_for_control_streams`]). Provisional.
+///
+/// WHY a fixed amount, and not one control message for each request stream
+/// (a Length of 16 bits, so up to 64 KiB each): the 265 request streams of
+/// the relay would make that more than 16 MiB, and request streams are read
+/// as their messages come, where data streams may wait for their reader.
+pub const CONTROL_STREAM_RESERVE: u32 = 1024 * 1024;
+
+/// The receive window of a connection whose peer may have `max_uni_streams`
+/// unidirectional streams for `MoQ` open with `stream_receive_window` each:
+/// what they can hold together, and [`CONTROL_STREAM_RESERVE`] beyond it.
+#[must_use]
+pub const fn receive_window_for(max_uni_streams: u32, stream_receive_window: u32) -> u32 {
+    (max_uni_streams + HTTP3_UNI_STREAMS)
+        .saturating_mul(stream_receive_window)
+        .saturating_add(CONTROL_STREAM_RESERVE)
+}
+
 /// WHY added to the streams a peer may open: the limits of QUIC count every
 /// stream of the connection. An HTTP/3 peer opens a control stream and may
 /// open the two QPACK streams (RFC 9114 §6.2, RFC 9204 §4.2). A peer that
@@ -145,6 +165,24 @@ pub enum Congestion {
 const HTTP3_UNI_STREAMS: u32 = 3;
 
 impl QuicLimits {
+    /// Whether the peer's unidirectional streams, each filled to its window
+    /// and not read, leave [`CONTROL_STREAM_RESERVE`] of the connection's
+    /// receive window to the other streams (§11.4.2: "To prevent deadlocks,
+    /// endpoints MUST allocate connection flow control to the control streams
+    /// before allocating it to any data streams"). A stream of the peer holds
+    /// the connection's credit for what arrived on it until it is read, and a
+    /// reader of a data stream waits for its consumer.
+    ///
+    /// WHY by the windows and not by which stream is given credit: QUIC has
+    /// one credit for the connection, which the sender takes for whatever it
+    /// writes first; a receiver can only see to it that the data streams
+    /// cannot take all of it. quinn has one stream window for every kind of
+    /// stream, so the request streams have the same one.
+    #[must_use]
+    pub const fn leaves_room_for_control_streams(&self) -> bool {
+        self.receive_window >= receive_window_for(self.max_uni_streams, self.stream_receive_window)
+    }
+
     fn transport(self) -> quinn::TransportConfig {
         // The WebTransport session is the bidirectional stream of the
         // client's CONNECT request, which counts against the server's limit.
@@ -1112,6 +1150,69 @@ mod tests {
         // web-transport-quinn server leaves unused of the 3 streams HTTP/3 is
         // given room for. quinn's default would be 100.
         crate::contract::opening_waits_at_the_peers_stream_limit(server, client, 66).await;
+    }
+
+    /// §11.4.2: "To prevent deadlocks, endpoints MUST allocate connection
+    /// flow control to the control streams before allocating it to any data
+    /// streams." The server reads none of the client's unidirectional
+    /// streams, as a reader held back by its consumer does not, and the
+    /// client fills each of them up to its window; then the client sends a
+    /// request on a bidirectional stream.
+    async fn a_request_after_data_streams_nobody_reads(limits: QuicLimits) -> bool {
+        let (client, server, _keep) = loopback(limits).await;
+        let client = Arc::new(client);
+        let data = vec![0x5a; usize::try_from(limits.stream_receive_window).unwrap()];
+        // As many as the server lets the client open; the ones beyond wait
+        // in quinn, in tasks of their own.
+        let streams = limits.max_uni_streams + HTTP3_UNI_STREAMS;
+        let mut writers = Vec::new();
+        for _ in 0..streams {
+            let client = Arc::clone(&client);
+            let data = data.clone();
+            writers.push(tokio::spawn(async move {
+                if let Ok(mut send) = client.open_uni().await {
+                    let _ = send.write_all(&data).await;
+                    std::future::pending::<()>().await;
+                }
+            }));
+        }
+        // Time for the data to take what credit it can.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let request = async {
+            let (mut send, _recv) = client.open_bi().await.ok()?;
+            send.write_all(b"request").await.ok()?;
+            let (_send, mut recv) = server.accept_bi().await.ok()?;
+            let mut read = [0; 7];
+            let mut got = 0;
+            while got < read.len() {
+                got += recv.read(&mut read[got..]).await.ok()??;
+            }
+            Some(read)
+        };
+        let arrived = tokio::time::timeout(Duration::from_secs(2), request).await;
+        for writer in writers {
+            writer.abort();
+        }
+        arrived.ok().flatten() == Some(*b"request")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_gets_through_data_streams_nobody_reads_only_where_the_windows_leave_room() {
+        // (the receive window of the connection; whether the request
+        //  arrives). 8 + 3 streams of 64 KiB hold 704 KiB.
+        let cases = [(262_144, false), (receive_window_for(8, 65_536), true)];
+        for (receive_window, arrives) in cases {
+            let limits = QuicLimits {
+                receive_window,
+                ..TEST_LIMITS
+            };
+            assert_eq!(limits.leaves_room_for_control_streams(), arrives);
+            assert_eq!(
+                a_request_after_data_streams_nobody_reads(limits).await,
+                arrives,
+                "{receive_window}"
+            );
+        }
     }
 
     /// `set_send_order` is quinn's priority of the stream, with the same

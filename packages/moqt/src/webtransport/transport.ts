@@ -19,7 +19,10 @@ export interface MoqtTransport {
 	 * 6.0.3 declares it without a chunk type, so a chunk is checked when read.
 	 */
 	readonly datagrams: { readonly readable: ReadableStream<unknown> };
-	createUnidirectionalStream(): Promise<WritableStream<Uint8Array>>;
+	/** `sendOrder` as the W3C WebTransport API has it: the larger first. */
+	createUnidirectionalStream(options: {
+		sendOrder: number;
+	}): Promise<WritableStream<Uint8Array>>;
 	createBidirectionalStream(): Promise<MoqtBidirectionalStream>;
 	close(info: { closeCode: number; reason: string }): void;
 	/**

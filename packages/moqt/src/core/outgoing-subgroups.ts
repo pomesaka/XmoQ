@@ -1,6 +1,10 @@
 import { InactiveError, StreamResetErrorCode } from "./error.ts";
 import type { KeyValuePair } from "./key-value-pair.ts";
-import type { SessionOutput, SessionResult } from "./session-output.ts";
+import {
+	DATA_STREAM_SEND_ORDER,
+	type SessionOutput,
+	type SessionResult,
+} from "./session-output.ts";
 import {
 	encodeSubgroupHeader,
 	encodeSubgroupObject,
@@ -124,7 +128,14 @@ export function createOutgoingSubgroups(
 			subscriptions.set(requestId, subscription);
 			return {
 				value: stream,
-				outputs: [{ type: "open-uni-stream", stream, data }],
+				outputs: [
+					{
+						type: "open-uni-stream",
+						stream,
+						data,
+						sendOrder: DATA_STREAM_SEND_ORDER,
+					},
+				],
 			};
 		},
 

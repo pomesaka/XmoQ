@@ -137,3 +137,19 @@ test.each(rows)(
 		expect(all.session.heldStreams()).toBe(1);
 	},
 );
+
+test("the control stream and a data stream are opened with their send orders", async () => {
+	const { peer, apply } = await joined();
+	// A subgroup stream, as the session opens one.
+	await apply([
+		{
+			type: "open-uni-stream",
+			stream: 99,
+			data: hex("14 01 00 00"),
+			sendOrder: -1,
+		},
+	]);
+	// The control stream that `start()` opened first: 0. The data stream
+	// below it (§11.4.2).
+	expect(peer.uniSendOrders()).toEqual([0, -1]);
+});

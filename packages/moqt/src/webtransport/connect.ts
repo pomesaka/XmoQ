@@ -99,7 +99,8 @@ export function adaptWebTransport(
 		incomingUnidirectionalStreams: webTransport.incomingUnidirectionalStreams,
 		incomingBidirectionalStreams: webTransport.incomingBidirectionalStreams,
 		datagrams: webTransport.datagrams,
-		createUnidirectionalStream: () => webTransport.createUnidirectionalStream(),
+		createUnidirectionalStream: (options) =>
+			webTransport.createUnidirectionalStream(options),
 		createBidirectionalStream: () => webTransport.createBidirectionalStream(),
 		close: (info) => webTransport.close(info),
 		streamError: (code, message) =>
