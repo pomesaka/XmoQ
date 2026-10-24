@@ -39,6 +39,9 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [The MOQT Streaming Format in TypeScript, `@xmoq/msf`](packages/msf/README.md)
 - [Between a video track and a decoder, `@xmoq/media`](packages/media/README.md)
 - [The viewer for the terminal, `xmoq-watch`](crates/watch/README.md)
+- [The gatherer of the chat, `xmoq-chat`](crates/chat/README.md)
+- [The tracks of the chat, `xmoq-chat-tracks`](crates/chat-tracks/README.md)
+- [The payloads of the chat's tracks, shared by the implementations](fixtures/chat-tracks/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
 - [MoQ library candidates](docs/moq-libraries.md)
 - [The audio and video demo: what it does and where it ends](docs/av-demo.md)
@@ -50,7 +53,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 
 ## Checks
 
-Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise install` once, then:
+Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise install` once. The Rust build also needs a C compiler, which mise does not install: `xmoq-chat` builds SQLite from source (on macOS the Command Line Tools' `clang`, on Linux `gcc`), and `xmoq-watch` builds OpenH264 with a C++ compiler. Then:
 
 | Command | What it runs |
 |---|---|
@@ -61,6 +64,7 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run check:workflows` | `actionlint` and `shellcheck` |
 | `mise run demo` | Starts the own relay and a web server; a page publishes video (a painted clock or the camera) and other pages watch it, in Chromium. See [`demo/README.md`](demo/README.md). Outside lint and type checking |
 | `mise run watch -- <flags>` | The viewer for the terminal, `xmoq-watch`: the picture of a broadcast in Ghostty or kitty, its sound, and the chat of its room. `-- --room http://127.0.0.1:8787/rooms/demo` next to `mise run demo`. See [`crates/watch/README.md`](crates/watch/README.md) |
+| `mise run chat -- <flags>` | The gatherer of the chat, `xmoq-chat`: numbers the lines of every room, keeps them in a SQLite file and publishes them as one track a room. See [`crates/chat/README.md`](crates/chat/README.md) |
 | `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
 | `mise run fmt` | Apply formatting and safe fixes |
 

@@ -1017,6 +1017,38 @@ export function spawnTerminalViewer(
 	return spawned;
 }
 
+/** The gatherer of the chat (`crates/chat`), a debug build as the Rust client is. */
+const CHAT_GATHERER_BINARY = join(here, "..", "target", "debug", "xmoq-chat");
+
+/**
+ * Starts `xmoq-chat` towards the relay of the run, keeping its history in
+ * `store`. It is stopped with the run, and `stop` stops it before that.
+ */
+export function spawnChatGatherer(
+	context: RunContext,
+	label: string,
+	store: string,
+	extraArgs: string[] = [],
+): LoggedProcess & { stop(): Promise<void> } {
+	if (!existsSync(CHAT_GATHERER_BINARY)) {
+		throw new Error(
+			`${CHAT_GATHERER_BINARY} is missing: cargo build -p xmoq-chat`,
+		);
+	}
+	const spawned = spawnLogged(label, CHAT_GATHERER_BINARY, [
+		"--url",
+		context.relayUrl,
+		"--cert-sha256",
+		context.certSha256Hex,
+		"--store",
+		store,
+		...extraArgs,
+	]);
+	const stop = (): Promise<void> => stopProcess(spawned, "SIGTERM");
+	defer(stop);
+	return { ...spawned, stop };
+}
+
 export function spawnRustClient(
 	context: RunContext,
 	label: string,

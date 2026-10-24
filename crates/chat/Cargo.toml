@@ -1,0 +1,20 @@
+[package]
+name = "xmoq-chat"
+version = "0.0.0"
+description = "The gatherer of the chat: takes what every participant of a room says on its MoQ track, numbers the lines of the room, keeps them, and publishes them as one track a room."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-chat-tracks = { path = "../chat-tracks" }
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+anyhow = "=1.0.100"
+serde_json = "=1.0.152"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+# The history (Q42, decided on 2026-10-24): SQLite, built from the source the crate carries,
+# which needs a C compiler. Used in one file, src/bin/xmoq-chat/storage.rs.
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
