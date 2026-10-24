@@ -19,7 +19,7 @@ use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{ControlMessage, Fetch, FetchRange, RequestOk, request_error_code};
 use xmoq_moqt::name::{FullTrackName, Location};
-use xmoq_moqt::params::{ANSWER_WAIT_MS, Parameter, answer_wait_ms};
+use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{FetchStreamOpened, PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
@@ -880,31 +880,19 @@ impl Relay {
         };
         let fill_timeout = fill_timeout(parameters);
         if fill_timeout == Some(0) {
-            let range = (asked.start, asked.end, asked.send_order);
+            // §10.2.8: "If omitted from FETCH, the receiver uses Ascending".
+            let descending = parameters.contains(&Parameter::GroupOrder(GroupOrder::Descending));
             return self.answer_without_asking(
-                session,
-                stream,
+                (session, stream),
                 request,
-                &asked.track,
-                range,
+                asked,
+                descending,
                 actions,
             );
         }
         if let Some((end, objects)) = self.cached(asked) {
-            // §10.6.2: "EXCESSIVE_LOAD: The responder is overloaded and
-            // cannot process the request at this time."
-            let held = self.held_beyond_the_cache();
-            if held.total >= self.held_beyond_cache_limit
-                || held.of(session) >= self.held_beyond_cache_share
-            {
-                actions.push(Action::NoteHeldBeyondCache {
-                    session,
-                    stream,
-                    refused: true,
-                    relay_bytes: held.total,
-                    session_bytes: held.of(session),
-                });
-                return refuse(self, request_error_code::EXCESSIVE_LOAD, actions);
+            if let Some(refusal) = self.held_beyond_cache_refusal(session, stream, actions) {
+                return self.refuse(session, stream, request, &refusal, actions);
             }
             let pieces = objects.into_iter().map(FetchPiece::Object).collect();
             let answer = (end, pieces, asked.send_order);
@@ -1310,11 +1298,21 @@ impl Relay {
 
     /// A FETCH with `FILL_TIMEOUT` 0 (§10.2.5): "the relay MUST NOT wait for
     /// upstream delivery and MUST report any unavailable Objects as Unknown
-    /// gaps". The answer is a fetch stream with one End of Unknown Range
-    /// indicator for the whole range.
+    /// gaps". The answer is a fetch stream with the Objects of the range
+    /// that the cache has, and End of Unknown Range indicators for the rest
+    /// ([`cache::Cache::immediately_available`]); where the cache has
+    /// nothing to say of the range, one indicator for the whole of it. A
+    /// stream that would keep more than the relay lets its fetch streams
+    /// keep beyond the cache is refused with `EXCESSIVE_LOAD`, as a FETCH
+    /// the cache answers whole is (`held_beyond_cache_refusal`).
     ///
-    /// FIXME: give the Objects the cache holds of the range, and the
-    /// indicator for the rest.
+    /// A Descending FETCH gets the cache's Objects only where its range is
+    /// in the Group the cache keeps; otherwise the one indicator. WHY NOT
+    /// its Objects there as well, with the indicators of the other Groups
+    /// after them: the stream would have Objects of several Groups, whose
+    /// Group ID Deltas depend on the Group Order (§11.4.4.1), and
+    /// [`Action::WriteFetchStream`] writes Ascending; and §11.4.4.2 does not
+    /// say where an indicator in a Descending stream begins.
     ///
     /// The `FETCH_OK` needs an End Location, which the relay knows only for
     /// a track it has a source of, from the largest Location it has seen.
@@ -1325,13 +1323,20 @@ impl Relay {
     /// the delivery of Objects only: waiting for the answer is waiting.
     fn answer_without_asking(
         &mut self,
-        session: SessionKey,
-        stream: StreamKey,
+        (session, stream): (SessionKey, StreamKey),
         request: PeerRequestId,
-        track: &FullTrackName,
-        (start, end, send_order): (Location, Location, i32),
+        asked: &AskedRange,
+        descending: bool,
         actions: &mut Vec<Action>,
     ) {
+        let AskedRange {
+            track,
+            start,
+            end,
+            send_order,
+            ..
+        } = asked;
+        let (start, end, send_order) = (*start, *end, *send_order);
         let largest = self.tracks.live(track).and_then(|live| live.largest);
         let refusal = match largest {
             // §10.12.3: "If ... Start Location is greater than the Largest
@@ -1371,15 +1376,62 @@ impl Relay {
         // Location", and does not say from where when no Object came before
         // and the Groups run downwards. A subscriber may read this one as
         // covering nothing, or everything.
-        let unknown = FetchPiece::EndOfRange(RangeEnd::Unknown, last_location(end));
+        let last = last_location(end);
+        let in_one_group = start.group == last.group;
+        let cached = self
+            .tracks
+            .live(track)
+            .filter(|live| !live.never_cached && (!descending || in_one_group))
+            .and_then(|live| live.cache.immediately_available(start, last));
+        let pieces = match cached {
+            Some(pieces) => {
+                let holds_objects = pieces
+                    .iter()
+                    .any(|piece| matches!(piece, FetchPiece::Object(_)));
+                if holds_objects
+                    && let Some(refusal) = self.held_beyond_cache_refusal(session, stream, actions)
+                {
+                    return self.refuse(session, stream, request, &refusal, actions);
+                }
+                pieces
+            }
+            None => vec![FetchPiece::EndOfRange(RangeEnd::Unknown, last)],
+        };
         self.write_answer(
             session,
             stream,
             request,
             track,
-            (end, vec![unknown], send_order),
+            (end, pieces, send_order),
             actions,
         );
+    }
+
+    /// `EXCESSIVE_LOAD` for a FETCH the relay would answer with Objects of
+    /// its cache, where its fetch streams keep as much beyond the cache as
+    /// it lets them, for all sessions or for this one (§10.6.2:
+    /// "`EXCESSIVE_LOAD`: The responder is overloaded and cannot process the
+    /// request at this time").
+    fn held_beyond_cache_refusal(
+        &self,
+        session: SessionKey,
+        stream: StreamKey,
+        actions: &mut Vec<Action>,
+    ) -> Option<Refusal> {
+        let held = self.held_beyond_the_cache();
+        let over = held.total >= self.held_beyond_cache_limit
+            || held.of(session) >= self.held_beyond_cache_share;
+        if !over {
+            return None;
+        }
+        actions.push(Action::NoteHeldBeyondCache {
+            session,
+            stream,
+            refused: true,
+            relay_bytes: held.total,
+            session_bytes: held.of(session),
+        });
+        Some(Refusal::code(request_error_code::EXCESSIVE_LOAD))
     }
 
     /// What the cache of the track has for the range of a FETCH: the End
