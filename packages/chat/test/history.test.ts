@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	catchUpLines,
 	historyStart,
@@ -16,134 +18,54 @@ test.each([
 	expect(historyStart(largestGroup)).toBe(start);
 });
 
-describe("what is fetched for a subscription to lines", () => {
-	// had, the Group of LARGEST_OBJECT, the lines it catches up at the most;
-	// then whether what was had is forgotten, the first Group fetched, and
-	// the gap before it.
-	test.each([
-		[
-			"nothing had: the newest 16",
-			undefined,
-			1_000n,
-			200,
-			false,
-			985n,
-			undefined,
-			undefined,
-		],
-		[
-			"nothing had, in a room of 3 lines",
-			undefined,
-			2n,
-			200,
-			false,
-			0n,
-			undefined,
-			undefined,
-		],
-		[
-			"nothing had, in a room without lines",
-			undefined,
-			undefined,
-			200,
-			false,
-			undefined,
-			undefined,
-			undefined,
-		],
-		[
-			"had up to the largest already",
-			50n,
-			50n,
-			200,
-			false,
-			undefined,
-			undefined,
-			undefined,
-		],
-		["a few lines missed", 50n, 55n, 200, false, 51n, undefined, undefined],
-		["one line missed", 50n, 51n, 200, false, 51n, undefined, undefined],
-		[
-			"missed exactly as many as it catches up",
-			50n,
-			250n,
-			200,
-			false,
-			51n,
-			undefined,
-			undefined,
-		],
-		[
-			"missed one more than it catches up: the newest, and a gap",
-			50n,
-			251n,
-			200,
-			false,
-			52n,
-			50n,
-			52n,
-		],
-		["missed many more", 50n, 10_000n, 200, false, 9_801n, 50n, 9_801n],
-		[
-			"catching up one line at the most",
-			50n,
-			1_000n,
-			1,
-			false,
-			1_000n,
-			50n,
-			1_000n,
-		],
-		[
-			"catching up the most a setting allows",
-			0n,
-			5_000n,
-			1_000,
-			false,
-			4_001n,
-			0n,
-			4_001n,
-		],
-		[
-			"a largest below what was had: numbered anew, the newest 16",
-			50n,
-			30n,
-			200,
-			true,
-			15n,
-			undefined,
-			undefined,
-		],
-		[
-			"numbered anew, fewer than 16 lines",
-			50n,
-			3n,
-			200,
-			true,
-			0n,
-			undefined,
-			undefined,
-		],
-		[
-			"numbered anew, without lines yet",
-			50n,
-			undefined,
-			200,
-			true,
-			undefined,
-			undefined,
-			undefined,
-		],
-	])(
+/**
+ * The rows of `fixtures/chat-history/history-to-fetch.tsv`, which the
+ * terminal viewer reads too (`history_to_fetch` of `crates/watch`).
+ */
+function sharedRows(): string[][] {
+	const table = readFileSync(
+		join(
+			import.meta.dir,
+			"..",
+			"..",
+			"..",
+			"fixtures",
+			"chat-history",
+			"history-to-fetch.tsv",
+		),
+		"utf8",
+	);
+	return table
+		.split("\n")
+		.filter((row) => row !== "")
+		.map((row) => row.split("\t"));
+}
+
+/** A column of the table: `-` is none. */
+const bigintOf = (column: string | undefined): bigint | undefined =>
+	column === undefined || column === "-" ? undefined : BigInt(column);
+
+describe("what is fetched for a subscription to lines: fixtures/chat-history", () => {
+	test.each(sharedRows())(
 		"%s",
-		(_case, had, largest, catchUp, forget, start, gapAfter, gapBefore) => {
-			const plan = historyToFetch(had, largest, catchUp);
-			expect(plan.forget).toBe(forget);
-			expect(plan.fetch?.start).toBe(start);
-			expect(plan.fetch?.gap?.after).toBe(gapAfter);
-			expect(plan.fetch?.gap?.before).toBe(gapBefore);
+		(_name, had, largest, catchUp, forget, start, gapAfter, gapBefore) => {
+			const plan = historyToFetch(
+				bigintOf(had),
+				bigintOf(largest),
+				Number(catchUp),
+			);
+			expect(plan.forget).toBe(forget === "yes");
+			expect(plan.fetch?.start).toBe(bigintOf(start));
+			expect(plan.fetch?.gap?.after).toBe(bigintOf(gapAfter));
+			expect(plan.fetch?.gap?.before).toBe(bigintOf(gapBefore));
 		},
 	);
+
+	test("the table has its 14 rows of 8 columns", () => {
+		expect(sharedRows().map((row) => row.length)).toEqual([
+			8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+		]);
+	});
 });
 
 describe("the lines a participant catches up at the most", () => {
