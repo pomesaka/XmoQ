@@ -14,22 +14,15 @@ type Socket =
 /// The most a room's messages may wait while something else is waited for.
 const KEPT: usize = 256;
 
-/// The most bytes of one message of a room. The hello of a room with a full
-/// history (50 lines of 500 characters) is under 128 KiB.
+/// The most bytes of one message of a room. The hello of a room that still
+/// keeps a full history of its chat (50 lines of 500 characters) is under
+/// 128 KiB.
 const MOST_A_MESSAGE: usize = 256 * 1024;
-
-/// What a room says to a viewer while it watches.
-pub enum Heard {
-    /// A line of the chat, ready to be shown.
-    Chat(String),
-    /// The publisher left, or another came.
-    Broadcast(Option<Broadcast>),
-}
 
 pub struct RoomSocket {
     socket: Socket,
-    /// What the room said while something else was waited for.
-    kept: VecDeque<Heard>,
+    /// The broadcasts the room said while something else was waited for.
+    kept: VecDeque<Option<Broadcast>>,
     broadcast: Option<Broadcast>,
 }
 
@@ -39,7 +32,7 @@ impl RoomSocket {
     pub async fn join(address: &str, name: &str) -> Result<Self> {
         let address = room::websocket_address(address, name)?;
         // WHY a limit of its own: the library's is 64 MiB a message, and
-        // what a room says is a line of chat or where a broadcast is.
+        // what a room says is where a broadcast is.
         let limits = WebSocketConfig::default()
             .max_message_size(Some(MOST_A_MESSAGE))
             .max_frame_size(Some(MOST_A_MESSAGE));
@@ -52,11 +45,10 @@ impl RoomSocket {
             kept: VecDeque::new(),
             broadcast: None,
         };
-        // The room says hello first: the chat so far and the broadcast it has.
-        let Said::Hello { history, broadcast } = joined.message().await? else {
+        // The room says hello first: the broadcast it has.
+        let Said::Hello { broadcast } = joined.message().await? else {
             bail!("the room did not begin with hello");
         };
-        joined.kept.extend(history.into_iter().map(Heard::Chat));
         joined.broadcast = broadcast;
         Ok(joined)
     }
@@ -74,15 +66,15 @@ impl RoomSocket {
         }
     }
 
-    /// What a message of the room says to a viewer; `None` for the rest.
-    fn heard(&mut self, said: Said) -> Option<Heard> {
+    /// Whether a message of the room says which broadcast it has now,
+    /// which [`Self::current`] gives from then on.
+    fn heard(&mut self, said: Said) -> bool {
         match said {
-            Said::Chat(line) => Some(Heard::Chat(line)),
             Said::Broadcast(broadcast) => {
-                self.broadcast.clone_from(&broadcast);
-                Some(Heard::Broadcast(broadcast))
+                self.broadcast = broadcast;
+                true
             }
-            Said::Hello { .. } | Said::Token(_) | Said::Other => None,
+            Said::Hello { .. } | Said::Token(_) | Said::Other => false,
         }
     }
 
@@ -101,32 +93,28 @@ impl RoomSocket {
             match self.message().await? {
                 Said::Token(token) => return Ok(token),
                 said => {
-                    if let Some(heard) = self.heard(said) {
+                    if self.heard(said) {
                         // A room that talks and gives no token: the oldest goes.
                         if self.kept.len() >= KEPT {
                             self.kept.pop_front();
                         }
-                        self.kept.push_back(heard);
+                        self.kept.push_back(self.current());
                     }
                 }
             }
         }
     }
 
-    pub async fn say(&mut self, text: &str) -> Result<()> {
-        self.socket.send(Message::text(room::say(text))).await?;
-        Ok(())
-    }
-
-    /// The next thing the room says to a viewer.
-    pub async fn next(&mut self) -> Result<Heard> {
+    /// The next broadcast the room says it has: the publisher left
+    /// (`None`), or another came.
+    pub async fn next(&mut self) -> Result<Option<Broadcast>> {
         loop {
             if let Some(heard) = self.kept.pop_front() {
                 return Ok(heard);
             }
             let said = self.message().await?;
-            if let Some(heard) = self.heard(said) {
-                return Ok(heard);
+            if self.heard(said) {
+                return Ok(self.current());
             }
         }
     }

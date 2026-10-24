@@ -95,9 +95,9 @@
 //   - Viewer `wa` comes first, when the gatherer has published no `lines` of
 //     the room yet: its SUBSCRIBE to `lines` is held by the relay
 //     (RENDEZVOUS_TIMEOUT) until the gatherer, told of `wa`, publishes the
-//     room. Its line `a1` is line 0, and `wa` shows `CHAT moq 0 wa: a1`.
+//     room. Its line `a1` is line 0, and `wa` shows `CHAT 0 wa: a1`.
 //   - Viewer `wb` comes then, and gets line 0 by its Joining FETCH
-//     (`CHAT moq 0 wa: a1`), and its own `b1` as line 1 (`CHAT moq 1 wb:
+//     (`CHAT 0 wa: a1`), and its own `b1` as line 1 (`CHAT 1 wb:
 //     b1`), which `wa` shows as well.
 //   - Each line is shown once, and both leave with 0 at the end of their
 //     `--seconds`.
@@ -523,26 +523,26 @@ async function chat(): Promise<string> {
 			"viewer:wa",
 			chatViewer("wa", "a1", 16, tracks),
 		);
-		await a.waitForLine(/^CHAT moq 0 wa: a1$/, 20_000);
+		await a.waitForLine(/^CHAT 0 wa: a1$/, 20_000);
 		const b = spawnTerminalViewer(
 			context,
 			"viewer:wb",
 			chatViewer("wb", "b1", 8, tracks),
 		);
-		await b.waitForLine(/^CHAT moq 0 wa: a1$/, 20_000);
-		await b.waitForLine(/^CHAT moq 1 wb: b1$/, 20_000);
-		await a.waitForLine(/^CHAT moq 1 wb: b1$/, 20_000);
+		await b.waitForLine(/^CHAT 0 wa: a1$/, 20_000);
+		await b.waitForLine(/^CHAT 1 wb: b1$/, 20_000);
+		await a.waitForLine(/^CHAT 1 wb: b1$/, 20_000);
 		const codes = await Promise.all([
 			withTimeout(a.exited, "wa to leave", 30_000),
 			withTimeout(b.exited, "wb to leave", 30_000),
 		]);
 		const shown = (viewer: LoggedProcess): string[] =>
-			viewer.matches(/^CHAT (moq .*)$/).map((match) => match[1] ?? "");
+			viewer.matches(/^CHAT (\d+ .*)$/).map((match) => match[1] ?? "");
 		const wrong: string[] = [];
 		if (codes.some((code) => code !== 0)) {
 			wrong.push(`they left with ${codes.join(" and ")}`);
 		}
-		const once = ["moq 0 wa: a1", "moq 1 wb: b1"];
+		const once = ["0 wa: a1", "1 wb: b1"];
 		for (const [name, viewer] of [
 			["wa", a],
 			["wb", b],

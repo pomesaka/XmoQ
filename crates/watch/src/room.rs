@@ -18,18 +18,17 @@ pub struct Broadcast {
 }
 
 /// What a room said.
+///
+/// The chat is not among it: it is on `MoQ` tracks (Q49, decided on
+/// 2026-10-24; [`crate::chat_track`]). A room that still sends its chat, or
+/// a history of it in its hello, has it passed over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Said {
-    /// The first message: the lines of the chat so far, and the broadcast
-    /// the room has.
+    /// The first message: the broadcast the room has.
     Hello {
-        /// The chat so far, each line as [`Said::Chat`] has it.
-        history: Vec<String>,
         /// The broadcast, where a publisher is in the room.
         broadcast: Option<Broadcast>,
     },
-    /// A line of the chat, ready to be shown.
-    Chat(String),
     /// A publisher came, or the one that was there left.
     Broadcast(Option<Broadcast>),
     /// The answer to [`ask_for_a_token`]: the token as text, or none where
@@ -50,10 +49,6 @@ impl std::fmt::Display for Invalid {
 }
 
 impl std::error::Error for Invalid {}
-
-/// The most lines of a room's chat so far that are read from its hello.
-/// The room keeps 50.
-pub const HISTORY_LIMIT: usize = 64;
 
 /// Whether a character changes how the text around it is laid out without
 /// being seen: the marks, embeddings, overrides and isolates of the
@@ -105,19 +100,6 @@ fn broadcast_of(value: &Value) -> Option<Broadcast> {
     })
 }
 
-/// A line of the chat as the pages show it: its number, who said it, and
-/// what.
-fn chat_line(value: &Value) -> String {
-    let text = |key| value.get(key).and_then(Value::as_str).unwrap_or("");
-    let line = format!(
-        "{} {}: {}",
-        value.get("seq").and_then(Value::as_u64).unwrap_or(0),
-        text("from"),
-        text("text")
-    );
-    clean(&line, LINE_LIMIT)
-}
-
 /// Reads one message of a room.
 ///
 /// A broadcast that lacks a field, has one of another type, or names a
@@ -131,19 +113,9 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
     let message: Value =
         serde_json::from_str(text).map_err(|error| Invalid(format!("no JSON: {error}")))?;
     Ok(match message.get("type").and_then(Value::as_str) {
-        Some("hello") => {
-            let history = message
-                .get("history")
-                .and_then(Value::as_array)
-                .map_or(&[][..], Vec::as_slice);
-            // The last of them: what a room keeps beyond the limit is old.
-            let from = history.len().saturating_sub(HISTORY_LIMIT);
-            Said::Hello {
-                history: history.iter().skip(from).map(chat_line).collect(),
-                broadcast: message.get("broadcast").and_then(broadcast_of),
-            }
-        }
-        Some("chat") => Said::Chat(chat_line(&message)),
+        Some("hello") => Said::Hello {
+            broadcast: message.get("broadcast").and_then(broadcast_of),
+        },
         Some("broadcast") => Said::Broadcast(message.get("broadcast").and_then(broadcast_of)),
         Some("token") => Said::Token(
             message
@@ -159,12 +131,6 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
 #[must_use]
 pub fn ask_for_a_token(namespace: &[String]) -> String {
     json!({"type": "token-for", "role": "sub", "namespace": namespace}).to_string()
-}
-
-/// The message that says a line in the chat.
-#[must_use]
-pub fn say(text: &str) -> String {
-    json!({"type": "chat", "text": text}).to_string()
 }
 
 /// The address of a room's WebSocket, from the address of the room
@@ -228,39 +194,26 @@ mod tests {
         let there = format!(
             r#"{{"relayUrl":"https://127.0.0.1:4443/","certSha256Hex":"{hash}","namespace":["xmoq","demo"],"since":1}}"#
         );
-        let chat = |line: &str| Said::Chat(line.to_string());
         // (the message; what it is read as)
         let cases = [
+            // A history of the chat, from a room that still keeps one, is
+            // passed over.
             (
                 format!(
                     r#"{{"type":"hello","history":[{{"type":"chat","seq":1,"from":"a","text":"hi"}}],"connected":2,"broadcast":{there}}}"#
                 ),
                 Said::Hello {
-                    history: vec!["1 a: hi".to_string()],
                     broadcast: Some(broadcast()),
                 },
             ),
             (
-                r#"{"type":"hello","history":[],"connected":1,"broadcast":null}"#.to_string(),
-                Said::Hello {
-                    history: vec![],
-                    broadcast: None,
-                },
+                r#"{"type":"hello","connected":1,"broadcast":null}"#.to_string(),
+                Said::Hello { broadcast: None },
             ),
+            // So is a line of its chat: the chat is on tracks.
             (
                 r#"{"type":"chat","seq":7,"from":"publisher","text":"hello","at":1}"#.to_string(),
-                chat("7 publisher: hello"),
-            ),
-            // An escape code in a line is taken out, and what is left of it is text.
-            (
-                r#"{"type":"chat","seq":8,"from":"x","text":"a\u001b[2Jb\nc"}"#.to_string(),
-                chat("8 x: a[2Jbc"),
-            ),
-            // Fields that are missing or of another type.
-            (r#"{"type":"chat"}"#.to_string(), chat("0 : ")),
-            (
-                r#"{"type":"chat","seq":"1","from":2,"text":null}"#.to_string(),
-                chat("0 : "),
+                Said::Other,
             ),
             (
                 format!(r#"{{"type":"broadcast","broadcast":{there}}}"#),
@@ -280,11 +233,6 @@ mod tests {
                 r#"{"type":"broadcast","broadcast":{"relayUrl":"file:///etc/passwd","certSha256Hex":"00","namespace":["a"]}}"#
                     .to_string(),
                 Said::Broadcast(None),
-            ),
-            // A right-to-left override and a line separator are taken out as well.
-            (
-                r#"{"type":"chat","seq":9,"from":"x","text":"a\u202eb\u2028c\u2066d\ufeff"}"#.to_string(),
-                chat("9 x: abcd"),
             ),
             // A broadcast without its certificate, and one whose namespace is no strings.
             (
@@ -317,31 +265,28 @@ mod tests {
     }
 
     #[test]
-    fn of_a_long_history_the_last_lines_are_read() {
-        let lines: Vec<String> = (1..=70)
-            .map(|seq| format!(r#"{{"seq":{seq},"from":"a","text":"t"}}"#))
-            .collect();
-        let message = format!(
-            r#"{{"type":"hello","history":[{}],"broadcast":null}}"#,
-            lines.join(",")
-        );
-        let Ok(Said::Hello { history, .. }) = read(&message) else {
-            panic!("a hello");
-        };
-        assert_eq!(history.len(), 64);
-        assert_eq!(history.first().map(String::as_str), Some("7 a: t"));
-        assert_eq!(history.last().map(String::as_str), Some("70 a: t"));
-    }
-
-    #[test]
-    fn a_long_line_is_cut_at_a_character() {
-        let long = "\u{3042}".repeat(200);
-        let message = format!(r#"{{"type":"chat","seq":1,"from":"a","text":"{long}"}}"#);
-        let Ok(Said::Chat(line)) = read(&message) else {
-            panic!("a chat");
-        };
-        assert_eq!(line.chars().count(), 120);
-        assert_eq!(line, format!("1 a: {}", "\u{3042}".repeat(115)));
+    fn a_line_is_made_safe_for_a_terminal() {
+        // (the text; the most characters; what is written)
+        let cases = [
+            // An escape code is taken out, and what is left of it is text.
+            ("a\u{1b}[2Jb\nc", 120, "a[2Jbc".to_string()),
+            // So are a right-to-left override, a line separator, an isolate
+            // and a byte order mark.
+            (
+                "a\u{202e}b\u{2028}c\u{2066}d\u{feff}",
+                120,
+                "abcd".to_string(),
+            ),
+            // A long line is cut at a character.
+            (
+                "\u{3042}\u{3042}\u{3042}",
+                2,
+                "\u{3042}\u{3042}".to_string(),
+            ),
+        ];
+        for (text, most, written) in cases {
+            assert_eq!(clean(text, most), written, "{text:?}");
+        }
     }
 
     #[test]
@@ -350,7 +295,6 @@ mod tests {
             ask_for_a_token(&["xmoq".to_string(), "demo".to_string()]),
             r#"{"namespace":["xmoq","demo"],"role":"sub","type":"token-for"}"#
         );
-        assert_eq!(say("a \"b\"\n"), r#"{"text":"a \"b\"\n","type":"chat"}"#);
     }
 
     #[test]
