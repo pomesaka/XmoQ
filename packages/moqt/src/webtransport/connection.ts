@@ -2374,6 +2374,7 @@ export async function connectOver(
 	}
 
 	io.acceptPeerStreams();
+	io.readDatagrams();
 	transport.closed.then(
 		(info) =>
 			teardown({ type: "peer", code: info.closeCode, reason: info.reason }),

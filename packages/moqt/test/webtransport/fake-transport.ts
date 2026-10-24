@@ -125,6 +125,72 @@ interface CloseInfo {
 	reason: string;
 }
 
+/**
+ * How many datagrams the fake keeps that the client has not read. WHY a
+ * bound that drops the oldest: the W3C WebTransport API cuts its incoming
+ * queue so (Editor's Draft, read on 2026-10-24), so a client that lets
+ * datagrams wait loses them; a fake that kept all of them would be more
+ * lenient than the browser. The number is the fake's own; Chromium's was
+ * not looked up.
+ */
+export const MAX_BUFFERED_DATAGRAMS = 8;
+
+/**
+ * The incoming datagrams of the fake: a readable with no queue of its own
+ * (a high water mark of 0, as the API has), fed from a bounded one.
+ */
+function datagramSource(): {
+	readable: ReadableStream<Uint8Array>;
+	send(datagram: Uint8Array): void;
+	end(error: Error): void;
+} {
+	const waiting: Uint8Array[] = [];
+	let wanted: ((datagram: Uint8Array) => void) | undefined;
+	let ended: Error | undefined;
+	let fail: (error: Error) => void = () => {};
+	const readable = new ReadableStream<Uint8Array>(
+		{
+			start(controller) {
+				fail = (error) => controller.error(error);
+			},
+			pull(controller) {
+				const datagram = waiting.shift();
+				if (datagram !== undefined) {
+					controller.enqueue(datagram);
+					return undefined;
+				}
+				return new Promise<void>((resolve) => {
+					wanted = (next) => {
+						wanted = undefined;
+						controller.enqueue(next);
+						resolve();
+					};
+				});
+			},
+		},
+		{ highWaterMark: 0 },
+	);
+	return {
+		readable,
+		send(datagram) {
+			if (ended !== undefined) return;
+			// A copy, as a datagram that crossed the network is.
+			const copy = datagram.slice();
+			if (wanted !== undefined) {
+				wanted(copy);
+				return;
+			}
+			waiting.push(copy);
+			if (waiting.length > MAX_BUFFERED_DATAGRAMS) waiting.shift();
+		},
+		end(error) {
+			ended = error;
+			waiting.length = 0;
+			fail(error);
+		},
+	};
+}
+
 /** The far end of a `MoqtTransport`, driven by the test. */
 export interface FakePeer {
 	transport: MoqtTransport;
@@ -134,6 +200,11 @@ export interface FakePeer {
 	clientBidi(): Promise<PeerBidiStream>;
 	openUni(): WritableStreamDefaultWriter<Uint8Array>;
 	openBidi(): PeerBidiStream;
+	/**
+	 * Sends a datagram to the client. Of the ones the client has not read,
+	 * only the latest `MAX_BUFFERED_DATAGRAMS` are kept.
+	 */
+	sendDatagram(datagram: Uint8Array): void;
 	/** Closes the transport session from the peer's side. */
 	close(info: CloseInfo): void;
 	/** Makes the transport session fail, as a lost connection does. */
@@ -249,9 +320,11 @@ export function createFakePeer(
 	// WHY the streams fail a task before `closed` settles: that is the order in
 	// which the connection can see the end of a session, and the one it must
 	// not take for resets and STOP_SENDINGs of the peer.
+	const datagrams = datagramSource();
 	const endStreams = (): void => {
 		const error = FakeWebTransportError.sessionEnded();
 		for (const end of streamEnders) end(error);
+		datagrams.end(error);
 	};
 	let closeInfo: CloseInfo | undefined;
 	let resolveClosed: (info: CloseInfo) => void = () => {};
@@ -268,6 +341,7 @@ export function createFakePeer(
 			closed,
 			incomingUnidirectionalStreams: incomingUni.readable,
 			incomingBidirectionalStreams: incomingBidi.readable,
+			datagrams: { readable: datagrams.readable },
 			createUnidirectionalStream() {
 				const failure = options.failUni?.();
 				if (failure !== undefined) return Promise.reject(failure);
@@ -331,6 +405,7 @@ export function createFakePeer(
 				reply: toClient.writable.getWriter(),
 			};
 		},
+		sendDatagram: datagrams.send,
 		close(info) {
 			endStreams();
 			setTimeout(() => resolveClosed(info), 0);

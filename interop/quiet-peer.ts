@@ -88,8 +88,8 @@
 //                     session with a PROTOCOL_VIOLATION"). own-rust and the
 //                     terminal viewer close the session with
 //                     PROTOCOL_VIOLATION: the peer prints `SESSION_ENDED
-//                     session=0 ClosedByPeer { code: 3,`. Not own-browser:
-//                     `@xmoq/moqt` does not read datagrams yet. The first
+//                     session=0 ClosedByPeer { code: 3,`, and own-browser
+//                     too, whose `@xmoq/moqt` reads every datagram. The first
 //                     run of the terminal viewer failed: it closed with
 //                     NO_ERROR when its SUBSCRIBE got no answer in 10 s, as
 //                     it reads nothing else while it waits for one; the
@@ -1014,8 +1014,13 @@ async function unknownDatagram(
 			said = `xmoq-watch left with ${code}`;
 			break;
 		}
-		case "own-browser":
-			throw new Error("@xmoq/moqt does not read datagrams yet");
+		case "own-browser": {
+			// The datagram comes right after the peer's SETUP, so connect()
+			// may end either way: what has to be seen is the peer's line.
+			const page = await connectedPage(context);
+			said = `the page's connect() ended: ${await withTimeout(page.connect, "the page's connect()")}`;
+			break;
+		}
 	}
 	await context.relay.waitForLine(/^DATAGRAM_SENT session=0 type=0x30$/);
 	// 3 is PROTOCOL_VIOLATION (§3.5).

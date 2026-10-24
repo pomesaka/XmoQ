@@ -10,7 +10,7 @@ import type { SessionEvent } from "../core/session-output.ts";
 export interface Diagnostics {
 	/** Called with every session event, before the connection acts on it. */
 	onEvent?: (event: SessionEvent) => void;
-	/** Called with the bytes of every stream. */
+	/** Called with the bytes of every stream, and of every datagram the peer sends, named `datagram`. */
 	onBytes?: (
 		direction: "sent" | "received",
 		stream: string,

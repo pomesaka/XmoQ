@@ -13,6 +13,12 @@ export interface MoqtTransport {
 		ReadableStream<unknown>
 	>;
 	readonly incomingBidirectionalStreams: ReadableStream<MoqtBidirectionalStream>;
+	/**
+	 * The datagrams of the peer. `readable` is a `ReadableStream` of
+	 * `Uint8Array` in the W3C WebTransport API; lib.dom.d.ts of TypeScript
+	 * 6.0.3 declares it without a chunk type, so a chunk is checked when read.
+	 */
+	readonly datagrams: { readonly readable: ReadableStream<unknown> };
 	createUnidirectionalStream(): Promise<WritableStream<Uint8Array>>;
 	createBidirectionalStream(): Promise<MoqtBidirectionalStream>;
 	close(info: { closeCode: number; reason: string }): void;
