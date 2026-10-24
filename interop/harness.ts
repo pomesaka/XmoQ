@@ -1018,7 +1018,14 @@ export function spawnRustClient(
 	// "publish-namespace" is a mode of the own Rust client alone: it announces
 	// the namespace and serves the track when it is asked for it.
 	// "fetch" is the own Rust client's as well: it sends a Standalone FETCH.
-	mode: "publish" | "publish-namespace" | "subscribe" | "fetch",
+	// "subscribe-namespace" is the own Rust client's as well: it sends
+	// SUBSCRIBE_NAMESPACE and prints what it is told.
+	mode:
+		| "publish"
+		| "publish-namespace"
+		| "subscribe"
+		| "fetch"
+		| "subscribe-namespace",
 	track: string,
 	extraArgs: string[] = [],
 ): LoggedProcess {

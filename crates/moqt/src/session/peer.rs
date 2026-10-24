@@ -11,10 +11,10 @@ use crate::aliases::SubscribedAlias;
 use crate::kvp::KeyValuePair;
 use crate::message::{
     ControlMessage, Fetch, FetchOk, FetchRange, GoAway, Publish, PublishDone, PublishNamespace,
-    ReasonPhrase, RequestError, RequestOk, RequestUpdate, Subscribe, SubscribeOk,
-    publish_done_status, request_error_code, retry_interval,
+    ReasonPhrase, RequestError, RequestOk, RequestUpdate, Subscribe, SubscribeNamespace,
+    SubscribeOk, publish_done_status, request_error_code, retry_interval,
 };
-use crate::name::{FullTrackName, Location};
+use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
 use crate::{Error, RequestFault, UsageError};
 
@@ -73,6 +73,10 @@ pub enum PeerRequest {
     /// [`Session::peer_request_yet_to_come`] says, and a caller that holds
     /// no FETCH for a SUBSCRIBE to come refuses the second.
     Fetch(Fetch),
+    /// The peer asks for the namespaces under a prefix (§6.1, §10.18). The
+    /// caller accepts with [`Session::accept_subscribe_namespace`] and sends
+    /// the NAMESPACE and `NAMESPACE_DONE` messages on the stream itself.
+    SubscribeNamespace(SubscribeNamespace),
 }
 
 /// What the first message on a request stream of the peer led to.
@@ -274,6 +278,10 @@ enum PeerRequestState {
         updates: u32,
     },
     PublishNamespace {
+        established: bool,
+    },
+    SubscribeNamespace {
+        prefix: TrackNamespace,
         established: bool,
     },
     Fetch(FetchPhase),
@@ -533,6 +541,7 @@ impl Session {
             ControlMessage::Publish(message) => message.request_id,
             ControlMessage::PublishNamespace(message) => message.request_id,
             ControlMessage::Fetch(message) => message.request_id,
+            ControlMessage::SubscribeNamespace(message) => message.request_id,
             ControlMessage::UnsupportedRequest { request_id, .. } => *request_id,
             _ => {
                 return Err(Error::ProtocolViolation(
@@ -604,6 +613,10 @@ impl Session {
                 PeerRequestState::PublishNamespace { established: false },
                 PeerRequest::PublishNamespace(message),
             ),
+            ControlMessage::SubscribeNamespace(message) => match self.namespace_state(&message) {
+                Ok(state) => (state, PeerRequest::SubscribeNamespace(message)),
+                Err(error_code) => return Ok(self.refuse_opened(id, error_code)),
+            },
             ControlMessage::Fetch(message) => {
                 let start = match self.peer.start_of(request_id, &message.range) {
                     Ok(start) => start,
@@ -844,7 +857,8 @@ impl Session {
             Some(PeerRequestState::Subscribe { phase, .. }) => *phase == SubscribePhase::Pending,
             Some(
                 PeerRequestState::Publish { established, .. }
-                | PeerRequestState::PublishNamespace { established },
+                | PeerRequestState::PublishNamespace { established }
+                | PeerRequestState::SubscribeNamespace { established, .. },
             ) => !*established,
             Some(PeerRequestState::Fetch(phase)) => {
                 matches!(phase, FetchPhase::Pending { .. })
@@ -866,6 +880,57 @@ impl Session {
             error_reason,
             redirect: None,
         }))
+    }
+
+    /// The state a `SUBSCRIBE_NAMESPACE` of the peer begins in, or the code it
+    /// is refused with. §10.18: "if a publisher receives a
+    /// `SUBSCRIBE_NAMESPACE` with a Track Namespace Prefix that shares a common
+    /// prefix with an established `SUBSCRIBE_NAMESPACE`, it MUST respond with
+    /// `REQUEST_ERROR` with error code `PREFIX_OVERLAP`". WHY one that waits
+    /// for its answer counts as well: two that came at once would otherwise
+    /// both be accepted, and overlap.
+    fn namespace_state(&self, message: &SubscribeNamespace) -> Result<PeerRequestState, u64> {
+        let prefix = &message.track_namespace_prefix;
+        let overlaps = self.peer.live.values().any(|state| {
+            matches!(
+                state,
+                PeerRequestState::SubscribeNamespace { prefix: other, .. }
+                    if other.is_prefix_of(prefix) || prefix.is_prefix_of(other)
+            )
+        });
+        if overlaps {
+            return Err(request_error_code::PREFIX_OVERLAP);
+        }
+        Ok(PeerRequestState::SubscribeNamespace {
+            prefix: prefix.clone(),
+            established: false,
+        })
+    }
+
+    /// Accepts a `SUBSCRIBE_NAMESPACE` of the peer and returns its
+    /// `REQUEST_OK` (§6.1: "the publisher MUST send a single `REQUEST_OK` or
+    /// `REQUEST_ERROR` as the first message on the bidirectional stream"). What
+    /// follows on the stream, the NAMESPACE and `NAMESPACE_DONE` messages, is
+    /// the caller's: it knows the namespaces.
+    ///
+    /// # Errors
+    ///
+    /// Fails unless `request` is a `SUBSCRIBE_NAMESPACE` that waits for its
+    /// answer.
+    pub fn accept_subscribe_namespace(
+        &mut self,
+        request: PeerRequestId,
+    ) -> Result<ControlMessage, UsageError> {
+        let Some(PeerRequestState::SubscribeNamespace { established, .. }) =
+            self.peer_request_mut(request)?
+        else {
+            return Err(UsageError("not a SUBSCRIBE_NAMESPACE of the peer"));
+        };
+        if *established {
+            return Err(NOT_PENDING);
+        }
+        *established = true;
+        Ok(ControlMessage::RequestOk(RequestOk::default()))
     }
 
     /// Takes the first message of a request the peer opened and refuses the
@@ -980,7 +1045,13 @@ impl Session {
             } | PeerRequestState::Rejected
                 | PeerRequestState::Fetch(FetchPhase::Over)
         );
-        let is_fetch = matches!(state, PeerRequestState::Fetch(_));
+        // §10.2.1, with what §10.2 lets the update of this request carry: the
+        // decoder let through what the update of any request may carry.
+        let update_kind = match state {
+            PeerRequestState::Fetch(_) => MessageKind::FetchUpdate,
+            PeerRequestState::SubscribeNamespace { .. } => MessageKind::NamespaceUpdate,
+            _ => MessageKind::RequestUpdate,
+        };
         // §10.1: a REQUEST_UPDATE consumes a Request ID of its sender, also
         // when the message itself is ignored below.
         if let ControlMessage::RequestUpdate(update) = &message {
@@ -990,10 +1061,8 @@ impl Session {
             return Ok(PeerRequestEvent::LateMessage);
         }
         match message {
-            // §10.2.1, with what §10.2 lets the update of a FETCH carry.
             ControlMessage::RequestUpdate(update)
-                if is_fetch
-                    && !params::all_allowed(&update.parameters, MessageKind::FetchUpdate) =>
+                if !params::all_allowed(&update.parameters, update_kind) =>
             {
                 Err(Error::ProtocolViolation("parameter not allowed in this message").into())
             }
@@ -1233,7 +1302,11 @@ impl Session {
             // §10.9.1: "When a REQUEST_UPDATE fails for a ... PUBLISH_NAMESPACE,
             // the responder MUST close the bidi stream." A request that is not
             // answered yet ends the same way, for the reason given above.
-            Some(PeerRequestState::Publish { .. } | PeerRequestState::PublishNamespace { .. })
+            Some(
+                PeerRequestState::Publish { .. }
+                | PeerRequestState::PublishNamespace { .. }
+                | PeerRequestState::SubscribeNamespace { .. },
+            )
             | None => {
                 self.reject_peer_request(request_id);
                 refused(AfterRefusal::CloseStream)
@@ -1298,6 +1371,7 @@ impl Session {
             }
             PeerRequestState::Subscribe { .. }
             | PeerRequestState::PublishNamespace { .. }
+            | PeerRequestState::SubscribeNamespace { .. }
             | PeerRequestState::Fetch(_)
             | PeerRequestState::Rejected => {}
         }
@@ -1415,6 +1489,111 @@ mod tests {
     const NOT_ALLOWED: RequestFault = RequestFault::Peer(Error::ProtocolViolation(
         "message not allowed in this request state",
     ));
+
+    /// §10.2.14: `TRACK_NAMESPACE_PREFIX` "MAY appear in `REQUEST_UPDATE` for
+    /// a `SUBSCRIBE_NAMESPACE`", which is then refused and its stream closed
+    /// (§10.9.1); in the update of a SUBSCRIBE it is not allowed (§10.2.1).
+    #[test]
+    fn a_new_prefix_is_refused_for_a_subscribe_namespace_and_not_allowed_for_a_subscribe() {
+        let ns = |fields: &[&[u8]]| {
+            TrackNamespace::new(fields.iter().map(|field| field.to_vec()).collect()).unwrap()
+        };
+        let update = ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: 2,
+            parameters: vec![Parameter::TrackNamespacePrefix(ns(&[b"xmoq", b"other"]))],
+        });
+        let subscribe_namespace = ControlMessage::SubscribeNamespace(SubscribeNamespace {
+            request_id: 0,
+            track_namespace_prefix: ns(&[b"xmoq"]),
+            parameters: vec![],
+        });
+        // (the request, whether it is answered first, what the update does)
+        let cases = [
+            (subscribe_namespace.clone(), true, Ok(true)),
+            (subscribe_namespace, false, Ok(true)),
+            (
+                subscribe(0, b"a"),
+                false,
+                Err(RequestFault::Peer(Error::ProtocolViolation(
+                    "parameter not allowed in this message",
+                ))),
+            ),
+        ];
+        for (first, answered, expected) in cases {
+            let mut session = server();
+            let PeerRequestOpened::Request(request, _) =
+                session.on_peer_request_opened(first.clone()).unwrap()
+            else {
+                panic!("{first:?}");
+            };
+            if answered {
+                session.accept_subscribe_namespace(request).unwrap();
+            }
+            let event = session.on_peer_request_message(request, update.clone());
+            let refused_and_closed = event.map(|event| {
+                matches!(
+                    event,
+                    PeerRequestEvent::UpdateRefused {
+                        then: AfterRefusal::CloseStream,
+                        ..
+                    }
+                )
+            });
+            assert_eq!(refused_and_closed, expected, "{first:?}");
+        }
+    }
+
+    /// §10.18: a `SUBSCRIBE_NAMESPACE` whose prefix shares a common prefix
+    /// with another gets `PREFIX_OVERLAP`. The first prefix is (`xmoq`,
+    /// `chat`).
+    #[test]
+    fn a_subscribe_namespace_whose_prefix_overlaps_is_refused() {
+        let ns = |fields: &[&[u8]]| {
+            TrackNamespace::new(fields.iter().map(|field| field.to_vec()).collect()).unwrap()
+        };
+        let subscribe_namespace = |request_id: u64, prefix: TrackNamespace| {
+            ControlMessage::SubscribeNamespace(SubscribeNamespace {
+                request_id,
+                track_namespace_prefix: prefix,
+                parameters: vec![],
+            })
+        };
+        // (the second prefix, whether it is refused)
+        let cases = [
+            (ns(&[b"xmoq", b"chat"]), true),
+            (ns(&[b"xmoq"]), true),
+            (ns(&[b"xmoq", b"chat", b"room"]), true),
+            (ns(&[]), true),
+            (ns(&[b"xmoq", b"video"]), false),
+        ];
+        for (second, refused) in cases {
+            let mut session = server();
+            let opened = session
+                .on_peer_request_opened(subscribe_namespace(0, ns(&[b"xmoq", b"chat"])))
+                .unwrap();
+            let PeerRequestOpened::Request(first, _) = opened else {
+                panic!("{opened:?}");
+            };
+            assert_eq!(
+                session.accept_subscribe_namespace(first),
+                Ok(ControlMessage::RequestOk(RequestOk::default()))
+            );
+            let again = session
+                .on_peer_request_opened(subscribe_namespace(2, second.clone()))
+                .unwrap();
+            let overlap = matches!(
+                again,
+                PeerRequestOpened::Refused {
+                    response: ControlMessage::RequestError(RequestError {
+                        error_code: request_error_code::PREFIX_OVERLAP,
+                        ..
+                    }),
+                    ..
+                }
+            );
+            assert_eq!(overlap, refused, "{second:?}");
+        }
+    }
 
     /// `refuse_peer_request`, at a client, whose peer's Request IDs are odd
     /// (§10.1): the refusal, and what a `REQUEST_UPDATE` on the refused stream

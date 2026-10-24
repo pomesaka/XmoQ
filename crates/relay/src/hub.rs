@@ -362,6 +362,14 @@ enum RequestCommand {
     Reset(u32),
 }
 
+/// The writer of the relay's half of a request stream the peer opened.
+struct RequestWriter {
+    commands: mpsc::Sender<RequestCommand>,
+    /// Resets the stream with the code, ahead of what waits in `commands`:
+    /// for a stream whose queue is full.
+    reset: oneshot::Sender<u32>,
+}
+
 struct SessionHandle<C: Connection> {
     connection: Arc<C>,
     control: mpsc::Sender<ControlMessage>,
@@ -372,7 +380,7 @@ struct SessionHandle<C: Connection> {
     /// moment; `None` while it holds something, or has sent no SETUP.
     idle_since: Option<u64>,
     /// The writers of the request streams the peer has open.
-    requests: HashMap<StreamKey, mpsc::Sender<RequestCommand>>,
+    requests: HashMap<StreamKey, RequestWriter>,
     /// The tasks of the request streams the relay has open on the session.
     own_requests: HashMap<OwnRequestKey, mpsc::Sender<OwnRequestCommand>>,
     stops: StreamStops,
@@ -1303,16 +1311,19 @@ impl<C: Connection> Hub<C> {
             return;
         };
         let (commands, command_inbox) = mpsc::channel(self.config.session_queue_len);
+        let (reset, reset_inbox) = oneshot::channel();
         let writer = tokio::spawn(write_request(
             session,
             stream,
             send,
-            command_inbox,
+            (command_inbox, reset_inbox),
             self.config.streams.trace.clone(),
             self.config.log.clone(),
             self.events.clone(),
         ));
-        handle.requests.insert(stream, commands);
+        handle
+            .requests
+            .insert(stream, RequestWriter { commands, reset });
         // Finished writers are dropped from the list as new ones come, so that
         // it holds about as many as there are open requests.
         handle.tasks.retain(|task| !task.is_finished());
@@ -2095,7 +2106,15 @@ impl<C: Connection> Hub<C> {
 
     /// Queues a command for the writer of a request stream. A stream whose
     /// queue is full belongs to a session that does not take its messages, and
-    /// the session is closed.
+    /// the session is closed; but for the stream of a `SUBSCRIBE_NAMESPACE`,
+    /// which is reset with `EXCESSIVE_LOAD` and ended alone.
+    ///
+    /// WHY the stream alone there: §10.18 has "If the publisher is unable to
+    /// send NAMESPACE or `NAMESPACE_DONE` messages in a timely manner because
+    /// the `SUBSCRIBE_NAMESPACE` response stream is blocked by flow control,
+    /// the publisher MAY reset the `SUBSCRIBE_NAMESPACE` response stream", and
+    /// the subscriber takes the reset as a `NAMESPACE_DONE` for each. Nothing
+    /// else of the session waits for that stream.
     fn request(
         &mut self,
         session: SessionKey,
@@ -2110,9 +2129,17 @@ impl<C: Connection> Hub<C> {
         else {
             return;
         };
+        let of_a_watch = matches!(
+            command,
+            RequestCommand::Send(ControlMessage::Namespace(_) | ControlMessage::NamespaceDone(_))
+        );
         // Closed means the writer ended because the peer stopped the stream,
         // which it reports itself.
-        if let Err(mpsc::error::TrySendError::Full(_)) = writer.try_send(command) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = writer.commands.try_send(command) {
+            if of_a_watch {
+                self.reset_full_request(session, stream, pending);
+                return;
+            }
             self.close(
                 session,
                 TerminationCode::InternalError.code(),
@@ -2120,6 +2147,37 @@ impl<C: Connection> Hub<C> {
                 pending,
             );
         }
+    }
+
+    /// Resets a request stream whose queue is full, ahead of what waits in it,
+    /// stops the peer's direction, and tells the core that the request is
+    /// over.
+    fn reset_full_request(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        pending: &mut VecDeque<Event>,
+    ) {
+        let code = stream_reset_code::EXCESSIVE_LOAD;
+        let Some(handle) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        if let Some(writer) = handle.requests.remove(&stream) {
+            // An error means the writer is gone, with the stream.
+            let _ = writer.reset.send(code);
+        }
+        handle.stops.stop(stream.0, code);
+        if let Some(log) = &self.config.log {
+            log.print(format!(
+                "RESET_FULL_REQUEST session={} stream={} code={code:#x}",
+                session.0, stream.0
+            ));
+        }
+        pending.push_back(Event::RequestClosed {
+            session,
+            stream,
+            how: RequestEnd::Aborted,
+        });
     }
 
     /// Closes every session, and answers when the peers have been told or
@@ -2407,14 +2465,23 @@ async fn write_request<C: Connection>(
     session: SessionKey,
     stream: StreamKey,
     mut send: C::Send,
-    mut commands: mpsc::Receiver<RequestCommand>,
+    (mut commands, mut reset): (mpsc::Receiver<RequestCommand>, oneshot::Receiver<u32>),
     trace: Trace,
     log: Option<Log>,
     events: mpsc::Sender<Envelope<C>>,
 ) {
     let label = format!("bi#{}", stream.0);
+    // The hub drops its sender with the writer's entry, without a reset.
+    let mut may_be_reset = true;
     loop {
         let command = tokio::select! {
+            code = &mut reset, if may_be_reset => {
+                let Ok(code) = code else {
+                    may_be_reset = false;
+                    continue;
+                };
+                Some(RequestCommand::Reset(code))
+            }
             command = commands.recv() => command,
             stopped = send.stopped() => {
                 if let WriteError::Stopped(code) = stopped {
@@ -2441,9 +2508,19 @@ async fn write_request<C: Connection>(
         };
         match command {
             Some(RequestCommand::Send(message)) => {
+                let of_a_watch = matches!(
+                    message,
+                    ControlMessage::Namespace(_) | ControlMessage::NamespaceDone(_)
+                );
                 // An error means the peer stopped the stream or is gone, which
                 // the other arm of the select reports.
-                let _ = send_message(&mut send, &message, &trace, &label).await;
+                let written = send_message(&mut send, &message, &trace, &label).await;
+                // The relay sends the next ones of the SUBSCRIBE_NAMESPACE as
+                // these are written.
+                if of_a_watch && written.is_ok() {
+                    let event = Event::NamespaceWritten { session, stream };
+                    let _ = events.send(Envelope::Core(event)).await;
+                }
             }
             // `None`: the session is going.
             Some(RequestCommand::Finish) | None => {
@@ -2967,6 +3044,16 @@ fn describe_fetch(action: &Action) -> Option<String> {
     })
 }
 
+/// The fields of a Track Namespace, as text, joined by `/`.
+fn fields_of(namespace: &xmoq_moqt::name::TrackNamespace) -> String {
+    namespace
+        .fields()
+        .iter()
+        .map(|field| String::from_utf8_lossy(field).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn name(message: &ControlMessage) -> String {
     match message {
         ControlMessage::Setup(_) => "SETUP".to_string(),
@@ -2986,6 +3073,11 @@ fn name(message: &ControlMessage) -> String {
         ControlMessage::Fetch(_) => "FETCH".to_string(),
         ControlMessage::FetchOk(_) => "FETCH_OK".to_string(),
         ControlMessage::GoAway(go_away) => format!("GOAWAY timeout_ms={}", go_away.timeout_ms),
+        ControlMessage::SubscribeNamespace(_) => "SUBSCRIBE_NAMESPACE".to_string(),
+        ControlMessage::Namespace(suffix) => format!("NAMESPACE suffix={}", fields_of(suffix)),
+        ControlMessage::NamespaceDone(suffix) => {
+            format!("NAMESPACE_DONE suffix={}", fields_of(suffix))
+        }
         ControlMessage::UnsupportedRequest { message_type, .. } => {
             format!("unsupported request {message_type:#x}")
         }

@@ -84,6 +84,39 @@ const FILES: { file: string; message: ControlMessage }[] = [
 			requestId: 1n,
 		},
 	},
+	// SUBSCRIBE_NAMESPACE, NAMESPACE and NAMESPACE_DONE (§10.16 to §10.18).
+	{
+		file: "subscribe-namespace-moqtail-ts",
+		message: {
+			type: "SUBSCRIBE_NAMESPACE",
+			requestId: 1n,
+			trackNamespacePrefix: [utf8("xmoq"), utf8("chat")],
+			parameters: {},
+		},
+	},
+	{
+		file: "subscribe-namespace-every-namespace-moqtail-ts",
+		message: {
+			type: "SUBSCRIBE_NAMESPACE",
+			requestId: 3n,
+			trackNamespacePrefix: [],
+			parameters: {},
+		},
+	},
+	{
+		file: "namespace-moqtail-ts",
+		message: {
+			type: "NAMESPACE",
+			trackNamespaceSuffix: [utf8("room"), utf8("alice")],
+		},
+	},
+	{
+		file: "namespace-done-moqtail-ts",
+		message: {
+			type: "NAMESPACE_DONE",
+			trackNamespaceSuffix: [utf8("room"), utf8("alice")],
+		},
+	},
 	{
 		file: "goaway-request-stream-moqtail-ts",
 		message: {

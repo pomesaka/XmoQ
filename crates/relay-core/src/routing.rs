@@ -1409,6 +1409,8 @@ impl Relay {
     /// actions.
     pub(crate) fn drop_routing_of(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
         self.namespaces.retain(|entry| entry.session != session);
+        self.drop_watches_of(session);
+        self.tell_the_watches(actions);
         // What was asked of the session: it will not answer.
         let asked: BTreeSet<(FullTrackName, OwnRequestKey)> = self
             .tracks

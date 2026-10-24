@@ -156,6 +156,15 @@ pub enum Event {
         /// How.
         how: RequestEnd,
     },
+    /// A NAMESPACE or `NAMESPACE_DONE` the relay sent on a request stream of
+    /// the peer ([`Action::SendRequest`]) was written to the stream. The relay
+    /// sends the next ones of a `SUBSCRIBE_NAMESPACE` as these come.
+    NamespaceWritten {
+        /// The session.
+        session: SessionKey,
+        /// The stream.
+        stream: StreamKey,
+    },
     /// A message arrived on a request stream the relay opened
     /// ([`Action::OpenRequest`]).
     OwnRequestMessage {

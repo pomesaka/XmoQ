@@ -6,6 +6,11 @@ import {
 } from "./bytes.ts";
 import { protocolViolation } from "./error.ts";
 import { MAX_KEY_VALUE_PAIRS, TooManyEntriesError } from "./key-value-pair.ts";
+import {
+	decodeTrackNamespace,
+	encodeTrackNamespace,
+	type TrackNamespace,
+} from "./track.ts";
 import { readLength, wireEnum } from "./wire.ts";
 
 /** Location of §1.4.2. */
@@ -75,6 +80,8 @@ export interface MessageParameters {
 	groupOrder?: GroupOrder;
 	/** 0x32 */
 	newGroupRequest?: bigint;
+	/** 0x34, the new prefix of a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS. */
+	trackNamespacePrefix?: TrackNamespace;
 }
 
 /**
@@ -91,6 +98,8 @@ export type ParameterScope =
 	| "PUBLISH_OK"
 	| "PUBLISH_NAMESPACE"
 	| "PUBLISH_NAMESPACE_OK"
+	/** SUBSCRIBE_NAMESPACE: AUTHORIZATION_TOKEN alone (§10.2.2). */
+	| "SUBSCRIBE_NAMESPACE"
 	| "REQUEST_OK"
 	/** REQUEST_UPDATE for a subscription (§10.9.1). */
 	| "REQUEST_UPDATE"
@@ -100,6 +109,16 @@ export type ParameterScope =
 	 * subscription; the session checks an update of a FETCH against this.
 	 */
 	| "REQUEST_UPDATE_OF_FETCH"
+	/**
+	 * REQUEST_UPDATE for a SUBSCRIBE_NAMESPACE, checked by the session as
+	 * REQUEST_UPDATE_OF_FETCH is.
+	 */
+	| "REQUEST_UPDATE_OF_SUBSCRIBE_NAMESPACE"
+	/**
+	 * A REQUEST_UPDATE whose request is not known, as the codec sees it: what
+	 * the update of any request accepts. The session narrows it.
+	 */
+	| "ANY_REQUEST_UPDATE"
 	| "FETCH"
 	/** No parameter of the draft lists FETCH_OK. */
 	| "FETCH_OK";
@@ -223,11 +242,7 @@ function decodeForward(value: number): boolean {
  * Every Message Parameter implemented here, in ascending Type order, which is
  * the order §10.2 requires on the wire. Adding a parameter takes one entry
  * here and one field in `MessageParameters`.
- *
- * TRACK_NAMESPACE_PREFIX (0x34) has no entry: it is allowed only in the
- * REQUEST_UPDATE of a namespace subscription, which is not implemented, so in
- * every message decoded here it is a PROTOCOL_VIOLATION (§10.2.1), the same
- * outcome as an unknown Type.
+
  */
 const PARAMETERS: readonly ParameterDefinition[] = [
 	{
@@ -260,6 +275,7 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 			"REQUEST_UPDATE",
 			"FETCH",
 			"REQUEST_UPDATE_OF_FETCH",
+			"SUBSCRIBE_NAMESPACE",
 		],
 		repeatable: true,
 		read: (reader, parameters) => {
@@ -429,18 +445,49 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 		},
 		writers: (parameters) => present(parameters.newGroupRequest, writeVarint),
 	},
+	{
+		name: "TRACK_NAMESPACE_PREFIX",
+		type: 0x34n,
+		// §10.2.14: "MAY appear in REQUEST_UPDATE for a SUBSCRIBE_NAMESPACE or
+		// SUBSCRIBE_TRACKS request".
+		scopes: ["REQUEST_UPDATE_OF_SUBSCRIBE_NAMESPACE"],
+		repeatable: false,
+		// §10.2.14: "uses the Track Namespace encoding described in Section
+		// 2.4.1", with no length before it, as in the Rust implementation
+		// (`crates/moqt/src/params.rs`, where the moqtail crate's other
+		// reading is).
+		read: (reader, parameters) => {
+			parameters.trackNamespacePrefix = decodeTrackNamespace(reader);
+		},
+		writers: (parameters) =>
+			present(parameters.trackNamespacePrefix, encodeTrackNamespace),
+	},
 ];
 
 const PARAMETERS_BY_TYPE: ReadonlyMap<bigint, ParameterDefinition> = new Map(
 	PARAMETERS.map((definition) => [definition.type, definition]),
 );
 
+const REQUEST_UPDATE_KINDS: readonly ParameterScope[] = [
+	"REQUEST_UPDATE",
+	"REQUEST_UPDATE_OF_FETCH",
+	"REQUEST_UPDATE_OF_SUBSCRIBE_NAMESPACE",
+];
+
 function allows(
 	definition: ParameterDefinition,
 	scope: ParameterScope,
 ): boolean {
-	if (scope !== "REQUEST_OK") return definition.scopes.includes(scope);
-	return REQUEST_OK_KINDS.some((kind) => definition.scopes.includes(kind));
+	switch (scope) {
+		case "REQUEST_OK":
+			return REQUEST_OK_KINDS.some((kind) => definition.scopes.includes(kind));
+		case "ANY_REQUEST_UPDATE":
+			return REQUEST_UPDATE_KINDS.some((kind) =>
+				definition.scopes.includes(kind),
+			);
+		default:
+			return definition.scopes.includes(scope);
+	}
 }
 
 /**

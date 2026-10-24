@@ -942,6 +942,47 @@ async fn a_session_whose_messages_pile_up_is_closed() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_subscribe_namespace_whose_messages_pile_up_is_reset_alone() {
+    // Room for one message on a request stream. The SUBSCRIBE_NAMESPACE is
+    // answered with REQUEST_OK and a NAMESPACE at once: the second does not fit.
+    let config = HubConfig {
+        session_queue_len: 1,
+        ..HubConfig::default()
+    };
+    let (hub, _task) = hub::spawn(config);
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut watcher = Peer::connect(&hub, true).await;
+    let prefix = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
+    let (_, message) = watcher.session.subscribe_namespace(prefix, vec![]).unwrap();
+    let (mut send, recv) = watcher.connection.open_bi().await.unwrap();
+    send_message(&mut send, &message, &Trace::default(), "request")
+        .await
+        .unwrap();
+    let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    // The REQUEST_OK may or may not be written before the reset.
+    let end = loop {
+        match timeout(SOON, reader.next_event()).await {
+            Ok(Ok(RequestStreamEvent::Message(ControlMessage::RequestOk(_)))) => {}
+            other => break other,
+        }
+    };
+    // EXCESSIVE_LOAD (0x9), and the session stays.
+    assert_eq!(
+        end,
+        Ok(Ok(RequestStreamEvent::Closed(RequestClose::Reset(Some(
+            0x9
+        )))))
+    );
+    assert_eq!(
+        timeout(SOON, send.stopped()).await,
+        Ok(WriteError::Stopped(Some(0x9)))
+    );
+    tokio::time::sleep(SOON).await;
+    assert_eq!(watcher.connection.close_info(), None);
+}
+
 /// What a publisher does at its end: the last Object on a new stream, then
 /// `PUBLISH_DONE` that counts the stream, then a FIN.
 async fn send_last_object_and_publish_done(publisher: &mut Peer, publication: &mut OpenRequest) {

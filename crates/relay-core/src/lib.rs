@@ -34,6 +34,7 @@
 //! gets its own copy of the payload today.
 
 mod cache;
+mod discovery;
 mod events;
 mod fetch;
 mod requests;
@@ -163,6 +164,10 @@ enum RequestSlot {
         request: PeerRequestId,
         peer_finished: bool,
     },
+    /// A `SUBSCRIBE_NAMESPACE` the relay accepted, whose stream gets the
+    /// NAMESPACE and `NAMESPACE_DONE` messages (`discovery`). A FIN of the
+    /// peer ends it (§6.1).
+    SubscribeNamespace { request: PeerRequestId },
     /// The relay has said its last on the stream. The request is given when the
     /// session still holds state for it: what the peer sends until the stream
     /// closes still goes to the session, which ignores it and keeps count of
@@ -181,6 +186,7 @@ impl RequestSlot {
             Self::Subscribe { request, .. } => Some((*request, Subscribed::Accepted)),
             Self::Waiting { request, .. } => Some((*request, Subscribed::Waiting)),
             Self::PublishNamespace { .. }
+            | Self::SubscribeNamespace { .. }
             | Self::Fetch { .. }
             | Self::Publish { .. }
             | Self::Finished(_)
@@ -198,7 +204,10 @@ impl RequestSlot {
             | Self::PublishNamespace { peer_finished, .. }
             | Self::Waiting { peer_finished, .. }
             | Self::Fetch { peer_finished, .. } => *peer_finished,
-            Self::Publish { .. } | Self::Finished(_) | Self::Stopped => false,
+            Self::Publish { .. }
+            | Self::SubscribeNamespace { .. }
+            | Self::Finished(_)
+            | Self::Stopped => false,
         }
     }
 
@@ -213,7 +222,10 @@ impl RequestSlot {
                 *peer_finished = true;
                 true
             }
-            Self::Publish { .. } | Self::Finished(_) | Self::Stopped => false,
+            Self::Publish { .. }
+            | Self::SubscribeNamespace { .. }
+            | Self::Finished(_)
+            | Self::Stopped => false,
         }
     }
 }
@@ -1452,6 +1464,8 @@ pub struct Relay {
     next_out_stream: u64,
     /// In the order they were announced.
     namespaces: Vec<Announcement>,
+    /// The `SUBSCRIBE_NAMESPACE` requests the relay accepted (`discovery`).
+    watches: Vec<discovery::NamespaceWatch>,
     /// FETCH requests of subscribers.
     fetches: fetch::Fetches,
     /// Bytes the caches of all tracks hold ([`cache::MAX_CACHED_BYTES`]).
@@ -1551,6 +1565,7 @@ impl Relay {
             out_streams: HashMap::new(),
             next_out_stream: 0,
             namespaces: Vec::new(),
+            watches: Vec::new(),
             fetches: fetch::Fetches::default(),
             cached_bytes: 0,
             fetch_ends: BTreeSet::new(),
@@ -1741,9 +1756,7 @@ impl Relay {
             Event::SendQueueFull {
                 out_stream,
                 carried,
-            } => {
-                self.on_send_queue_full(out_stream, &carried, &mut actions);
-            }
+            } => self.on_send_queue_full(out_stream, &carried, &mut actions),
             Event::DrainTimeout {
                 session,
                 track_alias,
@@ -1751,6 +1764,9 @@ impl Relay {
             } => self.on_drain_timeout(session, track_alias, wait, &mut actions),
             Event::EarlyStreamTimeout { session, stream } => {
                 self.on_early_stream_timeout(session, stream, &mut actions);
+            }
+            Event::NamespaceWritten { session, stream } => {
+                self.on_namespace_written(session, stream, &mut actions);
             }
             Event::RequestTimeout { session, stream } => {
                 self.on_request_timeout(session, stream, &mut actions);
@@ -2029,6 +2045,11 @@ impl Relay {
                 Some(&publish_namespace.track_namespace),
                 &publish_namespace.parameters,
             ),
+            PeerRequest::SubscribeNamespace(subscribe_namespace) => (
+                Operation::Subscribe,
+                Some(&subscribe_namespace.track_namespace_prefix),
+                &subscribe_namespace.parameters,
+            ),
             PeerRequest::Fetch(fetch) => {
                 let namespace = match &fetch.range {
                     xmoq_moqt::message::FetchRange::Standalone {
@@ -2145,6 +2166,15 @@ impl Relay {
             PeerRequest::Publish(publish) => {
                 self.on_publish(session, stream, request, publish, actions);
             }
+            PeerRequest::SubscribeNamespace(subscribe_namespace) => {
+                self.on_subscribe_namespace(
+                    session,
+                    stream,
+                    request,
+                    &subscribe_namespace,
+                    actions,
+                );
+            }
             PeerRequest::PublishNamespace(publish_namespace) => {
                 let namespace = publish_namespace.track_namespace;
                 // §10.6.2: "EXCESSIVE_LOAD: The responder is overloaded and
@@ -2186,6 +2216,7 @@ impl Relay {
                 for track in self.tracks.subscribed_in(&namespace) {
                     self.ask_the_publishers(&track, Some(session), None, actions);
                 }
+                self.tell_the_watches(actions);
             }
         }
     }
@@ -2663,6 +2694,7 @@ impl Relay {
             ) => (*request, Some(track.clone())),
             Some(
                 RequestSlot::PublishNamespace { request, .. }
+                | RequestSlot::SubscribeNamespace { request }
                 | RequestSlot::Fetch { request, .. }
                 | RequestSlot::Finished(Some(request)),
             ) => (*request, None),
@@ -2966,6 +2998,13 @@ impl Relay {
                 }
                 // §9.5: cancelling the request withdraws the namespace.
                 self.withdraw_namespace(session, stream);
+                self.tell_the_watches(actions);
+            }
+            Some(RequestSlot::SubscribeNamespace { request }) => {
+                if stream_gone {
+                    state.moqt.on_peer_request_closed(request);
+                }
+                self.end_watch(session, stream);
             }
             Some(RequestSlot::Finished(Some(request))) => {
                 if stream_gone {

@@ -491,6 +491,20 @@ export const MAX_UNANSWERED_UPDATES = 16;
 /** PUBLISH_DONE status code UPDATE_FAILED (§10.11). */
 const UPDATE_FAILED = 0x8n;
 
+/**
+ * §10.2.1, with what §10.2 lets the update of a subscription carry: the codec
+ * let through what the update of any request may carry. As in the Rust
+ * session (`on_peer_request_message`).
+ */
+function checkUpdateOfSubscription(message: RequestUpdate): void {
+	const outside = parametersOutsideScope(message.parameters, "REQUEST_UPDATE");
+	if (outside.length > 0) {
+		throw protocolViolation(
+			`${outside.join(", ")} not allowed in the REQUEST_UPDATE of a subscription`,
+		);
+	}
+}
+
 export function createRequests(options: RequestsOptions): Requests {
 	// §10.1: the client generates even Request IDs starting at 0.
 	let nextRequestId = 0n;
@@ -1067,6 +1081,7 @@ export function createRequests(options: RequestsOptions): Requests {
 	): void => {
 		// §10.1: REQUEST_UPDATE consumes a Request ID of its sender.
 		options.checkPeerRequestId(message.requestId);
+		checkUpdateOfSubscription(message);
 		const { stream, requestId } = request;
 		if (
 			Object.keys(message.parameters).every(
@@ -1160,6 +1175,7 @@ export function createRequests(options: RequestsOptions): Requests {
 	): void => {
 		// §10.1: REQUEST_UPDATE consumes a Request ID of its sender.
 		options.checkPeerRequestId(message.requestId);
+		checkUpdateOfSubscription(message);
 		refuseBeforeAnswer(
 			request,
 			RequestErrorCode.NOT_SUPPORTED,

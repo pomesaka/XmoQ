@@ -177,9 +177,36 @@ export interface GoAway {
 	requestId?: bigint;
 }
 
+/**
+ * SUBSCRIBE_NAMESPACE (§10.18). Decoded and encoded; this package sends none,
+ * and refuses one of the peer as a request it does not serve.
+ */
+export interface SubscribeNamespace {
+	type: "SUBSCRIBE_NAMESPACE";
+	requestId: bigint;
+	/** 0 to 32 fields (§10.18). */
+	trackNamespacePrefix: TrackNamespace;
+	parameters: MessageParameters;
+}
+
+/** NAMESPACE (§10.16), with the Track Namespace Suffix. */
+export interface Namespace {
+	type: "NAMESPACE";
+	trackNamespaceSuffix: TrackNamespace;
+}
+
+/** NAMESPACE_DONE (§10.17), with the Track Namespace Suffix. */
+export interface NamespaceDone {
+	type: "NAMESPACE_DONE";
+	trackNamespaceSuffix: TrackNamespace;
+}
+
 export type ControlMessage =
 	| Setup
 	| GoAway
+	| SubscribeNamespace
+	| Namespace
+	| NamespaceDone
 	| RequestUpdate
 	| Subscribe
 	| SubscribeOk
@@ -207,6 +234,9 @@ const MESSAGE_TYPES: Record<MessageName, bigint> = {
 	FETCH_OK: 0x18n,
 	PUBLISH: 0x1dn,
 	GOAWAY: 0x10n,
+	SUBSCRIBE_NAMESPACE: 0x50n,
+	NAMESPACE: 0x8n,
+	NAMESPACE_DONE: 0xen,
 };
 
 /**
@@ -219,12 +249,9 @@ const MESSAGE_TYPES: Record<MessageName, bigint> = {
  * sends it has not left the draft.
  */
 const UNIMPLEMENTED_MESSAGE_TYPES = {
-	NAMESPACE: 0x8n,
 	TRACK_STATUS: 0xdn,
-	NAMESPACE_DONE: 0xen,
 	PUBLISH_BLOCKED: 0xfn,
 	PUBLISH_OK: 0x1en,
-	SUBSCRIBE_NAMESPACE: 0x50n,
 	SUBSCRIBE_TRACKS: 0x51n,
 } satisfies Record<string, bigint>;
 
@@ -235,7 +262,7 @@ const REQUEST_MESSAGE_TYPES: ReadonlySet<bigint> = new Set([
 	MESSAGE_TYPES.PUBLISH,
 	MESSAGE_TYPES.FETCH,
 	MESSAGE_TYPES.PUBLISH_NAMESPACE,
-	UNIMPLEMENTED_MESSAGE_TYPES.SUBSCRIBE_NAMESPACE,
+	MESSAGE_TYPES.SUBSCRIBE_NAMESPACE,
 	UNIMPLEMENTED_MESSAGE_TYPES.SUBSCRIBE_TRACKS,
 ]);
 
@@ -244,6 +271,8 @@ export const FETCH_MESSAGE_TYPE = MESSAGE_TYPES.FETCH;
 
 /** The Message Type of SUBSCRIBE, which is decoded whole and handed to the application. */
 export const SUBSCRIBE_MESSAGE_TYPE = MESSAGE_TYPES.SUBSCRIBE;
+export const SUBSCRIBE_NAMESPACE_MESSAGE_TYPE =
+	MESSAGE_TYPES.SUBSCRIBE_NAMESPACE;
 
 /**
  * WHY SETUP has one value in two tables: Table 3 (stream types, §3.4) and
@@ -432,10 +461,11 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 			return { type: name, setupOptions: decodeKeyValuePairs(reader) };
 		case "REQUEST_UPDATE": {
 			const requestId = reader.varint();
-			// Every update is refused (see `requests.ts`), but its parameters are
-			// still held to §10.2.1: a parameter that is not allowed here is a
-			// PROTOCOL_VIOLATION, not an update to refuse.
-			const parameters = decodeMessageParameters(reader, name);
+			// Its parameters are held to §10.2.1 as far as the codec can tell:
+			// which an update may carry depends on its request, which the
+			// session knows and checks (`requests.ts`). A parameter that is
+			// not allowed is a PROTOCOL_VIOLATION, not an update to refuse.
+			const parameters = decodeMessageParameters(reader, "ANY_REQUEST_UPDATE");
 			return { type: name, requestId, parameters };
 		}
 		case "SUBSCRIBE": {
@@ -498,6 +528,17 @@ function decodePayload(name: MessageName, reader: ByteReader): ControlMessage {
 			const parameters = decodeMessageParameters(reader, name);
 			return { type: name, requestId, range, parameters };
 		}
+		case "SUBSCRIBE_NAMESPACE": {
+			const requestId = reader.varint();
+			// §10.18: more than 32 fields is a PROTOCOL_VIOLATION, which
+			// decoding a Track Namespace says.
+			const trackNamespacePrefix = decodeTrackNamespace(reader);
+			const parameters = decodeMessageParameters(reader, name);
+			return { type: name, requestId, trackNamespacePrefix, parameters };
+		}
+		case "NAMESPACE":
+		case "NAMESPACE_DONE":
+			return { type: name, trackNamespaceSuffix: decodeTrackNamespace(reader) };
 		case "GOAWAY": {
 			const uriLength = reader.varint();
 			if (uriLength > BigInt(MAX_NEW_SESSION_URI_LENGTH)) {
@@ -753,6 +794,15 @@ function encodePayload(writer: ByteWriter, message: ControlMessage): void {
 			writer.varint(message.requestId);
 			encodeFetchRange(writer, message.range);
 			encodeMessageParameters(writer, message.parameters, message.type);
+			break;
+		case "SUBSCRIBE_NAMESPACE":
+			writer.varint(message.requestId);
+			encodeTrackNamespace(writer, message.trackNamespacePrefix);
+			encodeMessageParameters(writer, message.parameters, message.type);
+			break;
+		case "NAMESPACE":
+		case "NAMESPACE_DONE":
+			encodeTrackNamespace(writer, message.trackNamespaceSuffix);
 			break;
 		case "GOAWAY": {
 			const uri = utf8Encoder.encode(message.newSessionUri);
