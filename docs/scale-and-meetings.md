@@ -58,15 +58,15 @@ Today a relay takes every session up to 256 (or `--max-sessions`) and closes the
 
 ### What the own relay has and lacks to be an edge
 
-Built: choice 1 above, with the session opened when a request needs it (`--upstream`, `--upstream-cert-sha256`, `--upstream-namespace`; the row on a relay above this one in the [implementation notes](moqt-implementation-notes.md)). The relay is the client of that session, and asks the upstream for a SUBSCRIBE, FETCH or TRACK_STATUS of a track that no session of its own announced. Lacking, read in the code of `main` on 2026-10-25:
+Built: choice 1 above, with the session opened when a request needs it and moved at a GOAWAY of the upstream (`--upstream`, `--upstream-cert-sha256`, `--upstream-namespace`; the row on a relay above this one in the [implementation notes](moqt-implementation-notes.md)). The relay is the client of that session, and asks the upstream for a SUBSCRIBE, FETCH or TRACK_STATUS of a track that no session of its own announced. Lacking, read in the code of `main` on 2026-10-25:
 
 3. **Choice 2.** It sends no SUBSCRIBE_NAMESPACE upstream and does not read NAMESPACE; `discovery.rs` only sends them.
 4. **It forwards no PUBLISH_NAMESPACE or PUBLISH upstream** (the other direction above).
 5. **The origin limits an edge as one viewer.** What a slow subscriber is counted by is per session, over all its tracks (4 MiB, 4,096 Objects, 256 streams), and an edge that falls behind on one track has that subscription ended (`TOO_FAR_BEHIND`), for all its viewers at once. A session has 16 FETCHes at once. An edge needs other limits at the origin, given by its token or by configuration.
 6. **Its own token.** The relay checks a token in every request with a key it shares with the room. A token for the namespace `*` allows every namespace (`crates/room-token/src/lib.rs`), so an edge given the key can make its own, as the gatherer does; the viewers' tokens are checked at the edge and not passed on (§10.2.1).
-7. **Losing the origin.** When the origin's session goes, the edge ends the tracks of its viewers as for any source that goes (PUBLISH_DONE), and the clients ask again, and the edge connects again for the next request. Lacking: following a GOAWAY of the origin to another URI.
+7. **Losing the origin.** When the origin's session goes, the edge ends the tracks of its viewers as for any source that goes (PUBLISH_DONE), and the clients ask again, and the edge connects again for the next request. A GOAWAY of the origin has the edge connect to the URI it names and take what it carries from there as well, so that its viewers go on (built).
 
-Not lacking: the cache, FETCH, priorities and delivery timeouts work at an edge as at any relay (RENDEZVOUS_TIMEOUT in part: the upstream is not asked with it, the row in the implementation notes), and the origin serves an edge as it serves any subscriber.
+Not lacking: the cache, FETCH, priorities, delivery timeouts and RENDEZVOUS_TIMEOUT work at an edge as at any relay (a held SUBSCRIBE is held at the origin as well), and the origin serves an edge as it serves any subscriber.
 
 ### To measure
 

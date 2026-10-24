@@ -195,6 +195,9 @@ enum Awaited {
     /// ([`ReceiptWait`]). For a Joining FETCH, the request stream of the
     /// SUBSCRIBE it names, which is Established.
     Receipt(Option<StreamKey>),
+    /// The session with the upstream relay, which is the one to ask and
+    /// is being opened (`upstream.rs`). What it joins, as for `Receipt`.
+    Upstream(Option<StreamKey>),
 }
 
 /// Whether [`Relay::ask_for`] may hold a FETCH whose range has an Object
@@ -1014,6 +1017,11 @@ impl Relay {
         );
         let (publisher, own) = match found {
             Ok(found) => found,
+            // Asked once its session is there (`Self::ask_what_waits_for_upstream`),
+            // or refused when none comes of it, within the time of a connect.
+            Err(None) if self.waits_for_upstream(&asked.track, actions) => {
+                return self.hold_for_upstream((session, stream), request, asked, fetch);
+            }
             Err(code) => {
                 let code = code.unwrap_or(request_error_code::DOES_NOT_EXIST);
                 return refuse(self, code, actions);
@@ -1064,11 +1072,6 @@ impl Relay {
                 Ok(own) => return Ok((publisher, own)),
                 Err(code) => refused = Some(code),
             }
-        }
-        if asked.is_empty() {
-            // The FETCH is refused all the same (known gap): the session
-            // with the upstream is for the next request.
-            self.waits_for_upstream(track, actions);
         }
         Err(refused)
     }
@@ -1285,7 +1288,7 @@ impl Relay {
                 self.awaiting_receipt.remove(subscriber);
                 actions.push(Action::StopReceiptTimer { session, stream });
             }
-            Awaited::Answer(_) => {}
+            Awaited::Answer(_) | Awaited::Upstream(_) => {}
         }
         Some(held)
     }
@@ -1319,10 +1322,12 @@ impl Relay {
             held_updates,
         } = held;
         match joins {
-            Awaited::Answer(subscribe) | Awaited::Receipt(Some(subscribe)) => {
+            Awaited::Answer(subscribe)
+            | Awaited::Receipt(Some(subscribe))
+            | Awaited::Upstream(Some(subscribe)) => {
                 self.join(subscriber, request, subscribe, (&fetch, wait), actions);
             }
-            Awaited::Receipt(None) => {
+            Awaited::Receipt(None) | Awaited::Upstream(None) => {
                 self.ask_standalone(subscriber, request, &fetch, wait, actions);
             }
             // Released when the SUBSCRIBE has come (`subscribe_has_come`).
@@ -1334,6 +1339,65 @@ impl Relay {
             Some(Standing::Relayed(fetch)) => fetch.held_updates = held_updates,
             Some(Standing::Held(again)) => again.held_updates = held_updates,
             Some(Standing::Written { .. }) | None => {}
+        }
+    }
+
+    /// Holds a FETCH for the session with the upstream relay, which is being
+    /// opened.
+    fn hold_for_upstream(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        request: PeerRequestId,
+        asked: &AskedRange,
+        fetch: &Fetch,
+    ) {
+        let held = HeldFetch {
+            request,
+            joins: Awaited::Upstream(asked.joins),
+            fetch: fetch.clone(),
+            held_updates: 0,
+        };
+        self.fetches.hold(subscriber, held);
+    }
+
+    /// The FETCH requests held for the session with the upstream relay,
+    /// by key, so that the same events lead to the same actions.
+    fn held_for_upstream(&self) -> Vec<(SessionKey, StreamKey)> {
+        let mut held: Vec<(SessionKey, StreamKey)> = self
+            .sessions
+            .keys()
+            .flat_map(|session| {
+                self.fetches
+                    .held_of(*session)
+                    .filter(|(_, held)| matches!(held.joins, Awaited::Upstream(_)))
+                    .map(|(stream, _)| (*session, stream))
+            })
+            .collect();
+        held.sort_unstable_by_key(|(session, stream)| (session.0, stream.0));
+        held
+    }
+
+    /// The session with the upstream is there: the FETCH requests held for
+    /// it are asked for as when they came.
+    pub(crate) fn ask_fetches_held_for_upstream(&mut self, actions: &mut Vec<Action>) {
+        for subscriber in self.held_for_upstream() {
+            if let Some(held) = self.fetches.take_held(&subscriber) {
+                self.ask_held_anew(subscriber, held, ReceiptWait::Start, actions);
+            }
+        }
+    }
+
+    /// No session with the upstream came: the FETCH requests held for it
+    /// are refused.
+    pub(crate) fn refuse_fetches_held_for_upstream(
+        &mut self,
+        refusal: &Refusal,
+        actions: &mut Vec<Action>,
+    ) {
+        for (session, stream) in self.held_for_upstream() {
+            if let Some(held) = self.fetches.take_held(&(session, stream)) {
+                self.refuse(session, stream, held.request, refusal, actions);
+            }
         }
     }
 

@@ -258,9 +258,10 @@ pub(crate) struct Waiter {
     filter: Option<SubscriptionFilter>,
     /// What the SUBSCRIBE asked of the delivery.
     asked: Delivery,
-    /// It is held for a publisher to appear (§10.2.6), and its time for
-    /// that is not over: it is not refused because nobody has the track.
-    held: bool,
+    /// It is held for a publisher to appear (§10.2.6), for this many
+    /// milliseconds, and its time for that is not over: it is not refused
+    /// because nobody has the track.
+    held: Option<u64>,
 }
 
 /// What a SUBSCRIBE asks of how its Objects are delivered.
@@ -296,15 +297,15 @@ impl Delivery {
 }
 
 impl Waiter {
-    /// The same SUBSCRIBE, held for a publisher to appear.
-    pub(crate) fn held(mut self) -> Self {
-        self.held = true;
+    /// The same SUBSCRIBE, held for a publisher to appear for `wait_ms`.
+    pub(crate) fn held(mut self, wait_ms: u64) -> Self {
+        self.held = Some(wait_ms);
         self
     }
 
     /// Whether it is held for a publisher to appear.
     pub(crate) fn is_held(&self) -> bool {
-        self.held
+        self.held.is_some()
     }
 
     /// Whether this is the SUBSCRIBE on that request stream of that session.
@@ -327,7 +328,7 @@ impl Waiter {
             forward,
             filter,
             asked,
-            held: false,
+            held: None,
         }
     }
 }
@@ -710,7 +711,7 @@ impl Relay {
         };
         for waiter in &mut pending.waiters {
             if waiter.is_on(session, stream) {
-                waiter.held = false;
+                waiter.held = None;
             }
         }
         pending.asks.is_empty()
@@ -738,16 +739,17 @@ impl Relay {
     /// announced earlier and were left out, since §9.5 has the SUBSCRIBE go
     /// "to the publisher that sent the `PUBLISH_NAMESPACE`".
     ///
-    /// `subscriber` is the session whose SUBSCRIBE has the publishers asked,
-    /// with the `NEW_GROUP_REQUEST` of that SUBSCRIBE, where the track has
-    /// nobody waiting yet; otherwise the one that waits first is taken. A publisher that has
+    /// `newcomer` is the SUBSCRIBE that has the publishers asked, where the
+    /// track has nobody waiting yet: its session, its `NEW_GROUP_REQUEST` and
+    /// its hold count as those of one that waits; otherwise the one that
+    /// waits first is taken. A publisher that has
     /// [`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`] requests of the relay for that
     /// session is passed over.
     pub(crate) fn ask_the_publishers(
         &mut self,
         track: &FullTrackName,
         first: Option<SessionKey>,
-        subscriber: Option<(SessionKey, Option<u64>)>,
+        newcomer: Option<&Waiter>,
         actions: &mut Vec<Action>,
     ) -> Asked {
         // §10.2.13: "A relay that receives a NEW_GROUP_REQUEST for a Track
@@ -759,15 +761,32 @@ impl Relay {
             .tracks
             .waiters(track)
             .iter()
+            .chain(newcomer)
             .filter_map(|waiter| waiter.asked.new_group_request)
-            .chain(subscriber.and_then(|(_, new_group)| new_group))
+            .max();
+        // §10.2.6 for the upstream relay: "the relay SHOULD hold the
+        // subscription and wait for a publisher to appear", which the relay
+        // above can do only if it is asked to. WHY passed on, where "Message
+        // Parameters are always intended for the peer endpoint only and are
+        // not forwarded by Relays" (§10.2.1): the sentence goes on "though
+        // relays can consider received parameter values when making a
+        // request", and this relay makes a request of its own, held for as
+        // long as the longest of those it holds. WHY to the upstream alone: a
+        // publisher that announced the namespace is the one that would
+        // appear, and it is there.
+        let held_ms = self
+            .tracks
+            .waiters(track)
+            .iter()
+            .chain(newcomer)
+            .filter_map(|waiter| waiter.held)
             .max();
         let subscriber = self
             .tracks
             .pending(track)
             .and_then(|pending| pending.waiters.first())
             .map(|waiter| waiter.session)
-            .or(subscriber.map(|(session, _)| session));
+            .or(newcomer.map(|waiter| waiter.session));
         // WHY counted once here, for every publisher: the tracks without a
         // source are gone through for it, and there may be a thousand.
         let asked_for = subscriber.map_or_else(HashMap::new, |session| self.asked_for(session));
@@ -808,7 +827,8 @@ impl Relay {
                     .get_or_insert(request_error_code::EXCESSIVE_LOAD);
                 continue;
             }
-            match self.ask(publisher, track, new_group, actions) {
+            let rendezvous = held_ms.filter(|_| self.upstream_for(track) == Some(publisher));
+            match self.ask(publisher, track, (new_group, rendezvous), actions) {
                 Ok(ask) => asked.asks.push(ask),
                 Err(error_code) => {
                     asked.nobody_because.get_or_insert(error_code);
@@ -886,7 +906,7 @@ impl Relay {
         &mut self,
         publisher: SessionKey,
         track: &FullTrackName,
-        new_group: Option<u64>,
+        (new_group, rendezvous): (Option<u64>, Option<u64>),
         actions: &mut Vec<Action>,
     ) -> Result<Ask, u64> {
         let Some(state) = self.sessions.get_mut(&publisher) else {
@@ -914,11 +934,13 @@ impl Relay {
         //
         // Nothing else of the downstream SUBSCRIBE is copied: §7 keeps its
         // priorities out, and what a token of the subscriber means to the
-        // publisher is undecided. The NEW_GROUP_REQUEST is
+        // publisher is undecided. The NEW_GROUP_REQUEST is, and the hold of
+        // those that wait is, for the upstream relay
         // (`Self::ask_the_publishers`).
         let parameters = new_group
             .map(Parameter::NewGroupRequest)
             .into_iter()
+            .chain(rendezvous.map(Parameter::RendezvousTimeout))
             .collect();
         let Ok((id, message)) = state.moqt.subscribe(track.clone(), parameters) else {
             // The session already has a subscription to the track in this

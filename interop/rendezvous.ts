@@ -6,6 +6,14 @@
 // Through the own relay. (The row "A SUBSCRIBE for a track nobody
 // publishes" of docs/moqt-implementation-notes.md.)
 //
+//   With --through-edge (publisher-comes alone): the subscriber connects to
+//   a second own relay, on the run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET,
+//   whose upstream is the relay of the run (`--upstream`); the publisher
+//   stays with the relay of the run. The relay below holds the SUBSCRIBE and
+//   asks the one above with a RENDEZVOUS_TIMEOUT of its own, which the one
+//   above holds as the lines say (its session 0 is the relay below), and the
+//   rest is as without it.
+//
 //   publisher-comes   The subscriber sends its SUBSCRIBE with a
 //                     RENDEZVOUS_TIMEOUT of 20 seconds while nobody
 //                     publishes the track. The relay holds it
@@ -73,6 +81,7 @@
 import { parseArgs } from "node:util";
 import {
 	log,
+	MOQLIVEMOCK_SIDE_PORT_OFFSET,
 	NAMESPACE,
 	openConnectedPage,
 	type RunContext,
@@ -80,6 +89,7 @@ import {
 	spawnRustClient,
 	spawnTerminalViewer,
 	startRun,
+	startSecondOwnRelay,
 	stopEverythingOnExit,
 	TRACK,
 	withTimeout,
@@ -99,9 +109,16 @@ const { values: options } = parseArgs({
 		subscriber: { type: "string", default: "own-rust" },
 		port: { type: "string", default: "24398" },
 		relay: { type: "string", default: "own" },
+		"through-edge": { type: "boolean", default: false },
 		verbose: { type: "boolean", default: false },
 	},
 });
+
+/**
+ * The relay below the run's with `--through-edge`, where the subscriber
+ * connects. Set once by `main`, before a case runs.
+ */
+let edgeUrl: string | undefined;
 
 stopEverythingOnExit();
 
@@ -121,6 +138,9 @@ async function subscribe(
 	subscriber: string,
 	rendezvousMs: number | undefined,
 ): Promise<Asked> {
+	if (edgeUrl !== undefined) {
+		context = { ...context, relayUrl: edgeUrl };
+	}
 	if (subscriber === "own-browser") {
 		const page = await openConnectedPage(
 			context,
@@ -614,6 +634,18 @@ async function main(): Promise<void> {
 					: ["own-rust"],
 			verbose: options.verbose,
 		});
+		if (options["through-edge"]) {
+			if (options.case !== "publisher-comes") {
+				throw new Error(
+					`--through-edge is for publisher-comes, not ${options.case}`,
+				);
+			}
+			const edge = await startSecondOwnRelay(
+				String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+				context,
+			);
+			edgeUrl = edge.url;
+		}
 		summary = await run(context, options.subscriber);
 	} finally {
 		await runCleanups();

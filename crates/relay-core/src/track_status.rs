@@ -5,7 +5,7 @@
 //! that announced a namespace of it, one after another, as a FETCH is
 //! (`fetch.rs`); with nobody to ask, `DOES_NOT_EXIST`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use xmoq_moqt::message::{ControlMessage, Subscribe, request_error_code};
 use xmoq_moqt::name::FullTrackName;
@@ -42,9 +42,13 @@ pub(crate) struct Relayed {
 }
 
 /// The subscribers' `TRACK_STATUS` requests that wait for a publisher, by
-/// their session and request stream.
+/// their session and request stream; and those that wait for the session
+/// with the upstream relay to be there (`upstream.rs`), to be asked then.
 #[derive(Debug, Default)]
-pub(crate) struct TrackStatuses(HashMap<(SessionKey, StreamKey), Relayed>);
+pub(crate) struct TrackStatuses(
+    HashMap<(SessionKey, StreamKey), Relayed>,
+    BTreeMap<(SessionKey, StreamKey), (PeerRequestId, Subscribe)>,
+);
 
 impl Relay {
     /// A subscriber's `TRACK_STATUS`.
@@ -109,10 +113,42 @@ impl Relay {
                 };
                 self.put_slot(session, stream, slot, actions);
             }
+            // Asked once its session is there, or refused when none comes
+            // of it, within the time of a connect.
+            Err(None) if self.waits_for_upstream(track, actions) => {
+                self.track_statuses
+                    .1
+                    .insert((session, stream), (request, asked.clone()));
+                let slot = RequestSlot::TrackStatus {
+                    request,
+                    peer_finished: false,
+                };
+                self.put_slot(session, stream, slot, actions);
+            }
             Err(code) => {
                 let refusal = Refusal::code(code.unwrap_or(request_error_code::DOES_NOT_EXIST));
                 self.refuse(session, stream, request, &refusal, actions);
             }
+        }
+    }
+
+    /// The session with the upstream is there: the `TRACK_STATUS` requests
+    /// that waited for it are taken as when they came.
+    pub(crate) fn ask_track_statuses_held_for_upstream(&mut self, actions: &mut Vec<Action>) {
+        for ((session, stream), (request, asked)) in std::mem::take(&mut self.track_statuses.1) {
+            self.on_track_status(session, stream, request, &asked, actions);
+        }
+    }
+
+    /// No session with the upstream came: the `TRACK_STATUS` requests that
+    /// waited for it are refused.
+    pub(crate) fn refuse_track_statuses_held_for_upstream(
+        &mut self,
+        refusal: &Refusal,
+        actions: &mut Vec<Action>,
+    ) {
+        for ((session, stream), (request, _)) in std::mem::take(&mut self.track_statuses.1) {
+            self.refuse(session, stream, request, refusal, actions);
         }
     }
 
@@ -152,10 +188,6 @@ impl Relay {
             let left =
                 |publisher: &SessionKey| *publisher != subscriber.0 && !asked.contains(publisher);
             let Some(publisher) = self.matching_publishers(track).find(left) else {
-                if asked.is_empty() {
-                    // Refused all the same (known gap), as a FETCH is.
-                    self.waits_for_upstream(track, actions);
-                }
                 return Err(refused);
             };
             asked.push(publisher);
@@ -468,6 +500,7 @@ impl Relay {
         stream: StreamKey,
         actions: &mut Vec<Action>,
     ) {
+        self.track_statuses.1.remove(&(session, stream));
         if let Some(relayed) = self.track_statuses.0.remove(&(session, stream)) {
             self.cancel_own_track_status(relayed.publisher, relayed.own, actions);
         }
@@ -480,6 +513,9 @@ impl Relay {
         session: SessionKey,
         actions: &mut Vec<Action>,
     ) {
+        self.track_statuses
+            .1
+            .retain(|(subscriber, _), _| *subscriber != session);
         let mut as_subscriber: Vec<(SessionKey, StreamKey)> = self
             .track_statuses
             .0

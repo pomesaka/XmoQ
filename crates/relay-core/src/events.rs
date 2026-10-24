@@ -849,5 +849,9 @@ pub enum Action {
     /// The I/O side reports [`Event::SessionOpened`] with [`Role::Client`]
     /// once the session is there, or [`Event::UpstreamFailed`]. It is asked
     /// for again only after one of the two.
-    ConnectUpstream,
+    ConnectUpstream {
+        /// Where: the New Session URI of a GOAWAY of the upstream (§10.4),
+        /// and empty for the place the relay was given.
+        uri: Vec<u8>,
+    },
 }

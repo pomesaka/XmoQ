@@ -2544,8 +2544,14 @@ impl Relay {
             ControlMessage::Setup(setup) => Some(setup.setup_options.clone()),
             _ => None,
         };
+        let moved_to = match &message {
+            ControlMessage::GoAway(go_away) => Some(go_away.new_session_uri.clone()),
+            _ => None,
+        };
         if let Err(error) = state.moqt.on_control_message(message) {
             self.fail_session(session, &error, actions);
+        } else if let Some(uri) = moved_to {
+            self.upstream_going_away(session, uri, actions);
         } else if let (Some(options), Some(Authorization(authorizer))) =
             (setup_options, &self.authorizer)
             && let Err(code) = authorizer.setup(&options)
@@ -2719,10 +2725,9 @@ impl Relay {
         let hold = self
             .rendezvous_ms(session, &subscribe.parameters)
             .filter(|_| room);
-        let waiter = if hold.is_some() {
-            waiter.held()
-        } else {
-            waiter
+        let waiter = match hold {
+            Some(wait_ms) => waiter.held(wait_ms),
+            None => waiter,
         };
         let waits = match self.tracks.phase(track_name) {
             // §9.5: "When a Relay receives an authorized SUBSCRIBE for a Track
@@ -2779,9 +2784,7 @@ impl Relay {
             // each publisher that has published the subscription's namespace
             // or prefix thereof."
             None => {
-                let new_group = routing::Delivery::of(&subscribe.parameters).new_group_request;
-                let asked =
-                    self.ask_the_publishers(track_name, None, Some((session, new_group)), actions);
+                let asked = self.ask_the_publishers(track_name, None, Some(&waiter), actions);
                 // WHY not held where a publisher is there and could not be
                 // asked: one has appeared, and the code says why it is not
                 // asked.
@@ -5042,7 +5045,7 @@ impl Action {
             | Self::FinishDataStream { out_stream }
             | Self::ResetDataStream { out_stream, .. } => Target::OutStream(*out_stream),
             Self::CloseSession { .. } => Target::Closing,
-            Self::ConnectUpstream => Target::Relay,
+            Self::ConnectUpstream { .. } => Target::Relay,
         }
     }
 }

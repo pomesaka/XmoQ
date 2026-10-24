@@ -2,6 +2,7 @@
 //! and the session with it, which is opened when a request needs it.
 
 use super::*;
+use xmoq_moqt::message::GoAway;
 
 /// The relay's session with the upstream relay, of which it is the client.
 const UPSTREAM: SessionKey = SessionKey(9);
@@ -105,7 +106,7 @@ fn refusals(actions: &[Action]) -> Vec<u64> {
 fn connects(actions: &[Action]) -> usize {
     actions
         .iter()
-        .filter(|action| matches!(action, Action::ConnectUpstream))
+        .filter(|action| matches!(action, Action::ConnectUpstream { .. }))
         .count()
 }
 
@@ -302,9 +303,9 @@ fn a_session_with_the_upstream_that_went_is_opened_again_for_the_next_request() 
     );
 }
 
-#[test]
-fn a_fetch_or_track_status_nobody_can_answer_has_the_session_with_the_upstream_opened() {
-    let rows: [(&str, ControlMessage); 2] = [
+/// A FETCH and a `TRACK_STATUS` of Alice for a track of `(xmoq)`.
+fn fetch_and_track_status() -> [(&'static str, ControlMessage); 2] {
+    [
         (
             "FETCH",
             ControlMessage::Fetch(Fetch {
@@ -331,16 +332,223 @@ fn a_fetch_or_track_status_nobody_can_answer_has_the_session_with_the_upstream_o
                 parameters: vec![],
             }),
         ),
-    ];
-    for (name, first) in rows {
+    ]
+}
+
+/// What the relay opened on the session with the upstream, by the kind of
+/// its first message.
+fn opened_upstream(actions: &[Action]) -> Vec<&'static str> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::OpenRequest {
+                session: UPSTREAM,
+                message,
+                ..
+            } => Some(match message {
+                ControlMessage::Fetch(_) => "FETCH",
+                ControlMessage::TrackStatus(_) => "TRACK_STATUS",
+                ControlMessage::Subscribe(_) => "SUBSCRIBE",
+                _ => "other",
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_fetch_or_track_status_waits_for_the_session_with_the_upstream_like_a_subscribe() {
+    for (name, first) in fetch_and_track_status() {
         let mut relay = edge(&[]);
-        let actions = relay.step(Event::RequestOpened {
+        let came = relay.step(Event::RequestOpened {
             session: ALICE,
             stream: StreamKey(0),
             first,
         });
-        // Refused all the same (known gap).
-        assert_eq!(connects(&actions), 1, "{name}");
-        assert_eq!(refusals(&actions).len(), 1, "{name}");
+        assert_eq!((connects(&came), refusals(&came).len()), (1, 0), "{name}");
+        assert_eq!(opened_upstream(&upstream_opened(&mut relay)), [name]);
     }
+}
+
+#[test]
+fn a_fetch_or_track_status_that_waited_for_an_upstream_that_cannot_be_reached_is_refused() {
+    for (name, first) in fetch_and_track_status() {
+        let mut relay = edge(&[]);
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first,
+        });
+        assert_eq!(
+            refusals(&relay.step(Event::UpstreamFailed)),
+            [INTERNAL_ERROR],
+            "{name}"
+        );
+    }
+}
+
+/// The `RENDEZVOUS_TIMEOUT` of the relay's SUBSCRIBEs.
+fn rendezvous_of(actions: &[Action]) -> Vec<Option<u64>> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::OpenRequest {
+                message: ControlMessage::Subscribe(subscribe),
+                ..
+            } => Some(xmoq_moqt::params::rendezvous_timeout(&subscribe.parameters)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_subscribe_held_for_a_publisher_to_appear_is_held_by_the_upstream_as_well() {
+    struct Row {
+        name: &'static str,
+        announced: bool,
+        rendezvous_ms: Option<u64>,
+        asked: Option<u64>,
+    }
+    let rows = [
+        Row {
+            name: "held",
+            announced: false,
+            rendezvous_ms: Some(5_000),
+            asked: Some(5_000),
+        },
+        Row {
+            // MAX_RENDEZVOUS_MS.
+            name: "held for longer than the relay holds",
+            announced: false,
+            rendezvous_ms: Some(60_000),
+            asked: Some(30_000),
+        },
+        Row {
+            name: "not held",
+            announced: false,
+            rendezvous_ms: None,
+            asked: None,
+        },
+        Row {
+            // The publisher that would appear is the one that announced.
+            name: "held, of a session that announced the namespace",
+            announced: true,
+            rendezvous_ms: Some(5_000),
+            asked: None,
+        },
+    ];
+    for row in rows {
+        let mut relay = edge(&[]);
+        if row.announced {
+            announce(&mut relay, &[b"xmoq"]);
+        }
+        upstream_opened(&mut relay);
+        let actions = subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], row.rendezvous_ms);
+        assert_eq!(rendezvous_of(&actions), [row.asked], "{}", row.name);
+    }
+}
+
+#[test]
+fn a_subscribe_held_while_the_relay_connects_is_held_by_the_upstream_as_well() {
+    let mut relay = edge(&[]);
+    subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], Some(5_000));
+    assert_eq!(rendezvous_of(&upstream_opened(&mut relay)), [Some(5_000)]);
+}
+
+/// The GOAWAY of the upstream, on its control stream, naming `uri`.
+fn upstream_goes_away(relay: &mut Relay, uri: &[u8]) -> Vec<Action> {
+    relay.step(Event::ControlMessage {
+        session: UPSTREAM,
+        message: ControlMessage::Setup(Setup::default()),
+    });
+    relay.step(Event::ControlMessage {
+        session: UPSTREAM,
+        message: ControlMessage::GoAway(GoAway {
+            new_session_uri: uri.to_vec(),
+            timeout_ms: 10_000,
+            request_id: Some(0),
+        }),
+    })
+}
+
+#[test]
+fn a_goaway_of_the_upstream_has_the_relay_connect_where_it_says_for_what_it_carries() {
+    struct Row {
+        name: &'static str,
+        /// Alice subscribed before the GOAWAY.
+        subscribed: bool,
+        uri: &'static [u8],
+        connects_to: Option<&'static [u8]>,
+    }
+    let rows = [
+        Row {
+            name: "a URI, with a subscription",
+            subscribed: true,
+            uri: b"https://127.0.0.1:4444/",
+            connects_to: Some(b"https://127.0.0.1:4444/"),
+        },
+        Row {
+            // §10.4: the current URI.
+            name: "no URI, with a subscription",
+            subscribed: true,
+            uri: b"",
+            connects_to: Some(b""),
+        },
+        Row {
+            name: "a URI, with nothing carried",
+            subscribed: false,
+            uri: b"https://127.0.0.1:4444/",
+            connects_to: None,
+        },
+    ];
+    for row in rows {
+        let mut relay = edge(&[]);
+        upstream_opened(&mut relay);
+        if row.subscribed {
+            subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None);
+        }
+        let gone = upstream_goes_away(&mut relay, row.uri);
+        let connects_to: Vec<&[u8]> = gone
+            .iter()
+            .filter_map(|action| match action {
+                Action::ConnectUpstream { uri } => Some(uri.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            connects_to,
+            row.connects_to.into_iter().collect::<Vec<_>>(),
+            "{}",
+            row.name
+        );
+    }
+}
+
+#[test]
+fn the_session_that_replaces_one_that_went_away_is_asked_for_the_tracks_the_old_one_carries() {
+    const NEW_UPSTREAM: SessionKey = SessionKey(10);
+    let mut relay = edge(&[]);
+    upstream_opened(&mut relay);
+    subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None);
+    // The upstream accepts: the track has its source, and Alice her answer.
+    relay.step(Event::OwnRequestMessage {
+        session: UPSTREAM,
+        request: OwnRequestKey(0),
+        message: ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: 1,
+            parameters: vec![],
+            track_properties: vec![],
+        }),
+    });
+    upstream_goes_away(&mut relay, b"https://127.0.0.1:4444/");
+    let opened = relay.step(Event::SessionOpened {
+        session: NEW_UPSTREAM,
+        role: Role::Client,
+    });
+    assert_eq!(asked_of(&opened), [NEW_UPSTREAM]);
+    // And nothing more of the old one.
+    assert_eq!(
+        routed(&subscribe_to(&mut relay, 1, &[b"xmoq", b"b"], None)),
+        Routed::Asks(vec![NEW_UPSTREAM])
+    );
 }
