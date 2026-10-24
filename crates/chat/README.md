@@ -38,7 +38,7 @@ The limits of the chat (Q43, decided on 2026-10-24), which flags change:
 | `--lines-per-second` | 5 | Lines one person may say in any second; the line over it is dropped, and does not count | 1 to 1,000 |
 | `--fetch-lines` | 1,000 | Lines one FETCH gets: of a longer range, the latest | 1 to 100,000 |
 
-`--room <room>` (repeatable, up to 8) has the gatherer take, publish and answer FETCH for those rooms alone (Q48, decided on 2026-10-24: a gatherer for each room). More than 8 are refused at the start: a session at the own relay may have 8 `SUBSCRIBE_NAMESPACE` requests (Q45, provisional), and a ninth would be refused for good while the gatherer looked as if it ran.
+`--room <room>` (repeatable, up to 8) has the gatherer take, publish and answer FETCH for those rooms alone (Q48, decided on 2026-10-24: a gatherer for each room). More than 8 are refused at the start: a session at the own relay may have 8 `SUBSCRIBE_NAMESPACE` requests (Q45, decided on 2026-10-24), and a ninth would be refused for good while the gatherer looked as if it ran.
 
 **Ten rooms of a hundred people** (Q41) are reached with a gatherer for each room, each with `--room` and a store of its own: each follows 100 participants, under the about 250 the own relay lets one session have (`MAX_PEER_REQUESTS`, 256 requests, the `SUBSCRIBE_NAMESPACE` and the PUBLISH among them). **Not measured.**
 
