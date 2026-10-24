@@ -826,7 +826,9 @@ export interface MoqtConnection {
 	 * a Track it already publishes to the peer (§5.1 allows one subscription
 	 * to a Track in each role): one it sent PUBLISH for before, answered or
 	 * not, and one the peer asked for with a SUBSCRIBE that waits for its
-	 * answer or was accepted.
+	 * answer or was accepted. `subscribe()` rejects with a `RangeError`, and
+	 * sends nothing, for a `maxObjectPayloadLength` that is not a whole
+	 * number from 1.
 	 */
 	publishNamespace(
 		trackNamespace: TrackNamespace,

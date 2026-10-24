@@ -148,11 +148,18 @@ export async function followCatalog(
 	const stop = new AbortController();
 	const stopBySignal = (): void => stop.abort(signal?.reason);
 	signal?.addEventListener("abort", stopBySignal, { once: true });
+	const maxLength = options.maxLength ?? DEFAULT_MAX_CATALOG_LENGTH;
 	let subscription: Subscription;
 	try {
 		subscription = await connection.subscribe({
 			trackNamespace: options.namespace,
 			trackName: CATALOG_TRACK_NAME,
+			// An Object that is longer than a catalog that is read ends its
+			// stream before the whole of it has come, as on the Joining FETCH.
+			// WHY at least 1: `@xmoq/moqt` takes a limit from 1, and a
+			// `maxLength` of 0 is one this takes; an Object of 1 byte is no
+			// catalog either, and `readCatalog` says so.
+			maxObjectPayloadLength: Math.max(maxLength, 1),
 			...(options.rendezvousTimeoutMs === undefined
 				? {}
 				: {
@@ -217,9 +224,7 @@ export async function followCatalog(
 		const reader = decodeFetchBody(connection, fetch, {
 			// An Object of the fetch stream that is longer than a catalog that
 			// is read ends the FETCH before the whole of it has come.
-			limits: {
-				maxObjectPayloadLength: options.maxLength ?? DEFAULT_MAX_CATALOG_LENGTH,
-			},
+			limits: { maxObjectPayloadLength: maxLength },
 		}).getReader();
 		for (;;) {
 			const next = await reader.read();
