@@ -1,0 +1,14 @@
+[package]
+name = "xmoq-track-serving"
+version = "0.0.0"
+description = "What a client of the relay needs to serve tracks of one Object a Group: the tasks that write its request, subgroup and fetch streams, what a FETCH gets, and the wait before asking again."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+tokio = { version = "=1.49.0", features = ["macros", "rt", "sync", "time"] }

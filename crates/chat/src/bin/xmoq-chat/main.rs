@@ -8,7 +8,6 @@
 
 mod session;
 mod storage;
-mod streams;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -17,11 +16,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::watch;
-use xmoq_chat::backoff::Backoff;
 use xmoq_chat::gather::Gatherer;
 use xmoq_chat::rooms::MAX_ROOMS;
 use xmoq_moqt_io::wt;
 use xmoq_moqt_io::{Connection, StreamConfig};
+use xmoq_track_serving::backoff::Backoff;
 
 use crate::session::{Ended, NoSetupInTime};
 use crate::storage::Store;
@@ -71,7 +70,7 @@ async fn run(args: xmoq_chat::args::Args) -> Result<()> {
         store.rooms(MAX_ROOMS)?.len()
     );
     let streams = StreamConfig::default();
-    // WHY a wait that grows (`xmoq_chat::backoff`): a relay that ends every
+    // WHY a wait that grows (`xmoq_track_serving::backoff`): a relay that ends every
     // session at once would have the gatherer connect every second for
     // good.
     let mut backoff = Backoff::default();

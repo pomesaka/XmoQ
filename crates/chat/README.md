@@ -7,7 +7,7 @@ mise run chat -- --url https://127.0.0.1:4443/ --cert-sha256 <64 hex digits> --s
 mise run chat -- --url ... --cert-sha256 ... --store room-r.sqlite3 --room r     # one room alone
 ```
 
-It runs until Ctrl-C or SIGTERM, and connects again after a session ends: a second later at first, twice as long after each session that lasted less than a minute, up to 30 seconds (`src/backoff.rs`, provisional). With a flag it does not know it prints its flags (`USAGE` in `src/args.rs`).
+It runs until Ctrl-C or SIGTERM, and connects again after a session ends: a second later at first, twice as long after each session that lasted less than a minute, up to 30 seconds (`backoff` of [`xmoq-track-serving`](../track-serving/README.md), provisional). With a flag it does not know it prints its flags (`USAGE` in `src/args.rs`).
 
 **Building it needs a C compiler**: `rusqlite` builds SQLite from the source it carries (`bundled`), through the `cc` crate. On macOS the Command Line Tools' `clang`, on Linux `gcc`.
 
@@ -51,7 +51,7 @@ When a participant whose subscription ended is asked again, which flags change (
 
 **Ten rooms of a hundred people** (Q41) are reached with a gatherer for each room, each with `--room` and a store of its own: each follows 100 participants, under the about 250 the own relay lets one session have (`MAX_PEER_REQUESTS`, 256 requests, the `SUBSCRIBE_NAMESPACE` and the PUBLISH among them). **Not measured.**
 
-**A FETCH of more lines than `--fetch-lines`** gets the latest lines of its range and, for the lines before them, an End of Unknown Range indicator (§11.4.4.2), before the lines in Ascending order and after them in Descending order. `FETCH_OK` keeps the End Location that was asked for (§10.13). Why not a shorter End Location, no indicator, or a refusal: at the top of `src/fetch.rs`.
+**A FETCH of more lines than `--fetch-lines`** gets the latest lines of its range and, for the lines before them, an End of Unknown Range indicator (§11.4.4.2), before the lines in Ascending order and after them in Descending order. `FETCH_OK` keeps the End Location that was asked for (§10.13). Why not a shorter End Location, no indicator, or a refusal: at the top of `crates/track-serving/src/fetch.rs`.
 
 What the gatherer holds of what the relay and the participants send has a bound that no flag removes. **All are provisional.**
 
@@ -64,9 +64,9 @@ What the gatherer holds of what the relay and the participants send has a bound 
 | Lines that wait for the `PUBLISH_OK` of their room | 64 a room; the rest are not sent live | `session.rs` |
 | Subgroup streams of lines being written | 256; the rest are not sent live (`LINE_NOT_SENT`) | `session.rs` |
 | FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `session.rs` |
-| Bytes of payload the FETCH answers being written hold together | 64 MiB; a FETCH whose answer would go past it is refused with `EXCESSIVE_LOAD`. The lines are read one by one, and the reading stops at the bound | `MAX_BYTES_HELD`, `src/fetch.rs` |
-| Messages for one request stream not written yet, the answers to `REQUEST_UPDATE` among them | 64; none is dropped (§10.9: "exactly one"): one more cancels the request with `EXCESSIVE_LOAD` | `COMMAND_QUEUE`, `streams.rs` |
-| A line's subgroup stream | 1 s for the relay to allow it, 5 s for the relay to take it; then it is reset, and the line is not sent live | `streams.rs` |
+| Bytes of payload the FETCH answers being written hold together | 64 MiB; a FETCH whose answer would go past it is refused with `EXCESSIVE_LOAD`. The lines are read one by one, and the reading stops at the bound | `MAX_BYTES_HELD`, `session.rs` |
+| Messages for one request stream not written yet, the answers to `REQUEST_UPDATE` among them | 64; none is dropped (§10.9: "exactly one"): one more cancels the request with `EXCESSIVE_LOAD` | `COMMAND_QUEUE`, `streams` of `xmoq-track-serving` |
+| A line's subgroup stream | 1 s for the relay to allow it, 5 s for the relay to take it; then it is reset, and the line is not sent live | `streams` of `xmoq-track-serving` |
 | The relay's direction of a FETCH's request stream | Stopped with `CANCELLED` when the gatherer finishes its own, 3 s after the end of the fetch stream at the most, where the relay has not ended it | `session.rs`, `fetch_over` |
 | The relay's SETUP; a stream for a request; the answer to a request | 10 s each | `session.rs` |
 
@@ -89,14 +89,14 @@ The library (`src/*.rs`) decides, and does no input or output; the tests are the
 | Module | What it decides |
 |---|---|
 | `rate` | Whether a person is over the rate |
-| `backoff` | How long to wait before connecting again, and before asking for a `SUBSCRIBE_NAMESPACE` again |
 | `said_again` | Whether, and after how long, a participant is asked again for its `said` |
 | `rooms` | The numbers of the lines of a room |
 | `gather` | What becomes of a line: taken, or dropped and why; who is followed, and whether a room is left empty |
-| `fetch` | What a FETCH gets, and how many bytes the answers may hold |
 | `args` | What the flags mean, the limits, and which rooms are taken |
 
-The binary (`src/bin/xmoq-chat/`): `session.rs` (the requests and the answers on one session), `streams.rs` (the tasks that write each stream), `storage.rs` (the store), `main.rs` (connecting again, and the signals). What it prints, one line for each thing it does (`WATCHING`, `PARTICIPANT`, `SUBSCRIBED`, `ROOM_PUBLISHED`, `LINE`, `LINE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/chat.ts` waits for.
+How long to wait before connecting again and before asking for a `SUBSCRIBE_NAMESPACE` again, what a FETCH gets, and the tasks that write each stream are [`xmoq-track-serving`](../track-serving/README.md)'s.
+
+The binary (`src/bin/xmoq-chat/`): `session.rs` (the requests and the answers on one session), `storage.rs` (the store), `main.rs` (connecting again, and the signals). What it prints, one line for each thing it does (`WATCHING`, `PARTICIPANT`, `SUBSCRIBED`, `ROOM_PUBLISHED`, `LINE`, `LINE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/chat.ts` waits for.
 
 ## Not done
 
