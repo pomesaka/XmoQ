@@ -4,12 +4,17 @@
 pub const USAGE: &str = "\
 xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file>
           [--room <room>]... [--text-bytes <n>] [--lines-per-second <n>] [--fetch-lines <n>]
+          [--ask-again-times <n>] [--ask-again-ms <ms>]
 
 --store             the SQLite file of the history, this gatherer's alone; made where it is not there
 --room              a room to gather, up to 8; every room without it
 --text-bytes        the most bytes of UTF-8 the text of a line may have (512)
 --lines-per-second  the most lines one person may say in any second (5)
---fetch-lines       the most lines one FETCH gets (1000)";
+--fetch-lines       the most lines one FETCH gets (1000)
+--ask-again-times   how many times in a row a participant whose subscription ended is asked again (30; 0 never)
+--ask-again-ms      the pause before it is, after an end or a refusal that names no time (1000)";
+
+use crate::said_again::{PAUSE_MS_LEAST, PAUSE_MS_MOST, Settings, TIMES_MOST};
 
 pub use xmoq_chat_tracks::limits::{
     FETCH_LINES_MOST, LINES_PER_SECOND_MOST, Limits, TEXT_BYTES_MOST,
@@ -70,6 +75,8 @@ pub struct Args {
     /// `--auth` (Q51, provisional): a gatherer of a room's real service
     /// would get its tokens from where the room's are made.
     pub auth_key: Option<Vec<u8>>,
+    /// `--ask-again-times`, `--ask-again-ms`.
+    pub ask_again: Settings,
 }
 
 /// Reads 64 hexadecimal digits.
@@ -98,6 +105,19 @@ where
     }
 }
 
+/// A number between `least` and `most`.
+fn number_from<T>(flag: &str, value: &str, least: T, most: T) -> Result<T, String>
+where
+    T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
+{
+    match value.parse::<T>() {
+        Ok(number) if number >= least && number <= most => Ok(number),
+        _ => Err(format!(
+            "{flag} is a number from {least} to {most}, not {value:?}"
+        )),
+    }
+}
+
 /// Reads the flags.
 ///
 /// # Errors
@@ -108,6 +128,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut limits = Limits::default();
     let mut rooms: Vec<String> = Vec::new();
     let mut auth_key = None;
+    let mut ask_again = Settings::default();
     while let Some(flag) = flags.next() {
         let value = flags
             .next()
@@ -135,6 +156,10 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
                 limits.lines_per_second = number_within(&flag, &value, LINES_PER_SECOND_MOST)?;
             }
             "--fetch-lines" => limits.fetch_lines = number_within(&flag, &value, FETCH_LINES_MOST)?,
+            "--ask-again-times" => ask_again.times = number_from(&flag, &value, 0, TIMES_MOST)?,
+            "--ask-again-ms" => {
+                ask_again.pause_ms = number_from(&flag, &value, PAUSE_MS_LEAST, PAUSE_MS_MOST)?;
+            }
             "--auth-key-hex" => {
                 auth_key = Some(
                     xmoq_room_token::unhex(&value)
@@ -162,6 +187,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
             Rooms::These(rooms)
         },
         auth_key,
+        ask_again,
     })
 }
 
@@ -190,6 +216,7 @@ mod tests {
             limits,
             rooms: Rooms::Every,
             auth_key: None,
+            ask_again: Settings::default(),
         }
     }
 
@@ -364,6 +391,62 @@ mod tests {
                 "a flag without its value",
                 &["--fetch-lines"],
                 Err("--fetch-lines needs a value".to_string()),
+            ),
+        ];
+        for (case, extra, expected) in cases {
+            let flags: Vec<&str> = base.iter().chain(extra).copied().collect();
+            assert_eq!(args(&flags), expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn the_flags_set_when_a_participant_is_asked_again() {
+        let base = [
+            "--url",
+            "https://h:1/",
+            "--cert-sha256",
+            HASH,
+            "--store",
+            "s",
+        ];
+        let asked = |times, pause_ms| {
+            Ok(Args {
+                ask_again: Settings { times, pause_ms },
+                ..with(Limits::default())
+            })
+        };
+        let cases: [(&str, &[&str], Result<Args, String>); 8] = [
+            ("the defaults", &[], asked(30, 1000)),
+            (
+                "both",
+                &["--ask-again-times", "3", "--ask-again-ms", "2000"],
+                asked(3, 2000),
+            ),
+            ("never", &["--ask-again-times", "0"], asked(0, 1000)),
+            (
+                "the most times",
+                &["--ask-again-times", "10000"],
+                asked(10_000, 1000),
+            ),
+            (
+                "too many times",
+                &["--ask-again-times", "10001"],
+                Err("--ask-again-times is a number from 0 to 10000, not \"10001\"".to_string()),
+            ),
+            (
+                "the shortest pause",
+                &["--ask-again-ms", "100"],
+                asked(30, 100),
+            ),
+            (
+                "a pause too short",
+                &["--ask-again-ms", "99"],
+                Err("--ask-again-ms is a number from 100 to 60000, not \"99\"".to_string()),
+            ),
+            (
+                "a pause too long",
+                &["--ask-again-ms", "60001"],
+                Err("--ask-again-ms is a number from 100 to 60000, not \"60001\"".to_string()),
             ),
         ];
         for (case, extra, expected) in cases {

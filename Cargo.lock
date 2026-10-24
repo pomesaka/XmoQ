@@ -2455,6 +2455,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "xmoq-again"
+version = "0.0.0"
+
+[[package]]
 name = "xmoq-chat"
 version = "0.0.0"
 dependencies = [
@@ -2462,6 +2466,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tokio",
+ "xmoq-again",
  "xmoq-chat-tracks",
  "xmoq-moqt",
  "xmoq-moqt-io",
@@ -2565,6 +2570,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "xmoq-again",
  "xmoq-chat-tracks",
  "xmoq-loc",
  "xmoq-moqt",

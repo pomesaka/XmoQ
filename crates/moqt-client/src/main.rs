@@ -2196,7 +2196,9 @@ impl Client<'_> {
     /// Announces the namespace and publishes the track to the peer when it
     /// subscribes. One Object goes out for every line on stdin, as in
     /// [`Self::publish`]; a line that comes while nobody is subscribed is an
-    /// error of the driver, which is to wait for `SERVING`.
+    /// error of the driver, which is to wait for `SERVING`. `publish-done`
+    /// ends the subscription with `PUBLISH_DONE` `TRACK_ENDED` while the
+    /// namespace stays announced.
     async fn serve(&mut self, payload: &[u8]) -> Result<()> {
         let (namespace_request, message) = self
             .session
@@ -2229,6 +2231,13 @@ impl Client<'_> {
         loop {
             tokio::select! {
                 line = stdin.next_line() => match line? {
+                    // The namespace stays announced, and the next SUBSCRIBE
+                    // is served.
+                    Some(line) if PublisherLine::read(&line) == PublisherLine::PublishDone => {
+                        self.end_served(&mut serving, publish_done_status::TRACK_ENDED)
+                            .await?;
+                        report::publish_done_sent();
+                    }
                     Some(_) => {
                         let Some(served) = &mut serving else {
                             bail!("asked to send while nobody is subscribed");
@@ -2269,6 +2278,26 @@ impl Client<'_> {
         }
 
         self.end_serving(serving, peer_requests).await
+    }
+
+    /// Ends the subscription that is served, if one is, with `PUBLISH_DONE`
+    /// and a FIN, and goes on: how the peer ends its direction is read as
+    /// what comes on the stream of a request that is over
+    /// (`said_the_last`).
+    async fn end_served(&mut self, serving: &mut Option<Serving>, status: u64) -> Result<()> {
+        let Some(mut ended) = serving.take() else {
+            return Ok(());
+        };
+        let done = self.session.subscribe_done(
+            ended.request,
+            status,
+            ended.streams,
+            ReasonPhrase::default(),
+        )?;
+        xmoq_moqt_io::send_message(&mut ended.send, &done, &self.args.trace, "served").await?;
+        ended.send.finish();
+        self.said_the_last.insert(ended.stream, ended.request);
+        Ok(())
     }
 
     /// The driver is done: ends the subscription that is served, if one
@@ -2798,17 +2827,8 @@ impl Client<'_> {
                 if let PeerRequestEvent::UpdateRefused { response, .. } = event {
                     xmoq_moqt_io::send_message(&mut served.send, &response, wire, "served").await?;
                     report::update_refused();
-                    if let Some(mut ended) = serving.take() {
-                        let done = self.session.subscribe_done(
-                            ended.request,
-                            publish_done_status::UPDATE_FAILED,
-                            ended.streams,
-                            ReasonPhrase::default(),
-                        )?;
-                        xmoq_moqt_io::send_message(&mut ended.send, &done, wire, "served").await?;
-                        ended.send.finish();
-                        self.said_the_last.insert(ended.stream, ended.request);
-                    }
+                    self.end_served(serving, publish_done_status::UPDATE_FAILED)
+                        .await?;
                 }
             }
             PeerRequestStreamEvent::Closed { stream, how } => {

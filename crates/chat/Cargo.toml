@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+xmoq-again = { path = "../again" }
 xmoq-chat-tracks = { path = "../chat-tracks" }
 xmoq-moqt = { path = "../moqt" }
 xmoq-moqt-io = { path = "../moqt-io" }

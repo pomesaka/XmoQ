@@ -1202,7 +1202,7 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			script: "chat.ts",
 			args: ["--restart", "no"],
 			relay: "moqtail",
-			expectedFailure: /told of unknown lines up to: none, not 2/,
+			expectedFailure: /told of unknown lines up to: none, not 3/,
 		},
 		// Own pages as participants of the chat (`joinChat` of `@xmoq/chat`,
 		// which the demo's pages use), with the gatherer, through both relays.

@@ -41,6 +41,18 @@
 //     through moqtail's relay has no restart: moqtail's relay 0.15.0 did not
 //     answer the PUBLISH of a gatherer that came again at once, now and
 //     then (docs/experiments/2026-10-24-chat-gatherer.md).
+//
+// Written before the run that asks again (2026-10-24):
+//
+//   - A participant whose subscription its publisher ends with PUBLISH_DONE
+//     while its namespace stays announced is subscribed to again by the
+//     gatherer (`ASKING_AGAIN ... in_ms=1000`, then a second `SUBSCRIBED`),
+//     and its next line is taken: through moqtail's relay `b`'s, numbered 9,
+//     before the late viewer, who then gets an End of Unknown Range up to
+//     Group 3 and Groups 4 to 9; through the own relay `a`'s after the
+//     restart, numbered 10. The room's
+//     PUBLISH_DONE then counts the two streams the second gatherer opened
+//     (`streams=2`).
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -178,6 +190,40 @@ async function fetchAll(
 	};
 }
 
+/**
+ * Has `who` end the gatherer's subscription with PUBLISH_DONE while its
+ * namespace stays announced, waits for the gatherer to subscribe again, and
+ * has `who` say a line that the gatherer numbers `number`. Says how long the
+ * gatherer said it would wait.
+ */
+async function endAndGatherAgain(
+	gatherer: LoggedProcess,
+	who: LoggedProcess,
+	name: string,
+	number: number,
+): Promise<string> {
+	const served = who.matches(/^SERVING /).length;
+	const subscriptions = gatherer.matches(subscribed(name)).length;
+	who.child.stdin.write("publish-done\n");
+	await who.waitForLine(/^PUBLISH_DONE_SENT$/);
+	const asking = await gatherer.waitForLine(
+		new RegExp(`^ASKING_AGAIN room="${ROOM}" name="${name}" in_ms=(\\d+)$`),
+	);
+	await pollFor(
+		() => (who.matches(/^SERVING /).length > served ? true : undefined),
+		`${name} to be asked for its track again`,
+	);
+	await pollFor(
+		() =>
+			gatherer.matches(subscribed(name)).length > subscriptions
+				? true
+				: undefined,
+		`the gatherer to subscribe to ${name} again`,
+	);
+	await sayOne(gatherer, who, name, number);
+	return captureGroup(asking, 1);
+}
+
 function expect(what: string, got: string, wanted: string): void {
 	if (got !== wanted) throw new Error(`${what}: ${got}, not ${wanted}`);
 }
@@ -271,20 +317,30 @@ async function main(): Promise<void> {
 			"3",
 		);
 
+		// WHY before the late viewer through moqtail's relay: that run is
+		// expected to fail at the late viewer's FETCH (`matrix.ts`).
+		const pauseOfB =
+			restart === "no" ? await endAndGatherAgain(first, b, "b", 9) : "1000";
+		expect("the pause before b was asked again", pauseOfB, "1000");
+
 		const before = await fetchAll(context, "late");
-		expect("the late viewer's FETCH_OK ends at", before.end, "{8, 1}");
+		expect(
+			"the late viewer's FETCH_OK ends at",
+			before.end,
+			restart === "no" ? "{9, 1}" : "{8, 1}",
+		);
 		expect(
 			"the late viewer was told of unknown lines up to",
 			before.unknownThrough,
-			restart === "no" ? "2" : "none",
+			restart === "no" ? "3" : "none",
 		);
 		expect(
 			"the late viewer got",
 			before.groups.join(","),
-			restart === "no" ? "3,4,5,6,7,8" : "0,1,2,3,4,5,6,7,8",
+			restart === "no" ? "4,5,6,7,8,9" : "0,1,2,3,4,5,6,7,8",
 		);
 		if (restart === "no") {
-			summary = `through the ${relay} relay, the gatherer numbered the lines of a and b 0 to 3 in the order they came and a viewer got them live (${seenLive}); a line of 513 bytes was dropped as too long; of 8 lines at once 5 were taken (${ofD.join(",")}) and 3 dropped as too fast; a late viewer's FETCH, cut to 6 lines, got an unknown range up to ${before.unknownThrough} and Groups ${before.groups.join(",")} (FETCH_OK ${before.end})`;
+			summary = `through the ${relay} relay, the gatherer numbered the lines of a and b 0 to 3 in the order they came and a viewer got them live (${seenLive}); a line of 513 bytes was dropped as too long; of 8 lines at once 5 were taken (${ofD.join(",")}) and 3 dropped as too fast; a late viewer's FETCH, cut to 6 lines, got an unknown range up to ${before.unknownThrough} and Groups ${before.groups.join(",")} (FETCH_OK ${before.end}), after b ended the gatherer's subscription with PUBLISH_DONE, was asked again after ${pauseOfB} ms, and its next line was numbered 9`;
 			return;
 		}
 
@@ -330,6 +386,8 @@ async function main(): Promise<void> {
 			"6",
 		);
 		expect("the viewer after the restart got", after.groups.join(","), "7,8,9");
+		const pause = await endAndGatherAgain(second, a, "a", 10);
+		expect("the pause before a was asked again", pause, "1000");
 
 		for (const who of [a, b, c, d, e]) who.child.stdin.end();
 		const [done] = await second.waitForLine(
@@ -338,7 +396,7 @@ async function main(): Promise<void> {
 		expect(
 			"the room's PUBLISH_DONE",
 			done,
-			'ROOM_DONE room="r" status=0x2 streams=1',
+			'ROOM_DONE room="r" status=0x2 streams=2',
 		);
 		const empty = spawnRustClient(
 			context,
@@ -373,7 +431,7 @@ async function main(): Promise<void> {
 			throw new Error("the gatherer of room r took something of room s");
 		}
 
-		summary = `through the ${relay} relay, the gatherer numbered the lines of a and b 0 to 3 in the order they came and a viewer got them live (${seenLive}); a line of 513 bytes was dropped as too long; of 8 lines at once 5 were taken (${ofD.join(",")}) and 3 dropped as too fast; a late viewer fetched Groups ${before.groups.join(",")} (FETCH_OK ${before.end}); after a restart on the same store the next line was numbered 9, and a FETCH with a limit of 3 got an unknown range up to ${after.unknownThrough} and Groups ${after.groups.join(",")} (FETCH_OK ${after.end}); the gatherer of room r alone was never told of room s; when everybody left, it ended the room (${done}), and a FETCH for it was refused with ${captureGroup(refused, 1)}`;
+		summary = `through the ${relay} relay, the gatherer numbered the lines of a and b 0 to 3 in the order they came and a viewer got them live (${seenLive}); a line of 513 bytes was dropped as too long; of 8 lines at once 5 were taken (${ofD.join(",")}) and 3 dropped as too fast; a late viewer fetched Groups ${before.groups.join(",")} (FETCH_OK ${before.end}); after a restart on the same store the next line was numbered 9, and a FETCH with a limit of 3 got an unknown range up to ${after.unknownThrough} and Groups ${after.groups.join(",")} (FETCH_OK ${after.end}); a ended the gatherer's subscription with PUBLISH_DONE, was asked again after ${pause} ms, and its next line was numbered 10; the gatherer of room r alone was never told of room s; when everybody left, it ended the room (${done}), and a FETCH for it was refused with ${captureGroup(refused, 1)}`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

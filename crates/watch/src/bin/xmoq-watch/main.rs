@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
+use xmoq_again::AskAgain;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::kvp::KeyValuePair;
@@ -40,7 +41,6 @@ use xmoq_moqt_io::{
     Connection, PeerRequestStreamEvent, RequestStreamEvent, SendStream, StreamConfig, StreamEnd,
     StreamStops, Trace, UniEvent, read_request_streams, read_uni_streams, send_message,
 };
-use xmoq_watch::again::AskAgain;
 use xmoq_watch::args::{Args, Chat, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
 use xmoq_watch::keys::{Asked, Keys};
@@ -878,7 +878,7 @@ async fn play(
     // one that falls behind), and a new session would stop the picture for
     // the sake of the sound. The watching page does the same
     // (`keepTrackOnSession` of `@xmoq/media`), by the same rule
-    // (`xmoq_watch::again`).
+    // (`xmoq-again`).
     let mut audio = Some(audio);
     let mut again = AskAgain::default();
     let mut ask_at: Option<tokio::time::Instant> = None;
