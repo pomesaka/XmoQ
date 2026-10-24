@@ -1429,6 +1429,7 @@ impl<C: Connection> Hub<C> {
                 Event::Object { .. }
                     | Event::DataStreamOpened { .. }
                     | Event::OutStreamOpened { .. }
+                    | Event::OutStreamStopped { .. }
                     | Event::OutStreamClosed { .. }
                     | Event::FetchStreamWritten { .. }
             );
@@ -1994,7 +1995,7 @@ impl<C: Connection> Hub<C> {
                                 stop_code(code)
                             ));
                         }
-                        return;
+                        Event::OutStreamStopped { out_stream }
                     }
                 };
                 let _ = events.send(Envelope::Core(event)).await;

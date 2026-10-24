@@ -268,6 +268,13 @@ pub enum Event {
         /// The stream.
         out_stream: OutStreamKey,
     },
+    /// The subscriber of a subgroup stream the relay asked for stopped it
+    /// with `STOP_SENDING`. Reported before [`Event::OutStreamClosed`] of
+    /// the stream.
+    OutStreamStopped {
+        /// The stream.
+        out_stream: OutStreamKey,
+    },
     /// A subgroup stream the relay asked for is done: written out and
     /// finished, reset, or never opened. Reported once for every
     /// [`Action::OpenDataStream`], and last.

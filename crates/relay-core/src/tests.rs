@@ -1589,6 +1589,46 @@ fn the_largest_object_of_a_publish_is_passed_on() {
     );
 }
 
+/// §11.4.3: a subscriber that stopped its stream for a Subgroup gets no
+/// other for it, "SHOULD NOT attempt to open a new stream to deliver
+/// additional Objects in that Subgroup". One closed otherwise gets another
+/// with the next Object, which does not start the Subgroup.
+#[test]
+fn a_stream_the_subscriber_stopped_is_not_opened_again() {
+    let late_header = SubgroupHeader {
+        subgroup_id: SubgroupId::Explicit(0),
+        first_object: false,
+        ..header(0)
+    };
+    // (whether Alice stopped her stream; what the next Object does)
+    let cases = [
+        (true, vec![]),
+        (
+            false,
+            vec![open_data_stream(ALICE, 1, late_header), send_object(1, 1)],
+        ),
+    ];
+    for (stopped, next) in cases {
+        let mut relay = relay_with_track();
+        subscribe_to_track(&mut relay, ALICE);
+        assert_eq!(
+            data_stream_opened(&mut relay, 7),
+            [open_data_stream(ALICE, 0, header(0))]
+        );
+        assert_eq!(object_arrived(&mut relay, 7, 0), [send_object(0, 0)]);
+        if stopped {
+            assert_eq!(
+                relay.step(Event::OutStreamStopped {
+                    out_stream: OutStreamKey(0),
+                }),
+                []
+            );
+        }
+        out_stream_closed(&mut relay, 0);
+        assert_eq!(object_arrived(&mut relay, 7, 1), next, "stopped: {stopped}");
+    }
+}
+
 #[test]
 fn a_subscriber_with_forward_state_0_gets_no_objects() {
     let mut relay = relay_with_track();

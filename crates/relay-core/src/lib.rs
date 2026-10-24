@@ -408,6 +408,27 @@ struct InStream {
     of_the_subscription_before: bool,
     /// The stream each subscriber gets this one on, by session.
     outs: HashMap<SessionKey, OutStreamKey>,
+    /// The subscriptions, by session and Track Alias, that stopped the
+    /// stream they got this one on: they get no other for it (§11.4.3,
+    /// "SHOULD NOT attempt to open a new stream to deliver additional
+    /// Objects in that Subgroup"). WHY here and not with the Subgroup: a
+    /// Subgroup taken anew from another stream of its source is what the
+    /// relay already lets reach a subscriber twice (§2.2, the gap on a
+    /// second stream for a Subgroup); this covers the stream that goes on.
+    /// WHY by Track Alias as well: a later subscription of the same session
+    /// has another alias and asked for the track anew.
+    stopped: HashSet<(SessionKey, u64)>,
+}
+
+impl InStream {
+    /// Whether the subscriber has no stream for this one and may be given
+    /// one: it did not stop the one it had ([`Self::stopped`]).
+    fn lacks_a_stream_for(&self, subscriber: &Subscriber) -> bool {
+        !self.outs.contains_key(&subscriber.session)
+            && !self
+                .stopped
+                .contains(&(subscriber.session, subscriber.track_alias))
+    }
 }
 
 /// A subgroup stream of a source: the session it arrives on, and its number
@@ -1749,6 +1770,7 @@ impl Relay {
                 self.on_track_malformed(session, stream, &mut actions);
             }
             Event::OutStreamOpened { out_stream } => self.out_stream_opened(out_stream),
+            Event::OutStreamStopped { out_stream } => self.out_stream_stopped(out_stream),
             Event::OutStreamClosed { out_stream } => self.forget_out_stream(out_stream),
             Event::SendQueueFull {
                 out_stream,
@@ -3213,6 +3235,7 @@ impl Relay {
             started: false,
             of_the_subscription_before: false,
             outs: HashMap::new(),
+            stopped: HashSet::new(),
         };
         // Where the header gives the Subgroup ID, every subscriber gets a
         // stream now, also for a Subgroup that turns out to hold no Object: a
@@ -3348,7 +3371,7 @@ impl Relay {
             in_stream.header
         };
         for subscriber in &mut track.subscribers {
-            if !in_stream.outs.contains_key(&subscriber.session) && subscriber.passes(location) {
+            if in_stream.lacks_a_stream_for(subscriber) && subscriber.passes(location) {
                 let out = OutStreamAllocator {
                     next: &mut self.next_out_stream,
                     out_streams: &mut self.out_streams,
@@ -3405,6 +3428,42 @@ impl Relay {
 
     /// The I/O side is done with a stream: nothing more is to be said about
     /// it.
+    /// Marks the subscription of a stream its subscriber stopped, on the
+    /// source's stream, so that it is not opened again ([`InStream::stopped`]).
+    fn out_stream_stopped(&mut self, out_stream: OutStreamKey) {
+        let Some(out) = self.out_streams.get(&out_stream) else {
+            return;
+        };
+        let Some(track) = self.tracks.live_mut(&out.track) else {
+            return;
+        };
+        let Some(track_alias) = track
+            .subscribers
+            .iter()
+            .find(|subscriber| subscriber.outs.contains(&out_stream))
+            .map(|subscriber| subscriber.track_alias)
+        else {
+            return;
+        };
+        let subscriptions: HashSet<(SessionKey, u64)> = track
+            .subscribers
+            .iter()
+            .map(|subscriber| (subscriber.session, subscriber.track_alias))
+            .collect();
+        if let Some(in_stream) = track
+            .in_streams
+            .values_mut()
+            .find(|in_stream| in_stream.outs.get(&out.session) == Some(&out_stream))
+        {
+            // Bounded by the subscriptions there are: those that went are
+            // let go of here.
+            in_stream
+                .stopped
+                .retain(|subscription| subscriptions.contains(subscription));
+            in_stream.stopped.insert((out.session, track_alias));
+        }
+    }
+
     fn forget_out_stream(&mut self, out_stream: OutStreamKey) {
         let Some(out) = self.out_streams.remove(&out_stream) else {
             return;
