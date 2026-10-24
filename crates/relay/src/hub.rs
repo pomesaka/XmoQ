@@ -3935,6 +3935,10 @@ mod fetch_write_tests {
             Ok((Ordering(send, self.1.clone()), recv))
         }
 
+        async fn read_datagram(&self) -> Result<Vec<u8>, xmoq_moqt_io::ConnectionLost> {
+            self.0.read_datagram().await
+        }
+
         fn close(&self, code: u32, reason: &[u8]) {
             self.0.close(code, reason);
         }

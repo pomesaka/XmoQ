@@ -423,6 +423,33 @@ async fn a_subscriptions_limit_on_its_payloads_stops_its_stream_only() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_datagram_of_an_unknown_type_fails_the_session() {
+    // (the datagrams the peer sends; the error, where one ends the session)
+    let cases: [(&[&[u8]], Option<Error>); 3] = [
+        // An OBJECT_DATAGRAM (type 0x00) is let go of.
+        (&[&[0x00, 0x01, 0x02]], None),
+        (
+            &[&[0x00, 0x01], &[0x30]],
+            Some(Error::ProtocolViolation("an unknown datagram type")),
+        ),
+        (
+            &[&[]],
+            Some(Error::ProtocolViolation("a datagram without a type")),
+        ),
+    ];
+    for (datagrams, error) in cases {
+        let mut reading = reading(StreamConfig::default(), 8);
+        for datagram in datagrams {
+            reading.peer.send_datagram(datagram);
+        }
+        match error {
+            Some(error) => assert_eq!(reading.next().await, UniEvent::Failed(error)),
+            None => reading.assert_quiet().await,
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn streams_that_never_say_what_they_are() {
     // (bytes sent before the stream goes silent)
     let cases: [(&str, Vec<u8>); 2] = [
@@ -1734,6 +1761,10 @@ mod held_until_delivered {
         async fn accept_bi(&self) -> Result<(Self::Send, Self::Recv), ConnectionLost> {
             let (send, recv) = self.0.accept_bi().await?;
             Ok((HeldSend(send, Arc::clone(&self.1)), recv))
+        }
+
+        async fn read_datagram(&self) -> Result<Vec<u8>, ConnectionLost> {
+            self.0.read_datagram().await
         }
 
         fn close(&self, code: u32, reason: &[u8]) {

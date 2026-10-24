@@ -754,7 +754,7 @@ pub enum UniEvent {
 }
 
 /// Readers of the peer's streams. Dropping it stops them.
-pub struct IncomingStreams(JoinHandle<()>);
+pub struct IncomingStreams(JoinHandle<()>, Option<JoinHandle<()>>);
 
 impl IncomingStreams {
     /// Completes when the readers are done: the connection is gone, and what
@@ -771,6 +771,9 @@ impl Drop for IncomingStreams {
         // The accept task owns the per-stream tasks in a JoinSet, which aborts
         // them when it is dropped.
         self.0.abort();
+        if let Some(datagrams) = &self.1 {
+            datagrams.abort();
+        }
     }
 }
 
@@ -831,7 +834,8 @@ pub fn read_uni_streams<C: Connection, T: Send + 'static>(
         limit: config.session_buffer_limit,
         used: AtomicUsize::new(0),
     });
-    accept_streams(
+    let datagrams = tokio::spawn(read_datagrams(Arc::clone(&connection), sink.clone()));
+    let mut streams = accept_streams(
         limit,
         sink.clone(),
         || UniEvent::ReaderPanicked,
@@ -851,7 +855,25 @@ pub fn read_uni_streams<C: Connection, T: Send + 'static>(
                 Some(read)
             }
         },
-    )
+    );
+    streams.1 = Some(datagrams);
+    streams
+}
+
+/// Reads the datagrams of the session for their type, until one is of a type
+/// that is unknown, which ends the session: [`UniEvent::Failed`] with the
+/// protocol error (§11; `xmoq_moqt::data::datagram_fault`). An
+/// `OBJECT_DATAGRAM` is let go of (see the crate root).
+///
+/// WHY with the unidirectional streams: every endpoint reads those for as
+/// long as its session lasts, and ends the session on their `Failed`.
+async fn read_datagrams<C: Connection, T>(connection: Arc<C>, sink: Sink<UniEvent, T>) {
+    while let Ok(datagram) = connection.read_datagram().await {
+        if let Some(error) = xmoq_moqt::data::datagram_fault(&datagram) {
+            sink.put(UniEvent::Failed(error)).await;
+            return;
+        }
+    }
 }
 
 /// How the reading of a request stream the peer opened ended.
@@ -965,27 +987,30 @@ where
     A: FnMut(tokio::sync::OwnedSemaphorePermit) -> F + Send + 'static,
     F: Future<Output = Option<ReaderTask>> + Send,
 {
-    IncomingStreams(tokio::spawn(async move {
-        let mut readers = JoinSet::new();
-        let slots = Arc::new(Semaphore::new(limit));
-        loop {
-            let Ok(permit) = Arc::clone(&slots).acquire_owned().await else {
-                break;
-            };
-            let Some(read) = accept(permit).await else {
-                break;
-            };
-            readers.spawn(read);
-            while let Some(joined) = readers.try_join_next() {
+    IncomingStreams(
+        tokio::spawn(async move {
+            let mut readers = JoinSet::new();
+            let slots = Arc::new(Semaphore::new(limit));
+            loop {
+                let Ok(permit) = Arc::clone(&slots).acquire_owned().await else {
+                    break;
+                };
+                let Some(read) = accept(permit).await else {
+                    break;
+                };
+                readers.spawn(read);
+                while let Some(joined) = readers.try_join_next() {
+                    report_panic(joined, &sink, panicked).await;
+                }
+            }
+            // No further stream will come. The readers still hold what they already
+            // read, so they get to finish and deliver it before this task ends.
+            while let Some(joined) = readers.join_next().await {
                 report_panic(joined, &sink, panicked).await;
             }
-        }
-        // No further stream will come. The readers still hold what they already
-        // read, so they get to finish and deliver it before this task ends.
-        while let Some(joined) = readers.join_next().await {
-            report_panic(joined, &sink, panicked).await;
-        }
-    }))
+        }),
+        None,
+    )
 }
 
 /// A reader that panicked has lost a stream without saying so; the session is

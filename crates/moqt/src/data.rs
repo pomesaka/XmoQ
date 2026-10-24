@@ -1,10 +1,8 @@
 //! Unidirectional stream types (§3.4), the Subgroup Header and the Objects that
 //! follow it on a subgroup stream (§11.4.2).
 //!
-//! FIXME: decode datagrams (§11.3). Nothing here reads them, so an
-//! `OBJECT_DATAGRAM` is lost and an unknown datagram type does not close the
-//! session, which §11 requires ("An endpoint that receives an unknown datagram
-//! type MUST close the session").
+//! Of a datagram (§11.3) only its type is read ([`datagram_fault`]).
+//! FIXME: decode `OBJECT_DATAGRAM`. Nothing here does, so its Object is lost.
 
 use crate::coding::{
     ReadError, ReadResult, Reader, ReceiveBuffer, parse_exact, put_length_prefixed,
@@ -257,6 +255,34 @@ pub(crate) fn object_properties_fault(
         if matches!(gap.value(), Value::Varint(gap) if *gap > id) {
             return Some(too_large);
         }
+    }
+    None
+}
+
+/// What is wrong with a datagram the peer sent, by its type alone: `None`
+/// for an `OBJECT_DATAGRAM` (§11.3.1), and a protocol error that closes the
+/// session for any other.
+///
+/// §11: "An endpoint that receives an unknown datagram type MUST close the
+/// session." §11.3.1 names the code for the two kinds there are: "Type values
+/// with both the STATUS bit (0x20) and `END_OF_GROUP` bit (0x02) set" and "Type
+/// values that do not match the form 0b00X0XXXX", which "MUST close the
+/// session with a `PROTOCOL_VIOLATION`".
+///
+/// WHY a datagram whose type cannot be read is one too: it is no
+/// `OBJECT_DATAGRAM`, which "All MOQT datagrams start with" a type says it
+/// would have to be (§11).
+#[must_use]
+pub fn datagram_fault(datagram: &[u8]) -> Option<Error> {
+    const STATUS: u64 = 0x20;
+    const END_OF_GROUP: u64 = 0x02;
+    let Some((ty, _)) = varint::decode(datagram) else {
+        return Some(Error::ProtocolViolation("a datagram without a type"));
+    };
+    // 0b00X0XXXX: no bit but 0x20 and the four low ones.
+    let of_the_form = ty & !(STATUS | 0x0f) == 0;
+    if !of_the_form || ty & (STATUS | END_OF_GROUP) == STATUS | END_OF_GROUP {
+        return Some(Error::ProtocolViolation("an unknown datagram type"));
     }
     None
 }
@@ -1089,6 +1115,36 @@ pub(crate) mod tests {
                 Err(Error::MalformedTrack(fault)),
                 "{bytes:02x?}"
             );
+        }
+    }
+
+    /// §11, §11.3.1: the types of a datagram.
+    #[test]
+    fn a_datagram_of_an_unknown_type_closes_the_session() {
+        let unknown = || Some(Error::ProtocolViolation("an unknown datagram type"));
+        // (the datagram's first bytes; what is wrong with it)
+        let cases: [(&[u8], Option<Error>); 12] = [
+            (&[0x00, 0x01], None),
+            (&[0x0f], None),
+            (&[0x20], None),
+            (&[0x21], None),
+            (&[0x2d], None),
+            // STATUS and END_OF_GROUP together.
+            (&[0x22], unknown()),
+            (&[0x2f], unknown()),
+            // Not of the form 0b00X0XXXX.
+            (&[0x10], unknown()),
+            (&[0x30], unknown()),
+            (&[0x40, 0x05], unknown()),
+            // Of the form in its value, written in two bytes.
+            (&[0x80, 0x05], None),
+            (
+                &[],
+                Some(Error::ProtocolViolation("a datagram without a type")),
+            ),
+        ];
+        for (datagram, fault) in cases {
+            assert_eq!(datagram_fault(datagram), fault, "{datagram:02x?}");
         }
     }
 

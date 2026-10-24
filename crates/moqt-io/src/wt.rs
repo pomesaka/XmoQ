@@ -74,10 +74,9 @@ const KEEP_ALIVE: Duration = Duration::from_secs(3);
 /// so one lost packet does not end a healthy connection.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 
-/// Bytes of datagrams a server keeps for one peer. Nothing here reads
-/// datagrams (see the FIXME in the crate root), so what arrives is held up
-/// to this many bytes; past that quinn drops the oldest (quinn-proto 0.11.19,
-/// `config/transport.rs`; read 2026-10-10).
+/// Bytes of datagrams a server keeps for one peer until they are read (for
+/// their type alone, see the crate root); past that quinn drops the oldest
+/// (quinn-proto 0.11.19, `config/transport.rs`; read 2026-10-10).
 ///
 /// WHY not switched off: quinn would then leave datagram support out of its
 /// transport parameters, while the library always announces datagrams in its
@@ -373,6 +372,19 @@ fn connection_end(error: SessionError) -> ConnectionEnd {
     }
 }
 
+impl WtConnection {
+    /// Sends a datagram of the session: what a peer that tests another sends.
+    ///
+    /// # Errors
+    ///
+    /// When the connection is gone, or the peer takes no datagram of that
+    /// size.
+    pub fn send_datagram(&self, datagram: &[u8]) -> Result<(), ConnectionLost> {
+        let sent = self.session.send_datagram(datagram.to_vec().into());
+        sent.map_err(|error| lost(&error))
+    }
+}
+
 impl Connection for WtConnection {
     type Send = WtSend;
     type Recv = WtRecv;
@@ -399,6 +411,15 @@ impl Connection for WtConnection {
             .await
             .map_err(|error| lost(&error))?;
         Ok((WtSend(send), WtRecv(recv)))
+    }
+
+    // web-transport-quinn 0.13.2 takes the Quarter Stream ID off
+    // (`Session::read_datagram`, read on 2026-10-24).
+    async fn read_datagram(&self) -> Result<Vec<u8>, ConnectionLost> {
+        let datagram = self.session.read_datagram().await;
+        datagram
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| lost(&error))
     }
 
     fn path(&self) -> Option<crate::PathNow> {

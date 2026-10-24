@@ -363,12 +363,14 @@ pub struct Close {
 struct Incoming {
     uni: tokio::sync::Mutex<mpsc::Receiver<MemoryRecv>>,
     bi: tokio::sync::Mutex<mpsc::Receiver<(MemorySend, MemoryRecv)>>,
+    datagrams: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
 }
 
 /// One end of an in-process connection.
 pub struct MemoryConnection {
     to_peer_uni: mpsc::Sender<MemoryRecv>,
     to_peer_bi: mpsc::Sender<(MemorySend, MemoryRecv)>,
+    to_peer_datagram: mpsc::Sender<Vec<u8>>,
     incoming: Incoming,
     /// The window of the streams this end opens.
     window: usize,
@@ -420,26 +422,47 @@ pub fn pair_with_window(window: usize) -> (MemoryConnection, MemoryConnection) {
     let (b_uni, a_incoming_uni) = mpsc::channel(ACCEPT_QUEUE);
     let (a_bi, b_incoming_bi) = mpsc::channel(ACCEPT_QUEUE);
     let (b_bi, a_incoming_bi) = mpsc::channel(ACCEPT_QUEUE);
+    let (a_datagram, b_incoming_datagram) = mpsc::channel(ACCEPT_QUEUE);
+    let (b_datagram, a_incoming_datagram) = mpsc::channel(ACCEPT_QUEUE);
     let (closed_sender, closed) = watch::channel(false);
     let closed_sender = Arc::new(closed_sender);
     let close = Arc::new(Mutex::new(None));
-    let end = |first, to_peer_uni, to_peer_bi, uni, bi| MemoryConnection {
-        first,
-        to_peer_uni,
-        to_peer_bi,
-        incoming: Incoming {
-            uni: tokio::sync::Mutex::new(uni),
-            bi: tokio::sync::Mutex::new(bi),
-        },
-        window,
-        closed_sender: Arc::clone(&closed_sender),
-        closed: closed.clone(),
-        close: Arc::clone(&close),
-        delivers_when_told: None,
-    };
+    let end =
+        |first, to_peer_uni, to_peer_bi, to_peer_datagram, uni, bi, datagrams| MemoryConnection {
+            first,
+            to_peer_uni,
+            to_peer_bi,
+            to_peer_datagram,
+            incoming: Incoming {
+                uni: tokio::sync::Mutex::new(uni),
+                bi: tokio::sync::Mutex::new(bi),
+                datagrams: tokio::sync::Mutex::new(datagrams),
+            },
+            window,
+            closed_sender: Arc::clone(&closed_sender),
+            closed: closed.clone(),
+            close: Arc::clone(&close),
+            delivers_when_told: None,
+        };
     (
-        end(true, a_uni, a_bi, a_incoming_uni, a_incoming_bi),
-        end(false, b_uni, b_bi, b_incoming_uni, b_incoming_bi),
+        end(
+            true,
+            a_uni,
+            a_bi,
+            a_datagram,
+            a_incoming_uni,
+            a_incoming_bi,
+            a_incoming_datagram,
+        ),
+        end(
+            false,
+            b_uni,
+            b_bi,
+            b_datagram,
+            b_incoming_uni,
+            b_incoming_bi,
+            b_incoming_datagram,
+        ),
     )
 }
 
@@ -451,6 +474,13 @@ impl MemoryConnection {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Sends a datagram to the peer, for a test of what is done with one:
+    /// the trait has no way to send. Dropped where the peer has
+    /// [`ACCEPT_QUEUE`] waiting, as a transport may drop one.
+    pub fn send_datagram(&self, datagram: &[u8]) {
+        let _ = self.to_peer_datagram.try_send(datagram.to_vec());
     }
 
     fn lost() -> ConnectionLost {
@@ -500,6 +530,11 @@ impl Connection for MemoryConnection {
     async fn accept_bi(&self) -> Result<(MemorySend, MemoryRecv), ConnectionLost> {
         let mut incoming = self.incoming.bi.lock().await;
         accept(&mut incoming, self.until_closed()).await
+    }
+
+    async fn read_datagram(&self) -> Result<Vec<u8>, ConnectionLost> {
+        let mut datagrams = self.incoming.datagrams.lock().await;
+        accept(&mut datagrams, self.until_closed()).await
     }
 
     fn close(&self, code: u32, reason: &[u8]) {
