@@ -157,6 +157,55 @@ fn a_fetch_within_the_latest_group_is_answered_from_the_cache() {
     }
 }
 
+/// The End Location of `FETCH_OK`, the Object IDs on the stream and End Of
+/// Track.
+type Ended = (Location, &'static [u64], bool);
+
+#[test]
+fn a_fetch_from_the_cache_that_reaches_the_end_of_the_track_says_so() {
+    // The Objects 0, 1 and 2 of Group 3, then End of Track at {3, 3} on the
+    // same stream.
+    let end = SubgroupObject {
+        status: ObjectStatus::EndOfTrack,
+        payload: vec![],
+        ..object(3)
+    };
+    // (Start Location; End Location; the End Location of FETCH_OK, the
+    //  Object IDs on the stream and End Of Track)
+    let cases: [(Location, Location, Ended); 5] = [
+        // §10.13: the End Location is the final Object, {3, 3}, plus 1.
+        (at(3, 0), at(3, 0), (at(3, 4), &[0, 1, 2], true)),
+        (at(3, 0), at(3, 4), (at(3, 4), &[0, 1, 2], true)),
+        (at(3, 1), at(9, 0), (at(3, 4), &[1, 2], true)),
+        // Short of it: 0.
+        (at(3, 0), at(3, 3), (at(3, 3), &[0, 1, 2], false)),
+        (at(3, 0), at(3, 1), (at(3, 1), &[0], false)),
+    ];
+    for (start, end_location, (answer_end, ids, end_of_track)) in cases {
+        let mut relay = relay_with_three_objects();
+        relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            object: end.clone(),
+        });
+        let actions = relay.step(fetch(b"a", start, end_location));
+        let pieces = ids.iter().map(|id| cached(3, *id)).collect();
+        let mut expected = answered(
+            answer_end,
+            vec![KeyValuePair::varint(2, 5).unwrap()],
+            pieces,
+        );
+        if let Some(Action::SendRequest {
+            message: ControlMessage::FetchOk(ok),
+            ..
+        }) = expected.first_mut()
+        {
+            ok.end_of_track = end_of_track;
+        }
+        assert_eq!(actions, expected, "{start:?} {end_location:?}");
+    }
+}
+
 #[test]
 fn a_fetch_the_cache_answered_ends_when_its_stream_is_written() {
     let written = |given_up| Event::FetchStreamWritten {
