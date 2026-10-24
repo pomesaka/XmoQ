@@ -19,10 +19,9 @@ mkdir -p "$logs"
 # A label run again begins with empty files.
 : > "$logs/relay.ticks"
 : > "$logs/used.mb"
-rm -f "$logs/sound-viewers.log" "$logs/sound-publisher.log"
+rm -f "$logs"/sound-viewers*.log "$logs"/sound-publisher*.log "$logs"/viewers-*.log "$logs"/publisher-*.log
 cert=/spike/work/cert/cert.pem
 sha=$(openssl x509 -in "$cert" -outform der | sha256sum | cut -d' ' -f1)
-common="--url https://127.0.0.1:$port --cert-sha256 $sha --namespace xmoq/fanout"
 seconds=$((frames / 25 + viewers / 100 + 12))
 pieces=$((frames * 2))
 
@@ -35,42 +34,65 @@ if [ -n "${CLIENTS_CPUS:-}" ]; then on_clients="taskset -c $CLIENTS_CPUS"; fi
 $on_relay "$bin/xmoq-relay" --port "$port" --cert-file "$cert" --key-file /spike/work/cert/key.pem \
   --max-sessions "${MAX_SESSIONS:-256}" --stats-every-ms 1000 ${RELAY_FLAGS:-} > "$logs/relay.log" 2> "$logs/relay.err" &
 relay=$!
-trap 'for p in ${publisher:-} ${sound:-} ${sampler:-} ${sound_viewers:-} ${video_viewers:-} ${profiler:-} $relay; do case "$p" in ""|0|*[!0-9]*) ;; *) kill "$p" 2>/dev/null || true;; esac; done' EXIT
+trap 'for p in ${publishers:-} ${sounds:-} ${sampler:-} ${sound_viewers:-} ${video_viewers:-} ${profiler:-} $relay; do case "$p" in ""|0|*[!0-9]*) ;; *) kill "$p" 2>/dev/null || true;; esac; done' EXIT
 sleep 1
-# shellcheck disable=SC2086
-( sleep 2; n=0; while [ "$n" -lt "$seconds" ]; do echo send; n=$((n + 1)); sleep 1; done ) |
-  $on_clients "$bin/xmoq-moqt-client" $common --track video --mode publish --payload-hex 00 --video-in "$video" \
-  --timeout-secs $((seconds + 10)) ${PUBLISHER_FLAGS:-} > "$logs/publisher.log" 2> "$logs/publisher.err" &
-publisher=$!
-if [ "${SOUND:-0}" = 1 ]; then
-  # A Group of 10 pieces every 200 ms: one line, one Group.
+# ROOMS=R: R rooms, each a namespace of its own (xmoq/fanout/1 ...) with its publishers and
+# <viewers> viewers; one room is xmoq/fanout, as before. The logs of room r are publisher-r.log
+# and the like, those of room 1 as before.
+rooms=${ROOMS:-1}
+publishers=; sounds=
+r=1
+while [ "$r" -le "$rooms" ]; do
+  room=; ns=xmoq/fanout
+  if [ "$rooms" -gt 1 ]; then ns="xmoq/fanout/$r"; [ "$r" -gt 1 ] && room="-$r"; fi
+  common="--url https://127.0.0.1:$port --cert-sha256 $sha --namespace $ns"
   # shellcheck disable=SC2086
-  ( sleep 2; n=0; while [ "$n" -lt $((seconds * 5)) ]; do echo send; n=$((n + 1)); sleep 0.2; done ) |
-    $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode publish --payload-hex 00 \
-    --video-in /spike/work/media/sound-shaped.h264 --video-frame-ms 20 --video-streams object \
-    --timeout-secs $((seconds + 10)) ${PUBLISHER_FLAGS:-} > "$logs/sound-publisher.log" 2> "$logs/sound-publisher.err" &
-  sound=$!
-fi
+  ( sleep 2; n=0; while [ "$n" -lt "$seconds" ]; do echo send; n=$((n + 1)); sleep 1; done ) |
+    $on_clients "$bin/xmoq-moqt-client" $common --track video --mode publish --payload-hex 00 --video-in "$video" \
+    --timeout-secs $((seconds + 10)) ${PUBLISHER_FLAGS:-} > "$logs/publisher$room.log" 2> "$logs/publisher$room.err" &
+  publishers="$publishers $!"
+  if [ "${SOUND:-0}" = 1 ]; then
+    # A Group of 10 pieces every 200 ms: one line, one Group.
+    # shellcheck disable=SC2086
+    ( sleep 2; n=0; while [ "$n" -lt $((seconds * 5)) ]; do echo send; n=$((n + 1)); sleep 0.2; done ) |
+      $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode publish --payload-hex 00 \
+      --video-in /spike/work/media/sound-shaped.h264 --video-frame-ms 20 --video-streams object \
+      --timeout-secs $((seconds + 10)) ${PUBLISHER_FLAGS:-} > "$logs/sound-publisher$room.log" 2> "$logs/sound-publisher$room.err" &
+    sounds="$sounds $!"
+  fi
+  r=$((r + 1))
+done
 sleep 3
 # VIEWER_PROCS=k: the viewers of each track in k processes of viewers/k sessions each (the
 # logs of the others are viewers-2.log ...). VIEWER_FLAGS: more flags of the viewers.
 procs=${VIEWER_PROCS:-1}
 each=$((viewers / procs))
 sound_viewers=; video_viewers=
-k=1
-while [ "$k" -le "$procs" ]; do
-  suffix=; [ "$k" -gt 1 ] && suffix="-$k"
-  if [ "${SOUND:-0}" = 1 ]; then
+r=1
+while [ "$r" -le "$rooms" ]; do
+  ns=xmoq/fanout
+  if [ "$rooms" -gt 1 ]; then ns="xmoq/fanout/$r"; fi
+  common="--url https://127.0.0.1:$port --cert-sha256 $sha --namespace $ns"
+  k=1
+  while [ "$k" -le "$procs" ]; do
+    # viewers.log for the first of room 1, viewers-<k>.log for the others of one room,
+    # viewers-<r>-<k>.log with rooms: summary.py reads viewers*.log of every one.
+    suffix=
+    if [ "$rooms" -gt 1 ]; then { [ "$r" -gt 1 ] || [ "$k" -gt 1 ]; } && suffix="-$r-$k"
+    elif [ "$k" -gt 1 ]; then suffix="-$k"; fi
+    if [ "${SOUND:-0}" = 1 ]; then
+      # shellcheck disable=SC2086
+      $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode subscribe --viewers "$each" --objects "$pieces" \
+        --timeout-secs $((seconds + 5)) ${VIEWER_FLAGS:-} > "$logs/sound-viewers$suffix.log" 2>&1 &
+      sound_viewers="$sound_viewers $!"
+    fi
     # shellcheck disable=SC2086
-    $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode subscribe --viewers "$each" --objects "$pieces" \
-      --timeout-secs $((seconds + 5)) ${VIEWER_FLAGS:-} > "$logs/sound-viewers$suffix.log" 2>&1 &
-    sound_viewers="$sound_viewers $!"
-  fi
-  # shellcheck disable=SC2086
-  $on_clients "$bin/xmoq-moqt-client" $common --track video --mode subscribe --viewers "$each" --objects "$frames" \
-    --timeout-secs $((seconds + 5)) ${VIEWER_FLAGS:-} > "$logs/viewers$suffix.log" 2>&1 &
-  video_viewers="$video_viewers $!"
-  k=$((k + 1))
+    $on_clients "$bin/xmoq-moqt-client" $common --track video --mode subscribe --viewers "$each" --objects "$frames" \
+      --timeout-secs $((seconds + 5)) ${VIEWER_FLAGS:-} > "$logs/viewers$suffix.log" 2>&1 &
+    video_viewers="$video_viewers $!"
+    k=$((k + 1))
+  done
+  r=$((r + 1))
 done
 # WHY /proc and not ps: the %cpu of Linux's ps is over the whole life of the process, where
 # macOS's is of the last moments. Every second: the time, utime+stime in ticks (100 a second)
@@ -123,4 +145,4 @@ if [ -n "${profiler:-}" ]; then
 fi
 for p in $sound_viewers; do wait "$p" || true; done
 kill "$sampler" 2>/dev/null || true
-python3 /spike/summary.py "$logs" "$viewers" "$video" "$frames" "$pieces"
+python3 /spike/summary.py "$logs" "$((viewers * rooms))" "$video" "$frames" "$pieces"
