@@ -1,0 +1,5 @@
+# The Linux of the fanout runs: the Rust of rust-toolchain.toml, what xmoq-watch needs to
+# build (ALSA's headers, a C++ compiler for openh264), and what the scripts use.
+FROM docker.io/library/rust:1.98.1-slim-trixie
+RUN apt-get update && apt-get install -y --no-install-recommends procps python3 openssl pkg-config libasound2-dev g++ && rm -rf /var/lib/apt/lists/*
+RUN rustup toolchain install 1.99.0 --profile minimal
