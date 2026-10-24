@@ -392,6 +392,11 @@ async function main(): Promise<void> {
 		);
 
 		// Page c leaves and joins again: it catches up the lines it missed.
+		// It has line 21 before it leaves (16 fetched, 20 and 21): a gatherer
+		// that has numbered a line has not yet had it reach c, and c leaving
+		// first would end that stream with line 21 not had, where the step
+		// below joins again with lastHad 21.
+		await lines(c, "c", 18);
 		const pace = (): Promise<void> =>
 			new Promise((resolve) => setTimeout(resolve, 250));
 		await leave(gatherer, c, "c");
