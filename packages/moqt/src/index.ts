@@ -25,6 +25,7 @@ export type {
 	PublishRequest,
 	SubscribeAnswer,
 	SubscribeRequest,
+	TrackStatusRequest,
 } from "./core/requests.ts";
 export {
 	createSubgroupStreamDecoder,
@@ -57,6 +58,8 @@ export type {
 	SessionConnectOptions,
 	SubgroupWriter,
 	Subscription,
+	TrackStatusCallOptions,
+	TrackStatusOk,
 } from "./webtransport/connection.ts";
 export type {
 	FetchEnd,

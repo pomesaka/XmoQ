@@ -842,6 +842,23 @@ window.xmoqOwn = {
 
 	newGroupRequests: () => Promise.resolve([...newGroupsAsked]),
 
+	trackStatus: withPlainErrors(async (namespace: string, trackName: string) => {
+		try {
+			const { largestObject, trackProperties } = await connected().trackStatus({
+				trackNamespace: namespaceFromPath(namespace),
+				trackName: utf8.encode(trackName),
+			});
+			const largest =
+				largestObject === undefined
+					? "none"
+					: `${largestObject.group},${largestObject.object}`;
+			return `TRACK_STATUS_OK largest=${largest} track_properties=${trackProperties.length}`;
+		} catch (error) {
+			if (!(error instanceof RequestFailedError)) throw error;
+			return `TRACK_STATUS_REFUSED error_code=0x${error.errorCode.toString(16)}`;
+		}
+	}),
+
 	keepVideoPublished: withPlainErrors(
 		async (
 			relayUrl: string,

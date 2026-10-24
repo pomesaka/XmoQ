@@ -179,6 +179,10 @@ describe("the connection's AUTHORIZATION TOKEN (§10.2.2)", () => {
 			},
 		});
 		sent.FETCH = tokensOf(await sentBytes((await peer.clientBidi()).sent));
+		connection.trackStatus(TRACK).catch(() => {});
+		sent.TRACK_STATUS = tokensOf(
+			await sentBytes((await peer.clientBidi()).sent),
+		);
 		connection
 			.subscribe({ ...TRACK, parameters: { authorizationToken: [OWN] } })
 			.catch(() => {});
@@ -201,6 +205,7 @@ describe("the connection's AUTHORIZATION TOKEN (§10.2.2)", () => {
 			PUBLISH: tokens,
 			SUBSCRIBE: tokens,
 			FETCH: tokens,
+			TRACK_STATUS: tokens,
 			"SUBSCRIBE with its own": withItsOwn,
 			"SUBSCRIBE with repeats": withRepeats,
 		});

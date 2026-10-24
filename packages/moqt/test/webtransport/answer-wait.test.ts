@@ -96,6 +96,18 @@ describe("a request the peer does not answer", () => {
 			ask: (connection) => connection.subscribe(TRACK),
 			waitMs: 1500,
 		},
+		{
+			name: "TRACK_STATUS",
+			options: {},
+			ask: (connection) => connection.trackStatus(TRACK),
+			waitMs: 10_000,
+		},
+		{
+			name: "TRACK_STATUS with a wait that is set",
+			options: { answerTimeoutMs: 1500 },
+			ask: (connection) => connection.trackStatus(TRACK),
+			waitMs: 1500,
+		},
 	])(
 		"$name is given up after $waitMs ms, both directions of its stream end with CANCELLED, and the session stays open",
 		async ({ options, ask, waitMs }) => {
