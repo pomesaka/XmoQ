@@ -10,6 +10,7 @@ use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
+use xmoq_moqt::immutable::{Of, searched_properties};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt_io::{Connection, SendStream};
 
@@ -395,13 +396,17 @@ impl AnnexBWriter {
             }
             return Ok(());
         }
-        let timing = loc::read_timing(object.properties.iter().map(|pair| {
-            let value = match pair.value() {
-                Value::Varint(value) => Some(*value),
-                Value::Bytes(_) => None,
-            };
-            (pair.ty(), value)
-        }))
+        let timing = loc::read_timing(
+            searched_properties(&object.properties, Of::Object)
+                .iter()
+                .map(|pair| {
+                    let value = match pair.value() {
+                        Value::Varint(value) => Some(*value),
+                        Value::Bytes(_) => None,
+                    };
+                    (pair.ty(), value)
+                }),
+        )
         .with_context(|| format!("the properties of {group_id}/{}", object.object_id))?;
         if let Some(file) = &mut self.file {
             file.write_all(&frame)

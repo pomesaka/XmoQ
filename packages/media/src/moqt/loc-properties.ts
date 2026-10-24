@@ -18,18 +18,25 @@ import { propertiesToSearch } from "@xmoq/moqt/properties";
  * takes for invalid: §12.7 lets a property be in both only where it
  * "allows multiple values", which LOC does not say of the Timestamp.
  *
- * WHY the properties as they came where the inside cannot be opened: an
+ * WHY the properties outside alone where the inside cannot be opened: an
  * Object with such Immutable Properties ends its Track as malformed in the
  * session of `@xmoq/moqt` (§12.7), and never reaches here from a
- * subscription or a FETCH of it; one made by hand is read as it is.
+ * subscription or a FETCH of it; one made by hand is read for what is
+ * outside. The Rust side does the same (`searched_properties` of
+ * `xmoq_moqt::immutable`).
  */
 export function locProperties(
 	properties: readonly KeyValuePair[],
 ): readonly KeyValuePair[] {
+	const outside = (): readonly KeyValuePair[] =>
+		properties.filter(({ type }) => type !== IMMUTABLE_PROPERTIES);
 	try {
 		const searched = propertiesToSearch(properties, "Object");
-		return "properties" in searched ? searched.properties : properties;
+		return "properties" in searched ? searched.properties : outside();
 	} catch {
-		return properties;
+		return outside();
 	}
 }
+
+/** Immutable Properties (transport §12.7). */
+const IMMUTABLE_PROPERTIES = 0xbn;
