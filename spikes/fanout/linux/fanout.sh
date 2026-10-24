@@ -12,7 +12,7 @@ set -eu
 viewers=$1
 video=$2
 frames=${3:-250}
-bin=/target/release
+bin=${BIN:-/target/release}
 port=48860
 logs=${LOGS:-$(mktemp -d)}
 mkdir -p "$logs"
@@ -29,7 +29,7 @@ pieces=$((frames * 2))
 "$bin/xmoq-relay" --port "$port" --cert-file "$cert" --key-file /spike/work/cert/key.pem \
   --max-sessions "${MAX_SESSIONS:-256}" --stats-every-ms 1000 > "$logs/relay.log" 2>&1 &
 relay=$!
-trap 'for p in ${publisher:-} ${sound:-} ${sampler:-} ${sound_viewers:-} $relay; do case "$p" in ""|0|*[!0-9]*) ;; *) kill "$p" 2>/dev/null || true;; esac; done' EXIT
+trap 'for p in ${publisher:-} ${sound:-} ${sampler:-} ${sound_viewers:-} ${video_viewers:-} ${profiler:-} $relay; do case "$p" in ""|0|*[!0-9]*) ;; *) kill "$p" 2>/dev/null || true;; esac; done' EXIT
 sleep 1
 # shellcheck disable=SC2086
 ( sleep 2; n=0; while [ "$n" -lt "$seconds" ]; do echo send; n=$((n + 1)); sleep 1; done ) |
@@ -46,16 +46,6 @@ if [ "${SOUND:-0}" = 1 ]; then
   sound=$!
 fi
 sleep 3
-# WHY /proc and not ps: the %cpu of Linux's ps is over the whole life of the process, where
-# macOS's is of the last moments. utime+stime in ticks (100 a second), and the RSS in KiB.
-( while :; do
-    stat=$(cat "/proc/$relay/stat" 2>/dev/null) || exit 0
-    rss=$(awk '/^VmRSS/ {print $2}' "/proc/$relay/status")
-    echo "$(date +%s.%N) $(echo "$stat" | awk '{print $14 + $15}') $rss" >> "$logs/relay.ticks"
-    free -m | awk '/^Mem/ {print $3}' >> "$logs/used.mb"
-    sleep 1
-  done ) &
-sampler=$!
 if [ "${SOUND:-0}" = 1 ]; then
   # shellcheck disable=SC2086
   "$bin/xmoq-moqt-client" $common --track audio --mode subscribe --viewers "$viewers" --objects "$pieces" \
@@ -64,7 +54,41 @@ if [ "${SOUND:-0}" = 1 ]; then
 fi
 # shellcheck disable=SC2086
 "$bin/xmoq-moqt-client" $common --track video --mode subscribe --viewers "$viewers" --objects "$frames" \
-  --timeout-secs $((seconds + 5)) > "$logs/viewers.log" 2>&1 || true
+  --timeout-secs $((seconds + 5)) > "$logs/viewers.log" 2>&1 &
+video_viewers=$!
+# WHY /proc and not ps: the %cpu of Linux's ps is over the whole life of the process, where
+# macOS's is of the last moments. Every second: the time, utime+stime in ticks (100 a second)
+# of the relay, the viewers of the video and those of the sound, the relay's RSS in KiB, and
+# the ticks the machine's cores were idle (/proc/stat), which tell whether the 5 were all busy.
+ticks() { awk '{print $14 + $15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
+( while :; do
+    [ -e "/proc/$relay/stat" ] || exit 0
+    rss=$(awk '/^VmRSS/ {print $2}' "/proc/$relay/status")
+    idle=$(awk '/^cpu / {print $5}' /proc/stat)
+    echo "$(date +%s.%N) $(ticks "$relay") $rss $(ticks "$video_viewers") $(ticks "${sound_viewers:-0}") $idle" >> "$logs/relay.ticks"
+    free -m | awk '/^Mem/ {print $3}' >> "$logs/used.mb"
+    sleep 1
+  done ) &
+sampler=$!
+if [ "${PROFILE:-0}" = 1 ]; then
+  # PROFILE=1: perf samples the relay for 10 s once the viewers have all begun (they begin
+  # 10 ms apart), the user space alone (perf_event_paranoid 2 of podman's machine).
+  ( sleep $((viewers / 100 + 1))
+    perf record -q -e cpu-clock:u -F 499 --call-graph dwarf,16384 -p "$relay" -o "$logs/perf.data" -- sleep 10 \
+      > "$logs/perf-record.log" 2>&1 ) &
+  profiler=$!
+fi
+wait "$video_viewers" || true
+if [ -n "${profiler:-}" ]; then
+  wait "$profiler" || true
+  # What each function takes itself, and with what it calls (the hub's own work is under
+  # Hub::run and the like).
+  perf report -i "$logs/perf.data" --no-children --sort symbol --stdio --percent-limit 0.3 -g none > "$logs/perf-self.txt" 2>/dev/null || true
+  perf report -i "$logs/perf.data" --children --sort symbol --stdio --percent-limit 1 -g none > "$logs/perf-children.txt" 2>/dev/null || true
+  # The stacks, demangled (setup.sh installs rustfilt), grouped by perf-groups.py.
+  perf script -i "$logs/perf.data" -F ip,sym --no-inline 2>/dev/null | /target/tools/bin/rustfilt > "$logs/perf.demangled"
+  python3 /spike/perf-groups.py < "$logs/perf.demangled" > "$logs/perf-groups.txt"
+fi
 if [ -n "${sound_viewers:-}" ]; then wait "$sound_viewers" || true; fi
 kill "$sampler" 2>/dev/null || true
 python3 /spike/summary.py "$logs" "$viewers" "$video" "$frames" "$pieces"
