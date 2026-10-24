@@ -18,6 +18,7 @@ use xmoq_moqt::fetch::{FetchEvent, FetchHeader, FetchStreamDecoder, FetchStreamE
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::session::RequestId;
+use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::{FetchBody, FetchChunk, RequestClose, RequestStreamEvent, StreamEnd};
 
 use crate::io::RequestStream;
@@ -137,6 +138,10 @@ pub enum Happened {
     /// `FETCH_OK` came with a Mandatory Track Property (§2.5.1); the session
     /// has ended the request.
     UnsupportedTrackProperty,
+    /// The Immutable Properties of the `FETCH_OK` made the Track malformed
+    /// (§12.7); the session has ended the request, which is cancelled with
+    /// `MALFORMED_TRACK` (§2.4.2).
+    MalformedTrack,
     /// The peer ended its direction of the request stream, or stopped this
     /// client's, which changes nothing by itself.
     RequestClosed(RequestClose),
@@ -264,6 +269,7 @@ pub fn step(progress: Progress, happened: Happened) -> Step {
         // The session has ended the request with the answer.
         Happened::Refused => ends("refused", None, false, None),
         Happened::UnsupportedTrackProperty => ends("unsupported_track_property", None, true, None),
+        Happened::MalformedTrack => ends("malformed_track", None, true, None),
         // The time was for the answer, not for the Objects.
         Happened::RequestClosed(RequestClose::Fin) | Happened::NotAnsweredInTime
             if progress.answered =>
@@ -300,7 +306,9 @@ pub struct OwnFetch {
     printed: Arc<Mutex<Printed>>,
     /// Ends the task of the request stream: sent, the request is cancelled
     /// (§3.3.2); dropped, this client's direction is finished.
-    request: Option<oneshot::Sender<()>>,
+    /// Takes the code this client's direction of the request stream is
+    /// reset with.
+    request: Option<oneshot::Sender<u32>>,
     body: Option<JoinHandle<()>>,
     /// Tells the task of the fetch stream to read no more and to keep the
     /// stream as it is (`Reading::cancel_request_only`).
@@ -469,17 +477,14 @@ impl Fetches {
     /// stream the peer reset, or whose fetch stream ended in a way the
     /// client does not take, is cancelled as well, and the flag is for the
     /// cancellation the client was told to make.
-    pub fn end(&mut self, index: usize, cancel: bool, gave_up: bool) {
+    pub fn end(&mut self, index: usize, cancel: Option<u32>, gave_up: bool) {
         let Some(fetch) = self.sent.get_mut(index) else {
             return;
         };
-        match fetch.request.take() {
-            // An error means the task is gone, and the stream with it.
-            Some(request) if cancel => {
-                let _ = request.send(());
-            }
-            // Dropped: the task finishes this client's direction.
-            Some(_) | None => {}
+        // An error means the task is gone, and the stream with it. Where
+        // the request is dropped, the task finishes this client's direction.
+        if let (Some(request), Some(code)) = (fetch.request.take(), cancel) {
+            let _ = request.send(code);
         }
         if gave_up && self.reading.cancel_request_only {
             // Only a fetch stream that is open by now is kept. One that
@@ -511,7 +516,7 @@ impl Drop for Fetches {
                 // What `step` decided, as far as it can still be done: the
                 // task resets the stream if it runs once more.
                 if let Some(request) = fetch.request.take() {
-                    let _ = request.send(());
+                    let _ = request.send(stream_reset_code::CANCELLED);
                 }
             }
             if let Some(body) = fetch.body.take() {
@@ -526,12 +531,12 @@ impl Drop for Fetches {
 async fn watch_request(
     index: usize,
     mut stream: RequestStream,
-    mut ending: oneshot::Receiver<()>,
+    mut ending: oneshot::Receiver<u32>,
     notes: mpsc::Sender<Note>,
 ) {
     let cancelled = loop {
         let event = tokio::select! {
-            ending = &mut ending => break ending.is_ok(),
+            ending = &mut ending => break ending.ok(),
             event = stream.next_event() => event,
         };
         let (note, closed) = match event {
@@ -540,19 +545,18 @@ async fn watch_request(
             Err(error) => (Note::RequestBroken(error), true),
         };
         if notes.send(note).await.is_err() {
-            break false;
+            break None;
         }
         if closed {
             // Nothing more is read. The client decides whether the FETCH
             // goes on (§10.12.3: the answer "can come at any time relative
             // to object delivery", and a FIN after it ends nothing).
-            break ending.await.is_ok();
+            break ending.await.ok();
         }
     };
-    if cancelled {
-        stream.cancel();
-    } else {
-        stream.finish();
+    match cancelled {
+        Some(code) => stream.cancel_with(code),
+        None => stream.finish(),
     }
 }
 

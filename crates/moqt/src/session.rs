@@ -17,6 +17,7 @@ pub use peer::{
 
 pub use crate::aliases::SubscribedAlias;
 use crate::aliases::SubscribedAliases;
+use crate::immutable::{TrackRefusal, track_properties_refusal};
 use crate::kvp::KeyValuePair;
 use crate::message::{
     ControlMessage, GoAway, Publish, PublishDone, PublishNamespace, ReasonPhrase, RequestError,
@@ -175,12 +176,15 @@ pub enum RequestEvent {
         /// Track Properties of the `SUBSCRIBE_OK`.
         track_properties: Vec<KeyValuePair>,
     },
-    /// `SUBSCRIBE_OK` named a Mandatory Track Property, none of which this crate
-    /// understands. The request is Terminated and the caller has to cancel the
-    /// stream (§2.5.1).
-    UnsupportedTrack {
-        /// Type of the first Mandatory Track Property found.
-        property_type: u64,
+    /// The Track Properties of the `SUBSCRIBE_OK` keep the track from being
+    /// processed: a Mandatory Track Property, none of which this crate
+    /// understands (§2.5.1), or Immutable Properties that make it malformed
+    /// (§12.7). The request is Terminated and the caller has to cancel the
+    /// stream, with `MALFORMED_TRACK` for a malformed track (§2.4.2: "it MUST
+    /// cancel any corresponding subscription") and `CANCELLED` otherwise.
+    TrackNotProcessed {
+        /// Why.
+        refusal: TrackRefusal,
         /// The alias the `SUBSCRIBE_OK` assigned. The publisher may already have
         /// opened subgroup streams under it; the session reports it as
         /// [`SubscribedAlias::Retired`], so the caller can stop them (§10.11).
@@ -223,12 +227,13 @@ pub enum RequestEvent {
         /// Track Properties of the `FETCH_OK`.
         track_properties: Vec<KeyValuePair>,
     },
-    /// `FETCH_OK` named a Mandatory Track Property, none of which this crate
-    /// understands. The request is Terminated and the caller has to cancel
-    /// its stream and stop the fetch stream (§2.5.1).
-    UnsupportedFetch {
-        /// Type of the first Mandatory Track Property found.
-        property_type: u64,
+    /// The Track Properties of the `FETCH_OK` keep the track from being
+    /// processed, as for [`RequestEvent::TrackNotProcessed`]. The request is
+    /// Terminated and the caller has to cancel its stream and stop the fetch
+    /// stream, with the codes said there.
+    FetchNotProcessed {
+        /// Why.
+        refusal: TrackRefusal,
     },
     /// `REQUEST_ERROR`: the peer rejected the request, which is now Terminated.
     Rejected(RequestError),
@@ -1061,19 +1066,14 @@ impl Session {
         ) {
             return Err(Error::DuplicateTrackAlias(ok.track_alias));
         }
-        if let Some(property) = ok
-            .track_properties
-            .iter()
-            .find(|property| property.is_mandatory_track_property())
-        {
-            let property_type = property.ty();
+        if let Some(refusal) = track_properties_refusal(&ok.track_properties) {
             self.end_request(request);
             // The publisher may already be sending under the alias. Remembered
             // as retired, its streams are told apart from ones that are merely
             // ahead of their SUBSCRIBE_OK (§11.1).
             self.subscribed_aliases.retire_if_unknown(ok.track_alias);
-            return Ok(RequestEvent::UnsupportedTrack {
-                property_type,
+            return Ok(RequestEvent::TrackNotProcessed {
+                refusal,
                 track_alias: ok.track_alias,
             });
         }
@@ -2124,8 +2124,8 @@ mod tests {
                 "a mandatory track property",
                 vec![(
                     subscribe_ok(7, vec![KeyValuePair::varint(0x4000, 1).unwrap()]),
-                    Ok(RequestEvent::UnsupportedTrack {
-                        property_type: 0x4000,
+                    Ok(RequestEvent::TrackNotProcessed {
+                        refusal: TrackRefusal::Unsupported(0x4000),
                         track_alias: 7,
                     }),
                     RequestState::Terminated,

@@ -8,6 +8,7 @@ use super::{
     first_request_id,
 };
 use crate::aliases::SubscribedAlias;
+use crate::immutable::{TrackRefusal, track_properties_refusal};
 use crate::kvp::KeyValuePair;
 use crate::message::{
     ControlMessage, Fetch, FetchOk, FetchRange, GoAway, Publish, PublishDone, PublishNamespace,
@@ -608,13 +609,28 @@ impl Session {
                 {
                     return Ok(self.refuse_opened(id, request_error_code::DUPLICATE_SUBSCRIPTION));
                 }
-                // §2.5.1: this crate understands no Mandatory Track Property.
-                if message
-                    .track_properties
-                    .iter()
-                    .any(KeyValuePair::is_mandatory_track_property)
-                {
-                    return Ok(self.refuse_opened(id, request_error_code::UNSUPPORTED_EXTENSION));
+                // §2.5.1: this crate understands no Mandatory Track Property,
+                // outside or inside Immutable Properties (§12.7).
+                //
+                // A malformed Track (§12.7) is refused with MALFORMED_TRACK,
+                // which §10.6 names "In response to a FETCH" of a relay
+                // publisher alone. WHY it all the same (decided on
+                // 2026-10-24): the publisher is told why, and §2.4.2 has the
+                // subscriber of a malformed Track "cancel any corresponding
+                // subscription", which a refusal of the PUBLISH comes
+                // closest to. WHY NOT INTERNAL_ERROR: it does not say why.
+                // WHY NOT UNINTERESTED, the one §10.6 lists for a subscriber:
+                // what it says is not what happened.
+                match track_properties_refusal(&message.track_properties) {
+                    Some(TrackRefusal::Malformed) => {
+                        return Ok(self.refuse_opened(id, request_error_code::MALFORMED_TRACK));
+                    }
+                    Some(TrackRefusal::Unsupported(_)) => {
+                        return Ok(
+                            self.refuse_opened(id, request_error_code::UNSUPPORTED_EXTENSION)
+                        );
+                    }
+                    None => {}
                 }
                 // The alias means the track before the answer: §10.10 lets the
                 // publisher send Objects "possibly before PUBLISH_OK".
@@ -3203,6 +3219,39 @@ mod tests {
 
     #[test]
     fn a_publish_this_endpoint_cannot_use_is_refused() {
+        // (the Track Properties; the code of the REQUEST_ERROR)
+        // UNSUPPORTED_EXTENSION 0x33 for a Mandatory Track Property (0x4000),
+        // outside or inside Immutable Properties (0x0B, `c0 40 00 01`);
+        // MALFORMED_TRACK 0x12 for Immutable Properties inside Immutable
+        // Properties.
+        let cases = [
+            (vec![KeyValuePair::varint(0x4000, 1).unwrap()], 0x33),
+            (
+                vec![KeyValuePair::bytes(0x0b, vec![0xc0, 0x40, 0x00, 0x01]).unwrap()],
+                0x33,
+            ),
+            (
+                vec![KeyValuePair::bytes(0x0b, vec![0x0b, 0x00]).unwrap()],
+                0x12,
+            ),
+        ];
+        for (track_properties, code) in cases {
+            let mut session = server();
+            let message = Publish {
+                request_id: 0,
+                full_track_name: track(b"a"),
+                track_alias: 7,
+                parameters: vec![],
+                track_properties: track_properties.clone(),
+            };
+            assert_eq!(
+                refusal(session.on_peer_request_opened(ControlMessage::Publish(message))),
+                Ok((code, Some(0))),
+                "{track_properties:?}"
+            );
+            assert_eq!(session.subscribed_alias(7), SubscribedAlias::Unknown);
+        }
+
         let mut session = server();
         let mut message = Publish {
             request_id: 0,
@@ -3215,7 +3264,6 @@ mod tests {
             refusal(session.on_peer_request_opened(ControlMessage::Publish(message.clone()))),
             Ok((0x33, Some(0)))
         );
-        assert_eq!(session.subscribed_alias(7), SubscribedAlias::Unknown);
 
         // The same track without the property is fine afterwards.
         message.request_id = 2;

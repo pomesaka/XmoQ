@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
 use xmoq_moqt::fetch::RangeEnd;
+use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{ControlMessage, Fetch, FetchRange, RequestOk, request_error_code};
 use xmoq_moqt::name::{FullTrackName, Location};
@@ -1962,29 +1963,57 @@ impl Relay {
                     actions,
                 );
             }
-            // §2.5.1: a Mandatory Track Property the relay does not
-            // understand. The session ended the request; its stream is
-            // cancelled.
-            RequestEvent::UnsupportedFetch { .. } => {
-                actions.push(Action::StopUpstreamTimer {
-                    session,
-                    request: own,
-                });
-                state_forgets(self, session, own);
-                actions.push(Action::CancelOwnRequest {
-                    session,
-                    request: own,
-                    code: stream_reset_code::CANCELLED,
-                });
-                let unsupported = Refusal::code(request_error_code::UNSUPPORTED_EXTENSION);
-                let unknown = stream_reset_code::UNKNOWN_OBJECT_STATUS;
-                self.fail_fetch(subscriber, &unsupported, unknown, actions);
+            RequestEvent::FetchNotProcessed { refusal } => {
+                self.on_fetch_not_processed(session, own, subscriber, refusal, actions);
             }
             // Nothing else answers a FETCH; the session has dealt with it. A
             // GOAWAY on its stream is as for the relay's SUBSCRIBE
             // (`routing.rs`): the FETCH goes on until the publisher ends it.
             _ => {}
         }
+    }
+
+    /// The publisher's `FETCH_OK` keeps the track from being processed
+    /// ([`RequestEvent::FetchNotProcessed`]): §2.5.1, a Mandatory Track
+    /// Property the relay does not understand, and §12.7, Immutable
+    /// Properties that make the Track malformed. The session ended the
+    /// request; its stream is cancelled.
+    fn on_fetch_not_processed(
+        &mut self,
+        session: SessionKey,
+        own: OwnRequestKey,
+        subscriber: (SessionKey, StreamKey),
+        refusal: TrackRefusal,
+        actions: &mut Vec<Action>,
+    ) {
+        actions.push(Action::StopUpstreamTimer {
+            session,
+            request: own,
+        });
+        state_forgets(self, session, own);
+        // §2.4.2: "If a relay detects a Malformed Track, it MUST
+        // ... reset any fetch streams with Status Code
+        // MALFORMED_TRACK"; §10.6: "MALFORMED_TRACK: In response to
+        // a FETCH, a relay publisher detected the track was
+        // malformed".
+        let (cancel, refused, reset) = match refusal {
+            TrackRefusal::Malformed => (
+                stream_reset_code::MALFORMED_TRACK,
+                request_error_code::MALFORMED_TRACK,
+                stream_reset_code::MALFORMED_TRACK,
+            ),
+            TrackRefusal::Unsupported(_) => (
+                stream_reset_code::CANCELLED,
+                request_error_code::UNSUPPORTED_EXTENSION,
+                stream_reset_code::UNKNOWN_OBJECT_STATUS,
+            ),
+        };
+        actions.push(Action::CancelOwnRequest {
+            session,
+            request: own,
+            code: cancel,
+        });
+        self.fail_fetch(subscriber, &Refusal::code(refused), reset, actions);
     }
 
     /// A publisher's `FETCH_OK` with End Of Track 1 for the FETCH of

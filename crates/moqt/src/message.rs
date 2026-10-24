@@ -3,6 +3,7 @@
 use crate::coding::{
     ReadError, ReadResult, Reader, ReceiveBuffer, parse_exact, put_length_prefixed,
 };
+use crate::immutable;
 use crate::kvp::{self, KeyValuePair};
 use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
@@ -52,11 +53,20 @@ const DYNAMIC_GROUPS: u64 = 0x30;
 /// and `FETCH_OK`.
 ///
 /// §12.6: "If an endpoint receives a value larger than 1, it MUST close the
-/// session with `PROTOCOL_VIOLATION`." WHY NOT inside Immutable Properties
-/// (§12.7) as well: this crate does not look into that property.
-fn decode_track_properties(reader: &mut Reader<'_>) -> ReadResult<Vec<KeyValuePair>> {
+/// session with `PROTOCOL_VIOLATION`." Inside Immutable Properties as well
+/// (§12.7: "processors MUST search both"), as is a `PROTOCOL_VIOLATION` of
+/// §1.4.3 inside them. Immutable Properties that make the Track malformed are
+/// handed on as they are: the session ends the request
+/// ([`crate::immutable::TrackRefusal`]), and a malformed Track does not end
+/// the session. The properties are handed on as they came, Immutable
+/// Properties as one property with its bytes: §12.7 has "the serialization
+/// ... of the Key-Value-Pairs MUST NOT change".
+pub(crate) fn decode_track_properties(reader: &mut Reader<'_>) -> ReadResult<Vec<KeyValuePair>> {
     let properties = kvp::decode_all(reader)?;
-    if properties.iter().any(|property| {
+    let Ok(searched) = immutable::properties_to_search(&properties, immutable::Of::Track)? else {
+        return Ok(properties);
+    };
+    if searched.iter().any(|property| {
         property.ty() == DYNAMIC_GROUPS
             && matches!(property.value(), kvp::Value::Varint(value) if *value > 1)
     }) {

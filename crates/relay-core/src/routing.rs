@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, ReasonPhrase, RequestError, request_error_code, retry_interval,
@@ -1005,8 +1006,11 @@ impl Relay {
                 // on.
                 self.on_upstream_accept(&own, accepted, track_properties, largest, actions);
             }
-            RequestEvent::UnsupportedTrack { track_alias, .. } => {
-                self.on_upstream_unsupported(&own, track_alias, actions);
+            RequestEvent::TrackNotProcessed {
+                refusal,
+                track_alias,
+            } => {
+                self.on_upstream_unsupported(&own, track_alias, refusal, actions);
             }
             RequestEvent::Rejected(error) => self.on_upstream_refusal(&own, &error, actions),
             RequestEvent::SubscriptionDone(_) => self.on_upstream_done(&own, actions),
@@ -1094,6 +1098,7 @@ impl Relay {
         &mut self,
         own: &OwnRequestView,
         track_alias: u64,
+        refusal: TrackRefusal,
         actions: &mut Vec<Action>,
     ) {
         // WHY the phase is not looked at: the session reports this for the
@@ -1105,13 +1110,29 @@ impl Relay {
         };
         state.own.remove(&request);
         state.drop_early_streams(publisher, track_alias, actions);
+        // A malformed Track (§12.7): the subscription is cancelled with
+        // MALFORMED_TRACK (§2.4.2), and the subscribers that wait for it are
+        // refused with the REQUEST_ERROR of that name, which §10.6 names "In
+        // response to a FETCH" alone. WHY it for a SUBSCRIBE too: as for a
+        // PUBLISH that the session refuses, the subscriber is told why
+        // (`xmoq_moqt::session`); no subscriber has the track yet, so there
+        // is no PUBLISH_DONE to send (§2.4.2).
+        let (code, refused) = match refusal {
+            TrackRefusal::Malformed => (
+                stream_reset_code::MALFORMED_TRACK,
+                request_error_code::MALFORMED_TRACK,
+            ),
+            TrackRefusal::Unsupported(_) => (
+                stream_reset_code::CANCELLED,
+                request_error_code::UNSUPPORTED_EXTENSION,
+            ),
+        };
         actions.push(Action::CancelOwnRequest {
             session: publisher,
             request,
-            code: stream_reset_code::CANCELLED,
+            code,
         });
-        let unsupported = Refusal::code(request_error_code::UNSUPPORTED_EXTENSION);
-        self.ask_is_over(&own.track, own.ask, &unsupported, actions);
+        self.ask_is_over(&own.track, own.ask, &Refusal::code(refused), actions);
     }
 
     /// The publisher said `PUBLISH_DONE` on the relay's SUBSCRIBE.
