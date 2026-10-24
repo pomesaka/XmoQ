@@ -14,6 +14,7 @@ mod fetch;
 mod filters;
 mod going_away;
 mod new_group;
+mod receipt;
 mod routing;
 mod sources;
 mod subgroups;

@@ -2473,7 +2473,7 @@ impl Client<'_> {
     /// WHY noted before it is sent: §5.1.2 has "Largest Object updates when
     /// the first byte of an Object with a Location larger than the previous
     /// value is published", and the relay takes the Object for the largest
-    /// when it has read it. A FETCH or a SUBSCRIBE that this client answers
+    /// from its first byte as well. A FETCH or a SUBSCRIBE that this client answers
     /// while the Object is under way would otherwise be answered as if the
     /// Object did not exist: a Joining FETCH would end before it, and the
     /// subscription begin after it. An Object that could not be written

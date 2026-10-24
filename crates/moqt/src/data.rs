@@ -212,6 +212,21 @@ pub struct SubgroupObject {
 pub enum SubgroupEvent {
     /// The Subgroup Header.
     Header(SubgroupHeader),
+    /// The fields of the next Object before its payload were read, and its
+    /// payload is not whole yet. Only where asked for
+    /// ([`SubgroupStreamDecoder::report_begun`]), at most once for an Object,
+    /// and always before [`Self::Object`] of the same Object, which follows
+    /// once the payload is whole (and does not, when the stream ends first).
+    ///
+    /// WHY: §5.1.2 has the Largest Object update "when the first byte of an
+    /// Object with a Location larger than the previous value is ... received",
+    /// which a relay cannot follow from whole Objects alone.
+    ObjectBegun {
+        /// Object ID within the Group.
+        object_id: u64,
+        /// Its Object Payload Length, more than 0.
+        payload_len: usize,
+    },
     /// The next Object.
     Object(SubgroupObject),
 }
@@ -343,6 +358,10 @@ pub struct SubgroupStreamDecoder {
     previous_object_id: Option<u64>,
     /// An End of Group or End of Track Object was decoded.
     ended: bool,
+    /// [`SubgroupEvent::ObjectBegun`] is yielded ([`Self::report_begun`]).
+    reports_begun: bool,
+    /// [`SubgroupEvent::ObjectBegun`] was yielded for the Object being read.
+    begun: bool,
 }
 
 impl SubgroupStreamDecoder {
@@ -358,7 +377,18 @@ impl SubgroupStreamDecoder {
             header: None,
             previous_object_id: None,
             ended: false,
+            reports_begun: false,
+            begun: false,
         }
+    }
+
+    /// Yields [`SubgroupEvent::ObjectBegun`] from now on.
+    ///
+    /// WHY asked for, and not yielded to every caller: only a relay counts
+    /// what it has begun to receive (§5.1.2, §10.2.11), and a receiver that
+    /// plays whole Objects has nothing to do with it.
+    pub fn report_begun(&mut self) {
+        self.reports_begun = true;
     }
 
     /// Refuses, with [`Error::ObjectTooLarge`], each Object whose Object
@@ -439,7 +469,7 @@ impl SubgroupStreamDecoder {
         };
         let event = match parsed {
             Ok(event) => event,
-            Err(ReadError::Short) => return Ok(None),
+            Err(ReadError::Short) => return Ok(self.begun_object()),
             Err(ReadError::Invalid(error)) => return Err(error),
         };
         let used = reader.position();
@@ -449,9 +479,37 @@ impl SubgroupStreamDecoder {
             SubgroupEvent::Object(object) => {
                 self.previous_object_id = Some(object.object_id);
                 self.ended = object.status != ObjectStatus::Normal;
+                self.begun = false;
             }
+            SubgroupEvent::ObjectBegun { .. } => {}
         }
         Ok(Some(event))
+    }
+
+    /// [`SubgroupEvent::ObjectBegun`] for the Object the buffer holds the
+    /// start of, where it is asked for and was not yielded yet, and the fields
+    /// before the payload are whole. Nothing is consumed: the Object is
+    /// decoded again from its first byte once its payload is whole.
+    ///
+    /// WHY no error here: the whole decode, which ran first, reads the same
+    /// fields in the same order and found them short, not invalid.
+    fn begun_object(&mut self) -> Option<SubgroupEvent> {
+        if !self.reports_begun || self.begun {
+            return None;
+        }
+        let header = self.header?;
+        let mut reader = Reader::new(self.buffer.unread());
+        let (object_id, _, payload_len) = self.decode_object_head(&mut reader, &header).ok()?;
+        // An Object without a payload has its status after the length, a
+        // field or two that are whole an instant later; it is not begun.
+        if payload_len == 0 {
+            return None;
+        }
+        self.begun = true;
+        Some(SubgroupEvent::ObjectBegun {
+            object_id,
+            payload_len,
+        })
     }
 
     /// Call when the stream ends with a FIN. §11.4 says a session SHOULD be
@@ -477,6 +535,36 @@ impl SubgroupStreamDecoder {
         reader: &mut Reader<'_>,
         header: &SubgroupHeader,
     ) -> ReadResult<SubgroupObject> {
+        let (object_id, properties, payload_len) = self.decode_object_head(reader, header)?;
+        // The Object Status field exists only when the payload is empty.
+        let (status, payload) = if payload_len == 0 {
+            let status = ObjectStatus::from_code(reader.varint()?)
+                .ok_or(Error::ProtocolViolation("unknown object status"))?;
+            (status, Vec::new())
+        } else {
+            (ObjectStatus::Normal, reader.bytes(payload_len)?.to_vec())
+        };
+
+        if status != ObjectStatus::Normal && !properties.is_empty() {
+            return Err(
+                Error::ProtocolViolation("properties on an object that is not Normal").into(),
+            );
+        }
+        Ok(SubgroupObject {
+            object_id,
+            properties,
+            status,
+            payload,
+        })
+    }
+
+    /// The fields of an Object before its payload: its Object ID, its
+    /// Properties and its Object Payload Length.
+    fn decode_object_head(
+        &self,
+        reader: &mut Reader<'_>,
+        header: &SubgroupHeader,
+    ) -> ReadResult<(u64, Vec<KeyValuePair>, usize)> {
         let delta = reader.varint()?;
         // §11.4.2: the first Object ID is the delta itself; later ones add delta + 1.
         let object_id = match self.previous_object_id {
@@ -512,26 +600,7 @@ impl SubgroupStreamDecoder {
         {
             return Err(Error::ObjectTooLarge { limit }.into());
         }
-        // The Object Status field exists only when the payload is empty.
-        let (status, payload) = if payload_len == 0 {
-            let status = ObjectStatus::from_code(reader.varint()?)
-                .ok_or(Error::ProtocolViolation("unknown object status"))?;
-            (status, Vec::new())
-        } else {
-            (ObjectStatus::Normal, reader.bytes(payload_len)?.to_vec())
-        };
-
-        if status != ObjectStatus::Normal && !properties.is_empty() {
-            return Err(
-                Error::ProtocolViolation("properties on an object that is not Normal").into(),
-            );
-        }
-        Ok(SubgroupObject {
-            object_id,
-            properties,
-            status,
-            payload,
-        })
+        Ok((object_id, properties, payload_len))
     }
 
     /// A length field of an Object. One over the buffer limit can never be
@@ -992,6 +1061,61 @@ pub(crate) mod tests {
     fn encodes_the_bytes_another_implementation_sent() {
         for (name, (header, objects)) in captured_streams() {
             assert_eq!(encode_stream(&header, &objects), fixture(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn yields_an_object_begun_once_before_an_object_whose_payload_is_not_whole() {
+        let moqlivemock = fixture("subgroup-stream-two-objects-from-moqlivemock");
+        // Header (Track Alias 0, Group 0), then Object 0 with End of Group
+        // (Payload Length 0, status 0x3): no payload to wait for.
+        let end_of_group: &[u8] = &[0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+        // (the stream, the bytes pushed at once, whether asked for, the events)
+        let cases: [(&[u8], usize, bool, &[&str]); 5] = [
+            (
+                &moqlivemock,
+                1,
+                true,
+                &[
+                    "header",
+                    "begun 0 of 21533",
+                    "object 0",
+                    // The sizes of fixtures/loc-04/README.md.
+                    "begun 1 of 931",
+                    "object 1",
+                ],
+            ),
+            (&moqlivemock, 1, false, &["header", "object 0", "object 1"]),
+            // Each Object whole in one push: it is begun and whole at once.
+            (
+                &moqlivemock,
+                moqlivemock.len(),
+                true,
+                &["header", "object 0", "object 1"],
+            ),
+            (end_of_group, 1, true, &["header", "object 0"]),
+            (end_of_group, 1, false, &["header", "object 0"]),
+        ];
+        for (bytes, chunk_len, asked, expected) in cases {
+            let mut decoder = SubgroupStreamDecoder::new(LIMIT);
+            if asked {
+                decoder.report_begun();
+            }
+            let mut seen = Vec::new();
+            for chunk in bytes.chunks(chunk_len) {
+                decoder.push(chunk).unwrap();
+                while let Some(event) = decoder.next_event().unwrap() {
+                    seen.push(match event {
+                        SubgroupEvent::Header(_) => "header".to_string(),
+                        SubgroupEvent::ObjectBegun {
+                            object_id,
+                            payload_len,
+                        } => format!("begun {object_id} of {payload_len}"),
+                        SubgroupEvent::Object(object) => format!("object {}", object.object_id),
+                    });
+                }
+            }
+            assert_eq!(seen, expected, "{chunk_len} {asked}");
         }
     }
 

@@ -191,6 +191,22 @@ impl Group {
         self.objects.insert(object_id, taken);
     }
 
+    /// The Object ID of its End of Group or End of Track, where one came.
+    fn ended_at(&self) -> Option<u64> {
+        self.objects
+            .iter()
+            .find(|(_, there)| ends_the_group(there.object.status))
+            .map(|(id, _)| *id)
+    }
+
+    /// Whether `object_id` is inside a gap that an Object after it
+    /// announced.
+    fn in_a_gap(&self, object_id: u64) -> bool {
+        self.objects
+            .range(object_id..)
+            .any(|(id, there)| id.saturating_sub(there.prior_gap()) <= object_id)
+    }
+
     fn give_up(&mut self, in_use: &mut usize) {
         *in_use = in_use.saturating_sub(self.bytes);
         self.objects.clear();
@@ -312,12 +328,7 @@ impl Cache {
             }
             return Verdict::Fine;
         }
-        let ended_at = group
-            .objects
-            .iter()
-            .find(|(_, there)| ends_the_group(there.object.status))
-            .map(|(id, _)| *id);
-        if ended_at.is_some_and(|end| object_id > end) {
+        if group.ended_at().is_some_and(|end| object_id > end) {
             // A status up there says nothing the End of Group did not say
             // (§11.2.1.1: no Objects exist from it on, in the Group or in
             // the track), and a publisher may end its track that way.
@@ -327,12 +338,7 @@ impl Cache {
             group.give_up(in_use);
             return Verdict::Fine;
         }
-        // Inside a gap that an Object after it announced.
-        let in_a_gap = group
-            .objects
-            .range(object_id..)
-            .any(|(id, there)| id.saturating_sub(there.prior_gap()) <= object_id);
-        if in_a_gap {
+        if group.in_a_gap(object_id) {
             // WHY a status is not held against the track, though §12.9 has
             // "an Object with an Object ID within a previously communicated
             // gap" and a status has an Object ID: the gap says that no
@@ -361,6 +367,20 @@ impl Cache {
             group.unsure_of_subgroup.insert(object_id);
         }
         Verdict::Fine
+    }
+
+    /// Whether a Normal Object at `location` would show the track to be
+    /// malformed by its Location alone, against what is kept of its Group:
+    /// after the End of Group, or inside a gap a later Object announced
+    /// ([`Self::insert`]). Nothing is changed.
+    pub(crate) fn refuses_an_object_at(&self, location: Location) -> bool {
+        self.0.as_deref().is_some_and(|group| {
+            group.id == location.group
+                && !group.given_up
+                && !group.objects.contains_key(&location.object)
+                && (group.ended_at().is_some_and(|end| location.object > end)
+                    || group.in_a_gap(location.object))
+        })
     }
 
     /// An Object of the Group `group_id` was passed on and cannot be kept:
