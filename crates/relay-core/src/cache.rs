@@ -217,8 +217,9 @@ impl Cache {
     /// answers no FETCH (see [`Self::answer`]), so keeping the rest of it
     /// would hold memory for nothing.
     ///
-    /// WHY a Group with an End of Track is given up: what a `FETCH_OK` has to
-    /// say of the end of a track (§10.13) is left to the publisher.
+    /// An End of Track is kept as an End of Group is: no Object is from it on,
+    /// in its Group or after (§11.2.1.1). An Object past it is not seen here:
+    /// the track found it malformed before (`Track::past_its_end`).
     pub(crate) fn insert(
         &mut self,
         cached: CachedObject,
@@ -263,7 +264,7 @@ impl Cache {
         let ended_at = group
             .objects
             .iter()
-            .find(|(_, there)| there.object.status == ObjectStatus::EndOfGroup)
+            .find(|(_, there)| ends_the_group(there.object.status))
             .map(|(id, _)| *id);
         if ended_at.is_some_and(|end| object_id > end) {
             // A status up there says nothing the End of Group did not say
@@ -295,10 +296,10 @@ impl Cache {
         let fits = group.objects.len() < MAX_CACHED_OBJECTS_OF_A_TRACK
             && group.bytes.saturating_add(size) <= MAX_CACHED_BYTES_OF_A_TRACK
             && in_use.saturating_add(size) <= MAX_CACHED_BYTES;
-        // An End of Group below Objects that came: taken back, or not.
-        let below =
-            status == ObjectStatus::EndOfGroup && group.objects.range(object_id..).next().is_some();
-        if !fits || below || status == ObjectStatus::EndOfTrack {
+        // An End of Group or of Track below Objects that came: taken back,
+        // or not.
+        let below = ends_the_group(status) && group.objects.range(object_id..).next().is_some();
+        if !fits || below {
             group.give_up(in_use);
             return Verdict::Fine;
         }
@@ -410,9 +411,10 @@ impl Cache {
             if unknown_from.is_none_or(|unknown| covered_from > unknown) {
                 break;
             }
-            unknown_from = match cached.object.status {
-                ObjectStatus::EndOfGroup => None,
-                _ => object_id.checked_add(1),
+            unknown_from = if ends_the_group(cached.object.status) {
+                None
+            } else {
+                object_id.checked_add(1)
             };
             if unknown_from.is_none_or(|unknown| unknown > last.object) {
                 break;
@@ -422,7 +424,7 @@ impl Cache {
             return None;
         }
         // A fetch stream has no Object Status (§11.4.4.1): an End of Group
-        // is said by the Objects that are missing after it.
+        // or of Track is said by the Objects that are missing after it.
         Some(
             group
                 .objects
@@ -433,6 +435,15 @@ impl Cache {
                 .collect(),
         )
     }
+}
+
+/// Whether no Object of the Group is from an Object with `status` on
+/// (§11.2.1.1: End of Group, "no objects with the specified Group ID and the
+/// Object ID that is greater than or equal to the one specified exist", and
+/// End of Track, "no objects with the location that is equal to or greater
+/// than the one specified exist").
+fn ends_the_group(status: ObjectStatus) -> bool {
+    matches!(status, ObjectStatus::EndOfGroup | ObjectStatus::EndOfTrack)
 }
 
 #[cfg(test)]
@@ -514,7 +525,6 @@ mod tests {
 
     #[test]
     fn a_range_is_answered_when_every_object_id_up_to_its_last_is_known() {
-        let end_of_group = ObjectStatus::EndOfGroup;
         // (the Objects of Group 5 that came, as (Object ID, Prior Object ID
         //  Gap); the first and the last Object ID that are asked for; the
         //  Object IDs of the answer, `None` where the cache has none)
@@ -557,29 +567,32 @@ mod tests {
             );
         }
 
-        // An End of Group at Object 2: no Object ID from there on exists
-        // (§11.2.1.1), and a fetch stream says so by what it leaves out.
-        let ended = || vec![object(5, 0, 0), object(5, 1, 0), status(5, 2, end_of_group)];
-        let (cache, _) = cache_of(ended());
-        // (the first and the last Object ID asked for; the answer)
-        let cases: [(Asked, Answer); 5] = [
-            ((0, 1), Some(&[0, 1])),
-            ((0, 2), Some(&[0, 1])),
-            ((1, 900), Some(&[1])),
-            ((2, 900), Some(&[])),
-            // Up to the last Object ID there is.
-            ((0, u64::MAX), Some(&[0, 1])),
-        ];
-        for ((first, last), answer) in cases {
-            assert_eq!(
-                ids(&cache, at(5, first), at(5, last)).as_deref(),
-                answer,
-                "{first} {last}"
-            );
+        // An End of Group or of Track at Object 2: no Object ID from there
+        // on exists (§11.2.1.1), and a fetch stream says so by what it
+        // leaves out.
+        for end in [ObjectStatus::EndOfGroup, ObjectStatus::EndOfTrack] {
+            let ended = vec![object(5, 0, 0), object(5, 1, 0), status(5, 2, end)];
+            let (cache, _) = cache_of(ended);
+            // (the first and the last Object ID asked for; the answer)
+            let cases: [(Asked, Answer); 5] = [
+                ((0, 1), Some(&[0, 1])),
+                ((0, 2), Some(&[0, 1])),
+                ((1, 900), Some(&[1])),
+                ((2, 900), Some(&[])),
+                // Up to the last Object ID there is.
+                ((0, u64::MAX), Some(&[0, 1])),
+            ];
+            for ((first, last), answer) in cases {
+                assert_eq!(
+                    ids(&cache, at(5, first), at(5, last)).as_deref(),
+                    answer,
+                    "{end:?} {first} {last}"
+                );
+            }
+            // But not where an Object before it is missing.
+            let (cache, _) = cache_of(vec![object(5, 0, 0), status(5, 2, end)]);
+            assert_eq!(ids(&cache, at(5, 0), at(5, 2)), None, "{end:?}");
         }
-        // But not where an Object before it is missing.
-        let (cache, _) = cache_of(vec![object(5, 0, 0), status(5, 2, end_of_group)]);
-        assert_eq!(ids(&cache, at(5, 0), at(5, 2)), None);
     }
 
     #[test]
@@ -626,15 +639,8 @@ mod tests {
         let kept = cache.answer(at(5, 0), at(5, 0)).unwrap();
         assert_eq!((kept[0].object.payload.len(), in_use), (3, 3));
 
-        // A Group that has an End of Track answers nothing.
-        let (cache, in_use) = cache_of(vec![
-            object(5, 0, 0),
-            status(5, 1, ObjectStatus::EndOfTrack),
-        ]);
-        assert_eq!((ids(&cache, at(5, 0), at(5, 0)), in_use), (None, 0));
-
-        // Nor one of which an Object was passed on that could not be kept;
-        // the next Group starts anew.
+        // A Group of which an Object was passed on that could not be kept
+        // answers nothing; the next Group starts anew.
         let (mut cache, mut in_use) = cache_of(vec![object(5, 0, 0)]);
         cache.leave_out(5, &mut in_use);
         cache.insert(object(5, 1, 0), true, &mut in_use);

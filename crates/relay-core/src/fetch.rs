@@ -1367,6 +1367,13 @@ impl Relay {
 
     /// Answers a FETCH with `FETCH_OK` and a fetch stream the relay writes
     /// itself: the End Location and what the stream carries.
+    ///
+    /// End Of Track is 1 where the range reaches the Object with the status
+    /// `END_OF_TRACK` that the relay received (§10.13: "1 if all Objects have
+    /// been published on this Track, and the End Location is the final Object
+    /// in the Track"; §2.4.2: "The final Object in a Track is the Object with
+    /// Status `END_OF_TRACK`"). The End Location is never beyond it: the
+    /// largest Location of the track is that Object from then on.
     fn write_answer(
         &mut self,
         session: SessionKey,
@@ -1378,16 +1385,19 @@ impl Relay {
     ) {
         // §9.6: "Relays MUST forward all Track Properties ... in the
         // responses to requests for that Track".
-        let properties = self
-            .tracks
-            .live(track)
-            .map(|live| live.properties.clone())
-            .unwrap_or_default();
+        let live = self.tracks.live(track);
+        let properties = live.map(|live| live.properties.clone()).unwrap_or_default();
+        let end_of_track = live
+            .and_then(|live| live.final_object)
+            .is_some_and(|last| last_location(end) >= last);
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
         let request_id = request.value();
-        let Ok((ok, owed)) = state.moqt.accept_fetch(request, false, end, properties) else {
+        let Ok((ok, owed)) = state
+            .moqt
+            .accept_fetch(request, end_of_track, end, properties)
+        else {
             // As where a publisher's answer cannot be passed on: this FETCH
             // alone.
             let failed = Refusal::code(request_error_code::INTERNAL_ERROR);
