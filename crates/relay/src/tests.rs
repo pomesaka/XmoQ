@@ -1988,6 +1988,48 @@ async fn a_fetch_is_passed_on_to_the_publisher_and_its_stream_back() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_priority_in_an_update_of_a_fetch_moves_the_stream_that_is_passed_on() {
+    let (log, mut lines) = hub::Log::collect();
+    let (_hub, mut publisher, mut alice, mut request, mut upstream) =
+        fetching(Some(log), true).await;
+    publisher.accept_relay_fetch(&mut upstream).await;
+    alice.answer(&mut request).await;
+    let mut stream = publisher.open_fetch_stream(&upstream).await;
+    stream.write(&[1; 100]).await.unwrap();
+    let mut body = alice.fetch_body(&request).await;
+    // SUBSCRIBER_PRIORITY 3 while the stream is passed on: answered by the
+    // relay, and nothing reaches the publisher (§10.2.1).
+    let update = ControlMessage::RequestUpdate(RequestUpdate {
+        request_id: request.id.value() + 2,
+        parameters: vec![Parameter::SubscriberPriority(3)],
+    });
+    send_message(&mut request.send, &update, &Trace::default(), "request")
+        .await
+        .unwrap();
+    assert_eq!(
+        request_end(&mut request.reader).await,
+        RequestStreamEvent::Message(ControlMessage::RequestOk(
+            xmoq_moqt::message::RequestOk::default()
+        ))
+    );
+    assert!(
+        timeout(SOON, upstream.reader.next_event()).await.is_err(),
+        "the publisher was told"
+    );
+    stream.write(&[2; 100]).await.unwrap();
+    stream.finish();
+    let (received, end) = read_fetch(&mut body).await;
+    assert_eq!(
+        (received.len(), end),
+        (200, FetchChunk::End(StreamEnd::Fin))
+    );
+    // -1 - (3 << 8 | 128).
+    let line = "FETCH_SEND_ORDER session=1 stream=1 send_order=-897";
+    let lines = logged(&mut lines);
+    assert!(lines.iter().any(|logged| logged == line), "{lines:#?}");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_subscriber_that_does_not_read_its_fetch_holds_the_publisher_back_and_is_cut_off() {
     let (log, mut lines) = hub::Log::collect();
     let (hub, mut publisher, alice, mut request, mut upstream) = fetching(Some(log), false).await;

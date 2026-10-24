@@ -152,6 +152,14 @@ pub(super) fn only_the_subgroup_timeout(parameters: &[Parameter]) -> Option<Appl
     Some(applied)
 }
 
+/// The `SUBSCRIBER_PRIORITY` among the parameters of a `REQUEST_UPDATE`.
+fn subscriber_priority(parameters: &[Parameter]) -> Option<u8> {
+    parameters.iter().find_map(|parameter| match parameter {
+        Parameter::SubscriberPriority(priority) => Some(*priority),
+        _ => None,
+    })
+}
+
 /// What an update that is applied carries of the two parameters a caller
 /// acts on.
 pub(super) struct AppliedUpdate {
@@ -218,7 +226,8 @@ pub enum PeerRequestEvent {
     /// Another `REQUEST_UPDATE` after one was refused. Nothing is sent (§10.9.1).
     UpdateAlreadyRefused,
     /// `REQUEST_UPDATE` for a FETCH that was answered. The caller sends
-    /// `response`, a `REQUEST_OK`; nothing of the FETCH changes.
+    /// `response`, a `REQUEST_OK`, and may give the fetch stream the new
+    /// `subscriber_priority`; nothing else of the FETCH changes.
     ///
     /// WHY accepted, where an update of a subscription is refused: a refusal
     /// has a price here that it does not have there. §10.9.1: "When a
@@ -226,17 +235,23 @@ pub enum PeerRequestEvent {
     /// data stream", so a subscriber that only meant to change its priority
     /// would lose the fetch. What an update of a FETCH may carry is
     /// `SUBSCRIBER_PRIORITY` (§10.2.7), `AUTHORIZATION_TOKEN` (§10.2.2) and
-    /// the two delivery timeouts (§10.2.3, §10.2.4), none of which anything
-    /// here uses; any other parameter closes the session (§10.2.1).
+    /// the two delivery timeouts (§10.2.3, §10.2.4); any other parameter
+    /// closes the session (§10.2.1).
     UpdateAccepted {
         /// The message to send on the request stream.
         response: ControlMessage,
+        /// The `SUBSCRIBER_PRIORITY` of the update (§10.2.7); `None` when it
+        /// had none, and the one before stands (§10.9).
+        subscriber_priority: Option<u8>,
     },
     /// `REQUEST_UPDATE` for a FETCH that has no answer yet. Nothing is sent
     /// now: responses carry no Request ID, so a `REQUEST_OK` sent first
     /// would be read as the answer to the FETCH. [`Session::accept_fetch`]
     /// says how many are owed.
-    UpdateHeld,
+    UpdateHeld {
+        /// As in [`Self::UpdateAccepted`].
+        subscriber_priority: Option<u8>,
+    },
     /// A message for a request this endpoint has said its last on: a
     /// subscription it ended with `PUBLISH_DONE`, a request that was
     /// rejected, a FETCH whose answer it ended
@@ -1291,13 +1306,16 @@ impl Session {
             Some(PeerRequestState::Fetch(FetchPhase::Answered)) => {
                 PeerRequestEvent::UpdateAccepted {
                     response: ControlMessage::RequestOk(RequestOk::default()),
+                    subscriber_priority: subscriber_priority(parameters),
                 }
             }
             Some(PeerRequestState::Fetch(FetchPhase::Pending { held_updates, .. })) => {
                 // Saturating: every update used up a Request ID, of which
                 // there are fewer than this counts.
                 *held_updates = held_updates.saturating_add(1);
-                PeerRequestEvent::UpdateHeld
+                PeerRequestEvent::UpdateHeld {
+                    subscriber_priority: subscriber_priority(parameters),
+                }
             }
             // Sorted out before this is called.
             Some(PeerRequestState::Rejected | PeerRequestState::Fetch(FetchPhase::Over)) => {
@@ -1798,7 +1816,9 @@ mod tests {
         session.on_fetch_answer_ended(subscription);
         assert_eq!(
             session.on_peer_request_message(waiting, with(4, vec![])),
-            Ok(PeerRequestEvent::UpdateHeld)
+            Ok(PeerRequestEvent::UpdateHeld {
+                subscriber_priority: None
+            })
         );
         assert!(
             session
@@ -2202,11 +2222,11 @@ mod tests {
                     .unwrap();
                     next += 2;
                     match session.on_peer_request_message(request, whole_message(&bytes)) {
-                        Ok(PeerRequestEvent::UpdateAccepted { response }) => {
+                        Ok(PeerRequestEvent::UpdateAccepted { response, .. }) => {
                             named(&response).to_string()
                         }
                         Ok(
-                            PeerRequestEvent::UpdateHeld
+                            PeerRequestEvent::UpdateHeld { .. }
                             | PeerRequestEvent::LateMessage
                             | PeerRequestEvent::UpdateAlreadyRefused,
                         ) => "-".to_string(),
@@ -2868,7 +2888,9 @@ mod tests {
         for request_id in [2, 4] {
             assert_eq!(
                 session.on_peer_request_message(fetch, update(request_id)),
-                Ok(PeerRequestEvent::UpdateHeld)
+                Ok(PeerRequestEvent::UpdateHeld {
+                    subscriber_priority: None
+                })
             );
         }
         // Each used up a Request ID (§10.1).
@@ -2886,7 +2908,8 @@ mod tests {
         assert_eq!(
             session.on_peer_request_message(fetch, update(6)),
             Ok(PeerRequestEvent::UpdateAccepted {
-                response: request_ok
+                response: request_ok,
+                subscriber_priority: None,
             })
         );
         // Anything else on the stream of a FETCH is a violation.
@@ -2902,7 +2925,9 @@ mod tests {
         let fetch = opened(&mut session, standalone(0, at(0, 0), at(3, 0)));
         assert_eq!(
             session.on_peer_request_message(fetch, update(2)),
-            Ok(PeerRequestEvent::UpdateHeld)
+            Ok(PeerRequestEvent::UpdateHeld {
+                subscriber_priority: None
+            })
         );
         // The REQUEST_ERROR is all there is to send: the request is over.
         assert_eq!(
@@ -2942,22 +2967,24 @@ mod tests {
                 parameters,
             })
         };
-        // (the parameters of the update; whether the session goes on).
+        // (the parameters of the update; whether the session goes on; the
+        //  SUBSCRIBER_PRIORITY the caller is given).
         let cases = [
-            (vec![], true),
-            (vec![Parameter::SubscriberPriority(3)], true),
-            (vec![Parameter::AuthorizationToken(vec![1])], true),
-            (vec![Parameter::ObjectDeliveryTimeout(5)], true),
-            (vec![Parameter::SubgroupDeliveryTimeout(5)], true),
+            (vec![], true, None),
+            (vec![Parameter::SubscriberPriority(3)], true, Some(3)),
+            (vec![Parameter::AuthorizationToken(vec![1])], true, None),
+            (vec![Parameter::ObjectDeliveryTimeout(5)], true, None),
+            (vec![Parameter::SubgroupDeliveryTimeout(5)], true, None),
             // "REQUEST_UPDATE (for a subscription)": §10.2.12, §10.2.13.
-            (vec![Parameter::Forward(false)], false),
-            (vec![Parameter::NewGroupRequest(0)], false),
+            (vec![Parameter::Forward(false)], false, None),
+            (vec![Parameter::NewGroupRequest(0)], false, None),
             (
                 vec![Parameter::SubscriberPriority(3), Parameter::Forward(true)],
                 false,
+                None,
             ),
         ];
-        for (parameters, goes_on) in cases {
+        for (parameters, goes_on, subscriber_priority) in cases {
             // Before the FETCH is answered, and after.
             for answered in [false, true] {
                 let mut session = server();
@@ -2972,9 +2999,12 @@ mod tests {
                     Ok(if answered {
                         PeerRequestEvent::UpdateAccepted {
                             response: ControlMessage::RequestOk(RequestOk::default()),
+                            subscriber_priority,
                         }
                     } else {
-                        PeerRequestEvent::UpdateHeld
+                        PeerRequestEvent::UpdateHeld {
+                            subscriber_priority,
+                        }
                     })
                 } else {
                     Err(RequestFault::Peer(Error::ProtocolViolation(

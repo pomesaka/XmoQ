@@ -538,6 +538,19 @@ pub enum Action {
         /// [`Action::OpenDataStream`].
         send_order: i32,
     },
+    /// The subscriber changed the `SUBSCRIBER_PRIORITY` of its FETCH with a
+    /// `REQUEST_UPDATE` (§10.9): the fetch stream of
+    /// [`Action::PipeFetch`] or [`Action::WriteFetchStream`] that answers it
+    /// stands by `send_order` from the next piece it writes, or from when it
+    /// opens. Does nothing when that stream has ended.
+    SetFetchSendOrder {
+        /// The session of the subscriber.
+        session: SessionKey,
+        /// The request stream of the FETCH.
+        stream: StreamKey,
+        /// As in [`Action::OpenDataStream`].
+        send_order: i32,
+    },
     /// Stop writing a fetch stream of [`Action::WriteFetchStream`] and reset
     /// it with `code`. The end is reported as for a stream that was given
     /// up, with this code. Does nothing when the stream is written.
