@@ -260,8 +260,12 @@ pub(crate) fn object_properties_fault(
 }
 
 /// What is wrong with a datagram the peer sent, by its type alone: `None`
-/// for an `OBJECT_DATAGRAM` (§11.3.1), and a protocol error that closes the
-/// session for any other.
+/// for an `OBJECT_DATAGRAM` (§11.3.1) and a padding datagram (§11.5.2), and
+/// a protocol error that closes the session for any other.
+///
+/// A padding datagram is let go of whatever follows its type: §11.5.2 has
+/// "The receiver MUST discard all data received in a padding datagram", and
+/// "MUST all be set to zero" is the sender's to keep.
 ///
 /// §11: "An endpoint that receives an unknown datagram type MUST close the
 /// session." §11.3.1 names the code for the two kinds there are: "Type values
@@ -276,9 +280,13 @@ pub(crate) fn object_properties_fault(
 pub fn datagram_fault(datagram: &[u8]) -> Option<Error> {
     const STATUS: u64 = 0x20;
     const END_OF_GROUP: u64 = 0x02;
+    const PADDING: u64 = 0x132B_3E29;
     let Some((ty, _)) = varint::decode(datagram) else {
         return Some(Error::ProtocolViolation("a datagram without a type"));
     };
+    if ty == PADDING {
+        return None;
+    }
     // 0b00X0XXXX: no bit but 0x20 and the four low ones.
     let of_the_form = ty & !(STATUS | 0x0f) == 0;
     if !of_the_form || ty & (STATUS | END_OF_GROUP) == STATUS | END_OF_GROUP {
@@ -1123,7 +1131,7 @@ pub(crate) mod tests {
     fn a_datagram_of_an_unknown_type_closes_the_session() {
         let unknown = || Some(Error::ProtocolViolation("an unknown datagram type"));
         // (the datagram's first bytes; what is wrong with it)
-        let cases: [(&[u8], Option<Error>); 12] = [
+        let cases: [(&[u8], Option<Error>); 14] = [
             (&[0x00, 0x01], None),
             (&[0x0f], None),
             (&[0x20], None),
@@ -1142,6 +1150,10 @@ pub(crate) mod tests {
                 &[],
                 Some(Error::ProtocolViolation("a datagram without a type")),
             ),
+            // A padding datagram (0x132B3E29, in five bytes), also with bytes
+            // that are not zero after it.
+            (&[0xf0, 0x13, 0x2b, 0x3e, 0x29, 0x00, 0x00], None),
+            (&[0xf0, 0x13, 0x2b, 0x3e, 0x29, 0x01], None),
         ];
         for (datagram, fault) in cases {
             assert_eq!(datagram_fault(datagram), fault, "{datagram:02x?}");
