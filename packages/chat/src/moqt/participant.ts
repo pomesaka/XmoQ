@@ -42,7 +42,8 @@ import { SeenLines } from "../core/seen-lines.ts";
 const SEEN_LINES = 200;
 
 /**
- * The longest payload of a line read from the Joining FETCH: 64 KiB, what
+ * The longest payload of a line read from the Joining FETCH or the
+ * subscription to `lines`: 64 KiB, what
  * the gatherer reads of one stream of `said` (`PAYLOAD_MOST`), which holds
  * the longest line it takes, 8,192 bytes of text, however it is escaped.
  */
@@ -338,6 +339,9 @@ export async function joinChat(
 					trackNamespace: roomNamespace(options.room),
 					trackName: new TextEncoder().encode(LINES_TRACK),
 					parameters: { rendezvousTimeout: BigInt(RENDEZVOUS_MS) },
+					// A longer Object ends its stream before it is gathered,
+					// and the subscription goes on.
+					maxObjectPayloadLength: MAX_LINE_PAYLOAD,
 				});
 			} catch (error) {
 				changed({ lastEnd: `refused: ${String(error).slice(0, 120)}` });

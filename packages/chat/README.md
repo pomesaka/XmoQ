@@ -34,7 +34,7 @@ What a participant holds of what comes has a bound that no option removes. **All
 |---|---|---|
 | Lines of the history | The newest 16 (`HISTORY_LINES`); a FETCH that brings more is not read further | `src/moqt/participant.ts` |
 | Line numbers remembered, so that each line is handed on once | 200, the newest; a line older than all of them is passed over | `SEEN_LINES` |
-| One line read from the FETCH | 64 KiB of payload, what the gatherer reads of one stream of `said`; a line of the subscription is bounded by the connection's `limits.maxObjectPayloadLength` | `MAX_LINE_PAYLOAD` |
+| One line read from the FETCH or the subscription | 64 KiB of payload, what the gatherer reads of one stream of `said`; the subscription is given it as its own `maxObjectPayloadLength`, so a longer Object ends its stream before it is gathered | `MAX_LINE_PAYLOAD` |
 | Lines being written at once | 16; one more is not sent (`busy`) | `MAX_WRITING` |
 | The Joining FETCH | 15 s from when it is sent | `FETCH_TIMEOUT_MS` |
 | Times taken in the rate | `linesPerSecond`, 1,000 at the most | `RateWindow`, `src/core/limits.ts` |
