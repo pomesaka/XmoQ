@@ -1,6 +1,6 @@
 """The FANOUT lines of spikes/fanout/run.sh, for the video's viewers and the sound's, and a
 summary of the relay's STATS lines and resets."""
-import collections, os, re, statistics, sys
+import collections, glob, os, re, statistics, sys
 
 logs, viewers, video, frames, pieces = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
 cpu, rss, video_cpu, sound_cpu, busy = [], [], [], [], []
@@ -23,9 +23,12 @@ ms = lambda us: f"{us / 1000:.1f}"
 
 
 def fanout(label, viewers_log, publisher_log, wanted):
-    text = open(viewers_log).read()
+    # viewers.log and, with VIEWER_PROCS, viewers-2.log ... of the other processes.
+    stem = viewers_log[: -len(".log")]
+    paths = [viewers_log] + sorted(glob.glob(f"{stem}-[0-9]*.log"))
+    text = "".join(open(path).read() for path in paths)
     stats = [dict(pair.split("=") for pair in line.split()[1:]) for line in text.splitlines() if line.startswith("VIDEO_STATS")]
-    ended = re.search(r"VIEWERS_ENDED ok=(\d+) failed=(\d+)", text)
+    ended = re.findall(r"VIEWERS_ENDED ok=(\d+) failed=(\d+)", text)
     got = [int(s["frames"]) for s in stats]
     before = [int(s["before_the_first_key_frame"]) for s in stats]
     whole = sum(1 for s in stats if int(s["frames"]) + int(s["before_the_first_key_frame"]) >= wanted)
@@ -40,7 +43,7 @@ def fanout(label, viewers_log, publisher_log, wanted):
     print("FANOUT %s viewers=%d kbit_per_group=%d viewers_with_all_in_order=%d viewers_ended_ok=%s viewers_failed=%s "
           "taken=%d before_a_key_frame=%d came_out_of_order=%d late_ms_median_of_p50=%s late_ms_worst_p99=%s late_ms_max=%s" % (
         label, viewers, sent * 8 // 1000 // max(sends, 1), whole,
-        ended.group(1) if ended else "?", ended.group(2) if ended else "?",
+        sum(int(ok) for ok, _ in ended) if ended else "?", sum(int(failed) for _, failed in ended) if ended else "?",
         sum(got), sum(before), sum(int(s["skipped"]) for s in stats),
         ms(statistics.median(p50)) if p50 else "-", ms(max(p99)) if p99 else "-", ms(max(mx)) if mx else "-"))
 
