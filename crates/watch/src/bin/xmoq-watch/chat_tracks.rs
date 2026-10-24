@@ -41,6 +41,11 @@ type Recv = <WtConnection as Connection>::Recv;
 /// [`TEXT_BYTES`] and their JSON, with room.
 const FETCH_LIMIT: usize = 64 * 1024;
 
+/// The most an Object of `lines` may be: a line of [`TEXT_BYTES`] and its
+/// JSON, with room. The page's chat has the same (`@xmoq/moqt`'s
+/// `maxObjectPayloadLength`). **Provisional.**
+const LINES_PAYLOAD_MOST: usize = 64 * 1024;
+
 /// How long a stream for a line of `said` may wait to be opened. WHY not
 /// waited for longer: a line said late is worth less than the next, as an
 /// Object of a live track (the Rust client's `SUBGROUP_OPEN_WAIT`).
@@ -83,6 +88,8 @@ pub enum Out {
 /// The chat on tracks of one session.
 pub struct ChatTracks {
     connection: Arc<WtConnection>,
+    /// Where the limit of `lines` on its Objects is given.
+    stops: StreamStops,
     /// `xmoq/chat/<room>`.
     room: TrackNamespace,
     token: Option<Vec<u8>>,
@@ -145,6 +152,7 @@ impl ChatTracks {
     pub async fn begin(
         requests: Requests<'_>,
         connection: &Arc<WtConnection>,
+        stops: &StreamStops,
         chat: &Chat,
         room: TrackNamespace,
     ) -> Result<Self> {
@@ -179,6 +187,7 @@ impl ChatTracks {
         }
         Ok(Self {
             connection: Arc::clone(connection),
+            stops: stops.clone(),
             room,
             token: token.map(<[u8]>::to_vec),
             answer_wait_ms,
@@ -309,6 +318,8 @@ impl ChatTracks {
             "CHAT_TRACKS_LINES track_alias={}",
             subscription.track_alias
         ))];
+        self.stops
+            .limit_payload(subscription.track_alias, LINES_PAYLOAD_MOST);
         let start = fetch_start(subscription.largest.map(|largest| largest.group));
         let joining_request_id = subscription.request.value();
         self.lines = Some(subscription);
@@ -382,6 +393,7 @@ impl ChatTracks {
             }
         };
         if let Some(lines) = self.lines.take() {
+            self.stops.unlimit_payload(lines.track_alias);
             lines.cancel();
         }
         let pause = self.again.after_end();

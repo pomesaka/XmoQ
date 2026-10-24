@@ -321,6 +321,9 @@ struct StopsInner {
     /// The bodies of fetch streams that were announced and not taken yet,
     /// each with what tells its reader that it left here.
     fetch_bodies: HashMap<u64, (FetchBody, oneshot::Sender<()>)>,
+    /// The limits on an Object Payload Length of subscriptions, by Track
+    /// Alias ([`StreamStops::limit_payload`]).
+    payload_limits: HashMap<u64, usize>,
 }
 
 /// One reader's entry in a [`StreamStops`], removed when the reader ends.
@@ -357,6 +360,33 @@ impl StreamStops {
         // The reader may have ended with a stop; then nobody waits for this.
         let _ = taken.send(());
         Some(body)
+    }
+
+    /// Holds each Object of the subgroup streams under `track_alias` whose
+    /// Object Payload Length is read from now on to `limit`: one over it
+    /// stops its stream alone with `INTERNAL_ERROR`, and the subscription and
+    /// the session go on (`Error::ObjectTooLarge`). For a subscriber that
+    /// knows its Objects are small: the one bound of every subgroup stream
+    /// (`StreamConfig::subgroup_buffer_limit`) is far larger. As
+    /// `subscribe({ maxObjectPayloadLength })` of `@xmoq/moqt`.
+    ///
+    /// WHY by Track Alias, where stops are by stream: the stream is opened
+    /// before its header says its alias, and the alias is bound to the
+    /// subscription when its `SUBSCRIBE_OK` comes, while the stream may be
+    /// read already. WHY its caller lets go of it ([`Self::unlimit_payload`]):
+    /// a publisher can give the alias to another subscription after this
+    /// one is over (§11.1).
+    pub fn limit_payload(&self, track_alias: u64, limit: usize) {
+        self.lock().payload_limits.insert(track_alias, limit);
+    }
+
+    /// The subscription under `track_alias` is over: its limit goes.
+    pub fn unlimit_payload(&self, track_alias: u64) {
+        self.lock().payload_limits.remove(&track_alias);
+    }
+
+    fn payload_limit(&self, track_alias: u64) -> Option<usize> {
+        self.lock().payload_limits.get(&track_alias).copied()
     }
 
     /// Streams that are being read, for tests.
@@ -1322,6 +1352,15 @@ async fn deliver_decoded<R: RecvStream, T>(
 ) -> Result<(), Option<Error>> {
     let stream = reader.stream();
     loop {
+        // WHY looked up before each Object and not once: the subscription's
+        // SUBSCRIBE_OK, and with it the limit, can come while the stream is
+        // read (`StreamStops::limit_payload`).
+        if let Some(limit) = decoder
+            .header()
+            .and_then(|header| reader.registration.stops.payload_limit(header.track_alias))
+        {
+            decoder.limit_payload(limit);
+        }
         let event = match decoder.next_event().map_err(Some)? {
             Some(SubgroupEvent::Header(header)) => {
                 // The stream has said what it is; from here on, how long it

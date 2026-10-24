@@ -266,6 +266,9 @@ pub(crate) fn object_properties_fault(
 pub struct SubgroupStreamDecoder {
     buffer: ReceiveBuffer,
     buffer_limit: usize,
+    /// The subscription's limit on an Object Payload Length, where its
+    /// subscriber gave one ([`Self::limit_payload`]).
+    payload_limit: Option<usize>,
     header: Option<SubgroupHeader>,
     previous_object_id: Option<u64>,
     /// An End of Group or End of Track Object was decoded.
@@ -281,10 +284,23 @@ impl SubgroupStreamDecoder {
         Self {
             buffer: ReceiveBuffer::new(buffer_limit),
             buffer_limit,
+            payload_limit: None,
             header: None,
             previous_object_id: None,
             ended: false,
         }
+    }
+
+    /// Refuses, with [`Error::ObjectTooLarge`], each Object whose Object
+    /// Payload Length is over `limit` and is read from now on: the limit of
+    /// the subscription the stream turned out to be of. An Object whose
+    /// length was read before is held to the limit of [`Self::new`] alone.
+    ///
+    /// WHY at the length, before the payload: the limit is there so that a
+    /// payload is not collected, which only a check where its length is read
+    /// keeps from happening.
+    pub fn limit_payload(&mut self, limit: usize) {
+        self.payload_limit = Some(limit);
     }
 
     /// Bytes pushed and not yet returned as events: what this decoder holds in
@@ -423,6 +439,11 @@ impl SubgroupStreamDecoder {
         }
 
         let payload_len = self.announced_length(reader)?;
+        if let Some(limit) = self.payload_limit
+            && payload_len > limit
+        {
+            return Err(Error::ObjectTooLarge { limit }.into());
+        }
         // The Object Status field exists only when the payload is empty.
         let (status, payload) = if payload_len == 0 {
             let status = ObjectStatus::from_code(reader.varint()?)
@@ -1068,6 +1089,44 @@ pub(crate) mod tests {
                 Err(Error::MalformedTrack(fault)),
                 "{bytes:02x?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_limit_of_the_subscription_refuses_an_object_from_its_length_on() {
+        // A header (Track Alias 0, Group 0), then Objects whose Payload Length
+        // is 4 or 5, each with that many bytes; the limit of the stream is far.
+        let header = [0x10, 0x00, 0x00, 0x00];
+        let object = |len: u8| {
+            let mut bytes = vec![0x00, len];
+            bytes.extend(std::iter::repeat_n(0x61, usize::from(len)));
+            bytes
+        };
+        // (the limit set after the header, if any; the Payload Length of the
+        //  Object; what the decoder says of it)
+        let cases = [
+            (None, 5, Ok(())),
+            (Some(4), 4, Ok(())),
+            (Some(4), 5, Err(Error::ObjectTooLarge { limit: 4 })),
+            (Some(5), 5, Ok(())),
+        ];
+        for (limit, len, expected) in cases {
+            let mut decoder = SubgroupStreamDecoder::new(1024);
+            decoder.push(&header).unwrap();
+            assert!(matches!(
+                decoder.next_event(),
+                Ok(Some(SubgroupEvent::Header(_)))
+            ));
+            if let Some(limit) = limit {
+                decoder.limit_payload(limit);
+            }
+            // The length alone is enough to decide: the payload is not pushed.
+            decoder.push(&object(len)[..2]).unwrap();
+            let decided = match decoder.next_event() {
+                Err(error) => Err(error),
+                Ok(_) => Ok(()),
+            };
+            assert_eq!(decided, expected, "{limit:?} {len}");
         }
     }
 

@@ -286,6 +286,10 @@ impl Requests<'_> {
         stops: &StreamStops,
     ) -> Result<(Vec<CatalogTrack>, CatalogKept)> {
         let subscription = self.subscribe(CATALOG, None).await?;
+        // The catalog's Objects are held to its limit from here on, and not
+        // to the 1 MiB undecoded of every subgroup stream alone. It stays for
+        // the session, as the subscription does.
+        stops.limit_payload(subscription.track_alias, CATALOG_LIMIT);
         let range = FetchRange::RelativeJoining {
             joining_request_id: subscription.request.value(),
             joining_start: 0,
