@@ -86,6 +86,7 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 | A stream for a request, which the relay has to allow | 10 s (`--open-wait-ms`); the request is not sent, and the viewer leaves or tries again | The row "A request that waits for a stream" of the implementation notes | `session.rs` |
 | The sound's subscription that ends while the video goes on | Asked for again on the same session after 1 s, or, after a refusal, after its Retry Interval (no less than 100 ms, doubling up to 5 s while refusals follow each other; no more than 30 s); the picture goes on. A SUBSCRIBE that could not be sent or got no answer is not tried again on that session (`AUDIO_ENDED`, `AUDIO_AGAIN`, `AUDIO_REFUSED`, `AUDIO_GIVEN_UP` in `--log`). `--cut-sound-s N`, for measuring, cancels the sound's subscription once N s after it was made | The rule and the values of the watching page (`keepTrackOnSession` of `@xmoq/media`); a relay ends the subscription of the one track that falls behind | `again`, `main.rs` |
 | A broadcast that is not there yet | Refused at once; with `--rendezvous-timeout-ms N` the relay is asked to hold the viewer's SUBSCRIBEs for N ms (the own relay holds 30 s at most), and the viewer waits that much longer for each answer | The row "A SUBSCRIBE for a track nobody publishes" of the implementation notes; without a room the viewer could not come first before | `session.rs` |
+| Requests the relay opens towards it that wait for their refusal | 16 in the queue, while the broadcast does not play yet; then the readers stop reading, and flow control holds the relay | Nothing is played before the SUBSCRIBEs are answered, and a relay here opens no request towards a viewer | `main.rs` |
 | The catalog | 5 s as a whole, as the page does | Over before the FETCH for it could be given up | `session.rs` |
 | A room's token, and its taking a line of the chat | 5 s | | `main.rs` |
 | One message of a room | 256 KiB | A hello with a full history is under 128 KiB | `room_socket.rs` |
@@ -126,5 +127,5 @@ Under `scripts/`, from the repository root; each starts a demo of its own on oth
 - Read a catalog that changes while it watches; choose between several video or audio tracks by anything but the first; follow a track into another namespace than the catalog's.
 - Conceal a packet of sound that did not come; resample (an output that does not take 48 kHz ends it); play more than one channel (two are mixed into one by the decoder).
 - Reach a room over TLS (`wss://`).
-- Answer a request the relay opens towards it.
+- Serve a request the relay opens towards it: each is refused with `NOT_SUPPORTED`, once the broadcast plays (until then up to 16 wait), and its Request ID is checked (§10.1), as the Rust client does in its modes that serve none.
 - Run on Windows.

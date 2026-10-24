@@ -76,8 +76,9 @@
 //                     URI; own-rust prints `REQUEST_GOAWAY ...` and leaves
 //                     with 0.
 //   request-id-parity The peer sends the client a SUBSCRIBE with the Request
-//                     ID 0, a client's (§10.1). own-browser and own-rust
-//                     close the session with INVALID_REQUEST_ID: the peer
+//                     ID 0, a client's (§10.1). own-browser, own-rust and
+//                     the terminal viewer close the session with
+//                     INVALID_REQUEST_ID: the peer
 //                     prints `SESSION_ENDED session=0 ClosedByPeer { code:
 //                     4,`, and own-rust `CLOSED_FOR_A_REQUEST_OF_THE_PEER
 //                     code=0x4 ...`.
@@ -890,7 +891,8 @@ async function goAwayPublisher(
  * REQUEST_UPDATE on the stream of a request the client refused
  * (`request-id-again`). The client closes the session with
  * INVALID_REQUEST_ID (0x4). own-rust refuses the peer's requests in its
- * `subscribe` mode, and the page does so for want of `serve`.
+ * `subscribe` mode, the page for want of `serve`, and the terminal viewer
+ * always.
  */
 async function peerRequestId(
 	context: RunContext,
@@ -917,8 +919,18 @@ async function peerRequestId(
 			said = line;
 			break;
 		}
-		case "xmoq-watch":
-			throw new Error("the terminal viewer reads no request of the peer");
+		case "xmoq-watch": {
+			// It plays (the peer answers its SUBSCRIBEs), refuses the peer's
+			// request, and leaves with the session's error.
+			const viewer = spawnTerminalViewer(
+				context,
+				"client:xmoq-watch",
+				VIEWER_ARGS,
+			);
+			const code = await withTimeout(viewer.exited, "xmoq-watch to leave");
+			said = `it left with ${code}`;
+			break;
+		}
 	}
 	// 4 is INVALID_REQUEST_ID (§3.5).
 	const [line] = await context.relay.waitForLine(

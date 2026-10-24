@@ -9,10 +9,8 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use xmoq_moqt::message::{
-    ControlMessage, ReasonPhrase, RequestError, request_error_code, retry_interval,
-};
-use xmoq_moqt::session::{PeerRequestId, PeerRequestOpened, Role, Session, Transport};
+use xmoq_moqt::message::ControlMessage;
+use xmoq_moqt::session::{PeerRequestId, Role, Session, Transport};
 use xmoq_moqt::{RequestFault, TerminationCode, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
@@ -277,7 +275,7 @@ fn refuse_requests(
                     stream,
                     mut send,
                     first,
-                } => match refuse(&mut session, first) {
+                } => match session.refuse_peer_request(first) {
                     Ok((response, request)) => {
                         if let Some(request) = request {
                             refused.insert(stream, request);
@@ -321,37 +319,6 @@ fn refuse_requests(
         }
     });
     (streams, refuser)
-}
-
-/// The answer to a request the peer opened, and the request where the session
-/// keeps it: `NOT_SUPPORTED`, or the session's own refusal.
-fn refuse(
-    session: &mut Session,
-    first: ControlMessage,
-) -> Result<(ControlMessage, Option<PeerRequestId>), xmoq_moqt::Error> {
-    match session.on_peer_request_opened(first)? {
-        PeerRequestOpened::Refused { response, request } => Ok((response, request)),
-        PeerRequestOpened::Request(request, _) => {
-            let response = session
-                .reject(
-                    request,
-                    request_error_code::NOT_SUPPORTED,
-                    retry_interval::made_up(request_error_code::NOT_SUPPORTED),
-                    ReasonPhrase::default(),
-                )
-                // A request the session has just handed over is one it can
-                // reject.
-                .unwrap_or_else(|_| {
-                    ControlMessage::RequestError(RequestError {
-                        error_code: request_error_code::NOT_SUPPORTED,
-                        retry_interval: retry_interval::made_up(request_error_code::NOT_SUPPORTED),
-                        error_reason: ReasonPhrase::default(),
-                        redirect: None,
-                    })
-                });
-            Ok((response, Some(request)))
-        }
-    }
 }
 
 /// Starts reading the peer's streams. With `serve`, the requests the peer

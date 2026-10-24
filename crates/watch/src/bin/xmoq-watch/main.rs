@@ -17,6 +17,7 @@ mod sound;
 mod terminal;
 mod video_decoder;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
@@ -32,11 +33,11 @@ use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{GoAway, setup_option};
 use xmoq_moqt::name::TrackNamespace;
-use xmoq_moqt::session::{ControlEvent, RequestEvent, Role, Session, Transport};
+use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, Role, Session, Transport};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
-    read_uni_streams, send_message,
+    Connection, PeerRequestStreamEvent, RequestStreamEvent, SendStream, StreamConfig, StreamEnd,
+    StreamStops, Trace, UniEvent, read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_watch::again::AskAgain;
 use xmoq_watch::args::{Args, Fit, Source};
@@ -82,6 +83,7 @@ const BEGINNING_AT_MOST: Duration = Duration::from_secs(60);
 struct UntilClosed {
     control: Option<<WtConnection as Connection>::Send>,
     readers: Option<xmoq_moqt_io::IncomingStreams>,
+    requests: Option<xmoq_moqt_io::IncomingStreams>,
 }
 
 /// The relay sent no SETUP in so many milliseconds.
@@ -699,6 +701,18 @@ async fn play(
         queue,
         |event| event,
     ));
+    // The requests the peer opens: none is served, and each is refused
+    // (`refuse_a_request_of_the_peer`). They are read from here on and
+    // answered once the broadcast plays; until then they wait in the queue.
+    let (asks, mut asked) = mpsc::channel(16);
+    kept.requests = Some(read_request_streams(
+        Arc::clone(connection),
+        StreamConfig::default(),
+        stops.clone(),
+        asks,
+        |event| event,
+    ));
+    let mut refused: HashMap<u64, PeerRequestId> = HashMap::new();
     let control_kept = &mut kept.control;
     let namespace = TrackNamespace::new(
         place
@@ -1038,6 +1052,9 @@ async fn play(
                     }
                 }
             }
+            Some(event) = asked.recv() => {
+                refuse_a_request_of_the_peer(&mut session, &mut refused, event).await?;
+            }
             event = events.recv() => match event {
                 Some(UniEvent::Object { header, object, .. }) => {
                     // An Object of the catalog's track, which stays
@@ -1185,6 +1202,48 @@ async fn waited_between_tries(ui: &mut Ui, tried: Option<Instant>) -> Result<boo
         .unless_ended("the wait", BETWEEN_TRIES * 2, waiting)
         .await?
         .is_some())
+}
+
+/// What the peer does on a request stream it opened: the viewer serves no
+/// request, and refuses each (`Session::refuse_peer_request`: `NOT_SUPPORTED`
+/// and a FIN, §3.3.2), as the Rust client does in its modes that serve
+/// none. What still comes on a refused stream goes to the session, which
+/// checks the Request ID of a `REQUEST_UPDATE` among it (§10.1). An error is
+/// one of the session, and is closed with its code (`termination_code`).
+async fn refuse_a_request_of_the_peer(
+    session: &mut Session,
+    refused: &mut HashMap<u64, PeerRequestId>,
+    event: PeerRequestStreamEvent<<WtConnection as Connection>::Send>,
+) -> Result<()> {
+    match event {
+        PeerRequestStreamEvent::Opened {
+            stream,
+            mut send,
+            first,
+        } => {
+            let (response, request) = session.refuse_peer_request(first)?;
+            if let Some(request) = request {
+                refused.insert(stream, request);
+            }
+            // An error means the peer is gone or stopped the stream.
+            let _ = send_message(&mut send, &response, &Trace::default(), "request").await;
+            send.finish();
+        }
+        PeerRequestStreamEvent::Message { stream, message } => {
+            // None where the session keeps nothing of it (`MAX_PEER_REQUESTS`).
+            if let Some(request) = refused.get(&stream) {
+                session.on_peer_request_message(*request, message)?;
+            }
+        }
+        PeerRequestStreamEvent::Closed { stream, .. } => {
+            if let Some(request) = refused.remove(&stream) {
+                session.on_peer_request_closed(request);
+            }
+        }
+        PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
+        PeerRequestStreamEvent::ReaderPanicked => bail!("a reader of a request stream panicked"),
+    }
+    Ok(())
 }
 
 /// Where a GOAWAY says to go: its New Session URI, or `None` for the URL of
