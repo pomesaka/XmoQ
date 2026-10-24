@@ -53,4 +53,4 @@ One run each, three of the goal's shape. Delay: the median of the viewers' media
 
 ## Decision or next action
 
-None. The goal is met on this machine up to about 500 viewers in all, not 1,000. More than one machine (the viewers elsewhere) is what would tell what the relay alone does.
+None. The goal is met on this machine up to about 500 viewers in all, not 1,000. More than one machine (the viewers elsewhere) is what would tell what the relay alone does. Read against the goal as decided later the same day (the rooms may be split over relays): one relay took 500 viewers in all; the goal may be reached with the rooms split over relays, which was not measured.
