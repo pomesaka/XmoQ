@@ -1,4 +1,10 @@
 export {
+	CATCH_UP_LINES,
+	CATCH_UP_LINES_MOST,
+	catchUpLines,
+	type LinesGap,
+} from "./core/history.ts";
+export {
 	type ChatLimits,
 	chatLimits,
 	type KeptBack,

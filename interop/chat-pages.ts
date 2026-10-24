@@ -4,7 +4,7 @@
 // `xmoq/chat/r/<name>`, says its lines on `said`, and reads the room's
 // `lines` with SUBSCRIBE and a Joining FETCH for the newest 16.
 //
-// Usage: bun chat-pages.ts [--relay own|moqtail] [--port N] [--verbose]
+// Usage: bun chat-pages.ts [--relay own|moqtail] [--restart yes|no] [--port N] [--verbose]
 //
 // Through moqtail's relay 0.15.0 the first SUBSCRIBE of page a for the
 // room is refused with DOES_NOT_EXIST: that relay does not hold it under
@@ -39,6 +39,23 @@
 //     `PARTICIPANT_GONE room="r" name="b"` and cancels its SUBSCRIBE for
 //     b's `said`, so that b is no longer heard. The others go on: a's next
 //     line is numbered 21. No other participant is let go.
+//
+// Catching up (added on 2026-10-24, written before its first run;
+// docs/experiments/2026-10-24-a-page-fetches-the-lines-it-missed.md):
+//
+//   - Page c leaves, a says 22 to 26, and c joins again on the same
+//     session with `lastHad` 21: its Joining FETCH brings 22 to 26 as
+//     history, and no gap is told. Through the own relay the gatherer
+//     answers `start=22,0 end=26,1 lines=5`.
+//   - c leaves again, a says 27 to 31, and c joins again with `lastHad` 26
+//     and `catchUpLines` 3: it is told of a gap after 26 and before 29, and
+//     has 29 to 31 as history; 27 and 28 never come. a's next line, 32,
+//     comes live.
+//   - `--restart yes` (the own relay alone): the gatherer is stopped and
+//     started again on the same store. The subscriptions of a and c end and
+//     are made again; nothing was said meanwhile, so their FETCH asks for
+//     nothing (the gatherer answers no FETCH), where it asked for the newest
+//     16 before. a's next line, 33, comes live to both, once.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,7 +75,11 @@ import {
 	stopEverythingOnExit,
 	withTimeout,
 } from "./harness.ts";
-import type { OwnPageExtras, PageChatReport } from "./xmoq-page.ts";
+import type {
+	OwnPageExtras,
+	PageChatCatchUp,
+	PageChatReport,
+} from "./xmoq-page.ts";
 
 // The driver is type-checked without the DOM library; `window` is only used
 // inside the functions that Playwright runs in the page.
@@ -69,6 +90,7 @@ const { values: options } = parseArgs({
 		relay: { type: "string", default: "own" },
 		port: { type: "string", default: "24398" },
 		verbose: { type: "boolean", default: false },
+		restart: { type: "string", default: "yes" },
 	},
 });
 
@@ -106,6 +128,57 @@ async function participant(
 	}, `page ${name} to be heard and to follow the room`);
 	return page;
 }
+
+/** Has page `name` leave the room, and waits until the gatherer lets it go. */
+async function leave(
+	gatherer: LoggedProcess,
+	page: Page,
+	name: string,
+): Promise<void> {
+	const gone = new RegExp(`^PARTICIPANT_GONE room="${ROOM}" name="${name}"$`);
+	const before = gatherer.matches(gone).length;
+	await withTimeout(
+		page.evaluate(() => window.xmoqOwn.chatLeave()),
+		`page ${name} to stop`,
+	);
+	await pollFor(
+		() => gatherer.matches(gone)[before],
+		`the gatherer to let ${name} go`,
+	);
+}
+
+/** Has page `name`, which left, join the room again with `catchUp`, and waits as `participant` does. */
+async function rejoin(
+	gatherer: LoggedProcess,
+	page: Page,
+	name: string,
+	catchUp: PageChatCatchUp,
+): Promise<void> {
+	const subscribed = new RegExp(`^SUBSCRIBED room="${ROOM}" name="${name}"$`);
+	const before = gatherer.matches(subscribed).length;
+	await withTimeout(
+		page.evaluate(([room, as, up]) => window.xmoqOwn.joinChat(room, as, up), [
+			ROOM,
+			name,
+			catchUp,
+		] satisfies [string, string, PageChatCatchUp]),
+		`page ${name} to join the room again`,
+	);
+	await pollFor(
+		() => gatherer.matches(subscribed)[before],
+		`the gatherer to follow ${name} again`,
+	);
+	await pollFor(async () => {
+		const { heard, following } = await report(page);
+		return heard && following ? true : undefined;
+	}, `page ${name} to be heard and to follow the room again`);
+}
+
+/** The FETCH answers the gatherer printed: what follows `FETCH_ANSWERED room="r" `, one each. */
+const answers = (gatherer: LoggedProcess): string[] =>
+	gatherer
+		.matches(/^FETCH_ANSWERED room="r" (.*)$/)
+		.map((match) => captureGroup(match, 1));
 
 /** Has the page say a line, and returns what became of it: "sent", or "kept-back <why>", or "not-sent <why>". */
 async function say(page: Page, text: string): Promise<string> {
@@ -185,6 +258,9 @@ async function main(): Promise<void> {
 	if (options.relay !== "own" && options.relay !== "moqtail") {
 		throw new Error(`--relay is own or moqtail, not ${options.relay}`);
 	}
+	if (options.restart !== "yes" && options.restart !== "no") {
+		throw new Error(`--restart is yes or no, not ${options.restart}`);
+	}
 	const directory = mkdtempSync(join(tmpdir(), "xmoq-chat-pages-"));
 	let summary: string;
 	try {
@@ -194,11 +270,8 @@ async function main(): Promise<void> {
 			clients: ["own-browser"],
 			verbose: options.verbose,
 		});
-		const gatherer = spawnChatGatherer(
-			context,
-			"gatherer",
-			join(directory, "chat.sqlite3"),
-		);
+		const store = join(directory, "chat.sqlite3");
+		const gatherer = spawnChatGatherer(context, "gatherer", store);
 		await gatherer.waitForLine(/^WATCHING prefix=xmoq\/chat$/);
 
 		const a = await participant(context, gatherer, "a");
@@ -271,10 +344,7 @@ async function main(): Promise<void> {
 		// The own relay has the latest Group alone, and passes the FETCH to
 		// the gatherer; moqtail's relay 0.15.0 answered it from what it held,
 		// and the gatherer was not asked (in each of 12 runs).
-		const answered = gatherer
-			.matches(/^FETCH_ANSWERED room="r" (.*)$/)
-			.map((match) => captureGroup(match, 1))
-			.join("; ");
+		const answered = answers(gatherer).join("; ");
 		expect(
 			"what the gatherer answered",
 			answered,
@@ -320,7 +390,95 @@ async function main(): Promise<void> {
 				.join(","),
 			"b",
 		);
-		summary = `through the ${options.relay} relay and the gatherer, pages a and b said lines on their tracks and had the room's lines live, numbered by the gatherer; a line of 513 bytes and the sixth of 6 at once were kept back by the page; page c, coming after 20 lines, had the newest 16 by its Joining FETCH and the next live (${ways.join("; ")}); page b stopped, withdrew its namespace, and the gatherer let it go and ended its subscription to b's said, while a's next line was numbered 21`;
+
+		// Page c leaves and joins again: it catches up the lines it missed.
+		const pace = (): Promise<void> =>
+			new Promise((resolve) => setTimeout(resolve, 250));
+		await leave(gatherer, c, "c");
+		for (let number = 22; number <= 26; number++) {
+			await sayOne(gatherer, a, "a", number);
+			await pace();
+		}
+		const answeredBefore = answers(gatherer).length;
+		await rejoin(gatherer, c, "c", { lastHad: "21" });
+		const caughtUp = await lines(c, "c", 23);
+		expect(
+			"what page c had after it joined again",
+			described(caughtUp.lines),
+			"4-19 history, 20-21 live, 22-26 history",
+		);
+		expect("the gaps page c was told of", caughtUp.gaps.join(","), "");
+
+		// More missed than it catches up: the newest, and a gap.
+		await leave(gatherer, c, "c");
+		for (let number = 27; number <= 31; number++) {
+			await sayOne(gatherer, a, "a", number);
+			await pace();
+		}
+		await rejoin(gatherer, c, "c", { lastHad: "26", catchUpLines: 3 });
+		await lines(c, "c", 26);
+		await sayOne(gatherer, a, "a", 32);
+		const withGap = await lines(c, "c", 27);
+		expect(
+			"what page c had after it joined again with a gap",
+			described(withGap.lines),
+			"4-19 history, 20-21 live, 22-26 history, 29-31 history, 32-32 live",
+		);
+		expect("the gaps page c was told of", withGap.gaps.join(","), "26-29");
+		const caughtUpAnswers = answers(gatherer).slice(answeredBefore).join("; ");
+		if (options.relay === "own") {
+			expect(
+				"what the gatherer answered for the catching up",
+				caughtUpAnswers,
+				"start=22,0 end=26,1 lines=5 unknown_through=none; start=29,0 end=31,1 lines=3 unknown_through=none",
+			);
+		}
+		let restarted = "no restart";
+		if (options.restart === "yes") {
+			await gatherer.stop();
+			await pollFor(async () => {
+				const [ofA, ofC] = [await report(a), await report(c)];
+				return ofA.following || ofC.following ? undefined : true;
+			}, "the subscriptions of a and c to end");
+			const second = spawnChatGatherer(context, "gatherer-2", store);
+			for (const [page, name] of [
+				[a, "a"],
+				[c, "c"],
+			] as const) {
+				await second.waitForLine(
+					new RegExp(`^SUBSCRIBED room="${ROOM}" name="${name}"$`),
+				);
+				await pollFor(async () => {
+					const { heard, following } = await report(page);
+					return heard && following ? true : undefined;
+				}, `page ${name} to be heard and to follow the room after the restart`);
+			}
+			await sayOne(second, a, "a", 33);
+			for (const [page, name, count, last] of [
+				[a, "a", 34, "0-33 live"],
+				[
+					c,
+					"c",
+					28,
+					"4-19 history, 20-21 live, 22-26 history, 29-31 history, 32-33 live",
+				],
+			] as const) {
+				const seen = await lines(page, name, count);
+				expect(
+					`the lines of page ${name} after the restart`,
+					described(seen.lines),
+					last,
+				);
+			}
+			expect(
+				"what the gatherer answered after the restart",
+				answers(second).join("; "),
+				"",
+			);
+			restarted =
+				"after a restart of the gatherer on the same store, a and c subscribed again, fetched nothing, and had line 33 live";
+		}
+		summary = `through the ${options.relay} relay and the gatherer, pages a and b said lines on their tracks and had the room's lines live, numbered by the gatherer; a line of 513 bytes and the sixth of 6 at once were kept back by the page; page c, coming after 20 lines, had the newest 16 by its Joining FETCH and the next live (${ways.join("; ")}); page b stopped, withdrew its namespace, and the gatherer let it go and ended its subscription to b's said, while a's next line was numbered 21; page c, joining again after 22 to 26, had them by its FETCH (${described(caughtUp.lines)}), and, joining again after 27 to 31 with catchUpLines 3, was told of the gap ${withGap.gaps.join(",")} and had 29 to 31 (gatherer answered: ${caughtUpAnswers === "" ? "none" : caughtUpAnswers}); ${restarted}`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });
