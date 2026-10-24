@@ -388,6 +388,8 @@ export type OwnPageExtras = {
 	joinChat(room: string, name: string): Promise<void>;
 	/** Says one line with `ChatParticipant.say`: what became of it, as JSON of `SayOutcome` with the Group in decimal. */
 	chatSay(text: string): Promise<string>;
+	/** Stops the participant (the `signal` of `joinChat`); the session stays open. */
+	chatLeave(): Promise<void>;
 	/** What the participant has had so far, in the order it came, and its status. */
 	chatReport(): Promise<PageChatReport>;
 };

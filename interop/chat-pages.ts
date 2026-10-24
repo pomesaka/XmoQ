@@ -33,6 +33,12 @@
 //   - c says a line: numbered 20, and all three pages get it live.
 //   - Every page has each line once, and says by which way it came: a and
 //     b had 0 to 20 live, c 4 to 19 as history and 20 live.
+//   - Page b stops (the `signal` of `joinChat`; added on 2026-10-24,
+//     written before its first run): it withdraws `xmoq/chat/r/b`, the
+//     relay tells the gatherer NAMESPACE_DONE, the gatherer prints
+//     `PARTICIPANT_GONE room="r" name="b"` and cancels its SUBSCRIBE for
+//     b's `said`, so that b is no longer heard. The others go on: a's next
+//     line is numbered 21. No other participant is let go.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -293,7 +299,28 @@ async function main(): Promise<void> {
 			}
 			ways.push(`${name}: ${described(seen.lines)}`);
 		}
-		summary = `through the ${options.relay} relay and the gatherer, pages a and b said lines on their tracks and had the room's lines live, numbered by the gatherer; a line of 513 bytes and the sixth of 6 at once were kept back by the page; page c, coming after 20 lines, had the newest 16 by its Joining FETCH and the next live (${ways.join("; ")})`;
+
+		// Page b stops: it withdraws its namespace, and the gatherer, told by
+		// the relay, lets b go and ends its subscription to b's `said`.
+		await withTimeout(
+			b.evaluate(() => window.xmoqOwn.chatLeave()),
+			"page b to stop",
+		);
+		await gatherer.waitForLine(/^PARTICIPANT_GONE room="r" name="b"$/);
+		await pollFor(
+			async () => ((await report(b)).heard ? undefined : true),
+			"the gatherer to end its subscription to the `said` of page b",
+		);
+		await sayOne(gatherer, a, "a", 21);
+		expect(
+			"the participants the gatherer let go",
+			gatherer
+				.matches(/^PARTICIPANT_GONE room="r" name="([^"]*)"$/)
+				.map((match) => captureGroup(match, 1))
+				.join(","),
+			"b",
+		);
+		summary = `through the ${options.relay} relay and the gatherer, pages a and b said lines on their tracks and had the room's lines live, numbered by the gatherer; a line of 513 bytes and the sixth of 6 at once were kept back by the page; page c, coming after 20 lines, had the newest 16 by its Joining FETCH and the next live (${ways.join("; ")}); page b stopped, withdrew its namespace, and the gatherer let it go and ended its subscription to b's said, while a's next line was numbered 21`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });
