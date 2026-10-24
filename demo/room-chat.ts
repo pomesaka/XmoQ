@@ -4,14 +4,18 @@
 // The page is a participant (`joinChat` of `@xmoq/chat`): it announces
 // `xmoq/chat/<room>/<name>`, says its lines on `said`, and reads the
 // room's `lines` from the gatherer (`xmoq-chat`, which `serve.ts` starts),
-// with the newest 16 by a Joining FETCH when it comes.
+// with the newest 16 by a Joining FETCH when it comes, and the lines it
+// missed (200 at the most, `?chatCatchUpLines=N`) when it subscribes or
+// connects again. Where it missed more, one line says so above them.
 
 import {
 	type ChatLimits,
 	type ChatParticipant,
+	catchUpLines,
 	chatLimits,
 	joinChat,
 	type KeptBack,
+	type LinesGap,
 	type SayOutcome,
 } from "@xmoq/chat";
 import type { MoqtConnection } from "@xmoq/moqt";
@@ -19,7 +23,8 @@ import type { MoqtConnection } from "@xmoq/moqt";
 declare const XMOQ_DEMO: { chatTracks: boolean };
 
 /**
- * How many lines the page shows; the oldest go.
+ * How many lines the page shows; the oldest go. The participant catches up
+ * as many by default (`CATCH_UP_LINES` of `@xmoq/chat`).
  * Not a flag: what a page holds is bounded whatever the address says.
  */
 const SHOWN_LINES = 200;
@@ -42,6 +47,17 @@ function limitsOfTheAddress(): ChatLimits {
 	if (textBytes !== null) given.textBytes = Number(textBytes);
 	if (linesPerSecond !== null) given.linesPerSecond = Number(linesPerSecond);
 	return chatLimits(given);
+}
+
+/**
+ * `?chatCatchUpLines=N`: how many of the lines it missed the page fetches
+ * at the most when it subscribes or connects again, from 1 to 1,000
+ * (`catchUpLines` of `@xmoq/chat`); 200 when left out. More than the page
+ * shows are fetched and the oldest go.
+ */
+function catchUpOfTheAddress(): number {
+	const given = new URLSearchParams(location.search).get("chatCatchUpLines");
+	return catchUpLines(given === null ? undefined : Number(given));
 }
 
 const KEPT_BACK: Record<KeptBack, (limits: ChatLimits) => string> = {
@@ -88,31 +104,59 @@ export function startChat(
 		say(`the chat's limits of the address: ${String(error)}; the defaults are used`);
 		limits = chatLimits();
 	}
+	let catchUp: number;
+	try {
+		catchUp = catchUpOfTheAddress();
+	} catch (error) {
+		say(`the chat's catching up of the address: ${String(error)}; the default is used`);
+		catchUp = catchUpLines();
+	}
 
+	/** The newest line number shown, for the participant of the next connection (`lastHad`). */
+	let lastHad: bigint | undefined;
+	/**
+	 * Places `shown` by its number: the history of the Joining FETCH can
+	 * come after a line said meanwhile. A gap has the number of the first
+	 * line after it (`before`), and goes before that line: a line goes
+	 * before the first element of a larger number, a gap before the first
+	 * of the same number or larger.
+	 */
+	const place = (shown: HTMLElement, number: bigint, isGap: boolean): void => {
+		const after = [...log.querySelectorAll<HTMLElement>("div[data-number]")].find((other) => {
+			const theirs = BigInt(other.dataset.number ?? "0");
+			return isGap ? theirs >= number : theirs > number;
+		});
+		log.insertBefore(shown, after ?? null);
+		while (log.childElementCount > SHOWN_LINES) log.firstElementChild?.remove();
+		if (after === undefined) log.scrollTop = log.scrollHeight;
+		document.body.dataset.chatLines = String(log.querySelectorAll("div[data-how]").length);
+	};
 	const add = (line: { name: string; text: string; at: number; number: bigint; how: string }): void => {
+		if (lastHad === undefined || line.number > lastHad) lastHad = line.number;
 		const shown = document.createElement("div");
 		shown.dataset.number = line.number.toString();
 		shown.dataset.how = line.how;
 		shown.textContent = `${shownTime(line.at)} ${line.number} ${line.name}: ${line.text}`;
-		// A line is placed by its number: the history of the Joining FETCH
-		// can come after a line said meanwhile.
-		const after = [...log.querySelectorAll<HTMLElement>("div[data-number]")].find(
-			(other) => BigInt(other.dataset.number ?? "0") > line.number,
-		);
-		log.insertBefore(shown, after ?? null);
-		while (log.childElementCount > SHOWN_LINES) log.firstElementChild?.remove();
-		if (after === undefined) log.scrollTop = log.scrollHeight;
-		document.body.dataset.chatLines = String(log.childElementCount);
+		place(shown, line.number, false);
+	};
+	const addGap = (gap: LinesGap): void => {
+		const shown = document.createElement("div");
+		shown.dataset.number = gap.before.toString();
+		shown.dataset.gap = "";
+		shown.style.opacity = "0.6";
+		shown.textContent = `lines ${gap.after + 1n} to ${gap.before - 1n} were not fetched`;
+		place(shown, gap.before, true);
 	};
 
 	let participant: ChatParticipant | undefined;
 	void keepInTheRoom(
 		connectForChat,
-		{ room, name, limits },
+		() => ({ room, name, limits, catchUpLines: catchUp, lastHad }),
 		(joined) => {
 			participant = joined;
 		},
 		add,
+		addGap,
 		say,
 	);
 
@@ -145,7 +189,9 @@ export function startChat(
 
 /**
  * Connects for the chat, joins the room, and does so again `AGAIN_MS` after
- * the session ended, for as long as the page is open.
+ * the session ended, for as long as the page is open. Each participant is
+ * told the newest line shown (`lastHad` of `where`), so that it fetches the
+ * lines the page missed while it was away.
  *
  * WHY a connection of its own, and not the one of the broadcast: the
  * participant names the `serve` handlers of its connection, which the
@@ -154,17 +200,25 @@ export function startChat(
  */
 async function keepInTheRoom(
 	connectForChat: () => Promise<MoqtConnection>,
-	where: { room: string; name: string; limits: ChatLimits },
+	where: () => {
+		room: string;
+		name: string;
+		limits: ChatLimits;
+		catchUpLines: number;
+		lastHad: bigint | undefined;
+	},
 	joined: (participant: ChatParticipant | undefined) => void,
 	onLine: Parameters<typeof joinChat>[1]["onLine"],
+	onGap: (gap: LinesGap) => void,
 	say: (text: string) => void,
 ): Promise<void> {
 	for (;;) {
 		try {
 			const connection = await connectForChat();
 			const participant = await joinChat(connection, {
-				...where,
+				...where(),
 				onLine,
+				onGap,
 				onMalformed: (number, why) => say(`line ${number} of the track is no line: ${why}`),
 				onStatus: (status) =>
 					say(

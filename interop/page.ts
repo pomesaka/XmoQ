@@ -45,6 +45,7 @@ import type {
 	PageAudioReport,
 	PageBroadcastReport,
 	PageCatalogReport,
+	PageChatCatchUp,
 	PageChatReport,
 	PageFetch,
 	PageFetchReport,
@@ -789,11 +790,13 @@ const chat: {
 	stop: AbortController;
 	lines: PageChatReport["lines"];
 	malformed: string[];
+	gaps: string[];
 } = {
 	participant: undefined,
 	stop: new AbortController(),
 	lines: [],
 	malformed: [],
+	gaps: [],
 };
 
 window.xmoqOwn = {
@@ -943,36 +946,50 @@ window.xmoqOwn = {
 		shown: [...kept.shown],
 	})),
 
-	joinChat: withPlainErrors(async (room: string, name: string) => {
-		chat.participant = await joinChat(connected(), {
-			room,
-			name,
-			signal: chat.stop.signal,
-			onLine(line) {
-				console.log(
-					`CHAT_LINE number=${line.number} name=${line.name} how=${line.how}`,
-				);
-				// WHY a bound: a run sends a few lines; this keeps a page from
-				// holding a room's worth.
-				if (chat.lines.length < 1_000) {
-					chat.lines.push({
-						number: line.number.toString(),
-						name: line.name,
-						text: line.text,
-						how: line.how,
-					});
-				}
-			},
-			onMalformed(number, why) {
-				chat.malformed.push(`${number} ${why}`);
-			},
-			onStatus(status) {
-				console.log(
-					`CHAT_STATUS heard=${status.heard} following=${status.following} last_end=${status.lastEnd ?? "none"}`,
-				);
-			},
-		});
-	}),
+	joinChat: withPlainErrors(
+		async (room: string, name: string, catchUp?: PageChatCatchUp) => {
+			// A page that left joins again with a participant of its own.
+			if (chat.stop.signal.aborted) chat.stop = new AbortController();
+			chat.participant = await joinChat(connected(), {
+				room,
+				name,
+				signal: chat.stop.signal,
+				...(catchUp?.catchUpLines === undefined
+					? {}
+					: { catchUpLines: catchUp.catchUpLines }),
+				...(catchUp?.lastHad === undefined
+					? {}
+					: { lastHad: BigInt(catchUp.lastHad) }),
+				onGap(gap) {
+					console.log(`CHAT_GAP after=${gap.after} before=${gap.before}`);
+					chat.gaps.push(`${gap.after}-${gap.before}`);
+				},
+				onLine(line) {
+					console.log(
+						`CHAT_LINE number=${line.number} name=${line.name} how=${line.how}`,
+					);
+					// WHY a bound: a run sends a few lines; this keeps a page from
+					// holding a room's worth.
+					if (chat.lines.length < 1_000) {
+						chat.lines.push({
+							number: line.number.toString(),
+							name: line.name,
+							text: line.text,
+							how: line.how,
+						});
+					}
+				},
+				onMalformed(number, why) {
+					chat.malformed.push(`${number} ${why}`);
+				},
+				onStatus(status) {
+					console.log(
+						`CHAT_STATUS heard=${status.heard} following=${status.following} last_end=${status.lastEnd ?? "none"}`,
+					);
+				},
+			});
+		},
+	),
 
 	chatSay: withPlainErrors(async (text: string) => {
 		if (chat.participant === undefined) throw new Error("joinChat() first");
@@ -991,6 +1008,7 @@ window.xmoqOwn = {
 		return {
 			lines: [...chat.lines],
 			malformed: [...chat.malformed],
+			gaps: [...chat.gaps],
 			heard: status?.heard ?? false,
 			following: status?.following ?? false,
 			lastEnd: status?.lastEnd ?? null,

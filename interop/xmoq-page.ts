@@ -383,9 +383,15 @@ export type OwnPageExtras = {
 	/**
 	 * Joins the room as a participant of the chat with `joinChat` of
 	 * `@xmoq/chat`, on the connection of `connect`, whose `serve` handlers
-	 * it then names. Resolves once the namespace is announced.
+	 * it then names. Resolves once the namespace is announced. Again after
+	 * `chatLeave`, with a participant of its own, which hands on to the same
+	 * report.
 	 */
-	joinChat(room: string, name: string): Promise<void>;
+	joinChat(
+		room: string,
+		name: string,
+		catchUp?: PageChatCatchUp,
+	): Promise<void>;
 	/** Says one line with `ChatParticipant.say`: what became of it, as JSON of `SayOutcome` with the Group in decimal. */
 	chatSay(text: string): Promise<string>;
 	/** Stops the participant (the `signal` of `joinChat`); the session stays open. */
@@ -393,6 +399,9 @@ export type OwnPageExtras = {
 	/** What the participant has had so far, in the order it came, and its status. */
 	chatReport(): Promise<PageChatReport>;
 };
+
+/** `catchUpLines` and `lastHad` (in decimal) of `joinChat`. */
+export type PageChatCatchUp = { catchUpLines?: number; lastHad?: string };
 
 /** What a participant of the chat had, in values that survive `page.evaluate`. */
 export type PageChatReport = {
@@ -405,6 +414,8 @@ export type PageChatReport = {
 	}[];
 	/** Objects of `lines` that were no line: "<Group> <why>". */
 	malformed: string[];
+	/** What `onGap` was called with: "<after>-<before>". */
+	gaps: string[];
 	/** `ChatParticipant.status()`. */
 	heard: boolean;
 	following: boolean;

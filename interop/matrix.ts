@@ -1205,18 +1205,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		},
 		// Own pages as participants of the chat (`joinChat` of `@xmoq/chat`,
 		// which the demo's pages use), with the gatherer, through both relays.
-		// The gatherer is not started again: through moqtail's relay that
-		// is what did not always work (above).
+		// The gatherer is started again through the own relay alone: through
+		// moqtail's relay that is what did not always work (above).
 		{
-			name: "own relay: chat: own pages say lines on their tracks and have the room's lines from the gatherer, live and, for a page that comes later, the newest 16 by a Joining FETCH, each line marked with the way it came",
+			name: "own relay: chat: own pages say lines on their tracks and have the room's lines from the gatherer, live, the newest 16 by a Joining FETCH, and the ones missed when they join again, with a gap past the limit",
 			script: "chat-pages.ts",
 			args: [],
 			relay: "own",
 		},
 		{
-			name: "moqtail relay: chat: own pages say lines on their tracks and have the room's lines from the gatherer, live and, for a page that comes later, the newest 16 by a Joining FETCH, each line marked with the way it came",
+			name: "moqtail relay: chat: own pages say lines on their tracks and have the room's lines from the gatherer, live, the newest 16 by a Joining FETCH, and the ones missed when they join again, with a gap past the limit",
 			script: "chat-pages.ts",
-			args: [],
+			args: ["--restart", "no"],
 			relay: "moqtail",
 		},
 		// The own clients against a peer that sends no SETUP, or answers no

@@ -12,7 +12,11 @@ import {
 	type Subscription,
 	type SubscriptionEnd,
 } from "@xmoq/moqt";
-import { HISTORY_LINES, historyStart } from "../core/history.ts";
+import {
+	catchUpLines,
+	historyToFetch,
+	type LinesGap,
+} from "../core/history.ts";
 import {
 	type ChatLimits,
 	chatLimits,
@@ -36,8 +40,11 @@ import { SeenLines } from "../core/seen-lines.ts";
 
 /**
  * How many line numbers are remembered, so that a line is handed on once
- * (`SeenLines`). WHY 200: what the demo's page keeps of the chat. Not a
- * setting. **Provisional**.
+ * (`SeenLines`), where `catchUpLines` is no more. WHY 200: what the demo's
+ * page keeps of the chat. **Provisional**. WHY as many as `catchUpLines`
+ * where that is more: the lines of a FETCH that catches up come with older
+ * numbers than live lines that came meanwhile, and a number below all those
+ * remembered is passed over as had.
  */
 const SEEN_LINES = 200;
 
@@ -125,6 +132,27 @@ export interface JoinChatOptions {
 	 * out of their order: a line said now can come before the history.
 	 */
 	onLine(line: ReceivedLine): void;
+	/**
+	 * Called where lines of the room were not fetched, before the lines
+	 * after them: a subscription made again missed more lines than
+	 * `catchUpLines`, and only the newest of them are fetched.
+	 */
+	onGap?(gap: LinesGap): void;
+	/**
+	 * How many of the lines it missed the participant fetches at the most,
+	 * when its subscription to `lines` is made again (or when it comes with
+	 * `lastHad`): `CATCH_UP_LINES` (200, what the demo's page keeps) when
+	 * left out, from 1 to `CATCH_UP_LINES_MOST` (1,000). Where it missed more,
+	 * the newest are fetched and `onGap` tells of the rest.
+	 */
+	catchUpLines?: number;
+	/**
+	 * The number of the newest line the caller already has, from an earlier
+	 * participant (a page that connected again): the first FETCH then catches
+	 * up from the line after it, as a subscription made again does. Left
+	 * out, the first FETCH brings the newest 16 lines.
+	 */
+	lastHad?: bigint;
 	/** Called for an Object of `lines` that is no line, with its Group ID and why. */
 	onMalformed?(number: bigint, why: Malformed): void;
 	/** Called when `status()` changes. */
@@ -185,13 +213,16 @@ function described(end: SubscriptionEnd): string {
  * (PUBLISH_NAMESPACE), serves the relay's SUBSCRIBE for `said` on it, and
  * subscribes to the room's `lines`, with a Joining FETCH for the newest
  * `HISTORY_LINES` where the room has lines. When the subscription ends it
- * is made again, `AGAIN_MS` later, for as long as the session lasts.
+ * is made again, `AGAIN_MS` later, for as long as the session lasts, and
+ * its Joining FETCH asks for the lines after the last one had
+ * (`historyToFetch`).
  *
  * **It names the connection's `serve` handlers**: a SUBSCRIBE for another
  * track, and every FETCH, are refused. Give it a connection of its own.
  *
  * Resolves once the namespace is announced; rejects as
- * `publishNamespace` does, or with a `RangeError` for limits out of range.
+ * `publishNamespace` does, or with a `RangeError` for limits or
+ * `catchUpLines` out of range, or a `lastHad` below 0.
  */
 export async function joinChat(
 	connection: Pick<
@@ -201,6 +232,10 @@ export async function joinChat(
 	options: JoinChatOptions,
 ): Promise<ChatParticipant> {
 	const limits = chatLimits(options.limits);
+	const catchUp = catchUpLines(options.catchUpLines);
+	if (options.lastHad !== undefined && options.lastHad < 0n) {
+		throw new RangeError(`lastHad is a line number, not ${options.lastHad}`);
+	}
 	const now = options.now ?? Date.now;
 	const stop = new AbortController();
 	options.signal?.addEventListener("abort", () => stop.abort(), { once: true });
@@ -268,12 +303,21 @@ export async function joinChat(
 	// `said`, which ends `listener`.
 	await connection.publishNamespace(ours, undefined, { signal: stop.signal });
 
-	const seen = new SeenLines(SEEN_LINES);
+	const remembered = Math.max(SEEN_LINES, catchUp);
+	let seen = new SeenLines(remembered);
+	/**
+	 * The largest line number that came, a line or not: the next
+	 * subscription's FETCH catches up from the one after it. WHY not only
+	 * the lines handed on: an Object that is no line was had all the same,
+	 * and fetching it again would bring it again.
+	 */
+	let had = options.lastHad;
 	const take = (
 		number: bigint,
 		payload: Uint8Array,
 		how: ReceivedLine["how"],
 	): void => {
+		if (had === undefined || number > had) had = number;
 		const read = readLine(number, payload);
 		if (!read.ok) {
 			options.onMalformed?.(number, read.why);
@@ -285,17 +329,28 @@ export async function joinChat(
 	const history = async (subscription: Subscription): Promise<void> => {
 		// §10.12.2: a Joining FETCH for a track whose SUBSCRIBE_OK said that
 		// nothing was published is refused with INVALID_RANGE; a room
-		// without lines has nothing to fetch.
-		const largest = subscription.parameters.largestObject;
-		if (largest === undefined) return;
+		// without lines has nothing to fetch (`historyToFetch`).
+		const largest = subscription.parameters.largestObject?.group;
+		// WHY decided here, before the first `await`: the live lines that
+		// come next would move `had` past what this FETCH is to bring.
+		const plan = historyToFetch(had, largest, catchUp);
+		if (plan.forget) {
+			seen = new SeenLines(remembered);
+			had = undefined;
+		}
+		if (plan.fetch === undefined || largest === undefined) return;
+		const { start, gap } = plan.fetch;
+		if (gap !== undefined) options.onGap?.(gap);
+		const most = largest - start + 1n;
 		const fetch = await connection.fetch(
 			{
 				range: {
-					// An Absolute Joining FETCH from the Group `historyStart`
-					// gives (§10.12.2.2): the reason is there.
+					// An Absolute Joining FETCH from the Group that
+					// `historyToFetch` gives (§10.12.2.2), to the Joining
+					// Location: why Absolute is at `historyStart`.
 					fetchType: "AbsoluteJoining",
 					joiningRequestId: subscription.requestId,
-					joiningStart: historyStart(largest.group),
+					joiningStart: start,
 				},
 			},
 			{
@@ -309,7 +364,7 @@ export async function joinChat(
 		const reader = decodeFetchBody(connection, fetch, {
 			limits: { maxObjectPayloadLength: MAX_LINE_PAYLOAD },
 		}).getReader();
-		let objects = 0;
+		let objects = 0n;
 		for (;;) {
 			const next = await reader.read();
 			if (next.done) return;
@@ -317,10 +372,10 @@ export async function joinChat(
 			const { groupId, objectId, payload } = next.value.object;
 			if (objectId !== 0n) continue;
 			take(groupId, payload, "history");
-			objects += 1;
+			objects += 1n;
 			// A relay or a gatherer that sends more than was asked for is not
 			// read further.
-			if (objects >= HISTORY_LINES) {
+			if (objects >= most) {
 				await reader.cancel();
 				return;
 			}
