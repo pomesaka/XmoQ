@@ -27,6 +27,8 @@ if [ -n "${RELAY_FLAGS:-}" ]; then relay_flags="-e RELAY_FLAGS"; fi
 # VIEWER_PROCS (processes a track's viewers run in) and VIEWER_FLAGS (more flags of theirs).
 if [ -n "${VIEWER_PROCS:-}" ]; then relay_flags="$relay_flags -e VIEWER_PROCS"; fi
 if [ -n "${VIEWER_FLAGS:-}" ]; then relay_flags="$relay_flags -e VIEWER_FLAGS"; fi
+# PUBLISHER_FLAGS: more flags of the two publishers ("--log-written on").
+if [ -n "${PUBLISHER_FLAGS:-}" ]; then relay_flags="$relay_flags -e PUBLISHER_FLAGS"; fi
 # WHY a memory limit: podman's machine is shared with other containers; this one is stopped
 # by the kernel before it takes theirs.
 # shellcheck disable=SC2086
