@@ -41,7 +41,7 @@ draftが黙っている箇所と矛盾している箇所で2つの実装がど�
 
 照合は`mise run interop`で走らせる。自前と`moqtail`のクライアントの全部の組み合わせで、`moqtail`のリレーと自前のリレーのそれぞれを通してObjectを1つ運び、実物のChromiumで確かめる。FETCH（StandaloneとJoining）の組と、MSFのカタログを`moqlivemock`の配信元と視聴者（`interop/peers/moqlivemock/`。Goでビルドする）とのあいだで読み書きする組もある。加えて、publisherやsubscriberが転送の途中で去る場面（kill、取り消し、読まないsubscriber）を、自前のリレーを通して走らせる。リレーが止まって同じポートで戻り、ページがつなぎ直す場面、答えの来ない要求を購読者が時間切れで取り消す場面、SETUPも答えも送らない相手（`xmoq-quiet-peer`、`crates/quiet-peer`。照合のためだけのcrateで、本体から依存させない）に対してクライアントがSETUP、PUBLISH、FETCHを諦める場面、購読者が購読の途中でREQUEST_UPDATEで配送の期限を変える場面、視聴者が配信より先に来てRENDEZVOUS_TIMEOUTで待つ場面（カタログの読み手が先に来る場面を含む）、端末の視聴者（`xmoq-watch`）が配信を視聴する場面、GOAWAY（`xmoq-quiet-peer`が送るものと、`moqtail`のリレーと自前のリレーがSIGTERMで送るもの）を受けたクライアントが移る場面、相手が誤ったRequest IDで要求を開く場面、SUBSCRIBE_NAMESPACEで名前空間の告知を受ける場面、チャットの集め役（`xmoq-chat`）を通して参加者がトラックで行を交わし、途中から来た参加者が履歴を受ける場面もある。場面は、リレーのログの行を待って進むので、その行の書式を変えると落ちる（`interop/disconnect.ts`の冒頭）。`mise run check`には入っていない。同じマシンで2つの作業コピーから同時に走らせるときは、`--base-port`を分ける。CIでは`interop`ジョブが同じタスクを呼び、照合が依存するパスに触れていないPRでは、skipと表示して終わる。`crates/`、`packages/`、`interop/`、`fixtures/`を変えたら、報告の前に`mise run interop`も走らせる。
 
-人がブラウザで見るためのデモは`mise run demo`で立てる（`demo/`。リレーとページのサーバーが立ち、Chromiumで配信のページと視聴のページを開く）。`demo/`はlintと型検査の対象外で、本体から依存させない。
+人がブラウザで見るためのデモは`mise run demo`で立てる（`demo/`。リレーとページのサーバーが立ち、Chromiumで配信のページと視聴のページを開く）。チャットの集め役（`xmoq-chat`）も立ち、ページはチャットをトラックだけで送り受けする（部屋のWebSocketはチャットを運ばない）。`--auth`のデモではチャットが無い（集め役とページのチャットの接続に渡すトークンの範囲が決まっていない）。`demo/`はlintと型検査の対象外で、本体から依存させない。
 
 1. 実装する。終わったと報告する前に`mise run check`を実際に走らせ、その出力を報告に含める。通っていない状態で終わったと報告しない
 2. 実装者とは別のレビュアーがコードを読む（`/review-team-xmoq`）。レビュアーには実装者の報告を渡さず、差分だけを渡す

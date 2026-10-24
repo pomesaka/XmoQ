@@ -4,7 +4,7 @@
 // are agreed on here.
 
 import { connect, type MoqtConnection } from "@xmoq/moqt";
-import { type SocketLine, startChat } from "./room-chat.ts";
+import { startChat } from "./room-chat.ts";
 
 export const NAMESPACE = ["xmoq", "demo"];
 export const TRACK = "video";
@@ -76,8 +76,7 @@ export const HERE: Broadcast = {
 
 /** What a room says on its WebSocket (`spikes/durable-objects-room/worker.js`). */
 type RoomMessage =
-	| { type: "hello"; history: SocketLine[]; connected: number; broadcast: Broadcast | null }
-	| ({ type: "chat" } & SocketLine)
+	| { type: "hello"; connected: number; broadcast: Broadcast | null }
 	| { type: "connected"; connected: number }
 	| { type: "reaction"; emoji: string }
 	| { type: "reactions"; counts: Record<string, number> }
@@ -108,24 +107,18 @@ export interface Room {
 
 /**
  * Joins the room `?room=NAME` ("demo" when left out) of the rooms `serve.ts`
- * started, and shows its chat and how many are connected. Undefined where
+ * started, shows how many are connected, and starts the chat of that room
+ * (over MoQ tracks, not this WebSocket). Undefined where
  * no rooms run: the demo then works without one.
  */
 export function joinRoom(as: string): Room | undefined {
 	if (XMOQ_DEMO.roomsUrl === null) return undefined;
 	const name = new URLSearchParams(location.search).get("room") ?? "demo";
 	const socket = new WebSocket(
-		`${XMOQ_DEMO.roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(name)}/ws?name=${encodeURIComponent(as)}`,
+		`${XMOQ_DEMO.roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(name)}/ws`,
 	);
 	const count = document.getElementById("connected");
-	// The chat, over this WebSocket and over the tracks of the chat.
-	const chat = startChat(
-		name,
-		as,
-		(text) => socket.send(JSON.stringify({ type: "chat", text })),
-		() => connectToRelay(HERE),
-	);
-	const show = (line: SocketLine): void => chat.showSocketLine(line);
+	startChat(name, as, () => connectToRelay(HERE));
 	// Reactions: an emoji somebody pressed is shown to everybody for two
 	// seconds, and counted for a script that looks at the page.
 	const reactions = document.getElementById("reactions");
@@ -165,17 +158,13 @@ export function joinRoom(as: string): Room | undefined {
 	});
 	socket.addEventListener("message", (event) => {
 		const message: RoomMessage = JSON.parse(String(event.data));
-		if (message.type === "hello") {
-			message.history.forEach(show);
-			first(message.broadcast);
-		}
+		if (message.type === "hello") first(message.broadcast);
 		if (message.type === "hello" || message.type === "broadcast") {
 			latest = message.broadcast;
 			if (latest !== null) {
 				for (const tell of waiting.splice(0)) tell(latest);
 			}
 		}
-		if (message.type === "chat") show(message);
 		if (message.type === "reaction") react(message.emoji, 1);
 		if (message.type === "reactions") {
 			for (const [emoji, count] of Object.entries(message.counts)) {

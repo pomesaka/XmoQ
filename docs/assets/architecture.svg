@@ -3,7 +3,7 @@
 <rect x="355" y="255" width="250" height="110" rx="15" fill="#143c40" stroke="#38516a" stroke-width="1.5"/><text x="480" y="289" class="name" text-anchor="middle">Rust MoQ Relay</text><text x="480" y="316" class="desc" text-anchor="middle">subscriptions · fan-out</text><text x="480" y="337" class="desc" text-anchor="middle">own MoQ layer · topology TBD</text>
 <rect x="55" y="397" width="250" height="100" rx="15" fill="#17283b" stroke="#38516a" stroke-width="1.5"/><text x="180" y="432" class="name" text-anchor="middle">Browser Viewer</text><text x="180" y="458" class="desc" text-anchor="middle">TypeScript · WebCodecs</text>
 <rect x="655" y="397" width="250" height="100" rx="15" fill="#17283b" stroke="#38516a" stroke-width="1.5"/><text x="780" y="432" class="name" text-anchor="middle">Ghostty CLI</text><text x="780" y="458" class="desc" text-anchor="middle">Rust · decoder / audio / graphics</text>
-<rect x="655" y="140" width="250" height="100" rx="15" fill="#352d35" stroke="#38516a" stroke-width="1.5"/><text x="780" y="173" class="name" text-anchor="middle">Durable Objects</text><text x="780" y="199" class="desc" text-anchor="middle">room state (proposed)</text><text x="780" y="220" class="desc" text-anchor="middle">chat over WebSocket, being moved</text>
+<rect x="655" y="140" width="250" height="100" rx="15" fill="#352d35" stroke="#38516a" stroke-width="1.5"/><text x="780" y="173" class="name" text-anchor="middle">Durable Objects</text><text x="780" y="199" class="desc" text-anchor="middle">room state (proposed)</text><text x="780" y="220" class="desc" text-anchor="middle">count · broadcast · reactions</text>
 <path d="M305 190 H480 V255" class="line" marker-end="url(#arr)"/>
 <path d="M430 365 V447 H305" class="line" marker-end="url(#arr)"/>
 <path d="M530 365 V447 H655" class="line" marker-end="url(#arr)"/>
@@ -14,5 +14,5 @@
 <path d="M780 497 V580 H608" class="chat" marker-end="url(#vio)"/><path d="M180 497 V580 H352" class="chat" marker-end="url(#vio)"/><text x="694" y="572" class="tag" text-anchor="middle">chat, via the relay</text><text x="266" y="572" class="tag" text-anchor="middle">chat, via the relay</text>
 <rect x="56" y="650" width="14" height="5" rx="2" fill="#69dacd"/><text x="80" y="657" class="desc">Proposed media path</text>
 <path d="M240 653 H280" class="dashed"/><text x="290" y="657" class="desc">Integration undecided</text>
-<rect x="470" y="650" width="14" height="5" rx="2" fill="#b9a3f2"/><text x="494" y="657" class="desc">Chat tracks; the room's WebSocket chat is kept beside them</text>
+<rect x="470" y="650" width="14" height="5" rx="2" fill="#b9a3f2"/><text x="494" y="657" class="desc">Chat tracks, which alone carry the chat</text>
 </svg>

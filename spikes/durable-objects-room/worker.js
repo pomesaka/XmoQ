@@ -1,9 +1,10 @@
-// A room as a Durable Object: where its broadcast is, a chat, and how many
-// are connected. A spike: run locally with Miniflare (run.mjs), never
-// deployed.
+// A room as a Durable Object: where its broadcast is, how many are
+// connected, and reactions. A spike: run locally with Miniflare (run.mjs),
+// never deployed. The chat is not here: it goes over MoQ tracks, through
+// the gatherer `xmoq-chat` (Q36 and Q49, decided on 2026-10-24).
 //
-//   GET /rooms/<room>             {broadcast, connected}
-//   GET /rooms/<room>/ws?name=N   a WebSocket: the chat and the count
+//   GET /rooms/<room>      {broadcast, connected}
+//   GET /rooms/<room>/ws   a WebSocket: the count, the broadcast, reactions
 //
 // **A broadcast is registered on the WebSocket, and lasts as long as that
 // WebSocket**: the publisher sends {type: "broadcast", broadcast:
@@ -11,14 +12,13 @@
 // room has no broadcast any more. Provisional: nothing is stored that could
 // outlive a publisher that vanished.
 //
-// On the WebSocket the room sends {type: "hello", history, connected,
-// broadcast} first, then {type: "chat", seq, from, text, at} for every
-// message of anybody, {type: "connected", connected} when the count
-// changes, and {type: "broadcast", broadcast} when the publisher registers
-// or leaves, and {type: "reaction", emoji} when somebody sent one (with
+// On the WebSocket the room sends {type: "hello", connected, broadcast}
+// first, then {type: "connected", connected} when the count changes,
+// {type: "broadcast", broadcast} when the publisher registers or leaves,
+// and {type: "reaction", emoji} when somebody sent one (with
 // REACTION_BATCH_MS, {type: "reactions", counts} for all of that while).
-// A client sends {type: "reaction", emoji}, {type: "chat", text}, and a publisher the
-// message above.
+// A client sends {type: "reaction", emoji}, and a publisher the message
+// above. Any other message is not answered.
 
 // **Tokens, an experiment** (how the relay authorizes is undecided): where
 // the Worker has the key it shares with the relay (`AUTH_KEY_HEX`), a
@@ -32,9 +32,6 @@
 
 /** How long a token is good for, in seconds. */
 const TOKEN_SECONDS = 600;
-
-/** How many chat messages a room keeps for those who come later. */
-const HISTORY = 50;
 
 // The pages of the demo are served from another origin.
 const CORS = {
@@ -91,14 +88,12 @@ export class Room {
 			const pair = new WebSocketPair();
 			// WHY the hibernation API: the object can be put to sleep between
 			// messages with its sockets open, and is not billed for waiting.
-			// The name, and the broadcast of a publisher, are kept with the
-			// socket, since nothing in memory is.
+			// The broadcast of a publisher is kept with the socket, since
+			// nothing in memory is.
 			this.ctx.acceptWebSocket(pair[1]);
-			pair[1].serializeAttachment({ name: (url.searchParams.get("name") ?? "anonymous").slice(0, 32) });
 			pair[1].send(
 				JSON.stringify({
 					type: "hello",
-					history: (await this.ctx.storage.get("history")) ?? [],
 					connected: this.ctx.getWebSockets().length,
 					broadcast: this.broadcast(),
 				}),
@@ -175,21 +170,6 @@ export class Room {
 			}, batchMs);
 			return;
 		}
-		if (said?.type !== "chat" || typeof said.text !== "string") return;
-		// The object handles one event at a time, and its storage holds
-		// other events back while a write is under way, so the numbers are
-		// given in the order the messages are taken, without a gap.
-		const seq = ((await this.ctx.storage.get("seq")) ?? 0) + 1;
-		const chat = {
-			type: "chat",
-			seq,
-			from: socket.deserializeAttachment()?.name ?? "anonymous",
-			text: said.text.slice(0, 500),
-			at: Date.now(),
-		};
-		const history = [...((await this.ctx.storage.get("history")) ?? []), chat].slice(-HISTORY);
-		await this.ctx.storage.put({ seq, history });
-		this.tellAll(chat);
 	}
 
 	webSocketClose(socket) {

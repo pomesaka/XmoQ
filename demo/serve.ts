@@ -9,16 +9,20 @@
 // at the token in SETUP, and closes a session without one before any
 // request.
 //
-// The rooms (a chat, a count, and where the broadcast is) are the spike in
+// The rooms (a count, where the broadcast is, and reactions) are the spike in
 // spikes/durable-objects-room, run locally with Miniflare. They start when
 // that directory has its dependencies (`npm install` there); without them
 // the demo runs without a room.
 //
 // The gatherer of the chat (`xmoq-chat`) starts beside the relay, where it
 // is built, and keeps the lines in `--chat-store` (demo/.chat/chat.sqlite3,
-// which is not committed). The pages then chat over its tracks as well as
-// over the room's WebSocket. Not with `--auth`: the gatherer sends no
-// token, and the relay would refuse it.
+// which is not committed). The pages chat over its tracks, and have no chat
+// without it. Not with `--auth`: the gatherer and the pages' connections
+// for the chat send no token, and the relay would refuse them. WHY NOT a
+// token for them: the relay takes a token for one namespace and one role,
+// and the gatherer asks for the namespace of every participant it finds,
+// so a token for it is one for any namespace under `xmoq/chat`, and who may
+// get that is not decided (the open decision on authorization tokens).
 //
 // Open http://localhost:8080/publish in Chromium, then /watch in one or
 // more other tabs. Ctrl-C stops the relay as well.
@@ -183,9 +187,14 @@ const chat =
 			})()
 		: undefined;
 chat?.on("exit", (code) => {
-	// The pages chat over the room's WebSocket without it; the run goes on.
+	// The pages have no chat without it; the run goes on.
 	console.log(`the gatherer of the chat exited with ${code}`);
 });
+/** Why the pages have no chat, where they have none. */
+const noChat =
+	authKeyHex !== undefined
+		? "no chat: the gatherer has no token for --auth"
+		: `no chat: ${chatBinary} is missing (cargo build -p xmoq-chat)`;
 const stop = (): void => {
 	relay.kill("SIGINT");
 	rooms?.kill("SIGINT");
@@ -197,8 +206,6 @@ process.on("SIGTERM", stop);
 const PAGES: Record<string, string> = {
 	"/publish": "publish.ts",
 	"/watch": "watch.ts",
-	// A try of chat as a MoQ track, beside the room's WebSocket; a script drives it.
-	"/chat": "chat.ts",
 };
 const scripts = new Map<string, string>();
 for (const [path, entry] of Object.entries(PAGES)) {
@@ -244,9 +251,13 @@ const html = (path: string): string => `<!doctype html>
 			roomsUrl === null
 				? "<p>no rooms: npm install in spikes/durable-objects-room, and start again</p>"
 				: `<p id="connected"></p>
-		<div id="chat" style="height: 8em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
+		${
+			chat === undefined
+				? `<p>${noChat}</p>`
+				: `<div id="chat" style="height: 8em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
 		<form><input size="40" placeholder="say something" /> <button>send</button></form>
-		<p id="chat-note"></p>
+		<p id="chat-note"></p>`
+		}
 		<p>${["👍", "❤️", "😂", "👏"].map((emoji) => `<button data-reaction="${emoji}">${emoji}</button>`).join(" ")} <span id="reactions"></span></p>`
 		}
 		<script type="module" src="${path}.js"></script>
@@ -279,10 +290,8 @@ console.log(`watch:   http://localhost:${server.port}/watch`);
 console.log(roomsUrl === null ? "rooms:   none" : `rooms:   ${roomsUrl}`);
 console.log(
 	chat !== undefined
-		? `chat:    over the room's WebSocket and the tracks; the gatherer keeps the lines in ${chatStore}`
-		: authKeyHex !== undefined
-			? "chat:    over the room's WebSocket alone: the gatherer has no token for --auth"
-			: `chat:    over the room's WebSocket alone: ${chatBinary} is missing (cargo build -p xmoq-chat)`,
+		? `chat:    over the tracks; the gatherer keeps the lines in ${chatStore}`
+		: `chat:    ${noChat}`,
 );
 if (authKeyHex !== undefined) {
 	console.log(
