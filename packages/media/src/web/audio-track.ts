@@ -20,6 +20,7 @@ import {
 	type AudioTrackPublisher,
 	createAudioTrackPublisher,
 } from "../moqt/audio-track-publisher.ts";
+import { locProperties } from "../moqt/loc-properties.ts";
 
 export interface AudioTrackEncoderOptions {
 	trackNamespace: readonly Uint8Array[];
@@ -426,7 +427,8 @@ export async function playAudioTrack(
 			drop("empty");
 			return;
 		}
-		const read = readLocTiming(object.properties);
+		// Inside Immutable Properties as well (§12.7).
+		const read = readLocTiming(locProperties(object.properties));
 		if (read.type !== "ok" || read.timing === undefined) {
 			drop("no-time");
 			return;

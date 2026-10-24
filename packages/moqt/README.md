@@ -25,6 +25,7 @@ Not implemented: the server role, the other requests opened by the peer (refused
 | Import | Content |
 |---|---|
 | `@xmoq/moqt` | `connect`, and the types and errors of a connection, a published Track and a subscription. `createSubgroupStreamDecoder`, the decoder of one subgroup stream as bytes, which a connection uses itself: **exported for tests outside this package that read a captured stream** (`@xmoq/media` reads the one of `moqlivemock` in `fixtures/moqt-18/`), not as a second way to receive Objects |
+| `@xmoq/moqt/properties` | `propertiesToSearch`: the properties of an Object or a Track outside Immutable Properties and inside it (§12.7), or why the Track is malformed. Without I/O, for a reader of properties above the session |
 | `@xmoq/moqt/diagnostics` | The types of the logging hooks in `ConnectOptions.diagnostics`. They show the session's internal events, which can change with the implementation |
 
 `PublishedTrack.onNewGroupRequest(handler)` names what is called when the subscriber of a track this endpoint publishes asks for a new Group with a REQUEST_UPDATE (§10.2.13). The request is answered with REQUEST_OK first; whether a Group begins is the application's. A publisher that wants such requests sets the Track Property DYNAMIC_GROUPS (`{ type: 0x30n, value: 1n }`) on its PUBLISH.

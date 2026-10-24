@@ -5,7 +5,8 @@
 	"type": "module",
 	"exports": {
 		".": "./src/index.ts",
-		"./diagnostics": "./src/diagnostics.ts"
+		"./diagnostics": "./src/diagnostics.ts",
+		"./properties": "./src/properties.ts"
 	},
 	"scripts": {
 		"test": "bun test",
