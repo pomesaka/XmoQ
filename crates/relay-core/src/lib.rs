@@ -41,6 +41,7 @@ mod requests;
 mod routing;
 #[cfg(test)]
 mod tests;
+mod track_status;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -165,6 +166,11 @@ enum RequestSlot {
         request: PeerRequestId,
         peer_finished: bool,
     },
+    /// A `TRACK_STATUS` the relay asked a publisher for (`track_status`).
+    TrackStatus {
+        request: PeerRequestId,
+        peer_finished: bool,
+    },
     /// A `SUBSCRIBE_NAMESPACE` the relay accepted, whose stream gets the
     /// NAMESPACE and `NAMESPACE_DONE` messages (`discovery`). A FIN of the
     /// peer ends it (§6.1).
@@ -189,6 +195,7 @@ impl RequestSlot {
             Self::PublishNamespace { .. }
             | Self::SubscribeNamespace { .. }
             | Self::Fetch { .. }
+            | Self::TrackStatus { .. }
             | Self::Publish { .. }
             | Self::Finished(_)
             | Self::Stopped => None,
@@ -204,7 +211,8 @@ impl RequestSlot {
             Self::Subscribe { peer_finished, .. }
             | Self::PublishNamespace { peer_finished, .. }
             | Self::Waiting { peer_finished, .. }
-            | Self::Fetch { peer_finished, .. } => *peer_finished,
+            | Self::Fetch { peer_finished, .. }
+            | Self::TrackStatus { peer_finished, .. } => *peer_finished,
             Self::Publish { .. }
             | Self::SubscribeNamespace { .. }
             | Self::Finished(_)
@@ -219,7 +227,8 @@ impl RequestSlot {
             Self::Subscribe { peer_finished, .. }
             | Self::PublishNamespace { peer_finished, .. }
             | Self::Waiting { peer_finished, .. }
-            | Self::Fetch { peer_finished, .. } => {
+            | Self::Fetch { peer_finished, .. }
+            | Self::TrackStatus { peer_finished, .. } => {
                 *peer_finished = true;
                 true
             }
@@ -251,6 +260,8 @@ struct SessionState {
     own: HashMap<OwnRequestKey, OwnRequest>,
     /// FETCH requests the relay opened on this session.
     own_fetches: HashMap<OwnRequestKey, fetch::OwnFetch>,
+    /// `TRACK_STATUS` requests the relay opened on this session.
+    own_track_statuses: HashMap<OwnRequestKey, track_status::OwnTrackStatus>,
     /// `PUBLISH_NAMESPACE` requests the session may still send now
     /// ([`MAX_ANNOUNCEMENTS_AT_ONCE`]).
     announcements_left: u32,
@@ -262,7 +273,7 @@ impl SessionState {
     /// Requests the relay has open on this session: SUBSCRIBE and FETCH
     /// together, which share [`MAX_OWN_REQUESTS_PER_SESSION`].
     fn own_requests(&self) -> usize {
-        self.own.len() + self.own_fetches.len()
+        self.own.len() + self.own_fetches.len() + self.own_track_statuses.len()
     }
 
     /// Whether the peer finished its direction of a request stream while the
@@ -1502,6 +1513,8 @@ pub struct Counts {
     /// waiting for the SUBSCRIBE they join, or answered by the relay with a
     /// fetch stream that is not reported written.
     pub fetches: usize,
+    /// `TRACK_STATUS` requests of subscribers asked of a publisher.
+    pub track_statuses: usize,
     /// Request streams of FETCH requests that were served, which the relay
     /// keeps its direction of open until the subscriber has ended its own,
     /// or the time for that is over.
@@ -1522,6 +1535,8 @@ pub struct Relay {
     watches: Vec<discovery::NamespaceWatch>,
     /// FETCH requests of subscribers.
     fetches: fetch::Fetches,
+    /// The subscribers' `TRACK_STATUS` requests asked of a publisher.
+    track_statuses: track_status::TrackStatuses,
     /// Bytes the caches of all tracks hold ([`cache::MAX_CACHED_BYTES`]).
     cached_bytes: usize,
     /// The request streams of FETCH requests that were served to the end of
@@ -1631,6 +1646,7 @@ impl Relay {
             namespaces: Vec::new(),
             watches: Vec::new(),
             fetches: fetch::Fetches::default(),
+            track_statuses: track_status::TrackStatuses::default(),
             cached_bytes: 0,
             fetch_ends: BTreeSet::new(),
             next_drain_wait: 0,
@@ -1753,6 +1769,9 @@ impl Relay {
         let mut actions = Vec::new();
         // What has to do with a FETCH the relay passes on goes its own way.
         let Some(event) = self.on_fetch_event(event, &mut actions) else {
+            return actions;
+        };
+        let Some(event) = self.on_track_status_event(event, &mut actions) else {
             return actions;
         };
         match event {
@@ -2075,6 +2094,7 @@ impl Relay {
                 early: VecDeque::new(),
                 own: HashMap::new(),
                 own_fetches: HashMap::new(),
+                own_track_statuses: HashMap::new(),
                 announcements_left: self.announcements_at_once,
                 announcement_timer: false,
             },
@@ -2282,10 +2302,8 @@ impl Relay {
         }
         match peer_request {
             PeerRequest::Fetch(fetch) => self.on_fetch(session, stream, request, &fetch, actions),
-            // FIXME: answer it (§4, §10.14), as decided on 2026-10-24.
-            PeerRequest::TrackStatus(_) => {
-                let not_supported = Refusal::code(request_error_code::NOT_SUPPORTED);
-                self.refuse(session, stream, request, &not_supported, actions);
+            PeerRequest::TrackStatus(track_status) => {
+                self.on_track_status(session, stream, request, &track_status, actions);
             }
             PeerRequest::Subscribe(subscribe) => {
                 self.on_subscribe(session, stream, request, &subscribe, actions);
@@ -2827,6 +2845,7 @@ impl Relay {
                 RequestSlot::PublishNamespace { request, .. }
                 | RequestSlot::SubscribeNamespace { request }
                 | RequestSlot::Fetch { request, .. }
+                | RequestSlot::TrackStatus { request, .. }
                 | RequestSlot::Finished(Some(request)),
             ) => (*request, None),
             Some(RequestSlot::Finished(None) | RequestSlot::Stopped) | None => return,
@@ -3091,6 +3110,7 @@ impl Relay {
                         | RequestSlot::Publish { .. }
                         | RequestSlot::PublishNamespace { .. }
                         | RequestSlot::Waiting { .. }
+                        | RequestSlot::TrackStatus { .. }
                 )
             )
         {
@@ -3099,6 +3119,13 @@ impl Relay {
         match slot {
             // §5.2: the subscriber cancelled its FETCH.
             Some(RequestSlot::Fetch { .. }) => self.on_fetch_cancelled(session, stream, actions),
+            // The subscriber gave its TRACK_STATUS up before an answer came.
+            Some(RequestSlot::TrackStatus { request, .. }) => {
+                if stream_gone {
+                    state.moqt.on_peer_request_closed(request);
+                }
+                self.on_track_status_cancelled(session, stream, actions);
+            }
             Some(RequestSlot::Subscribe { request, track, .. }) => {
                 if stream_gone {
                     state.moqt.on_peer_request_closed(request);
@@ -4088,6 +4115,7 @@ impl Relay {
         }
         self.drop_routing_of(session, actions);
         self.drop_fetches_of(session, actions);
+        self.drop_track_statuses_of(session, actions);
         let subscribed: BTreeSet<FullTrackName> = self
             .tracks
             .all_live()
@@ -4203,6 +4231,7 @@ impl Relay {
             pending_tracks: self.tracks.all_pending().count(),
             own_requests: self.sessions.values().map(SessionState::own_requests).sum(),
             fetches: self.fetch_count(),
+            track_statuses: self.track_status_count(),
             fetch_ends: self.fetch_ends.len(),
         }
     }

@@ -1024,16 +1024,12 @@ impl Relay {
         Ok(own)
     }
 
-    /// The publisher a FETCH was asked of refused it, or went, before it
-    /// answered: the next publisher of the track is asked
-    /// ([`Self::whom_to_ask`]). Where there is none, the subscriber is
-    /// refused with `refusal`. A FETCH that was answered, or whose fetch
-    /// stream has come, fails as [`Self::fail_fetch`] has it.
-    ///
-    /// WHY NOT also after a publisher that did not answer in time: each
-    /// publisher gets the whole wait, and a subscriber would wait as many
-    /// times as there are publishers. A refusal or a session that ends comes
-    /// at once.
+    /// The publisher a FETCH was asked of refused it, went, or did not
+    /// answer in time while the subscriber still waits
+    /// ([`Self::on_fetch_timeout`]), before it answered: the next publisher of
+    /// the track is asked ([`Self::whom_to_ask`]). Where there is none, the
+    /// subscriber is refused with `refusal`. A FETCH that was answered, or
+    /// whose fetch stream has come, fails as [`Self::fail_fetch`] has it.
     fn ask_the_next_or_fail(
         &mut self,
         subscriber: (SessionKey, StreamKey),
