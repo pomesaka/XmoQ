@@ -58,6 +58,11 @@ pub struct Chat {
     pub name: String,
     /// `--say`: a line said on `said` once the chat on tracks has begun.
     pub say: Option<String>,
+    /// `--chat-catch-up-lines`: how many of the lines it missed are fetched
+    /// when the subscription to `lines` is made again
+    /// ([`crate::chat_track::history_to_fetch`]); 1 to
+    /// [`crate::chat_track::CATCH_UP_LINES_MOST`].
+    pub catch_up: u64,
 }
 
 /// What the viewer was started with.
@@ -166,7 +171,7 @@ impl std::error::Error for Invalid {}
 /// The flags, each of which takes a value.
 pub const USAGE: &str = "\
 xmoq-watch --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
-           [--chat-room <room> [--name terminal] [--say <a line>]]
+           [--chat-room <room> [--name terminal] [--say <a line>]] [--chat-catch-up-lines 16]
 xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line>] [--token no]
   --video <track> --audio <track>   the tracks by name; without them, those of the catalog
   --video-version first|name:<track>|height:<n>|bitrate:<n>
@@ -271,6 +276,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
     let (mut room, mut name, mut say, mut ask_token) = (None, "terminal".to_string(), None, true);
     let (mut video, mut audio) = (None, None);
     let mut chat_room = None;
+    let mut catch_up = crate::chat_track::CATCH_UP_LINES;
     let mut args = Args {
         // Replaced below: a source is asked for.
         source: Source::Room {
@@ -314,6 +320,18 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             }
             "--namespace" => namespace = value,
             "--chat-room" => chat_room = Some(value),
+            "--chat-catch-up-lines" => {
+                catch_up = value
+                    .parse()
+                    .ok()
+                    .filter(|lines| (1..=crate::chat_track::CATCH_UP_LINES_MOST).contains(lines))
+                    .ok_or_else(|| {
+                        Invalid(format!(
+                            "--chat-catch-up-lines is a whole number from 1 to {}, not {value}",
+                            crate::chat_track::CATCH_UP_LINES_MOST
+                        ))
+                    })?;
+            }
             "--room" => room = Some(value),
             "--name" => name = value,
             "--say" => say = Some(value),
@@ -393,11 +411,13 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             room: room.to_string(),
             name: name.clone(),
             say: say.clone(),
+            catch_up,
         }),
         (None, Some(room)) => Some(Chat {
             room,
             name: name.clone(),
             say: say.clone(),
+            catch_up,
         }),
         (None, None) => None,
         (Some(_), Some(_)) => {
@@ -453,6 +473,7 @@ mod tests {
             room: "a".to_string(),
             name: "terminal".to_string(),
             say: None,
+            catch_up: 16,
         });
         Args {
             source,
@@ -489,6 +510,7 @@ mod tests {
                 room: room.to_string(),
                 name: name.to_string(),
                 say: None,
+                catch_up: 16,
             })
         };
         // (the flags; the chat, or what is wrong)
@@ -505,7 +527,23 @@ mod tests {
                     room: "r".to_string(),
                     name: "terminal".to_string(),
                     say: Some("hi".to_string()),
+                    catch_up: 16,
                 })),
+            ),
+            (
+                format!("{url} --chat-room r --chat-catch-up-lines 1000"),
+                Ok(Some(Chat {
+                    room: "r".to_string(),
+                    name: "terminal".to_string(),
+                    say: None,
+                    catch_up: 1000,
+                })),
+            ),
+            (
+                format!("{url} --chat-room r --chat-catch-up-lines 0"),
+                Err(Invalid(
+                    "--chat-catch-up-lines is a whole number from 1 to 1000, not 0".to_string(),
+                )),
             ),
             (
                 "--room http://h/rooms/b --name me".to_string(),
@@ -561,6 +599,7 @@ mod tests {
                     room: "a".to_string(),
                     name: "me".to_string(),
                     say: Some("hello".to_string()),
+                    catch_up: 16,
                 }),
                 tracks: Some(("v".to_string(), "a".to_string())),
                 video_version: VideoVersion::First,

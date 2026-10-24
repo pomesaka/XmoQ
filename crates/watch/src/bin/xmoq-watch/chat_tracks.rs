@@ -30,7 +30,7 @@ use xmoq_moqt_io::{
 };
 use xmoq_watch::again::AskAgain;
 use xmoq_watch::args::Chat;
-use xmoq_watch::chat_track::{Say, Saying, Shown, fetch_start, shown};
+use xmoq_watch::chat_track::{Say, Saying, Shown, history_to_fetch, shown, shown_gap};
 
 use crate::session::{Asked, NotSubscribed, Requests, Sent, Subscription, send_subscribe, settle};
 
@@ -99,6 +99,8 @@ pub struct ChatTracks {
     said: FullTrackName,
     saying: Saying,
     shown: Shown<Line>,
+    /// `--chat-catch-up-lines`.
+    catch_up: u64,
     /// The subscription to `lines`, while there is one.
     lines: Option<Subscription>,
     asking: Option<Answer>,
@@ -148,13 +150,16 @@ async fn on<T>(item: Option<impl std::future::Future<Output = T>>) -> T {
 impl ChatTracks {
     /// Announces the viewer's namespace and waits for the answer, so that a
     /// relay that refuses it is said at once. `lines` is asked for from the
-    /// loop ([`Came::AskNow`]), where the broadcast plays meanwhile.
+    /// loop ([`Came::AskNow`]), where the broadcast plays meanwhile. `had` is
+    /// the newest line shown on the sessions before, so that what was
+    /// missed between them is fetched (`history_to_fetch`).
     pub async fn begin(
         requests: Requests<'_>,
         connection: &Arc<WtConnection>,
         stops: &StreamStops,
         chat: &Chat,
         room: TrackNamespace,
+        had: Option<u64>,
     ) -> Result<Self> {
         let Requests {
             session,
@@ -194,7 +199,8 @@ impl ChatTracks {
             open_wait_ms,
             said,
             saying: Saying::default(),
-            shown: Shown::fetching(),
+            shown: Shown::fetching_after(had),
+            catch_up: chat.catch_up,
             lines: None,
             asking: None,
             ask_at: Some(tokio::time::Instant::now()),
@@ -205,6 +211,11 @@ impl ChatTracks {
             subscriber: None,
             fetched: mpsc::channel(32),
         })
+    }
+
+    /// The number of the newest line shown, if any.
+    pub fn last_shown(&self) -> Option<u64> {
+        self.shown.last()
     }
 
     /// The Track Alias of `lines`, while it is subscribed to.
@@ -320,15 +331,31 @@ impl ChatTracks {
         ))];
         self.stops
             .limit_payload(subscription.track_alias, LINES_PAYLOAD_MOST);
-        let start = fetch_start(subscription.largest.map(|largest| largest.group));
+        let plan = history_to_fetch(
+            self.shown.last(),
+            subscription.largest.map(|largest| largest.group),
+            self.catch_up,
+        );
         let joining_request_id = subscription.request.value();
         self.lines = Some(subscription);
+        if plan.forget {
+            self.shown.forget();
+            out.push(Out::Note("CHAT_TRACKS_NUMBERED_ANEW".to_string()));
+        }
         self.shown.refetching();
-        // No line yet: nothing to fetch.
-        let Some(joining_start) = start else {
+        // Nothing to fetch: no line yet, or none missed.
+        let Some((joining_start, gap)) = plan.fetch else {
             out.extend(self.fetch_ended());
             return out;
         };
+        // Told before the lines after it come.
+        if let Some(gap) = gap {
+            out.push(Out::Note(format!(
+                "CHAT_GAP after={} before={}",
+                gap.after, gap.before
+            )));
+            out.push(Out::Show(shown_gap(gap)));
+        }
         let range = FetchRange::AbsoluteJoining {
             joining_request_id,
             joining_start,
