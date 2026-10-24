@@ -12,7 +12,7 @@
 //
 // The exit code is 0 only if every pairing ended as the table below expects.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { ensureCertificate, MOQLIVEMOCK_SIDE_PORT_OFFSET } from "./harness.ts";
@@ -958,7 +958,10 @@ const { values: options } = parseArgs({
 		// prints it), and a client of a pairing that is running could be given
 		// the port a later pairing's relay is to listen on. One pairing of a CI
 		// run failed at the start of its relay with "Address already in use";
-		// that this is why was not shown. macOS takes them from 49152 on.
+		// that this is why was not shown. macOS takes them from 49152 on, and
+		// there a relay on such a port was shown to be unreachable
+		// (`firstEphemeralPort`). A base port whose ports reach that range is
+		// refused before anything runs.
 		"base-port": { type: "string", default: "24400" },
 		only: { type: "string", default: "" },
 		// Provisional. A pairing takes about a second; `run.ts` gives each of
@@ -1814,6 +1817,27 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 	];
 }
 
+/**
+ * The first port this machine hands out to an outgoing socket that names
+ * none: on Linux the first of `net.ipv4.ip_local_port_range`, elsewhere 49152,
+ * the first of macOS (`net.inet.ip.portrange.first`, read on the machine of
+ * these runs on 2026-10-25) and of the range IANA leaves to that use.
+ *
+ * WHY a relay's port must lie below it: on macOS a socket of another process
+ * on `0.0.0.0` that holds the port does not keep the relay from binding it on
+ * `[::]`, and what is sent to `127.0.0.1` then reaches the other socket; the
+ * relay prints that it listens and is never reached
+ * (docs/experiments/2026-10-25-the-relay-checks-a-subgroup-sent-again.md).
+ */
+function firstEphemeralPort(): number {
+	const linux = "/proc/sys/net/ipv4/ip_local_port_range";
+	if (existsSync(linux)) {
+		const first = Number(readFileSync(linux, "utf8").trim().split(/\s+/)[0]);
+		if (Number.isInteger(first) && first > 0) return first;
+	}
+	return 49152;
+}
+
 async function main(): Promise<void> {
 	const pairings = pairingsThrough(options.relay).filter((pairing) =>
 		pairing.name.includes(options.only),
@@ -1826,20 +1850,22 @@ async function main(): Promise<void> {
 		throw new Error(`--base-port "${options["base-port"]}" is not a port`);
 	}
 	const basePort = Number(options["base-port"]);
-	// The run with `mlmpub` takes a second port, its own plus an offset.
+	// One port a pairing, and the port 1000 above it for a pairing that
+	// starts a second relay or `mlmpub` (`catalog.ts`, `video.ts`,
+	// `watch-rust.ts`). WHY counted for every run: the width follows from the
+	// number of pairings alone, and no list of the scripts that take a second
+	// port has to be kept up to date.
 	const lastPort =
-		basePort +
-		pairings.length -
-		1 +
-		(pairings.some(
-			(pairing) =>
-				pairing.script === "catalog.ts" || pairing.script === "video.ts",
-		)
-			? MOQLIVEMOCK_SIDE_PORT_OFFSET
-			: 0);
+		basePort + MOQLIVEMOCK_SIDE_PORT_OFFSET + pairings.length - 1;
 	if (basePort < 1 || lastPort > 65535) {
 		throw new Error(
 			`--base-port ${basePort} with ${pairings.length} pairings needs the ports ${basePort} to ${lastPort}, outside 1 to 65535`,
+		);
+	}
+	const ephemeral = firstEphemeralPort();
+	if (lastPort >= ephemeral) {
+		throw new Error(
+			`--base-port ${basePort} with ${pairings.length} pairings needs the ports ${basePort} to ${lastPort}, which reach ${ephemeral}, where this machine hands out the ports of outgoing sockets; give a base port of ${ephemeral - (lastPort - basePort) - 1} or below`,
 		);
 	}
 	const timeoutSeconds = Number(options["pairing-timeout-seconds"]);
