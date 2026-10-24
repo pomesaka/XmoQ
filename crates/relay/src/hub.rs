@@ -2549,6 +2549,11 @@ async fn write_request<C: Connection>(
     let mut may_be_reset = true;
     loop {
         let command = tokio::select! {
+            // WHY biased, the reset first: the hub lets go of `commands` as
+            // it sends the reset, and a `None` of `commands` that came first
+            // would end the stream with a FIN, which the subscriber does not
+            // read as the relay giving the request up.
+            biased;
             code = &mut reset, if may_be_reset => {
                 let Ok(code) = code else {
                     may_be_reset = false;
