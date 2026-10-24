@@ -26,21 +26,27 @@ common="--url https://127.0.0.1:$port --cert-sha256 $sha --namespace xmoq/fanout
 seconds=$((frames / 25 + viewers / 100 + 12))
 pieces=$((frames * 2))
 
-"$bin/xmoq-relay" --port "$port" --cert-file "$cert" --key-file /spike/work/cert/key.pem \
-  --max-sessions "${MAX_SESSIONS:-256}" --stats-every-ms 1000 > "$logs/relay.log" 2>&1 &
+# RELAY_CPUS and CLIENTS_CPUS (run.sh SPLIT=1): the cores the relay, and the publishers and
+# viewers, run on. taskset executes the program, so $! is still its PID.
+on_relay=; on_clients=
+if [ -n "${RELAY_CPUS:-}" ]; then on_relay="taskset -c $RELAY_CPUS"; fi
+if [ -n "${CLIENTS_CPUS:-}" ]; then on_clients="taskset -c $CLIENTS_CPUS"; fi
+# shellcheck disable=SC2086
+$on_relay "$bin/xmoq-relay" --port "$port" --cert-file "$cert" --key-file /spike/work/cert/key.pem \
+  --max-sessions "${MAX_SESSIONS:-256}" --stats-every-ms 1000 ${RELAY_FLAGS:-} > "$logs/relay.log" 2>&1 &
 relay=$!
 trap 'for p in ${publisher:-} ${sound:-} ${sampler:-} ${sound_viewers:-} ${video_viewers:-} ${profiler:-} $relay; do case "$p" in ""|0|*[!0-9]*) ;; *) kill "$p" 2>/dev/null || true;; esac; done' EXIT
 sleep 1
 # shellcheck disable=SC2086
 ( sleep 2; n=0; while [ "$n" -lt "$seconds" ]; do echo send; n=$((n + 1)); sleep 1; done ) |
-  "$bin/xmoq-moqt-client" $common --track video --mode publish --payload-hex 00 --video-in "$video" \
+  $on_clients "$bin/xmoq-moqt-client" $common --track video --mode publish --payload-hex 00 --video-in "$video" \
   --timeout-secs $((seconds + 10)) > "$logs/publisher.log" 2>&1 &
 publisher=$!
 if [ "${SOUND:-0}" = 1 ]; then
   # A Group of 10 pieces every 200 ms: one line, one Group.
   # shellcheck disable=SC2086
   ( sleep 2; n=0; while [ "$n" -lt $((seconds * 5)) ]; do echo send; n=$((n + 1)); sleep 0.2; done ) |
-    "$bin/xmoq-moqt-client" $common --track audio --mode publish --payload-hex 00 \
+    $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode publish --payload-hex 00 \
     --video-in /spike/work/media/sound-shaped.h264 --video-frame-ms 20 --video-streams object \
     --timeout-secs $((seconds + 10)) > "$logs/sound-publisher.log" 2>&1 &
   sound=$!
@@ -48,12 +54,12 @@ fi
 sleep 3
 if [ "${SOUND:-0}" = 1 ]; then
   # shellcheck disable=SC2086
-  "$bin/xmoq-moqt-client" $common --track audio --mode subscribe --viewers "$viewers" --objects "$pieces" \
+  $on_clients "$bin/xmoq-moqt-client" $common --track audio --mode subscribe --viewers "$viewers" --objects "$pieces" \
     --timeout-secs $((seconds + 5)) > "$logs/sound-viewers.log" 2>&1 &
   sound_viewers=$!
 fi
 # shellcheck disable=SC2086
-"$bin/xmoq-moqt-client" $common --track video --mode subscribe --viewers "$viewers" --objects "$frames" \
+$on_clients "$bin/xmoq-moqt-client" $common --track video --mode subscribe --viewers "$viewers" --objects "$frames" \
   --timeout-secs $((seconds + 5)) > "$logs/viewers.log" 2>&1 &
 video_viewers=$!
 # WHY /proc and not ps: the %cpu of Linux's ps is over the whole life of the process, where
@@ -70,6 +76,10 @@ ticks() { awk '{print $14 + $15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
     sleep 1
   done ) &
 sampler=$!
+# The threads of the relay and of the viewers' processes, five times a second apart, once
+# the viewers have all begun: whether one of them is busy all the time.
+( sleep $((viewers / 100 + 2))
+  top -H -b -d 1 -n 5 -w 120 -p "$relay,$video_viewers${sound_viewers:+,$sound_viewers}" > "$logs/threads.txt" 2>&1 ) &
 if [ "${PROFILE:-0}" = 1 ]; then
   # PROFILE=1: perf samples the relay for 10 s once the viewers have all begun (they begin
   # 10 ms apart), the user space alone (perf_event_paranoid 2 of podman's machine).
