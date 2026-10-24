@@ -2555,6 +2555,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "xmoq-chat-tracks",
  "xmoq-loc",
  "xmoq-moqt",
  "xmoq-moqt-io",

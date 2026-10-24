@@ -26,9 +26,10 @@ The library (`src/*.rs`) decides, and does no input or output: it is given its t
 | `tracks` | Which tracks of a catalog are played |
 | `keys` | What a key asks for |
 | `room` | What a room says and is told; a line of the chat made safe for a terminal |
+| `chat_track` | The chat on MoQ tracks: the room of an address, the Groups of `said` and the lines that wait for the gatherer, which lines of `lines` are shown and in what order, and the mark of each line's way. The names and the JSON are `xmoq-chat-tracks`'s |
 | `marks` | For measuring with the demo's publisher (`--measure-demo-marks`). `--clock-skew-ppm <n>`, also for measuring, has the viewer's clock run n parts in a million faster (`sound.rs`, `micros_since`) |
 
-The binary (`src/bin/xmoq-watch/`) does the input and output, one kind a file: `session.rs` (the requests on the MoQ Transport session), `room_socket.rs` (the room's WebSocket), `terminal.rs` (line mode, keys, the window's size), `picture.rs` (the thread that decodes and writes frames), `sound.rs` (the Opus decoder and the queue of the output), and the two files below.
+The binary (`src/bin/xmoq-watch/`) does the input and output, one kind a file: `session.rs` (the requests on the MoQ Transport session), `room_socket.rs` (the room's WebSocket), `terminal.rs` (line mode, keys, the window's size), `picture.rs` (the thread that decodes and writes frames), `sound.rs` (the Opus decoder and the queue of the output), `chat_tracks.rs` (the chat on MoQ tracks), and the two files below.
 
 ## Dependencies that are not decided, and what they need
 
@@ -89,6 +90,7 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 | Requests the relay opens towards it that wait for their refusal | 16 in the queue, while the broadcast does not play yet; then the readers stop reading, and flow control holds the relay | Nothing is played before the SUBSCRIBEs are answered, and a relay here opens no request towards a viewer | `main.rs` |
 | The catalog | 5 s as a whole, as the page does | Over before the FETCH for it could be given up | `session.rs` |
 | A room's token, and its taking a line of the chat | 5 s | | `main.rs` |
+| The chat on MoQ tracks (decided on 2026-10-24, Q36): on the broadcast's session, with `--room` the room of its address and with `--url` only with `--chat-room`, `--name` as the name. The viewer announces `xmoq/chat/<room>/<name>`, writes each line it says (a key, or `--say`) as a Group of `said` for the gatherer, subscribes to `lines` of `xmoq/chat/<room>` and takes the latest 16 lines by a Joining FETCH. The SUBSCRIBE carries a RENDEZVOUS_TIMEOUT of 30 s: the gatherer publishes `lines` of a room once a participant has come, so the first viewer of a room is held for it. A subscription that is refused or ends (the gatherer ends `lines` of a room nobody is in with `TRACK_ENDED`) is asked for again by the sound's rule (`again`), and its FETCH shows only lines after those shown. Lines of both ways are shown, `ws` or `moq` before each (`CHAT ...` in `--log`); what fails of it is said (`CHAT_TRACKS_FAILED`) and the broadcast plays on | Lines said before the gatherer subscribes: 16 wait, a later one is not sent. A line over 512 bytes is not sent (the gatherer's `--text-bytes`). The FETCH's stream: 64 KiB. A stream for a line of `said`: 2 s to be opened, or it is not sent. **All provisional** | The gatherer subscribes when it is told of the namespace, after the viewer's first lines can be typed | `chat_track`, `chat_tracks.rs` |
 | One message of a room | 256 KiB | A hello with a full history is under 128 KiB | `room_socket.rs` |
 | Lines of a room's history that are read; lines of the chat that are kept | 64; 16 | The room keeps 50; 3 are shown | `room`, `main.rs` |
 | What a room says while a token is waited for | 256 messages; the oldest goes | | `room_socket.rs` |

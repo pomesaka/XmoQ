@@ -49,11 +49,27 @@ pub enum Source {
     },
 }
 
+/// The chat on `MoQ` tracks ([`crate::chat_track`]): the room and the
+/// viewer's name in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chat {
+    /// With `--room`, the last segment of its address; with `--url`,
+    /// `--chat-room`.
+    pub room: String,
+    /// `--name`.
+    pub name: String,
+    /// `--say`: a line said on `said` once the chat on tracks has begun.
+    /// With `--room` the same line goes to the room's WebSocket as well.
+    pub say: Option<String>,
+}
+
 /// What the viewer was started with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Args {
     /// Where the broadcast is.
     pub source: Source,
+    /// The chat on `MoQ` tracks. `None` with `--url` without `--chat-room`.
+    pub chat: Option<Chat>,
     /// `--video` and `--audio`: the names of the tracks. `None`: what the
     /// catalog of the broadcast has.
     pub tracks: Option<(String, String)>,
@@ -153,6 +169,7 @@ impl std::error::Error for Invalid {}
 /// The flags, each of which takes a value.
 pub const USAGE: &str = "\
 xmoq-watch --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
+           [--chat-room <room> [--name terminal] [--say <a line>]]
 xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line>] [--token no]
   --video <track> --audio <track>   the tracks by name; without them, those of the catalog
   --video-version first|name:<track>|height:<n>|bitrate:<n>
@@ -256,6 +273,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
     let (mut url, mut cert_sha256, mut namespace) = (None, None, "xmoq/demo".to_string());
     let (mut room, mut name, mut say, mut ask_token) = (None, "terminal".to_string(), None, true);
     let (mut video, mut audio) = (None, None);
+    let mut chat_room = None;
     let mut args = Args {
         // Replaced below: a source is asked for.
         source: Source::Room {
@@ -264,6 +282,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             say: None,
             ask_token: true,
         },
+        chat: None,
         tracks: None,
         video_version: VideoVersion::First,
         buffer_ms: DEFAULT_BUFFER_MS,
@@ -298,6 +317,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                 );
             }
             "--namespace" => namespace = value,
+            "--chat-room" => chat_room = Some(value),
             "--room" => room = Some(value),
             "--name" => name = value,
             "--say" => say = Some(value),
@@ -372,6 +392,24 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             other => return Err(Invalid(format!("unknown flag {other}"))),
         }
     }
+    args.chat = match (&room, chat_room) {
+        (Some(address), None) => crate::chat_track::room_of_address(address).map(|room| Chat {
+            room: room.to_string(),
+            name: name.clone(),
+            say: say.clone(),
+        }),
+        (None, Some(room)) => Some(Chat {
+            room,
+            name: name.clone(),
+            say: say.clone(),
+        }),
+        (None, None) => None,
+        (Some(_), Some(_)) => {
+            return Err(Invalid(
+                "--chat-room is for --url; with --room the chat is the room's".to_string(),
+            ));
+        }
+    };
     args.source = match (url, room) {
         (Some(url), None) => Source::Relay {
             url,
@@ -413,9 +451,17 @@ mod tests {
         parse(line.split_whitespace().map(str::to_string))
     }
 
+    /// The defaults with `source`; with a room, the chat of the room
+    /// `a` as `terminal`.
     fn defaults(source: Source) -> Args {
+        let chat = matches!(source, Source::Room { .. }).then(|| Chat {
+            room: "a".to_string(),
+            name: "terminal".to_string(),
+            say: None,
+        });
         Args {
             source,
+            chat,
             tracks: None,
             video_version: VideoVersion::First,
             buffer_ms: 150,
@@ -436,6 +482,51 @@ mod tests {
             measure_demo_marks: false,
             clock_skew_ppm: 0,
             cut_sound_s: None,
+        }
+    }
+
+    #[test]
+    fn the_chat_on_tracks_is_of_the_room_or_of_chat_room() {
+        let hash = "0f".repeat(32);
+        let url = format!("--url https://h:1/ --cert-sha256 {hash}");
+        let chat = |room: &str, name: &str| {
+            Some(Chat {
+                room: room.to_string(),
+                name: name.to_string(),
+                say: None,
+            })
+        };
+        // (the flags; the chat, or what is wrong)
+        let cases = [
+            (url.clone(), Ok(None)),
+            (format!("{url} --chat-room r"), Ok(chat("r", "terminal"))),
+            (
+                format!("{url} --chat-room r --name me"),
+                Ok(chat("r", "me")),
+            ),
+            (
+                format!("{url} --chat-room r --say hi"),
+                Ok(Some(Chat {
+                    room: "r".to_string(),
+                    name: "terminal".to_string(),
+                    say: Some("hi".to_string()),
+                })),
+            ),
+            (
+                "--room http://h/rooms/b --name me".to_string(),
+                Ok(chat("b", "me")),
+            ),
+            // An address without the room's name has no chat on tracks.
+            ("--room http://h".to_string(), Ok(None)),
+            (
+                "--room http://h/rooms/b --chat-room r".to_string(),
+                Err(Invalid(
+                    "--chat-room is for --url; with --room the chat is the room's".to_string(),
+                )),
+            ),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(parsed(&line).map(|args| args.chat), expected, "{line}");
         }
     }
 
@@ -473,6 +564,11 @@ mod tests {
                     say: Some("hello".to_string()),
                     ask_token: false,
                 },
+                chat: Some(Chat {
+                    room: "a".to_string(),
+                    name: "me".to_string(),
+                    say: Some("hello".to_string()),
+                }),
                 tracks: Some(("v".to_string(), "a".to_string())),
                 video_version: VideoVersion::First,
                 buffer_ms: 150,
