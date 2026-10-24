@@ -28,8 +28,8 @@
 //! its answer a `REQUEST_UPDATE` on its stream with the same Request ID; the
 //! client's SUBSCRIBEs as in `request-id-parity`.
 //! `--quiet datagram`: when the client's SETUP has come, a datagram of the
-//! type 0x30, which is no `OBJECT_DATAGRAM` (§11.3.1); the client's
-//! SUBSCRIBEs as in `request-id-parity`.
+//! type 0x30, which is no `OBJECT_DATAGRAM` (§11.3.1), and no answer to a
+//! request.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -170,8 +170,8 @@ enum Quiet {
     /// consumes a Request ID").
     PeerRequestIdAgain,
     /// When the client's SETUP has come, a datagram of the type 0x30, which
-    /// is no `OBJECT_DATAGRAM` (§11.3.1). A SUBSCRIBE of the client is
-    /// answered as in `RequestGoAway`, so that a viewer comes to play.
+    /// is no `OBJECT_DATAGRAM` (§11.3.1), and no answer to a request: the
+    /// client is to close the session while it waits for one.
     Datagram,
 }
 
@@ -485,16 +485,14 @@ async fn read_request(
                     let ok = ControlMessage::RequestOk(RequestOk::default());
                     let _ = send_message(&mut unanswered, &ok, &Trace::default(), "request").await;
                 }
-                // The ones that send the client something of their own answer
+                // The ones that send the client a request of their own answer
                 // its SUBSCRIBE as well, so that a viewer comes to play,
-                // where it reads what the peer sent: the terminal viewer reads
-                // nothing else while it waits for an answer.
+                // where it reads the peer's requests.
                 if matches!(
                     quiet,
                     Quiet::RequestGoAway
                         | Quiet::PeerRequestIdOfTheWrongParity
                         | Quiet::PeerRequestIdAgain
-                        | Quiet::Datagram
                 ) {
                     let answer = an_answer_that_plays(&message, stream);
                     let subscribe = matches!(message, ControlMessage::Subscribe(_));

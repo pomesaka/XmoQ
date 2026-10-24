@@ -1,6 +1,7 @@
 //! The requests of a viewer on its session: SUBSCRIBE, and the catalog of
 //! MSF by a Joining FETCH.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -30,6 +31,67 @@ const CATALOG: &str = "catalog";
 const CATALOG_WAIT: Duration = Duration::from_secs(5);
 /// The most a catalog may be.
 const CATALOG_LIMIT: usize = 1024 * 1024;
+
+/// Events of the session's unidirectional streams read ahead of their turn
+/// that are kept, while an answer is waited for ([`Events::while_waiting`]).
+/// **Provisional.** Beyond it reading pauses, and flow control holds the
+/// relay back.
+const MOST_READ_AHEAD: usize = 256;
+
+/// The events of the session's unidirectional streams, with those read
+/// ahead while an answer was waited for, which come first.
+pub struct Events {
+    received: mpsc::Receiver<UniEvent>,
+    ahead: VecDeque<UniEvent>,
+    /// The readers are gone: nothing more comes.
+    ended: bool,
+}
+
+impl Events {
+    pub fn new(received: mpsc::Receiver<UniEvent>) -> Self {
+        Self {
+            received,
+            ahead: VecDeque::new(),
+            ended: false,
+        }
+    }
+
+    /// The next event; `None` when the readers are gone.
+    pub async fn recv(&mut self) -> Option<UniEvent> {
+        if let Some(event) = self.ahead.pop_front() {
+            return Some(event);
+        }
+        self.received.recv().await
+    }
+
+    /// Waits for `answer` and reads the events meanwhile: one that fails the
+    /// session (a datagram of an unknown type, a stream that breaks the
+    /// protocol) ends the wait with its error, and the rest are kept for
+    /// [`Self::recv`].
+    ///
+    /// WHY: the answer to a request may take its time (10 s, and more with
+    /// a `RENDEZVOUS_TIMEOUT`), and a session that the peer broke meanwhile is
+    /// to be closed for it then, with its code, and not when the wait is
+    /// over. WHY the rest is kept and not let go of: an Object of a track
+    /// can be read before the answer that subscribes to it.
+    pub async fn while_waiting<T>(&mut self, answer: impl Future<Output = T>) -> Result<T> {
+        // Boxed: the requests it waits for are large futures, and the
+        // viewer's own future would grow by each.
+        let mut answer = Box::pin(answer);
+        loop {
+            let reading = !self.ended && self.ahead.len() < MOST_READ_AHEAD;
+            tokio::select! {
+                biased;
+                event = self.received.recv(), if reading => match event {
+                    Some(UniEvent::Failed(error)) => return Err(error.into()),
+                    Some(event) => self.ahead.push_back(event),
+                    None => self.ended = true,
+                },
+                answered = &mut answer => return Ok(answered),
+            }
+        }
+    }
+}
 
 /// A subscription: its request stream, kept open for as long as the track
 /// is wanted.
@@ -282,10 +344,12 @@ impl Requests<'_> {
     /// `followCatalog` of `@xmoq/msf` does.
     pub async fn catalog(
         &mut self,
-        events: &mut mpsc::Receiver<UniEvent>,
+        events: &mut Events,
         stops: &StreamStops,
     ) -> Result<(Vec<CatalogTrack>, CatalogKept)> {
-        let subscription = self.subscribe(CATALOG, None).await?;
+        let subscription = events
+            .while_waiting(self.subscribe(CATALOG, None))
+            .await??;
         // The catalog's Objects are held to its limit from here on, and not
         // to the 1 MiB undecoded of every subgroup stream alone. It stays for
         // the session, as the subscription does.
@@ -398,4 +462,81 @@ pub fn timestamp_of(object: &SubgroupObject) -> Option<u64> {
     }))
     .ok()??;
     timing.timescale.is_none().then_some(timing.timestamp)
+}
+
+#[cfg(test)]
+mod tests {
+    use xmoq_moqt::message::ControlMessage;
+
+    use super::*;
+
+    fn control(id: u64) -> UniEvent {
+        UniEvent::Control(ControlMessage::UnsupportedRequest {
+            message_type: 0x7f,
+            request_id: id,
+        })
+    }
+
+    #[tokio::test]
+    async fn an_error_of_the_session_ends_the_wait_for_an_answer() {
+        let (queue, received) = mpsc::channel(8);
+        let mut events = Events::new(received);
+        queue.send(control(1)).await.unwrap();
+        queue
+            .send(UniEvent::Failed(xmoq_moqt::Error::ProtocolViolation(
+                "an unknown datagram type",
+            )))
+            .await
+            .unwrap();
+        // An answer that never comes: the error ends the wait.
+        let waited = events.while_waiting(std::future::pending::<()>()).await;
+        let error = waited.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<xmoq_moqt::Error>(),
+            Some(&xmoq_moqt::Error::ProtocolViolation(
+                "an unknown datagram type"
+            ))
+        );
+        // What came before it is kept, in its order.
+        assert_eq!(events.recv().await, Some(control(1)));
+    }
+
+    #[tokio::test]
+    async fn what_comes_while_an_answer_is_waited_for_is_read_after_it() {
+        let (queue, received) = mpsc::channel(8);
+        let mut events = Events::new(received);
+        queue.send(control(1)).await.unwrap();
+        queue.send(control(2)).await.unwrap();
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        let waiting = events.while_waiting(answered);
+        // The answer comes once the two were read.
+        let send = async {
+            tokio::task::yield_now().await;
+            answer.send(7).unwrap();
+        };
+        let (waited, ()) = tokio::join!(waiting, send);
+        assert_eq!(waited.unwrap().unwrap(), 7);
+        queue.send(control(3)).await.unwrap();
+        for id in 1..=3 {
+            assert_eq!(events.recv().await, Some(control(id)), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_more_than_so_many_are_read_ahead() {
+        let (queue, received) = mpsc::channel(MOST_READ_AHEAD + 8);
+        let mut events = Events::new(received);
+        for id in 0..=u64::try_from(MOST_READ_AHEAD).unwrap() {
+            queue.send(control(id)).await.unwrap();
+        }
+        let waited = tokio::time::timeout(
+            Duration::from_millis(50),
+            events.while_waiting(std::future::pending::<()>()),
+        )
+        .await;
+        assert!(waited.is_err());
+        // The one beyond the limit waits in the queue.
+        assert_eq!(events.ahead.len(), MOST_READ_AHEAD);
+        assert_eq!(events.received.len(), 1);
+    }
 }
