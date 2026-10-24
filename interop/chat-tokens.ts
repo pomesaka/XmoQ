@@ -2,39 +2,51 @@
 // (`--auth-key-hex`), with the two tokens the demo's pages get from the room:
 // `sub` for `xmoq/chat/r` on the connection, and `pub` for
 // `xmoq/chat/r/<name>` on the PUBLISH_NAMESPACE alone (`publishNamespaceToken`
-// of `joinChat`). No gatherer: one that sends tokens is not in this tree
-// yet, so a page publishes the room's `lines` in its place, with a `pub`
-// token for `xmoq/chat/r`. The tokens are made here with the relay's key,
-// in the form `crates/relay/src/auth.rs` reads and
-// `spikes/durable-objects-room/worker.js` writes.
+// of `joinChat`). The gatherer (`xmoq-chat`) runs with the same key and makes
+// tokens of its own (`sub` and `pub` in `xmoq/chat/*`), as in the demo with
+// `--auth`. The pages' tokens are made here with the relay's key, in the form
+// `crates/room-token` reads and writes and `spikes/durable-objects-room/worker.js`
+// writes.
 //
 // Usage: bun chat-tokens.ts [--relay own] [--port N] [--verbose]
 //
-// What has to be seen, written before the first run (2026-10-24):
+// What has to be seen, written before the first run with the gatherer
+// (2026-10-25):
 //
-//   - The page in the gatherer's place connects with `pub` for
-//     `xmoq/chat/r`, publishes `lines`, and sends line 0.
-//   - Page a connects with `sub` for `xmoq/chat/r` and joins as `a` with
-//     `pub` for `xmoq/chat/r/a`: its PUBLISH_NAMESPACE is accepted, it follows
-//     the room (SUBSCRIBE), has line 0 by its Joining FETCH, and line 1,
-//     sent then, live.
-//   - Page b, with the same `sub` and `pub` for `xmoq/chat/r/a`, is refused
-//     its PUBLISH_NAMESPACE as `b` with REQUEST_ERROR 0x1 (UNAUTHORIZED).
+//   - The gatherer with `--auth-key-hex` is told of `xmoq/chat`
+//     (`WATCHING`): the relay took its SETUP and its SUBSCRIBE_NAMESPACE.
+//   - Pages a and e connect with `sub` for `xmoq/chat/r` and join as `a` and
+//     `e` with `pub` for their own name: their PUBLISH_NAMESPACE is
+//     accepted, the gatherer subscribes to each `said` (`SUBSCRIBED`), and
+//     each follows the room's `lines`, which the gatherer publishes.
+//   - a says a line, then e: the gatherer numbers them 0 and 1, and both
+//     pages have both, live.
+//   - Page f comes then with the same two tokens: its Joining FETCH, which
+//     the relay passes to the gatherer, brings 0 and 1 as history.
+//   - Page b, with `sub` and `pub` for `xmoq/chat/r/a`, is refused its
+//     PUBLISH_NAMESPACE as `b` with REQUEST_ERROR 0x1 (UNAUTHORIZED).
 //   - Page c, with `sub` and no token of its own, is refused the same way:
 //     the connection's token allows no announcing.
 //   - Page d connects with `pub` for `xmoq/chat/r/d` and gives the same
 //     token to `joinChat` (the library sends it once): its PUBLISH_NAMESPACE
 //     is accepted, and its SUBSCRIBE for `lines` refused with 0x1.
+//   - Nothing of b, c or d reaches the gatherer as a line.
 
 import { createHmac } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { parseArgs } from "node:util";
 import type { Page } from "playwright-core";
 import {
+	captureGroup,
+	type LoggedProcess,
 	log,
 	openPage,
 	pollFor,
 	type RunContext,
 	runCleanups,
+	spawnChatGatherer,
 	startRun,
 	stopEverythingOnExit,
 	withTimeout,
@@ -80,14 +92,6 @@ function expect(what: string, got: string, wanted: string): void {
 	if (got !== wanted) throw new Error(`${what}: ${got}, not ${wanted}`);
 }
 
-/** A line of `lines` as the gatherer writes it, in hex. */
-const linePayload = (text: string): string =>
-	hex(
-		new TextEncoder().encode(
-			JSON.stringify({ name: "g", text, sentAt: 1000, at: 1000 }),
-		),
-	);
-
 const report = (page: Page): Promise<PageChatReport> =>
 	page.evaluate(() => window.xmoqOwn.chatReport());
 
@@ -132,6 +136,80 @@ async function join(
 	}
 }
 
+/** Opens a page with both tokens, has it join room r as `name`, and waits until the gatherer listens to it and it follows the room. */
+async function participant(
+	context: RunContext,
+	gatherer: LoggedProcess,
+	name: string,
+): Promise<Page> {
+	const page = await connected(
+		context,
+		`page:${name}`,
+		token("sub", "xmoq/chat/r"),
+	);
+	expect(
+		`page ${name} joining with pub for xmoq/chat/r/${name}`,
+		await join(page, name, token("pub", `xmoq/chat/r/${name}`)),
+		"joined",
+	);
+	await gatherer.waitForLine(
+		new RegExp(`^SUBSCRIBED room="r" name="${name}"$`),
+	);
+	await pollFor(async () => {
+		const { heard, following } = await report(page);
+		return heard && following ? true : undefined;
+	}, `page ${name} to be heard and to follow the room`);
+	return page;
+}
+
+const taken = /^LINE room="r" number=(\d+) name="([^"]*)" /;
+
+/** Has the page say a line, and waits for the gatherer to number it `number`. */
+async function sayOne(
+	gatherer: LoggedProcess,
+	page: Page,
+	name: string,
+	number: number,
+): Promise<void> {
+	const before = gatherer.matches(taken).length;
+	const outcome: unknown = JSON.parse(
+		await page.evaluate(
+			(line) => window.xmoqOwn.chatSay(line),
+			`${name}${number}`,
+		),
+	);
+	const type =
+		typeof outcome === "object" && outcome !== null && "type" in outcome
+			? String(outcome.type)
+			: JSON.stringify(outcome);
+	expect(`what became of the line of ${name}`, type, "sent");
+	const numbered = await pollFor(
+		() => gatherer.matches(taken)[before],
+		`the gatherer to number the line of ${name}`,
+	);
+	expect(
+		"the line numbered",
+		`${captureGroup(numbered, 1)} ${captureGroup(numbered, 2)}`,
+		`${number} ${name}`,
+	);
+}
+
+/** "number how" for each line the page has, by number. */
+async function linesOf(
+	page: Page,
+	count: number,
+	label: string,
+): Promise<string> {
+	const seen = await pollFor(async () => {
+		const { lines } = await report(page);
+		return lines.length >= count ? lines : undefined;
+	}, `${label} to have ${count} lines`);
+	return [...seen]
+		.sort((x, y) => Number(x.number) - Number(y.number))
+		.map((line) => `${line.number} ${line.name} ${line.how}`)
+		.join(", ");
+}
+
 /** "refused 0x1" for an UNAUTHORIZED refusal, else the text as it came. */
 const refusal = (text: string): string =>
 	/REQUEST_ERROR 0x1:/.test(text) ? "refused 0x1" : text;
@@ -149,44 +227,35 @@ async function main(): Promise<void> {
 		verbose: options.verbose,
 		relayArgs: ["--auth-key-hex", KEY_HEX],
 	});
+	const directory = mkdtempSync(joinPath(tmpdir(), "xmoq-chat-tokens-"));
 	let summary: string;
 	try {
-		const room = await connected(
+		const gatherer = spawnChatGatherer(
 			context,
-			"page:lines",
-			token("pub", "xmoq/chat/r"),
+			"gatherer",
+			joinPath(directory, "chat.sqlite3"),
+			["--auth-key-hex", KEY_HEX],
 		);
-		await withTimeout(
-			room.evaluate(() => window.xmoq.publishTrack("xmoq/chat/r", "lines")),
-			"the page in the gatherer's place to publish lines",
-		);
-		await room.evaluate(
-			(payload) => window.xmoqOwn.sendObjectIn("0", payload, true, [], 0),
-			linePayload("before"),
-		);
+		await gatherer.waitForLine(/^WATCHING prefix=xmoq\/chat$/);
 
-		const a = await connected(context, "page:a", token("sub", "xmoq/chat/r"));
+		const a = await participant(context, gatherer, "a");
+		const e = await participant(context, gatherer, "e");
+		await sayOne(gatherer, a, "a", 0);
+		await sayOne(gatherer, e, "e", 1);
+		const live = "0 a live, 1 e live";
+		expect("the lines of page a", await linesOf(a, 2, "page a"), live);
+		expect("the lines of page e", await linesOf(e, 2, "page e"), live);
+
+		const f = await participant(context, gatherer, "f");
 		expect(
-			"page a joining with pub for xmoq/chat/r/a",
-			await join(a, "a", token("pub", "xmoq/chat/r/a")),
-			"joined",
+			"the lines of page f, which came later",
+			await linesOf(f, 2, "page f"),
+			"0 a history, 1 e history",
 		);
-		const history = await pollFor(async () => {
-			const seen = await report(a);
-			return seen.following && seen.lines.length >= 1 ? seen : undefined;
-		}, "page a to follow the room and have line 0");
-		await room.evaluate(
-			(payload) => window.xmoqOwn.sendObjectIn("1", payload, true, [], 0),
-			linePayload("after"),
-		);
-		const both = await pollFor(async () => {
-			const seen = await report(a);
-			return seen.lines.length >= 2 ? seen : undefined;
-		}, "page a to have line 1");
-		const lines = both.lines
-			.map((line) => `${line.number} ${line.how}`)
-			.join(", ");
-		expect("the lines of page a", lines, "0 history, 1 live");
+		const [answered] = gatherer.matches(/^FETCH_ANSWERED room="r" (.*)$/);
+		if (answered === undefined) {
+			throw new Error("the gatherer answered no FETCH for page f");
+		}
 
 		const b = await connected(context, "page:b", token("sub", "xmoq/chat/r"));
 		expect(
@@ -216,9 +285,15 @@ async function main(): Promise<void> {
 			refusal(ended.replace(/^refused: /, "")),
 			"refused 0x1",
 		);
-		summary = `through the own relay with --auth-key-hex, page a with sub for xmoq/chat/r on its connection and pub for xmoq/chat/r/a on its PUBLISH_NAMESPACE joined, followed the room and had ${lines} (following: ${history.following}); b with pub for another name and c with none were refused their PUBLISH_NAMESPACE with 0x1; d with pub alone announced and was refused its SUBSCRIBE with 0x1`;
+		const others = gatherer
+			.matches(taken)
+			.map((match) => captureGroup(match, 2))
+			.filter((name) => name !== "a" && name !== "e");
+		expect("the lines the gatherer took of others", others.join(","), "");
+		summary = `through the own relay with --auth-key-hex and the gatherer with the same key, pages a and e with sub for xmoq/chat/r on their connection and pub for their name on their PUBLISH_NAMESPACE joined, and each had both lines live (${live}); page f, which came later, had them by its Joining FETCH, which the gatherer answered (${answered[1]}); b with pub for another name and c with none were refused their PUBLISH_NAMESPACE with 0x1; d with pub alone announced and was refused its SUBSCRIBE with 0x1`;
 	} finally {
 		await runCleanups();
+		rmSync(directory, { recursive: true, force: true });
 	}
 	log("driver", `RESULT ${JSON.stringify({ relay: options.relay })}`);
 	log("driver", `SUMMARY ${summary}`);
