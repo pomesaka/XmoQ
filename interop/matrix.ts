@@ -1384,6 +1384,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 		},
 		{
+			name: "own relay: quiet peer: the relay lets a padding datagram go and keeps the session",
+			script: "quiet-peer.ts",
+			args: ["--case", "relay-padding-datagram", "--client", "quiet-peer"],
+			relay: "own",
+		},
+		{
 			name: "no relay: quiet peer: own-rust closes its session with PROTOCOL_VIOLATION at a datagram of an unknown type",
 			script: "quiet-peer.ts",
 			args: ["--case", "datagram", "--client", "own-rust"],

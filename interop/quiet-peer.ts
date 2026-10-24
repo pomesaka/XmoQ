@@ -1078,6 +1078,28 @@ async function relayUnknownDatagram(): Promise<string> {
 	return `the own relay closed the session of a client that sent a datagram of an unknown type with PROTOCOL_VIOLATION: ${closed}; the client: ${said}`;
 }
 
+/**
+ * A padding datagram (0x132B3E29) the own relay is sent after the client's
+ * SETUP is let go of (§11.5.2: "The receiver MUST discard all data received
+ * in a padding datagram"): the session stays, and the client prints
+ * `STAYED` after its time.
+ */
+async function relayPaddingDatagram(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: [],
+		verbose: options.verbose,
+	});
+	const client = spawnQuietClient(context, "client:quiet-peer", 1500, true, [
+		"--send-datagram-hex",
+		"f0132b3e290000",
+	]);
+	await client.waitForLine(/^DATAGRAM_SENT /);
+	const [stayed] = await client.waitForLine(/^STAYED ms=1500$/);
+	return `the own relay let a padding datagram go and kept the session: the client printed ${stayed}`;
+}
+
 async function relayIdleSession(): Promise<string> {
 	const context = await startRun({
 		relay: "own",
@@ -1414,6 +1436,7 @@ async function relayGroupKeptBeyondTheCache(): Promise<string> {
 const RELAY_CASES: Record<string, () => Promise<string>> = {
 	"relay-no-setup": relayNoSetup,
 	"relay-unknown-datagram": relayUnknownDatagram,
+	"relay-padding-datagram": relayPaddingDatagram,
 	"relay-idle-session": relayIdleSession,
 	"relay-many-announcements": relayManyAnnouncements,
 	"relay-one-session-asks-for-much": relayOneSessionAsksForMuch,
