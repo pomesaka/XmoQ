@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { SessionOutput } from "../src/core/session-output.ts";
 
 /** Parses hex written as in the moqtail relay log: byte pairs separated by spaces. */
 export function hex(text: string): Uint8Array<ArrayBuffer> {
@@ -14,6 +15,21 @@ export function hex(text: string): Uint8Array<ArrayBuffer> {
 export function toHex(bytes: Uint8Array): string {
 	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
 		" ",
+	);
+}
+
+/**
+ * Whether the output tells the I/O layer only about the times a stream of
+ * the peer has: that it has said what it is (`peer-stream-identified`), or
+ * that it is a subgroup stream with the idle time from now on
+ * (`watch-peer-stream-idle`). Tests that list what a stream leads to leave
+ * these out; `session-first-bytes.test.ts` and `session-idle-stream.test.ts`
+ * have when they come.
+ */
+export function isStreamTiming(output: SessionOutput): boolean {
+	return (
+		output.type === "peer-stream-identified" ||
+		output.type === "watch-peer-stream-idle"
 	);
 }
 

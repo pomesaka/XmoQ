@@ -4,7 +4,13 @@ import type { SessionLimits } from "../../src/core/limits.ts";
 import type { SubgroupOptions } from "../../src/core/outgoing-subgroups.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
-import { fromALibrary, hex, MOQTAIL_RELAY_SETUP, utf8 } from "../helpers.ts";
+import {
+	fromALibrary,
+	hex,
+	isStreamTiming,
+	MOQTAIL_RELAY_SETUP,
+	utf8,
+} from "../helpers.ts";
 
 const NAMESPACE = [utf8("xmoq"), utf8("phase0")];
 const TRACK_NAME = utf8("object");
@@ -25,13 +31,9 @@ function started(limits?: SessionLimits): Session {
 	return session;
 }
 
-/**
- * The outputs without the ones that say that a stream of the peer has said
- * what it is (`peer-stream-identified`), so that a test lists what a stream
- * leads to; `session-first-bytes.test.ts` has when that output comes.
- */
+/** The outputs without the ones about the times of a stream (`isStreamTiming`), so that a test lists what a stream leads to. */
 function said(outputs: SessionOutput[]): SessionOutput[] {
-	return outputs.filter((output) => output.type !== "peer-stream-identified");
+	return outputs.filter((output) => !isStreamTiming(output));
 }
 
 /** A session with SUBSCRIBE on stream 1 (Request ID 0) and PUBLISH on stream 2 (Request ID 2, Track Alias 1). */

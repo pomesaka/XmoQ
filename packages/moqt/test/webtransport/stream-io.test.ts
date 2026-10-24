@@ -54,6 +54,7 @@ async function joined(): Promise<{
 		maxPeerUniStreams: 8,
 		maxPeerBidiStreams: 8,
 		firstBytesTimeoutMs: 10_000,
+		idleSubgroupStreamTimeoutMs: 30_000,
 		openBidiTimeoutMs: 10_000,
 		trace: () => {},
 		input: (action) => apply(action(session)),

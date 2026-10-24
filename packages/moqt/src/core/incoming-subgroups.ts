@@ -92,6 +92,17 @@ export interface IncomingSubgroups {
 	 * for as long as the session lasts.
 	 */
 	dropBeforeHeader(peerStream: number): boolean;
+	/**
+	 * The stream, whose Subgroup Header is whole, sent nothing for the idle
+	 * time (`watch-peer-stream-idle`). It is stopped as one whose Objects are
+	 * lost: what it held is dropped, it counts as ended for PUBLISH_DONE
+	 * (§10.11), and its subscription goes on (§11.4.3: "Resets and
+	 * STOP_SENDING on SUBSCRIBE data streams have no impact on other
+	 * Subgroups in the Group or the subscription"). Does nothing for a stream
+	 * that has ended or was stopped before, so a time reported late does no
+	 * harm.
+	 */
+	idle(peerStream: number, out: SessionOutput[]): void;
 	/** A SUBSCRIBE left Pending: deliver or drop what was held for it. */
 	resolveHeld(out: SessionOutput[]): void;
 	clear(): void;
@@ -288,6 +299,19 @@ export function createIncomingSubgroups(
 		reason: "the subscription ended",
 		code: StreamResetErrorCode.CANCELLED,
 	};
+	/**
+	 * WHY INTERNAL_ERROR: no code of §3.3.3 is for a stream that is kept open
+	 * without bytes. DELIVERY_TIMEOUT is for "A delivery timeout (Section 8)",
+	 * which is a time the publisher keeps for an Object, and EXCESSIVE_LOAD
+	 * says "The endpoint is overloaded", which it is not. INTERNAL_ERROR is
+	 * "An implementation specific error", and the code a stream that does not
+	 * say what it is gets (`peerStreamTimedOut` in session.ts); the Rust
+	 * implementation sends the same (docs/moqt-implementation-notes.md).
+	 */
+	const idleStream: StopReason = {
+		reason: "no bytes within the idle time",
+		code: StreamResetErrorCode.INTERNAL_ERROR,
+	};
 	const unknownAlias: StopReason = {
 		reason: "unknown Track Alias",
 		code: StreamResetErrorCode.CANCELLED,
@@ -478,6 +502,12 @@ export function createIncomingSubgroups(
 					abandon(peerStream, stream, stopReason, out);
 					return;
 				}
+				// Not before the header is whole: until then the time a stream
+				// has to say what it is runs, and it is the shorter one by
+				// default (10 against 30 seconds).
+				if (item.type === "header" && !fin) {
+					out.push({ type: "watch-peer-stream-idle", peerStream });
+				}
 				// Delivering an Object can end the subscription and stop this stream.
 				if (stream.abandoned) return;
 			}
@@ -510,6 +540,13 @@ export function createIncomingSubgroups(
 			if (stream.requestId !== undefined) countEnded(stream, out);
 			else if (stream.held.length > 0) finishedHeld.push(stream);
 			else countEarlyClosed(header.trackAlias);
+		},
+
+		idle(peerStream, out) {
+			const stream = streams.get(peerStream);
+			if (stream === undefined || stream.abandoned) return;
+			if (stream.header === undefined) return;
+			abandon(peerStream, stream, idleStream, out);
 		},
 
 		dropBeforeHeader(peerStream) {

@@ -269,6 +269,15 @@ export type SessionOutput =
 	 */
 	| { type: "peer-stream-identified"; kind: PeerStreamKind; peerStream: number }
 	/**
+	 * The unidirectional stream of the peer is a subgroup stream whose
+	 * Subgroup Header is whole: from now on, each time it is read, it has the
+	 * idle time to send its next bytes, and `Session.peerUniStreamIdle` is
+	 * called when it has not. The time runs only while a read waits: not
+	 * while the stream is held back by this endpoint, a subscription whose
+	 * queue is full among them.
+	 */
+	| { type: "watch-peer-stream-idle"; peerStream: number }
+	/**
 	 * Give up a bidirectional stream the peer opened, in both directions:
 	 * STOP_SENDING for the peer's, and a reset of this endpoint's where it was
 	 * not used yet.
