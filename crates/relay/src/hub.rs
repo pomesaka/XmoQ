@@ -29,8 +29,8 @@ use xmoq_moqt_io::{
     open_fetch_stream_without_header, read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
-    Action, Event, FetchPiece, FetchPipeEnd, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay,
-    RequestEnd, Role, SessionKey, StreamKey,
+    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, OutStreamKey, OwnRequestEnd, OwnRequestKey,
+    Relay, RequestEnd, Role, SessionKey, StreamKey,
 };
 
 /// Limits of the relay. Every value is provisional: the draft sets none of
@@ -318,12 +318,28 @@ enum Envelope<C: Connection> {
         session: SessionKey,
         since: u64,
     },
-    /// The relay is to stop: every session is closed, and the sender is
-    /// answered when the closes have reached the peers.
-    Stop(oneshot::Sender<()>),
+    /// The relay is to stop.
+    Stop(Stopping),
     /// A test asks what the hub holds.
     #[cfg(test)]
     Inspect(tokio::sync::oneshot::Sender<Held>),
+}
+
+/// How the relay is to stop.
+enum Stopping {
+    /// Every session is told with GOAWAY, and `drained` is answered once no
+    /// session is left.
+    GoAway {
+        going_away: GoingAway,
+        drained: oneshot::Sender<()>,
+    },
+    /// Every session is closed with `code`, and `answer` is answered when
+    /// the closes have reached the peers.
+    Close {
+        answer: oneshot::Sender<()>,
+        code: u32,
+        reason: &'static str,
+    },
 }
 
 /// What the hub and its relay hold.
@@ -745,19 +761,43 @@ impl<C: Connection> HubHandle<C> {
         assert!(sent.is_ok(), "the hub is running");
     }
 
-    /// Closes every session and completes when the peers have been told,
-    /// or [`CLOSE_REACHES_THE_PEER`] later. For a relay that is about to end.
+    /// Closes every session with `code` and completes when the peers have
+    /// been told, or [`CLOSE_REACHES_THE_PEER`] later. For a relay that is
+    /// about to end: `GOAWAY_TIMEOUT` after a GOAWAY whose time is over
+    /// ([`Self::go_away`]; §3.6: "The sender closes the session with a
+    /// `GOAWAY_TIMEOUT` if the peer doesn't close the session within the
+    /// indicated Timeout").
     ///
     /// WHY the sessions are closed and not left to the end of the process: a
     /// connection that merely stops answering is found out by the peer's
-    /// idle timeout, seconds later, and without a code. `NO_ERROR`, "The
-    /// session is being terminated without an error" (§3.5): the draft's
-    /// way for a server that goes away is GOAWAY (§3.6), which this relay
-    /// does not send.
-    pub async fn stop(&self) {
+    /// idle timeout, seconds later, and without a code.
+    pub async fn stop_with(&self, code: u32, reason: &'static str) {
         let (answer, stopped) = oneshot::channel();
-        if self.events.send(Envelope::Stop(answer)).await.is_ok() {
+        let stop = Envelope::Stop(Stopping::Close {
+            answer,
+            code,
+            reason,
+        });
+        if self.events.send(stop).await.is_ok() {
             let _ = stopped.await;
+        }
+    }
+
+    /// Tells every session with GOAWAY that the relay is to stop (§3.6),
+    /// and completes once no session is left; the caller sees to the
+    /// Timeout.
+    pub async fn go_away(&self, new_session_uri: Vec<u8>, timeout_ms: u64) {
+        let (drained, gone) = oneshot::channel();
+        let going_away = GoingAway {
+            new_session_uri,
+            timeout_ms,
+        };
+        let go_away = Envelope::Stop(Stopping::GoAway {
+            going_away,
+            drained,
+        });
+        if self.events.send(go_away).await.is_ok() {
+            let _ = gone.await;
         }
     }
 
@@ -809,6 +849,7 @@ pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>)
         config,
         events: events.clone(),
         sessions: HashMap::new(),
+        drained: None,
         out_streams: HashMap::new(),
         fetch_pipes: HashMap::new(),
         timers: Timers::default(),
@@ -829,6 +870,9 @@ struct Hub<C: Connection> {
     /// For the tasks the hub starts, which report back through it.
     events: mpsc::Sender<Envelope<C>>,
     sessions: HashMap<SessionKey, SessionHandle<C>>,
+    /// Answered once no session is left, after GOAWAY was sent
+    /// ([`HubHandle::go_away`]).
+    drained: Option<oneshot::Sender<()>>,
     /// The writers of the subgroup streams that are not done, with the session
     /// each writes to.
     out_streams: HashMap<OutStreamKey, (SessionKey, OutgoingSubgroup)>,
@@ -1117,7 +1161,7 @@ impl<C: Connection> Hub<C> {
                 }
                 Envelope::SetupDue { session } => self.setup_due(session),
                 Envelope::IdleDue { session, since } => self.idle_due(session, since),
-                Envelope::Stop(answer) => self.stop(answer),
+                Envelope::Stop(stopping) => self.stop(stopping),
                 #[cfg(test)]
                 Envelope::Inspect(answer) => {
                     let _ = answer.send(Held {
@@ -1432,6 +1476,13 @@ impl<C: Connection> Hub<C> {
         }
         if may_have_changed {
             self.watch_idle();
+        }
+        // A session goes through here when it is closed, by the relay or by
+        // the peer.
+        if self.sessions.is_empty()
+            && let Some(drained) = self.drained.take()
+        {
+            let _ = drained.send(());
         }
     }
 
@@ -2182,7 +2233,30 @@ impl<C: Connection> Hub<C> {
 
     /// Closes every session, and answers when the peers have been told or
     /// [`CLOSE_REACHES_THE_PEER`] later ([`HubHandle::stop`]).
-    fn stop(&mut self, answer: oneshot::Sender<()>) {
+    fn stop(&mut self, stopping: Stopping) {
+        let (answer, code, reason) = match stopping {
+            Stopping::GoAway {
+                going_away,
+                drained,
+            } => {
+                self.log(|| {
+                    format!(
+                        "GOING_AWAY sessions={} timeout_ms={} uri={}",
+                        self.sessions.len(),
+                        going_away.timeout_ms,
+                        String::from_utf8_lossy(&going_away.new_session_uri)
+                    )
+                });
+                self.drained = Some(drained);
+                self.feed(VecDeque::from([Event::GoingAway(going_away)]));
+                return;
+            }
+            Stopping::Close {
+                answer,
+                code,
+                reason,
+            } => (answer, code, reason),
+        };
         let sessions: Vec<SessionKey> = self.sessions.keys().copied().collect();
         let connections: Vec<Arc<C>> = self
             .sessions
@@ -2192,7 +2266,7 @@ impl<C: Connection> Hub<C> {
         self.log(|| format!("STOPPING sessions={}", sessions.len()));
         let mut pending = VecDeque::new();
         for session in sessions {
-            self.close(session, NO_ERROR, "the relay is stopping", &mut pending);
+            self.close(session, code, reason, &mut pending);
         }
         self.feed(pending);
         tokio::spawn(async move {

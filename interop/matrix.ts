@@ -1109,6 +1109,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 		},
 		{
+			name: "own relay: goaway: the own relay is sent SIGTERM and sends GOAWAY naming another own relay, and the terminal viewer moves there and plays the same broadcast",
+			script: "watch-rust.ts",
+			args: ["--watch", "goaway"],
+			relay: "own",
+		},
+		{
 			name: "no relay: watch: the terminal viewer finds a video and an audio track in the catalog of moqlivemock's publisher and plays them",
 			script: "watch-rust.ts",
 			args: ["--watch", "from-mlmpub"],
@@ -1521,6 +1527,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			: []),
 		...(relays.includes("own")
 			? [
+					{
+						name: "own relay: goaway: the own relay is sent SIGTERM and sends GOAWAY naming another own relay, the own pages that publish and play move there and go on, and the relay ends once they have left",
+						script: "video.ts" as const,
+						args: ["--video", "goaway-from-own"],
+						relay: "own",
+					},
+					{
+						name: "own relay: goaway: the own relay is sent SIGTERM and sends GOAWAY, and own-rust, which subscribes, takes it and leaves with 0",
+						script: "video.ts" as const,
+						args: ["--video", "goaway-from-own-rust"],
+						relay: "own",
+					},
 					{
 						name: "own relay: video: an own page encodes and publishes video, and moqlivemock's subscriber takes its Groups and Objects",
 						script: "video.ts" as const,

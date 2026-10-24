@@ -4,7 +4,7 @@
 // the Timestamps of LOC, with no terminal and no sound output
 // (`--out /dev/null`, `--sound off`).
 //
-// Usage: bun watch-rust.ts [--watch page|from-mlmpub] [--port N] [--verbose]
+// Usage: bun watch-rust.ts [--watch page|from-mlmpub|goaway] [--port N] [--verbose]
 //
 // What has to be seen, written before the first run.
 //
@@ -65,17 +65,40 @@
 //     longer counted. In 3 of 7 runs the viewer then failed on the stream
 //     of its FETCH for the catalog, which opened after the catalog had
 //     come on the subscription; that stream is now let go of.)
+//
+// `--watch goaway`. Two own relays: the run's, started with
+// `--redirect-uri` naming the second, on the run's port plus
+// `MOQLIVEMOCK_SIDE_PORT_OFFSET`. A page publishes the broadcast through
+// each, as in `--watch page`. The viewer watches through the run's relay,
+// which is sent SIGTERM once the viewer has named the catalog and 3
+// seconds more have passed. Written before the first run:
+//
+//   - The relay says `GOING_AWAY sessions=2` (the page and the viewer).
+//   - The viewer says `GOAWAY timeout_ms=10000`, then `MOVED` with the
+//     second relay's URL, names the same catalog again there, and goes on
+//     to the end of its `--seconds`, leaving with 0 (`AV_PLAYED`, "the
+//     viewer was ended") having drawn 60 frames or more and played sound
+//     on the second relay.
+//   - The relay ends with 0 within its Timeout and the 2 seconds its closes
+//     take: the page that published through it does not move, and its
+//     session is closed with GOAWAY_TIMEOUT. In the first run the page
+//     closed that session itself at the GOAWAY, and the relay ended before
+//     its Timeout (`STOPPING sessions=0`); either is held to the same time.
+//     The viewer's first session ends with its own `AV_PLAYED`, "the relay
+//     sent GOAWAY".
 
 import { parseArgs } from "node:util";
 import {
 	type LoggedProcess,
 	log,
+	MOQLIVEMOCK_SIDE_PORT_OFFSET,
 	openConnectedPage,
 	pollFor,
 	runCleanups,
 	spawnTerminalViewer,
 	startMoqlivemockPublisher,
 	startRun,
+	startSecondOwnRelay,
 	stopEverythingOnExit,
 	withTimeout,
 } from "./harness.ts";
@@ -292,9 +315,116 @@ async function fromMlmpub(): Promise<string> {
 	return `xmoq-watch found a video and an audio track among the 13 of mlmpub's catalog and played them for ${SECONDS} s: ${fields.get("video_drawn")} frames drawn, ${fields.get("audio_packets")} packets of sound, ${fields.get("underruns")} underruns`;
 }
 
+/** The Timeout of the own relay's GOAWAY (`--goaway-timeout-ms`), and the time its closes take to reach the peers after it. */
+const GOAWAY_TIMEOUT_MS = 10_000;
+const CLOSE_REACHES_THE_PEER_MS = 2000;
+
+async function goAway(): Promise<string> {
+	const second = await startSecondOwnRelay(
+		String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+	);
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser"],
+		verbose: options.verbose,
+		relayArgs: [
+			"--redirect-uri",
+			second.url,
+			"--goaway-timeout-ms",
+			String(GOAWAY_TIMEOUT_MS),
+		],
+	});
+	const publish = async (label: string, relayUrl: string): Promise<void> => {
+		const page = await openConnectedPage(
+			{ ...context, relayUrl },
+			label,
+			"own-browser",
+		);
+		await withTimeout(
+			page.evaluate(
+				([namespace]) => window.xmoqOwn.publishBroadcast(namespace),
+				[NAMESPACE] satisfies [string],
+			),
+			`${label} to publish its broadcast`,
+		);
+		await pollFor(
+			async () =>
+				(await page.evaluate(() => window.xmoqOwn.broadcastReport())).painted >=
+				PAINTED_BEFORE
+					? true
+					: undefined,
+			`${label} to paint ${PAINTED_BEFORE} frames`,
+		);
+	};
+	await publish("publisher:first", context.relayUrl);
+	await publish("publisher:second", second.url);
+	const viewer = spawnTerminalViewer(context, "viewer:xmoq-watch", [
+		"--namespace",
+		NAMESPACE,
+		...HEADLESS,
+	]);
+	const [, catalog] = await viewer.waitForLine(/^CATALOG (.*)$/, 20_000);
+	await new Promise((resolve) => setTimeout(resolve, 3000));
+	const ended = context.relay.exited;
+	context.signalRelay("SIGTERM");
+	await context.relay.waitForLine(
+		new RegExp(
+			`^GOING_AWAY sessions=2 timeout_ms=${GOAWAY_TIMEOUT_MS} uri=${second.url.replaceAll(".", "\\.")}$`,
+		),
+	);
+	await viewer.waitForLine(
+		new RegExp(`^GOAWAY timeout_ms=${GOAWAY_TIMEOUT_MS}$`),
+	);
+	await viewer.waitForLine(
+		new RegExp(`^MOVED ${second.url.replaceAll(".", "\\.")}$`),
+	);
+	const catalogs = (): string[] =>
+		viewer.matches(/^CATALOG (.*)$/).map((match) => match[1] ?? "");
+	await pollFor(
+		async () => (catalogs().length >= 2 ? true : undefined),
+		"the viewer to name the catalog on the second relay",
+	);
+	if (catalogs().some((each) => each !== catalog)) {
+		throw new Error(
+			`the viewer was to name the same catalog on both relays: ${JSON.stringify(catalogs())}`,
+		);
+	}
+	// Each session ends with its own line: the first with "the relay sent
+	// GOAWAY".
+	const [line] = await viewer.waitForLine(
+		/^AV_PLAYED why="the viewer was ended".*$/,
+		30_000,
+	);
+	const code = await withTimeout(viewer.exited, "the viewer to leave");
+	const fields = fieldsOf(line);
+	const drawn = Number(fields.get("video_drawn") ?? Number.NaN);
+	const played = Number(fields.get("audio_played_ms") ?? Number.NaN);
+	if (
+		code !== 0 ||
+		fields.get("why") !== "the viewer was ended" ||
+		!(drawn >= 60) ||
+		!(played > 0)
+	) {
+		throw new Error(
+			`the viewer was to leave with 0 at its end, having drawn 60 frames or more and played sound on the second relay: ${code}, ${line}`,
+		);
+	}
+	const relayCode = await withTimeout(
+		ended,
+		"the own relay to end",
+		GOAWAY_TIMEOUT_MS + CLOSE_REACHES_THE_PEER_MS + 2000,
+	);
+	if (relayCode !== 0) {
+		throw new Error(`the own relay was to end with 0, not ${relayCode}`);
+	}
+	return `the own relay sent GOAWAY at SIGTERM naming another; xmoq-watch moved there, named the same catalog, and drew ${drawn} frames and played ${played} ms of sound there; the relay ended with 0`;
+}
+
 const RUNS: Record<string, () => Promise<string>> = {
 	page: fromPage,
 	"from-mlmpub": fromMlmpub,
+	goaway: goAway,
 };
 
 async function main(): Promise<void> {
