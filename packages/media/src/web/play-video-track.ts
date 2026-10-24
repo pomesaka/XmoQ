@@ -20,6 +20,7 @@ import {
 	type VideoDropReason,
 	type VideoReceiverEvent,
 } from "../core/video-receiver.ts";
+import { locProperties } from "../moqt/loc-properties.ts";
 
 /**
  * How many chunks may wait in the decoder before the Group that is played
@@ -414,7 +415,12 @@ export async function playVideoTrack(
 				count(
 					receiver.push({
 						groupId,
-						object: { objectId, properties, status: "Normal", payload },
+						object: {
+							objectId,
+							properties: locProperties(properties),
+							status: "Normal",
+							payload,
+						},
 					}),
 				);
 			}
@@ -438,7 +444,14 @@ export async function playVideoTrack(
 					break;
 				}
 				if (next.done || gaveUp !== undefined) break;
-				count(receiver.push(next.value));
+				// Inside Immutable Properties as well (§12.7).
+				const { groupId, object } = next.value;
+				count(
+					receiver.push({
+						groupId,
+						object: { ...object, properties: locProperties(object.properties) },
+					}),
+				);
 			}
 		} catch (error) {
 			// Not the subscription and not the decoder: a fault here. The
