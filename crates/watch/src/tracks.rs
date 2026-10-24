@@ -121,7 +121,7 @@ mod tests {
     fn the_first_tracks_the_viewer_can_decode_are_chosen() {
         let track = |name: &str, role: &str, codec: &str, packaging: &str| {
             format!(
-                r#"{{"name":"{name}","packaging":"{packaging}","isLive":true,"role":"{role}","codec":"{codec}"}}"#
+                r#"{{"name":"{name}","packaging":"{packaging}","isLive":true,"role":"{role}","codec":"{codec}","bitrate":1}}"#
             )
         };
         let catalog = |tracks: &[String]| {
@@ -181,14 +181,16 @@ mod tests {
     #[test]
     fn the_version_that_is_asked_for_is_chosen() {
         let demo = r#"{"version":"draft-01","tracks":[
-            {"name":"video","packaging":"loc","role":"video","codec":"avc3.42E01F","width":640,"height":360,"bitrate":1500000},
-            {"name":"video-low","packaging":"loc","role":"video","codec":"avc3.42E01F","width":320,"height":180,"bitrate":500000},
-            {"name":"video-bare","packaging":"loc","role":"video","codec":"avc3.42E01F"},
-            {"name":"audio","packaging":"loc","role":"audio","codec":"opus"}]}"#;
+            {"name":"video","packaging":"loc","isLive":true,"role":"video","codec":"avc3.42E01F","width":640,"height":360,"bitrate":1500000},
+            {"name":"video-low","packaging":"loc","isLive":true,"role":"video","codec":"avc3.42E01F","width":320,"height":180,"bitrate":500000},
+            {"name":"video-bare","packaging":"loc","isLive":true,"role":"video","codec":"avc3.42E01F","bitrate":2000000},
+            {"name":"audio","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":64000}]}"#;
+        // A LOC track has a bitrate (MSF §5.2.22); these two have the same,
+        // and no height.
         let bare = r#"{"version":"draft-01","tracks":[
-            {"name":"a","packaging":"loc","role":"video","codec":"avc3.42E01F"},
-            {"name":"b","packaging":"loc","role":"video","codec":"avc3.42E01F"},
-            {"name":"audio","packaging":"loc","role":"audio","codec":"opus"}]}"#;
+            {"name":"a","packaging":"loc","isLive":true,"role":"video","codec":"avc3.42E01F","bitrate":1000},
+            {"name":"b","packaging":"loc","isLive":true,"role":"video","codec":"avc3.42E01F","bitrate":1000},
+            {"name":"audio","packaging":"loc","isLive":true,"role":"audio","codec":"opus","bitrate":64000}]}"#;
         let mock = include_str!("../../../fixtures/msf-01/catalog-moqlivemock.json");
         let named = |name: &str| VideoVersion::Named(name.to_string());
         // (the catalog; what is asked for; the video track that is chosen)
@@ -208,7 +210,8 @@ mod tests {
             ),
             (demo, VideoVersion::BitrateAtMost(1_500_000), Ok("video")),
             (demo, VideoVersion::BitrateAtMost(1), Ok("video-low")),
-            // The catalog says the measure of none: the first.
+            // The catalog says the height of none, and the same bitrate of
+            // both: the first.
             (bare, VideoVersion::HeightAtMost(360), Ok("a")),
             (bare, VideoVersion::BitrateAtMost(1), Ok("a")),
             (
