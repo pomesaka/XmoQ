@@ -9,7 +9,7 @@ import type { KeyValuePair } from "../../src/core/key-value-pair.ts";
 import { endsBefore, type Location } from "../../src/core/parameters.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
-import { hex, toHex, utf8 } from "../helpers.ts";
+import { hex, isStreamTiming, toHex, utf8 } from "../helpers.ts";
 
 const TRACK = { trackNamespace: [utf8("xmoq")], trackName: utf8("a") };
 
@@ -56,13 +56,11 @@ const REQUEST_ERROR = encodeControlMessage({
 
 /**
  * The outputs in a few words each, so that a row of a table can say what it
- * expects. That a stream has said what it is (`peer-stream-identified`) is
- * left out here; `session-first-bytes.test.ts` has when it is reported.
+ * expects. The outputs about the times of a stream (`isStreamTiming`) are
+ * left out.
  */
 function briefly(outputs: SessionOutput[]): string[] {
-	return outputs
-		.filter((output) => output.type !== "peer-stream-identified")
-		.map(brief);
+	return outputs.filter((output) => !isStreamTiming(output)).map(brief);
 }
 
 /** One output in a few words. */

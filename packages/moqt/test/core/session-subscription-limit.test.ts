@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionLimits } from "../../src/core/limits.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
-import { hex, utf8 } from "../helpers.ts";
+import { hex, isStreamTiming, utf8 } from "../helpers.ts";
 
 const NAMESPACE = [utf8("xmoq"), utf8("phase0")];
 
@@ -48,9 +48,7 @@ function summary(output: SessionOutput): string {
 }
 
 function summaries(outputs: SessionOutput[]): string[] {
-	return outputs
-		.filter((output) => output.type !== "peer-stream-identified")
-		.map(summary);
+	return outputs.filter((output) => !isStreamTiming(output)).map(summary);
 }
 
 /**

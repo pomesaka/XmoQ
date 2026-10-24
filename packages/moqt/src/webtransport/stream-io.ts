@@ -43,6 +43,12 @@ export interface StreamIoOptions {
 	 */
 	firstBytesTimeoutMs: number;
 	/**
+	 * How long a subgroup stream of the peer, once its Subgroup Header is
+	 * whole, may wait for its next bytes while it is read. One that has not
+	 * sent any by then is stopped (`watch-peer-stream-idle`).
+	 */
+	idleSubgroupStreamTimeoutMs: number;
+	/**
 	 * How long a bidirectional stream of this endpoint, a request, may wait
 	 * to be opened: for the peer to allow one more stream. Then what was to
 	 * be written on it fails with `StreamNotOpenedError`.
@@ -94,6 +100,10 @@ interface PeerStream {
 	reader: ReadableStreamDefaultReader<unknown>;
 	/** Runs out when the stream has not said what it is in time; cleared when it has. */
 	firstBytesTimer: ReturnType<typeof setTimeout>;
+	/** Whether the stream has the idle time, from the moment its Subgroup Header is whole. */
+	watchedIdle: boolean;
+	/** Runs while a read of a watched stream waits; cleared when the read returns. */
+	idleTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface LocalStream {
@@ -138,6 +148,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		maxPeerUniStreams,
 		maxPeerBidiStreams,
 		firstBytesTimeoutMs,
+		idleSubgroupStreamTimeoutMs,
 		openBidiTimeoutMs,
 		trace,
 		input,
@@ -242,12 +253,38 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		setTimeout(() => {
 			void input((session) => session.peerStreamTimedOut(kind, peerStream));
 		}, firstBytesTimeoutMs);
+	/**
+	 * Starts the time a subgroup stream has to send its next bytes, for one
+	 * read. It runs from when the read is made, which is after the bytes
+	 * before were taken by the session, so it counts from the stream's last
+	 * bytes, or from its Subgroup Header.
+	 *
+	 * WHY from the last bytes and not from when the stream was taken: a
+	 * stream that sends slowly but steadily, a Group published over minutes,
+	 * is a way to publish, and keeps its place. What is stopped is one the
+	 * peer keeps open with nothing on it, which holds one of the places for
+	 * the streams read at once, and what the session held of it, for as long
+	 * as the session lasts. WHY only while a read waits: a stream that
+	 * waits because this endpoint does not read it, a subscription whose
+	 * queue is full, has not been silent; its bytes are in the transport.
+	 *
+	 * The draft has no such time (§11.4 and §11.4.3 say nothing of a stream
+	 * left open without bytes; §13.6 has "Implementations are advised to use
+	 * timeouts to prevent resource exhaustion attacks by a peer that does
+	 * not send expected data within an expected time"). A page in the
+	 * background runs the timer late, never early, as for the first bytes.
+	 */
+	const startIdleTimer = (peerStream: number): ReturnType<typeof setTimeout> =>
+		setTimeout(() => {
+			void input((session) => session.peerUniStreamIdle(peerStream));
+		}, idleSubgroupStreamTimeoutMs);
 	const peerStreamsOf = (kind: PeerStreamKind): Map<number, PeerStream> =>
 		kind === "uni" ? peerUniStreams : peerBidiStreams;
 	/** The stream has ended: its timer and what was kept of it go. */
 	const forgetPeerStream = (kind: PeerStreamKind, peerStream: number): void => {
 		const streams = peerStreamsOf(kind);
 		clearTimeout(streams.get(peerStream)?.firstBytesTimer);
+		clearTimeout(streams.get(peerStream)?.idleTimer);
 		streams.delete(peerStream);
 	};
 	let nextPeerStream = 0;
@@ -265,8 +302,9 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * transport, where flow control holds the peer back.
 	 *
 	 * A stream holds its place until it has ended: a subgroup that stays open
-	 * for a long time, and a stream of no subscription that the peer does not
-	 * close, each keep one.
+	 * for a long time and goes on sending, and a stream of no subscription
+	 * that the peer does not close, each keep one. A subgroup stream that
+	 * sends nothing is stopped after `idleSubgroupStreamTimeoutMs`.
 	 *
 	 * WHY the control stream counts: it is one of the peer's unidirectional
 	 * streams, and nothing tells it apart before its first bytes are read. A
@@ -327,8 +365,9 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * peer from being read.
 	 *
 	 * A subgroup stream that stays open after its header holds a place among
-	 * the unidirectional streams in the same way, and is left to: a time
-	 * would end a Group that is sent slowly, which is a way to publish.
+	 * the unidirectional streams in the same way for as long as it sends: a
+	 * Group that is sent slowly is a way to publish. One that sends nothing
+	 * for `idleSubgroupStreamTimeoutMs` is stopped (`startIdleTimer` below).
 	 */
 	const bidiSlots = createStreamSlots(maxPeerBidiStreams);
 
@@ -388,15 +427,19 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 		/** `error` is what the read failed with. */
 		onReset(session: Session, error: unknown): SessionOutput[];
 		onEnd(): void;
+		/** Called before each read, and with the read's end, whatever it brought. */
+		whileReading?: { start(): void; stop(): void };
 	}): Promise<void> => {
 		try {
 			for (;;) {
+				source.whileReading?.start();
 				// Only the read is guarded: it fails when the peer reset the stream
 				// or the session ended. Anything else that throws in this loop is a
 				// fault of this endpoint and goes to `fatal` below.
 				const chunk = await source.reader
 					.read()
 					.catch((error: unknown) => ({ failed: true, error }) as const);
+				source.whileReading?.stop();
 				if ("failed" in chunk) {
 					// When the session ended, the read fails as well. That is not a
 					// reset by the peer, and `transport.closed` reports it.
@@ -686,6 +729,11 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 					inTurn(stream, stop)?.settled.catch(() => {});
 					return undefined;
 				}
+				case "watch-peer-stream-idle": {
+					const peer = peerUniStreams.get(output.peerStream);
+					if (peer !== undefined) peer.watchedIdle = true;
+					return undefined;
+				}
 				case "peer-stream-identified":
 					clearTimeout(
 						peerStreamsOf(output.kind).get(output.peerStream)?.firstBytesTimer,
@@ -764,10 +812,13 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 				transport.incomingUnidirectionalStreams,
 				(peerStream, stream) => {
 					const reader = stream.getReader();
-					peerUniStreams.set(peerStream, {
+					const peer: PeerStream = {
 						reader,
 						firstBytesTimer: startFirstBytesTimer("uni", peerStream),
-					});
+						watchedIdle: false,
+						idleTimer: undefined,
+					};
+					peerUniStreams.set(peerStream, peer);
 					uniSlots.take();
 					// Before any byte: the session stops only streams it knows.
 					void input((session) => {
@@ -788,6 +839,17 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 							forgetPeerStream("uni", peerStream);
 							uniSlots.release();
 						},
+						whileReading: {
+							start() {
+								if (peer.watchedIdle) {
+									peer.idleTimer = startIdleTimer(peerStream);
+								}
+							},
+							stop() {
+								clearTimeout(peer.idleTimer);
+								peer.idleTimer = undefined;
+							},
+						},
 					});
 				},
 				uniSlots.free,
@@ -801,6 +863,8 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 					peerBidiStreams.set(peerStream, {
 						reader,
 						firstBytesTimer: startFirstBytesTimer("bidi", peerStream),
+						watchedIdle: false,
+						idleTimer: undefined,
 					});
 					bidiSlots.take();
 					void input((session) => {
@@ -854,8 +918,9 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 			for (const timer of openTimers) clearTimeout(timer);
 			openTimers.clear();
 			for (const streams of [peerUniStreams, peerBidiStreams]) {
-				for (const { firstBytesTimer } of streams.values()) {
+				for (const { firstBytesTimer, idleTimer } of streams.values()) {
 					clearTimeout(firstBytesTimer);
+					clearTimeout(idleTimer);
 				}
 				streams.clear();
 			}

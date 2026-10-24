@@ -132,6 +132,17 @@ function isAnswer(event: SessionEvent): event is Extract<
  */
 const DEFAULT_FIRST_BYTES_TIMEOUT_MS = 10_000;
 /**
+ * Decided on 2026-10-24, and the value of the Rust implementation, which
+ * gets it in another change (docs/moqt-implementation-notes.md, row on a
+ * subgroup stream that sends nothing). The publishers of this repository
+ * (read on 2026-10-24) close the stream of a Group that is one Object, the
+ * chat line and the catalog, right after it, and send a Group of media as
+ * its frames come. A publisher that pauses inside a Group for longer loses
+ * the rest of that Group at this endpoint; its next Group comes on a new
+ * stream and is read.
+ */
+const DEFAULT_IDLE_SUBGROUP_STREAM_TIMEOUT_MS = 30_000;
+/**
  * §10.11 asks for at least the larger of the two delivery timeouts. Neither
  * is implemented, so this is a fixed value for now.
  */
@@ -158,10 +169,10 @@ const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
  * at once, and so does a delay above 2^31 - 1, Infinity among them. A wait
  * that was asked for and does not happen is not noticed.
  */
-function timerDelay(name: string, value: number): number {
-	if (!Number.isInteger(value) || value < 0 || value > MAX_TIMER_DELAY_MS) {
+function timerDelay(name: string, value: number, least = 0): number {
+	if (!Number.isInteger(value) || value < least || value > MAX_TIMER_DELAY_MS) {
 		throw new RangeError(
-			`${name} is a whole number from 0 to ${MAX_TIMER_DELAY_MS}, not ${String(value)}`,
+			`${name} is a whole number from ${least} to ${MAX_TIMER_DELAY_MS}, not ${String(value)}`,
 		);
 	}
 	return value;
@@ -253,6 +264,26 @@ export interface SessionConnectOptions {
 	 * its first read is then stopped at once. There is no value for "never".
 	 */
 	firstBytesTimeoutMs?: number;
+	/**
+	 * How long a subgroup stream of the peer may send nothing once its
+	 * Subgroup Header is whole, 30000 when left out: counted from its last
+	 * bytes, or from its header, and only while the stream is read, so not
+	 * while it waits for a subscription whose queue is full
+	 * (`subscriptionHighWaterMark`). A stream that sends nothing for that
+	 * long is stopped with STOP_SENDING `INTERNAL_ERROR` (`0x0`), and the
+	 * Objects held of it are dropped; **the subscription and the session
+	 * stay**, and the stream counts as ended for PUBLISH_DONE. Fetch
+	 * streams do not have this time. A whole number from 1 to 2147483647,
+	 * or `connect` rejects with a `RangeError`.
+	 *
+	 * WHY from 1, where the other waits take 0: there is no value that
+	 * switches this off, so a peer cannot hold places among
+	 * `maxPeerUniStreams` with streams it keeps open and silent for as long
+	 * as the session lasts; the most is the longest delay a timer takes.
+	 * With 0 every subgroup stream would be stopped at the first read that
+	 * finds no bytes waiting, which no publisher can keep to.
+	 */
+	idleSubgroupStreamTimeoutMs?: number;
 	/**
 	 * How long to wait for the peer's SETUP before closing with
 	 * CONTROL_MESSAGE_TIMEOUT. Like the two waits below, a whole number from
@@ -1099,6 +1130,12 @@ export async function connectOver(
 		"firstBytesTimeoutMs",
 		options.firstBytesTimeoutMs ?? DEFAULT_FIRST_BYTES_TIMEOUT_MS,
 	);
+	const idleSubgroupStreamTimeoutMs = timerDelay(
+		"idleSubgroupStreamTimeoutMs",
+		options.idleSubgroupStreamTimeoutMs ??
+			DEFAULT_IDLE_SUBGROUP_STREAM_TIMEOUT_MS,
+		1,
+	);
 	const setupTimeoutMs = timerDelay(
 		"setupTimeoutMs",
 		options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
@@ -1157,6 +1194,7 @@ export async function connectOver(
 		maxPeerUniStreams,
 		maxPeerBidiStreams,
 		firstBytesTimeoutMs,
+		idleSubgroupStreamTimeoutMs,
 		openBidiTimeoutMs: openStreamTimeoutMs,
 		trace: (direction, name, data) =>
 			options.diagnostics?.onBytes?.(direction, name, data),

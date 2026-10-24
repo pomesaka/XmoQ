@@ -258,6 +258,14 @@ export interface Session {
 	 */
 	peerStreamTimedOut(kind: PeerStreamKind, peerStream: number): SessionOutput[];
 	/**
+	 * A subgroup stream of the peer, watched since its Subgroup Header was
+	 * whole (`watch-peer-stream-idle`), has sent no byte for the idle time.
+	 * The outputs stop it with INTERNAL_ERROR and drop what the session held
+	 * of it; the session and the subscription stay. Does nothing for a stream
+	 * that is no subgroup stream, has ended, or was stopped before.
+	 */
+	peerUniStreamIdle(peerStream: number): SessionOutput[];
+	/**
 	 * How many streams the session keeps something of: request streams of
 	 * either side, and the peer's streams by the numbers the I/O layer gave
 	 * them. Nothing acts on it. It is here so that a test can see that what
@@ -745,6 +753,12 @@ export function createSession(options: SessionOptions = {}): Session {
 				});
 			});
 		},
+
+		peerUniStreamIdle: (peerStream) =>
+			guard((out) => {
+				if (peerUniStreams.get(peerStream)?.kind !== "subgroup") return;
+				requests.incoming.idle(peerStream, out);
+			}),
 
 		heldStreams: () =>
 			requests.heldStreams() +
