@@ -31,7 +31,8 @@ cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --lock
 cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --locked --root interop/peers/moqtail/.tools client
 # moqlivemock v0.16.1: a clone of the tag, `go build` of mlmpub, a patch of one line and `go build` of mlmsub, and its asset (peers/moqlivemock/README.md)
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
-cargo build --locked -p xmoq-moqt-client -p xmoq-relay
+cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat
+cargo build --locked --release -p xmoq-watch
 bun install --frozen-lockfile
 bun run --cwd interop playwright-core install --no-shell chromium
 bun interop/matrix.ts
@@ -225,6 +226,7 @@ Not every client can leave in every way. `own-rust` and `moqtail-rust` close the
 | `watch-rust.ts` | The driver for the runs of the terminal viewer, `xmoq-watch` (`crates/watch`), with no terminal and no sound output (`--out /dev/null`, `--sound off`): it finds the video and the audio track in a catalog and plays both for 8 seconds, of a page that publishes the catalog and both tracks on one connection (`publishBroadcast`) through the own relay, and of moqlivemock's publisher with no relay. What has to be seen is at its top. The viewer is the one binary of these runs that is a release build (`TERMINAL_VIEWER_BINARY` in `harness.ts` has why) |
 | `quiet-peer.ts` | The driver for the thirty-one runs with `xmoq-quiet-peer` (`--case no-setup\|no-publish-answer\|no-fetch-answer\|no-stream\|no-subgroup-stream\|goaway\|goaway-publisher\|goaway-request\|request-id-parity\|request-id-again --client own-browser\|own-rust\|xmoq-watch`, and `--case relay-no-setup\|relay-idle-session --client quiet-peer`). What has to be seen is at the top of the file |
 | `namespaces.ts` | Namespace discovery (`--relay own\|moqtail`): an own-rust client sends SUBSCRIBE_NAMESPACE for (`xmoq`) and is told with NAMESPACE and NAMESPACE_DONE of (`xmoq`, `phase0`) as an own-rust publisher announces it and leaves. What has to be seen is at the top of the file |
+| `chat.ts` | The gatherer of the chat, `xmoq-chat` (`crates/chat`), through a relay (`--relay own\|moqtail`): own-rust clients are two participants of a room and its viewers, live and by FETCH; a line too long, lines too fast, and a FETCH cut to its limit; with `--restart yes` (the default) also a restart of the gatherer on the same store with `--room r`, a participant of another room, and the end of the room. Through moqtail's relay it runs with `--restart no`, and is expected to fail at the FETCH the gatherer cuts to its limit (why both, at the pairing in `matrix.ts`). What has to be seen is at the top of the file |
 | `rendezvous.ts` | The driver for the eleven runs in which a SUBSCRIBE comes before its publisher (`--case publisher-comes\|nobody-comes\|not-asked\|publisher-returns\|another-publisher-comes\|page-publisher-returns\|viewer-before-the-broadcast --subscriber own-browser\|own-rust`). What has to be seen is at the top of the file |
 | `new-group.ts` | The driver for the two runs in which a subscriber asks for a new Group (`--publisher own-rust\|own-browser`). What has to be seen is at the top of the file |
 | `no-answer.ts` | The driver for the three runs in which a SUBSCRIBE is not answered in time (`--subscriber own-browser\|own-rust\|xmoq-watch`). What has to be seen is at the top of the file |

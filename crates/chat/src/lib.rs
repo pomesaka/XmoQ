@@ -1,0 +1,18 @@
+//! The gatherer of the chat: it is told of every participant of every room
+//! (`SUBSCRIBE_NAMESPACE` for `xmoq/chat`), takes what each says on its
+//! track `said`, numbers the lines of a room in the order they reach it,
+//! keeps them, and publishes them on the track `lines` of the room.
+//!
+//! This is the part that touches nothing: how long to wait before asking again ([`backoff`]), how fast one person may say lines
+//! ([`rate`]), the numbering of a room ([`rooms`]), what a FETCH gets ([`fetch`]), what is decided of
+//! a line that comes ([`gather`]), and what the flags mean ([`args`]). Each
+//! is given its times and its bytes, and none reads a clock, a socket or the
+//! store. The names and payloads of the tracks, and the limits of a line,
+//! are `xmoq-chat-tracks`, which the other sides of the chat use too.
+
+pub mod args;
+pub mod backoff;
+pub mod fetch;
+pub mod gather;
+pub mod rate;
+pub mod rooms;

@@ -1,0 +1,11 @@
+plain	3	{"name":"alice","text":"hi","sentAt":1761300000000,"at":1761300000007}	"alice"	"hi"	1761300000000	1761300000007	-	yes
+what JSON escapes	0	{"name":"a\"b","text":"line\nbreak\\","sentAt":0,"at":1}	"a\"b"	"line\nbreak\\"	0	1	-	yes
+the members in another order	7	{"at":2,"sentAt":1,"text":"t","name":"n"}	"n"	"t"	1	2	-	no
+a member more	7	{"name":"n","text":"t","sentAt":1,"at":2,"room":"r"}	"n"	"t"	1	2	-	no
+no name	1	{"text":"t","sentAt":1,"at":2}	-	-	-	-	name	-
+a name that is a number	1	{"name":5,"text":"t","sentAt":1,"at":2}	-	-	-	-	name	-
+no text	1	{"name":"n","sentAt":1,"at":2}	-	-	-	-	text	-
+a sentAt with a fraction	1	{"name":"n","text":"t","sentAt":1.5,"at":2}	-	-	-	-	sent-at	-
+no at	1	{"name":"n","text":"t","sentAt":1}	-	-	-	-	at	-
+an at too large	1	{"name":"n","text":"t","sentAt":1,"at":9007199254740992}	-	-	-	-	at	-
+an array	1	["n","t",1,2]	-	-	-	-	not-an-object	-

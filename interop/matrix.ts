@@ -45,6 +45,7 @@ interface Pairing {
 		| "no-answer.ts"
 		| "quiet-peer.ts"
 		| "namespaces.ts"
+		| "chat.ts"
 		| "rendezvous.ts"
 		| "new-group.ts";
 	/** The arguments of the driver, without the relay and the port. */
@@ -1154,6 +1155,36 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			script: "namespaces.ts",
 			args: [],
 			relay: "own",
+		},
+		// The gatherer of the chat (`crates/chat`): own-rust clients are the
+		// participants of a room and its viewers.
+		{
+			name: "own relay: chat: the gatherer numbers the lines of a room as they come, serves them live and from its store, drops lines too long or too fast, numbers on after a restart, gathers one room, and ends it",
+			script: "chat.ts",
+			args: [],
+			relay: "own",
+		},
+		// WHY expected to fail: moqtail's relay 0.15.0 passes on the Objects of
+		// an upstream fetch stream alone, and takes an End of Range indicator
+		// for no prior Location (`FetchObject::context` of moqtail-rs), where
+		// §11.4.4.2 has "Prior Group ID and prior Object ID: The values from
+		// the End of Range indicator". The answer the gatherer cut to its limit
+		// reaches the viewer as Groups 0 to 5 and without the indicator
+		// (docs/experiments/2026-10-24-chat-gatherer.md). The rest of the run
+		// passes before that.
+		// WHY no restart of the gatherer here (`--restart no`): moqtail's relay
+		// 0.15.0 did not answer the PUBLISH of a gatherer that came again at
+		// once in 2 of about 20 runs, CI's among them; its track manager takes
+		// its `tracks` and `track_aliases` locks in both orders
+		// (`remove_track` and `get_track_by_alias` of
+		// apps/relay/src/server/track_manager.rs, read at relay@0.15.0), which
+		// would wedge it. The restart runs through the own relay.
+		{
+			name: "moqtail relay: chat: the gatherer numbers and serves lines as through the own relay, without a restart, and a FETCH it cut to its limit reaches the viewer without its End of Unknown Range indicator",
+			script: "chat.ts",
+			args: ["--restart", "no"],
+			relay: "moqtail",
+			expectedFailure: /told of unknown lines up to: none, not 2/,
 		},
 		// The own clients against a peer that sends no SETUP, or answers no
 		// request (`crates/quiet-peer`): what reached the peer is what counts.

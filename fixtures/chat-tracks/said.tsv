@@ -1,0 +1,16 @@
+both	{"text":"hi","sentAt":1761300000000}	"hi"	1761300000000	-	yes
+a member more	{"text":"hi","sentAt":0,"to":"b"}	"hi"	0	-	no
+an empty text	{"text":"","sentAt":5}	""	5	-	yes
+escapes	{"text":"a\"b\u00e9","sentAt":5}	"a\"bé"	5	-	no
+what JSON escapes, as written	{"text":"line\nbreak\\","sentAt":0}	"line\nbreak\\"	0	-	yes
+the largest time	{"text":"x","sentAt":9007199254740991}	"x"	9007199254740991	-	yes
+a time too large	{"text":"x","sentAt":9007199254740992}	-	-	sent-at	-
+a time below 0	{"text":"x","sentAt":-1}	-	-	sent-at	-
+a time with a fraction	{"text":"x","sentAt":1.5}	-	-	sent-at	-
+a time with an exponent	{"text":"x","sentAt":1e3}	-	-	sent-at	-
+a time as a string	{"text":"x","sentAt":"5"}	-	-	sent-at	-
+no time	{"text":"x"}	-	-	sent-at	-
+a text that is a number	{"text":5,"sentAt":5}	-	-	text	-
+no text	{"sentAt":5}	-	-	text	-
+an array	["x",5]	-	-	not-an-object	-
+not JSON	hi	-	-	not-an-object	-
