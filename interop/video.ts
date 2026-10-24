@@ -266,7 +266,13 @@
 //     - `goaway-from-moqtail-rust`: own-rust subscribes to the bars of the
 //       publishing page and **prints `GOAWAY uri=https://127.0.0.1:<port>
 //       timeout_ms=10000 request_id=0` and leaves with 0**, connecting to
-//       nothing else.
+//       nothing else. The page publishes with `publishVideo`, on its one
+//       session, which it does not leave at a GOAWAY. WHY NOT
+//       `keepVideoPublished`: moqtail's relay sends the GOAWAY to one
+//       session after another, and a page that got it first left at once,
+//       so that the relay ended own-rust's subscription with PUBLISH_DONE
+//       before it wrote own-rust's GOAWAY, and own-rust left without it (1
+//       of the runs of CI on 2026-10-24).
 //
 //   goaway-from-own, goaway-from-own-rust
 //                 The same two, through the own relay, started with
@@ -288,7 +294,9 @@
 //                 besides the one that publishes or plays, and that session
 //                 does not move. So the count is 3 with one page and 4 with
 //                 two, and the relay ends with 0 after its Timeout, once it
-//                 has closed that session with GOAWAY_TIMEOUT.
+//                 has closed that session with GOAWAY_TIMEOUT. With
+//                 `goaway-from-own-rust` it is 2: its page publishes on that
+//                 session (`goaway-from-moqtail-rust` has why).
 //                 The terminal viewer is in `watch-rust.ts --watch goaway`.
 //     - The terminal viewer is not run so: it reads the catalog with a
 //       Joining FETCH, and moqtail's relay asks a page's publisher for
@@ -1608,25 +1616,13 @@ async function goAwayAtSigtermRust(relay: RelayThatSendsAway): Promise<string> {
 	);
 	await withTimeout(
 		publisher.evaluate(
-			([url, hash, namespace, setup]) =>
-				window.xmoqOwn.keepVideoPublished(url, hash, namespace, setup),
-			[
-				context.relayUrl,
-				context.certSha256Hex,
-				NAMESPACE,
-				{ ...BARS, mapping: "stream-per-group" },
-			] satisfies [string, string, string, PageVideoSetup],
+			([namespace, setup]) => window.xmoqOwn.publishVideo(namespace, setup),
+			[NAMESPACE, { ...BARS, mapping: "stream-per-group" }] satisfies [
+				string,
+				PageVideoSetup,
+			],
 		),
 		"the page to begin publishing",
-	);
-	await pollFor(
-		async () =>
-			(
-				await publisher.evaluate(() => window.xmoqOwn.keptReport())
-			).publishing.includes("publishing 1")
-				? true
-				: undefined,
-		"the publisher to publish on its first session",
 	);
 	const rust = spawnRustClient(
 		context,
@@ -1637,7 +1633,8 @@ async function goAwayAtSigtermRust(relay: RelayThatSendsAway): Promise<string> {
 		["--objects", "100000", "--timeout-secs", "60"],
 	);
 	await rust.waitForLine(/^OBJECT /);
-	const { whenGone } = await sendAway(context, relay, 3, second.url);
+	// The page's session and own-rust's.
+	const { whenGone } = await sendAway(context, relay, 2, second.url);
 	const [line] = await rust.waitForLine(
 		new RegExp(
 			`^GOAWAY uri=${second.url.replaceAll(".", "\\.")} timeout_ms=${goAway.timeoutMs} request_id=${goAway.requestId}$`,
@@ -1645,8 +1642,7 @@ async function goAwayAtSigtermRust(relay: RelayThatSendsAway): Promise<string> {
 	);
 	const code = await withTimeout(rust.exited, "own-rust to leave");
 	if (code !== 0) throw new Error(`own-rust was to leave with 0, not ${code}`);
-	// WHY its own lines and not the own relay's: the publishing page moves
-	// there as well.
+	// WHY its own lines: the relay it names is not looked at.
 	const connected = rust.matches(/^CONNECTED /).length;
 	if (connected !== 1) {
 		throw new Error(`own-rust was to connect once, not ${connected} times`);
