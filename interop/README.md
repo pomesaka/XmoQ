@@ -152,7 +152,7 @@ Each of these runs ends by moving one more Object over the same track with a fre
 | Option of `matrix.ts` | Values (default first) |
 |---|---|
 | `--relay` | `moqtail` and `own`. Give it once to run through one relay only |
-| `--base-port` | `24400`. The first of the UDP ports used, one per pairing; the run with `mlmpub` takes the port 1000 above its own as well. Below 32768, where Linux begins to hand out the source ports of outgoing sockets |
+| `--base-port` | `24400`. The first of the UDP ports used, one per pairing; a run that starts a second relay or `mlmpub` takes the port 1000 above its own as well, so a run uses the base port up to 1000 + the number of pairings - 1 above it. Below 32768, where Linux begins to hand out the source ports of outgoing sockets. A base port whose ports reach that range (on Linux, as `net.ipv4.ip_local_port_range` has it; elsewhere from 49152, as on macOS) is refused before anything runs |
 | `--only` | Empty. Runs the pairings whose name contains the text, such as `--only own-rust`, `--only "own relay"`, `--only "leaving: "` or `--only "fetch: "` |
 | `--pairing-timeout-seconds` | `120` (provisional). A pairing that takes longer is stopped and counted as failed |
 
