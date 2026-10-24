@@ -1185,6 +1185,80 @@ fn a_track_found_malformed_takes_its_fetches_with_it() {
     assert_eq!(relay.counts().fetches, 1);
 }
 
+/// §10.13: End Of Track 1 says "the End Location is the final Object in
+/// the Track"; the relay takes it for the end of the track (§2.4.2), and
+/// refuses the FETCH alone where an Object larger than it is known.
+#[test]
+fn a_fetch_ok_that_says_end_of_track_ends_the_track_where_it_agrees() {
+    let fetch_ok_with = |end_of_track, end_location| {
+        ControlMessage::FetchOk(FetchOk {
+            end_of_track,
+            end_location,
+            parameters: vec![],
+            track_properties: vec![KeyValuePair::varint(2, 5).unwrap()],
+        })
+    };
+    // (an Object of Group 3 came before; End Of Track; End Location; what
+    // Alice gets; the final Object of the track after)
+    let cases = [
+        (
+            false,
+            true,
+            at(2, 3),
+            vec![
+                AWAIT_STREAM,
+                send(FETCH_STREAM, fetch_ok_with(true, at(2, 3))),
+            ],
+            Some(at(2, 2)),
+        ),
+        // The whole of Group 2: its last Object is not known.
+        (
+            false,
+            true,
+            at(2, 0),
+            vec![
+                AWAIT_STREAM,
+                send(FETCH_STREAM, fetch_ok_with(true, at(2, 0))),
+            ],
+            Some(at(2, u64::MAX)),
+        ),
+        (
+            false,
+            false,
+            at(2, 0),
+            vec![
+                AWAIT_STREAM,
+                send(FETCH_STREAM, fetch_ok_with(false, at(2, 0))),
+            ],
+            None,
+        ),
+        (
+            true,
+            true,
+            at(2, 0),
+            vec![STOP_TIMER, CANCEL_UPSTREAM, refuse(0x12), FINISH],
+            None,
+        ),
+    ];
+    for (object_before, end_of_track, end_location, answer, final_object) in cases {
+        let mut relay = fetching();
+        if object_before {
+            subscribe_to_track(&mut relay, BOB);
+            data_stream_opened(&mut relay, 7);
+            object_arrived(&mut relay, 7, 0);
+        }
+        let actions = relay.step(Event::OwnRequestMessage {
+            session: PUBLISHER,
+            request: OWN,
+            message: fetch_ok_with(end_of_track, end_location),
+        });
+        let case = (object_before, end_of_track, end_location);
+        assert_eq!(actions, answer, "{case:?}");
+        let track = relay.tracks.live(&track(b"a")).unwrap();
+        assert_eq!(track.final_object, final_object, "{case:?}");
+    }
+}
+
 #[test]
 fn a_joining_fetch_of_a_track_found_malformed_is_refused_as_that() {
     // Alice's Joining FETCH for the track "b" is asked of the publisher.

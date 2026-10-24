@@ -799,9 +799,13 @@ struct Track {
     /// The largest Location known for the track (§10.2.11): what the source
     /// said, or a larger one seen since.
     largest: Option<Location>,
-    /// Where an Object with the status `END_OF_TRACK` came, of any source:
-    /// §2.4.2 has "The final Object in a Track is the Object with Status
-    /// `END_OF_TRACK`", and an Object larger than it makes the track malformed.
+    /// Where an Object with the status `END_OF_TRACK` came, of any source,
+    /// or the last Object of a FETCH whose answer said End of Track
+    /// ([`Self::ends_at`]): §2.4.2 has "The final Object in a Track is the
+    /// Object with Status `END_OF_TRACK` or the last Object sent in a FETCH
+    /// whose response indicated End of Track", and an Object larger than it
+    /// makes the track malformed. The Object ID is `u64::MAX` where the
+    /// FETCH ended with a whole Group: its last Object is not known.
     final_object: Option<Location>,
     subscribers: Vec<Subscriber>,
     /// SUBSCRIBEs that came while every source of the track drained, and
@@ -910,8 +914,9 @@ impl Track {
     /// Objects that are larger are larger than the final one, whichever came
     /// first, and the streams of a track keep no order between them. The
     /// largest a source said in its answer counts, as one it said exists.
-    /// The last Object of a FETCH that said End of Track is not looked for:
-    /// the relay does not read into a fetch stream it passes on.
+    /// The end a FETCH said is its End Location ([`Self::ends_at`]), not the
+    /// last Object on its stream: the relay does not read into a fetch
+    /// stream it passes on.
     fn past_its_end(&mut self, group: u64, object: &SubgroupObject) -> bool {
         let location = Location {
             group,
@@ -924,6 +929,29 @@ impl Track {
             self.final_object = Some(location);
         }
         past
+    }
+
+    /// A `FETCH_OK` with End Of Track 1 said the track ends at `last`, its
+    /// End Location less one (§10.13: "the End Location is the final Object
+    /// in the Track"). Says whether that agrees with what is known; where it
+    /// does, `last` is the final Object from now on, unless one is known.
+    ///
+    /// WHY a `FETCH_OK` that disagrees ends that FETCH alone, and leaves the
+    /// track as it is (decided on 2026-10-24): which of the two sources is
+    /// wrong is not known, and the Objects already passed on are not to be
+    /// taken back. WHY NOT malformed, as §2.4.2 would have it for an Object
+    /// larger than the final one: that would end every subscription of the
+    /// track over one answer.
+    fn ends_at(&mut self, last: Location) -> bool {
+        let whole_group = last.object == u64::MAX;
+        let agrees = self.largest.is_none_or(|largest| largest <= last)
+            && self
+                .final_object
+                .is_none_or(|known| known == last || (whole_group && known.group == last.group));
+        if agrees && self.final_object.is_none() {
+            self.final_object = Some(last);
+        }
+        agrees
     }
 
     /// A stream of a source turned out to be of this Subgroup. Says whether
