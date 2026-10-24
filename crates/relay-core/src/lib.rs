@@ -4378,13 +4378,9 @@ const DEFAULT_PUBLISHER_PRIORITY: u8 = 128;
 
 /// The Publisher Priority of the Subgroups of a subscription that carry
 /// none, from the Track Properties of the PUBLISH or `SUBSCRIBE_OK` that
-/// established it.
-///
-/// WHY a value above 255 counts as none: §12.4 has "Priorities above 255
-/// are invalid" and does not say what a receiver does with one; the relay
-/// passes the property on as it came and only has to compare with it. Of
-/// two such properties in one message the first counts; nothing refuses a
-/// second.
+/// established it. A value above 255 never gets here: the decoder of
+/// `xmoq-moqt` closes the session. Of two such properties in one message the
+/// first counts; nothing refuses a second.
 fn default_publisher_priority(properties: &[KeyValuePair]) -> u8 {
     properties
         .iter()

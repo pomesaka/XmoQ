@@ -19,3 +19,7 @@ pair-runs-past-the-value	track	-	0b03110561	malformed-track	-
 two-immutable-properties	track	-	0b02300100020405	ok	30=1,04=5
 malformed-before-mandatory	track	-	0b020b00bff501	malformed-track	-
 inner-type-over-2-64	track	-	0b0cfffffffffffffffffe000200	protocol-violation	-
+default-publisher-priority-255	track	-	0e80ff	ok	0e=255
+default-publisher-priority-above-255	track	-	0e8100	protocol-violation	-
+default-publisher-priority-inside-255	track	-	0b030e80ff	ok	0e=255
+default-publisher-priority-inside-above-255	track	-	0b030e8100	protocol-violation	-

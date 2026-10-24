@@ -48,12 +48,19 @@ const SUBSCRIBE_TRACKS: u64 = 0x51;
 
 /// The Track Property `DYNAMIC_GROUPS` (§12.6).
 const DYNAMIC_GROUPS: u64 = 0x30;
+/// The Track Property DEFAULT PUBLISHER PRIORITY (§12.4).
+const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
 
 /// Decodes the Track Properties that end `SUBSCRIBE_OK`, `PUBLISH`, `REQUEST_OK`
 /// and `FETCH_OK`.
 ///
 /// §12.6: "If an endpoint receives a value larger than 1, it MUST close the
-/// session with `PROTOCOL_VIOLATION`." Inside Immutable Properties as well
+/// session with `PROTOCOL_VIOLATION`." A DEFAULT PUBLISHER PRIORITY above 255
+/// does the same: §12.4 has "Priorities above 255 are invalid" and does not
+/// say what a receiver does with one, and this reads it as §12.5 and §12.6
+/// have it for their own properties, as `moqtail` 0.15.0 does. WHY NOT refuse
+/// only the request: neither the two neighbouring properties nor `moqtail`
+/// leave the session open. Inside Immutable Properties as well
 /// (§12.7: "processors MUST search both"), as is a `PROTOCOL_VIOLATION` of
 /// §1.4.3 inside them. Immutable Properties that make the Track malformed are
 /// handed on as they are: the session ends the request
@@ -66,11 +73,21 @@ pub(crate) fn decode_track_properties(reader: &mut Reader<'_>) -> ReadResult<Vec
     let Ok(searched) = immutable::properties_to_search(&properties, immutable::Of::Track)? else {
         return Ok(properties);
     };
-    if searched.iter().any(|property| {
-        property.ty() == DYNAMIC_GROUPS
-            && matches!(property.value(), kvp::Value::Varint(value) if *value > 1)
-    }) {
-        return Err(Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1").into());
+    for property in &searched {
+        let &kvp::Value::Varint(value) = property.value() else {
+            continue;
+        };
+        match property.ty() {
+            DYNAMIC_GROUPS if value > 1 => {
+                return Err(Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1").into());
+            }
+            DEFAULT_PUBLISHER_PRIORITY if value > 255 => {
+                return Err(
+                    Error::ProtocolViolation("DEFAULT PUBLISHER PRIORITY is above 255").into(),
+                );
+            }
+            _ => {}
+        }
     }
     Ok(properties)
 }
@@ -1865,26 +1882,6 @@ pub(crate) mod tests {
                 &[0x18, 0x00, 0x06, 0x00, 0x01, 0x02, 0x01, 0x08, 0x05],
                 Error::ProtocolViolation("parameter not allowed in this message"),
             ),
-            // DYNAMIC_GROUPS (0x30) = 2 in each message that carries Track
-            // Properties: SUBSCRIBE_OK, PUBLISH of "a"/"t", REQUEST_OK, FETCH_OK.
-            (
-                &[0x04, 0x00, 0x04, 0x00, 0x00, 0x30, 0x02],
-                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
-            ),
-            (
-                &[
-                    0x1d, 0x00, 0x0a, 0x00, 0x01, 0x01, 0x61, 0x01, 0x74, 0x00, 0x00, 0x30, 0x02,
-                ],
-                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
-            ),
-            (
-                &[0x07, 0x00, 0x03, 0x00, 0x30, 0x02],
-                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
-            ),
-            (
-                &[0x18, 0x00, 0x06, 0x00, 0x01, 0x02, 0x00, 0x30, 0x02],
-                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
-            ),
             // REQUEST_ERROR with a 1025-byte Reason Phrase announced.
             (
                 &[0x05, 0x00, 0x04, 0x00, 0x00, 0x84, 0x01],
@@ -1897,6 +1894,43 @@ pub(crate) mod tests {
                 Err(error.clone()),
                 "{bytes:02x?}"
             );
+        }
+    }
+
+    /// A Track Property out of its range, in each message that carries Track
+    /// Properties: `SUBSCRIBE_OK`, PUBLISH of "a"/"t", `REQUEST_OK`, `FETCH_OK`.
+    #[test]
+    fn rejects_track_properties_out_of_range() {
+        // (the property; the error)
+        let properties: &[(&[u8], Error)] = &[
+            // DYNAMIC_GROUPS (0x30) = 2 (§12.6).
+            (
+                &[0x30, 0x02],
+                Error::ProtocolViolation("DYNAMIC_GROUPS is neither 0 nor 1"),
+            ),
+            // DEFAULT PUBLISHER PRIORITY (0x0E) = 256 (§12.4).
+            (
+                &[0x0e, 0x81, 0x00],
+                Error::ProtocolViolation("DEFAULT PUBLISHER PRIORITY is above 255"),
+            ),
+        ];
+        // (the type; the fields before the Track Properties)
+        let messages: &[(u8, &[u8])] = &[
+            (0x04, &[0x00, 0x00]),
+            (0x1d, &[0x00, 0x01, 0x01, 0x61, 0x01, 0x74, 0x00, 0x00]),
+            (0x07, &[0x00]),
+            (0x18, &[0x00, 0x01, 0x02, 0x00]),
+        ];
+        for (property, error) in properties {
+            for (ty, fields) in messages {
+                let length = u8::try_from(fields.len() + property.len()).unwrap();
+                let bytes = [&[*ty, 0x00, length][..], fields, property].concat();
+                assert_eq!(
+                    ControlMessage::decode(&bytes),
+                    Err(error.clone()),
+                    "{bytes:02x?}"
+                );
+            }
         }
     }
 
