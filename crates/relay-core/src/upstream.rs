@@ -31,6 +31,10 @@ pub(crate) struct Upstream {
     /// No fields: every track.
     namespace: TrackNamespace,
     link: Link,
+    /// Where [`Action::ConnectUpstream`] connects: the New Session URI of
+    /// the last GOAWAY of the upstream that named one, and empty for the
+    /// place the relay was given.
+    uri: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +55,7 @@ impl Relay {
         self.upstream = Some(Upstream {
             namespace,
             link: Link::Absent,
+            uri: Vec::new(),
         });
     }
 
@@ -100,27 +105,85 @@ impl Relay {
             Link::Connecting => true,
             Link::Absent => {
                 upstream.link = Link::Connecting;
-                actions.push(Action::ConnectUpstream);
+                actions.push(Action::ConnectUpstream {
+                    uri: upstream.uri.clone(),
+                });
                 true
             }
         }
     }
 
     /// A session the relay opened as the client is there: the upstream is
-    /// asked for the tracks that wait for it.
+    /// asked for the tracks that wait for it, and for those that are
+    /// subscribed to and that it is the one to ask for: after a GOAWAY of
+    /// the upstream before, the tracks the session that is going away
+    /// still carries. The FETCH and `TRACK_STATUS` requests that wait for
+    /// it are asked anew.
+    ///
+    /// WHY the tracks that have a source as well (§3.6: the client
+    /// "establishes a new session in the background"): the new session
+    /// becomes one more source of each (§9.3), and the subscribers go on
+    /// with it when the old one ends, where they would otherwise be told
+    /// `PUBLISH_DONE` and have to subscribe again.
     pub(crate) fn upstream_opened(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
         let Some(upstream) = self.upstream.as_mut() else {
             return;
         };
         upstream.link = Link::Open(session);
-        for track in self.waiting_for_upstream() {
+        let namespace = upstream.namespace.clone();
+        let tracks: BTreeSet<FullTrackName> = self
+            .tracks
+            .subscribed_in(&namespace)
+            .into_iter()
+            .filter(|track| self.upstream_takes(track))
+            .collect();
+        for track in tracks {
             let asked = self.ask_the_publishers(&track, Some(session), None, actions);
-            if asked.asks.is_empty() {
+            let waits_alone = self
+                .tracks
+                .pending(&track)
+                .is_some_and(|pending| pending.asks.is_empty());
+            if waits_alone {
                 let code = asked
                     .nobody_because
                     .unwrap_or(request_error_code::DOES_NOT_EXIST);
                 self.refuse_waiters(&track, &Refusal::code(code), actions);
             }
+        }
+        self.ask_fetches_held_for_upstream(actions);
+        self.ask_track_statuses_held_for_upstream(actions);
+    }
+
+    /// The upstream sent GOAWAY on the control stream of `session` (§3.6,
+    /// §10.4): no new request goes on it, the relay connects to the URI it
+    /// names (or to the same place, where it names none), and asks there
+    /// for what it is subscribed to ([`Self::upstream_opened`]).
+    ///
+    /// WHY at once, where nothing new is asked: §3.6 has the client
+    /// establish the new session "in the background" and close the old one
+    /// once it has nothing left on it, and the upstream closes the old one
+    /// when its Timeout is over.
+    pub(crate) fn upstream_going_away(
+        &mut self,
+        session: SessionKey,
+        uri: Vec<u8>,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(upstream) = self.upstream.as_mut() else {
+            return;
+        };
+        if upstream.link != Link::Open(session) {
+            return;
+        }
+        upstream.link = Link::Absent;
+        if !uri.is_empty() {
+            upstream.uri = uri;
+        }
+        let namespace = upstream.namespace.clone();
+        let carried = self.tracks.subscribed_in(&namespace);
+        if let Some(track) = carried.iter().find(|track| self.upstream_takes(track)) {
+            let track = track.clone();
+            self.waits_for_upstream(&track, actions);
         }
     }
 
@@ -142,6 +205,8 @@ impl Relay {
         for track in self.waiting_for_upstream() {
             self.refuse_waiters(&track, &unreachable, actions);
         }
+        self.refuse_fetches_held_for_upstream(&unreachable, actions);
+        self.refuse_track_statuses_held_for_upstream(&unreachable, actions);
     }
 
     /// The session with the upstream is gone: the next request that needs

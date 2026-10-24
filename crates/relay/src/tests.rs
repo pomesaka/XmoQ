@@ -4234,7 +4234,7 @@ mod upstream {
     /// a new connection to it, of which the edge is the client.
     fn edge_of(origin: &HubHandle<MemoryConnection>) -> HubHandle<MemoryConnection> {
         let origin = origin.clone();
-        let connect: hub::Connect<MemoryConnection> = Arc::new(move || {
+        let connect: hub::Connect<MemoryConnection> = Arc::new(move |_| {
             let origin = origin.clone();
             Box::pin(async move {
                 let (local, remote) = pair();
@@ -4247,6 +4247,74 @@ mod upstream {
             connect,
         };
         hub::spawn_with_upstream(HubConfig::default(), Some(upstream)).0
+    }
+
+    /// An edge whose upstream is `first`, and `second` where a GOAWAY of
+    /// `first` names the URI `second`.
+    fn edge_of_two(
+        first: &HubHandle<MemoryConnection>,
+        second: &HubHandle<MemoryConnection>,
+    ) -> HubHandle<MemoryConnection> {
+        let (first, second) = (first.clone(), second.clone());
+        let connect: hub::Connect<MemoryConnection> = Arc::new(move |uri: Option<String>| {
+            let origin = match uri.as_deref() {
+                Some("second") => second.clone(),
+                _ => first.clone(),
+            };
+            Box::pin(async move {
+                let (local, remote) = pair();
+                origin.add_session(remote).await;
+                Ok(local)
+            })
+        });
+        let upstream = hub::Upstream {
+            namespace: TrackNamespace::new(vec![]).unwrap(),
+            connect,
+        };
+        hub::spawn_with_upstream(HubConfig::default(), Some(upstream)).0
+    }
+
+    /// §3.6 at an edge: the origin's GOAWAY has the edge take the track from
+    /// the relay it names as well, and the subscriber goes on with it when
+    /// the first origin is gone, with no `PUBLISH_DONE`.
+    #[tokio::test(start_paused = true)]
+    async fn a_subscriber_of_the_edge_goes_on_when_the_origin_sends_it_elsewhere() {
+        let (first, _first_task) = hub::spawn(HubConfig::default());
+        let (second, _second_task) = hub::spawn(HubConfig::default());
+        let edge = edge_of_two(&first, &second);
+        let mut publisher = Peer::connect(&first, true).await;
+        let _namespace = publisher.publish_namespace().await;
+        let mut moved = Peer::connect(&second, true).await;
+        let _moved_namespace = moved.publish_namespace().await;
+        let mut alice = Peer::connect(&edge, true).await;
+        let mut request = alice.start_subscribing().await;
+        let _upstream = publisher.accept_relay_subscribe().await;
+        let RequestEvent::SubscribeEstablished { track_alias, .. } =
+            alice.answer(&mut request).await
+        else {
+            panic!("Alice was not accepted");
+        };
+
+        let going_away = {
+            let first = first.clone();
+            tokio::spawn(async move { first.go_away(b"second".to_vec(), 1_000).await })
+        };
+        let upstream = moved.accept_relay_subscribe().await;
+        moved
+            .send_group_as(upstream.track_alias, 0, &[object(0, 3)])
+            .await
+            .finish();
+        assert_eq!(alice.receive_stream(track_alias).await, [0]);
+
+        first.stop_with(0x10, "the GOAWAY's time is over").await;
+        going_away.abort();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        moved
+            .send_group_as(upstream.track_alias, 1, &[object(0, 3)])
+            .await
+            .finish();
+        assert_eq!(alice.receive_stream(track_alias).await, [0]);
+        assert!(timeout(SOON, request.reader.next_event()).await.is_err());
     }
 
     #[tokio::test(start_paused = true)]

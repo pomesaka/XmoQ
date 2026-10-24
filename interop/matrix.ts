@@ -1651,6 +1651,21 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--case", "publisher-comes", "--subscriber", "own-rust"],
 			relay: "own",
 		},
+		...["own-browser", "own-rust"].map(
+			(subscriber): RelayPairing => ({
+				// "edge: " lets `--only` pick it with the others through two relays.
+				name: `own relay: edge: rendezvous: ${subscriber} subscribes at an own relay below before anybody publishes the track, both relays hold it, and it is accepted when own-rust publishes above`,
+				script: "rendezvous.ts",
+				args: [
+					"--case",
+					"publisher-comes",
+					"--subscriber",
+					subscriber,
+					"--through-edge",
+				],
+				relay: "own",
+			}),
+		),
 		{
 			name: "own relay: rendezvous: own-browser's held SUBSCRIBE is refused with TIMEOUT when nobody publishes the track",
 			script: "rendezvous.ts",
@@ -1858,6 +1873,15 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 						// prints its signal there ("Received signal 11", seen
 						// on macOS with chrome://crash). WHY this run alone:
 						// Chromium prints a great deal there.
+						env: { DEBUG: "pw:browser" },
+					},
+					{
+						// "edge: " lets `--only` pick it with the others through two relays.
+						name: "own relay: edge: video: the relay above the viewer's own relay is stopped and started anew, and the pages connect again and go on",
+						script: "video.ts" as const,
+						args: ["--video", "reconnect-through-edge"],
+						relay: "own",
+						// WHY: as for the run above.
 						env: { DEBUG: "pw:browser" },
 					},
 					{

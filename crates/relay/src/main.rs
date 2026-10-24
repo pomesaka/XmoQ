@@ -388,10 +388,14 @@ async fn main() -> Result<()> {
     let upstream = args.upstream.map(|upstream| {
         let streams = config.streams.clone();
         let (url, cert_sha256) = (Arc::new(upstream.url), upstream.cert_sha256);
-        let connect: hub::Connect<WtConnection> = Arc::new(move || {
+        let connect: hub::Connect<WtConnection> = Arc::new(move |moved_to: Option<String>| {
             let (url, streams) = (Arc::clone(&url), streams.clone());
             Box::pin(async move {
-                wt::connect(&url, cert_sha256, &streams)
+                // WHY the same certificate hash at the URI of a GOAWAY: the
+                // pin is the one way this relay checks a peer, and nothing
+                // gives it another (known gap).
+                let url = moved_to.as_deref().unwrap_or(&url);
+                wt::connect(url, cert_sha256, &streams)
                     .await
                     .map_err(|error| error.to_string())
             })

@@ -858,9 +858,12 @@ impl<C: Connection> HubHandle<C> {
     }
 }
 
-/// Makes a connection to the upstream relay, or says why it could not.
-pub type Connect<C> =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<C, String>> + Send>> + Send + Sync>;
+/// Makes a connection to the upstream relay, or says why it could not: to
+/// the URI it is given (the New Session URI of a GOAWAY of the upstream,
+/// §10.4), or to the place it was made for where it is given none.
+pub type Connect<C> = Arc<
+    dyn Fn(Option<String>) -> Pin<Box<dyn Future<Output = Result<C, String>> + Send>> + Send + Sync,
+>;
 
 /// The relay above this one ([`spawn_with_upstream`]).
 pub struct Upstream<C> {
@@ -1422,16 +1425,22 @@ impl<C: Connection> Hub<C> {
 
     /// Starts the connection [`Action::ConnectUpstream`] asks for. The relay
     /// is told [`Event::UpstreamFailed`] at once where it has no upstream.
-    fn connect_upstream(&mut self, pending: &mut VecDeque<Event>) {
+    fn connect_upstream(&mut self, uri: Vec<u8>, pending: &mut VecDeque<Event>) {
         let Some(upstream) = &self.upstream else {
             pending.push_back(Event::UpstreamFailed);
             return;
         };
+        let Ok(uri) = String::from_utf8(uri) else {
+            self.log(|| "UPSTREAM_FAILED the New Session URI is not UTF-8".to_string());
+            pending.push_back(Event::UpstreamFailed);
+            return;
+        };
+        let uri = (!uri.is_empty()).then_some(uri);
         let (connect, events) = (Arc::clone(&upstream.connect), self.events.clone());
         // WHY not among the tasks of a session: it is of none yet. It ends
         // by itself, within the time the connection has to be made.
         tokio::spawn(async move {
-            let connected = connect().await.map(Arc::new);
+            let connected = connect(uri).await.map(Arc::new);
             // The hub is gone when this fails.
             let _ = events.send(Envelope::Upstream(connected)).await;
         });
@@ -1830,7 +1839,7 @@ impl<C: Connection> Hub<C> {
                 code,
                 reason,
             } => self.close(session, code, &reason, pending),
-            Action::ConnectUpstream => self.connect_upstream(pending),
+            Action::ConnectUpstream { uri } => self.connect_upstream(uri, pending),
             // Taken by `execute_upstream` above.
             Action::OpenRequest { .. }
             | Action::SendOwnRequest { .. }
@@ -3286,7 +3295,9 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartAnnouncementTimer { .. }
         | Action::StartCheckTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
-        Action::ConnectUpstream => "CONNECT_UPSTREAM".to_string(),
+        Action::ConnectUpstream { uri } => {
+            format!("CONNECT_UPSTREAM uri={}", String::from_utf8_lossy(uri))
+        }
     })
 }
 

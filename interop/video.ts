@@ -1274,13 +1274,28 @@ function checkShown(report: PageKeptReport, session: number): number {
 	return shown.length;
 }
 
-async function reconnect(): Promise<string> {
+/**
+ * `throughEdge`: the viewer connects to a second own relay whose upstream is
+ * the relay of the run (`--upstream`), on the run's port plus
+ * `MOQLIVEMOCK_SIDE_PORT_OFFSET`, and only the relay above is stopped. The
+ * relay below loses its upstream, ends the track for the viewer, refuses
+ * its SUBSCRIBEs while the one above is gone, and connects to it again when
+ * it is back.
+ */
+async function reconnect(throughEdge: boolean): Promise<string> {
 	const context = await startRun({
 		relay: "own",
 		port: options.port,
 		clients: ["own-browser"],
 		verbose: options.verbose,
 	});
+	const edge = throughEdge
+		? await startSecondOwnRelay(
+				String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+				context,
+			)
+		: undefined;
+	const viewerUrl = edge?.url ?? context.relayUrl;
 	// The pages make their own connections; the one `openConnectedPage`
 	// makes is not used.
 	const publisher = await openConnectedPage(
@@ -1348,7 +1363,7 @@ async function reconnect(): Promise<string> {
 			([url, hash, namespace, name, codec]) =>
 				window.xmoqOwn.keepVideoPlayed(url, hash, namespace, name, codec),
 			[
-				context.relayUrl,
+				viewerUrl,
 				context.certSha256Hex,
 				PAGE_NAMESPACE,
 				BARS.trackName,
@@ -1400,7 +1415,8 @@ async function reconnect(): Promise<string> {
 	const second = checkShown(back, 2);
 	const failed = (states: string[]): number =>
 		states.filter((state) => state === "failed").length;
-	return `the relay was stopped and started anew: the publisher published on a second session after ${failed(back.publishing)} tries that failed, and the viewer showed ${first} frames before and ${second} after, after ${failed(back.playing)} tries that failed`;
+	const where = throughEdge ? "the relay above the viewer's" : "the relay";
+	return `${where} was stopped and started anew: the publisher published on a second session after ${failed(back.publishing)} tries that failed, and the viewer showed ${first} frames before and ${second} after, after ${failed(back.playing)} tries that failed`;
 }
 
 /** The relays that send GOAWAY at SIGTERM, and the GOAWAY each sends own-rust, which subscribes with Request ID 0. */
@@ -1664,7 +1680,8 @@ const CASES: Record<string, () => Promise<string>> = {
 	"from-mlmpub": fromMlmpub,
 	"key-frames-too-large": keyFramesTooLarge,
 	"page-to-page": pageToPage,
-	reconnect,
+	reconnect: () => reconnect(false),
+	"reconnect-through-edge": () => reconnect(true),
 };
 
 async function main(): Promise<void> {
