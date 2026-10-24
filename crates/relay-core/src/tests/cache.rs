@@ -1123,3 +1123,51 @@ fn a_group_of_the_same_number_of_a_track_that_came_again_is_not_the_one_a_stream
     // the three bytes are kept by the stream as before.
     assert_eq!(relay.counts().held_beyond_cache_bytes, 3);
 }
+
+#[test]
+fn a_priority_in_an_update_moves_the_stream_the_relay_writes() {
+    let priority = Event::RequestMessage {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        message: ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: 4,
+            parameters: vec![Parameter::SubscriberPriority(3)],
+        }),
+    };
+    let written = Event::FetchStreamWritten {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        given_up: None,
+    };
+    // (what comes between the answer and the update; what the update
+    //  brings about)
+    let cases = [
+        // §10.2.7: SUBSCRIBER_PRIORITY 3, -1 - (3 << 8 | 128).
+        (
+            vec![],
+            vec![
+                Action::SendRequest {
+                    session: ALICE,
+                    stream: FETCH_STREAM,
+                    message: ControlMessage::RequestOk(RequestOk::default()),
+                },
+                Action::SetFetchSendOrder {
+                    session: ALICE,
+                    stream: FETCH_STREAM,
+                    send_order: -897,
+                },
+            ],
+        ),
+        // The answer is over with the stream: the update is not answered,
+        // and there is nothing to move.
+        (vec![written], vec![]),
+    ];
+    for (between, expected) in cases {
+        let mut relay = relay_with_three_objects();
+        relay.step(fetch(b"a", at(3, 0), at(3, 0)));
+        for event in &between {
+            relay.step(event.clone());
+        }
+        assert_eq!(relay.step(priority.clone()), expected, "{between:?}");
+    }
+}

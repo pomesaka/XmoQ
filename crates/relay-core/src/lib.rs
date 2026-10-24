@@ -2900,13 +2900,14 @@ impl Relay {
                     self.ask_for_a_new_group(track, group, actions);
                 }
             }
-            // For a FETCH that has its FETCH_OK. Nothing of it changes.
-            PeerRequestEvent::UpdateAccepted { response } => actions.push(Action::SendRequest {
-                session,
-                stream,
-                message: response,
-            }),
-            PeerRequestEvent::UpdateHeld => self.on_fetch_update_held(session, stream, actions),
+            // For a FETCH that has its FETCH_OK.
+            PeerRequestEvent::UpdateAccepted {
+                response,
+                subscriber_priority,
+            } => self.on_fetch_updated((session, stream), response, subscriber_priority, actions),
+            PeerRequestEvent::UpdateHeld {
+                subscriber_priority,
+            } => self.on_fetch_update_held(session, stream, subscriber_priority, actions),
             // The first two: the answer to a NEW_GROUP_REQUEST the relay
             // passed on. Nothing hangs on it: a publisher that refused ends
             // the subscription with PUBLISH_DONE next (§10.9.1), as it ends
@@ -4468,6 +4469,7 @@ impl Action {
             | Self::AbortFetchPipe { session, .. }
             | Self::WriteFetchStream { session, .. }
             | Self::AbortFetchWrite { session, .. }
+            | Self::SetFetchSendOrder { session, .. }
             | Self::NoteHeldBeyondCache { session, .. } => Target::Session(*session),
             Self::SendObject { out_stream, .. }
             | Self::SetDeliveryTimeout { out_stream, .. }

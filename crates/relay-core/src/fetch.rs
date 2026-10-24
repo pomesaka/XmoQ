@@ -336,6 +336,10 @@ impl Fetches {
         }
     }
 
+    fn get_mut(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<&mut Standing> {
+        self.0.get_mut(subscriber)
+    }
+
     fn held_mut(&mut self, subscriber: &(SessionKey, StreamKey)) -> Option<&mut HeldFetch> {
         match self.0.get_mut(subscriber)? {
             Standing::Held(held) => Some(held),
@@ -2327,14 +2331,94 @@ impl Relay {
         }
     }
 
-    /// A `REQUEST_UPDATE` came for a FETCH that has no answer yet.
+    /// A `REQUEST_UPDATE` of the subscriber gave its FETCH the
+    /// `SUBSCRIBER_PRIORITY` `priority` (§10.2.7, §10.9). The fetch stream
+    /// to the subscriber stands by it from here on ([`fetch_send_order`]),
+    /// whether the relay passes it on or writes it, and one that is not
+    /// open yet opens with it.
+    ///
+    /// WHY NOT a `REQUEST_UPDATE` of the relay's own to the publisher, with
+    /// its answer passed on: §10.2.1 has "Message Parameters are always
+    /// intended for the peer endpoint only and are not forwarded by Relays";
+    /// §7.3 has "Relays SHOULD NOT directly use Subscriber Priority ... from
+    /// incoming subscriptions for upstream subscriptions", so the relay's
+    /// FETCH names no priority from the start (`upstream_parameters`); and
+    /// a publisher that refused would reset its fetch stream (§10.9.1:
+    /// "When a `REQUEST_UPDATE` fails for a FETCH, the publisher MUST reset
+    /// the FETCH data stream"), so a subscriber that only changed its
+    /// priority could lose the fetch. The priority is of the subscriber's
+    /// session ("relative to other subscriptions and fetch responses in the
+    /// same session"), and that session is the relay's.
+    fn reprioritize_fetch(
+        &mut self,
+        (session, stream): (SessionKey, StreamKey),
+        priority: Option<u8>,
+        actions: &mut Vec<Action>,
+    ) {
+        // §10.9: a parameter the update leaves out "remains unchanged".
+        let Some(priority) = priority else {
+            return;
+        };
+        let send_order = crate::send_order(priority, crate::DEFAULT_PRIORITY);
+        let set = Action::SetFetchSendOrder {
+            session,
+            stream,
+            send_order,
+        };
+        match self.fetches.get_mut(&(session, stream)) {
+            // Taken with the FETCH when it is asked for (`ask_for`); the
+            // relay's FETCH upstream leaves the priority out.
+            Some(Standing::Held(held)) => {
+                held.fetch
+                    .parameters
+                    .retain(|parameter| !matches!(parameter, Parameter::SubscriberPriority(_)));
+                held.fetch
+                    .parameters
+                    .push(Parameter::SubscriberPriority(priority));
+            }
+            Some(Standing::Relayed(fetch)) => {
+                fetch.send_order = send_order;
+                if fetch.pipe == Pipe::Running {
+                    actions.push(set);
+                }
+            }
+            Some(Standing::Written {
+                told_to_stop: false,
+                ..
+            }) => actions.push(set),
+            Some(Standing::Written { .. }) | None => {}
+        }
+    }
+
+    /// A `REQUEST_UPDATE` came for a FETCH that has its answer: `response`
+    /// is its `REQUEST_OK`, and `priority` its `SUBSCRIBER_PRIORITY`.
+    pub(crate) fn on_fetch_updated(
+        &mut self,
+        subscriber: (SessionKey, StreamKey),
+        response: ControlMessage,
+        priority: Option<u8>,
+        actions: &mut Vec<Action>,
+    ) {
+        let (session, stream) = subscriber;
+        actions.push(Action::SendRequest {
+            session,
+            stream,
+            message: response,
+        });
+        self.reprioritize_fetch(subscriber, priority, actions);
+    }
+
+    /// A `REQUEST_UPDATE` came for a FETCH that has no answer yet, with
+    /// this `SUBSCRIBER_PRIORITY`.
     pub(crate) fn on_fetch_update_held(
         &mut self,
         session: SessionKey,
         stream: StreamKey,
+        priority: Option<u8>,
         actions: &mut Vec<Action>,
     ) {
         let subscriber = (session, stream);
+        self.reprioritize_fetch(subscriber, priority, actions);
         let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
         if let Some(held) = self.fetches.held_mut(&subscriber) {
             held.held_updates = held.held_updates.saturating_add(1);

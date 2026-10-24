@@ -2799,7 +2799,7 @@ impl Client<'_> {
                     // A REQUEST_UPDATE for a FETCH that is answered changes
                     // nothing and gets its REQUEST_OK.
                     let event = self.session.on_peer_request_message(request, message)?;
-                    if let PeerRequestEvent::UpdateAccepted { response } = event {
+                    if let PeerRequestEvent::UpdateAccepted { response, .. } = event {
                         self.answers.say(stream, response);
                     }
                     return Ok(());

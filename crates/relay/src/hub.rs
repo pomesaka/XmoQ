@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use xmoq_moqt::data::SubgroupObject;
@@ -412,9 +412,10 @@ struct SessionHandle<C: Connection> {
     /// The tasks that write a fetch stream the relay made itself and are not
     /// done.
     fetch_writes: Vec<JoinHandle<()>>,
-    /// What stops such a task, by the request stream of its FETCH
-    /// ([`Action::AbortFetchWrite`]).
-    fetch_write_aborts: HashMap<StreamKey, oneshot::Sender<u32>>,
+    /// What stops such a task and what reorders its stream, by the request
+    /// stream of its FETCH ([`Action::AbortFetchWrite`],
+    /// [`Action::SetFetchSendOrder`]).
+    fetch_write_controls: HashMap<StreamKey, FetchControl>,
 }
 
 /// The path of a connection as fields of a log line; nothing for a
@@ -455,13 +456,46 @@ impl<C: Connection> Drop for SessionHandle<C> {
     }
 }
 
+/// What the hub holds of a fetch stream it passes on or writes: the way to
+/// cut it short, and the way to change where it stands among the streams to
+/// the subscriber ([`Action::SetFetchSendOrder`]).
+struct FetchControl {
+    abort: oneshot::Sender<u32>,
+    send_order: watch::Sender<i32>,
+}
+
+impl FetchControl {
+    /// The control, and the two ends its task reads.
+    fn new(send_order: i32) -> (Self, oneshot::Receiver<u32>, watch::Receiver<i32>) {
+        let (abort, aborted) = oneshot::channel();
+        let (send_order, reordered) = watch::channel(send_order);
+        (Self { abort, send_order }, aborted, reordered)
+    }
+}
+
+/// Gives a fetch stream the send order the relay changed it to since it was
+/// last looked at ([`Action::SetFetchSendOrder`]).
+///
+/// WHY between writes, and not while one waits: the write holds the
+/// writer, and a write that is dropped to make room may have written a part
+/// of its bytes. A write waits for room as long as the subscriber's wait at
+/// most, and the pieces of a stream that is passed on are 1 KiB.
+fn follow_send_order<S: SendStream>(
+    reordered: &mut watch::Receiver<i32>,
+    writer: &mut FetchStreamWriter<S>,
+) {
+    if reordered.has_changed().unwrap_or(false) {
+        writer.set_send_order(*reordered.borrow_and_update());
+    }
+}
+
 /// A fetch stream the relay writes itself ([`Action::WriteFetchStream`]).
 struct FetchWrite<C> {
     connection: Arc<C>,
     header: FetchHeader,
     /// Where the stream stands among the streams to the subscriber
-    /// (`Action::WriteFetchStream`).
-    send_order: i32,
+    /// (`Action::WriteFetchStream`), and where the relay moves it to later.
+    send_order: watch::Receiver<i32>,
     pieces: Vec<FetchPiece>,
     /// How long the subscriber may take nothing.
     patience: Duration,
@@ -509,6 +543,7 @@ impl<C: Connection> FetchWrite<C> {
             aborted: &mut aborted,
             open: true,
         };
+        let mut reordered = self.send_order.clone();
         // The stream itself. WHY it is opened without its header: an order
         // to stop that comes while the header waits to be written has to
         // reset the stream with its own code, and a call that opens and
@@ -527,7 +562,7 @@ impl<C: Connection> FetchWrite<C> {
         };
         // Before the header: §7.1 has the Objects of a FETCH scheduled with
         // those of the subscriptions.
-        writer.set_send_order(self.send_order);
+        writer.set_send_order(*reordered.borrow_and_update());
         // Objects of one Group, or indicators alone: the same bytes in
         // either Group Order.
         let mut encoder = FetchStreamEncoder::new(self.header, GroupOrder::Ascending);
@@ -557,6 +592,7 @@ impl<C: Connection> FetchWrite<C> {
                 FetchPiece::EndOfRange(kind, location) => encoder.end_of_range(*kind, *location),
             }
             let bytes = encoder.take_bytes();
+            follow_send_order(&mut reordered, &mut writer);
             if let Some(how) = self.write(&mut writer, &bytes, &mut orders, by).await {
                 writer.reset(how.code());
                 return ended(how, written);
@@ -881,8 +917,8 @@ struct Hub<C: Connection> {
     out_streams: HashMap<OutStreamKey, (SessionKey, OutgoingSubgroup)>,
     /// The fetch streams that are being passed on, by the subscriber's
     /// session and the request stream of its FETCH, each with the way to cut
-    /// it short. Dropping that cuts it short as well.
-    fetch_pipes: HashMap<(SessionKey, StreamKey), oneshot::Sender<u32>>,
+    /// it short and to reorder it. Dropping that cuts it short as well.
+    fetch_pipes: HashMap<(SessionKey, StreamKey), FetchControl>,
     timers: Timers,
     /// The next number that names a moment a session began to hold nothing.
     idle_moments: u64,
@@ -1386,7 +1422,7 @@ impl<C: Connection> Hub<C> {
                 opening: Arc::new(AtomicUsize::new(0)),
                 tasks: vec![writer, watcher, setup_due],
                 fetch_writes: Vec::new(),
-                fetch_write_aborts: HashMap::new(),
+                fetch_write_controls: HashMap::new(),
             },
         );
         self.feed(VecDeque::from([Event::SessionOpened {
@@ -1699,6 +1735,7 @@ impl<C: Connection> Hub<C> {
             | Action::AbortFetchPipe { .. }
             | Action::WriteFetchStream { .. }
             | Action::AbortFetchWrite { .. }
+            | Action::SetFetchSendOrder { .. }
             | Action::NoteHeldBeyondCache { .. } => {}
         }
     }
@@ -1742,13 +1779,12 @@ impl<C: Connection> Hub<C> {
                 let waits = PipeWaits {
                     upstream: Duration::from_millis(upstream_wait_ms),
                     downstream: Duration::from_millis(downstream_wait_ms),
-                    send_order,
                 };
                 let header = FetchHeader { request_id };
                 self.pipe_fetch(
                     (from, from_stream),
                     (session, stream),
-                    header,
+                    (header, send_order),
                     waits,
                     pending,
                 );
@@ -1758,9 +1794,9 @@ impl<C: Connection> Hub<C> {
                 stream,
                 code,
             } => {
-                if let Some(abort) = self.fetch_pipes.remove(&(session, stream)) {
+                if let Some(control) = self.fetch_pipes.remove(&(session, stream)) {
                     // The task may have just ended; then nobody needs this.
-                    let _ = abort.send(code);
+                    let _ = control.abort.send(code);
                 }
             }
             Action::WriteFetchStream {
@@ -1779,13 +1815,28 @@ impl<C: Connection> Hub<C> {
                 stream,
                 code,
             } => {
-                let abort = self
+                let control = self
                     .sessions
                     .get_mut(&session)
-                    .and_then(|handle| handle.fetch_write_aborts.remove(&stream));
-                if let Some(abort) = abort {
+                    .and_then(|handle| handle.fetch_write_controls.remove(&stream));
+                if let Some(control) = control {
                     // The task may have just ended; then nobody needs this.
-                    let _ = abort.send(code);
+                    let _ = control.abort.send(code);
+                }
+            }
+            Action::SetFetchSendOrder {
+                session,
+                stream,
+                send_order,
+            } => {
+                let written = self
+                    .sessions
+                    .get(&session)
+                    .and_then(|handle| handle.fetch_write_controls.get(&stream));
+                let control = self.fetch_pipes.get(&(session, stream)).or(written);
+                if let Some(control) = control {
+                    // Nobody reads it when the task has ended.
+                    control.send_order.send_replace(send_order);
                 }
             }
             other => return Some(other),
@@ -1814,10 +1865,10 @@ impl<C: Connection> Hub<C> {
         // the lists stay short. The tasks go with the session.
         handle.fetch_writes.retain(|task| !task.is_finished());
         handle
-            .fetch_write_aborts
-            .retain(|_, abort| !abort.is_closed());
-        let (abort, aborted) = oneshot::channel();
-        handle.fetch_write_aborts.insert(stream, abort);
+            .fetch_write_controls
+            .retain(|_, control| !control.abort.is_closed());
+        let (control, aborted, reordered) = FetchControl::new(send_order);
+        handle.fetch_write_controls.insert(stream, control);
         let pieces_bytes: usize = pieces
             .iter()
             .map(|piece| match piece {
@@ -1828,7 +1879,7 @@ impl<C: Connection> Hub<C> {
         let writing = FetchWrite {
             connection: Arc::clone(&handle.connection),
             header: FetchHeader { request_id },
-            send_order,
+            send_order: reordered,
             pieces,
             patience: Duration::from_millis(wait_ms),
             whole: self.config.cached_fetch_whole(pieces_bytes),
@@ -1859,7 +1910,7 @@ impl<C: Connection> Hub<C> {
         &mut self,
         (from, from_stream): (SessionKey, StreamKey),
         subscriber: (SessionKey, StreamKey),
-        header: FetchHeader,
+        (header, send_order): (FetchHeader, i32),
         waits: PipeWaits,
         pending: &mut VecDeque<Event>,
     ) {
@@ -1871,8 +1922,8 @@ impl<C: Connection> Hub<C> {
         };
         // Before anything can end it: an end that is reported for a FETCH
         // without this entry is one the relay does not wait for (`feed`).
-        let (abort, aborted) = oneshot::channel();
-        self.fetch_pipes.insert(subscriber, abort);
+        let (control, aborted, reordered) = FetchControl::new(send_order);
+        self.fetch_pipes.insert(subscriber, control);
         let Some(publisher) = self.sessions.get(&from) else {
             pending.push_back(ended(FetchPipeEnd::UpstreamLost));
             return;
@@ -1893,6 +1944,7 @@ impl<C: Connection> Hub<C> {
             header,
             body,
             waits,
+            reordered,
             trace: self.config.streams.trace.clone(),
             label: format!("session#{} fetch#{}", session.0, header.request_id),
         };
@@ -2805,10 +2857,6 @@ struct PipeWaits {
     upstream: Duration,
     /// For the subscriber to take what was read.
     downstream: Duration,
-    /// Not a wait: where the stream to the subscriber stands among the
-    /// streams to its session (`Action::PipeFetch`). Here because it comes
-    /// with the waits and is used where they are.
-    send_order: i32,
 }
 
 /// One fetch stream of a publisher on its way to a subscriber.
@@ -2832,6 +2880,9 @@ struct FetchPipe<C: Connection> {
     header: FetchHeader,
     body: FetchBody,
     waits: PipeWaits,
+    /// Where the stream to the subscriber stands among the streams to its
+    /// session (`Action::PipeFetch`), and where the relay moves it to later.
+    reordered: watch::Receiver<i32>,
     trace: Trace,
     label: String,
 }
@@ -2854,7 +2905,7 @@ impl<C: Connection> FetchPipe<C> {
                 // the code its request stream is reset with for that.
                 open_fetch_stream_in_order(
                     &*self.connection,
-                    (self.header, self.waits.send_order),
+                    (self.header, *self.reordered.borrow_and_update()),
                     &self.trace,
                     &self.label,
                     stream_reset_code::TOO_FAR_BEHIND,
@@ -2918,6 +2969,7 @@ impl<C: Connection> FetchPipe<C> {
             // that does not end in time says only that it did not take all
             // of it. A subscriber on a slow link takes a piece now and then.
             for piece in bytes.chunks(PIPE_PIECE) {
+                follow_send_order(&mut self.reordered, &mut send);
                 let written = tokio::select! {
                     biased;
                     code = &mut aborted => {
@@ -3061,6 +3113,7 @@ fn describe(action: &Action) -> Option<String> {
         | Action::WriteFetchStream { .. }
         | Action::StartJoiningFetchTimer { .. }
         | Action::NoteHeldBeyondCache { .. }
+        | Action::SetFetchSendOrder { .. }
         | Action::AbortFetchWrite { .. } => return describe_fetch(action),
         // Logged where the session is closed, whoever asked for it.
         Action::CloseSession { .. }
@@ -3163,6 +3216,14 @@ fn describe_fetch(action: &Action) -> Option<String> {
             code,
         } => format!(
             "ABORT_FETCH_WRITE session={} stream={} code={code:#x}",
+            session.0, stream.0
+        ),
+        Action::SetFetchSendOrder {
+            session,
+            stream,
+            send_order,
+        } => format!(
+            "FETCH_SEND_ORDER session={} stream={} send_order={send_order}",
             session.0, stream.0
         ),
         Action::NoteHeldBeyondCache {
@@ -3553,7 +3614,7 @@ mod fetch_write_tests {
         let write = FetchWrite {
             connection: Arc::clone(&connection),
             header: FetchHeader { request_id: 4 },
-            send_order: 0,
+            send_order: watch::channel(0).1,
             pieces,
             patience,
             whole: WHOLE,
@@ -3640,7 +3701,7 @@ mod fetch_write_tests {
         let write = FetchWrite {
             connection: Arc::clone(&connection),
             header: FetchHeader { request_id: 4 },
-            send_order: 0,
+            send_order: watch::channel(0).1,
             pieces: vec![indicator(0)],
             patience: IN_TIME,
             whole: Duration::MAX,
@@ -3687,6 +3748,35 @@ mod fetch_write_tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_stream_the_relay_writes_takes_the_send_order_it_is_moved_to() {
+        // The window lets 64 bytes wait, so the write of 50 indicators of
+        // 20 bytes waits for the subscriber while the order is changed.
+        let (relay, subscriber) = pair_with_window(64);
+        let connection = Arc::new(relay);
+        let (moved, reordered) = watch::channel(-7);
+        let write = FetchWrite {
+            connection: Arc::clone(&connection),
+            header: FetchHeader { request_id: 4 },
+            send_order: reordered,
+            pieces: (0..50).map(indicator).collect(),
+            patience: IN_TIME,
+            whole: WHOLE,
+            trace: Trace::default(),
+            label: "test".to_string(),
+        };
+        let writing = tokio::spawn(write.run(oneshot::channel().1));
+        let mut stream = in_time(subscriber.accept_uni()).await.unwrap();
+        // The order is set before the header is written.
+        let mut buffer = [0u8; 64];
+        assert!(in_time(stream.read(&mut buffer)).await.unwrap().is_some());
+        assert_eq!(stream.send_order(), Some(-7));
+        moved.send_replace(-897);
+        while in_time(stream.read(&mut buffer)).await.unwrap().is_some() {}
+        assert_eq!(stream.send_order(), Some(-897));
+        assert_eq!(in_time(writing).await.unwrap().given_up(), None);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_subscriber_that_takes_each_piece_in_time_and_the_whole_too_slowly_is_cut() {
         // The window lets 64 bytes wait; 50 indicators of 20 bytes. The
@@ -3700,7 +3790,7 @@ mod fetch_write_tests {
             let write = FetchWrite {
                 connection: Arc::clone(&connection),
                 header: FetchHeader { request_id: 4 },
-                send_order: 0,
+                send_order: watch::channel(0).1,
                 pieces,
                 patience: Duration::from_secs(1),
                 whole: Duration::from_millis(whole_ms),
@@ -3969,7 +4059,7 @@ mod fetch_write_tests {
             let write = FetchWrite {
                 connection: Arc::clone(&connection),
                 header: FetchHeader { request_id: 4 },
-                send_order: 0,
+                send_order: watch::channel(0).1,
                 pieces: vec![indicator(0), indicator(1)],
                 patience: IN_TIME,
                 whole: WHOLE,
@@ -4041,7 +4131,7 @@ mod fetch_write_tests {
         let write = FetchWrite {
             connection: Arc::clone(&connection),
             header: FetchHeader { request_id: 0 },
-            send_order: 0,
+            send_order: watch::channel(0).1,
             pieces: vec![FetchPiece::EndOfRange(RangeEnd::Unknown, unknown)],
             patience: IN_TIME,
             whole: WHOLE,

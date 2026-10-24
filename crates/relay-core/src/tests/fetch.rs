@@ -97,6 +97,31 @@ const PIPE: Action = Action::PipeFetch {
     send_order: FETCH_SEND_ORDER,
 };
 
+/// The send order of a fetch stream whose FETCH has the
+/// `SUBSCRIBER_PRIORITY` 3: -1 - (3 << 8 | 128) (`send_order`).
+const PRIORITY_3_SEND_ORDER: i32 = -897;
+
+fn pipe_with(send_order: i32) -> Action {
+    Action::PipeFetch {
+        from: PUBLISHER,
+        from_stream: UPSTREAM_STREAM,
+        session: ALICE,
+        stream: FETCH_STREAM,
+        request_id: 0,
+        upstream_wait_ms: 5_000,
+        downstream_wait_ms: 10_000,
+        send_order,
+    }
+}
+
+fn set_send_order(send_order: i32) -> Action {
+    Action::SetFetchSendOrder {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        send_order,
+    }
+}
+
 fn abort_pipe(code: u32) -> Action {
     Action::AbortFetchPipe {
         session: ALICE,
@@ -145,6 +170,9 @@ enum Happens {
     Cancelled,
     /// Alice sends `REQUEST_UPDATE` with this Request ID.
     Update(u64),
+    /// Alice sends `REQUEST_UPDATE` with this Request ID and this
+    /// `SUBSCRIBER_PRIORITY`.
+    Priority(u64, u8),
     Closed(SessionKey),
 }
 
@@ -185,6 +213,14 @@ fn happen(relay: &mut Relay, what: &Happens) -> Vec<Action> {
             message: ControlMessage::RequestUpdate(RequestUpdate {
                 request_id: *request_id,
                 parameters: vec![],
+            }),
+        },
+        Happens::Priority(request_id, priority) => Event::RequestMessage {
+            session: ALICE,
+            stream: FETCH_STREAM,
+            message: ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: *request_id,
+                parameters: vec![Parameter::SubscriberPriority(*priority)],
             }),
         },
         Happens::Closed(session) => Event::SessionClosed { session: *session },
@@ -570,13 +606,60 @@ fn fetches_with_updates() -> Vec<Case> {
     ]
 }
 
+/// The `SUBSCRIBER_PRIORITY` of an update moves the fetch stream to Alice
+/// (§10.2.7), and nothing is asked of the publisher.
+fn fetches_whose_priority_changes() -> Vec<Case> {
+    use Happens::{Ok, PipeEnded, Priority, Stream};
+    vec![
+        (
+            "a priority before the publisher's stream: the stream to Alice opens with it",
+            false,
+            vec![
+                (Priority(2, 3), vec![]),
+                (Ok, vec![AWAIT_STREAM, fetch_ok_to_alice(), request_ok()]),
+                (Stream, vec![STOP_TIMER, pipe_with(PRIORITY_3_SEND_ORDER)]),
+            ],
+        ),
+        (
+            "a priority while the stream is passed on, before the answer: it is moved",
+            false,
+            vec![
+                (Stream, vec![STOP_TIMER, PIPE]),
+                (Priority(2, 3), vec![set_send_order(PRIORITY_3_SEND_ORDER)]),
+            ],
+        ),
+        (
+            "a priority while the stream is passed on, after the answer: it is moved",
+            false,
+            vec![
+                (Ok, vec![AWAIT_STREAM, fetch_ok_to_alice()]),
+                (Stream, vec![STOP_TIMER, PIPE]),
+                (
+                    Priority(2, 3),
+                    vec![request_ok(), set_send_order(PRIORITY_3_SEND_ORDER)],
+                ),
+            ],
+        ),
+        (
+            "a priority after the stream was passed on to its end: nothing to move",
+            false,
+            vec![
+                (Stream, vec![STOP_TIMER, PIPE]),
+                (PipeEnded(FetchPipeEnd::Finished), vec![START_TIMER]),
+                (Priority(2, 3), vec![]),
+            ],
+        ),
+    ]
+}
+
 #[test]
 fn what_happens_to_a_fetch_and_what_the_relay_does_about_it() {
     let cases = fetches_that_come_to_their_end()
         .into_iter()
         .chain(fetches_that_the_publisher_cuts_short())
         .chain(fetches_that_the_subscriber_cuts_short())
-        .chain(fetches_with_updates());
+        .chain(fetches_with_updates())
+        .chain(fetches_whose_priority_changes());
     for (name, over, steps) in cases {
         let mut relay = fetching();
         let last = steps.len() - 1;
@@ -2862,6 +2945,50 @@ fn a_joining_fetch_that_waits_goes_with_its_subscribe_and_with_its_session() {
         );
         assert_eq!(relay.counts().fetches, 0, "{happens:?}");
     }
+}
+
+#[test]
+fn a_priority_given_to_a_joining_fetch_that_waits_is_the_one_its_stream_opens_with() {
+    let subscribe_ok_from_bob = ControlMessage::SubscribeOk(SubscribeOk {
+        track_alias: UPSTREAM_ALIAS,
+        parameters: vec![Parameter::LargestObject(at(7, 1))],
+        track_properties: vec![],
+    });
+    let mut relay = relay_with_a_pending_subscription(true);
+    assert_eq!(relay.step(joining(true, 0, vec![])), []);
+    // SUBSCRIBER_PRIORITY 3 while the FETCH waits for its SUBSCRIBE.
+    let priority = Event::RequestMessage {
+        session: ALICE,
+        stream: FETCH_STREAM,
+        message: ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: 4,
+            parameters: vec![Parameter::SubscriberPriority(3)],
+        }),
+    };
+    assert_eq!(relay.step(priority), []);
+    // The FETCH asked of Bob names no priority (§7.3).
+    let asked = bob_answers(&mut relay, subscribe_ok_from_bob);
+    let fetch_parameters = asked.iter().find_map(|action| match action {
+        Action::OpenRequest {
+            session: BOB,
+            message: ControlMessage::Fetch(fetch),
+            ..
+        } => Some(fetch.parameters.clone()),
+        _ => None,
+    });
+    assert_eq!(fetch_parameters, Some(vec![]), "{asked:?}");
+    // Bob's fetch stream (his request 1 is the relay's FETCH, Request ID 3)
+    // is passed on with the priority.
+    let actions = relay.step(Event::FetchStreamOpened {
+        session: BOB,
+        stream: StreamKey(31),
+        request_id: 3,
+    });
+    let send_order = actions.iter().find_map(|action| match action {
+        Action::PipeFetch { send_order, .. } => Some(*send_order),
+        _ => None,
+    });
+    assert_eq!(send_order, Some(PRIORITY_3_SEND_ORDER), "{actions:?}");
 }
 
 #[test]

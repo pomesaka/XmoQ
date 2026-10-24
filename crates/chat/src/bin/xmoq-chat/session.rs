@@ -1350,7 +1350,7 @@ impl Gathering<'_> {
                     // its REQUEST_OK (§10.9).
                     // None is dropped (§10.9: "exactly one"): where the queue
                     // is full the FETCH is cancelled instead (`tell`).
-                    if let PeerRequestEvent::UpdateAccepted { response } = event
+                    if let PeerRequestEvent::UpdateAccepted { response, .. } = event
                         && fetching.answering.says.try_send(response).is_err()
                     {
                         self.end_fetch(stream, stream_reset_code::EXCESSIVE_LOAD);
