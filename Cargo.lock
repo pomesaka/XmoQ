@@ -1105,13 +1105,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
-name = "opus-decoder"
-version = "0.1.1"
+name = "opus-rs"
+version = "0.1.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15ae32c275dabb0cd2c863460bf349e9abc3568ba2abf0f9eb7b7d2edeeed07e"
-dependencies = [
- "thiserror 2.0.21",
-]
+checksum = "d9d1d772e17346cc5d8cf4b2cc088ec26c9708227db4e6f80e1104cd0040052c"
 
 [[package]]
 name = "percent-encoding"
@@ -2445,7 +2442,7 @@ dependencies = [
  "cpal",
  "futures-util",
  "openh264",
- "opus-decoder",
+ "opus-rs",
  "rustix",
  "serde_json",
  "tokio",

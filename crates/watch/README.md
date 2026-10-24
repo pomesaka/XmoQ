@@ -38,7 +38,7 @@ Read in the crates' manifests and build scripts at the versions of `Cargo.lock`,
 |---|---|---|---|---|
 | `openh264` 0.9.8 (`openh264-sys2`) | Decoding H.264 | `video_decoder.rs` alone | BSD-2-Clause; it builds Cisco's OpenH264 from the source it carries (BSD-2-Clause) | A C++ compiler (`cc`). `nasm` is used for the assembly where it is found, and left out where it is not |
 | `cpal` 0.18.2 | The sound output | `audio_output.rs` alone | Apache-2.0 | macOS: nothing more (CoreAudio through `coreaudio-rs` and the `objc2` crates). Linux: the headers of ALSA and `pkg-config` (`alsa-sys` 0.4.0 probes `alsa`; Debian and Ubuntu: `libasound2-dev`), which `scripts/ci/check-rust.sh` installs in CI and asks for elsewhere |
-| `opus-decoder` 0.1.1 | Decoding Opus | `sound.rs` | MIT OR Apache-2.0 | Nothing but Rust |
+| `opus-rs` 0.1.39 (decided on 2026-10-24; why, in `sound.rs`) | Decoding Opus | `sound.rs` | BSD-3-Clause; a port of libopus 1.6 | Nothing but Rust. **Much `unsafe` of its own** (181 blocks and 71 functions in its `src/`, counted on 2026-10-21, not read), and a 0.x crate with 37 releases in eight months, whose API can change from one to the next: the version is pinned (`=0.1.39`) |
 | `tokio-tungstenite` 0.30.0 | The room's WebSocket | `room_socket.rs` | MIT | Nothing but Rust. Without TLS: a room is reached over `ws://` alone |
 | `rustix` 1.1.5 | The terminal's line mode and the size of its window | `terminal.rs` | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | Nothing but Rust |
 

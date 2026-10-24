@@ -1,5 +1,16 @@
-//! The sound: packets of Opus decoded with the crate `opus-decoder`, and
-//! played by [`crate::audio_output`] at the moments they are due.
+//! The sound: packets of Opus decoded with the crate `opus-rs`, and played
+//! by [`crate::audio_output`] at the moments they are due.
+//!
+//! WHY `opus-rs` 0.1.39 (decided on 2026-10-24): set against libopus on
+//! 9,000 packets of a browser and 9,000 of moqlivemock, it decoded within
+//! -130 dB of libopus, in 1.2 to 1.5 times libopus's processor time, and did
+//! not overflow with the checks of a debug build on
+//! (`docs/experiments/2026-10-21-opus-decoders-in-rust-set-against-libopus.md`).
+//! WHY NOT `opus-decoder` 0.1.1, the decoder before: it overflowed on 169 of
+//! the browser's 9,000 packets (a debug build panics there) and took 92
+//! times libopus's time. WHY NOT libopus (the crate `opus`): a C compiler
+//! and cmake in every build. WHY NOT `opus-pure`, a fork of `opus-rs` as
+//! close and as fast: two contributors, where `opus-rs` has six.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -10,6 +21,10 @@ use xmoq_watch::marks::sound_is_marked;
 use xmoq_watch::playout::{Counts, Packet, Playout, RATE};
 
 use crate::audio_output::AudioOutput;
+
+/// Samples of the longest packet of Opus, 120 ms of one channel at 48 kHz:
+/// what the decoder is given room for.
+const MOST_SAMPLES: usize = 5760;
 
 /// How loud the sound is played, changed while it plays.
 pub struct Volume {
@@ -75,7 +90,7 @@ pub struct Heard {
 /// The decoder and the output of one session.
 pub struct Sound {
     shared: Arc<Mutex<Shared>>,
-    decoder: opus_decoder::OpusDecoder,
+    decoder: opus_rs::OpusDecoder,
     pcm: Vec<f32>,
     refused: u64,
     began: Instant,
@@ -126,10 +141,9 @@ impl Sound {
         };
         Ok(Self {
             shared,
-            decoder: opus_decoder::OpusDecoder::new(RATE, 1)
+            decoder: opus_rs::OpusDecoder::new(i32::try_from(RATE)?, 1)
                 .map_err(|error| anyhow!("the decoder of Opus: {error}"))?,
-            // 120 ms, the longest packet of Opus.
-            pcm: vec![0.0; 5760],
+            pcm: vec![0.0; MOST_SAMPLES],
             refused: 0,
             began,
             was_marked: false,
@@ -146,7 +160,7 @@ impl Sound {
     /// outside the lock the output takes: 2.5 ms for a packet of 20 ms, and
     /// the output must not wait for it.
     pub fn take(&mut self, packet: &[u8], due_us: u64) -> bool {
-        let Ok(samples) = self.decoder.decode_float(packet, &mut self.pcm, false) else {
+        let Ok(samples) = self.decoder.decode(packet, MOST_SAMPLES, &mut self.pcm) else {
             self.refused += 1;
             return false;
         };
