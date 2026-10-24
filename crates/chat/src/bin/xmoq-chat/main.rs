@@ -91,6 +91,7 @@ async fn run(args: xmoq_chat::args::Args) -> Result<()> {
                     &connection,
                     &store,
                     (&mut gatherer, &args.rooms, key.as_ref()),
+                    args.ask_again,
                     &mut stop,
                 )
                 .await;

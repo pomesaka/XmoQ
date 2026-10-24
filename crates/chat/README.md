@@ -22,6 +22,8 @@ It runs until Ctrl-C or SIGTERM, and connects again after a session ends: a seco
 
 The gatherer asks with one `SUBSCRIBE_NAMESPACE` for `xmoq/chat`, or, with `--room`, one for `xmoq/chat/<room>` for each room given, and follows every namespace of exactly four fields `xmoq`, `chat`, room, name, the last two UTF-8; any other is passed over. Where such a request ends (the relay ends it, or tells more namespaces than the session keeps), it is asked for again alone, after the same growing wait, and the session goes on. It subscribes to each participant's `said` with the Largest Object filter (§5.1.2), so that a relay that still has older lines does not pass them again to a gatherer that connected anew; why, at `subscribe` in `src/bin/xmoq-chat/session.rs`. `NAMESPACE_DONE` ends the subscription to that participant.
 
+**A participant whose subscription ends or is refused while its namespace stays announced is subscribed to again** (`ASKING_AGAIN ... in_ms=N`), by the rule every client of this repository asks by ([`xmoq-again`](../again/README.md), the watching page's): after 1 second (`--ask-again-ms`) where it ended or the refusal names no time, after the Retry Interval where it names one (no less than 100 ms, doubling while refusals follow each other, up to 5 s; no more than 30 s), also after a Retry Interval of 0. Its next lines are taken; what it said meanwhile is not fetched (decided on 2026-10-24). After `--ask-again-times` times in a row without a subscription that was established (30), it is not asked again until its NAMESPACE comes again (`NOT_ASKING_AGAIN`), nor after a track that was malformed. Why, at the top of `src/said_again.rs`.
+
 **Rooms**: a room is numbered and published while somebody is followed in it. When the first participant comes, the room is numbered on from what the store holds, and published with its largest number as `LARGEST_OBJECT`. When the last one leaves, its PUBLISH ends with `PUBLISH_DONE` `TRACK_ENDED`, sent once every stream of a line of the room is closed (§10.11), with their number (`ROOM_DONE ... streams=N`). **A FETCH for a room nobody is in** reaches no publisher: the own relay refuses it with `DOES_NOT_EXIST`. Its lines are in the store, and a FETCH gets them again once somebody is in the room. Why not every room of the store, at the top of `src/rooms.rs` and of `session.rs`.
 
 **Order**: the lines of a room are numbered from 0, without a gap, in the order they reach the gatherer; `sentAt` plays no part in it.
@@ -37,6 +39,13 @@ The limits of the chat (Q43, decided on 2026-10-24), which flags change:
 | `--text-bytes` | 512 | Bytes of UTF-8 in the text of one line | 1 to 8,192 |
 | `--lines-per-second` | 5 | Lines one person may say in any second; the line over it is dropped, and does not count | 1 to 1,000 |
 | `--fetch-lines` | 1,000 | Lines one FETCH gets: of a longer range, the latest | 1 to 100,000 |
+
+When a participant whose subscription ended is asked again, which flags change (**provisional**):
+
+| Flag | Default | What it sets | The flag's range |
+|---|---|---|---|
+| `--ask-again-times` | 30 | Times in a row a participant is asked again without a subscription that was established; against the own relay, which refuses a `said` nobody publishes with a Retry Interval of 1,001, about two minutes | 0 (never) to 10,000 |
+| `--ask-again-ms` | 1,000 | The pause after an end, and after a refusal that names no time or says 0 | 100 to 60,000 |
 
 `--room <room>` (repeatable, up to 8) has the gatherer take, publish and answer FETCH for those rooms alone (Q48, decided on 2026-10-24: a gatherer for each room). More than 8 are refused at the start: a session at the own relay may have 8 `SUBSCRIBE_NAMESPACE` requests (Q45, decided on 2026-10-24), and a ninth would be refused for good while the gatherer looked as if it ran.
 
@@ -81,6 +90,7 @@ The library (`src/*.rs`) decides, and does no input or output; the tests are the
 |---|---|
 | `rate` | Whether a person is over the rate |
 | `backoff` | How long to wait before connecting again, and before asking for a `SUBSCRIBE_NAMESPACE` again |
+| `said_again` | Whether, and after how long, a participant is asked again for its `said` |
 | `rooms` | The numbers of the lines of a room |
 | `gather` | What becomes of a line: taken, or dropped and why; who is followed, and whether a room is left empty |
 | `fetch` | What a FETCH gets, and how many bytes the answers may hold |
@@ -94,13 +104,12 @@ The binary (`src/bin/xmoq-chat/`): `session.rs` (the requests and the answers on
 - **The own relay keeps 256 requests of one session** (`MAX_PEER_REQUESTS` of `xmoq-moqt`): one gatherer follows about 250 participants through it. Ten rooms of a hundred take a gatherer a room (above). Not measured.
 - **A `PUBLISH_OK` with Forward State 0** (§9.5: a relay "MAY respond with PUBLISH_OK in Forward State=0 until there are known subscribers") leaves the room not live for good: its lines wait (64 at the most) and are not sent, and a `REQUEST_UPDATE` with FORWARD 1 is refused as any update that carries more than delivery timeouts, which ends the PUBLISH. The own relay answers with Forward State 1; moqtail's 0.15.0 did in every run here. A FETCH still gets the lines.
 - Lines said while the gatherer is away are lost: it does not FETCH what it missed when it subscribes again.
-- A `NAMESPACE_DONE` that comes while a `SUBSCRIBE_NAMESPACE` is being asked for again is not seen: that participant stays followed, and its room published, until the gatherer's next session.
-- A participant whose subscription ended or was refused is not subscribed to again while its namespace stays announced (`FIXME` in `session.rs`).
+- A `NAMESPACE_DONE` that comes while a `SUBSCRIBE_NAMESPACE` is being asked for again is not seen: that participant stays followed, and its room published, until the gatherer's next session; it is asked again for its `said` `--ask-again-times` times.
 - `sentAt` is passed on as the sender gave it; the gatherer does not compare it with its clock.
 
 ## Checks
 
-`interop/chat.ts` (`mise run interop`, the pairings `<relay> relay: chat: ...`): two participants of a room, a live viewer and a late one, a line too long, lines too fast, and a FETCH cut to its limit, through the own relay and through `moqtail`'s; through the own relay also a restart on the same store with `--room r`, a participant of another room that is not taken, and the end of the room when everybody has left ([record](../../docs/experiments/2026-10-24-chat-gatherer.md)).
+`interop/chat.ts` (`mise run interop`, the pairings `<relay> relay: chat: ...`): two participants of a room, a live viewer and a late one, a line too long, lines too fast, and a FETCH cut to its limit, through the own relay and through `moqtail`'s; a participant that ends the gatherer's subscription with `PUBLISH_DONE` and is asked again; through the own relay also a restart on the same store with `--room r`, a participant of another room that is not taken, and the end of the room when everybody has left ([record](../../docs/experiments/2026-10-24-chat-gatherer.md); asking a participant again: [record](../../docs/experiments/2026-10-24-the-gatherer-asks-a-participant-again.md)).
 
 `interop/chat-pages.ts` (the pairings `<relay> relay: chat: own pages ...`): own pages as participants with `joinChat` of [`@xmoq/chat`](../../packages/chat/README.md), which the demo's pages use, through both relays; a page that comes later gets the newest 16 lines by a Joining FETCH, which the own relay passes to the gatherer and moqtail's 0.15.0 answered from what it held, without asking the gatherer ([record](../../docs/experiments/2026-10-24-demo-chat-over-tracks.md)); and a page that stops withdraws its namespace, and the gatherer lets it go (`PARTICIPANT_GONE`) while the others go on ([record](../../docs/experiments/2026-10-24-a-page-withdraws-its-chat-namespace.md)).
 

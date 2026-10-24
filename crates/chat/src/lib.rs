@@ -3,7 +3,7 @@
 //! track `said`, numbers the lines of a room in the order they reach it,
 //! keeps them, and publishes them on the track `lines` of the room.
 //!
-//! This is the part that touches nothing: how long to wait before asking again ([`backoff`]), how fast one person may say lines
+//! This is the part that touches nothing: how long to wait before asking again ([`backoff`]), whether and when a participant is asked again for its `said` ([`said_again`]), how fast one person may say lines
 //! ([`rate`]), the numbering of a room ([`rooms`]), what a FETCH gets ([`fetch`]), what is decided of
 //! a line that comes ([`gather`]), and what the flags mean ([`args`]). Each
 //! is given its times and its bytes, and none reads a clock, a socket or the
@@ -16,3 +16,4 @@ pub mod fetch;
 pub mod gather;
 pub mod rate;
 pub mod rooms;
+pub mod said_again;

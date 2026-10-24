@@ -45,6 +45,7 @@ use xmoq_chat::args::Rooms as Taken;
 use xmoq_chat::backoff::Backoff;
 use xmoq_chat::fetch::Held;
 use xmoq_chat::gather::Left;
+use xmoq_chat::said_again::{Over, SaidAgain, Settings as AskAgain};
 use xmoq_moqt::params::SubscriptionFilter;
 
 use anyhow::{Result, anyhow, bail};
@@ -163,6 +164,14 @@ impl std::fmt::Display for NoSetupInTime {
 
 impl std::error::Error for NoSetupInTime {}
 
+/// A participant that is followed in this session.
+struct Followed {
+    /// The token of its SUBSCRIBE, while it has one.
+    said: Option<u64>,
+    /// When it is asked again after its subscription is over.
+    again: SaidAgain,
+}
+
 /// What a request of the gatherer is for.
 #[derive(Debug, Clone)]
 enum Purpose {
@@ -257,9 +266,14 @@ struct Gathering<'a> {
     heard: mpsc::Sender<(u64, Heard)>,
     rooms: HashMap<String, Room>,
     next_track_alias: u64,
-    /// The token of the SUBSCRIBE of each participant that is followed,
-    /// where it has one.
-    people: HashMap<Person, Option<u64>>,
+    /// Each participant that is followed.
+    people: HashMap<Person, Followed>,
+    /// The participants whose `said` is to be asked for again, and when.
+    /// WHY apart from [`Self::people`]: the loop looks for the earliest
+    /// with every event, and few wait at once out of up to 4,096 followed.
+    asking_again: HashMap<Person, Instant>,
+    /// `--ask-again-times`, `--ask-again-ms`.
+    ask_again: AskAgain,
     early: VecDeque<(u64, Vec<u8>)>,
     /// The requests of the relay the session keeps after the gatherer
     /// refused them, by their stream, until the stream is gone.
@@ -369,6 +383,7 @@ pub async fn gather(
     connection: &Arc<WtConnection>,
     store: &Store,
     (gatherer, rooms_taken, key): (&mut Gatherer, &Taken, Option<&RoomKey>),
+    ask_again: AskAgain,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<Ended> {
     let stops = StreamStops::default();
@@ -408,6 +423,8 @@ pub async fn gather(
         rooms: HashMap::new(),
         next_track_alias: FIRST_TRACK_ALIAS,
         people: HashMap::new(),
+        asking_again: HashMap::new(),
+        ask_again,
         early: VecDeque::new(),
         refused: HashMap::new(),
         fetches: HashMap::new(),
@@ -494,6 +511,7 @@ pub async fn gather(
             Some((stream, answered)) = fetches_done.recv() => gathering.fetch_over(stream, answered),
             Some(token) = drained_rooms.recv() => gathering.publish_done(token)?,
             () = sleep_until(gathering.next_watch()) => gathering.watch_again()?,
+            () = sleep_until(gathering.next_said()) => gathering.said_again()?,
             Some(_) = gathering.sends.join_next() => {}
             Some(_) = gathering.replies.join_next() => {}
         }
@@ -796,15 +814,100 @@ impl Gathering<'_> {
             Parameter::GroupOrder(GroupOrder::Ascending),
         ];
         parameters.extend(self.token_parameter(TokenRole::Sub));
+        self.asking_again.remove(person);
         let Ok((request, message)) = self
             .session
             .subscribe(said_track(person)?, parameters.clone())
         else {
             // A subscription to the track is there already.
+            println!(
+                "NOT_SUBSCRIBED room={:?} name={:?} why=\"a subscription is there already\"",
+                person.room, person.name
+            );
             return Ok(());
         };
         let token = self.open(Purpose::Said(person.clone()), request, message, &parameters);
-        self.people.insert(person.clone(), Some(token));
+        if let Some(followed) = self.people.get_mut(person) {
+            followed.said = Some(token);
+        }
+        Ok(())
+    }
+
+    /// The `said` of a participant that stays announced is over: it is
+    /// asked for again after a pause, or not until its NAMESPACE comes
+    /// again ([`SaidAgain`]).
+    fn said_over(&mut self, person: &Person, over: Over, why: &str) {
+        println!(
+            "NOT_SUBSCRIBED room={:?} name={:?} why={why:?}",
+            person.room, person.name
+        );
+        // Not followed: its NAMESPACE_DONE came.
+        let Some(followed) = self.people.get_mut(person) else {
+            return;
+        };
+        followed.said = None;
+        match followed.again.over(over) {
+            Some(pause) => {
+                println!(
+                    "ASKING_AGAIN room={:?} name={:?} in_ms={pause}",
+                    person.room, person.name
+                );
+                self.asking_again.insert(
+                    person.clone(),
+                    Instant::now() + Duration::from_millis(pause),
+                );
+            }
+            None => println!(
+                "NOT_ASKING_AGAIN room={:?} name={:?}",
+                person.room, person.name
+            ),
+        }
+    }
+
+    /// The subscription to a participant's `said` is established: the
+    /// Objects that came before it are taken.
+    fn said_established(&mut self, person: &Person, track_alias: u64) -> Result<()> {
+        println!("SUBSCRIBED room={:?} name={:?}", person.room, person.name);
+        if let Some(followed) = self.people.get_mut(person) {
+            followed.again.subscribed();
+        }
+        let early: Vec<Vec<u8>> = self
+            .early
+            .iter()
+            .filter(|(alias, _)| *alias == track_alias)
+            .map(|(_, payload)| payload.clone())
+            .collect();
+        self.early.retain(|(alias, _)| *alias != track_alias);
+        for payload in early {
+            self.on_said(person, &payload)?;
+        }
+        Ok(())
+    }
+
+    /// When the next participant is to be asked for again.
+    fn next_said(&self) -> Option<Instant> {
+        self.asking_again.values().min().copied()
+    }
+
+    /// Asks again for every participant whose time has come.
+    fn said_again(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let due: Vec<Person> = self
+            .asking_again
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(person, _)| person.clone())
+            .collect();
+        for person in due {
+            self.asking_again.remove(&person);
+            if self
+                .people
+                .get(&person)
+                .is_some_and(|followed| followed.said.is_none())
+            {
+                self.subscribe(&person)?;
+            }
+        }
         Ok(())
     }
 
@@ -826,13 +929,27 @@ impl Gathering<'_> {
             }
         }
         self.publish(&person.room)?;
-        match self.gatherer.admit(&person) {
+        let admitted = self.gatherer.admit(&person);
+        if matches!(admitted, Admitted::Now | Admitted::Already) {
+            // A NAMESPACE that comes again counts the times anew.
+            let again = SaidAgain::new(self.ask_again);
+            self.people
+                .entry(person.clone())
+                .and_modify(|followed| followed.again = again.clone())
+                .or_insert(Followed { said: None, again });
+        }
+        match admitted {
             Admitted::Now => {
                 println!("PARTICIPANT room={:?} name={:?}", person.room, person.name);
                 self.subscribe(&person)
             }
             // Followed, and with no subscription in this session.
-            Admitted::Already if !matches!(self.people.get(&person), Some(Some(_))) => {
+            Admitted::Already
+                if self
+                    .people
+                    .get(&person)
+                    .is_some_and(|followed| followed.said.is_none()) =>
+            {
                 self.subscribe(&person)
             }
             Admitted::Already => Ok(()),
@@ -851,7 +968,11 @@ impl Gathering<'_> {
         let Some(person) = person_of(namespace) else {
             return;
         };
-        if let Some(Some(token)) = self.people.remove(&person) {
+        self.asking_again.remove(&person);
+        if let Some(Followed {
+            said: Some(token), ..
+        }) = self.people.remove(&person)
+        {
             self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
         }
         match self.gatherer.leave(&person) {
@@ -1061,8 +1182,8 @@ impl Gathering<'_> {
     /// that ends it every time (one that tells more namespaces than the
     /// session keeps, `TooManyNamespaces`) is asked no more often than every
     /// 30 seconds. What it misses: a `NAMESPACE_DONE` that comes while no
-    /// request is open; that participant stays followed until its
-    /// subscription ends.
+    /// request is open; that participant stays followed, and is asked again
+    /// for its `said` as many times as [`SaidAgain`] lets it.
     fn request_over(&mut self, token: u64, purpose: &Purpose, why: &str) {
         match purpose {
             Purpose::Watch(index) => {
@@ -1076,18 +1197,7 @@ impl Gathering<'_> {
                     watch.again = Some(Instant::now() + wait);
                 }
             }
-            // FIXME: subscribe again to a participant whose subscription
-            // ended while its namespace is still announced; now only a
-            // NAMESPACE that comes again does.
-            Purpose::Said(person) => {
-                if let Some(token) = self.people.get_mut(person) {
-                    *token = None;
-                }
-                println!(
-                    "NOT_SUBSCRIBED room={:?} name={:?} why={why:?}",
-                    person.room, person.name
-                );
-            }
+            Purpose::Said(person) => self.said_over(person, Over::Ended, why),
             Purpose::Lines(room) => {
                 let room = room.clone();
                 println!("ROOM_NOT_PUBLISHED room={room:?} why={why:?}");
@@ -1121,17 +1231,7 @@ impl Gathering<'_> {
                 self.on_namespace_done(&namespace);
             }
             (Purpose::Said(person), RequestEvent::SubscribeEstablished { track_alias, .. }) => {
-                println!("SUBSCRIBED room={:?} name={:?}", person.room, person.name);
-                let early: Vec<Vec<u8>> = self
-                    .early
-                    .iter()
-                    .filter(|(alias, _)| *alias == track_alias)
-                    .map(|(_, payload)| payload.clone())
-                    .collect();
-                self.early.retain(|(alias, _)| *alias != track_alias);
-                for payload in early {
-                    self.on_said(person, &payload)?;
-                }
+                self.said_established(person, track_alias)?;
             }
             (Purpose::Lines(room), RequestEvent::PublishEstablished { forward, .. }) => {
                 let room = room.clone();
@@ -1170,6 +1270,11 @@ impl Gathering<'_> {
                     self.end_publish(&room, publish_done_status::UPDATE_FAILED, false);
                 }
             }
+            (Purpose::Said(person), RequestEvent::Rejected(error)) => {
+                self.let_go(token, Command::Finish);
+                let why = format!("refused with {:#x}", error.error_code);
+                self.said_over(person, Over::Refused(error.retry_wait_ms()), &why);
+            }
             (_, RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
                 let why = format!("refused with {:#x}", error.error_code);
@@ -1181,9 +1286,7 @@ impl Gathering<'_> {
                     person.room, person.name, done.status_code
                 );
                 self.let_go(token, Command::Finish);
-                if let Some(token) = self.people.get_mut(person) {
-                    *token = None;
-                }
+                self.said_over(person, Over::Ended, "PUBLISH_DONE");
             }
             (
                 _,
@@ -1194,7 +1297,12 @@ impl Gathering<'_> {
             ) => {
                 // §2.4.2: "it MUST cancel any corresponding subscription".
                 self.let_go(token, Command::Cancel(stream_reset_code::MALFORMED_TRACK));
-                self.request_over(token, purpose, "the track is malformed");
+                match purpose {
+                    Purpose::Said(person) => {
+                        self.said_over(person, Over::Malformed, "the track is malformed");
+                    }
+                    _ => self.request_over(token, purpose, "the track is malformed"),
+                }
             }
             (
                 _,
