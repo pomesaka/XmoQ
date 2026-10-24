@@ -203,21 +203,27 @@ export function createAudioTrackPublisher(
 					}
 					if (open === undefined || open.to !== to) return;
 					const { stream } = open;
+					let handed = false;
 					try {
 						await stream.write({
 							objectId: BigInt(objectId),
 							payload: chunk.data,
 							properties: locProperties({ timestamp }),
 						});
+						// Counted here, as the video publisher does: the Object
+						// is with the transport, whatever its stream's close does.
+						handed = true;
+						stats.written += 1;
 						if (last) {
 							open = undefined;
 							await stream.close();
 						}
-						stats.written += 1;
 					} catch (error) {
 						open = undefined;
 						await stream.reset().catch(() => {});
-						throw error;
+						// WHY a close that fails is no chunk left out: the chunk
+						// was handed to the transport before it.
+						if (!handed) throw error;
 					}
 				})
 				.catch(() => {

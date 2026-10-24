@@ -34,6 +34,8 @@ export interface FakeTrack {
 	delay(turns: { reset: number; rejection: number }): void;
 	/** The next write fails with this. */
 	failNextWrite(error: Error): void;
+	/** The next `close` of a stream fails with this, and leaves the stream open. */
+	failNextClose(error: Error): void;
 	/** The next `openSubgroup` fails with this. */
 	failNextOpen(error: Error): void;
 	/**
@@ -80,6 +82,7 @@ export function fakeTrack(): FakeTrack {
 	let heldOpens: Promise<void> = Promise.resolve();
 	let delays = { reset: 0, rejection: 0 };
 	let writeFailure: Error | undefined;
+	let closeFailure: Error | undefined;
 	let openFailure: Error | undefined;
 	let over: PublishEnd | undefined;
 	let open = 0;
@@ -156,6 +159,12 @@ export function fakeTrack(): FakeTrack {
 				},
 				close: async () => {
 					if (over !== undefined || !isOpen()) return;
+					if (closeFailure !== undefined) {
+						const error = closeFailure;
+						closeFailure = undefined;
+						log.push(`${stream}: close failed`);
+						throw error;
+					}
 					state = "closed";
 					open -= 1;
 					log.push(`${stream}: closed`);
@@ -201,6 +210,9 @@ export function fakeTrack(): FakeTrack {
 		},
 		failNextWrite: (error) => {
 			writeFailure = error;
+		},
+		failNextClose: (error) => {
+			closeFailure = error;
 		},
 		failNextOpen: (error) => {
 			openFailure = error;
