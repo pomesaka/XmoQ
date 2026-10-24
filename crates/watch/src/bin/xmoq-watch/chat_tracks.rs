@@ -30,7 +30,7 @@ use xmoq_moqt_io::{
 };
 use xmoq_watch::again::AskAgain;
 use xmoq_watch::args::Chat;
-use xmoq_watch::chat_track::{Say, Saying, Shown, joining_start, shown_from_track};
+use xmoq_watch::chat_track::{Say, Saying, Shown, fetch_start, shown_from_track};
 
 use crate::session::{Asked, NotSubscribed, Requests, Sent, Subscription, send_subscribe, settle};
 
@@ -309,12 +309,19 @@ impl ChatTracks {
             "CHAT_TRACKS_LINES track_alias={}",
             subscription.track_alias
         ))];
-        let range = FetchRange::RelativeJoining {
-            joining_request_id: subscription.request.value(),
-            joining_start: joining_start(),
-        };
+        let start = fetch_start(subscription.largest.map(|largest| largest.group));
+        let joining_request_id = subscription.request.value();
         self.lines = Some(subscription);
         self.shown.refetching();
+        // No line yet: nothing to fetch.
+        let Some(joining_start) = start else {
+            out.extend(self.fetch_ended());
+            return out;
+        };
+        let range = FetchRange::AbsoluteJoining {
+            joining_request_id,
+            joining_start,
+        };
         let tokens = self
             .token
             .iter()

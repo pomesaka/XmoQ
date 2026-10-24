@@ -19,12 +19,21 @@ pub const RECENT_LINES: u64 = 16;
 /// it. **Provisional.**
 pub const SAID_WAITING: usize = 16;
 
-/// The `joining_start` of the Joining FETCH for [`RECENT_LINES`]: the Group
-/// of the Joining Location and the ones before it (§10.12.2.1, "the
-/// Joining Location's Group minus Joining Start").
+/// The Group an Absolute Joining FETCH for the [`RECENT_LINES`] latest lines
+/// starts with, from the Group of the `LARGEST_OBJECT` of the subscription's
+/// `SUBSCRIBE_OK` (its Joining Location); `None` where it had none, and no
+/// line is there to fetch.
+///
+/// WHY Absolute, with the Group worked out here: the Relative form leaves
+/// the relay to work out "{Joining Location.Group - Joining Start, 0}"
+/// (§10.12.2.1), which the draft does not say of when it cannot be
+/// subtracted, and a room has fewer lines than 16 at first. The own relay
+/// starts at Group 0 then; `moqtail`'s relay@0.15.0 refuses the FETCH
+/// ("Joining fetch start location is larger than the track's largest
+/// location", seen on 2026-10-24). The range is the same either way.
 #[must_use]
-pub fn joining_start() -> u64 {
-    RECENT_LINES - 1
+pub fn fetch_start(largest_group: Option<u64>) -> Option<u64> {
+    largest_group.map(|group| group.saturating_sub(RECENT_LINES - 1))
 }
 
 /// The name of the room of an address of a room, `http://host:port/rooms/<name>`:
@@ -199,7 +208,18 @@ mod tests {
 
     #[test]
     fn the_joining_fetch_reaches_back_sixteen_lines() {
-        assert_eq!(joining_start(), 15);
+        // (the Group of the Joining Location; the Group the FETCH starts with)
+        let cases = [
+            (None, None),
+            (Some(0), Some(0)),
+            (Some(3), Some(0)),
+            (Some(15), Some(0)),
+            (Some(16), Some(1)),
+            (Some(100), Some(85)),
+        ];
+        for (largest, start) in cases {
+            assert_eq!(fetch_start(largest), start, "{largest:?}");
+        }
     }
 
     #[test]
