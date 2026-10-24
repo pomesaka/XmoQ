@@ -64,6 +64,12 @@ pub struct Args {
     pub limits: Limits,
     /// `--room`.
     pub rooms: Rooms,
+    /// `--auth-key-hex`: the key the relay checks the tokens of the room
+    /// with (its flag of that name), with which the gatherer makes tokens
+    /// of its own for its SETUP and its requests. Only for the demo with
+    /// `--auth` (Q51, provisional): a gatherer of a room's real service
+    /// would get its tokens from where the room's are made.
+    pub auth_key: Option<Vec<u8>>,
 }
 
 /// Reads 64 hexadecimal digits.
@@ -101,6 +107,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut url, mut cert_sha256, mut store) = (None, None, None);
     let mut limits = Limits::default();
     let mut rooms: Vec<String> = Vec::new();
+    let mut auth_key = None;
     while let Some(flag) = flags.next() {
         let value = flags
             .next()
@@ -128,6 +135,13 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
                 limits.lines_per_second = number_within(&flag, &value, LINES_PER_SECOND_MOST)?;
             }
             "--fetch-lines" => limits.fetch_lines = number_within(&flag, &value, FETCH_LINES_MOST)?,
+            "--auth-key-hex" => {
+                auth_key = Some(
+                    xmoq_room_token::unhex(&value)
+                        .filter(|key| !key.is_empty())
+                        .ok_or_else(|| format!("--auth-key-hex is hex digits, not {value:?}"))?,
+                );
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -147,6 +161,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
         } else {
             Rooms::These(rooms)
         },
+        auth_key,
     })
 }
 
@@ -174,6 +189,7 @@ mod tests {
             store: "s".to_string(),
             limits,
             rooms: Rooms::Every,
+            auth_key: None,
         }
     }
 
@@ -242,6 +258,44 @@ mod tests {
         ];
         for (case, rooms, room, expected) in cases {
             assert_eq!(rooms.has(room), expected, "{case}");
+        }
+    }
+
+    /// What `--auth-key-hex` comes to.
+    type Key = Result<Option<Vec<u8>>, String>;
+
+    #[test]
+    fn the_key_of_the_relay_is_hex_digits() {
+        let base = [
+            "--url",
+            "https://h:1/",
+            "--cert-sha256",
+            HASH,
+            "--store",
+            "s",
+        ];
+        let cases: [(&str, Key); 4] = [
+            ("00ff10", Ok(Some(vec![0x00, 0xff, 0x10]))),
+            (
+                "0",
+                Err("--auth-key-hex is hex digits, not \"0\"".to_string()),
+            ),
+            (
+                "zz",
+                Err("--auth-key-hex is hex digits, not \"zz\"".to_string()),
+            ),
+            (
+                "",
+                Err("--auth-key-hex is hex digits, not \"\"".to_string()),
+            ),
+        ];
+        for (hex, expected) in cases {
+            let flags: Vec<&str> = base
+                .iter()
+                .copied()
+                .chain(["--auth-key-hex", hex])
+                .collect();
+            assert_eq!(args(&flags).map(|args| args.auth_key), expected, "{hex}");
         }
     }
 

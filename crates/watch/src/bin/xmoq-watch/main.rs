@@ -41,7 +41,7 @@ use xmoq_moqt_io::{
     StreamStops, Trace, UniEvent, read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_watch::again::AskAgain;
-use xmoq_watch::args::{Args, Fit, Source};
+use xmoq_watch::args::{Args, Chat, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
 use xmoq_watch::keys::{Asked, Keys};
 use xmoq_watch::marks::Recent;
@@ -271,6 +271,14 @@ enum Ended {
     Moved(Option<String>),
 }
 
+/// The tokens of a room for the chat on tracks ([`chat_tokens_of`]), each
+/// as an AUTHORIZATION TOKEN; none where the room gave none.
+#[derive(Default)]
+struct ChatTokens {
+    publish: Option<Vec<u8>>,
+    subscribe: Option<Vec<u8>>,
+}
+
 /// Where one broadcast is played from.
 struct Place {
     url: String,
@@ -278,6 +286,8 @@ struct Place {
     /// The fields of the Track Namespace.
     namespace: Vec<String>,
     token: Option<Vec<u8>>,
+    /// The tokens of the room for the chat on tracks, where it gave them.
+    chat_tokens: ChatTokens,
     /// The broadcast of the room this is, where a room said it.
     broadcast: Option<Broadcast>,
 }
@@ -325,6 +335,7 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
                 // The flag has the fields between slashes.
                 namespace: namespace.split('/').map(str::to_string).collect(),
                 token: None,
+                chat_tokens: ChatTokens::default(),
                 broadcast: None,
             }));
         }
@@ -348,7 +359,7 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
             .unless_ended(
                 "the room's token",
                 ROOM_WAIT,
-                room.token(&broadcast.namespace),
+                room.token(room::TokenRole::Sub, &broadcast.namespace),
             )
             .await?
         else {
@@ -364,13 +375,51 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
             }
         ));
     }
+    let mut chat_tokens = ChatTokens::default();
+    if let (true, Some(chat)) = (ask_token, &args.chat) {
+        let Some(tokens) = ui
+            .unless_ended(
+                "the room's tokens for the chat",
+                ROOM_WAIT,
+                chat_tokens_of(room, chat),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        chat_tokens = tokens;
+    }
     Ok(Some(Place {
         url: broadcast.relay_url.clone(),
         cert_sha256: room::certificate_hash(&broadcast.cert_sha256_hex)?,
         namespace: broadcast.namespace.clone(),
         token,
+        chat_tokens,
         broadcast: Some(broadcast),
     }))
+}
+
+/// The two tokens the chat on tracks needs of a room: `pub` in the
+/// viewer's namespace `xmoq/chat/<room>/<name>`, for its `PUBLISH_NAMESPACE`,
+/// and `sub` in `xmoq/chat/<room>`, for its SUBSCRIBE and FETCH of `lines`.
+///
+/// WHY tokens of their own on the chat's requests, and not the session's
+/// token as well: that one is `sub` in the broadcast's namespace, which
+/// allows none of them, and the SETUP carries it already.
+async fn chat_tokens_of(room: &mut RoomSocket, chat: &Chat) -> Result<ChatTokens> {
+    let prefix = xmoq_chat_tracks::names::PREFIX.map(str::to_string);
+    let room_fields: Vec<String> = prefix.into_iter().chain([chat.room.clone()]).collect();
+    let mine: Vec<String> = room_fields
+        .iter()
+        .cloned()
+        .chain([chat.name.clone()])
+        .collect();
+    let publish = room.token(room::TokenRole::Pub, &mine).await?;
+    let subscribe = room.token(room::TokenRole::Sub, &room_fields).await?;
+    Ok(ChatTokens {
+        publish: publish.map(|text| room::authorization_token(&text)),
+        subscribe: subscribe.map(|text| room::authorization_token(&text)),
+    })
 }
 
 async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
@@ -850,12 +899,22 @@ async fn play(
                     connection,
                     session: &mut session,
                     namespace: &namespace,
-                    token: place.token.as_deref(),
+                    token: place.chat_tokens.subscribe.as_deref(),
                     answer_wait_ms: args.answer_wait_ms,
                     open_wait_ms: args.open_wait_ms,
                     rendezvous_ms: None,
                 };
-                ChatTracks::begin(requests, connection, &stops, chat, room, ui.chat_had).await
+                let publish = place.chat_tokens.publish.as_deref();
+                ChatTracks::begin(
+                    requests,
+                    publish,
+                    connection,
+                    &stops,
+                    chat,
+                    room,
+                    ui.chat_had,
+                )
+                .await
             };
             match begun.await {
                 Ok(mut tracks) => {

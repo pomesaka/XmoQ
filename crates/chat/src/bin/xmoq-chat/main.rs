@@ -75,6 +75,7 @@ async fn run(args: xmoq_chat::args::Args) -> Result<()> {
     // session at once would have the gatherer connect every second for
     // good.
     let mut backoff = Backoff::default();
+    let key = args.auth_key.as_deref().map(xmoq_room_token::RoomKey::new);
     loop {
         let began = std::time::Instant::now();
         let connecting = wt::connect(&args.url, args.cert_sha256, &streams);
@@ -86,9 +87,13 @@ async fn run(args: xmoq_chat::args::Args) -> Result<()> {
             Ok(connection) => {
                 let connection = Arc::new(connection);
                 println!("CONNECTED url={}", args.url);
-                let result =
-                    session::gather(&connection, &store, (&mut gatherer, &args.rooms), &mut stop)
-                        .await;
+                let result = session::gather(
+                    &connection,
+                    &store,
+                    (&mut gatherer, &args.rooms, key.as_ref()),
+                    &mut stop,
+                )
+                .await;
                 match &result {
                     Ok(ended) => println!("SESSION_ENDED {ended:?}"),
                     Err(error) => println!("SESSION_FAILED {error:#}"),

@@ -1,0 +1,14 @@
+[package]
+name = "xmoq-room-token"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+description = "The token of a room that the relay checks: its text, made and read with the key the relay shares with the room"
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-moqt = { path = "../moqt" }
+# HMAC-SHA-256. Already built, under quinn.
+ring = "=0.17.14"

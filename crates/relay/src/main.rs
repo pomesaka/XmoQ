@@ -19,6 +19,7 @@ mod tests;
 
 use std::sync::Arc;
 use std::time::Duration;
+use xmoq_room_token::unhex;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::Semaphore;
@@ -245,7 +246,7 @@ fn parse_args() -> Result<Args> {
                 };
             }
             "--auth-key-hex" => {
-                auth_key = Some(auth::unhex(&value).context("--auth-key-hex is not hex")?);
+                auth_key = Some(unhex(&value).context("--auth-key-hex is not hex")?);
             }
             "--auth-setup" => {
                 auth_setup = match value.as_str() {

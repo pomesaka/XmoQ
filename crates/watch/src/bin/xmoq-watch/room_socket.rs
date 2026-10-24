@@ -83,11 +83,15 @@ impl RoomSocket {
         self.broadcast.clone()
     }
 
-    /// A token for watching in the namespace, or `None` where the room
-    /// gives none.
-    pub async fn token(&mut self, namespace: &[String]) -> Result<Option<String>> {
+    /// A token for `role` in the namespace, or `None` where the room gives
+    /// none.
+    pub async fn token(
+        &mut self,
+        role: room::TokenRole,
+        namespace: &[String],
+    ) -> Result<Option<String>> {
         self.socket
-            .send(Message::text(room::ask_for_a_token(namespace)))
+            .send(Message::text(room::ask_for_a_token(role, namespace)))
             .await?;
         loop {
             match self.message().await? {
