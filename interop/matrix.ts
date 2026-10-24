@@ -1185,6 +1185,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "none",
 		},
 		{
+			name: "no relay: quiet peer: the terminal viewer closes its session with INVALID_REQUEST_ID for a request of the peer with a Request ID of a client's parity",
+			script: "quiet-peer.ts",
+			args: ["--case", "request-id-parity", "--client", "xmoq-watch"],
+			relay: "none",
+		},
+		{
 			name: "no relay: quiet peer: own-browser closes its session with INVALID_REQUEST_ID for a REQUEST_UPDATE that uses the Request ID of a request it refused",
 			script: "quiet-peer.ts",
 			args: ["--case", "request-id-again", "--client", "own-browser"],
@@ -1194,6 +1200,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			name: "no relay: quiet peer: own-rust closes its session with INVALID_REQUEST_ID for a REQUEST_UPDATE that uses the Request ID of a request it refused",
 			script: "quiet-peer.ts",
 			args: ["--case", "request-id-again", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: the terminal viewer closes its session with INVALID_REQUEST_ID for a REQUEST_UPDATE that uses the Request ID of a request it refused",
+			script: "quiet-peer.ts",
+			args: ["--case", "request-id-again", "--client", "xmoq-watch"],
 			relay: "none",
 		},
 		{

@@ -868,6 +868,41 @@ impl Session {
         }))
     }
 
+    /// Takes the first message of a request the peer opened and refuses the
+    /// request, for an endpoint that serves none: with `NOT_SUPPORTED` (§10.6.2:
+    /// "The endpoint does not support the type of request") where the session
+    /// hands it over, or with the session's own refusal. Returns the
+    /// `REQUEST_ERROR` to send before a FIN (§3.3.2), and the request where
+    /// the session keeps it, which is fed what still comes on its stream
+    /// ([`Self::on_peer_request_message`]) and reported gone
+    /// ([`Self::on_peer_request_closed`]), as one rejected with [`Self::reject`].
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::on_peer_request_opened`] fails with: a Request ID §10.1
+    /// does not allow, among others. The session then has to be closed with
+    /// [`Error::termination_code`].
+    pub fn refuse_peer_request(
+        &mut self,
+        first: ControlMessage,
+    ) -> Result<(ControlMessage, Option<PeerRequestId>), Error> {
+        match self.on_peer_request_opened(first)? {
+            PeerRequestOpened::Refused { response, request } => Ok((response, request)),
+            PeerRequestOpened::Request(request, _) => {
+                // A request the session has just handed over waits for its
+                // answer, which is all `reject` asks.
+                self.reject_peer_request(request.id);
+                let response = ControlMessage::RequestError(RequestError {
+                    error_code: request_error_code::NOT_SUPPORTED,
+                    retry_interval: retry_interval::made_up(request_error_code::NOT_SUPPORTED),
+                    error_reason: ReasonPhrase::default(),
+                    redirect: None,
+                });
+                Ok((response, Some(request)))
+            }
+        }
+    }
+
     /// Asks the publisher to change parameters of an Established
     /// subscription its PUBLISH made (§10.9: "A subscriber can also send
     /// `REQUEST_UPDATE` to modify parameters of a subscription established
@@ -1380,6 +1415,51 @@ mod tests {
     const NOT_ALLOWED: RequestFault = RequestFault::Peer(Error::ProtocolViolation(
         "message not allowed in this request state",
     ));
+
+    /// `refuse_peer_request`, at a client, whose peer's Request IDs are odd
+    /// (§10.1): the refusal, and what a `REQUEST_UPDATE` on the refused stream
+    /// then says of its Request ID.
+    #[test]
+    fn a_request_refused_by_the_session_has_its_ids_checked() {
+        let not_supported = ControlMessage::RequestError(RequestError {
+            error_code: request_error_code::NOT_SUPPORTED,
+            retry_interval: retry_interval::made_up(request_error_code::NOT_SUPPORTED),
+            error_reason: ReasonPhrase::default(),
+            redirect: None,
+        });
+        // (the SUBSCRIBE's Request ID, the update's, what the update leads to)
+        let cases = [
+            (1, Some(3), Ok(Ok(()))),
+            (1, Some(1), Ok(Err(Error::InvalidRequestId(1)))),
+            (0, None, Err(Error::InvalidRequestId(0))),
+        ];
+        for (subscribe_id, update_id, expected) in cases {
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            let outcome = session
+                .refuse_peer_request(subscribe(subscribe_id, b"a"))
+                .map(|(response, request)| {
+                    assert_eq!(response, not_supported);
+                    let request = request.unwrap();
+                    let Some(update_id) = update_id else {
+                        return Ok(());
+                    };
+                    session
+                        .on_peer_request_message(
+                            request,
+                            ControlMessage::RequestUpdate(RequestUpdate {
+                                request_id: update_id,
+                                parameters: vec![],
+                            }),
+                        )
+                        .map(|_| ())
+                        .map_err(|fault| match fault {
+                            RequestFault::Peer(error) => error,
+                            RequestFault::Usage(error) => panic!("{error}"),
+                        })
+                });
+            assert_eq!(outcome, expected, "{subscribe_id} {update_id:?}");
+        }
+    }
 
     #[test]
     fn request_ids_of_the_peer_are_checked() {

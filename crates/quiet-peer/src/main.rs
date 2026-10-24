@@ -22,9 +22,11 @@
 //! answer, naming the same URI (`REQUEST_GOAWAY_SENT session=0 stream=0
 //! uri=..`).
 //! `--quiet request-id-parity`: when the client's SETUP has come, it sends the
-//! client a SUBSCRIBE with the Request ID 0, a client's (§10.1).
+//! client a SUBSCRIBE with the Request ID 0, a client's (§10.1), and answers
+//! the client's SUBSCRIBEs with `SUBSCRIBE_OK`.
 //! `--quiet request-id-again`: a SUBSCRIBE with the Request ID 1, and after
-//! its answer a `REQUEST_UPDATE` on its stream with the same Request ID.
+//! its answer a `REQUEST_UPDATE` on its stream with the same Request ID; the
+//! client's SUBSCRIBEs as in `request-id-parity`.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -153,7 +155,9 @@ enum Quiet {
     /// `PUBLISH_NAMESPACE` with `REQUEST_OK`.
     RequestGoAway,
     /// When the client's SETUP has come, a SUBSCRIBE to the client with the
-    /// Request ID 0, which is of a client's parity (§10.1), and nothing else.
+    /// Request ID 0, which is of a client's parity (§10.1). A SUBSCRIBE of the
+    /// client is answered with `SUBSCRIBE_OK`, as in `RequestGoAway`, so that a
+    /// viewer comes to play; other requests are not.
     PeerRequestIdOfTheWrongParity,
     /// When the client's SETUP has come, a SUBSCRIBE to the client with the
     /// Request ID 1, and after its answer a `REQUEST_UPDATE` on its stream
@@ -399,6 +403,23 @@ fn described(message: &ControlMessage) -> String {
     }
 }
 
+/// What the peer answers in the modes that let a client come to play: a
+/// SUBSCRIBE with `SUBSCRIBE_OK`, under the number of its stream as the Track
+/// Alias, and a `PUBLISH_NAMESPACE` with `REQUEST_OK`; nothing else.
+fn an_answer_that_plays(message: &ControlMessage, stream: u64) -> Option<ControlMessage> {
+    match message {
+        ControlMessage::Subscribe(_) => Some(ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: stream,
+            parameters: vec![],
+            track_properties: vec![],
+        })),
+        ControlMessage::PublishNamespace(_) => {
+            Some(ControlMessage::RequestOk(RequestOk::default()))
+        }
+        _ => None,
+    }
+}
+
 /// Reads one request stream to its end and prints what came. The sending
 /// half is kept open and unused meanwhile: that is the answer that does
 /// not come.
@@ -433,27 +454,23 @@ async fn read_request(
                     let ok = ControlMessage::RequestOk(RequestOk::default());
                     let _ = send_message(&mut unanswered, &ok, &Trace::default(), "request").await;
                 }
-                if quiet == Quiet::RequestGoAway {
-                    let answer = match &message {
-                        ControlMessage::Subscribe(_) => {
-                            Some(ControlMessage::SubscribeOk(SubscribeOk {
-                                track_alias: stream,
-                                parameters: vec![],
-                                track_properties: vec![],
-                            }))
-                        }
-                        ControlMessage::PublishNamespace(_) => {
-                            Some(ControlMessage::RequestOk(RequestOk::default()))
-                        }
-                        _ => None,
-                    };
+                // The two that send the client a request of their own answer
+                // its SUBSCRIBE as well, so that a viewer comes to play,
+                // where it reads the peer's requests.
+                if matches!(
+                    quiet,
+                    Quiet::RequestGoAway
+                        | Quiet::PeerRequestIdOfTheWrongParity
+                        | Quiet::PeerRequestIdAgain
+                ) {
+                    let answer = an_answer_that_plays(&message, stream);
                     let subscribe = matches!(message, ControlMessage::Subscribe(_));
                     if let Some(answer) = answer {
                         let _ =
                             send_message(&mut unanswered, &answer, &Trace::default(), "request")
                                 .await;
                     }
-                    if subscribe && session == 0 && stream == 0 {
+                    if quiet == Quiet::RequestGoAway && subscribe && session == 0 && stream == 0 {
                         let uri = format!("https://127.0.0.1:{port}/moved");
                         // "Request ID: Present only when sent on the control
                         // stream."
@@ -481,17 +498,7 @@ async fn read_request(
                             error_reason: ReasonPhrase::default(),
                             redirect: None,
                         })),
-                        ControlMessage::Subscribe(_) => {
-                            Some(ControlMessage::SubscribeOk(SubscribeOk {
-                                track_alias: stream,
-                                parameters: vec![],
-                                track_properties: vec![],
-                            }))
-                        }
-                        ControlMessage::PublishNamespace(_) => {
-                            Some(ControlMessage::RequestOk(RequestOk::default()))
-                        }
-                        _ => None,
+                        _ => an_answer_that_plays(&message, stream),
                     };
                     let refused = matches!(answer, Some(ControlMessage::RequestError(_)));
                     if let Some(answer) = answer {
