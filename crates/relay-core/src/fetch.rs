@@ -19,7 +19,7 @@ use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{ControlMessage, Fetch, FetchRange, RequestOk, request_error_code};
 use xmoq_moqt::name::{FullTrackName, Location};
-use xmoq_moqt::params::Parameter;
+use xmoq_moqt::params::{ANSWER_WAIT_MS, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{FetchStreamOpened, PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
@@ -165,6 +165,11 @@ pub(crate) struct RelayedFetch {
     parameters: Vec<Parameter>,
     /// The publishers asked so far, the one asked last among them.
     asked: Vec<SessionKey>,
+    /// What is left of the time the subscriber waits for its answer
+    /// (`xmoq_moqt::params::answer_wait_ms`, the rows of
+    /// `fixtures/request-answer-wait/`), less each publisher's wait that ran
+    /// out ([`Relay::on_fetch_timeout`]).
+    answer_left_ms: u64,
 }
 
 /// What a Joining FETCH that is held waits for. WHY two kinds and not one
@@ -901,6 +906,7 @@ impl Relay {
             let answer = (end, pieces, asked.send_order);
             return self.write_answer(session, stream, request, &asked.track, answer, actions);
         }
+        let answer_left_ms = answer_wait_ms(ANSWER_WAIT_MS, parameters);
         let parameters = upstream_parameters(parameters);
         let mut asked_of = Vec::new();
         let range = (asked.start, asked.end);
@@ -938,6 +944,7 @@ impl Relay {
                 end: asked.end,
                 parameters,
                 asked: asked_of,
+                answer_left_ms,
             },
         );
     }
@@ -2129,6 +2136,23 @@ impl Relay {
         // §10.6.2, TIMEOUT.
         let too_late = Refusal::code(request_error_code::TIMEOUT);
         let unknown = stream_reset_code::UNKNOWN_OBJECT_STATUS;
+        // The next publisher is asked while the subscriber still waits
+        // (§9.5: "When more than one publisher is available, the Relay MAY
+        // send the FETCH to any of them"), decided on 2026-10-24. WHY
+        // while any of its time is left, and not only where a whole wait of
+        // the next publisher fits: an answer that comes early in that wait
+        // is in time. WHY NOT every publisher, each with a wait of its own:
+        // the answer would come after the subscriber gave up. WHY NOT a
+        // number of publishers: nothing gives one. The time a refusal took
+        // is not counted; it is short beside a wait that ran out.
+        let wait_ms = self.upstream_answer_wait_ms;
+        let left = self.fetches.relayed_mut(&subscriber).map(|fetch| {
+            fetch.answer_left_ms = fetch.answer_left_ms.saturating_sub(wait_ms);
+            fetch.answer_left_ms
+        });
+        if left.is_some_and(|left| left > 0) {
+            return self.ask_the_next_or_fail(subscriber, &too_late, unknown, actions);
+        }
         self.fail_fetch(subscriber, &too_late, unknown, actions);
     }
 

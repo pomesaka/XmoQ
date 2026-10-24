@@ -275,6 +275,12 @@ const FETCHES: (Pairing & { relays: string[] })[] = [
 		args: ["--fetch", "other-publisher"],
 		relays: ["own"],
 	},
+	{
+		name: "own-browser fetches what a publisher that answers nothing is asked first for; the relay asks an own page next, while the page that fetches still waits, and it answers",
+		script: "fetch.ts",
+		args: ["--fetch", "silent-publisher-first"],
+		relays: ["own"],
+	},
 	// The publisher is an own page that only announced: it serves the track
 	// when the relay asks, and answers a FETCH from what it has sent (`serve`
 	// of `@xmoq/moqt`).

@@ -1551,7 +1551,14 @@ pub struct Relay {
     /// this event was handled: what the fetch streams keep of it is looked
     /// at before the event is done with.
     cache_let_go: bool,
+    /// [`Self::set_upstream_answer_wait_ms`].
+    upstream_answer_wait_ms: u64,
 }
+
+/// How long the I/O side waits for a publisher's answer to a request of the
+/// relay, where it is not told otherwise
+/// ([`Relay::set_upstream_answer_wait_ms`]). Provisional.
+pub const UPSTREAM_ANSWER_WAIT_MS: u64 = 5_000;
 
 /// What a request asks to be allowed to do with a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1637,7 +1644,16 @@ impl Relay {
             held_beyond_cache_share: fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE
                 / fetch::SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE,
             cache_let_go: false,
+            upstream_answer_wait_ms: UPSTREAM_ANSWER_WAIT_MS,
         }
+    }
+
+    /// How long the I/O side waits for a publisher's answer to a request of
+    /// the relay ([`Action::StartUpstreamTimer`]), in place of
+    /// [`UPSTREAM_ANSWER_WAIT_MS`]: what a FETCH that was not answered in
+    /// time has used of the time its subscriber waits.
+    pub fn set_upstream_answer_wait_ms(&mut self, wait_ms: u64) {
+        self.upstream_answer_wait_ms = wait_ms;
     }
 
     /// How many `PUBLISH_NAMESPACE` requests a session may send at once, and

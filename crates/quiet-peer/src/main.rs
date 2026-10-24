@@ -70,7 +70,9 @@
 //! the end how many requests it was sent (`REFUSED asked=..`). With
 //! `--announce-and-stay-quiet yes` it publishes the track `live` as well
 //! (PUBLISH, no Object), and answers nothing the relay asks of it
-//! (`QUIET asked=..`).
+//! (`QUIET asked=..`); with `--quiet-track <namespace>/<name>` as well, that
+//! track in place of `live` (`PUBLISHED_QUIET track=..`), so that the relay
+//! has it as the first source of a track another publisher serves.
 //!
 //! With `--publish-group <objects>x<bytes>` it publishes the track `big` of
 //! `(xmoq)` and sends Group 0 with that many Objects of that many bytes on
@@ -205,8 +207,10 @@ enum Args {
         ask: Option<Ask>,
         /// `--announce-and-refuse yes`, and `--announce-and-stay-quiet yes`.
         announce_and_refuse: bool,
-        /// `--announce-and-stay-quiet yes`: it answers nothing.
-        answers_nothing: bool,
+        /// `--announce-and-stay-quiet yes`: it answers nothing, and publishes
+        /// this track, its namespace's fields and its name joined with `/`
+        /// (`--quiet-track`, `xmoq/live` where it is not given).
+        quiet_track: Option<String>,
         /// `--publish-group` and `--next-group-after-ms`.
         publish_group: Option<(u64, usize, Option<Duration>)>,
         /// `--fetch-cached`, `--read-bytes-a-second` and `--fetch-group`.
@@ -311,6 +315,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut announce_per_second, mut hold_tracks) = (None, None);
     let (mut ask_per_second, mut asked, mut rendezvous_ms) = (None, Asked::Subscribe, None);
     let (mut cancel, mut announce_and_refuse) = (Cancel::Never, false);
+    let mut quiet_track = None;
     let (mut say_each, mut stay_quiet) = (false, false);
     let mut ask_every = None;
     let (mut group, mut next_group_after) = (None, None);
@@ -350,6 +355,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                 (announce_and_refuse, stay_quiet) = (true, value == "yes");
             }
             "--announce-and-refuse" => announce_and_refuse = value == "yes",
+            "--quiet-track" => quiet_track = Some(value),
             "--publish-group" => group = Some(group_of(&value)?),
             "--next-group-after-ms" => {
                 next_group_after = Some(Duration::from_millis(
@@ -389,7 +395,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                 say_each,
             }),
             announce_and_refuse,
-            answers_nothing: stay_quiet,
+            quiet_track: stay_quiet.then(|| quiet_track.unwrap_or_else(|| "xmoq/live".to_string())),
             publish_group: group.map(|(objects, bytes)| (objects, bytes, next_group_after)),
             fetch_cached: fetches.map(|fetches| (fetches, read_a_second, fetch_group)),
         });
@@ -1095,14 +1101,15 @@ async fn leave_unanswered(
 }
 
 /// Announces `(xmoq)` once and refuses what the relay asks of it, for
-/// `stay`. With `answers_nothing` it publishes the track `live` as well, and
-/// answers nothing the relay asks.
+/// `stay`. With `quiet_track` it publishes that track as well, and answers
+/// nothing the relay asks.
 async fn announce_and_refuse(
     url: &str,
     cert_sha256: [u8; 32],
     stay: Duration,
-    answers_nothing: bool,
+    quiet_track: Option<&str>,
 ) -> Result<()> {
+    let answers_nothing = quiet_track.is_some();
     let (connection, _control) = connected(url, cert_sha256).await?;
     let counts = Arc::new(Announced::default());
     let message = ControlMessage::PublishNamespace(PublishNamespace {
@@ -1125,12 +1132,19 @@ async fn announce_and_refuse(
     // Kept to the end, as the announcement.
     let mut publication = None;
     if answers_nothing {
+        let named = quiet_track.unwrap_or("xmoq/live");
+        let (namespace, name) = named
+            .rsplit_once('/')
+            .context("--quiet-track is <namespace>/<name>")?;
+        let fields = namespace
+            .split('/')
+            .map(|field| field.as_bytes().to_vec())
+            .collect();
+        let full_track_name =
+            FullTrackName::new(TrackNamespace::new(fields)?, name.as_bytes().to_vec())?;
         let publish = ControlMessage::Publish(Publish {
             request_id: 2,
-            full_track_name: FullTrackName::new(
-                TrackNamespace::new(vec![b"xmoq".to_vec()])?,
-                b"live".to_vec(),
-            )?,
+            full_track_name,
             track_alias: 1,
             parameters: Vec::new(),
             track_properties: Vec::new(),
@@ -1146,7 +1160,12 @@ async fn announce_and_refuse(
             bail!("the PUBLISH was not accepted: {answer:?}");
         }
         publication = Some((send, reader));
-        println!("PUBLISHED_LIVE");
+        // WHY two lines: drivers wait for the first since before the flag.
+        if named == "xmoq/live" {
+            println!("PUBLISHED_LIVE");
+        } else {
+            println!("PUBLISHED_QUIET track={named}");
+        }
     }
     let began = tokio::time::Instant::now();
     let mut tasks = tokio::task::JoinSet::new();
@@ -1424,9 +1443,9 @@ async fn main() -> Result<()> {
             cert_sha256,
             stay,
             announce_and_refuse: true,
-            answers_nothing,
+            quiet_track,
             ..
-        } => return announce_and_refuse(&url, cert_sha256, stay, answers_nothing).await,
+        } => return announce_and_refuse(&url, cert_sha256, stay, quiet_track.as_deref()).await,
         Args::Connect {
             url,
             cert_sha256,
