@@ -842,7 +842,7 @@ async fn play(
                     open_wait_ms: args.open_wait_ms,
                     rendezvous_ms: None,
                 };
-                ChatTracks::begin(requests, connection, chat, room).await
+                ChatTracks::begin(requests, connection, &stops, chat, room).await
             };
             match begun.await {
                 Ok(mut tracks) => {

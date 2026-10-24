@@ -368,6 +368,61 @@ async fn an_object_over_the_limit_stops_its_stream_only() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_subscriptions_limit_on_its_payloads_stops_its_stream_only() {
+    // The limit of every stream (16) is far; the subscription's is 4.
+    let config = StreamConfig {
+        subgroup_buffer_limit: 64,
+        ..StreamConfig::default()
+    };
+    let mut reading = reading(config, 8);
+    let alias = header().track_alias;
+    let object = |len: u8| {
+        let mut bytes = vec![0x00, len];
+        bytes.extend(std::iter::repeat_n(0x61, usize::from(len)));
+        bytes
+    };
+    // An Object of 5 read before the limit is given is taken.
+    let mut send = open_with(&reading.peer, &subgroup_bytes(&[])).await;
+    let stream = reading.opened().await;
+    send.write_all(&object(5)).await.unwrap();
+    assert!(matches!(reading.next().await, UniEvent::Object { .. }));
+    // From the limit on, one of 4 is taken and one of 5 stops the stream,
+    // with INTERNAL_ERROR (0x0): the limit is this endpoint's.
+    reading.stops.limit_payload(alias, 4);
+    send.write_all(&[0x00, 0x04, 0x61, 0x61, 0x61, 0x61])
+        .await
+        .unwrap();
+    assert!(matches!(reading.next().await, UniEvent::Object { .. }));
+    send.write_all(&[0x00, 0x05]).await.unwrap();
+    assert_eq!(
+        reading.next().await,
+        UniEvent::SubgroupClosed {
+            stream,
+            header: header(),
+            end: StreamEnd::Aborted(None),
+        }
+    );
+    assert_eq!(
+        send.write_all(&[0]).await,
+        Err(WriteError::Stopped(Some(0x0)))
+    );
+    // The session goes on, under the limit on another stream of the alias,
+    // and without it once the subscription let go of it.
+    let mut other = open_with(&reading.peer, &subgroup_bytes(&[])).await;
+    let stream = reading.opened().await;
+    other.write_all(&object(5)).await.unwrap();
+    assert!(matches!(
+        reading.next().await,
+        UniEvent::SubgroupClosed { stream: closed, .. } if closed == stream
+    ));
+    reading.stops.unlimit_payload(alias);
+    let mut third = open_with(&reading.peer, &subgroup_bytes(&[])).await;
+    reading.opened().await;
+    third.write_all(&object(5)).await.unwrap();
+    assert!(matches!(reading.next().await, UniEvent::Object { .. }));
+}
+
+#[tokio::test(start_paused = true)]
 async fn streams_that_never_say_what_they_are() {
     // (bytes sent before the stream goes silent)
     let cases: [(&str, Vec<u8>); 2] = [
