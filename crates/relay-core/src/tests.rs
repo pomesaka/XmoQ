@@ -2461,3 +2461,33 @@ fn a_stream_towards_a_subscriber_has_the_send_order_of_its_subscribe_and_its_hea
         assert_eq!(opened, [expected], "{case}");
     }
 }
+
+/// §12.7: "When looking for the value of a property, processors MUST search
+/// both the mutable properties and the contents of Immutable Properties".
+#[test]
+fn the_relay_reads_a_track_property_inside_immutable_properties_as_well() {
+    let varint = |ty, value| KeyValuePair::varint(ty, value).unwrap();
+    // Immutable Properties (0x0B) hold a sequence of their own, whose first
+    // Type counts from 0: DEFAULT PUBLISHER PRIORITY (0x0E) = 3 is `0e 03`,
+    // and DYNAMIC_GROUPS (0x30) = 1 after it `22 01`.
+    let immutable = |bytes: Vec<u8>| KeyValuePair::bytes(0x0b, bytes).unwrap();
+    // (the Track Properties; the default Publisher Priority; whether the
+    //  track has dynamic Groups)
+    let cases = [
+        (vec![], 128, false),
+        (vec![varint(0x0e, 3), varint(0x30, 1)], 3, true),
+        (vec![immutable(vec![0x0e, 0x03, 0x22, 0x01])], 3, true),
+        // Outside first: the one outside counts.
+        (vec![varint(0x0e, 5), immutable(vec![0x0e, 0x03])], 5, false),
+    ];
+    for (properties, priority, dynamic) in cases {
+        assert_eq!(
+            (
+                crate::default_publisher_priority(&properties),
+                crate::dynamic_groups(&properties)
+            ),
+            (priority, dynamic),
+            "{properties:?}"
+        );
+    }
+}

@@ -4,6 +4,8 @@
 //! Immutable Properties." `propertiesToSearch` of `@xmoq/moqt` reads them by
 //! the same rule; both read the rows of `fixtures/immutable-properties/`.
 
+use std::borrow::Cow;
+
 use crate::Error;
 use crate::coding::{ReadError, Reader};
 use crate::kvp::{self, KeyValuePair, Value};
@@ -14,9 +16,40 @@ pub const IMMUTABLE_PROPERTIES: u64 = 0x0b;
 /// What the properties belong to: an Object may have one Immutable
 /// Properties, a Track any number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Of {
+pub enum Of {
+    /// Object Properties.
     Object,
+    /// Track Properties.
     Track,
+}
+
+/// The properties to look for the value of a property in, for a reader
+/// above the session: those of [`properties_to_search`], in its order.
+///
+/// Properties that are malformed or cannot be read never get to such a
+/// reader: the session refuses them first (`decode_track_properties`, the
+/// [`TrackRefusal`] of a request, and the check of an Object's properties
+/// in [`crate::data`]). For such properties this gives the ones outside
+/// Immutable Properties, as they came. Borrowed where there are no
+/// Immutable Properties, which is what most properties are.
+#[must_use]
+pub fn searched_properties(properties: &[KeyValuePair], of: Of) -> Cow<'_, [KeyValuePair]> {
+    if properties
+        .iter()
+        .all(|property| property.ty() != IMMUTABLE_PROPERTIES)
+    {
+        return Cow::Borrowed(properties);
+    }
+    match properties_to_search(properties, of) {
+        Ok(Ok(searched)) => Cow::Owned(searched),
+        Ok(Err(_)) | Err(_) => Cow::Owned(
+            properties
+                .iter()
+                .filter(|property| property.ty() != IMMUTABLE_PROPERTIES)
+                .cloned()
+                .collect(),
+        ),
+    }
 }
 
 /// The properties §12.7 has a processor search: those without Immutable
@@ -211,5 +244,42 @@ mod tests {
             read += 1;
         }
         assert_eq!(read, 25);
+    }
+
+    /// What a reader above the session searches: column 6 of the rows the
+    /// session accepts, and the properties outside for one it refuses.
+    #[test]
+    fn a_reader_above_the_session_searches_what_the_session_does() {
+        let rows = include_str!("../../../fixtures/immutable-properties/properties.tsv");
+        let mut read = 0;
+        for row in rows.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [name, of, _, hex, "ok", searched] = fields[..] else {
+                continue;
+            };
+            let of = if of == "object" {
+                Of::Object
+            } else {
+                Of::Track
+            };
+            let properties = parse_exact(&unhex(hex), kvp::decode_all).unwrap();
+            let found = searched_properties(&properties, of);
+            assert_eq!(searched_text(&found), searched, "{name}");
+            read += 1;
+        }
+        assert!(read > 0);
+        // Immutable Properties inside Immutable Properties: malformed, and
+        // nothing is outside.
+        let refused = parse_exact(&unhex("0b020b00"), kvp::decode_all).unwrap();
+        assert_eq!(
+            searched_text(&searched_properties(&refused, Of::Track)),
+            "none"
+        );
+        // Without Immutable Properties the properties are not copied.
+        let plain = parse_exact(&unhex("0405"), kvp::decode_all).unwrap();
+        assert!(matches!(
+            searched_properties(&plain, Of::Object),
+            Cow::Borrowed(_)
+        ));
     }
 }
