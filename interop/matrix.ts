@@ -47,6 +47,7 @@ interface Pairing {
 		| "namespaces.ts"
 		| "chat.ts"
 		| "chat-pages.ts"
+		| "chat-tokens.ts"
 		| "rendezvous.ts"
 		| "new-group.ts";
 	/** The arguments of the driver, without the relay and the port. */
@@ -1218,6 +1219,16 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			script: "chat-pages.ts",
 			args: ["--restart", "no"],
 			relay: "moqtail",
+		},
+		// The tokens of a participant (`publishNamespaceToken` of `joinChat`)
+		// through the own relay with `--auth-key-hex`, the one relay that
+		// checks tokens. A page stands in for the gatherer, which sends no
+		// token in this tree.
+		{
+			name: "own relay: chat: with tokens, a page announces its name with pub on the PUBLISH_NAMESPACE and reads the room with sub on its connection, and a pub token for another name, none, or pub alone are refused",
+			script: "chat-tokens.ts",
+			args: [],
+			relay: "own",
 		},
 		// The own clients against a peer that sends no SETUP, or answers no
 		// request (`crates/quiet-peer`): what reached the peer is what counts.

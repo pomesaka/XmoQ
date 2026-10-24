@@ -64,6 +64,16 @@ export type XmoqPage = {
  */
 export type OwnPageExtras = {
 	/**
+	 * `connect` with an AUTHORIZATION TOKEN for the whole connection
+	 * (`authorizationToken` of `connect` of `@xmoq/moqt`): the Token structure
+	 * in hex, which goes into SETUP and every request the page sends.
+	 */
+	connectWithToken(
+		relayUrl: string,
+		certSha256Hex: string,
+		tokenHex: string,
+	): Promise<void>;
+	/**
 	 * Sends PUBLISH_NAMESPACE and no PUBLISH. A page that does not say how it
 	 * serves the requests of the peer refuses them with REQUEST_ERROR
 	 * NOT_SUPPORTED, so this page refuses the SUBSCRIBE a relay sends it for
@@ -391,6 +401,8 @@ export type OwnPageExtras = {
 		room: string,
 		name: string,
 		catchUp?: PageChatCatchUp,
+		/** `publishNamespaceToken` of `joinChat`, the Token structure in hex; none when left out. */
+		publishNamespaceTokenHex?: string,
 	): Promise<void>;
 	/** Says one line with `ChatParticipant.say`: what became of it, as JSON of `SayOutcome` with the Group in decimal. */
 	chatSay(text: string): Promise<string>;

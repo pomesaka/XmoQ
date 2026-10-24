@@ -125,6 +125,23 @@ export interface ChatStatus {
 export interface JoinChatOptions {
 	room: string;
 	name: string;
+	/**
+	 * An AUTHORIZATION TOKEN (§10.2.2, the bytes of the Token structure) for
+	 * the PUBLISH_NAMESPACE of `xmoq/chat/<room>/<name>` alone: in the demo's
+	 * relay, one that allows publishing in that namespace. Left out, the
+	 * PUBLISH_NAMESPACE carries none of its own.
+	 *
+	 * The token for reading the room goes on the connection instead
+	 * (`authorizationToken` of `connect`): its SETUP, the SUBSCRIBE for
+	 * `lines` and the Joining FETCH carry it, and the PUBLISH_NAMESPACE as
+	 * well, before this one. WHY a token of the request beside the
+	 * connection's: the two name different namespaces and operations, and
+	 * §10.2.2 has the parameter "authorize the sender to perform the
+	 * operation carrying the parameter", so each goes where it is needed.
+	 * WHY NOT this one on the SUBSCRIBE and the FETCH as well: it allows
+	 * nothing there.
+	 */
+	publishNamespaceToken?: Uint8Array;
 	/** The limits of a line; `DEFAULT_LIMITS` for what is left out. */
 	limits?: Partial<ChatLimits>;
 	/**
@@ -301,7 +318,13 @@ export async function joinChat(
 	// Withdrawn when the participant stops (§6.2): the relay tells the
 	// gatherer NAMESPACE_DONE, and the gatherer ends its SUBSCRIBE for
 	// `said`, which ends `listener`.
-	await connection.publishNamespace(ours, undefined, { signal: stop.signal });
+	await connection.publishNamespace(
+		ours,
+		options.publishNamespaceToken === undefined
+			? undefined
+			: { authorizationToken: [options.publishNamespaceToken] },
+		{ signal: stop.signal },
+	);
 
 	const remembered = Math.max(SEEN_LINES, catchUp);
 	let seen = new SeenLines(remembered);

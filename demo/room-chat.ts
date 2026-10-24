@@ -20,6 +20,16 @@ import {
 } from "@xmoq/chat";
 import type { MoqtConnection } from "@xmoq/moqt";
 
+/**
+ * A connection for the chat, and the token for the participant's
+ * PUBLISH_NAMESPACE where the relay asks for tokens (`--auth`); the
+ * connection carries the one for reading the room.
+ */
+export interface ChatConnection {
+	connection: MoqtConnection;
+	publishNamespaceToken: Uint8Array | undefined;
+}
+
 declare const XMOQ_DEMO: { chatTracks: boolean };
 
 /**
@@ -89,7 +99,7 @@ const shownTime = (at: number): string => new Date(at).toTimeString().slice(0, 8
 export function startChat(
 	room: string,
 	name: string,
-	connectForChat: () => Promise<MoqtConnection>,
+	connectForChat: () => Promise<ChatConnection>,
 ): void {
 	const log = document.getElementById("chat");
 	const note = document.getElementById("chat-note");
@@ -199,7 +209,7 @@ export function startChat(
  * watching page changes its broadcast or connects again for it.
  */
 async function keepInTheRoom(
-	connectForChat: () => Promise<MoqtConnection>,
+	connectForChat: () => Promise<ChatConnection>,
 	where: () => {
 		room: string;
 		name: string;
@@ -214,9 +224,10 @@ async function keepInTheRoom(
 ): Promise<void> {
 	for (;;) {
 		try {
-			const connection = await connectForChat();
+			const { connection, publishNamespaceToken } = await connectForChat();
 			const participant = await joinChat(connection, {
 				...where(),
+				publishNamespaceToken,
 				onLine,
 				onGap,
 				onMalformed: (number, why) => say(`line ${number} of the track is no line: ${why}`),

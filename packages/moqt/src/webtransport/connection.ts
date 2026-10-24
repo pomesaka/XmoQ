@@ -202,7 +202,9 @@ export interface SessionConnectOptions {
 	 * REQUEST_UPDATE, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS,
 	 * PUBLISH_NAMESPACE, TRACK_STATUS or FETCH message") that this library
 	 * sends. It goes before the tokens a request has of its own
-	 * (`parameters.authorizationToken`). Nothing is added when left out.
+	 * (`parameters.authorizationToken`), and a token that is there already,
+	 * byte for byte, is sent once (§10.2.2: repeated tokens are "unique").
+	 * Nothing is added when left out.
 	 *
 	 * **It is in SETUP as well** (the AUTHORIZATION TOKEN Setup Option,
 	 * §10.3.1.4: "functionally equivalent to the AUTHORIZATION TOKEN message
@@ -2572,19 +2574,36 @@ export async function connectOver(
 		clearTimeout(setupTimer);
 	}
 
-	/** The parameters of a request with the connection's token before its own, where the connection has one. */
+	/**
+	 * The parameters of a request with the connection's token before its own,
+	 * where the connection has one, and each token once. WHY each once:
+	 * §10.2.2 lets the parameter be repeated "as long as the combination of
+	 * Token Type and Token Value are unique after resolving any aliases", and
+	 * it is this library that adds the connection's token, so a caller that
+	 * gives the same one to a request cannot see the repeat it would make.
+	 * WHY by the bytes: no alias is registered or used here, so two Token
+	 * structures with the same Type and Value are the same bytes.
+	 */
+	const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
+		a.length === b.length && a.every((byte, index) => byte === b[index]);
 	const authorized = (
 		parameters: MessageParameters | undefined,
-	): MessageParameters | undefined =>
-		options.authorizationToken === undefined
-			? parameters
-			: {
-					...parameters,
-					authorizationToken: [
-						options.authorizationToken,
-						...(parameters?.authorizationToken ?? []),
-					],
-				};
+	): MessageParameters | undefined => {
+		const tokens = [
+			...(options.authorizationToken === undefined
+				? []
+				: [options.authorizationToken]),
+			...(parameters?.authorizationToken ?? []),
+		];
+		if (tokens.length === 0) return parameters;
+		return {
+			...parameters,
+			authorizationToken: tokens.filter(
+				(token, index) =>
+					tokens.findIndex((earlier) => sameBytes(earlier, token)) === index,
+			),
+		};
+	};
 
 	return {
 		serve(handlers) {

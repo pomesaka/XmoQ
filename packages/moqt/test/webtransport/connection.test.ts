@@ -141,20 +141,23 @@ describe("the connection's AUTHORIZATION TOKEN (§10.2.2)", () => {
 		options: SessionConnectOptions;
 		tokens: string[];
 		withItsOwn: string[];
+		withRepeats: string[];
 	}>([
 		{
-			name: "a connection with a token puts it into every request, before the request's own",
+			name: "a connection with a token puts it into every request, before the request's own, and each token once",
 			options: { authorizationToken: TOKEN },
 			tokens: ["03 00 61 62"],
 			withItsOwn: ["03 00 61 62", "03 00 7a"],
+			withRepeats: ["03 00 61 62", "03 00 7a"],
 		},
 		{
-			name: "a connection without one adds nothing",
+			name: "a connection without one adds nothing, and sends a request's token given twice once",
 			options: {},
 			tokens: [],
 			withItsOwn: ["03 00 7a"],
+			withRepeats: ["03 00 61 62", "03 00 7a"],
 		},
-	])("$name", async ({ options, tokens, withItsOwn }) => {
+	])("$name", async ({ options, tokens, withItsOwn, withRepeats }) => {
 		const { peer, connection } = await connected(options);
 		await peer.clientUni();
 		const sent: Record<string, string[]> = {};
@@ -182,12 +185,24 @@ describe("the connection's AUTHORIZATION TOKEN (§10.2.2)", () => {
 		sent["SUBSCRIBE with its own"] = tokensOf(
 			await sentBytes((await peer.clientBidi()).sent),
 		);
+		// §10.2.2: repeated tokens are to be unique; the connection's token,
+		// and one given twice, go once.
+		connection
+			.subscribe({
+				...TRACK,
+				parameters: { authorizationToken: [TOKEN, OWN, OWN] },
+			})
+			.catch(() => {});
+		sent["SUBSCRIBE with repeats"] = tokensOf(
+			await sentBytes((await peer.clientBidi()).sent),
+		);
 		expect(sent).toEqual({
 			PUBLISH_NAMESPACE: tokens,
 			PUBLISH: tokens,
 			SUBSCRIBE: tokens,
 			FETCH: tokens,
 			"SUBSCRIBE with its own": withItsOwn,
+			"SUBSCRIBE with repeats": withRepeats,
 		});
 		connection.close();
 	});
