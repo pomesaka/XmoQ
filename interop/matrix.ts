@@ -1402,6 +1402,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "none",
 		},
 		{
+			name: "no relay: quiet peer: own-browser closes its session with PROTOCOL_VIOLATION at a datagram of an unknown type",
+			script: "quiet-peer.ts",
+			args: ["--case", "datagram", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
 			name: "own relay: quiet peer: the relay closes a session that sent its SETUP and holds nothing, and keeps one that announced",
 			script: "quiet-peer.ts",
 			args: ["--case", "relay-idle-session", "--client", "quiet-peer"],

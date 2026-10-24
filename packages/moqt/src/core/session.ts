@@ -5,6 +5,7 @@ import {
 	SETUP_OPTION_AUTHORIZATION_TOKEN,
 	SETUP_OPTION_MOQT_IMPLEMENTATION,
 } from "./control-stream.ts";
+import { classifyDatagram } from "./datagram.ts";
 import { MoqtError, protocolViolation, StreamResetErrorCode } from "./error.ts";
 import {
 	FETCH_HEADER_STREAM_TYPE,
@@ -56,7 +57,8 @@ export interface SessionOptions {
  *
  * Not implemented: the server role, requests opened by the peer other than
  * SUBSCRIBE (they are answered with REQUEST_ERROR), REQUEST_UPDATE, GOAWAY,
- * datagrams, namespace subscription and timers. Of a FETCH this endpoint
+ * delivering Object Datagrams (their type is checked, `receiveDatagram`),
+ * namespace subscription and timers. Of a FETCH this endpoint
  * sends, the fetch stream is handed on as bytes; `fetch.ts` decodes them for
  * whoever wants Objects.
  */
@@ -227,6 +229,12 @@ export interface Session {
 	 * code of the reset, when the transport reported one.
 	 */
 	peerBidiStreamReset(peerStream: number, code?: number): SessionOutput[];
+	/**
+	 * A datagram of the peer (§11). One whose type is not allowed closes the
+	 * session (`classifyDatagram`); any other is dropped, since Object
+	 * Datagrams are not delivered.
+	 */
+	receiveDatagram(datagram: Uint8Array): SessionOutput[];
 	/**
 	 * The peer opened a stream, and nothing of it was reported yet. Without
 	 * this the session does not know a stream that has sent no byte, and
@@ -649,6 +657,14 @@ export function createSession(options: SessionOptions = {}): Session {
 				requests.incoming.reset(peerStream, out);
 			});
 		},
+
+		receiveDatagram: (datagram) =>
+			guard(() => {
+				const datagramKind = classifyDatagram(datagram);
+				if (datagramKind.kind === "fault") {
+					throw protocolViolation(datagramKind.reason);
+				}
+			}),
 
 		receivePeerBidiStreamData: (peerStream, data, fin) =>
 			guard((out) => {

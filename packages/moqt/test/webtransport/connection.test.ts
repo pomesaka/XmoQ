@@ -1075,6 +1075,39 @@ describe("connectOver", () => {
 		},
 	);
 
+	// The datagrams before the last are dropped, and reading goes on after
+	// them; the last closes the session with PROTOCOL_VIOLATION (§11, §11.3.1).
+	test.each([
+		{
+			name: "an unknown datagram type",
+			datagrams: ["10"],
+			reason: "unknown datagram type 0x10",
+		},
+		{
+			name: "a Type with STATUS and END_OF_GROUP",
+			datagrams: ["22"],
+			reason: "datagram type 0x22 has both STATUS and END_OF_GROUP",
+		},
+		{ name: "an empty datagram", datagrams: [""], reason: "empty datagram" },
+		{
+			name: "an unknown type after an OBJECT_DATAGRAM and a PADDING DATAGRAM",
+			datagrams: ["00 09 00 61", "f0 13 2b 3e 29 00", "40"],
+			reason: "unknown datagram type 0x40",
+		},
+	])("closes the session for $name", async ({ datagrams, reason }) => {
+		const { peer, connection } = await connected();
+		for (const datagram of datagrams) {
+			await settle();
+			expect(peer.closeInfo()).toBeUndefined();
+			peer.sendDatagram(hex(datagram));
+		}
+		expect(await connection.closed).toMatchObject({
+			type: "error",
+			error: { code: 3 },
+		});
+		expect(peer.closeInfo()).toEqual({ closeCode: 3, reason });
+	});
+
 	test("ends the session with INTERNAL_ERROR when a diagnostics hook throws", async () => {
 		const { peer, connection, request } = await subscribed({
 			diagnostics: {

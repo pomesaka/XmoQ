@@ -48,7 +48,7 @@ export interface StreamIoOptions {
 	 * be written on it fails with `StreamNotOpenedError`.
 	 */
 	openBidiTimeoutMs: number;
-	/** Called with the bytes of every stream. */
+	/** Called with the bytes of every stream, and of every datagram the peer sends, named `datagram`. */
 	trace(direction: "sent" | "received", stream: string, data: Uint8Array): void;
 	/**
 	 * Reports input to the session and performs its outputs. Resolves when
@@ -77,6 +77,8 @@ export interface StreamIo {
 	perform(output: StreamOutput): Promise<Backpressure | undefined>;
 	/** Starts accepting the streams the peer opens. */
 	acceptPeerStreams(): void;
+	/** Starts reading the datagrams of the peer and reporting each to the session. */
+	readDatagrams(): void;
 	/**
 	 * How many streams something is kept of, in either direction. Nothing
 	 * acts on it; a test reads it to see that a stream that has ended in
@@ -721,10 +723,42 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 			}
 		},
 
-		// FIXME: datagrams are not read. §11 says "An endpoint that receives an
-		// unknown datagram type MUST close the session", and an Object sent in a
-		// datagram is lost without a trace. Read `transport.datagrams` once
-		// Object Datagrams (§11.3) are implemented.
+		/**
+		 * WHY datagrams are read although no Object Datagram is delivered: §11
+		 * has "An endpoint that receives an unknown datagram type MUST close
+		 * the session", which only a reader can do. The session drops the
+		 * others (`Session.receiveDatagram`).
+		 *
+		 * WHY one datagram at a time, the next read only after the session has
+		 * taken the one before: nothing is kept here, so what waits is held by
+		 * the transport and not by this endpoint. The W3C WebTransport API
+		 * bounds that (Editor's Draft, read on 2026-10-24: the incoming queue
+		 * is cut to its [[IncomingMaxBufferedDatagrams]] from the oldest end,
+		 * which drops datagrams rather than holding the peer back, and a
+		 * datagram older than `incomingMaxAge` is dropped; what Chromium does
+		 * was not measured). WHY NOT a read that hands each datagram on
+		 * without waiting: every one would add a call to the queue of the
+		 * session's outputs, with no bound but how fast the peer sends.
+		 */
+		readDatagrams() {
+			const read = async (): Promise<void> => {
+				const reader = transport.datagrams.readable.getReader();
+				for (;;) {
+					// Only the read is guarded: it fails when the transport session
+					// ends, which `transport.closed` reports to the connection.
+					const next = await reader.read().catch(() => undefined);
+					if (next === undefined || next.done || cleared) return;
+					const datagram = next.value;
+					if (!(datagram instanceof Uint8Array)) {
+						throw new TypeError("a datagram that is not bytes was read");
+					}
+					trace("received", "datagram", datagram);
+					await input((session) => session.receiveDatagram(datagram));
+				}
+			};
+			read().catch((error: unknown) => fatal(toError(error)));
+		},
+
 		acceptPeerStreams() {
 			void accept(
 				transport.incomingUnidirectionalStreams,
