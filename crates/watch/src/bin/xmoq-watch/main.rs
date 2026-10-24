@@ -32,7 +32,7 @@ use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{GoAway, setup_option};
 use xmoq_moqt::name::TrackNamespace;
-use xmoq_moqt::session::{ControlEvent, Role, Session, Transport};
+use xmoq_moqt::session::{ControlEvent, RequestEvent, Role, Session, Transport};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
     Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent,
@@ -388,6 +388,8 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     let mut tried: Option<Instant> = None;
     // Where the last relay said to go with its GOAWAY.
     let mut moved_to: Option<String> = None;
+    // Whether the last try was made without the wait.
+    let mut went_at_once = false;
     loop {
         let Some(mut place) = place(args, &mut room, ui).await? else {
             return Ok(());
@@ -396,24 +398,20 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
         // provided." WHY the same certificate hash: the viewer has no other
         // for it; a relay elsewhere with another certificate turns the
         // connection down, and the viewer goes on as after any failure.
-        if let Some(url) = moved_to.take() {
-            place.url = url;
+        let moved = moved_to.take();
+        if let Some(url) = &moved {
+            place.url.clone_from(url);
         }
         // WHY not at once again: a room that names one broadcast after the
         // other, or one that is gone, would have the viewer connect as fast
-        // as it can.
-        if let Some(wait) = tried.and_then(|tried| BETWEEN_TRIES.checked_sub(tried.elapsed())) {
-            let waiting = async {
-                tokio::time::sleep(wait).await;
-                Ok(())
-            };
-            if ui
-                .unless_ended("the wait", BETWEEN_TRIES * 2, waiting)
-                .await?
-                .is_none()
-            {
-                return Ok(());
-            }
+        // as it can. WHY at once after a GOAWAY, and only once in a row: the
+        // picture stands still until the next session plays, and a relay
+        // that sends GOAWAY on every session would have it connect as fast
+        // as it can. `keepPlaying` of `@xmoq/media` does the same.
+        let at_once = moved.is_some() && !went_at_once;
+        went_at_once = at_once;
+        if !at_once && !waited_between_tries(ui, tried).await? {
+            return Ok(());
         }
         tried = Some(Instant::now());
         let mut began = false;
@@ -911,7 +909,19 @@ async fn play(
             event = video.reader.next_event() => {
                 match event {
                     Ok(RequestStreamEvent::Message(message)) => {
-                        session.on_request_message(video.request, message)?;
+                        // §10.4: "re-issue that specific request on a session
+                        // at the specified URI (or the current session if no
+                        // URI is provided)". WHY a new session for the video
+                        // also without a URI: the picture's clock and its first
+                        // frame begin with a session here, and the sound
+                        // follows the picture.
+                        if let RequestEvent::GoAway(go_away) =
+                            session.on_request_message(video.request, message)?
+                        {
+                            ui.note(&format!("REQUEST_GOAWAY video timeout_ms={}", go_away.timeout_ms));
+                            ended = Ended::Moved(new_url(&go_away));
+                            break "the relay sent GOAWAY for the video";
+                        }
                     }
                     Ok(RequestStreamEvent::Closed(_)) => {}
                     Err(error) => failed = Some(error.into()),
@@ -928,7 +938,16 @@ async fn play(
                 let how = match event {
                     Ok(RequestStreamEvent::Message(message)) => {
                         let line = format!("{message:?}");
-                        session.on_request_message(ended.request, message)?;
+                        // The sound alone is asked for again on this session,
+                        // also where a URI is named (§10.4 has it sent there):
+                        // the picture stays here, and the sound plays by its
+                        // clock. `keepTrackOnSession` of the page does the same.
+                        if let RequestEvent::GoAway(_) =
+                            session.on_request_message(ended.request, message)?
+                        {
+                            session.cancel(ended.request);
+                            ended.cancel();
+                        }
                         line
                     }
                     // Without PUBLISH_DONE the session still has the
@@ -1150,6 +1169,22 @@ fn termination_code(played: &Result<Ended>) -> u32 {
         .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
         .and_then(xmoq_moqt::Error::termination_code)
         .map_or(0, xmoq_moqt::TerminationCode::code)
+}
+
+/// Waits what is left of [`BETWEEN_TRIES`] since `tried`; false where the
+/// viewer was told to end meanwhile.
+async fn waited_between_tries(ui: &mut Ui, tried: Option<Instant>) -> Result<bool> {
+    let Some(wait) = tried.and_then(|tried| BETWEEN_TRIES.checked_sub(tried.elapsed())) else {
+        return Ok(true);
+    };
+    let waiting = async {
+        tokio::time::sleep(wait).await;
+        Ok(())
+    };
+    Ok(ui
+        .unless_ended("the wait", BETWEEN_TRIES * 2, waiting)
+        .await?
+        .is_some())
 }
 
 /// Where a GOAWAY says to go: its New Session URI, or `None` for the URL of

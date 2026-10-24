@@ -629,25 +629,19 @@ export function drainControlMessages(
 }
 
 /**
- * `drainControlMessages` for a request stream. §10.4: "A GOAWAY MAY also be
- * sent on a request stream to initiate migration of that individual request."
- *
- * FIXME: move the request: send it again to the URI, or to this session where
- * there is none, and end it here. Until then the session ends with
- * INTERNAL_ERROR, as for a message this package does not implement; the Rust
- * implementation does the same.
+ * The rules §10.4 sets for a GOAWAY on a request stream, as a client, the
+ * receiver of this package, has them: "Request ID: Present only when sent on
+ * the control stream", and "The endpoint MUST close the session with a
+ * PROTOCOL_VIOLATION ... if it receives more than one GOAWAY on the control
+ * stream or on a single request stream". `before` is whether that stream had
+ * one. The Rust implementation checks the same, also on the stream of a
+ * request of the peer that has been refused or ended.
  */
-export function drainRequestMessages(
-	buffer: Uint8Array,
-	data: Uint8Array,
-	onMessage: (message: ControlMessage) => void,
-): Uint8Array {
-	return drainControlMessages(buffer, data, (message) => {
-		if (message.type === "GOAWAY") {
-			throw new NotImplementedError("GOAWAY on a request stream");
-		}
-		onMessage(message);
-	});
+export function checkRequestGoAway(message: GoAway, before: boolean): void {
+	if (message.requestId !== undefined) {
+		throw protocolViolation("a GOAWAY on a request stream with a Request ID");
+	}
+	if (before) throw protocolViolation("a second GOAWAY on a request stream");
 }
 
 /**

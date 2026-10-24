@@ -51,6 +51,18 @@ export type SessionEvent =
 			/** Milliseconds the peer waits before it closes; 0 for no particular time. */
 			timeout: bigint;
 	  }
+	/**
+	 * A GOAWAY on the stream of a request of this endpoint (§10.4): the peer
+	 * asks for that request to be sent again, to `newSessionUri`, or on this
+	 * session where it is empty, and this one to be ended. The request is as
+	 * it was.
+	 */
+	| {
+			type: "request-go-away";
+			requestId: bigint;
+			newSessionUri: string;
+			timeout: bigint;
+	  }
 	| { type: "publish-namespace-ok"; requestId: bigint }
 	| { type: "publish-ok"; requestId: bigint; parameters: MessageParameters }
 	| {

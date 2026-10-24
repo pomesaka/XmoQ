@@ -1932,7 +1932,9 @@ impl Relay {
                 let unknown = stream_reset_code::UNKNOWN_OBJECT_STATUS;
                 self.fail_fetch(subscriber, &unsupported, unknown, actions);
             }
-            // Nothing else answers a FETCH; the session has dealt with it.
+            // Nothing else answers a FETCH; the session has dealt with it. A
+            // GOAWAY on its stream is as for the relay's SUBSCRIBE
+            // (`routing.rs`): the FETCH goes on until the publisher ends it.
             _ => {}
         }
     }

@@ -4,7 +4,7 @@ import type { SessionLimits } from "../../src/core/limits.ts";
 import type { SubgroupOptions } from "../../src/core/outgoing-subgroups.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
-import { hex, MOQTAIL_RELAY_SETUP, utf8 } from "../helpers.ts";
+import { fromALibrary, hex, MOQTAIL_RELAY_SETUP, utf8 } from "../helpers.ts";
 
 const NAMESPACE = [utf8("xmoq"), utf8("phase0")];
 const TRACK_NAME = utf8("object");
@@ -130,6 +130,42 @@ describe("Session", () => {
 		expect(() =>
 			session.publishNamespace({ trackNamespace: NAMESPACE }),
 		).toThrow("the peer sent GOAWAY");
+		expect(
+			said(
+				session.receivePeerUniStreamData(
+					4,
+					hex("14 09 00 00 00 00 01 61"),
+					true,
+				),
+			),
+		).toEqual([OBJECT_ON_ALIAS_9]);
+	});
+
+	// §10.4: a GOAWAY on a request stream asks for that request to be sent
+	// again; the session tells it and leaves the request, and the session, as
+	// they were.
+	test("a GOAWAY on the stream of a SUBSCRIBE is told and changes nothing", () => {
+		const session = subscribed();
+		expect(
+			session.receiveRequestStreamData(
+				1,
+				hex(fromALibrary("goaway-request-stream-moqtail-ts")),
+				false,
+			),
+		).toEqual([
+			{
+				type: "event",
+				event: {
+					type: "request-go-away",
+					requestId: 0n,
+					newSessionUri: "https://relay.example:4443/",
+					timeout: 2000n,
+				},
+			},
+		]);
+		expect(session.subscribe({ ...TRACK, trackName: utf8("b") }).value).toBe(
+			2n,
+		);
 		expect(
 			said(
 				session.receivePeerUniStreamData(
@@ -1419,12 +1455,20 @@ describe("Session", () => {
 			fin: false,
 			code: 3,
 		},
+		// §10.4, a GOAWAY on a request stream.
 		{
-			name: "a GOAWAY on a request stream, not implemented",
+			name: "a GOAWAY on a request stream with a Request ID",
 			on: "subscribe",
-			bytes: "10 00 02 00 00",
+			bytes: "10 00 03 00 00 00",
 			fin: false,
-			code: 1,
+			code: 3,
+		},
+		{
+			name: "a second GOAWAY on one request stream",
+			on: "subscribe",
+			bytes: "10 00 02 00 00 10 00 02 00 00",
+			fin: false,
+			code: 3,
 		},
 		{
 			name: "a FIN inside an Object",
@@ -1493,6 +1537,23 @@ describe("Session", () => {
 			name: "a peer stream that begins with SUBSCRIBE_OK",
 			on: "peer-bidi",
 			bytes: "04 00 02 00 00",
+			fin: false,
+			code: 3,
+		},
+		// A SUBSCRIBE of the peer, refused for want of `serve`, and then
+		// GOAWAYs on its stream, held to §10.4 as the Rust session holds them.
+		{
+			name: "a second GOAWAY on the stream of a refused request of the peer",
+			on: "peer-bidi",
+			bytes:
+				"03 00 0a 01 01 04 78 6d 6f 71 01 61 00 10 00 02 00 00 10 00 02 00 00",
+			fin: false,
+			code: 3,
+		},
+		{
+			name: "a GOAWAY with a Request ID on the stream of a refused request of the peer",
+			on: "peer-bidi",
+			bytes: "03 00 0a 01 01 04 78 6d 6f 71 01 61 00 10 00 03 00 00 00",
 			fin: false,
 			code: 3,
 		},

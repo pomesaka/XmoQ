@@ -15,9 +15,12 @@
 //! `--quiet goaway`: on its first session it refuses every request with
 //! `GOING_AWAY`, and after the first refusal sends a GOAWAY with the New
 //! Session URI `https://127.0.0.1:<port>/moved` (`GOAWAY_SENT session=0
-//! uri=..`). On later
-//! sessions it answers a SUBSCRIBE with `SUBSCRIBE_OK` and sends nothing on
-//! it, and a `PUBLISH_NAMESPACE` with `REQUEST_OK`.
+//! uri=..`). On later sessions it answers a SUBSCRIBE with `SUBSCRIBE_OK`
+//! and sends nothing on it, and a `PUBLISH_NAMESPACE` with `REQUEST_OK`.
+//! `--quiet goaway-request`: the same answers on every session, and on the
+//! first one a GOAWAY on the stream of the first SUBSCRIBE, after its
+//! answer, naming the same URI (`REQUEST_GOAWAY_SENT session=0 stream=0
+//! uri=..`).
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -137,6 +140,13 @@ enum Quiet {
     /// `PUBLISH_NAMESPACE` with `REQUEST_OK`; other requests are not
     /// answered.
     GoAway,
+    /// On the first session, a GOAWAY on the stream of the first SUBSCRIBE,
+    /// after its `SUBSCRIBE_OK`, naming the path `/moved` of this peer
+    /// (§10.4: "A GOAWAY MAY also be sent on a request stream to initiate
+    /// migration of that individual request"). Otherwise as `GoAway` on its
+    /// later sessions: a SUBSCRIBE is answered with `SUBSCRIBE_OK`, a
+    /// `PUBLISH_NAMESPACE` with `REQUEST_OK`.
+    RequestGoAway,
 }
 
 /// What the program is asked to be.
@@ -308,19 +318,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--stay-ms" => {
                 stay = Some(Duration::from_millis(value.parse().context("--stay-ms")?));
             }
-            "--quiet" => {
-                quiet = Some(match value.as_str() {
-                    "setup" => Quiet::Setup,
-                    "requests" => Quiet::Requests,
-                    "publish" => Quiet::Publish,
-                    "streams" => Quiet::Streams,
-                    "subgroups" => Quiet::Subgroups,
-                    "goaway" => Quiet::GoAway,
-                    other => bail!(
-                        "--quiet is setup, requests, publish, streams or subgroups, not {other}"
-                    ),
-                });
-            }
+            "--quiet" => quiet = Some(quiet_of(&value)?),
             other => bail!("unknown flag {other}"),
         }
     }
@@ -353,6 +351,22 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     })
 }
 
+/// The value of `--quiet`.
+fn quiet_of(value: &str) -> Result<Quiet> {
+    Ok(match value {
+        "setup" => Quiet::Setup,
+        "requests" => Quiet::Requests,
+        "publish" => Quiet::Publish,
+        "streams" => Quiet::Streams,
+        "subgroups" => Quiet::Subgroups,
+        "goaway" => Quiet::GoAway,
+        "goaway-request" => Quiet::RequestGoAway,
+        other => bail!(
+            "--quiet is setup, requests, publish, streams, subgroups, goaway or goaway-request, not {other}"
+        ),
+    })
+}
+
 /// What a message on a request stream is printed as.
 fn described(message: &ControlMessage) -> String {
     match message {
@@ -382,6 +396,7 @@ async fn read_request(
         <WtConnection as Connection>::Recv,
     ),
     refusal: tokio::sync::mpsc::Sender<()>,
+    port: u16,
 ) {
     let (mut unanswered, recv) = halves;
     let mut reader = RequestReader::new(recv, &Trace::default(), "request");
@@ -402,6 +417,41 @@ async fn read_request(
                 if answered {
                     let ok = ControlMessage::RequestOk(RequestOk::default());
                     let _ = send_message(&mut unanswered, &ok, &Trace::default(), "request").await;
+                }
+                if quiet == Quiet::RequestGoAway {
+                    let answer = match &message {
+                        ControlMessage::Subscribe(_) => {
+                            Some(ControlMessage::SubscribeOk(SubscribeOk {
+                                track_alias: stream,
+                                parameters: vec![],
+                                track_properties: vec![],
+                            }))
+                        }
+                        ControlMessage::PublishNamespace(_) => {
+                            Some(ControlMessage::RequestOk(RequestOk::default()))
+                        }
+                        _ => None,
+                    };
+                    let subscribe = matches!(message, ControlMessage::Subscribe(_));
+                    if let Some(answer) = answer {
+                        let _ =
+                            send_message(&mut unanswered, &answer, &Trace::default(), "request")
+                                .await;
+                    }
+                    if subscribe && session == 0 && stream == 0 {
+                        let uri = format!("https://127.0.0.1:{port}/moved");
+                        // "Request ID: Present only when sent on the control
+                        // stream."
+                        let go_away = ControlMessage::GoAway(GoAway {
+                            new_session_uri: uri.clone().into_bytes(),
+                            timeout_ms: 5000,
+                            request_id: None,
+                        });
+                        let _ =
+                            send_message(&mut unanswered, &go_away, &Trace::default(), "request")
+                                .await;
+                        println!("REQUEST_GOAWAY_SENT session={session} stream={stream} uri={uri}");
+                    }
                 }
                 if quiet == Quiet::GoAway {
                     let answer = match &message {
@@ -532,7 +582,7 @@ async fn serve(
             }
             halves = connection.accept_bi() => {
                 let Ok(halves) = halves else { continue };
-                requests.spawn(read_request(session, streams, quiet, halves, refusal.clone()));
+                requests.spawn(read_request(session, streams, quiet, halves, refusal.clone(), port));
                 streams += 1;
             }
         }

@@ -10,7 +10,7 @@ use super::{
 use crate::aliases::SubscribedAlias;
 use crate::kvp::KeyValuePair;
 use crate::message::{
-    ControlMessage, Fetch, FetchOk, FetchRange, Publish, PublishDone, PublishNamespace,
+    ControlMessage, Fetch, FetchOk, FetchRange, GoAway, Publish, PublishDone, PublishNamespace,
     ReasonPhrase, RequestError, RequestOk, RequestUpdate, Subscribe, SubscribeOk,
     publish_done_status, request_error_code, retry_interval,
 };
@@ -239,6 +239,10 @@ pub enum PeerRequestEvent {
     /// that; there is nothing to do. A `REQUEST_UPDATE` among them has used
     /// up its Request ID.
     LateMessage,
+    /// A GOAWAY on the stream of the peer's request (§10.4): the peer means to
+    /// send the request again elsewhere ("re-issue that specific request")
+    /// and end this one. The request is as it was.
+    GoAway(GoAway),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +320,11 @@ pub(super) struct PeerRequests {
 }
 
 impl PeerRequests {
+    /// Whether the request of the peer with this ID is still there.
+    pub(super) fn is_live(&self, id: u64) -> bool {
+        self.live.contains_key(&id)
+    }
+
     pub(super) fn new(own_role: Role) -> Self {
         let peer_role = match own_role {
             Role::Client => Role::Server,
@@ -915,8 +924,12 @@ impl Session {
         request: PeerRequestId,
         message: ControlMessage,
     ) -> Result<PeerRequestEvent, RequestFault> {
-        if matches!(message, ControlMessage::GoAway(_)) {
-            return Err(super::go_away_on_a_request_stream().into());
+        if let ControlMessage::GoAway(go_away) = message {
+            if self.peer_request_mut(request)?.is_none() {
+                return Err(Error::ProtocolViolation("message after the request ended").into());
+            }
+            self.check_request_go_away(request.id, &go_away, false)?;
+            return Ok(PeerRequestEvent::GoAway(go_away));
         }
         let Some(state) = self.peer_request_mut(request)? else {
             return Err(Error::ProtocolViolation("message after the request ended").into());

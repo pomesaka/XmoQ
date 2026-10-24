@@ -242,6 +242,12 @@ pub enum RequestEvent {
     /// `PUBLISH_DONE`. It crossed the `PUBLISH_DONE` on the way; there is
     /// nothing to do.
     LateMessage,
+    /// A GOAWAY on the stream of the request (§10.4): "the endpoint SHOULD
+    /// re-issue that specific request on a session at the specified URI (or
+    /// the current session if no URI is provided), and close the old request
+    /// stream". The request is as it was; sending it again and ending this
+    /// one are the caller's.
+    GoAway(GoAway),
 }
 
 /// What a message on the peer's control stream was.
@@ -267,6 +273,9 @@ pub struct Session {
     peer_setup_received: bool,
     /// Whether the peer sent GOAWAY on its control stream.
     peer_going_away: bool,
+    /// The requests the peer sent GOAWAY on the stream of (§10.4), by whether
+    /// this endpoint opened them and their Request ID.
+    moved: HashSet<(bool, u64)>,
     next_request_id: u64,
     /// Requests that are Pending or Established, by Request ID.
     requests: HashMap<u64, Request>,
@@ -295,6 +304,7 @@ impl Session {
             setup_sent: false,
             peer_setup_received: false,
             peer_going_away: false,
+            moved: HashSet::new(),
             // §10.1: the client uses even Request IDs from 0, the server odd from 1.
             next_request_id: first_request_id(role),
             requests: HashMap::new(),
@@ -592,10 +602,54 @@ impl Session {
         message: ControlMessage,
     ) -> Result<RequestEvent, RequestFault> {
         self.check_own(request)?;
-        if matches!(message, ControlMessage::GoAway(_)) {
-            return Err(go_away_on_a_request_stream().into());
+        if let ControlMessage::GoAway(go_away) = message {
+            if !self.requests.contains_key(&request.0) {
+                // It crossed this endpoint's end of the request, as any message
+                // may (§5.1).
+                if self.ended_by_publish_done.contains(&request.0) {
+                    return Ok(RequestEvent::LateMessage);
+                }
+                return Err(Error::ProtocolViolation("message after the request ended").into());
+            }
+            self.check_request_go_away(request.0, &go_away, true)?;
+            return Ok(RequestEvent::GoAway(go_away));
         }
         Ok(self.on_own_request_message(request, message)?)
+    }
+
+    /// The rules §10.4 sets for a GOAWAY on the stream of request `id`.
+    /// `own` tells the requests this endpoint opened from the peer's, whose
+    /// IDs may be the same numbers.
+    fn check_request_go_away(&mut self, id: u64, go_away: &GoAway, own: bool) -> Result<(), Error> {
+        // "Request ID: Present only when sent on the control stream."
+        if go_away.request_id.is_some() {
+            return Err(Error::ProtocolViolation(
+                "a GOAWAY on a request stream with a Request ID",
+            ));
+        }
+        // "If a server receives a GOAWAY with a non-zero New Session URI
+        // Length it MUST close the session with a PROTOCOL_VIOLATION."
+        if self.role == Role::Server && !go_away.new_session_uri.is_empty() {
+            return Err(Error::ProtocolViolation("a GOAWAY of a client with a URI"));
+        }
+        // "The endpoint MUST close the session with a PROTOCOL_VIOLATION if
+        // it receives more than one GOAWAY on the control stream or on a
+        // single request stream." Only requests that are still there are
+        // remembered, so the set is no larger than they are.
+        let (requests, peer) = (&self.requests, &self.peer);
+        self.moved.retain(|&(of_own, id)| {
+            if of_own {
+                requests.contains_key(&id)
+            } else {
+                peer.is_live(id)
+            }
+        });
+        if !self.moved.insert((own, id)) {
+            return Err(Error::ProtocolViolation(
+                "a second GOAWAY on a request stream",
+            ));
+        }
+        Ok(())
     }
 
     fn on_own_request_message(
@@ -952,16 +1006,6 @@ impl Session {
         let first = first_request_id(self.role);
         request.0 < self.next_request_id && request.0 % 2 == first
     }
-}
-
-/// A GOAWAY on a request stream (§10.4: "A GOAWAY MAY also be sent on a
-/// request stream to initiate migration of that individual request").
-///
-/// FIXME: move the request: send it again to the URI, or to this session
-/// where there is none, and end it here. Until then the session ends with
-/// `INTERNAL_ERROR`, as for a message this crate does not implement.
-fn go_away_on_a_request_stream() -> Error {
-    Error::UnsupportedMessageType(crate::message::GOAWAY)
 }
 
 fn first_request_id(role: Role) -> u64 {
@@ -1477,16 +1521,77 @@ mod tests {
         );
     }
 
-    /// A GOAWAY on a request stream is not taken yet: the session ends as for a
-    /// message this crate does not implement.
+    /// §10.4, a GOAWAY on the stream of a request of this endpoint: told to
+    /// the caller, the request as it was, by the rules of its fields.
     #[test]
-    fn a_goaway_on_a_request_stream_is_not_implemented() {
-        let mut session = set_up(Role::Client);
-        let (open, _) = session.subscribe(track(b"a"), vec![]).unwrap();
-        assert_eq!(
-            session.feed(open, go_away(b"", None)),
-            Err(Error::UnsupportedMessageType(0x10))
-        );
+    fn a_goaway_on_a_request_stream_is_told_and_moves_nothing() {
+        let uri: &[u8] = b"https://relay.example/";
+        // (the GOAWAYs fed in turn, what the last one leads to)
+        let cases = [
+            (
+                vec![go_away(uri, None)],
+                Ok(Some(b"https://relay.example/".to_vec())),
+            ),
+            (
+                vec![go_away(uri, Some(0))],
+                Err(Error::ProtocolViolation(
+                    "a GOAWAY on a request stream with a Request ID",
+                )),
+            ),
+            (
+                vec![go_away(uri, None), go_away(uri, None)],
+                Err(Error::ProtocolViolation(
+                    "a second GOAWAY on a request stream",
+                )),
+            ),
+        ];
+        for (messages, expected) in cases {
+            let mut session = set_up(Role::Client);
+            let (open, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+            let mut last = Ok(None);
+            for message in messages {
+                last = session.feed(open, message).map(|event| match event {
+                    RequestEvent::GoAway(go_away) => Some(go_away.new_session_uri),
+                    _ => None,
+                });
+            }
+            assert_eq!(last, expected);
+            // "The GOAWAY message does not impact subscription state", nor
+            // opens the session's way to new requests.
+            assert_eq!(session.request_state(open), Some(RequestState::Pending));
+            assert!(!session.peer_going_away());
+        }
+    }
+
+    /// The same on the stream of a request of the peer, at a server, which may
+    /// be sent no New Session URI (§10.4).
+    #[test]
+    fn a_goaway_on_a_request_stream_of_the_peer_follows_the_same_rules() {
+        // (New Session URI, what the session says)
+        let cases: [(&[u8], Result<(), Error>); 2] = [
+            (b"", Ok(())),
+            (
+                b"https://relay.example/",
+                Err(Error::ProtocolViolation("a GOAWAY of a client with a URI")),
+            ),
+        ];
+        for (uri, expected) in cases {
+            let mut session = set_up(Role::Server);
+            let opened = session
+                .on_peer_request_opened(ControlMessage::Subscribe(Subscribe {
+                    request_id: 0,
+                    full_track_name: track(b"a"),
+                    parameters: vec![],
+                }))
+                .unwrap();
+            let PeerRequestOpened::Request(id, _) = opened else {
+                panic!("{opened:?}");
+            };
+            let fed = session
+                .on_peer_request_message(id, go_away(uri, None))
+                .map(|event| assert!(matches!(event, PeerRequestEvent::GoAway(_))));
+            assert_eq!(fed, expected.map_err(RequestFault::Peer), "{uri:?}");
+        }
     }
 
     #[test]

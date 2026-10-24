@@ -657,7 +657,14 @@ const QUIET_PEER_BINARY = join(
  */
 export async function startQuietPeer(setup: {
 	port: string;
-	quiet: "setup" | "requests" | "publish" | "streams" | "subgroups" | "goaway";
+	quiet:
+		| "setup"
+		| "requests"
+		| "publish"
+		| "streams"
+		| "subgroups"
+		| "goaway"
+		| "goaway-request";
 	clients: Client[];
 }): Promise<RunContext> {
 	if (!existsSync(QUIET_PEER_BINARY)) {
