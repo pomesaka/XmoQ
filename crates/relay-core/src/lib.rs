@@ -60,7 +60,7 @@ pub use routing::{
     MAX_WAITING_SUBSCRIBERS,
 };
 use routing::{Announcement, Ask, Declined, OwnRequest, PendingTrack, Refusal, Waiter};
-use xmoq_moqt::data::{SubgroupHeader, SubgroupId, SubgroupObject};
+use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{
     ControlMessage, Publish, ReasonPhrase, Subscribe, publish_done_status, request_error_code,
@@ -762,6 +762,10 @@ struct Track {
     /// The largest Location known for the track (§10.2.11): what the source
     /// said, or a larger one seen since.
     largest: Option<Location>,
+    /// Where an Object with the status `END_OF_TRACK` came, of any source:
+    /// §2.4.2 has "The final Object in a Track is the Object with Status
+    /// `END_OF_TRACK`", and an Object larger than it makes the track malformed.
+    final_object: Option<Location>,
     subscribers: Vec<Subscriber>,
     /// SUBSCRIBEs that came while every source of the track drained, and
     /// are held for a publisher to appear (§10.2.6): no more than
@@ -849,12 +853,40 @@ impl Track {
             never_cached: !cache::may_be_cached(&properties),
             properties,
             largest,
+            final_object: None,
             subscribers: Vec::new(),
             held: Vec::new(),
             in_streams: HashMap::new(),
             subgroups: Subgroups::default(),
             cache: cache::Cache::default(),
         }
+    }
+
+    /// Whether an Object at `location` is past the end of the track, which
+    /// makes it malformed; an Object with the status `END_OF_TRACK` that is not
+    /// is the end from then on (§2.4.2, the fifth example: "An Object is received
+    /// whose Group and Object ID are larger than the final Object in the
+    /// Track. The final Object in a Track is the Object with Status
+    /// `END_OF_TRACK`"), for `object` of `group`.
+    ///
+    /// WHY also an `END_OF_TRACK` below the largest Location known: the
+    /// Objects that are larger are larger than the final one, whichever came
+    /// first, and the streams of a track keep no order between them. The
+    /// largest a source said in its answer counts, as one it said exists.
+    /// The last Object of a FETCH that said End of Track is not looked for:
+    /// the relay does not read into a fetch stream it passes on.
+    fn past_its_end(&mut self, group: u64, object: &SubgroupObject) -> bool {
+        let location = Location {
+            group,
+            object: object.object_id,
+        };
+        let end_of_track = object.status == ObjectStatus::EndOfTrack;
+        let past = self.final_object.is_some_and(|end| location > end)
+            || (end_of_track && self.largest.is_some_and(|largest| largest > location));
+        if end_of_track && !past {
+            self.final_object = Some(location);
+        }
+        past
     }
 
     /// A stream of a source turned out to be of this Subgroup. Says whether
@@ -3145,7 +3177,9 @@ impl Relay {
         // first Object on this stream, whatever FIRST_OBJECT says: it is the
         // one reading a subscriber can follow from the stream alone, and the
         // header goes downstream as it came, so both arrive at the same ID.
-        let taking = if known.is_some() {
+        let taking = if track.past_its_end(group, &object) {
+            Taking::Malformed
+        } else if known.is_some() {
             Taking::Taken
         } else {
             let subgroup = (group, object.object_id);

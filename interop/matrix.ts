@@ -765,6 +765,17 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
+		name: "an own-rust publisher sends a Group after an Object with the status END_OF_TRACK; the track ends as malformed",
+		script: "disconnect.ts",
+		args: [
+			"--scenario",
+			"end-of-track",
+			"--publisher",
+			"own-rust",
+			...each("subscriber", ["own-rust", "own-browser"]),
+		],
+	},
+	{
 		name: "two own-rust publishers send the same Group with Publisher Priority 0 and 1; the track ends as malformed",
 		script: "disconnect.ts",
 		args: [
