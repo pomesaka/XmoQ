@@ -2,7 +2,7 @@
 
 ![XmoQ system architecture](assets/architecture.svg)
 
-The diagram shows **intended component boundaries**, not a tested deployment. Solid arrows are proposed media paths; the dashed connection to Durable Objects is **undecided**.
+The diagram shows **intended component boundaries**, not a tested deployment. Solid arrows are proposed media paths; the dashed connection to Durable Objects is **undecided**. The violet lines are the chat on MoQ tracks: solid for the gatherer (`xmoq-chat`), dotted for the participants' side, which the pages and the terminal viewer do not have yet; they still chat over the room's WebSocket.
 
 ## Broadcast flow
 
