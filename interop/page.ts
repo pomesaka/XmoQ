@@ -894,8 +894,9 @@ window.xmoqOwn = {
 						codec,
 						onFrame: playout.onFrame,
 					});
-					return { ended: playback.ended.then((end) => end.type) };
+					return { ended: playback.ended };
 				},
+				movedBy: (end) => (end.type === "moved" ? end.goAway : undefined),
 				delayMs: KEPT_DELAY_MS,
 				onState(state) {
 					if (state.type === "playing") session = state.session;
@@ -1538,10 +1539,18 @@ window.xmoqOwn = {
 			};
 			videoPlaying = playing;
 			void playback.ended.then((end) => {
-				playing.ended =
-					end.type === "subscription-ended"
-						? `subscription-ended ${end.end.type}`
-						: `${end.type} ${errorText(end.error)}`;
+				switch (end.type) {
+					case "subscription-ended":
+						playing.ended = `subscription-ended ${end.end.type}`;
+						break;
+					case "moved":
+						playing.ended = `moved ${end.goAway.newSessionUri}`;
+						break;
+					case "decoder-failed":
+					case "failed":
+						playing.ended = `${end.type} ${errorText(end.error)}`;
+						break;
+				}
 				console.log(`video ended: ${playing.ended}`);
 			});
 		},

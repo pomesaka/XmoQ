@@ -1155,6 +1155,24 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "none",
 		},
 		{
+			name: "no relay: quiet peer: own-browser moves its session to the URI of a GOAWAY on its SUBSCRIBE's stream",
+			script: "quiet-peer.ts",
+			args: ["--case", "goaway-request", "--client", "own-browser"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust closes its session with NO_ERROR at a GOAWAY on its SUBSCRIBE's stream",
+			script: "quiet-peer.ts",
+			args: ["--case", "goaway-request", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: the terminal viewer moves its session to the URI of a GOAWAY on its video's stream",
+			script: "quiet-peer.ts",
+			args: ["--case", "goaway-request", "--client", "xmoq-watch"],
+			relay: "none",
+		},
+		{
 			name: "no relay: quiet peer: own-rust closes its session with NO_ERROR at a GOAWAY",
 			script: "quiet-peer.ts",
 			args: ["--case", "goaway", "--client", "own-rust"],

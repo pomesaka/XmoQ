@@ -1010,6 +1010,15 @@ impl Relay {
             }
             RequestEvent::Rejected(error) => self.on_upstream_refusal(&own, &error, actions),
             RequestEvent::SubscriptionDone(_) => self.on_upstream_done(&own, actions),
+            // §10.4: "the endpoint SHOULD re-issue that specific request on a
+            // session at the specified URI (or the current session if no URI
+            // is provided)"; a publisher, a client, names none. WHY NOT send
+            // the SUBSCRIBE again: on the same session it is a second
+            // subscription to the track in the same role, which the
+            // publisher refuses with DUPLICATE_SUBSCRIPTION while the first
+            // lasts (§5.1). The subscription goes on until the publisher ends
+            // it or goes, as for one without a GOAWAY (`RequestEvent::GoAway`).
+            //
             // Nothing else answers a SUBSCRIBE; the session has dealt with
             // it. The answer to a NEW_GROUP_REQUEST the relay passed on
             // (`ask_for_a_new_group`) is among it: nothing hangs on it, and a

@@ -1,12 +1,14 @@
 import type { Bytes } from "./bytes.ts";
 import {
 	type ControlMessage,
-	drainRequestMessages,
+	checkRequestGoAway,
+	drainControlMessages,
 	encodeControlMessage,
 	FETCH_MESSAGE_TYPE,
 	type Fetch,
 	type FetchOk,
 	type FetchRange,
+	type GoAway,
 	type PublishDone,
 	type RequestError,
 	type RequestOk,
@@ -1209,6 +1211,42 @@ export function createRequests(options: RequestsOptions): Requests {
 		out.push({ type: "send", stream: request.stream, data: REQUEST_OK });
 	};
 
+	/** Whether this endpoint opened the request. */
+	const ownRequest = (request: RequestEntry): boolean =>
+		request.kind === "SUBSCRIBE" ||
+		request.kind === "FETCH" ||
+		request.kind === "PUBLISH_NAMESPACE" ||
+		(request.kind === "PUBLISH" && request.openedBy === "self");
+	/** The requests the peer sent a GOAWAY on the stream of (§10.4). */
+	const moved = new WeakSet<RequestEntry>();
+	/**
+	 * A GOAWAY on a request stream (§10.4): "the endpoint SHOULD re-issue
+	 * that specific request on a session at the specified URI (or the current
+	 * session if no URI is provided), and close the old request stream". The
+	 * request is as it was; for a request of this endpoint the application is
+	 * told, and sending it again is the application's. One on a request of the
+	 * peer says that the peer will send it elsewhere, and nothing is done, also
+	 * where this endpoint has ended it.
+	 */
+	const onRequestGoAway = (
+		request: RequestEntry,
+		message: GoAway,
+		out: SessionOutput[],
+	): void => {
+		checkRequestGoAway(message, moved.has(request));
+		moved.add(request);
+		if (!ownRequest(request)) return;
+		out.push({
+			type: "event",
+			event: {
+				type: "request-go-away",
+				requestId: request.requestId,
+				newSessionUri: message.newSessionUri,
+				timeout: message.timeout,
+			},
+		});
+	};
+
 	const onResponse = (
 		request: RequestEntry,
 		message: ControlMessage,
@@ -1944,7 +1982,7 @@ export function createRequests(options: RequestsOptions): Requests {
 		receiveStreamData(stream, data, fin, out) {
 			const request = requestStreams.get(stream);
 			if (request === undefined) return;
-			request.inbound = drainRequestMessages(
+			request.inbound = drainControlMessages(
 				request.inbound,
 				data,
 				(message) => {
@@ -1959,12 +1997,22 @@ export function createRequests(options: RequestsOptions): Requests {
 						if (message.type === "REQUEST_UPDATE") {
 							options.checkPeerRequestId(message.requestId);
 						}
+						// Held to its rules on a request of the peer, as the Rust
+						// session does; on one of this endpoint's, as the Rust
+						// session does too, it crossed the end and is not read.
+						if (message.type === "GOAWAY" && !ownRequest(request)) {
+							onRequestGoAway(request, message, out);
+						}
 						return;
 					}
 					if (request.state === "Terminated") {
 						throw protocolViolation(
 							`${message.type} on a ${request.kind} request stream that had ended`,
 						);
+					}
+					if (message.type === "GOAWAY") {
+						onRequestGoAway(request, message, out);
+						return;
 					}
 					onResponse(request, message, out);
 				},

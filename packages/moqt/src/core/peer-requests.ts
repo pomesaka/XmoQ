@@ -1,8 +1,9 @@
 import { concatBytes } from "./bytes.ts";
 import {
+	checkRequestGoAway,
 	decodeControlMessage,
 	decodeRequestStart,
-	drainRequestMessages,
+	drainControlMessages,
 	encodeControlMessage,
 	FETCH_MESSAGE_TYPE,
 	type Fetch,
@@ -342,14 +343,22 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 	 * any other message is ignored. A FIN inside a message is a
 	 * PROTOCOL_VIOLATION.
 	 */
+	/** The refused requests whose stream had a GOAWAY. */
+	const movedAfterRefusal = new WeakSet<{ inbound: Uint8Array }>();
 	const readAfterRefusal = (
 		kept: { inbound: Uint8Array },
 		data: Uint8Array,
 		fin: boolean,
 	): void => {
-		kept.inbound = drainRequestMessages(kept.inbound, data, (message) => {
+		kept.inbound = drainControlMessages(kept.inbound, data, (message) => {
 			if (message.type === "REQUEST_UPDATE") {
 				checkRequestId(message.requestId);
+			}
+			// A GOAWAY is held to its rules here as well (§10.4), as the Rust
+			// session holds it on a request of the peer it refused.
+			if (message.type === "GOAWAY") {
+				checkRequestGoAway(message, movedAfterRefusal.has(kept));
+				movedAfterRefusal.add(kept);
 			}
 		});
 		if (fin && kept.inbound.length > 0) {

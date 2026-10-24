@@ -27,8 +27,8 @@ use xmoq_moqt::data::{
 use xmoq_moqt::fetch::{FetchHeader, FetchObject};
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, Fetch, FetchRange, ReasonPhrase, RequestError, RequestOk, publish_done_status,
-    request_error_code, setup_option,
+    ControlMessage, Fetch, FetchRange, GoAway, ReasonPhrase, RequestError, RequestOk,
+    publish_done_status, request_error_code, setup_option,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
@@ -1295,7 +1295,7 @@ impl Client<'_> {
                 if !fetch.progress.hears_the_peer() {
                     return Ok(());
                 }
-                let happened = match self.session.on_request_message(fetch.id, message)? {
+                let happened = match on_request(&mut self.session, fetch.id, message)? {
                     RequestEvent::FetchEstablished {
                         end_of_track,
                         end_location,
@@ -1470,7 +1470,7 @@ impl Client<'_> {
     ) -> Result<RequestEvent> {
         match event {
             RequestStreamEvent::Message(response) => {
-                Ok(self.session.on_request_message(request_id, response)?)
+                Ok(on_request(&mut self.session, request_id, response)?)
             }
             RequestStreamEvent::Closed(how) => {
                 bail!("the peer closed the {label} stream without a response: {how}")
@@ -1563,7 +1563,7 @@ impl Client<'_> {
                 },
                 event = next_request_event(&mut stream) => match event? {
                     RequestStreamEvent::Message(message) => {
-                        match self.session.on_request_message(request_id, message)? {
+                        match on_request(&mut self.session, request_id, message)? {
                             RequestEvent::SubscriptionDone(done) => {
                                 report::publish_done_received(&done);
                                 drain_deadline = Some(Instant::now() + DRAIN_TIMEOUT);
@@ -1897,7 +1897,7 @@ impl Client<'_> {
                 // (§5.1.1).
                 event = publish_stream.next_event_or_stopped() => match event? {
                     RequestStreamEvent::Message(message) => {
-                        match self.session.on_request_message(publish_request, message)? {
+                        match on_request(&mut self.session, publish_request, message)? {
                             // §10.9.1: a refused update also ends the
                             // subscription, with UPDATE_FAILED.
                             RequestEvent::UpdateRefused { response } => {
@@ -1960,7 +1960,7 @@ impl Client<'_> {
         let session = &mut self.session;
         let answered = publish_stream
             .finish_and_await_close(PUBLISH_DONE_ANSWER_WAIT, |message| {
-                session.on_request_message(publish_request, message)?;
+                on_request(session, publish_request, message)?;
                 Ok(())
             })
             .await?;
@@ -2072,7 +2072,7 @@ impl Client<'_> {
                     // What crossed the PUBLISH_DONE: the session has to see
                     // it (§10.1).
                     RequestStreamEvent::Message(message) => {
-                        self.session.on_request_message(request, message)?;
+                        on_request(&mut self.session, request, message)?;
                     }
                 },
                 Err(_) => break,
@@ -2821,6 +2821,14 @@ async fn run_session(
     // message, each of which ends the session.
     let later = tokio::select! {
         result = client.run_mode() => match result {
+            Err(error) if error.chain().any(<dyn std::error::Error>::is::<RequestGoneAway>) => {
+                if let Some(RequestGoneAway(go_away)) =
+                    error.chain().find_map(|cause| cause.downcast_ref())
+                {
+                    report::request_go_away(go_away);
+                }
+                return Ok(());
+            }
             // The GOAWAY behind the refusal, which travels on another
             // stream and may be read after it. WHY a limit, the time an
             // answer gets: GOING_AWAY also comes from a peer that received a
@@ -2896,6 +2904,32 @@ const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
 /// The peer sent no SETUP in so many milliseconds.
 #[derive(Debug)]
 struct NoSetupInTime(u64);
+
+/// `Session::on_request_message`, where a GOAWAY on the request's stream
+/// (§10.4) ends the mode as a GOAWAY on the control stream does: this client
+/// does not send the request again, and leaves with `NO_ERROR`.
+fn on_request(
+    session: &mut Session,
+    request: RequestId,
+    message: ControlMessage,
+) -> Result<RequestEvent> {
+    match session.on_request_message(request, message)? {
+        RequestEvent::GoAway(go_away) => Err(RequestGoneAway(go_away).into()),
+        event => Ok(event),
+    }
+}
+
+/// A GOAWAY on the stream of a request of this client.
+#[derive(Debug)]
+struct RequestGoneAway(GoAway);
+
+impl std::fmt::Display for RequestGoneAway {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "the peer sent GOAWAY on a request stream")
+    }
+}
+
+impl std::error::Error for RequestGoneAway {}
 
 /// A request refused with `GOING_AWAY` (§10.4): the peer has sent GOAWAY,
 /// which may come after the refusal on the control stream.

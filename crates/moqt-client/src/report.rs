@@ -24,6 +24,14 @@ pub fn setup_ok(peer_setup: &Setup) {
     println!("SETUP_OK server_setup={peer_setup:?}");
 }
 
+pub fn request_go_away(go_away: &GoAway) {
+    println!(
+        "REQUEST_GOAWAY uri={} timeout_ms={}",
+        String::from_utf8_lossy(&go_away.new_session_uri),
+        go_away.timeout_ms
+    );
+}
+
 pub fn go_away(go_away: &GoAway) {
     println!(
         "GOAWAY uri={} timeout_ms={} request_id={}",

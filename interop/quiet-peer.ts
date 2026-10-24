@@ -69,6 +69,12 @@
 //                     and leaves with 0. The peer refuses every request of
 //                     that session with GOING_AWAY, as §10.4 has it, and the
 //                     client reads the refusal before the GOAWAY.
+//   goaway-request    The peer answers the first SUBSCRIBE and sends GOAWAY
+//                     on its stream, naming the same URI (§10.4). The page
+//                     (`movedBy` of `keepPlaying`) and the terminal viewer
+//                     close the session with NO_ERROR and connect to the
+//                     URI; own-rust prints `REQUEST_GOAWAY ...` and leaves
+//                     with 0.
 //   goaway-publisher  The same, with the page as a publisher
 //                     (`keepPublishing`): its PUBLISH_NAMESPACE is refused,
 //                     and it announces on the URI (`REQUEST session=1
@@ -612,11 +618,37 @@ async function noSubgroupStream(
  * 0. The peer answers their SUBSCRIBEs, so that each is playing when it
  * reads the GOAWAY.
  */
+/**
+ * The milliseconds between the peer printing `first` and `second`, as the
+ * driver reads its lines: to within a turn of the driver's loop. Called
+ * before either is printed.
+ */
+async function timeBetween(
+	context: RunContext,
+	first: RegExp,
+	second: RegExp,
+): Promise<number> {
+	const [from, to] = await Promise.all([
+		context.relay.waitForLine(first).then(() => performance.now()),
+		context.relay.waitForLine(second).then(() => performance.now()),
+	]);
+	return Math.round(to - from);
+}
+
 async function goAway(
 	context: RunContext,
 	client: QuietClient,
 ): Promise<string> {
 	const sent = context.relay.waitForLine(/^GOAWAY_SENT session=0 uri=(\S+)$/);
+	// own-rust does not connect again.
+	const moving =
+		client === "own-rust"
+			? undefined
+			: timeBetween(
+					context,
+					/^GOAWAY_SENT session=0 /,
+					/^SESSION session=1 path=\/moved$/,
+				);
 	let said = "";
 	switch (client) {
 		case "own-browser": {
@@ -690,8 +722,99 @@ async function goAway(
 		}
 		return `own-rust closed its session with NO_ERROR when the peer sent GOAWAY naming ${uri}: ${said}`;
 	}
-	await context.relay.waitForLine(/^SESSION session=1 path=\/moved$/);
-	return `${client} closed its session with NO_ERROR when the peer sent GOAWAY, and connected to the URI it named (${uri}): ${said}`;
+	return `${client} closed its session with NO_ERROR when the peer sent GOAWAY, and connected to the URI it named (${uri}) ${await moving} ms after the GOAWAY was sent: ${said}`;
+}
+
+/**
+ * A GOAWAY on the stream of the client's first SUBSCRIBE (§10.4), after its
+ * SUBSCRIBE_OK, naming `/moved` of the same peer. The page and the terminal
+ * viewer move their session there, as for a GOAWAY on the control stream;
+ * own-rust prints `REQUEST_GOAWAY ...` and leaves with 0.
+ */
+async function goAwayOnARequest(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	const sent = context.relay.waitForLine(
+		/^REQUEST_GOAWAY_SENT session=0 stream=0 uri=(\S+)$/,
+	);
+	// own-rust does not connect again.
+	const moving =
+		client === "own-rust"
+			? undefined
+			: timeBetween(
+					context,
+					/^REQUEST_GOAWAY_SENT session=0 /,
+					/^SESSION session=1 path=\/moved$/,
+				);
+	let said = "";
+	switch (client) {
+		case "own-browser": {
+			const page = await openPage(context, "client:own-browser", "own-browser");
+			await withTimeout(
+				page.evaluate(
+					([url, hash, namespace, track]) =>
+						window.xmoqOwn.keepVideoPlayed(
+							url,
+							hash,
+							namespace,
+							track,
+							"avc1.42001f",
+						),
+					[
+						context.relayUrl,
+						context.certSha256Hex,
+						NAMESPACE,
+						TRACK,
+					] satisfies [string, string, string, string],
+				),
+				"the page to begin playing",
+			);
+			const states = await pollFor(async () => {
+				const { playing } = await page.evaluate(() =>
+					window.xmoqOwn.keptReport(),
+				);
+				return playing.includes("playing 2") ? playing : undefined;
+			}, "the page to play on the new session");
+			said = `its states: ${states.join(", ")}`;
+			break;
+		}
+		case "own-rust": {
+			const rust = spawnRustClient(
+				context,
+				"client:own-rust",
+				client,
+				"subscribe",
+				TRACK,
+			);
+			const [line] = await rust.waitForLine(
+				/^REQUEST_GOAWAY uri=\S+\/moved timeout_ms=5000$/,
+			);
+			const code = await withTimeout(rust.exited, "own-rust to leave");
+			if (code !== 0)
+				throw new Error(`own-rust was to leave with 0, not ${code}`);
+			said = `${line}, and it left with 0`;
+			break;
+		}
+		case "xmoq-watch": {
+			const viewer = spawnTerminalViewer(
+				context,
+				"client:xmoq-watch",
+				VIEWER_ARGS,
+			);
+			const [line] = await viewer.waitForLine(/MOVED https:\/\/\S+\/moved/);
+			said = line;
+			break;
+		}
+	}
+	const [, uri] = await sent;
+	await context.relay.waitForLine(
+		/^SESSION_ENDED session=0 ClosedByPeer \{ code: 0,/,
+	);
+	if (client === "own-rust") {
+		return `own-rust closed its session with NO_ERROR when the peer sent GOAWAY on its SUBSCRIBE's stream naming ${uri}: ${said}`;
+	}
+	return `${client} closed its session with NO_ERROR when the peer sent GOAWAY on its SUBSCRIBE's stream, and connected to the URI it named (${uri}) ${await moving} ms after the GOAWAY was sent: ${said}`;
 }
 
 /**
@@ -761,7 +884,8 @@ const CASES: Record<
 			| "publish"
 			| "streams"
 			| "subgroups"
-			| "goaway";
+			| "goaway"
+			| "goaway-request";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
@@ -772,6 +896,7 @@ const CASES: Record<
 	"no-subgroup-stream": { quiet: "subgroups", run: noSubgroupStream },
 	goaway: { quiet: "goaway", run: goAway },
 	"goaway-publisher": { quiet: "goaway", run: goAwayPublisher },
+	"goaway-request": { quiet: "goaway-request", run: goAwayOnARequest },
 };
 
 async function relayNoSetup(): Promise<string> {

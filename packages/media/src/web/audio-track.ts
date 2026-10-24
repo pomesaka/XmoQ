@@ -374,6 +374,12 @@ export async function playAudioTrack(
 	};
 	options.signal?.addEventListener("abort", stop, { once: true });
 	if (options.signal?.aborted) stop();
+	// Transport §10.4: a GOAWAY on the subscription's stream asks for it to
+	// be sent again. It is cancelled here, and `ended` says `cancelled`; the
+	// caller asks again, as `keepTrackOnSession` does on the session it has,
+	// also where a URI is named: the picture stays on the session, and the
+	// sound plays by its clock. The terminal viewer does the same.
+	void subscription.goAway.then(stop);
 	/** How many Objects went on to the decoder, or were dropped as late: one that is neither when `push` returns is held. */
 	let passed = 0;
 	const decode = (chunk: { timestamp: number; data: Uint8Array }): void => {

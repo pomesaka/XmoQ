@@ -455,6 +455,15 @@ export interface Subscription {
 	readonly objects: ReadableStream<ReceivedObject>;
 	/** Resolves once the subscription has ended, with how. Never rejects. */
 	readonly ended: Promise<SubscriptionEnd>;
+	/**
+	 * Resolves when the publisher sends GOAWAY on the stream of this
+	 * subscription (§10.4), also one that came before its SUBSCRIBE_OK, and
+	 * never where it does not. The subscription goes on; §10.4 has the
+	 * subscriber "re-issue that specific request on a session at the
+	 * specified URI (or the current session if no URI is provided), and close
+	 * the old request stream", which is the caller's to do.
+	 */
+	readonly goAway: Promise<GoAwayNotice>;
 	/** Cancels the SUBSCRIBE request (§3.3.2). Does nothing once the subscription or the session has ended. */
 	cancel(): Promise<void>;
 	/**
@@ -877,6 +886,8 @@ interface ActiveSubscription {
 	publishDoneTimer: ReturnType<typeof setTimeout> | undefined;
 	/** The `update()` calls that wait for their answer, in the order sent. */
 	updates: Deferred<MessageParameters>[];
+	/** Resolved by a GOAWAY on its request stream. */
+	goAway: Deferred<GoAwayNotice>;
 }
 
 /** What the connection keeps for a FETCH, from the moment it is sent. */
@@ -1094,6 +1105,11 @@ export async function connectOver(
 	const closed = deferred<SessionClose>();
 	const peerSetup = deferred<KeyValuePair[]>();
 	const goAway = deferred<GoAwayNotice>();
+	/**
+	 * GOAWAYs that came on the stream of a SUBSCRIBE before its answer, for
+	 * the subscription it may become. Never more than the SUBSCRIBEs that wait.
+	 */
+	const earlyGoAways = new Map<bigint, GoAwayNotice>();
 	// The session can end before anything awaits this promise; the failure is
 	// reported by the `await` below when it is reached, and by `closed`.
 	peerSetup.promise.catch(() => {});
@@ -1282,6 +1298,7 @@ export async function connectOver(
 		pendingPublishes.delete(requestId);
 		pendingSubscribes.delete(requestId);
 		pendingPublishAliases.delete(requestId);
+		earlyGoAways.delete(requestId);
 	};
 
 	/** Fails everything that waits on the session. The first cause wins. */
@@ -1351,7 +1368,11 @@ export async function connectOver(
 			publishDone: undefined,
 			publishDoneTimer: undefined,
 			updates: [],
+			goAway: deferred(),
 		};
+		const early = earlyGoAways.get(requestId);
+		earlyGoAways.delete(requestId);
+		if (early !== undefined) active.goAway.resolve(early);
 		subscriptions.set(requestId, active);
 		const update = async (
 			parameters: MessageParameters,
@@ -1391,6 +1412,7 @@ export async function connectOver(
 			trackProperties: event.trackProperties,
 			objects: active.objects.readable,
 			ended: active.ended.promise,
+			goAway: active.goAway.promise,
 			cancel: cancelRequest,
 			update,
 		};
@@ -2035,6 +2057,21 @@ export async function connectOver(
 			case "setup":
 				peerSetup.resolve(event.setupOptions);
 				return undefined;
+			case "request-go-away": {
+				const notice = {
+					newSessionUri: event.newSessionUri,
+					timeoutMs: Number(event.timeout),
+				};
+				const subscription = subscriptions.get(event.requestId);
+				if (subscription !== undefined) subscription.goAway.resolve(notice);
+				else if (pendingSubscribes.has(event.requestId)) {
+					earlyGoAways.set(event.requestId, notice);
+				}
+				// WHY nothing for the other requests (PUBLISH, PUBLISH_NAMESPACE,
+				// FETCH): no caller of this package moves one, and the peer
+				// ends it after its Timeout (§10.4) as it ends any.
+				return undefined;
+			}
 			case "go-away":
 				goAway.resolve({
 					newSessionUri: event.newSessionUri,

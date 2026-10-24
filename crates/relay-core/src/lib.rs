@@ -2722,10 +2722,15 @@ impl Relay {
             // passed on. Nothing hangs on it: a publisher that refused ends
             // the subscription with PUBLISH_DONE next (§10.9.1), as it ends
             // any other.
+            //
+            // The last: a client that is to send its request again elsewhere
+            // (§10.4); it ends this one itself, and the relay serves it until
+            // then.
             PeerRequestEvent::OwnUpdateAccepted { .. }
             | PeerRequestEvent::OwnUpdateFailed(_)
             | PeerRequestEvent::UpdateAlreadyRefused
-            | PeerRequestEvent::LateMessage => {}
+            | PeerRequestEvent::LateMessage
+            | PeerRequestEvent::GoAway(_) => {}
         }
     }
 

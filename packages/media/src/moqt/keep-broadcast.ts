@@ -69,6 +69,27 @@ async function goAwayBehind(
 	}
 }
 
+/**
+ * The pause before the next session, after one that a GOAWAY ended: none,
+ * once in a row. WHY none: what was played or published stands still until
+ * the next session, and the relay that sent it may close the old one
+ * before its Timeout is over (transport §10.4: "This is a hint"). WHY once
+ * in a row: a relay that sends GOAWAY on every session would have the next
+ * made as fast as it can. The terminal viewer does the same.
+ */
+function createMovePause(): {
+	ended(moved: boolean): void;
+	pauseMs(ms: number): number;
+} {
+	let atOnce = false;
+	return {
+		ended(moved) {
+			atOnce = moved && !atOnce;
+		},
+		pauseMs: (ms) => (atOnce ? 0 : ms),
+	};
+}
+
 /** Where a publisher that is kept stands. */
 export type PublishingState =
 	| { type: "connecting"; attempt: number }
@@ -116,6 +137,7 @@ export function keepPublishing(options: KeepPublishingOptions): Promise<void> {
 		| { type: "moved"; goAway: GoAwayNotice };
 	/** The GOAWAY that ended the session before, for the next `connect`. */
 	let movedBy: GoAwayNotice | undefined;
+	const pause = createMovePause();
 	return keepSession<Over>({
 		async run() {
 			const goAway = movedBy;
@@ -172,14 +194,17 @@ export function keepPublishing(options: KeepPublishingOptions): Promise<void> {
 				connection.close();
 			}
 		},
-		wait: (ms) => waitFor(movedBy === undefined ? ms : 0, signal),
+		wait: (ms) => waitFor(pause.pauseMs(ms), signal),
 		stopped: () => signal.aborted,
 		...(options.delayMs === undefined ? {} : { delayMs: options.delayMs }),
 		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
 		onOutcome(outcome) {
-			if (outcome.type === "ended" && outcome.result.type === "moved") {
-				movedBy = outcome.result.goAway;
-			}
+			const moved =
+				outcome.type === "ended" && outcome.result.type === "moved"
+					? outcome.result.goAway
+					: undefined;
+			if (moved !== undefined) movedBy = moved;
+			pause.ended(moved !== undefined);
 			options.onState?.(
 				outcome.type === "ended"
 					? outcome.result
@@ -306,6 +331,15 @@ export interface KeepPlayingOptions<E> {
 	 * followed by a new session as without it.
 	 */
 	stay?: { notYet(error: unknown): boolean; againMs?: number };
+	/**
+	 * The GOAWAY that ended what was played, where it was one: a GOAWAY on the
+	 * stream of a subscription (transport §10.4; `playVideoTrack` ends with
+	 * `moved`). The session is then left as at a GOAWAY on the control
+	 * stream, and `connect` is handed it. WHY a new session also where it
+	 * names no URI, which §10.4 has sent again on "the current session": the
+	 * tracks of one broadcast are played from one session, by one clock.
+	 */
+	movedBy?(end: E): GoAwayNotice | undefined;
 	/** Aborting it closes the session and ends the trying. */
 	signal?: AbortSignal;
 	onState?(state: PlayingState<E>): void;
@@ -337,15 +371,31 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 		| { type: "playing-ended"; end: E };
 	/** The GOAWAY that ended the session before, for the next `connect`. */
 	let movedBy: GoAwayNotice | undefined;
+	const pause = createMovePause();
 	return keepSession<Over>({
 		async run() {
 			const goAway = movedBy;
 			movedBy = undefined;
 			const connection = await options.connect(goAway);
 			if (connection === undefined) return { type: "nothing-to-play" };
-			const moved = connection.goAway.then(
-				(notice): Over => ({ type: "moved", goAway: notice }),
-			);
+			/** Resolved when what was played ended for a GOAWAY on its stream. */
+			let trackMoved: (notice: GoAwayNotice) => void = () => {};
+			const moved = Promise.race([
+				connection.goAway,
+				new Promise<GoAwayNotice>((resolve) => {
+					trackMoved = resolve;
+				}),
+			]).then((notice): Over => ({ type: "moved", goAway: notice }));
+			const play = async (): Promise<{ ended: Promise<E> }> => {
+				const { ended } = await options.play(connection, signal);
+				return {
+					ended: ended.then((end) => {
+						const notice = options.movedBy?.(end);
+						if (notice !== undefined) trackMoved(notice);
+						return end;
+					}),
+				};
+			};
 			const gone: Promise<Over> = Promise.race([
 				connection.closed.then(
 					(close): Over => ({ type: "session-ended", close }),
@@ -365,7 +415,7 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 					const over = await Promise.race([
 						moved.then((close) => ({ type: "session-ended" as const, close })),
 						stayOnSession<E, Over>({
-							play: () => options.play(connection, signal),
+							play,
 							closed: gone,
 							notYet: stay.notYet,
 							againAfter: (error) =>
@@ -388,17 +438,19 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 					// The caller stopped: its signal closes the session.
 					return over.type === "session-ended" ? over.close : await gone;
 				}
-				const started = await Promise.race([
-					options.play(connection, signal),
-					moved,
-				]);
+				const started = await Promise.race([play(), moved]);
 				if (!("ended" in started)) return started;
 				const { ended } = started;
 				sessions += 1;
 				options.onState?.({ type: "playing", session: sessions, connection });
 				return await Promise.race([
 					gone,
-					ended.then((end): Over => ({ type: "playing-ended", end })),
+					ended.then((end): Over => {
+						const notice = options.movedBy?.(end);
+						return notice === undefined
+							? { type: "playing-ended", end }
+							: { type: "moved", goAway: notice };
+					}),
 				]);
 			} catch (error) {
 				const notice = await goAwayBehind(connection, error);
@@ -411,14 +463,17 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 				connection.close();
 			}
 		},
-		wait: (ms) => waitFor(movedBy === undefined ? ms : 0, signal),
+		wait: (ms) => waitFor(pause.pauseMs(ms), signal),
 		stopped: () => signal.aborted,
 		...(options.delayMs === undefined ? {} : { delayMs: options.delayMs }),
 		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
 		onOutcome(outcome) {
-			if (outcome.type === "ended" && outcome.result.type === "moved") {
-				movedBy = outcome.result.goAway;
-			}
+			const moved =
+				outcome.type === "ended" && outcome.result.type === "moved"
+					? outcome.result.goAway
+					: undefined;
+			if (moved !== undefined) movedBy = moved;
+			pause.ended(moved !== undefined);
 			options.onState?.(
 				outcome.type === "ended"
 					? outcome.result

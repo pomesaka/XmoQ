@@ -6,6 +6,7 @@
 
 import {
 	decodeFetchBody,
+	type GoAwayNotice,
 	type MoqtConnection,
 	type ReceivedObject,
 	type SubscriptionEnd,
@@ -92,7 +93,15 @@ export type VideoPlaybackEnd =
 	/** The decoder failed `maxDecoderFailures` times in a row; the subscription was cancelled. */
 	| { type: "decoder-failed"; error: unknown }
 	/** Something here failed that is no decoder's doing; the subscription was cancelled, and the error was reported with `reportError`. */
-	| { type: "failed"; error: unknown };
+	| { type: "failed"; error: unknown }
+	/**
+	 * The publisher sent GOAWAY on the subscription's stream (transport
+	 * §10.4), which asks for the SUBSCRIBE to be sent again, to
+	 * `goAway.newSessionUri` or on this session where it is empty; the
+	 * subscription was cancelled. `keepPlaying` with `movedBy` makes a new
+	 * session for it.
+	 */
+	| { type: "moved"; goAway: GoAwayNotice };
 
 /** What was counted while a track was played. */
 export interface VideoPlaybackStats {
@@ -370,6 +379,10 @@ export async function playVideoTrack(
 	};
 	options.signal?.addEventListener("abort", stopBySignal, { once: true });
 	if (options.signal?.aborted) stopBySignal();
+	void subscription.goAway.then((goAway) => {
+		gaveUp ??= { type: "moved", goAway };
+		cancel();
+	});
 
 	/** Cancels the Joining FETCH; does nothing where there is none, or it is over. */
 	let cancelJoiningFetch: () => void = () => {};

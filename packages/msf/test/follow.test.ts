@@ -126,6 +126,8 @@ function fake(options: {
 		trackProperties: [],
 		objects: objects.stream,
 		ended,
+		// No GOAWAY comes here.
+		goAway: new Promise(() => {}),
 		cancel: async () => {
 			cancelled.subscription += 1;
 			objects.close();
