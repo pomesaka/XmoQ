@@ -67,3 +67,9 @@ delta-update-as-in-the-example-that-removes	delta-update	{"generatedAt":17461046
 delta-update-with-an-empty-version	invalid	{"version":"","deltaUpdate":[{"op":"add","tracks":[]}]}
 timeline-track-of-another-kind-without-is-live	invalid	{"version":"draft-01","tracks":[{"name":"e","packaging":"eventtimeline","eventType":"com.example.x"}]}
 byte-order-mark	invalid	﻿{"version":"draft-01","tracks":[]}
+percent-in-a-variable-reference	catalog	{"version":"draft-01","tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1,"x-url":"https://cdn.example/%session_id%/v"}]}
+percent-in-two-variable-references	catalog	{"version":"draft-01","tracks":[{"name":"video-%a%%b-1_C%","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1}]}
+percent-alone	invalid	{"version":"draft-01","tracks":[{"name":"100%","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1}]}
+percent-in-a-field-that-is-not-read	invalid	{"version":"draft-01","x-note":["50% off"],"tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1}]}
+percent-around-a-name-with-a-dot	invalid	{"version":"draft-01","tracks":[{"name":"%a.b%","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1}]}
+percent-around-no-name	invalid	{"version":"draft-01","tracks":[{"name":"a%%b","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1}]}

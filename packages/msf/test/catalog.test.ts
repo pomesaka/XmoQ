@@ -104,9 +104,9 @@ describe("fixtures/msf-01/catalogs.tsv: what a payload is read as", () => {
 			return { name, outcome, json };
 		});
 
-	test("the table has 69 rows, each with a name of its own", () => {
-		expect(rows.length).toBe(69);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(69);
+	test("the table has 75 rows, each with a name of its own", () => {
+		expect(rows.length).toBe(75);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(75);
 	});
 
 	// §5.2.28 has a JSON Number and no more; `crates/msf` reads the same
@@ -409,6 +409,15 @@ describe("encodeCatalog", () => {
 				],
 			},
 			reason: 'track 1: the name "a" comes twice in its namespace',
+		},
+		{
+			name: "a name with a percent outside a variable reference (§5.4.1)",
+			catalog: {
+				version: "draft-01",
+				tracks: [{ name: "100%", packaging: "x", isLive: true }],
+			},
+			reason:
+				'the catalog: "100%" has a "%" outside a variable reference (§5.4.1)',
 		},
 		{
 			name: "a bitrate that JSON has no number for",
