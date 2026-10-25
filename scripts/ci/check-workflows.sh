@@ -5,5 +5,5 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "${REPO_ROOT}"
 
 actionlint
-shellcheck --external-sources scripts/ci/*.sh
+shellcheck --external-sources scripts/ci/*.sh scripts/agent-demo.sh
 ran "Workflow and script checks (actionlint, shellcheck)"

@@ -8,6 +8,7 @@
 		"@xmoq/media": "workspace:*",
 		"@xmoq/moqt": "workspace:*",
 		"@xmoq/msf": "workspace:*",
-		"@xmoq/transcript": "workspace:*"
+		"@xmoq/transcript": "workspace:*",
+		"playwright-core": "1.64.0"
 	}
 }
