@@ -227,6 +227,106 @@ impl Event {
 mod tests {
     use super::*;
 
+    /// The rows of `fixtures/agent-lines/lines.tsv`, which `@xmoq/meeting`
+    /// reads as well: the lines both write, each with the event that is to
+    /// write it.
+    #[test]
+    fn the_lines_both_write_are_as_the_shared_table_says() {
+        let path = format!(
+            "{}/../../fixtures/agent-lines/lines.tsv",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let table =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        let events = [
+            (
+                "a participant came",
+                Event::Participant {
+                    state: ParticipantState::Joined,
+                    id: "p1".to_string(),
+                },
+            ),
+            (
+                "a participant left",
+                Event::Participant {
+                    state: ParticipantState::Left,
+                    id: "p1".to_string(),
+                },
+            ),
+            (
+                "a line of the chat",
+                Event::Chat {
+                    number: 7,
+                    from: "alice".to_string(),
+                    text: "hello".to_string(),
+                    sent_at: 990,
+                    gathered_at: 995,
+                },
+            ),
+            (
+                "a line with what a terminal would act on, and a line break",
+                Event::Chat {
+                    number: 8,
+                    from: "b\"ob".to_string(),
+                    text: "a\u{1b}[2J\nb".to_string(),
+                    sent_at: 0,
+                    gathered_at: 0,
+                },
+            ),
+            (
+                "a piece of speech",
+                Event::Speech {
+                    number: 3,
+                    from: ["xmoq", "meet", "demo", "p1"].map(str::to_string).to_vec(),
+                    text: "こんにちは".to_string(),
+                    start_us: 10,
+                    end_us: 20,
+                    read_at: 30,
+                },
+            ),
+            (
+                "a picture of a participant, at a path from the folder",
+                Event::Frame {
+                    path: "frames/1700000000000/000001-g12-o7.png".to_string(),
+                    group: 12,
+                    object: 7,
+                    timestamp_us: 1_700_000_000_000_000,
+                    width: 320,
+                    height: 180,
+                    asked: Asked::Command,
+                    of: Some("p1".to_string()),
+                },
+            ),
+            (
+                "an error",
+                Event::Error {
+                    message:
+                        "no command /nothing: /frame is one, and // begins a line that is said"
+                            .to_string(),
+                },
+            ),
+        ];
+        let rows: Vec<(&str, &str)> = table
+            .lines()
+            .map(|row| row.split_once('\t').expect("a name and a line"))
+            .collect();
+        // The names of the table are those of the events here, and no more:
+        // a row added there and not here is counted, as `@xmoq/meeting` does.
+        let mut named: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
+        let mut ours: Vec<&str> = events.iter().map(|(name, _)| *name).collect();
+        named.sort_unstable();
+        ours.sort_unstable();
+        assert_eq!(named, ours, "{path}");
+        for (name, event) in &events {
+            let line = rows
+                .iter()
+                .find(|(row, _)| row == name)
+                .map(|(_, line)| *line)
+                .expect("named");
+            assert_eq!(event.line(1000), line, "{name}");
+        }
+    }
+
     #[test]
     fn each_event_is_one_line_of_json() {
         // (the event; the line written at 1000)
@@ -288,7 +388,7 @@ mod tests {
             ),
             (
                 Event::Frame {
-                    path: "/tmp/out/frames/000003-g12-o7.png".to_string(),
+                    path: "frames/1700000000000/000003-g12-o7.png".to_string(),
                     group: 12,
                     object: 7,
                     timestamp_us: 1_700_000_000_000_000,
@@ -297,7 +397,7 @@ mod tests {
                     asked: Asked::Command,
                     of: None,
                 },
-                r#"{"asked":"command","at":1000,"group":12,"height":720,"object":7,"path":"/tmp/out/frames/000003-g12-o7.png","timestamp_us":1700000000000000,"type":"frame","width":1280}"#,
+                r#"{"asked":"command","at":1000,"group":12,"height":720,"object":7,"path":"frames/1700000000000/000003-g12-o7.png","timestamp_us":1700000000000000,"type":"frame","width":1280}"#,
             ),
             (
                 Event::Speech {

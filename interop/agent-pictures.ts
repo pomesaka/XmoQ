@@ -3,7 +3,7 @@
 // `agent-frames.ts` and `agent-meeting.ts` use them.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import type { Page } from "playwright-core";
 import { type LoggedProcess, pollFor } from "./harness.ts";
 import { BROADCAST } from "./xmoq-page.ts";
@@ -139,12 +139,14 @@ export async function checkPicture(
 	if (
 		line.asked !== "command" ||
 		`${line.width}x${line.height}` !== wanted ||
-		dirname(line.path) !== framesDir ||
+		line.path !== inRun(framesDir, fileName(line.path)) ||
 		!line.path.endsWith(".png")
 	) {
 		throw new Error(`${which} frame line: ${JSON.stringify(line)}`);
 	}
-	const file = new Uint8Array(readFileSync(line.path));
+	const file = new Uint8Array(
+		readFileSync(join(framesDir, fileName(line.path))),
+	);
 	const size = pngSize(file);
 	if (size !== wanted) {
 		throw new Error(`${which} PNG is ${size}`);
@@ -167,6 +169,19 @@ export async function checkPicture(
 	return seen;
 }
 
+/** The name of the file a `path` of a `frame` line names. */
+function fileName(path: string): string {
+	return path.split("/").at(-1) ?? "";
+}
+
+/**
+ * The `path` a `frame` line has for `file` of the run in `framesDir`: from
+ * `--out`, with `/` (`crates/agent/README.md`, `fixtures/agent-lines/`).
+ */
+function inRun(framesDir: string, file: string): string {
+	return `frames/${basename(framesDir)}/${file}`;
+}
+
 /** Holds the PNG files in `framesDir` to be `paths`, in any order. */
 export function expectFiles(
 	paths: string[],
@@ -174,7 +189,7 @@ export function expectFiles(
 	when: string,
 ): void {
 	const there = pictures(framesDir).sort();
-	const wanted = paths.map((path) => path.slice(framesDir.length + 1)).sort();
+	const wanted = paths.map(fileName).sort();
 	if (JSON.stringify(there) !== JSON.stringify(wanted)) {
 		throw new Error(
 			`the files ${when}: ${JSON.stringify(there)}, not ${JSON.stringify(wanted)}`,

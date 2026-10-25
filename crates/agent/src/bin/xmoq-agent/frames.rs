@@ -57,8 +57,9 @@ pub struct Pictures {
 /// (`XMOQ_AGENT_FRAMES`) was lost with it now and then (CI of #339).
 const END_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Writes `taken` into `dir`, and removes what it says to.
-fn write(dir: &std::path::Path, taken: &Taken, asked: Asked) -> Event {
+/// Writes `taken` into `dir`, and removes what it says to. `run` is `dir`
+/// from `--out`, as the line says it.
+fn write(dir: &std::path::Path, run: &str, taken: &Taken, asked: Asked) -> Event {
     let path = dir.join(&taken.file_name);
     if let Err(error) = std::fs::write(&path, &taken.png) {
         return Event::Error {
@@ -71,7 +72,11 @@ fn write(dir: &std::path::Path, taken: &Taken, asked: Asked) -> Event {
         let _ = std::fs::remove_file(dir.join(removed));
     }
     Event::Frame {
-        path: path.display().to_string(),
+        // WHY from `--out` and not the whole path: the page of a meeting
+        // writes the same lines (`fixtures/agent-lines/`) and cannot know
+        // where its folder is; the reader of the lines knows `--out`. WHY
+        // with `/`: the same on every system, as the page writes it.
+        path: format!("{run}/{}", taken.file_name),
         group: taken.of.group,
         object: taken.of.object,
         timestamp_us: taken.of.timestamp_us,
@@ -83,8 +88,12 @@ fn write(dir: &std::path::Path, taken: &Taken, asked: Asked) -> Event {
 }
 
 impl Pictures {
-    /// Starts the thread, which writes into `dir` (made where it is not).
-    pub fn start(settings: Settings, dir: PathBuf) -> anyhow::Result<Self> {
+    /// Starts the thread, which writes into `run` of `out` (made where it
+    /// is not), `run` with `/` between its parts.
+    pub fn start(settings: Settings, out: &std::path::Path, run: String) -> anyhow::Result<Self> {
+        let dir: PathBuf = run
+            .split('/')
+            .fold(out.to_path_buf(), |dir, part| dir.join(part));
         let mut frames = Frames::new(settings)?;
         std::fs::create_dir_all(&dir)?;
         let (jobs, mut waiting) = mpsc::channel::<Job>(MOST_WAITING);
@@ -115,11 +124,11 @@ impl Pictures {
                             } else {
                                 Asked::Every
                             };
-                            write(&dir, &taken, asked)
+                            write(&dir, &run, &taken, asked)
                         }),
                     Job::Ask => frames
                         .ask()
-                        .map(|taken| write(&dir, &taken, Asked::Command)),
+                        .map(|taken| write(&dir, &run, &taken, Asked::Command)),
                     Job::Forgo => {
                         frames.forgo();
                         None

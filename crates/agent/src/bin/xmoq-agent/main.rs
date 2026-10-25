@@ -42,15 +42,16 @@ use crate::output::{Output, now_ms};
 /// it.
 const FRAMES_DIR: &str = "frames";
 
-/// Where the pictures of this run go: `<out>/frames/<when it began, ms>/`.
+/// Where the pictures of this run go in `--out`: `frames/<when it began,
+/// ms>`, with `/`.
 ///
 /// WHY a directory a run: `Frames` names its files from 1 on each run, and
 /// those of a run before in the same `--out` would be written over, and not
 /// counted by `--frames-kept`. WHY NOT go on from the numbers there: what
 /// names the files is `xmoq-picture`'s. WHY NOT empty the directory: the
 /// pictures an agent asked for before are its own.
-fn frames_dir_of(out: &str) -> std::path::PathBuf {
-    Path::new(out).join(FRAMES_DIR).join(now_ms().to_string())
+fn frames_run() -> String {
+    format!("{FRAMES_DIR}/{}", now_ms())
 }
 use crate::stdin::Line;
 
@@ -710,7 +711,11 @@ async fn read(args: &Args) -> Result<()> {
         participant: participant_id(),
     };
     let mut pictures = if args.frames {
-        Some(Pictures::start(args.pictures, frames_dir_of(&args.out))?)
+        Some(Pictures::start(
+            args.pictures,
+            Path::new(&args.out),
+            frames_run(),
+        )?)
     } else {
         None
     };
