@@ -160,7 +160,14 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 	? spawn("node", ["run.mjs", "--port", options["rooms-port"]], {
 			cwd: roomsDir,
 			stdio: ["ignore", "ignore", "inherit"],
-			env: { ...process.env, AUTH_KEY_HEX: authKeyHex ?? "" },
+			env: {
+				...process.env,
+				AUTH_KEY_HEX: authKeyHex ?? "",
+				// The relay the rooms name in their hello, with a broadcast
+				// and without one.
+				RELAY_URL: `https://127.0.0.1:${options["relay-port"]}/`,
+				RELAY_CERT_SHA256_HEX: certSha256Hex,
+			},
 		})
 	: undefined;
 const roomsUrl =

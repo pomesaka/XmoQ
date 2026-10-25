@@ -16,4 +16,6 @@ node check.mjs         # the broadcast, a token, the count, and no chat, against
 
 With `AUTH_KEY_HEX` in the environment of `run.mjs`, the room gives out tokens the relay checks (`token-for` on the WebSocket). To anybody who asks: who may publish and who may watch is not decided here.
 
+With `RELAY_URL` and `RELAY_CERT_SHA256_HEX` in the environment of `run.mjs` (and of `check.mjs`, which then checks them), the hello names the relay of the rooms as `relay: {relayUrl, certSha256Hex}`, with a broadcast and without one, so that a participant can take part in the chat before anybody broadcasts (decided on 2026-10-25; why, at the top of `worker.js`). Without them it is `null`. `mise run demo` gives them.
+
 `worker.js` has the paths and the messages at its top.
