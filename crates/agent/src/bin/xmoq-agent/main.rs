@@ -78,6 +78,22 @@ pub struct Reader {
     frames: bool,
     /// The picture asked for, from one session to the next.
     frame: FrameAsking,
+    /// The id the reader asks a room's meeting for its seat by, the same
+    /// for the whole run (`participant_id`).
+    participant: String,
+}
+
+/// A random id of 16 hex digits for a seat in a room's meeting, as a page
+/// makes its own.
+///
+/// WHY from the keys `std` makes for each `HashMap` and not a crate of
+/// random numbers: the id is no secret (it is a field of a namespace) and
+/// has only to differ from the others' in the room, which 64 random bits
+/// do, and the keys are random for each process. One is made a run.
+fn participant_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    format!("{:016x}", hasher.finish())
 }
 
 /// The picture asked for (`/frame`), from one session to the next, as
@@ -300,6 +316,13 @@ enum Found {
     /// The relay of the rooms, for the chat, while the room has no
     /// broadcast.
     Relay(Relay),
+    /// The relay of the rooms, for the room's meeting (`--meeting`), whose
+    /// participants each have a broadcast and none is the room's.
+    Meeting {
+        relay: Relay,
+        /// The meeting's room, `--meeting`.
+        meeting: String,
+    },
 }
 
 /// Waits until the room has a broadcast, or names its relay. `None` when
@@ -327,6 +350,27 @@ async fn broadcast_of(room: &mut RoomSocket, reader: &mut Reader) -> Result<Opti
             },
         }
     }
+}
+
+/// Where the reader connects in the room now; `None` when the reader is to
+/// end first.
+async fn found_in(
+    args: &Args,
+    room: &mut RoomSocket,
+    reader: &mut Reader,
+) -> Result<Option<Found>> {
+    // WHY the relay of the hello, and no wait for a broadcast: the room's
+    // broadcast is nobody's of the meeting.
+    if let Some((meeting, _)) = &args.meeting {
+        let relay = room.relay().ok_or_else(|| {
+            anyhow::anyhow!("the room names no relay, where its meeting would be")
+        })?;
+        return Ok(Some(Found::Meeting {
+            relay,
+            meeting: meeting.clone(),
+        }));
+    }
+    broadcast_of(room, reader).await
 }
 
 /// Where the broadcast is now, with the tokens of the room. `None` when
@@ -362,7 +406,7 @@ async fn place(
         (Source::Room { ask_token, .. }, Some(room)) => (room, *ask_token),
         (Source::Room { .. }, None) => bail!("the room is gone"),
     };
-    let Some(found) = broadcast_of(room, reader).await? else {
+    let Some(found) = found_in(args, room, reader).await? else {
         return Ok(None);
     };
     let mut token = None;
@@ -375,23 +419,14 @@ async fn place(
         Found::Broadcast(broadcast) => {
             transcript_of(args, hello.as_deref(), Some(&broadcast.namespace))
         }
-        Found::Relay(_) => transcript_of(args, hello.as_deref(), None),
+        Found::Relay(_) | Found::Meeting { .. } => transcript_of(args, hello.as_deref(), None),
     };
     let mut transcript_token = None;
     if ask_token {
-        if let Found::Broadcast(broadcast) = &found {
-            let Some(given) = reader
-                .unless_ended(
-                    "the room's token",
-                    ROOM_WAIT,
-                    room.token(room::TokenRole::Sub, &broadcast.namespace),
-                )
-                .await?
-            else {
-                return Ok(None);
-            };
-            token = given.map(|text| room::authorization_token(&text));
-        }
+        let Some(given) = session_token_of(&found, room, reader).await? else {
+            return Ok(None);
+        };
+        token = given;
         let Some(tokens) = reader
             .unless_ended(
                 "the room's tokens for the chat",
@@ -435,7 +470,88 @@ async fn place(
             transcript,
             transcript_token,
         },
+        // The seat's `sub` in `xmoq/meet/<room>/*`, in the SETUP and on the
+        // meeting's requests (`InMeeting`).
+        Found::Meeting { relay, .. } => Place {
+            url: relay.relay_url,
+            cert_sha256: room::certificate_hash(&relay.cert_sha256_hex)?,
+            namespace: None,
+            token,
+            chat_tokens,
+            broadcast: None,
+            transcript,
+            transcript_token,
+        },
     }))
+}
+
+/// The session's own token, as an AUTHORIZATION TOKEN: `sub` in the
+/// broadcast's namespace, or the seat's in a meeting; `Some(None)` where
+/// the room gives none (and for a session for the chat alone, which takes
+/// the chat's), `None` where the reader is to end first.
+async fn session_token_of(
+    found: &Found,
+    room: &mut RoomSocket,
+    reader: &mut Reader,
+) -> Result<Option<Option<Vec<u8>>>> {
+    match found {
+        Found::Broadcast(broadcast) => {
+            let given = reader
+                .unless_ended(
+                    "the room's token",
+                    ROOM_WAIT,
+                    room.token(room::TokenRole::Sub, &broadcast.namespace),
+                )
+                .await?;
+            Ok(given.map(|given| given.map(|text| room::authorization_token(&text))))
+        }
+        Found::Meeting { meeting, .. } => seat_token_of(meeting, room, reader).await,
+        Found::Relay(_) => Ok(Some(None)),
+    }
+}
+
+/// `sub` in `xmoq/meet/<room>/*` of the reader's seat in the room's
+/// meeting, as an AUTHORIZATION TOKEN; `Some(None)` where the room gives no
+/// tokens, `None` where the reader is to end first.
+///
+/// WHY a seat, though the reader announces nothing in the meeting: the room
+/// counts its 49 by the seats it gives (Q58), and a reader takes one of them
+/// as a participant's page does. Whether those present learn that an agent
+/// takes part is undecided (`docs/open-questions.md`); a seat says nothing
+/// to them. WHY asked again on every session: the same id on the same
+/// WebSocket is the same seat with a new token, and a token is good for
+/// 600 s from when the room made it.
+async fn seat_token_of(
+    meeting_room: &str,
+    room: &mut RoomSocket,
+    reader: &mut Reader,
+) -> Result<Option<Option<Vec<u8>>>> {
+    let participant = reader.participant.clone();
+    let Some(seat) = reader
+        .unless_ended(
+            "the room's seat in its meeting",
+            ROOM_WAIT,
+            room.seat(&participant),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let expected: Vec<String> = xmoq_viewer::meeting::prefix(meeting_room)
+        .into_iter()
+        .chain(["*".to_string()])
+        .collect();
+    if seat.subscribe != expected {
+        bail!(
+            "the room's seat is for {}, not {}",
+            seat.subscribe.join("/"),
+            expected.join("/")
+        );
+    }
+    Ok(Some(
+        seat.subscribe_token
+            .map(|text| room::authorization_token(&text)),
+    ))
 }
 
 /// Writes that the broadcast of `place` began or ended; nothing for a
@@ -580,6 +696,7 @@ async fn read(args: &Args) -> Result<()> {
         speech_had: None,
         frames: args.frames,
         frame: FrameAsking::default(),
+        participant: participant_id(),
     };
     let mut pictures = if args.frames {
         Some(Pictures::start(args.pictures, frames_dir_of(&args.out))?)

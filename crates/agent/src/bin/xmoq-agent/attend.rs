@@ -708,7 +708,9 @@ pub async fn attend(
             }
             heard = on(room.as_mut().map(RoomSocket::next)) => match heard {
                 Ok(broadcast) => {
-                    if broadcast.is_some() && broadcast != place.broadcast {
+                    // In a meeting the room's broadcast is nobody's of it,
+                    // and the session stays.
+                    if meeting.is_none() && broadcast.is_some() && broadcast != place.broadcast {
                         break Ended::Again;
                     }
                 }

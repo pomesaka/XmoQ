@@ -52,8 +52,27 @@ pub enum Said {
     /// The answer to [`ask_for_a_token`]: the token as text, or none where
     /// the room has no key.
     Token(Option<String>),
+    /// The answer to [`ask_for_a_seat`] where the meeting had room.
+    Seat(Seat),
+    /// The answer to [`ask_for_a_seat`] where the meeting was full: how many
+    /// it takes.
+    MeetingFull(u64),
     /// Something the viewer has no use for.
     Other,
+}
+
+/// A participant's seat in a room's meeting (Q58, decided on 2026-10-25):
+/// what of the room's `meeting` a reader that announces nothing there has
+/// a use for. Its `publish`, the participant's own namespace, is passed
+/// over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seat {
+    /// The participant's id, as it was asked for.
+    pub participant: String,
+    /// The namespace `subscribe` allows, its fields: `xmoq/meet/<room>/*`.
+    pub subscribe: Vec<String>,
+    /// `sub` in it, or none where the room has no key.
+    pub subscribe_token: Option<String>,
 }
 
 /// What is no message of a room.
@@ -122,6 +141,18 @@ fn relay_of(value: &Value) -> Option<Relay> {
     })
 }
 
+fn seat_of(message: &Value) -> Option<Seat> {
+    let subscribe = message.get("subscribe")?;
+    Some(Seat {
+        participant: message.get("participant")?.as_str()?.to_string(),
+        subscribe: fields_of(subscribe.get("namespace")?)?,
+        subscribe_token: subscribe
+            .get("token")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 fn broadcast_of(value: &Value) -> Option<Broadcast> {
     let Relay {
         relay_url,
@@ -164,6 +195,13 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
                 .and_then(Value::as_str)
                 .map(str::to_string),
         ),
+        // A seat without its participant or its namespace is none: there is
+        // nothing to subscribe to.
+        Some("meeting") => seat_of(&message).map_or(Said::Other, Said::Seat),
+        Some("meeting-full") => message
+            .get("most")
+            .and_then(Value::as_u64)
+            .map_or(Said::Other, Said::MeetingFull),
         _ => Said::Other,
     })
 }
@@ -185,6 +223,13 @@ pub fn ask_for_a_token(role: TokenRole, namespace: &[String]) -> String {
         TokenRole::Pub => "pub",
     };
     json!({"type": "token-for", "role": role, "namespace": namespace}).to_string()
+}
+
+/// The message that asks a room for a seat in its meeting as `participant`,
+/// a random id the asker made (Q58, decided on 2026-10-25).
+#[must_use]
+pub fn ask_for_a_seat(participant: &str) -> String {
+    json!({"type": "join-meeting", "participant": participant}).to_string()
 }
 
 /// The address of a room's WebSocket, from the address of the room
@@ -417,6 +462,48 @@ mod tests {
     }
 
     #[test]
+    fn the_answers_to_a_seat_are_read() {
+        let seat = |token: Option<&str>| {
+            Said::Seat(Seat {
+                participant: "a1".to_string(),
+                subscribe: ["xmoq", "meet", "r", "*"].map(str::to_string).to_vec(),
+                subscribe_token: token.map(str::to_string),
+            })
+        };
+        // (the message, as `spikes/durable-objects-room/worker.js` sends it;
+        // what it is read as)
+        let cases = [
+            (
+                r#"{"type":"meeting","participant":"a1","publish":{"namespace":["xmoq","meet","r","a1"],"token":"v1|xmoq/meet/r/a1|pub|1|ff"},"subscribe":{"namespace":["xmoq","meet","r","*"],"token":"v1|xmoq/meet/r/*|sub|1|ff"}}"#,
+                seat(Some("v1|xmoq/meet/r/*|sub|1|ff")),
+            ),
+            // A room without a key.
+            (
+                r#"{"type":"meeting","participant":"a1","publish":{"namespace":["xmoq","meet","r","a1"],"token":null},"subscribe":{"namespace":["xmoq","meet","r","*"],"token":null}}"#,
+                seat(None),
+            ),
+            (
+                r#"{"type":"meeting-full","most":49}"#,
+                Said::MeetingFull(49),
+            ),
+            // Without the participant, without the namespace, and a full
+            // meeting that does not say how many it takes.
+            (
+                r#"{"type":"meeting","subscribe":{"namespace":["xmoq","meet","r","*"],"token":null}}"#,
+                Said::Other,
+            ),
+            (
+                r#"{"type":"meeting","participant":"a1","subscribe":{"token":null}}"#,
+                Said::Other,
+            ),
+            (r#"{"type":"meeting-full"}"#, Said::Other),
+        ];
+        for (message, said) in cases {
+            assert_eq!(read(message), Ok(said), "{message}");
+        }
+    }
+
+    #[test]
     fn a_line_is_made_safe_for_a_terminal() {
         // (the text; the most characters; what is written)
         let cases = [
@@ -450,6 +537,10 @@ mod tests {
         assert_eq!(
             ask_for_a_token(TokenRole::Pub, &["xmoq".to_string(), "chat".to_string()]),
             r#"{"namespace":["xmoq","chat"],"role":"pub","type":"token-for"}"#
+        );
+        assert_eq!(
+            ask_for_a_seat("a1"),
+            r#"{"participant":"a1","type":"join-meeting"}"#
         );
     }
 
