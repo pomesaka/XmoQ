@@ -853,5 +853,7 @@ pub enum Action {
         /// Where: the New Session URI of a GOAWAY of the upstream (§10.4),
         /// and empty for the place the relay was given.
         uri: Vec<u8>,
+        /// How long to wait before connecting, in milliseconds.
+        after_ms: u64,
     },
 }

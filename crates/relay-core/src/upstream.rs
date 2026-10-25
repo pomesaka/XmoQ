@@ -16,7 +16,9 @@
 //! edge from a viewer to leave its session open, and without that the edge
 //! would connect again every 30 seconds for nothing.
 
-use std::collections::BTreeSet;
+mod announcements;
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use xmoq_moqt::message::{ReasonPhrase, request_error_code, retry_interval};
 use xmoq_moqt::name::{FullTrackName, TrackNamespace};
@@ -35,6 +37,8 @@ pub(crate) struct Upstream {
     /// the last GOAWAY of the upstream that named one, and empty for the
     /// place the relay was given.
     uri: Vec<u8>,
+    /// What the relay announces there, by namespace (`announcements.rs`).
+    announced: BTreeMap<TrackNamespace, announcements::Passed>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +60,7 @@ impl Relay {
             namespace,
             link: Link::Absent,
             uri: Vec::new(),
+            announced: BTreeMap::new(),
         });
     }
 
@@ -76,6 +81,17 @@ impl Relay {
                 .upstream
                 .as_ref()
                 .is_some_and(|upstream| upstream.namespace.is_prefix_of(track.namespace()))
+    }
+
+    /// Whether a SUBSCRIBE of `session` for `track` would go back to the
+    /// upstream it came from: the relay is the client of the session, and
+    /// nobody here announced the track's namespace. It is refused with
+    /// `DOES_NOT_EXIST`, as where nobody has the track. WHY: the upstream
+    /// asks this relay for a namespace it was told of here (§9.5), and one
+    /// that was withdrawn meanwhile would have the two ask each other for
+    /// it, each holding the other's SUBSCRIBE.
+    pub(crate) fn asks_back(&self, session: SessionKey, track: &FullTrackName) -> bool {
+        self.is_client_session(session) && self.upstream_takes(track)
     }
 
     /// The session with the upstream, where it is the one to ask for
@@ -104,10 +120,7 @@ impl Relay {
             Link::Open(_) => false,
             Link::Connecting => true,
             Link::Absent => {
-                upstream.link = Link::Connecting;
-                actions.push(Action::ConnectUpstream {
-                    uri: upstream.uri.clone(),
-                });
+                self.connect_upstream_after(0, actions);
                 true
             }
         }
@@ -152,6 +165,7 @@ impl Relay {
         }
         self.ask_fetches_held_for_upstream(actions);
         self.ask_track_statuses_held_for_upstream(actions);
+        self.pass_announcements_upstream(actions);
     }
 
     /// The upstream sent GOAWAY on the control stream of `session` (§3.6,
@@ -185,6 +199,10 @@ impl Relay {
             let track = track.clone();
             self.waits_for_upstream(&track, actions);
         }
+        // Left as they are on the session that goes away, and sent again on
+        // the next.
+        self.forget_announcements_on(session);
+        self.pass_announcements_upstream(actions);
     }
 
     /// No session with the upstream came of [`Action::ConnectUpstream`].
@@ -207,11 +225,14 @@ impl Relay {
         }
         self.refuse_fetches_held_for_upstream(&unreachable, actions);
         self.refuse_track_statuses_held_for_upstream(&unreachable, actions);
+        self.connect_again_for_announcements(actions);
     }
 
     /// The session with the upstream is gone: the next request that needs
-    /// it opens another.
+    /// it opens another, and so do the announcements there were on it
+    /// (`Relay::drop_session` passes them on once the session is let go of).
     pub(crate) fn upstream_gone(&mut self, session: SessionKey) {
+        self.forget_announcements_on(session);
         if let Some(upstream) = self.upstream.as_mut()
             && upstream.link == Link::Open(session)
         {

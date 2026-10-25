@@ -1425,7 +1425,7 @@ impl<C: Connection> Hub<C> {
 
     /// Starts the connection [`Action::ConnectUpstream`] asks for. The relay
     /// is told [`Event::UpstreamFailed`] at once where it has no upstream.
-    fn connect_upstream(&mut self, uri: Vec<u8>, pending: &mut VecDeque<Event>) {
+    fn connect_upstream(&mut self, uri: Vec<u8>, after: Duration, pending: &mut VecDeque<Event>) {
         let Some(upstream) = &self.upstream else {
             pending.push_back(Event::UpstreamFailed);
             return;
@@ -1440,6 +1440,7 @@ impl<C: Connection> Hub<C> {
         // WHY not among the tasks of a session: it is of none yet. It ends
         // by itself, within the time the connection has to be made.
         tokio::spawn(async move {
+            tokio::time::sleep(after).await;
             let connected = connect(uri).await.map(Arc::new);
             // The hub is gone when this fails.
             let _ = events.send(Envelope::Upstream(connected)).await;
@@ -1839,7 +1840,9 @@ impl<C: Connection> Hub<C> {
                 code,
                 reason,
             } => self.close(session, code, &reason, pending),
-            Action::ConnectUpstream { uri } => self.connect_upstream(uri, pending),
+            Action::ConnectUpstream { uri, after_ms } => {
+                self.connect_upstream(uri, Duration::from_millis(after_ms), pending);
+            }
             // Taken by `execute_upstream` above.
             Action::OpenRequest { .. }
             | Action::SendOwnRequest { .. }
@@ -3295,9 +3298,10 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartAnnouncementTimer { .. }
         | Action::StartCheckTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
-        Action::ConnectUpstream { uri } => {
-            format!("CONNECT_UPSTREAM uri={}", String::from_utf8_lossy(uri))
-        }
+        Action::ConnectUpstream { uri, after_ms } => format!(
+            "CONNECT_UPSTREAM uri={} after_ms={after_ms}",
+            String::from_utf8_lossy(uri)
+        ),
     })
 }
 

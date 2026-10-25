@@ -2049,6 +2049,9 @@ impl Relay {
         let Some(event) = self.on_track_status_event(event, &mut actions) else {
             return actions;
         };
+        let Some(event) = self.on_announcement_event(event, &mut actions) else {
+            return actions;
+        };
         let Some(event) = self.on_data_event(event, &mut actions) else {
             return actions;
         };
@@ -2633,6 +2636,12 @@ impl Relay {
             PeerRequest::TrackStatus(track_status) => {
                 self.on_track_status(session, stream, request, &track_status, actions);
             }
+            PeerRequest::Subscribe(subscribe)
+                if self.asks_back(session, &subscribe.full_track_name) =>
+            {
+                let nobody = Refusal::code(request_error_code::DOES_NOT_EXIST);
+                self.refuse(session, stream, request, &nobody, actions);
+            }
             PeerRequest::Subscribe(subscribe) => {
                 self.on_subscribe(session, stream, request, &subscribe, actions);
             }
@@ -2690,6 +2699,7 @@ impl Relay {
                     self.ask_the_publishers(&track, Some(session), None, actions);
                 }
                 self.tell_the_watches(actions);
+                self.pass_announcements_upstream(actions);
             }
         }
     }
@@ -3486,6 +3496,7 @@ impl Relay {
                 // §9.5: cancelling the request withdraws the namespace.
                 self.withdraw_namespace(session, stream);
                 self.tell_the_watches(actions);
+                self.pass_announcements_upstream(actions);
             }
             Some(RequestSlot::SubscribeNamespace { request }) => {
                 if stream_gone {
@@ -4638,6 +4649,7 @@ impl Relay {
             self.source_gone(&track, on_the_session, TrackEnd::SourceGone, actions);
         }
         self.drop_routing_of(session, actions);
+        self.pass_announcements_upstream(actions);
         self.drop_fetches_of(session, actions);
         self.drop_track_statuses_of(session, actions);
         let subscribed: BTreeSet<FullTrackName> = self
@@ -4686,6 +4698,7 @@ impl Relay {
         self.sessions
             .get(&session)
             .is_some_and(|state| state.requests.len() == 0 && state.own_requests() == 0)
+            && !self.announces_upstream_on(session)
     }
 
     /// What the relay holds.

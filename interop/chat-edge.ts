@@ -1,0 +1,243 @@
+// The chat through two relays: the gatherer (`xmoq-chat`) at the own relay of
+// the run, and the participants and the viewers at a second own relay below
+// it (`--upstream`), on the run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET. The
+// relay below passes the namespaces its participants announce on to the one
+// above (§9.5), where the gatherer is told of them by its
+// SUBSCRIBE_NAMESPACE, and the gatherer's SUBSCRIBE for each `said` comes
+// back down to the participant.
+//
+// Usage: bun chat-edge.ts [--port N] [--verbose]
+//
+// What has to be seen, written before the first run:
+//
+//   - The gatherer is told of `a` and `b`, both at the relay below, and
+//     subscribes to each one's `said` (`SUBSCRIBED`); each participant serves
+//     the subscription (`SERVING`).
+//   - The relay below announces each namespace upstream once
+//     (`OPEN_REQUEST ... PUBLISH_NAMESPACE`, two in all).
+//   - Lines of `a` and `b`, one after the other, are numbered 0 to 3, and a
+//     viewer at the relay below subscribed to `lines` gets them live: Groups
+//     0 to 3, whose JSON names a, b, a, b.
+//   - A viewer at the relay below that comes then FETCHes 0 to 100 and gets
+//     Groups 0 to 3, with `FETCH_OK` ending at {3, 1}.
+//   - When `a` leaves, the relay below withdraws its namespace upstream
+//     (`CANCEL_OWN_REQUEST`), and the relay above tells the gatherer
+//     (`NAMESPACE_DONE`).
+
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseArgs } from "node:util";
+import {
+	captureGroup,
+	type LoggedProcess,
+	log,
+	MOQLIVEMOCK_SIDE_PORT_OFFSET,
+	pollFor,
+	type RunContext,
+	runCleanups,
+	spawnChatGatherer,
+	spawnRustClient,
+	startRun,
+	startSecondOwnRelay,
+	stopEverythingOnExit,
+	withTimeout,
+} from "./harness.ts";
+
+const { values: options } = parseArgs({
+	options: {
+		// The relay above: the own one alone, whose lines the run reads.
+		relay: { type: "string", default: "own" },
+		port: { type: "string", default: "24397" },
+		verbose: { type: "boolean", default: false },
+	},
+});
+
+stopEverythingOnExit();
+
+const ROOM = "r";
+
+/** What a participant says: the JSON of `said`, in hex for `--payload-hex`. */
+function said(text: string): string {
+	const json = JSON.stringify({ text, sentAt: 1_761_300_000_000 });
+	return Buffer.from(json, "utf8").toString("hex");
+}
+
+const subscribed = (name: string): RegExp =>
+	new RegExp(`^SUBSCRIBED room="${ROOM}" name="${name}"$`);
+
+/** A participant of the room at `below`, which says `text` for every line of its input. */
+async function participant(
+	below: RunContext,
+	gatherer: LoggedProcess,
+	name: string,
+	text: string,
+): Promise<LoggedProcess> {
+	const spawned = spawnRustClient(
+		below,
+		`said:${name}`,
+		"own-rust",
+		"publish-namespace",
+		"said",
+		[
+			"--namespace",
+			`xmoq/chat/${ROOM}/${name}`,
+			"--payload-hex",
+			said(text),
+			"--timeout-secs",
+			"60",
+		],
+	);
+	await spawned.waitForLine(/^NAMESPACE_PUBLISHED/);
+	await spawned.waitForLine(/^SERVING /);
+	await gatherer.waitForLine(subscribed(name));
+	return spawned;
+}
+
+/** Has `who` say one line, and waits for the gatherer to number it `number`. */
+async function sayOne(
+	gatherer: LoggedProcess,
+	who: LoggedProcess,
+	name: string,
+	number: number,
+): Promise<void> {
+	const taken = new RegExp(
+		`^LINE room="${ROOM}" number=(\\d+) name="${name}" `,
+	);
+	const before = gatherer.matches(taken).length;
+	who.child.stdin.write("line\n");
+	const numbered = await pollFor(
+		() => gatherer.matches(taken)[before],
+		`the gatherer to take a line of ${name}`,
+	);
+	const got = Number(captureGroup(numbered, 1));
+	if (got !== number) {
+		throw new Error(`the line of ${name} was numbered ${got}, not ${number}`);
+	}
+}
+
+/** The sender a line's payload names. */
+function nameIn(hex: string): string {
+	const text = Buffer.from(hex, "hex").toString("utf8");
+	const name = /^\{"name":"([^"]*)"/.exec(text)?.[1];
+	if (name === undefined) throw new Error(`no name in ${text}`);
+	return name;
+}
+
+function expect(what: string, got: string, wanted: string): void {
+	if (got !== wanted) throw new Error(`${what}: ${got}, not ${wanted}`);
+}
+
+async function main(): Promise<void> {
+	if (options.relay !== "own") {
+		throw new Error(`--relay is own, not ${options.relay}`);
+	}
+	const directory = mkdtempSync(join(tmpdir(), "xmoq-chat-edge-"));
+	let summary: string;
+	try {
+		const context = await startRun({
+			relay: "own",
+			port: options.port,
+			clients: ["own-rust"],
+			verbose: options.verbose,
+		});
+		const edge = await startSecondOwnRelay(
+			String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+			context,
+		);
+		const below: RunContext = { ...context, relayUrl: edge.url };
+		const gatherer = spawnChatGatherer(
+			context,
+			"gatherer",
+			join(directory, "chat.sqlite3"),
+			[],
+		);
+		await gatherer.waitForLine(/^WATCHING prefix=xmoq\/chat$/);
+
+		const a = await participant(below, gatherer, "a", "from a");
+		const b = await participant(below, gatherer, "b", "from b");
+		await edge.relay.waitForLines(
+			/^OPEN_REQUEST session=\d+ own=\d+ PUBLISH_NAMESPACE/,
+			2,
+		);
+
+		await gatherer.waitForLine(
+			new RegExp(`^ROOM_PUBLISHED room="${ROOM}" forward=true`),
+		);
+		const live = spawnRustClient(
+			below,
+			"live",
+			"own-rust",
+			"subscribe",
+			"lines",
+			["--namespace", `xmoq/chat/${ROOM}`, "--objects", "4"],
+		);
+		await live.waitForLine(/^SUBSCRIBED /);
+		const turns: [LoggedProcess, string, number][] = [
+			[a, "a", 0],
+			[b, "b", 1],
+			[a, "a", 2],
+			[b, "b", 3],
+		];
+		for (const [who, name, number] of turns) {
+			await sayOne(gatherer, who, name, number);
+		}
+		const liveCode = await withTimeout(live.exited, "the live viewer to leave");
+		if (liveCode !== 0)
+			throw new Error(`the live viewer left with ${liveCode}`);
+		const seenLive = live
+			.matches(/^OBJECT group=(\d+) object=0 .*payload_hex=(\S*)$/)
+			.map(
+				(match) =>
+					`${captureGroup(match, 1)}:${nameIn(captureGroup(match, 2))}`,
+			)
+			.join(" ");
+		expect("the live viewer got", seenLive, "0:a 1:b 2:a 3:b");
+
+		const late = spawnRustClient(below, "late", "own-rust", "fetch", "lines", [
+			"--namespace",
+			`xmoq/chat/${ROOM}`,
+			"--fetch-start",
+			"0,0",
+			"--fetch-end",
+			"100,0",
+		]);
+		const [ok] = await late.waitForLine(
+			/^FETCH_OK request_id=\d+ end_group=(\d+) end_object=(\d+)/,
+		);
+		const lateCode = await withTimeout(late.exited, "the late viewer to leave");
+		if (lateCode !== 0)
+			throw new Error(`the late viewer left with ${lateCode}`);
+		const end = ok.replace(
+			/^.*end_group=(\d+) end_object=(\d+).*$/,
+			"{$1, $2}",
+		);
+		expect("the late viewer's FETCH_OK", end, "{3, 1}");
+		const fetched = late
+			.matches(/^FETCH_OBJECT request_id=\d+ group=(\d+) /)
+			.map((match) => captureGroup(match, 1))
+			.join(",");
+		expect("the late viewer fetched", fetched, "0,1,2,3");
+
+		a.child.kill("SIGTERM");
+		await edge.relay.waitForLine(/^CANCEL_OWN_REQUEST session=\d+ own=\d+/);
+		await context.relay.waitForLine(
+			/^SEND session=\d+ stream=\d+ NAMESPACE_DONE /,
+		);
+
+		summary = `the gatherer at the relay above was told of a and b at the relay below, which announced their namespaces upstream once each, and subscribed to them through it; it numbered their lines 0 to 3, which a viewer at the relay below got live (${seenLive}) and a late one fetched (${fetched}, FETCH_OK ${end}); when a left, the relay below withdrew its namespace upstream and the gatherer was told`;
+	} finally {
+		await runCleanups();
+		rmSync(directory, { recursive: true, force: true });
+	}
+	log("driver", `RESULT ${JSON.stringify({ chat: "through-edge" })}`);
+	log("driver", `SUMMARY ${summary}`);
+}
+
+main().catch((error: unknown) => {
+	log(
+		"driver",
+		`FAILED chat through an edge: ${error instanceof Error ? error.message : String(error)}`,
+	);
+	process.exitCode = 1;
+});

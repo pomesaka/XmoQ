@@ -47,6 +47,7 @@ interface Pairing {
 		| "quiet-peer.ts"
 		| "namespaces.ts"
 		| "chat.ts"
+		| "chat-edge.ts"
 		| "chat-pages.ts"
 		| "chat-tokens.ts"
 		| "agent.ts"
@@ -1319,6 +1320,13 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		{
 			name: "own relay: chat: the gatherer numbers the lines of a room as they come, serves them live and from its store, drops lines too long or too fast, numbers on after a restart, gathers one room, and ends it",
 			script: "chat.ts",
+			args: [],
+			relay: "own",
+		},
+		{
+			// "edge: " lets `--only` pick it with the others through two relays.
+			name: "own relay: edge: chat: the gatherer at the relay above hears and numbers the participants at an own relay below, which announces their namespaces upstream once each and withdraws them as they leave",
+			script: "chat-edge.ts",
 			args: [],
 			relay: "own",
 		},

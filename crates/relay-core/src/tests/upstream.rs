@@ -511,7 +511,7 @@ fn a_goaway_of_the_upstream_has_the_relay_connect_where_it_says_for_what_it_carr
         let connects_to: Vec<&[u8]> = gone
             .iter()
             .filter_map(|action| match action {
-                Action::ConnectUpstream { uri } => Some(uri.as_slice()),
+                Action::ConnectUpstream { uri, .. } => Some(uri.as_slice()),
                 _ => None,
             })
             .collect();
@@ -550,5 +550,216 @@ fn the_session_that_replaces_one_that_went_away_is_asked_for_the_tracks_the_old_
     assert_eq!(
         routed(&subscribe_to(&mut relay, 1, &[b"xmoq", b"b"], None)),
         Routed::Asks(vec![NEW_UPSTREAM])
+    );
+}
+
+/// `session` announces `fields` on its stream `stream`.
+fn announce_by(
+    relay: &mut Relay,
+    session: SessionKey,
+    stream: u64,
+    fields: &[&[u8]],
+) -> Vec<Action> {
+    relay.step(Event::RequestOpened {
+        session,
+        stream: StreamKey(stream),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: stream * 2,
+            track_namespace: namespace_of(fields),
+            parameters: vec![],
+        }),
+    })
+}
+
+/// `session` withdraws what it announced on its stream `stream` (§6.2).
+fn withdraw(relay: &mut Relay, session: SessionKey, stream: u64) -> Vec<Action> {
+    relay.step(Event::RequestClosed {
+        session,
+        stream: StreamKey(stream),
+        how: RequestEnd::Aborted,
+    })
+}
+
+/// The namespaces the relay announced on the session with the upstream.
+fn announced_upstream(actions: &[Action]) -> Vec<TrackNamespace> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::OpenRequest {
+                session: UPSTREAM,
+                message: ControlMessage::PublishNamespace(announced),
+                ..
+            } => Some(announced.track_namespace.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn cancelled_upstream(actions: &[Action]) -> usize {
+    actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action,
+                Action::CancelOwnRequest {
+                    session: UPSTREAM,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+#[test]
+fn a_namespace_announced_here_is_announced_upstream_once_whoever_announces_it() {
+    struct Row {
+        name: &'static str,
+        upstream: &'static [&'static [u8]],
+        announced: &'static [&'static [u8]],
+        passed: bool,
+    }
+    let rows = [
+        Row {
+            name: "within the prefix",
+            upstream: &[b"xmoq"],
+            announced: &[b"xmoq", b"chat", b"r", b"a"],
+            passed: true,
+        },
+        Row {
+            name: "every namespace",
+            upstream: &[],
+            announced: &[b"xmoq", b"chat", b"r", b"a"],
+            passed: true,
+        },
+        Row {
+            name: "outside the prefix",
+            upstream: &[b"xmoq"],
+            announced: &[b"other"],
+            passed: false,
+        },
+    ];
+    for row in rows {
+        let mut relay = edge(row.upstream);
+        upstream_opened(&mut relay);
+        let passed = announced_upstream(&announce_by(&mut relay, PUBLISHER, 0, row.announced));
+        let expected: Vec<TrackNamespace> = if row.passed {
+            vec![namespace_of(row.announced)]
+        } else {
+            vec![]
+        };
+        assert_eq!(passed, expected, "{}", row.name);
+    }
+}
+
+#[test]
+fn a_namespace_two_announce_is_withdrawn_upstream_when_the_last_of_them_withdraws() {
+    let mut relay = edge(&[]);
+    upstream_opened(&mut relay);
+    let fields: &[&[u8]] = &[b"xmoq", b"chat", b"r", b"a"];
+    assert_eq!(
+        announced_upstream(&announce_by(&mut relay, PUBLISHER, 0, fields)).len(),
+        1
+    );
+    assert_eq!(
+        announced_upstream(&announce_by(&mut relay, ALICE, 0, fields)).len(),
+        0
+    );
+    assert_eq!(cancelled_upstream(&withdraw(&mut relay, PUBLISHER, 0)), 0);
+    // The last one goes with its session.
+    assert_eq!(
+        cancelled_upstream(&relay.step(Event::SessionClosed { session: ALICE })),
+        1
+    );
+}
+
+#[test]
+fn an_announcement_opens_the_session_with_the_upstream_and_keeps_it() {
+    let mut relay = edge(&[]);
+    let fields: &[&[u8]] = &[b"xmoq", b"chat", b"r", b"a"];
+    assert_eq!(connects(&announce_by(&mut relay, PUBLISHER, 0, fields)), 1);
+    assert_eq!(
+        announced_upstream(&upstream_opened(&mut relay)),
+        [namespace_of(fields)]
+    );
+    // It holds something there, so it is not closed as idle.
+    assert!(!relay.holds_nothing(UPSTREAM));
+    withdraw(&mut relay, PUBLISHER, 0);
+    assert!(relay.holds_nothing(UPSTREAM));
+}
+
+#[test]
+fn what_is_announced_upstream_is_announced_again_on_the_next_session() {
+    const NEXT: SessionKey = SessionKey(10);
+    let mut relay = edge(&[]);
+    upstream_opened(&mut relay);
+    let fields: &[&[u8]] = &[b"xmoq", b"chat", b"r", b"a"];
+    announce_by(&mut relay, PUBLISHER, 0, fields);
+    // It went: asked for again at once, for the announcement.
+    assert_eq!(
+        connects(&relay.step(Event::SessionClosed { session: UPSTREAM })),
+        1
+    );
+    // And again a second later while none comes.
+    let failed = relay.step(Event::UpstreamFailed);
+    assert!(
+        failed.iter().any(|action| matches!(
+            action,
+            Action::ConnectUpstream {
+                after_ms: 1_000,
+                ..
+            }
+        )),
+        "{failed:?}"
+    );
+    let opened = relay.step(Event::SessionOpened {
+        session: NEXT,
+        role: Role::Client,
+    });
+    let announced: Vec<&TrackNamespace> = opened
+        .iter()
+        .filter_map(|action| match action {
+            Action::OpenRequest {
+                session: NEXT,
+                message: ControlMessage::PublishNamespace(announced),
+                ..
+            } => Some(&announced.track_namespace),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(announced, [&namespace_of(fields)]);
+}
+
+#[test]
+fn a_subscribe_of_the_upstream_goes_to_who_announced_here_and_never_back_up() {
+    let mut relay = edge(&[]);
+    upstream_opened(&mut relay);
+    announce_by(&mut relay, PUBLISHER, 0, &[b"xmoq", b"chat", b"r", b"a"]);
+    let asked = |relay: &mut Relay, stream: u64, fields: &[&[u8]]| {
+        relay.step(Event::RequestOpened {
+            session: UPSTREAM,
+            stream: StreamKey(stream),
+            first: ControlMessage::Subscribe(Subscribe {
+                request_id: stream * 2 + 1,
+                full_track_name: track_in(fields),
+                parameters: vec![],
+            }),
+        })
+    };
+    assert_eq!(
+        asked_of(&asked(&mut relay, 0, &[b"xmoq", b"chat", b"r", b"a"])),
+        [PUBLISHER]
+    );
+    let refused = asked(&mut relay, 1, &[b"xmoq", b"chat", b"r", b"b"]);
+    assert_eq!(asked_of(&refused), [SessionKey(0); 0]);
+    assert!(
+        refused.iter().any(|action| matches!(
+            action,
+            Action::SendRequest {
+                session: UPSTREAM,
+                message: ControlMessage::RequestError(error),
+                ..
+            } if error.error_code == DOES_NOT_EXIST
+        )),
+        "{refused:?}"
     );
 }
