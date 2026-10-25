@@ -36,7 +36,9 @@
 // the tone, and writes nothing.
 //
 // Open http://localhost:8080/publish in Chromium, then /watch in one or
-// more other tabs. Ctrl-C stops the relay as well.
+// more other tabs; or /meet in two or more, each a participant of the
+// meeting of its room, whose transcript the transcriber reads for the room
+// "demo" alone. Ctrl-C stops the relay as well.
 
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
@@ -75,6 +77,8 @@ const { values: options } = parseArgs({
 });
 
 const here = import.meta.dir;
+/** The meeting the transcriber reads: that of the room `/meet` opens when no `?room=` says. */
+const MEETING_PREFIX = "xmoq/meet/demo";
 const relayBinary =
 	options["relay-binary"] ?? join(here, "..", "target", "debug", "xmoq-relay");
 /** The key of this run, where it is one with authorization: 32 random bytes. */
@@ -185,9 +189,15 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 				// and without one.
 				RELAY_URL: `https://127.0.0.1:${options["relay-port"]}/`,
 				RELAY_CERT_SHA256_HEX: certSha256Hex,
-				// The prefix a transcriber listens under: the demo's one
-				// broadcast, whatever the room (`NAMESPACE` of `shared.ts`).
-				TRANSCRIPT_PREFIX: "xmoq/demo",
+				// The prefix a transcriber listens under for a room: that of
+				// its meeting (`/meet`). WHY not the demo's one broadcast
+				// (`xmoq/demo`), which the transcriber reads as well: the room
+				// names one prefix, and a meeting has no other way to say
+				// where its transcript is; the watching page reads the
+				// broadcast's by its namespace, and an agent in the room of
+				// the broadcast is given `--transcript xmoq/demo`
+				// (`scripts/agent-demo.sh`).
+				TRANSCRIPT_PREFIX: "xmoq/meet/{room}",
 			},
 		})
 	: undefined;
@@ -257,6 +267,11 @@ const transcriber =
 					certSha256Hex,
 					"--namespace",
 					NAMESPACE.join("/"),
+					// The meeting of the room "demo" alone: the transcript is
+					// one for each prefix, and a room's hello names that of
+					// its own meeting, `xmoq/meet/<room>`.
+					"--namespace",
+					MEETING_PREFIX,
 					"--language",
 					options["transcribe-language"],
 					...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
@@ -283,6 +298,7 @@ process.on("SIGTERM", stop);
 const PAGES: Record<string, string> = {
 	"/publish": "publish.ts",
 	"/watch": "watch.ts",
+	"/meet": "meet.ts",
 };
 const scripts = new Map<string, string>();
 for (const [path, entry] of Object.entries(PAGES)) {
@@ -321,12 +337,17 @@ const html = (path: string): string => `<!doctype html>
 		</style>
 	</head>
 	<body>
-		<p>XmoQ demo, ${path.slice(1)} · <a href="/publish">publish (a clock)</a> · <a href="/publish?source=camera">publish (camera)</a> · <a href="/watch">watch</a></p>
+		<p>XmoQ demo, ${path.slice(1)} · <a href="/publish">publish (a clock)</a> · <a href="/publish?source=camera">publish (camera)</a> · <a href="/watch">watch</a> · <a href="/meet">meet</a></p>
 		<canvas width="640" height="360"></canvas>
 		${path === "/watch" ? `<p id="caption" style="min-height: 1.5em; font-size: 1.2em; color: #fff;">${noCaptions ?? ""}</p><p><button id="sound">sound</button></p>` : ""}
+		${path === "/meet" ? `<p><button id="sound">sound</button></p><div id="tiles" style="display: flex; flex-wrap: wrap; gap: 4px;"></div>` : ""}
 		<pre id="status">loading</pre>
 		${
-			roomsUrl === null
+			path === "/meet"
+				? roomsUrl === null
+					? "<p>no rooms: npm install in spikes/durable-objects-room, and start again; a meeting takes its seat from the room</p>"
+					: ""
+				: roomsUrl === null
 				? "<p>no rooms: npm install in spikes/durable-objects-room, and start again</p>"
 				: `<p id="connected"></p>
 		${
@@ -365,6 +386,7 @@ const server = Bun.serve({
 // WHY localhost: it is a secure context, which WebTransport and the camera need.
 console.log(`publish: http://localhost:${server.port}/publish`);
 console.log(`watch:   http://localhost:${server.port}/watch`);
+console.log(`meet:    http://localhost:${server.port}/meet`);
 console.log(roomsUrl === null ? "rooms:   none" : `rooms:   ${roomsUrl}`);
 console.log(
 	chat !== undefined
@@ -373,7 +395,7 @@ console.log(
 );
 console.log(
 	noCaptions ??
-		`captions: the transcriber reads ${NAMESPACE.join("/")} in ${options["transcribe-language"]}; open /publish?audio=mic to be heard`,
+		`captions: the transcriber reads ${NAMESPACE.join("/")} and ${MEETING_PREFIX} in ${options["transcribe-language"]}; open /publish?audio=mic to be heard`,
 );
 if (authKeyHex !== undefined) {
 	console.log(

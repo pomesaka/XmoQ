@@ -218,8 +218,10 @@ start() {
 	local holder=$!
 	local events="${out}/events.jsonl" before=0
 	[[ ! -f ${events} ]] || before=$(wc -l <"${events}")
+	# WHY --transcript: the room names the transcript of its meeting
+	# (`xmoq/meet/demo`, demo/serve.ts), and the reader follows the broadcast.
 	nohup target/release/xmoq-agent --room "http://127.0.0.1:${rooms_port}/rooms/demo" \
-		--name "${name}" --out "${out}" <"${say}" >"${out}/agent.log" 2>&1 &
+		--name "${name}" --out "${out}" --transcript xmoq/demo <"${say}" >"${out}/agent.log" 2>&1 &
 	local agent=$!
 	record "${holder}" "sleep"
 	record "${agent}" "xmoq-agent"
