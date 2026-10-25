@@ -5,7 +5,7 @@
 </div>
 
 > [!IMPORTANT]
-> **Early implementation.** No working streaming implementation is claimed. No media has been sent. What exists is an own MoQ Transport implementation: a client in Rust and in TypeScript and a minimal relay in Rust, which exchange single Objects with each other and with `moqtail` peers.
+> **Early implementation, on one machine.** An own MoQ Transport (draft 18) in Rust and TypeScript and a relay in Rust carry a page's video and sound to other pages and to a terminal viewer, with a chat and captions, and a CLI lets an agent read a broadcast or a meeting. Nothing has run over a real network or on Cloudflare. What is done and what is open is in the [requirements](docs/requirements.md).
 
 XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCodecs, a Rust relay and terminal CLI, and Cloudflare Durable Objects for application state. Its purpose is to let an agent such as Claude take part in a broadcast, and later in a meeting of up to 49 people: a CLI subscribes and writes what the tracks carry where the agent reads it ([vision](docs/vision.md)). Integration with events in a separately developed SNS is a future direction, not committed.
 
@@ -13,58 +13,35 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 
 ![Proposed XmoQ architecture](docs/assets/architecture.svg)
 
-*Conceptual design — interoperability and integration are not yet validated.*
+*The intended components. What of it is built is in the [architecture](docs/architecture.md).*
 
 ## Documentation
 
-- [Vision](docs/vision.md)
-- [Requirements](docs/requirements.md)
-- [Architecture and broadcast flow](docs/architecture.md)
-- [Scaling a broadcast and meetings: a design draft](docs/scale-and-meetings.md)
+Start with the [vision](docs/vision.md), what is done and what is open ([requirements](docs/requirements.md)), the [architecture](docs/architecture.md) and the [open questions](docs/open-questions.md). An agent that implements reads the [agent guide](docs/agent-guide.md) first.
+
+The design:
+
 - [Protocol layers](docs/protocols.md)
-- [MoQ Transport implementation notes](docs/moqt-implementation-notes.md)
-- [Wire fixtures captured from moqtail](fixtures/moqt-18/README.md)
-- [Bytes written by hand from the draft, read by both implementations](fixtures/moqt-18-by-hand/README.md)
-- [The points at which a stream of the peer has said what it is](fixtures/first-bytes/README.md)
-- [What becomes of a SUBSCRIBE the peer sends](fixtures/peer-subscribe/README.md)
-- [What becomes of a FETCH the peer sends](fixtures/peer-fetch/README.md)
-- [Whether the SUBSCRIBE of a Joining FETCH is yet to come](fixtures/joining-request-id/README.md)
-- [What a publisher answers a FETCH range with, from what it published](fixtures/published-fetch/README.md)
-- [Catalogs of MSF, from another implementation and written by hand](fixtures/msf-01/README.md)
-- [When picture and sound are played: what the page and the terminal viewer agree on](fixtures/playout/README.md)
-- [How long a request waits for its answer](fixtures/request-answer-wait/README.md)
-- [The Retry Interval of a REQUEST_ERROR](fixtures/retry-interval/README.md)
-- [What a receiver makes of Immutable Properties](fixtures/immutable-properties/README.md)
-- [A LOC video stream of another implementation](fixtures/loc-04/README.md)
-- [Browser client library `@xmoq/moqt`](packages/moqt/README.md)
-- [The Low Overhead Media Container in TypeScript, `@xmoq/loc`](packages/loc/README.md)
-- [The MOQT Streaming Format in TypeScript, `@xmoq/msf`](packages/msf/README.md)
-- [Between a video track and a decoder, `@xmoq/media`](packages/media/README.md)
-- [A participant of the chat over MoQ tracks, `@xmoq/chat`](packages/chat/README.md)
-- [The reader of JSON that the packages of the tracks share, `@xmoq/json`](packages/json/README.md)
-- [The viewer for the terminal, `xmoq-watch`](crates/watch/README.md)
-- [Pictures of a video track as PNG, `xmoq-picture`](crates/picture/README.md)
-- [The gatherer of the chat, `xmoq-chat`](crates/chat/README.md)
-- [The reader of a room for an agent, `xmoq-agent`](crates/agent/README.md)
-- [The tracks of the chat, `xmoq-chat-tracks`](crates/chat-tracks/README.md)
-- [The payloads of the chat's tracks, shared by the implementations](fixtures/chat-tracks/README.md)
-- [When a track is asked for again on the same session, `xmoq-again`](crates/again/README.md)
-- [Serving tracks of one Object a Group and answering FETCH, `xmoq-track-serving`](crates/track-serving/README.md)
-- [The transcriber, `xmoq-transcriber`](crates/transcriber/README.md)
-- [Cutting sound and reading it with whisper.cpp, `xmoq-speech`](crates/speech/README.md)
-- [The tracks of the transcripts, `xmoq-transcript-tracks`](crates/transcript-tracks/README.md)
-- [A reader of the transcripts over MoQ tracks, `@xmoq/transcript`](packages/transcript/README.md)
-- [A participant of a meeting in a page, `@xmoq/meeting`](packages/meeting/README.md)
-- [The payload of a transcript, shared by the implementations](fixtures/transcript-tracks/README.md)
-- [A voice for the transcriber's interop run](fixtures/speech/README.md)
-- [Interop runs against moqtail peers](interop/README.md)
-- [MoQ library candidates](docs/moq-libraries.md)
+- [MoQ Transport implementation notes](docs/moqt-implementation-notes.md): what both implementations do where draft 18 is silent or contradicts itself
+- [Scaling a broadcast and meetings: a design draft](docs/scale-and-meetings.md)
 - [The audio and video demo: what it does and where it ends](docs/av-demo.md)
 - [Roadmap](docs/roadmap.md)
-- [Validation](docs/validation.md)
-- [Open questions](docs/open-questions.md)
-- [Experiment records](docs/experiments/README.md)
-- [Agent guide](docs/agent-guide.md)
+- [Validation](docs/validation.md) and the [experiment records](docs/experiments/README.md)
+- [MoQ library candidates](docs/moq-libraries.md), the survey of Phase 0
+
+The parts, each with its scope, its flags and what it lacks:
+
+- Browser packages: [`@xmoq/moqt`](packages/moqt/README.md) (MoQ Transport), [`@xmoq/loc`](packages/loc/README.md) (LOC), [`@xmoq/json`](packages/json/README.md) (the payloads' JSON), [`@xmoq/msf`](packages/msf/README.md) (MSF catalogs), [`@xmoq/chat`](packages/chat/README.md), [`@xmoq/transcript`](packages/transcript/README.md), [`@xmoq/media`](packages/media/README.md) (video and sound tracks), [`@xmoq/meeting`](packages/meeting/README.md)
+- Rust programs: [`xmoq-watch`](crates/watch/README.md) (the viewer for the terminal), [`xmoq-agent`](crates/agent/README.md) (a room read for an agent), [`xmoq-chat`](crates/chat/README.md) (the chat's gatherer), [`xmoq-transcriber`](crates/transcriber/README.md)
+- Rust libraries: [`xmoq-picture`](crates/picture/README.md), [`xmoq-speech`](crates/speech/README.md), [`xmoq-again`](crates/again/README.md), [`xmoq-track-serving`](crates/track-serving/README.md), [`xmoq-chat-tracks`](crates/chat-tracks/README.md), [`xmoq-transcript-tracks`](crates/transcript-tracks/README.md)
+- [The demo](demo/README.md), and the [interop runs against `moqtail` peers](interop/README.md) with [`moqlivemock`](interop/peers/moqlivemock/README.md)
+
+Bytes and tables that more than one implementation reads in its tests (`fixtures/`):
+
+- Captured on the wire: [from `moqtail`](fixtures/moqt-18/README.md), [Chromium closing a session](fixtures/webtransport-close/README.md), [a LOC video stream](fixtures/loc-04/README.md), [MSF catalogs](fixtures/msf-01/README.md)
+- Built by another library in a script: [`moqt-18-from-libraries`](fixtures/moqt-18-from-libraries/README.md); written by hand from the draft: [`moqt-18-by-hand`](fixtures/moqt-18-by-hand/README.md)
+- What both implementations do in the same case: [first bytes of a stream](fixtures/first-bytes/README.md), [a SUBSCRIBE of the peer](fixtures/peer-subscribe/README.md), [a FETCH of the peer](fixtures/peer-fetch/README.md), [the SUBSCRIBE of a Joining FETCH](fixtures/joining-request-id/README.md), [a FETCH answered from what was published](fixtures/published-fetch/README.md), [Objects before SUBSCRIBE_OK](fixtures/early-objects/README.md), [Immutable Properties](fixtures/immutable-properties/README.md), [the wait for an answer](fixtures/request-answer-wait/README.md), [the Retry Interval](fixtures/retry-interval/README.md), [playout](fixtures/playout/README.md), [the chat's history](fixtures/chat-history/README.md), [who is in a meeting](fixtures/meeting-presence/README.md)
+- Payloads of the tracks: [the chat's](fixtures/chat-tracks/README.md), [a transcript's](fixtures/transcript-tracks/README.md); [a voice for the transcriber's interop run](fixtures/speech/README.md)
 
 ## Checks
 
@@ -75,7 +52,7 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run check` | Everything CI runs |
 | `mise run check:rust` | `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` |
 | `mise run check:ts` | Biome (format and lint), oxlint (`as` assertions), `typecheck` for packages and `interop/`, `bun test` per package |
-| `mise run check:layers` | Dependency rules: `xmoq-moqt` stays free of I/O crates, nothing depends on `spikes/`, packages do not depend on `interop/` |
+| `mise run check:layers` | Dependency rules: the layers of the packages (`package_layer` in `scripts/ci/check-layers.sh`), `xmoq-moqt` free of I/O crates, nothing depending on `spikes/`, packages not depending on `interop/` |
 | `mise run check:workflows` | `actionlint` and `shellcheck` |
 | `mise run check:docs` | The index of `docs/experiments/` and the list of files of `interop/` are what `scripts/ci/experiments-index.sh` and `scripts/ci/interop-index.sh` write (`mise run fmt` writes them) |
 | `mise run demo` | Starts the own relay and a web server; a page publishes video (a painted clock or the camera) and other pages watch it, in Chromium, with captions from the transcriber where its models are fetched. See [`demo/README.md`](demo/README.md). Outside lint and type checking |
@@ -112,6 +89,10 @@ The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop
 | `--cached-fetch-least-kbps` | The rate it has to take such a stream at, at the least: a larger Group has as long as it takes at that rate | 500 |
 | `--delivery-patience-ms` | Experiment: what a subscriber gets that asked for no delivery timeout | Off |
 | `--auth-key-hex`, `--auth-setup off` | Experiment: the key tokens are checked with, and whether SETUP is asked for one | No tokens; on with a key |
+| `--upstream`, `--upstream-cert-sha256`, `--upstream-namespace` | The relay above this one, asked for the tracks under that namespace that nobody announced here; the first two go together | No upstream; every namespace with `--upstream` alone |
+| `--redirect-uri` | The New Session URI of the GOAWAY the relay sends when it is told to stop | Empty: the URI the client used |
+| `--goaway-timeout-ms` | The Timeout of that GOAWAY, and how long the relay waits before it closes the sessions that are left | 10,000 |
+| `--stats-every-ms`, `--log-arrivals on` | For measuring: a `STATS` line for each session at that interval, and an `ARRIVED` line on stderr for every Object that arrives | Off |
 | `--slow-open-ms` | For a run that looks at how long streams take to open; 0 logs every stream | Not logged |
 
 CI (`.github/workflows/ci.yml`) runs the same tasks. A task whose target does not exist yet prints `SKIP` and succeeds; `spikes/` is outside every check, and so are the copies of `moqtail` code under `interop/peers/`. The interop run is a CI job of its own, which calls `mise run interop`; for a pull request that touches nothing the run depends on, the job reports that it skipped the pairings.

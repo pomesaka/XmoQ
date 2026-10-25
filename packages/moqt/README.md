@@ -2,7 +2,7 @@
 
 MoQ Transport for the browser, written from the text of `draft-ietf-moq-transport-18` (WebTransport subprotocol `moqt-18`).
 
-Status: partly implemented. The client end of a session and the messages below are implemented and were run against the `moqtail` relay only. The own relay does not exist yet, so the roadmap item for this client is still open.
+Status: partly implemented. The client end of a session and the messages below are implemented, and run against the `moqtail` relay and the own relay in the interop run. What of the draft is not is in the [implementation notes](../../docs/moqt-implementation-notes.md).
 
 ## Scope
 
