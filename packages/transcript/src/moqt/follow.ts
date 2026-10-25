@@ -4,9 +4,12 @@
 // draft-ietf-moq-transport-18.
 
 import {
+	createAskAgain,
 	decodeFetchBody,
 	type MoqtConnection,
+	RequestFailedError,
 	type Subscription,
+	waitFor,
 } from "@xmoq/moqt";
 import { SPEECH_TRACK, transcriptNamespace } from "../core/names.ts";
 import { type Malformed, readSpeech, type Speech } from "../core/payloads.ts";
@@ -30,9 +33,6 @@ const RENDEZVOUS_MS = 10_000;
 
 /** How long the Joining FETCH has, as `@xmoq/chat` gives its own. **Provisional**. */
 const FETCH_TIMEOUT_MS = 15_000;
-
-/** How long to wait before subscribing again after the subscription ended or was refused, as `@xmoq/chat` waits. **Provisional**. */
-const AGAIN_MS = 2_000;
 
 /** How many piece numbers are remembered, so that a piece is handed on once. **Provisional**. */
 const SEEN_PIECES = 200;
@@ -68,26 +68,12 @@ export interface TranscriptReader {
 	stop(): void;
 }
 
-/** Waits `ms`, or less where `signal` is aborted. */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true },
-		);
-	});
-}
-
 /**
  * Follows the transcript of `listened` for as long as the connection lasts
  * or until `stop`: the latest pieces by a Joining FETCH, then every piece
- * live. A subscription that ends or is refused is made again `AGAIN_MS`
- * later. Each piece is handed on once, whichever way it came.
+ * live. A subscription that ends or is refused is made again after the
+ * pause of `createAskAgain` (@xmoq/moqt): 1 s, or the Retry Interval of a
+ * refusal. Each piece is handed on once, whichever way it came.
  */
 export function followTranscript(
 	connection: Pick<MoqtConnection, "subscribe" | "fetch" | "close">,
@@ -174,6 +160,7 @@ export function followTranscript(
 	};
 
 	const follow = async (): Promise<void> => {
+		const again = createAskAgain();
 		while (!stop.signal.aborted) {
 			let subscription: Subscription;
 			try {
@@ -185,13 +172,19 @@ export function followTranscript(
 				});
 			} catch (error) {
 				changed({ lastEnd: `refused: ${String(error).slice(0, 120)}` });
-				await delay(AGAIN_MS, stop.signal);
+				await waitFor(
+					again.afterRefusal(
+						error instanceof RequestFailedError ? error.retryWaitMs : undefined,
+					),
+					stop.signal,
+				);
 				continue;
 			}
 			const cancel = (): void => {
 				void subscription.cancel().catch(() => {});
 			};
 			stop.signal.addEventListener("abort", cancel, { once: true });
+			again.subscribed();
 			changed({ following: true });
 			// WHY a failed FETCH is no failure of the reader: the pieces that
 			// come live are there all the same.
@@ -201,7 +194,7 @@ export function followTranscript(
 			await fetched;
 			stop.signal.removeEventListener("abort", cancel);
 			changed({ following: false, lastEnd: end.type });
-			await delay(AGAIN_MS, stop.signal);
+			await waitFor(again.afterEnd(), stop.signal);
 		}
 	};
 	void follow();

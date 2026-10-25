@@ -1,27 +1,20 @@
 // A participant of the chat kept across sessions: when a session ends it
 // connects again and joins anew, and when the relay sends GOAWAY (§10.4) it
-// goes where the GOAWAY says. Section numbers are of
-// draft-ietf-moq-transport-18.
+// goes where the GOAWAY says. The loop is `keepMoving` of @xmoq/moqt.
+// Section numbers are of draft-ietf-moq-transport-18.
 
 import {
-	DEFAULT_ANSWER_WAIT_MS,
 	type GoAwayNotice,
+	keepMoving,
 	type MoqtConnection,
-	RequestErrorCode,
-	RequestFailedError,
 	type SessionClose,
+	sessionMovingOutcome,
 } from "@xmoq/moqt";
 import {
 	type ChatParticipant,
 	type JoinChatOptions,
 	joinChat,
 } from "./participant.ts";
-
-/**
- * How long to wait before connecting again after a session ended or could
- * not be made. **Provisional**, as the 2 seconds the demo's pages wait.
- */
-export const DEFAULT_ROOM_AGAIN_MS = 2_000;
 
 /** A connection for the chat, and the token for its PUBLISH_NAMESPACE (`JoinChatOptions.publishNamespaceToken`). */
 export interface ChatConnection {
@@ -54,8 +47,8 @@ export interface KeepInTheRoomOptions {
 	/**
 	 * Makes a connection; called anew for every session, so that a caller can
 	 * ask anew for a token. `goAway` is the last GOAWAY that ended a session,
-	 * and **stays the same until another comes**, as for `keepPlaying` of
-	 * `@xmoq/media`: §10.4 has "The client MUST use this URI for the new
+	 * and **stays the same until another comes** (`KeepMovingOptions.connect`
+	 * of `@xmoq/moqt`): §10.4 has "The client MUST use this URI for the new
 	 * session if provided" (`newSessionUri`; empty where the current one is
 	 * reused), and the relay that sent it refuses what comes (GOING_AWAY).
 	 */
@@ -65,56 +58,11 @@ export interface KeepInTheRoomOptions {
 	 * that `lastHad` can be the newest line shown. Its `signal` is this one's.
 	 */
 	join(): Omit<JoinChatOptions, "publishNamespaceToken" | "signal">;
-	/** `DEFAULT_ROOM_AGAIN_MS` when left out. */
+	/** The least time from one try at a session to the next: `DEFAULT_RECONNECT_DELAY_MS` of `@xmoq/moqt` when left out (`KeepMovingOptions.againMs`). */
 	againMs?: number;
 	/** Aborting it closes the session and ends the trying. */
 	signal?: AbortSignal;
 	onState?(state: RoomState): void;
-}
-
-const delay = (ms: number, signal: AbortSignal): Promise<void> =>
-	new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true },
-		);
-	});
-
-/**
- * The GOAWAY behind a refusal with GOING_AWAY, or undefined where `error`
- * is no such refusal or no GOAWAY comes, as `goAwayBehind` of `@xmoq/media`
- * has it. Transport §10.4: requests "that arrive after the GOAWAY, MUST be
- * rejected with REQUEST_ERROR using error code GOING_AWAY"; the GOAWAY
- * travels on the control stream and the refusal on the request's, between
- * which QUIC keeps no order, so the refusal can be read first. WHY a limit,
- * the time an answer gets (`DEFAULT_ANSWER_WAIT_MS`): GOING_AWAY also comes
- * from a peer that received a GOAWAY (§10.6.2) and sends none.
- */
-async function goAwayBehind(
-	connection: Pick<MoqtConnection, "goAway" | "closed">,
-	error: unknown,
-): Promise<GoAwayNotice | undefined> {
-	if (
-		!(error instanceof RequestFailedError) ||
-		error.errorCode !== RequestErrorCode.GOING_AWAY
-	) {
-		return undefined;
-	}
-	const given = new AbortController();
-	try {
-		return await Promise.race([
-			connection.goAway,
-			connection.closed.then(() => undefined),
-			delay(DEFAULT_ANSWER_WAIT_MS, given.signal).then(() => undefined),
-		]);
-	} finally {
-		given.abort();
-	}
 }
 
 /**
@@ -123,90 +71,40 @@ async function goAwayBehind(
  * after `againMs`. Resolves once `signal` was aborted; never rejects.
  *
  * **A GOAWAY ends the session with NO_ERROR**, also one that comes while the
- * namespace waits for its answer, and the next session is made with it, as
- * `keepPublishing` of `@xmoq/media` does. WHY NOT announce on the new session
+ * namespace waits for its answer and one read after a refusal with
+ * GOING_AWAY, and the next session is made with it, at once, once in a row,
+ * as `keepMoving` does for every client. WHY NOT announce on the new session
  * first and leave the old later, as §9.5.1 has a publisher do: one name in
  * two sessions is two publishers of `said` at the relay, and the gatherer
- * would follow both. WHY NOT wait for the relay to close: a full relay that
- * sends a session away (`--when-full`) closes it only after its Timeout.
- *
- * The next session after one a GOAWAY ended is made at once, once in a row,
- * as `@xmoq/media` and the terminal viewer do: a relay that sends GOAWAY on
- * every session would otherwise have them made as fast as can be.
+ * would follow both.
  */
 export async function keepInTheRoom(
 	options: KeepInTheRoomOptions,
 ): Promise<void> {
 	const signal = options.signal ?? new AbortController().signal;
-	const againMs = options.againMs ?? DEFAULT_ROOM_AGAIN_MS;
-	let movedBy: GoAwayNotice | undefined;
-	let atOnce = false;
-	let attempt = 0;
 	let sessions = 0;
-	while (!signal.aborted) {
-		attempt += 1;
-		options.onState?.({ type: "connecting", attempt });
-		let moved: GoAwayNotice | undefined;
-		try {
-			const { connection, publishNamespaceToken } =
-				await options.connect(movedBy);
-			let goneAway: GoAwayNotice | undefined;
-			const goAway = connection.goAway.then((notice) => {
-				goneAway = notice;
-				return notice;
+	await keepMoving<ChatConnection, SessionClose>({
+		connect: options.connect,
+		async run({ connection, publishNamespaceToken }) {
+			const participant = await joinChat(connection, {
+				...options.join(),
+				...(publishNamespaceToken === undefined
+					? {}
+					: { publishNamespaceToken }),
+				signal,
 			});
-			const stop = (): void => connection.close();
-			signal.addEventListener("abort", stop, { once: true });
-			try {
-				if (signal.aborted) stop();
-				const joined = await Promise.race([
-					joinChat(connection, {
-						...options.join(),
-						...(publishNamespaceToken === undefined
-							? {}
-							: { publishNamespaceToken }),
-						signal,
-					}).then((participant) => ({ participant })),
-					goAway.then((notice) => ({ notice })),
-				]);
-				if ("notice" in joined) {
-					moved = joined.notice;
-				} else {
-					sessions += 1;
-					options.onState?.({
-						type: "joined",
-						session: sessions,
-						participant: joined.participant,
-					});
-					const over = await Promise.race([
-						connection.closed.then((close) => ({ close })),
-						goAway.then((notice) => ({ notice })),
-					]);
-					if ("notice" in over) moved = over.notice;
-					// A session the caller's `signal` closed is the caller's end.
-					else if (!signal.aborted) {
-						options.onState?.({ type: "session-ended", close: over.close });
-					}
-				}
-			} catch (error) {
-				// After a GOAWAY the requests of the connection reject, the
-				// PUBLISH_NAMESPACE among them: that is the move, not a failure.
-				const behind = goneAway ?? (await goAwayBehind(connection, error));
-				if (behind === undefined) throw error;
-				moved = behind;
-			} finally {
-				signal.removeEventListener("abort", stop);
-				// NO_ERROR, also after a GOAWAY (§3.6).
-				connection.close();
-			}
-		} catch (error) {
-			if (!signal.aborted) options.onState?.({ type: "failed", error });
-		}
-		if (moved !== undefined) {
-			movedBy = moved;
-			options.onState?.({ type: "moved", goAway: moved });
-		}
-		atOnce = moved !== undefined && !atOnce;
-		await delay(atOnce ? 0 : againMs, signal);
-	}
+			sessions += 1;
+			options.onState?.({ type: "joined", session: sessions, participant });
+			return connection.closed;
+		},
+		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
+		signal,
+		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
+		onOutcome(outcome) {
+			const state = sessionMovingOutcome(outcome);
+			// A session the caller's `signal` closed is the caller's end.
+			if (state.type !== "moved" && signal.aborted) return;
+			options.onState?.(state);
+		},
+	});
 }

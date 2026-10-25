@@ -1,93 +1,28 @@
 // A publisher and a viewer that go on over more than one session: when the
 // session ends (the relay went, the link broke), the next is made after a
 // pause and the tracks are published or played anew. The loop is
-// `keepSession` of `src/core`; here it meets a connection of @xmoq/moqt.
+// `keepMoving` of @xmoq/moqt, which follows GOAWAY.
 
 import {
-	DEFAULT_ANSWER_WAIT_MS,
 	type GoAwayNotice,
+	keepMoving,
 	type MoqtConnection,
+	type MovingOutcome,
 	type PeerFetch,
 	type PeerSubscribe,
 	RequestErrorCode,
 	RequestFailedError,
 	type SessionClose,
+	sessionMovingOutcome,
+	waitFor,
 } from "@xmoq/moqt";
-import { keepSession, stayOnSession } from "../core/keep-session.ts";
+import { stayOnSession } from "./stay-on-session.ts";
 
 /** A track that answers the requests for it: a publisher of this package. */
 export interface ServedTrack {
 	/** Whether the SUBSCRIBE was for this track, and is answered. */
 	subscribe(request: PeerSubscribe): boolean;
 	fetch(request: PeerFetch): boolean;
-}
-
-const waitFor = (ms: number, signal: AbortSignal): Promise<void> =>
-	new Promise((resolve) => {
-		if (signal.aborted) {
-			resolve();
-			return;
-		}
-		const timer = setTimeout(done, ms);
-		function done(): void {
-			clearTimeout(timer);
-			signal.removeEventListener("abort", done);
-			resolve();
-		}
-		signal.addEventListener("abort", done, { once: true });
-	});
-
-/**
- * The GOAWAY behind a refusal with GOING_AWAY, or undefined where `error`
- * is no such refusal or no GOAWAY comes. Transport §10.4: requests "that
- * arrive after the GOAWAY, MUST be rejected with REQUEST_ERROR using error
- * code GOING_AWAY"; the GOAWAY travels on the control stream and the refusal
- * on the request's, between which QUIC keeps no order, so the refusal can be
- * read first. WHY a limit, the time an answer gets (`DEFAULT_ANSWER_WAIT_MS`
- * of `@xmoq/moqt`): GOING_AWAY also comes from a peer that received a GOAWAY
- * (§10.6.2) and sends none. The Rust clients wait in the same way.
- */
-async function goAwayBehind(
-	connection: MoqtConnection,
-	error: unknown,
-): Promise<GoAwayNotice | undefined> {
-	if (
-		!(error instanceof RequestFailedError) ||
-		error.errorCode !== RequestErrorCode.GOING_AWAY
-	) {
-		return undefined;
-	}
-	const given = new AbortController();
-	try {
-		return await Promise.race([
-			connection.goAway,
-			connection.closed.then(() => undefined),
-			waitFor(DEFAULT_ANSWER_WAIT_MS, given.signal).then(() => undefined),
-		]);
-	} finally {
-		given.abort();
-	}
-}
-
-/**
- * The pause before the next session, after one that a GOAWAY ended: none,
- * once in a row. WHY none: what was played or published stands still until
- * the next session, and the relay that sent it may close the old one
- * before its Timeout is over (transport §10.4: "This is a hint"). WHY once
- * in a row: a relay that sends GOAWAY on every session would have the next
- * made as fast as it can. The terminal viewer does the same.
- */
-function createMovePause(): {
-	ended(moved: boolean): void;
-	pauseMs(ms: number): number;
-} {
-	let atOnce = false;
-	return {
-		ended(moved) {
-			atOnce = moved && !atOnce;
-		},
-		pauseMs: (ms) => (atOnce ? 0 : ms),
-	};
 }
 
 /** Where a publisher that is kept stands. */
@@ -107,8 +42,8 @@ export interface KeepPublishingOptions {
 	trackNamespace: Uint8Array[];
 	/** The tracks of the namespace. **They go on between sessions**: the encoders are the caller's and are not stopped here. */
 	tracks: readonly ServedTrack[];
-	/** `DEFAULT_RECONNECT_DELAY_MS` when left out. */
-	delayMs?: number;
+	/** The least time from one try at a session to the next: `DEFAULT_RECONNECT_DELAY_MS` of `@xmoq/moqt` when left out (`KeepMovingOptions.againMs`). */
+	againMs?: number;
 	/** Aborting it closes the session and ends the trying. */
 	signal?: AbortSignal;
 	onState?(state: PublishingState): void;
@@ -131,84 +66,33 @@ export interface KeepPublishingOptions {
  */
 export function keepPublishing(options: KeepPublishingOptions): Promise<void> {
 	let sessions = 0;
-	const signal = options.signal ?? new AbortController().signal;
-	type Over =
-		| { type: "session-ended"; close: SessionClose }
-		| { type: "moved"; goAway: GoAwayNotice };
-	/** The last GOAWAY that ended a session, for every `connect` until another comes (as `keepPlaying`). */
-	let movedBy: GoAwayNotice | undefined;
-	const pause = createMovePause();
-	return keepSession<Over>({
-		async run() {
-			const connection = await options.connect(movedBy);
-			const stop = (): void => connection.close();
-			signal.addEventListener("abort", stop, { once: true });
-			try {
-				if (signal.aborted) stop();
-				connection.serve({
-					subscribe(request) {
-						if (options.tracks.some((track) => track.subscribe(request)))
-							return;
-						request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-					},
-					fetch(request) {
-						if (options.tracks.some((track) => track.fetch(request))) return;
-						request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-					},
-				});
-				// As `keepPlaying`: a GOAWAY ends the session with NO_ERROR,
-				// also while the namespace waits for its answer. WHY NOT
-				// announce on the new session first and stop here later, as
-				// transport §9.5.1 has a publisher do: one publisher in two
-				// sessions is two sources of its tracks at the relay.
-				const moved = connection.goAway.then(
-					(notice): Over => ({ type: "moved", goAway: notice }),
-				);
-				const announced = await Promise.race([
-					connection.publishNamespace(options.trackNamespace),
-					moved,
-				]);
-				if (announced !== undefined) return announced;
-				sessions += 1;
-				options.onState?.({
-					type: "publishing",
-					session: sessions,
-					connection,
-				});
-				return await Promise.race([
-					connection.closed.then(
-						(close): Over => ({ type: "session-ended", close }),
-					),
-					moved,
-				]);
-			} catch (error) {
-				const notice = await goAwayBehind(connection, error);
-				if (notice === undefined) throw error;
-				return { type: "moved", goAway: notice };
-			} finally {
-				signal.removeEventListener("abort", stop);
-				// Also a session on which nothing could be announced is not left
-				// open. NO_ERROR, also after a GOAWAY (§3.6).
-				connection.close();
-			}
+	return keepMoving<{ connection: MoqtConnection }, SessionClose>({
+		connect: async (goAway) => ({ connection: await options.connect(goAway) }),
+		async run({ connection }) {
+			connection.serve({
+				subscribe(request) {
+					if (options.tracks.some((track) => track.subscribe(request))) return;
+					request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
+				},
+				fetch(request) {
+					if (options.tracks.some((track) => track.fetch(request))) return;
+					request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
+				},
+			});
+			// A GOAWAY while the namespace waits for its answer ends the
+			// session as well (`keepMoving`). WHY NOT announce on the new
+			// session first and stop here later, as transport §9.5.1 has a
+			// publisher do: one publisher in two sessions is two sources of
+			// its tracks at the relay.
+			await connection.publishNamespace(options.trackNamespace);
+			sessions += 1;
+			options.onState?.({ type: "publishing", session: sessions, connection });
+			return connection.closed;
 		},
-		wait: (ms) => waitFor(pause.pauseMs(ms), signal),
-		stopped: () => signal.aborted,
-		...(options.delayMs === undefined ? {} : { delayMs: options.delayMs }),
+		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
+		...(options.signal === undefined ? {} : { signal: options.signal }),
 		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
-		onOutcome(outcome) {
-			const moved =
-				outcome.type === "ended" && outcome.result.type === "moved"
-					? outcome.result.goAway
-					: undefined;
-			if (moved !== undefined) movedBy = moved;
-			pause.ended(moved !== undefined);
-			options.onState?.(
-				outcome.type === "ended"
-					? outcome.result
-					: { type: "failed", error: outcome.error },
-			);
-		},
+		onOutcome: (outcome) => options.onState?.(sessionMovingOutcome(outcome)),
 	});
 }
 
@@ -317,8 +201,8 @@ export interface KeepPlayingOptions<E> {
 		connection: MoqtConnection,
 		signal: AbortSignal,
 	): Promise<{ ended: Promise<E> }>;
-	/** `DEFAULT_RECONNECT_DELAY_MS` when left out. */
-	delayMs?: number;
+	/** The least time from one try at a session to the next: `DEFAULT_RECONNECT_DELAY_MS` of `@xmoq/moqt` when left out (`KeepMovingOptions.againMs`). */
+	againMs?: number;
 	/**
 	 * **A trial; left out, nothing changes.** With it the session is kept
 	 * where there is nothing to play yet (`play` rejects, and `notYet` says
@@ -365,27 +249,23 @@ export interface KeepPlayingOptions<E> {
  */
 export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 	let sessions = 0;
-	const signal = options.signal ?? new AbortController().signal;
 	type Over =
-		| { type: "nothing-to-play" }
 		| { type: "session-ended"; close: SessionClose }
-		| { type: "moved"; goAway: GoAwayNotice }
-		| { type: "playing-ended"; end: E };
-	/** The last GOAWAY that ended a session, for every `connect` until another comes (`KeepPlayingOptions.connect`). */
-	let movedBy: GoAwayNotice | undefined;
-	const pause = createMovePause();
-	return keepSession<Over>({
-		async run() {
-			const connection = await options.connect(movedBy);
-			if (connection === undefined) return { type: "nothing-to-play" };
+		| { type: "playing-ended"; end: E }
+		/** What was played ended for a GOAWAY on its stream. */
+		| { type: "track-moved"; goAway: GoAwayNotice };
+	return keepMoving<{ connection: MoqtConnection }, Over>({
+		async connect(goAway) {
+			const connection = await options.connect(goAway);
+			if (connection === undefined) throw new NothingToPlay();
+			return { connection };
+		},
+		async run({ connection }, signal) {
 			/** Resolved when what was played ended for a GOAWAY on its stream. */
 			let trackMoved: (notice: GoAwayNotice) => void = () => {};
-			const moved = Promise.race([
-				connection.goAway,
-				new Promise<GoAwayNotice>((resolve) => {
-					trackMoved = resolve;
-				}),
-			]).then((notice): Over => ({ type: "moved", goAway: notice }));
+			const moved = new Promise<GoAwayNotice>((resolve) => {
+				trackMoved = resolve;
+			});
 			const play = async (): Promise<{ ended: Promise<E> }> => {
 				const { ended } = await options.play(connection, signal);
 				return {
@@ -400,85 +280,85 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 				connection.closed.then(
 					(close): Over => ({ type: "session-ended", close }),
 				),
-				moved,
+				moved.then((goAway): Over => ({ type: "track-moved", goAway })),
 			]);
-			const stop = (): void => connection.close();
-			signal.addEventListener("abort", stop, { once: true });
-			try {
-				if (signal.aborted) stop();
-				const { stay } = options;
-				if (stay !== undefined) {
-					const session = sessions + 1;
-					// Raced with the GOAWAY: `play` may wait for an answer the
-					// relay that goes away does not give. Closing the session
-					// below ends what is left of it.
-					const over = await Promise.race([
-						moved.then((close) => ({ type: "session-ended" as const, close })),
-						stayOnSession<E, Over>({
-							play,
-							closed: gone,
-							notYet: stay.notYet,
-							againAfter: (error) =>
-								error instanceof RequestFailedError
-									? error.retryWaitMs
-									: undefined,
-							wait: (ms) => waitFor(ms, signal),
-							stopped: () => signal.aborted,
-							...(stay.againMs === undefined ? {} : { againMs: stay.againMs }),
-							onPlaying() {
-								sessions = session;
-								options.onState?.({ type: "playing", session, connection });
-							},
-							onNotYet: (error) =>
-								options.onState?.({ type: "not-yet", error }),
-							onEnded: (end) =>
-								options.onState?.({ type: "playing-ended", end }),
-						}),
-					]);
-					// The caller stopped: its signal closes the session.
-					return over.type === "session-ended" ? over.close : await gone;
-				}
-				const started = await Promise.race([play(), moved]);
-				if (!("ended" in started)) return started;
-				const { ended } = started;
-				sessions += 1;
-				options.onState?.({ type: "playing", session: sessions, connection });
-				return await Promise.race([
-					gone,
-					ended.then((end): Over => {
-						const notice = options.movedBy?.(end);
-						return notice === undefined
-							? { type: "playing-ended", end }
-							: { type: "moved", goAway: notice };
-					}),
-				]);
-			} catch (error) {
-				const notice = await goAwayBehind(connection, error);
-				if (notice === undefined) throw error;
-				return { type: "moved", goAway: notice };
-			} finally {
-				signal.removeEventListener("abort", stop);
-				// Also a session on which nothing could be played is not left open.
-				// NO_ERROR, also after a GOAWAY (§3.6).
-				connection.close();
+			const { stay } = options;
+			if (stay !== undefined) {
+				const session = sessions + 1;
+				const over = await stayOnSession<E, Over>({
+					play,
+					closed: gone,
+					notYet: stay.notYet,
+					againAfter: (error) =>
+						error instanceof RequestFailedError ? error.retryWaitMs : undefined,
+					wait: (ms) => waitFor(ms, signal),
+					stopped: () => signal.aborted,
+					...(stay.againMs === undefined ? {} : { againMs: stay.againMs }),
+					onPlaying() {
+						sessions = session;
+						options.onState?.({ type: "playing", session, connection });
+					},
+					onNotYet: (error) => options.onState?.({ type: "not-yet", error }),
+					onEnded: (end) => options.onState?.({ type: "playing-ended", end }),
+				});
+				// The caller stopped: its signal closes the session.
+				return over.type === "session-ended" ? over.close : await gone;
+			}
+			const { ended } = await play();
+			sessions += 1;
+			options.onState?.({ type: "playing", session: sessions, connection });
+			return await Promise.race([
+				gone,
+				ended.then((end): Over => ({ type: "playing-ended", end })),
+			]);
+		},
+		movedBy(over) {
+			switch (over.type) {
+				case "track-moved":
+					return over.goAway;
+				case "playing-ended":
+					return options.movedBy?.(over.end);
+				case "session-ended":
+					return undefined;
 			}
 		},
-		wait: (ms) => waitFor(pause.pauseMs(ms), signal),
-		stopped: () => signal.aborted,
-		...(options.delayMs === undefined ? {} : { delayMs: options.delayMs }),
+		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
+		...(options.signal === undefined ? {} : { signal: options.signal }),
 		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
 		onOutcome(outcome) {
-			const moved =
-				outcome.type === "ended" && outcome.result.type === "moved"
-					? outcome.result.goAway
-					: undefined;
-			if (moved !== undefined) movedBy = moved;
-			pause.ended(moved !== undefined);
-			options.onState?.(
-				outcome.type === "ended"
-					? outcome.result
-					: { type: "failed", error: outcome.error },
-			);
+			options.onState?.(playingStateOf(outcome));
 		},
 	});
+}
+
+function playingStateOf<E>(
+	outcome: MovingOutcome<
+		| { type: "session-ended"; close: SessionClose }
+		| { type: "playing-ended"; end: E }
+		| { type: "track-moved"; goAway: GoAwayNotice }
+	>,
+): PlayingState<E> {
+	switch (outcome.type) {
+		case "done":
+			return outcome.result.type === "track-moved"
+				? { type: "moved", goAway: outcome.result.goAway }
+				: outcome.result;
+		case "moved":
+			return outcome;
+		case "failed":
+			return outcome.error instanceof NothingToPlay
+				? { type: "nothing-to-play" }
+				: outcome;
+	}
+}
+
+/**
+ * `KeepPlayingOptions.connect` gave no connection. WHY a rejection of
+ * `connect`, and no outcome of `keepMoving` of its own: no other client has
+ * nothing to connect to, and it is paused for as a failed try is.
+ */
+class NothingToPlay extends Error {
+	constructor() {
+		super("there is nothing to connect to now");
+	}
 }

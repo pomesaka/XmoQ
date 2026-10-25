@@ -1,8 +1,8 @@
 # xmoq-again
 
-When a track that ended, or was refused, is asked for again on the same session. No input or output, and no dependencies. The terminal viewer ([`xmoq-watch`](../watch/README.md), its sound and its chat's `lines`) and the chat's gatherer ([`xmoq-chat`](../chat/README.md), a participant's `said`) ask by it.
+When a track that ended, or was refused, is asked for again on the same session. No input or output, and no dependencies. The terminal viewer ([`xmoq-watch`](../watch/README.md)), the agent ([`xmoq-agent`](../agent/README.md)), the part they share (`xmoq-viewer-io`), the chat's gatherer ([`xmoq-chat`](../chat/README.md), a participant's `said`) and the transcriber ([`xmoq-transcriber`](../transcriber/README.md)) ask by it.
 
-The rule and its default values are the watching page's (`stayOnSession` of `packages/media/src/core/keep-session.ts`), all **provisional** there:
+The rule and its default values are the pages' (`createAskAgain` of `@xmoq/moqt`, `packages/moqt/src/core/again.ts`), all **provisional**; both are tested with the rows of [`fixtures/ask-again/same-session.tsv`](../../fixtures/ask-again/README.md):
 
 | Value | Default | Where |
 |---|---|---|

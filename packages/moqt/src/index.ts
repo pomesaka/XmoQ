@@ -4,6 +4,19 @@
 // them yet. The types of `ConnectOptions.diagnostics` are in the entry
 // "@xmoq/moqt/diagnostics".
 
+export {
+	type AskAgain,
+	type AskAgainPauses,
+	createAskAgain,
+	createNextSession,
+	DEFAULT_ASK_AGAIN_DELAY_MS,
+	DEFAULT_RECONNECT_DELAY_MS,
+	MAX_MIN_ASK_AGAIN_DELAY_MS,
+	MAX_NAMED_ASK_AGAIN_DELAY_MS,
+	MIN_ASK_AGAIN_DELAY_MS,
+	type NextSession,
+	type SessionEnding,
+} from "./core/again.ts";
 export type { FetchRange, Redirect } from "./core/control-message.ts";
 export { RequestErrorCode } from "./core/error.ts";
 export type { FetchObject, RangeEnd } from "./core/fetch.ts";
@@ -96,3 +109,14 @@ export {
 	decodeFetchBody,
 	FetchBodyError,
 } from "./webtransport/fetch-objects.ts";
+export {
+	goAwayBehind,
+	type KeepMovingOptions,
+	keepMoving,
+	type MovingConnection,
+	type MovingOutcome,
+	type MovingSession,
+	type SessionMovingOutcome,
+	sessionMovingOutcome,
+	waitFor,
+} from "./webtransport/keep-moving.ts";

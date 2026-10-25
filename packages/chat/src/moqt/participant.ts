@@ -4,13 +4,16 @@
 // draft-ietf-moq-transport-18.
 
 import {
+	createAskAgain,
 	decodeFetchBody,
 	type MoqtConnection,
 	type PeerSubscribe,
 	type PublishedTrack,
 	RequestErrorCode,
+	RequestFailedError,
 	type Subscription,
 	type SubscriptionEnd,
+	waitFor,
 } from "@xmoq/moqt";
 import {
 	catchUpLines,
@@ -66,20 +69,12 @@ const MAX_LINE_PAYLOAD = 64 * 1024;
  * measured (the interop run `chat-pages.ts` had it answered within its step
  * of 20 s); the own relay holds 30 seconds at the most. A relay that does
  * not hold it (moqtail's 0.15.0) refuses at once, and the SUBSCRIBE is made
- * again `AGAIN_MS` later.
+ * again after the pause of `createAskAgain` (@xmoq/moqt).
  */
 const RENDEZVOUS_MS = 10_000;
 
 /** How long the Joining FETCH has, as `followCatalog` of @xmoq/msf gives its own, and for the same reason. **Provisional**. */
 const FETCH_TIMEOUT_MS = 15_000;
-
-/**
- * How long to wait before the room is subscribed to again after its
- * subscription ended or was refused: the gatherer started again, or the
- * room was not published in time. **Provisional**, as the 2 seconds the
- * demo's pages wait before they connect again.
- */
-const AGAIN_MS = 2_000;
 
 /**
  * Lines being written on `said` at once. One more is not sent. WHY a bound:
@@ -191,19 +186,6 @@ export interface ChatParticipant {
 	status(): ChatStatus;
 }
 
-const delay = (ms: number, signal: AbortSignal): Promise<void> =>
-	new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true },
-		);
-	});
-
 const same = (a: readonly Uint8Array[], b: readonly Uint8Array[]): boolean =>
 	a.length === b.length &&
 	a.every(
@@ -230,7 +212,9 @@ function described(end: SubscriptionEnd): string {
  * (PUBLISH_NAMESPACE), serves the relay's SUBSCRIBE for `said` on it, and
  * subscribes to the room's `lines`, with a Joining FETCH for the newest
  * `HISTORY_LINES` where the room has lines. When the subscription ends it
- * is made again, `AGAIN_MS` later, for as long as the session lasts, and
+ * is made again after the pause of `createAskAgain` (@xmoq/moqt): 1 s,
+ * or the Retry Interval of a refusal, as the terminal viewer asks for the
+ * same track. For as long as the session lasts, and
  * its Joining FETCH asks for the lines after the last one had
  * (`historyToFetch`).
  *
@@ -418,6 +402,7 @@ export async function joinChat(
 	};
 
 	const follow = async (): Promise<void> => {
+		const again = createAskAgain();
 		while (!stop.signal.aborted) {
 			let subscription: Subscription;
 			try {
@@ -431,13 +416,19 @@ export async function joinChat(
 				});
 			} catch (error) {
 				changed({ lastEnd: `refused: ${String(error).slice(0, 120)}` });
-				await delay(AGAIN_MS, stop.signal);
+				await waitFor(
+					again.afterRefusal(
+						error instanceof RequestFailedError ? error.retryWaitMs : undefined,
+					),
+					stop.signal,
+				);
 				continue;
 			}
 			const cancel = (): void => {
 				void subscription.cancel().catch(() => {});
 			};
 			stop.signal.addEventListener("abort", cancel, { once: true });
+			again.subscribed();
 			changed({ following: true });
 			// WHY a failed FETCH is no failure of the participant: the lines
 			// that come live are there all the same; the history is missing.
@@ -447,7 +438,7 @@ export async function joinChat(
 			await fetched;
 			stop.signal.removeEventListener("abort", cancel);
 			changed({ following: false, lastEnd: described(end) });
-			await delay(AGAIN_MS, stop.signal);
+			await waitFor(again.afterEnd(), stop.signal);
 		}
 	};
 	void follow();

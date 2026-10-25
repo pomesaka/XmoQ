@@ -10,7 +10,13 @@ import {
 	playAudioTrack,
 	playVideoTrack,
 } from "@xmoq/media";
-import type { MoqtConnection, NamespaceSubscriptionEnd } from "@xmoq/moqt";
+import {
+	createAskAgain,
+	type MoqtConnection,
+	type NamespaceSubscriptionEnd,
+	RequestFailedError,
+	waitFor,
+} from "@xmoq/moqt";
 import { type CatalogTrack, followCatalog } from "@xmoq/msf";
 import { meetingPrefix, participantOf } from "../core/names.ts";
 import {
@@ -38,9 +44,6 @@ export const DEFAULT_MOST_OTHERS = 48;
  * the transcript's.
  */
 const CATALOG_RENDEZVOUS_MS = 10_000;
-
-/** How long to wait before a catalog is followed again after its subscription ended or failed. **Provisional**, as the transcript waits. */
-const CATALOG_AGAIN_MS = 2_000;
 
 /** What of a participant is received. */
 export type ReceivedKind = "video" | "audio";
@@ -98,21 +101,6 @@ export interface Meeting {
 	ids(): string[];
 	/** Whose video is received, or would be once its catalog is read. */
 	watched(): string[];
-}
-
-/** Waits `ms`, or less where `signal` is aborted. */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true },
-		);
-	});
 }
 
 const utf8 = new TextEncoder();
@@ -257,13 +245,18 @@ export function createMeeting(options: MeetingOptions): Meeting {
 		): Promise<void> => {
 			const { signal: stopped } = participant.stop;
 			const namespace = [...prefix, id].map((field) => utf8.encode(field));
+			// The pause before the catalog is followed again: the rule every
+			// client asks by (`createAskAgain` of @xmoq/moqt).
+			const again = createAskAgain();
 			while (!stopped.aborted) {
+				let pauseMs: number;
 				try {
 					const follower = await followCatalog(connection, {
 						namespace,
 						signal: stopped,
 						rendezvousTimeoutMs: CATALOG_RENDEZVOUS_MS,
 					});
+					again.subscribed();
 					const states = follower.states.getReader();
 					for (;;) {
 						const next = await states.read();
@@ -279,11 +272,15 @@ export function createMeeting(options: MeetingOptions): Meeting {
 						participant.tracks = chosen;
 						sync();
 					}
+					pauseMs = again.afterEnd();
 				} catch (error) {
 					if (!stopped.aborted)
 						tell({ type: "failed", id, what: "catalog", error });
+					pauseMs = again.afterRefusal(
+						error instanceof RequestFailedError ? error.retryWaitMs : undefined,
+					);
 				}
-				await delay(CATALOG_AGAIN_MS, stopped);
+				await waitFor(pauseMs, stopped);
 			}
 		};
 

@@ -23,15 +23,6 @@ export {
 	type WaitingFrame,
 } from "./core/frame-queue.ts";
 export {
-	DEFAULT_ASK_AGAIN_DELAY_MS,
-	DEFAULT_RECONNECT_DELAY_MS,
-	type KeepSessionOptions,
-	keepSession,
-	type SessionOutcome,
-	type StayOptions,
-	stayOnSession,
-} from "./core/keep-session.ts";
-export {
 	AUTO_MARGIN_MS,
 	AUTO_MIN_SAMPLES,
 	AUTO_STEP_MS,
@@ -102,6 +93,7 @@ export {
 	type PublishingState,
 	type ServedTrack,
 } from "./moqt/keep-broadcast.ts";
+export { type StayOptions, stayOnSession } from "./moqt/stay-on-session.ts";
 export {
 	createVideoTrackPublisher,
 	DEFAULT_MAX_PENDING_BYTES,

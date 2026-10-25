@@ -1,20 +1,23 @@
 //! When a track that ended, or was refused, is asked for again on the same
-//! session: the terminal viewer's sound and chat (`xmoq-watch`), whose
-//! subscription a relay can end while the session goes on, and the
-//! gatherer's subscription to a participant (`xmoq-chat`).
+//! session, whose subscription a relay can end while the session goes on:
+//! by the terminal viewer (`xmoq-watch`), the agent (`xmoq-agent`), the
+//! part they share (`xmoq-viewer-io`), the gatherer (`xmoq-chat`) and the
+//! transcriber (`xmoq-transcriber`).
 //!
-//! The rule and the default values are those of the watching page
-//! (`stayOnSession` in `packages/media/src/core/keep-session.ts`, which
-//! `keepTrackOnSession` uses for its sound), so that every client asks a
-//! relay as often. All of them are provisional there.
+//! The rule and the default values are those of the pages
+//! (`createAskAgain` in `packages/moqt/src/core/again.ts`), so that every
+//! client asks a relay as often; both are tested with the rows of
+//! `fixtures/ask-again/same-session.tsv`. All of them are provisional.
 //!
 //! WHY a crate of its own: the terminal viewer and the gatherer both ask
 //! by it, and neither may depend on the other (the viewer builds
 //! `openh264` from C++, the gatherer SQLite from C). WHY NOT in
 //! `xmoq-moqt`: how often an application asks is its policy and not the
 //! protocol's, and the protocol libraries hand a Retry Interval on without
-//! waiting by themselves (as `@xmoq/moqt` does). WHY NOT a copy in each
-//! client: the rule would be in two places, and the two would drift.
+//! waiting by themselves. The pages have it in `@xmoq/moqt` only because
+//! their packages of layer 0 cannot depend on each other (the top of
+//! `again.ts` there). WHY NOT a copy in each client: the rule would be in
+//! two places, and the two would drift.
 
 /// The pause after a subscription ended, and after a refusal that names
 /// no time (`DEFAULT_ASK_AGAIN_DELAY_MS`).
@@ -113,96 +116,47 @@ impl AskAgain {
 mod tests {
     use super::*;
 
-    /// What happens to the track, in order: `Some(named)` a refusal,
-    /// `None` an end; `Subscribed` resets. Each with the pause expected.
-    enum Step {
-        Ended(u64),
-        Refused(Option<u64>, u64),
-        Subscribed,
+    /// A number of the table, or `None` for `-`.
+    fn value_of(field: &str) -> Option<u64> {
+        (field != "-").then(|| field.parse().unwrap())
     }
 
+    /// `fixtures/ask-again/same-session.tsv`, which `createAskAgain` of
+    /// `@xmoq/moqt` is tested with too.
     #[test]
-    fn pauses_follow_the_rule_of_the_watching_page() {
-        use Step::{Ended, Refused, Subscribed};
-        let cases: [(&str, Pauses, Vec<Step>); 8] = [
-            ("an end", Pauses::default(), vec![Ended(1000)]),
-            (
-                "a refusal without a time",
-                Pauses::default(),
-                vec![Refused(None, 1000)],
-            ),
-            (
-                "a refusal that names 3 s",
-                Pauses::default(),
-                vec![Refused(Some(3000), 3000)],
-            ),
-            (
-                "refusals that say at once: 100, 200, 400 ms",
-                Pauses::default(),
-                vec![
-                    Refused(Some(0), 100),
-                    Refused(Some(0), 200),
-                    Refused(Some(0), 400),
-                ],
-            ),
-            (
-                "the shortest grows to 5 s and no further, and a subscription resets it",
-                Pauses::default(),
-                vec![
-                    Refused(Some(0), 100),
-                    Refused(Some(0), 200),
-                    Refused(Some(0), 400),
-                    Refused(Some(0), 800),
-                    Refused(Some(0), 1600),
-                    Refused(Some(0), 3200),
-                    Refused(Some(0), 5000),
-                    Refused(Some(0), 5000),
-                    Subscribed,
-                    Refused(Some(0), 100),
-                ],
-            ),
-            (
-                "a refusal that names a minute: 30 s",
-                Pauses::default(),
-                vec![Refused(Some(60_000), 30_000)],
-            ),
-            (
-                "another pause after an end is the pause after a refusal without a time too",
-                Pauses {
-                    after_end_ms: 2500,
-                    ..Pauses::default()
-                },
-                vec![Ended(2500), Refused(None, 2500), Refused(Some(0), 100)],
-            ),
-            (
-                "other bounds of the named pause",
-                Pauses {
-                    after_end_ms: 1000,
-                    shortest_ms: 300,
-                    most_shortest_ms: 500,
-                    most_named_ms: 4000,
-                },
-                vec![
-                    Refused(Some(0), 300),
-                    Refused(Some(0), 500),
-                    Refused(Some(0), 500),
-                    Refused(Some(9000), 4000),
-                    Subscribed,
-                    Refused(Some(0), 300),
-                ],
-            ),
-        ];
-        for (name, pauses, steps) in cases {
-            let mut again = AskAgain::new(pauses);
-            for (index, step) in steps.into_iter().enumerate() {
-                match step {
-                    Ended(ms) => assert_eq!(again.after_end(), ms, "{name}: step {index}"),
-                    Refused(named, ms) => {
-                        assert_eq!(again.after_refusal(named), ms, "{name}: step {index}");
-                    }
-                    Subscribed => again.subscribed(),
+    fn pauses_follow_the_shared_table() {
+        let table = include_str!("../../../fixtures/ask-again/same-session.tsv");
+        let mut rows = 0;
+        for row in table.lines() {
+            let [name, after_end, shortest, most_shortest, most_named, steps] =
+                row.split('\t').collect::<Vec<_>>()[..]
+            else {
+                panic!("{row}");
+            };
+            let default = Pauses::default();
+            let mut again = AskAgain::new(Pauses {
+                after_end_ms: value_of(after_end).unwrap_or(default.after_end_ms),
+                shortest_ms: value_of(shortest).unwrap_or(default.shortest_ms),
+                most_shortest_ms: value_of(most_shortest).unwrap_or(default.most_shortest_ms),
+                most_named_ms: value_of(most_named).unwrap_or(default.most_named_ms),
+            });
+            for step in steps.split(' ') {
+                if step == "subscribed" {
+                    again.subscribed();
+                    continue;
                 }
+                let (what, ms) = step.split_once('=').unwrap();
+                let pause = match what.strip_prefix("refused:") {
+                    Some(named) => again.after_refusal(value_of(named)),
+                    None if what == "ended" => again.after_end(),
+                    None => panic!("{name}: no step {step}"),
+                };
+                assert_eq!(pause, ms.parse::<u64>().unwrap(), "{name}: {step}");
             }
+            rows += 1;
         }
+        // WHY not a count of rows: a row that is added would have it changed in
+        // both implementations; a table that is not read is what this guards against.
+        assert!(rows > 0);
     }
 }

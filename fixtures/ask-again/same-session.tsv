@@ -1,0 +1,8 @@
+an end	-	-	-	-	ended=1000
+a refusal without a time	-	-	-	-	refused:-=1000
+a refusal that names 3 s	-	-	-	-	refused:3000=3000
+refusals that say at once: 100, 200, 400 ms	-	-	-	-	refused:0=100 refused:0=200 refused:0=400
+the shortest grows to 5 s and no further, and a subscription resets it	-	-	-	-	refused:0=100 refused:0=200 refused:0=400 refused:0=800 refused:0=1600 refused:0=3200 refused:0=5000 refused:0=5000 subscribed refused:0=100
+a refusal that names a minute: 30 s	-	-	-	-	refused:60000=30000
+another pause after an end is the pause after a refusal without a time too	2500	-	-	-	ended=2500 refused:-=2500 refused:0=100
+other bounds of the named pause	1000	300	500	4000	refused:0=300 refused:0=500 refused:0=500 refused:9000=4000 subscribed refused:0=300

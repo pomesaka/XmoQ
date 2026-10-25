@@ -1,21 +1,20 @@
 // A reader of a transcript kept across sessions: when a session ends it
 // connects again and follows anew, and when the relay sends GOAWAY (§10.4)
-// it goes where the GOAWAY says. Section numbers are of
-// draft-ietf-moq-transport-18.
+// it goes where the GOAWAY says. The loop is `keepMoving` of @xmoq/moqt.
+// Section numbers are of draft-ietf-moq-transport-18.
 
-import type { GoAwayNotice, MoqtConnection, SessionClose } from "@xmoq/moqt";
+import {
+	type GoAwayNotice,
+	keepMoving,
+	type MoqtConnection,
+	type SessionClose,
+	sessionMovingOutcome,
+} from "@xmoq/moqt";
 import {
 	type FollowTranscriptOptions,
 	followTranscript,
 	type TranscriptReader,
 } from "./follow.ts";
-
-/**
- * How long to wait before connecting again after a session ended or could
- * not be made. **Provisional**, as the 2 seconds of `@xmoq/chat`'s
- * `keepInTheRoom` and the demo's pages.
- */
-export const DEFAULT_TRANSCRIPT_AGAIN_MS = 2_000;
 
 /** What a session of the reader needs of its connection. */
 export type TranscriptConnection = Pick<
@@ -47,25 +46,12 @@ export interface KeepFollowingTranscriptOptions {
 	connect(goAway?: GoAwayNotice): Promise<TranscriptConnection>;
 	/** What `followTranscript` is given on each session. */
 	follow: FollowTranscriptOptions;
-	/** `DEFAULT_TRANSCRIPT_AGAIN_MS` when left out. */
+	/** The least time from one try at a session to the next: `DEFAULT_RECONNECT_DELAY_MS` of `@xmoq/moqt` when left out (`KeepMovingOptions.againMs`). */
 	againMs?: number;
 	/** Aborting it closes the session and ends the trying. */
 	signal?: AbortSignal;
 	onState?(state: KeptTranscriptState): void;
 }
-
-const delay = (ms: number, signal: AbortSignal): Promise<void> =>
-	new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true },
-		);
-	});
 
 /**
  * Follows the transcript for as long as `signal` lets it: connects, follows
@@ -73,63 +59,40 @@ const delay = (ms: number, signal: AbortSignal): Promise<void> =>
  * `againMs`. Resolves once `signal` was aborted; never rejects.
  *
  * **A GOAWAY ends the session with NO_ERROR**, and the next session is made
- * with it. WHY NOT go on reading on the old session until the relay closes
- * it, as §3.6 lets a client: the relay refuses the SUBSCRIBE that follows an
- * end of `speech` (GOING_AWAY), and a full relay that sends a session away
+ * with it, at once, once in a row, as `keepMoving` does for every client.
+ * WHY NOT go on reading on the old session until the relay closes it, as
+ * §3.6 lets a client: the relay refuses the SUBSCRIBE that follows an end
+ * of `speech` (GOING_AWAY), and a full relay that sends a session away
  * (`--when-full`) closes it only after its Timeout. Each session's reader
  * fetches the latest pieces anew (`follow.latest`), so a piece the session
  * before handed on can be handed on again: the caller passes over a number
  * it had (as the demo's captions do).
- *
- * The next session after one a GOAWAY ended is made at once, once in a row,
- * as `@xmoq/media` and `@xmoq/chat` do: a relay that sends GOAWAY on every
- * session would otherwise have them made as fast as can be.
  */
 export async function keepFollowingTranscript(
 	options: KeepFollowingTranscriptOptions,
 ): Promise<void> {
 	const signal = options.signal ?? new AbortController().signal;
-	const againMs = options.againMs ?? DEFAULT_TRANSCRIPT_AGAIN_MS;
-	let movedBy: GoAwayNotice | undefined;
-	let atOnce = false;
-	let attempt = 0;
 	let sessions = 0;
-	while (!signal.aborted) {
-		attempt += 1;
-		options.onState?.({ type: "connecting", attempt });
-		let moved: GoAwayNotice | undefined;
-		try {
-			const connection = await options.connect(movedBy);
-			const stop = (): void => connection.close();
-			signal.addEventListener("abort", stop, { once: true });
+	await keepMoving<{ connection: TranscriptConnection }, SessionClose>({
+		connect: async (goAway) => ({ connection: await options.connect(goAway) }),
+		async run({ connection }) {
 			const reader = followTranscript(connection, options.follow);
 			try {
-				if (signal.aborted) stop();
 				sessions += 1;
 				options.onState?.({ type: "reading", session: sessions, reader });
-				const over = await Promise.race([
-					connection.closed.then((close) => ({ close })),
-					connection.goAway.then((notice) => ({ notice })),
-				]);
-				if ("notice" in over) moved = over.notice;
-				// A session the caller's `signal` closed is the caller's end.
-				else if (!signal.aborted) {
-					options.onState?.({ type: "session-ended", close: over.close });
-				}
+				return await connection.closed;
 			} finally {
 				reader.stop();
-				signal.removeEventListener("abort", stop);
-				// NO_ERROR, also after a GOAWAY (§3.6).
-				connection.close();
 			}
-		} catch (error) {
-			if (!signal.aborted) options.onState?.({ type: "failed", error });
-		}
-		if (moved !== undefined) {
-			movedBy = moved;
-			options.onState?.({ type: "moved", goAway: moved });
-		}
-		atOnce = moved !== undefined && !atOnce;
-		await delay(atOnce ? 0 : againMs, signal);
-	}
+		},
+		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
+		signal,
+		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
+		onOutcome(outcome) {
+			const state = sessionMovingOutcome(outcome);
+			// A session the caller's `signal` closed is the caller's end.
+			if (state.type !== "moved" && signal.aborted) return;
+			options.onState?.(state);
+		},
+	});
 }

@@ -53,7 +53,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 - `xmoq-chat-tracks`と`xmoq-transcript-tracks`はCコンパイラを要らない形に保ち、`xmoq-watch`をSQLiteに依存させない
 - whisper.cppのモデルはリポジトリに入れない（`mise run speech-model`がユーザーのキャッシュに取る）
 - 本体（`crates/`、`packages/`）から`spikes/`、`demo/`、`interop/`、照合のためだけの`xmoq-quiet-peer`に依存させない。`spikes/`と`demo/`はlintと型検査の対象外。`interop/`は対象で、`interop/peers/`は`moqtail`のコードの写しなので整形もlintもしない（元との差分を読めるようにするため）
-- 断りや終わりの後にいつ頼み直すかの規則は`xmoq-again`にある。クライアントごとに書き直さず、これを使う
+- 断りや終わりの後にいつ頼み直すかの規則は、Rustは`xmoq-again`、TypeScriptは`@xmoq/moqt`（`createAskAgain`、`createNextSession`、GOAWAYで移るループの`keepMoving`）にある。層0のパッケージどうしは依存できないので、TypeScriptの側は`@xmoq/moqt`に置く。表は`fixtures/ask-again/`で、両方のテストが読む。クライアントごとに書き直さず、これを使う
 - 部屋のトークンの形は`xmoq-room-token`にあり、部屋（`spikes/durable-objects-room/worker.js`）がJavaScriptで同じ形を別に書いている。変えるときは両方を直す
 
 ## 実装の決まり

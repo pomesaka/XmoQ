@@ -1,0 +1,6 @@
+a session that ends is followed by the next after the pause	2000	ended=2000 ended=2000
+a session that cannot be made is tried again after the same pause	500	failed=500 failed=500 ended=500
+a GOAWAY has the next session made at once	2000	moved=0 ended=2000
+GOAWAYs in a row: at once once, then after the pause, then at once again	2000	moved=0 moved=2000 moved=0 moved=2000
+a session that ends or fails after a GOAWAY is followed after the pause, and the next GOAWAY at once	2000	moved=0 failed=2000 moved=0 ended=2000 moved=0
+a session longer than the pause is followed at once	2000	ended@5000=0 ended@500=1500 failed@2000=0 moved@100=0 moved@100=1900
