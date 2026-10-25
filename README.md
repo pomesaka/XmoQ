@@ -53,6 +53,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [The transcriber, `xmoq-transcriber`](crates/transcriber/README.md)
 - [Cutting sound and reading it with whisper.cpp, `xmoq-speech`](crates/speech/README.md)
 - [The tracks of the transcripts, `xmoq-transcript-tracks`](crates/transcript-tracks/README.md)
+- [A reader of the transcripts over MoQ tracks, `@xmoq/transcript`](packages/transcript/README.md)
 - [The payload of a transcript, shared by the implementations](fixtures/transcript-tracks/README.md)
 - [A voice for the transcriber's interop run](fixtures/speech/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
@@ -75,7 +76,7 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run check:ts` | Biome (format and lint), oxlint (`as` assertions), `typecheck` for packages and `interop/`, `bun test` per package |
 | `mise run check:layers` | Dependency rules: `xmoq-moqt` stays free of I/O crates, nothing depends on `spikes/`, packages do not depend on `interop/` |
 | `mise run check:workflows` | `actionlint` and `shellcheck` |
-| `mise run demo` | Starts the own relay and a web server; a page publishes video (a painted clock or the camera) and other pages watch it, in Chromium. See [`demo/README.md`](demo/README.md). Outside lint and type checking |
+| `mise run demo` | Starts the own relay and a web server; a page publishes video (a painted clock or the camera) and other pages watch it, in Chromium, with captions from the transcriber where its models are fetched. See [`demo/README.md`](demo/README.md). Outside lint and type checking |
 | `mise run watch -- <flags>` | The viewer for the terminal, `xmoq-watch`: the picture of a broadcast in Ghostty or kitty, its sound, and the chat of its room. `-- --room http://127.0.0.1:8787/rooms/demo` next to `mise run demo`. See [`crates/watch/README.md`](crates/watch/README.md) |
 | `mise run chat -- <flags>` | The gatherer of the chat, `xmoq-chat`: numbers the lines of every room, keeps them in a SQLite file and publishes them as one track a room. See [`crates/chat/README.md`](crates/chat/README.md) |
 | `mise run transcriber -- <flags>` | The transcriber, `xmoq-transcriber`: reads the voices of the broadcasts under a prefix with whisper.cpp and publishes their words as one track a prefix. See [`crates/transcriber/README.md`](crates/transcriber/README.md) |

@@ -1,0 +1,22 @@
+{
+	"name": "@xmoq/transcript",
+	"version": "0.0.0",
+	"description": "A reader of the transcripts over MoQ tracks: the track speech of the transcriber xmoq-transcriber",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.core.json"
+	},
+	"dependencies": {
+		"@xmoq/json": "workspace:*",
+		"@xmoq/moqt": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.2",
+		"typescript": "6.0.3"
+	}
+}

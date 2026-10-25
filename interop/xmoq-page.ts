@@ -342,6 +342,14 @@ export type OwnPageExtras = {
 	/** What `publishVoice` has made so far. */
 	voiceReport(): Promise<PageVoiceReport>;
 	/**
+	 * Reads the transcript of the prefix `listened` (its fields between
+	 * slashes) with `followTranscript` of `@xmoq/transcript`, on the page's
+	 * connection, fetching `latest` pieces when it begins.
+	 */
+	followTranscript(listened: string, latest: number): Promise<void>;
+	/** The pieces `followTranscript` was handed, in order. */
+	transcriptReport(): Promise<PageTranscriptPiece[]>;
+	/**
 	 * As `publishTrack` of the page, with the Track Property DYNAMIC_GROUPS
 	 * = 1 (transport §12.6) on the PUBLISH, and a handler for the
 	 * NEW_GROUP_REQUESTs of the subscriber. `sendObject` then sends on this
@@ -631,6 +639,15 @@ export const BROADCAST: {
 export const VOICE: { audio: string; pauseMs: number } = {
 	audio: "audio",
 	pauseMs: 1500,
+};
+
+/** A piece of a transcript as a page was handed it. */
+export type PageTranscriptPiece = {
+	/** The Group ID, in decimal. */
+	number: string;
+	from: string[];
+	text: string;
+	how: "live" | "history";
 };
 
 /** What `publishVoice` made on a page. */

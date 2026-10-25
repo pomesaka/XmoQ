@@ -1,6 +1,6 @@
 # xmoq-transcript-tracks
 
-The tracks of the transcripts (decided on 2026-10-25), as every side uses them: the transcriber ([`xmoq-transcriber`](../transcriber/README.md)) writes them, and an agent and, later, a page read them. It does no input or output and needs nothing built from C. A reader does not need the C++ and cmake that the transcriber's whisper.cpp needs.
+The tracks of the transcripts (decided on 2026-10-25), as every side uses them: the transcriber ([`xmoq-transcriber`](../transcriber/README.md)) writes them, and an agent and a page ([`@xmoq/transcript`](../../packages/transcript/README.md)) read them. It does no input or output and needs nothing built from C. A reader does not need the C++ and cmake that the transcriber's whisper.cpp needs.
 
 | Module | What it has |
 |---|---|

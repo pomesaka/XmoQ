@@ -80,6 +80,19 @@ Nothing was written before: the question came when the transcriber was to run be
 
 **Decided on this: a voice is told by Silero by default**, and by loudness with `--voice loudness`. The interop pairing with Silero passed (6.0 s). Its pieces' words were there 775 ms and 460 ms after their ends.
 
+### 4. The demo's captions (added on 2026-10-25)
+
+`bun demo/serve.ts --relay-port 36400 --port 36401 --rooms-port 36402` (no rooms ran), with the release build of the transcriber, `large-v3-turbo-q5_0`, Silero, and `--transcribe-language auto`. A script drove headless Chromium 156 with a fake microphone that plays a WAV file over and over (`--use-file-for-fake-audio-capture`). The publishing page was opened with `?audio=mic`, or without it for the tone, and a watching page 3 s later. The script printed every caption the watching page showed.
+
+Written before: with a voice the page shows its words, and with the tone none.
+
+- **The English voice** (5.5 s, played over and over without a pause between): the page showed "Hello everyone. Today we will talk about how the relay delivers video and audio to many viewers." three times over in one caption. The file plays without a pause between its rounds, so the voice did not end, and pieces were cut at 15 s.
+- **The Japanese voice**: 「こんにちは。今日は新しい配信の仕組みについて話します。リレーを通して映像と音声を届けます。」 twice over, then the next piece.
+- **The tone**: in the first run of 35 s, one caption, 「Hmm.」, came about 23 s after the publishing page began. In three more runs of 60 s, with a second transcriber that printed what it cut, no piece was cut and no caption came. What made the first piece was not found.
+- A page that came showed the latest piece of the transcript, though it was read minutes before. The page now shows a piece of its FETCH only where it was read less than 8 s before (`at`). Run once after that change: a watching page that came 12 s after the publishing page had closed showed no caption, and was following the transcript.
+
+The full interop run on the three changes of Silero, `@xmoq/json` and the captions (`mise run interop -- --base-port 36000`, with the machine's lock) ended 229 of 229 as expected (481.4 s).
+
 ## What was not run
 
 - Linux: neither the build of whisper.cpp nor the run. CI is to do both, with the processor alone.
