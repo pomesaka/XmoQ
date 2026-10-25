@@ -7,7 +7,7 @@
 //! another program than whisper.cpp, an agent among them. How the sound is
 //! cut, and what is done with the words, stay outside the reader.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
@@ -63,6 +63,31 @@ pub struct Opened {
     pub readers: Vec<Box<dyn Words + Send>>,
     /// What was opened, as fields of a line (`path=... language=...`).
     pub said: String,
+    /// The directory the readers write to, removed when this is dropped;
+    /// `None` where they write nothing.
+    pub dir: Option<Scratch>,
+}
+
+/// A directory of the readers' own, removed with what is in it when dropped.
+///
+/// WHY on drop: the transcriber returns from its loop on SIGTERM and Ctrl-C
+/// as on an error, so a value held there is dropped however it ends, short
+/// of SIGKILL.
+#[derive(Debug)]
+pub struct Scratch(PathBuf);
+
+impl Scratch {
+    /// The directory.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Opens `count` readers of `engine`, at least one: they read at once, each
@@ -94,6 +119,7 @@ pub fn open(engine: Engine, options: &EngineOptions, count: usize) -> Result<Ope
                     model.display(),
                     options.language
                 ),
+                dir: None,
             })
         }
         Engine::Command => {
@@ -101,13 +127,14 @@ pub fn open(engine: Engine, options: &EngineOptions, count: usize) -> Result<Ope
             // machine write pieces of the same names.
             let dir = std::env::temp_dir().join(format!("xmoq-transcriber-{}", std::process::id()));
             std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+            let dir = Scratch(dir);
             let mut readers: Vec<Box<dyn Words + Send>> = Vec::with_capacity(count);
             for n in 0..count.max(1) {
                 readers.push(Box::new(Command::new(
                     options.command.clone(),
                     &options.language,
                     options.command_limits,
-                    dir.join(format!("piece-{n}.wav")),
+                    dir.path().join(format!("piece-{n}.wav")),
                 )?));
             }
             Ok(Opened {
@@ -117,6 +144,7 @@ pub fn open(engine: Engine, options: &EngineOptions, count: usize) -> Result<Ope
                     options.command.join(" "),
                     options.language
                 ),
+                dir: Some(dir),
             })
         }
     }
@@ -136,5 +164,21 @@ mod tests {
         for (name, expected) in cases {
             assert_eq!(Engine::named(name), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn the_directory_of_command_readers_goes_when_dropped() {
+        let options = EngineOptions {
+            model: None,
+            cache: None,
+            language: "en".to_owned(),
+            command: vec!["true".to_owned()],
+            command_limits: CommandLimits::default(),
+        };
+        let opened = open(Engine::Command, &options, 2).unwrap();
+        let dir = opened.dir.as_ref().unwrap().path().to_owned();
+        assert!(dir.is_dir());
+        drop(opened);
+        assert!(!dir.exists());
     }
 }

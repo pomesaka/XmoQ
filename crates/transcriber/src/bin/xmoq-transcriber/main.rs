@@ -89,7 +89,13 @@ async fn run(args: Args) -> Result<()> {
         None
     };
     let loading = Instant::now();
-    let opened = xmoq_speech::engine::open(
+    // `dir` is held until `run` returns, on SIGTERM as well, and the
+    // readers' directory goes with it.
+    let xmoq_speech::engine::Opened {
+        readers,
+        said,
+        dir: _held_until_the_end,
+    } = xmoq_speech::engine::open(
         args.engine,
         &EngineOptions {
             model: args.model.clone(),
@@ -100,12 +106,8 @@ async fn run(args: Args) -> Result<()> {
         },
         args.readers,
     )?;
-    println!(
-        "MODEL_LOADED {} ms={}",
-        opened.said,
-        loading.elapsed().as_millis()
-    );
-    let (mut reader, mut read) = Reader::start(opened.readers, args.waiting);
+    println!("MODEL_LOADED {} ms={}", said, loading.elapsed().as_millis());
+    let (mut reader, mut read) = Reader::start(readers, args.waiting);
     let first = wall_ms();
     let mut transcripts: Vec<Transcript> = args
         .prefixes
