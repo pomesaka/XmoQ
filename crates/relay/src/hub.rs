@@ -650,13 +650,6 @@ const SUBSCRIPTION_BUDGET: usize = 0;
 /// `NO_ERROR`: "The session is being terminated without an error" (§3.5).
 const NO_ERROR: u32 = 0x0;
 
-/// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11): The session was closed because
-/// the peer took too long to respond to a control message." What a session
-/// is closed with whose client sent no SETUP in time, as the clients of
-/// this repository close one whose server sent none.
-// FIXME: use `xmoq_moqt::TerminationCode::ControlMessageTimeout` in its place.
-const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
-
 impl<C: Connection> Drop for SessionHandle<C> {
     fn drop(&mut self) {
         for task in self.tasks.iter().chain(&self.fetch_writes) {
@@ -1631,9 +1624,12 @@ impl<C: Connection> Hub<C> {
             .is_some_and(|handle| !handle.said_something);
         if silent {
             let mut pending = VecDeque::new();
+            // §3.5: "The session was closed because the peer took too long
+            // to respond to a control message", as the clients of this
+            // repository close one whose server sent no SETUP.
             self.close(
                 session,
-                CONTROL_MESSAGE_TIMEOUT,
+                TerminationCode::ControlMessageTimeout.code(),
                 "no SETUP in time",
                 &mut pending,
             );

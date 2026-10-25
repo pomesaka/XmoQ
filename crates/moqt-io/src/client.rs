@@ -1,13 +1,15 @@
 //! The start and the end of a client's session: the SETUP it sends and the
 //! one it waits for (§3.3), what is kept until the session is closed, and
-//! the code it closes the session with (§3.5). The Rust client
-//! (`xmoq-moqt-client`), the gatherer of the chat and the transcriber take
-//! them from here.
+//! the code it closes the session with (§3.5). Every client of this
+//! repository that is not the relay takes them from here: the Rust client
+//! (`xmoq-moqt-client`), the gatherer of the chat, the transcriber, and the
+//! viewers (`xmoq-viewer-io`, for the terminal viewer and the agent).
 //!
 //! WHY here, once: the clients start and close a session the same way, and
 //! copies of the rule had drifted apart (one found a SETUP that did not come
 //! under a `context`, the others did not, and closed with `NO_ERROR`).
 
+use std::future::Future;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -136,19 +138,33 @@ impl<C: Connection> Default for UntilClosed<C> {
     }
 }
 
+/// Where a client takes the events of the peer's unidirectional streams
+/// from: the channel of [`crate::read_uni_streams`], or a client's own
+/// queue in front of it.
+pub trait UniEvents {
+    /// The next event; `None` once the readers are gone.
+    fn next_event(&mut self) -> impl Future<Output = Option<UniEvent>> + Send;
+}
+
+impl UniEvents for mpsc::Receiver<UniEvent> {
+    fn next_event(&mut self) -> impl Future<Output = Option<UniEvent>> + Send {
+        self.recv()
+    }
+}
+
 /// Opens the control stream, sends SETUP with `options`, and hands the
 /// first message of the peer's control stream to `session`, which takes a
-/// SETUP alone there. `events` are those of [`crate::read_uni_streams`].
+/// SETUP alone there.
 /// The control stream goes into `control` as soon as it is open, also where
 /// what follows fails ([`UntilClosed`]).
 ///
 /// # Errors
 ///
 /// [`SetupError`]; [`termination_code`] gives the code to close with.
-pub async fn setup<C: Connection>(
+pub async fn setup<C: Connection, E: UniEvents>(
     connection: &C,
     session: &mut Session,
-    events: &mut mpsc::Receiver<UniEvent>,
+    events: &mut E,
     control: &mut Option<C::Send>,
     options: Vec<KeyValuePair>,
     wait: Duration,
@@ -158,7 +174,7 @@ pub async fn setup<C: Connection>(
     send_message(control, &setup, &Trace::default(), "control")
         .await
         .map_err(SetupError::Send)?;
-    match tokio::time::timeout(wait, events.recv()).await {
+    match tokio::time::timeout(wait, events.next_event()).await {
         Ok(Some(UniEvent::Control(message))) => session
             .on_control_message(message)
             .map_err(SetupError::Session),
