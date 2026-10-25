@@ -8,7 +8,7 @@ use xmoq_moqt::name::TrackNamespace;
 pub const USAGE: &str = "\
 xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --namespace <a/b>...
                  [--model <file>] [--language <code>] [--voice vad|loudness] [--vad-model <file>]
-                 [--keep <n>] [--waiting <n>] [--tracks <n>]
+                 [--keep <n>] [--waiting <n>] [--readers <n>] [--tracks <n>]
                  [--auth-key-hex <hex>]
 
 --namespace     a prefix whose broadcasts are listened to, its fields between slashes; up to 8,
@@ -22,6 +22,7 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
                 mise run speech-model -- silero-v5.1.2 fetches it)
 --keep          the latest pieces of each transcript kept for FETCH (1000)
 --waiting       pieces that wait to be read; one more is dropped and counted (16)
+--readers       threads that read pieces at once, each with a state of its own over the one model (1)
 --tracks        audio tracks listened to at once (16)
 --auth-key-hex  the relay's key, of which tokens are made: for the demo alone";
 
@@ -39,6 +40,10 @@ pub const KEEP_MOST: usize = 100_000;
 /// The most `--waiting`. Each waiting piece holds up to 15 s of samples,
 /// 960 KB.
 pub const WAITING_MOST: usize = 256;
+
+/// The most `--readers`. Each holds a state of whisper.cpp of its own, tens
+/// of MiB beside the model, which they share.
+pub const READERS_MOST: usize = 8;
 
 /// The most `--tracks`: the own relay keeps 256 requests of one session,
 /// two for each broadcast (the catalog and the audio).
@@ -66,6 +71,8 @@ pub struct Args {
     pub keep: usize,
     /// `--waiting`.
     pub waiting: usize,
+    /// `--readers`.
+    pub readers: usize,
     /// `--tracks`.
     pub tracks: usize,
     /// `--auth-key-hex`: the key the relay checks tokens with, of which the
@@ -113,7 +120,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut prefixes: Vec<TrackNamespace> = Vec::new();
     let mut language = "auto".to_string();
     let (mut vad, mut vad_model) = (true, None);
-    let (mut keep, mut waiting, mut tracks) = (1000, 16, 16);
+    let (mut keep, mut waiting, mut tracks, mut readers) = (1000, 16, 16, 1);
     while let Some(flag) = flags.next() {
         let value = flags
             .next()
@@ -153,6 +160,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
             "--keep" => keep = number_within(&flag, &value, KEEP_MOST)?,
             "--waiting" => waiting = number_within(&flag, &value, WAITING_MOST)?,
             "--tracks" => tracks = number_within(&flag, &value, TRACKS_MOST)?,
+            "--readers" => readers = number_within(&flag, &value, READERS_MOST)?,
             "--auth-key-hex" => {
                 auth_key = Some(
                     xmoq_room_token::unhex(&value)
@@ -182,6 +190,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
         vad_model,
         keep,
         waiting,
+        readers,
         tracks,
         auth_key,
     })
@@ -219,14 +228,18 @@ mod tests {
             ),
             (None, "auto", 1000, 16, 16, None)
         );
-        assert_eq!((read.vad, read.vad_model), (true, None));
+        assert_eq!((read.vad, read.vad_model, read.readers), (true, None, 1));
         let loudness = args(&["--namespace", "a", "--voice", "loudness"]).unwrap();
         assert!(!loudness.vad);
     }
 
     #[test]
     fn flags_that_are_refused() {
-        let cases: [(&[&str], &str); 10] = [
+        let cases: [(&[&str], &str); 11] = [
+            (
+                &["--namespace", "a", "--readers", "9"],
+                "--readers is a number from 1 to 8",
+            ),
             (
                 &["--namespace", "a", "--voice", "quiet"],
                 "--voice is vad or loudness",

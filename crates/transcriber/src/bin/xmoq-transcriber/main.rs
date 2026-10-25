@@ -93,7 +93,12 @@ async fn run(args: Args) -> Result<()> {
         args.language,
         loading.elapsed().as_millis()
     );
-    let (mut reader, mut read) = Reader::start(whisper, args.waiting);
+    let mut whispers = Vec::with_capacity(args.readers);
+    for _ in 1..args.readers {
+        whispers.push(whisper.another()?);
+    }
+    whispers.push(whisper);
+    let (mut reader, mut read) = Reader::start(whispers, args.waiting);
     let first = wall_ms();
     let mut transcripts: Vec<Transcript> = args
         .prefixes

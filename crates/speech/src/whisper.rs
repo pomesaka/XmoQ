@@ -9,16 +9,17 @@
 //! would be loaded again for every piece, seconds for the large ones.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
 
-/// A model of whisper.cpp, loaded, with the state one track is read in.
+/// A model of whisper.cpp, loaded, with the state a piece is read in.
 pub struct Whisper {
-    /// Kept for the state, which refers to it.
-    _context: WhisperContext,
+    /// The model, which [`Self::another`] shares.
+    context: Arc<WhisperContext>,
     state: WhisperState,
     language: Option<String>,
 }
@@ -41,9 +42,29 @@ impl Whisper {
             .create_state()
             .map_err(|error| anyhow!("the state of whisper.cpp: {error}"))?;
         Ok(Self {
-            _context: context,
+            context: Arc::new(context),
             state,
             language: (language != "auto").then(|| language.to_owned()),
+        })
+    }
+
+    /// Another reader of the same model, in the same language, with a state
+    /// of its own: it reads on another thread while this one reads, and the
+    /// model is held once (`whisper_init_state` of whisper.cpp, which
+    /// `create_state` of `whisper-rs` 0.16.0 calls, gives a state that
+    /// refers to the model).
+    ///
+    /// # Errors
+    /// When whisper.cpp makes no state.
+    pub fn another(&self) -> Result<Self> {
+        let state = self
+            .context
+            .create_state()
+            .map_err(|error| anyhow!("the state of whisper.cpp: {error}"))?;
+        Ok(Self {
+            context: Arc::clone(&self.context),
+            state,
+            language: self.language.clone(),
         })
     }
 

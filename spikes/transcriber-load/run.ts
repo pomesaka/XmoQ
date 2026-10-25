@@ -4,13 +4,14 @@
 // under their prefix with large-v3-turbo-q5_0 (Metal on macOS) and Silero, and the run reads
 // what it prints for `--seconds`.
 //
-//   bun spikes/transcriber-load/run.ts --speakers N [--seconds 60] [--language auto] [--port N]
+//   bun spikes/transcriber-load/run.ts --speakers N [--seconds 60] [--language auto]
+//     [--model large-v3-turbo-q5_0|small-q5_1] [--readers N] [--port N]
 //
 // Needs `say` and `afconvert` (macOS), the release build of the transcriber, and the models in
 // the cache (`mise run speech-model`, `mise run speech-model -- silero-v5.1.2`).
 //
 // Prints one line, LOAD {...}:
-//   speakers, seconds, language
+//   speakers, seconds, language, model, readers
 //   cut: pieces the transcriber cut; read: pieces it read (SPEECH); dropped: PIECE_DROPPED
 //   behind_ms: p50, p95 and max of SPEECH's behind_ms, the transcriber's clock when it had read
 //     a piece less the piece's endUs, which is up to 200 ms after the voice ended
@@ -42,6 +43,8 @@ const { values: options } = parseArgs({
 		speakers: { type: "string", default: "1" },
 		seconds: { type: "string", default: "60" },
 		language: { type: "string", default: "auto" },
+		model: { type: "string", default: "large-v3-turbo-q5_0" },
+		readers: { type: "string", default: "1" },
 		port: { type: "string", default: "24599" },
 	},
 });
@@ -91,11 +94,11 @@ async function main(): Promise<void> {
 	const speakers = Number(options.speakers);
 	const seconds = Number(options.seconds);
 	const samples = voice();
-	const turbo = join(
+	const model = join(
 		process.env.XDG_CACHE_HOME || join(homedir(), ".cache"),
 		"xmoq",
 		"whisper",
-		"ggml-large-v3-turbo-q5_0.bin",
+		`ggml-${options.model}.bin`,
 	);
 	const context = await startRun({
 		relay: "own",
@@ -110,7 +113,9 @@ async function main(): Promise<void> {
 		"--language",
 		options.language,
 		"--model",
-		turbo,
+		model,
+		"--readers",
+		options.readers,
 		"--tracks",
 		String(Math.max(16, speakers)),
 	]);
@@ -147,6 +152,9 @@ async function main(): Promise<void> {
 			speakers,
 			seconds: Math.round((Date.now() - began) / 1000),
 			language: options.language,
+			model: options.model,
+			readers: Number(options.readers),
+			texts: [...new Set(transcriber.matches(/^SPEECH .* text="(.*)"$/).map((match) => match[1]))].slice(0, 5),
 			cut: transcriber.matches(/^PIECE_CUT /).length,
 			read: read.length,
 			dropped: transcriber.matches(/^PIECE_DROPPED /).length,
