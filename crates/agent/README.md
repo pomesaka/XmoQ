@@ -94,4 +94,4 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 
 The library (`src/*.rs`) decides, and does no input or output: `events` (the lines written), `input` (what a line of stdin asks for), `presence` (who is in the chat), `args` (the flags). The binary (`src/bin/xmoq-agent/`): `main.rs` (the room, connecting again, the signals), `attend.rs` (one session: the chat, who is in it, stdin, the video), `frames.rs` (the pictures, on a thread that writes the PNG files), `output.rs` (stdout and the file), `stdin.rs` (the lines of stdin, on a thread).
 
-`interop/agent.ts` runs it against a page through the own relay and the gatherer (`mise run interop`).
+`interop/agent.ts` runs it against a page through the own relay and the gatherer (`mise run interop`). `interop/agent-frames.ts` asks it twice with `/frame` for a picture of a page's broadcast, and has the page decode the PNG ([record](../../docs/experiments/2026-10-25-pictures-of-a-broadcast-for-an-agent.md)).

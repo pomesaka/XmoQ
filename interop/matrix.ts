@@ -51,6 +51,7 @@ interface Pairing {
 		| "chat-tokens.ts"
 		| "agent.ts"
 		| "transcriber.ts"
+		| "agent-frames.ts"
 		| "rendezvous.ts"
 		| "new-group.ts"
 		| "track-status.ts";
@@ -1384,6 +1385,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		{
 			name: "own relay: transcriber: a page's voice is read by whisper.cpp and its words reach a reader of the transcript live and by a FETCH",
 			script: "transcriber.ts",
+			args: [],
+			relay: "own",
+		},
+		{
+			name: "own relay: agent: xmoq-agent takes no picture of a page's broadcast unasked, writes a PNG of its video for each /frame with a frame line, and keeps no more files than --frames-kept",
+			script: "agent-frames.ts",
 			args: [],
 			relay: "own",
 		},
