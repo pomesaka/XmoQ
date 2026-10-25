@@ -3,7 +3,14 @@
 // goes where the GOAWAY says. Section numbers are of
 // draft-ietf-moq-transport-18.
 
-import type { GoAwayNotice, MoqtConnection, SessionClose } from "@xmoq/moqt";
+import {
+	DEFAULT_ANSWER_WAIT_MS,
+	type GoAwayNotice,
+	type MoqtConnection,
+	RequestErrorCode,
+	RequestFailedError,
+	type SessionClose,
+} from "@xmoq/moqt";
 import {
 	type ChatParticipant,
 	type JoinChatOptions,
@@ -79,6 +86,38 @@ const delay = (ms: number, signal: AbortSignal): Promise<void> =>
 	});
 
 /**
+ * The GOAWAY behind a refusal with GOING_AWAY, or undefined where `error`
+ * is no such refusal or no GOAWAY comes, as `goAwayBehind` of `@xmoq/media`
+ * has it. Transport §10.4: requests "that arrive after the GOAWAY, MUST be
+ * rejected with REQUEST_ERROR using error code GOING_AWAY"; the GOAWAY
+ * travels on the control stream and the refusal on the request's, between
+ * which QUIC keeps no order, so the refusal can be read first. WHY a limit,
+ * the time an answer gets (`DEFAULT_ANSWER_WAIT_MS`): GOING_AWAY also comes
+ * from a peer that received a GOAWAY (§10.6.2) and sends none.
+ */
+async function goAwayBehind(
+	connection: Pick<MoqtConnection, "goAway" | "closed">,
+	error: unknown,
+): Promise<GoAwayNotice | undefined> {
+	if (
+		!(error instanceof RequestFailedError) ||
+		error.errorCode !== RequestErrorCode.GOING_AWAY
+	) {
+		return undefined;
+	}
+	const given = new AbortController();
+	try {
+		return await Promise.race([
+			connection.goAway,
+			connection.closed.then(() => undefined),
+			delay(DEFAULT_ANSWER_WAIT_MS, given.signal).then(() => undefined),
+		]);
+	} finally {
+		given.abort();
+	}
+}
+
+/**
  * Keeps the participant in the room for as long as `signal` lets it:
  * connects, joins (`joinChat`), and when the session ends connects again
  * after `againMs`. Resolves once `signal` was aborted; never rejects.
@@ -152,8 +191,9 @@ export async function keepInTheRoom(
 			} catch (error) {
 				// After a GOAWAY the requests of the connection reject, the
 				// PUBLISH_NAMESPACE among them: that is the move, not a failure.
-				if (goneAway === undefined) throw error;
-				moved = goneAway;
+				const behind = goneAway ?? (await goAwayBehind(connection, error));
+				if (behind === undefined) throw error;
+				moved = behind;
 			} finally {
 				signal.removeEventListener("abort", stop);
 				// NO_ERROR, also after a GOAWAY (§3.6).
