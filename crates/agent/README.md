@@ -8,7 +8,7 @@ Building it needs a C++ compiler, for the H.264 decoder that `xmoq-picture` buil
 
 ## Using it from an agent
 
-`mise run agent-demo -- start --out /tmp/room` does all of what follows in one go, with a voice as the page's microphone, and `mise run agent-demo -- stop --out /tmp/room` ends it (`scripts/agent-demo.sh` has its flags). By hand: a demo of its own, on ports apart from `mise run demo`'s (4443, 8080, 8787), then the reader in its room, in the background:
+`mise run agent-demo -- start --out /tmp/room` does all of what follows in one go, with a voice as the page's microphone, and `mise run agent-demo -- stop --out /tmp/room` ends it (`scripts/agent-demo.sh` has its flags). `start --meeting 3` opens 3 participants of the meeting (`/meet`) in place of the publishing page, each saying the voice 2 s after the one before, and starts the reader with `--meeting demo`; it ends by printing their ids, and `/frame <id>` gives the picture of one ([record](../../docs/experiments/2026-10-25-agent-demo-with-a-meeting.md)). By hand: a demo of its own, on ports apart from `mise run demo`'s (4443, 8080, 8787), then the reader in its room, in the background:
 
 ```sh
 bun install --frozen-lockfile          # once after main moved: the demo bundles the packages

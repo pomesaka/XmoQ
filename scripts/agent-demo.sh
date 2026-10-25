@@ -4,9 +4,12 @@
 #
 #   mise run agent-demo -- start --out DIR [--relay-port 33443] [--port 33080]
 #       [--rooms-port 33787] [--name claude] [--voice FILE.wav | --tone]
-#       [--transcribe-language auto]
+#       [--transcribe-language auto] [--meeting N]
 #   mise run agent-demo -- stop --out DIR
 #
+# `--meeting N` (1 to 8): N participants of the meeting of the room "demo"
+# (`/meet`) in place of the publishing page, each saying the voice 2 s after
+# the one before, and the reader in the meeting (`--meeting demo`).
 # The ports default apart from `mise run demo`'s (4443, 8080, 8787). `start`
 # writes each process it starts into DIR/pids (its PID, when it began and its
 # command, as `ps` tells them); `stop` ends those, and only those that are
@@ -21,7 +24,7 @@ cd "${REPO_ROOT}"
 END_WAIT_S=15
 
 usage() {
-	sed -n '2,13p' "${BASH_SOURCE[0]}" >&2
+	sed -n '2,16p' "${BASH_SOURCE[0]}" >&2
 	exit 2
 }
 
@@ -36,9 +39,11 @@ name=claude
 voice="${REPO_ROOT}/fixtures/speech/hello-from-the-relay.wav"
 tone=false
 transcribe_language=""
+meeting=0
 while [[ $# -gt 0 ]]; do
 	case $1 in
 	--out) out=$2 ;;
+	--meeting) meeting=$2 ;;
 	--relay-port) relay_port=$2 ;;
 	--port) port=$2 ;;
 	--rooms-port) rooms_port=$2 ;;
@@ -55,6 +60,10 @@ while [[ $# -gt 0 ]]; do
 	shift 2
 done
 [[ -n ${out} ]] || usage
+# WHY 8 at most: the meeting receives the video of the first 8 who came
+# (@xmoq/meeting), and each page is a Chromium of its own.
+[[ ${meeting} =~ ^[0-8]$ ]] || usage
+[[ ${meeting} -eq 0 || ${tone} == false ]] || usage
 mkdir -p "${out}"
 out="$(cd "${out}" && pwd)"
 pids="${out}/pids"
@@ -218,28 +227,64 @@ start() {
 	local holder=$!
 	local events="${out}/events.jsonl" before=0
 	[[ ! -f ${events} ]] || before=$(wc -l <"${events}")
+	local in_meeting=()
+	[[ ${meeting} -eq 0 ]] || in_meeting=(--meeting demo)
 	nohup target/release/xmoq-agent --room "http://127.0.0.1:${rooms_port}/rooms/demo" \
-		--name "${name}" --out "${out}" <"${say}" >"${out}/agent.log" 2>&1 &
+		--name "${name}" --out "${out}" ${in_meeting[@]+"${in_meeting[@]}"} \
+		<"${say}" >"${out}/agent.log" 2>&1 &
 	local agent=$!
 	record "${holder}" "sleep"
 	record "${agent}" "xmoq-agent"
 
-	local sound=(--voice "${voice}")
-	[[ ${tone} == false ]] || sound=(--tone)
-	nohup bun demo/open-publish.ts --port "${port}" "${sound[@]}" \
-		</dev/null >"${out}/page.log" 2>&1 &
-	local page=$!
-	record "${page}" "demo/open-publish.ts"
-	wait_for_line 0 "${out}/page.log" "^opened " 60 "${page}"
-	wait_for_line "${before}" "${events}" '"state":"began","type":"broadcast"' 60 "${agent}"
-
-	grep -E "^(no )?captions:" "${out}/demo.log" || true
-	cat <<EOF
+	if [[ ${meeting} -eq 0 ]]; then
+		local sound=(--voice "${voice}")
+		[[ ${tone} == false ]] || sound=(--tone)
+		nohup bun demo/open-publish.ts --port "${port}" "${sound[@]}" \
+			</dev/null >"${out}/page.log" 2>&1 &
+		local page=$!
+		record "${page}" "demo/open-publish.ts"
+		wait_for_line 0 "${out}/page.log" "^opened " 60 "${page}"
+		wait_for_line "${before}" "${events}" '"state":"began","type":"broadcast"' 60 "${agent}"
+		grep -E "^(no )?captions:" "${out}/demo.log" || true
+		cat <<EOF
 the reader is in http://127.0.0.1:${rooms_port}/rooms/demo as ${name}, and the broadcast began
   say:    echo 'hello' > ${say}      (/frame for a picture)
   read:   ${events}
   logs:   ${out}/demo.log, ${out}/agent.log, ${out}/page.log
   watch:  http://localhost:${port}/watch
+  stop:   mise run agent-demo -- stop --out ${out}
+EOF
+		return
+	fi
+
+	# Page i says the voice 2 i s into a round of 2 (N - 1) + 1.5 s of
+	# silence and the voice: each begins 2 s after the one before, and the
+	# rounds stay as long, so that they stay apart.
+	local index ids=() logs=() page
+	for ((index = 0; index < meeting; index++)); do
+		local log="${out}/meet-$((index + 1)).log"
+		nohup bun demo/open-publish.ts --port "${port}" --voice "${voice}" --meet \
+			--before-s "$((2 * index))" --after-s "$((2 * (meeting - 1 - index) + 1)).5" \
+			</dev/null >"${log}" 2>&1 &
+		page=$!
+		record "${page}" "demo/open-publish.ts"
+		wait_for_line 0 "${log}" "^seated as " 60 "${page}"
+		ids+=("$(sed -n 's/^seated as //p' "${log}")")
+		logs+=("${log}")
+	done
+	local id
+	for id in "${ids[@]}"; do
+		wait_for_line "${before}" "${events}" "\"id\":\"${id}\",\"state\":\"joined\",\"type\":\"participant\"" 60 "${agent}"
+	done
+	grep -E "^(no )?captions:" "${out}/demo.log" || true
+	cat <<EOF
+the reader is in the meeting of http://127.0.0.1:${rooms_port}/rooms/demo as ${name}, with ${meeting} participants: ${ids[*]}
+  say:    echo 'hello' > ${say}      (said in the room's chat)
+  frame:  echo '/frame ${ids[0]}' > ${say}   (a picture of that participant; /frame alone, of the one who spoke last)
+  who:    grep '"type":"participant"' ${events}   (each one's id, as it joins and leaves)
+  read:   ${events}   ("speech" lines, each with the participant's namespace as "from")
+  logs:   ${out}/demo.log, ${out}/agent.log, ${logs[*]}
+  meet:   http://localhost:${port}/meet   (one more participant, in a browser)
   stop:   mise run agent-demo -- stop --out ${out}
 EOF
 }
