@@ -17,8 +17,9 @@
 // {type: "broadcast", broadcast} when the publisher registers or leaves,
 // and {type: "reaction", emoji} when somebody sent one (with
 // REACTION_BATCH_MS, {type: "reactions", counts} for all of that while).
-// A client sends {type: "reaction", emoji}, and a publisher the message
-// above. Any other message is not answered.
+// A client sends {type: "reaction", emoji}, token-for and join-meeting
+// (below), and a publisher the message above. Any other message is not
+// answered.
 //
 // **The relay of the rooms** (decided on 2026-10-25): `relay` of the hello
 // is {relayUrl, certSha256Hex} where the Worker has `RELAY_URL` and
@@ -53,10 +54,39 @@
 // (crates/relay/src/auth.rs): `v1|<namespace>|<role>|<expiry>|<mac>`, the
 // mac HMAC-SHA-256 over what stands before it. **Anybody who asks gets
 // one**: who may publish in a room, and who may watch, is what would be
-// decided here, and is not.
+// decided here, and is not. Except in a meeting's namespaces (`xmoq/meet`
+// and under it), which token-for leaves unanswered: they are join-meeting's.
+
+// **A meeting** (Q58, decided on 2026-10-25): a participant sends
+// {type: "join-meeting", participant: "<id>"}, the id a random one the page
+// makes; within MOST_IN_A_MEETING the room answers {type: "meeting",
+// participant, publish: {namespace: ["xmoq", "meet", <room>, <id>], token},
+// subscribe: {namespace: ["xmoq", "meet", <room>, "*"], token}}, token null
+// without a key, and beyond it {type: "meeting-full", most}. Those counted
+// are the sockets that joined, until they close; the same socket asking
+// again with its id is answered again, with new tokens, full or not, since
+// it is counted already. Not answered: an id that is empty,
+// longer than 64, or has a `/` or a `*`; another id on a socket that joined;
+// an id another open socket has; a room whose name has a `/` or a `*`.
+// WHY here and not at the relay: the room hands out the tokens, and one it
+// does not give is a participant the relay never sees; the relay knows
+// namespaces and sessions, not meetings, and would have to be told which
+// prefix is one and how many it takes. WHY the sockets and not the
+// namespaces the relay announces: a token outlives the socket for its 600 s,
+// so a participant that left the room may stay at the relay that long; the
+// room counts who it would give a token to now.
 
 /** How long a token is good for, in seconds. */
 const TOKEN_SECONDS = 600;
+
+/** The participants of a meeting, the agents among them (decided on 2026-10-25). */
+const MOST_IN_A_MEETING = 49;
+
+/** Whether the namespace is a meeting's: `xmoq/meet` or under it. */
+const meetingNamespace = (namespace) => namespace[0] === "xmoq" && namespace[1] === "meet";
+
+/** Whether `id` can be the last field of a participant's namespace. */
+const participantId = (id) => typeof id === "string" && id !== "" && id.length <= 64 && !id.includes("/") && !id.includes("*");
 
 // The pages of the demo are served from another origin.
 const CORS = {
@@ -116,13 +146,17 @@ export class Room {
 			// The broadcast of a publisher is kept with the socket, since
 			// nothing in memory is.
 			this.ctx.acceptWebSocket(pair[1]);
+			const room = decodeURIComponent(url.pathname.split("/")[2] ?? "");
+			// The room's name, for join-meeting: an object woken for a message
+			// is not told the URL its socket came by.
+			pair[1].serializeAttachment({ room });
 			pair[1].send(
 				JSON.stringify({
 					type: "hello",
 					connected: this.ctx.getWebSockets().length,
 					broadcast: this.broadcast(),
 					relay: this.relay(),
-					transcript: this.transcript(decodeURIComponent(url.pathname.split("/")[2] ?? "")),
+					transcript: this.transcript(room),
 				}),
 			);
 			this.tellAll({ type: "connected", connected: this.ctx.getWebSockets().length });
@@ -197,7 +231,12 @@ export class Room {
 			// room makes neither for anybody who asks, and leaves the asking
 			// unanswered.
 			if (namespace.some((field) => field.includes("*") || field.includes("/"))) return;
+			if (meetingNamespace(namespace)) return;
 			socket.send(JSON.stringify({ type: "token", role: said.role, namespace, token: await this.token(said.role, namespace) }));
+			return;
+		}
+		if (said?.type === "join-meeting") {
+			await this.joinMeeting(socket, said.participant);
 			return;
 		}
 		if (said?.type === "reaction" && typeof said.emoji === "string") {
@@ -227,6 +266,36 @@ export class Room {
 			}, batchMs);
 			return;
 		}
+	}
+
+	/** Answers join-meeting from `socket` for the participant `id`, or leaves it unanswered (at the top). */
+	async joinMeeting(socket, id) {
+		const attachment = socket.deserializeAttachment() ?? {};
+		const room = attachment.room ?? "";
+		if (!participantId(id) || room === "" || room.includes("/") || room.includes("*")) return;
+		if (attachment.meeting !== undefined && attachment.meeting !== id) return;
+		const others = this.ctx.getWebSockets().filter((each) => each !== socket);
+		if (others.some((each) => each.deserializeAttachment()?.meeting === id)) return;
+		if (attachment.meeting === undefined) {
+			const counted = others.filter((each) => each.deserializeAttachment()?.meeting !== undefined).length;
+			if (counted >= MOST_IN_A_MEETING) {
+				socket.send(JSON.stringify({ type: "meeting-full", most: MOST_IN_A_MEETING }));
+				return;
+			}
+			// WHY before the tokens are made: making one waits, and another
+			// join-meeting can be read meanwhile; it has to count this one.
+			socket.serializeAttachment({ ...attachment, meeting: id });
+		}
+		const publish = ["xmoq", "meet", room, id];
+		const subscribe = ["xmoq", "meet", room, "*"];
+		socket.send(
+			JSON.stringify({
+				type: "meeting",
+				participant: id,
+				publish: { namespace: publish, token: await this.token("pub", publish) },
+				subscribe: { namespace: subscribe, token: await this.token("sub", subscribe) },
+			}),
+		);
 	}
 
 	webSocketClose(socket) {

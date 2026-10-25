@@ -9,12 +9,14 @@ A room that says where its broadcast is, knows how many are connected, and passe
 ```sh
 npm install            # miniflare, into this directory
 node run.mjs           # the rooms, on http://127.0.0.1:8787
-node check.mjs         # the broadcast, a token, the count, and no chat, against it
+node check.mjs         # the broadcast, a token, the count, no chat, and a meeting of 49, against it
 ```
 
 `mise run demo` in the repository root starts these rooms with the relay and the pages: the publishing page tells the room where it publishes, over its WebSocket, and the watching page learns it there; both show the count. `?room=NAME` on both pages is another room.
 
 With `AUTH_KEY_HEX` in the environment of `run.mjs`, the room gives out tokens the relay checks (`token-for` on the WebSocket). To anybody who asks: who may publish and who may watch is not decided here.
+
+**A meeting** (Q58, decided on 2026-10-25): a page sends `{type: "join-meeting", participant: "<id>"}`, the id a random one it makes, and while fewer than 49 sockets of the room have joined it gets `{type: "meeting", participant, publish: {namespace: ["xmoq", "meet", "<room>", "<id>"], token}, subscribe: {namespace: ["xmoq", "meet", "<room>", "*"], token}}` (the tokens null without `AUTH_KEY_HEX`); else `{type: "meeting-full", most: 49}`. A socket counts from its join until it closes, and the same id on the same socket is answered again, with new tokens. An id that is empty, over 64 characters, or has a `/` or a `*`, another id on a socket that joined, and an id another open socket has are not answered. `token-for` makes no token in `xmoq/meet` or under it, so that the 49 cannot be passed by. Why the room and not the relay counts, at the top of `worker.js`.
 
 With `RELAY_URL` and `RELAY_CERT_SHA256_HEX` in the environment of `run.mjs` (and of `check.mjs`, which then checks them), the hello names the relay of the rooms as `relay: {relayUrl, certSha256Hex}`, with a broadcast and without one, so that a participant can take part in the chat before anybody broadcasts (decided on 2026-10-25; why, at the top of `worker.js`). Without them it is `null`. `mise run demo` gives them.
 
