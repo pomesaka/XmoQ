@@ -6,6 +6,7 @@
 
 use xmoq_picture::frames::Settings;
 use xmoq_viewer::chat_track::{CATCH_UP_LINES, CATCH_UP_LINES_MOST, room_of_address};
+use xmoq_viewer::meeting::Limits;
 use xmoq_viewer::room::certificate_hash;
 
 /// Where the broadcast is.
@@ -64,6 +65,10 @@ pub struct Args {
     /// transcript `xmoq/transcript/<prefix>` is followed, its fields. `None`:
     /// the broadcast's namespace.
     pub transcript: Option<Vec<String>>,
+    /// `--meeting`: the room of a meeting, whose participants publish under
+    /// `xmoq/meet/<room>/<id>`, in place of one broadcast; with the limits
+    /// of `--meeting-most` and `--meeting-video-linger-ms`.
+    pub meeting: Option<(String, Limits)>,
 }
 
 /// What is wrong with the flags.
@@ -89,7 +94,7 @@ pub const DEFAULT_NAME: &str = "agent";
 pub const USAGE: &str = "\
 xmoq-agent --room http://host:port/rooms/<name> --out <dir> [--name agent] [--token no]
 xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
-           --chat-room <room> --out <dir> [--name agent]
+           (--chat-room <room> | --meeting <room>) --out <dir> [--name agent]
   --out <dir>                       where events.jsonl is written (made where it is not)
   --chat-catch-up-lines <n>         the lines missed while away that are fetched (16; 1 to 1000)
   --answer-wait-ms <ms>             how long the relay gets to answer a request (10000)
@@ -100,6 +105,10 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
   --frame-every-ms <ms>             a picture this often by the broadcast's clock, unasked (none)
   --frame-longest <n>               the longest side of a picture, in pixels (1280)
   --frames-kept <n>                 the pictures kept in <dir>/frames; the oldest goes (500)
+  --meeting <room>                  a meeting's participants under xmoq/meet/<room>, in place of
+                                    --namespace; /frame <id> asks for one's picture
+  --meeting-most <n>                the participants kept (49; 1 or more)
+  --meeting-video-linger-ms <ms>    how long a participant's video stays after its picture (30000)
   --speech on|off                   off: no transcript is followed (on)
   --transcript <prefix>             the prefix the transcriber listens under (the broadcast's namespace)
 Each event is a line of JSON on stdout and in <dir>/events.jsonl. A line of stdin is said in the
@@ -146,6 +155,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
     let mut seconds = None;
     let (mut frames, mut pictures) = (true, Settings::default());
     let (mut speech, mut transcript) = (true, None);
+    let (mut meeting, mut limits, mut named_namespace) = (None, Limits::default(), false);
     while let Some(flag) = given.next() {
         let value = given
             .next()
@@ -158,7 +168,18 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                         .map_err(|error| Invalid(format!("--cert-sha256: {error}")))?,
                 );
             }
-            "--namespace" => namespace = value,
+            "--namespace" => {
+                namespace = value;
+                named_namespace = true;
+            }
+            "--meeting" => {
+                if value.is_empty() || value.contains('/') {
+                    return Err(Invalid(format!("--meeting {value}: one field, not empty")));
+                }
+                meeting = Some(value);
+            }
+            "--meeting-most" => limits.most_participants = size(&flag, &value)?,
+            "--meeting-video-linger-ms" => limits.video_linger_ms = number(&flag, &value)?,
             "--room" => room = Some(value),
             "--chat-room" => chat_room = Some(value),
             "--token" => {
@@ -230,7 +251,10 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                 // The flag has the fields between slashes.
                 namespace: namespace.split('/').map(str::to_string).collect(),
             },
-            chat_room.ok_or_else(|| Invalid("--url needs --chat-room".to_string()))?,
+            // A meeting's chat is the meeting's room unless it is named.
+            chat_room
+                .or_else(|| meeting.clone())
+                .ok_or_else(|| Invalid("--url needs --chat-room or --meeting".to_string()))?,
         ),
         (None, Some(address)) => {
             if chat_room.is_some() {
@@ -250,7 +274,21 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         (None, None) => return Err(Invalid("--url or --room is needed".to_string())),
         (Some(_), Some(_)) => return Err(Invalid("--url or --room, not both".to_string())),
     };
+    // WHY not with a room yet: how a room lets the participants of a
+    // meeting in, and gives their tokens, waits for how they find each other
+    // (Q57).
+    if meeting.is_some() && matches!(source, Source::Room { .. }) {
+        return Err(Invalid(
+            "--meeting is for --url, not yet for --room".to_string(),
+        ));
+    }
+    if meeting.is_some() && named_namespace {
+        return Err(Invalid(
+            "--meeting or --namespace: a meeting has a broadcast for each participant".to_string(),
+        ));
+    }
     Ok(Args {
+        meeting: meeting.map(|room| (room, limits)),
         source,
         room,
         name,
@@ -297,6 +335,77 @@ mod tests {
             },
             speech: true,
             transcript: None,
+            meeting: None,
+        }
+    }
+
+    #[test]
+    fn the_flags_of_a_meeting_are_read() {
+        let hash = "0f".repeat(32);
+        let relay = format!("--url https://h:1/ --cert-sha256 {hash} --out o");
+        let at_relay = |room: &str, meeting: Option<(&str, Limits)>| Args {
+            source: Source::Relay {
+                url: "https://h:1/".to_string(),
+                cert_sha256: [0x0f; 32],
+                namespace: vec!["xmoq".to_string(), "demo".to_string()],
+            },
+            room: room.to_string(),
+            meeting: meeting.map(|(room, limits)| (room.to_string(), limits)),
+            ..in_room(room, "agent")
+        };
+        // (the flags after `relay`; what they are read as)
+        let cases = [
+            (
+                "--meeting m",
+                Ok(at_relay("m", Some(("m", Limits::default())))),
+            ),
+            // The chat of another room than the meeting's.
+            (
+                "--meeting m --chat-room c",
+                Ok(at_relay("c", Some(("m", Limits::default())))),
+            ),
+            (
+                "--meeting m --meeting-most 3 --meeting-video-linger-ms 0",
+                Ok(at_relay(
+                    "m",
+                    Some((
+                        "m",
+                        Limits {
+                            most_participants: 3,
+                            video_linger_ms: 0,
+                        },
+                    )),
+                )),
+            ),
+            // The participants cannot be unbounded.
+            (
+                "--meeting m --meeting-most 0",
+                Err(Invalid("--meeting-most 0: 1 or more".to_string())),
+            ),
+            (
+                "--meeting m --namespace xmoq/demo",
+                Err(Invalid(
+                    "--meeting or --namespace: a meeting has a broadcast for each participant"
+                        .to_string(),
+                )),
+            ),
+            (
+                "--meeting m/n",
+                Err(Invalid("--meeting m/n: one field, not empty".to_string())),
+            ),
+            (
+                "",
+                Err(Invalid("--url needs --chat-room or --meeting".to_string())),
+            ),
+        ];
+        assert_eq!(
+            parsed("--room http://h/rooms/a --out o --meeting m"),
+            Err(Invalid(
+                "--meeting is for --url, not yet for --room".to_string()
+            ))
+        );
+        for (flags, expected) in cases {
+            assert_eq!(parsed(&format!("{relay} {flags}")), expected, "{flags}");
         }
     }
 
@@ -419,7 +528,7 @@ mod tests {
             ),
             (
                 format!("--url https://h:1/ --cert-sha256 {hash} --out o"),
-                Err(Invalid("--url needs --chat-room".to_string())),
+                Err(Invalid("--url needs --chat-room or --meeting".to_string())),
             ),
             (
                 "--url https://h:1/ --chat-room r --out o".to_string(),

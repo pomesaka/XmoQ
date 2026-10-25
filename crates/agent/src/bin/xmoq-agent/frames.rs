@@ -78,6 +78,7 @@ fn write(dir: &std::path::Path, taken: &Taken, asked: Asked) -> Event {
         width: taken.width,
         height: taken.height,
         asked,
+        of: None,
     }
 }
 

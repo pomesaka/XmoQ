@@ -16,6 +16,15 @@ pub enum BroadcastState {
     Ended,
 }
 
+/// Whether a participant of a meeting came or left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticipantState {
+    /// Its namespace was announced.
+    Joined,
+    /// It was withdrawn, or not told of again on a new session.
+    Left,
+}
+
 /// Why a frame was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Asked {
@@ -60,6 +69,14 @@ pub enum Event {
         /// Their name in the chat.
         name: String,
     },
+    /// A participant of the meeting came or left (`--meeting`): its
+    /// broadcast under `xmoq/meet/<room>` was announced, or withdrawn.
+    Participant {
+        /// Which.
+        state: ParticipantState,
+        /// The last field of its namespace.
+        id: String,
+    },
     /// The room's broadcast began or ended.
     Broadcast {
         /// Which.
@@ -83,6 +100,9 @@ pub enum Event {
         height: u32,
         /// Why it was taken.
         asked: Asked,
+        /// In a meeting, whose picture it is: written as `id`, and left out
+        /// otherwise.
+        of: Option<String>,
     },
     /// Something said in a broadcast, as the transcriber read it
     /// (`xmoq-transcript-tracks`).
@@ -133,6 +153,14 @@ impl Event {
             }
             Self::Joined { name } => json!({"type": "joined", "name": name}),
             Self::Left { name } => json!({"type": "left", "name": name}),
+            Self::Participant { state, id } => json!({
+                "type": "participant",
+                "state": match state {
+                    ParticipantState::Joined => "joined",
+                    ParticipantState::Left => "left",
+                },
+                "id": id,
+            }),
             Self::Broadcast { state, namespace } => json!({
                 "type": "broadcast",
                 "state": match state {
@@ -149,7 +177,9 @@ impl Event {
                 width,
                 height,
                 asked,
-            } => json!({
+                of,
+            } => {
+                let mut frame = json!({
                 "type": "frame",
                 "path": path,
                 "group": group,
@@ -161,7 +191,12 @@ impl Event {
                     Asked::Command => "command",
                     Asked::Every => "every",
                 },
-            }),
+                });
+                if let (Some(of), Value::Object(fields)) = (of, &mut frame) {
+                    fields.insert("id".to_string(), json!(of));
+                }
+                frame
+            }
             Self::Speech {
                 number,
                 from,
@@ -260,20 +295,9 @@ mod tests {
                     width: 1280,
                     height: 720,
                     asked: Asked::Command,
+                    of: None,
                 },
                 r#"{"asked":"command","at":1000,"group":12,"height":720,"object":7,"path":"/tmp/out/frames/000003-g12-o7.png","timestamp_us":1700000000000000,"type":"frame","width":1280}"#,
-            ),
-            (
-                Event::Frame {
-                    path: "f.png".to_string(),
-                    group: 0,
-                    object: 0,
-                    timestamp_us: 0,
-                    width: 1,
-                    height: 1,
-                    asked: Asked::Every,
-                },
-                r#"{"asked":"every","at":1000,"group":0,"height":1,"object":0,"path":"f.png","timestamp_us":0,"type":"frame","width":1}"#,
             ),
             (
                 Event::Speech {
@@ -291,6 +315,56 @@ mod tests {
                     message: "frame: not built yet".to_string(),
                 },
                 r#"{"at":1000,"message":"frame: not built yet","type":"error"}"#,
+            ),
+        ];
+        for (event, line) in cases {
+            assert_eq!(event.line(1000), line, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn a_frame_and_a_participant_are_lines_of_json() {
+        // (the event; the line written at 1000)
+        let cases = [
+            (
+                Event::Frame {
+                    path: "f.png".to_string(),
+                    group: 0,
+                    object: 0,
+                    timestamp_us: 0,
+                    width: 1,
+                    height: 1,
+                    asked: Asked::Every,
+                    of: None,
+                },
+                r#"{"asked":"every","at":1000,"group":0,"height":1,"object":0,"path":"f.png","timestamp_us":0,"type":"frame","width":1}"#,
+            ),
+            (
+                Event::Frame {
+                    path: "f.png".to_string(),
+                    group: 0,
+                    object: 0,
+                    timestamp_us: 0,
+                    width: 1,
+                    height: 1,
+                    asked: Asked::Command,
+                    of: Some("p1".to_string()),
+                },
+                r#"{"asked":"command","at":1000,"group":0,"height":1,"id":"p1","object":0,"path":"f.png","timestamp_us":0,"type":"frame","width":1}"#,
+            ),
+            (
+                Event::Participant {
+                    state: ParticipantState::Joined,
+                    id: "p1".to_string(),
+                },
+                r#"{"at":1000,"id":"p1","state":"joined","type":"participant"}"#,
+            ),
+            (
+                Event::Participant {
+                    state: ParticipantState::Left,
+                    id: "p1".to_string(),
+                },
+                r#"{"at":1000,"id":"p1","state":"left","type":"participant"}"#,
             ),
         ];
         for (event, line) in cases {

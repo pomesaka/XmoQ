@@ -195,6 +195,12 @@ impl Meeting {
         }
     }
 
+    /// The video of [`Video::Subscribe`] could not be subscribed to: none
+    /// is, and the next picture asks for it anew.
+    pub fn video_failed(&mut self) {
+        self.watched = None;
+    }
+
     /// Whose video is subscribed.
     #[must_use]
     pub fn watching(&self) -> Option<&str> {
@@ -282,6 +288,7 @@ mod tests {
         /// `/frame`, with an id or without, at the time in ms.
         Asked(Option<&'static str>, u64),
         Linger(u64),
+        VideoFailed,
         SessionEnded,
     }
 
@@ -303,6 +310,10 @@ mod tests {
                 Err(why) => format!("error: {why}"),
             }),
             Step::Linger(now) => meeting.linger_over(now).map(|id| format!("cancel {id}")),
+            Step::VideoFailed => {
+                meeting.video_failed();
+                None
+            }
             Step::SessionEnded => {
                 meeting.session_ended();
                 None
@@ -314,8 +325,12 @@ mod tests {
 
     /// (what happens in the meeting `r`, a video kept 30 s; what each step
     /// gave, where it gave something)
-    fn cases() -> [Case; 9] {
-        use Step::{Asked, Done, Linger, Named, SessionEnded, Spoke};
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a table, one row a case: cut in two, a reader would look for a case in two places"
+    )]
+    fn cases() -> [Case; 10] {
+        use Step::{Asked, Done, Linger, Named, SessionEnded, Spoke, VideoFailed};
         const A: &str = "xmoq/meet/r/a";
         const B: &str = "xmoq/meet/r/b";
         [
@@ -400,6 +415,20 @@ mod tests {
                     r#"a Subscribe { cancel: None, to: "a" }"#,
                     r#"Left("a")"#,
                     "error: nobody has spoken; /frame <id>, and nobody is there",
+                ],
+            ),
+            // A video that could not be subscribed to is asked for again.
+            (
+                &[
+                    Named(A),
+                    Asked(Some("a"), 0),
+                    VideoFailed,
+                    Asked(Some("a"), 10),
+                ],
+                &[
+                    r#"Came("a")"#,
+                    r#"a Subscribe { cancel: None, to: "a" }"#,
+                    r#"a Subscribe { cancel: None, to: "a" }"#,
                 ],
             ),
             // A new session subscribes anew.

@@ -2,10 +2,6 @@
 //! `xmoq/transcript/<prefix>`, where the prefix is the one a transcriber
 //! listens under.
 
-/// The fields a meeting's namespace begins with: its participants publish
-/// under `xmoq/meet/<room>/<id>`.
-const MEETING: [&str; 2] = ["xmoq", "meet"];
-
 /// The prefix whose transcript is followed: `--transcript` where it is
 /// given, else the room's (its hello), else the meeting's
 /// (`xmoq/meet/<room>`), else the broadcast's namespace; `None` where none
@@ -26,13 +22,9 @@ pub fn prefix(
     flag.or(hello)
         .map(<[String]>::to_vec)
         .or_else(|| {
-            meeting.map(|room| {
-                MEETING
-                    .iter()
-                    .map(|field| (*field).to_string())
-                    .chain([room.to_string()])
-                    .collect()
-            })
+            // The meeting's prefix is `xmoq_viewer::meeting`'s, as the
+            // reader's namespace of the meeting is.
+            meeting.map(xmoq_viewer::meeting::prefix)
         })
         .or_else(|| broadcast.map(<[String]>::to_vec))
 }
