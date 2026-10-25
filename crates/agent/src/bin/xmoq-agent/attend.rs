@@ -26,7 +26,10 @@ use xmoq_moqt_io::{
     Connection, RequestReader, RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace,
     UniEvent, read_request_streams, read_uni_streams, send_message,
 };
+use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
+use xmoq_transcript_tracks::payloads::{Speech, read_speech};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
+use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, Track};
 use xmoq_viewer_io::room_socket::RoomSocket;
 use xmoq_viewer_io::session::{
     self, CatalogKept, Events, GoneAway, Requests, Subscription, new_url, timestamp_of,
@@ -343,6 +346,52 @@ fn on_video_object(
     pictures.leaving_out = !given;
 }
 
+/// How long the relay is asked to hold the SUBSCRIBE to `speech` for a
+/// transcriber to publish it: the most the own relay holds, as for the
+/// chat's `lines`. WHY held: a transcriber that starts after the reader has
+/// its pieces read from the start.
+const SPEECH_RENDEZVOUS_MS: u64 = 30_000;
+
+/// The most an Object of `speech` may be. **Provisional**: a piece of a few
+/// seconds is some hundred bytes of text.
+const SPEECH_PAYLOAD_MOST: usize = 64 * 1024;
+
+/// The most bytes of the stream of the FETCH of `speech`: the pieces
+/// fetched, with room. **Provisional.**
+const SPEECH_FETCH_MOST: usize = 1024 * 1024;
+
+/// How many of the pieces missed while the subscription was away are
+/// fetched: as many as of the chat's lines by default. **Provisional.**
+const SPEECH_CATCH_UP: u64 = xmoq_viewer::chat_track::CATCH_UP_LINES;
+
+/// Writes what came of the transcript.
+fn on_speech(reader: &mut Reader, out: FollowOut<Speech>) {
+    match out {
+        FollowOut::Item(piece) => reader.tell(&Event::Speech {
+            number: piece.number,
+            from: piece.from,
+            text: piece.text,
+            start_us: piece.start_us,
+            end_us: piece.end_us,
+            read_at: piece.at,
+        }),
+        FollowOut::Gap(gap) => reader.error(format!(
+            "speech: {} pieces not fetched ({} to {})",
+            gap.before - gap.after - 1,
+            gap.after + 1,
+            gap.before - 1
+        )),
+        FollowOut::Note(note) => eprintln!("{note}"),
+    }
+}
+
+/// Keeps the newest piece written, for the next session.
+fn remember_speech(reader: &mut Reader, place: &Place, follower: &Follower<Speech>) {
+    if let (Some(prefix), Some(last)) = (&place.transcript, follower.last_shown()) {
+        reader.speech_had = Some((prefix.clone(), last));
+    }
+}
+
 /// What a line of stdin asks for, where the session has to do it.
 enum Wants {
     Nothing,
@@ -532,6 +581,43 @@ pub async fn attend(
     };
     chat.watch(&mut session, connection, reader).await;
     eprintln!("XMOQ_AGENT_CHAT room={} name={}", args.room, args.name);
+    let mut speech = match &place.transcript {
+        Some(prefix) => {
+            let listened = TrackNamespace::new(
+                prefix
+                    .iter()
+                    .map(|field| field.as_bytes().to_vec())
+                    .collect(),
+            )?;
+            let had = reader
+                .speech_had
+                .as_ref()
+                .filter(|(of, _)| of == prefix)
+                .map(|(_, had)| *had);
+            Some(Follower::new(
+                Track {
+                    namespace: transcript_namespace(&listened)?,
+                    name: SPEECH,
+                    rendezvous_ms: Some(SPEECH_RENDEZVOUS_MS),
+                    payload_most: SPEECH_PAYLOAD_MOST,
+                    fetch_most: SPEECH_FETCH_MOST,
+                    catch_up: SPEECH_CATCH_UP,
+                    note: "XMOQ_AGENT_SPEECH",
+                    fetch_note: "XMOQ_AGENT_SPEECH",
+                    read: |number, payload| read_speech(number, payload).ok(),
+                },
+                Asking {
+                    connection: Arc::clone(connection),
+                    stops: stops.clone(),
+                    token: place.transcript_token.clone(),
+                    answer_wait_ms: args.answer_wait_ms,
+                    open_wait_ms: args.open_wait_ms,
+                },
+                had,
+            ))
+        }
+        None => None,
+    };
 
     let ended = loop {
         let Chat {
@@ -625,6 +711,14 @@ pub async fn attend(
                     *room = None;
                 }
             },
+            came = on(speech.as_mut().map(Follower::next)) => {
+                if let Some(follower) = speech.as_mut() {
+                    for out in follower.on(&mut session, came).await {
+                        on_speech(reader, out);
+                    }
+                    remember_speech(reader, place, follower);
+                }
+            }
             came = tracks.next() => {
                 for out in chat.tracks.on(&mut session, came).await {
                     match out {
@@ -665,6 +759,16 @@ pub async fn attend(
                     reader.had = chat.tracks.last_shown();
                 }
                 Some(UniEvent::Object { header, object, .. })
+                    if speech.as_ref().and_then(Follower::track_alias) == Some(header.track_alias) =>
+                {
+                    if let Some(follower) = speech.as_mut() {
+                        if let Some(piece) = follower.live(header.group_id, &object.payload) {
+                            on_speech(reader, FollowOut::Item(piece));
+                        }
+                        remember_speech(reader, place, follower);
+                    }
+                }
+                Some(UniEvent::Object { header, object, .. })
                     if video.as_ref().is_ok_and(|video| video.subscription.track_alias == header.track_alias) =>
                 {
                     if let Some(pictures) = pictures.as_mut() {
@@ -681,7 +785,15 @@ pub async fn attend(
                     if chat.tracks.fetch_request_id() == Some(header.request_id) =>
                 {
                     session.on_fetch_stream(header.request_id)?;
-                    chat.tracks.read_fetch(&stops, stream, header);
+                    chat.tracks.read_fetch(stream, header);
+                }
+                Some(UniEvent::FetchOpened { stream, header })
+                    if speech.as_ref().and_then(Follower::fetch_request_id) == Some(header.request_id) =>
+                {
+                    session.on_fetch_stream(header.request_id)?;
+                    if let Some(follower) = speech.as_ref() {
+                        follower.read_fetch(stream, header);
+                    }
                 }
                 Some(UniEvent::FetchOpened { stream, header }) => {
                     session.on_fetch_stream(header.request_id)?;

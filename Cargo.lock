@@ -2682,6 +2682,7 @@ dependencies = [
  "xmoq-moqt-io",
  "xmoq-msf",
  "xmoq-picture",
+ "xmoq-transcript-tracks",
  "xmoq-viewer",
  "xmoq-viewer-io",
 ]

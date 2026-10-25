@@ -1228,7 +1228,7 @@ async fn play(
                 {
                     session.on_fetch_stream(header.request_id)?;
                     if let Some(tracks) = chat.as_ref() {
-                        tracks.read_fetch(&stops, stream, header);
+                        tracks.read_fetch(stream, header);
                     }
                 }
                 Some(UniEvent::FetchOpened { stream, header }) => {

@@ -1,37 +1,34 @@
 //! The chat on `MoQ` tracks, on the session of the broadcast
 //! (`xmoq_viewer::chat_track` decides): the viewer announces its namespace
-//! and publishes `said` to the gatherer that subscribes to it, and takes the
-//! room's `lines` by SUBSCRIBE and its latest lines by a Joining FETCH.
-//! Nothing of it ends the session: what fails is said, and the broadcast
-//! plays on.
+//! and publishes `said` to the gatherer that subscribes to it, and follows
+//! the room's `lines` ([`crate::follow`]). Nothing of it ends the session:
+//! what fails is said, and the broadcast plays on.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
-use tokio::sync::mpsc;
-use xmoq_again::AskAgain;
 use xmoq_chat_tracks::limits::TEXT_BYTES;
 use xmoq_chat_tracks::names::{LINES, Person, SAID, person_namespace, room_namespace};
 use xmoq_chat_tracks::payloads::{Line, Said, read_line};
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
-use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
-use xmoq_moqt::message::{ControlMessage, FetchRange};
-use xmoq_moqt::name::{FullTrackName, TrackNamespace};
-use xmoq_moqt::params::{GroupOrder, Parameter};
-use xmoq_moqt::session::{
-    PeerRequest, PeerRequestId, PeerRequestOpened, RequestEvent, RequestId, Session,
-};
+use xmoq_moqt::message::ControlMessage;
+use xmoq_moqt::name::FullTrackName;
+use xmoq_moqt::params::Parameter;
+use xmoq_moqt::session::{PeerRequest, PeerRequestId, PeerRequestOpened, RequestEvent, Session};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, FetchChunk, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream,
-    StreamStops, Trace, send_message,
+    Connection, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream, StreamStops,
+    Trace, send_message,
 };
-use xmoq_viewer::chat_track::{LinesGap, Say, Saying, Shown, history_to_fetch};
+use xmoq_viewer::chat_track::{LinesGap, Say, Saying};
 
-use crate::session::{Asked, NotSubscribed, Requests, Sent, Subscription, send_subscribe, settle};
+use crate::follow::{self, Asking, Follower, Track, send_request};
+use crate::session::Requests;
+
+pub use crate::follow::Came;
 
 type Send = <WtConnection as Connection>::Send;
 type Recv = <WtConnection as Connection>::Recv;
@@ -57,26 +54,6 @@ const SAID_OPEN_WAIT: Duration = Duration::from_secs(2);
 /// otherwise be refused before its own announcement reached the gatherer.
 const LINES_RENDEZVOUS_MS: u64 = 30_000;
 
-/// A SUBSCRIBE to `lines` on its way, and what came of it.
-type Answer =
-    std::pin::Pin<Box<dyn std::future::Future<Output = (Asked, Result<Sent>)> + std::marker::Send>>;
-
-/// What the chat on tracks has to be told of, from the loop of the session.
-pub enum Came {
-    /// A line of the FETCH, by its number.
-    Fetched(u64, Vec<u8>),
-    /// The FETCH's stream ended, or no stream comes.
-    FetchEnded,
-    /// What came on the FETCH's request stream.
-    FetchAnswer(Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>),
-    /// The time to ask for `lines` (again) has come.
-    AskNow,
-    /// What came of the SUBSCRIBE to `lines`, boxed: it is the largest by far.
-    Settled(Box<(Asked, Result<Sent>)>),
-    /// What came on the stream of the subscription to `lines`.
-    Lines(Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>),
-}
-
 /// What the loop is to do with what came. How a line is shown is the
 /// program's: the terminal and the agent's file show it differently.
 pub enum Out {
@@ -90,30 +67,14 @@ pub enum Out {
 
 /// The chat on tracks of one session.
 pub struct ChatTracks {
-    connection: Arc<WtConnection>,
-    /// Where the limit of `lines` on its Objects is given.
-    stops: StreamStops,
-    /// `xmoq/chat/<room>`.
-    room: TrackNamespace,
-    token: Option<Vec<u8>>,
-    answer_wait_ms: u64,
-    open_wait_ms: u64,
     /// `xmoq/chat/<room>/<name>`, `said`.
     said: FullTrackName,
     saying: Saying,
-    shown: Shown<Line>,
-    /// `--chat-catch-up-lines`.
-    catch_up: u64,
-    /// The subscription to `lines`, while there is one.
-    lines: Option<Subscription>,
-    asking: Option<Answer>,
-    ask_at: Option<tokio::time::Instant>,
-    again: AskAgain,
-    /// The Joining FETCH, while its answer may still come.
-    fetch: Option<(RequestId, RequestReader<Recv>)>,
-    /// The request streams that stay open while the session lasts: the
-    /// `PUBLISH_NAMESPACE`'s and those of each `FETCH`.
-    kept: Vec<Send>,
+    /// The room's `lines`.
+    lines: Follower<Line>,
+    /// The request stream of the `PUBLISH_NAMESPACE`, which stays open while
+    /// the session lasts.
+    _announce: Send,
     /// The half of the `PUBLISH_NAMESPACE`'s stream the relay writes to.
     /// WHY kept, though nothing more is read: letting go of it stops the
     /// stream, and the relay takes the announcement as withdrawn (the
@@ -122,32 +83,6 @@ pub struct ChatTracks {
     /// The gatherer's SUBSCRIBE to `said`: its stream, request, Track Alias,
     /// and the half of its stream that stays open.
     subscriber: Option<(u64, PeerRequestId, u64, Send)>,
-    fetched: (mpsc::Sender<Came>, mpsc::Receiver<Came>),
-}
-
-/// Opens the stream of a request and sends its message, within `wait_ms`.
-async fn send_request(
-    connection: &WtConnection,
-    wait_ms: u64,
-    message: &ControlMessage,
-    label: &str,
-) -> Result<(Send, RequestReader<Recv>)> {
-    let wait = Duration::from_millis(wait_ms);
-    let Ok(opened) = tokio::time::timeout(wait, connection.open_bi()).await else {
-        bail!("the relay allowed no stream for {label} within {wait_ms} ms");
-    };
-    let (mut send, recv) = opened?;
-    let trace = Trace::default();
-    send_message(&mut send, message, &trace, label).await?;
-    Ok((send, RequestReader::new(recv, &trace, label)))
-}
-
-/// Waits for `item` where there is one, and for ever where there is none.
-async fn on<T>(item: Option<impl std::future::Future<Output = T>>) -> T {
-    match item {
-        Some(future) => future.await,
-        None => std::future::pending().await,
-    }
 }
 
 impl ChatTracks {
@@ -203,346 +138,81 @@ impl ChatTracks {
             RequestEvent::PublishNamespaceEstablished => {}
             other => bail!("the PUBLISH_NAMESPACE was answered with {other:?}"),
         }
+        let lines = Follower::new(
+            Track {
+                namespace: room,
+                name: LINES,
+                rendezvous_ms: Some(LINES_RENDEZVOUS_MS),
+                payload_most: LINES_PAYLOAD_MOST,
+                fetch_most: FETCH_LIMIT,
+                catch_up,
+                note: "CHAT_TRACKS_LINES",
+                fetch_note: "CHAT_TRACKS",
+                read: |number, payload| read_line(number, payload).ok(),
+            },
+            Asking {
+                connection: Arc::clone(connection),
+                stops: stops.clone(),
+                token: token.map(<[u8]>::to_vec),
+                answer_wait_ms,
+                open_wait_ms,
+            },
+            had,
+        );
         Ok(Self {
-            connection: Arc::clone(connection),
-            stops: stops.clone(),
-            room,
-            token: token.map(<[u8]>::to_vec),
-            answer_wait_ms,
-            open_wait_ms,
             said,
             saying: Saying::default(),
-            shown: Shown::fetching_after(had),
-            catch_up,
-            lines: None,
-            asking: None,
-            ask_at: Some(tokio::time::Instant::now()),
-            again: AskAgain::default(),
-            fetch: None,
-            kept: vec![announce_send],
+            lines,
+            _announce: announce_send,
             _announced: answers,
             subscriber: None,
-            fetched: mpsc::channel(32),
         })
     }
 
     /// The number of the newest line shown, if any.
     pub fn last_shown(&self) -> Option<u64> {
-        self.shown.last()
+        self.lines.last_shown()
     }
 
     /// The Track Alias of `lines`, while it is subscribed to.
     pub fn lines_alias(&self) -> Option<u64> {
-        self.lines.as_ref().map(|lines| lines.track_alias)
+        self.lines.track_alias()
     }
 
     /// The Request ID of the Joining FETCH, while it is open.
     pub fn fetch_request_id(&self) -> Option<u64> {
-        self.fetch.as_ref().map(|(fetch, _)| fetch.value())
+        self.lines.fetch_request_id()
     }
 
     /// What comes next.
     pub async fn next(&mut self) -> Came {
-        let Self {
-            fetched,
-            fetch,
-            asking,
-            ask_at,
-            lines,
-            ..
-        } = self;
-        tokio::select! {
-            came = fetched.1.recv() => came.unwrap_or(Came::FetchEnded),
-            answer = on(fetch.as_mut().map(|(_, answers)| answers.next_event())) => Came::FetchAnswer(answer),
-            settled = on(asking.as_mut()) => Came::Settled(Box::new(settled)),
-            () = on(ask_at.map(tokio::time::sleep_until)) => Came::AskNow,
-            event = on(lines.as_mut().map(|lines| lines.reader.next_event())) => Came::Lines(event),
-        }
+        self.lines.next().await
     }
 
     /// What came, and what the loop is to do with it.
     pub async fn on(&mut self, session: &mut Session, came: Came) -> Vec<Out> {
-        match came {
-            Came::Fetched(number, payload) => self.fetched(number, &payload).into_iter().collect(),
-            Came::FetchEnded => self.fetch_ended(),
-            Came::FetchAnswer(answer) => match self.on_fetch_answer(session, answer) {
-                Ok(shown) => shown,
-                Err(error) => {
-                    let mut out = vec![Out::Note(format!("CHAT_TRACKS_FETCH_FAILED {error:#}"))];
-                    out.extend(self.fetch_ended());
-                    out
-                }
-            },
-            Came::AskNow => {
-                self.ask_at = None;
-                self.ask(session)
-            }
-            Came::Settled(settled) => {
-                self.asking = None;
-                let (asked, sent) = *settled;
-                self.settled(session, &asked, sent).await
-            }
-            Came::Lines(event) => self.on_lines(session, event),
-        }
-    }
-
-    /// Sends the SUBSCRIBE to `lines`, held by the relay for the gatherer.
-    fn ask(&mut self, session: &mut Session) -> Vec<Out> {
-        let mut requests = Requests {
-            connection: &self.connection,
-            session,
-            namespace: &self.room,
-            token: self.token.as_deref(),
-            answer_wait_ms: self.answer_wait_ms,
-            open_wait_ms: self.open_wait_ms,
-            rendezvous_ms: Some(LINES_RENDEZVOUS_MS),
-        };
-        match requests.ask(LINES, None) {
-            Ok(asked) => {
-                let connection = Arc::clone(&self.connection);
-                let open_wait_ms = self.open_wait_ms;
-                self.asking = Some(Box::pin(async move {
-                    let sent = send_subscribe(&connection, open_wait_ms, &asked).await;
-                    (asked, sent)
-                }));
-                Vec::new()
-            }
-            Err(error) => vec![Out::Note(format!("CHAT_TRACKS_LINES_GIVEN_UP {error:#}"))],
-        }
-    }
-
-    /// What came of the SUBSCRIBE to `lines`: a subscription and its Joining
-    /// FETCH, or a pause before it is asked for again.
-    async fn settled(
-        &mut self,
-        session: &mut Session,
-        asked: &Asked,
-        sent: Result<Sent>,
-    ) -> Vec<Out> {
-        let subscription = match settle(session, asked, sent) {
-            Ok(subscription) => subscription,
-            Err(NotSubscribed::Refused(error)) => {
-                let pause = self.again.after_refusal(error.retry_wait_ms());
-                self.ask_in(pause);
-                return vec![Out::Note(format!(
-                    "CHAT_TRACKS_LINES_REFUSED error_code={:#x}; asking again in {pause} ms",
-                    error.error_code
-                ))];
-            }
-            Err(NotSubscribed::Failed(error)) => {
-                let pause = self.again.after_end();
-                self.ask_in(pause);
-                return vec![Out::Note(format!(
-                    "CHAT_TRACKS_LINES_FAILED {error:#}; asking again in {pause} ms"
-                ))];
-            }
-        };
-        self.again.subscribed();
-        let mut out = vec![Out::Note(format!(
-            "CHAT_TRACKS_LINES track_alias={}",
-            subscription.track_alias
-        ))];
-        self.stops
-            .limit_payload(subscription.track_alias, LINES_PAYLOAD_MOST);
-        let plan = history_to_fetch(
-            self.shown.last(),
-            subscription.largest.map(|largest| largest.group),
-            self.catch_up,
-        );
-        let joining_request_id = subscription.request.value();
-        self.lines = Some(subscription);
-        if plan.forget {
-            self.shown.forget();
-            out.push(Out::Note("CHAT_TRACKS_NUMBERED_ANEW".to_string()));
-        }
-        self.shown.refetching();
-        // Nothing to fetch: no line yet, or none missed.
-        let Some((joining_start, gap)) = plan.fetch else {
-            out.extend(self.fetch_ended());
-            return out;
-        };
-        // Told before the lines after it come.
-        if let Some(gap) = gap {
-            out.push(Out::Gap(gap));
-        }
-        let range = FetchRange::AbsoluteJoining {
-            joining_request_id,
-            joining_start,
-        };
-        let tokens = self
-            .token
-            .iter()
-            .map(|token| Parameter::AuthorizationToken(token.clone()))
-            .collect();
-        let sent = match session.fetch(range, tokens) {
-            Ok((fetch, message)) => {
-                send_request(&self.connection, self.open_wait_ms, &message, "fetch")
-                    .await
-                    .map(|(request_send, answers)| (fetch, request_send, answers))
-            }
-            Err(error) => Err(error.into()),
-        };
-        match sent {
-            Ok((fetch, request_send, answers)) => {
-                self.kept.push(request_send);
-                self.fetch = Some((fetch, answers));
-            }
-            Err(error) => {
-                out.push(Out::Note(format!("CHAT_TRACKS_FETCH_FAILED {error:#}")));
-                out.extend(self.fetch_ended());
-            }
-        }
-        out
-    }
-
-    /// What came on the stream of the subscription to `lines`. The
-    /// subscription that ends (the gatherer ends `lines` of a room nobody
-    /// is in with `TRACK_ENDED`) is asked for again, as the sound's is.
-    fn on_lines(
-        &mut self,
-        session: &mut Session,
-        event: Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>,
-    ) -> Vec<Out> {
-        let Some(lines) = self.lines.as_ref() else {
-            return Vec::new();
-        };
-        let request = lines.request;
-        let how = match event {
-            Ok(RequestStreamEvent::Message(message)) => {
-                match session.on_request_message(request, message) {
-                    Ok(RequestEvent::SubscriptionDone(done)) => {
-                        format!("PUBLISH_DONE status_code={:#x}", done.status_code)
-                    }
-                    Ok(other) => {
-                        return vec![Out::Note(format!("CHAT_TRACKS_LINES_SAID {other:?}"))];
-                    }
-                    Err(error) => format!("{error:?}"),
-                }
-            }
-            Ok(RequestStreamEvent::Closed(closed)) => {
-                session.cancel(request);
-                format!("closed {closed:?}")
-            }
-            Err(error) => {
-                session.cancel(request);
-                format!("{error}")
-            }
-        };
-        if let Some(lines) = self.lines.take() {
-            self.stops.unlimit_payload(lines.track_alias);
-            lines.cancel();
-        }
-        let pause = self.again.after_end();
-        self.ask_in(pause);
-        vec![Out::Note(format!(
-            "CHAT_TRACKS_LINES_ENDED {how}; asking again in {pause} ms"
-        ))]
-    }
-
-    fn ask_in(&mut self, pause_ms: u64) {
-        self.ask_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause_ms));
+        self.lines
+            .on(session, came)
+            .await
+            .into_iter()
+            .map(|out| match out {
+                follow::Out::Item(line) => Out::Line(line),
+                follow::Out::Gap(gap) => Out::Gap(gap),
+                follow::Out::Note(note) => Out::Note(note),
+            })
+            .collect()
     }
 
     /// Reads the stream of the FETCH on a task of its own; its lines come
     /// back by [`Self::next`].
-    pub fn read_fetch(
-        &self,
-        stops: &StreamStops,
-        stream: u64,
-        header: xmoq_moqt::fetch::FetchHeader,
-    ) {
-        let Some(mut body) = stops.take_fetch_body(stream) else {
-            return;
-        };
-        let to = self.fetched.0.clone();
-        tokio::spawn(async move {
-            let mut decoder = FetchStreamDecoder::new(FETCH_LIMIT, GroupOrder::Ascending);
-            // The readers took the header off; the decoder wants to see one.
-            if decoder
-                .push(&FetchStreamEncoder::new(header, GroupOrder::Ascending).take_bytes())
-                .is_ok()
-            {
-                'read: loop {
-                    loop {
-                        match decoder.next_event() {
-                            Ok(Some(FetchEvent::Object(object))) => {
-                                let _ = to
-                                    .send(Came::Fetched(object.group_id, object.payload))
-                                    .await;
-                            }
-                            Ok(Some(_)) => {}
-                            Ok(None) => break,
-                            Err(_) => break 'read,
-                        }
-                    }
-                    match body.next().await {
-                        FetchChunk::Bytes(bytes) => {
-                            if decoder.push(&bytes).is_err() {
-                                break;
-                            }
-                        }
-                        _ => break,
-                    }
-                }
-            }
-            let _ = to.send(Came::FetchEnded).await;
-        });
-    }
-
-    /// What came on the FETCH's request stream: its answer. A refusal (a
-    /// room without lines yet is `INVALID_RANGE`, §10.12.3) ends the FETCH,
-    /// and the lines that waited are shown. Returns the lines to show.
-    fn on_fetch_answer(
-        &mut self,
-        session: &mut Session,
-        answer: Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>,
-    ) -> Result<Vec<Out>> {
-        let Some((fetch, _)) = self.fetch.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let fetch = *fetch;
-        match answer {
-            Ok(RequestStreamEvent::Message(message)) => {
-                match session.on_request_message(fetch, message)? {
-                    RequestEvent::Rejected(_) => Ok(self.fetch_ended()),
-                    _ => Ok(Vec::new()),
-                }
-            }
-            // Its stream brings the lines, or brought them.
-            Ok(RequestStreamEvent::Closed(_)) => {
-                self.fetch = None;
-                Ok(Vec::new())
-            }
-            Err(error) => {
-                self.fetch = None;
-                Err(error.into())
-            }
-        }
-    }
-
-    /// The FETCH is over: the lines that waited, shown.
-    fn fetch_ended(&mut self) -> Vec<Out> {
-        self.fetch = None;
-        self.shown
-            .fetch_ended()
-            .into_iter()
-            .map(|(_, line)| Out::Line(line))
-            .collect()
-    }
-
-    /// A line of the FETCH: the line to show, if it is shown.
-    fn fetched(&mut self, number: u64, payload: &[u8]) -> Option<Out> {
-        let line = read_line(number, payload).ok()?;
-        let (_, line) = self.shown.fetched(number, line)?;
-        Some(Out::Line(line))
+    pub fn read_fetch(&self, stream: u64, header: xmoq_moqt::fetch::FetchHeader) {
+        self.lines.read_fetch(stream, header);
     }
 
     /// An Object of `lines`, the Group `number`: the line to show, if it is
     /// shown.
     pub fn live(&mut self, number: u64, payload: &[u8]) -> Option<Line> {
-        let line = read_line(number, payload).ok()?;
-        let (_, line) = self.shown.live(number, line)?;
-        Some(line)
+        self.lines.live(number, payload)
     }
 
     /// A line the viewer says. `false` where it is not sent: too long, or
