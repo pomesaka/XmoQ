@@ -23,10 +23,26 @@ export interface FrameQueue<T> {
 	/**
 	 * The frames whose time has come, in the order they came, and no longer
 	 * held: **the last one is shown**, and the ones before it are passed
-	 * over for it. The caller closes all of them.
+	 * over for it. The caller closes all of them. **A frame that came before
+	 * one whose time has come goes with it, whatever its own time**: the
+	 * picture never goes back.
 	 *
 	 * WHY the buffer is given here and not when the frame came: it can be
 	 * moved while watching, and the frames that wait follow it at once.
+	 *
+	 * WHY the frames before go too: a frame's time is fixed when it comes,
+	 * by the fastest way of that moment (`PlayoutClock.baseOf`), and the
+	 * frames come in the order of their Timestamps. When the fastest way
+	 * becomes much shorter between two frames, as where the start of a
+	 * Group comes late by a Joining FETCH and the next frames on time by
+	 * the subscription, the later frame can be due before the earlier one;
+	 * taken each by its own time, the later was drawn first and the earlier
+	 * after it (seen once through two relays: 85, 87, 86, 88). WHY NOT keep
+	 * the times from going down in the order of the frames: the clock would
+	 * be held back for the frames after such a change, with a rule of its
+	 * own beside the fastest way. WHY NOT work the times of the frames that
+	 * wait out again when the fastest way changes: every frame that waits
+	 * would move, for a case that passing over one frame settles.
 	 */
 	due(now: number, bufferMs: number): WaitingFrame<T>[];
 	waiting(): number;
@@ -48,8 +64,12 @@ export function createFrameQueue<T>(
 			return gone;
 		},
 		due(now, bufferMs) {
-			const due = frames.filter((each) => each.base + bufferMs <= now);
-			frames = frames.filter((each) => each.base + bufferMs > now);
+			let through = 0;
+			for (const [index, each] of frames.entries()) {
+				if (each.base + bufferMs <= now) through = index + 1;
+			}
+			const due = frames.slice(0, through);
+			frames = frames.slice(through);
 			return due;
 		},
 		waiting: () => frames.length,
