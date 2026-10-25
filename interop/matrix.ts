@@ -1409,6 +1409,14 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: [],
 			relay: "own",
 		},
+		// The same voice through the own relay with --auth-key-hex: the
+		// relay, the transcriber and the room's tokens share one key.
+		{
+			name: "own relay: transcriber: with tokens, a page announces its voice with pub, the transcriber makes its own with the relay's key, and a reader with sub gets the words",
+			script: "transcriber.ts",
+			args: ["--auth", "yes"],
+			relay: "own",
+		},
 		{
 			name: "own relay: agent: xmoq-agent takes no picture of a page's broadcast unasked, writes a PNG of its video for each /frame with a frame line, and keeps no more files than --frames-kept",
 			script: "agent-frames.ts",

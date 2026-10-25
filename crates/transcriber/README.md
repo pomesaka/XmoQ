@@ -66,9 +66,8 @@ The library (`src/*.rs`) decides and does no input or output: what the flags mea
 
 - Run through the own relay alone, not through `moqtail`'s.
 - On Linux it was neither built nor run here. CI is to build it and to run the interop pairing with the smallest model. How fast the larger models read on the processor of a Linux machine was not measured.
-- `--auth-key-hex` was not run.
 - A broadcast whose catalog cannot be read, or names no Opus track, is not asked for its catalog again until its namespace is announced again.
 
 ## Checks
 
-`interop/transcriber.ts` (`mise run interop`, the pairing `own relay: transcriber: ...`): a page publishes a voice and silence, over and over (`fixtures/speech/`). The transcriber reads it with the smallest model, and a live reader of the transcript gets two pieces with the words. A later reader gets them by a FETCH ([record](../../docs/experiments/2026-10-25-the-transcriber-reads-a-voice.md)).
+`interop/transcriber.ts` (`mise run interop`, the pairing `own relay: transcriber: ...`): a page publishes a voice and silence, over and over (`fixtures/speech/`). The transcriber reads it with the smallest model, and a live reader of the transcript gets two pieces with the words. A later reader gets them by a FETCH ([record](../../docs/experiments/2026-10-25-the-transcriber-reads-a-voice.md)). With `--auth yes` (the pairing `own relay: transcriber: with tokens, ...`) the relay, the transcriber and the room's tokens have one key: the page announces with `pub` for its namespace, and a reader with `sub` for the transcript gets the words.

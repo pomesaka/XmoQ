@@ -701,6 +701,18 @@ let broadcastPublishing:
 /** What `followTranscript` was handed. */
 const transcriptPieces: PageTranscriptPiece[] = [];
 
+/**
+ * The parameters of a PUBLISH_NAMESPACE that carries a token of its own
+ * (`publishNamespaceToken` of `joinChat` does the same); none without one.
+ */
+function namespaceToken(
+	tokenHex: string | undefined,
+): { authorizationToken: Uint8Array[] } | undefined {
+	return tokenHex === undefined
+		? undefined
+		: { authorizationToken: [fromHex(tokenHex)] };
+}
+
 /** What `publishVoice` started. */
 let voicePublishing:
 	| {
@@ -1456,141 +1468,151 @@ window.xmoqOwn = {
 		console.log("video stopped");
 	}),
 
-	publishBroadcast: withPlainErrors(async (namespace: string) => {
-		const moq = connected();
-		const trackNamespace = namespaceTuple(namespace);
-		const sampleRate = 48_000;
-		const video = await createVideoTrackEncoder({
-			trackNamespace,
-			trackName: utf8.encode(BROADCAST.video),
-			firstGroup: BigInt(Date.now()),
-			codec: BROADCAST.codec,
-			width: BROADCAST.width,
-			height: BROADCAST.height,
-			framerate: BROADCAST.framerate,
-			bitrate: BROADCAST.bitrate,
-			keyFrameIntervalMs: 1000,
-			mapping: "stream-per-group",
-		});
-		// The encoder counts from about here (`epoch` of `@xmoq/media`): a
-		// frame's time is the page's clock since then, so that the Timestamp
-		// of LOC is the moment it was painted.
-		const videoBegan = Date.now();
-		const audio = await createAudioTrackEncoder({
-			trackNamespace,
-			trackName: utf8.encode(BROADCAST.audio),
-			firstGroup: BigInt(Date.now()),
-			codec: "opus",
-			sampleRate,
-			numberOfChannels: 1,
-		});
-		const audioBegan = Date.now();
-		const catalog = createCatalogPublisher({
-			namespace: trackNamespace,
-			catalog: {
-				version: "draft-01",
-				tracks: [
-					{
-						name: BROADCAST.video,
-						packaging: "loc",
-						isLive: true,
-						role: "video",
-						codec: BROADCAST.catalogCodec,
-						bitrate: BROADCAST.bitrate,
-						width: BROADCAST.width,
-						height: BROADCAST.height,
-						framerate: BROADCAST.framerate,
-					},
-					{
-						name: BROADCAST.audio,
-						packaging: "loc",
-						isLive: true,
-						role: "audio",
-						codec: "opus",
-						bitrate: 67_000,
-						samplerate: sampleRate,
-						channelConfig: "1",
-					},
-				],
-			},
-		});
-		moq.serve({
-			subscribe(request) {
-				if (catalog.subscribe(request)) return;
-				if (video.publisher.subscribe(request)) return;
-				if (audio.publisher.subscribe(request)) return;
-				request
-					.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
-					.catch(() => {});
-			},
-			fetch(request) {
-				if (catalog.fetch(request)) return;
-				if (video.publisher.fetch(request)) return;
-				if (audio.publisher.fetch(request)) return;
-				request
-					.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
-					.catch(() => {});
-			},
-		});
-		/** The mark of the demo: the first 200 ms of every 2 seconds. */
-		const marked = (wallClockMs: number): boolean => wallClockMs % 2000 < 200;
-		const canvas = new OffscreenCanvas(BROADCAST.width, BROADCAST.height);
-		const context = canvas.getContext("2d");
-		if (context === null) throw new Error("no 2d context");
-		const timers: ReturnType<typeof setInterval>[] = [];
-		const publishing = { video, audio, catalog, timers, painted: 0, made: 0 };
-		broadcastPublishing = publishing;
-		timers[0] = setInterval(() => {
-			const now = Date.now();
-			publishing.painted += 1;
-			context.fillStyle = "#444";
-			context.fillRect(0, 0, BROADCAST.width, BROADCAST.height);
-			// Something that moves, so that the frames differ.
-			context.fillStyle = "#3a7";
-			context.fillRect((publishing.painted * 4) % BROADCAST.width, 300, 40, 30);
-			if (marked(now)) {
-				// `MARK` of the demo: 80 pixels from (540, 20) of 640x360.
-				context.fillStyle = "#fff";
-				context.fillRect(540, 20, 80, 80);
-			}
-			video.encode(
-				new VideoFrame(canvas, { timestamp: (now - videoBegan) * 1000 }),
+	publishBroadcast: withPlainErrors(
+		async (namespace: string, publishNamespaceTokenHex?: string) => {
+			const moq = connected();
+			const trackNamespace = namespaceTuple(namespace);
+			const sampleRate = 48_000;
+			const video = await createVideoTrackEncoder({
+				trackNamespace,
+				trackName: utf8.encode(BROADCAST.video),
+				firstGroup: BigInt(Date.now()),
+				codec: BROADCAST.codec,
+				width: BROADCAST.width,
+				height: BROADCAST.height,
+				framerate: BROADCAST.framerate,
+				bitrate: BROADCAST.bitrate,
+				keyFrameIntervalMs: 1000,
+				mapping: "stream-per-group",
+			});
+			// The encoder counts from about here (`epoch` of `@xmoq/media`): a
+			// frame's time is the page's clock since then, so that the Timestamp
+			// of LOC is the moment it was painted.
+			const videoBegan = Date.now();
+			const audio = await createAudioTrackEncoder({
+				trackNamespace,
+				trackName: utf8.encode(BROADCAST.audio),
+				firstGroup: BigInt(Date.now()),
+				codec: "opus",
+				sampleRate,
+				numberOfChannels: 1,
+			});
+			const audioBegan = Date.now();
+			const catalog = createCatalogPublisher({
+				namespace: trackNamespace,
+				catalog: {
+					version: "draft-01",
+					tracks: [
+						{
+							name: BROADCAST.video,
+							packaging: "loc",
+							isLive: true,
+							role: "video",
+							codec: BROADCAST.catalogCodec,
+							bitrate: BROADCAST.bitrate,
+							width: BROADCAST.width,
+							height: BROADCAST.height,
+							framerate: BROADCAST.framerate,
+						},
+						{
+							name: BROADCAST.audio,
+							packaging: "loc",
+							isLive: true,
+							role: "audio",
+							codec: "opus",
+							bitrate: 67_000,
+							samplerate: sampleRate,
+							channelConfig: "1",
+						},
+					],
+				},
+			});
+			moq.serve({
+				subscribe(request) {
+					if (catalog.subscribe(request)) return;
+					if (video.publisher.subscribe(request)) return;
+					if (audio.publisher.subscribe(request)) return;
+					request
+						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+						.catch(() => {});
+				},
+				fetch(request) {
+					if (catalog.fetch(request)) return;
+					if (video.publisher.fetch(request)) return;
+					if (audio.publisher.fetch(request)) return;
+					request
+						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+						.catch(() => {});
+				},
+			});
+			/** The mark of the demo: the first 200 ms of every 2 seconds. */
+			const marked = (wallClockMs: number): boolean => wallClockMs % 2000 < 200;
+			const canvas = new OffscreenCanvas(BROADCAST.width, BROADCAST.height);
+			const context = canvas.getContext("2d");
+			if (context === null) throw new Error("no 2d context");
+			const timers: ReturnType<typeof setInterval>[] = [];
+			const publishing = { video, audio, catalog, timers, painted: 0, made: 0 };
+			broadcastPublishing = publishing;
+			timers[0] = setInterval(() => {
+				const now = Date.now();
+				publishing.painted += 1;
+				context.fillStyle = "#444";
+				context.fillRect(0, 0, BROADCAST.width, BROADCAST.height);
+				// Something that moves, so that the frames differ.
+				context.fillStyle = "#3a7";
+				context.fillRect(
+					(publishing.painted * 4) % BROADCAST.width,
+					300,
+					40,
+					30,
+				);
+				if (marked(now)) {
+					// `MARK` of the demo: 80 pixels from (540, 20) of 640x360.
+					context.fillStyle = "#fff";
+					context.fillRect(540, 20, 80, 80);
+				}
+				video.encode(
+					new VideoFrame(canvas, { timestamp: (now - videoBegan) * 1000 }),
+				);
+			}, 1000 / BROADCAST.framerate);
+			const frames = 960;
+			let phase = 0;
+			let level = 0.25;
+			// Every piece is 20 ms after the one before it, whenever its timer
+			// came: a decoder wants the sound without gaps.
+			const firstPiece = audioBegan;
+			timers[1] = setInterval(() => {
+				const piece = publishing.made;
+				publishing.made += 1;
+				const loud = marked(firstPiece + piece * 20);
+				const samples = new Float32Array(frames);
+				for (let index = 0; index < frames; index++) {
+					phase += (2 * Math.PI * (loud ? 1000 : 440)) / sampleRate;
+					// Towards its value and not at once: a step is a click.
+					level += ((loud ? 0.6 : 0.25) - level) * 0.02;
+					samples[index] = level * Math.sin(phase);
+				}
+				audio.encode(
+					new AudioData({
+						format: "f32",
+						sampleRate,
+						numberOfFrames: frames,
+						numberOfChannels: 1,
+						timestamp: piece * 20_000,
+						data: samples,
+					}),
+				);
+			}, 20);
+			void video.failed.then((error) => {
+				console.log(`video encoder failed: ${errorText(error)}`);
+			});
+			await moq.publishNamespace(
+				trackNamespace,
+				namespaceToken(publishNamespaceTokenHex),
 			);
-		}, 1000 / BROADCAST.framerate);
-		const frames = 960;
-		let phase = 0;
-		let level = 0.25;
-		// Every piece is 20 ms after the one before it, whenever its timer
-		// came: a decoder wants the sound without gaps.
-		const firstPiece = audioBegan;
-		timers[1] = setInterval(() => {
-			const piece = publishing.made;
-			publishing.made += 1;
-			const loud = marked(firstPiece + piece * 20);
-			const samples = new Float32Array(frames);
-			for (let index = 0; index < frames; index++) {
-				phase += (2 * Math.PI * (loud ? 1000 : 440)) / sampleRate;
-				// Towards its value and not at once: a step is a click.
-				level += ((loud ? 0.6 : 0.25) - level) * 0.02;
-				samples[index] = level * Math.sin(phase);
-			}
-			audio.encode(
-				new AudioData({
-					format: "f32",
-					sampleRate,
-					numberOfFrames: frames,
-					numberOfChannels: 1,
-					timestamp: piece * 20_000,
-					data: samples,
-				}),
-			);
-		}, 20);
-		void video.failed.then((error) => {
-			console.log(`video encoder failed: ${errorText(error)}`);
-		});
-		await moq.publishNamespace(trackNamespace);
-		console.log("broadcast published");
-	}),
+			console.log("broadcast published");
+		},
+	),
 
 	endBroadcast: withPlainErrors(async () => {
 		if (broadcastPublishing === undefined) {
@@ -1689,83 +1711,92 @@ window.xmoqOwn = {
 		},
 	),
 
-	publishVoice: withPlainErrors(async (namespace: string, voice: string) => {
-		const moq = connected();
-		const trackNamespace = namespaceTuple(namespace);
-		const sampleRate = 48_000;
-		const audio = await createAudioTrackEncoder({
-			trackNamespace,
-			trackName: utf8.encode(VOICE.audio),
-			firstGroup: BigInt(Date.now()),
-			codec: "opus",
-			sampleRate,
-			numberOfChannels: 1,
-		});
-		const catalog = createCatalogPublisher({
-			namespace: trackNamespace,
-			catalog: {
-				version: "draft-01",
-				tracks: [
-					{
-						name: VOICE.audio,
-						packaging: "loc",
-						isLive: true,
-						role: "audio",
-						codec: "opus",
-						bitrate: 32_000,
-						samplerate: sampleRate,
-						channelConfig: "1",
-					},
-				],
-			},
-		});
-		moq.serve({
-			subscribe(request) {
-				if (catalog.subscribe(request)) return;
-				if (audio.publisher.subscribe(request)) return;
-				request
-					.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
-					.catch(() => {});
-			},
-			fetch(request) {
-				if (catalog.fetch(request)) return;
-				if (audio.publisher.fetch(request)) return;
-				request
-					.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
-					.catch(() => {});
-			},
-		});
-		const spoken = voiceAt48kHz(voice);
-		const round = new Float32Array(
-			spoken.length + (VOICE.pauseMs * sampleRate) / 1000,
-		);
-		round.set(spoken);
-		const frames = 960;
-		const counted = { made: 0 };
-		// Every piece is 20 ms after the one before it, whenever its timer
-		// came, as in `publishBroadcast`.
-		setInterval(() => {
-			const piece = counted.made;
-			counted.made += 1;
-			const samples = new Float32Array(frames);
-			for (let index = 0; index < frames; index++) {
-				samples[index] = round[(piece * frames + index) % round.length] ?? 0;
-			}
-			audio.encode(
-				new AudioData({
-					format: "f32",
-					sampleRate,
-					numberOfFrames: frames,
-					numberOfChannels: 1,
-					timestamp: piece * 20_000,
-					data: samples,
-				}),
+	publishVoice: withPlainErrors(
+		async (
+			namespace: string,
+			voice: string,
+			publishNamespaceTokenHex?: string,
+		) => {
+			const moq = connected();
+			const trackNamespace = namespaceTuple(namespace);
+			const sampleRate = 48_000;
+			const audio = await createAudioTrackEncoder({
+				trackNamespace,
+				trackName: utf8.encode(VOICE.audio),
+				firstGroup: BigInt(Date.now()),
+				codec: "opus",
+				sampleRate,
+				numberOfChannels: 1,
+			});
+			const catalog = createCatalogPublisher({
+				namespace: trackNamespace,
+				catalog: {
+					version: "draft-01",
+					tracks: [
+						{
+							name: VOICE.audio,
+							packaging: "loc",
+							isLive: true,
+							role: "audio",
+							codec: "opus",
+							bitrate: 32_000,
+							samplerate: sampleRate,
+							channelConfig: "1",
+						},
+					],
+				},
+			});
+			moq.serve({
+				subscribe(request) {
+					if (catalog.subscribe(request)) return;
+					if (audio.publisher.subscribe(request)) return;
+					request
+						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+						.catch(() => {});
+				},
+				fetch(request) {
+					if (catalog.fetch(request)) return;
+					if (audio.publisher.fetch(request)) return;
+					request
+						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
+						.catch(() => {});
+				},
+			});
+			const spoken = voiceAt48kHz(voice);
+			const round = new Float32Array(
+				spoken.length + (VOICE.pauseMs * sampleRate) / 1000,
 			);
-		}, 20);
-		voicePublishing = { audio, round: round.length, counted };
-		await moq.publishNamespace(trackNamespace);
-		console.log("voice published");
-	}),
+			round.set(spoken);
+			const frames = 960;
+			const counted = { made: 0 };
+			// Every piece is 20 ms after the one before it, whenever its timer
+			// came, as in `publishBroadcast`.
+			setInterval(() => {
+				const piece = counted.made;
+				counted.made += 1;
+				const samples = new Float32Array(frames);
+				for (let index = 0; index < frames; index++) {
+					samples[index] = round[(piece * frames + index) % round.length] ?? 0;
+				}
+				audio.encode(
+					new AudioData({
+						format: "f32",
+						sampleRate,
+						numberOfFrames: frames,
+						numberOfChannels: 1,
+						timestamp: piece * 20_000,
+						data: samples,
+					}),
+				);
+			}, 20);
+			voicePublishing = { audio, round: round.length, counted };
+			await moq.publishNamespace(
+				trackNamespace,
+				namespaceToken(publishNamespaceTokenHex),
+			);
+			console.log("voice published");
+		},
+	),
 
 	followTranscript: withPlainErrors(
 		async (listened: string, latest: number) => {

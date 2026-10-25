@@ -303,9 +303,14 @@ export type OwnPageExtras = {
 	 * picture is grey with a white square, and the sound a tone with a loud
 	 * beep, for the first 200 ms of every 2 seconds of the page's clock
 	 * (`marked` and `MARK` of `demo/shared.ts`): what a viewer measures how
-	 * far apart picture and sound leave it by.
+	 * far apart picture and sound leave it by. With
+	 * `publishNamespaceTokenHex` the PUBLISH_NAMESPACE carries that token, as
+	 * in `publishVoice`.
 	 */
-	publishBroadcast(namespace: string): Promise<void>;
+	publishBroadcast(
+		namespace: string,
+		publishNamespaceTokenHex?: string,
+	): Promise<void>;
 	/**
 	 * Ends the three tracks of `publishBroadcast` with PUBLISH_DONE
 	 * (TRACK_ENDED), as a publisher that stops its broadcast and stays
@@ -336,9 +341,15 @@ export type OwnPageExtras = {
 	 * is the samples of the voice in base64: 16-bit little-endian, one
 	 * channel at 16,000 Hz, which the page makes 48,000 Hz by drawing lines
 	 * between them. Each Object has the page's clock as its Timestamp, as in
-	 * `publishBroadcast`.
+	 * `publishBroadcast`. With `publishNamespaceTokenHex` (the Token structure
+	 * in hex) the PUBLISH_NAMESPACE carries that token, as the demo's pages
+	 * carry the room's `pub` token; the connection's own is for the rest.
 	 */
-	publishVoice(namespace: string, voice: string): Promise<void>;
+	publishVoice(
+		namespace: string,
+		voice: string,
+		publishNamespaceTokenHex?: string,
+	): Promise<void>;
 	/** What `publishVoice` has made so far. */
 	voiceReport(): Promise<PageVoiceReport>;
 	/**

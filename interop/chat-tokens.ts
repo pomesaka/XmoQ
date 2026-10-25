@@ -32,7 +32,6 @@
 //     is accepted, and its SUBSCRIBE for `lines` refused with 0x1.
 //   - Nothing of b, c or d reaches the gatherer as a line.
 
-import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
@@ -46,6 +45,7 @@ import {
 	openPage,
 	pollFor,
 	type RunContext,
+	roomToken,
 	runCleanups,
 	spawnChatGatherer,
 	startRun,
@@ -81,22 +81,9 @@ stopEverythingOnExit();
 /** The key of the run, which the relay is given: 32 bytes. */
 const KEY_HEX = "11".repeat(32);
 
-const hex = (bytes: Uint8Array): string =>
-	[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-
-/**
- * A token of the room for `role` in `namespace`, good for 10 minutes, as the
- * Token structure in hex: Alias Type USE_VALUE (0x3), Token Type 0, the
- * value (§10.2.2).
- */
-function token(role: "pub" | "sub", namespace: string): string {
-	const expiry = Math.floor(Date.now() / 1000) + 600;
-	const signed = `v1|${namespace}|${role}|${expiry}`;
-	const mac = createHmac("sha256", Buffer.from(KEY_HEX, "hex"))
-		.update(signed)
-		.digest("hex");
-	return `0300${hex(new TextEncoder().encode(`${signed}|${mac}`))}`;
-}
+/** A token of the room for `role` in `namespace`, with the run's key (`roomToken`). */
+const token = (role: "pub" | "sub", namespace: string): string =>
+	roomToken(KEY_HEX, role, namespace);
 
 function expect(what: string, got: string, wanted: string): void {
 	if (got !== wanted) throw new Error(`${what}: ${got}, not ${wanted}`);
