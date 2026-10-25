@@ -252,23 +252,20 @@ impl Chat {
 /// second.
 const FRAME_WAIT: Duration = Duration::from_secs(10);
 
-/// The video of the broadcast, for its pictures.
+/// What `/frame` gets once the thread of the pictures is gone (it panicked).
+const THREAD_ENDED: &str = "frame: the thread of the pictures ended";
+
+/// The video of the broadcast on this session, for its pictures.
 struct Video {
-    pictures: Pictures,
     subscription: Subscription,
     _catalog: CatalogKept,
-    /// Until when the picture asked for is waited for.
-    asked_until: Option<tokio::time::Instant>,
-    /// Whether Objects are being left out, which is told once each time it
-    /// begins.
-    leaving_out: bool,
 }
 
 /// Why there are no pictures on this session.
 enum NoVideo {
     /// `--frames off`.
     Off,
-    /// The catalog, the subscription or the thread failed, or the video ended.
+    /// The catalog or the subscription failed, or the video ended.
     Failed(String),
 }
 
@@ -281,17 +278,14 @@ impl NoVideo {
     }
 }
 
-/// Reads the catalog and subscribes to its first H.264 video track, and
-/// starts the thread of its pictures.
+/// Reads the catalog and subscribes to its first H.264 video track.
 ///
 /// WHY the first: the demo's publisher puts its main version first, and
 /// `xmoq-watch` takes it where nothing else is asked.
 async fn subscribe_video(
-    args: &xmoq_agent::args::Args,
     requests: &mut Requests<'_>,
     events: &mut Events,
     stops: &StreamStops,
-    session_number: u64,
 ) -> Result<Video> {
     let (tracks, catalog) = requests.catalog(events, stops).await?;
     let video = xmoq_msf::video_tracks(&tracks, "avc")
@@ -302,29 +296,23 @@ async fn subscribe_video(
     let subscription = events
         .while_waiting(requests.subscribe(&video, None))
         .await??;
-    let pictures = Pictures::start(
-        args.pictures,
-        std::path::Path::new(&args.out).join(FRAMES_DIR),
-        format!("s{session_number}-"),
-    )?;
     eprintln!(
         "XMOQ_AGENT_VIDEO track={video} track_alias={}",
         subscription.track_alias
     );
     Ok(Video {
-        pictures,
         subscription,
         _catalog: catalog,
-        asked_until: None,
-        leaving_out: false,
     })
 }
 
-/// The directory of the pictures in `--out`.
-pub const FRAMES_DIR: &str = "frames";
-
 /// An Object of the video, for the thread of its pictures.
-fn on_video_object(video: &mut Video, reader: &mut Reader, group: u64, object: &SubgroupObject) {
+fn on_video_object(
+    pictures: &mut Pictures,
+    reader: &mut Reader,
+    group: u64,
+    object: &SubgroupObject,
+) {
     if object.status != ObjectStatus::Normal {
         return;
     }
@@ -336,19 +324,19 @@ fn on_video_object(video: &mut Video, reader: &mut Reader, group: u64, object: &
     let Ok(annex_b) = loc::to_annex_b(&object.payload) else {
         return;
     };
-    let given = video.pictures.object(Job::Object {
+    let given = pictures.object(Job::Object {
         group,
         object: object.object_id,
         timestamp_us,
         annex_b,
     });
-    if !given && !video.leaving_out {
+    if !given && !pictures.leaving_out {
         reader.error(format!(
             "frame: the pictures are behind; {} Objects of the video left out so far",
-            video.pictures.left_out
+            pictures.left_out
         ));
     }
-    video.leaving_out = !given;
+    pictures.leaving_out = !given;
 }
 
 /// What a line of stdin asks for, where the session has to do it.
@@ -402,6 +390,7 @@ pub async fn attend(
     place: &Place,
     room: &mut Option<RoomSocket>,
     reader: &mut Reader,
+    pictures: &mut Option<Pictures>,
     kept: &mut UntilClosed,
 ) -> Result<Ended> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
@@ -445,12 +434,11 @@ pub async fn attend(
     {
         return Ok(Ended::Quit);
     }
-    reader.sessions += 1;
     // WHY before the chat: reading the catalog takes every event of the
     // session meanwhile (`Requests::catalog`), and the chat's lines and its
     // FETCH would be taken with them.
     let mut video = Err(NoVideo::Off);
-    if args.frames {
+    if let Some(pictures) = pictures.as_mut() {
         let broadcast = TrackNamespace::new(
             place
                 .namespace
@@ -467,13 +455,18 @@ pub async fn attend(
             open_wait_ms: args.open_wait_ms,
             rendezvous_ms: None,
         };
-        let subscribed = subscribe_video(args, &mut requests, &mut events, &stops, reader.sessions);
+        let subscribed = subscribe_video(&mut requests, &mut events, &stops);
         // The catalog's SUBSCRIBE and FETCH, the catalog itself, and the
         // video's SUBSCRIBE.
         let wait = Duration::from_millis(args.answer_wait_ms * 3) + Duration::from_secs(5);
         video = match reader.unless_ended("the video", wait, subscribed).await {
             Ok(None) => return Ok(Ended::Quit),
-            Ok(Some(video)) => Ok(video),
+            Ok(Some(video)) => {
+                // Before the first Object of this session's video reaches
+                // the thread: the Objects go through the loop below.
+                pictures.tell(Job::BeginAgain).await;
+                Ok(video)
+            }
             Err(error) => {
                 if let Some(GoneAway(go_away)) =
                     error.chain().find_map(|cause| cause.downcast_ref())
@@ -540,45 +533,44 @@ pub async fn attend(
             settle_at,
             ..
         } = &mut chat;
-        let (told, video_answers, asked_until) = match &mut video {
-            Ok(video) => (
-                Some(&mut video.pictures.told),
-                Some(&mut video.subscription.reader),
-                video.asked_until,
-            ),
-            Err(_) => (None, None, None),
-        };
+        let video_answers = video
+            .as_mut()
+            .ok()
+            .map(|video| &mut video.subscription.reader);
+        let asked_until = pictures.as_ref().and_then(|pictures| pictures.asked_until);
+        let told = pictures.as_mut().map(|pictures| &mut pictures.told);
         tokio::select! {
             outside = reader.outside() => match outside {
                 Outside::End => break Ended::Quit,
                 Outside::Line(line) => match on_line(&mut chat.tracks, connection, reader, line) {
                     Wants::Nothing => {}
-                    Wants::Frame => match &mut video {
-                        Ok(video) => {
-                            video.pictures.tell(Job::Ask).await;
-                            video.asked_until = Some(tokio::time::Instant::now() + FRAME_WAIT);
+                    Wants::Frame => match (pictures.as_mut(), &video) {
+                        (Some(pictures), Ok(_)) => {
+                            pictures.tell(Job::Ask).await;
+                            pictures.asked_until = Some(tokio::time::Instant::now() + FRAME_WAIT);
                         }
-                        Err(why) => reader.error(why.message()),
+                        (_, Err(why)) => reader.error(why.message()),
+                        (None, Ok(_)) => reader.error(THREAD_ENDED.to_string()),
                     },
                 },
             },
-            event = on(told.map(mpsc::Receiver::recv)) => match (event, &mut video) {
-                (Some(event), Ok(video)) => {
-                    if matches!(event, Event::Frame { asked: FrameAsked::Command, .. }) {
-                        video.asked_until = None;
+            event = on(told.map(mpsc::Receiver::recv)) => {
+                if let Some(event) = event {
+                    if let (Event::Frame { asked: FrameAsked::Command, .. }, Some(pictures)) =
+                        (&event, pictures.as_mut())
+                    {
+                        pictures.asked_until = None;
                     }
                     reader.tell(&event);
+                } else {
+                    reader.error(THREAD_ENDED.to_string());
+                    *pictures = None;
                 }
-                (None, _) | (_, Err(_)) => {
-                    let why = NoVideo::Failed("the thread of the pictures ended".to_string());
-                    reader.error(why.message());
-                    video = Err(why);
-                }
-            },
+            }
             () = on(asked_until.map(tokio::time::sleep_until)) => {
-                if let Ok(video) = &mut video {
-                    video.asked_until = None;
-                    video.pictures.tell(Job::Forgo).await;
+                if let Some(pictures) = pictures.as_mut() {
+                    pictures.asked_until = None;
+                    pictures.tell(Job::Forgo).await;
                 }
                 reader.error(format!("frame: no picture within {} s", FRAME_WAIT.as_secs()));
             }
@@ -667,8 +659,8 @@ pub async fn attend(
                 Some(UniEvent::Object { header, object, .. })
                     if video.as_ref().is_ok_and(|video| video.subscription.track_alias == header.track_alias) =>
                 {
-                    if let Ok(video) = &mut video {
-                        on_video_object(video, reader, header.group_id, &object);
+                    if let Some(pictures) = pictures.as_mut() {
+                        on_video_object(pictures, reader, header.group_id, &object);
                     }
                 }
                 // An Object of the catalog's track, which stays subscribed:

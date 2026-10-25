@@ -38,7 +38,7 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
 | `--frames off` | on | The video is not subscribed to, and `/frame` gets an `error`. On, the reader subscribes to the first H.264 video track of the broadcast's catalog and holds the latest Group's frames undecoded until a picture is asked for (`xmoq-picture`) |
 | `--frame-every-ms` | none | A picture this often by the broadcast's Timestamps, unasked |
 | `--frame-longest` | 1280 | The longest side of a picture, in pixels; a larger one is made smaller |
-| `--frames-kept` | 500 | The pictures kept of a session in `<dir>/frames/`; the oldest file goes for the newest |
+| `--frames-kept` | 500 | The pictures kept in `<dir>/frames/`, of every session together; the oldest file goes for the newest. Files that were there when the reader began are not counted, and not removed |
 
 ## What it writes
 
@@ -57,7 +57,7 @@ Every line has `type` and `at`, the reader's clock in milliseconds since the Uni
 ```json
 {"at":1792883451092,"name":"p","type":"joined"}
 {"at":1792883451113,"from":"p","gathered_at":1792883451111,"number":0,"sent_at":1792883451110,"text":"hello from p","type":"chat"}
-{"asked":"command","at":1792884905154,"group":1792884901959,"height":360,"object":12,"path":"/tmp/room/frames/s1-000001-g1792884901959-o12.png","timestamp_us":1792884904928000,"type":"frame","width":640}
+{"asked":"command","at":1792884905154,"group":1792884901959,"height":360,"object":12,"path":"/tmp/room/frames/000001-g1792884901959-o12.png","timestamp_us":1792884904928000,"type":"frame","width":640}
 {"at":1792883451182,"message":"no command /nothing: /frame is one, and // begins a line that is said","type":"error"}
 {"at":1792883451205,"name":"p","type":"left"}
 ```
@@ -85,7 +85,7 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 
 - **With a room, the chat is there only while the room has a broadcast**: the chat is on the session of the broadcast, and the room says where the relay is only with it. A line said meanwhile gets an `error`.
 - No speech yet: it waits for the transcriber's track.
-- **`--frames-kept` holds for each session**: the files of a session are named `s<n>-...` and those of earlier sessions are not removed. A session's `Frames` (`xmoq-picture`) begins anew, since a new publisher can number its Groups from 0.
+- **A reader started again in the same `--out` writes over the pictures of the one before**: the names begin from 1 again (`000001-...`), and what the earlier run kept is neither counted nor removed.
 - The video that ends (PUBLISH_DONE) is not asked for again on that session; the next session asks.
 - Objects of the video that wait for the thread of the pictures: 256; beyond them they are left out, an `error` says so when it begins, and the frames after them in their Group give no picture.
 - Requests of the relay are refused with `NOT_SUPPORTED`, except the gatherer's SUBSCRIBE to `said`.

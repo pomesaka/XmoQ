@@ -32,6 +32,10 @@ use xmoq_viewer_io::room_socket::{ChatTokens, RoomSocket};
 use xmoq_viewer_io::session::termination_code;
 
 use crate::attend::{Ended, UntilClosed, attend};
+use crate::frames::Pictures;
+
+/// The directory of the pictures in `--out`.
+const FRAMES_DIR: &str = "frames";
 use crate::output::Output;
 use crate::stdin::Line;
 
@@ -52,8 +56,6 @@ pub struct Reader {
     presence: Presence,
     /// The newest line of the chat written, from one session to the next.
     had: Option<u64>,
-    /// The sessions begun so far, which name the files of their pictures.
-    sessions: u64,
 }
 
 /// What came from outside the session while something is waited for.
@@ -271,6 +273,14 @@ async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
         Source::Relay { .. } => None,
     };
     let follows = room.is_some();
+    let mut pictures = if args.frames {
+        Some(Pictures::start(
+            args.pictures,
+            Path::new(&args.out).join(FRAMES_DIR),
+        )?)
+    } else {
+        None
+    };
     let mut tried: Option<Instant> = None;
     // The last GOAWAY: the URL left, and where to go instead, for as long
     // as the place is the one left (as `xmoq-watch` has it, where the reasons
@@ -317,8 +327,16 @@ async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
             Ok(Some(connection)) => {
                 let connection = Arc::new(connection);
                 let mut kept = UntilClosed::default();
-                let attended =
-                    attend(args, &connection, &place, &mut room, reader, &mut kept).await;
+                let attended = attend(
+                    args,
+                    &connection,
+                    &place,
+                    &mut room,
+                    reader,
+                    &mut pictures,
+                    &mut kept,
+                )
+                .await;
                 connection.close(attended.as_ref().err().map_or(0, termination_code), b"");
                 let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
                 attended
@@ -373,7 +391,6 @@ async fn read(args: &Args) -> Result<()> {
             .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds)),
         presence: Presence::new(&args.room, &args.name),
         had: None,
-        sessions: 0,
     };
     let ran = run(args, &mut reader).await;
     if let Err(error) = &ran {

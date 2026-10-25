@@ -35,9 +35,14 @@ macOS 14.4, arm64, loopback; Bun 1.3.12; Chromium 156.0.8078.4 of playwright-cor
 
 The full run ended 219 of 219 as expected (441.3 s), the reader's pairing among them (1.0 s).
 
+### One `Frames` for the whole run
+
+Then the reader kept one `Frames` for the run and called `begin_again` on each session's video (`Frames::begin_again` of #329), and its files lost the prefix of their session. Run once more by a script that was not kept, with `--frames-kept 1` and two `/frame` 1.5 s apart: `000001-g1792887291715-o13.png` (1,602 bytes) and then `000002-g1792887291717-o2.png` (2,156 bytes), and the first was removed when the second was written. `Frames` counted 99 given, 17 decoded, 79 passed over, 2 taken. The full run after it ended 225 of 225 as expected (468.1 s).
+
 ## What was not run
 
 - A room (`--room`): the interop runs have none, and the run uses `--url` with `--chat-room`. The room's tokens are asked for by the code `xmoq-watch` uses (`RoomSocket::chat_tokens`, now in `xmoq-viewer-io`), which the reader's run does not reach.
 - A reader that connects again, and the 2 s after which those not told of again are written as `left`: the table test of `presence` alone.
 - `/frame` in `mise run interop`: `anna-4aa4` adds that pairing. `--frame-every-ms`, and a `/frame` that gets no picture within 10 s.
+- A second session with video through a relay, where `begin_again` is called on a `Frames` that had pictures: the table tests of `xmoq-picture` (`src/tests.rs`) alone, and the PNG pairing of `anna-4aa4` when it reconnects.
 - `speech`: not built yet.
