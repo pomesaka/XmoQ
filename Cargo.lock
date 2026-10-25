@@ -2729,6 +2729,7 @@ dependencies = [
  "xmoq-moqt",
  "xmoq-moqt-io",
  "xmoq-msf",
+ "xmoq-track-serving",
 ]
 
 [[package]]
