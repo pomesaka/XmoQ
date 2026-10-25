@@ -123,7 +123,8 @@ check_spike_deps() {
 # The layer of a package under packages/, a number; empty for a name that is none of them.
 package_layer() {
 	case "$1" in
-	@xmoq/moqt | @xmoq/loc) echo 0 ;;
+	# The reader of JSON is one that the packages of the tracks share.
+	@xmoq/moqt | @xmoq/loc | @xmoq/json) echo 0 ;;
 	# The chat is built on the transport alone, as the streaming format is.
 	@xmoq/msf | @xmoq/chat) echo 1 ;;
 	@xmoq/media) echo 2 ;;

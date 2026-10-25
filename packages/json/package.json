@@ -1,0 +1,18 @@
+{
+	"name": "@xmoq/json",
+	"version": "0.0.0",
+	"description": "A reader of JSON that reads the payloads of the tracks as serde_json does: the text of each number kept, and what serde_json refuses refused",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/json.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.core.json"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.2",
+		"typescript": "6.0.3"
+	}
+}

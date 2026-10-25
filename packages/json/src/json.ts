@@ -1,21 +1,26 @@
 // A reader of JSON (RFC 8259) that keeps the text of each number, for the
-// payloads of the chat's tracks.
+// payloads of the tracks that Rust writes and reads with `serde_json`: the
+// chat's (`@xmoq/chat`) and the transcripts' (`@xmoq/transcript`).
 //
-// WHY NOT `JSON.parse`: the gatherer and the terminal viewer read the same
-// payloads with `serde_json` (`crates/chat-tracks/src/payloads.rs`), and the
-// same bytes are to give the same line or the same reason in every reader
-// (`fixtures/chat-tracks/`). `JSON.parse` makes the same number of `1e3`
-// and `1000`, of `1.0` and `1`, and of `-0` and `0`, where `serde_json` has
-// a float for the first of each, which is no time. It also takes what
-// `serde_json` refuses: an escaped lone surrogate (`"\ud800"`), a number
-// beyond a double (`1e400`, which it makes Infinity), and nesting of any
-// depth. The rows of the table that are about JSON's edges were checked
-// against `serde_json` by its test, which reads the same table.
+// WHY NOT `JSON.parse`: the same bytes are to give the same value, or the
+// same reason why there is none, in every reader (`fixtures/chat-tracks/`,
+// `fixtures/transcript-tracks/`). `JSON.parse` makes the same number of
+// `1e3` and `1000`, of `1.0` and `1`, and of `-0` and `0`, where
+// `serde_json` has a float for the first of each, which is no integer. It
+// also takes what `serde_json` refuses: an escaped lone surrogate
+// (`"\ud800"`), a number beyond a double (`1e400`, which it makes
+// Infinity), and nesting of any depth. The rows of the tables that are
+// about JSON's edges were checked against `serde_json` by the Rust tests,
+// which read the same tables.
+//
+// WHY a package of its own, in the lowest layer: each package of the
+// tracks reads its payloads with it, and packages of one layer may not
+// depend on each other (`scripts/ci/check-layers.sh`).
 
-/** A value as this reader keeps it: of a number its text, of an array and a literal only what it is. */
+/** A value as this reader keeps it: of a number its text, of a literal only what it is. */
 export type JsonValue =
 	| { kind: "object"; members: Map<string, JsonValue> }
-	| { kind: "array" }
+	| { kind: "array"; items: JsonValue[] }
 	| { kind: "string"; value: string }
 	| { kind: "number"; text: string }
 	| { kind: "literal" };
@@ -160,17 +165,18 @@ export function readJson(text: string): JsonValue | undefined {
 			}
 			case "[": {
 				at += 1;
+				const items: JsonValue[] = [];
 				space();
 				if (text[at] === "]") {
 					at += 1;
-					return { kind: "array" };
+					return { kind: "array", items };
 				}
 				for (;;) {
-					value(depth + 1);
+					items.push(value(depth + 1));
 					space();
 					if (text[at] === "]") {
 						at += 1;
-						return { kind: "array" };
+						return { kind: "array", items };
 					}
 					expect(",");
 				}

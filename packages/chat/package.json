@@ -12,6 +12,7 @@
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.core.json"
 	},
 	"dependencies": {
+		"@xmoq/json": "workspace:*",
 		"@xmoq/moqt": "workspace:*"
 	},
 	"devDependencies": {

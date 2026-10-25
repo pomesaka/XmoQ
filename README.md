@@ -41,6 +41,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [The MOQT Streaming Format in TypeScript, `@xmoq/msf`](packages/msf/README.md)
 - [Between a video track and a decoder, `@xmoq/media`](packages/media/README.md)
 - [A participant of the chat over MoQ tracks, `@xmoq/chat`](packages/chat/README.md)
+- [The reader of JSON that the packages of the tracks share, `@xmoq/json`](packages/json/README.md)
 - [The viewer for the terminal, `xmoq-watch`](crates/watch/README.md)
 - [Pictures of a video track as PNG, `xmoq-picture`](crates/picture/README.md)
 - [The gatherer of the chat, `xmoq-chat`](crates/chat/README.md)
