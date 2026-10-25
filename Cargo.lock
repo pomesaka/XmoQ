@@ -2802,6 +2802,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "opus-rs",
+ "rustix",
  "whisper-rs",
 ]
 

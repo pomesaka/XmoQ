@@ -89,12 +89,12 @@ async fn run(args: Args) -> Result<()> {
         None
     };
     let loading = Instant::now();
-    // `dir` is held until `run` returns, on SIGTERM as well, and the
-    // readers' directory goes with it.
+    // `scratch` is held until `run` returns, on SIGTERM as well, and the
+    // readers' programs and directory go with it.
     let xmoq_speech::engine::Opened {
         readers,
         said,
-        dir: _held_until_the_end,
+        scratch: _held_until_the_end,
     } = xmoq_speech::engine::open(
         args.engine,
         &EngineOptions {

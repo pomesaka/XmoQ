@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 
 use crate::Words;
-use crate::command::{Command, CommandLimits};
+use crate::command::{Command, CommandLimits, Running};
 use crate::model::{DEFAULT_MODEL, model_file};
 use crate::whisper::Whisper;
 
@@ -63,30 +63,36 @@ pub struct Opened {
     pub readers: Vec<Box<dyn Words + Send>>,
     /// What was opened, as fields of a line (`path=... language=...`).
     pub said: String,
-    /// The directory the readers write to, removed when this is dropped;
-    /// `None` where they write nothing.
-    pub dir: Option<Scratch>,
+    /// What the readers leave, which goes when this is dropped; `None`
+    /// where they leave nothing.
+    pub scratch: Option<Scratch>,
 }
 
-/// A directory of the readers' own, removed with what is in it when dropped.
+/// What readers that run programs leave: the programs that run, stopped
+/// with what they started, and a directory of the readers' own, removed
+/// with what is in it, when this is dropped.
 ///
 /// WHY on drop: the transcriber returns from its loop on SIGTERM and Ctrl-C
 /// as on an error, so a value held there is dropped however it ends, short
 /// of SIGKILL.
 #[derive(Debug)]
-pub struct Scratch(PathBuf);
+pub struct Scratch {
+    dir: PathBuf,
+    running: Running,
+}
 
 impl Scratch {
     /// The directory.
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.dir
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        self.running.stop_all();
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -119,7 +125,7 @@ pub fn open(engine: Engine, options: &EngineOptions, count: usize) -> Result<Ope
                     model.display(),
                     options.language
                 ),
-                dir: None,
+                scratch: None,
             })
         }
         Engine::Command => {
@@ -127,14 +133,18 @@ pub fn open(engine: Engine, options: &EngineOptions, count: usize) -> Result<Ope
             // machine write pieces of the same names.
             let dir = std::env::temp_dir().join(format!("xmoq-transcriber-{}", std::process::id()));
             std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
-            let dir = Scratch(dir);
+            let scratch = Scratch {
+                dir,
+                running: Running::default(),
+            };
             let mut readers: Vec<Box<dyn Words + Send>> = Vec::with_capacity(count);
             for n in 0..count.max(1) {
                 readers.push(Box::new(Command::new(
                     options.command.clone(),
                     &options.language,
                     options.command_limits,
-                    dir.path().join(format!("piece-{n}.wav")),
+                    scratch.path().join(format!("piece-{n}.wav")),
+                    scratch.running.clone(),
                 )?));
             }
             Ok(Opened {
@@ -144,7 +154,7 @@ pub fn open(engine: Engine, options: &EngineOptions, count: usize) -> Result<Ope
                     options.command.join(" "),
                     options.language
                 ),
-                dir: Some(dir),
+                scratch: Some(scratch),
             })
         }
     }
@@ -176,7 +186,7 @@ mod tests {
             command_limits: CommandLimits::default(),
         };
         let opened = open(Engine::Command, &options, 2).unwrap();
-        let dir = opened.dir.as_ref().unwrap().path().to_owned();
+        let dir = opened.scratch.as_ref().unwrap().path().to_owned();
         assert!(dir.is_dir());
         drop(opened);
         assert!(!dir.exists());
