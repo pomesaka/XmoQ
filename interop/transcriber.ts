@@ -5,7 +5,7 @@
 // `xmoq/voice` with the smallest model of whisper.cpp, and own-rust clients
 // read the transcript `speech` of `xmoq/transcript/xmoq/voice`.
 //
-// Usage: bun transcriber.ts [--port N] [--verbose]
+// Usage: bun transcriber.ts [--auth yes|no] [--port N] [--verbose]
 //
 // What has to be seen, written before the first run:
 //
@@ -42,6 +42,14 @@
 //     "start_us":...,"end_us":...,"read_at":...}` whose text has "relay";
 //     each number once, going up by one.
 
+// `--auth yes`, written before its first run (2026-10-25): the relay, the
+// transcriber and the room's tokens have one key (`--auth-key-hex`). The
+// page connects with `sub` for its namespace and announces it with `pub`
+// for it (`publishVoice` with a token); the transcriber makes its own
+// tokens. A reader with `sub` for `xmoq/transcript/xmoq/voice` gets two
+// pieces whose text has "relay", from `xmoq/voice/page`: the voice reached
+// the transcript's track through a relay that checks every request.
+
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,7 +58,9 @@ import {
 	captureGroup,
 	log,
 	openConnectedPage,
+	openPage,
 	pollFor,
+	roomToken,
 	runCleanups,
 	spawnAgent,
 	spawnRustClient,
@@ -70,6 +80,7 @@ const { values: options } = parseArgs({
 		port: { type: "string", default: "24499" },
 		// The matrix gives every driver a relay; this one is through the own.
 		relay: { type: "string", default: "own" },
+		auth: { type: "string", default: "no" },
 		verbose: { type: "boolean", default: false },
 	},
 });
@@ -141,7 +152,109 @@ function expect(what: string, got: string, wanted: string): void {
 	if (got !== wanted) throw new Error(`${what}: ${got}, not ${wanted}`);
 }
 
+/** The key of the run with `--auth yes`, which the relay and the transcriber are given: 32 bytes. */
+const KEY_HEX = "22".repeat(32);
+
+/** `--auth yes`: the voice through a relay that asks for tokens. */
+async function withTokens(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser", "own-rust"],
+		verbose: options.verbose,
+		relayArgs: ["--auth-key-hex", KEY_HEX],
+	});
+	const transcriber = spawnTranscriber(context, "transcriber", [
+		"--namespace",
+		PREFIX,
+		"--language",
+		"en",
+		"--auth-key-hex",
+		KEY_HEX,
+	]);
+	await transcriber.waitForLine(
+		new RegExp(`^TRANSCRIPT_PUBLISHED prefix=${PREFIX} forward=true`),
+	);
+	await transcriber.waitForLine(new RegExp(`^WATCHING prefix=${PREFIX}$`));
+	const namespace = `${PREFIX}/page`;
+	const page = await openPage(context, "publisher", "own-browser");
+	await withTimeout(
+		page.evaluate(
+			([url, hash, tokenOf]) =>
+				window.xmoqOwn.connectWithToken(url, hash, tokenOf),
+			[
+				context.relayUrl,
+				context.certSha256Hex,
+				roomToken(KEY_HEX, "sub", namespace),
+			] satisfies [string, string, string],
+		),
+		"the page to connect",
+	);
+	await withTimeout(
+		page.evaluate(
+			([at, voice, tokenOf]) => window.xmoqOwn.publishVoice(at, voice, tokenOf),
+			[
+				namespace,
+				samplesOf(VOICE_FILE),
+				roomToken(KEY_HEX, "pub", namespace),
+			] satisfies [string, string, string],
+		),
+		"the page to publish its voice with its token",
+	);
+	await transcriber.waitForLine(
+		new RegExp(`^AUDIO_SUBSCRIBED namespace=${namespace}$`),
+	);
+	const live = spawnRustClient(
+		context,
+		"live",
+		"own-rust",
+		"subscribe",
+		"speech",
+		[
+			"--namespace",
+			TRANSCRIPT,
+			"--objects",
+			"2",
+			"--timeout-secs",
+			"30",
+			"--auth-token-hex",
+			roomToken(KEY_HEX, "sub", TRANSCRIPT),
+		],
+	);
+	const code = await withTimeout(live.exited, "the live reader to leave");
+	if (code !== 0) throw new Error(`the live reader left with ${code}`);
+	const pieces = live
+		.matches(/^OBJECT group=(\d+) object=0 .*payload_hex=(\S*)$/)
+		.map(pieceOf);
+	if (pieces.length !== 2) {
+		throw new Error(`the live reader got ${pieces.length} pieces, not 2`);
+	}
+	for (const piece of pieces) {
+		expect("a piece is from", piece.from.join("/"), namespace);
+		if (!/relay/i.test(piece.text)) {
+			throw new Error(
+				`a piece says ${JSON.stringify(piece.text)}, without "relay"`,
+			);
+		}
+	}
+	return `through the own relay with --auth-key-hex, the page announced ${namespace} with its pub token and the transcriber, with the same key, published two pieces that a reader with sub for ${TRANSCRIPT} got: ${pieces.map((piece) => JSON.stringify(piece.text)).join(" and ")}`;
+}
+
 async function main(): Promise<void> {
+	if (options.auth === "yes") {
+		let summary: string;
+		try {
+			summary = await withTokens();
+		} finally {
+			await runCleanups();
+		}
+		log("driver", "RESULT {}");
+		log("driver", `SUMMARY ${summary}`);
+		return;
+	}
+	if (options.auth !== "no") {
+		throw new Error(`--auth is yes or no, not ${options.auth}`);
+	}
 	let summary: string;
 	const agentOut = mkdtempSync(join(tmpdir(), "xmoq-agent-speech-"));
 	try {

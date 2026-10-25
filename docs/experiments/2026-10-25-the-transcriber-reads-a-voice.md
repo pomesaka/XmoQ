@@ -93,9 +93,17 @@ Written before: with a voice the page shows its words, and with the tone none.
 
 The full interop run on the three changes of Silero, `@xmoq/json` and the captions (`mise run interop -- --base-port 36000`, with the machine's lock) ended 229 of 229 as expected (481.4 s).
 
+### 5. With tokens (added on 2026-10-25)
+
+The page's voice could not reach a relay that checks tokens: `publishVoice` sent its PUBLISH_NAMESPACE without one. It now takes a token for it, and so does `publishBroadcast` (`interop/page.ts`). `interop/transcriber.ts --auth yes` runs the own relay with `--auth-key-hex`, and the transcriber with the same key. The page connects with `sub` for `xmoq/voice/page` and announces that namespace with `pub` for it, and the reader (the own Rust client) carries `sub` for `xmoq/transcript/xmoq/voice`. The tokens are made with the run's key in the room's form (`roomToken` of `interop/harness.ts`).
+
+Written before the run: the reader gets two pieces with "relay" in them, from `xmoq/voice/page`.
+
+**As expected, the first time it ran** (5.2 s, `--only "transcriber:"`): two pieces, "Hello from the relay." each, from `xmoq/voice/page`. The pairing without tokens passed in the same run. Rebased on `main` with `@xmoq/transcript` (#345), the full interop run (`mise run interop -- --base-port 36000`, with the machine's lock) ended 234 of 234 as expected (519.3 s), both pairings of the transcriber among them.
+
 ## What was not run
 
 - Linux: neither the build of whisper.cpp nor the run. CI is to do both, with the processor alone.
 - A meeting, a real microphone, voices over each other, music or noise. The values of cutting were chosen on voices of `say` alone.
-- `--auth-key-hex`, `moqtail`'s relay, a transcriber that starts again, and a catalog that changes its audio track.
+- `moqtail`'s relay, a transcriber that starts again, and a catalog that changes its audio track.
 - How much of the machine the transcriber takes while it reads.

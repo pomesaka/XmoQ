@@ -7,7 +7,7 @@ import {
 	execFileSync,
 	spawn,
 } from "node:child_process";
-import { createHash, X509Certificate } from "node:crypto";
+import { createHash, createHmac, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1062,6 +1062,29 @@ export function spawnAgent(
 	]);
 	defer(() => stopProcess(spawned, "SIGTERM"));
 	return spawned;
+}
+
+/**
+ * A token of the room for `role` in `namespace`, made with `keyHex`, the key
+ * the relay is given (`--auth-key-hex`), good for 10 minutes: the Token
+ * structure in hex, Alias Type USE_VALUE (0x3), Token Type 0, the value
+ * (§10.2.2). The form is the one `crates/room-token` reads and writes and
+ * `spikes/durable-objects-room/worker.js` makes.
+ */
+export function roomToken(
+	keyHex: string,
+	role: "pub" | "sub",
+	namespace: string,
+): string {
+	const expiry = Math.floor(Date.now() / 1000) + 600;
+	const signed = `v1|${namespace}|${role}|${expiry}`;
+	const mac = createHmac("sha256", Buffer.from(keyHex, "hex"))
+		.update(signed)
+		.digest("hex");
+	const value = [...new TextEncoder().encode(`${signed}|${mac}`)]
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
+	return `0300${value}`;
 }
 
 /**
