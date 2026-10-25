@@ -1707,9 +1707,9 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 	// came 3 seconds late by itself, the start of a process and its
 	// connection had to fit into the 3 seconds, and did not on a loaded
 	// machine (6 of 24 rounds with four matrices at once, and once in CI).
-	// The race is not gone: what has to fit into the relay's 5 seconds now
-	// is the later subscribers' start and messages between peers that are
-	// connected.
+	// The subscribers are connected before any of them subscribes, too
+	// (`subscribesWhen`): what has to fit into the relay's 5 seconds is
+	// messages between peers that are connected.
 	//
 	// It announces the namespace and waits to be asked. Its Groups start
 	// after the one the other publisher sends, as a source that goes on with
@@ -1735,13 +1735,20 @@ async function publishWhileAsked(run: Run): Promise<ScenarioResult> {
 	// The subscribers subscribe and are not answered: "Subscribers while the
 	// publisher has not answered the relay's SUBSCRIBE: They wait, and no
 	// SUBSCRIBE_OK is sent."
+	let subscribeNow = (): void => {};
+	const subscribesWhen = new Promise<void>((resolve) => {
+		subscribeNow = resolve;
+	});
 	const waiting: { session: number; subscriber: Promise<Subscriber> }[] = [];
 	for (const [index, kind] of subscriberKinds.entries()) {
-		const subscriber = startSubscriber(kind, `sub${index + 1}:${kind}`, run);
+		const subscriber = startSubscriber(kind, `sub${index + 1}:${kind}`, run, {
+			subscribesWhen,
+		});
 		// Observed here already, so that a failure while it waits is not unhandled.
 		subscriber.catch(() => {});
 		waiting.push({ session: await sessionOfNewClient(run), subscriber });
 	}
+	subscribeNow();
 	// The relay's SUBSCRIBE has come to the publisher, which holds its
 	// answer back. The first subscriber's SUBSCRIBE is what made the relay
 	// ask. Of a later subscriber the relay prints nothing while it waits, so

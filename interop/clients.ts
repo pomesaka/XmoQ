@@ -1004,6 +1004,23 @@ export interface SubscriberPlan {
 	 * it counts as subscribed when the relay has answered REQUEST_OK.
 	 */
 	updatesSubgroupTimeoutMs?: number;
+	/**
+	 * Own clients: the subscriber connects at once and sends its SUBSCRIBE
+	 * once this resolves (own-rust: `--subscribe-on-line`), so that what
+	 * takes time is over before a window the relay opens.
+	 */
+	subscribesWhen?: Promise<void>;
+}
+
+/** Sends the SUBSCRIBE of a started own-rust subscriber once `when` resolves; with no `when` it sent it by itself. */
+async function subscribeOnLine(
+	client: LoggedProcess,
+	when: Promise<void> | undefined,
+): Promise<void> {
+	if (when === undefined) return;
+	await client.waitForLine(/^READY_TO_SUBSCRIBE$/);
+	await when;
+	client.child.stdin.write("subscribe\n");
 }
 
 function startRustSubscriber(
@@ -1028,9 +1045,13 @@ function startRustSubscriber(
 					"--update-subgroup-timeout-ms",
 					String(plan.updatesSubgroupTimeoutMs),
 				]),
+		...(plan.subscribesWhen === undefined ? [] : ["--subscribe-on-line"]),
 	]);
 	if (plan.updatesSubgroupTimeoutMs !== undefined && kind !== "own-rust") {
 		throw new Error(`${kind} sends no REQUEST_UPDATE`);
+	}
+	if (plan.subscribesWhen !== undefined && kind !== "own-rust") {
+		throw new Error(`${kind} cannot hold its SUBSCRIBE back`);
 	}
 	const kill = async (): Promise<void> => {
 		client.child.kill("SIGKILL");
@@ -1067,10 +1088,11 @@ function startRustSubscriber(
 	return {
 		kind,
 		label,
-		subscribed:
+		subscribed: subscribeOnLine(client, plan.subscribesWhen).then(() =>
 			plan.updatesSubgroupTimeoutMs === undefined
 				? client.waitForLine(/^SUBSCRIBED /)
 				: client.waitForLine(/^UPDATE_ACCEPTED$/),
+		),
 		object: (group) =>
 			objectOf(new RegExp(`^OBJECT group=${group} .*payload_hex=([0-9a-f]*)$`)),
 		async properties(group) {
@@ -1144,6 +1166,10 @@ async function startBrowserSubscriber(
 ): Promise<Subscriber> {
 	const page = await openConnectedPage(run.context, label, kind);
 	const names = [NAMESPACE, plan.track ?? TRACK] satisfies [string, string];
+	if (plan.subscribesWhen !== undefined && kind !== "own-browser") {
+		throw new Error(`${kind} cannot hold its SUBSCRIBE back`);
+	}
+	await plan.subscribesWhen;
 	if (kind === "moqtail-browser") {
 		await onPage(
 			label,
