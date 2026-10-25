@@ -1351,6 +1351,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: [],
 			relay: "own",
 		},
+		{
+			name: "own relay: edge: chat: seven participants come at once at an own relay below, which is refused the announcements beyond the relay above's five at once and sends them again after the Retry Interval; the gatherer hears all seven",
+			script: "chat-edge.ts",
+			args: ["--case", "many"],
+			relay: "own",
+		},
 		// WHY expected to fail: moqtail's relay 0.15.0 passes on the Objects of
 		// an upstream fetch stream alone, and takes an End of Range indicator
 		// for no prior Location (`FetchObject::context` of moqtail-rs), where

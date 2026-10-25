@@ -2133,6 +2133,9 @@ impl Relay {
             Event::AnnouncementTimeout { session } => {
                 self.on_announcement_timeout(session, &mut actions);
             }
+            Event::UpstreamAnnouncementTimeout { session } => {
+                self.on_upstream_announcement_timeout(session, &mut actions);
+            }
             Event::RendezvousTimeout { session, stream } => {
                 self.on_rendezvous_timeout(session, stream, &mut actions);
             }
@@ -5094,6 +5097,7 @@ impl Action {
             | Self::StopReceiptTimer { session, .. }
             | Self::StartRendezvousTimer { session, .. }
             | Self::StartAnnouncementTimer { session, .. }
+            | Self::StartUpstreamAnnouncementTimer { session, .. }
             | Self::StartFetchEndTimer { session, .. }
             | Self::StopRequest { session, .. }
             | Self::OpenRequest { session, .. }

@@ -6,9 +6,18 @@
 // SUBSCRIBE_NAMESPACE, and the gatherer's SUBSCRIBE for each `said` comes
 // back down to the participant.
 //
-// Usage: bun chat-edge.ts [--port N] [--verbose]
+// Usage: bun chat-edge.ts [--case two|many] [--port N] [--verbose]
 //
-// What has to be seen, written before the first run:
+// What has to be seen with `--case many`, written before the first run: 7
+// participants that come at the relay below at once, before it has a
+// session upstream, are all announced upstream though the relay above takes
+// 5 announcements of a session at once and one more a second: the relay
+// below is refused the others (`EXCESSIVE_LOAD`), says when it sends them
+// again (`ANNOUNCE_UPSTREAM_LATER ... after_ms=1000`), and does; the gatherer
+// subscribes to all 7 and numbers a line of each, 0 to 6.
+//
+// What has to be seen with `--case two` (the default), written before the
+// first run:
 //
 //   - The gatherer is told of `a` and `b`, both at the relay below, and
 //     subscribes to each one's `said` (`SUBSCRIBED`); each participant serves
@@ -48,6 +57,7 @@ const { values: options } = parseArgs({
 	options: {
 		// The relay above: the own one alone, whose lines the run reads.
 		relay: { type: "string", default: "own" },
+		case: { type: "string", default: "two" },
 		port: { type: "string", default: "24397" },
 		verbose: { type: "boolean", default: false },
 	},
@@ -116,6 +126,32 @@ async function sayOne(
 	}
 }
 
+/** Participants that come at once in `--case many`: more than the 5 announcements the relay above takes of a session at once. */
+const MANY = 7;
+
+async function many(
+	below: RunContext,
+	gatherer: LoggedProcess,
+	edge: RunContext["relay"],
+): Promise<string> {
+	const names = Array.from({ length: MANY }, (_, index) => `p${index}`);
+	const participants = await Promise.all(
+		names.map((name) => participant(below, gatherer, name, `from ${name}`)),
+	);
+	const [later] = await edge.waitForLines(
+		/^ANNOUNCE_UPSTREAM_LATER session=\d+ after_ms=(\d+)$/,
+		1,
+	);
+	if (later === undefined)
+		throw new Error("the relay below printed no ANNOUNCE_UPSTREAM_LATER");
+	for (const [index, name] of names.entries()) {
+		const who = participants[index];
+		if (who === undefined) throw new Error(`no participant ${name}`);
+		await sayOne(gatherer, who, name, index);
+	}
+	return `${MANY} participants came at the relay below at once; the relay above refused it the announcements beyond its 5 at once, the relay below sent them again after ${captureGroup(later, 1)} ms one at a time, and the gatherer subscribed to all ${MANY} and numbered a line of each, 0 to ${MANY - 1}`;
+}
+
 /** The sender a line's payload names. */
 function nameIn(hex: string): string {
 	const text = Buffer.from(hex, "hex").toString("utf8");
@@ -154,84 +190,96 @@ async function main(): Promise<void> {
 		);
 		await gatherer.waitForLine(/^WATCHING prefix=xmoq\/chat$/);
 
-		const a = await participant(below, gatherer, "a", "from a");
-		const b = await participant(below, gatherer, "b", "from b");
-		await edge.relay.waitForLines(
-			/^OPEN_REQUEST session=\d+ own=\d+ PUBLISH_NAMESPACE/,
-			2,
-		);
-
-		await gatherer.waitForLine(
-			new RegExp(`^ROOM_PUBLISHED room="${ROOM}" forward=true`),
-		);
-		const live = spawnRustClient(
-			below,
-			"live",
-			"own-rust",
-			"subscribe",
-			"lines",
-			["--namespace", `xmoq/chat/${ROOM}`, "--objects", "4"],
-		);
-		await live.waitForLine(/^SUBSCRIBED /);
-		const turns: [LoggedProcess, string, number][] = [
-			[a, "a", 0],
-			[b, "b", 1],
-			[a, "a", 2],
-			[b, "b", 3],
-		];
-		for (const [who, name, number] of turns) {
-			await sayOne(gatherer, who, name, number);
-		}
-		const liveCode = await withTimeout(live.exited, "the live viewer to leave");
-		if (liveCode !== 0)
-			throw new Error(`the live viewer left with ${liveCode}`);
-		const seenLive = live
-			.matches(/^OBJECT group=(\d+) object=0 .*payload_hex=(\S*)$/)
-			.map(
-				(match) =>
-					`${captureGroup(match, 1)}:${nameIn(captureGroup(match, 2))}`,
-			)
-			.join(" ");
-		expect("the live viewer got", seenLive, "0:a 1:b 2:a 3:b");
-
-		const late = spawnRustClient(below, "late", "own-rust", "fetch", "lines", [
-			"--namespace",
-			`xmoq/chat/${ROOM}`,
-			"--fetch-start",
-			"0,0",
-			"--fetch-end",
-			"100,0",
-		]);
-		const [ok] = await late.waitForLine(
-			/^FETCH_OK request_id=\d+ end_group=(\d+) end_object=(\d+)/,
-		);
-		const lateCode = await withTimeout(late.exited, "the late viewer to leave");
-		if (lateCode !== 0)
-			throw new Error(`the late viewer left with ${lateCode}`);
-		const end = ok.replace(
-			/^.*end_group=(\d+) end_object=(\d+).*$/,
-			"{$1, $2}",
-		);
-		expect("the late viewer's FETCH_OK", end, "{3, 1}");
-		const fetched = late
-			.matches(/^FETCH_OBJECT request_id=\d+ group=(\d+) /)
-			.map((match) => captureGroup(match, 1))
-			.join(",");
-		expect("the late viewer fetched", fetched, "0,1,2,3");
-
-		a.child.kill("SIGTERM");
-		await edge.relay.waitForLine(/^CANCEL_OWN_REQUEST session=\d+ own=\d+/);
-		await context.relay.waitForLine(
-			/^SEND session=\d+ stream=\d+ NAMESPACE_DONE /,
-		);
-
-		summary = `the gatherer at the relay above was told of a and b at the relay below, which announced their namespaces upstream once each, and subscribed to them through it; it numbered their lines 0 to 3, which a viewer at the relay below got live (${seenLive}) and a late one fetched (${fetched}, FETCH_OK ${end}); when a left, the relay below withdrew its namespace upstream and the gatherer was told`;
+		summary =
+			options.case === "many"
+				? await many(below, gatherer, edge.relay)
+				: await two(context, edge, below, gatherer);
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });
 	}
-	log("driver", `RESULT ${JSON.stringify({ chat: "through-edge" })}`);
+	log(
+		"driver",
+		`RESULT ${JSON.stringify({ chat: "through-edge", case: options.case })}`,
+	);
 	log("driver", `SUMMARY ${summary}`);
+}
+
+async function two(
+	context: RunContext,
+	edge: Awaited<ReturnType<typeof startSecondOwnRelay>>,
+	below: RunContext,
+	gatherer: LoggedProcess,
+): Promise<string> {
+	if (options.case !== "two") {
+		throw new Error(`--case is two or many, not ${options.case}`);
+	}
+	const a = await participant(below, gatherer, "a", "from a");
+	const b = await participant(below, gatherer, "b", "from b");
+	await edge.relay.waitForLines(
+		/^OPEN_REQUEST session=\d+ own=\d+ PUBLISH_NAMESPACE/,
+		2,
+	);
+
+	await gatherer.waitForLine(
+		new RegExp(`^ROOM_PUBLISHED room="${ROOM}" forward=true`),
+	);
+	const live = spawnRustClient(
+		below,
+		"live",
+		"own-rust",
+		"subscribe",
+		"lines",
+		["--namespace", `xmoq/chat/${ROOM}`, "--objects", "4"],
+	);
+	await live.waitForLine(/^SUBSCRIBED /);
+	const turns: [LoggedProcess, string, number][] = [
+		[a, "a", 0],
+		[b, "b", 1],
+		[a, "a", 2],
+		[b, "b", 3],
+	];
+	for (const [who, name, number] of turns) {
+		await sayOne(gatherer, who, name, number);
+	}
+	const liveCode = await withTimeout(live.exited, "the live viewer to leave");
+	if (liveCode !== 0) throw new Error(`the live viewer left with ${liveCode}`);
+	const seenLive = live
+		.matches(/^OBJECT group=(\d+) object=0 .*payload_hex=(\S*)$/)
+		.map(
+			(match) => `${captureGroup(match, 1)}:${nameIn(captureGroup(match, 2))}`,
+		)
+		.join(" ");
+	expect("the live viewer got", seenLive, "0:a 1:b 2:a 3:b");
+
+	const late = spawnRustClient(below, "late", "own-rust", "fetch", "lines", [
+		"--namespace",
+		`xmoq/chat/${ROOM}`,
+		"--fetch-start",
+		"0,0",
+		"--fetch-end",
+		"100,0",
+	]);
+	const [ok] = await late.waitForLine(
+		/^FETCH_OK request_id=\d+ end_group=(\d+) end_object=(\d+)/,
+	);
+	const lateCode = await withTimeout(late.exited, "the late viewer to leave");
+	if (lateCode !== 0) throw new Error(`the late viewer left with ${lateCode}`);
+	const end = ok.replace(/^.*end_group=(\d+) end_object=(\d+).*$/, "{$1, $2}");
+	expect("the late viewer's FETCH_OK", end, "{3, 1}");
+	const fetched = late
+		.matches(/^FETCH_OBJECT request_id=\d+ group=(\d+) /)
+		.map((match) => captureGroup(match, 1))
+		.join(",");
+	expect("the late viewer fetched", fetched, "0,1,2,3");
+
+	a.child.kill("SIGTERM");
+	await edge.relay.waitForLine(/^CANCEL_OWN_REQUEST session=\d+ own=\d+/);
+	await context.relay.waitForLine(
+		/^SEND session=\d+ stream=\d+ NAMESPACE_DONE /,
+	);
+
+	return `the gatherer at the relay above was told of a and b at the relay below, which announced their namespaces upstream once each, and subscribed to them through it; it numbered their lines 0 to 3, which a viewer at the relay below got live (${seenLive}) and a late one fetched (${fetched}, FETCH_OK ${end}); when a left, the relay below withdrew its namespace upstream and the gatherer was told`;
 }
 
 main().catch((error: unknown) => {

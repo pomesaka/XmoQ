@@ -2127,6 +2127,7 @@ impl<C: Connection> Hub<C> {
             | Action::StopReceiptTimer { .. }
             | Action::StartRendezvousTimer { .. }
             | Action::StartAnnouncementTimer { .. }
+            | Action::StartUpstreamAnnouncementTimer { .. }
             | Action::StartFetchEndTimer { .. }
             | Action::StartUpstreamTimer { .. }
             | Action::StartFetchStreamTimer { .. }
@@ -2621,6 +2622,11 @@ impl<C: Connection> Hub<C> {
                 Duration::from_millis(wait_ms),
                 Event::AnnouncementTimeout { session },
             ),
+            Action::StartUpstreamAnnouncementTimer { session, wait_ms } => (
+                session,
+                Duration::from_millis(wait_ms),
+                Event::UpstreamAnnouncementTimeout { session },
+            ),
             Action::StartRendezvousTimer {
                 session,
                 stream,
@@ -2655,6 +2661,18 @@ impl<C: Connection> Hub<C> {
             ),
             _ => return,
         };
+        let limit = self.timer_limit(&event);
+        if let Some(event) = self.timers.start(session, limit, wait, event) {
+            // WHY at once: see `Action::StartUpstreamTimer`. Whatever the
+            // timer guarded is let go of now instead of never.
+            self.log(|| format!("TIMER_NOT_STARTED session={} too many timers", session.0));
+            pending.push_back(event);
+        }
+    }
+
+    /// How many timers the session of `event` may have running for it to
+    /// be started.
+    fn timer_limit(&self, event: &Event) -> usize {
         // WHY the timer that gives a session an announcement back is
         // started whatever the session has running: one that is not started
         // counts as run out at once, which is right for a wait (what it
@@ -2663,15 +2681,13 @@ impl<C: Connection> Hub<C> {
         // may would have every announcement back at once, and the limit on
         // announcements would not hold for it. There is one such timer for
         // a session at most.
-        let limit = match event {
-            Event::AnnouncementTimeout { .. } => usize::MAX,
+        // The same for the one after which an announcement upstream is sent
+        // again: one that ran out at once would send it again at once.
+        match event {
+            Event::AnnouncementTimeout { .. } | Event::UpstreamAnnouncementTimeout { .. } => {
+                usize::MAX
+            }
             _ => self.config.max_timers_per_session,
-        };
-        if let Some(event) = self.timers.start(session, limit, wait, event) {
-            // WHY at once: see `Action::StartUpstreamTimer`. Whatever the
-            // timer guarded is let go of now instead of never.
-            self.log(|| format!("TIMER_NOT_STARTED session={} too many timers", session.0));
-            pending.push_back(event);
         }
     }
 
@@ -3625,6 +3641,10 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartAnnouncementTimer { .. }
         | Action::StartCheckTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
+        Action::StartUpstreamAnnouncementTimer { session, wait_ms } => format!(
+            "ANNOUNCE_UPSTREAM_LATER session={} after_ms={wait_ms}",
+            session.0
+        ),
         Action::ConnectUpstream { uri, after_ms } => format!(
             "CONNECT_UPSTREAM uri={} after_ms={after_ms}",
             String::from_utf8_lossy(uri)
