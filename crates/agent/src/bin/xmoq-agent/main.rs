@@ -35,9 +35,22 @@ use xmoq_viewer_io::session::termination_code;
 use crate::attend::{Ended, UntilClosed, attend};
 use crate::frames::Pictures;
 
-/// The directory of the pictures in `--out`.
+use crate::output::{Output, now_ms};
+
+/// The directory of the pictures in `--out`, with one directory a run in
+/// it.
 const FRAMES_DIR: &str = "frames";
-use crate::output::Output;
+
+/// Where the pictures of this run go: `<out>/frames/<when it began, ms>/`.
+///
+/// WHY a directory a run: `Frames` names its files from 1 on each run, and
+/// those of a run before in the same `--out` would be written over, and not
+/// counted by `--frames-kept`. WHY NOT go on from the numbers there: what
+/// names the files is `xmoq-picture`'s. WHY NOT empty the directory: the
+/// pictures an agent asked for before are its own.
+fn frames_dir_of(out: &str) -> std::path::PathBuf {
+    Path::new(out).join(FRAMES_DIR).join(now_ms().to_string())
+}
 use crate::stdin::Line;
 
 /// How long the room, a token, the relay's connection each get.
@@ -559,10 +572,7 @@ async fn read(args: &Args) -> Result<()> {
         frame: FrameAsking::default(),
     };
     let mut pictures = if args.frames {
-        Some(Pictures::start(
-            args.pictures,
-            Path::new(&args.out).join(FRAMES_DIR),
-        )?)
+        Some(Pictures::start(args.pictures, frames_dir_of(&args.out))?)
     } else {
         None
     };
