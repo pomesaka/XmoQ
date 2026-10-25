@@ -1,0 +1,231 @@
+/// <reference path="./file-system-access.d.ts" />
+// The folder a page of a meeting writes into for an agent, with the File
+// System Access API of Chromium: one root the person chooses once, which is
+// remembered (IndexedDB), and under it a folder for each meeting the page
+// attends, `<root>/<room>/<id>/`, laid out as `xmoq-agent --out` lays its
+// own: `events.jsonl`, `inbox.txt` and `frames/<when the writing began>/`.
+
+import { type AgentEvent, agentLine } from "../core/agent-lines.ts";
+
+/**
+ * The name the root is to have, under the person's Documents:
+ * `~/Documents/xmoq`. WHY there: Chromium lets a page have no home, desktop
+ * or Documents folder itself, and every folder in them that is not blocked
+ * otherwise (`kBlockPaths` of
+ * chrome/browser/file_system_access/chrome_file_system_access_permission_context.cc,
+ * Chromium's main, read on 2026-10-25). The page cannot know the path of
+ * what was chosen; this name is what it tells the person to choose, and
+ * what an agent is told to read.
+ */
+export const AGENT_ROOT = "~/Documents/xmoq";
+
+/**
+ * How long a line waits to be written to `events.jsonl`, with the lines
+ * after it, in ms. **Provisional.** WHY: every write copies the whole file
+ * (the WHY at `flush`); a second is as long as the inbox waits too.
+ */
+export const FLUSH_EVERY_MS = 1000;
+
+const DATABASE = "xmoq-agent-folder";
+const STORE = "handles";
+const ROOT_KEY = "root";
+
+/** Where the root stands for this page now. */
+export type RootState =
+	/** The browser has no File System Access (not Chromium). */
+	| { type: "unsupported" }
+	/** None was chosen, or what was is gone. */
+	| { type: "none" }
+	/** Chosen, and the page may write in it. */
+	| { type: "granted"; root: FileSystemDirectoryHandle }
+	/** Chosen, and the person is to allow it again, with a click (`allowRoot`). */
+	| { type: "to-allow"; root: FileSystemDirectoryHandle };
+
+/** The one store of handles, opened and made where it is not. */
+function database(): Promise<IDBDatabase> {
+	return new Promise((resolve, reject) => {
+		const opening = indexedDB.open(DATABASE, 1);
+		opening.onupgradeneeded = () => {
+			opening.result.createObjectStore(STORE);
+		};
+		opening.onsuccess = () => resolve(opening.result);
+		opening.onerror = () => reject(opening.error);
+	});
+}
+
+async function stored(): Promise<FileSystemDirectoryHandle | undefined> {
+	const db = await database();
+	try {
+		return await new Promise((resolve, reject) => {
+			const getting = db
+				.transaction(STORE, "readonly")
+				.objectStore(STORE)
+				.get(ROOT_KEY);
+			getting.onsuccess = () => {
+				const value: unknown = getting.result;
+				resolve(value instanceof FileSystemDirectoryHandle ? value : undefined);
+			};
+			getting.onerror = () => reject(getting.error);
+		});
+	} finally {
+		db.close();
+	}
+}
+
+async function store(root: FileSystemDirectoryHandle): Promise<void> {
+	const db = await database();
+	try {
+		await new Promise<void>((resolve, reject) => {
+			const putting = db
+				.transaction(STORE, "readwrite")
+				.objectStore(STORE)
+				.put(root, ROOT_KEY);
+			putting.onsuccess = () => resolve();
+			putting.onerror = () => reject(putting.error);
+		});
+	} finally {
+		db.close();
+	}
+}
+
+const READ_WRITE: FileSystemHandlePermissionDescriptor = { mode: "readwrite" };
+
+/** The root that was chosen before, and whether the page may write in it now. Asks the person nothing. */
+export async function rememberedRoot(): Promise<RootState> {
+	if (window.showDirectoryPicker === undefined) return { type: "unsupported" };
+	const root = await stored();
+	if (root === undefined) return { type: "none" };
+	const state = await root.queryPermission?.(READ_WRITE);
+	return state === "granted"
+		? { type: "granted", root }
+		: { type: "to-allow", root };
+}
+
+/**
+ * Has the person choose the root, and remembers it. **To be called from a
+ * click**: the picker opens only on a gesture. It opens in Documents, and
+ * remembers where it was last (`id`). Rejects where the person closes it.
+ */
+export async function chooseRoot(): Promise<FileSystemDirectoryHandle> {
+	if (window.showDirectoryPicker === undefined) {
+		throw new Error("this browser has no showDirectoryPicker: Chromium has it");
+	}
+	const root = await window.showDirectoryPicker({
+		id: "xmoq",
+		mode: "readwrite",
+		startIn: "documents",
+	});
+	await store(root);
+	return root;
+}
+
+/**
+ * Asks the person to let the page write in `root` again. **To be called
+ * from a click**, as the picker. True where it may.
+ */
+export async function allowRoot(
+	root: FileSystemDirectoryHandle,
+): Promise<boolean> {
+	return (await root.requestPermission?.(READ_WRITE)) === "granted";
+}
+
+/** The folder of one meeting the page attends, for an agent. */
+export interface AgentFolder {
+	/** `<room>/<id>`, under the root: what an agent is told to read. */
+	readonly path: string;
+	/** When the writing began (ms), which names the folder of its pictures. */
+	readonly began: number;
+	/** Adds a line to `events.jsonl`, behind the ones before. Never throws; a failure is told to `onError`. */
+	write(event: AgentEvent): void;
+	/** Writes a picture at `path`, from the folder (`framePath`), before its line is written. */
+	writeFile(path: string, data: Blob): Promise<void>;
+	/** `inbox.txt` as it is now; empty where there is none. */
+	readInbox(): Promise<Uint8Array>;
+}
+
+/**
+ * Opens, and makes where it is not, `<root>/<room>/<id>/` with its
+ * `events.jsonl`, `inbox.txt` and `frames/<began>/`.
+ */
+export async function openAgentFolder(
+	root: FileSystemDirectoryHandle,
+	room: string,
+	id: string,
+	options: { now?: () => number; onError?(error: unknown): void } = {},
+): Promise<AgentFolder> {
+	const now = options.now ?? Date.now;
+	const folder = await (
+		await root.getDirectoryHandle(room, { create: true })
+	).getDirectoryHandle(id, { create: true });
+	const events = await folder.getFileHandle("events.jsonl", { create: true });
+	const inbox = await folder.getFileHandle("inbox.txt", { create: true });
+	const began = now();
+	/** The lines that wait to be written, and the write under way. */
+	let waiting: string[] = [];
+	/** A flush is set for the end of this second. */
+	let flushing = false;
+	let writing: Promise<void> = Promise.resolve();
+	const flush = async (): Promise<void> => {
+		if (waiting.length === 0) return;
+		const text = waiting.join("");
+		waiting = [];
+		// WHY a writable for every flush: what is written there reaches the
+		// file when it is closed, and an agent reads the file meanwhile.
+		// What that costs: Chromium writes into a swap file, which keeps a
+		// copy of the file (`keepExistingData`), and moves it over the file
+		// at `close` (`FileSystemAccessSafeMoveHelper` in
+		// content/browser/file_system_access/file_system_access_file_writer_impl.cc,
+		// Chromium's main, read on 2026-10-25): the file is copied once a
+		// flush, and is another file after it, so a reader that follows it is
+		// to follow its name (`tail -F`).
+		const writable = await events.createWritable({ keepExistingData: true });
+		try {
+			await writable.seek((await events.getFile()).size);
+			await writable.write(text);
+		} finally {
+			await writable.close();
+		}
+	};
+	const fileAt = async (path: string): Promise<FileSystemFileHandle> => {
+		const names = path.split("/");
+		const file = names.pop();
+		if (file === undefined) throw new Error(`no file in ${path}`);
+		let at = folder;
+		for (const name of names) {
+			at = await at.getDirectoryHandle(name, { create: true });
+		}
+		return at.getFileHandle(file, { create: true });
+	};
+	return {
+		path: `${room}/${id}`,
+		began,
+		write(event) {
+			try {
+				waiting.push(`${agentLine(event, now())}\n`);
+			} catch (error) {
+				options.onError?.(error);
+				return;
+			}
+			// The lines of a second go in one flush: each copies the file.
+			if (flushing) return;
+			flushing = true;
+			setTimeout(() => {
+				flushing = false;
+				writing = writing.then(flush).catch((error: unknown) => {
+					options.onError?.(error);
+				});
+			}, FLUSH_EVERY_MS);
+		},
+		async writeFile(path, data) {
+			const writable = await (await fileAt(path)).createWritable();
+			try {
+				await writable.write(data);
+			} finally {
+				await writable.close();
+			}
+		},
+		async readInbox() {
+			return new Uint8Array(await (await inbox.getFile()).arrayBuffer());
+		},
+	};
+}

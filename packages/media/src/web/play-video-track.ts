@@ -36,6 +36,27 @@ export const DEFAULT_MAX_DECODE_QUEUE = 8;
  */
 export const DEFAULT_MAX_DECODER_FAILURES = 3;
 
+/**
+ * How many chunks given to the decoder are remembered for where they came
+ * from (`FrameOrigin`). **Provisional.** WHY a bound: a decoder that gives
+ * no frame for a chunk (one it dropped, or one before a failure) would
+ * leave it remembered for as long as the track plays. WHY 64: the decoder
+ * is given no more than `maxDecodeQueue` (8) chunks ahead of what it gave,
+ * and H.264 holds back at most 16 frames for their order; 64 is well above
+ * both. A frame whose chunk is no longer remembered is handed on all the
+ * same, with `at` undefined: it is shown, and only who wants its place
+ * (an agent's picture) goes without it.
+ */
+export const MAX_FRAMES_REMEMBERED = 64;
+
+/** Where a frame came from: the Location of its Object, and the Timestamp of LOC it carried. */
+export interface FrameOrigin {
+	group: bigint;
+	object: bigint;
+	/** In µs, as `frame.timestamp` has it (`VideoReceiverEvent` "frame"). */
+	timestampUs: bigint;
+}
+
 export interface PlayVideoTrackOptions {
 	trackNamespace: Uint8Array[];
 	trackName: Uint8Array;
@@ -51,8 +72,11 @@ export interface PlayVideoTrackOptions {
 	 * Called with each frame the decoder gives, in the order it gives them.
 	 * **The frame is the caller's from then on, and the caller closes it**
 	 * (`VideoFrame.close()`); a frame that is not closed keeps its memory.
+	 * `at` is where the frame came from: its Location and the Timestamp of
+	 * LOC it carried (`frame.timestamp` is that, in µs), or undefined where
+	 * that was not kept (`MAX_FRAMES_REMEMBERED`).
 	 */
-	onFrame(frame: VideoFrame): void;
+	onFrame(frame: VideoFrame, at: FrameOrigin | undefined): void;
 	/**
 	 * How long the sender may take with an Object or the end of a Subgroup
 	 * before it gives it up (`DeliveryTimeouts`, transport §8), sent with the
@@ -244,6 +268,12 @@ export async function playVideoTrack(
 	/** Set once the SUBSCRIBE was accepted. */
 	let cancel: () => void = () => {};
 
+	/**
+	 * Where the chunks the decoder was given came from, by their timestamp, in
+	 * the order they were given. A frame of the decoder has the timestamp of
+	 * its chunk (WebCodecs), and is looked up and taken off here.
+	 */
+	const origins = new Map<number, FrameOrigin>();
 	const newDecoder = (): VideoDecoder => {
 		const made: VideoDecoder = new VideoDecoder({
 			output: (frame) => {
@@ -255,8 +285,10 @@ export async function playVideoTrack(
 				}
 				stats.decoded += 1;
 				failuresInARow = 0;
+				const at = origins.get(frame.timestamp);
+				origins.delete(frame.timestamp);
 				try {
-					options.onFrame(frame);
+					options.onFrame(frame, at);
 				} catch (error) {
 					// The caller did not take the frame: it is closed here, which
 					// does nothing where the caller closed it.
@@ -342,6 +374,16 @@ export async function playVideoTrack(
 				timestamp: Number(event.timestamp),
 				data: event.data,
 			});
+			origins.set(chunk.timestamp, {
+				group: event.group,
+				object: event.object,
+				timestampUs: event.timestamp,
+			});
+			// The oldest first: a Map keeps the order things were set in.
+			for (const [timestamp] of origins) {
+				if (origins.size <= MAX_FRAMES_REMEMBERED) break;
+				origins.delete(timestamp);
+			}
 			const submitted = decoder;
 			try {
 				submitted.decode(chunk);

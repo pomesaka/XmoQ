@@ -234,6 +234,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 
 ### Phase 6 — Meetings
 
+- 2026-10-25 [A page of a meeting writes for Claude Code](2026-10-25-a-page-writes-for-claude-code.md)
 - 2026-10-25 [A voice longer than a piece](2026-10-25-a-voice-longer-than-a-piece.md)
 - 2026-10-25 [An agent keeps the meeting over a GOAWAY](2026-10-25-an-agent-keeps-the-meeting-over-a-goaway.md)
 

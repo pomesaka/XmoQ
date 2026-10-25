@@ -50,27 +50,31 @@ pub fn read(line: &str) -> Input {
 mod tests {
     use super::*;
 
+    /// What a line asks for, as the third column of the shared table writes it:
+    /// its type, a space, and the rest as it is.
+    fn written(input: &Input) -> String {
+        match input {
+            Input::Say(text) => format!("say {text}"),
+            Input::Frame(id) => format!("frame {}", id.as_deref().unwrap_or("-")),
+            Input::Unknown(name) => format!("unknown {name}"),
+            Input::Nothing => "nothing".to_string(),
+        }
+    }
+
+    /// `fixtures/agent-lines/inbox.tsv`, which `@xmoq/meeting` reads too: a
+    /// line of `inbox.txt` of a page is read as a line of stdin here.
     #[test]
     fn a_line_of_stdin_is_said_or_is_a_command() {
-        // (the line; what it asks for)
-        let cases = [
-            ("hello", Input::Say("hello".to_string())),
-            ("hello\r", Input::Say("hello".to_string())),
-            (" /frame", Input::Say(" /frame".to_string())),
-            ("/frame", Input::Frame(None)),
-            ("/frame p1", Input::Frame(Some("p1".to_string()))),
-            ("/frame  p1  p2", Input::Frame(Some("p1".to_string()))),
-            ("/frame\tp1", Input::Frame(Some("p1".to_string()))),
-            ("//frame", Input::Say("/frame".to_string())),
-            ("//", Input::Say("/".to_string())),
-            ("///x", Input::Say("//x".to_string())),
-            ("/quit", Input::Unknown("quit".to_string())),
-            ("/", Input::Unknown(String::new())),
-            ("", Input::Nothing),
-            ("\r", Input::Nothing),
-        ];
-        for (line, input) in cases {
-            assert_eq!(read(line), input, "{line:?}");
+        let table = include_str!("../../../fixtures/agent-lines/inbox.tsv");
+        let mut rows = 0;
+        for row in table.lines() {
+            let [name, line, asks] = row.split('\t').collect::<Vec<_>>()[..] else {
+                panic!("{row}");
+            };
+            let line: String = serde_json::from_str(line).unwrap();
+            assert_eq!(written(&read(&line)), asks, "{name}");
+            rows += 1;
         }
+        assert!(rows > 0);
     }
 }

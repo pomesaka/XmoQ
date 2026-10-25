@@ -1,3 +1,16 @@
+export {
+	type AgentCall,
+	type AgentCallOptions,
+	type AgentCallState,
+	createAgentCall,
+} from "./core/agent-call.ts";
+export {
+	type InboxLine,
+	MAX_INBOX_LINE_BYTES,
+	newInboxLines,
+	readInboxLine,
+} from "./core/agent-inbox.ts";
+export { type AgentEvent, agentLine, framePath } from "./core/agent-lines.ts";
 export { MEET, meetingPrefix, participantOf } from "./core/names.ts";
 export {
 	createPresence,
@@ -11,6 +24,21 @@ export {
 	chooseTracks,
 	type OfferedTrack,
 } from "./core/tracks.ts";
+export {
+	type AgentBridge,
+	type AgentBridgeOptions,
+	createAgentBridge,
+	INBOX_EVERY_MS,
+} from "./web/agent-bridge.ts";
+export {
+	AGENT_ROOT,
+	type AgentFolder,
+	allowRoot,
+	chooseRoot,
+	openAgentFolder,
+	type RootState,
+	rememberedRoot,
+} from "./web/agent-folder.ts";
 export {
 	type AttendingState,
 	type KeepAttendingOptions,

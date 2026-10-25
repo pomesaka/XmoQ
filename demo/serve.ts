@@ -343,7 +343,14 @@ const html = (path: string): string => `<!doctype html>
 			path === "/meet"
 				? roomsUrl === null
 					? "<p>no rooms: npm install in spikes/durable-objects-room, and start again; a meeting takes its seat from the room</p>"
-					: ""
+					: `${
+							chat === undefined
+								? `<p>${noChat}</p>`
+								: `<div id="chat" style="height: 6em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
+		<form><input size="40" placeholder="say something" /> <button>send</button></form>
+		<p id="chat-note"></p>`
+						}
+		<p><button id="agent-link">link a folder for Claude Code</button> <button id="agent-call">call Claude Code</button> <span id="agent-note"></span></p>`
 				: roomsUrl === null
 				? "<p>no rooms: npm install in spikes/durable-objects-room, and start again</p>"
 				: `<p id="connected"></p>
