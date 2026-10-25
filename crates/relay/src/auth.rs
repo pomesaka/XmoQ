@@ -45,7 +45,7 @@ use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::token::Token;
 use xmoq_relay_core::{Authorizer, Denied, Operation};
-use xmoq_room_token::{Fault, Grant, RoomKey, namespace_fits};
+use xmoq_room_token::{Fault, Grant, Role, RoomKey, namespace_fits};
 
 /// The Setup Option AUTHORIZATION TOKEN (§10.3.1.4).
 const SETUP_AUTHORIZATION_TOKEN: u64 = 0x03;
@@ -212,7 +212,33 @@ impl Authorizer for RoomTokens {
         }
         if self.setup { verdict } else { Ok(()) }
     }
+
+    /// A token for the namespace `*`, which allows every namespace
+    /// ([`namespace_fits`]), for [`OWN_TOKEN_SECONDS`] from now: what the
+    /// relay puts on its SETUP and requests to an upstream relay that
+    /// shares the key. Made anew for each, as the chat's gatherer makes its
+    /// own (`crates/chat`): a relay runs for longer than one token.
+    fn own_token(&self, operation: Operation) -> Option<Vec<u8>> {
+        let role = match operation {
+            Operation::Publish => Role::Pub,
+            Operation::Subscribe => Role::Sub,
+        };
+        let expiry = (self.now)().saturating_add(OWN_TOKEN_SECONDS);
+        let text = self.key.make("*", role, expiry);
+        Some(
+            Token::UseValue {
+                token_type: 0,
+                value: text.into_bytes(),
+            }
+            .encode(),
+        )
+    }
 }
+
+/// How long a token the relay makes for itself runs: as long as one the
+/// room makes (`TOKEN_SECONDS` of `spikes/durable-objects-room/worker.js`)
+/// and one the gatherer makes. Provisional.
+const OWN_TOKEN_SECONDS: u64 = 600;
 
 #[cfg(test)]
 mod tests {
@@ -482,5 +508,35 @@ mod tests {
                 "{tokens:?}"
             );
         }
+    }
+
+    /// The relay's own token passes a relay with the same key for its
+    /// operation in any namespace, and is the one a room would make for
+    /// `*` that runs for 600 seconds.
+    #[test]
+    fn the_relays_own_token_allows_its_operation_everywhere_at_a_relay_of_the_same_key() {
+        let rows = [
+            (Operation::Subscribe, Operation::Subscribe, Ok(())),
+            (Operation::Publish, Operation::Publish, Ok(())),
+            (
+                Operation::Subscribe,
+                Operation::Publish,
+                Err(Denied::Request(code::UNAUTHORIZED)),
+            ),
+        ];
+        let here = TrackNamespace::new(vec![b"xmoq".to_vec(), b"chat".to_vec()]).unwrap();
+        for (made_for, asked, verdict) in rows {
+            let made = room(false).own_token(made_for).unwrap();
+            let parameters = [Parameter::AuthorizationToken(made)];
+            assert_eq!(
+                room(false).request(asked, Some(&here), &parameters),
+                verdict,
+                "{made_for:?} {asked:?}"
+            );
+        }
+        assert_eq!(
+            room(false).own_token(Operation::Subscribe),
+            Some(token(KEY, "v1|*|sub|1800000600"))
+        );
     }
 }

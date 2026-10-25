@@ -50,6 +50,7 @@ interface Pairing {
 		| "chat-edge.ts"
 		| "chat-pages.ts"
 		| "chat-tokens.ts"
+		| "auth-edge.ts"
 		| "agent.ts"
 		| "transcriber.ts"
 		| "agent-frames.ts"
@@ -1686,6 +1687,20 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			name: "own relay: rendezvous: own-rust subscribes before anybody publishes the track, is held, and is accepted when own-rust publishes",
 			script: "rendezvous.ts",
 			args: ["--case", "publisher-comes", "--subscriber", "own-rust"],
+			relay: "own",
+		},
+		{
+			// "edge: " lets `--only` pick it with the others through two relays.
+			name: "own relay: edge: chat tokens: the pages join the chat at an own relay below the gatherer's, both with --auth-key-hex, as through one relay",
+			script: "chat-tokens.ts",
+			args: ["--through-edge"],
+			relay: "own",
+		},
+		{
+			// "edge: " lets `--only` pick it with the others through two relays.
+			name: "own relay: edge: auth: both relays ask for tokens, the one below makes its own for its SETUP and its SUBSCRIBE upstream, and checks its viewers as before",
+			script: "auth-edge.ts",
+			args: [],
 			relay: "own",
 		},
 		...["own-browser", "own-rust"].map(

@@ -763,3 +763,226 @@ fn a_subscribe_of_the_upstream_goes_to_who_announced_here_and_never_back_up() {
         "{refused:?}"
     );
 }
+
+/// An authorization that lets a request or a SETUP through with any token
+/// and turns down one without, and whose own token is the name of the
+/// operation.
+struct AnyToken;
+
+impl crate::Authorizer for AnyToken {
+    fn request(
+        &self,
+        _operation: crate::Operation,
+        _namespace: Option<&TrackNamespace>,
+        parameters: &[Parameter],
+    ) -> Result<(), crate::Denied> {
+        if parameters
+            .iter()
+            .any(|parameter| matches!(parameter, Parameter::AuthorizationToken(_)))
+        {
+            Ok(())
+        } else {
+            Err(crate::Denied::Request(0x5))
+        }
+    }
+
+    fn setup(&self, setup_options: &[KeyValuePair]) -> Result<(), xmoq_moqt::TerminationCode> {
+        if setup_options.iter().any(|option| option.ty() == 0x03) {
+            Ok(())
+        } else {
+            Err(xmoq_moqt::TerminationCode::Unauthorized)
+        }
+    }
+
+    fn own_token(&self, operation: crate::Operation) -> Option<Vec<u8>> {
+        Some(match operation {
+            crate::Operation::Publish => b"pub".to_vec(),
+            crate::Operation::Subscribe => b"sub".to_vec(),
+        })
+    }
+}
+
+/// [`edge`], with [`AnyToken`].
+fn edge_with_tokens() -> Relay {
+    let mut relay = edge(&[]);
+    relay.set_authorizer(AnyToken);
+    relay
+}
+
+/// The AUTHORIZATION TOKENs of the requests the relay opened on the
+/// session with the upstream, by the kind of request.
+fn tokens_upstream(actions: &[Action]) -> Vec<(&'static str, Vec<Vec<u8>>)> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::OpenRequest {
+                session: UPSTREAM,
+                message,
+                ..
+            } => {
+                let (kind, parameters) = match message {
+                    ControlMessage::Subscribe(subscribe) => ("SUBSCRIBE", &subscribe.parameters),
+                    ControlMessage::TrackStatus(asked) => ("TRACK_STATUS", &asked.parameters),
+                    ControlMessage::Fetch(fetch) => ("FETCH", &fetch.parameters),
+                    _ => return None,
+                };
+                let tokens = parameters
+                    .iter()
+                    .filter_map(|parameter| match parameter {
+                        Parameter::AuthorizationToken(token) => Some(token.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((kind, tokens))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_relay_carries_a_token_of_its_own_to_the_upstream_and_none_of_its_subscribers() {
+    let token = Parameter::AuthorizationToken(b"of the subscriber".to_vec());
+    let subscribe = ControlMessage::Subscribe(Subscribe {
+        request_id: 0,
+        full_track_name: track_in(&[b"xmoq", b"a"]),
+        parameters: vec![token.clone()],
+    });
+    let [(_, fetch), (_, track_status)] = fetch_and_track_status();
+    let with_token = |message: ControlMessage| match message {
+        ControlMessage::Fetch(mut fetch) => {
+            fetch.parameters.push(token.clone());
+            ControlMessage::Fetch(fetch)
+        }
+        ControlMessage::TrackStatus(mut asked) => {
+            asked.parameters.push(token.clone());
+            ControlMessage::TrackStatus(asked)
+        }
+        other => other,
+    };
+    for (name, first) in [
+        ("SUBSCRIBE", subscribe),
+        ("FETCH", with_token(fetch)),
+        ("TRACK_STATUS", with_token(track_status)),
+    ] {
+        let mut relay = edge_with_tokens();
+        upstream_opened(&mut relay);
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first,
+        });
+        assert_eq!(
+            tokens_upstream(&actions),
+            [(name, vec![b"sub".to_vec()])],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn the_relays_setup_to_the_upstream_carries_its_token_and_one_to_a_viewer_does_not() {
+    let mut relay = edge_with_tokens();
+    let opened = upstream_opened(&mut relay);
+    let Some(Action::SendControl {
+        message: ControlMessage::Setup(setup),
+        ..
+    }) = opened.first()
+    else {
+        panic!("no SETUP first: {opened:?}");
+    };
+    let tokens: Vec<&KeyValuePair> = setup
+        .setup_options
+        .iter()
+        .filter(|option| option.ty() == 0x03)
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    // A session the relay is the server of gets no token of the relay's.
+    let viewer = relay.step(Event::SessionOpened {
+        session: SessionKey(11),
+        role: Role::Server,
+    });
+    let Some(Action::SendControl {
+        message: ControlMessage::Setup(setup),
+        ..
+    }) = viewer.first()
+    else {
+        panic!("no SETUP first: {viewer:?}");
+    };
+    assert!(setup.setup_options.iter().all(|option| option.ty() != 0x03));
+}
+
+#[test]
+fn what_the_upstream_sends_is_not_checked_for_a_token_but_what_a_viewer_sends_is() {
+    let mut relay = edge_with_tokens();
+    upstream_opened(&mut relay);
+    // The upstream's SETUP, without a token: the session stays.
+    let setup = relay.step(Event::ControlMessage {
+        session: UPSTREAM,
+        message: ControlMessage::Setup(Setup::default()),
+    });
+    assert_eq!(setup, []);
+    // A publisher here announces, with a token.
+    relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 0,
+            track_namespace: namespace_of(&[b"xmoq", b"chat"]),
+            parameters: vec![Parameter::AuthorizationToken(b"pub".to_vec())],
+        }),
+    });
+    let without_token = |session: SessionKey| Event::RequestOpened {
+        session,
+        stream: StreamKey(4),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: if session == UPSTREAM { 9 } else { 8 },
+            full_track_name: track_in(&[b"xmoq", b"chat"]),
+            parameters: vec![],
+        }),
+    };
+    assert_eq!(asked_of(&relay.step(without_token(UPSTREAM))), [PUBLISHER]);
+    let refused = relay.step(without_token(ALICE));
+    assert_eq!(asked_of(&refused), [SessionKey(0); 0]);
+    assert!(
+        refused.iter().any(|action| matches!(
+            action,
+            Action::SendRequest {
+                session: ALICE,
+                message: ControlMessage::RequestError(_),
+                ..
+            }
+        )),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_namespace_announced_upstream_carries_the_relays_own_token_and_not_its_publishers() {
+    let mut relay = edge_with_tokens();
+    upstream_opened(&mut relay);
+    let announced = relay.step(Event::RequestOpened {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        first: ControlMessage::PublishNamespace(PublishNamespace {
+            request_id: 0,
+            track_namespace: namespace_of(&[b"xmoq", b"chat", b"r", b"a"]),
+            parameters: vec![Parameter::AuthorizationToken(b"of the publisher".to_vec())],
+        }),
+    });
+    let tokens: Vec<Vec<Parameter>> = announced
+        .iter()
+        .filter_map(|action| match action {
+            Action::OpenRequest {
+                session: UPSTREAM,
+                message: ControlMessage::PublishNamespace(passed),
+                ..
+            } => Some(passed.parameters.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tokens,
+        [vec![Parameter::AuthorizationToken(b"pub".to_vec())]]
+    );
+}

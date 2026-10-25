@@ -1088,6 +1088,10 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) -> Result<OwnRequestKey, u64> {
         let fetches_for_one = self.fetches_for_one;
+        // The relay's own token for the upstream relay, beside the
+        // parameters it passes on (`upstream_parameters`), which leave the
+        // subscriber's out.
+        let token = self.token_for(publisher, crate::Operation::Subscribe);
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
@@ -1114,7 +1118,8 @@ impl Relay {
             start,
             end,
         };
-        let Ok((id, message)) = state.moqt.fetch(range, parameters.to_vec()) else {
+        let parameters = parameters.iter().cloned().chain(token).collect();
+        let Ok((id, message)) = state.moqt.fetch(range, parameters) else {
             // The range and the parameters passed the session's checks when
             // they came in, or were made here.
             return Err(request_error_code::INTERNAL_ERROR);

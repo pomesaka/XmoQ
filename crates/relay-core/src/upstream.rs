@@ -23,8 +23,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use xmoq_moqt::message::{ReasonPhrase, request_error_code, retry_interval};
 use xmoq_moqt::name::{FullTrackName, TrackNamespace};
 
+use xmoq_moqt::kvp::KeyValuePair;
+use xmoq_moqt::message::setup_option;
+use xmoq_moqt::params::Parameter;
+use xmoq_moqt::session::Role;
+
 use crate::routing::{RETRY_WHAT_IS_NOT_THERE_MS, Refusal};
-use crate::{Action, Relay, SessionKey};
+use crate::{Action, Authorization, Operation, Relay, SessionKey};
 
 /// The upstream relay, as far as the relay knows it.
 #[derive(Debug)]
@@ -62,6 +67,40 @@ impl Relay {
             uri: Vec::new(),
             announced: BTreeMap::new(),
         });
+    }
+
+    /// Whether the relay opened `session` as the client: one with an
+    /// upstream relay, now or before its GOAWAY.
+    pub(crate) fn is_client_session(&self, session: SessionKey) -> bool {
+        self.sessions
+            .get(&session)
+            .is_some_and(|state| state.moqt.role() == Role::Client)
+    }
+
+    /// The relay's own token for `operation`, from its authorization
+    /// (`Authorizer::own_token`).
+    fn own_token(&self, operation: Operation) -> Option<Vec<u8>> {
+        let Authorization(authorizer) = self.authorizer.as_ref()?;
+        authorizer.own_token(operation)
+    }
+
+    /// The AUTHORIZATION TOKEN of a request of the relay to `session`, where
+    /// that is a session with an upstream relay (§10.2.2): the upstream
+    /// checks this relay's requests as any other's, and nothing of the
+    /// requests of its subscribers is passed on (§10.2.1). None to any
+    /// other session: a publisher here is asked as before.
+    pub(crate) fn token_for(&self, session: SessionKey, operation: Operation) -> Option<Parameter> {
+        if !self.is_client_session(session) {
+            return None;
+        }
+        self.own_token(operation).map(Parameter::AuthorizationToken)
+    }
+
+    /// The AUTHORIZATION TOKEN Setup Option of the relay's SETUP to an
+    /// upstream relay (§10.3.1.4), which checks it as a client's.
+    pub(crate) fn setup_token(&self) -> Option<KeyValuePair> {
+        let token = self.own_token(Operation::Subscribe)?;
+        KeyValuePair::bytes(setup_option::AUTHORIZATION_TOKEN, token).ok()
     }
 
     /// Whether the upstream is the one to ask for `track`: it takes the

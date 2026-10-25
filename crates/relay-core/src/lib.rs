@@ -1895,6 +1895,14 @@ pub trait Authorizer: Send {
     fn setup(&self, _setup_options: &[KeyValuePair]) -> Result<(), TerminationCode> {
         Ok(())
     }
+
+    /// A token of the relay's own for `operation` in every namespace, as
+    /// the value of an AUTHORIZATION TOKEN (a Token structure, §10.2.2),
+    /// for what it sends the upstream relay: its SETUP and its requests.
+    /// `None` where the relay has none to give.
+    fn own_token(&self, _operation: Operation) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 struct Authorization(Box<dyn Authorizer>);
@@ -2397,7 +2405,10 @@ impl Relay {
         );
         // An implementation name too long for a Setup Option is left out; the
         // option is a SHOULD (§10.3.1.5).
-        let options = option.map(|option| vec![option]).unwrap_or_default();
+        let mut options = option.map(|option| vec![option]).unwrap_or_default();
+        if role == Role::Client {
+            options.extend(self.setup_token());
+        }
         match moqt.setup(options) {
             Ok(message) => actions.push(Action::SendControl { session, message }),
             Err(error) => {
@@ -2492,10 +2503,28 @@ impl Relay {
 
     /// Whether the relay's authorization, where it has one, allows a
     /// request.
-    fn allowed(&self, request: &PeerRequest) -> Result<(), Denied> {
+    fn allowed(&self, session: SessionKey, request: &PeerRequest) -> Result<(), Denied> {
         let Some(Authorization(authorizer)) = &self.authorizer else {
             return Ok(());
         };
+        // WHY a session the relay opened as the client is not checked, its
+        // SETUP neither (`on_control_message`): it is the upstream relay
+        // this relay chose (`--upstream` and its pinned certificate hash, or
+        // the URI of its GOAWAY) and authenticated with TLS, and what it
+        // asks for comes of requests it checked itself, a gatherer's
+        // SUBSCRIBE of a participant this relay announced to it. What it
+        // costs: an upstream that is taken over can ask the publishers here
+        // for anything announced up, which by then is a broadcast nobody
+        // can trust anyway. WHY NOT have the upstream put a token of its own
+        // on what it asks: it would put one on its SUBSCRIBEs to every
+        // publisher, not knowing which session is a relay, and how peers
+        // that are not ours take a parameter they do not expect is not known
+        // (moqtail-ts 0.13.0 copies the parameters of a SUBSCRIBE into its
+        // SUBSCRIBE_OK, `routing.rs`). WHY NOT check and refuse: the chat's
+        // gatherer above could not reach a participant here.
+        if self.is_client_session(session) {
+            return Ok(());
+        }
         let (operation, namespace, parameters) = match request {
             PeerRequest::Subscribe(subscribe) | PeerRequest::TrackStatus(subscribe) => (
                 Operation::Subscribe,
@@ -2555,9 +2584,11 @@ impl Relay {
             self.fail_session(session, &error, actions);
         } else if let Some(uri) = moved_to {
             self.upstream_going_away(session, uri, actions);
-        } else if let (Some(options), Some(Authorization(authorizer))) =
-            (setup_options, &self.authorizer)
-            && let Err(code) = authorizer.setup(&options)
+        } else if let (Some(options), Some(Authorization(authorizer)), false) = (
+            setup_options,
+            &self.authorizer,
+            self.is_client_session(session),
+        ) && let Err(code) = authorizer.setup(&options)
         {
             self.close_unauthorized(session, code, actions);
         }
@@ -2618,7 +2649,7 @@ impl Relay {
                 return;
             }
         };
-        match self.allowed(&peer_request) {
+        match self.allowed(session, &peer_request) {
             Ok(()) => {}
             Err(Denied::Session(code)) => return self.close_unauthorized(session, code, actions),
             Err(Denied::Request(code)) => {

@@ -218,6 +218,7 @@ impl Relay {
             .copied()
             .unwrap_or(0);
         let for_one = self.requests_for_one;
+        let token = self.token_for(publisher, crate::Operation::Subscribe);
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
@@ -230,7 +231,9 @@ impl Relay {
         {
             return Err(request_error_code::EXCESSIVE_LOAD);
         }
-        let Ok((id, message)) = state.moqt.track_status(track.clone(), Vec::new()) else {
+        // The relay's own token alone, for the upstream relay.
+        let parameters = token.into_iter().collect();
+        let Ok((id, message)) = state.moqt.track_status(track.clone(), parameters) else {
             return Err(request_error_code::INTERNAL_ERROR);
         };
         let own = OwnRequestKey(self.next_own_request);
