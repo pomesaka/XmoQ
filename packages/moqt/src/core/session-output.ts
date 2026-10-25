@@ -33,7 +33,12 @@ export type RequestClosedReason =
 	 * After PUBLISH_DONE: every stream counted by its Stream Count ended, or
 	 * the caller reported that the wait for late streams expired (§10.11).
 	 */
-	| "publish-done";
+	| "publish-done"
+	/**
+	 * A SUBSCRIBE_NAMESPACE was told of more namespaces than it keeps at once
+	 * (`MAX_NAMESPACES_OF_A_SUBSCRIPTION`), and was cancelled.
+	 */
+	| "too-many-namespaces";
 
 export type SessionEvent =
 	/** The peer's SETUP arrived. */
@@ -64,6 +69,19 @@ export type SessionEvent =
 			timeout: bigint;
 	  }
 	| { type: "publish-namespace-ok"; requestId: bigint }
+	/** The REQUEST_OK of a SUBSCRIBE_NAMESPACE of this endpoint (§10.18). */
+	| { type: "namespaces-subscribed"; requestId: bigint }
+	/**
+	 * A NAMESPACE (`done` false) or NAMESPACE_DONE (`done` true) on the stream
+	 * of a SUBSCRIBE_NAMESPACE of this endpoint (§10.16, §10.17), with the
+	 * whole namespace: the prefix, then the suffix the peer sent.
+	 */
+	| {
+			type: "namespace";
+			requestId: bigint;
+			done: boolean;
+			trackNamespace: TrackNamespace;
+	  }
 	| { type: "publish-ok"; requestId: bigint; parameters: MessageParameters }
 	| {
 			type: "subscribe-ok";

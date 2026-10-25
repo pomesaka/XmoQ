@@ -1316,6 +1316,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: [],
 			relay: "own",
 		},
+		{
+			name: "moqtail relay: namespaces: own-browser is told with NAMESPACE and NAMESPACE_DONE of a namespace own-rust announces and withdraws under its prefix, and cancels",
+			script: "namespaces.ts",
+			args: ["--watcher", "own-browser"],
+			relay: "moqtail",
+		},
+		{
+			name: "own relay: namespaces: own-browser is told with NAMESPACE and NAMESPACE_DONE of a namespace own-rust announces and withdraws under its prefix, and cancels",
+			script: "namespaces.ts",
+			args: ["--watcher", "own-browser"],
+			relay: "own",
+		},
 		// The gatherer of the chat (`crates/chat`): own-rust clients are the
 		// participants of a room and its viewers.
 		{

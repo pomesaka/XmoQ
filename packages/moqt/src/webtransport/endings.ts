@@ -41,6 +41,23 @@ export type PublishEnd =
 	| { type: "session-closed"; close: SessionClose };
 
 /**
+ * How a SUBSCRIBE_NAMESPACE that was answered with REQUEST_OK ended. Every
+ * namespace it told of that had no NAMESPACE_DONE counts as done then
+ * (§10.18: "it SHOULD treat this as though each active namespace received
+ * a NAMESPACE_DONE"); no change says so.
+ */
+export type NamespaceSubscriptionEnd =
+	/** The publisher finished the request stream. */
+	| { type: "peer-closed" }
+	/** The publisher reset the request stream. `code` is a Stream Reset Error Code (§3.3.3). */
+	| { type: "peer-reset"; code: number | undefined }
+	/** This endpoint cancelled it: `cancel()`, the `signal` of the call, or a reader that cancelled `changes`. */
+	| { type: "cancelled" }
+	/** More namespaces than are kept at once (`MAX_NAMESPACES_OF_A_SUBSCRIPTION`, 4,096), so this endpoint cancelled it. */
+	| { type: "too-many-namespaces" }
+	| { type: "session-closed"; close: SessionClose };
+
+/**
  * How a FETCH ended. The Objects are in `Fetch.body`, which says by itself
  * whether all of them came.
  */

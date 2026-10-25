@@ -190,8 +190,9 @@ export interface GoAway {
 }
 
 /**
- * SUBSCRIBE_NAMESPACE (§10.18). Decoded and encoded; this package sends none,
- * and refuses one of the peer as a request it does not serve.
+ * SUBSCRIBE_NAMESPACE (§10.18). This package sends one
+ * (`MoqtConnection.subscribeNamespace`), and refuses one of the peer as a
+ * request it does not serve.
  */
 export interface SubscribeNamespace {
 	type: "SUBSCRIBE_NAMESPACE";

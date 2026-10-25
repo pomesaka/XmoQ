@@ -360,6 +360,19 @@ export type OwnPageExtras = {
 	 */
 	trackStatus(namespace: string, trackName: string): Promise<string>;
 	/**
+	 * Sends a SUBSCRIBE_NAMESPACE (transport §10.18) for `prefix` on the
+	 * connection of `connect`, and resolves once it is answered. What comes
+	 * of it is kept as the lines the Rust client prints for the same
+	 * (`--mode subscribe-namespace`): `NAMESPACES_SUBSCRIBED`, then
+	 * `NAMESPACE namespace=<path>` and `NAMESPACE_DONE namespace=<path>`, and
+	 * at its end `NAMESPACES_ENDED <how>`. Rejects for a refusal.
+	 */
+	watchNamespaces(prefix: string): Promise<void>;
+	/** The lines of `watchNamespaces` so far. */
+	namespaceLines(): Promise<string[]>;
+	/** Cancels the request of `watchNamespaces`. */
+	stopWatchingNamespaces(): Promise<void>;
+	/**
 	 * Whether the browser has a decoder for the codec, for Annex B without a
 	 * description: "supported", "not supported", or "no VideoDecoder".
 	 */

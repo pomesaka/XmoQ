@@ -104,6 +104,13 @@ export interface FetchRequest {
 	parameters?: MessageParameters;
 }
 
+/** What a SUBSCRIBE_NAMESPACE asks for (§10.18). AUTHORIZATION_TOKEN is the one parameter it may carry (§10.2.2). */
+export interface SubscribeNamespaceRequest {
+	/** 0 to 32 fields; none asks for every namespace (§6.1). */
+	trackNamespacePrefix: TrackNamespace;
+	parameters?: MessageParameters;
+}
+
 /** What a TRACK_STATUS asks about (§10.14). AUTHORIZATION_TOKEN is the one parameter it may carry (§10.2.2). */
 export interface TrackStatusRequest extends FullTrackName {
 	parameters?: MessageParameters;
@@ -210,6 +217,26 @@ export interface Requests {
 	 * AUTHORIZATION_TOKEN (§10.2.2).
 	 */
 	trackStatus(request: TrackStatusRequest): SessionResult<bigint>;
+	/**
+	 * Asks the peer for the namespaces under a prefix, now and as they come
+	 * and go (§6.1, §10.18). The answer is the event `namespaces-subscribed`
+	 * or `request-error`; then each NAMESPACE and NAMESPACE_DONE is the event
+	 * `namespace`, with the whole namespace, the prefix before the suffix the
+	 * peer sent (§10.16). The request ends with the peer's FIN or reset, after
+	 * which every namespace told of counts as done (§10.18, "SHOULD treat this
+	 * as though each active namespace received a NAMESPACE_DONE"; the
+	 * application is told `request-closed`, and the session tells of no
+	 * NAMESPACE_DONE for them), with `cancelRequest`, or with the session.
+	 *
+	 * More than `MAX_NAMESPACES_OF_A_SUBSCRIPTION` namespaces at once end the
+	 * request alone: its stream is reset and the peer's direction stopped
+	 * with CANCELLED, as the Rust callers do, and the application is told
+	 * `request-closed` of `too-many-namespaces`.
+	 *
+	 * Throws a `RangeError`, and sends nothing, for a parameter other than
+	 * AUTHORIZATION_TOKEN and for a prefix of more than 32 fields.
+	 */
+	subscribeNamespace(request: SubscribeNamespaceRequest): SessionResult<bigint>;
 	/**
 	 * What the Request ID of a FETCH_HEADER refers to (§11.4.4), on the
 	 * stream `peerStream`. The stream may come before the FETCH_OK (§10.13).
@@ -515,6 +542,14 @@ interface PeerFetchEntry extends RequestCommon {
 	served: boolean;
 }
 
+/** A SUBSCRIBE_NAMESPACE of this endpoint (§10.18). */
+interface SubscribeNamespaceEntry extends RequestCommon {
+	kind: "SUBSCRIBE_NAMESPACE";
+	prefix: TrackNamespace;
+	/** The suffixes the peer named with NAMESPACE and has not ended, by `namespaceKey`. */
+	named: Set<string>;
+}
+
 /** A TRACK_STATUS of this endpoint, which its one answer ends (§10.14). */
 interface TrackStatusEntry extends RequestCommon {
 	kind: "TRACK_STATUS";
@@ -533,7 +568,29 @@ type RequestEntry =
 	| PeerTrackStatusEntry
 	| SubscribeEntry
 	| FetchEntry
-	| TrackStatusEntry;
+	| TrackStatusEntry
+	| SubscribeNamespaceEntry;
+
+/**
+ * Namespaces one SUBSCRIBE_NAMESPACE of this endpoint keeps at once: decided
+ * on 2026-10-24, as many as the own relay tells of under a prefix, and the
+ * same as the Rust session (`MAX_NAMESPACES_OF_A_SUBSCRIPTION`). WHY a limit:
+ * how many the peer names is the peer's to choose, and each is kept until its
+ * NAMESPACE_DONE.
+ */
+export const MAX_NAMESPACES_OF_A_SUBSCRIPTION = 4096;
+
+/** §2.4.1: a Track Namespace has at most 32 fields, and with a Track Name at most 4,096 bytes. */
+const MAX_NAMESPACE_FIELDS = 32;
+const MAX_NAMESPACE_BYTES = 4096;
+
+/** A key of a namespace for a `Set`: the fields' bytes in hex, joined with dots. */
+const namespaceKey = (namespace: TrackNamespace): string =>
+	namespace
+		.map((field) =>
+			Array.from(field, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+		)
+		.join(".");
 
 /** §10.2.12: FORWARD defaults to 1 wherever it is omitted, except in REQUEST_UPDATE. */
 const DEFAULT_FORWARD = true;
@@ -878,12 +935,13 @@ export function createRequests(options: RequestsOptions): Requests {
 		// (The other MUST of §10.6.1, a non-zero Connect URI Length, binds a
 		// server that receives a Redirect, which this endpoint never is.)
 		if (
-			request.kind === "PUBLISH_NAMESPACE" &&
+			(request.kind === "PUBLISH_NAMESPACE" ||
+				request.kind === "SUBSCRIBE_NAMESPACE") &&
 			message.redirect !== undefined &&
 			message.redirect.trackName.length > 0
 		) {
 			throw protocolViolation(
-				"Redirect for PUBLISH_NAMESPACE has a non-empty Track Name",
+				`Redirect for ${request.kind} has a non-empty Track Name`,
 			);
 		}
 		endRequest(request, out, () => {
@@ -1069,6 +1127,104 @@ export function createRequests(options: RequestsOptions): Requests {
 			// package reads a FIN of a request's sender as its end (§11.4.1),
 			// and a peer may read it so as well.
 			finishSend(request, out);
+		});
+	};
+
+	/**
+	 * What comes on the stream of a SUBSCRIBE_NAMESPACE of this endpoint
+	 * (§10.18): REQUEST_OK or REQUEST_ERROR first ("If the subscriber
+	 * receives any message other than a REQUEST_OK or a REQUEST_ERROR as the
+	 * first message ... it MUST close the session with a
+	 * PROTOCOL_VIOLATION"), then NAMESPACE and NAMESPACE_DONE. As in the Rust
+	 * session (`answered_namespaces`, `on_namespace`).
+	 */
+	const onNamespaceMessage = (
+		request: SubscribeNamespaceEntry,
+		message: ControlMessage,
+		out: SessionOutput[],
+	): void => {
+		if (request.state === "Pending") {
+			if (message.type === "REQUEST_ERROR") {
+				onRequestError(request, message, out);
+				return;
+			}
+			if (message.type !== "REQUEST_OK") {
+				throw protocolViolation(
+					`${message.type} before the answer to SUBSCRIBE_NAMESPACE`,
+				);
+			}
+			// No parameter of §10.2 lists this REQUEST_OK, and no Track Property
+			// belongs to it (§10.5).
+			if (
+				Object.keys(message.parameters).length > 0 ||
+				message.trackProperties.length > 0
+			) {
+				throw protocolViolation(
+					"a REQUEST_OK of SUBSCRIBE_NAMESPACE with parameters or properties",
+				);
+			}
+			request.state = "Established";
+			out.push({
+				type: "event",
+				event: { type: "namespaces-subscribed", requestId: request.requestId },
+			});
+			return;
+		}
+		if (message.type !== "NAMESPACE" && message.type !== "NAMESPACE_DONE") {
+			throw protocolViolation(
+				`unexpected ${message.type} on the SUBSCRIBE_NAMESPACE request stream`,
+			);
+		}
+		const suffix = message.trackNamespaceSuffix;
+		const trackNamespace = [...request.prefix, ...suffix];
+		// A namespace longer than §2.4.1 allows breaks the rule for any
+		// namespace.
+		if (
+			trackNamespace.length > MAX_NAMESPACE_FIELDS ||
+			trackNamespace.reduce((sum, field) => sum + field.length, 0) >
+				MAX_NAMESPACE_BYTES
+		) {
+			throw protocolViolation("a namespace of NAMESPACE that is too long");
+		}
+		const key = namespaceKey(suffix);
+		if (message.type === "NAMESPACE_DONE") {
+			// §10.18: "If a subscriber receives a NAMESPACE_DONE before the
+			// corresponding NAMESPACE, it MUST close the session with a
+			// 'PROTOCOL_VIOLATION'."
+			if (!request.named.delete(key)) {
+				throw protocolViolation(
+					"NAMESPACE_DONE before the corresponding NAMESPACE",
+				);
+			}
+			out.push({
+				type: "event",
+				event: {
+					type: "namespace",
+					requestId: request.requestId,
+					done: true,
+					trackNamespace,
+				},
+			});
+			return;
+		}
+		// WHY a NAMESPACE for a namespace named before is told again: the draft
+		// does not make it an error, and the Rust session tells it again.
+		if (
+			!request.named.has(key) &&
+			request.named.size >= MAX_NAMESPACES_OF_A_SUBSCRIPTION
+		) {
+			abandonRequest(request, "too-many-namespaces", out);
+			return;
+		}
+		request.named.add(key);
+		out.push({
+			type: "event",
+			event: {
+				type: "namespace",
+				requestId: request.requestId,
+				done: false,
+				trackNamespace,
+			},
 		});
 	};
 
@@ -1364,6 +1520,7 @@ export function createRequests(options: RequestsOptions): Requests {
 		request.kind === "FETCH" ||
 		request.kind === "TRACK_STATUS" ||
 		request.kind === "PUBLISH_NAMESPACE" ||
+		request.kind === "SUBSCRIBE_NAMESPACE" ||
 		(request.kind === "PUBLISH" && request.openedBy === "self");
 	/** The requests the peer sent a GOAWAY on the stream of (§10.4). */
 	const moved = new WeakSet<RequestEntry>();
@@ -1424,6 +1581,10 @@ export function createRequests(options: RequestsOptions): Requests {
 		// the draft names no consequence, and an update of a request that
 		// creates no state has nothing to apply to. As in the Rust session.
 		if (request.kind === "PEER_TRACK_STATUS") throw unexpected;
+		if (request.kind === "SUBSCRIBE_NAMESPACE") {
+			onNamespaceMessage(request, message, out);
+			return;
+		}
 		// §10.9: "The receiver of a REQUEST_UPDATE MUST respond with exactly
 		// one REQUEST_OK or REQUEST_ERROR". Responses carry no Request ID, so
 		// they answer the updates in the order sent.
@@ -1764,6 +1925,24 @@ export function createRequests(options: RequestsOptions): Requests {
 					requestId: common.requestId,
 					trackNamespace: request.trackNamespace,
 					trackName: request.trackName,
+					parameters: request.parameters ?? {},
+				},
+			}));
+		},
+
+		subscribeNamespace(request) {
+			// The prefix and the parameters are checked by the encoding.
+			return openRequest((common) => ({
+				entry: {
+					...common,
+					kind: "SUBSCRIBE_NAMESPACE",
+					prefix: request.trackNamespacePrefix,
+					named: new Set(),
+				},
+				message: {
+					type: "SUBSCRIBE_NAMESPACE",
+					requestId: common.requestId,
+					trackNamespacePrefix: request.trackNamespacePrefix,
 					parameters: request.parameters ?? {},
 				},
 			}));
