@@ -176,23 +176,34 @@ struct Args {
     /// this client sends (§5.1.2); `None` for an unfiltered one. Largest
     /// Object without the flag.
     subscription_filter: Option<SubscriptionFilter>,
-    /// `--publish-on-line`: the publisher prints `READY_TO_PUBLISH` where it
-    /// would send its PUBLISH, and sends it when the driver writes the line
-    /// `publish`.
-    ///
-    /// WHY a line and not only a delay: a driver that wants the PUBLISH to
-    /// arrive within a window some other peer opens (a relay that waits a few
-    /// seconds for an answer) cannot have this client start and connect
-    /// inside that window on a loaded machine. Everything that takes time is
-    /// done before the line.
-    publish_on_line: bool,
-    /// `--serve-on-line`: the client prints `ASKED request_id=N` for the
-    /// SUBSCRIBE it would serve, and sends `SUBSCRIBE_OK` when the driver
-    /// writes the line `serve`.
-    serve_on_line: bool,
+    /// What this client does only when the driver writes a line.
+    on_line: OnLine,
     /// What the flags say of the FETCH requests this client sends.
     fetch: FetchArgs,
     trace: Trace,
+}
+
+/// The steps a client takes only when the driver writes a line on stdin.
+///
+/// WHY a line and not only a delay: a driver that wants a request to arrive
+/// within a window some other peer opens (a relay that waits a few seconds
+/// for an answer, or for the late streams of a track that ended) cannot have
+/// this client start and connect inside that window on a loaded machine.
+/// Everything that takes time is done before the line.
+#[derive(Default)]
+struct OnLine {
+    /// `--publish-on-line`: the publisher prints `READY_TO_PUBLISH` where it
+    /// would send its PUBLISH, and sends it when the driver writes the line
+    /// `publish`.
+    publish: bool,
+    /// `--serve-on-line`: the client prints `ASKED request_id=N` for the
+    /// SUBSCRIBE it would serve, and sends `SUBSCRIBE_OK` when the driver
+    /// writes the line `serve`.
+    serve: bool,
+    /// `--subscribe-on-line`: the subscriber prints `READY_TO_SUBSCRIBE`
+    /// once its session is set up, and sends its SUBSCRIBE when the driver
+    /// writes the line `subscribe`.
+    subscribe: bool,
 }
 
 /// The lines of the driver, on stdin.
@@ -812,15 +823,16 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let mut object_properties = Vec::new();
     let (mut serve_delay_ms, mut answer_delay_ms) = (0, 0);
     let mut subscription_filter = Some(SubscriptionFilter::LargestObject);
-    let (mut publish_on_line, mut serve_on_line) = (false, false);
+    let mut on_line = OnLine::default();
     let (mut fetch, mut auth) = (FetchFlags::default(), auth::AuthFlag::default());
     let (mut trace, mut catalog_video) = (false, false);
 
     while let Some(flag) = args.next() {
         let switch = match flag.as_str() {
             "--trace" => Some(&mut trace),
-            "--publish-on-line" => Some(&mut publish_on_line),
-            "--serve-on-line" => Some(&mut serve_on_line),
+            "--publish-on-line" => Some(&mut on_line.publish),
+            "--serve-on-line" => Some(&mut on_line.serve),
+            "--subscribe-on-line" => Some(&mut on_line.subscribe),
             "--join-at-once" => Some(&mut fetch.join_at_once),
             "--catalog-video" => Some(&mut catalog_video),
             "--fetch-cancel-request-only" => Some(&mut fetch.cancel_request_only),
@@ -895,8 +907,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         serve_delay: Duration::from_millis(serve_delay_ms),
         answer_delay: Duration::from_millis(answer_delay_ms),
         subscription_filter,
-        publish_on_line,
-        serve_on_line,
+        on_line,
         fetch: fetch.args(),
         trace: if trace {
             Trace::new(report::trace)
@@ -1861,7 +1872,7 @@ impl Client<'_> {
             tokio::time::sleep(self.args.publish_delay),
         )
         .await?;
-        if self.args.publish_on_line {
+        if self.args.on_line.publish {
             report::ready_to_publish();
             self.attending(
                 peer_requests,
@@ -2446,7 +2457,7 @@ impl Client<'_> {
     /// `SUBSCRIBE_OK`: a time, and a line of the driver.
     async fn before_serving(&self, request: PeerRequestId, stdin: &mut DriverLines) -> Result<()> {
         tokio::time::sleep(self.args.serve_delay).await;
-        if self.args.serve_on_line {
+        if self.args.on_line.serve {
             report::asked(request.value());
             wait_for_line(stdin, "serve").await?;
         }
@@ -2988,6 +2999,11 @@ impl Client<'_> {
     async fn run_mode(&mut self) -> Result<()> {
         match &self.args.mode {
             Mode::Subscribe { objects } => {
+                if self.args.on_line.subscribe {
+                    report::ready_to_subscribe();
+                    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+                    wait_for_line(&mut stdin, "subscribe").await?;
+                }
                 self.subscribe(*objects).await?;
                 if !self.args.video.stay_after.is_zero() {
                     report::staying();
