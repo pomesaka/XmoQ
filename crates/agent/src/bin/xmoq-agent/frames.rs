@@ -3,7 +3,9 @@
 //!
 //! WHY a thread: decoding a Group's frames and writing a PNG take a moment
 //! of a core (a Group of 1080 lines, 4 ms a frame), and the session's loop
-//! reads the chat meanwhile.
+//! reads the chat meanwhile. WHY one for the whole run, and not one a
+//! session: `--frames-kept` bounds the files of every session together,
+//! which one `Frames` keeps the names of (`Frames::begin_again`).
 
 use std::path::PathBuf;
 
@@ -18,6 +20,9 @@ pub const MOST_WAITING: usize = 256;
 
 /// What the thread is given.
 pub enum Job {
+    /// The video of a new session follows: another track, or the same one
+    /// numbered anew.
+    BeginAgain,
     /// An Object of the video track, in the order it came.
     Object {
         group: u64,
@@ -31,18 +36,24 @@ pub enum Job {
     Forgo,
 }
 
-/// The thread of one video track.
+/// The thread of the pictures, and what the session's loop keeps of them.
 pub struct Pictures {
     jobs: mpsc::Sender<Job>,
     /// What the thread wrote, and what failed.
     pub told: mpsc::Receiver<Event>,
     /// Objects left out because the thread was behind.
     pub left_out: u64,
+    /// Whether Objects are being left out, which is told once each time it
+    /// begins.
+    pub leaving_out: bool,
+    /// Until when the picture asked for is waited for; from one session to
+    /// the next, as `Frames` keeps the asking.
+    pub asked_until: Option<tokio::time::Instant>,
 }
 
-/// Writes `taken` into `dir` under `prefix`, and removes what it says to.
-fn write(dir: &std::path::Path, prefix: &str, taken: &Taken, asked: Asked) -> Event {
-    let path = dir.join(format!("{prefix}{}", taken.file_name));
+/// Writes `taken` into `dir`, and removes what it says to.
+fn write(dir: &std::path::Path, taken: &Taken, asked: Asked) -> Event {
+    let path = dir.join(&taken.file_name);
     if let Err(error) = std::fs::write(&path, &taken.png) {
         return Event::Error {
             message: format!("frame: {}: {error}", path.display()),
@@ -51,7 +62,7 @@ fn write(dir: &std::path::Path, prefix: &str, taken: &Taken, asked: Asked) -> Ev
     for removed in &taken.removed {
         // WHY nothing is said where it fails: the agent may have moved or
         // removed the file itself.
-        let _ = std::fs::remove_file(dir.join(format!("{prefix}{removed}")));
+        let _ = std::fs::remove_file(dir.join(removed));
     }
     Event::Frame {
         path: path.display().to_string(),
@@ -65,12 +76,8 @@ fn write(dir: &std::path::Path, prefix: &str, taken: &Taken, asked: Asked) -> Ev
 }
 
 impl Pictures {
-    /// Starts the thread, which writes into `dir` (made where it is not)
-    /// with `prefix` before each file's name.
-    ///
-    /// WHY a prefix of the session: a `Frames` is of one track, and names
-    /// its files from 0; a new session begins a new one.
-    pub fn start(settings: Settings, dir: PathBuf, prefix: String) -> anyhow::Result<Self> {
+    /// Starts the thread, which writes into `dir` (made where it is not).
+    pub fn start(settings: Settings, dir: PathBuf) -> anyhow::Result<Self> {
         let mut frames = Frames::new(settings)?;
         std::fs::create_dir_all(&dir)?;
         let (jobs, mut waiting) = mpsc::channel::<Job>(MOST_WAITING);
@@ -78,35 +85,40 @@ impl Pictures {
         std::thread::spawn(move || {
             while let Some(job) = waiting.blocking_recv() {
                 let was_asked = frames.is_asked();
-                let (taken, asked) = match job {
+                let told = match job {
+                    Job::BeginAgain => frames.begin_again().err().map(|error| Event::Error {
+                        message: format!("frame: {error}"),
+                    }),
                     Job::Object {
                         group,
                         object,
                         timestamp_us,
                         annex_b,
-                    } => (
-                        frames.take(VideoObject {
+                    } => frames
+                        .take(VideoObject {
                             group,
                             object,
                             timestamp_us,
                             annex_b: &annex_b,
+                        })
+                        .map(|taken| {
+                            let asked = if was_asked {
+                                Asked::Command
+                            } else {
+                                Asked::Every
+                            };
+                            write(&dir, &taken, asked)
                         }),
-                        if was_asked {
-                            Asked::Command
-                        } else {
-                            Asked::Every
-                        },
-                    ),
-                    Job::Ask => (frames.ask(), Asked::Command),
+                    Job::Ask => frames
+                        .ask()
+                        .map(|taken| write(&dir, &taken, Asked::Command)),
                     Job::Forgo => {
                         frames.forgo();
-                        (None, Asked::Command)
+                        None
                     }
                 };
-                if let Some(taken) = taken
-                    && tell
-                        .blocking_send(write(&dir, &prefix, &taken, asked))
-                        .is_err()
+                if let Some(event) = told
+                    && tell.blocking_send(event).is_err()
                 {
                     break;
                 }
@@ -128,6 +140,8 @@ impl Pictures {
             jobs,
             told,
             left_out: 0,
+            leaving_out: false,
+            asked_until: None,
         })
     }
 
@@ -141,11 +155,11 @@ impl Pictures {
         given
     }
 
-    /// Asks for a picture, or gives the asking up.
+    /// Asks for a picture, gives the asking up, or begins a session's video.
     ///
     /// WHY waited for where the queue is full, and not left out as an
-    /// Object is: the agent asked, and the wait is for one job of the
-    /// thread to be done.
+    /// Object is: the agent asked, or the video that follows is decoded
+    /// wrongly without it; the wait is for one job of the thread to be done.
     pub async fn tell(&self, job: Job) {
         let _ = self.jobs.send(job).await;
     }
