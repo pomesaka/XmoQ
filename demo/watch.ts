@@ -30,12 +30,15 @@ import {
 	RequestFailedError,
 } from "@xmoq/moqt";
 import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
+import { TRANSCRIPT_PREFIX } from "@xmoq/transcript";
+import { startCaptions } from "./captions.ts";
 import {
 	type Broadcast,
 	connectToRelay,
 	firstBytes,
 	HERE,
 	MARK,
+	NAMESPACE,
 	namespace,
 	joinRoom,
 	SAMPLE_RATE,
@@ -235,6 +238,14 @@ async function main(): Promise<void> {
 	// relay this page was served with.
 	const room = joinRoom(`viewer-${Math.floor(Math.random() * 1000)}`);
 	if (room !== undefined) await room.broadcast;
+	// The transcriber listens under the namespace the publishing page
+	// announces (`serve.ts`), and its transcript is of that prefix.
+	startCaptions(NAMESPACE, async () =>
+		connectToRelay(
+			through(HERE),
+			await room?.token("sub", [...TRANSCRIPT_PREFIX, ...NAMESPACE]),
+		),
+	);
 	/** What the first line under the picture says of the session. */
 	let link = "connecting";
 	let sessions = 0;

@@ -42,6 +42,7 @@ import {
 	followCatalog,
 	namespaceTuple,
 } from "@xmoq/msf";
+import { followTranscript } from "@xmoq/transcript";
 import type {
 	PageAudioReport,
 	PageBroadcastReport,
@@ -54,6 +55,7 @@ import type {
 	PageKeptReport,
 	PageProperty,
 	PageReceivedObject,
+	PageTranscriptPiece,
 	PageVideoPublishReport,
 	PageVideoReport,
 	PageVideoSetup,
@@ -695,6 +697,9 @@ let broadcastPublishing:
 			made: number;
 	  }
 	| undefined;
+
+/** What `followTranscript` was handed. */
+const transcriptPieces: PageTranscriptPiece[] = [];
 
 /** What `publishVoice` started. */
 let voicePublishing:
@@ -1753,6 +1758,27 @@ window.xmoqOwn = {
 		await moq.publishNamespace(trackNamespace);
 		console.log("voice published");
 	}),
+
+	followTranscript: withPlainErrors(
+		async (listened: string, latest: number) => {
+			followTranscript(connected(), {
+				listened: listened.split("/"),
+				latest,
+				onSpeech(speech) {
+					transcriptPieces.push({
+						number: speech.number.toString(),
+						from: speech.from,
+						text: speech.text,
+						how: speech.how,
+					});
+				},
+			});
+		},
+	),
+
+	transcriptReport: withPlainErrors(
+		async (): Promise<PageTranscriptPiece[]> => [...transcriptPieces],
+	),
 
 	voiceReport: withPlainErrors(async (): Promise<PageVoiceReport> => {
 		if (voicePublishing === undefined) {

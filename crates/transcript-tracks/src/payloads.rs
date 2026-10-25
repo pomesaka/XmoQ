@@ -11,7 +11,7 @@
 //! `at` is the transcriber's clock when it had read the piece, in
 //! milliseconds since the Unix epoch.
 //!
-//! WHY JSON: the chat's tracks are JSON, a page reads it with `JSON.parse`,
+//! WHY JSON: the chat's tracks are JSON, a page reads it (`@xmoq/json`),
 //! and an agent reads it as it is. WHY the whole namespace in `from`, and
 //! not the fields after the prefix: a transcript of one broadcast has a
 //! prefix that is its whole namespace, which would leave nothing.

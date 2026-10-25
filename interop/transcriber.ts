@@ -24,6 +24,10 @@
 //     tells a voice half a second at a time with the model of voice activity; the
 //     smallest model reads 1.4 s in about 0.25 s on a Mac, unmeasured on
 //     the processors of CI). The run says how long it was.
+//   - A page that reads the transcript with `followTranscript` of
+//     `@xmoq/transcript`, from before the live reader, is handed the same
+//     two pieces live, with the same text and `from` (written before the
+//     run that added it, 2026-10-25).
 //   - A reader that comes later FETCHes the whole transcript and gets the
 //     pieces the transcriber has kept, the two above among them, and
 //     FETCH_OK ends at {largest, 1}.
@@ -172,6 +176,14 @@ async function main(): Promise<void> {
 		await transcriber.waitForLine(
 			new RegExp(`^AUDIO_SUBSCRIBED namespace=${PREFIX}/page$`),
 		);
+		const reader = await openConnectedPage(context, "reader", "own-browser");
+		await withTimeout(
+			reader.evaluate(
+				([prefix]) => window.xmoqOwn.followTranscript(prefix, 0),
+				[PREFIX] satisfies [string],
+			),
+			"the page to follow the transcript",
+		);
 		const live = spawnRustClient(
 			context,
 			"live",
@@ -216,6 +228,23 @@ async function main(): Promise<void> {
 		}
 		if (second.startUs < first.endUs) {
 			throw new Error("the second piece begins before the first ends");
+		}
+		const onPage = await pollFor(async () => {
+			const pieces = await reader.evaluate(() =>
+				window.xmoqOwn.transcriptReport(),
+			);
+			const both = [first, second].map((piece) =>
+				pieces.find((had) => had.number === String(piece.group)),
+			);
+			return both.every((had) => had !== undefined) ? both : undefined;
+		}, "the page to be handed both pieces");
+		for (const [index, piece] of [first, second].entries()) {
+			const had = onPage[index];
+			expect(
+				`the page's piece ${piece.group}`,
+				JSON.stringify([had?.text, had?.from, had?.how]),
+				JSON.stringify([piece.text, piece.from, "live"]),
+			);
 		}
 
 		const late = spawnRustClient(
@@ -309,7 +338,7 @@ async function main(): Promise<void> {
 			() => (report.audioEncoderError === null ? true : undefined),
 			"the page's encoder to have no error",
 		);
-		summary = `through the own relay, the transcriber listened to the page's voice under ${PREFIX} with the smallest model and published two pieces a live reader got, Groups ${first.group} and ${second.group}, saying ${JSON.stringify(first.text)} and ${JSON.stringify(second.text)}, of ${(first.endUs - first.startUs) / 1000} and ${(second.endUs - second.startUs) / 1000} ms, there ${first.at - Math.round(first.endUs / 1000)} and ${second.at - Math.round(second.endUs / 1000)} ms after their ends; a late reader fetched ${fetched.length} pieces up to Group ${largest}; xmoq-agent, which came then, wrote the pieces ${numbers.join(",")} as speech lines, from ${fetchedByAgent.number} by its FETCH and ${liveToAgent.number} live; the page made ${report.made} pieces of sound, ${report.voices} voices`;
+		summary = `through the own relay, the transcriber listened to the page's voice under ${PREFIX} with the smallest model and published two pieces a live reader and a page with @xmoq/transcript got, Groups ${first.group} and ${second.group}, saying ${JSON.stringify(first.text)} and ${JSON.stringify(second.text)}, of ${(first.endUs - first.startUs) / 1000} and ${(second.endUs - second.startUs) / 1000} ms, there ${first.at - Math.round(first.endUs / 1000)} and ${second.at - Math.round(second.endUs / 1000)} ms after their ends; a late reader fetched ${fetched.length} pieces up to Group ${largest}; xmoq-agent, which came then, wrote the pieces ${numbers.join(",")} as speech lines, from ${fetchedByAgent.number} by its FETCH and ${liveToAgent.number} live; the page made ${report.made} pieces of sound, ${report.voices} voices`;
 	} finally {
 		await runCleanups();
 		rmSync(agentOut, { recursive: true, force: true });

@@ -1,6 +1,6 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--stats-every-ms N] [--chat-store FILE]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--stats-every-ms N] [--chat-store FILE] [--transcribe-language auto|ja|en|...]
 //
 // `--auth` (an experiment; how the relay authorizes is undecided): a key
 // is made for this run and given to the relay and to the rooms. The relay
@@ -25,14 +25,26 @@
 // `xmoq/chat`. A gatherer built without that flag exits at once with
 // "unknown flag", which is shown as any other exit of the gatherer.
 //
+// The transcriber (`xmoq-transcriber`, a release build) starts beside the
+// relay where it is built and its models are in the cache (`mise run
+// speech-model`, and `mise run speech-model -- silero-v5.1.2`). It listens
+// under the publishing page's namespace, and the watching page shows its
+// transcript as captions. Without it, or without the models, the demo runs
+// without captions and says how to have them. With `--auth` it is given the
+// relay's key, as the gatherer is. The publishing page sends a tone unless
+// it is opened with `?audio=mic`; the transcriber tells that no voice is in
+// the tone, and writes nothing.
+//
 // Open http://localhost:8080/publish in Chromium, then /watch in one or
 // more other tabs. Ctrl-C stops the relay as well.
 
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+import { NAMESPACE } from "./namespace.ts";
 
 const { values: options } = parseArgs({
 	options: {
@@ -53,6 +65,11 @@ const { values: options } = parseArgs({
 		"relay-log": { type: "string" },
 		// The gatherer's store: one file for one gatherer, which holds it alone.
 		"chat-store": { type: "string" },
+		// The language the transcriber reads in: `auto` (its default), or a
+		// code of whisper's. A code is twice as fast as `auto`, and has every
+		// voice read in that language: an English voice read with `ja` came
+		// out in Japanese (crates/speech/README.md).
+		"transcribe-language": { type: "string", default: "auto" },
 		port: { type: "string", default: "8080" },
 	},
 });
@@ -150,8 +167,9 @@ const relay = spawn(
 relay.on("exit", (code) => {
 	console.log(`the relay exited with ${code}`);
 	// The gatherer would otherwise stay, connecting again to nobody, and
-	// hold its store.
+	// hold its store; the transcriber would hold its models.
 	chat?.kill("SIGINT");
+	transcriber?.kill("SIGINT");
 	process.exit(code ?? 1);
 });
 // The rooms, where the spike is installed.
@@ -203,12 +221,59 @@ chat?.on("exit", (code) => {
 	// The pages have no chat without it; the run goes on.
 	console.log(`the gatherer of the chat exited with ${code}`);
 });
+// The transcriber, where it is built and its models are in the cache.
+const transcriberBinary = join(
+	here,
+	"..",
+	"target",
+	"release",
+	"xmoq-transcriber",
+);
+const whisperCache = join(
+	process.env.XDG_CACHE_HOME || join(homedir(), ".cache"),
+	"xmoq",
+	"whisper",
+);
+const transcriberModels = [
+	join(whisperCache, "ggml-large-v3-turbo-q5_0.bin"),
+	join(whisperCache, "ggml-silero-v5.1.2.bin"),
+];
+/** Why the watching page has no captions, where it has none. */
+const noCaptions = !existsSync(transcriberBinary)
+	? `no captions: ${transcriberBinary} is missing (cargo build --release -p xmoq-transcriber)`
+	: transcriberModels.some((model) => !existsSync(model))
+		? "no captions: a model of the transcriber is missing (mise run speech-model, and mise run speech-model -- silero-v5.1.2)"
+		: undefined;
+const transcriber =
+	noCaptions === undefined
+		? spawn(
+				transcriberBinary,
+				[
+					"--url",
+					`https://127.0.0.1:${options["relay-port"]}/`,
+					"--cert-sha256",
+					certSha256Hex,
+					"--namespace",
+					NAMESPACE.join("/"),
+					"--language",
+					options["transcribe-language"],
+					...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
+				],
+				// Its lines, one for each thing it does, are not shown.
+				{ stdio: ["ignore", "ignore", "inherit"] },
+			)
+		: undefined;
+transcriber?.on("exit", (code) => {
+	// The watching page has no captions without it; the run goes on.
+	console.log(`the transcriber exited with ${code}`);
+});
 /** Why the pages have no chat, where they have none. */
 const noChat = `no chat: ${chatBinary} is missing (cargo build -p xmoq-chat)`;
 const stop = (): void => {
 	relay.kill("SIGINT");
 	rooms?.kill("SIGINT");
 	chat?.kill("SIGINT");
+	transcriber?.kill("SIGINT");
 };
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
@@ -227,6 +292,7 @@ for (const [path, entry] of Object.entries(PAGES)) {
 			XMOQ_DEMO: JSON.stringify({
 				roomsUrl,
 				chatTracks: chat !== undefined,
+				transcript: transcriber !== undefined,
 				relayUrl: `https://127.0.0.1:${options["relay-port"]}/`,
 				certSha256Hex,
 			}),
@@ -255,7 +321,7 @@ const html = (path: string): string => `<!doctype html>
 	<body>
 		<p>XmoQ demo, ${path.slice(1)} · <a href="/publish">publish (a clock)</a> · <a href="/publish?source=camera">publish (camera)</a> · <a href="/watch">watch</a></p>
 		<canvas width="640" height="360"></canvas>
-		${path === "/watch" ? '<p><button id="sound">sound</button></p>' : ""}
+		${path === "/watch" ? `<p id="caption" style="min-height: 1.5em; font-size: 1.2em; color: #fff;">${noCaptions ?? ""}</p><p><button id="sound">sound</button></p>` : ""}
 		<pre id="status">loading</pre>
 		${
 			roomsUrl === null
@@ -302,6 +368,10 @@ console.log(
 	chat !== undefined
 		? `chat:    over the tracks; the gatherer keeps the lines in ${chatStore}`
 		: `chat:    ${noChat}`,
+);
+console.log(
+	noCaptions ??
+		`captions: the transcriber reads ${NAMESPACE.join("/")} in ${options["transcribe-language"]}; open /publish?audio=mic to be heard`,
 );
 if (authKeyHex !== undefined) {
 	console.log(

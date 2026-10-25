@@ -1,6 +1,6 @@
 # The payload of a transcript's track
 
-The JSON the transcriber writes on `speech` (decided on 2026-10-25), and what a reader makes of it. `xmoq-transcript-tracks` (`crates/transcript-tracks/src/payloads.rs`) reads the table in its tests. A TypeScript reader is to read the same table once there is one. The rows were written by hand from the decision; no other implementation writes these payloads. Bytes a text table cannot hold (not UTF-8) are a case of the Rust test itself.
+The JSON the transcriber writes on `speech` (decided on 2026-10-25), and what a reader makes of it. `xmoq-transcript-tracks` (`crates/transcript-tracks/src/payloads.rs`) and `@xmoq/transcript` (`packages/transcript/test/payloads.test.ts`) read the table in their tests, so that the same bytes give the same piece, or the same reason why there is none. The rows were written by hand from the decision; no other implementation writes these payloads. Bytes a text table cannot hold (not UTF-8) are a case of the Rust test itself.
 
 Columns are separated by a tab. A text column holds a JSON literal (`from` an array of strings, `text` a string), so that quotes, backslashes and line breaks are written as JSON writes them; `-` is "none".
 

@@ -4,9 +4,10 @@
 // are agreed on here.
 
 import { connect, type MoqtConnection } from "@xmoq/moqt";
+import { NAMESPACE } from "./namespace.ts";
 import { startChat } from "./room-chat.ts";
 
-export const NAMESPACE = ["xmoq", "demo"];
+export { NAMESPACE };
 export const TRACK = "video";
 export const AUDIO_TRACK = "audio";
 export const SAMPLE_RATE = 48_000;
