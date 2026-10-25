@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use xmoq_chat_tracks::names::Person;
-use xmoq_viewer::room::{self, Broadcast, Relay, Said};
+use xmoq_viewer::room::{self, Broadcast, Relay, Said, Seat};
 
 /// The tokens of a room for the chat on tracks ([`RoomSocket::chat_tokens`]),
 /// each as an AUTHORIZATION TOKEN; none where the room gave none.
@@ -167,7 +167,36 @@ impl RoomSocket {
                 self.broadcast = broadcast;
                 true
             }
-            Said::Hello { .. } | Said::Token(_) | Said::Other => false,
+            Said::Hello { .. }
+            | Said::Token(_)
+            | Said::Seat(_)
+            | Said::MeetingFull(_)
+            | Said::Other => false,
+        }
+    }
+
+    /// Says `message`, and waits for what `answer` takes as its answer. The
+    /// broadcasts said meanwhile are kept for [`Self::next`].
+    async fn asked<T>(
+        &mut self,
+        message: String,
+        answer: impl Fn(&Said) -> Option<T>,
+    ) -> Result<T> {
+        self.socket.send(Message::text(message)).await?;
+        loop {
+            let said = self.message().await?;
+            match answer(&said) {
+                Some(answer) => return Ok(answer),
+                None => {
+                    if self.heard(said) {
+                        // A room that talks and does not answer: the oldest goes.
+                        if self.kept.len() >= KEPT {
+                            self.kept.pop_front();
+                        }
+                        self.kept.push_back(self.current());
+                    }
+                }
+            }
         }
     }
 
@@ -187,23 +216,37 @@ impl RoomSocket {
         role: room::TokenRole,
         namespace: &[String],
     ) -> Result<Option<String>> {
-        self.socket
-            .send(Message::text(room::ask_for_a_token(role, namespace)))
-            .await?;
-        loop {
-            match self.message().await? {
-                Said::Token(token) => return Ok(token),
-                said => {
-                    if self.heard(said) {
-                        // A room that talks and gives no token: the oldest goes.
-                        if self.kept.len() >= KEPT {
-                            self.kept.pop_front();
-                        }
-                        self.kept.push_back(self.current());
-                    }
-                }
-            }
+        self.asked(room::ask_for_a_token(role, namespace), |said| match said {
+            Said::Token(token) => Some(token.clone()),
+            _ => None,
+        })
+        .await
+    }
+
+    /// A seat in the room's meeting as `participant`: asked again, the same
+    /// on the same WebSocket, it has a new token. A room that does not take
+    /// the id does not answer, and this waits for ever.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::token`]; a meeting that is full; a seat for another
+    /// participant.
+    pub async fn seat(&mut self, participant: &str) -> Result<Seat> {
+        let seat = self
+            .asked(room::ask_for_a_seat(participant), |said| match said {
+                Said::Seat(seat) => Some(Ok(seat.clone())),
+                Said::MeetingFull(most) => Some(Err(*most)),
+                _ => None,
+            })
+            .await?
+            .map_err(|most| anyhow!("the meeting is full: it takes {most}"))?;
+        if seat.participant != participant {
+            bail!(
+                "the room gave a seat for {}, not for {participant}",
+                seat.participant
+            );
         }
+        Ok(seat)
     }
 
     /// The two tokens the chat on tracks needs of the room: `pub` in the
@@ -311,6 +354,86 @@ mod tests {
         .unwrap();
         assert!(refused(&error));
         assert_eq!(error.to_string(), "refused for 0 s");
+    }
+
+    /// A room that says hello, reads one message, says `answers`, and keeps
+    /// what it read.
+    fn room_answering(
+        listener: TcpListener,
+        answers: Vec<String>,
+    ) -> tokio::task::JoinHandle<String> {
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Message::text(
+                    r#"{"type":"hello","connected":1,"broadcast":null}"#,
+                ))
+                .await
+                .unwrap();
+            let asked = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            for answer in answers {
+                socket.send(Message::text(answer)).await.unwrap();
+            }
+            // Held open until the reader is done.
+            let _ = socket.next().await;
+            asked.to_string()
+        })
+    }
+
+    #[tokio::test]
+    async fn a_seat_is_asked_for() {
+        let broadcast = r#"{"type":"broadcast","broadcast":{"relayUrl":"https://h/","certSha256Hex":"00","namespace":["xmoq","demo"]}}"#;
+        let seat = r#"{"type":"meeting","participant":"a1","publish":{"namespace":["xmoq","meet","r","a1"],"token":null},"subscribe":{"namespace":["xmoq","meet","r","*"],"token":"v1|t"}}"#;
+        let another = seat.replace(r#""participant":"a1""#, r#""participant":"b2""#);
+        // (what the room says after join-meeting; the seat's token, or the
+        // error; whether a broadcast is kept for `next`)
+        let cases = [
+            (vec![seat.to_string()], Ok(Some("v1|t")), false),
+            // What the room says meanwhile is not the answer, and a broadcast
+            // among it is kept.
+            (
+                vec![
+                    r#"{"type":"connected","connected":2}"#.to_string(),
+                    broadcast.to_string(),
+                    seat.to_string(),
+                ],
+                Ok(Some("v1|t")),
+                true,
+            ),
+            (
+                vec![r#"{"type":"meeting-full","most":49}"#.to_string()],
+                Err("the meeting is full: it takes 49"),
+                false,
+            ),
+            (
+                vec![another],
+                Err("the room gave a seat for b2, not for a1"),
+                false,
+            ),
+        ];
+        for (answers, expected, kept) in cases {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let room = room_answering(listener, answers);
+            let mut joined = RoomSocket::join(&format!("http://127.0.0.1:{port}/rooms/r"), "agent")
+                .await
+                .unwrap();
+            let got = joined.seat("a1").await;
+            assert_eq!(
+                got.as_ref()
+                    .map(|seat| seat.subscribe_token.as_deref())
+                    .map_err(ToString::to_string),
+                expected.map_err(str::to_string),
+                "{expected:?}"
+            );
+            assert_eq!(joined.kept.is_empty(), !kept, "{expected:?}");
+            drop(joined);
+            assert_eq!(
+                room.await.unwrap(),
+                r#"{"participant":"a1","type":"join-meeting"}"#
+            );
+        }
     }
 
     #[tokio::test]

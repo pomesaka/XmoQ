@@ -92,7 +92,7 @@ pub const DEFAULT_NAME: &str = "agent";
 
 /// The flags, each of which takes a value.
 pub const USAGE: &str = "\
-xmoq-agent --room http://host:port/rooms/<name> --out <dir> [--name agent] [--token no]
+xmoq-agent --room http://host:port/rooms/<name> --out <dir> [--name agent] [--token no | --meeting <name>]
 xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
            (--chat-room <room> | --meeting <room>) --out <dir> [--name agent]
   --out <dir>                       where events.jsonl is written (made where it is not)
@@ -106,7 +106,8 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
   --frame-longest <n>               the longest side of a picture, in pixels (1280)
   --frames-kept <n>                 the pictures kept in <dir>/frames; the oldest goes (500)
   --meeting <room>                  a meeting's participants under xmoq/meet/<room>, in place of
-                                    --namespace; /frame <id> asks for one's picture
+                                    --namespace; /frame <id> asks for one's picture; with --room,
+                                    the room's name, and the room gives the reader a seat of its 49
   --meeting-most <n>                the participants kept (49; 1 or more)
   --meeting-video-linger-ms <ms>    how long a participant's video stays after its picture (30000)
   --speech on|off                   off: no transcript is followed (on)
@@ -274,13 +275,21 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         (None, None) => return Err(Invalid("--url or --room is needed".to_string())),
         (Some(_), Some(_)) => return Err(Invalid("--url or --room, not both".to_string())),
     };
-    // WHY not with a room yet: how a room lets the participants of a
-    // meeting in, and gives their tokens, waits for how they find each other
-    // (Q57).
-    if meeting.is_some() && matches!(source, Source::Room { .. }) {
-        return Err(Invalid(
-            "--meeting is for --url, not yet for --room".to_string(),
-        ));
+    if let (Some(meeting), Source::Room { ask_token, .. }) = (&meeting, &source) {
+        // The room gives the seats of its own meeting alone
+        // (`xmoq/meet/<room>/*`).
+        if *meeting != room {
+            return Err(Invalid(format!(
+                "--meeting {meeting} with --room: a room's meeting is its own, {room}"
+            )));
+        }
+        // WHY not without tokens: the seat the room gives (Q58) is the token,
+        // and a reader that asks for none takes no seat of the 49.
+        if !ask_token {
+            return Err(Invalid(
+                "--token no with --meeting: the room's seat in its meeting is a token".to_string(),
+            ));
+        }
     }
     if meeting.is_some() && named_namespace {
         return Err(Invalid(
@@ -398,14 +407,39 @@ mod tests {
                 Err(Invalid("--url needs --chat-room or --meeting".to_string())),
             ),
         ];
-        assert_eq!(
-            parsed("--room http://h/rooms/a --out o --meeting m"),
-            Err(Invalid(
-                "--meeting is for --url, not yet for --room".to_string()
-            ))
-        );
         for (flags, expected) in cases {
             assert_eq!(parsed(&format!("{relay} {flags}")), expected, "{flags}");
+        }
+        // (the flags after `--room http://h/rooms/a --out o`; what they are
+        // read as)
+        let in_a_room = [
+            (
+                "--meeting a",
+                Ok(Args {
+                    meeting: Some(("a".to_string(), Limits::default())),
+                    ..in_room("a", "agent")
+                }),
+            ),
+            (
+                "--meeting m",
+                Err(Invalid(
+                    "--meeting m with --room: a room's meeting is its own, a".to_string(),
+                )),
+            ),
+            (
+                "--meeting a --token no",
+                Err(Invalid(
+                    "--token no with --meeting: the room's seat in its meeting is a token"
+                        .to_string(),
+                )),
+            ),
+        ];
+        for (flags, expected) in in_a_room {
+            assert_eq!(
+                parsed(&format!("--room http://h/rooms/a --out o {flags}")),
+                expected,
+                "{flags}"
+            );
         }
     }
 
