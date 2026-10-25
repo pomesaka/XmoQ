@@ -81,7 +81,7 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 
 ## Who is in the chat
 
-`joined` and `left` come of a `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<room>` (decided on 2026-10-25), as the gatherer finds its participants. **Only those who announce a namespace for the chat are seen**: a page or a viewer that does not take part in the chat is not. The reader itself is left out. Where the reader connects again, the relay tells of everybody there; those it does not tell of within 2 s (`SETTLE_MS`, **provisional**) are written as `left`.
+`joined` and `left` come of a `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<room>` (decided on 2026-10-25), as the gatherer finds its participants. **Only those who announce a namespace for the chat are seen**: a page or a viewer that does not take part in the chat is not. The reader itself is left out. Where the reader connects again, the relay tells of everybody there; those it does not tell of within 2 s (`SETTLE_MS`, **provisional**) are written as `left`. The rule is `xmoq_viewer::presence`'s, which a meeting's participants go by as well. 4,096 are kept (`MOST_IN_THE_CHAT`, the namespaces the own relay tells of to one request; **provisional**); one more is written as an `error` and not as `joined`.
 
 ## Known gaps
 

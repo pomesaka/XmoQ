@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 /// How long after a `SUBSCRIBE_NAMESPACE` of a new session was answered
-/// those not told of again are taken to have left. **Provisional**, the value
-/// of the reader's chat (`crates/agent/src/presence.rs`).
+/// those not told of again are taken to have left. **Provisional**; the
+/// reader's chat (`crates/agent/src/presence.rs`) goes by it as well.
 ///
 /// WHY: the relay tells of every namespace under the prefix when it is
 /// asked (§6.1), and nobody is told to have left while the reader was away;
