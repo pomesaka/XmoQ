@@ -49,7 +49,7 @@ export const DEFAULT_MAX_PENDING_BYTES = 4 * 1024 * 1024;
  * How long `end` waits for what is queued to be written, in milliseconds.
  * Provisional: the time `@xmoq/moqt` gives a peer to end a request stream.
  */
-const DEFAULT_END_TIMEOUT_MS = 3000;
+export const DEFAULT_END_TIMEOUT_MS = 3000;
 
 export interface VideoTrackPublisherOptions {
 	trackNamespace: readonly Uint8Array[];

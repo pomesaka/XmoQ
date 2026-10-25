@@ -21,6 +21,7 @@ import {
 	createAudioTrackPublisher,
 } from "../moqt/audio-track-publisher.ts";
 import { locProperties } from "../moqt/loc-properties.ts";
+import { DEFAULT_END_TIMEOUT_MS } from "../moqt/video-track-publisher.ts";
 
 export interface AudioTrackEncoderOptions {
 	trackNamespace: readonly Uint8Array[];
@@ -39,6 +40,12 @@ export interface AudioTrackEncoderOptions {
 	chunksPerGroup?: number;
 	/** `AudioTrackPublisherOptions.publisherPriority`. */
 	publisherPriority?: number;
+	/**
+	 * How long `end` waits for the encoder to give what it holds, and then
+	 * the publisher for its writes (`AudioTrackPublisherOptions.endTimeoutMs`);
+	 * 3000 ms when left out, as for video.
+	 */
+	endTimeoutMs?: number;
 }
 
 export interface AudioTrackEncoderStats {
@@ -99,7 +106,9 @@ export async function createAudioTrackEncoder(
 		);
 	}
 	const epoch = BigInt(Date.now()) * 1000n;
+	const endTimeoutMs = options.endTimeoutMs ?? DEFAULT_END_TIMEOUT_MS;
 	const publisher = createAudioTrackPublisher({
+		endTimeoutMs,
 		trackNamespace: options.trackNamespace,
 		trackName: options.trackName,
 		firstGroup: options.firstGroup,
@@ -179,7 +188,16 @@ export async function createAudioTrackEncoder(
 			const wasOpen = !closed;
 			closed = true;
 			if (wasOpen && encoder.state === "configured") {
-				await encoder.flush().catch(() => {});
+				// WHY with a time limit, as for video: nothing says that an
+				// encoder that stands still answers a flush.
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				await Promise.race([
+					encoder.flush().catch(() => {}),
+					new Promise((resolve) => {
+						timer = setTimeout(resolve, endTimeoutMs);
+					}),
+				]);
+				clearTimeout(timer);
 			}
 			if (encoder.state !== "closed") encoder.close();
 			await publisher.end();
