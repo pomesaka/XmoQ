@@ -1330,37 +1330,50 @@ fn a_held_track_that_was_passed_over_is_asked_for_when_the_session_has_room_agai
 
 #[test]
 fn only_so_many_namespaces_are_kept_for_one_session() {
-    // The expectation below is spelled out for a limit of 64.
+    // (the limit the relay is given, if any; how many are kept)
+    let cases = [(None, 64), (Some(3), 3), (Some(100), 100)];
     assert_eq!(crate::MAX_NAMESPACES_PER_SESSION, 64);
-    // The limit on how often a session announces is not the one looked at.
-    let mut relay = Relay::new("test/0");
-    relay.set_announcements(1_000, 1_000);
-    for session in [PUBLISHER, BOB] {
-        relay.step(Event::SessionOpened {
-            session,
-            role: Role::Server,
-        });
-    }
-    for stream in 0..64 {
-        let actions = announce(&mut relay, PUBLISHER, stream, &[b"xmoq"]);
-        assert!(
-            matches!(
-                actions.as_slice(),
-                [Action::SendRequest {
-                    message: ControlMessage::RequestOk(_),
-                    ..
-                }]
-            ),
-            "{stream}: {actions:?}"
+    for (given, kept) in cases {
+        // The limit on how often a session announces is not the one looked at.
+        let mut relay = Relay::new("test/0");
+        relay.set_announcements(1_000, 1_000);
+        if let Some(namespaces) = given {
+            relay.set_limits_of_a_session(crate::LimitsOfASession {
+                namespaces,
+                ..crate::LimitsOfASession::default()
+            });
+        }
+        for session in [PUBLISHER, BOB] {
+            relay.step(Event::SessionOpened {
+                session,
+                role: Role::Server,
+            });
+        }
+        for stream in 0..kept {
+            let actions = announce(&mut relay, PUBLISHER, stream, &[b"xmoq"]);
+            assert!(
+                matches!(
+                    actions.as_slice(),
+                    [Action::SendRequest {
+                        message: ControlMessage::RequestOk(_),
+                        ..
+                    }]
+                ),
+                "{given:?} {stream}: {actions:?}"
+            );
+        }
+        // One more: EXCESSIVE_LOAD (0x9). Another session is not held back.
+        assert_eq!(
+            announce(&mut relay, PUBLISHER, kept, &[b"xmoq"]),
+            refused(PUBLISHER, kept, error(0x9)),
+            "{given:?}"
+        );
+        assert_eq!(announce(&mut relay, BOB, 0, &[b"xmoq"]).len(), 1);
+        assert_eq!(
+            relay.counts().namespaces,
+            usize::try_from(kept).unwrap() + 1
         );
     }
-    // The 65th: EXCESSIVE_LOAD (0x9). Another session is not held back.
-    assert_eq!(
-        announce(&mut relay, PUBLISHER, 64, &[b"xmoq"]),
-        refused(PUBLISHER, 64, error(0x9))
-    );
-    assert_eq!(announce(&mut relay, BOB, 0, &[b"xmoq"]).len(), 1);
-    assert_eq!(relay.counts().namespaces, 65);
 }
 
 #[test]
@@ -2087,37 +2100,48 @@ fn a_waiting_subscriber_that_finished_its_direction_leaves_nothing_when_refused(
 
 #[test]
 fn only_so_many_requests_of_the_relay_are_open_on_one_publisher() {
-    // The expectation below is spelled out for a limit of 64.
+    // (the limit the relay is given, if any; how many are open)
+    let cases = [(None, 64), (Some(3), 3)];
     assert_eq!(crate::MAX_OWN_REQUESTS_PER_SESSION, 64);
-    let mut relay = relay();
-    // The limit this test is about is the one for all subscribers; one
-    // session takes all of it here.
-    relay.set_share_of_one_subscriber(64, 16);
-    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
-    announce(&mut relay, CAROL, 0, &[b"other"]);
-    // Alice asks for one track after the other of the publisher's namespace.
-    for number in 0..65u64 {
-        let name = format!("track-{number}");
-        let actions = relay.step(Event::RequestOpened {
-            session: ALICE,
-            stream: StreamKey(number),
-            first: subscribe(number * 2, name.as_bytes()),
-        });
-        match number {
-            0..=63 => assert!(
-                matches!(actions.first(), Some(Action::OpenRequest { .. })),
-                "track {number}: {actions:?}"
-            ),
-            // The 65th: EXCESSIVE_LOAD (0x9), and nothing goes upstream.
-            _ => assert_eq!(actions, refused(ALICE, 64, error(0x9))),
+    for (given, open) in cases {
+        let mut relay = relay();
+        if let Some(own_requests) = given {
+            relay.set_limits_of_a_session(crate::LimitsOfASession {
+                own_requests,
+                ..crate::LimitsOfASession::default()
+            });
         }
+        // The limit this test is about is the one for all subscribers; one
+        // session takes all of it here.
+        relay.set_share_of_one_subscriber(64, 16);
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        announce(&mut relay, CAROL, 0, &[b"other"]);
+        // Alice asks for one track after the other of the publisher's namespace.
+        for number in 0..=open {
+            let name = format!("track-{number}");
+            let actions = relay.step(Event::RequestOpened {
+                session: ALICE,
+                stream: StreamKey(number),
+                first: subscribe(number * 2, name.as_bytes()),
+            });
+            if number < open {
+                assert!(
+                    matches!(actions.first(), Some(Action::OpenRequest { .. })),
+                    "{given:?} track {number}: {actions:?}"
+                );
+            } else {
+                // One more: EXCESSIVE_LOAD (0x9), and nothing goes upstream.
+                assert_eq!(actions, refused(ALICE, open, error(0x9)), "{given:?}");
+            }
+        }
+        assert_eq!(relay.counts().own_requests, usize::try_from(open).unwrap());
+        // Another publisher is not held back by this one.
+        assert_eq!(
+            subscribe_to(&mut relay, BOB, 0, &[b"other"]),
+            asked(CAROL, open, 1, &[b"other"]),
+            "{given:?}"
+        );
     }
-    assert_eq!(relay.counts().own_requests, 64);
-    // Another publisher is not held back by this one.
-    assert_eq!(
-        subscribe_to(&mut relay, BOB, 0, &[b"other"]),
-        asked(CAROL, 64, 1, &[b"other"])
-    );
 }
 
 #[test]

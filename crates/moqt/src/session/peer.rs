@@ -19,8 +19,9 @@ use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
 use crate::{Error, RequestFault, UsageError};
 
-/// Requests of the peer that are open at once. One more is answered with
-/// `REQUEST_ERROR` `EXCESSIVE_LOAD`.
+/// Requests of the peer that are open at once, unless
+/// [`Session::set_most_peer_requests`] says otherwise. One more is answered
+/// with `REQUEST_ERROR` `EXCESSIVE_LOAD`.
 ///
 /// Provisional: the draft sets no limit, and `XmoQ` has not decided one.
 pub const MAX_PEER_REQUESTS: usize = 256;
@@ -349,6 +350,9 @@ pub(super) struct PeerRequests {
     /// come.
     seen_ahead: BTreeSet<u64>,
     live: HashMap<u64, PeerRequestState>,
+    /// [`MAX_PEER_REQUESTS`], or what [`Session::set_most_peer_requests`]
+    /// set.
+    pub(super) most: usize,
 }
 
 impl PeerRequests {
@@ -368,6 +372,7 @@ impl PeerRequests {
             lowest_unseen: parity,
             seen_ahead: BTreeSet::new(),
             live: HashMap::new(),
+            most: MAX_PEER_REQUESTS,
         }
     }
 
@@ -552,7 +557,7 @@ impl Session {
     /// Refuses a request of the peer whose Request ID was taken, and keeps it
     /// as rejected until its stream is reported gone.
     fn refuse_opened(&mut self, request: PeerRequestId, error_code: u64) -> PeerRequestOpened {
-        let kept = self.peer.live.len() < MAX_PEER_REQUESTS;
+        let kept = self.peer.live.len() < self.peer.most;
         if kept {
             self.peer
                 .live
@@ -706,7 +711,7 @@ impl Session {
             _ => return Ok(self.refuse_opened(id, request_error_code::NOT_SUPPORTED)),
         };
         // The one refusal that keeps nothing: the table is full.
-        if self.peer.live.len() >= MAX_PEER_REQUESTS {
+        if self.peer.live.len() >= self.peer.most {
             self.forget_peer_request(&state);
             return Ok(PeerRequestOpened::Refused {
                 response: request_error(request_error_code::EXCESSIVE_LOAD),
@@ -4029,6 +4034,24 @@ mod tests {
         );
         // The refused PUBLISH left its alias behind as unwanted.
         assert_eq!(session.subscribed_alias(7), SubscribedAlias::Retired);
+    }
+
+    #[test]
+    fn open_requests_of_the_peer_are_bounded_by_what_the_session_was_set_to() {
+        // (the limit set, how many requests are taken)
+        let cases = [(3, 3), (300, 300), (0, 1)];
+        for (most, taken) in cases {
+            let mut session = server();
+            session.set_most_peer_requests(most);
+            for index in 0..taken {
+                opened(&mut session, publish_namespace(index * 2));
+            }
+            assert_eq!(
+                refusal(session.on_peer_request_opened(publish_namespace(taken * 2))),
+                Ok((0x9, None)),
+                "{most}"
+            );
+        }
     }
 
     #[test]

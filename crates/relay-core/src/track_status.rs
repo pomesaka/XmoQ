@@ -219,6 +219,7 @@ impl Relay {
             .unwrap_or(0);
         let for_one = self.requests_for_one;
         let token = self.token_for(publisher, crate::Operation::Subscribe);
+        let own_requests_most = self.limits_of_a_session.own_requests;
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
@@ -226,9 +227,7 @@ impl Relay {
         if state.moqt.peer_going_away() {
             return Err(request_error_code::DOES_NOT_EXIST);
         }
-        if state.own_requests() >= crate::MAX_OWN_REQUESTS_PER_SESSION
-            || for_this_session >= for_one
-        {
+        if state.own_requests() >= own_requests_most || for_this_session >= for_one {
             return Err(request_error_code::EXCESSIVE_LOAD);
         }
         // The relay's own token alone, for the upstream relay.

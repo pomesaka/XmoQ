@@ -76,8 +76,9 @@ const GOAWAY_TIMEOUT_MS: u64 = 10_000;
 /// about 10 Mbit/s at 100 ms, room for the demo's 2.65 Mbit/s and for a
 /// 720p video of 2.5 Mbit/s. WHY NOT 48 KiB with the connection's 4 MiB of
 /// before: about 3.9 Mbit/s at 100 ms leaves no room for those. WHY NOT the
-/// 256 KiB of before: the connection would need about 18 MiB, some 4.5 GiB
-/// for 256 sessions; with 128 KiB the worst is about 2.4 GiB.
+/// 256 KiB of before: the connection would need about 18 MiB, some 18 GiB
+/// for the 1,000 sessions a relay takes by default (`--max-sessions`);
+/// with 128 KiB the worst is about 9.2 GiB (9.375 MiB a session).
 fn quic_limits(
     streams: &StreamConfig,
     idle_timeout: Duration,
@@ -156,6 +157,8 @@ struct Args {
     delivery_patience: Option<Duration>,
     /// The limits of what waits to be written ([`SendFlags`]).
     send: SendFlags,
+    /// What one session may have ([`SessionFlags`]).
+    session: SessionFlags,
     /// `--stats-every-ms`: [`HubConfig::stats_every`]. For measuring.
     stats_every: Option<Duration>,
     /// `--log-arrivals on`: [`HubConfig::log_arrivals`]. For measuring.
@@ -222,6 +225,38 @@ impl SendFlags {
         if let Some(bytes) = self.relay_bytes {
             config.send_for_the_relay_bytes = bytes;
         }
+    }
+}
+
+/// `--peer-requests-per-session`, `--own-requests-per-session`,
+/// `--namespaces-per-session` ([`HubConfig::limits_of_a_session`]). Each is
+/// more than 0 where it is said.
+#[derive(Default)]
+struct SessionFlags {
+    peer_requests: Option<usize>,
+    own_requests: Option<usize>,
+    namespaces: Option<usize>,
+}
+
+impl SessionFlags {
+    /// Takes `flag` where it is one of these: true then.
+    fn take(&mut self, flag: &str, value: &str) -> Result<bool> {
+        let place = match flag {
+            "--peer-requests-per-session" => &mut self.peer_requests,
+            "--own-requests-per-session" => &mut self.own_requests,
+            "--namespaces-per-session" => &mut self.namespaces,
+            _ => return Ok(false),
+        };
+        *place = Some(more_than_none(flag, value)?);
+        Ok(true)
+    }
+
+    fn apply(&self, config: &mut HubConfig) {
+        let limits = &mut config.limits_of_a_session;
+        limits.peer_requests = self.peer_requests.unwrap_or(limits.peer_requests);
+        limits.own_requests = self.own_requests.unwrap_or(limits.own_requests);
+        limits.namespaces = self.namespaces.unwrap_or(limits.namespaces);
+        config.streams.max_request_streams = hub::request_streams_for(limits.peer_requests);
     }
 }
 
@@ -318,6 +353,7 @@ fn parse_args() -> Result<Args> {
     let mut delivery_patience = None;
     let mut stats_every = None;
     let mut send = SendFlags::default();
+    let mut session = SessionFlags::default();
     let mut log_arrivals = false;
     let mut auth_key = None;
     let mut auth_setup = true;
@@ -372,7 +408,7 @@ fn parse_args() -> Result<Args> {
             "--upstream" => upstream = Some(value),
             "--upstream-cert-sha256" => upstream_cert = Some(value),
             "--upstream-namespace" => upstream_namespace = Some(value),
-            other if send.take(other, &value)? => {}
+            other if send.take(other, &value)? || session.take(other, &value)? => {}
             other => bail!("unknown flag {other}"),
         }
     }
@@ -394,6 +430,7 @@ fn parse_args() -> Result<Args> {
         held_beyond_cache,
         delivery_patience,
         send,
+        session,
         stats_every,
         log_arrivals,
         auth_key,
@@ -440,6 +477,7 @@ async fn main() -> Result<()> {
     }
     config.send.delivery_patience = args.delivery_patience;
     args.send.apply(&mut config);
+    args.session.apply(&mut config);
     config.stats_every = args.stats_every;
     config.log_arrivals = args.log_arrivals;
     config.auth_key = args.auth_key;
