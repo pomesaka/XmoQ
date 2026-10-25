@@ -16,7 +16,8 @@ bun demo/serve.ts --relay-port 33443 --port 33080 --rooms-port 33787 --chat-stor
 # add --transcribe-language en (or ja, ...) where the voice's language is known: twice as fast as auto
 # open http://localhost:33080/publish?audio=mic in Chromium: the broadcast, with the microphone as its sound
 mkdir -p /tmp/room; mkfifo /tmp/room/say; sleep 86400 > /tmp/room/say &
-mise run agent -- --room http://127.0.0.1:33787/rooms/demo --name claude --out /tmp/room < /tmp/room/say &
+mise run agent -- --room http://127.0.0.1:33787/rooms/demo --name claude --out /tmp/room --transcript xmoq/demo < /tmp/room/say &
+# --transcript: the demo's room names the transcript of its meeting (/meet), and this is the broadcast's
 echo 'hello' > /tmp/room/say          # said in the chat
 echo '/frame' > /tmp/room/say         # a picture of the broadcast now
 tail -f /tmp/room/events.jsonl

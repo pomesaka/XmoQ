@@ -48,6 +48,8 @@ With `mise run demo` up; each line is one thing to open, and what nobody has jud
 
 **The chat with `--auth`**: each time a page connects for the chat, it asks the room for two tokens, `sub` for `xmoq/chat/<room>`, which its connection carries (SETUP, the SUBSCRIBE for `lines`, the Joining FETCH), and `pub` for `xmoq/chat/<room>/<name>`, which only its PUBLISH_NAMESPACE carries (`publishNamespaceToken` of `joinChat`). The gatherer is given the relay's key (`--auth-key-hex`) and makes its own tokens. A gatherer built before it took that flag is not started with `--auth` (`serve.ts` asks the binary), and the pages then have no chat, as the line under the picture says ([record](../docs/experiments/2026-10-24-the-demo-chat-with-tokens.md)).
 
+**A meeting** (`/meet`, decided on 2026-10-25, Q57 to Q59): open <http://localhost:8080/meet> in two or more tabs. Each tab is a participant of the meeting of the room `?room=NAME` ("demo" when left out). It asks the room for a seat (`join-meeting`) under a random id, publishes a small picture with its id on it and the microphone (`?audio=none` for no sound) under `xmoq/meet/<room>/<id>`, and shows the others with `createMeeting` of [`@xmoq/meeting`](../packages/meeting/README.md): the sound of all of them, which plays after a click on **sound**, and the small video of the first 8 who came. Past 49 the room gives no seat, and the tab says the meeting is full and tries no more. Publishing and receiving are two connections, one with the seat's `pub` and one with its `sub`. The transcriber listens under `xmoq/meet/demo` as well, and the room names `xmoq/meet/<room>` as its transcript (`TRANSCRIPT_PREFIX`), so an agent in the meeting (`mise run agent -- --room http://127.0.0.1:8787/rooms/demo --meeting demo --out DIR`) gets what each one says. The meetings of other rooms are not transcribed. An agent in the room's broadcast is given `--transcript xmoq/demo` ([record](../docs/experiments/2026-10-25-the-demo-has-a-meeting-page.md)).
+
 `bun demo/check.ts` checks a running demo in headless Chromium: the frames a second, and that sound leaves the watching page.
 
 Ctrl-C stops the web server, the relay, the gatherer and the transcriber. `bun demo/serve.ts --port N --relay-port M` chooses other ports.
@@ -80,6 +82,8 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | both | `uni=N` | How many streams of the peer are read at once | The library's |
 | both | `timer=page`, `timer=slow` | The page's own timer, and that timer as a background tab has it | A worker's timer |
 | both | `diag=1` | More in the page's report, for looking into a run | |
+| meet | `room=NAME` | The room whose meeting the page is in; `uni=N`, `diag=1` and `timer=` as for the other two | `demo` |
+| meet | `audio=none` | No sound is sent | The microphone |
 | publish | `clockSkewPpm=N` | For measuring: the painted clock's times run N parts in a million faster than the machine's clock (the tone's do not follow: the encoder counts samples), as a camera's against a microphone's | 0 |
 | publish | `toneSkewPpm=N` | For measuring: the tone makes its pieces N parts in a million faster than the machine's clock passes, as a microphone whose samples are counted by a clock of its own | 0 |
 | publish | `canvasClock=performance` | For measuring: the painted clock is timed by `performance.now()` and the tone by `Date.now()`, two clocks that move apart by themselves (60 ms in an hour on one machine) | `Date.now()` for both |
