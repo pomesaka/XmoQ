@@ -70,7 +70,7 @@ Not lacking: the cache, FETCH, priorities, delivery timeouts and RENDEZVOUS_TIME
 
 ### To measure
 
-The delay a second hop adds; an origin with 20 edges; a page with both tracks on one session, which the record of 500 viewers did not have (each viewer there was two sessions of the Rust client); and a run of 10,000, which takes about 21 machines or a scaled-down run with fewer viewers an edge.
+Measured once, on one machine over loopback ([record](experiments/2026-10-25-one-video-track-through-two-edges.md)): an origin with two edges of up to 250 viewers each, where the origin sent each Group once to each edge and the frames came sooner than with the same viewers at the origin alone. Still to measure: the delay a second hop adds on its own machine; an origin with 20 edges; a page with both tracks on one session, which the record of 500 viewers did not have (each viewer there was two sessions of the Rust client); and a run of 10,000, which takes about 21 machines or a scaled-down run with fewer viewers an edge.
 
 ## Part 2: meetings of 49
 
