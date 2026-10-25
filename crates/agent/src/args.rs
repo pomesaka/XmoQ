@@ -58,6 +58,12 @@ pub struct Args {
     /// `--frame-every-ms`, `--frame-longest`, `--frames-kept`; the defaults
     /// are `xmoq-picture`'s.
     pub pictures: Settings,
+    /// `--speech off`: no transcript is followed.
+    pub speech: bool,
+    /// `--transcript`: the prefix the transcriber listens under, whose
+    /// transcript `xmoq/transcript/<prefix>` is followed, its fields. `None`:
+    /// the broadcast's namespace.
+    pub transcript: Option<Vec<String>>,
 }
 
 /// What is wrong with the flags.
@@ -94,6 +100,8 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
   --frame-every-ms <ms>             a picture this often by the broadcast's clock, unasked (none)
   --frame-longest <n>               the longest side of a picture, in pixels (1280)
   --frames-kept <n>                 the pictures kept in <dir>/frames; the oldest goes (500)
+  --speech on|off                   off: no transcript is followed (on)
+  --transcript <prefix>             the prefix the transcriber listens under (the broadcast's namespace)
 Each event is a line of JSON on stdout and in <dir>/events.jsonl. A line of stdin is said in the
 chat; /frame asks for a picture; a line that begins with // is said with one / taken off.";
 
@@ -137,6 +145,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         (DEFAULT_WAIT_MS, DEFAULT_WAIT_MS, DEFAULT_WAIT_MS);
     let mut seconds = None;
     let (mut frames, mut pictures) = (true, Settings::default());
+    let (mut speech, mut transcript) = (true, None);
     while let Some(flag) = given.next() {
         let value = given
             .next()
@@ -190,6 +199,22 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                         .ok_or_else(|| Invalid(format!("{flag} {value}: too long")))?,
                 );
             }
+            "--speech" => {
+                speech = match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(Invalid(format!("--speech {value}: on or off"))),
+                };
+            }
+            "--transcript" => {
+                let fields: Vec<String> = value.split('/').map(str::to_string).collect();
+                if fields.iter().any(String::is_empty) {
+                    return Err(Invalid(format!(
+                        "--transcript {value}: fields between slashes, none empty"
+                    )));
+                }
+                transcript = Some(fields);
+            }
             "--frame-longest" => pictures.longest_side = size(&flag, &value)?,
             "--frames-kept" => pictures.most_kept = size(&flag, &value)?,
             other => return Err(Invalid(format!("unknown flag {other}"))),
@@ -237,6 +262,8 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         seconds,
         frames,
         pictures,
+        speech,
+        transcript,
     })
 }
 
@@ -268,6 +295,8 @@ mod tests {
                 longest_side: 1280,
                 most_kept: 500,
             },
+            speech: true,
+            transcript: None,
         }
     }
 
@@ -305,6 +334,24 @@ mod tests {
             (
                 "--frames maybe",
                 Err(Invalid("--frames maybe: on or off".to_string())),
+            ),
+            (
+                "--speech off --transcript xmoq/voice",
+                Ok(Args {
+                    speech: false,
+                    transcript: Some(vec!["xmoq".to_string(), "voice".to_string()]),
+                    ..in_room("a", "agent")
+                }),
+            ),
+            (
+                "--transcript xmoq//voice",
+                Err(Invalid(
+                    "--transcript xmoq//voice: fields between slashes, none empty".to_string(),
+                )),
+            ),
+            (
+                "--speech maybe",
+                Err(Invalid("--speech maybe: on or off".to_string())),
             ),
         ];
         for (flags, expected) in cases {

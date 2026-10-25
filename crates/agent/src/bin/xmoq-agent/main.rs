@@ -56,6 +56,9 @@ pub struct Reader {
     presence: Presence,
     /// The newest line of the chat written, from one session to the next.
     had: Option<u64>,
+    /// The newest piece of speech written, and of which transcript, from one
+    /// session to the next.
+    speech_had: Option<(Vec<String>, u64)>,
 }
 
 /// What came from outside the session while something is waited for.
@@ -154,6 +157,29 @@ impl Reader {
     }
 }
 
+/// `sub` in `xmoq/transcript/<prefix>`, of the room, as an AUTHORIZATION
+/// TOKEN; `Some(None)` where the room gives none, `None` where the reader is
+/// to end first.
+async fn transcript_token_of(
+    room: &mut RoomSocket,
+    reader: &mut Reader,
+    prefix: &[String],
+) -> Result<Option<Option<Vec<u8>>>> {
+    let fields: Vec<String> = xmoq_transcript_tracks::names::PREFIX
+        .iter()
+        .map(|field| (*field).to_string())
+        .chain(prefix.iter().cloned())
+        .collect();
+    let given = reader
+        .unless_ended(
+            "the room's token for the transcript",
+            ROOM_WAIT,
+            room.token(room::TokenRole::Sub, &fields),
+        )
+        .await?;
+    Ok(given.map(|given| given.map(|text| room::authorization_token(&text))))
+}
+
 /// Where one session goes: a broadcast, or the room's relay for its chat.
 pub struct Place {
     url: String,
@@ -164,6 +190,19 @@ pub struct Place {
     chat_tokens: ChatTokens,
     /// The broadcast of the room this is, where a room said it.
     broadcast: Option<Broadcast>,
+    /// The prefix whose transcript is followed; `None` with `--speech off`.
+    transcript: Option<Vec<String>>,
+    /// `sub` in `xmoq/transcript/<prefix>`, where the room gave one.
+    transcript_token: Option<Vec<u8>>,
+}
+
+/// The prefix whose transcript is followed for a broadcast in `namespace`.
+fn transcript_of(args: &Args, namespace: &[String]) -> Option<Vec<String>> {
+    args.speech.then(|| {
+        args.transcript
+            .clone()
+            .unwrap_or_else(|| namespace.to_vec())
+    })
 }
 
 /// Where the reader connects in a room.
@@ -225,6 +264,8 @@ async fn place(
                 token: None,
                 chat_tokens: ChatTokens::default(),
                 broadcast: None,
+                transcript: transcript_of(args, namespace),
+                transcript_token: None,
             }));
         }
         (Source::Room { ask_token, .. }, Some(room)) => (room, *ask_token),
@@ -235,6 +276,12 @@ async fn place(
     };
     let mut token = None;
     let mut chat_tokens = ChatTokens::default();
+    // A session for the chat alone has no broadcast whose voice to read.
+    let transcript = match &found {
+        Found::Broadcast(broadcast) => transcript_of(args, &broadcast.namespace),
+        Found::Relay(_) => None,
+    };
+    let mut transcript_token = None;
     if ask_token {
         if let Found::Broadcast(broadcast) = &found {
             let Some(given) = reader
@@ -260,6 +307,12 @@ async fn place(
             return Ok(None);
         };
         chat_tokens = tokens;
+        if let Some(prefix) = &transcript {
+            let Some(given) = transcript_token_of(room, reader, prefix).await? else {
+                return Ok(None);
+            };
+            transcript_token = given;
+        }
     }
     Ok(Some(match found {
         Found::Broadcast(broadcast) => Place {
@@ -269,6 +322,8 @@ async fn place(
             token,
             chat_tokens,
             broadcast: Some(broadcast),
+            transcript,
+            transcript_token,
         },
         Found::Relay(relay) => Place {
             url: relay.relay_url,
@@ -281,6 +336,8 @@ async fn place(
             token: chat_tokens.subscribe.clone(),
             chat_tokens,
             broadcast: None,
+            transcript: None,
+            transcript_token: None,
         },
     }))
 }
@@ -428,6 +485,7 @@ async fn read(args: &Args) -> Result<()> {
             .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds)),
         presence: Presence::new(&args.room, &args.name),
         had: None,
+        speech_had: None,
     };
     let ran = run(args, &mut reader).await;
     if let Err(error) = &ran {

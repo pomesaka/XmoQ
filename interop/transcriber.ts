@@ -27,8 +27,18 @@
 //     pieces the transcriber has kept, the two above among them, and
 //     FETCH_OK ends at {largest, 1}.
 //   - The transcriber dropped no piece (`PIECE_DROPPED`).
+//
+// Written before the first run with the reader for agents (2026-10-25):
+//
+//   - `xmoq-agent --namespace xmoq/voice/page --transcript xmoq/voice`,
+//     which comes after the pieces above, writes the latest of them, fetched
+//     by its Joining FETCH, and then a piece said after it came, as lines
+//     `{"type":"speech","number":N,"from":["xmoq","voice","page"],"text":...,
+//     "start_us":...,"end_us":...,"read_at":...}` whose text has "relay";
+//     each number once, going up by one.
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -37,6 +47,7 @@ import {
 	openConnectedPage,
 	pollFor,
 	runCleanups,
+	spawnAgent,
 	spawnRustClient,
 	spawnTranscriber,
 	startRun,
@@ -127,6 +138,7 @@ function expect(what: string, got: string, wanted: string): void {
 
 async function main(): Promise<void> {
 	let summary: string;
+	const agentOut = mkdtempSync(join(tmpdir(), "xmoq-agent-speech-"));
 	try {
 		const context = await startRun({
 			relay: "own",
@@ -245,14 +257,61 @@ async function main(): Promise<void> {
 			String(transcriber.matches(/^PIECE_DROPPED /).length),
 			"0",
 		);
+
+		const agent = spawnAgent(context, "agent", [
+			"--namespace",
+			`${PREFIX}/page`,
+			"--transcript",
+			PREFIX,
+			"--chat-room",
+			"r",
+			"--name",
+			"claude",
+			"--frames",
+			"off",
+			"--out",
+			agentOut,
+			"--seconds",
+			"60",
+		]);
+		const spoken = (): { number: number; line: string }[] =>
+			agent.matches(/^\{.*"type":"speech".*\}$/).map((match) => ({
+				number: Number(/"number":(\d+)/.exec(match[0])?.[1]),
+				line: match[0],
+			}));
+		const fetchedByAgent = await pollFor(
+			() => spoken()[0],
+			"xmoq-agent to write the pieces it fetched",
+			30_000,
+		);
+		const liveToAgent = await pollFor(
+			() => spoken().find((piece) => piece.number > largest),
+			"xmoq-agent to write a piece said after it came",
+			30_000,
+		);
+		const numbers = spoken().map((piece) => piece.number);
+		for (const [at, number] of numbers.entries()) {
+			if (at > 0 && number !== (numbers[at - 1] ?? 0) + 1) {
+				throw new Error(`xmoq-agent wrote the pieces ${numbers.join(",")}`);
+			}
+		}
+		for (const piece of [fetchedByAgent, liveToAgent]) {
+			if (!piece.line.includes(`"from":["xmoq","voice","page"]`)) {
+				throw new Error(`xmoq-agent wrote ${piece.line}`);
+			}
+			if (!/"text":"[^"]*relay/i.test(piece.line)) {
+				throw new Error(`xmoq-agent wrote ${piece.line}, without "relay"`);
+			}
+		}
 		const report = await page.evaluate(() => window.xmoqOwn.voiceReport());
 		await pollFor(
 			() => (report.audioEncoderError === null ? true : undefined),
 			"the page's encoder to have no error",
 		);
-		summary = `through the own relay, the transcriber listened to the page's voice under ${PREFIX} with the smallest model and published two pieces a live reader got, Groups ${first.group} and ${second.group}, saying ${JSON.stringify(first.text)} and ${JSON.stringify(second.text)}, of ${(first.endUs - first.startUs) / 1000} and ${(second.endUs - second.startUs) / 1000} ms, there ${first.at - Math.round(first.endUs / 1000)} and ${second.at - Math.round(second.endUs / 1000)} ms after their ends; a late reader fetched ${fetched.length} pieces up to Group ${largest}; the page made ${report.made} pieces of sound, ${report.voices} voices`;
+		summary = `through the own relay, the transcriber listened to the page's voice under ${PREFIX} with the smallest model and published two pieces a live reader got, Groups ${first.group} and ${second.group}, saying ${JSON.stringify(first.text)} and ${JSON.stringify(second.text)}, of ${(first.endUs - first.startUs) / 1000} and ${(second.endUs - second.startUs) / 1000} ms, there ${first.at - Math.round(first.endUs / 1000)} and ${second.at - Math.round(second.endUs / 1000)} ms after their ends; a late reader fetched ${fetched.length} pieces up to Group ${largest}; xmoq-agent, which came then, wrote the pieces ${numbers.join(",")} as speech lines, from ${fetchedByAgent.number} by its FETCH and ${liveToAgent.number} live; the page made ${report.made} pieces of sound, ${report.voices} voices`;
 	} finally {
 		await runCleanups();
+		rmSync(agentOut, { recursive: true, force: true });
 	}
 	log("driver", "RESULT {}");
 	log("driver", `SUMMARY ${summary}`);

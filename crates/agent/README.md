@@ -39,6 +39,8 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
 | `--frame-every-ms` | none | A picture this often by the broadcast's Timestamps, unasked |
 | `--frame-longest` | 1280 | The longest side of a picture, in pixels; a larger one is made smaller |
 | `--frames-kept` | 500 | The pictures kept in `<dir>/frames/`, of every session together; the oldest file goes for the newest. Files that were there when the reader began are not counted, and not removed |
+| `--speech off` | on | No transcript is followed. On, the reader subscribes to `speech` of `xmoq/transcript/<prefix>`, held by the relay for 30 s for a transcriber to come, and asked for again when it is refused or ends |
+| `--transcript` | the broadcast's namespace | The prefix the transcriber listens under (its `--namespace`), fields between slashes. With a room that gives tokens, the reader asks it for `sub` in `xmoq/transcript/<prefix>` |
 
 ## What it writes
 
@@ -51,7 +53,7 @@ Every line has `type` and `at`, the reader's clock in milliseconds since the Uni
 | `chat_gap` | `after`, `before` | More lines were said while the reader was away than `--chat-catch-up-lines`: those between were not fetched |
 | `joined`, `left` | `name` | Somebody's chat namespace `xmoq/chat/<room>/<name>` was announced, or withdrawn |
 | `frame` | `path`, `group`, `object`, `timestamp_us` (the Timestamp of LOC of the frame), `width`, `height`, `asked` (`command`, `every`) | A picture of the broadcast, written as a PNG in `<dir>/frames/`: asked for with `/frame`, or every `--frame-every-ms`. It is of the latest frame that decoded, which can be older than the moment it was asked for. `/frame` that gets none within 10 s gets an `error` |
-| `speech` | `from`, `text`, `start_us`, `end_us` | Something said in the broadcast, as text. **Not built yet** |
+| `speech` | `number` (in the transcript), `from` (the namespace of the broadcast whose voice it was), `text`, `start_us`, `end_us` (on the clock of the Timestamps of LOC of that broadcast's audio), `read_at` (the transcriber's clock, ms) | Something said in a broadcast, as the transcriber (`xmoq-transcriber`) read it: the pieces of `speech` of `xmoq/transcript/<prefix>` (`xmoq-transcript-tracks`), each once, in the order of its number. The latest 16 when the reader comes, by a Joining FETCH, then each as it is read; those missed while away, as for the chat. Pieces not fetched are told as an `error`. With `--transcript`, the pieces of every broadcast under that prefix, each with its `from` |
 | `error` | `message` | Something went wrong, or a line of stdin was not said; the reader goes on |
 
 ```json
@@ -84,7 +86,7 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 ## Known gaps
 
 - **With a room that names no relay, the chat is there only while the room has a broadcast**: the room says where the relay is only with the broadcast then (a room run without `RELAY_URL`, `spikes/durable-objects-room/README.md`). A line said meanwhile gets an `error`.
-- No speech yet: it waits for the transcriber's track.
+- **The transcript is that of the broadcast's namespace unless `--transcript` names the prefix the transcriber listens under**: a transcriber run with a prefix above the broadcast's (`--namespace xmoq` for `xmoq/demo`) publishes `xmoq/transcript/xmoq`, and the reader without `--transcript xmoq` waits for `xmoq/transcript/xmoq/demo`, which does not come. The room does not say what the transcriber listens under. A session at the room's relay for the chat alone follows no transcript.
 - **A reader started again in the same `--out` writes over the pictures of the one before**: the names begin from 1 again (`000001-...`), and what the earlier run kept is neither counted nor removed.
 - The video that ends (PUBLISH_DONE) is not asked for again on that session; the next session asks.
 - Objects of the video that wait for the thread of the pictures: 256; beyond them they are left out, an `error` says so when it begins, and the frames after them in their Group give no picture.

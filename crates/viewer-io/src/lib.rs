@@ -1,7 +1,9 @@
 //! What a viewer of a room does on its sockets, for the viewer of the
 //! terminal (`xmoq-watch`) and the reader for an agent (`xmoq-agent`): the
 //! room's WebSocket ([`room_socket`]), the requests of a session and the
-//! catalog ([`session`]), and the chat on tracks ([`chat_tracks`]).
+//! catalog ([`session`]), the chat on tracks ([`chat_tracks`]), and the
+//! following of a track of one item a Group, the chat's `lines` and a
+//! transcript's `speech` ([`follow`]).
 //! What they decide is `xmoq-viewer`'s, where its tests are.
 //!
 //! WHY a crate of its own apart from `xmoq-viewer`, as `xmoq-moqt-io` is
@@ -11,5 +13,6 @@
 //! program: the two would drift.
 
 pub mod chat_tracks;
+pub mod follow;
 pub mod room_socket;
 pub mod session;

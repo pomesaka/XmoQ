@@ -17,6 +17,7 @@ xmoq-moqt-io = { path = "../moqt-io" }
 xmoq-msf = { path = "../msf" }
 # The video decoder (`openh264`) and the PNG writer are there.
 xmoq-picture = { path = "../picture" }
+xmoq-transcript-tracks = { path = "../transcript-tracks" }
 xmoq-viewer = { path = "../viewer" }
 xmoq-viewer-io = { path = "../viewer-io" }
 anyhow = "=1.0.100"

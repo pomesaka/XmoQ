@@ -84,16 +84,22 @@ pub enum Event {
         /// Why it was taken.
         asked: Asked,
     },
-    /// Something said in the broadcast, as text.
+    /// Something said in a broadcast, as the transcriber read it
+    /// (`xmoq-transcript-tracks`).
     Speech {
-        /// Who said it.
-        from: String,
+        /// Its number in the transcript (the Group of `speech`).
+        number: u64,
+        /// The namespace of the broadcast whose voice it was.
+        from: Vec<String>,
         /// What.
         text: String,
-        /// When it began, on the clock of the Timestamps of LOC (µs).
+        /// When it began, on the clock of the Timestamps of LOC of that
+        /// broadcast's audio (µs).
         start_us: u64,
         /// When it ended, on that clock (µs).
         end_us: u64,
+        /// When the transcriber had read it, on its clock (ms).
+        read_at: u64,
     },
     /// Something went wrong; the reader goes on.
     Error {
@@ -157,16 +163,20 @@ impl Event {
                 },
             }),
             Self::Speech {
+                number,
                 from,
                 text,
                 start_us,
                 end_us,
+                read_at,
             } => json!({
                 "type": "speech",
+                "number": number,
                 "from": from,
                 "text": text,
                 "start_us": start_us,
                 "end_us": end_us,
+                "read_at": read_at,
             }),
             Self::Error { message } => json!({"type": "error", "message": message}),
         };
@@ -267,12 +277,14 @@ mod tests {
             ),
             (
                 Event::Speech {
-                    from: "xmoq/demo".to_string(),
+                    number: 3,
+                    from: vec!["xmoq".to_string(), "demo".to_string()],
                     text: "こんにちは".to_string(),
                     start_us: 10,
                     end_us: 20,
+                    read_at: 30,
                 },
-                r#"{"at":1000,"end_us":20,"from":"xmoq/demo","start_us":10,"text":"こんにちは","type":"speech"}"#,
+                r#"{"at":1000,"end_us":20,"from":["xmoq","demo"],"number":3,"read_at":30,"start_us":10,"text":"こんにちは","type":"speech"}"#,
             ),
             (
                 Event::Error {
