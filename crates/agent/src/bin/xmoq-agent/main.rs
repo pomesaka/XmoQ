@@ -522,7 +522,7 @@ async fn session_token_of(
 /// tokens, `None` where the reader is to end first.
 ///
 /// WHY a seat, though the reader announces nothing in the meeting: the room
-/// counts its 49 by the seats it gives (Q58), and a reader takes one of them
+/// counts its 49 by the seats it gives, and a reader takes one of them
 /// as a participant's page does. Whether those present learn that an agent
 /// takes part is undecided (`docs/open-questions.md`); a seat says nothing
 /// to them. WHY asked again on every session: the same id on the same

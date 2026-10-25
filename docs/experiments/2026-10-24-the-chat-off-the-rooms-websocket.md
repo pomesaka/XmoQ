@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, chat (Q49, decided on 2026-10-24: the chat goes over the MoQ tracks alone, and the room's WebSocket carries none).
+- Roadmap item: Phase 4, chat (decided on 2026-10-24: the chat goes over the MoQ tracks alone, and the room's WebSocket carries none).
 
 ## Objective
 

@@ -19,7 +19,16 @@
 //! `PUBLISH_NAMESPACE`; `sub`: SUBSCRIBE and a Standalone FETCH) in that
 //! namespace, until its expiry: in exactly that namespace, or, where its
 //! last field is `*`, in those under the fields before it
-//! ([`namespace_fits`], decided as Q50).
+//! ([`namespace_fits`], decided on 2026-10-24, so that a room's chat can be
+//! allowed).
+//!
+//! WHY a token on every request (decided on 2026-10-11): the room's
+//! namespace is the unit, and the relay keeps no state of it. WHY NOT on
+//! SETUP alone: the token would have to speak for the whole session. WHY
+//! NOT a signature the relay checks with a public key, yet: more on the
+//! room's side, for a need that comes with more than one relay, when it is
+//! to take the shared key's place. WHY NOT CAT or JWT: a library, for
+//! nothing this needs yet.
 //!
 //! The relay wants such a token in the SETUP of a client as well (the Setup
 //! Option of the same number, §10.3.1.4), and closes a session without

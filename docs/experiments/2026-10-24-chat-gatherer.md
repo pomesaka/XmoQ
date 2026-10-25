@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, chat over MoQ tracks (Q36, decided on 2026-10-24); the history in SQLite (Q42) and the limits of the chat (Q43), both decided on 2026-10-24.
+- Roadmap item: Phase 4, chat over MoQ tracks (decided on 2026-10-24); the history in SQLite and the limits of the chat, both decided on 2026-10-24.
 
 ## Objective
 
@@ -50,7 +50,7 @@ After that, `mise run interop -- --base-port 45300` ended 189 of 189 as expected
 
 ## After the review
 
-The review of the change found ten faults, and the user decided on a gatherer for each room (Q48, 2026-10-24). What changed: a room is numbered and published while somebody is in it, and not from the store at the start; its PUBLISH ends with `PUBLISH_DONE` `TRACK_ENDED` once every stream of its lines is closed, with their number (§10.11); the same order for a `PUBLISH_DONE` after a refused `REQUEST_UPDATE`; `said` is subscribed to with the Largest Object filter (§5.1.2); the relay's direction of a FETCH's request stream is stopped at the gatherer's FIN where the relay has not ended it; answers to `REQUEST_UPDATE` are never dropped, and a request whose queue of 64 is full is cancelled with `EXCESSIVE_LOAD`; a `SUBSCRIBE_NAMESPACE` that ends is asked for again alone, and sessions are connected again, after a wait that doubles from 1 s to 30 s; the store runs with `synchronous = FULL` and `locking_mode = EXCLUSIVE`, one gatherer to a file; the FETCH answers being written hold 64 MiB of payload at the most; `--room` (up to 8).
+The review of the change found ten faults, and the user decided on a gatherer for each room (2026-10-24). What changed: a room is numbered and published while somebody is in it, and not from the store at the start; its PUBLISH ends with `PUBLISH_DONE` `TRACK_ENDED` once every stream of its lines is closed, with their number (§10.11); the same order for a `PUBLISH_DONE` after a refused `REQUEST_UPDATE`; `said` is subscribed to with the Largest Object filter (§5.1.2); the relay's direction of a FETCH's request stream is stopped at the gatherer's FIN where the relay has not ended it; answers to `REQUEST_UPDATE` are never dropped, and a request whose queue of 64 is full is cancelled with `EXCESSIVE_LOAD`; a `SUBSCRIBE_NAMESPACE` that ends is asked for again alone, and sessions are connected again, after a wait that doubles from 1 s to 30 s; the store runs with `synchronous = FULL` and `locking_mode = EXCLUSIVE`, one gatherer to a file; the FETCH answers being written hold 64 MiB of payload at the most; `--room` (up to 8).
 
 **Expected, written before these runs** (at the head of `interop/chat.ts`): as before through the own relay, and the second gatherer, with `--room r`, watches `xmoq/chat/r` and never asks a participant of room s for its track; when everybody has left, `ROOM_DONE room="r" status=0x2 streams=1`, and a FETCH for the room is refused with `DOES_NOT_EXIST` (0x10). Through moqtail's relay, with no restart and `--fetch-lines 6`, the late viewer's FETCH is to show an End of Unknown Range up to Group 2 and Groups 3 to 8, which moqtail's relay is expected not to pass on.
 

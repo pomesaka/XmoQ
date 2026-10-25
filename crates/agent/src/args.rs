@@ -283,7 +283,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                 "--meeting {meeting} with --room: a room's meeting is its own, {room}"
             )));
         }
-        // WHY not without tokens: the seat the room gives (Q58) is the token,
+        // WHY not without tokens: the seat the room gives is the token,
         // and a reader that asks for none takes no seat of the 49.
         if !ask_token {
             return Err(Invalid(

@@ -30,7 +30,7 @@ pub struct Relay {
 
 /// What a room said.
 ///
-/// The chat is not among it: it is on `MoQ` tracks (Q49, decided on
+/// The chat is not among it: it is on `MoQ` tracks (decided on
 /// 2026-10-24; [`crate::chat_track`]). A room that still sends its chat, or
 /// a history of it in its hello, has it passed over.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub enum Said {
     Other,
 }
 
-/// A participant's seat in a room's meeting (Q58, decided on 2026-10-25):
+/// A participant's seat in a room's meeting (decided on 2026-10-25):
 /// what of the room's `meeting` a reader that announces nothing there has
 /// a use for. Its `publish`, the participant's own namespace, is passed
 /// over.
@@ -229,7 +229,7 @@ pub fn ask_for_a_token(role: TokenRole, namespace: &[String]) -> String {
 }
 
 /// The message that asks a room for a seat in its meeting as `participant`,
-/// a random id the asker made (Q58, decided on 2026-10-25).
+/// a random id the asker made (decided on 2026-10-25).
 #[must_use]
 pub fn ask_for_a_seat(participant: &str) -> String {
     json!({"type": "join-meeting", "participant": participant}).to_string()

@@ -1,7 +1,7 @@
 #!/bin/sh
 # A demo of its own with authorization and rooms on other ports, its publishing page in
 # headless Chromium in a room, and xmoq-watch joining that room: the room says where the
-# broadcast is and gives the token. The viewer's --say goes to the chat's tracks (Q49: the
+# broadcast is and gives the token. The viewer's --say goes to the chat's tracks (the
 # room carries no chat), which show nothing here: no gatherer (xmoq-chat) is started.
 # Then once more without a token, which the relay is to refuse.
 #

@@ -4,7 +4,7 @@
 //!
 //! A room is numbered while somebody is followed in it
 //! ([`crate::gather::Gatherer::leave`]), and not from the store when the
-//! gatherer starts. WHY: the history keeps every room for good (Q42), and a
+//! gatherer starts. WHY: the history keeps every room for good, and a
 //! room that is numbered holds one of [`MAX_ROOMS`] and a PUBLISH at the
 //! relay; numbered from the store, a history of that many rooms would leave
 //! no room for a new one, and a relay that keeps 256 requests of a session
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 ///
 /// WHY a limit: every room numbered holds a PUBLISH at the relay and its state here,
 /// and the rooms are named by whoever announces a namespace. WHY 1,024: a
-/// hundred times the ten rooms that are aimed at (Q41, decided on
+/// hundred times the ten rooms that are aimed at (decided on
 /// 2026-10-24). **Provisional.**
 pub const MAX_ROOMS: usize = 1_024;
 

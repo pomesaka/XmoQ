@@ -42,7 +42,7 @@ const MAX_HANDSHAKES: usize = 64;
 
 /// How long the relay waits after its GOAWAY before it closes the sessions
 /// that are left, where `--goaway-timeout-ms` does not say. Decided on
-/// 2026-10-24 (Q47): the 10 seconds `moqtail`'s relay waits (relay@0.15.0,
+/// 2026-10-24: the 10 seconds `moqtail`'s relay waits (relay@0.15.0,
 /// read on 2026-10-24).
 const GOAWAY_TIMEOUT_MS: u64 = 10_000;
 
@@ -111,6 +111,16 @@ struct Args {
     idle_timeout: Duration,
     /// `--congestion cubic|newreno|bbr`: the congestion control of the
     /// relay's connections ([`Congestion`]). For measuring.
+    ///
+    /// WHY Cubic unless told (decided on 2026-10-12): where the link's rate
+    /// is the limit and its queue drops, Cubic was as good or better, and BBR
+    /// sent more than the link takes
+    /// (docs/experiments/2026-10-12-cubic-and-bbr-over-a-link-with-too-little-room.md).
+    /// WHY NOT BBR: it was better only where packets are lost at random
+    /// (docs/experiments/2026-10-12-video-over-a-link-that-delays-and-loses.md),
+    /// which of the two a viewer's path is like is not known, and
+    /// `quinn-proto` 0.11.19 calls its BBR experimental. To be looked at
+    /// again with runs over real links.
     congestion: Congestion,
     /// `--max-sessions`: how many sessions the relay takes at once, where it
     /// is not the relay's own number ([`HubConfig::max_sessions`]). More

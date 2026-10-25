@@ -1,4 +1,4 @@
-// The limits of a line (Q43, decided on 2026-10-24), as a participant keeps
+// The limits of a line (decided on 2026-10-24), as a participant keeps
 // to them before it sends: the gatherer drops a line over them
 // (`crates/chat/src/gather.rs`), and a sender that knows the limits can say
 // so to whoever typed the line instead of losing it without a word.

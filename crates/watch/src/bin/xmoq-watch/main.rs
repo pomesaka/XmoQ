@@ -840,7 +840,7 @@ async fn play(
     if let Some(line) = found {
         ui.note(&line);
     }
-    // The chat on tracks, beside the room's WebSocket (Q36): what fails of
+    // The chat on tracks, beside the room's WebSocket: what fails of
     // it is said, and the broadcast plays on without it.
     let mut chat = match &args.chat {
         Some(chat) => {

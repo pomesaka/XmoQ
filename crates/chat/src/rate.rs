@@ -1,4 +1,4 @@
-//! How many lines one person may say in a second (Q43, decided on
+//! How many lines one person may say in a second (decided on
 //! 2026-10-24: 5; a line over it is dropped and counted).
 
 use std::collections::VecDeque;

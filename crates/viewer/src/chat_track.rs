@@ -1,6 +1,6 @@
-//! The chat on `MoQ` tracks (Q36; the room's WebSocket carries none since
-//! Q49): what the viewer says on its track `said`, and which lines of the
-//! room's track `lines` it shows, and in what order.
+//! The chat on `MoQ` tracks (the room's WebSocket carries none): what the
+//! viewer says on its track `said`, and which lines of the room's track
+//! `lines` it shows, and in what order.
 //!
 //! Decided on 2026-10-24: on the session of the broadcast; with a room, its
 //! name and the viewer's name in the chat, without one only with

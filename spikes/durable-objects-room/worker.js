@@ -1,7 +1,7 @@
 // A room as a Durable Object: where its broadcast is, how many are
 // connected, and reactions. A spike: run locally with Miniflare (run.mjs),
 // never deployed. The chat is not here: it goes over MoQ tracks, through
-// the gatherer `xmoq-chat` (Q36 and Q49, decided on 2026-10-24).
+// the gatherer `xmoq-chat` (decided on 2026-10-24).
 //
 //   GET /rooms/<room>      {broadcast, connected}
 //   GET /rooms/<room>/ws   a WebSocket: the count, the broadcast, reactions
@@ -67,7 +67,7 @@
 // decided here, and is not. Except in a meeting's namespaces (`xmoq/meet`
 // and under it), which token-for leaves unanswered: they are join-meeting's.
 
-// **A meeting** (Q58, decided on 2026-10-25): a participant sends
+// **A meeting** (decided on 2026-10-25): a participant sends
 // {type: "join-meeting", participant: "<id>"}, the id a random one the page
 // makes; within MOST_IN_A_MEETING the room answers {type: "meeting",
 // participant, publish: {namespace: ["xmoq", "meet", <room>, <id>], token},
@@ -195,7 +195,7 @@ export class Room {
 	 * fields, from the setting `prefix`, or null where the Worker was not
 	 * told. Null as well where a
 	 * field would be empty or have a `*`, which the relay reads as every
-	 * namespace under the ones before it (Q50): a room's name with a `/` or a
+	 * namespace under the ones before it: a room's name with a `/` or a
 	 * `*` makes no prefix.
 	 */
 	transcript(prefix, room) {
@@ -237,7 +237,7 @@ export class Room {
 		if (said?.type === "token-for" && (said.role === "pub" || said.role === "sub") && Array.isArray(said.namespace)) {
 			const namespace = said.namespace.map(String);
 			// The relay reads a last field `*` as every namespace under the
-			// ones before it (Q50), and the token joins the fields with `/`,
+			// ones before it, and the token joins the fields with `/`,
 			// so that ["xmoq/chat", "blue"] would sign xmoq/chat/blue: the
 			// room makes neither for anybody who asks, and leaves the asking
 			// unanswered.

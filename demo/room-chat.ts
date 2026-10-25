@@ -1,5 +1,5 @@
-// The chat under the picture of both pages, over MoQ tracks alone (Q36
-// and Q49, decided on 2026-10-24; the room's WebSocket carries no chat).
+// The chat under the picture of both pages, over MoQ tracks alone
+// (decided on 2026-10-24; the room's WebSocket carries no chat).
 //
 // The page is a participant (`joinChat` of `@xmoq/chat`): it announces
 // `xmoq/chat/<room>/<name>`, says its lines on `said`, and reads the

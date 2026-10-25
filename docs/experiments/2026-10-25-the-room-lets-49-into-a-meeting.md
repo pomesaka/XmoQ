@@ -6,7 +6,7 @@
 
 ## Objective
 
-The 49 participants of a meeting are counted by the room, which gives no tokens beyond them (Q58, decided on 2026-10-25). The room answers `join-meeting` with a token to publish in `xmoq/meet/<room>/<id>` and one to subscribe to `xmoq/meet/<room>/*`, or `meeting-full`. Does it count as `spikes/durable-objects-room/README.md` says, with a key and without?
+The 49 participants of a meeting are counted by the room, which gives no tokens beyond them (decided on 2026-10-25). The room answers `join-meeting` with a token to publish in `xmoq/meet/<room>/<id>` and one to subscribe to `xmoq/meet/<room>/*`, or `meeting-full`. Does it count as `spikes/durable-objects-room/README.md` says, with a key and without?
 
 ## Expected
 

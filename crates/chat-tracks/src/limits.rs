@@ -1,7 +1,7 @@
-//! The limits of the chat (Q43, decided on 2026-10-24), with their defaults,
+//! The limits of the chat (decided on 2026-10-24), with their defaults,
 //! and how far a setting may take them.
 
-/// The limits of the chat (Q43, decided on 2026-10-24), which flags may
+/// The limits of the chat (decided on 2026-10-24), which flags may
 /// change. What they bound is the chat's; what the gatherer reads from the
 /// relay is bounded elsewhere, and no flag removes that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

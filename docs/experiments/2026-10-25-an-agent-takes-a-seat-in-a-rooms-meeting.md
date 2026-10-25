@@ -6,7 +6,7 @@
 
 ## Objective
 
-`xmoq-agent --meeting` ran with `--url` alone: nothing let it into a room's meeting or gave it the tokens. The room now gives the seats of its meeting, 49 at most (`join-meeting`, Q58, decided on 2026-10-25). With `--room <room> --meeting <name>` the reader asks the room for a seat, and uses the seat's `sub` in `xmoq/meet/<room>/*`. It announces nothing in the meeting. Does it get in through a relay that asks for tokens, and does its seat count among the 49?
+`xmoq-agent --meeting` ran with `--url` alone: nothing let it into a room's meeting or gave it the tokens. The room now gives the seats of its meeting, 49 at most (`join-meeting`, decided on 2026-10-25). With `--room <room> --meeting <name>` the reader asks the room for a seat, and uses the seat's `sub` in `xmoq/meet/<room>/*`. It announces nothing in the meeting. Does it get in through a relay that asks for tokens, and does its seat count among the 49?
 
 ## Expected
 

@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, meetings, the reader for agents (`crates/agent`, `crates/viewer`). The meeting is **proposed** (`docs/scale-and-meetings.md`, Part 2); how its participants find each other is undecided (Q57), and this is the side that reads the relay's namespaces.
+- Roadmap item: Phase 4, meetings, the reader for agents (`crates/agent`, `crates/viewer`). The meeting is **proposed** (`docs/scale-and-meetings.md`, Part 2); how its participants find each other is undecided, and this is the side that reads the relay's namespaces.
 
 ## Objective
 
@@ -34,5 +34,5 @@ The change was then put on `main` at `pwxrmsky` (the reader's chat on `xmoq_view
 
 - `/frame` alone of the one who spoke last: no transcriber runs here, so nobody's voice is read. Run since in [who speaks in a meeting](2026-10-25-who-speaks-in-a-meeting.md).
 - The video let go of after `--meeting-video-linger-ms`, a participant over `--meeting-most`, and a meeting over a GOAWAY or a new session: the table tests of `xmoq_viewer::meeting` and `xmoq_viewer::presence` alone.
-- A meeting through a room (`--room`): not built, waiting for Q57. A meeting through `moqtail`'s relay.
+- A meeting through a room (`--room`): not built, waiting for the decision on how participants find each other. A meeting through `moqtail`'s relay.
 - How long the first picture of a participant takes (a catalog, a subscription, and a key frame): not measured.

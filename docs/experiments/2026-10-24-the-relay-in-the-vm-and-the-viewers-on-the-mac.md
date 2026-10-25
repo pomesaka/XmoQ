@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, relay scale/load testing; the goal of Q41
+- Roadmap item: Phase 4, relay scale/load testing; the goal of 2026-10-24 (10 rooms of 100 viewers, 500 ms)
 
 ## Objective
 

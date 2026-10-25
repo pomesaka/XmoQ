@@ -1,8 +1,8 @@
-//! The history of the chat, kept for good (Q42, decided on 2026-10-24) in
+//! The history of the chat, kept for good (decided on 2026-10-24) in
 //! one SQLite file. The only file of the gatherer that touches `rusqlite`,
 //! so that the store can be replaced.
 //!
-//! WHY SQLite (the user's decision, Q42, 2026-10-24): a FETCH asks for a
+//! WHY SQLite (the user's decision, 2026-10-24): a FETCH asks for a
 //! range of a room's lines by their numbers, which an index answers
 //! without reading the history before it, and a line is in the file once
 //! its transaction is over, also when the process is killed right after.
@@ -55,8 +55,8 @@ impl Store {
     /// WHY `journal_mode = WAL`: a FETCH reads while lines are written.
     ///
     /// WHY `locking_mode = EXCLUSIVE`, set before WAL, and a write at once:
-    /// **one gatherer to a file.** Gatherers of different rooms (one a room,
-    /// Q48) each run with a store of their own. SQLite, read on 2026-10-24:
+    /// **one gatherer to a file.** Gatherers of different rooms (one a room)
+    /// each run with a store of their own. SQLite, read on 2026-10-24:
     /// "When the locking-mode is set to EXCLUSIVE, the database connection
     /// never releases file-locks ... The first time the database is written,
     /// an exclusive lock is obtained and held"
@@ -84,7 +84,7 @@ impl Store {
     /// "Writers sync the WAL on every transaction commit if PRAGMA
     /// synchronous is set to FULL but omit this sync if PRAGMA synchronous
     /// is set to NORMAL". WHY NOT NORMAL, which the review of the first
-    /// version found: the history is kept for good (Q42). The price is a
+    /// version found: the history is kept for good. The price is a
     /// sync of the disk for every line taken, which was not measured.
     pub fn open(path: &Path) -> Result<Self> {
         let connection =

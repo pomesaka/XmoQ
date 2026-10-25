@@ -22,8 +22,8 @@ xmoq-viewer-io = { path = "../viewer-io" }
 anyhow = "=1.0.100"
 serde_json = "=1.0.152"
 tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-# The decoder and the output are provisional (docs/open-questions.md); each is used in one
-# file of src/bin/xmoq-watch, named in the README.
+# The decoder is decided (src/bin/xmoq-watch/sound.rs) and the output is not
+# (docs/open-questions.md); each is used in one file of src/bin/xmoq-watch.
 opus-rs = "=0.1.39"
 cpal = "=0.18.2"
 # The terminal's line mode and the size of its window, without `unsafe`.

@@ -6,7 +6,7 @@
 
 ## Objective
 
-The user decided (open question Q26) that `xmoq-watch` decodes its sound with `opus-rs` 0.1.39 in place of `opus-decoder` 0.1.1, on the comparison of [2026-10-21](2026-10-21-opus-decoders-in-rust-set-against-libopus.md). Whether the viewer plays with it as before.
+The user decided that `xmoq-watch` decodes its sound with `opus-rs` 0.1.39 in place of `opus-decoder` 0.1.1, on the comparison of [2026-10-21](2026-10-21-opus-decoders-in-rust-set-against-libopus.md). Whether the viewer plays with it as before.
 
 ## What changed
 
@@ -36,4 +36,4 @@ bun watch-rust.ts --watch from-mlmpub --port 48781
 
 ## Decision or next action
 
-None here: the output (`cpal`) is still open (Q37).
+None here: the output (`cpal`) is still open.

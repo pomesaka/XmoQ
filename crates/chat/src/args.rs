@@ -28,7 +28,7 @@ pub const PAYLOAD_MOST: usize = 64 * 1024;
 
 /// The most `--room` flags: as many `SUBSCRIBE_NAMESPACE` requests as the own
 /// relay lets one session have open (`MAX_NAMESPACE_WATCHES_PER_SESSION` of
-/// `crates/relay-core/src/discovery.rs`, 8, decided on 2026-10-24: Q45). WHY refused at
+/// `crates/relay-core/src/discovery.rs`, 8, decided on 2026-10-24). WHY refused at
 /// the start and not left to the relay: a ninth request would be refused
 /// with `EXCESSIVE_LOAD` for good, and its room would never be gathered
 /// while the gatherer looked as if it ran.
@@ -40,7 +40,7 @@ pub enum Rooms {
     /// Every room: one `SUBSCRIBE_NAMESPACE` for `xmoq/chat`.
     Every,
     /// These (`--room`), one `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<room>`
-    /// each, in the order given (Q48, decided on 2026-10-24: a gatherer for
+    /// each, in the order given (decided on 2026-10-24: a gatherer for
     /// each room).
     These(Vec<String>),
 }
@@ -72,7 +72,7 @@ pub struct Args {
     /// `--auth-key-hex`: the key the relay checks the tokens of the room
     /// with (its flag of that name), with which the gatherer makes tokens
     /// of its own for its SETUP and its requests. Only for the demo with
-    /// `--auth` (Q51, provisional): a gatherer of a room's real service
+    /// `--auth` (provisional): a gatherer of a room's real service
     /// would get its tokens from where the room's are made.
     pub auth_key: Option<Vec<u8>>,
     /// `--ask-again-times`, `--ask-again-ms`.
