@@ -2159,7 +2159,9 @@ async function subgroupAgain(run: Run): Promise<ScenarioResult> {
 	const subscribers = await joinAsSubscribers(subscriberKinds, "sub", run);
 	const group = await publisher.send();
 	await allReceive(subscribers, group, publisher);
-	const twice = await publisher.sendSubgroupAgain(again === "longer");
+	const twice = await publisher.sendSubgroupAgain(again === "longer", (group) =>
+		deliveredWhole(group, subscribers.length, run),
+	);
 	const ended = await outcomes(subscribers);
 	for (const { subscriber, outcome } of ended) {
 		expectPublishDone(subscriber, outcome, { statusCode: MALFORMED_TRACK });
@@ -2184,6 +2186,39 @@ async function subgroupAgain(run: Run): Promise<ScenarioResult> {
 		subscriptions: subscriptionsOf(ended),
 		measured: {},
 	};
+}
+
+/**
+ * Resolves once the relay has finished its stream of the Group towards each
+ * of `subscribers` sessions: the first stream of `subgroupAgain` was taken
+ * whole and passed on whole.
+ *
+ * WHY the second stream waits for this, and not only for the FIN of the
+ * first that the publisher wrote: QUIC keeps no order between two streams,
+ * so the second, opened after that FIN was written, can still reach the
+ * relay first. The relay then holds it as the Subgroup's stream and ends
+ * the first (§11.4), and what the run is about, a Subgroup delivered whole
+ * and sent again, did not happen. In a run of CI (#339, 2026-10-25) the
+ * short stream came first: the relay reset its stream towards the
+ * subscriber with 0x1, stopped the publisher's with 0x1, and passed on the
+ * long one to its end.
+ */
+async function deliveredWhole(
+	group: number,
+	subscribers: number,
+	run: Run,
+): Promise<void> {
+	const opened = await run.context.relay.waitForLines(
+		new RegExp(`^OPEN_DATA session=\\d+ out=(\\d+) .* group=${group}$`),
+		subscribers,
+	);
+	for (const line of opened) {
+		const out = captureGroup(line, 1);
+		await run.context.relay.waitForLines(
+			new RegExp(`^FINISH_DATA out=${out}$`),
+			1,
+		);
+	}
 }
 
 const ASK_WAYS = [

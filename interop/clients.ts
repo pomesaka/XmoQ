@@ -154,13 +154,17 @@ export interface Publisher {
 	 */
 	sendEndOfTrack?(): Promise<number>;
 	/**
-	 * own-rust: sends the next Group on a stream that ends with a FIN, then
-	 * the same Subgroup on a second such stream with one Object more
-	 * (`longer`) or one fewer (`subgroup-again-longer`,
-	 * `subgroup-again-shorter`), and resolves with the Group once both were
+	 * own-rust: sends the next Group on a stream that ends with a FIN, then,
+	 * once `delivered` resolves for that Group, the same Subgroup on a second
+	 * such stream with one Object more (`longer`) or one fewer
+	 * (`subgroup-again-longer`, `subgroup-again-shorter`, then
+	 * `subgroup-again-second`), and resolves with the Group once both were
 	 * sent.
 	 */
-	sendSubgroupAgain?(longer: boolean): Promise<number>;
+	sendSubgroupAgain?(
+		longer: boolean,
+		delivered: (group: number) => Promise<void>,
+	): Promise<number>;
 	/**
 	 * own-browser: sends the next Group as `objects` Objects of `bytes` bytes
 	 * each, on one stream, and resolves with the Group.
@@ -381,11 +385,13 @@ async function startRustPublisher(
 			client.child.stdin.write("end-of-track\n");
 			return sent();
 		},
-		async sendSubgroupAgain(longer) {
+		async sendSubgroupAgain(longer, delivered) {
 			client.child.stdin.write(
 				longer ? "subgroup-again-longer\n" : "subgroup-again-shorter\n",
 			);
 			const group = await sent();
+			await delivered(group);
+			client.child.stdin.write("subgroup-again-second\n");
 			const twice = new RegExp(`^SENT group=${group} `);
 			await pollFor(
 				() => (client.matches(twice).length >= 2 ? true : undefined),

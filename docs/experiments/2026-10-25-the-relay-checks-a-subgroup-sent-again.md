@@ -38,9 +38,24 @@ macOS 14.4, arm64, loopback; Bun 1.3.14; Chromium 156.0.8078.4 of playwright-cor
 
 Why it fails at that port: 49155 is in macOS's range of ephemeral ports (49152 to 65535), and on this machine a socket of another process on `0.0.0.0` that holds a port does not keep the relay from binding it. With an IPv4 socket bound to `0.0.0.0:49997` first, a socket on `[::]` without `IPV6_V6ONLY`, as the relay binds, was bound to the same port as well, and a datagram sent to `127.0.0.1:49997` reached the IPv4 socket and not the `[::]` one; with the IPv4 socket on `127.0.0.1` the second bind failed with `EADDRINUSE`. So a relay of a pairing whose port another process holds as its ephemeral port prints `LISTENING` and is not reached over IPv4. When the run failed, 49155 was free again, and which process held it was not seen.
 
+## The second stream after the first was delivered whole (added on 2026-10-25)
+
+In CI on #339 (a change that touches no data path), "own relay: leaving: an own-rust publisher sends a Subgroup it delivered whole again with one Object fewer; the track ends as malformed" failed. The relay's log had the two streams of Group 1 the other way round: the short one (Object 0 alone) reached the relay first, then the long one (0 and 1). The relay reset its stream towards the subscriber with 0x1, stopped the publisher's with 0x1, and passed on the long one to its end. So the Subgroup was not delivered whole before it was sent again. The own-rust client opened the second stream once it had written the first stream's FIN, and QUIC keeps no order between two streams.
+
+**The fix, in the run and in the client of the run alone; the relay is unchanged.** The own-rust client sends the first stream at `subgroup-again-longer` or `subgroup-again-shorter`, and the second at a further line, `subgroup-again-second` (`send_subgroup_twice` of `crates/moqt-client/src/main.rs`). `subgroupAgain` of `interop/disconnect.ts` writes that line once the relay has printed `FINISH_DATA` for each of its streams of the Group towards the subscribers (`OPEN_DATA ... group=1`; `deliveredWhole`).
+
+`mise run interop -- --only "Subgroup it delivered whole again" --base-port 36000`, two pairings a run (the longer and the shorter), on macOS 14.4 on an M3 Pro, with debug builds:
+
+| | Runs | Pairings as expected |
+|---|---|---|
+| Before the fix, on `main` at `1b8a2f7e` | 10 | 20 of 20 |
+| After it | 10 | 20 of 20 |
+
+The failure of CI did not come here before the fix, in 10 runs. What the fix changes was seen in the relay's log of a run after it: `FINISH_DATA out=2` and `out=3` (the relay's streams of the first stream towards the two subscribers) came before the publisher's second `SENT group=1`, and then the relay stopped the publisher's second stream with 0x12 (malformed). Whether CI's failure is gone can be seen only in CI's runs.
+
 ## Limitations and blockers
 
-- A second stream whose header the relay reads before the first stream's FIN takes the place of the first, as before, and nothing is compared. The own-rust client opens the second stream once `finish_and_wait` of the first has returned, and in every run here the relay read the first FIN before the second header; the runs do not show this case.
+- A second stream whose header the relay reads before the first stream's FIN takes the place of the first, as before, and nothing is compared. The runs do not show this case. Since the section below, the run sends the second stream only once the relay has finished its streams of the first towards every subscriber.
 - `--base-port 49100` puts every pairing from the 53rd on in macOS's range of ephemeral ports.
 
 ## Open questions raised
