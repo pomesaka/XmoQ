@@ -79,6 +79,8 @@ fn main() -> Result<()> {
         model: Some(model.into()),
         cache: None,
         language: language.clone(),
+        command: Vec::new(),
+        command_limits: xmoq_speech::command::CommandLimits::default(),
     };
     let mut readers = xmoq_speech::engine::open(Engine::Whisper, &options, 1)?.readers;
     let whisper = readers.first_mut().context("a reader")?;

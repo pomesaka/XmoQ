@@ -2,20 +2,28 @@
 
 use std::path::PathBuf;
 
+use std::time::Duration;
 use xmoq_moqt::name::TrackNamespace;
+
+use xmoq_speech::command::CommandLimits;
 use xmoq_speech::engine::Engine;
 
 /// How the transcriber is started without a flag it does not know.
 pub const USAGE: &str = "\
 xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --namespace <a/b>...
-                 [--engine whisper] [--model <file>] [--language <code>]
+                 [--engine whisper|command] [--model <file>] [--language <code>]
+                 [--engine-command '<program> <args>'] [--engine-timeout-ms <n>] [--engine-most-output <n>]
                  [--voice vad|loudness] [--vad-model <file>]
                  [--keep <n>] [--waiting <n>] [--readers <n>] [--tracks <n>]
                  [--auth-key-hex <hex>]
 
 --namespace     a prefix whose broadcasts are listened to, its fields between slashes; up to 8,
                 none a prefix of another. Its transcript is the track speech of xmoq/transcript/<prefix>
---engine        what reads the pieces (whisper)
+--engine        what reads the pieces: whisper.cpp with --model, or a program run for each piece (whisper)
+--engine-command      with --engine command: the program and its arguments, between spaces; the piece's
+                      WAV file is its last argument, the language in XMOQ_LANGUAGE, and its stdout the words
+--engine-timeout-ms   with --engine command: how long it may take for a piece, or it is killed (30000)
+--engine-most-output  with --engine command: the most bytes of its stdout (65536)
 --model         the file of a model of whisper.cpp (~/.cache/xmoq/whisper/ggml-large-v3-turbo-q5_0.bin;
                 mise run speech-model fetches it)
 --language      a language code of whisper's, or auto (auto). A code is twice as fast as auto, and has
@@ -25,7 +33,8 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
                 mise run speech-model -- silero-v5.1.2 fetches it)
 --keep          the latest pieces of each transcript kept for FETCH (1000)
 --waiting       pieces that wait to be read; one more is dropped and counted (16)
---readers       threads that read pieces at once, each with a state of its own over the one model (1)
+--readers       threads that read pieces at once: of whisper, each a state of its own over the one model;
+                of command, each runs the program for a piece of its own (1)
 --tracks        audio tracks listened to at once (16)
 --auth-key-hex  the relay's key, of which tokens are made: for the demo alone";
 
@@ -43,6 +52,14 @@ pub const KEEP_MOST: usize = 100_000;
 /// The most `--waiting`. Each waiting piece holds up to 15 s of samples,
 /// 960 KB.
 pub const WAITING_MOST: usize = 256;
+
+/// The most `--engine-timeout-ms`: 10 minutes. A piece is 15 s at the
+/// most, and a reader that takes longer has the pieces dropped behind it.
+pub const ENGINE_TIMEOUT_MOST_MS: usize = 600_000;
+
+/// The most `--engine-most-output`: 1 MiB, the most the words of a piece
+/// are held at.
+pub const ENGINE_OUTPUT_MOST: usize = 1024 * 1024;
 
 /// The most `--readers`. Each holds a state of whisper.cpp of its own, tens
 /// of MiB beside the model, which they share.
@@ -63,6 +80,11 @@ pub struct Args {
     pub prefixes: Vec<TrackNamespace>,
     /// `--engine`.
     pub engine: Engine,
+    /// `--engine-command`, split at spaces; empty but with `--engine
+    /// command`.
+    pub command: Vec<String>,
+    /// `--engine-timeout-ms` and `--engine-most-output`.
+    pub command_limits: CommandLimits,
     /// `--model`; `None` for the default in the cache
     /// (`xmoq_speech::model`).
     pub model: Option<PathBuf>,
@@ -115,6 +137,42 @@ fn is_prefix(prefix: &TrackNamespace, of: &TrackNamespace) -> bool {
     of.fields().starts_with(prefix.fields())
 }
 
+/// The limits of `--engine command`, where the flags of the engine agree
+/// with it.
+///
+/// WHY refused and not passed over: a flag that does nothing would have the
+/// transcriber look as if it read with what it names.
+fn command_limits(
+    engine: Engine,
+    command: &[String],
+    timeout: Option<usize>,
+    most_output: Option<usize>,
+    model: bool,
+) -> Result<CommandLimits, String> {
+    match engine {
+        Engine::Whisper => {
+            if !command.is_empty() || timeout.is_some() || most_output.is_some() {
+                return Err("--engine-command, --engine-timeout-ms and --engine-most-output are for --engine command".to_string());
+            }
+        }
+        Engine::Command => {
+            if command.is_empty() {
+                return Err("--engine command needs --engine-command".to_string());
+            }
+            if model {
+                return Err("--model is for --engine whisper".to_string());
+            }
+        }
+    }
+    let defaults = CommandLimits::default();
+    Ok(CommandLimits {
+        timeout: timeout.map_or(defaults.timeout, |ms| {
+            Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX))
+        }),
+        most_output: most_output.unwrap_or(defaults.most_output),
+    })
+}
+
 /// Reads the flags.
 ///
 /// # Errors
@@ -125,6 +183,8 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut prefixes: Vec<TrackNamespace> = Vec::new();
     let mut language = "auto".to_string();
     let mut engine = Engine::Whisper;
+    let mut command: Vec<String> = Vec::new();
+    let (mut timeout, mut most_output) = (None, None);
     let (mut vad, mut vad_model) = (true, None);
     let (mut keep, mut waiting, mut tracks, mut readers) = (1000, 16, 16, 1);
     while let Some(flag) = flags.next() {
@@ -158,6 +218,18 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
                     format!("--engine is one of {}, not {value:?}", Engine::NAMES)
                 })?;
             }
+            "--engine-command" => {
+                command = value.split_whitespace().map(str::to_string).collect();
+                if command.is_empty() {
+                    return Err("--engine-command names no program".to_string());
+                }
+            }
+            "--engine-timeout-ms" => {
+                timeout = Some(number_within(&flag, &value, ENGINE_TIMEOUT_MOST_MS)?);
+            }
+            "--engine-most-output" => {
+                most_output = Some(number_within(&flag, &value, ENGINE_OUTPUT_MOST)?);
+            }
             "--model" => model = Some(PathBuf::from(value)),
             "--language" => language = value,
             "--voice" => {
@@ -185,6 +257,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     if prefixes.is_empty() {
         return Err("--namespace is needed".to_string());
     }
+    let command_limits = command_limits(engine, &command, timeout, most_output, model.is_some())?;
     if prefixes.len() > PREFIXES_MOST {
         return Err(format!(
             "--namespace is given {} times: a session at the own relay may have {PREFIXES_MOST} SUBSCRIBE_NAMESPACE requests; run another transcriber for the rest",
@@ -196,6 +269,8 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
         cert_sha256: cert_sha256.ok_or("--cert-sha256 is needed")?,
         prefixes,
         engine,
+        command,
+        command_limits,
         model,
         language,
         vad,
@@ -241,17 +316,89 @@ mod tests {
             (None, "auto", 1000, 16, 16, None)
         );
         assert_eq!((read.vad, read.vad_model, read.readers), (true, None, 1));
-        assert_eq!(read.engine, Engine::Whisper);
+        assert_eq!(
+            (read.engine, read.command.is_empty(), read.command_limits),
+            (Engine::Whisper, true, CommandLimits::default())
+        );
+        let command = args(&[
+            "--namespace",
+            "a",
+            "--engine",
+            "command",
+            "--engine-command",
+            "say-it  --fast",
+            "--engine-timeout-ms",
+            "500",
+            "--engine-most-output",
+            "10",
+        ])
+        .unwrap();
+        assert_eq!(
+            (command.engine, command.command, command.command_limits),
+            (
+                Engine::Command,
+                vec!["say-it".to_string(), "--fast".to_string()],
+                CommandLimits {
+                    timeout: Duration::from_millis(500),
+                    most_output: 10
+                }
+            )
+        );
         let loudness = args(&["--namespace", "a", "--voice", "loudness"]).unwrap();
         assert!(!loudness.vad);
     }
 
     #[test]
     fn flags_that_are_refused() {
-        let cases: [(&[&str], &str); 12] = [
+        let cases: [(&[&str], &str); 17] = [
             (
                 &["--namespace", "a", "--engine", "claude"],
-                "--engine is one of whisper",
+                "--engine is one of whisper, command",
+            ),
+            (
+                &["--namespace", "a", "--engine", "command"],
+                "--engine command needs --engine-command",
+            ),
+            (
+                &["--namespace", "a", "--engine-command", "x"],
+                "are for --engine command",
+            ),
+            (
+                &[
+                    "--namespace",
+                    "a",
+                    "--engine",
+                    "command",
+                    "--engine-command",
+                    "x",
+                    "--model",
+                    "m",
+                ],
+                "--model is for --engine whisper",
+            ),
+            (
+                &[
+                    "--namespace",
+                    "a",
+                    "--engine",
+                    "command",
+                    "--engine-command",
+                    " ",
+                ],
+                "--engine-command names no program",
+            ),
+            (
+                &[
+                    "--namespace",
+                    "a",
+                    "--engine",
+                    "command",
+                    "--engine-command",
+                    "x",
+                    "--engine-timeout-ms",
+                    "0",
+                ],
+                "--engine-timeout-ms is a number from 1 to 600000",
             ),
             (
                 &["--namespace", "a", "--readers", "9"],

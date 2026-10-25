@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 
 use crate::Words;
+use crate::command::{Command, CommandLimits};
 use crate::model::{DEFAULT_MODEL, model_file};
 use crate::whisper::Whisper;
 
@@ -20,17 +21,20 @@ use crate::whisper::Whisper;
 pub enum Engine {
     /// whisper.cpp, with a model of its own ([`crate::model`]).
     Whisper,
+    /// A program run for each piece ([`crate::command`]).
+    Command,
 }
 
 impl Engine {
     /// The names a flag gives them by.
-    pub const NAMES: &str = "whisper";
+    pub const NAMES: &str = "whisper, command";
 
     /// The reader named `name`.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
         match name {
             "whisper" => Some(Self::Whisper),
+            "command" => Some(Self::Command),
             _ => None,
         }
     }
@@ -46,6 +50,11 @@ pub struct EngineOptions {
     pub cache: Option<PathBuf>,
     /// A language code of whisper's (`ja`, `en`), or `auto`.
     pub language: String,
+    /// For [`Engine::Command`]: the program and its arguments.
+    pub command: Vec<String>,
+    /// For [`Engine::Command`]: what the program is given before it is
+    /// stopped.
+    pub command_limits: CommandLimits,
 }
 
 /// The readers that were opened, and what to say of them.
@@ -87,6 +96,29 @@ pub fn open(engine: Engine, options: &EngineOptions, count: usize) -> Result<Ope
                 ),
             })
         }
+        Engine::Command => {
+            // WHY a directory of this process's own: two transcribers on one
+            // machine write pieces of the same names.
+            let dir = std::env::temp_dir().join(format!("xmoq-transcriber-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+            let mut readers: Vec<Box<dyn Words + Send>> = Vec::with_capacity(count);
+            for n in 0..count.max(1) {
+                readers.push(Box::new(Command::new(
+                    options.command.clone(),
+                    &options.language,
+                    options.command_limits,
+                    dir.join(format!("piece-{n}.wav")),
+                )?));
+            }
+            Ok(Opened {
+                readers,
+                said: format!(
+                    "engine=command command={} language={}",
+                    options.command.join(" "),
+                    options.language
+                ),
+            })
+        }
     }
 }
 
@@ -96,8 +128,11 @@ mod tests {
 
     #[test]
     fn engines_are_named_by_their_flag() {
-        let cases: [(&str, Option<Engine>); 2] =
-            [("whisper", Some(Engine::Whisper)), ("Whisper", None)];
+        let cases: [(&str, Option<Engine>); 3] = [
+            ("whisper", Some(Engine::Whisper)),
+            ("command", Some(Engine::Command)),
+            ("Whisper", None),
+        ];
         for (name, expected) in cases {
             assert_eq!(Engine::named(name), expected, "{name}");
         }

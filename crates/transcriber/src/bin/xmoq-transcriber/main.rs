@@ -95,6 +95,8 @@ async fn run(args: Args) -> Result<()> {
             model: args.model.clone(),
             cache: cache_dir(),
             language: args.language.clone(),
+            command: args.command.clone(),
+            command_limits: args.command_limits,
         },
         args.readers,
     )?;

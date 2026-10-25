@@ -29,6 +29,11 @@ cargo run --release --example read-wav -p xmoq-speech -- ~/.cache/xmoq/whisper/g
 
 WHY a choice of readers (asked for on 2026-10-25 by the project owner): the transcription is an experiment, and what reads the words may become another program than whisper.cpp, an agent among them. A reader gets a piece, 16 kHz and one channel, and gives its words; how the sound is cut, and the track and the numbering of the words, stay outside it. A reader is added as a value of `Engine` in `src/engine.rs` and a file of its own.
 
+| Reader | File | What it reads with |
+|---|---|---|
+| `whisper` | `src/whisper.rs` | whisper.cpp and a model of its own (below) |
+| `command` | `src/command.rs` | A program run for each piece: the piece is a WAV file, its path the program's last argument, and its standard output the words. It has a time and a size of output it is stopped at, and fails on an exit that is not 0 (the transcriber's flags). WHY: whatever reads the words (a script around another model, an agent) is put in place without a change here. WHY NOT a service over the network: where the sound of the people present may be sent is undecided (Q35) |
+
 **Every reader needs whisper.cpp to be built**: the model of voice activity that cuts the sound (Silero, `vad`) runs on whisper.cpp too. WHY it is not moved to another runtime now (decided on 2026-10-25): the cutting is outside the reader and works as it is; moving it would be a change of the cutting, measured again, for a build that only a transcriber without whisper.cpp would gain.
 
 ## whisper.cpp, and what it needs to build

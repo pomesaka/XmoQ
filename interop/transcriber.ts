@@ -5,7 +5,7 @@
 // `xmoq/voice` with the smallest model of whisper.cpp, and own-rust clients
 // read the transcript `speech` of `xmoq/transcript/xmoq/voice`.
 //
-// Usage: bun transcriber.ts [--auth yes|no] [--port N] [--verbose]
+// Usage: bun transcriber.ts [--auth yes|no] [--engine whisper|command] [--port N] [--verbose]
 //
 // What has to be seen, written before the first run:
 //
@@ -50,7 +50,15 @@
 // pieces whose text has "relay", from `xmoq/voice/page`: the voice reached
 // the transcript's track through a relay that checks every request.
 
-import { mkdtempSync, rmSync } from "node:fs";
+// `--engine command`, written before its first run (2026-10-25): the
+// transcriber reads each piece with a program (`--engine-command`) in place
+// of whisper.cpp. The program is a script that checks that its argument is
+// a WAV file with samples in it, and prints "words from a command". A live
+// reader of the transcript gets a piece from `xmoq/voice/page` with that
+// text: a piece cut from the page's voice reached the program as a file,
+// and its output reached the track.
+
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -82,6 +90,7 @@ const { values: options } = parseArgs({
 		// The matrix gives every driver a relay; this one is through the own.
 		relay: { type: "string", default: "own" },
 		auth: { type: "string", default: "no" },
+		engine: { type: "string", default: "whisper" },
 		verbose: { type: "boolean", default: false },
 	},
 });
@@ -218,7 +227,100 @@ async function withTokens(): Promise<string> {
 	return `through the own relay with --auth-key-hex, the page announced ${namespace} with its pub token and the transcriber, with the same key, published two pieces that a reader with sub for ${TRANSCRIPT} got: ${pieces.map((piece) => JSON.stringify(piece.text)).join(" and ")}`;
 }
 
+/** What the script of `--engine command` prints for every piece. */
+const COMMAND_WORDS = "words from a command";
+
+/** `--engine command`: each piece read by a script, which says the same words. */
+async function withCommand(dir: string): Promise<string> {
+	const script = join(dir, "read-piece.sh");
+	writeFileSync(
+		script,
+		[
+			"#!/bin/sh",
+			"# $1 is the piece: a WAV file, its header and at least one sample.",
+			'[ "$(head -c 4 "$1")" = RIFF ] || exit 1',
+			'[ "$(wc -c < "$1")" -gt 46 ] || exit 2',
+			`echo '${COMMAND_WORDS}'`,
+			"",
+		].join("\n"),
+	);
+	chmodSync(script, 0o755);
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser", "own-rust"],
+		verbose: options.verbose,
+	});
+	const transcriber = spawnTranscriber(
+		context,
+		"transcriber",
+		[
+			"--namespace",
+			PREFIX,
+			"--language",
+			"en",
+			"--engine",
+			"command",
+			"--engine-command",
+			script,
+		],
+		"command",
+	);
+	await transcriber.waitForLine(/^MODEL_LOADED engine=command /);
+	await transcriber.waitForLine(new RegExp(`^WATCHING prefix=${PREFIX}$`));
+	const namespace = `${PREFIX}/page`;
+	const page = await openConnectedPage(context, "publisher", "own-browser");
+	await withTimeout(
+		page.evaluate(([at, voice]) => window.xmoqOwn.publishVoice(at, voice), [
+			namespace,
+			samplesOf(VOICE_FILE),
+		] satisfies [string, string]),
+		"the page to publish its voice",
+	);
+	await transcriber.waitForLine(
+		new RegExp(`^AUDIO_SUBSCRIBED namespace=${namespace}$`),
+	);
+	const live = spawnRustClient(
+		context,
+		"live",
+		"own-rust",
+		"subscribe",
+		"speech",
+		["--namespace", TRANSCRIPT, "--objects", "1", "--timeout-secs", "30"],
+	);
+	const code = await withTimeout(live.exited, "the live reader to leave");
+	if (code !== 0) throw new Error(`the live reader left with ${code}`);
+	const [piece] = live
+		.matches(/^OBJECT group=(\d+) object=0 .*payload_hex=(\S*)$/)
+		.map(pieceOf);
+	if (piece === undefined) throw new Error("the live reader got no piece");
+	expect("a piece is from", piece.from.join("/"), namespace);
+	expect("a piece says", piece.text, COMMAND_WORDS);
+	expect(
+		"pieces the program failed on",
+		String(transcriber.matches(/^PIECE_NOT_READ /).length),
+		"0",
+	);
+	return `through the own relay, the transcriber read a piece of the page's voice under ${PREFIX} with --engine command: a script got it as a WAV file, and a live reader of ${TRANSCRIPT} got ${JSON.stringify(piece.text)} from ${namespace} in Group ${piece.group}`;
+}
+
 async function main(): Promise<void> {
+	if (options.engine === "command") {
+		let summary: string;
+		const dir = mkdtempSync(join(tmpdir(), "xmoq-engine-command-"));
+		try {
+			summary = await withCommand(dir);
+		} finally {
+			await runCleanups();
+			rmSync(dir, { recursive: true, force: true });
+		}
+		log("driver", "RESULT {}");
+		log("driver", `SUMMARY ${summary}`);
+		return;
+	}
+	if (options.engine !== "whisper") {
+		throw new Error(`--engine is whisper or command, not ${options.engine}`);
+	}
 	if (options.auth === "yes") {
 		let summary: string;
 		try {
