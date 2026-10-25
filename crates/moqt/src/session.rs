@@ -1067,6 +1067,22 @@ impl Session {
         self.subscribed_aliases.state(track_alias)
     }
 
+    /// Whether a `SUBSCRIBE` of this endpoint waits for its `SUBSCRIBE_OK`,
+    /// which could still give a Track Alias that is unknown now
+    /// ([`crate::early`]).
+    #[must_use]
+    pub fn has_pending_subscribe(&self) -> bool {
+        self.requests.values().any(|request| {
+            matches!(
+                request,
+                Request::Subscribe {
+                    track_alias: None,
+                    ..
+                }
+            )
+        })
+    }
+
     /// Records that a data stream carrying `track_alias` ended, by FIN or by
     /// reset. `PUBLISH_DONE` counts the streams of a subscription, and once that
     /// many have ended the subscription has nothing left to deliver (§10.11).
@@ -2448,6 +2464,66 @@ mod tests {
                 "{connect_uri:?}"
             );
         }
+    }
+
+    /// §11.4.2: Objects read before the `SUBSCRIBE_OK` that gives their
+    /// alias are given to the subscription after it, in their order
+    /// (`crate::early`), and not when no `SUBSCRIBE` waits.
+    #[test]
+    fn objects_read_before_their_subscribe_ok_are_given_after_it() {
+        use crate::early::{Arrived, EarlyObjects};
+        let mut session = client();
+        let mut early = EarlyObjects::default();
+        // No SUBSCRIBE waits: the stream is stopped.
+        assert!(matches!(
+            early.arrive(&session, 1, 7, 64, "stray"),
+            Arrived::Stop {
+                stream: 1,
+                code: crate::stream_reset_code::CANCELLED
+            }
+        ));
+        let (request, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        for line in ["line 0", "line 1"] {
+            assert!(matches!(
+                early.arrive(&session, 2, 7, 64, line),
+                Arrived::Held
+            ));
+        }
+        // Before the SUBSCRIBE_OK nothing is let go of.
+        assert_eq!(early.settle(&session).released, Vec::<&str>::new());
+        session.feed(request, subscribe_ok(7, vec![])).unwrap();
+        let settled = early.settle(&session);
+        assert_eq!(settled.released, ["line 0", "line 1"]);
+        assert_eq!(settled.stopped, Vec::new());
+        assert!(early.is_empty());
+        assert!(matches!(
+            early.arrive(&session, 2, 7, 64, "line 2"),
+            Arrived::Deliver("line 2")
+        ));
+    }
+
+    /// A stream reset while it held Objects lets go of them; held ones of
+    /// an alias no SUBSCRIBE can give any more are stopped.
+    #[test]
+    fn held_objects_are_let_go_of_with_their_stream_or_their_subscribe() {
+        use crate::early::{Arrived, EarlyObjects};
+        let mut session = client();
+        let mut early = EarlyObjects::default();
+        let (request, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+        assert!(matches!(
+            early.arrive(&session, 1, 7, 64, "a"),
+            Arrived::Held
+        ));
+        assert!(matches!(
+            early.arrive(&session, 2, 8, 64, "b"),
+            Arrived::Held
+        ));
+        early.stream_closed(1, true);
+        session.feed(request, subscribe_ok(9, vec![])).unwrap();
+        let settled = early.settle(&session);
+        assert_eq!(settled.released, Vec::<&str>::new());
+        assert_eq!(settled.stopped, [(2, crate::stream_reset_code::CANCELLED)]);
+        assert!(early.is_empty());
     }
 
     #[test]

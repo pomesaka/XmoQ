@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::SubgroupObject;
+use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::immutable::{Of, searched_integers};
 use xmoq_moqt::kvp::KeyValuePair;
@@ -21,7 +22,7 @@ use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream,
-    StreamStops, Trace, UniEvent, send_message,
+    StreamEnd, StreamStops, Trace, UniEvent, send_message,
 };
 use xmoq_msf::CatalogTrack;
 
@@ -48,6 +49,9 @@ pub struct Events {
     ahead: VecDeque<UniEvent>,
     /// The readers are gone: nothing more comes.
     ended: bool,
+    /// Objects read before the `SUBSCRIBE_OK` that gives their alias
+    /// (`xmoq_moqt::early`).
+    early: EarlyObjects<UniEvent>,
 }
 
 impl Events {
@@ -58,7 +62,79 @@ impl Events {
             received,
             ahead: VecDeque::new(),
             ended: false,
+            early: EarlyObjects::default(),
         }
+    }
+
+    /// The next event, as [`Self::recv`], for a caller that looks at the
+    /// Track Alias of an Object: an Object of an alias the session does not
+    /// know yet is held while a `SUBSCRIBE` of it waits for its answer, and
+    /// comes once the session took the `SUBSCRIBE_OK`; its stream is stopped
+    /// where no `SUBSCRIBE` waits, or where too much is held
+    /// (`xmoq_moqt::early`). `None` when the readers are gone.
+    ///
+    /// WHY here and not in the readers: what an alias is, is the session's,
+    /// which the caller's loop holds; the `SUBSCRIBE_OK` comes on a stream of
+    /// its own, and can be read after the first Objects of its track.
+    /// Called anew each time round the caller's loop, it first gives what
+    /// the session took meanwhile let go of.
+    pub async fn recv_sorted(
+        &mut self,
+        session: &Session,
+        stops: &StreamStops,
+    ) -> Option<UniEvent> {
+        self.settle(session, stops);
+        loop {
+            let event = self.recv().await?;
+            if let Some(event) = self.sort(session, stops, event) {
+                return Some(event);
+            }
+        }
+    }
+
+    fn sort(
+        &mut self,
+        session: &Session,
+        stops: &StreamStops,
+        event: UniEvent,
+    ) -> Option<UniEvent> {
+        match event {
+            UniEvent::Object {
+                stream,
+                ref header,
+                ref object,
+            } => {
+                let (alias, bytes) = (header.track_alias, held_bytes(object));
+                match self.early.arrive(session, stream, alias, bytes, event) {
+                    Arrived::Deliver(event) => Some(event),
+                    Arrived::Held => None,
+                    Arrived::Stop { stream, code } => {
+                        stops.stop(stream, code);
+                        None
+                    }
+                }
+            }
+            UniEvent::SubgroupClosed { stream, end, .. } => {
+                self.early
+                    .stream_closed(stream, !matches!(end, StreamEnd::Fin));
+                Some(event)
+            }
+            event => Some(event),
+        }
+    }
+
+    /// Gives the Objects held for an alias the session knows now to
+    /// [`Self::recv`], before anything else, in the order they came; and
+    /// stops the streams of those no `SUBSCRIBE` can give any more.
+    fn settle(&mut self, session: &Session, stops: &StreamStops) {
+        if self.early.is_empty() {
+            return;
+        }
+        let settled = self.early.settle(session);
+        for (stream, code) in settled.stopped {
+            stops.stop(stream, code);
+        }
+        self.put_back(settled.released.into());
     }
 
     /// The next event; `None` when the readers are gone.

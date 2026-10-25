@@ -15,6 +15,7 @@
 mod aliases;
 mod coding;
 pub mod data;
+pub mod early;
 mod error;
 pub mod fetch;
 pub mod immutable;

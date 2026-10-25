@@ -1153,7 +1153,7 @@ async fn play(
                 }
                 ui.chat_had = tracks.last_shown();
             }
-            event = events.recv() => match event {
+            event = events.recv_sorted(&session, &stops) => match event {
                 Some(UniEvent::Object { header, object, .. })
                     if chat.as_ref().and_then(ChatTracks::lines_alias) == Some(header.track_alias) =>
                 {
