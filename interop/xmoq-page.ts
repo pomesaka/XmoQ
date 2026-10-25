@@ -487,8 +487,12 @@ export type PageKeptReport = {
 	publishing: string[];
 	/** The states of `keepPlaying`, in the same way ("playing 2"). */
 	playing: string[];
-	/** The frames the playout drew: the number its bars say, and the session it came on. */
-	shown: { number: number | null; session: number }[];
+	/**
+	 * The frames the playout drew: the number its bars say, the session it
+	 * came on, and when it was drawn (`Date.now()`, milliseconds since 1970),
+	 * for a driver that measures how long the picture stood still.
+	 */
+	shown: { number: number | null; session: number; at: number }[];
 };
 
 /**

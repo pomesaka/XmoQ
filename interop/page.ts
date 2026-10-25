@@ -1012,7 +1012,11 @@ window.xmoqOwn = {
 				// No sound is played here.
 				sampleRate: 48_000,
 				draw(frame) {
-					kept.shown.push({ number: readNumber(reading, frame), session });
+					kept.shown.push({
+						number: readNumber(reading, frame),
+						session,
+						at: Date.now(),
+					});
 				},
 			});
 			void keepPlaying({
@@ -1616,7 +1620,11 @@ window.xmoqOwn = {
 				// No sound is played here.
 				sampleRate: 48_000,
 				draw(frame) {
-					kept.shown.push({ number: readNumber(reading, frame), session });
+					kept.shown.push({
+						number: readNumber(reading, frame),
+						session,
+						at: Date.now(),
+					});
 				},
 			});
 			const trackNamespace = namespaceTuple(namespace);
