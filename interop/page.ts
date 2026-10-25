@@ -3,7 +3,7 @@
 // same shape as the moqtail-ts page in peers/moqtail/browser so the driver can
 // swap one for the other.
 
-import { type ChatParticipant, joinChat } from "@xmoq/chat";
+import { type ChatParticipant, joinChat, keepInTheRoom } from "@xmoq/chat";
 import {
 	type AudioPlayback,
 	type AudioTrackEncoder,
@@ -848,7 +848,12 @@ function readNumber(
 }
 
 /** What `keepVideoPublished` and `keepVideoPlayed` saw. */
-const kept: PageKeptReport = { publishing: [], playing: [], shown: [] };
+const kept: PageKeptReport = {
+	publishing: [],
+	playing: [],
+	chat: [],
+	shown: [],
+};
 
 /** A connection of a page that makes its own, one for every session. */
 const connectAnew = (
@@ -1124,6 +1129,7 @@ window.xmoqOwn = {
 	keptReport: withPlainErrors(async () => ({
 		publishing: [...kept.publishing],
 		playing: [...kept.playing],
+		chat: [...kept.chat],
 		shown: [...kept.shown],
 	})),
 
@@ -1191,6 +1197,55 @@ window.xmoqOwn = {
 	chatLeave: withPlainErrors(async () => {
 		chat.stop.abort();
 	}),
+
+	keepChat: withPlainErrors(
+		async (
+			relayUrl: string,
+			certSha256Hex: string,
+			room: string,
+			name: string,
+		) => {
+			let at = relayUrl;
+			void keepInTheRoom({
+				async connect(goAway) {
+					at = goAway?.newSessionUri || relayUrl;
+					return { connection: await connectAnew(at, certSha256Hex) };
+				},
+				join: () => ({
+					room,
+					name,
+					onLine(line) {
+						if (chat.lines.length < 1_000) {
+							chat.lines.push({
+								number: line.number.toString(),
+								name: line.name,
+								text: line.text,
+								how: line.how,
+							});
+						}
+					},
+				}),
+				signal: chat.stop.signal,
+				againMs: KEPT_DELAY_MS,
+				onState(state) {
+					if (state.type === "joined") chat.participant = state.participant;
+					else chat.participant = undefined;
+					const said =
+						state.type === "connecting"
+							? `connecting ${state.attempt}`
+							: state.type === "joined"
+								? `joined ${state.session} ${at}`
+								: state.type === "moved"
+									? `moved ${state.goAway.newSessionUri}`
+									: state.type === "failed"
+										? `failed ${errorText(state.error)}`
+										: state.type;
+					kept.chat.push(said);
+					console.log(`kept chat: ${said}`);
+				},
+			});
+		},
+	),
 
 	chatReport: withPlainErrors(async () => {
 		const status = chat.participant?.status();

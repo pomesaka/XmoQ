@@ -13,6 +13,13 @@ export {
 } from "./core/limits.ts";
 export type { Line, Malformed } from "./core/payloads.ts";
 export {
+	type ChatConnection,
+	DEFAULT_ROOM_AGAIN_MS,
+	type KeepInTheRoomOptions,
+	keepInTheRoom,
+	type RoomState,
+} from "./moqt/keep-in-the-room.ts";
+export {
 	type ChatParticipant,
 	type ChatStatus,
 	type JoinChatOptions,

@@ -9,26 +9,17 @@
 // connects again. Where it missed more, one line says so above them.
 
 import {
+	type ChatConnection,
 	type ChatLimits,
 	type ChatParticipant,
 	catchUpLines,
 	chatLimits,
-	joinChat,
 	type KeptBack,
+	keepInTheRoom,
 	type LinesGap,
 	type SayOutcome,
 } from "@xmoq/chat";
-import type { MoqtConnection } from "@xmoq/moqt";
-
-/**
- * A connection for the chat, and the token for the participant's
- * PUBLISH_NAMESPACE where the relay asks for tokens (`--auth`); the
- * connection carries the one for reading the room.
- */
-export interface ChatConnection {
-	connection: MoqtConnection;
-	publishNamespaceToken: Uint8Array | undefined;
-}
+import type { GoAwayNotice } from "@xmoq/moqt";
 
 declare const XMOQ_DEMO: { chatTracks: boolean };
 
@@ -38,9 +29,6 @@ declare const XMOQ_DEMO: { chatTracks: boolean };
  * Not a flag: what a page holds is bounded whatever the address says.
  */
 const SHOWN_LINES = 200;
-
-/** How long the page waits before it connects again for the chat, as the pages do for the broadcast. */
-const AGAIN_MS = 2_000;
 
 /**
  * `?chatTextBytes=N` and `?chatLinesPerSecond=N`: the limits of a line,
@@ -93,13 +81,19 @@ const shownTime = (at: number): string => new Date(at).toTimeString().slice(0, 8
 
 /**
  * Shows the chat of the room `room` as `name`, and says what is typed in
- * the form, on a connection of `connectForChat`. Does nothing where the
- * page has no chat (`serve.ts` runs no gatherer).
+ * the form, on a connection of `connectForChat` (with the GOAWAY that ended
+ * the session before, where one did). Does nothing where the page has no
+ * chat (`serve.ts` runs no gatherer).
+ *
+ * WHY a connection of its own, and not the one of the broadcast: the
+ * participant names the `serve` handlers of its connection, which the
+ * publishing page needs for its own tracks, and the chat goes on while the
+ * watching page changes its broadcast or connects again for it.
  */
 export function startChat(
 	room: string,
 	name: string,
-	connectForChat: () => Promise<ChatConnection>,
+	connectForChat: (goAway?: GoAwayNotice) => Promise<ChatConnection>,
 ): void {
 	const log = document.getElementById("chat");
 	const note = document.getElementById("chat-note");
@@ -159,16 +153,35 @@ export function startChat(
 	};
 
 	let participant: ChatParticipant | undefined;
-	void keepInTheRoom(
-		connectForChat,
-		() => ({ room, name, limits, catchUpLines: catchUp, lastHad }),
-		(joined) => {
-			participant = joined;
+	// Each participant is told the newest line shown (`lastHad`), so that it
+	// fetches the lines the page missed while it was away.
+	void keepInTheRoom({
+		connect: connectForChat,
+		join: () => ({
+			room,
+			name,
+			limits,
+			catchUpLines: catchUp,
+			lastHad,
+			onLine: add,
+			onGap: addGap,
+			onMalformed: (number, why) => say(`line ${number} of the track is no line: ${why}`),
+			onStatus: (status) =>
+				say(
+					`chat over the track: ${status.heard ? "the gatherer listens" : "nobody listens yet"}, ${status.following ? "following the room" : `not following the room (${status.lastEnd ?? "not yet"})`}`,
+				),
+		}),
+		onState(state) {
+			if (state.type === "joined") {
+				participant = state.participant;
+				return;
+			}
+			participant = undefined;
+			if (state.type === "session-ended") say("chat over the track: the session ended; connecting again");
+			if (state.type === "moved") say(`chat over the track: the relay sent it to ${state.goAway.newSessionUri || "itself"}`);
+			if (state.type === "failed") say(`chat over the track: ${String(state.error).slice(0, 120)}`);
 		},
-		add,
-		addGap,
-		say,
-	);
+	});
 
 	const form = document.querySelector("form");
 	form?.addEventListener("submit", (event) => {
@@ -197,53 +210,3 @@ export function startChat(
 	});
 }
 
-/**
- * Connects for the chat, joins the room, and does so again `AGAIN_MS` after
- * the session ended, for as long as the page is open. Each participant is
- * told the newest line shown (`lastHad` of `where`), so that it fetches the
- * lines the page missed while it was away.
- *
- * WHY a connection of its own, and not the one of the broadcast: the
- * participant names the `serve` handlers of its connection, which the
- * publishing page needs for its own tracks, and the chat goes on while the
- * watching page changes its broadcast or connects again for it.
- */
-async function keepInTheRoom(
-	connectForChat: () => Promise<ChatConnection>,
-	where: () => {
-		room: string;
-		name: string;
-		limits: ChatLimits;
-		catchUpLines: number;
-		lastHad: bigint | undefined;
-	},
-	joined: (participant: ChatParticipant | undefined) => void,
-	onLine: Parameters<typeof joinChat>[1]["onLine"],
-	onGap: (gap: LinesGap) => void,
-	say: (text: string) => void,
-): Promise<void> {
-	for (;;) {
-		try {
-			const { connection, publishNamespaceToken } = await connectForChat();
-			const participant = await joinChat(connection, {
-				...where(),
-				publishNamespaceToken,
-				onLine,
-				onGap,
-				onMalformed: (number, why) => say(`line ${number} of the track is no line: ${why}`),
-				onStatus: (status) =>
-					say(
-						`chat over the track: ${status.heard ? "the gatherer listens" : "nobody listens yet"}, ${status.following ? "following the room" : `not following the room (${status.lastEnd ?? "not yet"})`}`,
-					),
-			});
-			joined(participant);
-			await connection.closed;
-			joined(undefined);
-			say("chat over the track: the session ended; connecting again");
-		} catch (error) {
-			joined(undefined);
-			say(`chat over the track: ${String(error).slice(0, 120)}`);
-		}
-		await new Promise((resolve) => setTimeout(resolve, AGAIN_MS));
-	}
-}
