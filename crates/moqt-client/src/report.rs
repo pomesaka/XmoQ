@@ -305,6 +305,12 @@ pub fn ready_to_publish() {
     println!("READY_TO_PUBLISH");
 }
 
+/// `--subscribe-on-line`: the session is set up, and the subscriber waits
+/// for the driver's line `subscribe`.
+pub fn ready_to_subscribe() {
+    println!("READY_TO_SUBSCRIBE");
+}
+
 /// `--serve-on-line`: the SUBSCRIBE this client would serve has come, with
 /// this Request ID, and waits for the driver's line `serve`.
 pub fn asked(request_id: u64) {
