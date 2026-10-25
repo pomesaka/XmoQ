@@ -33,7 +33,7 @@ use xmoq_moqt_io::{
     read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
-    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, LimitsOfASession, OutStreamKey,
+    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, LimitsOfASession, OutStreamKey, Over,
     OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SessionKey, StreamKey,
 };
 
@@ -593,7 +593,7 @@ struct SessionHandle<C: Connection> {
     /// Alias the relay gave it, which a session never gets again; within
     /// [`Self::budget`]. One that no stream holds is dropped when the next
     /// stream opens.
-    subscriptions: HashMap<u64, Arc<SendBudget>>,
+    subscriptions: HashMap<u64, SubscriptionBudget>,
     /// The subgroup streams towards it that the relay was told to open and
     /// that are not open yet: they wait for the peer to allow one more
     /// stream. For the log (`DATA_OPENED`).
@@ -612,6 +612,14 @@ struct SessionHandle<C: Connection> {
     /// [`HubConfig::when_full`]; it counts for [`MAX_SENDING_AWAY`] and not
     /// for [`HubConfig::max_sessions`].
     sent_away: bool,
+}
+
+/// What waits to be written to one subscription, and the stream of it that
+/// was opened last, which names the subscription to the core
+/// ([`Over::Relay`]).
+struct SubscriptionBudget {
+    budget: Arc<SendBudget>,
+    latest: OutStreamKey,
 }
 
 /// The path of a connection as fields of a log line; nothing for a
@@ -1980,69 +1988,64 @@ impl<C: Connection> Hub<C> {
             .get(&out_stream)
             .and_then(|(session, writer)| writer.send(object).err().map(|full| (*session, full)));
         if let Some((session, full)) = full {
-            let carried = self.carried_for(session, full);
-            pending.push_back(Event::SendQueueFull {
-                out_stream,
-                carried,
-            });
+            pending.push_back(self.queue_full(out_stream, session, full));
         }
-        self.keep_to_the_relay_s_bound(pending);
+        self.keep_to_the_relay_s_bound(out_stream, pending);
     }
 
     /// Where more waits to be written to all the subscribers than
-    /// [`HubConfig::send_for_the_relay_bytes`], the subscription of any
-    /// session that has the most bytes waiting ends, as one over its own
-    /// limit does.
+    /// [`HubConfig::send_for_the_relay_bytes`], the core is told so
+    /// (`Over::Relay`) with the bytes waiting for each subscription that
+    /// has some, named by its stream opened last, and chooses the one that
+    /// ends.
     ///
-    /// WHY after the Object was queued, and not by refusing it as the
-    /// limits of a session and a subscription do: the Object that goes over
-    /// is as often one of a subscriber that keeps up, whose stream would be
-    /// reset for a hole; the relay is over by that Object until the
-    /// subscription has ended. WHY the bytes waiting and not those a stream
-    /// carried, which choose within a session: a subscriber that keeps up
-    /// carries the most, having been sent the most, and what ending one
-    /// frees of this bound is what waits.
-    fn keep_to_the_relay_s_bound(&self, pending: &mut VecDeque<Event>) {
+    /// WHY by subscription and not by stream: this runs for every Object
+    /// while the relay is over, which is when it has the most to do, and a
+    /// relay has far fewer subscriptions than streams. WHY the stream opened
+    /// last names it: a subscription with bytes waiting has a stream not
+    /// done, the latest the likeliest; where that one is gone the core
+    /// passes the subscription over, and the next Object tells it again.
+    fn keep_to_the_relay_s_bound(&self, out_stream: OutStreamKey, pending: &mut VecDeque<Event>) {
         if self.budget.in_use().0 <= self.config.send_for_the_relay_bytes {
             return;
         }
-        let most = self
+        let held = self
             .sessions
             .values()
             .flat_map(|handle| handle.subscriptions.values())
-            .max_by_key(|budget| budget.in_use().0);
-        let Some(most) = most else {
-            return;
-        };
-        let stream = self
-            .out_streams
-            .iter()
-            .find(|(_, (_, writer))| writer.counts_in(most))
-            .map(|(key, _)| *key);
-        if let Some(out_stream) = stream {
-            // Nothing carried: the subscription of `out_stream` is the one
-            // that ends.
-            pending.push_back(Event::SendQueueFull {
-                out_stream,
-                carried: Vec::new(),
-            });
-        }
+            .map(|subscription| (subscription.latest, subscription.budget.in_use().0))
+            .filter(|(_, bytes)| *bytes > 0)
+            .collect();
+        pending.push_back(Event::SendQueueFull {
+            out_stream,
+            over: Over::Relay,
+            held,
+        });
     }
 
-    /// What each stream not done to `session` has carried
-    /// ([`OutgoingSubgroup::carried`]), for the core to choose which
-    /// subscription to end, where the budget `full` names of a stream to
-    /// `session` is used up: none for the subscription's own, which ends;
-    /// those to `session` for the session's.
-    fn carried_for(&self, session: SessionKey, full: QueueFull) -> Vec<(OutStreamKey, usize)> {
+    /// What the core is told where the budget `full` names of a stream to
+    /// `session` is used up: for the subscription's own, nothing more; for
+    /// the session's, what each stream not done to `session` has carried
+    /// ([`OutgoingSubgroup::carried`]).
+    fn queue_full(&self, out_stream: OutStreamKey, session: SessionKey, full: QueueFull) -> Event {
         if full.level == SUBSCRIPTION_BUDGET {
-            return Vec::new();
+            return Event::SendQueueFull {
+                out_stream,
+                over: Over::Subscription,
+                held: Vec::new(),
+            };
         }
-        self.out_streams
+        let held = self
+            .out_streams
             .iter()
             .filter(|(_, (of, _))| *of == session)
             .map(|(key, (_, writer))| (*key, writer.carried()))
-            .collect()
+            .collect();
+        Event::SendQueueFull {
+            out_stream,
+            over: Over::Session,
+            held,
+        }
     }
 
     /// Hands a control message to the writer of the session's control
@@ -2410,6 +2413,7 @@ impl<C: Connection> Hub<C> {
         &mut self,
         session: SessionKey,
         track_alias: u64,
+        out_stream: OutStreamKey,
     ) -> Option<Arc<SendBudget>> {
         let limits = SendLimits {
             delivery_patience: self.config.send.delivery_patience,
@@ -2420,12 +2424,17 @@ impl<C: Connection> Hub<C> {
         // subscriptions of a session come and go.
         handle
             .subscriptions
-            .retain(|_, budget| Arc::strong_count(budget) > 1);
-        let budget = handle
-            .subscriptions
-            .entry(track_alias)
-            .or_insert_with(|| SendBudget::within(limits, &handle.budget));
-        Some(Arc::clone(budget))
+            .retain(|_, subscription| Arc::strong_count(&subscription.budget) > 1);
+        let subscription =
+            handle
+                .subscriptions
+                .entry(track_alias)
+                .or_insert_with(|| SubscriptionBudget {
+                    budget: SendBudget::within(limits, &handle.budget),
+                    latest: out_stream,
+                });
+        subscription.latest = out_stream;
+        Some(Arc::clone(&subscription.budget))
     }
 
     /// Carries out [`Action::OpenDataStream`]; another action is none of
@@ -2442,7 +2451,8 @@ impl<C: Connection> Hub<C> {
             return;
         };
         let delivery_timeout = asked.map(Duration::from_millis);
-        let Some(subscription) = self.subscription_budget(session, header.track_alias) else {
+        let Some(subscription) = self.subscription_budget(session, header.track_alias, out_stream)
+        else {
             return;
         };
         let Some(handle) = self.sessions.get(&session) else {
@@ -2528,11 +2538,7 @@ impl<C: Connection> Hub<C> {
                 // Too many streams of this subscription, of this subscriber
                 // or of the relay are not written out. No writer was
                 // started, so the hub says what one would have said.
-                let carried = self.carried_for(session, full);
-                pending.push_back(Event::SendQueueFull {
-                    out_stream,
-                    carried,
-                });
+                pending.push_back(self.queue_full(out_stream, session, full));
                 pending.push_back(Event::OutStreamClosed { out_stream });
             }
         }

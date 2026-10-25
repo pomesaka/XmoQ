@@ -49,8 +49,8 @@ use std::sync::Arc;
 
 pub use cache::CachedObject;
 pub use events::{
-    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, OutStreamKey, OwnRequestEnd, OwnRequestKey,
-    RequestEnd, SessionKey, StreamEnd, StreamKey,
+    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, OutStreamKey, Over, OwnRequestEnd,
+    OwnRequestKey, RequestEnd, SessionKey, StreamEnd, StreamKey,
 };
 pub use fetch::{
     MAX_BYTES_HELD_BEYOND_THE_CACHE, MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER, fetch_reset_passed_on,
@@ -2120,14 +2120,11 @@ impl Relay {
             | Event::DataStreamClosed { .. }
             | Event::TrackMalformed { .. }
             | Event::EarlyStreamTimeout { .. }
-            | Event::CheckStreamTimeout { .. } => {}
+            | Event::CheckStreamTimeout { .. }
+            | Event::SendQueueFull { .. } => {}
             Event::OutStreamOpened { out_stream } => self.out_stream_opened(out_stream),
             Event::OutStreamStopped { out_stream } => self.out_stream_stopped(out_stream),
             Event::OutStreamClosed { out_stream } => self.forget_out_stream(out_stream),
-            Event::SendQueueFull {
-                out_stream,
-                carried,
-            } => self.on_send_queue_full(out_stream, &carried, &mut actions),
             Event::DrainTimeout {
                 session,
                 track_alias,
@@ -2195,6 +2192,11 @@ impl Relay {
             Event::CheckStreamTimeout { session, stream } => {
                 self.on_check_timeout(session, stream, actions);
             }
+            Event::SendQueueFull {
+                out_stream,
+                over,
+                held,
+            } => self.on_send_queue_full(out_stream, over, &held, actions),
             other => return Some(other),
         }
         None
@@ -2206,80 +2208,144 @@ impl Relay {
         }
     }
 
-    /// What waits to be written for `out_stream` is over a limit. The
-    /// subscription of that session whose streams carry the most ends
-    /// (`carried`, from the I/O side), the one of `out_stream` where none
-    /// carries more. `carried` holds nothing for a limit of the subscription
-    /// itself and for the relay's (`out_stream` is then one of the
-    /// subscription the I/O side chose), so that the subscription of
-    /// `out_stream` ends; it holds the streams of the session for the
-    /// session's limit.
+    /// What waits to be written for `out_stream` is over the limit `over`,
+    /// and `held` is what each stream holds by its measure ([`Over`]). One
+    /// subscription ends:
+    ///
+    /// - [`Over::Subscription`]: that of `out_stream`.
+    /// - [`Over::Session`]: of the subscriber's session, the one whose
+    ///   streams carried the most bytes; that of `out_stream` where none
+    ///   carried more.
+    /// - [`Over::Relay`]: of any session, the one whose streams have the
+    ///   most bytes waiting; the first in `held` where two have as much.
+    ///   `out_stream` plays no part: it may be gone already, ended by a
+    ///   limit of the session that the same Object reached first.
     ///
     /// WHY end one subscription: its queue is the only place the delay can
     /// go without holding back the publisher and the other subscribers (§8
-    /// names `TOO_FAR_BEHIND` for it). WHY the one that carries the most, and
-    /// not the one that went over: the limit is the session's, and the one
-    /// that went over is as often a small track that comes often, the sound
-    /// behind its own video, as the track that fills it; a viewer behind a
-    /// link of 2 Mbit/s lost its sound so in one run of two
+    /// names `TOO_FAR_BEHIND` for it). WHY the one that carried the most of
+    /// the session, and not the one that went over: the limit is the
+    /// session's, and the one that went over is as often a small track that
+    /// comes often, the sound behind its own video, as the track that fills
+    /// it; a viewer behind a link of 2 Mbit/s lost its sound so in one run
+    /// of two
     /// (docs/experiments/2026-10-14-three-minutes-behind-a-narrow-link-and-the-relays-limit-for-one-viewer.md).
     /// WHY bytes and not streams: a sound of one piece a stream holds more
-    /// streams than its video.
+    /// streams than its video. WHY the bytes waiting for the relay's limit,
+    /// of any session: a subscriber that keeps up has carried the most,
+    /// having been sent the most, and what ending one frees of this limit is
+    /// what waits.
     ///
-    /// Where another subscription ends, `out_stream` itself is reset with
-    /// `TOO_FAR_BEHIND`: the Object that did not fit was not queued, and a
-    /// stream without it would carry a Subgroup with a hole.
+    /// Where another subscription ends at the limit of a session,
+    /// `out_stream` itself is reset with `TOO_FAR_BEHIND`: the Object that
+    /// did not fit was not queued, and a stream without it would carry a
+    /// Subgroup with a hole. At the relay's limit the Object was queued
+    /// (`HubConfig::send_for_the_relay_bytes`: the Object that goes over is
+    /// as often one of a subscriber that keeps up), and nothing else is
+    /// reset.
     fn on_send_queue_full(
         &mut self,
         out_stream: OutStreamKey,
-        carried: &[(OutStreamKey, usize)],
+        over: Over,
+        held: &[(OutStreamKey, usize)],
         actions: &mut Vec<Action>,
     ) {
-        let Some(out) = self.out_streams.get(&out_stream) else {
+        let own = self
+            .out_streams
+            .get(&out_stream)
+            .map(|out| (out.session, out.track.clone()));
+        let ended = match over {
+            Over::Relay => self.most_held(held, |_| true).map(|(key, _)| key),
+            Over::Subscription => own,
+            // The subscription of `out_stream` where none of the session
+            // carried more.
+            Over::Session => own.map(|own| {
+                let session = own.0;
+                match self.most_held(held, |of| of == session) {
+                    Some((key, bytes)) if bytes > self.held_by(held, &own) => key,
+                    _ => own,
+                }
+            }),
+        };
+        let Some(ended) = ended else {
             return;
         };
-        let (full_track, subscriber) = (out.track.clone(), out.session);
-        let mut by_track: Vec<(FullTrackName, usize)> = vec![(full_track.clone(), 0)];
-        for (stream, bytes) in carried {
+        let own_stream_has_a_hole = over == Over::Session
+            && self
+                .out_streams
+                .get(&out_stream)
+                .is_some_and(|out| (out.session, &out.track) != (ended.0, &ended.1));
+        if own_stream_has_a_hole {
+            self.reset_for_a_hole(out_stream, actions);
+        }
+        let (session, track) = ended;
+        self.end_subscription(
+            &track,
+            session,
+            publish_done_status::TOO_FAR_BEHIND,
+            stream_reset_code::TOO_FAR_BEHIND,
+            actions,
+        );
+    }
+
+    /// Of the subscriptions of the streams in `held` whose session `counts`,
+    /// the one that holds the most, summed over its streams, with what it
+    /// holds; the first of them where two hold as much.
+    fn most_held(
+        &self,
+        held: &[(OutStreamKey, usize)],
+        counts: impl Fn(SessionKey) -> bool,
+    ) -> Option<((SessionKey, FullTrackName), usize)> {
+        let mut by_subscription: HashMap<(SessionKey, FullTrackName), (usize, usize)> =
+            HashMap::new();
+        for (order, (stream, bytes)) in held.iter().enumerate() {
             let Some(out) = self.out_streams.get(stream) else {
                 continue;
             };
-            if out.session != subscriber {
+            if !counts(out.session) {
                 continue;
             }
-            if let Some(entry) = by_track.iter_mut().find(|(track, _)| *track == out.track) {
-                entry.1 = entry.1.saturating_add(*bytes);
-            } else {
-                by_track.push((out.track.clone(), *bytes));
-            }
+            let entry = by_subscription
+                .entry((out.session, out.track.clone()))
+                .or_insert((order, 0));
+            entry.1 = entry.1.saturating_add(*bytes);
         }
-        // The first of the largest: the track of `out_stream` where it ties.
-        let ended = by_track
-            .iter()
-            .fold(None::<&(FullTrackName, usize)>, |most, entry| match most {
-                Some(most) if most.1 >= entry.1 => Some(most),
-                _ => Some(entry),
+        by_subscription
+            .into_iter()
+            .max_by(|(_, (a_order, a)), (_, (b_order, b))| a.cmp(b).then(b_order.cmp(a_order)))
+            .map(|(key, (_, bytes))| (key, bytes))
+    }
+
+    /// What the streams of the subscription `of` hold in `held`.
+    fn held_by(&self, held: &[(OutStreamKey, usize)], of: &(SessionKey, FullTrackName)) -> usize {
+        held.iter()
+            .filter(|(stream, _)| {
+                self.out_streams
+                    .get(stream)
+                    .is_some_and(|out| (out.session, &out.track) == (of.0, &of.1))
             })
-            .map_or_else(|| full_track.clone(), |(track, _)| track.clone());
-        if ended != full_track {
-            let subscriber_entry = self.tracks.live_mut(&full_track).and_then(|track| {
-                track
-                    .subscribers
-                    .iter_mut()
-                    .find(|entry| entry.session == subscriber)
-            });
-            reset_out_stream(
-                &mut self.out_streams,
-                subscriber_entry,
-                out_stream,
-                stream_reset_code::TOO_FAR_BEHIND,
-                actions,
-            );
-        }
-        self.end_subscription(
-            &ended,
-            subscriber,
-            publish_done_status::TOO_FAR_BEHIND,
+            .map(|(_, bytes)| *bytes)
+            .fold(0, usize::saturating_add)
+    }
+
+    /// `out_stream`'s Object did not fit, and another subscription ends: the
+    /// stream is reset with `TOO_FAR_BEHIND`, which would carry a Subgroup
+    /// with a hole.
+    fn reset_for_a_hole(&mut self, out_stream: OutStreamKey, actions: &mut Vec<Action>) {
+        let Some(out) = self.out_streams.get(&out_stream) else {
+            return;
+        };
+        let (subscriber, full_track) = (out.session, out.track.clone());
+        let subscriber_entry = self.tracks.live_mut(&full_track).and_then(|track| {
+            track
+                .subscribers
+                .iter_mut()
+                .find(|entry| entry.session == subscriber)
+        });
+        reset_out_stream(
+            &mut self.out_streams,
+            subscriber_entry,
+            out_stream,
             stream_reset_code::TOO_FAR_BEHIND,
             actions,
         );

@@ -1954,13 +1954,6 @@ impl OutgoingSubgroup {
         self.share.carried.load(Ordering::Relaxed)
     }
 
-    /// Whether the stream was started with `budget`
-    /// ([`Self::spawn`]), and not one within it.
-    #[must_use]
-    pub fn counts_in(&self, budget: &Arc<SendBudget>) -> bool {
-        Arc::ptr_eq(&self.share.budget, budget)
-    }
-
     /// Queues an Object.
     ///
     /// # Errors
