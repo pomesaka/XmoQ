@@ -1,6 +1,6 @@
 # xmoq-transcriber
 
-The transcriber (decided on 2026-10-25). It is a client of the relay beside it, as the gatherer of the chat is. It listens to the audio tracks of the broadcasts announced under a prefix, reads their words with whisper.cpp ([`xmoq-speech`](../speech/README.md)), and publishes them as one track for each prefix. An agent reads the transcript by subscribing to that track, and so can any viewer.
+The transcriber (decided on 2026-10-25). It is a client of the relay beside it, as the gatherer of the chat is. It listens to the audio tracks of the broadcasts announced under a prefix, reads their words with a reader, whisper.cpp by default (`--engine`, [`xmoq-speech`](../speech/README.md)), and publishes them as one track for each prefix. An agent reads the transcript by subscribing to that track, and so can any viewer.
 
 ```sh
 mise run speech-model                       # the default model, once
@@ -24,7 +24,7 @@ WHY these, and WHY NOT the other choices (every namespace of the relay; a room t
 
 **The pieces are numbered from the time the transcriber started**, in milliseconds since the Unix epoch, and up by one from there. A transcriber that starts again therefore goes on above the Group IDs it gave before, which a relay and its subscribers may still have (why, at `Transcript::new` in `src/transcript.rs`). **Nothing is kept on disk**: the pieces are lost when it stops. Whether and for how long a transcript is to be kept is [undecided](../../docs/open-questions.md).
 
-**Readers for every track** (`src/bin/xmoq-transcriber/reader.rs`): threads over the one model, one by default (`--readers`). Each takes the next piece that was cut. A piece that finds `--waiting` pieces waiting for it is dropped and counted (`PIECE_DROPPED`). How long a piece waited, how long whisper.cpp took, and how long after the end of the piece its words were there are in each `SPEECH` line (`waited_ms`, `took_ms`, `behind_ms`). `behind_ms` is `at` minus `endUs` (both in milliseconds), and holds where the broadcast's Timestamps are wall-clock time, as the demo's pages make them.
+**Readers for every track** (`src/bin/xmoq-transcriber/reader.rs`): threads, one by default (`--readers`), each with a reader of `--engine`, which the binary knows by the trait `Words` of `xmoq-speech` alone. Readers of whisper.cpp share the one model. Each takes the next piece that was cut. A piece that finds `--waiting` pieces waiting for it is dropped and counted (`PIECE_DROPPED`). How long a piece waited, how long the reader took, and how long after the end of the piece its words were there are in each `SPEECH` line (`waited_ms`, `took_ms`, `behind_ms`). `behind_ms` is `at` minus `endUs` (both in milliseconds), and holds where the broadcast's Timestamps are wall-clock time, as the demo's pages make them.
 
 **How many voices at once**: with the default model on a Mac (one machine, loopback), one transcriber kept up with 2 people speaking at the same moment with `--language auto`, and 4 with `--language en`. With more, the words came later and later, and with 8 and `auto` pieces were dropped. With `--model small-q5_1` it kept up with 8 with `auto` and 16 with `en`; `--readers 2` read no more than one reader on Metal ([record](../../docs/experiments/2026-10-25-how-many-voices-one-transcriber-reads.md)).
 
@@ -35,13 +35,14 @@ An audio subscription that ends or is refused while the broadcast stays announce
 | Flag | Default | What it sets | The flag's range |
 |---|---|---|---|
 | `--namespace` | (needed) | A prefix to listen under, its fields between slashes | 1 to 8; none the same as another, a prefix of it, or under it; 30 fields at the most |
+| `--engine` | `whisper` | What reads the pieces (`Engine` of [`xmoq-speech`](../speech/README.md)). How the sound is cut, and the track and the numbering of the words, are the same with every reader | `whisper` |
 | `--model` | `~/.cache/xmoq/whisper/ggml-large-v3-turbo-q5_0.bin` | The file of the model | |
 | `--language` | `auto` | A language code of whisper's (`ja`, `en`), or `auto`, with which whisper.cpp finds the language of each piece first (twice as slow, [`xmoq-speech`](../speech/README.md)). With a code, every voice is read in that language: an English voice read with `ja` came out in Japanese | |
 | `--voice` | `vad` | How a voice is told: by the model of voice activity, or by `loudness` (why the model: [`xmoq-speech`](../speech/README.md)) | `vad`, `loudness` |
 | `--vad-model` | `~/.cache/xmoq/whisper/ggml-silero-v5.1.2.bin` | The file of the model of voice activity. Loaded once at the start, so that a missing one stops the transcriber there, and once more for each broadcast | |
 | `--keep` | 1,000 | The latest pieces of each transcript kept for FETCH | 1 to 100,000 |
 | `--waiting` | 16 | Pieces that wait for the reader | 1 to 256 |
-| `--readers` | 1 | Threads that read pieces at once, each with a state of its own over the one model (`Whisper::another` of `xmoq-speech`). With more than one, a later piece can be done before an earlier one, of the same voice as well, and is numbered first | 1 to 8 |
+| `--readers` | 1 | Threads that read pieces at once, each with a reader of `--engine` (`engine::open` of `xmoq-speech`); readers of whisper.cpp have a state of their own over the one model. With more than one, a later piece can be done before an earlier one, of the same voice as well, and is numbered first | 1 to 8 |
 | `--tracks` | 16 | Broadcasts listened to at once; one more is passed over (`BROADCAST_IGNORED`) | 1 to 100 |
 | `--auth-key-hex` | none | The relay's key, of which the transcriber makes its tokens: `sub` in `<prefix>/*` for its SETUP, its SUBSCRIBE_NAMESPACE, SUBSCRIBEs and FETCHes, and `pub` in `xmoq/transcript/<prefix>` for its PUBLISH. For the demo alone, as the gatherer's (Q51, provisional) | |
 
@@ -63,7 +64,7 @@ A piece that is not sent live is kept, and a FETCH gets it.
 
 ## What is where
 
-The library (`src/*.rs`) decides and does no input or output: what the flags mean (`args`), and the numbering and keeping of a transcript (`transcript`). The binary (`src/bin/xmoq-transcriber/`): `session.rs` (the requests and the answers on one session), `reader.rs` (the thread of whisper.cpp), `main.rs` (the model, connecting again, the signals). What it prints, one line for each thing it does (`MODEL_LOADED`, `VAD_LOADED`, `WATCHING`, `BROADCAST`, `AUDIO_SUBSCRIBED`, `TRANSCRIPT_PUBLISHED`, `PIECE_CUT`, `SPEECH`, `PIECE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/transcriber.ts` waits for.
+The library (`src/*.rs`) decides and does no input or output: what the flags mean (`args`), and the numbering and keeping of a transcript (`transcript`). The binary (`src/bin/xmoq-transcriber/`): `session.rs` (the requests and the answers on one session), `reader.rs` (the threads of the readers), `main.rs` (opening the reader, connecting again, the signals). What it prints, one line for each thing it does (`MODEL_LOADED`, `VAD_LOADED`, `WATCHING`, `BROADCAST`, `AUDIO_SUBSCRIBED`, `TRANSCRIPT_PUBLISHED`, `PIECE_CUT`, `SPEECH`, `PIECE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/transcriber.ts` waits for.
 
 ## Not done
 

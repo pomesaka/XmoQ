@@ -1,7 +1,7 @@
 [package]
 name = "xmoq-transcriber"
 version = "0.0.0"
-description = "The transcriber: listens to the audio tracks of the broadcasts announced under a prefix, reads their words with whisper.cpp, and publishes them as one track a prefix."
+description = "The transcriber: listens to the audio tracks of the broadcasts announced under a prefix, reads their words (whisper.cpp by default), and publishes them as one track a prefix."
 edition.workspace = true
 publish.workspace = true
 

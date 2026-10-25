@@ -1,20 +1,21 @@
-//! The one reader of every track: a thread of its own with the model of
-//! whisper.cpp, which reads the pieces in the order they were cut.
+//! The readers of every track: threads, each with a reader of `--engine`
+//! (`xmoq_speech::engine`), which read the pieces in the order they were
+//! cut.
 //!
-//! WHY a thread and not a task: whisper.cpp holds the thread it reads on
-//! for as long as it reads, a fifth of the piece's length and more
-//! (`crates/speech/README.md`), and the session's loop must go on meanwhile.
-//! WHY readers for every track and not one for each: the model is loaded
-//! once (550 MiB), and each reader is a state of its own over it
-//! (`--readers`, 1 by default; `Whisper::another`).
+//! WHY a thread and not a task: a reader holds the thread it reads on for
+//! as long as it reads (whisper.cpp a twentieth of the piece's length and
+//! more, `crates/speech/README.md`), and the session's loop must go on
+//! meanwhile. WHY readers for every track and not one for each: whisper.cpp
+//! loads its model once, and each reader is a state of its own over it
+//! (`--readers`, 1 by default).
 
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
+use xmoq_speech::Words;
 use xmoq_speech::cut::Piece;
-use xmoq_speech::whisper::Whisper;
 use xmoq_transcriber::transcript::Said;
 
 /// What the reader has read and the loop has not taken yet; the reader
@@ -34,7 +35,7 @@ pub struct ToRead {
 pub struct Read {
     pub prefix: usize,
     pub said: Said,
-    /// How long it waited for the reader, and how long whisper.cpp took.
+    /// How long it waited for the reader, and how long the reader took.
     pub waited_ms: u128,
     pub took_ms: u128,
 }
@@ -46,18 +47,21 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Starts a thread for each of `whispers`, with at most `waiting`
+    /// Starts a thread for each of `readers`, with at most `waiting`
     /// pieces waiting for them. Each thread takes the next piece that
     /// waits. What they read comes on the receiver, in the order each was
     /// done: with more than one thread, a later piece can be done before
     /// an earlier one, of the same voice as well.
-    pub fn start(whispers: Vec<Whisper>, waiting: usize) -> (Self, mpsc::Receiver<Read>) {
+    pub fn start(
+        readers: Vec<Box<dyn Words + Send>>,
+        waiting: usize,
+    ) -> (Self, mpsc::Receiver<Read>) {
         let (pieces, to_read) = sync_channel(waiting);
         let to_read = Arc::new(Mutex::new(to_read));
         let (read_by, read) = mpsc::channel(READ_QUEUE);
-        for mut whisper in whispers {
+        for mut words in readers {
             let (to_read, read_by) = (Arc::clone(&to_read), read_by.clone());
-            std::thread::spawn(move || run(&mut whisper, &to_read, &read_by));
+            std::thread::spawn(move || run(words.as_mut(), &to_read, &read_by));
         }
         (Self { pieces, dropped: 0 }, read)
     }
@@ -97,7 +101,7 @@ fn next(to_read: &Mutex<Receiver<(Instant, ToRead)>>) -> Option<(Instant, ToRead
 }
 
 fn run(
-    whisper: &mut Whisper,
+    words: &mut dyn Words,
     to_read: &Mutex<Receiver<(Instant, ToRead)>>,
     read_by: &mpsc::Sender<Read>,
 ) {
@@ -111,7 +115,7 @@ fn run(
     )) = next(to_read)
     {
         let began = Instant::now();
-        let text = whisper.text(&piece.samples);
+        let text = words.text(&piece.samples);
         let took_ms = began.elapsed().as_millis();
         let waited_ms = began.duration_since(given).as_millis();
         let text = match text {

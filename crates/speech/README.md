@@ -1,6 +1,6 @@
 # xmoq-speech
 
-The words of audio tracks, for the transcriber ([`xmoq-transcriber`](../transcriber/README.md)). It decodes the packets of Opus of a track to one channel at 16 kHz, cuts the sound where there is a voice, and reads each piece with whisper.cpp.
+The words of audio tracks, for the transcriber ([`xmoq-transcriber`](../transcriber/README.md)). It decodes the packets of Opus of a track to one channel at 16 kHz, cuts the sound where there is a voice, and reads each piece with a reader: whisper.cpp by default.
 
 | Module | What it does |
 |---|---|
@@ -8,12 +8,13 @@ The words of audio tracks, for the transcriber ([`xmoq-transcriber`](../transcri
 | `frames` | The sound in frames of 20 ms, each with the Timestamp of its first sample. A Timestamp more than 100 ms from where the sound before ended is a gap, and ends the piece under way |
 | `judge` | Whether a frame has a voice. **By default by a model of voice activity** (Silero, through whisper.cpp): the frames are judged half a second at a time, together with the half second before them, and a frame has a voice where the window of 32 ms its middle is in has a probability of 0.5 or more. **Or by loudness** (`--voice loudness` of the transcriber, and the tests): -40 dBFS or louder. Why the model, below |
 | `cut` | Where a piece begins and ends: with a frame that has a voice, the end after 600 ms without one, and no piece longer than 15 s. Pieces with less than 250 ms of voice are left out. 200 ms before the voice are kept |
-| `whisper`, `vad` | whisper.cpp through `whisper-rs`, for reading and for telling a voice: the two files that use it |
+| `engine` | Which reader reads the pieces (`Engine`, the transcriber's `--engine`), and opening it (`open`): the one place that names the readers |
+| `whisper`, `vad` | whisper.cpp through `whisper-rs`, for reading and for telling a voice: the two files that use it. `whisper` is private to the crate: a reader is had through `engine` |
 | `model` | Where a model is looked for |
 
 **All values are provisional**: they were chosen on voices of `say`, not on a meeting.
 
-`Listener` (one for each track) decodes, judges and cuts. Each track has a model of voice activity of its own, which holds what it heard of that track. `Words` reads a piece, and `Whisper` implements it. The transcriber has one `Whisper` for every track. The model is loaded once, and whisper.cpp reads one piece at a time.
+`Listener` (one for each track) decodes, judges and cuts. Each track has a model of voice activity of its own, which holds what it heard of that track. `Words` reads a piece; `engine::open` gives the readers of the engine it is told, and the transcriber knows them by `Words` alone. The transcriber has its readers for every track. The model is loaded once, and whisper.cpp reads one piece at a time.
 
 ```sh
 mise run speech-model                    # the default model, into ~/.cache/xmoq/whisper/
@@ -23,6 +24,12 @@ afconvert -f WAVE -d LEI16@48000 -c 1 voice.aiff voice.wav     # macOS, from `sa
 cargo run --release --example read-wav -p xmoq-speech -- ~/.cache/xmoq/whisper/ggml-tiny.bin en voice.wav \
   ~/.cache/xmoq/whisper/ggml-silero-v5.1.2.bin    # without it, a voice is told by loudness
 ```
+
+## The readers
+
+WHY a choice of readers (asked for on 2026-10-25 by the project owner): the transcription is an experiment, and what reads the words may become another program than whisper.cpp, an agent among them. A reader gets a piece, 16 kHz and one channel, and gives its words; how the sound is cut, and the track and the numbering of the words, stay outside it. A reader is added as a value of `Engine` in `src/engine.rs` and a file of its own.
+
+**Every reader needs whisper.cpp to be built**: the model of voice activity that cuts the sound (Silero, `vad`) runs on whisper.cpp too. WHY it is not moved to another runtime now (decided on 2026-10-25): the cutting is outside the reader and works as it is; moving it would be a change of the cutting, measured again, for a build that only a transcriber without whisper.cpp would gain.
 
 ## whisper.cpp, and what it needs to build
 

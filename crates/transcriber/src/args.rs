@@ -3,16 +3,19 @@
 use std::path::PathBuf;
 
 use xmoq_moqt::name::TrackNamespace;
+use xmoq_speech::engine::Engine;
 
 /// How the transcriber is started without a flag it does not know.
 pub const USAGE: &str = "\
 xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --namespace <a/b>...
-                 [--model <file>] [--language <code>] [--voice vad|loudness] [--vad-model <file>]
+                 [--engine whisper] [--model <file>] [--language <code>]
+                 [--voice vad|loudness] [--vad-model <file>]
                  [--keep <n>] [--waiting <n>] [--readers <n>] [--tracks <n>]
                  [--auth-key-hex <hex>]
 
 --namespace     a prefix whose broadcasts are listened to, its fields between slashes; up to 8,
                 none a prefix of another. Its transcript is the track speech of xmoq/transcript/<prefix>
+--engine        what reads the pieces (whisper)
 --model         the file of a model of whisper.cpp (~/.cache/xmoq/whisper/ggml-large-v3-turbo-q5_0.bin;
                 mise run speech-model fetches it)
 --language      a language code of whisper's, or auto (auto). A code is twice as fast as auto, and has
@@ -58,6 +61,8 @@ pub struct Args {
     pub cert_sha256: [u8; 32],
     /// `--namespace`, in the order given.
     pub prefixes: Vec<TrackNamespace>,
+    /// `--engine`.
+    pub engine: Engine,
     /// `--model`; `None` for the default in the cache
     /// (`xmoq_speech::model`).
     pub model: Option<PathBuf>,
@@ -119,6 +124,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut url, mut cert_sha256, mut model, mut auth_key) = (None, None, None, None);
     let mut prefixes: Vec<TrackNamespace> = Vec::new();
     let mut language = "auto".to_string();
+    let mut engine = Engine::Whisper;
     let (mut vad, mut vad_model) = (true, None);
     let (mut keep, mut waiting, mut tracks, mut readers) = (1000, 16, 16, 1);
     while let Some(flag) = flags.next() {
@@ -146,6 +152,11 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
                     ));
                 }
                 prefixes.push(namespace);
+            }
+            "--engine" => {
+                engine = Engine::named(&value).ok_or_else(|| {
+                    format!("--engine is one of {}, not {value:?}", Engine::NAMES)
+                })?;
             }
             "--model" => model = Some(PathBuf::from(value)),
             "--language" => language = value,
@@ -184,6 +195,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
         url: url.ok_or("--url is needed")?,
         cert_sha256: cert_sha256.ok_or("--cert-sha256 is needed")?,
         prefixes,
+        engine,
         model,
         language,
         vad,
@@ -229,13 +241,18 @@ mod tests {
             (None, "auto", 1000, 16, 16, None)
         );
         assert_eq!((read.vad, read.vad_model, read.readers), (true, None, 1));
+        assert_eq!(read.engine, Engine::Whisper);
         let loudness = args(&["--namespace", "a", "--voice", "loudness"]).unwrap();
         assert!(!loudness.vad);
     }
 
     #[test]
     fn flags_that_are_refused() {
-        let cases: [(&[&str], &str); 11] = [
+        let cases: [(&[&str], &str); 12] = [
+            (
+                &["--namespace", "a", "--engine", "claude"],
+                "--engine is one of whisper",
+            ),
             (
                 &["--namespace", "a", "--readers", "9"],
                 "--readers is a number from 1 to 8",
