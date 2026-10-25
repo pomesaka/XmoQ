@@ -43,7 +43,7 @@ use xmoq_picture::video_decoder::VideoDecoder;
 use xmoq_viewer::chat_track::{shown, shown_gap};
 use xmoq_viewer::room::{self, Broadcast};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
-use xmoq_viewer_io::room_socket::{ChatTokens, RoomSocket};
+use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};
 use xmoq_viewer_io::session::{
     self, Events, GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, new_url,
     timestamp_of,
@@ -392,8 +392,10 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     // With a room: where the broadcast is, and a token, are the room's to say.
     let mut room = match &args.source {
         Source::Room { address, name, .. } => {
-            let joining = RoomSocket::join(address, name);
-            let Some(room) = ui.unless_ended("the room", ANSWER_WAIT, joining).await? else {
+            let joining = RoomSocket::join_when_there(address, name, ROOM_COMES_WITHIN);
+            // The last try may begin as the refusals' time ends.
+            let wait = ROOM_COMES_WITHIN + ANSWER_WAIT;
+            let Some(room) = ui.unless_ended("the room", wait, joining).await? else {
                 return Ok(());
             };
             Some(room)

@@ -1,6 +1,10 @@
 //! A room over its WebSocket (`xmoq_viewer::room` has what is said on it).
 
 use std::collections::VecDeque;
+use std::time::Duration;
+
+use tokio::time::Instant;
+use xmoq_again::AskAgain;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
@@ -42,7 +46,53 @@ pub struct RoomSocket {
     transcript: Option<Vec<String>>,
 }
 
+/// How long a room that refuses the connection is asked again, from the
+/// first try. **Provisional.** WHY asked again at all: rooms often start
+/// after the readers that join them (a demo started beside them, a Worker
+/// restarted), and a reader that gives up at the first refusal has to be
+/// started again by hand. WHY a limit: a wrong address would otherwise be
+/// tried for ever without a word.
+pub const ROOM_COMES_WITHIN: Duration = Duration::from_secs(30);
+
+/// Whether the connection was refused: nobody listens there (yet).
+fn refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+            || matches!(
+                cause.downcast_ref::<tokio_tungstenite::tungstenite::Error>(),
+                Some(tokio_tungstenite::tungstenite::Error::Io(io))
+                    if io.kind() == std::io::ErrorKind::ConnectionRefused
+            )
+    })
+}
+
 impl RoomSocket {
+    /// [`Self::join`], asked again by the rule of `xmoq-again` (a refusal
+    /// that names no time) while the connection is refused, for `within`
+    /// from the first try. Any other failure ends it at once.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::join`]; a refusal that lasts `within`.
+    pub async fn join_when_there(address: &str, name: &str, within: Duration) -> Result<Self> {
+        let until = Instant::now() + within;
+        let mut again = AskAgain::default();
+        loop {
+            match Self::join(address, name).await {
+                Err(error) if refused(&error) => {
+                    let pause = Duration::from_millis(again.after_refusal(None));
+                    if Instant::now() + pause > until {
+                        return Err(error.context(format!("refused for {} s", within.as_secs())));
+                    }
+                    tokio::time::sleep(pause).await;
+                }
+                joined => return joined,
+            }
+        }
+    }
+
     /// Joins the room at `address` (`http://host:port/rooms/<name>`) as
     /// `name`.
     ///
@@ -200,5 +250,86 @@ impl RoomSocket {
                 return Ok(self.current());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// A port that nobody listens on: bound, then let go.
+    async fn free_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    /// A room that says hello, from `delay` on, on `port`.
+    fn room_later(port: u16, delay: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Message::text(
+                    r#"{"type":"hello","connected":1,"broadcast":null}"#,
+                ))
+                .await
+                .unwrap();
+            // Held open until the reader has read the hello.
+            let _ = socket.next().await;
+        })
+    }
+
+    #[tokio::test]
+    async fn a_room_that_begins_listening_later_is_joined() {
+        let port = free_port().await;
+        let room = room_later(port, Duration::from_millis(1500));
+        let joined = RoomSocket::join_when_there(
+            &format!("http://127.0.0.1:{port}/rooms/demo"),
+            "agent",
+            ROOM_COMES_WITHIN,
+        )
+        .await
+        .unwrap();
+        assert_eq!(joined.current(), None);
+        drop(joined);
+        room.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_lasts_ends_it() {
+        let port = free_port().await;
+        let error = RoomSocket::join_when_there(
+            &format!("http://127.0.0.1:{port}/rooms/demo"),
+            "agent",
+            Duration::ZERO,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(refused(&error));
+        assert_eq!(error.to_string(), "refused for 0 s");
+    }
+
+    #[tokio::test]
+    async fn a_connection_closed_without_a_word_is_not_asked_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let closing = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        let error = RoomSocket::join_when_there(
+            &format!("http://127.0.0.1:{port}/rooms/demo"),
+            "agent",
+            ROOM_COMES_WITHIN,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(!refused(&error));
+        closing.await.unwrap();
     }
 }

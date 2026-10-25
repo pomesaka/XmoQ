@@ -8,7 +8,7 @@ Building it needs a C++ compiler, for the H.264 decoder that `xmoq-picture` buil
 
 ## Using it from an agent
 
-A demo of its own, on ports apart from `mise run demo`'s (4443, 8080, 8787), then the reader in its room, in the background:
+`mise run agent-demo -- start --out /tmp/room` does all of what follows in one go, with a voice as the page's microphone, and `mise run agent-demo -- stop --out /tmp/room` ends it (`scripts/agent-demo.sh` has its flags). By hand: a demo of its own, on ports apart from `mise run demo`'s (4443, 8080, 8787), then the reader in its room, in the background:
 
 ```sh
 bun install --frozen-lockfile          # once after main moved: the demo bundles the packages
@@ -34,7 +34,7 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
 
 | Flag | Default | What |
 |---|---|---|
-| `--room` | | The room. Its last path segment is the room of the chat |
+| `--room` | | The room. Its last path segment is the room of the chat. A room that refuses the connection is asked again every 1 s for 30 s, as `xmoq-watch` does (`ROOM_COMES_WITHIN` of `xmoq-viewer-io`) |
 | `--url`, `--cert-sha256`, `--namespace`, `--chat-room` | `xmoq/demo` for the namespace | A relay without a room, and the room of the chat on it |
 | `--name` | `agent` | The name in the chat |
 | `--out` | | The directory of `events.jsonl` and `frames/`, made where it is not. Started again in the same `--out`, the reader adds to `events.jsonl` and puts its pictures in a directory of its own (`frames/<when it began, ms>/`): nothing of a run before is written over or removed |

@@ -163,6 +163,17 @@ wait_for_line() {
 	done
 }
 
+# Waits until something listens on 127.0.0.1:$1, for $2 s at the most, while
+# the process $3 is there.
+wait_for_port() {
+	local port=$1 deadline=$((SECONDS + $2)) pid=$3
+	until (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; do
+		[[ -n $(began_of "${pid}") ]] || fail "it ended before 127.0.0.1:${port} listened"
+		[[ ${SECONDS} -lt ${deadline} ]] || fail "nothing listened on 127.0.0.1:${port} in $2 s"
+		sleep 0.2
+	done
+}
+
 start() {
 	if [[ -e ${pids} ]]; then
 		echo "agent-demo: ${pids} is there: a start before was not stopped (stop --out ${out})" >&2
@@ -194,6 +205,10 @@ start() {
 	local demo=$!
 	record "${demo}" "demo/serve.ts"
 	wait_for_line 0 "${out}/demo.log" "^publish:" 120 "${demo}"
+	# WHY: the demo says where the rooms are when it has started them, not
+	# when workerd listens; the reader asks again for a while, but a reader
+	# begun on a room that is there says nothing of the refusals.
+	wait_for_port "${rooms_port}" 60 "${demo}"
 
 	# WHY held open: the reader reads stdin to its end, and the first `echo`
 	# into a pipe that nobody else holds would be its end.

@@ -30,7 +30,7 @@ use xmoq_chat_tracks::names::Person;
 use xmoq_moqt_io::wt;
 use xmoq_moqt_io::{Connection, StreamConfig};
 use xmoq_viewer::room::{self, Broadcast, Relay};
-use xmoq_viewer_io::room_socket::{ChatTokens, RoomSocket};
+use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};
 use xmoq_viewer_io::session::termination_code;
 
 use crate::attend::{Ended, UntilClosed, attend};
@@ -460,8 +460,10 @@ fn person_of(args: &Args) -> Person {
 async fn run(args: &Args, reader: &mut Reader, pictures: &mut Option<Pictures>) -> Result<()> {
     let mut room = match &args.source {
         Source::Room { address, .. } => {
-            let joining = RoomSocket::join(address, &args.name);
-            let Some(room) = reader.unless_ended("the room", ROOM_WAIT, joining).await? else {
+            let joining = RoomSocket::join_when_there(address, &args.name, ROOM_COMES_WITHIN);
+            // The last try may begin as the refusals' time ends.
+            let wait = ROOM_COMES_WITHIN + ROOM_WAIT;
+            let Some(room) = reader.unless_ended("the room", wait, joining).await? else {
                 return Ok(());
             };
             Some(room)
