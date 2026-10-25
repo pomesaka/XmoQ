@@ -2142,6 +2142,10 @@ impl Relay {
             Event::SessionClosed { session } => self.drop_session(session, &mut actions),
             Event::UpstreamFailed => self.upstream_failed(&mut actions),
             Event::GoingAway(going_away) => self.on_going_away(going_away, &mut actions),
+            Event::SendAway {
+                session,
+                going_away,
+            } => self.send_away(session, going_away, &mut actions),
         }
         actions
     }
@@ -2490,6 +2494,23 @@ impl Relay {
         // It fails for a second GOAWAY alone: the relay sent SETUP when the
         // session opened, and a client's GOAWAY has no URI.
         if let Ok(message) = state.moqt.go_away(uri, going_away.timeout_ms) {
+            actions.push(Action::SendControl { session, message });
+        }
+    }
+
+    /// [`Event::SendAway`]. Nothing where the session has had its GOAWAY
+    /// already, because the relay is to stop, or is gone.
+    fn send_away(&mut self, session: SessionKey, going_away: GoingAway, actions: &mut Vec<Action>) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        if state.moqt.role() != Role::Server {
+            return;
+        }
+        if let Ok(message) = state
+            .moqt
+            .go_away(going_away.new_session_uri, going_away.timeout_ms)
+        {
             actions.push(Action::SendControl { session, message });
         }
     }

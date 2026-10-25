@@ -86,7 +86,7 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
 | `mise run fmt` | Apply formatting and safe fixes |
 
-The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop run start it) has these flags, read off `crates/relay/src/main.rs` on 2026-10-13. The pages' and `demo/serve.ts`'s are in [the demo's README](demo/README.md), the terminal viewer's in `USAGE` of `crates/watch/src/args.rs`.
+The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop run start it) has these flags, read off `crates/relay/src/main.rs` on 2026-10-25. The pages' and `demo/serve.ts`'s are in [the demo's README](demo/README.md), the terminal viewer's in `USAGE` of `crates/watch/src/args.rs`.
 
 | Flag | What it sets | Without it |
 |---|---|---|
@@ -95,7 +95,8 @@ The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop
 | `--idle-timeout-ms` | How long nothing may arrive from a peer before its connection counts as lost | 6,000 |
 | `--setup-timeout-ms` | How long a client has for its SETUP | 10,000 |
 | `--idle-session-ms` | How long a session that has sent its SETUP may hold nothing | 30,000 |
-| `--max-sessions` | How many sessions it takes at once | 256 |
+| `--max-sessions` | How many sessions it takes at once; more than 0 | 1,000 |
+| `--when-full` | Where a session goes that comes when it is full: a GOAWAY after its SETUP names this URL with `sent-away=1` in its query, and a session that came with that is closed rather than sent on. The relay there has to have the same certificate, or one the clients take otherwise | Closed with `INTERNAL_ERROR` |
 | `--announce-at-once` | How many `PUBLISH_NAMESPACE` requests a session may send at once | 5 |
 | `--announce-every-ms` | The time in which a session gets one of them back | 1,000 |
 | `--requests-for-one-session` | How many requests the relay has open on one publisher for one subscriber's session | 8 |

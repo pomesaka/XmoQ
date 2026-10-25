@@ -673,7 +673,7 @@ async function main(): Promise<void> {
 	// so and connects again after two seconds, asking the room anew where
 	// the broadcast is.
 	await keepPlaying({
-		async connect() {
+		async connect(goAway) {
 			// Where the room names no broadcast, the page waits for the
 			// room's word that one has begun, which comes as it happens.
 			// WHY NOT ask again after the pause, as before: the pause is 2
@@ -688,7 +688,15 @@ async function main(): Promise<void> {
 				found = await room.named();
 				link = "connecting";
 			}
-			const broadcast = through(found);
+			// After a GOAWAY that named a place, the page goes there (transport
+			// §10.4: "The client MUST use this URI for the new session if
+			// provided"), as a relay that is full asks; the room still says
+			// what is played. The relay there has the same certificate.
+			const named = through(found);
+			const broadcast =
+				goAway === undefined || goAway.newSessionUri === ""
+					? named
+					: { ...named, relayUrl: goAway.newSessionUri };
 			document.body.dataset.broadcast = JSON.stringify(broadcast);
 			playingNamespace = namespace(broadcast.namespace);
 			// Where the rooms give tokens, the connection carries one.

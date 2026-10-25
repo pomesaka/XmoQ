@@ -105,3 +105,48 @@ fn a_request_after_it_is_refused_with_going_away_and_what_was_taken_goes_on() {
         "{actions:?}"
     );
 }
+
+#[test]
+fn a_session_sent_away_alone_is_told_and_refuses_what_it_is_asked_and_the_others_go_on() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    let send_away = |session| Event::SendAway {
+        session,
+        going_away: GoingAway {
+            new_session_uri: URI.to_vec(),
+            timeout_ms: 10_000,
+        },
+    };
+    assert_eq!(relay.step(send_away(BOB)), [go_away(BOB, URI, 0)]);
+    // Once only: the second would be a protocol violation (§10.4).
+    assert_eq!(relay.step(send_away(BOB)), []);
+    assert_eq!(
+        subscribe_to_track(&mut relay, BOB),
+        [
+            Action::SendRequest {
+                session: BOB,
+                stream: StreamKey(0),
+                message: request_error(0x6),
+            },
+            Action::FinishRequest {
+                session: BOB,
+                stream: StreamKey(0),
+            },
+        ]
+    );
+    // Alice was told nothing, and still gets the track.
+    data_stream_opened(&mut relay, 7);
+    let actions = object_arrived(&mut relay, 7, 0);
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::SendObject { .. })),
+        "{actions:?}"
+    );
+    assert!(
+        !actions.iter().any(
+            |action| matches!(action, Action::SendControl { session, .. } if *session == ALICE)
+        ),
+        "{actions:?}"
+    );
+}

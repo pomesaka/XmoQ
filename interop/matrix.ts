@@ -51,6 +51,7 @@ interface Pairing {
 		| "chat-pages.ts"
 		| "chat-tokens.ts"
 		| "auth-edge.ts"
+		| "when-full.ts"
 		| "agent.ts"
 		| "transcriber.ts"
 		| "agent-frames.ts"
@@ -1723,6 +1724,18 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			name: "own relay: edge: auth: both relays ask for tokens, the one below makes its own for its SETUP and its SUBSCRIBE upstream, and checks its viewers as before",
 			script: "auth-edge.ts",
 			args: [],
+			relay: "own",
+		},
+		{
+			name: "own relay: when full: the relay above, full, sends the next viewer with GOAWAY to the relay below (`--when-full`), and the page plays there",
+			script: "when-full.ts",
+			args: ["--case", "moves"],
+			relay: "own",
+		},
+		{
+			name: "own relay: when full: two full relays that name each other send a viewer away once, and the one it was sent to closes it",
+			script: "when-full.ts",
+			args: ["--case", "both-full"],
 			relay: "own",
 		},
 		...["own-browser", "own-rust"].map(

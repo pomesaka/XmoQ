@@ -53,7 +53,7 @@ use xmoq_relay_core::{
 /// | Objects waiting to be written to it | 4 MiB (`send.bytes`) |
 /// | Messages waiting to be written to it | 256 a stream |
 ///
-/// That is about 27 MiB a session and 6.9 GiB for 256 sessions, plus what the
+/// That is about 27 MiB a session and 26 GiB for 1,000 sessions, plus what the
 /// events that wait for the hub hold (shared, 1024 events). Without the QUIC
 /// limits the first two rows are those of the transport library, which for
 /// quinn's defaults are far larger than everything else here.
@@ -61,8 +61,28 @@ use xmoq_relay_core::{
 pub struct HubConfig {
     /// Limits and deadlines of the streams of each session.
     pub streams: StreamConfig,
-    /// Sessions served at once. One more is closed at once.
+    /// Sessions served at once. One more is sent to [`Self::when_full`]
+    /// where there is one, and closed at once otherwise. **Provisional:
+    /// 1,000** (decided on 2026-10-25 that a full relay sends the next
+    /// session to another; the number is the 500 viewers a relay is to
+    /// serve, at two sessions a page, `docs/open-questions.md`).
     pub max_sessions: usize,
+    /// Where a session goes that comes when [`Self::max_sessions`] are
+    /// served: the URL a GOAWAY right after the relay's SETUP names (§3.6,
+    /// §10.4), with [`SENT_AWAY_QUERY`] added. `None`: it is closed.
+    ///
+    /// WHY a GOAWAY after SETUP: it is the one thing of the draft that names
+    /// another place for a whole session, and the clients here follow it.
+    /// WHY NOT refuse before SETUP: nothing before SETUP carries a URI, and
+    /// a client refused by the WebTransport handshake knows only to come
+    /// back. WHY NOT REDIRECT (§10.6.1) on each request: the session would
+    /// keep its place, and no client here follows a REDIRECT.
+    ///
+    /// No certificate hash goes with it: a GOAWAY carries a URI alone, and a
+    /// client that pinned a hash pins the same one at the URI (the pages of
+    /// `interop/page.ts`, `new_url` of `xmoq-viewer-io`), so the relay there
+    /// has to have the same certificate, or one under a CA the clients take.
+    pub when_full: Option<String>,
     /// Events from all sessions that wait for the hub. Readers wait beyond
     /// that, which holds their peers back through flow control.
     pub event_queue_len: usize,
@@ -189,6 +209,72 @@ impl HubConfig {
     }
 }
 
+/// What a full relay adds to the query of the URL it sends a session to
+/// ([`HubConfig::when_full`]). A session that came with it is closed where
+/// the relay is full, and not sent on.
+///
+/// WHY: two relays that each name the other are the natural pair, and a
+/// client cannot stop the round by itself (the watching page and the
+/// terminal viewer go at once after one GOAWAY, and after a pause after the
+/// next, without end). WHY NOT more than one step: where the second relay
+/// is full as well, the place to find a relay with room is the one that
+/// hands out relays, which is not here yet.
+pub const SENT_AWAY_QUERY: &str = "sent-away=1";
+
+/// The Timeout of the GOAWAY a session that is sent away gets, and how long
+/// it has to go before it is closed with `GOAWAY_TIMEOUT`. **Provisional.**
+/// WHY short: the session holds a place beyond [`HubConfig::max_sessions`]
+/// and has nothing to carry; the clients here go at once.
+pub const SEND_AWAY_TIMEOUT_MS: u64 = 2_000;
+
+/// How many sessions may be being sent away at once, beyond
+/// [`HubConfig::max_sessions`]. One more is closed at once. **Provisional.**
+/// WHY a bound: each is a connection the relay holds, as long as
+/// [`SEND_AWAY_TIMEOUT_MS`]. WHY 64: as many as the handshakes the relay
+/// takes at once (`MAX_HANDSHAKES` of `main.rs`).
+pub const MAX_SENDING_AWAY: usize = 64;
+
+/// `GOAWAY_TIMEOUT` (§3.5): "The session was closed because the peer took
+/// too long to close the session in response to a GOAWAY".
+pub const GOAWAY_TIMEOUT: u32 = 0x10;
+
+/// How a session came to the relay ([`HubHandle::add_session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    /// As any session does.
+    First,
+    /// Sent by a relay that was full: its URL has [`SENT_AWAY_QUERY`].
+    SentAway,
+}
+
+impl Arrival {
+    /// How the session of a URL whose query is `query` came.
+    #[must_use]
+    pub fn of_query(query: Option<&str>) -> Self {
+        let sent_away =
+            query.is_some_and(|query| query.split('&').any(|pair| pair == SENT_AWAY_QUERY));
+        if sent_away {
+            Self::SentAway
+        } else {
+            Self::First
+        }
+    }
+}
+
+/// `url` with [`SENT_AWAY_QUERY`] in its query.
+fn sent_away_url(url: &str) -> String {
+    let (before, fragment) = url
+        .split_once('#')
+        .map_or((url, None), |(before, fragment)| (before, Some(fragment)));
+    let joint = if before.contains('?') { '&' } else { '?' };
+    let mut sent = format!("{before}{joint}{SENT_AWAY_QUERY}");
+    if let Some(fragment) = fragment {
+        sent.push('#');
+        sent.push_str(fragment);
+    }
+    sent
+}
+
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
@@ -203,7 +289,8 @@ impl Default for HubConfig {
                 report_objects_begun: true,
                 ..StreamConfig::default()
             },
-            max_sessions: 256,
+            max_sessions: 1_000,
+            when_full: None,
             event_queue_len: 1024,
             session_queue_len: 256,
             send: SendLimits::default(),
@@ -297,6 +384,11 @@ enum Envelope<C: Connection> {
     NewSession {
         session: SessionKey,
         connection: Arc<C>,
+        arrival: Arrival,
+    },
+    /// The Timeout of the GOAWAY of a session that was sent away is over.
+    SendAwayDue {
+        session: SessionKey,
     },
     /// The first message of a request stream, with the half to answer on.
     RequestOpened {
@@ -424,6 +516,10 @@ struct SessionHandle<C: Connection> {
     /// stream of its FETCH ([`Action::AbortFetchWrite`],
     /// [`Action::SetFetchSendOrder`]).
     fetch_write_controls: HashMap<StreamKey, FetchControl>,
+    /// It came when the relay was full and was sent to
+    /// [`HubConfig::when_full`]; it counts for [`MAX_SENDING_AWAY`] and not
+    /// for [`HubConfig::max_sessions`].
+    sent_away: bool,
 }
 
 /// The path of a connection as fields of a log line; nothing for a
@@ -846,12 +942,13 @@ impl<C: Connection> HubHandle<C> {
     }
 
     /// Hands a connection whose handshake is done to the relay.
-    pub async fn add_session(&self, connection: C) {
+    pub async fn add_session(&self, connection: C, arrival: Arrival) {
         // Relaxed: the numbers only have to differ.
         let session = SessionKey(self.next_session.fetch_add(1, Ordering::Relaxed));
         let envelope = Envelope::NewSession {
             session,
             connection: Arc::new(connection),
+            arrival,
         };
         // An error means the hub is gone, and the connection with the envelope.
         let _ = self.events.send(envelope).await;
@@ -1247,7 +1344,9 @@ impl<C: Connection> Hub<C> {
                 Envelope::NewSession {
                     session,
                     connection,
-                } => self.add_session(session, connection, Role::Server),
+                    arrival,
+                } => self.add_session(session, connection, Role::Server, arrival),
+                Envelope::SendAwayDue { session } => self.send_away_due(session),
                 Envelope::Upstream(connected) => self.upstream_connected(connected),
                 Envelope::RequestOpened {
                     session,
@@ -1453,7 +1552,7 @@ impl<C: Connection> Hub<C> {
             Ok(connection) => {
                 let session = SessionKey(self.next_session.fetch_add(1, Ordering::Relaxed));
                 self.log(|| format!("UPSTREAM_CONNECTED session={}", session.0));
-                self.add_session(session, connection, Role::Client);
+                self.add_session(session, connection, Role::Client, Arrival::First);
             }
             Err(reason) => {
                 self.log(|| format!("UPSTREAM_FAILED {reason}"));
@@ -1465,8 +1564,27 @@ impl<C: Connection> Hub<C> {
     /// `role` is the relay's: [`Role::Client`] for its session with the
     /// upstream relay, which is not refused for [`HubConfig::max_sessions`],
     /// since without it nobody of this relay gets the tracks it carries.
-    fn add_session(&mut self, session: SessionKey, connection: Arc<C>, role: Role) {
-        if role == Role::Server && self.sessions.len() >= self.config.max_sessions {
+    fn add_session(
+        &mut self,
+        session: SessionKey,
+        connection: Arc<C>,
+        role: Role,
+        arrival: Arrival,
+    ) {
+        let sending_away = self
+            .sessions
+            .values()
+            .filter(|handle| handle.sent_away)
+            .count();
+        let full = role == Role::Server
+            && self.sessions.len().saturating_sub(sending_away) >= self.config.max_sessions;
+        let send_to = match &self.config.when_full {
+            Some(url) if full && arrival == Arrival::First && sending_away < MAX_SENDING_AWAY => {
+                Some(sent_away_url(url))
+            }
+            _ => None,
+        };
+        if full && send_to.is_none() {
             self.log(|| format!("SESSION_REFUSED session={} too many sessions", session.0));
             connection.close(TerminationCode::InternalError.code(), b"too many sessions");
             return;
@@ -1531,9 +1649,41 @@ impl<C: Connection> Hub<C> {
                 tasks: vec![writer, watcher, setup_due],
                 fetch_writes: Vec::new(),
                 fetch_write_controls: HashMap::new(),
+                sent_away: send_to.is_some(),
             },
         );
-        self.feed(VecDeque::from([Event::SessionOpened { session, role }]));
+        let mut events = VecDeque::from([Event::SessionOpened { session, role }]);
+        if let Some(url) = send_to {
+            self.log(|| format!("SESSION_SENT_AWAY session={} uri={url}", session.0));
+            let due = tokio::spawn({
+                let events = self.events.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(SEND_AWAY_TIMEOUT_MS)).await;
+                    // The hub is gone when this fails.
+                    let _ = events.send(Envelope::SendAwayDue { session }).await;
+                }
+            });
+            if let Some(handle) = self.sessions.get_mut(&session) {
+                handle.tasks.push(due);
+            }
+            events.push_back(Event::SendAway {
+                session,
+                going_away: GoingAway {
+                    new_session_uri: url.into_bytes(),
+                    timeout_ms: SEND_AWAY_TIMEOUT_MS,
+                },
+            });
+        }
+        self.feed(events);
+    }
+
+    /// The session that was sent away is still there: §3.6, "The sender
+    /// closes the session with a `GOAWAY_TIMEOUT` if the peer doesn't close
+    /// the session within the indicated Timeout".
+    fn send_away_due(&mut self, session: SessionKey) {
+        let mut pending = VecDeque::new();
+        self.close(session, GOAWAY_TIMEOUT, "sent away", &mut pending);
+        self.feed(pending);
     }
 
     fn add_request(&mut self, session: SessionKey, stream: StreamKey, send: C::Send) {
