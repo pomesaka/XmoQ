@@ -33,6 +33,7 @@ use tokio::task::JoinSet;
 use xmoq_again::AskAgain;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
+use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::immutable::{Of, TrackRefusal, searched_integers};
 use xmoq_moqt::kvp::KeyValuePair;
@@ -51,7 +52,7 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestClose, PeerRequestStreamEvent, RequestClose,
-    RequestReadError, StreamConfig, StreamStops, Trace, UniEvent, read_request_streams,
+    RequestReadError, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, read_request_streams,
     read_uni_streams, send_message,
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
@@ -99,10 +100,6 @@ const PEER_REQUEST_QUEUE: usize = 16;
 /// What the tasks of the request streams said and the loop did not take
 /// yet. Provisional.
 const HEARD_QUEUE: usize = 256;
-
-/// Objects that came before the `SUBSCRIBE_OK` that gives their Track
-/// Alias (§11.4.2); past it the oldest is dropped. Provisional.
-const EARLY_OBJECTS: usize = 64;
 
 /// Pieces of a transcript that wait for its `PUBLISH_OK`; past it a piece is
 /// not sent live, and a FETCH gets it. Provisional.
@@ -281,7 +278,9 @@ struct Transcribing<'a> {
     /// The broadcast each catalog FETCH is for, by its Request ID.
     catalog_fetches: HashMap<u64, TrackNamespace>,
     catalogs: mpsc::Sender<(TrackNamespace, RequestId, Option<Vec<u8>>)>,
-    early: VecDeque<(u64, SubgroupObject)>,
+    /// Objects read before the `SUBSCRIBE_OK` that gives their Track Alias,
+    /// by that alias (`xmoq_moqt::early`).
+    early: EarlyObjects<(u64, SubgroupObject)>,
     refused: HashMap<u64, PeerRequestId>,
     fetches: HashMap<u64, Fetching>,
     fetch_done: mpsc::Sender<(u64, Answered)>,
@@ -400,7 +399,7 @@ pub async fn transcribe(
         asking_again: HashMap::new(),
         catalog_fetches: HashMap::new(),
         catalogs,
-        early: VecDeque::new(),
+        early: EarlyObjects::default(),
         refused: HashMap::new(),
         fetches: HashMap::new(),
         fetch_done,
@@ -1093,6 +1092,9 @@ impl Transcribing<'_> {
 
     /// An event of the relay's unidirectional streams.
     fn on_uni(&mut self, event: UniEvent) -> Result<Option<Ended>> {
+        // What a SUBSCRIBE that ended meanwhile left held is let go of before
+        // what came after it.
+        self.take_early()?;
         match event {
             UniEvent::Control(message) => match self.session.on_control_message(message)? {
                 ControlEvent::GoAway(_) => {
@@ -1101,26 +1103,42 @@ impl Transcribing<'_> {
                 }
                 ControlEvent::Setup(_) => bail!("the session took a second SETUP"),
             },
-            UniEvent::Object { header, object, .. } => {
+            UniEvent::Object {
+                stream,
+                header,
+                object,
+            } => {
                 if object.status != ObjectStatus::Normal {
                     return Ok(None);
                 }
-                let track = match self.session.subscribed_alias(header.track_alias) {
+                let (alias, bytes) = (header.track_alias, held_bytes(&object));
+                let object =
+                    match self
+                        .early
+                        .arrive(&self.session, stream, alias, bytes, (alias, object))
+                    {
+                        Arrived::Deliver((_, object)) => object,
+                        Arrived::Held => return Ok(None),
+                        Arrived::Stop { stream, code } => {
+                            self.stops.stop(stream, code);
+                            return Ok(None);
+                        }
+                    };
+                let track = match self.session.subscribed_alias(alias) {
                     SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
                         track.clone()
                     }
-                    SubscribedAlias::Unknown => {
-                        if self.early.len() >= EARLY_OBJECTS {
-                            self.early.pop_front();
-                        }
-                        self.early.push_back((header.track_alias, object));
-                        return Ok(None);
-                    }
-                    SubscribedAlias::Retired => return Ok(None),
+                    SubscribedAlias::Unknown | SubscribedAlias::Retired => return Ok(None),
                 };
                 self.on_object(&track, &object)?;
             }
-            UniEvent::SubgroupClosed { header, .. } => {
+            UniEvent::SubgroupClosed {
+                stream,
+                header,
+                end,
+            } => {
+                self.early
+                    .stream_closed(stream, !matches!(end, StreamEnd::Fin));
                 self.session.on_data_stream_closed(header.track_alias);
             }
             UniEvent::TrackMalformed { header, error, .. } => {
@@ -1282,7 +1300,7 @@ impl Transcribing<'_> {
         if let Some(broadcast) = self.broadcasts.get_mut(namespace) {
             broadcast.catalog_fetch = Some(token);
         }
-        self.take_early(track_alias)
+        self.take_early()
     }
 
     /// The fetch stream of a broadcast's catalog was read: its request is
@@ -1302,23 +1320,24 @@ impl Transcribing<'_> {
         }
     }
 
-    /// The Objects of a track that came before its `SUBSCRIBE_OK`.
-    fn take_early(&mut self, track_alias: u64) -> Result<()> {
-        let early: Vec<SubgroupObject> = self
-            .early
-            .iter()
-            .filter(|(alias, _)| *alias == track_alias)
-            .map(|(_, object)| object.clone())
-            .collect();
-        self.early.retain(|(alias, _)| *alias != track_alias);
-        if early.is_empty() {
+    /// The Objects held for an alias the session knows now are taken, in the
+    /// order they came, and the streams of those no `SUBSCRIBE` can give any
+    /// more are stopped (`xmoq_moqt::early`).
+    fn take_early(&mut self) -> Result<()> {
+        if self.early.is_empty() {
             return Ok(());
         }
-        let SubscribedAlias::Established(track) = self.session.subscribed_alias(track_alias) else {
-            return Ok(());
-        };
-        let track = track.clone();
-        for object in early {
+        let settled = self.early.settle(&self.session);
+        for (stream, code) in settled.stopped {
+            self.stops.stop(stream, code);
+        }
+        for (track_alias, object) in settled.released {
+            let track = match self.session.subscribed_alias(track_alias) {
+                SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
+                    track.clone()
+                }
+                SubscribedAlias::Unknown | SubscribedAlias::Retired => continue,
+            };
             self.on_object(&track, &object)?;
         }
         Ok(())
@@ -1380,12 +1399,12 @@ impl Transcribing<'_> {
             ) => {
                 self.catalog_established(&namespace.clone(), track_alias)?;
             }
-            (Purpose::Audio(namespace), RequestEvent::SubscribeEstablished { track_alias, .. }) => {
+            (Purpose::Audio(namespace), RequestEvent::SubscribeEstablished { .. }) => {
                 println!("AUDIO_SUBSCRIBED namespace={}", shown(namespace));
                 if let Some(broadcast) = self.broadcasts.get_mut(namespace) {
                     broadcast.again.subscribed();
                 }
-                self.take_early(track_alias)?;
+                self.take_early()?;
             }
             (Purpose::Speech(prefix), RequestEvent::PublishEstablished { forward, .. }) => {
                 self.published_ok(*prefix, token, forward)?;

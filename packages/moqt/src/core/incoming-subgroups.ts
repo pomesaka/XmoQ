@@ -169,7 +169,91 @@ const EARLY_CLOSED_ALIAS_LIMIT = 64;
 const HELD_OBJECT_OVERHEAD = 64;
 const HELD_PROPERTY_OVERHEAD = 16;
 
-function heldBytesOf(object: SubgroupObject): number {
+/**
+ * What a Track Alias is to the Objects of its streams, for the rule of
+ * `arrivalOf` (`fixtures/early-objects/`, which the Rust implementation reads
+ * too: `crates/moqt/src/early.rs`).
+ */
+export type EarlyAlias = "established" | "draining" | "retired" | "unknown";
+
+/** What becomes of an Object: to its subscription, held, or its stream stopped. */
+export type Arrival =
+	| { type: "deliver" }
+	| { type: "hold" }
+	| ({ type: "stop" } & StopReason);
+
+const subscriptionEnded: StopReason = {
+	reason: "the subscription ended",
+	code: StreamResetErrorCode.CANCELLED,
+};
+const unknownAlias: StopReason = {
+	reason: "unknown Track Alias",
+	code: StreamResetErrorCode.CANCELLED,
+};
+
+/**
+ * What becomes of an Object of an alias in the state `alias`, while
+ * `heldBytes` are held for the session and the Object is counted at
+ * `objectBytes` (`heldBytesOf`).
+ *
+ * §11.4.2: "If an endpoint receives a subgroup with an unknown Track Alias,
+ * it MAY abandon the stream, or choose to buffer it for a brief period to
+ * handle reordering with the control message that establishes the Track
+ * Alias." WHY held while a SUBSCRIBE waits for its answer: the SUBSCRIBE_OK
+ * and the first Objects come on different streams, and a relay that answers
+ * a SUBSCRIBE it held for a publisher (RENDEZVOUS_TIMEOUT) passes that
+ * publisher's first Object on at once; abandoned, it is lost. WHY NOT
+ * without one waiting: no answer can then give the alias. WHY NOT for a
+ * time: the SUBSCRIBE's own wait for its answer bounds it.
+ */
+export function arrivalOf(
+	alias: EarlyAlias,
+	subscribePending: boolean,
+	heldBytes: number,
+	objectBytes: number,
+	maxHeldBytes: number,
+): Arrival {
+	switch (alias) {
+		case "established":
+		case "draining":
+			return { type: "deliver" };
+		// §11.1: Objects of an ended subscription are dropped at once.
+		case "retired":
+			return { type: "stop", ...subscriptionEnded };
+		case "unknown":
+			if (!subscribePending) return { type: "stop", ...unknownAlias };
+			if (heldBytes + objectBytes > maxHeldBytes) {
+				return {
+					type: "stop",
+					reason: "too many Objects before SUBSCRIBE_OK",
+					code: StreamResetErrorCode.INTERNAL_ERROR,
+				};
+			}
+			return { type: "hold" };
+	}
+}
+
+/** What becomes of what is held for an alias once something changed: released to its subscription, kept, or its stream stopped. */
+export type Settle =
+	| { type: "release" }
+	| { type: "keep" }
+	| ({ type: "stop" } & StopReason);
+
+/** What becomes of Objects held for an alias that is now in the state `alias`. */
+export function settleOf(alias: EarlyAlias, subscribePending: boolean): Settle {
+	const arrival = arrivalOf(alias, subscribePending, 0, 0, 0);
+	switch (arrival.type) {
+		case "deliver":
+			return { type: "release" };
+		case "hold":
+			return { type: "keep" };
+		case "stop":
+			return arrival;
+	}
+}
+
+/** The bytes a held Object is counted at against `maxHeldSubgroupBytes`. */
+export function heldBytesOf(object: SubgroupObject): number {
 	let bytes = HELD_OBJECT_OVERHEAD + object.payload.length;
 	for (const { value } of object.properties) {
 		bytes += HELD_PROPERTY_OVERHEAD;
@@ -295,10 +379,6 @@ export function createIncomingSubgroups(
 		countEnded(stream, out);
 	};
 
-	const subscriptionEnded: StopReason = {
-		reason: "the subscription ended",
-		code: StreamResetErrorCode.CANCELLED,
-	};
 	/**
 	 * WHY INTERNAL_ERROR: no code of §3.3.3 is for a stream that is kept open
 	 * without bytes. DELIVERY_TIMEOUT is for "A delivery timeout (Section 8)",
@@ -312,10 +392,14 @@ export function createIncomingSubgroups(
 		reason: "no bytes within the idle time",
 		code: StreamResetErrorCode.INTERNAL_ERROR,
 	};
-	const unknownAlias: StopReason = {
-		reason: "unknown Track Alias",
-		code: StreamResetErrorCode.CANCELLED,
-	};
+
+	/** What a Track Alias is now, for `arrivalOf`; a draining one is bound as an established one is. */
+	const earlyAlias = (trackAlias: bigint): EarlyAlias =>
+		bindings.has(trackAlias)
+			? "established"
+			: retired.has(trackAlias)
+				? "retired"
+				: "unknown";
 
 	/** Returns why to abandon the stream, or nothing when it can go on. */
 	const onHeader = (
@@ -328,12 +412,14 @@ export function createIncomingSubgroups(
 			stream.subgroupId = header.subgroupId.value;
 		}
 		stream.requestId = bindings.get(header.trackAlias)?.requestId;
-		if (stream.requestId !== undefined) return undefined;
-		// §11.1: Objects of an ended subscription are dropped at once.
-		if (retired.has(header.trackAlias)) return subscriptionEnded;
-		// With no SUBSCRIBE Pending, no SUBSCRIBE_OK can establish this alias.
-		if (!options.hasPendingSubscribe()) return unknownAlias;
-		return undefined;
+		const arrival = arrivalOf(
+			earlyAlias(header.trackAlias),
+			options.hasPendingSubscribe(),
+			0,
+			0,
+			limits.maxHeldSubgroupBytes,
+		);
+		return arrival.type === "stop" ? arrival : undefined;
 	};
 
 	/** Delivers the Object, or holds it. Returns why to abandon the stream when holding it went over the limit. */
@@ -366,15 +452,17 @@ export function createIncomingSubgroups(
 			return undefined;
 		}
 		const bytes = heldBytesOf(object);
+		const arrival = arrivalOf(
+			"unknown",
+			options.hasPendingSubscribe(),
+			heldBytes,
+			bytes,
+			limits.maxHeldSubgroupBytes,
+		);
+		if (arrival.type === "stop") return arrival;
 		stream.held.push(event);
 		stream.heldBytes += bytes;
 		heldBytes += bytes;
-		if (heldBytes > limits.maxHeldSubgroupBytes) {
-			return {
-				reason: "too many Objects before SUBSCRIBE_OK",
-				code: StreamResetErrorCode.INTERNAL_ERROR,
-			};
-		}
 		return undefined;
 	};
 
@@ -575,11 +663,11 @@ export function createIncomingSubgroups(
 				if (stream.abandoned || stream.requestId !== undefined) continue;
 				if (stream.header === undefined) continue;
 				if (deliverHeld(stream, out)) continue;
-				if (retired.has(stream.header.trackAlias)) {
-					abandon(peerStream, stream, subscriptionEnded, out);
-				} else if (!stillPending) {
-					abandon(peerStream, stream, unknownAlias, out);
-				}
+				const settle = settleOf(
+					earlyAlias(stream.header.trackAlias),
+					stillPending,
+				);
+				if (settle.type === "stop") abandon(peerStream, stream, settle, out);
 			}
 			const finished = finishedHeld;
 			finishedHeld = [];

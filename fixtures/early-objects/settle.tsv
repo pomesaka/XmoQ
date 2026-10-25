@@ -1,0 +1,5 @@
+established-is-released	established	no	release
+draining-is-released	draining	no	release
+retired-is-stopped	retired	yes	stop-cancelled
+unknown-with-a-pending-subscribe-is-kept	unknown	yes	keep
+unknown-without-a-pending-subscribe-is-stopped	unknown	no	stop-cancelled

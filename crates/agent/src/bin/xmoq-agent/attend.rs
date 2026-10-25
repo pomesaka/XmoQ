@@ -761,7 +761,7 @@ pub async fn attend(
                     session::refuse_peer_request(&mut session, &mut refused, event).await?;
                 }
             }
-            event = events.recv() => match event {
+            event = events.recv_sorted(&session, &stops) => match event {
                 Some(UniEvent::Object { header, object, .. })
                     if chat.tracks.lines_alias() == Some(header.track_alias) =>
                 {

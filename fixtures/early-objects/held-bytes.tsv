@@ -1,0 +1,5 @@
+nothing	0	-	64
+a-payload	100	-	164
+a-varint-property	0	v	80
+a-bytes-property	10	b5	95
+two-properties	1	v,b3	100

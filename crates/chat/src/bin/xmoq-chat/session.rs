@@ -53,6 +53,7 @@ use xmoq_chat::gather::{Admitted, Gatherer};
 use xmoq_chat_tracks::names::{self, Person, lines_track, person_of, room_of_lines, said_track};
 use xmoq_chat_tracks::payloads::Line;
 use xmoq_moqt::data::ObjectStatus;
+use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
@@ -70,8 +71,8 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, PeerRequestClose, PeerRequestStreamEvent, RequestClose, RequestReadError,
-    SendStream, StreamConfig, StreamStops, Trace, UniEvent, read_request_streams, read_uni_streams,
-    send_message,
+    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, read_request_streams,
+    read_uni_streams, send_message,
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 
@@ -111,12 +112,6 @@ const PEER_REQUEST_QUEUE: usize = 16;
 /// What the tasks of the gatherer's request streams said and the loop did
 /// not take yet; they wait when it is full. Provisional.
 const HEARD_QUEUE: usize = 256;
-
-/// Objects of `said` that came before the `SUBSCRIBE_OK` that gives their
-/// Track Alias, which arrives on another stream (§11.4.2: such a stream
-/// "may be ahead of" its answer). Past it the oldest is dropped, and its
-/// line lost. WHY a limit: the relay names the aliases. Provisional.
-const EARLY_OBJECTS: usize = 64;
 
 /// Lines of a room that wait for its `PUBLISH_OK`. Past it a line is not
 /// sent live; it is in the store, and a FETCH gets it. Provisional.
@@ -287,7 +282,9 @@ struct Gathering<'a> {
     asking_again: HashMap<Person, Instant>,
     /// `--ask-again-times`, `--ask-again-ms`.
     ask_again: AskAgain,
-    early: VecDeque<(u64, Vec<u8>)>,
+    /// Objects of `said` read before the `SUBSCRIBE_OK` that gives their
+    /// Track Alias, by that alias, with their payload (`xmoq_moqt::early`).
+    early: EarlyObjects<(u64, Vec<u8>)>,
     /// The requests of the relay the session keeps after the gatherer
     /// refused them, by their stream, until the stream is gone.
     refused: HashMap<u64, PeerRequestId>,
@@ -389,7 +386,7 @@ pub async fn gather(
         people: HashMap::new(),
         asking_again: HashMap::new(),
         ask_again,
-        early: VecDeque::new(),
+        early: EarlyObjects::default(),
         refused: HashMap::new(),
         fetches: HashMap::new(),
         fetch_done,
@@ -830,20 +827,35 @@ impl Gathering<'_> {
 
     /// The subscription to a participant's `said` is established: the
     /// Objects that came before it are taken.
-    fn said_established(&mut self, person: &Person, track_alias: u64) -> Result<()> {
+    fn said_established(&mut self, person: &Person) -> Result<()> {
         println!("SUBSCRIBED room={:?} name={:?}", person.room, person.name);
         if let Some(followed) = self.people.get_mut(person) {
             followed.again.subscribed();
         }
-        let early: Vec<Vec<u8>> = self
-            .early
-            .iter()
-            .filter(|(alias, _)| *alias == track_alias)
-            .map(|(_, payload)| payload.clone())
-            .collect();
-        self.early.retain(|(alias, _)| *alias != track_alias);
-        for payload in early {
-            self.on_said(person, &payload)?;
+        self.settle_early()
+    }
+
+    /// The Objects held for an alias the session knows now are taken, in the
+    /// order they came, and the streams of those no `SUBSCRIBE` can give any
+    /// more are stopped (`xmoq_moqt::early`).
+    fn settle_early(&mut self) -> Result<()> {
+        if self.early.is_empty() {
+            return Ok(());
+        }
+        let settled = self.early.settle(&self.session);
+        for (stream, code) in settled.stopped {
+            self.stops.stop(stream, code);
+        }
+        for (track_alias, payload) in settled.released {
+            let person = match self.session.subscribed_alias(track_alias) {
+                SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
+                    person_of(track.namespace())
+                }
+                SubscribedAlias::Unknown | SubscribedAlias::Retired => None,
+            };
+            if let Some(person) = person {
+                self.on_said(&person, &payload)?;
+            }
         }
         Ok(())
     }
@@ -1038,6 +1050,9 @@ impl Gathering<'_> {
 
     /// An event of the relay's unidirectional streams.
     fn on_uni(&mut self, event: UniEvent) -> Result<Option<Ended>> {
+        // What a SUBSCRIBE that ended meanwhile left held is let go of before
+        // what came after it.
+        self.settle_early()?;
         match event {
             UniEvent::Control(message) => match self.session.on_control_message(message)? {
                 ControlEvent::GoAway(_) => {
@@ -1046,28 +1061,41 @@ impl Gathering<'_> {
                 }
                 ControlEvent::Setup(_) => bail!("the session took a second SETUP"),
             },
-            UniEvent::Object { header, object, .. } => {
+            UniEvent::Object {
+                stream,
+                header,
+                object,
+            } => {
                 if object.status != ObjectStatus::Normal {
                     return Ok(None);
                 }
-                let person = match self.session.subscribed_alias(header.track_alias) {
+                let (alias, bytes) = (header.track_alias, held_bytes(&object));
+                let item = (alias, object.payload);
+                let payload = match self.early.arrive(&self.session, stream, alias, bytes, item) {
+                    Arrived::Deliver((_, payload)) => payload,
+                    Arrived::Held => return Ok(None),
+                    Arrived::Stop { stream, code } => {
+                        self.stops.stop(stream, code);
+                        return Ok(None);
+                    }
+                };
+                let person = match self.session.subscribed_alias(alias) {
                     SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
                         person_of(track.namespace())
                     }
-                    SubscribedAlias::Unknown => {
-                        if self.early.len() >= EARLY_OBJECTS {
-                            self.early.pop_front();
-                        }
-                        self.early.push_back((header.track_alias, object.payload));
-                        return Ok(None);
-                    }
-                    SubscribedAlias::Retired => return Ok(None),
+                    SubscribedAlias::Unknown | SubscribedAlias::Retired => None,
                 };
                 if let Some(person) = person {
-                    self.on_said(&person, &object.payload)?;
+                    self.on_said(&person, &payload)?;
                 }
             }
-            UniEvent::SubgroupClosed { header, .. } => {
+            UniEvent::SubgroupClosed {
+                stream,
+                header,
+                end,
+            } => {
+                self.early
+                    .stream_closed(stream, !matches!(end, StreamEnd::Fin));
                 self.session.on_data_stream_closed(header.track_alias);
             }
             UniEvent::TrackMalformed { header, error, .. } => {
@@ -1195,8 +1223,8 @@ impl Gathering<'_> {
             (Purpose::Watch(_), RequestEvent::NamespaceDone(namespace)) => {
                 self.on_namespace_done(&namespace);
             }
-            (Purpose::Said(person), RequestEvent::SubscribeEstablished { track_alias, .. }) => {
-                self.said_established(person, track_alias)?;
+            (Purpose::Said(person), RequestEvent::SubscribeEstablished { .. }) => {
+                self.said_established(person)?;
             }
             (Purpose::Lines(room), RequestEvent::PublishEstablished { forward, .. }) => {
                 let room = room.clone();

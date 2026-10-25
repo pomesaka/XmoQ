@@ -1,0 +1,7 @@
+established-is-delivered	established	no	0	100	deliver
+draining-is-delivered	draining	no	0	100	deliver
+retired-is-stopped	retired	yes	0	100	stop-cancelled
+unknown-without-a-pending-subscribe-is-stopped	unknown	no	0	100	stop-cancelled
+unknown-with-a-pending-subscribe-is-held	unknown	yes	0	100	hold
+held-up-to-the-limit	unknown	yes	1048476	100	hold
+held-past-the-limit-is-stopped	unknown	yes	1048477	100	stop-internal-error
