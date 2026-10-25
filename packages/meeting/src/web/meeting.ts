@@ -92,10 +92,13 @@ export interface Meeting {
 	 * `MoqtConnection.subscribeNamespace` does where it is refused. Called
 	 * again with the next session, it keeps who was there: those the relay
 	 * does not tell of again within `SETTLE_MS` have left.
+	 * `onTaken` is called once the SUBSCRIBE_NAMESPACE was taken (its
+	 * REQUEST_OK), before anybody is told of.
 	 */
 	attend(
 		connection: MoqtConnection,
 		signal?: AbortSignal,
+		onTaken?: () => void,
 	): Promise<NamespaceSubscriptionEnd>;
 	/** The others there, in the order they came. */
 	ids(): string[];
@@ -145,12 +148,14 @@ export function createMeeting(options: MeetingOptions): Meeting {
 	const attend = async (
 		connection: MoqtConnection,
 		signal: AbortSignal = new AbortController().signal,
+		onTaken?: () => void,
 	): Promise<NamespaceSubscriptionEnd> => {
 		const prefix = meetingPrefix(options.room);
 		const subscription = await connection.subscribeNamespace(
 			{ trackNamespacePrefix: prefix.map((field) => utf8.encode(field)) },
 			{ signal },
 		);
+		onTaken?.();
 		const attending = new Map<string, Attending>();
 
 		const receive = (

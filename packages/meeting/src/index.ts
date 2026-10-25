@@ -12,6 +12,11 @@ export {
 	type OfferedTrack,
 } from "./core/tracks.ts";
 export {
+	type AttendingState,
+	type KeepAttendingOptions,
+	keepAttending,
+} from "./web/keep-attending.ts";
+export {
 	createMeeting,
 	DEFAULT_MOST_OTHERS,
 	DEFAULT_MOST_WATCHED,

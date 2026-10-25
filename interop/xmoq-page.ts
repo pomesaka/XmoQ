@@ -396,6 +396,24 @@ export type OwnPageExtras = {
 	 */
 	keptTranscriptReport(): Promise<string[]>;
 	/**
+	 * Attends the meeting of `room` as `self` with `keepAttending` of
+	 * `@xmoq/meeting`, as the demo's meeting page does, on connections of
+	 * its own to `relayUrl`, or to the URI of the GOAWAY that ended the
+	 * session before, with the same certificate's hash. What it receives is
+	 * closed and not counted.
+	 */
+	keepMeeting(
+		relayUrl: string,
+		certSha256Hex: string,
+		room: string,
+		self: string,
+	): Promise<void>;
+	/**
+	 * The states of `keepMeeting`, in order: "connecting 1", "attending 1
+	 * <relay URL>", "moved <URI>", "ended <how>", "failed <error>".
+	 */
+	keptMeetingReport(): Promise<string[]>;
+	/**
 	 * As `publishTrack` of the page, with the Track Property DYNAMIC_GROUPS
 	 * = 1 (transport §12.6) on the PUBLISH, and a handler for the
 	 * NEW_GROUP_REQUESTs of the subscriber. `sendObject` then sends on this

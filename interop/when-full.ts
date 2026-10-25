@@ -28,6 +28,16 @@
 //     above, as the demo's captions do (`keepTranscript`). The relay above
 //     prints SESSION_SENT_AWAY once more, with the same URI; the reader says
 //     `moved` with it, and then `reading 2` at that URI.
+//     Written on 2026-10-25, before the meeting's page followed GOAWAY:
+//     the second viewer then attends the meeting of the room `r`
+//     with a connection of its own to the relay above, as the demo's
+//     meeting page does (`keepMeeting`). The relay above prints
+//     SESSION_SENT_AWAY a fourth time, with the same URI; the participant
+//     says `moved` with it, and then `attending 2` at that URI.
+//     Written on 2026-10-25, after a review, before `keepAttending` said
+//     `attending` only once the SUBSCRIBE_NAMESPACE was taken: the session
+//     sent away is then counted for nothing, and the participant says
+//     `moved` and then `attending 1` at that URI, with no `attending` before.
 //   - both-full: the relay below has `--max-sessions 1` and `--when-full`
 //     the relay above. The relay above sends the second viewer away once;
 //     the relay below closes it (SESSION_REFUSED) and does not send it back:
@@ -258,7 +268,38 @@ async function main(): Promise<void> {
 					`the second viewer's captions did not read where they were sent: ${captions.join(", ")}`,
 				);
 			}
-			summary = `the relay above, full with the publisher and the relay below, sent the second viewer to ${sentTo}, and it played there (${states.join(", ")}); its chat was sent there as well and joined the room there (${chat.join(", ")}), and its captions read there (${captions.join(", ")})`;
+			// The meeting of the same page, on a session of its own (as the demo's
+			// meeting page has it), is sent away as well, and follows the GOAWAY.
+			// Nobody else is in the meeting: the participant attends where it
+			// was sent, whoever is there.
+			await second.evaluate(
+				([url, hash]) => window.xmoqOwn.keepMeeting(url, hash, "r", "second"),
+				[context.relayUrl, context.certSha256Hex] satisfies [string, string],
+			);
+			await withTimeout(
+				// The fourth: the video's, the chat's and the captions' before it.
+				context.relay.waitForLines(/^SESSION_SENT_AWAY /, 4),
+				"the relay above to send the second viewer's meeting away",
+			);
+			const meeting = await pollFor(async () => {
+				const now = await second.evaluate(() =>
+					window.xmoqOwn.keptMeetingReport(),
+				);
+				return now.some((said) => said.startsWith("attending 1 "))
+					? now
+					: undefined;
+			}, "the second viewer's meeting to be attended where it was sent");
+			const meetingMovedAt = meeting.indexOf(`moved ${sentTo}`);
+			if (
+				meetingMovedAt === -1 ||
+				meeting.indexOf(`attending 1 ${sentTo}`) < meetingMovedAt ||
+				meeting.indexOf(`attending 1 ${context.relayUrl}`) !== -1
+			) {
+				throw new Error(
+					`the second viewer's meeting was not attended where it was sent: ${meeting.join(", ")}`,
+				);
+			}
+			summary = `the relay above, full with the publisher and the relay below, sent the second viewer to ${sentTo}, and it played there (${states.join(", ")}); its chat was sent there as well and joined the room there (${chat.join(", ")}), and its captions read there (${captions.join(", ")}), and its meeting was attended there (${meeting.join(", ")})`;
 		} else {
 			await withTimeout(
 				below.relay.waitForLines(

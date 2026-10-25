@@ -247,6 +247,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-25 [The captions of a page follow a GOAWAY](2026-10-25-the-captions-follow-a-goaway.md)
 - 2026-10-25 [The chat of a page follows a GOAWAY](2026-10-25-the-chat-follows-a-goaway.md)
 - 2026-10-25 [The chat through two relays](2026-10-25-the-chat-through-two-relays.md)
+- 2026-10-25 [The meeting of a page follows a GOAWAY](2026-10-25-the-meeting-follows-a-goaway.md)
 - 2026-10-25 [Two relays that ask for tokens](2026-10-25-two-relays-that-ask-for-tokens.md)
 
 ### Not tied to a Phase
