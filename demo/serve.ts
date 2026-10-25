@@ -234,8 +234,10 @@ const whisperCache = join(
 	"xmoq",
 	"whisper",
 );
+// The transcriber's default model (`DEFAULT_MODEL` in crates/speech/src/model.rs)
+// and its model of voice activity.
 const transcriberModels = [
-	join(whisperCache, "ggml-large-v3-turbo-q5_0.bin"),
+	join(whisperCache, "ggml-small-q5_1.bin"),
 	join(whisperCache, "ggml-silero-v5.1.2.bin"),
 ];
 /** Why the watching page has no captions, where it has none. */

@@ -37,7 +37,7 @@ sha256_expected() {
 }
 
 # Kept the same as `DEFAULT_MODEL` in crates/speech/src/model.rs.
-DEFAULT_MODEL=large-v3-turbo-q5_0
+DEFAULT_MODEL=small-q5_1
 
 dir="${XDG_CACHE_HOME:-${HOME}/.cache}/xmoq/whisper"
 name="${DEFAULT_MODEL}"

@@ -9,7 +9,7 @@
 //!
 //! WHY one reader: a model is loaded once (the large one is 550 MiB), and
 //! whisper.cpp reads one piece at a time as fast as it reads several
-//! (README). [`Words::text`] takes as long as whisper.cpp does: a fifth of
+//! (README). [`Words::text`] takes as long as whisper.cpp does: a twentieth of
 //! the piece's length with the default model on a Mac, more without a
 //! graphics processor. The caller keeps it off the task that reads the
 //! session.

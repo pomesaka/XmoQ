@@ -64,11 +64,11 @@ Written before: `small-q5_1` reads in a third of the time, so it keeps up with t
 
 ## What it means for meetings
 
-A meeting where 49 speak at once is not a case: people take turns. What a meeting with one transcriber of this model can have is about 2 people speaking at the same moment with `auto`, and about 4 with a language code, before the words come later and later. More at once, for longer than the waiting pieces allow, has pieces dropped. To read more at once, the choices are a smaller model, a language code, more than one reader, or more than one transcriber. The first two were measured (above): `small-q5_1` with a language code kept up with 16 speakers at once. Two readers of the large model on one Mac did not read more. More than one transcriber, on more than one machine, was not measured. None is decided.
+A meeting where 49 speak at once is not a case: people take turns. What a meeting with one transcriber of this model can have is about 2 people speaking at the same moment with `auto`, and about 4 with a language code, before the words come later and later. More at once, for longer than the waiting pieces allow, has pieces dropped. To read more at once, the choices are a smaller model, a language code, more than one reader, or more than one transcriber. The first two were measured (above): `small-q5_1` with a language code kept up with 16 speakers at once. Two readers of the large model on one Mac did not read more. More than one transcriber, on more than one machine, was not measured. On these numbers the default became `small-q5_1`, for meetings and broadcasts alike (decided on 2026-10-25 by the project owner, `crates/speech/README.md`).
 
 ## What was not run
 
 - People who take turns, or who speak over each other in part: here every speaker spoke at the same moment, the hardest case.
-- `ja`, two readers of `small-q5_1`, or more than one transcriber.
+- `ja`, two readers of `small-q5_1`, or more than one transcriber. That `small-q5_1` reads Japanese words right was seen on one voice alone (the first record), not on many speakers.
 - Linux, a machine without a graphics processor, and a machine with nothing else running. Other sessions' builds ran on this one.
 - How much of the processor and the graphics processor the transcriber took.

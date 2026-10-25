@@ -18,7 +18,7 @@ The words of audio tracks, for the transcriber ([`xmoq-transcriber`](../transcri
 
 ```sh
 mise run speech-model                    # the default model, into ~/.cache/xmoq/whisper/
-mise run speech-model -- tiny            # or small-q5_1, large-v3-turbo-q5_0; --dir <dir> elsewhere
+mise run speech-model -- tiny            # or large-v3-turbo-q5_0; --dir <dir> elsewhere
 mise run speech-model -- silero-v5.1.2   # the model of voice activity
 afconvert -f WAVE -d LEI16@48000 -c 1 voice.aiff voice.wav     # macOS, from `say -o voice.aiff ...`
 cargo run --release --example read-wav -p xmoq-speech -- ~/.cache/xmoq/whisper/ggml-tiny.bin en voice.wav \
@@ -68,7 +68,7 @@ What it costs: a piece cannot end before its frames are judged, so its words com
 
 The models are not in the repository. `crates/speech/scripts/fetch-model.sh` (`mise run speech-model`) fetches them from Hugging Face's `ggerganov/whisper.cpp`, the repository that whisper.cpp's own download script uses. It checks each against the sha256 written in the script, and keeps it in `${XDG_CACHE_HOME:-~/.cache}/xmoq/whisper/` unless `--dir` names another place. The transcriber looks there unless `--model` names a file.
 
-**The default is `large-v3-turbo-q5_0`** (547 MiB), decided on 2026-10-25 on the numbers below. It was the one model of the three that read Japanese and English right with punctuation, and with Metal it reads a voice in a fifth of its length. One reader can therefore keep up with about five voices at once. **`small-q5_1`** (181 MiB) reads both languages right without punctuation, in a fifteenth of the time. It is the one to take where many voices are listened to at once, or without a graphics processor. **`tiny`** (74 MiB) is what the interop runs read with: it read the English voice right and the Japanese one wrong. **`silero-v5.1.2`** (885 KB) is the model of voice activity (above); every transcriber loads it, one for each track.
+**The default is `small-q5_1`** (181 MiB), decided on 2026-10-25 by the project owner, for meetings and broadcasts alike. WHY: one transcriber on a Mac kept up with 8 people speaking at the same moment with `--language auto`, and 16 with `en` ([record](../../docs/experiments/2026-10-25-how-many-voices-one-transcriber-reads.md)). It read both voices below right, without punctuation, in a third of the large model's time. WHY NOT **`large-v3-turbo-q5_0`** (547 MiB), the default before: it was the one model of the three that read with punctuation, but one transcriber kept up with 2 voices at once with `auto` and 4 with `en`, and a second reader (`--readers 2`) did not add to that on Metal. It is still there with `--model`. That `small-q5_1` reads Japanese words right was seen on one voice alone. **`tiny`** (74 MiB) is what the interop runs read with: it read the English voice right and the Japanese one wrong. **`silero-v5.1.2`** (885 KB) is the model of voice activity (above); every transcriber loads it, one for each track.
 
 Read on an M3 Pro, release build, `--language` given. Each model ran 3 times on each voice made with `say` (Kyoko, Japanese, 8.6 s; Samantha, English, 5.5 s), while the machine also ran other sessions' builds ([record](../../docs/experiments/2026-10-25-the-transcriber-reads-a-voice.md)):
 
