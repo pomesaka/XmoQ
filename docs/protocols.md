@@ -2,7 +2,7 @@
 
 ![XmoQ protocol layers](assets/protocol-layers.svg)
 
-This is the **proposed browser media path**, not a claim that all layers have been integrated.
+The layers of the browser's media path. They run together in the demo, on one machine.
 
 MoQ is a media Object distribution protocol, not a replacement for the entire WebRTC media stack. One WebTransport session can multiplex streams and datagrams. A MoQ Track is **not** the same thing as a QUIC stream.
 
@@ -10,7 +10,7 @@ MoQ is a media Object distribution protocol, not a replacement for the entire We
 
 XmoQ implements the MoQ Transport layer itself, in Rust (relay and client) and in TypeScript (browser), pinned to `draft-ietf-moq-transport-18` (WebTransport subprotocol `moqt-18`). QUIC and WebTransport are not reimplemented: Rust uses existing crates and the browser uses its native `WebTransport`.
 
-What exists is listed in the [roadmap](roadmap.md), Phase 0b.
+What of the draft is implemented, and what is not, is in the [implementation notes](moqt-implementation-notes.md).
 
 The relay accepts WebTransport only, not native QUIC. Browsers can use nothing else, the Rust CLI can use WebTransport as well, and one path means one implementation and one set of interop runs.
 
@@ -34,7 +34,7 @@ The implementation follows the draft text, not library behaviour and not model m
 
 ## Streaming format: decided, the catalog partly implemented
 
-Tracks are described by a catalog of `draft-ietf-moq-msf-01` (MSF), and media Objects are packaged as LOC says. `@xmoq/msf` reads and writes the catalog as bytes; nothing publishes or reads one over a connection yet ([roadmap](roadmap.md), Phase 1).
+Tracks are described by a catalog of `draft-ietf-moq-msf-01` (MSF), and media Objects are packaged as LOC says. `@xmoq/msf` reads, follows and publishes a catalog track; what of MSF-01 it does not do is in [its README](../packages/msf/README.md).
 
 - **The layer above MoQ Transport, in a package of its own.** `@xmoq/msf` may use `@xmoq/moqt`, never the other way round, and the part that reads and checks a catalog uses neither a connection nor `@xmoq/moqt`. A relay does not read a catalog (MSF-01 §5: "The payload of the Catalog object is opaque to Relays"), so the Rust side has nothing of MSF yet.
 - **The revision of LOC is LOC-04, with its property numbers on transport draft 18**; decided on 2026-10-11. No document names that pair: MSF-01 cites LOC-02, whose Timestamp is a number draft 18 uses for something else, and LOC-04 cites draft 19. Why, and why not the others, is at the top of the [README of `@xmoq/loc`](../packages/loc/README.md). The catalog names the packaging with the string `"loc"` and carries no property number.
@@ -42,22 +42,12 @@ Tracks are described by a catalog of `draft-ietf-moq-msf-01` (MSF), and media Ob
 - **LOC is in a package of its own, `@xmoq/loc`, which depends on neither `@xmoq/moqt` nor `@xmoq/msf`**: it makes and reads the Object Properties of a frame as types and values, and turns a video payload with lengths into one with start codes. It uses the numbers of LOC-04, none of which transport draft 18 defines, and which `moqlivemock`'s publisher sends on draft 18; [its README](../packages/loc/README.md) has the two tables side by side, and what else is read into the draft. **What is of that revision is in a directory with its name (`src/draft-04/`), and one line chooses it**, so that another revision is a small change; a Rust implementation of LOC, when there is one, is to have the same shape.
 - **In Rust, the catalog of MSF is read by the crate `xmoq-msf`** (`crates/msf`): the version, and of every track what a viewer chooses by (name, packaging, role, codec, size). It checks far less than `@xmoq/msf`, and does not read the table of hand-written catalogs both are to agree on (`fixtures/msf-01/catalogs.tsv`); the Rust client uses it to find the first H.264 video track (`--catalog-video`).
 - **In Rust, LOC is the crate `xmoq-loc`** (`crates/loc`), which depends on no other crate and has what depends on the revision in a module with its name (`draft_04`), as `@xmoq/loc` does: the Timestamp and the Timescale of an Object, and a video payload with a start code for every length prefix. Both read the payloads of `fixtures/loc-04/`.
-- **What orders the frames of a video track for a decoder is `@xmoq/media`**, the layer above the three. Its rules are its own where no draft has one (which frame a decoder begins with, when a frame counts as lost): [its README](../packages/media/README.md), "How the receiver decides". The receiving side plays the video of `moqlivemock`'s publisher in Chromium (`playVideoTrack`, in the interop run); the sending side is there without an encoder or a connection.
+- **What orders the frames of a video track for a decoder is `@xmoq/media`**, the layer above the three. Its rules are its own where no draft has one (which frame a decoder begins with, when a frame counts as lost): [its README](../packages/media/README.md), "How the receiver decides". It plays the video of `moqlivemock`'s publisher in Chromium (`playVideoTrack`, in the interop run), and a page encodes video that another page plays through the relay (`createVideoTrackEncoder`).
 - **A video track is sent with a Group on one stream** (Subgroup 0; a Group begins with a key frame). Decided on 2026-10-11. That leaves the MUST of MSF-01 §6 for a stream for every Object, on purpose; why, and where that sentence stands in its working group, is at `DEFAULT_MAPPING` in `packages/media/src/core/video-sender.ts` and in the README of `@xmoq/media`. The receiver reads both.
 
-## Discussed
+## Not decided
 
-- MoQ over WebTransport for browser streaming.
-- WebCodecs for browser media processing.
-- Rust relay and terminal client.
-
-## Undecided or requiring validation
-
-- Codec, media packaging, keyframe handling and A/V synchronization.
-- Native CLI transport, decoder and audio output.
-- Chat as MoQ Track versus a different application transport.
-- Reactions semantics and persistence.
-- Relay ↔ Durable Objects protocol.
+What of the protocols is open (the details of the codec, a newer draft, what the relay and the room say to each other, the CLI's audio output) is in the [open questions](open-questions.md). Reactions go over the room's WebSocket in the spike; how they are carried and kept is undecided.
 
 ## Primary specifications
 
