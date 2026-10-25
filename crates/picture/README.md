@@ -1,8 +1,8 @@
 # xmoq-picture
 
-Pictures of an H.264 video track: decoded to RGB, made smaller by a whole number each way, and written as PNG. `xmoq-watch` decodes with it for the terminal; `Frames` is for a reader that asks for a picture now and then (an agent), and is written to be used by `xmoq-agent`. It reads no clock, file or socket: the caller writes the files and removes them.
+Pictures of an H.264 video track: decoded to RGB, made smaller by a whole number each way, and written as PNG. `xmoq-watch` decodes with it for the terminal; `Frames` is for a reader that asks for a picture now and then (an agent), which `xmoq-agent` uses. It reads no clock, file or socket: the caller writes the files and removes them.
 
-**Provisional throughout.** Nothing calls `Frames` yet.
+**Provisional throughout.**
 
 | Module | What it decides |
 |---|---|

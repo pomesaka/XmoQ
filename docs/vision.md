@@ -24,6 +24,6 @@ Decided on 2026-10-25:
 Goals of a broadcast, to aim at and not required (decided on 2026-10-25, in place of the 2026-10-24 goal of 100 viewers a room and 10 rooms): a delay of 500 ms at most from a frame being made to its being shown, at the 99th percentile of the viewers' frames (decided on 2026-10-24); one relay serves 500 viewers, and relays are added to build a broadcast of 10,000 ([requirements](requirements.md)). For a meeting, 49 participants at most (decided on 2026-10-25); its delay is undecided.
 
 ## Undecided
-What the agent's CLI writes and in what form, whether an agent is given pictures, whether an agent ever speaks with a voice, how the people of a meeting or a broadcast learn that an agent takes part and transcribes them, and how relays are added and a meeting is built ([proposed design](scale-and-meetings.md)). Browser/OS support, deployment, recording, moderation, authentication, licensing and operational requirements.
+What is not decided, for an agent, a meeting and the rest, is in the [open questions](open-questions.md).
 
 No production readiness or shipped features are claimed.
