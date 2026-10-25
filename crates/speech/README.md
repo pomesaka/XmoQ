@@ -12,7 +12,7 @@ The words of audio tracks, for the transcriber ([`xmoq-transcriber`](../transcri
 | `whisper`, `vad` | whisper.cpp through `whisper-rs`, for reading and for telling a voice: the two files that use it. `whisper` is private to the crate: a reader is had through `engine` |
 | `model` | Where a model is looked for |
 
-**All values are provisional**: they were chosen on voices of `say`, not on a meeting.
+**All values are provisional**: they were chosen on voices of `say`, not on a meeting. A voice that goes on past 15 s is cut there: in paragraphs of 27 and 42 s no word was lost at a cut, and the word a cut fell in was read on both sides of it or read wrong ([record](../../docs/experiments/2026-10-25-a-voice-longer-than-a-piece.md)).
 
 `Listener` (one for each track) decodes, judges and cuts. Each track has a model of voice activity of its own, which holds what it heard of that track. `Words` reads a piece; `engine::open` gives the readers of the engine it is told, and the transcriber knows them by `Words` alone. The transcriber has its readers for every track. The model is loaded once, and whisper.cpp reads one piece at a time.
 
