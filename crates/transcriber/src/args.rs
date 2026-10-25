@@ -24,7 +24,7 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
                       WAV file is its last argument, the language in XMOQ_LANGUAGE, and its stdout the words
 --engine-timeout-ms   with --engine command: how long it may take for a piece, or it is killed (30000)
 --engine-most-output  with --engine command: the most bytes of its stdout (65536)
---model         the file of a model of whisper.cpp (~/.cache/xmoq/whisper/ggml-large-v3-turbo-q5_0.bin;
+--model         the file of a model of whisper.cpp (~/.cache/xmoq/whisper/ggml-small-q5_1.bin;
                 mise run speech-model fetches it)
 --language      a language code of whisper's, or auto (auto). A code is twice as fast as auto, and has
                 whisper.cpp read every voice in that language: English read with ja comes out in Japanese

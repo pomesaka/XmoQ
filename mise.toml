@@ -70,7 +70,7 @@ description = "A demo of its own on other ports, the agent's reader in its room 
 run = "scripts/agent-demo.sh"
 
 [tasks.speech-model]
-description = "Fetch a model of whisper.cpp for xmoq-speech into ~/.cache/xmoq/whisper: mise run speech-model -- [tiny|small-q5_1|large-v3-turbo-q5_0] [--dir <dir>]"
+description = "Fetch a model of whisper.cpp for xmoq-speech into ~/.cache/xmoq/whisper: mise run speech-model -- [small-q5_1 (default)|tiny|large-v3-turbo-q5_0] [--dir <dir>]"
 run = "crates/speech/scripts/fetch-model.sh"
 
 [tasks.demo]

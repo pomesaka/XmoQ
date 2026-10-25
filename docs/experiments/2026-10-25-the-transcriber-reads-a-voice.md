@@ -118,3 +118,4 @@ Written before the run: the reader gets two pieces with "relay" in them, from `x
 - A meeting, a real microphone, voices over each other, music or noise. The values of cutting were chosen on voices of `say` alone.
 - `moqtail`'s relay, a transcriber that starts again, and a catalog that changes its audio track.
 - How much of the machine the transcriber takes while it reads.
+- Japanese read by `small-q5_1`, the default since 2026-10-25, on more than the one voice of `say` (Kyoko, 8.6 s): it read that one's words right, without punctuation.

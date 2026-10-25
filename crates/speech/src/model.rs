@@ -4,8 +4,17 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// The model used where none is named. Kept the same as `DEFAULT_MODEL` in
-/// `crates/speech/scripts/fetch-model.sh`, which fetches it.
-pub const DEFAULT_MODEL: &str = "large-v3-turbo-q5_0";
+/// `crates/speech/scripts/fetch-model.sh`, which fetches it, and with the
+/// file `demo/serve.ts` looks for.
+///
+/// WHY `small-q5_1` (decided on 2026-10-25 by the project owner, for
+/// meetings and broadcasts alike): one transcriber on a Mac kept up with 8
+/// people speaking at the same moment with `--language auto` and 16 with
+/// `en`. WHY NOT `large-v3-turbo-q5_0`, which reads with punctuation: it
+/// kept up with 2 with `auto` and 4 with `en`, and a second reader did not
+/// add to that (`docs/experiments/2026-10-25-how-many-voices-one-transcriber-reads.md`).
+/// It is still there with `--model`.
+pub const DEFAULT_MODEL: &str = "small-q5_1";
 
 /// The model of voice activity used where none is named
 /// ([`crate::judge`]). Kept the same as the name the script fetches it by.
