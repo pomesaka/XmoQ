@@ -17,6 +17,7 @@ import {
 	type VideoPlayback,
 	type VideoTrackEncoder,
 } from "@xmoq/media";
+import { createMeeting, type MeetingEvent } from "@xmoq/meeting";
 import {
 	connect,
 	decodeFetchBody,
@@ -53,6 +54,7 @@ import type {
 	PageFetchReport,
 	PageFetchServing,
 	PageKeptReport,
+	PageMeetingReport,
 	PageProperty,
 	PageReceivedObject,
 	PageTranscriptPiece,
@@ -117,6 +119,24 @@ let watchedNamespaces: NamespaceSubscription | undefined;
 /** Whether the voice of `publishBroadcast` is heard, where it has one. */
 let speakingNow = false;
 const namespaceLines: string[] = [];
+/** What `attendMeeting` was told and handed. */
+const meetingReport: PageMeetingReport = { events: [], frames: {}, audio: {} };
+
+/** A line of `meetingReport.events`: the event without its error. */
+function meetingLine(event: MeetingEvent): string {
+	switch (event.type) {
+		case "came":
+		case "left":
+		case "too-many":
+			return `${event.type} ${event.id}`;
+		case "receiving":
+			return `receiving ${event.id} ${event.kind} ${event.track} ${event.times}`;
+		case "stopped":
+			return `stopped ${event.id} ${event.kind}`;
+		case "failed":
+			return `failed ${event.id} ${event.what} ${errorText(event.error)}`;
+	}
+}
 /** The subscription `serveTrack` accepted, once it has. */
 let served: Promise<PublishedTrack> | undefined;
 /**
@@ -943,6 +963,41 @@ window.xmoqOwn = {
 	stopWatchingNamespaces: withPlainErrors(async () => {
 		await watchedNamespaces?.cancel();
 	}),
+
+	attendMeeting: withPlainErrors(
+		async (room: string, self: string, mostWatched: number) => {
+			const meeting = createMeeting({
+				room,
+				self,
+				mostWatched,
+				onFrame(id, frame) {
+					frame.close();
+					meetingReport.frames[id] = (meetingReport.frames[id] ?? 0) + 1;
+				},
+				onAudio(id, data) {
+					data.close();
+					meetingReport.audio[id] = (meetingReport.audio[id] ?? 0) + 1;
+				},
+				onEvent(event) {
+					const line = meetingLine(event);
+					meetingReport.events.push(line);
+					console.log(`meeting: ${line}`);
+				},
+			});
+			void meeting.attend(connected()).then(
+				(end) => meetingReport.events.push(`ended ${end.type}`),
+				(error: unknown) =>
+					meetingReport.events.push(`refused ${errorText(error)}`),
+			);
+		},
+	),
+
+	meetingReport: () =>
+		Promise.resolve({
+			events: [...meetingReport.events],
+			frames: { ...meetingReport.frames },
+			audio: { ...meetingReport.audio },
+		}),
 
 	keepVideoPublished: withPlainErrors(
 		async (

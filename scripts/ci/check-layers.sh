@@ -128,6 +128,7 @@ package_layer() {
 	# The chat is built on the transport alone, as the streaming format is.
 	@xmoq/msf | @xmoq/chat | @xmoq/transcript) echo 1 ;;
 	@xmoq/media) echo 2 ;;
+	@xmoq/meeting) echo 3 ;;
 	*) echo "" ;;
 	esac
 }

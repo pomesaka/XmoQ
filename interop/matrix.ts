@@ -57,6 +57,7 @@ interface Pairing {
 		| "agent-frames.ts"
 		| "agent-meeting.ts"
 		| "agent-meeting-speech.ts"
+		| "meeting-pages.ts"
 		| "rendezvous.ts"
 		| "new-group.ts"
 		| "track-status.ts";
@@ -1435,6 +1436,17 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		{
 			name: "own relay: agent: xmoq-agent --meeting follows the transcript of two pages that publish a voice and a picture under xmoq/meet/r/<id>, each piece with its from, and /frame alone gives the picture of the one who spoke last",
 			script: "agent-meeting-speech.ts",
+			args: [],
+			relay: "own",
+		},
+		// A meeting of pages (`@xmoq/meeting`): each publishes under
+		// xmoq/meet/r/<id> and finds the others with SUBSCRIBE_NAMESPACE.
+		// Not through moqtail's relay: its Joining FETCH of a page's catalog
+		// asks the page for Group 0, where the page numbers its Groups by the
+		// clock, and no catalog comes (docs/experiments/2026-10-24-goaway-and-moqtail.md).
+		{
+			name: "own relay: meeting: three pages that publish under xmoq/meet/r/<id> receive each other's sound and the video of the first who came, and let go of one who leaves",
+			script: "meeting-pages.ts",
 			args: [],
 			relay: "own",
 		},

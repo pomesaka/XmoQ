@@ -109,78 +109,54 @@ impl Presence {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Clone, Copy)]
-    enum Step {
-        Named(&'static str),
-        Done(&'static str),
-        SessionEnded,
-        Settled,
-    }
-
-    fn came(name: &str) -> Change {
-        Change::Came(name.to_string())
-    }
-
-    fn left(name: &str) -> Change {
-        Change::Left(name.to_string())
-    }
-
-    #[test]
-    fn who_comes_and_who_leaves() {
-        use Step::{Done, Named, SessionEnded, Settled};
-        // (what happens, with room for 2; the changes of all of it)
-        let cases: [(&[Step], Vec<Change>); 9] = [
-            (&[Named("a")], vec![came("a")]),
-            (&[Named("a"), Done("a")], vec![came("a"), left("a")]),
-            // Told twice: one came.
-            (&[Named("a"), Named("a")], vec![came("a")]),
-            // Gone without having come.
-            (&[Done("a")], vec![]),
-            // A new session tells of a again and not of b: b left meanwhile.
-            (
-                &[Named("a"), Named("b"), SessionEnded, Named("a"), Settled],
-                vec![came("a"), came("b"), left("b")],
-            ),
-            (&[SessionEnded, Named("c"), Settled], vec![came("c")]),
-            (&[Named("a"), Settled], vec![came("a")]),
-            // One more than there is room for is left out, and comes once
-            // there is room.
-            (
-                &[Named("a"), Named("b"), Named("c"), Done("a"), Named("c")],
-                vec![
-                    came("a"),
-                    came("b"),
-                    Change::TooMany("c".to_string()),
-                    left("a"),
-                    came("c"),
-                ],
-            ),
-            // Told of again while full: still there, nothing more.
-            (
-                &[Named("a"), Named("b"), Named("b")],
-                vec![came("a"), came("b")],
-            ),
-        ];
-        for (steps, expected) in cases {
-            let mut presence = Presence::new(2);
-            let mut changes = Vec::new();
-            for step in steps {
-                match *step {
-                    Named(name) => changes.extend(presence.named(name)),
-                    Done(name) => changes.extend(presence.done(name)),
-                    SessionEnded => presence.session_ended(),
-                    Settled => changes.extend(presence.settled()),
-                }
-            }
-            assert_eq!(changes, expected, "{steps:?}");
+    /// A change as `fixtures/meeting-presence/` writes it.
+    fn written(change: &Change) -> String {
+        match change {
+            Change::Came(name) => format!("came:{name}"),
+            Change::Left(name) => format!("left:{name}"),
+            Change::TooMany(name) => format!("too-many:{name}"),
         }
     }
 
+    /// The rows of `fixtures/meeting-presence/who-is-there.tsv`, which
+    /// `@xmoq/meeting` reads as well.
     #[test]
-    fn room_for_none_is_room_for_one() {
+    fn who_comes_and_who_leaves() {
+        let rows = include_str!("../../../fixtures/meeting-presence/who-is-there.tsv");
+        let mut read = 0;
+        for row in rows.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [name, most, steps, expected] = fields[..] else {
+                panic!("a row of four fields: {row}");
+            };
+            let mut presence = Presence::new(most.parse().unwrap());
+            let mut changes = Vec::new();
+            for step in steps.split(' ') {
+                match step.split_once(':') {
+                    Some(("named", id)) => changes.extend(presence.named(id)),
+                    Some(("done", id)) => changes.extend(presence.done(id)),
+                    None if step == "session-ended" => presence.session_ended(),
+                    None if step == "settled" => changes.extend(presence.settled()),
+                    _ => panic!("no such step: {step}"),
+                }
+            }
+            let changes: Vec<String> = changes.iter().map(written).collect();
+            let expected: Vec<&str> = if expected == "-" {
+                Vec::new()
+            } else {
+                expected.split(' ').collect()
+            };
+            assert_eq!(changes, expected, "{name}");
+            read += 1;
+        }
+        assert_eq!(read, 10);
+    }
+
+    #[test]
+    fn room_for_none_keeps_the_first() {
         let mut presence = Presence::new(0);
-        assert_eq!(presence.named("a"), Some(came("a")));
-        assert_eq!(presence.named("b"), Some(Change::TooMany("b".to_string())));
+        presence.named("a");
+        presence.named("b");
         assert_eq!(presence.names().collect::<Vec<_>>(), ["a"]);
     }
 }

@@ -23,6 +23,7 @@
       "dependencies": {
         "@xmoq/chat": "workspace:*",
         "@xmoq/media": "workspace:*",
+        "@xmoq/meeting": "workspace:*",
         "@xmoq/moqt": "workspace:*",
         "@xmoq/msf": "workspace:*",
         "@xmoq/transcript": "workspace:*",
@@ -68,6 +69,19 @@
       "dependencies": {
         "@xmoq/loc": "workspace:*",
         "@xmoq/moqt": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "typescript": "6.0.3",
+      },
+    },
+    "packages/meeting": {
+      "name": "@xmoq/meeting",
+      "version": "0.0.0",
+      "dependencies": {
+        "@xmoq/media": "workspace:*",
+        "@xmoq/moqt": "workspace:*",
+        "@xmoq/msf": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "1.4.2",
@@ -122,6 +136,8 @@
     "@xmoq/loc": ["@xmoq/loc@workspace:packages/loc"],
 
     "@xmoq/media": ["@xmoq/media@workspace:packages/media"],
+
+    "@xmoq/meeting": ["@xmoq/meeting@workspace:packages/meeting"],
 
     "@xmoq/moqt": ["@xmoq/moqt@workspace:packages/moqt"],
 

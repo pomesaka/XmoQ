@@ -259,24 +259,26 @@ mod tests {
         path.split('/').map(ToString::to_string).collect()
     }
 
+    /// The rows of `fixtures/meeting-presence/participant-of.tsv`, which
+    /// `@xmoq/meeting` reads as well.
     #[test]
     fn a_participant_is_the_field_after_the_prefix() {
-        // (the namespace; the participant of the meeting `r`)
-        let cases = [
-            ("xmoq/meet/r/a1", Some("a1")),
-            ("xmoq/meet/r", None),
-            ("xmoq/meet/r/a1/more", None),
-            ("xmoq/meet/other/a1", None),
-            ("xmoq/chat/r/a1", None),
-            ("xmoq/demo", None),
-        ];
-        for (namespace, expected) in cases {
+        let rows = include_str!("../../../fixtures/meeting-presence/participant-of.tsv");
+        let mut read = 0;
+        for row in rows.lines() {
+            let fields: Vec<&str> = row.split('\t').collect();
+            let [name, room, namespace, expected] = fields[..] else {
+                panic!("a row of four fields: {row}");
+            };
+            let namespace: Vec<String> = namespace.split(' ').map(ToString::to_string).collect();
             assert_eq!(
-                participant_of("r", &fields(namespace)),
-                expected,
-                "{namespace}"
+                participant_of(room, &namespace),
+                (expected != "-").then_some(expected),
+                "{name}"
             );
+            read += 1;
         }
+        assert_eq!(read, 6);
         assert_eq!(prefix("r"), fields("xmoq/meet/r"));
     }
 

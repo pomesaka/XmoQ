@@ -54,6 +54,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 - [Cutting sound and reading it with whisper.cpp, `xmoq-speech`](crates/speech/README.md)
 - [The tracks of the transcripts, `xmoq-transcript-tracks`](crates/transcript-tracks/README.md)
 - [A reader of the transcripts over MoQ tracks, `@xmoq/transcript`](packages/transcript/README.md)
+- [A participant of a meeting in a page, `@xmoq/meeting`](packages/meeting/README.md)
 - [The payload of a transcript, shared by the implementations](fixtures/transcript-tracks/README.md)
 - [A voice for the transcriber's interop run](fixtures/speech/README.md)
 - [Interop runs against moqtail peers](interop/README.md)
