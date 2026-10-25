@@ -38,6 +38,8 @@ pub struct RoomSocket {
     broadcast: Option<Broadcast>,
     /// The relay of the rooms, as the hello said it.
     relay: Option<Relay>,
+    /// The prefix of the room's transcript, as the hello said it.
+    transcript: Option<Vec<String>>,
 }
 
 impl RoomSocket {
@@ -64,14 +66,28 @@ impl RoomSocket {
             kept: VecDeque::new(),
             broadcast: None,
             relay: None,
+            transcript: None,
         };
-        // The room says hello first: the broadcast it has, and its relay.
-        let Said::Hello { broadcast, relay } = joined.message().await? else {
+        // The room says hello first: the broadcast it has, its relay, and
+        // its transcript's prefix.
+        let Said::Hello {
+            broadcast,
+            relay,
+            transcript,
+        } = joined.message().await?
+        else {
             bail!("the room did not begin with hello");
         };
         joined.broadcast = broadcast;
         joined.relay = relay;
+        joined.transcript = transcript;
         Ok(joined)
+    }
+
+    /// The prefix a transcriber listens under for the room, where the
+    /// room's hello said it.
+    pub fn transcript(&self) -> Option<Vec<String>> {
+        self.transcript.clone()
     }
 
     /// The relay of the rooms, where the room's hello said it: there with a

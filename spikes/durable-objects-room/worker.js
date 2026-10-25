@@ -13,7 +13,7 @@
 // outlive a publisher that vanished.
 //
 // On the WebSocket the room sends {type: "hello", connected, broadcast,
-// relay} first, then {type: "connected", connected} when the count changes,
+// relay, transcript} first, then {type: "connected", connected} when the count changes,
 // {type: "broadcast", broadcast} when the publisher registers or leaves,
 // and {type: "reaction", emoji} when somebody sent one (with
 // REACTION_BATCH_MS, {type: "reactions", counts} for all of that while).
@@ -28,6 +28,22 @@
 // the broadcast: in a meeting every participant has a namespace of its own,
 // and no one broadcast says where the room's relay is. WHY NOT a flag of
 // each client: whoever uses a room would have to know the relay as well.
+//
+// **The transcript of a room** (decided on 2026-10-25): `transcript` of the
+// hello is the prefix a transcriber listens under for the room, its fields,
+// from `TRANSCRIPT_PREFIX` with `{room}` put in the room's name
+// (`xmoq/meet/{room}` for meetings, whose participants publish under
+// `xmoq/meet/<room>/<id>`; `xmoq/demo` for the demo's one broadcast), and
+// null without it. Its transcript is `speech` of `xmoq/transcript/<prefix>`
+// (`crates/transcript-tracks`), which a reader follows. WHY from the
+// Worker's settings, beside the relay: one transcriber listens under the
+// prefix to every broadcast of the room, and the room says where those are.
+// WHY NOT the transcriber telling the room over the WebSocket that it is
+// there: a transcriber would join every room it listens to, and one
+// listening under `xmoq/meet` hears many. WHY NOT each publisher saying it
+// with its broadcast: in a meeting every participant would say the same.
+// The room does not know whether a transcriber runs: a reader's SUBSCRIBE
+// waits for one (`RENDEZVOUS_TIMEOUT`).
 
 // **Tokens, an experiment** (how the relay authorizes is undecided): where
 // the Worker has the key it shares with the relay (`AUTH_KEY_HEX`), a
@@ -106,6 +122,7 @@ export class Room {
 					connected: this.ctx.getWebSockets().length,
 					broadcast: this.broadcast(),
 					relay: this.relay(),
+					transcript: this.transcript(decodeURIComponent(url.pathname.split("/")[2] ?? "")),
 				}),
 			);
 			this.tellAll({ type: "connected", connected: this.ctx.getWebSockets().length });
@@ -126,6 +143,22 @@ export class Room {
 		const certSha256Hex = this.env.RELAY_CERT_SHA256_HEX;
 		if (typeof relayUrl !== "string" || relayUrl === "" || typeof certSha256Hex !== "string" || certSha256Hex === "") return null;
 		return { relayUrl, certSha256Hex };
+	}
+
+	/**
+	 * The prefix a transcriber listens under for the room named `room`, its
+	 * fields, or null where the Worker was not told. Null as well where a
+	 * field would be empty or have a `*`, which the relay reads as every
+	 * namespace under the ones before it (Q50): a room's name with a `/` or a
+	 * `*` makes no prefix.
+	 */
+	transcript(room) {
+		const prefix = this.env.TRANSCRIPT_PREFIX;
+		if (typeof prefix !== "string" || prefix === "") return null;
+		if (room.includes("/") || room.includes("*")) return null;
+		const fields = prefix.replaceAll("{room}", room).split("/");
+		if (fields.some((field) => field === "" || field.includes("*"))) return null;
+		return fields;
 	}
 
 	/** The broadcast of the publisher that is connected, the latest where there are several; null without one. */

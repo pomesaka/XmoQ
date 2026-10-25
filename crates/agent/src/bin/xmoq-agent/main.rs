@@ -261,13 +261,18 @@ pub struct Place {
     transcript_token: Option<Vec<u8>>,
 }
 
-/// The prefix whose transcript is followed for a broadcast in `namespace`.
-fn transcript_of(args: &Args, namespace: &[String]) -> Option<Vec<String>> {
-    args.speech.then(|| {
-        args.transcript
-            .clone()
-            .unwrap_or_else(|| namespace.to_vec())
-    })
+/// The prefix whose transcript is followed (`xmoq_agent::transcript`), with
+/// what the room's hello said and the broadcast's namespace, where there
+/// are; none with `--speech off`.
+fn transcript_of(
+    args: &Args,
+    hello: Option<&[String]>,
+    broadcast: Option<&[String]>,
+) -> Option<Vec<String>> {
+    if !args.speech {
+        return None;
+    }
+    xmoq_agent::transcript::prefix(args.transcript.as_deref(), hello, None, broadcast)
 }
 
 /// Where the reader connects in a room.
@@ -329,7 +334,7 @@ async fn place(
                 token: None,
                 chat_tokens: ChatTokens::default(),
                 broadcast: None,
-                transcript: transcript_of(args, namespace),
+                transcript: transcript_of(args, None, Some(namespace)),
                 transcript_token: None,
             }));
         }
@@ -341,10 +346,15 @@ async fn place(
     };
     let mut token = None;
     let mut chat_tokens = ChatTokens::default();
-    // A session for the chat alone has no broadcast whose voice to read.
+    // A session for the chat alone has no broadcast whose namespace to
+    // take: it follows the transcript the room or the flag names, as in a
+    // meeting, whose participants each have a broadcast of their own.
+    let hello = room.transcript();
     let transcript = match &found {
-        Found::Broadcast(broadcast) => transcript_of(args, &broadcast.namespace),
-        Found::Relay(_) => None,
+        Found::Broadcast(broadcast) => {
+            transcript_of(args, hello.as_deref(), Some(&broadcast.namespace))
+        }
+        Found::Relay(_) => transcript_of(args, hello.as_deref(), None),
     };
     let mut transcript_token = None;
     if ask_token {
@@ -401,8 +411,8 @@ async fn place(
             token: chat_tokens.subscribe.clone(),
             chat_tokens,
             broadcast: None,
-            transcript: None,
-            transcript_token: None,
+            transcript,
+            transcript_token,
         },
     }))
 }

@@ -167,6 +167,9 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 				// and without one.
 				RELAY_URL: `https://127.0.0.1:${options["relay-port"]}/`,
 				RELAY_CERT_SHA256_HEX: certSha256Hex,
+				// The prefix a transcriber listens under: the demo's one
+				// broadcast, whatever the room (`NAMESPACE` of `shared.ts`).
+				TRANSCRIPT_PREFIX: "xmoq/demo",
 			},
 		})
 	: undefined;

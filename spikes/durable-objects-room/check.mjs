@@ -1,8 +1,8 @@
 // Checks the room Worker that run.mjs serves: the broadcast of a room, a
 // token, the count, and that it carries no chat.
 //
-// Usage: node check.mjs [http://127.0.0.1:8787], with the RELAY_URL and
-// RELAY_CERT_SHA256_HEX run.mjs was given, if any.
+// Usage: node check.mjs [http://127.0.0.1:8787], with the RELAY_URL,
+// RELAY_CERT_SHA256_HEX and TRANSCRIPT_PREFIX run.mjs was given, if any.
 const origin = process.argv[2] ?? "http://127.0.0.1:8787";
 const room = `check-${Date.now()}`;
 const say = (what, value) => console.log(what, JSON.stringify(value));
@@ -86,6 +86,12 @@ if (hello === undefined || "history" in hello) fail("the late one's hello is mis
 	say("the relay in the late one's hello:", hello?.relay);
 	if (JSON.stringify(hello?.relay) !== JSON.stringify(told)) fail(`the hello names the relay ${JSON.stringify(hello?.relay)}, not ${JSON.stringify(told)}`);
 	if (hello?.broadcast !== null) fail("the late one's hello has a broadcast, where nobody broadcasts");
+	// The transcript's prefix, with the room's name put in for {room}.
+	const prefix = process.env.TRANSCRIPT_PREFIX
+		? process.env.TRANSCRIPT_PREFIX.replaceAll("{room}", room).split("/")
+		: null;
+	say("the transcript in the late one's hello:", hello?.transcript);
+	if (JSON.stringify(hello?.transcript) !== JSON.stringify(prefix)) fail(`the hello names the transcript ${JSON.stringify(hello?.transcript)}, not ${JSON.stringify(prefix)}`);
 }
 
 // 3. The count: the late one is told that 3 are connected.

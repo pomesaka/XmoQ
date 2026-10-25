@@ -18,4 +18,6 @@ With `AUTH_KEY_HEX` in the environment of `run.mjs`, the room gives out tokens t
 
 With `RELAY_URL` and `RELAY_CERT_SHA256_HEX` in the environment of `run.mjs` (and of `check.mjs`, which then checks them), the hello names the relay of the rooms as `relay: {relayUrl, certSha256Hex}`, with a broadcast and without one, so that a participant can take part in the chat before anybody broadcasts (decided on 2026-10-25; why, at the top of `worker.js`). Without them it is `null`. `mise run demo` gives them.
 
+With `TRANSCRIPT_PREFIX` (and the same to `check.mjs`), the hello names the prefix a transcriber listens under for the room as `transcript: ["xmoq", "meet", "<room>"]`, `{room}` in it put in the room's name (`xmoq/meet/{room}`); a reader follows `speech` of `xmoq/transcript/<prefix>` (decided on 2026-10-25; why, at the top of `worker.js`). Without it, and for a room whose name has a `/` or a `*`, it is `null`. `mise run demo` gives `xmoq/demo`, the namespace of its one broadcast.
+
 `worker.js` has the paths and the messages at its top.

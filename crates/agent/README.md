@@ -40,7 +40,7 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
 | `--frame-longest` | 1280 | The longest side of a picture, in pixels; a larger one is made smaller |
 | `--frames-kept` | 500 | The pictures kept in `<dir>/frames/`, of every session together; the oldest file goes for the newest. Files that were there when the reader began are not counted, and not removed |
 | `--speech off` | on | No transcript is followed. On, the reader subscribes to `speech` of `xmoq/transcript/<prefix>`, held by the relay for 30 s for a transcriber to come, and asked for again when it is refused or ends |
-| `--transcript` | the broadcast's namespace | The prefix the transcriber listens under (its `--namespace`), fields between slashes. With a room that gives tokens, the reader asks it for `sub` in `xmoq/transcript/<prefix>` |
+| `--transcript` | the room's, else the broadcast's namespace | The prefix the transcriber listens under (its `--namespace`), fields between slashes. Without it, the prefix the room's hello names (`transcript`, from the room's `TRANSCRIPT_PREFIX`), else the broadcast's namespace (`xmoq_agent::transcript::prefix` has the order). With a room that gives tokens, the reader asks it for `sub` in `xmoq/transcript/<prefix>` |
 
 ## What it writes
 
@@ -86,7 +86,7 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 ## Known gaps
 
 - **With a room that names no relay, the chat is there only while the room has a broadcast**: the room says where the relay is only with the broadcast then (a room run without `RELAY_URL`, `spikes/durable-objects-room/README.md`). A line said meanwhile gets an `error`.
-- **The transcript is that of the broadcast's namespace unless `--transcript` names the prefix the transcriber listens under**: a transcriber run with a prefix above the broadcast's (`--namespace xmoq` for `xmoq/demo`) publishes `xmoq/transcript/xmoq`, and the reader without `--transcript xmoq` waits for `xmoq/transcript/xmoq/demo`, which does not come. The room does not say what the transcriber listens under. A session at the room's relay for the chat alone follows no transcript.
+- **Without `--transcript` and a room that names its transcript, the transcript is that of the broadcast's namespace**: a transcriber run with a prefix above the broadcast's (`--namespace xmoq` for `xmoq/demo`) publishes `xmoq/transcript/xmoq`, and such a reader waits for `xmoq/transcript/xmoq/demo`, which does not come. A session at the room's relay for the chat alone follows the transcript the flag or the room names, and none else.
 - **A reader started again in the same `--out` writes over the pictures of the one before**: the names begin from 1 again (`000001-...`), and what the earlier run kept is neither counted nor removed.
 - Objects of the video that wait for the thread of the pictures: 256; beyond them they are left out, an `error` says so when it begins, and the frames after them in their Group give no picture.
 - Requests of the relay are refused with `NOT_SUPPORTED`, except the gatherer's SUBSCRIBE to `said`.

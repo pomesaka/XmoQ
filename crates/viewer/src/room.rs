@@ -41,6 +41,11 @@ pub enum Said {
         broadcast: Option<Broadcast>,
         /// The relay of the rooms, where the room says it.
         relay: Option<Relay>,
+        /// The prefix a transcriber listens under for the room, its fields,
+        /// where the room says it: its transcript is `speech` of
+        /// `xmoq/transcript/<prefix>` (decided on 2026-10-25; why, at the top
+        /// of `spikes/durable-objects-room/worker.js`).
+        transcript: Option<Vec<String>>,
     },
     /// A publisher came, or the one that was there left.
     Broadcast(Option<Broadcast>),
@@ -94,6 +99,16 @@ pub fn clean(text: &str, most: usize) -> String {
         .collect()
 }
 
+/// The fields of a namespace: strings, none empty, and at least one.
+fn fields_of(value: &Value) -> Option<Vec<String>> {
+    let fields: Vec<String> = value
+        .as_array()?
+        .iter()
+        .map(|field| field.as_str().map(str::to_string))
+        .collect::<Option<_>>()?;
+    (!fields.is_empty() && fields.iter().all(|field| !field.is_empty())).then_some(fields)
+}
+
 fn relay_of(value: &Value) -> Option<Relay> {
     let relay_url = value.get("relayUrl")?.as_str()?;
     // WHY https alone: it is what a relay is reached by (WebTransport), and
@@ -140,6 +155,7 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
         Some("hello") => Said::Hello {
             broadcast: message.get("broadcast").and_then(broadcast_of),
             relay: message.get("relay").and_then(relay_of),
+            transcript: message.get("transcript").and_then(fields_of),
         },
         Some("broadcast") => Said::Broadcast(message.get("broadcast").and_then(broadcast_of)),
         Some("token") => Said::Token(
@@ -243,6 +259,7 @@ mod tests {
                 Said::Hello {
                     broadcast: Some(broadcast()),
                     relay: None,
+                    transcript: None,
                 },
             ),
             (
@@ -250,6 +267,7 @@ mod tests {
                 Said::Hello {
                     broadcast: None,
                     relay: None,
+                    transcript: None,
                 },
             ),
             // So is a line of its chat: the chat is on tracks.
@@ -353,7 +371,46 @@ mod tests {
         for (message, broadcast, relay) in cases {
             assert_eq!(
                 read(&message),
-                Ok(Said::Hello { broadcast, relay }),
+                Ok(Said::Hello {
+                    broadcast,
+                    relay,
+                    transcript: None
+                }),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prefix_of_the_transcript_is_read_from_the_hello() {
+        // (the `transcript` of a hello without a broadcast; what it is read as)
+        let cases = [
+            (
+                r#"["xmoq","meet","r"]"#,
+                Some(vec![
+                    "xmoq".to_string(),
+                    "meet".to_string(),
+                    "r".to_string(),
+                ]),
+            ),
+            (r#"["xmoq"]"#, Some(vec!["xmoq".to_string()])),
+            ("null", None),
+            // No fields, an empty field, a field that is no string, and no array.
+            ("[]", None),
+            (r#"["xmoq",""]"#, None),
+            (r#"["xmoq",1]"#, None),
+            (r#""xmoq/meet/r""#, None),
+        ];
+        for (transcript, read_as) in cases {
+            let message =
+                format!(r#"{{"type":"hello","broadcast":null,"transcript":{transcript}}}"#);
+            assert_eq!(
+                read(&message),
+                Ok(Said::Hello {
+                    broadcast: None,
+                    relay: None,
+                    transcript: read_as
+                }),
                 "{message}"
             );
         }
