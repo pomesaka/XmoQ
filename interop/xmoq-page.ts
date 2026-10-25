@@ -454,6 +454,14 @@ export type OwnPageExtras = {
 	/** What `attendMeeting` was told and handed so far. */
 	meetingReport(): Promise<PageMeetingReport>;
 	/**
+	 * Writes `line` and a line feed at the end of `inbox.txt` of the folder
+	 * `attendMeeting` writes into for an agent (`createAgentBridge` of
+	 * `@xmoq/meeting`, in the page's own storage), as an agent would.
+	 */
+	agentInbox(line: string): Promise<void>;
+	/** The lines of `events.jsonl` of that folder, and of each picture a `frame` line names, its length and its bytes 1 to 3. */
+	agentFolderReport(): Promise<PageAgentFolderReport>;
+	/**
 	 * Whether the browser has a decoder for the codec, for Annex B without a
 	 * description: "supported", "not supported", or "no VideoDecoder".
 	 */
@@ -771,6 +779,11 @@ export type PageBroadcastReport = {
 };
 
 /** What `attendMeeting` was told and handed on a page. */
+export type PageAgentFolderReport = {
+	lines: string[];
+	pictures: Record<string, string>;
+};
+
 export type PageMeetingReport = {
 	/**
 	 * Each event of the meeting, in order: `came <id>`, `left <id>`,

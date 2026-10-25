@@ -17,7 +17,14 @@ import {
 	type VideoPlayback,
 	type VideoTrackEncoder,
 } from "@xmoq/media";
-import { createMeeting, keepAttending, type MeetingEvent } from "@xmoq/meeting";
+import {
+	type AgentFolder,
+	createAgentBridge,
+	createMeeting,
+	keepAttending,
+	type MeetingEvent,
+	openAgentFolder,
+} from "@xmoq/meeting";
 import {
 	connect,
 	decodeFetchBody,
@@ -45,6 +52,7 @@ import {
 } from "@xmoq/msf";
 import { followTranscript, keepFollowingTranscript } from "@xmoq/transcript";
 import type {
+	PageAgentFolderReport,
 	PageAudioReport,
 	PageBroadcastReport,
 	PageCatalogReport,
@@ -726,6 +734,8 @@ const transcriptPieces: PageTranscriptPiece[] = [];
 const keptTranscript: string[] = [];
 /** The states of `keepMeeting`, as `keptMeetingReport` gives them. */
 const keptMeeting: string[] = [];
+/** The folder `attendMeeting` writes into for an agent, once it does. */
+let agentFolder: AgentFolder | undefined;
 
 /**
  * The parameters of a PUBLISH_NAMESPACE that carries a token of its own
@@ -977,11 +987,24 @@ window.xmoqOwn = {
 
 	attendMeeting: withPlainErrors(
 		async (room: string, self: string, mostWatched: number) => {
+			// An agent's folder in the page's own storage (OPFS): a handle as
+			// the one the person chooses, with no picker to click.
+			const folder = await openAgentFolder(
+				await navigator.storage.getDirectory(),
+				room,
+				self,
+			);
+			const bridge = createAgentBridge({
+				folder,
+				say: async () => "this page has no chat",
+			});
+			agentFolder = folder;
 			const meeting = createMeeting({
 				room,
 				self,
 				mostWatched,
-				onFrame(id, frame) {
+				onFrame(id, frame, at) {
+					bridge.frame(id, frame, at);
 					frame.close();
 					meetingReport.frames[id] = (meetingReport.frames[id] ?? 0) + 1;
 				},
@@ -990,6 +1013,12 @@ window.xmoqOwn = {
 					meetingReport.audio[id] = (meetingReport.audio[id] ?? 0) + 1;
 				},
 				onEvent(event) {
+					if (event.type === "came" || event.type === "left") {
+						bridge.participant(
+							event.type === "came" ? "joined" : "left",
+							event.id,
+						);
+					}
 					const line = meetingLine(event);
 					meetingReport.events.push(line);
 					console.log(`meeting: ${line}`);
@@ -1000,6 +1029,55 @@ window.xmoqOwn = {
 				(error: unknown) =>
 					meetingReport.events.push(`refused ${errorText(error)}`),
 			);
+		},
+	),
+
+	agentInbox: withPlainErrors(async (line: string) => {
+		if (agentFolder === undefined)
+			throw new Error("attendMeeting() has not completed");
+		const root = await navigator.storage.getDirectory();
+		const [room, self] = agentFolder.path.split("/");
+		const inbox = await (
+			await (
+				await root.getDirectoryHandle(room ?? "")
+			).getDirectoryHandle(self ?? "")
+		).getFileHandle("inbox.txt");
+		const writable = await inbox.createWritable({ keepExistingData: true });
+		await writable.seek((await inbox.getFile()).size);
+		await writable.write(`${line}\n`);
+		await writable.close();
+	}),
+
+	agentFolderReport: withPlainErrors(
+		async (): Promise<PageAgentFolderReport> => {
+			if (agentFolder === undefined)
+				throw new Error("attendMeeting() has not completed");
+			const root = await navigator.storage.getDirectory();
+			const [room, self] = agentFolder.path.split("/");
+			const folder = await (
+				await root.getDirectoryHandle(room ?? "")
+			).getDirectoryHandle(self ?? "");
+			const events = await (
+				await (await folder.getFileHandle("events.jsonl")).getFile()
+			).text();
+			const lines = events.split("\n").filter((line) => line !== "");
+			// The first bytes of each picture a `frame` line names: a PNG begins
+			// with 0x89 "PNG".
+			const pictures: Record<string, string> = {};
+			for (const line of lines) {
+				const path = /"path":"([^"]+)"/.exec(line)?.[1];
+				if (path === undefined) continue;
+				let at = folder;
+				const names = path.split("/");
+				const name = names.pop() ?? "";
+				for (const dir of names) at = await at.getDirectoryHandle(dir);
+				const bytes = new Uint8Array(
+					await (await (await at.getFileHandle(name)).getFile()).arrayBuffer(),
+				);
+				pictures[path] =
+					`${bytes.length} ${new TextDecoder().decode(bytes.subarray(1, 4))}`;
+			}
+			return { lines, pictures };
 		},
 	),
 

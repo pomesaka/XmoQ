@@ -6,6 +6,7 @@
 // own broadcast is the caller's as well (`@xmoq/media`, `@xmoq/msf`).
 
 import {
+	type FrameOrigin,
 	keepTrackOnSession,
 	playAudioTrack,
 	playVideoTrack,
@@ -78,8 +79,8 @@ export interface MeetingOptions {
 	mostWatched?: number;
 	/** `DEFAULT_MOST_OTHERS` when left out. */
 	mostOthers?: number;
-	/** Each decoded frame of `id`; **the callee closes it**, as `PlayVideoTrackOptions.onFrame`. */
-	onFrame(id: string, frame: VideoFrame): void;
+	/** Each decoded frame of `id`, and where it came from; **the callee closes it**, as `PlayVideoTrackOptions.onFrame`. */
+	onFrame(id: string, frame: VideoFrame, at: FrameOrigin | undefined): void;
 	/** Each decoded piece of the sound of `id`; **the callee closes it**, as `PlayAudioTrackOptions.onData`. */
 	onAudio(id: string, data: AudioData): void;
 	onEvent?(event: MeetingEvent): void;
@@ -180,7 +181,7 @@ export function createMeeting(options: MeetingOptions): Meeting {
 							trackNamespace,
 							trackName,
 							codec,
-							onFrame: (frame) => options.onFrame(id, frame),
+							onFrame: (frame, at) => options.onFrame(id, frame, at),
 							signal: playing,
 						});
 						return { ended: playback.ended.then((end) => end.type) };

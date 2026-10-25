@@ -1479,7 +1479,7 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		// asks the page for Group 0, where the page numbers its Groups by the
 		// clock, and no catalog comes (docs/experiments/2026-10-24-goaway-and-moqtail.md).
 		{
-			name: "own relay: meeting: three pages that publish under xmoq/meet/r/<id> receive each other's sound and the video of the first who came, and let go of one who leaves",
+			name: "own relay: meeting: three pages under xmoq/meet/r/<id> receive each other's sound and the first one's video, let go of one who leaves, and one writes for an agent and takes a picture its inbox asks for",
 			script: "meeting-pages.ts",
 			args: [],
 			relay: "own",

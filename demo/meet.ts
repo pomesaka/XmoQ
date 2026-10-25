@@ -13,9 +13,22 @@ import {
 	createVideoTrackEncoder,
 	keepPublishing,
 } from "@xmoq/media";
-import { createMeeting, keepAttending } from "@xmoq/meeting";
+import {
+	AGENT_ROOT,
+	type AgentBridge,
+	allowRoot,
+	chooseRoot,
+	createAgentBridge,
+	createAgentCall,
+	createMeeting,
+	keepAttending,
+	openAgentFolder,
+	rememberedRoot,
+} from "@xmoq/meeting";
 import type { GoAwayNotice } from "@xmoq/moqt";
 import { createCatalogPublisher } from "@xmoq/msf";
+import { keepFollowingTranscript } from "@xmoq/transcript";
+import { startChat } from "./room-chat.ts";
 import {
 	AUDIO_TRACK,
 	type Broadcast,
@@ -74,7 +87,8 @@ type RoomMessage =
 			publish: { token: string | null };
 			subscribe: { token: string | null };
 	  }
-	| { type: "meeting-full"; most: number };
+	| { type: "meeting-full"; most: number }
+	| { type: "token"; token: string | null };
 
 /** §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value. */
 const tokenOf = (text: string | null): Uint8Array | undefined =>
@@ -113,7 +127,10 @@ const show = (): void => {
  * room gives the same seat with new tokens to the same id on the same
  * socket.
  */
-function seats(): { seat(): Promise<Seat> } {
+function seats(): {
+	seat(): Promise<Seat>;
+	token(role: "pub" | "sub", namespace: string[]): Promise<Uint8Array | undefined>;
+} {
 	const roomsUrl = XMOQ_DEMO.roomsUrl;
 	if (roomsUrl === null) {
 		throw new Error("no rooms: a meeting takes its seat from the room");
@@ -128,6 +145,8 @@ function seats(): { seat(): Promise<Seat> } {
 	});
 	/** Who waits for the answer to join-meeting, in the order they asked. */
 	const waiting: ((message: RoomMessage) => void)[] = [];
+	/** Who waits for the answer to token-for, in the order they asked. */
+	const tokens: ((token: string | null) => void)[] = [];
 	socket.addEventListener("message", (event) => {
 		const message: RoomMessage = JSON.parse(String(event.data));
 		if (message.type === "hello") {
@@ -139,6 +158,7 @@ function seats(): { seat(): Promise<Seat> } {
 		if (message.type === "meeting" || message.type === "meeting-full") {
 			waiting.shift()?.(message);
 		}
+		if (message.type === "token") tokens.shift()?.(message.token);
 	});
 	// A seat asked for after this is never answered: the page has to be
 	// opened again.
@@ -147,6 +167,16 @@ function seats(): { seat(): Promise<Seat> } {
 		show();
 	});
 	return {
+		// The chat's tokens, as the other pages ask for them (`joinRoom` of
+		// `shared.ts`); the room gives none for a namespace with a `*`.
+		async token(role, namespace) {
+			await greeted;
+			const text = await new Promise<string | null>((resolve) => {
+				tokens.push(resolve);
+				socket.send(JSON.stringify({ type: "token-for", role, namespace }));
+			});
+			return tokenOf(text);
+		},
 		async seat() {
 			await greeted;
 			const at = relay;
@@ -347,12 +377,146 @@ async function main(): Promise<void> {
 		},
 	});
 
+	/**
+	 * Claude Code on this machine, while it is called: what the meeting
+	 * holds is written into `~/Documents/xmoq/<room>/<id>/` (`AGENT_ROOT`),
+	 * as `xmoq-agent --out` writes, and the lines it writes into `inbox.txt`
+	 * there are said in the chat, as this page.
+	 */
+	const agent: { bridge: AgentBridge | undefined } = { bridge: undefined };
+
+	// The chat of the room, under the page's id, as the other pages have it
+	// (`room-chat.ts`): the person and Claude Code share it, as they share
+	// the seat. Its tokens are asked of the room each time, as theirs.
+	const chat = startChat(
+		room,
+		self,
+		async (goAway) => {
+			const seat = await theRoom.seat();
+			const [sub, pub] = await Promise.all([
+				theRoom.token("sub", ["xmoq", "chat", room]),
+				theRoom.token("pub", ["xmoq", "chat", room, self]),
+			]);
+			return {
+				connection: await connectToRelay(movedTo(seat.relay, goAway), sub),
+				...(pub === undefined ? {} : { publishNamespaceToken: pub }),
+			};
+		},
+		(line) => agent.bridge?.chat(line),
+	);
+
+	const agentNote = document.getElementById("agent-note");
+	const linkButton = document.getElementById("agent-link");
+	const callButton = document.getElementById("agent-call");
+	const tellAgent = (text: string): void => {
+		if (agentNote !== null) agentNote.textContent = text;
+		document.body.dataset.agent = text;
+	};
+	/** What the page says of the root before Claude Code is called. */
+	const showRoot = async (): Promise<void> => {
+		const root = await rememberedRoot();
+		switch (root.type) {
+			case "unsupported":
+				tellAgent("this browser cannot write into a folder: Chromium can");
+				return;
+			case "none":
+				tellAgent(`not linked: make ${AGENT_ROOT} and choose it`);
+				return;
+			case "granted":
+				tellAgent(`linked: Claude Code reads ${AGENT_ROOT}/${room}/${self}/ once called`);
+				return;
+			case "to-allow":
+				tellAgent(`linked to ${AGENT_ROOT}; the page asks to write there again when Claude Code is called`);
+		}
+	};
+	void showRoot();
+	linkButton?.addEventListener("click", () => {
+		chooseRoot().then(showRoot, (error: unknown) => tellAgent(`not linked: ${why(error)}`));
+	});
+
+	/** Begins writing for Claude Code, choosing the root or allowing it again where it has to be. */
+	const call = async (): Promise<() => void> => {
+		const remembered = await rememberedRoot();
+		let root: FileSystemDirectoryHandle;
+		switch (remembered.type) {
+			case "unsupported":
+				throw new Error("this browser cannot write into a folder: Chromium can");
+			case "none":
+				root = await chooseRoot();
+				break;
+			case "to-allow":
+				root = remembered.root;
+				if (!(await allowRoot(root))) {
+					throw new Error(`not allowed to write in ${AGENT_ROOT}: call again to be asked again`);
+				}
+				break;
+			case "granted":
+				root = remembered.root;
+		}
+		const folder = await openAgentFolder(root, room, self, {
+			onError: (error) => tellAgent(`writing for Claude Code: ${why(error)}`),
+		});
+		const bridge = createAgentBridge({
+			folder,
+			say: (text) => chat?.say(text) ?? Promise.resolve("this page has no chat"),
+		});
+		for (const id of meeting.ids()) bridge.participant("joined", id);
+		const stop = new AbortController();
+		agent.bridge = bridge;
+		// The meeting's transcript, for Claude Code alone: the people there
+		// hear the voices, and the page shows no captions.
+		let newest = -1n;
+		void keepFollowingTranscript({
+			connect: async (goAway) => {
+				const seat = await theRoom.seat();
+				return connectToRelay(
+					movedTo(seat.relay, goAway),
+					await theRoom.token("sub", ["xmoq", "transcript", "xmoq", "meet", room]),
+				);
+			},
+			follow: {
+				listened: ["xmoq", "meet", room],
+				latest: 1,
+				onSpeech(speech) {
+					// A new session fetches the latest piece again.
+					if (speech.number <= newest) return;
+					newest = speech.number;
+					bridge.speech(speech);
+				},
+			},
+			signal: stop.signal,
+		});
+		tellAgent(`Claude Code reads ${AGENT_ROOT}/${folder.path}/ and writes lines into inbox.txt there`);
+		// What was written stays.
+		return () => {
+			bridge.stop();
+			stop.abort();
+			agent.bridge = undefined;
+		};
+	};
+	// One call at a time: a press while one is made does nothing
+	// (`createAgentCall`).
+	const agentCall = createAgentCall({
+		start: call,
+		onState(state) {
+			if (callButton !== null) {
+				callButton.textContent =
+					state.type === "on" ? "stop Claude Code" : "call Claude Code";
+				callButton.toggleAttribute("disabled", state.type === "calling");
+			}
+			if (state.type === "failed") tellAgent(`Claude Code not called: ${why(state.error)}`);
+			if (state.type === "idle") void showRoot();
+		},
+	});
+	callButton?.addEventListener("click", () => agentCall.press());
+
 	const meeting = createMeeting({
 		room,
 		self,
-		onFrame(id, frame) {
+		onFrame(id, frame, at) {
 			others(id).frames += 1;
 			tileOf(id).getContext("2d")?.drawImage(frame, 0, 0, WIDTH, HEIGHT);
+			agent.bridge?.frame(id, frame, at);
 			frame.close();
 		},
 		onAudio(id, data) {
@@ -366,6 +530,9 @@ async function main(): Promise<void> {
 				document.querySelector(`canvas[data-id="${event.id}"]`)?.remove();
 			}
 			if (event.type === "came") others(event.id);
+			if (event.type === "came" || event.type === "left") {
+				agent.bridge?.participant(event.type === "came" ? "joined" : "left", event.id);
+			}
 			if (event.type === "failed") {
 				state.failed = [
 					...state.failed,

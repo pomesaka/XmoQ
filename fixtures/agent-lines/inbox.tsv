@@ -1,0 +1,14 @@
+a line is said	"hello"	say hello
+a carriage return before the line feed is taken off	"hello\r"	say hello
+a line that does not begin with a slash is said as it is	" /frame"	say  /frame
+a picture of whoever spoke last	"/frame"	frame -
+a picture of one named	"/frame p1"	frame p1
+words after the one named are let be	"/frame  p1  p2"	frame p1
+a tab between the words	"/frame\tp1"	frame p1
+two slashes say a line that begins with one	"//frame"	say /frame
+two slashes alone say one	"//"	say /
+three slashes say two	"///x"	say //x
+a command that is none	"/quit"	unknown quit
+a slash alone is a command with no name	"/"	unknown 
+an empty line asks for nothing	""	nothing
+a carriage return alone asks for nothing	"\r"	nothing

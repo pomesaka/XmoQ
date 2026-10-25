@@ -17,6 +17,7 @@ import {
 	type KeptBack,
 	keepInTheRoom,
 	type LinesGap,
+	type ReceivedLine,
 	type SayOutcome,
 } from "@xmoq/chat";
 import type { GoAwayNotice } from "@xmoq/moqt";
@@ -59,10 +60,10 @@ function catchUpOfTheAddress(): number {
 }
 
 const KEPT_BACK: Record<KeptBack, (limits: ChatLimits) => string> = {
-	"too-long": (limits) => `not sent: longer than ${limits.textBytes} bytes`,
+	"too-long": (limits) => `longer than ${limits.textBytes} bytes`,
 	"too-fast": (limits) =>
-		`not sent: more than ${limits.linesPerSecond} lines in a second`,
-	"not-well-formed": () => "not sent: the text has a broken character",
+		`more than ${limits.linesPerSecond} lines in a second`,
+	"not-well-formed": () => "the text has a broken character",
 };
 
 /**
@@ -94,10 +95,11 @@ export function startChat(
 	room: string,
 	name: string,
 	connectForChat: (goAway?: GoAwayNotice) => Promise<ChatConnection>,
-): void {
+	onLine?: (line: ReceivedLine) => void,
+): ChatSaying | undefined {
 	const log = document.getElementById("chat");
 	const note = document.getElementById("chat-note");
-	if (!XMOQ_DEMO.chatTracks || log === null) return;
+	if (!XMOQ_DEMO.chatTracks || log === null) return undefined;
 	const say = (text: string): void => {
 		if (note !== null) note.textContent = text;
 	};
@@ -135,7 +137,8 @@ export function startChat(
 		if (after === undefined) log.scrollTop = log.scrollHeight;
 		document.body.dataset.chatLines = String(log.querySelectorAll("div[data-how]").length);
 	};
-	const add = (line: { name: string; text: string; at: number; number: bigint; how: string }): void => {
+	const add = (line: ReceivedLine): void => {
+		onLine?.(line);
 		if (lastHad === undefined || line.number > lastHad) lastHad = line.number;
 		const shown = document.createElement("div");
 		shown.dataset.number = line.number.toString();
@@ -183,6 +186,14 @@ export function startChat(
 		},
 	});
 
+	/** Says `text`; why it was not sent (without a "not sent"), or undefined where it was. */
+	const sayLine = async (text: string): Promise<string | undefined> => {
+		if (participant === undefined) return "not in the room's chat yet";
+		const outcome: SayOutcome = await participant.say(text);
+		if (outcome.type === "kept-back") return KEPT_BACK[outcome.why](limits);
+		if (outcome.type === "not-sent") return outcome.why;
+		return undefined;
+	};
 	const form = document.querySelector("form");
 	form?.addEventListener("submit", (event) => {
 		event.preventDefault();
@@ -191,22 +202,20 @@ export function startChat(
 		const text = input.value;
 		void (async () => {
 			// The text stays in the field where it was not sent, to be sent again.
-			if (participant === undefined) {
-				say("not sent: not in the room's chat yet");
-				return;
-			}
-			const outcome: SayOutcome = await participant.say(text);
-			if (outcome.type === "kept-back") {
-				say(KEPT_BACK[outcome.why](limits));
-				return;
-			}
-			if (outcome.type === "not-sent") {
-				say(`not sent: ${outcome.why}`);
+			const why = await sayLine(text);
+			if (why !== undefined) {
+				say(`not sent: ${why}`);
 				return;
 			}
 			input.value = "";
 			say("sent");
 		})();
 	});
+	return { say: sayLine };
+}
+
+/** Says a line in the chat of `startChat` from elsewhere than its form (an agent's inbox). */
+export interface ChatSaying {
+	say(text: string): Promise<string | undefined>;
 }
 

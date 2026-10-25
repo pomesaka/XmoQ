@@ -23,6 +23,19 @@
 //     of p3 come to it.
 //   - After that nothing more of p2 comes to p1 or p3: its counts of frames
 //     and of sound stay the same over a second.
+//
+// Written on 2026-10-25, before a page of a meeting wrote for an agent
+// (`createAgentBridge` of `@xmoq/meeting`): every page also writes into a
+// folder of its own storage (OPFS), as it would into the one a person
+// chooses. Once p1 receives the video of p2, the driver writes `/frame p2`,
+// `hello` and `/frame p3` into p1's `inbox.txt`, as an agent would.
+//
+//   - p1's `events.jsonl` has `participant` lines, `joined` for p2 and then
+//     p3; a `frame` line with `id` p2, `asked` command and a `path` under
+//     `frames/`, whose file is a PNG (its bytes 1 to 3 are "PNG"); an `error`
+//     `not said: this page has no chat` for `hello` (the page here has no
+//     chat); and an `error` `/frame p3: no picture of p3 came`, since p1
+//     receives the video of one alone.
 
 import { parseArgs } from "node:util";
 import type { Page } from "playwright-core";
@@ -154,6 +167,52 @@ async function main(): Promise<void> {
 			throw new Error(`p1 was told of them as ${JSON.stringify(order)}`);
 		}
 
+		// An agent asks p1 for pictures and to say a line, through its folder.
+		for (const line of ["/frame p2", "hello", "/frame p3"]) {
+			await page("p1").evaluate(([said]) => window.xmoqOwn.agentInbox(said), [
+				line,
+			] satisfies [string]);
+		}
+		const folder = await pollFor(async () => {
+			const now = await page("p1").evaluate(() =>
+				window.xmoqOwn.agentFolderReport(),
+			);
+			return now.lines.some((line) => line.includes("no picture of p3"))
+				? now
+				: undefined;
+		}, "p1 to write what its inbox asked for");
+		const joined = folder.lines
+			.filter((line) => line.includes('"type":"participant"'))
+			.map((line) =>
+				/"id":"([^"]+)","state":"([^"]+)"/.exec(line)?.slice(1).join(" "),
+			);
+		if (JSON.stringify(joined) !== JSON.stringify(["p2 joined", "p3 joined"])) {
+			throw new Error(`p1 wrote the participants as ${JSON.stringify(joined)}`);
+		}
+		const frame = folder.lines.find((line) => line.includes('"type":"frame"'));
+		const path =
+			frame === undefined
+				? undefined
+				: /"path":"(frames\/[^"]+)"/.exec(frame)?.[1];
+		if (
+			frame === undefined ||
+			path === undefined ||
+			!frame.includes('"id":"p2"') ||
+			!frame.includes('"asked":"command"') ||
+			!(folder.pictures[path] ?? "").endsWith(" PNG")
+		) {
+			throw new Error(`p1 wrote no picture of p2: ${JSON.stringify(folder)}`);
+		}
+		if (
+			!folder.lines.some((line) =>
+				line.includes("not said: this page has no chat"),
+			)
+		) {
+			throw new Error(
+				`p1 did not say why hello was not said: ${JSON.stringify(folder.lines)}`,
+			);
+		}
+
 		await page("p2").evaluate(() => window.xmoq.disconnect());
 		for (const id of ["p1", "p3"]) {
 			await told(page(id), id, "left p2");
@@ -185,7 +244,7 @@ async function main(): Promise<void> {
 			}
 		}
 		const last = after[0];
-		summary = `through the ${options.relay} relay, three pages met in xmoq/meet/r: p1 (one video) received the video of p2 and the sound of p2 and p3, p2 and p3 the video and sound of both others; when p2 closed its session p1 and p3 stopped its video and sound, and p1 received the video of p3 in its place (p1 had ${JSON.stringify(last?.frames)} frames and ${JSON.stringify(last?.audio)} pieces of sound)`;
+		summary = `through the ${options.relay} relay, three pages met in xmoq/meet/r: p1 (one video) received the video of p2 and the sound of p2 and p3, p2 and p3 the video and sound of both others; when p2 closed its session p1 and p3 stopped its video and sound, and p1 received the video of p3 in its place (its folder for an agent: ${folder.lines.length} lines, the picture of p2 at ${path} of ${folder.pictures[path] ?? ""}) (p1 had ${JSON.stringify(last?.frames)} frames and ${JSON.stringify(last?.audio)} pieces of sound)`;
 	} finally {
 		await runCleanups();
 	}

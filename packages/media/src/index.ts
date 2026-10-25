@@ -126,6 +126,8 @@ export {
 export {
 	DEFAULT_MAX_DECODE_QUEUE,
 	DEFAULT_MAX_DECODER_FAILURES,
+	type FrameOrigin,
+	MAX_FRAMES_REMEMBERED,
 	type PlayVideoTrackOptions,
 	playVideoTrack,
 	type VideoPlayback,
