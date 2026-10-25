@@ -36,9 +36,8 @@
 //! nobody is left to ask); its lines are in the store, and a FETCH gets them again
 //! once somebody is in the room.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use xmoq_chat::args::Rooms as Taken;
@@ -56,30 +55,29 @@ use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::message::{
-    ControlMessage, Fetch, FetchRange, ReasonPhrase, RequestOk, publish_done_status,
-    request_error_code,
+    ControlMessage, FetchRange, ReasonPhrase, publish_done_status, request_error_code,
 };
 use xmoq_moqt::name::{Location, TrackNamespace};
 use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{
-    ControlEvent, PeerRequest, PeerRequestEvent, PeerRequestId, PeerRequestOpened, RequestEvent,
-    RequestId, Role, Session, SubscribedAlias, Transport,
+    ControlEvent, RequestEvent, RequestId, Role, Session, SubscribedAlias, Transport,
 };
 use xmoq_moqt::token::Token;
 use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, PeerRequestClose, PeerRequestStreamEvent, RequestClose, RequestReadError,
-    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, client,
-    read_request_streams, read_uni_streams, send_message,
+    Connection, PeerRequestStreamEvent, RequestClose, RequestReadError, StreamConfig, StreamEnd,
+    StreamStops, UniEvent, client, read_request_streams, read_uni_streams,
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 
+use xmoq_track_serving::answers::{self, FETCHES_AT_ONCE, Fetches};
 use xmoq_track_serving::backoff::Backoff;
-use xmoq_track_serving::fetch::{Held, payload_bytes, pieces_of, plan};
+use xmoq_track_serving::fetch::{pieces_of, plan};
+use xmoq_track_serving::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
+use xmoq_track_serving::requests::{AskedFetch, FetchAnswer, PeerRequests};
 use xmoq_track_serving::streams::{
-    Answer, Answered, Answering, Command, GroupToSend, Heard, RequestTask, Sending, Waits,
-    answer_fetch, open_request, send_group,
+    Answered, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request, send_group,
 };
 use xmoq_track_serving::{shown, sleep_until};
 
@@ -116,16 +114,8 @@ const LINES_WAITING_FOR_A_ROOM: usize = 64;
 /// a task for every line. Provisional.
 const LINES_BEING_SENT: usize = 256;
 
-/// FETCH requests answered at once, as many as the Rust client answers
-/// (`MAX_ANSWERED_AT_ONCE`); one more is refused with `EXCESSIVE_LOAD`.
-/// WHY twice the 16 the relay asks one publisher for: as there. A FETCH
-/// that was answered and waits for the relay to end its request stream is
-/// not counted; what bounds those is the session, which keeps no more than
-/// 256 requests of the relay (`MAX_PEER_REQUESTS`). Provisional.
-const FETCHES_AT_ONCE: usize = 32;
-
 /// The most bytes of payload the answers to FETCH requests that are being
-/// written hold together ([`Held`]).
+/// written hold together (`Held` of `xmoq-track-serving`).
 ///
 /// Not a flag: with `--fetch-lines` and `--text-bytes` at their most, one
 /// answer could be 100,000 lines of 49 KiB, and 32 are answered at once.
@@ -136,14 +126,6 @@ const FETCHES_AT_ONCE: usize = 32;
 /// the bound, so no more than that is read for an answer that is refused.
 /// **Provisional.**
 const MAX_BYTES_HELD: usize = 64 * 1024 * 1024;
-
-/// How long a room whose PUBLISH failed waits before it is published
-/// again, on the next line that comes for it. Provisional.
-const PUBLISH_AGAIN_AFTER: Duration = Duration::from_secs(5);
-
-/// The Track Alias of the first room the gatherer publishes; each next one
-/// has the next (§11.1: one alias a track of the session).
-const FIRST_TRACK_ALIAS: u64 = 1;
 
 /// How a session ended without an error.
 #[derive(Debug)]
@@ -190,60 +172,6 @@ struct Watch {
     backoff: Backoff,
 }
 
-/// A PUBLISH of a room that is to end: its `PUBLISH_DONE` waits for every
-/// subgroup stream of the room to be closed (§10.11: "A sender MUST NOT send
-/// `PUBLISH_DONE` until it has closed all streams it will ever open"), and
-/// then counts them (Stream Count).
-struct Ending {
-    room: String,
-    status: u64,
-    opened: Arc<AtomicU64>,
-}
-
-/// A room the gatherer numbers.
-struct Room {
-    /// The token of its PUBLISH, while there is one.
-    publish: Option<u64>,
-    track_alias: u64,
-    /// Whether the PUBLISH has its `PUBLISH_OK` with Forward State 1: lines
-    /// are sent on it.
-    live: bool,
-    /// The subgroup streams of its PUBLISH that were opened.
-    opened: Arc<AtomicU64>,
-    /// Lines that wait for the `PUBLISH_OK`.
-    waiting: VecDeque<Line>,
-    /// Not published again before this, after a PUBLISH that failed.
-    not_before: Option<Instant>,
-    /// The lines of the room whose streams are being sent ([`Sending`]).
-    sending: watch::Sender<usize>,
-}
-
-impl Room {
-    fn new() -> Self {
-        Self {
-            publish: None,
-            track_alias: 0,
-            live: false,
-            opened: Arc::new(AtomicU64::new(0)),
-            waiting: VecDeque::new(),
-            not_before: None,
-            sending: watch::channel(0).0,
-        }
-    }
-}
-
-/// A FETCH of the relay that the gatherer answers.
-struct Fetching {
-    request: PeerRequestId,
-    answering: Answering,
-    /// Its answer was written, or ended otherwise.
-    over: bool,
-    /// The relay finished its direction of the request stream.
-    peer_finished: bool,
-    /// The bytes of payload the answer holds until it is written ([`Held`]).
-    bytes: usize,
-}
-
 /// Everything of one session.
 struct Gathering<'a> {
     connection: &'a Arc<WtConnection>,
@@ -254,7 +182,8 @@ struct Gathering<'a> {
     own: HashMap<u64, Own>,
     next_token: u64,
     heard: mpsc::Sender<(u64, Heard)>,
-    rooms: HashMap<String, Room>,
+    /// The `lines` of each room the gatherer numbers.
+    rooms: HashMap<String, Publication<Line>>,
     next_track_alias: u64,
     /// Each participant that is followed.
     people: HashMap<Person, Followed>,
@@ -267,15 +196,12 @@ struct Gathering<'a> {
     /// Objects of `said` read before the `SUBSCRIBE_OK` that gives their
     /// Track Alias, by that alias, with their payload (`xmoq_moqt::early`).
     early: EarlyObjects<(u64, Vec<u8>)>,
-    /// The requests of the relay the session keeps after the gatherer
-    /// refused them, by their stream, until the stream is gone.
-    refused: HashMap<u64, PeerRequestId>,
-    fetches: HashMap<u64, Fetching>,
-    fetch_done: mpsc::Sender<(u64, Answered)>,
-    held: Held,
+    /// The requests of the relay: the FETCH requests being answered, and
+    /// those refused.
+    requests: PeerRequests,
     /// The PUBLISH requests that wait for their streams to be closed, by
-    /// token, and where the loop is told that they are.
-    ending: HashMap<u64, Ending>,
+    /// token, with their room, and where the loop is told that they are.
+    ending: HashMap<u64, (String, Ending)>,
     drained: mpsc::Sender<u64>,
     watches: Vec<Watch>,
     /// The rooms the gatherer takes (`--room`).
@@ -283,8 +209,6 @@ struct Gathering<'a> {
     /// `--auth-key-hex`.
     key: Option<&'a RoomKey>,
     sends: JoinSet<()>,
-    /// Answers to requests of the relay that are being written.
-    replies: JoinSet<()>,
     began: Instant,
 }
 
@@ -371,10 +295,7 @@ pub async fn gather(
         asking_again: HashMap::new(),
         ask_again,
         early: EarlyObjects::default(),
-        refused: HashMap::new(),
-        fetches: HashMap::new(),
-        fetch_done,
-        held: Held::new(MAX_BYTES_HELD),
+        requests: PeerRequests::new(Fetches::new(FETCHES_AT_ONCE, MAX_BYTES_HELD), fetch_done),
         ending: HashMap::new(),
         drained,
         watches: prefixes(rooms_taken)?
@@ -389,7 +310,6 @@ pub async fn gather(
         taken: rooms_taken,
         key,
         sends: JoinSet::new(),
-        replies: JoinSet::new(),
         began: Instant::now(),
     };
 
@@ -441,7 +361,7 @@ pub async fn gather(
             () = sleep_until(gathering.next_watch()) => gathering.watch_again()?,
             () = sleep_until(gathering.next_said()) => gathering.said_again()?,
             Some(_) = gathering.sends.join_next() => {}
-            Some(_) = gathering.replies.join_next() => {}
+            Some(_) = gathering.requests.replies().join_next() => {}
         }
     };
     Ok(ended)
@@ -592,11 +512,18 @@ impl Gathering<'_> {
         Some(own.purpose)
     }
 
+    // FIXME: take the steps of a PUBLISH (`publish` to `publish_done`,
+    // `send_live`) and of the gatherer's own requests (`open`, `tell`,
+    // `let_go`, `watch`, `watch_again`) from `xmoq-track-serving`; the
+    // transcriber has a copy of each.
     /// Publishes the `lines` of a room, unless they are published or wait
     /// to be published again.
     fn publish(&mut self, room: &str) -> Result<()> {
-        let entry = self.rooms.entry(room.to_string()).or_insert_with(Room::new);
-        if entry.publish.is_some() || entry.not_before.is_some_and(|after| Instant::now() < after) {
+        let entry = self
+            .rooms
+            .entry(room.to_string())
+            .or_insert_with(|| Publication::new(LINES_WAITING_FOR_A_ROOM));
+        if !entry.to_publish(Instant::now()) {
             return Ok(());
         }
         let track_alias = self.next_track_alias;
@@ -627,11 +554,7 @@ impl Gathering<'_> {
             &parameters,
         );
         if let Some(entry) = self.rooms.get_mut(room) {
-            entry.publish = Some(token);
-            entry.track_alias = track_alias;
-            entry.live = false;
-            entry.opened = Arc::new(AtomicU64::new(0));
-            entry.not_before = None;
+            entry.published(token, track_alias);
         }
         Ok(())
     }
@@ -640,12 +563,8 @@ impl Gathering<'_> {
     /// Does nothing where `token` is no longer the room's PUBLISH.
     fn unpublish(&mut self, room: &str, token: u64, failed: bool) {
         if let Some(entry) = self.rooms.get_mut(room)
-            && entry.publish == Some(token)
+            && entry.unpublished(token, failed, Instant::now())
         {
-            entry.publish = None;
-            entry.live = false;
-            entry.waiting.clear();
-            entry.not_before = failed.then(|| Instant::now() + PUBLISH_AGAIN_AFTER);
             println!("ROOM_UNPUBLISHED room={room:?}");
         }
     }
@@ -655,66 +574,48 @@ impl Gathering<'_> {
     /// closed ([`Self::publish_done`]). `forget`: the room is numbered no
     /// more, and its state goes.
     fn end_publish(&mut self, room: &str, status: u64, forget: bool) {
-        let Some(entry) = self.rooms.get_mut(room) else {
-            return;
-        };
-        let token = entry.publish.take();
-        entry.live = false;
-        entry.waiting.clear();
-        let sending = entry.sending.subscribe();
-        let opened = Arc::clone(&entry.opened);
+        let ending = self.rooms.get_mut(room).and_then(|entry| entry.end(status));
         if forget {
             self.rooms.remove(room);
         }
-        let Some(token) = token else {
+        let Some(ending) = ending else {
             return;
         };
-        self.ending.insert(
-            token,
-            Ending {
-                room: room.to_string(),
-                status,
-                opened,
-            },
-        );
         let drained = self.drained.clone();
+        let when_drained = ending.when_drained();
         tokio::spawn(async move {
-            let mut sending = sending;
-            // An error: the room's state went with its last sender, and no
-            // stream of it is being sent.
-            let _ = sending.wait_for(|count| *count == 0).await;
-            let _ = drained.send(token).await;
+            let _ = drained.send(when_drained.await).await;
         });
+        self.ending.insert(ending.token, (room.to_string(), ending));
     }
 
     /// Every stream of an ending PUBLISH is closed: its `PUBLISH_DONE`, with
     /// the number of streams it opened (§10.11), and a FIN. Where the room
     /// is numbered again meanwhile, it is published anew.
     fn publish_done(&mut self, token: u64) -> Result<()> {
-        let Some(ending) = self.ending.remove(&token) else {
+        let Some((room, ending)) = self.ending.remove(&token) else {
             return Ok(());
         };
         if let Some(own) = self.own.get(&token) {
+            let streams = ending.streams();
             let done = self.session.publish_done(
                 own.request,
                 ending.status,
-                ending.opened.load(Ordering::Relaxed),
+                streams,
                 ReasonPhrase::default(),
             )?;
             self.tell(token, Command::Say(done));
             self.let_go(token, Command::Finish);
             println!(
-                "ROOM_DONE room={:?} status={:#x} streams={}",
-                ending.room,
-                ending.status,
-                ending.opened.load(Ordering::Relaxed)
+                "ROOM_DONE room={room:?} status={:#x} streams={streams}",
+                ending.status
             );
         }
-        if self.gatherer.rooms.knows(&ending.room) {
-            if let Some(entry) = self.rooms.get_mut(&ending.room) {
-                entry.not_before = None;
+        if self.gatherer.rooms.knows(&room) {
+            if let Some(entry) = self.rooms.get_mut(&room) {
+                entry.may_publish_again();
             }
-            self.publish(&ending.room)?;
+            self.publish(&room)?;
         }
         Ok(())
     }
@@ -971,16 +872,11 @@ impl Gathering<'_> {
     /// Sends a line that is kept on the `lines` of its room, or has it wait
     /// for the room's `PUBLISH_OK`.
     fn send_live(&mut self, room: &str, line: Line) -> Result<()> {
-        let is_live = self.rooms.get(room).is_some_and(|entry| entry.live);
+        let is_live = self.rooms.get(room).is_some_and(Publication::live);
         if !is_live {
             self.publish(room)?;
-            if let Some(entry) = self.rooms.get_mut(room)
-                && entry.publish.is_some()
-            {
-                if entry.waiting.len() >= LINES_WAITING_FOR_A_ROOM {
-                    entry.waiting.pop_front();
-                }
-                entry.waiting.push_back(line);
+            if let Some(entry) = self.rooms.get_mut(room) {
+                entry.wait(line);
             }
             return Ok(());
         }
@@ -995,12 +891,12 @@ impl Gathering<'_> {
             return Ok(());
         }
         let sending = GroupToSend {
-            track_alias: entry.track_alias,
+            track_alias: entry.track_alias(),
             group_id: line.number,
             payload: line.payload(),
-            opened: Arc::clone(&entry.opened),
+            opened: Arc::clone(entry.opened()),
         };
-        let counted = Sending::begin(&entry.sending);
+        let counted = Sending::begin(entry.sending());
         let connection = Arc::clone(self.connection);
         let room = room.to_string();
         self.sends.spawn(async move {
@@ -1193,14 +1089,11 @@ impl Gathering<'_> {
             }
             (Purpose::Lines(room), RequestEvent::PublishEstablished { forward, .. }) => {
                 let room = room.clone();
-                let waiting = match self.rooms.get_mut(&room) {
-                    // Not for a PUBLISH that is ending, or one before.
-                    Some(entry) if entry.publish == Some(token) => {
-                        entry.live = forward;
-                        std::mem::take(&mut entry.waiting)
-                    }
-                    _ => VecDeque::new(),
-                };
+                let waiting = self
+                    .rooms
+                    .get_mut(&room)
+                    .map(|entry| entry.established(token, forward))
+                    .unwrap_or_default();
                 let largest = self.gatherer.rooms.largest(&room);
                 println!(
                     "ROOM_PUBLISHED room={room:?} forward={forward} largest={}",
@@ -1223,7 +1116,7 @@ impl Gathering<'_> {
                 if self
                     .rooms
                     .get(&room)
-                    .is_some_and(|entry| entry.publish == Some(token))
+                    .is_some_and(|entry| entry.publish() == Some(token))
                 {
                     self.end_publish(&room, publish_done_status::UPDATE_FAILED, false);
                 }
@@ -1275,99 +1168,20 @@ impl Gathering<'_> {
         Ok(None)
     }
 
-    /// An event of a request stream the relay opened.
+    /// An event of the relay's request streams: a FETCH is answered.
     fn on_peer_request(&mut self, event: PeerRequestStreamEvent<Send>) -> Result<()> {
-        match event {
-            PeerRequestStreamEvent::Opened {
-                stream,
-                send,
-                first,
-            } => match self.session.on_peer_request_opened(first)? {
-                PeerRequestOpened::Refused { response, request } => {
-                    if let Some(request) = request {
-                        self.refused.insert(stream, request);
-                    }
-                    self.reply(send, response);
-                }
-                PeerRequestOpened::Request(request, PeerRequest::Fetch(fetch)) => {
-                    self.on_fetch(stream, send, request, &fetch)?;
-                }
-                // The gatherer is asked for nothing else: it announces no
-                // namespace, and is the subscriber of no PUBLISH it takes.
-                PeerRequestOpened::Request(request, _) => {
-                    self.refuse(stream, send, request, request_error_code::NOT_SUPPORTED)?;
-                }
-            },
-            PeerRequestStreamEvent::Message { stream, message } => {
-                if let Some(fetching) = self.fetches.get(&stream) {
-                    let event = self
-                        .session
-                        .on_peer_request_message(fetching.request, message)
-                        .map_err(fault)?;
-                    // A REQUEST_UPDATE of a FETCH changes nothing, and gets
-                    // its REQUEST_OK (§10.9).
-                    // None is dropped (§10.9: "exactly one"): where the queue
-                    // is full the FETCH is cancelled instead (`tell`).
-                    if let PeerRequestEvent::UpdateAccepted { response, .. } = event
-                        && fetching.answering.says.try_send(response).is_err()
-                    {
-                        self.end_fetch(stream, stream_reset_code::EXCESSIVE_LOAD);
-                    }
-                } else if let Some(request) = self.refused.get(&stream) {
-                    // What crossed the refusal: the session has to see it, a
-                    // REQUEST_UPDATE uses up a Request ID (§10.1).
-                    self.session
-                        .on_peer_request_message(*request, message)
-                        .map_err(fault)?;
-                }
-            }
-            PeerRequestStreamEvent::Closed { stream, how } => {
-                if let Some(request) = self.refused.remove(&stream) {
-                    self.session.on_peer_request_closed(request);
-                }
-                self.fetch_closed(stream, how);
-            }
-            PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
-            PeerRequestStreamEvent::ReaderPanicked => {
-                bail!("a reader of a request stream panicked")
-            }
+        if let Some(asked) = self
+            .requests
+            .on_event(&mut self.session, &self.stops, event)?
+        {
+            self.on_fetch(asked)?;
         }
-        Ok(())
-    }
-
-    /// Writes the last message on a request stream of the relay, then a FIN
-    /// (§3.3.2), in a task of its own.
-    fn reply(&mut self, mut send: Send, response: ControlMessage) {
-        self.replies.spawn(async move {
-            // An error means the relay is gone or stopped the stream.
-            let _ = send_message(&mut send, &response, &Trace::default(), "reply").await;
-            send.finish();
-        });
-    }
-
-    /// Refuses a request of the relay with `code`.
-    fn refuse(&mut self, stream: u64, send: Send, request: PeerRequestId, code: u64) -> Result<()> {
-        let response = self
-            .session
-            .reject(request, code, 0, ReasonPhrase::default())?;
-        self.refused.insert(stream, request);
-        self.reply(send, response);
         Ok(())
     }
 
     /// A FETCH of the relay: for a range of the `lines` of a room, which is
     /// answered from the store ([`xmoq_chat::fetch`]).
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one refusal after the other, each with its code, and the answer"
-    )]
-    fn on_fetch(
-        &mut self,
-        stream: u64,
-        send: Send,
-        request: PeerRequestId,
-        fetch: &Fetch,
-    ) -> Result<()> {
+    fn on_fetch(&mut self, asked: AskedFetch) -> Result<()> {
         // WHY a Joining FETCH is refused: the gatherer has no subscriber of
         // its own to join; the relay turns a viewer's Joining FETCH into a
         // Standalone one before it asks a publisher (`Relay::join` of
@@ -1376,45 +1190,32 @@ impl Gathering<'_> {
             full_track_name,
             start,
             end,
-        } = &fetch.range
+        } = asked.fetch.range.clone()
         else {
-            return self.refuse(stream, send, request, request_error_code::NOT_SUPPORTED);
+            return self.refuse(asked, request_error_code::NOT_SUPPORTED);
         };
-        let Some(room) = room_of_lines(full_track_name).filter(|room| self.taken.has(room)) else {
-            return self.refuse(stream, send, request, request_error_code::DOES_NOT_EXIST);
+        let Some(room) = room_of_lines(&full_track_name).filter(|room| self.taken.has(room)) else {
+            return self.refuse(asked, request_error_code::DOES_NOT_EXIST);
         };
-        let answering = self
-            .fetches
-            .values()
-            .filter(|fetching| !fetching.over)
-            .count();
-        if answering >= FETCHES_AT_ONCE {
-            return self.refuse(stream, send, request, request_error_code::EXCESSIVE_LOAD);
+        if self.requests.full() {
+            return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);
         }
-        // §10.2.8: "If omitted from FETCH, the receiver uses Ascending".
-        let group_order = fetch
-            .parameters
-            .iter()
-            .find_map(|parameter| match parameter {
-                Parameter::GroupOrder(order) => Some(*order),
-                _ => None,
-            })
-            .unwrap_or(GroupOrder::Ascending);
+        let group_order = answers::group_order(&asked.fetch);
         let largest = if self.gatherer.rooms.knows(&room) {
             self.gatherer.rooms.largest(&room)
         } else {
             self.store.next_number(&room)?.checked_sub(1)
         };
         let most = self.gatherer.limits().fetch_lines;
-        let planned = match plan(*start, *end, largest, most, group_order) {
+        let planned = match plan(start, end, largest, most, group_order) {
             Ok(planned) => planned,
             Err(code) => {
                 println!("FETCH_REFUSED room={room:?} error_code={code:#x}");
-                return self.refuse(stream, send, request, code);
+                return self.refuse(asked, code);
             }
         };
         let lines = match planned.groups {
-            Some(range) => self.store.lines(&room, range, self.held.room()),
+            Some(range) => self.store.lines(&room, range, self.requests.room()),
             None => Ok(Some(Vec::new())),
         };
         let mut lines = match lines {
@@ -1423,11 +1224,11 @@ impl Gathering<'_> {
             // cannot process the request at this time" (`MAX_BYTES_HELD`).
             Ok(None) => {
                 println!("FETCH_REFUSED room={room:?} error_code=0x9 why=too-many-bytes-held");
-                return self.refuse(stream, send, request, request_error_code::EXCESSIVE_LOAD);
+                return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);
             }
             Err(error) => {
                 println!("FETCH_REFUSED room={room:?} error_code=0x0 store_error={error:#}");
-                return self.refuse(stream, send, request, request_error_code::INTERNAL_ERROR);
+                return self.refuse(asked, request_error_code::INTERNAL_ERROR);
             }
         };
         if group_order == GroupOrder::Descending {
@@ -1439,17 +1240,17 @@ impl Gathering<'_> {
             planned.left_out,
         );
         drop(lines);
-        let bytes = payload_bytes(&pieces);
         // The store gave no more than there is room for.
-        if !self.held.take(bytes) {
-            return self.refuse(stream, send, request, request_error_code::EXCESSIVE_LOAD);
+        if !self.requests.hold(&pieces) {
+            return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);
         }
-        // End Of Track 0: the chat goes on.
-        let (ok, owed) = self
-            .session
-            .accept_fetch(request, false, planned.end_location, vec![])?;
-        let mut messages = vec![ok];
-        messages.extend((0..owed).map(|_| ControlMessage::RequestOk(RequestOk::default())));
+        let answer = FetchAnswer {
+            end_location: planned.end_location,
+            group_order,
+            pieces,
+        };
+        self.requests
+            .answer(self.connection, &mut self.session, asked, answer)?;
         println!(
             "FETCH_ANSWERED room={room:?} start={},{} end={},{} lines={count} unknown_through={}",
             start.group,
@@ -1461,121 +1262,17 @@ impl Gathering<'_> {
                 |(location, _)| location.group.to_string()
             ),
         );
-        let answer = Answer {
-            messages,
-            request_id: request.value(),
-            group_order,
-            pieces,
-        };
-        let answering = answer_fetch(
-            self.connection,
-            stream,
-            send,
-            answer,
-            self.fetch_done.clone(),
-        );
-        self.fetches.insert(
-            stream,
-            Fetching {
-                request,
-                answering,
-                over: false,
-                peer_finished: false,
-                bytes,
-            },
-        );
         Ok(())
+    }
+
+    /// Refuses a FETCH of the relay with `code`.
+    fn refuse(&mut self, asked: AskedFetch, code: u64) -> Result<()> {
+        Ok(self.requests.refuse_fetch(&mut self.session, asked, code)?)
     }
 
     /// What the task of a FETCH said.
     fn fetch_over(&mut self, stream: u64, answered: Answered) {
-        let Some(fetching) = self.fetches.get_mut(&stream) else {
-            return;
-        };
-        match answered {
-            Answered::Written => {
-                println!(
-                    "FETCH_SERVED request_id={} how=Written",
-                    fetching.request.value()
-                );
-                fetching.over = true;
-                self.held.give_back(std::mem::take(&mut fetching.bytes));
-                // From here on nothing is answered on the request stream
-                // (§10.1: a REQUEST_UPDATE still uses up its Request ID).
-                self.session.on_fetch_answer_ended(fetching.request);
-                if fetching.peer_finished {
-                    let request = fetching.request;
-                    self.fetches.remove(&stream);
-                    self.session.on_peer_request_closed(request);
-                }
-            }
-            // The gatherer's direction is over and the relay's is not: it is
-            // stopped. WHY: a relay that never ends it would keep the request
-            // in the session, which holds 256 of the relay's
-            // (`MAX_PEER_REQUESTS`), and refuses every one after. The own
-            // relay finishes its direction of a FETCH it passed on once the
-            // fetch stream reached its FIN (`finish_if_served` of
-            // `crates/relay-core/src/fetch.rs`), and stops a subscriber's
-            // direction 2 seconds after its own FIN; the gatherer stops the
-            // relay's at its own FIN, which is 3 seconds after the end of the
-            // fetch stream at the most (row on the request stream of a FETCH
-            // that was served to its end, `docs/moqt-implementation-notes.md`).
-            Answered::RequestOver { peer_ended: false } => {
-                println!(
-                    "FETCH_REQUEST_STOPPED request_id={}",
-                    fetching.request.value()
-                );
-                self.end_fetch(stream, stream_reset_code::CANCELLED);
-            }
-            Answered::RequestOver { peer_ended: true } => {}
-            // The task has reset its directions (§5.2: "It MUST reset the
-            // bidi request stream and unidirectional data stream").
-            Answered::Stopped | Answered::Failed => {
-                println!(
-                    "FETCH_SERVED request_id={} how={answered:?}",
-                    fetching.request.value()
-                );
-                self.end_fetch(stream, stream_reset_code::CANCELLED);
-            }
-        }
-    }
-
-    /// Ends a FETCH of the relay on both streams with `code`, where they are
-    /// not over, and forgets it.
-    fn end_fetch(&mut self, stream: u64, code: u32) {
-        let Some(mut fetching) = self.fetches.remove(&stream) else {
-            return;
-        };
-        if let Some(cancel) = fetching.answering.cancel.take() {
-            let _ = cancel.send(code);
-        }
-        if !fetching.peer_finished {
-            self.stops.stop(stream, code);
-        }
-        self.held.give_back(fetching.bytes);
-        self.session.on_peer_request_closed(fetching.request);
-    }
-
-    /// The relay's direction of the request stream of a FETCH is over.
-    fn fetch_closed(&mut self, stream: u64, how: PeerRequestClose) {
-        let Some(fetching) = self.fetches.get_mut(&stream) else {
-            return;
-        };
-        // A subscriber that finishes its direction has not given the FETCH
-        // up (§3.3.2); one that resets it has.
-        if !how.is_fin() {
-            fetching.peer_finished = true;
-            self.end_fetch(stream, stream_reset_code::CANCELLED);
-            return;
-        }
-        fetching.peer_finished = true;
-        if let Some(ended) = fetching.answering.peer_ended.take() {
-            let _ = ended.send(());
-        }
-        if fetching.over {
-            let request = fetching.request;
-            self.fetches.remove(&stream);
-            self.session.on_peer_request_closed(request);
-        }
+        self.requests
+            .over(&mut self.session, &self.stops, stream, answered);
     }
 }

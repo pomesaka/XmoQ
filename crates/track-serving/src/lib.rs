@@ -1,11 +1,13 @@
 //! What a client of the relay needs to serve tracks of its own on a session
-//! that it also subscribes on, as the gatherer of the chat (`xmoq-chat`)
-//! does. Such a client is told of namespaces under a
+//! that it also subscribes on, as the gatherer of the chat (`xmoq-chat`) and
+//! the transcriber (`xmoq-transcriber`) do. Such a client is told of namespaces under a
 //! prefix, subscribes to a track of each, publishes one track of one Object
 //! a Group for each prefix, and answers the relay's FETCH for it.
 //!
 //! The parts: how long to wait before asking again ([`backoff`]), what a
-//! FETCH gets of such a track ([`fetch`]; both without input or output),
+//! FETCH gets of such a track ([`fetch`]), the FETCH requests being answered
+//! ([`answers`]), the PUBLISH of a track ([`publication`]; these four
+//! without input or output), the requests the relay opens ([`requests`]),
 //! and the tasks that write the streams ([`streams`]).
 //!
 //! WHY a crate of its own, apart from the gatherer: a transcriber of the
@@ -14,8 +16,11 @@
 //! messages for any peer, and these tasks are the policy of a client that
 //! publishes (its waits, its limits, a Group a stream).
 
+pub mod answers;
 pub mod backoff;
 pub mod fetch;
+pub mod publication;
+pub mod requests;
 pub mod streams;
 
 use std::time::Instant;

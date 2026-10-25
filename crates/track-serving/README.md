@@ -1,9 +1,12 @@
 # xmoq-track-serving
 
-What a client of the relay needs to serve tracks of its own on a session it also subscribes on. The gatherer of the chat ([`xmoq-chat`](../chat/README.md)) uses it. Such a client is told of namespaces under a prefix, subscribes to a track of each, publishes one track for each prefix with one Object in each Group, and answers the relay's FETCH for it.
+What a client of the relay needs to serve tracks of its own on a session it also subscribes on. The gatherer of the chat ([`xmoq-chat`](../chat/README.md)) and the transcriber ([`xmoq-transcriber`](../transcriber/README.md)) use it. Such a client is told of namespaces under a prefix, subscribes to a track of each, publishes one track for each prefix with one Object in each Group, and answers the relay's FETCH for it.
 
 | Module | What it has |
 |---|---|
+| `answers` | The FETCH requests of the relay that are answered, from the answer to the end of both directions of the request stream: how many at once (32, `FETCHES_AT_ONCE`), the bytes their answers hold, the answer to a `REQUEST_UPDATE`, and when the relay's direction is stopped. What is to be done to the session and the streams comes back as steps. No input or output |
+| `publication` | The PUBLISH of a track, from the PUBLISH to its `PUBLISH_DONE`: what waits for the `PUBLISH_OK`, the streams it opened, and the pause before a PUBLISH that failed is sent again (5 s, `PUBLISH_AGAIN_AFTER`). No input or output; the count of the streams being sent is a `tokio` watch, shared with their tasks |
+| `requests` | The requests the relay opens: a FETCH is handed to the client, which plans its answer and hands it back to be written; every other request is refused with `NOT_SUPPORTED`; the steps of `answers` are carried out. Writes the answers, the refusals and the log |
 | `backoff` | How long to wait before connecting again, and before asking for a `SUBSCRIBE_NAMESPACE` again: 1 s, doubling up to 30 s, and 1 s again after one that lasted a minute (provisional) |
 | `fetch` | What a FETCH gets of a track whose Groups have one Object each and no gap: the latest Groups of its range up to a limit, and an End of Unknown Range indicator for those left out (why, at the top of `src/fetch.rs`); the pieces of the answer; the bytes the answers being written may hold together, to a bound that each client sets. No input or output |
 | `streams` | The tasks that write the streams, one task for each stream: a request stream the client opens (it reads the answers and writes what it is told), the subgroup stream of one Group, and the answer to a FETCH on its request stream and a fetch stream of its own |

@@ -21,10 +21,9 @@
 //! somebody is in it: there are 8 prefixes at the most, and a viewer who
 //! comes before the broadcast finds the track.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
@@ -37,33 +36,33 @@ use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::immutable::{Of, TrackRefusal, searched_integers};
 use xmoq_moqt::message::{
-    ControlMessage, Fetch, FetchRange, ReasonPhrase, RequestOk, publish_done_status,
-    request_error_code,
+    ControlMessage, FetchRange, ReasonPhrase, publish_done_status, request_error_code,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{
-    ControlEvent, FetchStreamOpened, PeerRequest, PeerRequestEvent, PeerRequestId,
-    PeerRequestOpened, RequestEvent, RequestId, Role, Session, SubscribedAlias, Transport,
+    ControlEvent, FetchStreamOpened, RequestEvent, RequestId, Role, Session, SubscribedAlias,
+    Transport,
 };
 use xmoq_moqt::token::Token;
 use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, FetchChunk, PeerRequestClose, PeerRequestStreamEvent, RequestClose,
-    RequestReadError, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, client,
-    read_request_streams, read_uni_streams, send_message,
+    Connection, FetchChunk, PeerRequestStreamEvent, RequestClose, RequestReadError, StreamConfig,
+    StreamEnd, StreamStops, UniEvent, client, read_request_streams, read_uni_streams,
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 use xmoq_speech::cut::Cut;
 use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
 use xmoq_speech::vad::Silero;
 use xmoq_speech::{AudioPacket, Listener};
+use xmoq_track_serving::answers::{self, FETCHES_AT_ONCE, Fetches};
 use xmoq_track_serving::backoff::Backoff;
-use xmoq_track_serving::fetch::{Held, Plan, payload_bytes, pieces_of, plan};
+use xmoq_track_serving::fetch::{Plan, pieces_of, plan};
+use xmoq_track_serving::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
+use xmoq_track_serving::requests::{AskedFetch, FetchAnswer, PeerRequests};
 use xmoq_track_serving::streams::{
-    Answer, Answered, Answering, Command, GroupToSend, Heard, RequestTask, Sending, Waits,
-    answer_fetch, open_request, send_group,
+    Answered, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request, send_group,
 };
 use xmoq_track_serving::{shown, sleep_until};
 use xmoq_transcriber::args::Args;
@@ -105,16 +104,10 @@ const PIECES_WAITING_FOR_A_PUBLISH: usize = 64;
 /// sent live. Provisional.
 const PIECES_BEING_SENT: usize = 64;
 
-/// FETCH requests answered at once, as the gatherer answers. Provisional.
-const FETCHES_AT_ONCE: usize = 32;
-
 /// The bytes of payload the FETCH answers being written hold together
-/// ([`Held`]): 16 answers of the default 1,000 pieces of 1 KB. Provisional.
+/// (`Held` of `xmoq-track-serving`): 16 answers of the default 1,000 pieces
+/// of 1 KB. Provisional.
 const MAX_BYTES_HELD: usize = 16 * 1000 * 1024;
-
-/// How long a transcript whose PUBLISH failed waits before it is published
-/// again. Provisional.
-const PUBLISH_AGAIN_AFTER: Duration = Duration::from_secs(5);
 
 /// The probability of a voice from which a frame has one: whisper.cpp's
 /// default (`whisper_vad_default_params`). Provisional.
@@ -125,10 +118,6 @@ const CATALOG: &[u8] = b"catalog";
 
 /// The most a catalog may be, as the terminal viewer reads it.
 const CATALOG_LIMIT: usize = 1024 * 1024;
-
-/// The Track Alias of the first transcript published; each next one has the
-/// next (§11.1).
-const FIRST_TRACK_ALIAS: u64 = 1;
 
 /// How a session ended without an error.
 #[derive(Debug)]
@@ -205,48 +194,6 @@ struct Broadcast {
     audio_again: AskAgain,
 }
 
-/// A PUBLISH of a transcript that is to end once its streams are closed
-/// (§10.11), as the gatherer ends a room's.
-struct Ending {
-    prefix: usize,
-    status: u64,
-    opened: Arc<AtomicU64>,
-}
-
-/// The PUBLISH of the transcript of one prefix.
-struct Published {
-    publish: Option<u64>,
-    track_alias: u64,
-    live: bool,
-    opened: Arc<AtomicU64>,
-    waiting: VecDeque<Speech>,
-    not_before: Option<Instant>,
-    sending: watch::Sender<usize>,
-}
-
-impl Published {
-    fn new() -> Self {
-        Self {
-            publish: None,
-            track_alias: 0,
-            live: false,
-            opened: Arc::new(AtomicU64::new(0)),
-            waiting: VecDeque::new(),
-            not_before: None,
-            sending: watch::channel(0).0,
-        }
-    }
-}
-
-/// A FETCH of the relay that the transcriber answers, as the gatherer's.
-struct Fetching {
-    request: PeerRequestId,
-    answering: Answering,
-    over: bool,
-    peer_finished: bool,
-    bytes: usize,
-}
-
 /// Everything of one session.
 struct Transcribing<'a> {
     connection: &'a Arc<WtConnection>,
@@ -261,7 +208,8 @@ struct Transcribing<'a> {
     own: HashMap<u64, Own>,
     next_token: u64,
     heard: mpsc::Sender<(u64, Heard)>,
-    published: Vec<Published>,
+    /// The transcript of each prefix.
+    published: Vec<Publication<Speech>>,
     next_track_alias: u64,
     watches: Vec<Watch>,
     broadcasts: HashMap<TrackNamespace, Broadcast>,
@@ -273,14 +221,14 @@ struct Transcribing<'a> {
     /// Objects read before the `SUBSCRIBE_OK` that gives their Track Alias,
     /// by that alias (`xmoq_moqt::early`).
     early: EarlyObjects<(u64, SubgroupObject)>,
-    refused: HashMap<u64, PeerRequestId>,
-    fetches: HashMap<u64, Fetching>,
-    fetch_done: mpsc::Sender<(u64, Answered)>,
-    held: Held,
-    ending: HashMap<u64, Ending>,
+    /// The requests of the relay: the FETCH requests being answered, and
+    /// those refused.
+    requests: PeerRequests,
+    /// The PUBLISH requests that wait for their streams to be closed, by
+    /// token, with their prefix.
+    ending: HashMap<u64, (usize, Ending)>,
     drained: mpsc::Sender<u64>,
     sends: JoinSet<()>,
-    replies: JoinSet<()>,
     /// Audio Objects without a Timestamp of LOC, which are not read.
     untimed: u64,
 }
@@ -377,7 +325,11 @@ pub async fn transcribe(
         own: HashMap::new(),
         next_token: 0,
         heard,
-        published: args.prefixes.iter().map(|_| Published::new()).collect(),
+        published: args
+            .prefixes
+            .iter()
+            .map(|_| Publication::new(PIECES_WAITING_FOR_A_PUBLISH))
+            .collect(),
         next_track_alias: FIRST_TRACK_ALIAS,
         watches: args
             .prefixes
@@ -394,14 +346,10 @@ pub async fn transcribe(
         catalog_fetches: HashMap::new(),
         catalogs,
         early: EarlyObjects::default(),
-        refused: HashMap::new(),
-        fetches: HashMap::new(),
-        fetch_done,
-        held: Held::new(MAX_BYTES_HELD),
+        requests: PeerRequests::new(Fetches::new(FETCHES_AT_ONCE, MAX_BYTES_HELD), fetch_done),
         ending: HashMap::new(),
         drained,
         sends: JoinSet::new(),
-        replies: JoinSet::new(),
         untimed: 0,
     };
 
@@ -461,7 +409,7 @@ pub async fn transcribe(
             () = sleep_until(transcribing.next_watch()) => transcribing.watch_again()?,
             () = sleep_until(transcribing.next_ask()) => transcribing.ask_again()?,
             Some(_) = transcribing.sends.join_next() => {}
-            Some(_) = transcribing.replies.join_next() => {}
+            Some(_) = transcribing.requests.replies().join_next() => {}
         }
     };
     // The pieces under way are read: what was said before the end is not
@@ -604,6 +552,10 @@ impl Transcribing<'_> {
         Some(own.purpose)
     }
 
+    // FIXME: take the steps of a PUBLISH (`publish` to `publish_done`,
+    // `send_live`) and of the transcriber's own requests (`open`, `tell`,
+    // `let_go`, `watch`, `watch_again`) from `xmoq-track-serving`; the
+    // gatherer has a copy of each.
     /// Publishes the transcript of a prefix, unless it is published or waits
     /// to be published again.
     fn publish(&mut self, prefix: usize) -> Result<()> {
@@ -613,7 +565,7 @@ impl Transcribing<'_> {
         let Some(entry) = self.published.get(prefix) else {
             return Ok(());
         };
-        if entry.publish.is_some() || entry.not_before.is_some_and(|after| Instant::now() < after) {
+        if !entry.to_publish(Instant::now()) {
             return Ok(());
         }
         let track_alias = self.next_track_alias;
@@ -649,11 +601,7 @@ impl Transcribing<'_> {
         };
         let token = self.open(Purpose::Speech(prefix), request, message, &parameters);
         if let Some(entry) = self.published.get_mut(prefix) {
-            entry.publish = Some(token);
-            entry.track_alias = track_alias;
-            entry.live = false;
-            entry.opened = Arc::new(AtomicU64::new(0));
-            entry.not_before = None;
+            entry.published(token, track_alias);
         }
         Ok(())
     }
@@ -662,12 +610,8 @@ impl Transcribing<'_> {
     /// pause, on the next piece.
     fn unpublish(&mut self, prefix: usize, token: u64) {
         if let Some(entry) = self.published.get_mut(prefix)
-            && entry.publish == Some(token)
+            && entry.unpublished(token, true, Instant::now())
         {
-            entry.publish = None;
-            entry.live = false;
-            entry.waiting.clear();
-            entry.not_before = Some(Instant::now() + PUBLISH_AGAIN_AFTER);
             println!("TRANSCRIPT_UNPUBLISHED prefix={prefix}");
         }
     }
@@ -676,40 +620,29 @@ impl Transcribing<'_> {
     /// sent are closed ([`Self::publish_done`]), as the gatherer ends a
     /// room's.
     fn end_publish(&mut self, prefix: usize, status: u64) {
-        let Some(entry) = self.published.get_mut(prefix) else {
+        let Some(ending) = self
+            .published
+            .get_mut(prefix)
+            .and_then(|entry| entry.end(status))
+        else {
             return;
         };
-        let Some(token) = entry.publish.take() else {
-            return;
-        };
-        entry.live = false;
-        entry.waiting.clear();
-        let sending = entry.sending.subscribe();
-        let opened = Arc::clone(&entry.opened);
-        self.ending.insert(
-            token,
-            Ending {
-                prefix,
-                status,
-                opened,
-            },
-        );
         let drained = self.drained.clone();
+        let when_drained = ending.when_drained();
         tokio::spawn(async move {
-            let mut sending = sending;
-            let _ = sending.wait_for(|count| *count == 0).await;
-            let _ = drained.send(token).await;
+            let _ = drained.send(when_drained.await).await;
         });
+        self.ending.insert(ending.token, (prefix, ending));
     }
 
     /// Every stream of an ending PUBLISH is closed: its `PUBLISH_DONE` with
     /// the number of streams (§10.11), and the transcript is published anew.
     fn publish_done(&mut self, token: u64) -> Result<()> {
-        let Some(ending) = self.ending.remove(&token) else {
+        let Some((prefix, ending)) = self.ending.remove(&token) else {
             return Ok(());
         };
         if let Some(own) = self.own.get(&token) {
-            let streams = ending.opened.load(Ordering::Relaxed);
+            let streams = ending.streams();
             let done = self.session.publish_done(
                 own.request,
                 ending.status,
@@ -719,11 +652,11 @@ impl Transcribing<'_> {
             self.tell(token, Command::Say(done));
             self.let_go(token, Command::Finish);
             println!(
-                "TRANSCRIPT_DONE prefix={} status={:#x} streams={streams}",
-                ending.prefix, ending.status
+                "TRANSCRIPT_DONE prefix={prefix} status={:#x} streams={streams}",
+                ending.status
             );
         }
-        self.publish(ending.prefix)
+        self.publish(prefix)
     }
 
     /// The pieces of a prefix's broadcasts that were read.
@@ -753,16 +686,11 @@ impl Transcribing<'_> {
     /// Sends a piece on the transcript of its prefix, or has it wait for the
     /// `PUBLISH_OK`.
     fn send_live(&mut self, prefix: usize, speech: Speech) -> Result<()> {
-        let is_live = self.published.get(prefix).is_some_and(|entry| entry.live);
+        let is_live = self.published.get(prefix).is_some_and(Publication::live);
         if !is_live {
             self.publish(prefix)?;
-            if let Some(entry) = self.published.get_mut(prefix)
-                && entry.publish.is_some()
-            {
-                if entry.waiting.len() >= PIECES_WAITING_FOR_A_PUBLISH {
-                    entry.waiting.pop_front();
-                }
-                entry.waiting.push_back(speech);
+            if let Some(entry) = self.published.get_mut(prefix) {
+                entry.wait(speech);
             }
             return Ok(());
         }
@@ -777,12 +705,12 @@ impl Transcribing<'_> {
             return Ok(());
         }
         let group = GroupToSend {
-            track_alias: entry.track_alias,
+            track_alias: entry.track_alias(),
             group_id: speech.number,
             payload: speech.payload(),
-            opened: Arc::clone(&entry.opened),
+            opened: Arc::clone(entry.opened()),
         };
-        let counted = Sending::begin(&entry.sending);
+        let counted = Sending::begin(entry.sending());
         let connection = Arc::clone(self.connection);
         self.sends.spawn(async move {
             let _counted = counted;
@@ -1390,14 +1318,11 @@ impl Transcribing<'_> {
     /// The `PUBLISH_OK` of a transcript: the pieces that waited for it are
     /// sent.
     fn published_ok(&mut self, prefix: usize, token: u64, forward: bool) -> Result<()> {
-        let waiting = match self.published.get_mut(prefix) {
-            // Not for a PUBLISH that is ending, or one before.
-            Some(entry) if entry.publish == Some(token) => {
-                entry.live = forward;
-                std::mem::take(&mut entry.waiting)
-            }
-            _ => VecDeque::new(),
-        };
+        let waiting = self
+            .published
+            .get_mut(prefix)
+            .map(|entry| entry.established(token, forward))
+            .unwrap_or_default();
         let largest = self.transcripts.get(prefix).and_then(Transcript::largest);
         println!(
             "TRANSCRIPT_PUBLISHED prefix={} forward={forward} largest={}",
@@ -1464,7 +1389,7 @@ impl Transcribing<'_> {
                 if self
                     .published
                     .get(prefix)
-                    .is_some_and(|entry| entry.publish == Some(token))
+                    .is_some_and(|entry| entry.publish() == Some(token))
                 {
                     self.end_publish(prefix, publish_done_status::UPDATE_FAILED);
                 }
@@ -1530,172 +1455,74 @@ impl Transcribing<'_> {
         Ok(None)
     }
 
-    /// An event of a request stream the relay opened, as the gatherer takes
-    /// it.
+    /// An event of the relay's request streams: a FETCH is answered.
     fn on_peer_request(&mut self, event: PeerRequestStreamEvent<Send>) -> Result<()> {
-        match event {
-            PeerRequestStreamEvent::Opened {
-                stream,
-                send,
-                first,
-            } => match self.session.on_peer_request_opened(first)? {
-                PeerRequestOpened::Refused { response, request } => {
-                    if let Some(request) = request {
-                        self.refused.insert(stream, request);
-                    }
-                    self.reply(send, response);
-                }
-                PeerRequestOpened::Request(request, PeerRequest::Fetch(fetch)) => {
-                    self.on_fetch(stream, send, request, &fetch)?;
-                }
-                // Asked for nothing else: it announces no namespace.
-                PeerRequestOpened::Request(request, _) => {
-                    self.refuse(stream, send, request, request_error_code::NOT_SUPPORTED)?;
-                }
-            },
-            PeerRequestStreamEvent::Message { stream, message } => {
-                if let Some(fetching) = self.fetches.get(&stream) {
-                    let event = self
-                        .session
-                        .on_peer_request_message(fetching.request, message)
-                        .map_err(fault)?;
-                    if let PeerRequestEvent::UpdateAccepted { response, .. } = event
-                        && fetching.answering.says.try_send(response).is_err()
-                    {
-                        self.end_fetch(stream, stream_reset_code::EXCESSIVE_LOAD);
-                    }
-                } else if let Some(request) = self.refused.get(&stream) {
-                    self.session
-                        .on_peer_request_message(*request, message)
-                        .map_err(fault)?;
-                }
-            }
-            PeerRequestStreamEvent::Closed { stream, how } => {
-                if let Some(request) = self.refused.remove(&stream) {
-                    self.session.on_peer_request_closed(request);
-                }
-                self.fetch_closed(stream, how);
-            }
-            PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
-            PeerRequestStreamEvent::ReaderPanicked => {
-                bail!("a reader of a request stream panicked")
-            }
+        if let Some(asked) = self
+            .requests
+            .on_event(&mut self.session, &self.stops, event)?
+        {
+            self.on_fetch(asked)?;
         }
         Ok(())
     }
 
-    fn reply(&mut self, mut send: Send, response: ControlMessage) {
-        self.replies.spawn(async move {
-            use xmoq_moqt_io::SendStream;
-            let _ = send_message(&mut send, &response, &Trace::default(), "reply").await;
-            send.finish();
-        });
-    }
-
-    fn refuse(&mut self, stream: u64, send: Send, request: PeerRequestId, code: u64) -> Result<()> {
-        let response = self
-            .session
-            .reject(request, code, 0, ReasonPhrase::default())?;
-        self.refused.insert(stream, request);
-        self.reply(send, response);
-        Ok(())
-    }
-
-    /// A FETCH of the relay for a range of a transcript, answered from the
-    /// pieces kept ([`xmoq_track_serving::fetch`]).
-    fn on_fetch(
-        &mut self,
-        stream: u64,
-        send: Send,
-        request: PeerRequestId,
-        fetch: &Fetch,
-    ) -> Result<()> {
+    /// A FETCH of the relay: for a range of a transcript, which is answered
+    /// from the pieces kept ([`xmoq_track_serving::fetch`]).
+    fn on_fetch(&mut self, asked: AskedFetch) -> Result<()> {
         // A Joining FETCH is refused, as the gatherer refuses it: the relay
         // turns a viewer's into a Standalone one before it asks.
         let FetchRange::Standalone {
             full_track_name,
             start,
             end,
-        } = &fetch.range
+        } = asked.fetch.range.clone()
         else {
-            return self.refuse(stream, send, request, request_error_code::NOT_SUPPORTED);
+            return self.refuse(asked, request_error_code::NOT_SUPPORTED);
         };
-        let Some(prefix) = listened_of(full_track_name).and_then(|listened| {
+        let Some(prefix) = listened_of(&full_track_name).and_then(|listened| {
             self.args
                 .prefixes
                 .iter()
                 .position(|prefix| *prefix == listened)
         }) else {
-            return self.refuse(stream, send, request, request_error_code::DOES_NOT_EXIST);
+            return self.refuse(asked, request_error_code::DOES_NOT_EXIST);
         };
-        if self
-            .fetches
-            .values()
-            .filter(|fetching| !fetching.over)
-            .count()
-            >= FETCHES_AT_ONCE
-        {
-            return self.refuse(stream, send, request, request_error_code::EXCESSIVE_LOAD);
+        if self.requests.full() {
+            return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);
         }
-        // §10.2.8: "If omitted from FETCH, the receiver uses Ascending".
-        let group_order = fetch
-            .parameters
-            .iter()
-            .find_map(|parameter| match parameter {
-                Parameter::GroupOrder(order) => Some(*order),
-                _ => None,
-            })
-            .unwrap_or(GroupOrder::Ascending);
+        let group_order = answers::group_order(&asked.fetch);
         let Some(transcript) = self.transcripts.get(prefix) else {
-            return self.refuse(stream, send, request, request_error_code::DOES_NOT_EXIST);
+            return self.refuse(asked, request_error_code::DOES_NOT_EXIST);
         };
-        let (planned, speeches) = match Self::planned(transcript, *start, *end, group_order) {
+        let (planned, speeches) = match Self::planned(transcript, start, end, group_order) {
             Ok(planned) => planned,
             Err(code) => {
                 println!("FETCH_REFUSED prefix={prefix} error_code={code:#x}");
-                return self.refuse(stream, send, request, code);
+                return self.refuse(asked, code);
             }
         };
         let count = speeches.len();
         let pieces = pieces_of(speeches, planned.left_out);
-        let bytes = payload_bytes(&pieces);
-        if !self.held.take(bytes) {
-            return self.refuse(stream, send, request, request_error_code::EXCESSIVE_LOAD);
+        if !self.requests.hold(&pieces) {
+            return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);
         }
-        // End Of Track 0: the transcript goes on.
-        let (ok, owed) = self
-            .session
-            .accept_fetch(request, false, planned.end_location, vec![])?;
-        let mut messages = vec![ok];
-        messages.extend((0..owed).map(|_| ControlMessage::RequestOk(RequestOk::default())));
+        let answer = FetchAnswer {
+            end_location: planned.end_location,
+            group_order,
+            pieces,
+        };
+        self.requests
+            .answer(self.connection, &mut self.session, asked, answer)?;
         println!(
             "FETCH_ANSWERED prefix={prefix} start={},{} end={},{} pieces={count}",
             start.group, start.object, planned.end_location.group, planned.end_location.object,
         );
-        let answer = Answer {
-            messages,
-            request_id: request.value(),
-            group_order,
-            pieces,
-        };
-        let answering = answer_fetch(
-            self.connection,
-            stream,
-            send,
-            answer,
-            self.fetch_done.clone(),
-        );
-        self.fetches.insert(
-            stream,
-            Fetching {
-                request,
-                answering,
-                over: false,
-                peer_finished: false,
-                bytes,
-            },
-        );
         Ok(())
+    }
+
+    /// Refuses a FETCH of the relay with `code`.
+    fn refuse(&mut self, asked: AskedFetch, code: u64) -> Result<()> {
+        Ok(self.requests.refuse_fetch(&mut self.session, asked, code)?)
     }
 
     /// What a FETCH of a transcript gets: the plan, and the pieces in the
@@ -1731,60 +1558,9 @@ impl Transcribing<'_> {
         Ok((planned, speeches))
     }
 
-    /// What the task of a FETCH said, as the gatherer takes it (why the
-    /// relay's direction is stopped, at its `fetch_over`).
+    /// What the task of a FETCH said.
     fn fetch_over(&mut self, stream: u64, answered: Answered) {
-        let Some(fetching) = self.fetches.get_mut(&stream) else {
-            return;
-        };
-        match answered {
-            Answered::Written => {
-                fetching.over = true;
-                self.held.give_back(std::mem::take(&mut fetching.bytes));
-                self.session.on_fetch_answer_ended(fetching.request);
-                if fetching.peer_finished {
-                    let request = fetching.request;
-                    self.fetches.remove(&stream);
-                    self.session.on_peer_request_closed(request);
-                }
-            }
-            Answered::RequestOver { peer_ended: false } | Answered::Stopped | Answered::Failed => {
-                self.end_fetch(stream, stream_reset_code::CANCELLED);
-            }
-            Answered::RequestOver { peer_ended: true } => {}
-        }
-    }
-
-    fn end_fetch(&mut self, stream: u64, code: u32) {
-        let Some(mut fetching) = self.fetches.remove(&stream) else {
-            return;
-        };
-        if let Some(cancel) = fetching.answering.cancel.take() {
-            let _ = cancel.send(code);
-        }
-        if !fetching.peer_finished {
-            self.stops.stop(stream, code);
-        }
-        self.held.give_back(fetching.bytes);
-        self.session.on_peer_request_closed(fetching.request);
-    }
-
-    fn fetch_closed(&mut self, stream: u64, how: PeerRequestClose) {
-        let Some(fetching) = self.fetches.get_mut(&stream) else {
-            return;
-        };
-        fetching.peer_finished = true;
-        if !how.is_fin() {
-            self.end_fetch(stream, stream_reset_code::CANCELLED);
-            return;
-        }
-        if let Some(ended) = fetching.answering.peer_ended.take() {
-            let _ = ended.send(());
-        }
-        if fetching.over {
-            let request = fetching.request;
-            self.fetches.remove(&stream);
-            self.session.on_peer_request_closed(request);
-        }
+        self.requests
+            .over(&mut self.session, &self.stops, stream, answered);
     }
 }
