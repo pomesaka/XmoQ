@@ -482,6 +482,19 @@ export type OwnPageExtras = {
 	chatSay(text: string): Promise<string>;
 	/** Stops the participant (the `signal` of `joinChat`); the session stays open. */
 	chatLeave(): Promise<void>;
+	/**
+	 * Keeps a participant of the chat in the room with `keepInTheRoom` of
+	 * `@xmoq/chat`, on connections of its own to `relayUrl`, or to the URI of
+	 * the GOAWAY that ended the session before, with the same certificate's
+	 * hash. Its states are in `keptReport().chat`; `chatSay` and `chatReport`
+	 * go to the participant of the session it is on.
+	 */
+	keepChat(
+		relayUrl: string,
+		certSha256Hex: string,
+		room: string,
+		name: string,
+	): Promise<void>;
 	/** What the participant has had so far, in the order it came, and its status. */
 	chatReport(): Promise<PageChatReport>;
 };
@@ -517,6 +530,11 @@ export type PageKeptReport = {
 	publishing: string[];
 	/** The states of `keepPlaying`, in the same way ("playing 2"). */
 	playing: string[];
+	/**
+	 * The states of `keepChat`, in the same way: "connecting 1", "joined 1
+	 * <relay URL>", "moved <URI>", "session-ended", "failed <error>".
+	 */
+	chat: string[];
 	/**
 	 * The frames the playout drew: the number its bars say, the session it
 	 * came on, and when it was drawn (`Date.now()`, milliseconds since 1970),

@@ -16,6 +16,12 @@
 //     with the URL of the relay below and `?sent-away=1`; the second viewer
 //     says `moved` with that URI and then plays at the relay below: it draws
 //     frames on its first session that plays (`keepPlaying` counts those).
+//     Written on 2026-10-25, before `keepInTheRoom` of `@xmoq/chat` followed
+//     GOAWAY: the second viewer then keeps a participant of the chat in the
+//     room `r` with a connection of its own to the relay above
+//     (`keepChat`). The relay above prints SESSION_SENT_AWAY a second time,
+//     with the same URI; the chat says `moved` with it, and then `joined 1`
+//     at that URI, its first session joined.
 //   - both-full: the relay below has `--max-sessions 1` and `--when-full`
 //     the relay above. The relay above sends the second viewer away once;
 //     the relay below closes it (SESSION_REFUSED) and does not send it back:
@@ -28,6 +34,7 @@ import {
 	log,
 	MOQLIVEMOCK_SIDE_PORT_OFFSET,
 	openPage,
+	pollFor,
 	runCleanups,
 	startRun,
 	startSecondOwnRelay,
@@ -189,7 +196,30 @@ async function main(): Promise<void> {
 					`the second viewer did not say it moved: ${states.join(", ")}`,
 				);
 			}
-			summary = `the relay above, full with the publisher and the relay below, sent the second viewer to ${sentTo}, and it played there (${states.join(", ")})`;
+			// The chat of the same page, on a session of its own (as the demo's
+			// pages have it), is sent away as well, and follows the GOAWAY.
+			await second.evaluate(
+				([url, hash]) => window.xmoqOwn.keepChat(url, hash, "r", "second"),
+				[context.relayUrl, context.certSha256Hex] satisfies [string, string],
+			);
+			await withTimeout(
+				context.relay.waitForLines(
+					/^SESSION_SENT_AWAY session=\d+ uri=(\S+)$/,
+					2,
+				),
+				"the relay above to send the second viewer's chat away",
+			);
+			const chat = await pollFor(async () => {
+				const now = (await report(second)).chat;
+				return now.some((said) => said.startsWith("joined ")) ? now : undefined;
+			}, "the second viewer's chat to join");
+			const movedAt = chat.indexOf(`moved ${sentTo}`);
+			if (movedAt === -1 || chat.indexOf(`joined 1 ${sentTo}`) < movedAt) {
+				throw new Error(
+					`the second viewer's chat did not join where it was sent: ${chat.join(", ")}`,
+				);
+			}
+			summary = `the relay above, full with the publisher and the relay below, sent the second viewer to ${sentTo}, and it played there (${states.join(", ")}); its chat was sent there as well and joined the room there (${chat.join(", ")})`;
 		} else {
 			await withTimeout(
 				below.relay.waitForLines(

@@ -1328,6 +1328,7 @@ async function reconnect(throughEdge: boolean): Promise<string> {
 		return {
 			publishing: published.publishing,
 			playing: played.playing,
+			chat: played.chat,
 			shown: played.shown,
 		};
 	};
@@ -1534,6 +1535,7 @@ async function goAwayAtSigterm(
 		return {
 			publishing: published.publishing,
 			playing: played.playing,
+			chat: played.chat,
 			shown: played.shown,
 		};
 	};
