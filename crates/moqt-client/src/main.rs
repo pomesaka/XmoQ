@@ -546,6 +546,15 @@ async fn next_publish_anew(stdin: &mut DriverLines) -> Result<bool> {
     }
 }
 
+/// The line that has to come after `subgroup-again-longer` or
+/// `subgroup-again-shorter`, before the second stream is sent.
+async fn next_subgroup_again_second(stdin: &mut DriverLines) -> Result<()> {
+    match stdin.next_line().await?.as_deref().map(PublisherLine::read) {
+        Some(PublisherLine::SubgroupAgainSecond) => Ok(()),
+        other => bail!("after subgroup-again-* comes subgroup-again-second, not {other:?}"),
+    }
+}
+
 /// A line of the driver on a publisher's stdin.
 #[derive(Debug, PartialEq, Eq)]
 enum PublisherLine {
@@ -563,11 +572,14 @@ enum PublisherLine {
     /// what is sent after it is past the end of the track (§2.4.2).
     EndOfTrack,
     /// `subgroup-again-longer`, `subgroup-again-shorter`: the next Group on
-    /// a stream that ends with a FIN, then the same Subgroup on a second
-    /// stream that ends with a FIN, with one Object more or one fewer: Objects
-    /// 0, then 0 and 1; or 0 and 1, then 0. The second and the third example
-    /// of a malformed track (§2.4.2), for the interop run.
+    /// a stream that ends with a FIN, then, at the line
+    /// `subgroup-again-second`, the same Subgroup on a second stream that
+    /// ends with a FIN, with one Object more or one fewer: Objects 0, then 0
+    /// and 1; or 0 and 1, then 0. The second and the third example of a
+    /// malformed track (§2.4.2), for the interop run.
     SubgroupAgain { longer: bool },
+    /// `subgroup-again-second`: the second stream of `SubgroupAgain`.
+    SubgroupAgainSecond,
 }
 
 impl PublisherLine {
@@ -581,6 +593,7 @@ impl PublisherLine {
             "end-of-track" => Self::EndOfTrack,
             "subgroup-again-longer" => Self::SubgroupAgain { longer: true },
             "subgroup-again-shorter" => Self::SubgroupAgain { longer: false },
+            "subgroup-again-second" => Self::SubgroupAgainSecond,
             _ => Self::Send,
         }
     }
@@ -2041,13 +2054,15 @@ impl Client<'_> {
                             .await?;
                         stream_count = 0;
                     }
-                    Some(PublisherLine::PublishAnew { .. }) => {
-                        bail!("publish-anew without a publish-done before it")
+                    // Each comes after the line it follows (`next_publish_anew`,
+                    // `next_subgroup_again_second`), and never alone.
+                    Some(line @ (PublisherLine::PublishAnew { .. } | PublisherLine::SubgroupAgainSecond)) => {
+                        bail!("{line:?} without the line it follows")
                     }
                     Some(PublisherLine::SubgroupAgain { longer }) => {
                         let group = (track_alias, self.args.first_group + sent);
                         stream_count += self
-                            .send_subgroup_twice(&mut peer_requests, group, payload, longer)
+                            .send_subgroup_twice((&mut peer_requests, &mut stdin), group, payload, longer)
                             .await?;
                         sent += 1;
                     }
@@ -2499,21 +2514,31 @@ impl Client<'_> {
 
     /// `subgroup-again-longer` and `subgroup-again-shorter`
     /// ([`PublisherLine::SubgroupAgain`]): the Group on two streams one
-    /// after the other. Returns how many streams were opened.
+    /// after the other, the second at the driver's `subgroup-again-second`.
+    /// Returns how many streams were opened.
     async fn send_subgroup_twice(
         &mut self,
-        peer_requests: &mut io::PeerRequests,
+        (peer_requests, stdin): (&mut io::PeerRequests, &mut DriverLines),
         (track_alias, group_id): (u64, u64),
         payload: &[u8],
         longer: bool,
     ) -> Result<u64> {
         let (first, again) = if longer { (1, 2) } else { (2, 1) };
         let mut opened = 0;
-        // WHY one after the other: the second stream is to open after the
-        // first ended with its FIN, which `send_object` waits for; one that
-        // opened before would take the place of the first at the own relay
-        // (§11.4).
-        for objects in [first, again] {
+        // WHY the second waits for a line of the driver, and not only for the
+        // FIN of the first, which `send_object` waits for: QUIC keeps no
+        // order between two streams, so a second stream opened after the
+        // first's FIN was written can still reach the relay first. Then the
+        // relay holds the second as the Subgroup's stream and ends the first
+        // (§11.4), and what the run looks for, a Subgroup delivered whole and
+        // then sent again, did not happen: in a run of CI (2026-10-25) the
+        // short stream came first and was reset with 0x1. The driver writes
+        // the line once the relay has finished its streams of the first
+        // towards every subscriber (`subgroupAgain` of `interop/disconnect.ts`).
+        for (index, objects) in [first, again].into_iter().enumerate() {
+            if index == 1 {
+                next_subgroup_again_second(stdin).await?;
+            }
             let object = (
                 track_alias,
                 group_id,
@@ -3516,6 +3541,7 @@ mod tests {
                 "subgroup-again-shorter",
                 PublisherLine::SubgroupAgain { longer: false },
             ),
+            ("subgroup-again-second", PublisherLine::SubgroupAgainSecond),
             (
                 "publish-anew",
                 PublisherLine::PublishAnew { same_alias: false },
