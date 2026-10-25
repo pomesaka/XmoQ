@@ -30,7 +30,7 @@ import {
 
 declare const XMOQ_DEMO: { roomsUrl: string | null };
 
-/** The size each participant sends at: the small version the meeting receives of 8 (Q59). */
+/** The size each participant sends at: the small version the meeting receives of 8. */
 const WIDTH = 320;
 const HEIGHT = 180;
 const FRAMES_A_SECOND = 15;

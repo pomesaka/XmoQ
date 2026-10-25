@@ -7,8 +7,8 @@
 //!
 //! where the mac is HMAC-SHA-256, with the key the relay shares with the
 //! room, over the text before the last `|`. The relay reads it, and the
-//! gatherer of the chat makes its own with the key of the demo (Q51,
-//! provisional), as the room (`spikes/durable-objects-room/worker.js`) does.
+//! gatherer of the chat makes its own with the key of the demo (provisional),
+//! as the room (`spikes/durable-objects-room/worker.js`) does.
 //!
 //! WHY one crate for the one that makes it and the one that reads it, and
 //! not a table of `fixtures/` both read: both are Rust, and one function
@@ -128,7 +128,7 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
 /// the namespace `asked`: the same fields, or, where the last field of the
 /// token is `*`, the fields before it, followed by any or none. Field by
 /// field, not as text: `xmoq/chat/*` allows `xmoq/chat` and
-/// `xmoq/chat/blue/a`, and not `xmoq/chatter`. Decided as Q50, for the chat
+/// `xmoq/chat/blue/a`, and not `xmoq/chatter`. Decided on 2026-10-24, for the chat
 /// of a room.
 ///
 /// WHY also the namespace before the `*` itself (decided on 2026-10-24): the

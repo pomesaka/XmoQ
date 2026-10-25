@@ -98,7 +98,8 @@ pub(crate) const FETCH_UPSTREAM_WAIT_MS: u64 = 5_000;
 /// receiving, for that Object to be whole, before it asks a publisher for
 /// the range ([`ReceiptWait`]); shorter where the FETCH has a
 /// `FILL_TIMEOUT` that is. **Provisional**, the same as a publisher's
-/// answer gets (`docs/open-questions.md`).
+/// answer gets; not chosen by a measurement: a key frame of 1 MiB at
+/// 2 Mbit/s takes about 4 seconds.
 pub(crate) const FETCH_RECEIPT_WAIT_MS: u64 = 5_000;
 
 /// The longest the relay waits that way, whatever `FILL_TIMEOUT` says

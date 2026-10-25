@@ -87,7 +87,7 @@
 //     The viewer's first session ends with its own `AV_PLAYED`, "the relay
 //     sent GOAWAY".
 //
-// `--watch chat`. The chat on MoQ tracks (Q36), through the own relay with
+// `--watch chat`. The chat on MoQ tracks, through the own relay with
 // the gatherer (`xmoq-chat`) beside it, while a page publishes the broadcast
 // as in `--watch page`. Two viewers of room `r`, each with `--chat-room r`
 // and a line to say (`--say`). Written before the first run:

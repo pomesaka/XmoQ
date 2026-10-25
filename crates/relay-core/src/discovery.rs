@@ -14,27 +14,27 @@ use crate::routing::Refusal;
 use crate::{Action, Relay, RequestSlot, SessionKey, StreamKey};
 
 /// `SUBSCRIBE_NAMESPACE` requests one session may have open at once. One
-/// more is refused with `EXCESSIVE_LOAD`. Decided on 2026-10-24 (Q45). WHY a limit: each
+/// more is refused with `EXCESSIVE_LOAD`. Decided on 2026-10-24. WHY a limit: each
 /// is looked at with every announcement and every withdrawal, and keeps the
 /// namespaces it was told of.
 pub const MAX_NAMESPACE_WATCHES_PER_SESSION: usize = 8;
 
 /// Namespaces under the prefix of one `SUBSCRIBE_NAMESPACE` that the relay
-/// tells of. Decided on 2026-10-24 (Q45). One more at the request is refused with
+/// tells of. Decided on 2026-10-24. One more at the request is refused with
 /// `NAMESPACE_TOO_LARGE` (§10.6.2: "the namespace prefix matches more
 /// publishers than the relay is willing to enumerate"); one more later resets
 /// the request stream with `EXCESSIVE_LOAD` (§3.3.3), which the subscriber
 /// takes as a `NAMESPACE_DONE` for each (§10.18).
 ///
 /// WHY 4,096: the gatherer of the chat watches every room with one request,
-/// and the aim is 10 rooms of 100 people (`docs/open-questions.md`). WHY a
+/// and the aim was 10 rooms of 100 people when this was set; a relay takes
+/// 1,000 sessions now (`HubConfig::max_sessions` of `xmoq-relay`). WHY a
 /// limit: the relay keeps, for each request, the namespaces it told of.
 pub const MAX_NAMESPACES_OF_A_WATCH: usize = 4096;
 
 /// NAMESPACE and `NAMESPACE_DONE` of one watch that the relay has sent and
 /// the I/O side has not reported written ([`crate::Event::NamespaceWritten`]). The
-/// rest of what changed is sent as these are written. Decided on 2026-10-24
-/// (Q45).
+/// rest of what changed is sent as these are written. Decided on 2026-10-24.
 ///
 /// WHY a window, and not everything at once: what waits for a request stream
 /// at the I/O side is bounded (256 messages, `session_queue_len` of

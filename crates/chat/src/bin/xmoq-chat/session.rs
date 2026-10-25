@@ -484,7 +484,7 @@ pub async fn gather(
 
 impl Gathering<'_> {
     /// A token of the gatherer's own for `role` in every namespace of the
-    /// chat (`xmoq/chat/*`, Q50) that runs for [`TOKEN_SECONDS`] from now,
+    /// chat (`xmoq/chat/*`) that runs for [`TOKEN_SECONDS`] from now,
     /// carried as an AUTHORIZATION TOKEN (§10.2.2: Alias Type `USE_VALUE`,
     /// Token Type 0); `None` without `--auth-key-hex`.
     ///

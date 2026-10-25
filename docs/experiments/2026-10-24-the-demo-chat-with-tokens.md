@@ -6,7 +6,7 @@
 
 ## Objective
 
-With `bun demo/serve.ts --auth` the relay refuses a request without a token of the room, and the pages had no chat. The relay now takes a token whose last field is `*` for the namespaces under it (Q50). What a participant needs: `pub` for `xmoq/chat/<room>/<name>` for its PUBLISH_NAMESPACE, and `sub` for `xmoq/chat/<room>` for its SUBSCRIBE for `lines` and its Joining FETCH. Does a page with the second on its connection and the first on its PUBLISH_NAMESPACE alone (`publishNamespaceToken` of `joinChat`) get through the relay, and are the wrong tokens refused? Does the demo start the gatherer with `--auth` only where the gatherer takes the relay's key?
+With `bun demo/serve.ts --auth` the relay refuses a request without a token of the room, and the pages had no chat. The relay now takes a token whose last field is `*` for the namespaces under it. What a participant needs: `pub` for `xmoq/chat/<room>/<name>` for its PUBLISH_NAMESPACE, and `sub` for `xmoq/chat/<room>` for its SUBSCRIBE for `lines` and its Joining FETCH. Does a page with the second on its connection and the first on its PUBLISH_NAMESPACE alone (`publishNamespaceToken` of `joinChat`) get through the relay, and are the wrong tokens refused? Does the demo start the gatherer with `--auth` only where the gatherer takes the relay's key?
 
 ## Expected
 

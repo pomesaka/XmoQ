@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, chat over MoQ tracks (Q36, decided on 2026-10-24): the gatherer of the chat finds the participants' tracks by SUBSCRIBE_NAMESPACE. Also a known gap of the implementation notes ("Messages the relay does not implement").
+- Roadmap item: Phase 4, chat over MoQ tracks (decided on 2026-10-24): the gatherer of the chat finds the participants' tracks by SUBSCRIBE_NAMESPACE. Also a known gap of the implementation notes ("Messages the relay does not implement").
 
 ## Objective
 

@@ -2,11 +2,11 @@
 
 - Date: 2026-10-24
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, relay scale/load testing; the goal of Q41
+- Roadmap item: Phase 4, relay scale/load testing; the goal of 2026-10-24 (10 rooms of 100 viewers, 500 ms)
 
 ## Objective
 
-The goal decided on 2026-10-24 (Q41): a delay of 500 ms at most, 100 viewers a room, 10 rooms open at once. Whether one relay meets it on the Linux VM of today's runs, with each room a publisher of video and sound: the delay at the 99th percentile, what is lost, the relay's processor and memory. Where it does not, how many rooms and viewers it does.
+The goal decided on 2026-10-24: a delay of 500 ms at most, 100 viewers a room, 10 rooms open at once. Whether one relay meets it on the Linux VM of today's runs, with each room a publisher of video and sound: the delay at the 99th percentile, what is lost, the relay's processor and memory. Where it does not, how many rooms and viewers it does.
 
 ## Environment
 

@@ -5,7 +5,7 @@
 //! WHY a program and a file: whatever reads the words (a script around
 //! another model, an agent) is put in place without a change here.
 //! WHY NOT a service over the network: where the sound of the people
-//! present may be sent is undecided (Q35, `docs/open-questions.md`); a
+//! present may be sent is undecided (`docs/open-questions.md`); a
 //! program that sends it is the person's who runs it.
 
 use std::io::Read as _;

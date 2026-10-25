@@ -6,6 +6,18 @@
 //! late its first picture. Everything else is asked of a publisher, as
 //! before.
 //!
+//! WHY NOT keep the Group for 30 seconds after the track's last publisher
+//! has gone (decided on 2026-10-11, and left out the same day): no client
+//! here could read anything with it. Without a publisher the relay cannot
+//! accept a SUBSCRIBE (§9.4: "The relay MUST have an Established upstream
+//! subscription before sending `SUBSCRIBE_OK` in response to a downstream
+//! SUBSCRIBE"), a Joining FETCH needs a subscription that is Established or
+//! Pending (§10.12.2), and `followCatalog` of `@xmoq/msf` sends its FETCH
+//! only after its SUBSCRIBE was accepted. What is left is a Standalone FETCH
+//! of a Group whose number the viewer knows, which no client here sends. A
+//! publisher that breaks and comes back is helped by a SUBSCRIBE that waits
+//! for it instead (`RENDEZVOUS_TIMEOUT`).
+//!
 //! What goes in is what the relay passes on to subscribers: an Object of a
 //! stream it took the Subgroup from, whether or not anybody is subscribed.
 //! Which of several sources a Subgroup is taken from is therefore decided
@@ -65,9 +77,9 @@ const IMMUTABLE_PROPERTIES: u64 = 0x0b;
 /// a property, processors MUST search both the mutable properties and the
 /// contents of Immutable Properties" (§12.7), so a `MAX_CACHE_DURATION` can
 /// be in there. WHY NOT leave out only a track with one inside, which
-/// `searched_properties` could tell: that is the decision docs/open-questions.md
-/// has as provisional. It keeps a publisher that uses them for anything from
-/// being cached.
+/// `searched_properties` could tell: nothing has decided it, and this is
+/// provisional. It keeps a publisher that uses them for anything from being
+/// cached.
 pub(crate) fn may_be_cached(track_properties: &[KeyValuePair]) -> bool {
     !track_properties
         .iter()

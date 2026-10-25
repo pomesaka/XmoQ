@@ -32,7 +32,7 @@ The gatherer asks with one `SUBSCRIBE_NAMESPACE` for `xmoq/chat`, or, with `--ro
 
 ## Limits
 
-The limits of the chat (Q43, decided on 2026-10-24), which flags change:
+The limits of the chat (decided on 2026-10-24), which flags change:
 
 | Flag | Default | What it bounds | The flag's range |
 |---|---|---|---|
@@ -47,9 +47,9 @@ When a participant whose subscription ended is asked again, which flags change (
 | `--ask-again-times` | 30 | Times in a row a participant is asked again without a subscription that was established; against the own relay, which refuses a `said` nobody publishes with a Retry Interval of 1,001, about two minutes | 0 (never) to 10,000 |
 | `--ask-again-ms` | 1,000 | The pause after an end, and after a refusal that names no time or says 0 | 100 to 60,000 |
 
-`--room <room>` (repeatable, up to 8) has the gatherer take, publish and answer FETCH for those rooms alone (Q48, decided on 2026-10-24: a gatherer for each room). More than 8 are refused at the start: a session at the own relay may have 8 `SUBSCRIBE_NAMESPACE` requests (Q45, decided on 2026-10-24), and a ninth would be refused for good while the gatherer looked as if it ran.
+`--room <room>` (repeatable, up to 8) has the gatherer take, publish and answer FETCH for those rooms alone (decided on 2026-10-24: a gatherer for each room). More than 8 are refused at the start: a session at the own relay may have 8 `SUBSCRIBE_NAMESPACE` requests (decided on 2026-10-24), and a ninth would be refused for good while the gatherer looked as if it ran.
 
-**Ten rooms of a hundred people** (Q41) are reached with a gatherer for each room, each with `--room` and a store of its own: each follows 100 participants, under the about 250 the own relay lets one session have (`MAX_PEER_REQUESTS`, 256 requests, the `SUBSCRIBE_NAMESPACE` and the PUBLISH among them). **Not measured.**
+**Ten rooms of a hundred people** are reached with a gatherer for each room, each with `--room` and a store of its own: each follows 100 participants, under the about 250 the own relay lets one session have (`MAX_PEER_REQUESTS`, 256 requests, the `SUBSCRIBE_NAMESPACE` and the PUBLISH among them). **Not measured.**
 
 **A FETCH of more lines than `--fetch-lines`** gets the latest lines of its range and, for the lines before them, an End of Unknown Range indicator (§11.4.4.2), before the lines in Ascending order and after them in Descending order. `FETCH_OK` keeps the End Location that was asked for (§10.13). Why not a shorter End Location, no indicator, or a refusal: at the top of `crates/track-serving/src/fetch.rs`.
 
@@ -74,7 +74,7 @@ A line that is not sent live is in the store, and a FETCH gets it.
 
 ## The store
 
-One SQLite file (`--store`), made where it is not there: the table `lines` (room, number, name, text, `sent_at`, at), keyed by room and number, with `PRAGMA user_version` 1. Nothing is taken out of it (Q42, decided on 2026-10-24: kept for good). A line is in the file, synced to the disk (`synchronous = FULL`), before it is published, so that a power loss does not take back a line that was seen and give its number to another.
+One SQLite file (`--store`), made where it is not there: the table `lines` (room, number, name, text, `sent_at`, at), keyed by room and number, with `PRAGMA user_version` 1. Nothing is taken out of it (decided on 2026-10-24: kept for good). A line is in the file, synced to the disk (`synchronous = FULL`), before it is published, so that a power loss does not take back a line that was seen and give its number to another.
 
 **Each gatherer runs with a store of its own.** The file is held with `locking_mode = EXCLUSIVE`, and a second gatherer on it stops at the start (`the store ... is in use`). WHY NOT one file for gatherers of different rooms, which WAL allows on one machine: each would wait for the others' writes, and nothing would keep two from holding the same room. What the SQLite documentation says, and why SQLite and not JSON Lines, at the top of `src/bin/xmoq-chat/storage.rs`, the one file that uses `rusqlite`. The price of FULL is a sync of the disk for every line, which was not measured.
 
@@ -100,7 +100,7 @@ The binary (`src/bin/xmoq-chat/`): `session.rs` (the requests and the answers on
 
 ## Not done
 
-- **Authorization for the demo alone** (Q51, provisional). With `--auth-key-hex <hex>`, the key the relay is given under the same flag, the gatherer makes tokens of the room's form itself (`xmoq-room-token`): `sub` in `xmoq/chat/*` for its SETUP, its SUBSCRIBE_NAMESPACE and its SUBSCRIBEs, `pub` in `xmoq/chat/*` for its PUBLISHes, each made anew for its request and good for 600 s, as the room's. Without the flag it sends no token. A gatherer of a real service would not hold the relay's key. Who may announce `xmoq/chat/<room>/<name>` is the relay's check of the participant's token.
+- **Authorization for the demo alone** (provisional). With `--auth-key-hex <hex>`, the key the relay is given under the same flag, the gatherer makes tokens of the room's form itself (`xmoq-room-token`): `sub` in `xmoq/chat/*` for its SETUP, its SUBSCRIBE_NAMESPACE and its SUBSCRIBEs, `pub` in `xmoq/chat/*` for its PUBLISHes, each made anew for its request and good for 600 s, as the room's. Without the flag it sends no token. A gatherer of a real service would not hold the relay's key. Who may announce `xmoq/chat/<room>/<name>` is the relay's check of the participant's token.
 - **The own relay keeps 256 requests of one session** (`MAX_PEER_REQUESTS` of `xmoq-moqt`): one gatherer follows about 250 participants through it. Ten rooms of a hundred take a gatherer a room (above). Not measured.
 - **A `PUBLISH_OK` with Forward State 0** (§9.5: a relay "MAY respond with PUBLISH_OK in Forward State=0 until there are known subscribers") leaves the room not live for good: its lines wait (64 at the most) and are not sent, and a `REQUEST_UPDATE` with FORWARD 1 is refused as any update that carries more than delivery timeouts, which ends the PUBLISH. The own relay answers with Forward State 1; moqtail's 0.15.0 did in every run here. A FETCH still gets the lines.
 - Lines said while the gatherer is away are lost: it does not FETCH what it missed when it subscribes again.

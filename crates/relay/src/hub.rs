@@ -77,7 +77,7 @@ pub struct HubConfig {
     /// where there is one, and closed at once otherwise. **Provisional:
     /// 1,000** (decided on 2026-10-25 that a full relay sends the next
     /// session to another; the number is the 500 viewers a relay is to
-    /// serve, at two sessions a page, `docs/open-questions.md`).
+    /// serve, at two sessions a page).
     pub max_sessions: usize,
     /// Where a session goes that comes when [`Self::max_sessions`] are
     /// served: the URL a GOAWAY right after the relay's SETUP names (§3.6,
@@ -143,7 +143,7 @@ pub struct HubConfig {
     /// subscribers of the relay together. Where they would be more, the
     /// subscription of the relay whose streams carry the most ends
     /// (`TOO_FAR_BEHIND`), of whichever session. **Provisional: 2 GiB**
-    /// (`--relay-send-bytes`; decided on 2026-10-25, Q61).
+    /// (`--relay-send-bytes`; decided on 2026-10-25).
     ///
     /// WHY a bound of the relay's own: the bound of a session times
     /// [`Self::max_sessions`] is 8 GiB, which is what a deployment does not

@@ -47,7 +47,7 @@ A subscription to a broadcast's catalog or sound that ends or is refused while t
 | `--waiting` | 16 | Pieces that wait for the reader | 1 to 256 |
 | `--readers` | 1 | Threads that read pieces at once, each with a reader of `--engine` (`engine::open` of `xmoq-speech`); readers of whisper.cpp have a state of their own over the one model. With more than one, a later piece can be done before an earlier one, of the same voice as well, and is numbered first | 1 to 8 |
 | `--tracks` | 16 | Broadcasts listened to at once; one more is passed over (`BROADCAST_IGNORED`) | 1 to 100 |
-| `--auth-key-hex` | none | The relay's key, of which the transcriber makes its tokens: `sub` in `<prefix>/*` for its SETUP, its SUBSCRIBE_NAMESPACE, SUBSCRIBEs and FETCHes, and `pub` in `xmoq/transcript/<prefix>` for its PUBLISH. For the demo alone, as the gatherer's (Q51, provisional) | |
+| `--auth-key-hex` | none | The relay's key, of which the transcriber makes its tokens: `sub` in `<prefix>/*` for its SETUP, its SUBSCRIBE_NAMESPACE, SUBSCRIBEs and FETCHes, and `pub` in `xmoq/transcript/<prefix>` for its PUBLISH. For the demo alone, as the gatherer's (provisional) | |
 
 ## What it holds
 

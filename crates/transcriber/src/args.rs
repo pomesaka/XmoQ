@@ -40,7 +40,7 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
 
 /// The most `--namespace` flags: as many `SUBSCRIBE_NAMESPACE` requests as
 /// the own relay lets one session have open
-/// (`MAX_NAMESPACE_WATCHES_PER_SESSION`, Q45), as for the gatherer's
+/// (`MAX_NAMESPACE_WATCHES_PER_SESSION`), as for the gatherer's
 /// `--room`. WHY refused at the start: a ninth would be refused for good,
 /// and its broadcasts never read while the transcriber looked as if it ran.
 pub const PREFIXES_MOST: usize = 8;
@@ -104,7 +104,7 @@ pub struct Args {
     pub tracks: usize,
     /// `--auth-key-hex`: the key the relay checks tokens with, of which the
     /// transcriber makes its own, as the gatherer of the chat does. Only for
-    /// the demo (Q51, provisional).
+    /// the demo (provisional).
     pub auth_key: Option<Vec<u8>>,
 }
 
