@@ -281,9 +281,14 @@ async function main(): Promise<void> {
 		const liveCode = await withTimeout(live.exited, "the live viewer to leave");
 		if (liveCode !== 0)
 			throw new Error(`the live viewer left with ${liveCode}`);
+		// WHY in the order of the Groups and not of their arrival: each Group
+		// comes on a subgroup stream of its own, and streams reach the viewer
+		// in no order; that the lines are numbered in the order said is
+		// checked as the gatherer takes each (`sayOne`).
 		const seenLive = live
 			.matches(/^OBJECT group=(\d+) object=0 .*payload_hex=(\S*)$/)
 			.map(lineOf)
+			.sort((one, other) => one.group - other.group)
 			.map(({ group, name }) => `${group}:${name}`)
 			.join(" ");
 		expect("the live viewer got", seenLive, "0:a 1:b 2:a 3:b");
