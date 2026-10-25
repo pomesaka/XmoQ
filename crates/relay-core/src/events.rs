@@ -295,19 +295,19 @@ pub enum Event {
         /// The stream.
         out_stream: OutStreamKey,
     },
-    /// What waits to be written to the subscriber of this stream is over its
-    /// limit: the subscriber does not keep up.
+    /// What waits to be written is over a limit: a subscriber does not
+    /// keep up. The relay ends one subscription, by `over`.
     SendQueueFull {
-        /// The stream whose Object, or whose opening, went over the limit.
+        /// The stream whose Object, or whose opening, went over the limit;
+        /// for [`Over::Relay`], the one whose Object was queued last, which
+        /// plays no part in the choice.
         out_stream: OutStreamKey,
-        /// For each stream to the same subscriber session that is not done,
-        /// the payload bytes it has carried, where the limit of the session
-        /// was reached; none for a limit of the subscription itself and for
-        /// the relay's, where `out_stream` is one of the subscription the
-        /// I/O side chose. The relay ends the subscription whose streams
-        /// carry the most, and the one of `out_stream` where none carries
-        /// more.
-        carried: Vec<(OutStreamKey, usize)>,
+        /// Which limit.
+        over: Over,
+        /// What streams hold, by the measure of that limit ([`Over`]). The
+        /// relay sums them by subscription; a stream it no longer knows is
+        /// passed over.
+        held: Vec<(OutStreamKey, usize)>,
     },
     /// The time to wait for the last Objects of a track after `PUBLISH_DONE` is
     /// over. Answers [`Action::StartDrainTimer`].
@@ -419,6 +419,22 @@ pub enum Event {
         /// What its GOAWAY says.
         going_away: GoingAway,
     },
+}
+
+/// Which limit of what waits to be written was reached
+/// ([`Event::SendQueueFull`]), and what the I/O side gives with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Over {
+    /// That of the subscription of the stream. Nothing is given: that
+    /// subscription ends.
+    Subscription,
+    /// That of the subscriber's session, all its subscriptions together.
+    /// Given: the payload bytes each stream to the session has carried.
+    Session,
+    /// That of the relay, all sessions together. Given: for each
+    /// subscription with bytes waiting, those bytes, with a stream of it.
+    /// The Object that went over was queued.
+    Relay,
 }
 
 /// What the GOAWAY of a relay that is to stop says ([`Event::GoingAway`]),
