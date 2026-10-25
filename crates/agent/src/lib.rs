@@ -11,3 +11,4 @@ pub mod args;
 pub mod events;
 pub mod input;
 pub mod presence;
+pub mod transcript;
