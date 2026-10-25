@@ -27,7 +27,7 @@ use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt_io::StreamConfig;
 use xmoq_moqt_io::wt::{self, Congestion, QuicLimits, WtConnection, WtServer, accept};
 
-use crate::hub::{HubConfig, HubHandle, Log};
+use crate::hub::{Arrival, GOAWAY_TIMEOUT, HubConfig, HubHandle, Log};
 
 /// How long a client may take over the WebTransport handshake. Provisional.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -45,10 +45,6 @@ const MAX_HANDSHAKES: usize = 64;
 /// 2026-10-24 (Q47): the 10 seconds `moqtail`'s relay waits (relay@0.15.0,
 /// read on 2026-10-24).
 const GOAWAY_TIMEOUT_MS: u64 = 10_000;
-
-/// `GOAWAY_TIMEOUT` (§3.5): "The session was closed because the peer took
-/// too long to close the session in response to a GOAWAY".
-const GOAWAY_TIMEOUT: u32 = 0x10;
 
 /// The QUIC limits that go with the limits of the relay. Provisional.
 ///
@@ -115,10 +111,13 @@ struct Args {
     /// `--congestion cubic|newreno|bbr`: the congestion control of the
     /// relay's connections ([`Congestion`]). For measuring.
     congestion: Congestion,
-    /// `--max-sessions`: how many sessions the relay takes at once, where a
-    /// run wants another number than the relay's own
-    /// ([`HubConfig::max_sessions`]). For measuring.
+    /// `--max-sessions`: how many sessions the relay takes at once, where it
+    /// is not the relay's own number ([`HubConfig::max_sessions`]). More
+    /// than 0: there is no way to have none.
     max_sessions: Option<usize>,
+    /// `--when-full`: where a session goes that comes when the relay is
+    /// full ([`HubConfig::when_full`]). Closed where it is not said.
+    when_full: Option<String>,
     /// `--slow-open-ms`: [`HubConfig::slow_open`], for a run that looks at
     /// how long streams take to open; 0 logs every stream.
     slow_open: Option<Duration>,
@@ -232,6 +231,15 @@ fn count(flag: &str, value: &str) -> Result<usize> {
     value.parse().with_context(|| flag.to_string())
 }
 
+/// A count that may not be 0: a limit that has no way to be none.
+fn more_than_none(flag: &str, value: &str) -> Result<usize> {
+    let count = count(flag, value)?;
+    if count == 0 {
+        bail!("{flag} must be more than 0");
+    }
+    Ok(count)
+}
+
 /// What a flag of `on` or `off` gives.
 fn on_or_off(flag: &str, value: &str) -> Result<bool> {
     match value {
@@ -254,7 +262,7 @@ fn parse_args() -> Result<Args> {
     let mut key_file = None;
     let mut idle_timeout = xmoq_moqt_io::wt::IDLE_TIMEOUT;
     let mut congestion = Congestion::default();
-    let mut max_sessions = None;
+    let (mut max_sessions, mut when_full) = (None, None);
     let (mut slow_open, mut setup_timeout, mut idle_session) = (None, None, None);
     let (mut announce_every, mut announce_at_once) = (None, None);
     let mut for_one_session = (None, None);
@@ -292,7 +300,8 @@ fn parse_args() -> Result<Args> {
                 }
                 idle_timeout = Duration::from_millis(millis);
             }
-            "--max-sessions" => max_sessions = Some(value.parse().context("--max-sessions")?),
+            "--max-sessions" => max_sessions = Some(more_than_none(&flag, &value)?),
+            "--when-full" => when_full = Some(value),
             "--slow-open-ms" => slow_open = Some(millis(&flag, &value)?),
             "--setup-timeout-ms" => setup_timeout = Some(millis(&flag, &value)?),
             "--announce-every-ms" => announce_every = Some(number(&flag, &value)?),
@@ -325,6 +334,7 @@ fn parse_args() -> Result<Args> {
         idle_timeout,
         congestion,
         max_sessions,
+        when_full,
         slow_open,
         setup_timeout,
         idle_session,
@@ -355,6 +365,7 @@ async fn main() -> Result<()> {
     if let Some(max_sessions) = args.max_sessions {
         config.max_sessions = max_sessions;
     }
+    config.when_full = args.when_full;
     if let Some(slow_open) = args.slow_open {
         config.slow_open = slow_open;
     }
@@ -481,7 +492,8 @@ async fn accept_sessions(server: &WtServer, hub: &HubHandle<WtConnection>, log: 
                         "SESSION_ACCEPTED authority={} path={}",
                         asked.authority, asked.path
                     ));
-                    hub.add_session(connection).await;
+                    let arrival = Arrival::of_query(asked.query.as_deref());
+                    hub.add_session(connection, arrival).await;
                 }
                 Ok(Err(error)) => log.print(format!("HANDSHAKE_FAILED {error}")),
                 Err(_) => log.print("HANDSHAKE_FAILED timed out".to_string()),

@@ -969,6 +969,8 @@ pub struct SessionRequest {
     pub authority: String,
     /// The path of that URL.
     pub path: String,
+    /// The query of that URL, without its `?`; `None` where it has none.
+    pub query: Option<String>,
 }
 
 /// Completes the handshake of one connection attempt and returns the session
@@ -988,6 +990,7 @@ pub async fn accept(incoming: Incoming) -> Result<(WtConnection, SessionRequest)
     let asked = SessionRequest {
         authority: request.url.authority().to_string(),
         path: request.url.path().to_string(),
+        query: request.url.query().map(str::to_string),
     };
     let offered = request
         .protocols

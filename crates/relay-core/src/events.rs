@@ -399,9 +399,20 @@ pub enum Event {
     /// which the relay is the client gets an empty New Session URI (§10.4: "A
     /// client MUST send a zero-length New Session URI").
     GoingAway(GoingAway),
+    /// The relay is full, and this session, which opened just now, is sent
+    /// to another relay: it is told with GOAWAY, with `going_away`'s New
+    /// Session URI, and refuses every request of the peer with
+    /// `GOING_AWAY` from then on (§10.4). The other sessions are not told.
+    SendAway {
+        /// The session.
+        session: SessionKey,
+        /// What its GOAWAY says.
+        going_away: GoingAway,
+    },
 }
 
-/// What the GOAWAY of a relay that is to stop says ([`Event::GoingAway`]).
+/// What the GOAWAY of a relay that is to stop says ([`Event::GoingAway`]),
+/// or of one that sends a session away ([`Event::SendAway`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoingAway {
     /// Where the clients continue; empty for the URI they used.

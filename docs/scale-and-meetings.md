@@ -13,7 +13,7 @@ Decided on 2026-10-25, the inputs of this draft ([requirements](requirements.md)
 ### What one relay does today
 
 - With a video track and a track of the shape of the sound (an Object a stream, 50 a second), one relay on Linux in a VM of 5 cores gave everything to 500 viewers and fell seconds behind at 1,000; with video alone it gave everything to 1,000 ([record](experiments/2026-10-24-one-video-track-to-many-viewers-on-linux.md)). The sound costs more than its bytes: at 500 viewers it is 25,000 streams opened and closed a second.
-- The relay takes 256 sessions at once unless `--max-sessions` says otherwise (`HubConfig::max_sessions` in `crates/relay/src/hub.rs`), and closes one more at once with `INTERNAL_ERROR` and the reason `too many sessions`. A page of the demo is two sessions, one for the media and one for the chat (`@xmoq/chat` connects on its own), so 500 viewers are 1,000 sessions.
+- The relay takes 1,000 sessions at once unless `--max-sessions` says otherwise (`HubConfig::max_sessions` in `crates/relay/src/hub.rs`, provisional). One more is sent to another relay with GOAWAY where `--when-full` names one, and closed with `INTERNAL_ERROR` and the reason `too many sessions` otherwise. A page of the demo is two sessions, one for the media and one for the chat (`@xmoq/chat` connects on its own), so 500 viewers are 1,000 sessions.
 - A relay sends GOAWAY with a New Session URI (`--redirect-uri`) only when it is told to stop. The page (`keepPlaying`, `keepPublishing`) and the terminal viewer follow it to the URI.
 
 ### Shapes
@@ -52,9 +52,9 @@ A viewer that chats announces `xmoq/chat/<room>/<name>` and says its lines on `s
 
 ### When a relay is full
 
-Today a relay takes every session up to 256 (or `--max-sessions`) and closes the next. Before it gets there with too many viewers, it falls behind for all of them: at 1,000 with sound, every viewer was seconds late.
+Before a relay is full with too many viewers, it falls behind for all of them: at 1,000 with sound, every viewer was seconds late.
 
-**Recommended**: an edge takes as many sessions as it was measured to serve (1,000 sessions, 500 viewers, on that VM), and answers one more with GOAWAY naming another edge rather than closing it, so that the clients that follow GOAWAY move by themselves; the room is asked again where the edge knows no other. Who starts another edge when all are full is a matter of hosting, which is undecided.
+**Built** (decided on 2026-10-25): a relay takes 1,000 sessions (`--max-sessions`, provisional), the 500 viewers it was measured to serve on that VM, and answers one more with its SETUP and a GOAWAY naming the relay of `--when-full`, so that the clients that follow GOAWAY move by themselves: the watching page of the demo, the pages of `@xmoq/media` that are given the GOAWAY in `connect`, the terminal viewer and the agent's reader. The URL gets `sent-away=1` in its query, and a full relay closes a session that came with it, so a session is sent on once at most, also between two relays that name each other. The relay there has to have the same certificate, or one the clients take otherwise: a GOAWAY carries a URI alone, and a client pins the hash it had. Run in `mise run interop` (`when full:`, [record](experiments/2026-10-25-a-full-relay-sends-the-next-session-away.md)). **Not done**: the chat's session of a page (`@xmoq/chat`) does not follow a GOAWAY, and stays closed at a full relay while its media go on elsewhere; a relay that is the upstream of edges counts them as sessions like viewers, and one that is full sends an edge that comes to the relay of its `--when-full` like a viewer; where both relays are full, the session is closed, and the room is not asked for another. Who starts another edge when all are full is a matter of hosting, which is undecided.
 
 ### What the own relay has and lacks to be an edge
 

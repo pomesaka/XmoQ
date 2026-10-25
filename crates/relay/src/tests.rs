@@ -31,7 +31,7 @@ use xmoq_moqt_io::{
 };
 use xmoq_relay_core::{Counts, Event, FetchPipeEnd, SessionKey, StreamKey};
 
-use crate::hub::{self, Held, HubConfig, HubHandle};
+use crate::hub::{self, Arrival, Held, HubConfig, HubHandle};
 
 const SOON: Duration = Duration::from_secs(1);
 
@@ -85,8 +85,13 @@ impl Peer {
     /// the relay sends on unidirectional streams; one that does not stands for
     /// a receiver that has stopped reading.
     async fn connect(hub: &HubHandle<MemoryConnection>, reads: bool) -> Self {
+        Self::arrive(hub, reads, Arrival::First).await
+    }
+
+    /// [`Self::connect`], for a session that came as `arrival` says.
+    async fn arrive(hub: &HubHandle<MemoryConnection>, reads: bool, arrival: Arrival) -> Self {
         let (local, remote) = pair();
-        Self::connect_over(hub, local, remote, reads).await
+        Self::connect_over(hub, local, remote, reads, arrival).await
     }
 
     /// A peer that reads, towards which the relay's finished subgroup
@@ -97,7 +102,10 @@ impl Peer {
         hub: &HubHandle<MemoryConnection>,
     ) -> (Self, Arc<tokio::sync::Notify>) {
         let (remote, local, told) = pair_that_delivers_when_told();
-        (Self::connect_over(hub, local, remote, true).await, told)
+        (
+            Self::connect_over(hub, local, remote, true, Arrival::First).await,
+            told,
+        )
     }
 
     async fn connect_over(
@@ -105,8 +113,9 @@ impl Peer {
         local: MemoryConnection,
         remote: MemoryConnection,
         reads: bool,
+        arrival: Arrival,
     ) -> Self {
-        hub.add_session(remote).await;
+        hub.add_session(remote, arrival).await;
         let connection = Arc::new(local);
         let mut session = Session::new(Role::Client, Transport::WebTransport);
         let mut control = connection.open_uni().await.unwrap();
@@ -605,6 +614,138 @@ async fn a_session_over_the_limit_is_closed_at_once() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_session_over_the_limit_is_sent_to_when_full_once_and_closed_otherwise() {
+    // (where the relay sends it; how it came; the New Session URI of its
+    //  GOAWAY, or None for a session closed at once with INTERNAL_ERROR)
+    let cases: [(Option<&str>, Arrival, Option<&str>); 4] = [
+        (
+            Some("https://b.example/moq"),
+            Arrival::First,
+            Some("https://b.example/moq?sent-away=1"),
+        ),
+        (
+            Some("https://b.example/moq?room=r#x"),
+            Arrival::First,
+            Some("https://b.example/moq?room=r&sent-away=1#x"),
+        ),
+        (Some("https://b.example/moq"), Arrival::SentAway, None),
+        (None, Arrival::First, None),
+    ];
+    for (when_full, arrival, uri) in cases {
+        let config = HubConfig {
+            max_sessions: 1,
+            when_full: when_full.map(str::to_string),
+            ..HubConfig::default()
+        };
+        let (hub, _task) = hub::spawn(config);
+        let mut first = Peer::connect(&hub, true).await;
+        let mut second = Peer::arrive(&hub, uri.is_some(), arrival).await;
+        let Some(uri) = uri else {
+            timeout(SOON, second.connection.closed())
+                .await
+                .expect("the session is closed");
+            assert_eq!(
+                second.connection.close_info().map(|close| close.code),
+                Some(0x1),
+                "{when_full:?} {arrival:?}"
+            );
+            continue;
+        };
+        let UniEvent::Control(ControlMessage::GoAway(go_away)) = second.next_data().await else {
+            panic!("no GOAWAY: {when_full:?} {arrival:?}");
+        };
+        assert_eq!(
+            (
+                go_away.new_session_uri.as_slice(),
+                go_away.timeout_ms,
+                go_away.request_id
+            ),
+            (uri.as_bytes(), hub::SEND_AWAY_TIMEOUT_MS, Some(0)),
+        );
+        // It was not served: what it asks is refused with GOING_AWAY (0x6).
+        let (id, message) = second
+            .session
+            .publish(track(), PUBLISHER_ALIAS, vec![], vec![])
+            .unwrap();
+        let (_request, event) = second.request(id, message).await;
+        assert!(
+            matches!(&event, RequestEvent::Rejected(error) if error.error_code == 0x6),
+            "{event:?}"
+        );
+        // The first is served as before, and was told nothing.
+        first.publish().await;
+        // GOAWAY_TIMEOUT (0x10) once its Timeout is over.
+        tokio::time::sleep(Duration::from_millis(hub::SEND_AWAY_TIMEOUT_MS - 10)).await;
+        assert!(second.connection.close_info().is_none());
+        timeout(SOON, second.connection.closed())
+            .await
+            .expect("the session is closed");
+        assert_eq!(
+            second.connection.close_info().map(|close| close.code),
+            Some(0x10)
+        );
+    }
+}
+
+#[test]
+fn a_session_came_sent_away_where_its_query_has_the_pair() {
+    // (the query of the URL; how the session came)
+    let cases = [
+        (None, Arrival::First),
+        (Some(""), Arrival::First),
+        (Some("sent-away=1"), Arrival::SentAway),
+        (Some("room=r&sent-away=1"), Arrival::SentAway),
+        (Some("sent-away=10"), Arrival::First),
+        (Some("not-sent-away=1"), Arrival::First),
+    ];
+    for (query, arrival) in cases {
+        assert_eq!(Arrival::of_query(query), arrival, "{query:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sessions_being_sent_away_have_a_limit_of_their_own() {
+    let config = HubConfig {
+        max_sessions: 1,
+        when_full: Some("https://b.example/".to_string()),
+        ..HubConfig::default()
+    };
+    let (hub, _task) = hub::spawn(config);
+    let _first = Peer::connect(&hub, true).await;
+    let mut away = Vec::new();
+    for _ in 0..hub::MAX_SENDING_AWAY {
+        let mut peer = Peer::connect(&hub, true).await;
+        assert!(
+            matches!(
+                peer.next_data().await,
+                UniEvent::Control(ControlMessage::GoAway(_))
+            ),
+            "sent away"
+        );
+        away.push(peer);
+    }
+    let one_more = Peer::connect(&hub, false).await;
+    timeout(SOON, one_more.connection.closed())
+        .await
+        .expect("the session is closed");
+    assert_eq!(
+        one_more.connection.close_info().map(|close| close.code),
+        Some(0x1)
+    );
+    // One that goes makes room for the next to be sent away.
+    away.pop().expect("one").connection.close(0, b"");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let mut next = Peer::connect(&hub, true).await;
+    assert!(
+        matches!(
+            next.next_data().await,
+            UniEvent::Control(ControlMessage::GoAway(_))
+        ),
+        "sent away"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_client_that_sends_no_setup_is_closed_when_its_time_is_over() {
     // (the time a client has; how long the test waits; whether the session
     //  is closed by then)
@@ -622,7 +763,7 @@ async fn a_client_that_sends_no_setup_is_closed_when_its_time_is_over() {
         let (hub, _task) = hub::spawn(config);
         // A session and nothing on it: no control stream, no SETUP.
         let (local, remote) = pair();
-        hub.add_session(remote).await;
+        hub.add_session(remote, Arrival::First).await;
         let ended = timeout(Duration::from_millis(waits_ms), local.closed()).await;
         assert_eq!(ended.is_ok(), closed, "{has_ms} {waits_ms}");
         // CONTROL_MESSAGE_TIMEOUT (0x11).
@@ -4238,7 +4379,7 @@ mod upstream {
             let origin = origin.clone();
             Box::pin(async move {
                 let (local, remote) = pair();
-                origin.add_session(remote).await;
+                origin.add_session(remote, Arrival::First).await;
                 Ok(local)
             })
         });
@@ -4263,7 +4404,7 @@ mod upstream {
             };
             Box::pin(async move {
                 let (local, remote) = pair();
-                origin.add_session(remote).await;
+                origin.add_session(remote, Arrival::First).await;
                 Ok(local)
             })
         });
