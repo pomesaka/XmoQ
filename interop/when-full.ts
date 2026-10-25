@@ -88,9 +88,6 @@ const BARS: PageVideoSetup = {
 /** How long the second viewer is watched where it is not to play, and the relay above for a second session sent away. */
 const WATCHED_MS = 5_000;
 
-const sleep = (ms: number): Promise<void> =>
-	new Promise((resolve) => setTimeout(resolve, ms));
-
 async function report(page: Page): Promise<PageKeptReport> {
 	return page.evaluate(() => window.xmoqOwn.keptReport());
 }
@@ -114,13 +111,15 @@ async function drawn(
 	page: Page,
 	session: number,
 	frames: number,
+	what: string,
 ): Promise<void> {
-	for (;;) {
+	await pollFor(async () => {
 		const now = await report(page);
-		if (now.shown.filter((frame) => frame.session === session).length >= frames)
-			return;
-		await sleep(100);
-	}
+		return now.shown.filter((frame) => frame.session === session).length >=
+			frames
+			? true
+			: undefined;
+	}, what);
 }
 
 async function main(): Promise<void> {
@@ -162,10 +161,7 @@ async function main(): Promise<void> {
 		);
 		const first = await openPage(context, "viewer:first", "own-browser");
 		await play(first, below.url, context.certSha256Hex);
-		await withTimeout(
-			drawn(first, 1, 25),
-			"the first viewer to play at the relay below",
-		);
+		await drawn(first, 1, 25, "the first viewer to play at the relay below");
 
 		const second = await openPage(context, "viewer:second", "own-browser");
 		await play(second, context.relayUrl, context.certSha256Hex);
@@ -189,8 +185,10 @@ async function main(): Promise<void> {
 			);
 		}
 		if (!bothFull) {
-			await withTimeout(
-				drawn(second, 1, 25),
+			await drawn(
+				second,
+				1,
+				25,
 				"the second viewer to play at the relay below",
 			);
 			const states = (await report(second)).playing;

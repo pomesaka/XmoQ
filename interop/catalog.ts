@@ -77,6 +77,7 @@ import {
 	pollFor,
 	type RunContext,
 	runCleanups,
+	STEP_TIMEOUT_MS,
 	spawnMlmsub,
 	startMoqlivemockPublisher,
 	startRun,
@@ -154,6 +155,29 @@ function expectState(
 	}
 }
 
+/**
+ * How long the driver waits for a call to a page that waits itself for
+ * `STEP_TIMEOUT_MS`. WHY longer than the page: the page says what it had
+ * when its own time is over, and that says more than the driver's timeout.
+ */
+const PAGE_WAIT_MS = 2 * STEP_TIMEOUT_MS;
+
+/** The page's report of the catalog once it has `states` states. */
+function reportOf(
+	page: Awaited<ReturnType<typeof openConnectedPage>>,
+	states: number,
+	what: string,
+): Promise<PageCatalogReport> {
+	return withTimeout(
+		page.evaluate(
+			([count, timeoutMs]) => window.xmoqOwn.catalogReport(count, timeoutMs),
+			[states, STEP_TIMEOUT_MS] satisfies [number, number],
+		),
+		what,
+		PAGE_WAIT_MS,
+	);
+}
+
 function follow(
 	page: Awaited<ReturnType<typeof openConnectedPage>>,
 	namespace: string,
@@ -161,13 +185,14 @@ function follow(
 ): Promise<PageCatalogReport> {
 	return withTimeout(
 		page.evaluate(
-			async ([name, count]) => {
+			async ([name, count, timeoutMs]) => {
 				await window.xmoqOwn.followCatalog(name);
-				return window.xmoqOwn.catalogReport(count);
+				return window.xmoqOwn.catalogReport(count, timeoutMs);
 			},
-			[namespace, states] satisfies [string, number],
+			[namespace, states, STEP_TIMEOUT_MS] satisfies [string, number, number],
 		),
 		"the page to read the catalog",
+		PAGE_WAIT_MS,
 	);
 }
 
@@ -194,7 +219,7 @@ async function fromMlmpub(): Promise<string> {
 	await follow(page, MLMPUB_NAMESPACE, 1);
 	// A second state would come at once: the same Object on the subscription.
 	await new Promise((resolve) => setTimeout(resolve, 1000));
-	const report = await page.evaluate(() => window.xmoqOwn.catalogReport(1));
+	const report = await reportOf(page, 1, "the page to report the catalog");
 	const seen = JSON.stringify(report).slice(0, 900);
 	log("driver", `REPORT ${seen}`);
 	const [state, ...more] = report.states;
@@ -284,8 +309,9 @@ async function own(): Promise<string> {
 			`the catalog that replaces the one at {${publisher.at.join(", ")}} is at {${next.join(", ")}}, not at Object 0 of the next Group`,
 		);
 	}
-	const second = await withTimeout(
-		reader.evaluate(() => window.xmoqOwn.catalogReport(2)),
+	const second = await reportOf(
+		reader,
+		2,
 		"the reader to have the catalog that replaced the first",
 	);
 	seen = JSON.stringify(second).slice(0, 1200);
@@ -309,11 +335,15 @@ async function own(): Promise<string> {
 		);
 	}
 	const ended = await withTimeout(
-		reader.evaluate(() => window.xmoqOwn.catalogEnded()),
+		reader.evaluate(([timeoutMs]) => window.xmoqOwn.catalogEnded(timeoutMs), [
+			STEP_TIMEOUT_MS,
+		] satisfies [number]),
 		"the reader's subscription to the catalog track to end",
+		PAGE_WAIT_MS,
 	);
-	const third = await withTimeout(
-		reader.evaluate(() => window.xmoqOwn.catalogReport(3)),
+	const third = await reportOf(
+		reader,
+		3,
 		"the reader to have the last catalog",
 	);
 	seen = JSON.stringify(third).slice(0, 1500);
@@ -363,10 +393,7 @@ async function readerFirst(): Promise<string> {
 		following,
 		"the reader's SUBSCRIBE to be accepted once the catalog is published",
 	);
-	const report = await withTimeout(
-		reader.evaluate(() => window.xmoqOwn.catalogReport(1)),
-		"the reader to have the catalog",
-	);
+	const report = await reportOf(reader, 1, "the reader to have the catalog");
 	const seen = JSON.stringify(report).slice(0, 900);
 	log("driver", `REPORT ${seen}`);
 	expectState(report.states.at(0), FIRST, publisher.at, seen);

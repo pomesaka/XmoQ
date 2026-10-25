@@ -588,7 +588,10 @@ async function startBrowserPublisher(
 			payloadHex,
 			sendsSeveral: false,
 			async send() {
-				await page.evaluate((hex) => window.xmoq.sendObject(hex), payloadHex);
+				await withTimeout(
+					page.evaluate((hex) => window.xmoq.sendObject(hex), payloadHex),
+					`${label} to send its Object`,
+				);
 				sentGroup0 = true;
 				return 0;
 			},

@@ -22,6 +22,7 @@ import {
 	log,
 	NAMESPACE,
 	openConnectedPage,
+	pollFor,
 	type RunContext,
 	runCleanups,
 	spawnRustClient,
@@ -79,20 +80,19 @@ async function publish(
 			"the page to publish the track",
 		);
 		return {
-			asked: async () => {
-				for (let tries = 0; tries < 100; tries += 1) {
-					const [first] = await page.evaluate(() =>
-						window.xmoqOwn.newGroupRequests(),
-					);
-					if (first !== undefined) return first;
-					await new Promise((resolve) => setTimeout(resolve, 100));
-				}
-				throw new Error("the page was told of no NEW_GROUP_REQUEST in 10 s");
-			},
+			asked: () =>
+				pollFor(
+					async () =>
+						(await page.evaluate(() => window.xmoqOwn.newGroupRequests()))[0],
+					"the page to be told of a NEW_GROUP_REQUEST",
+				),
 			send: async () => {
-				await page.evaluate(([payload]) => window.xmoq.sendObject(payload), [
-					PAYLOAD_HEX,
-				] satisfies [string]);
+				await withTimeout(
+					page.evaluate(([payload]) => window.xmoq.sendObject(payload), [
+						PAYLOAD_HEX,
+					] satisfies [string]),
+					"the page to send its Object",
+				);
 			},
 		};
 	}
@@ -145,10 +145,7 @@ async function run(context: RunContext, publisher: string): Promise<string> {
 	const [sent] = await context.relay.waitForLine(
 		/^SEND session=0 stream=\d+ REQUEST_UPDATE$/,
 	);
-	const group = await withTimeout(
-		publishing.asked(),
-		"the publisher to report the NEW_GROUP_REQUEST",
-	);
+	const group = await publishing.asked();
 	if (group !== "0") {
 		throw new Error(`the publisher was to be asked with 0, not ${group}`);
 	}

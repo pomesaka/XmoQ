@@ -216,9 +216,9 @@ export type OwnPageExtras = {
 	/**
 	 * What the reading started with `followCatalog` has given so far.
 	 * Resolves once it has `states` states at least and the Joining FETCH is
-	 * over.
+	 * over; rejects with what it had when that is not so after `timeoutMs`.
 	 */
-	catalogReport(states: number): Promise<PageCatalogReport>;
+	catalogReport(states: number, timeoutMs: number): Promise<PageCatalogReport>;
 	/**
 	 * Announces the namespace and publishes its catalog track with
 	 * `createCatalogPublisher` of `@xmoq/msf`: the page answers the SUBSCRIBE
@@ -240,9 +240,10 @@ export type OwnPageExtras = {
 	endCatalog(catalog: Catalog): Promise<[string, string]>;
 	/**
 	 * Resolves once the subscription started with `followCatalog` has ended:
-	 * "publish-done <status code>", or the type of another end.
+	 * "publish-done <status code>", or the type of another end. Rejects when
+	 * it has not ended after `timeoutMs`.
 	 */
-	catalogEnded(): Promise<string>;
+	catalogEnded(timeoutMs: number): Promise<string>;
 	/**
 	 * Starts playing the video track with `playVideoTrack` of `@xmoq/media`:
 	 * a SUBSCRIBE, and a decoder of WebCodecs configured with `codec`. The
@@ -290,7 +291,7 @@ export type OwnPageExtras = {
 	stopAudio(): Promise<void>;
 	/** Plays the audio track with `playAudioTrack` of `@xmoq/media`; nothing is sounded: what the decoder gives is noted and closed. */
 	playAudio(namespace: string, trackName: string): Promise<void>;
-	/** What `playAudio` has so far, once it has `pieces` pieces or `timeoutMs` are over. */
+	/** What `playAudio` has so far, once it has `pieces` pieces or `timeoutMs` are over; rejects when nothing played by then. */
 	audioReport(pieces: number, timeoutMs: number): Promise<PageAudioReport>;
 	/** What the encoder and the publisher started with `publishVideo` have counted so far. */
 	videoPublishReport(): Promise<PageVideoPublishReport>;
@@ -442,7 +443,7 @@ export type OwnPageExtras = {
 	 * What the playing started with `playVideo` has given so far. Resolves
 	 * once `frames` frames at least were decoded, the playing has ended, or
 	 * `timeoutMs` are over, whichever comes first: a run that gets too few
-	 * frames still has a report to show.
+	 * frames still has a report to show. Rejects when nothing played by then.
 	 */
 	videoReport(frames: number, timeoutMs: number): Promise<PageVideoReport>;
 	/** Cancels the subscription and keeps the session. */
