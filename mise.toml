@@ -44,8 +44,8 @@ description = "actionlint for workflows and shellcheck for scripts/ci"
 run = "scripts/ci/check-workflows.sh"
 
 [tasks."check:docs"]
-description = "The generated parts of the documents are what their scripts write: the index of docs/experiments/"
-run = "scripts/ci/experiments-index.sh --check"
+description = "The generated parts of the documents are what their scripts write: the index of docs/experiments/ and the list of files of interop/"
+run = ["scripts/ci/experiments-index.sh --check", "scripts/ci/interop-index.sh --check"]
 
 # Not part of `check`: it builds the moqtail relay and needs a Chromium, which takes minutes the
 # first time. CI runs it in a job of its own.

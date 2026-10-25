@@ -11,3 +11,4 @@ if compgen -G "packages/*/package.json" >/dev/null; then
 	biome check --write
 fi
 scripts/ci/experiments-index.sh
+scripts/ci/interop-index.sh
