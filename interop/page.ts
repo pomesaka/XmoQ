@@ -745,6 +745,8 @@ let voicePublishing:
 			round: number;
 			/** Pieces of 20 ms made, counted by the timer. */
 			counted: { made: number };
+			/** With `catalogHeldBack`: whether the catalog is still refused, how many of its requests were, and how many SUBSCRIBEs for it came after. */
+			catalog: { held: boolean; refused: number; askedAfter: number };
 	  }
 	| undefined;
 
@@ -1859,8 +1861,31 @@ window.xmoqOwn = {
 			namespace: string,
 			voice: string,
 			publishNamespaceTokenHex?: string,
+			catalogHeldBack?: boolean,
 		) => {
 			const moq = connected();
+			const held = {
+				held: catalogHeldBack === true,
+				refused: 0,
+				askedAfter: 0,
+			};
+			/** Refuses a request for the catalog while it is held back; true where it did. */
+			const refusedWhileHeld = (request: {
+				trackName: Uint8Array;
+				reject(code: bigint, reason?: string): Promise<void>;
+			}): boolean => {
+				// MSF §5: the catalog track is named "catalog".
+				if (utf8Decoder.decode(request.trackName) !== "catalog") return false;
+				if (!held.held) return false;
+				held.refused += 1;
+				request
+					.reject(
+						RequestErrorCode.DOES_NOT_EXIST,
+						"the catalog is not there yet",
+					)
+					.catch(() => {});
+				return true;
+			};
 			const trackNamespace = namespaceTuple(namespace);
 			const sampleRate = 48_000;
 			const audio = await createAudioTrackEncoder({
@@ -1891,13 +1916,18 @@ window.xmoqOwn = {
 			});
 			moq.serve({
 				subscribe(request) {
-					if (catalog.subscribe(request)) return;
+					if (refusedWhileHeld(request)) return;
+					if (catalog.subscribe(request)) {
+						if (catalogHeldBack === true) held.askedAfter += 1;
+						return;
+					}
 					if (audio.publisher.subscribe(request)) return;
 					request
 						.reject(RequestErrorCode.DOES_NOT_EXIST, "not a track of this page")
 						.catch(() => {});
 				},
 				fetch(request) {
+					if (refusedWhileHeld(request)) return;
 					if (catalog.fetch(request)) return;
 					if (audio.publisher.fetch(request)) return;
 					request
@@ -1932,7 +1962,12 @@ window.xmoqOwn = {
 					}),
 				);
 			}, 20);
-			voicePublishing = { audio, round: round.length, counted };
+			voicePublishing = {
+				audio,
+				round: round.length,
+				counted,
+				catalog: held,
+			};
 			await moq.publishNamespace(
 				trackNamespace,
 				namespaceToken(publishNamespaceTokenHex),
@@ -2002,6 +2037,21 @@ window.xmoqOwn = {
 	),
 
 	keptTranscriptReport: () => Promise.resolve([...keptTranscript]),
+
+	releaseCatalog: withPlainErrors(async (): Promise<number> => {
+		if (voicePublishing === undefined) {
+			throw new Error("publishVoice() has not completed");
+		}
+		voicePublishing.catalog.held = false;
+		return voicePublishing.catalog.refused;
+	}),
+
+	catalogAskedAfterRelease: withPlainErrors(async (): Promise<number> => {
+		if (voicePublishing === undefined) {
+			throw new Error("publishVoice() has not completed");
+		}
+		return voicePublishing.catalog.askedAfter;
+	}),
 
 	voiceReport: withPlainErrors(async (): Promise<PageVoiceReport> => {
 		if (voicePublishing === undefined) {

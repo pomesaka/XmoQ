@@ -1439,6 +1439,22 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--engine", "command"],
 			relay: "own",
 		},
+		// A page that announces before it has its catalog refuses it at first:
+		// the transcriber asks for it again (xmoq-again), through both relays,
+		// and hears the page once it is answered through the own one. Through
+		// moqtail's the catalog does not reach it after all (transcriber.ts).
+		{
+			name: "own relay: transcriber: a page refuses its catalog at first, and the transcriber asks for it again and reads the page's voice once it is answered",
+			script: "transcriber.ts",
+			args: ["--case", "catalog-refused"],
+			relay: "own",
+		},
+		{
+			name: "moqtail relay: transcriber: a page refuses its catalog at first, and the transcriber asks for it again, which the page takes once it answers for its catalog",
+			script: "transcriber.ts",
+			args: ["--case", "catalog-refused"],
+			relay: "moqtail",
+		},
 		{
 			name: "own relay: agent: xmoq-agent takes no picture of a page's broadcast unasked, writes a PNG of its video for each /frame with a frame line, and keeps no more files than --frames-kept",
 			script: "agent-frames.ts",
