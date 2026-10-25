@@ -12,4 +12,4 @@ workspace = true
 xmoq-moqt = { path = "../moqt" }
 xmoq-moqt-io = { path = "../moqt-io" }
 anyhow = "=1.0.100"
-tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "=1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
