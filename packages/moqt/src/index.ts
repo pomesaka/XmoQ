@@ -116,6 +116,7 @@ export {
 	type MovingConnection,
 	type MovingOutcome,
 	type MovingSession,
+	RUN_END_WAIT_MS,
 	type SessionMovingOutcome,
 	sessionMovingOutcome,
 	waitFor,

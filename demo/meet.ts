@@ -13,7 +13,8 @@ import {
 	createVideoTrackEncoder,
 	keepPublishing,
 } from "@xmoq/media";
-import { createMeeting } from "@xmoq/meeting";
+import { createMeeting, keepAttending } from "@xmoq/meeting";
+import type { GoAwayNotice } from "@xmoq/moqt";
 import { createCatalogPublisher } from "@xmoq/msf";
 import {
 	AUDIO_TRACK,
@@ -53,6 +54,16 @@ interface Seat {
 	publish: Uint8Array | undefined;
 	subscribe: Uint8Array | undefined;
 }
+
+/**
+ * Where to connect after `goAway`: §10.4 has "The client MUST use this URI
+ * for the new session if provided", with the room's certificate hash, as
+ * the watching page does. The room's relay where it names none.
+ */
+const movedTo = (relay: Broadcast, goAway?: GoAwayNotice): Broadcast =>
+	goAway === undefined || goAway.newSessionUri === ""
+		? relay
+		: { ...relay, relayUrl: goAway.newSessionUri };
 
 /** What the room says that this page reads. */
 type RoomMessage =
@@ -315,9 +326,9 @@ async function main(): Promise<void> {
 	// and the seat's `pub` allows the PUBLISH_NAMESPACE of this page alone,
 	// its `sub` the SUBSCRIBE_NAMESPACE and the SUBSCRIBEs alone.
 	void keepPublishing({
-		connect: async () => {
+		connect: async (goAway) => {
 			const seat = await theRoom.seat();
-			return connectToRelay(seat.relay, seat.publish);
+			return connectToRelay(movedTo(seat.relay, goAway), seat.publish);
 		},
 		trackNamespace: fields(mine),
 		tracks: [
@@ -364,27 +375,25 @@ async function main(): Promise<void> {
 			show();
 		},
 	});
-	void (async () => {
-		for (;;) {
-			try {
-				const seat = await theRoom.seat();
-				const connection = await connectToRelay(seat.relay, seat.subscribe);
-				state.receiving = "attending";
-				show();
-				const end = await meeting.attend(connection);
-				state.receiving = `the session ended (${end.type})`;
-				connection.close();
-			} catch (error) {
-				state.receiving = `could not attend (${why(error)})`;
-			}
+	void keepAttending({
+		meeting,
+		connect: async (goAway) => {
+			const seat = await theRoom.seat();
+			return connectToRelay(movedTo(seat.relay, goAway), seat.subscribe);
+		},
+		againMs: AGAIN_MS,
+		signal: full.signal,
+		onState(attending) {
+			state.receiving =
+				attending.type === "failed"
+					? `could not attend (${why(attending.error)})`
+					: attending.type === "attending-ended"
+						? `the session ended (${attending.ended.type})`
+						: attending.type;
 			show();
-			if (document.body.dataset.full === "true") {
-				full.abort();
-				return;
-			}
-			await new Promise((resolve) => setTimeout(resolve, AGAIN_MS));
-		}
-	})();
+			if (document.body.dataset.full === "true") full.abort();
+		},
+	});
 
 	// The page's own picture: its id, and a clock that moves.
 	const preview = document.querySelector("canvas");

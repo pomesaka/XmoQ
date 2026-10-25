@@ -27,7 +27,9 @@ type Session =
 	/** `run` is refused with GOING_AWAY, and the session closes 10 ms after. */
 	| "refused-then-closes"
 	/** The GOAWAY to `uri` comes, and `run` resolves before the race has seen it. */
-	| { goAwayAsItEnds: string };
+	| { goAwayAsItEnds: string }
+	/** The GOAWAY to `uri` comes, and `run` ends 20 ms after the connection closed. */
+	| { goAwayEndsLate: string };
 
 /** A session as `connect` gives it: the connection, and what the test is to do on it. */
 interface FakeSession {
@@ -151,6 +153,19 @@ test.each<{
 		log: ["close", "failed", "wait 1000", "close", "done over"],
 	},
 	{
+		name: "after a GOAWAY the next session waits for the run on the closed connection to end",
+		sessions: [{ goAwayEndsLate: "https://b" }, "runs"],
+		connects: ["-", "https://b"],
+		log: [
+			"close",
+			"run ended",
+			"moved https://b",
+			"wait 0",
+			"close",
+			"done over",
+		],
+	},
+	{
 		name: "a GOAWAY that came as `run` resolved is a move",
 		sessions: [{ goAwayAsItEnds: "https://b" }, "runs"],
 		connects: ["-", "https://b"],
@@ -221,7 +236,17 @@ test.each<{
 			if (typeof does === "object" && "goAway" in does) {
 				setTimeout(() => connection.resolveGoAway(does.goAway), 0);
 			}
-			return new Promise<string>(() => {});
+			if (typeof does === "object" && "goAwayEndsLate" in does) {
+				setTimeout(() => connection.resolveGoAway(does.goAwayEndsLate), 0);
+				// What it does on the session goes on for a while after the
+				// connection closed.
+				await connection.closed;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				seen.push("run ended");
+				return "late";
+			}
+			// What a run does when its connection closes: its requests reject.
+			return connection.closed.then(() => "closed");
 		},
 		movedBy: (result) =>
 			result === "track moved" ? notice("https://t") : undefined,

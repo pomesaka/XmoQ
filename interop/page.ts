@@ -17,7 +17,7 @@ import {
 	type VideoPlayback,
 	type VideoTrackEncoder,
 } from "@xmoq/media";
-import { createMeeting, type MeetingEvent } from "@xmoq/meeting";
+import { createMeeting, keepAttending, type MeetingEvent } from "@xmoq/meeting";
 import {
 	connect,
 	decodeFetchBody,
@@ -724,6 +724,8 @@ let broadcastPublishing:
 const transcriptPieces: PageTranscriptPiece[] = [];
 /** The states of `keepTranscript`, as `keptTranscriptReport` gives them. */
 const keptTranscript: string[] = [];
+/** The states of `keepMeeting`, as `keptMeetingReport` gives them. */
+const keptMeeting: string[] = [];
 
 /**
  * The parameters of a PUBLISH_NAMESPACE that carries a token of its own
@@ -2037,6 +2039,47 @@ window.xmoqOwn = {
 	),
 
 	keptTranscriptReport: () => Promise.resolve([...keptTranscript]),
+
+	keepMeeting: withPlainErrors(
+		async (
+			relayUrl: string,
+			certSha256Hex: string,
+			room: string,
+			self: string,
+		) => {
+			let at = relayUrl;
+			const meeting = createMeeting({
+				room,
+				self,
+				onFrame: (_id, frame) => frame.close(),
+				onAudio: (_id, data) => data.close(),
+			});
+			void keepAttending({
+				meeting,
+				async connect(goAway) {
+					at = goAway?.newSessionUri || relayUrl;
+					return connectAnew(at, certSha256Hex);
+				},
+				againMs: KEPT_DELAY_MS,
+				onState(state) {
+					const said =
+						state.type === "connecting"
+							? `connecting ${state.attempt}`
+							: state.type === "attending"
+								? `attending ${state.session} ${at}`
+								: state.type === "moved"
+									? `moved ${state.goAway.newSessionUri}`
+									: state.type === "failed"
+										? `failed ${errorText(state.error)}`
+										: `ended ${state.ended.type}`;
+					keptMeeting.push(said);
+					console.log(`kept meeting: ${said}`);
+				},
+			});
+		},
+	),
+
+	keptMeetingReport: () => Promise.resolve([...keptMeeting]),
 
 	releaseCatalog: withPlainErrors(async (): Promise<number> => {
 		if (voicePublishing === undefined) {

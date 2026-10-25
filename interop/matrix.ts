@@ -1773,7 +1773,7 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 		},
 		{
-			name: "own relay: when full: the relay above, full, sends the next viewer with GOAWAY to the relay below (`--when-full`), and the page plays there, and its chat joins the room and its captions read there",
+			name: "own relay: when full: the relay above, full, sends the next viewer with GOAWAY to the relay below (`--when-full`), and the page plays there, and its chat joins the room, its captions read there, and its meeting is attended there",
 			script: "when-full.ts",
 			args: ["--case", "moves"],
 			relay: "own",

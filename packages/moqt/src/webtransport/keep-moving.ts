@@ -74,6 +74,17 @@ export async function goAwayBehind(
 	}
 }
 
+/**
+ * **Provisional**: how long the next session waits, after a GOAWAY ended
+ * the one before, for the `run` of that one to end on its closed connection.
+ * WHY wait: a `run` that is still under way when the next begins keeps the
+ * state of the caller (who is in a meeting, what plays) and changes it
+ * after the next has begun. WHY a bound: a `run` that does not end when its
+ * connection closes would hold the move; the requests of a closed
+ * connection reject at once, so a second is long.
+ */
+export const RUN_END_WAIT_MS = 1000;
+
 /** What `connect` gives: a connection, and whatever else `run` needs of that session (a token, say). */
 export interface MovingSession {
 	readonly connection: MovingConnection;
@@ -139,7 +150,8 @@ export interface KeepMovingOptions<S extends MovingSession, R> {
  *   full relay that sends a session away (`--when-full`) closes it only
  *   then.
  * - Every session is closed when it is over, also one on which `run`
- *   failed.
+ *   failed; after a GOAWAY, the next is made once the `run` on the closed
+ *   connection has ended, `RUN_END_WAIT_MS` at most.
  */
 export async function keepMoving<S extends MovingSession, R>(
 	options: KeepMovingOptions<S, R>,
@@ -168,10 +180,12 @@ export async function keepMoving<S extends MovingSession, R>(
 		});
 		const stop = (): void => open.close();
 		signal.addEventListener("abort", stop, { once: true });
+		let ran: Promise<R> | undefined;
 		try {
 			if (signal.aborted) stop();
+			ran = options.run(made, signal);
 			const first = await Promise.race([
-				options.run(made, signal).then((result) => ({ result })),
+				ran.then((result) => ({ result })),
 				goAway.then((notice) => ({ notice })),
 			]);
 			if ("notice" in first) return { type: "moved", goAway: first.notice };
@@ -192,6 +206,17 @@ export async function keepMoving<S extends MovingSession, R>(
 		} finally {
 			signal.removeEventListener("abort", stop);
 			open.close();
+			if (ran !== undefined) {
+				const given = new AbortController();
+				await Promise.race([
+					ran.then(
+						() => {},
+						() => {},
+					),
+					waitFor(RUN_END_WAIT_MS, given.signal),
+				]);
+				given.abort();
+			}
 		}
 	};
 

@@ -4,11 +4,12 @@ A participant of a meeting in a page. Every participant publishes a broadcast of
 
 | Export | What it is |
 |---|---|
-| `createMeeting(options)` | A meeting of `room` as `self`. `attend(connection, signal)` takes part on one session until it ends; called again with the next session, it keeps who was there. Each decoded frame and piece of sound is handed to `onFrame(id, …)` and `onAudio(id, …)`, and the callee closes it. `onEvent` is told who came and left, and which tracks began and stopped |
+| `createMeeting(options)` | A meeting of `room` as `self`. `attend(connection, signal, onTaken)` takes part on one session until it ends (`onTaken` once its SUBSCRIBE_NAMESPACE was taken); called again with the next session, it keeps who was there. Each decoded frame and piece of sound is handed to `onFrame(id, …)` and `onAudio(id, …)`, and the callee closes it. `onEvent` is told who came and left, and which tracks began and stopped |
 | `DEFAULT_MOST_WATCHED`, `DEFAULT_MOST_OTHERS` | 8 videos at once, and 48 others: the room gives no token past 49 participants, and a page keeps 48 others besides |
 | `meetingPrefix`, `participantOf`, `MEET` | The names, as `crates/viewer/src/meeting.rs` has them |
 | `createPresence`, `SETTLE_MS`, `watchedOf` | Who is there in the order they came, across sessions, as `Presence` of `crates/viewer/src/presence.rs` has it; and whose video is received |
 | `chooseTracks` | The video with the fewest pixels, and the first sound, of a catalog's tracks in its own namespace |
+| `keepAttending(options)` | `attend` across sessions: `connect` is called anew for each session (the demo asks the room for its seat and tokens each time), and the session is made again 1 s after the try before at the soonest. **A GOAWAY (§10.4) ends the session with NO_ERROR**, and the next `connect` is handed it, so that the caller connects to its New Session URI; it is handed the same GOAWAY until another comes, and the session after one is made at once, once in a row (`keepMoving` of `@xmoq/moqt`, as for every client). WHY a new session: the relay refuses every request after its GOAWAY, so one who comes after it could not be received. The demo's meeting page (`/meet`) attends by it |
 
 What it does, in order:
 
@@ -23,4 +24,4 @@ Layer 3 (`scripts/ci/check-layers.sh`): it depends on `@xmoq/moqt`, `@xmoq/msf` 
 
 ## Checks
 
-`test/presence.test.ts` reads the shared rows of [`fixtures/meeting-presence/`](../../fixtures/meeting-presence/README.md), which `crates/viewer` reads as well. `test/tracks.test.ts` checks which tracks of a catalog are chosen and the limits. The interop run `own relay: meeting: …` (`interop/meeting-pages.ts`) has three pages meet, one of them with one video, and one leave; not through moqtail's relay, which brings no catalog of a page ([record](../../docs/experiments/2026-10-25-a-meeting-of-pages.md)).
+`test/presence.test.ts` reads the shared rows of [`fixtures/meeting-presence/`](../../fixtures/meeting-presence/README.md), which `crates/viewer` reads as well. `test/tracks.test.ts` checks which tracks of a catalog are chosen and the limits. The interop run `own relay: meeting: …` (`interop/meeting-pages.ts`) has three pages meet, one of them with one video, and one leave; not through moqtail's relay, which brings no catalog of a page ([record](../../docs/experiments/2026-10-25-a-meeting-of-pages.md)). `test/keep-attending.test.ts` checks `keepAttending` on sessions of the test, and the interop run `own relay: when full: …` (`interop/when-full.ts`) has a page's meeting sent away by a full relay and attended where it was sent ([record](../../docs/experiments/2026-10-25-the-meeting-follows-a-goaway.md)).
