@@ -23,6 +23,7 @@ import {
 	type FetchRange,
 	type KeyValuePair,
 	type MoqtConnection,
+	type NamespaceSubscription,
 	type PeerFetch,
 	type PeerStreamEnd,
 	PublishEndedError,
@@ -109,6 +110,9 @@ interface Reading {
 
 let connection: MoqtConnection | undefined;
 let published: PublishedTrack | undefined;
+/** The SUBSCRIBE_NAMESPACE of `watchNamespaces`, and the lines of what came of it. */
+let watchedNamespaces: NamespaceSubscription | undefined;
+const namespaceLines: string[] = [];
 /** The subscription `serveTrack` accepted, once it has. */
 let served: Promise<PublishedTrack> | undefined;
 /**
@@ -892,6 +896,33 @@ window.xmoqOwn = {
 			if (!(error instanceof RequestFailedError)) throw error;
 			return `TRACK_STATUS_REFUSED error_code=0x${error.errorCode.toString(16)}`;
 		}
+	}),
+
+	watchNamespaces: withPlainErrors(async (prefix: string) => {
+		const subscription = await connected().subscribeNamespace({
+			trackNamespacePrefix: namespaceFromPath(prefix),
+		});
+		watchedNamespaces = subscription;
+		namespaceLines.push("NAMESPACES_SUBSCRIBED");
+		void (async () => {
+			for await (const { trackNamespace, done } of subscription.changes) {
+				const path = trackNamespace
+					.map((field) => utf8Decoder.decode(field))
+					.join("/");
+				namespaceLines.push(
+					`${done ? "NAMESPACE_DONE" : "NAMESPACE"} namespace=${path}`,
+				);
+			}
+			namespaceLines.push(
+				`NAMESPACES_ENDED ${(await subscription.ended).type}`,
+			);
+		})();
+	}),
+
+	namespaceLines: () => Promise.resolve([...namespaceLines]),
+
+	stopWatchingNamespaces: withPlainErrors(async () => {
+		await watchedNamespaces?.cancel();
 	}),
 
 	keepVideoPublished: withPlainErrors(

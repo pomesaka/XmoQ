@@ -84,7 +84,7 @@ Sound is Opus, a piece every 20 ms, each an Object on a stream of its own (decid
 
 | Choice | How | For | Against |
 | --- | --- | --- | --- |
-| A. SUBSCRIBE_NAMESPACE | Each participant announces `xmoq/meet/<room>/<participant>` and publishes a catalog there; each subscribes to the namespaces under `xmoq/meet/<room>` and is told NAMESPACE when one comes and NAMESPACE_DONE when one goes | The relay serves it (8 a session, 4,096 namespaces under a prefix, row on SUBSCRIBE_NAMESPACE in the [implementation notes](moqt-implementation-notes.md)); the relay itself says who left; as the chat does | `@xmoq/moqt` decodes NAMESPACE and NAMESPACE_DONE and sends no SUBSCRIBE_NAMESPACE |
+| A. SUBSCRIBE_NAMESPACE | Each participant announces `xmoq/meet/<room>/<participant>` and publishes a catalog there; each subscribes to the namespaces under `xmoq/meet/<room>` and is told NAMESPACE when one comes and NAMESPACE_DONE when one goes | The relay serves it (8 a session, 4,096 namespaces under a prefix, row on SUBSCRIBE_NAMESPACE in the [implementation notes](moqt-implementation-notes.md)); the relay itself says who left; as the chat does | None was found: `@xmoq/moqt` sends SUBSCRIBE_NAMESPACE since 2026-10-25 (`MoqtConnection.subscribeNamespace`) |
 | B. The room lists them | The room's WebSocket says who is there | Nothing new in the browser library | The room believes the pages; a participant whose connection to the relay died stays listed; against the direction of carrying everything over QUIC (the chat's decision of 2026-10-24) |
 
 **Recommended: A.** The namespace prefix is the meeting's own, apart from `xmoq/chat`, and the meeting's chat is the room's chat as it is.

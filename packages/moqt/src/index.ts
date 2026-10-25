@@ -24,9 +24,11 @@ export type {
 	FetchRequest,
 	PublishRequest,
 	SubscribeAnswer,
+	SubscribeNamespaceRequest,
 	SubscribeRequest,
 	TrackStatusRequest,
 } from "./core/requests.ts";
+export { MAX_NAMESPACES_OF_A_SUBSCRIPTION } from "./core/requests.ts";
 export {
 	createSubgroupStreamDecoder,
 	type ObjectStatus,
@@ -49,6 +51,8 @@ export type {
 	FetchWriter,
 	GoAwayNotice,
 	MoqtConnection,
+	NamespaceChange,
+	NamespaceSubscription,
 	PeerFetch,
 	PeerSubscribe,
 	PublishedTrack,
@@ -57,12 +61,14 @@ export type {
 	ServeHandlers,
 	SessionConnectOptions,
 	SubgroupWriter,
+	SubscribeNamespaceCallOptions,
 	Subscription,
 	TrackStatusCallOptions,
 	TrackStatusOk,
 } from "./webtransport/connection.ts";
 export type {
 	FetchEnd,
+	NamespaceSubscriptionEnd,
 	PeerStreamEnd,
 	PublishEnd,
 	RequestAbort,

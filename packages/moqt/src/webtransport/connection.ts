@@ -26,6 +26,7 @@ import type {
 	FetchRequest,
 	PublishRequest,
 	SubscribeAnswer,
+	SubscribeNamespaceRequest,
 	SubscribeRequest,
 	TrackStatusRequest,
 } from "../core/requests.ts";
@@ -43,6 +44,7 @@ import {
 	type FetchEnd,
 	FetchEndedError,
 	FetchStreamResetError,
+	type NamespaceSubscriptionEnd,
 	type PeerStreamEnd,
 	type PublishEnd,
 	PublishEndedError,
@@ -83,6 +85,15 @@ const DEFAULT_MAX_PEER_BIDI_STREAMS = 64;
  */
 const FETCH_BODY_HIGH_WATER_MARK = 4;
 /**
+ * Changes of a SUBSCRIBE_NAMESPACE that `NamespaceSubscription.changes`
+ * holds; with the last of them the connection stops reading the request
+ * stream, and the peer's flow control holds it. Provisional: the own relay
+ * sends 64 at a time (row on SUBSCRIBE_NAMESPACE in the implementation
+ * notes), and how many namespaces are kept is bounded apart from this
+ * (`MAX_NAMESPACES_OF_A_SUBSCRIPTION`).
+ */
+const NAMESPACE_CHANGES_HIGH_WATER_MARK = 64;
+/**
  * The largest code an application may reset a stream with.
  *
  * WHY 255 and not the 2^32 - 1 of W3C WebTransport (`[Clamp] unsigned long?
@@ -113,10 +124,12 @@ function isAnswer(event: SessionEvent): event is Extract<
 			| "subscribe-ok"
 			| "request-error"
 			| "fetch-ok"
-			| "track-status-ok";
+			| "track-status-ok"
+			| "namespaces-subscribed";
 	}
 > {
 	switch (event.type) {
+		case "namespaces-subscribed":
 		case "publish-namespace-ok":
 		case "publish-ok":
 		case "subscribe-ok":
@@ -200,8 +213,8 @@ export interface SessionConnectOptions {
 	/**
 	 * An AUTHORIZATION TOKEN for the whole connection: the Token structure as
 	 * bytes (§10.2.2). **It is put into every request this connection sends
-	 * that can carry one**: PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE, FETCH and
-	 * TRACK_STATUS,
+	 * that can carry one**: PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE, FETCH,
+	 * TRACK_STATUS and SUBSCRIBE_NAMESPACE,
 	 * which are the ones of §10.2.2 ("It MAY appear in a PUBLISH, SUBSCRIBE,
 	 * REQUEST_UPDATE, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS,
 	 * PUBLISH_NAMESPACE, TRACK_STATUS or FETCH message") that this library
@@ -656,6 +669,45 @@ export interface TrackStatusCallOptions {
 	signal?: AbortSignal;
 }
 
+/** A NAMESPACE (`done` false) or NAMESPACE_DONE (`done` true) of a SUBSCRIBE_NAMESPACE (§10.16, §10.17). */
+export interface NamespaceChange {
+	/** The whole namespace: the prefix that was asked for, then the suffix the peer sent. */
+	trackNamespace: TrackNamespace;
+	done: boolean;
+}
+
+/** A SUBSCRIBE_NAMESPACE the peer answered with REQUEST_OK (§10.18). */
+export interface NamespaceSubscription {
+	readonly requestId: bigint;
+	/**
+	 * The NAMESPACE and NAMESPACE_DONE messages in the order they came, the
+	 * namespaces published when the request was answered among them (§6.1).
+	 * A NAMESPACE for a namespace told of before is passed on again, as the
+	 * Rust session does. Bounded: while it holds 64 that were not read, the
+	 * request stream is not read. It closes when the request ends; cancelling
+	 * it cancels the request.
+	 */
+	readonly changes: ReadableStream<NamespaceChange>;
+	/** Resolves once the request has ended, with how. Never rejects. */
+	readonly ended: Promise<NamespaceSubscriptionEnd>;
+	/**
+	 * Cancels the request: both directions of its stream are given up with
+	 * CANCELLED (§3.3.2; §6.1 has "closing the stream with either a FIN or
+	 * RESET_STREAM"). Does nothing after it has ended.
+	 */
+	cancel(): Promise<void>;
+}
+
+export interface SubscribeNamespaceCallOptions {
+	/**
+	 * Cancels the request when it aborts: before the answer,
+	 * `subscribeNamespace` rejects with `RequestAbortedError` of `cancelled`;
+	 * after it, as `cancel()`. With a signal that has aborted already nothing
+	 * is sent, and `subscribeNamespace` rejects with its reason.
+	 */
+	signal?: AbortSignal;
+}
+
 /**
  * A SUBSCRIBE of the peer, to be answered once with `accept` or `reject`.
  *
@@ -956,6 +1008,21 @@ export interface MoqtConnection {
 		options?: TrackStatusCallOptions,
 	): Promise<TrackStatusOk>;
 	/**
+	 * Sends a SUBSCRIBE_NAMESPACE (§10.18) for the namespaces under
+	 * `trackNamespacePrefix` (0 to 32 fields; none asks for every namespace,
+	 * §6.1), and resolves with it once the peer answered REQUEST_OK.
+	 * AUTHORIZATION_TOKEN is the one parameter it may carry (§10.2.2); with
+	 * another, or with a prefix of more than 32 fields, it rejects with a
+	 * `RangeError` and sends nothing. Otherwise it rejects as `trackStatus`
+	 * does. A relay refuses a prefix that shares a common prefix with another
+	 * SUBSCRIBE_NAMESPACE of this session with `PREFIX_OVERLAP` (§10.18),
+	 * which is a `RequestFailedError`.
+	 */
+	subscribeNamespace(
+		request: SubscribeNamespaceRequest,
+		options?: SubscribeNamespaceCallOptions,
+	): Promise<NamespaceSubscription>;
+	/**
 	 * Closes the session (§3.5). `code` is a Session Termination Error Code,
 	 * NO_ERROR when left out; a value that is not a whole number from 0 to
 	 * 2^32 - 1 throws a `RangeError` and leaves the session open. The draft
@@ -1214,6 +1281,22 @@ export async function connectOver(
 	const pendingPublishes = new Map<bigint, Deferred<PublishedTrack>>();
 	const pendingSubscribes = new Map<bigint, Deferred<Subscription>>();
 	const pendingTrackStatuses = new Map<bigint, Deferred<TrackStatusOk>>();
+	const pendingNamespaceSubscriptions = new Map<
+		bigint,
+		Deferred<NamespaceSubscription>
+	>();
+	/** SUBSCRIBE_NAMESPACEs that were answered and have not ended. */
+	const namespaceSubscriptions = new Map<
+		bigint,
+		{
+			changes: ObjectQueue<NamespaceChange>;
+			ended: Deferred<NamespaceSubscriptionEnd>;
+			/** Lets go of the call's signal. */
+			release: () => void;
+		}
+	>();
+	/** The signal of each SUBSCRIBE_NAMESPACE that waits for its answer, handed on to it then. */
+	const namespaceSignals = new Map<bigint, AbortSignal>();
 	/** Track Alias of each PUBLISH that is waiting for its response. */
 	const pendingPublishAliases = new Map<bigint, bigint>();
 	const subscriptions = new Map<bigint, ActiveSubscription>();
@@ -1433,12 +1516,67 @@ export async function connectOver(
 		pendingPublishes.get(requestId)?.reject(error);
 		pendingSubscribes.get(requestId)?.reject(error);
 		pendingTrackStatuses.get(requestId)?.reject(error);
+		pendingNamespaceSubscriptions.get(requestId)?.reject(error);
 		pendingNamespaces.delete(requestId);
 		pendingPublishes.delete(requestId);
 		pendingSubscribes.delete(requestId);
 		pendingTrackStatuses.delete(requestId);
+		pendingNamespaceSubscriptions.delete(requestId);
+		namespaceSignals.delete(requestId);
 		pendingPublishAliases.delete(requestId);
 		earlyGoAways.delete(requestId);
+	};
+
+	/** Ends an answered SUBSCRIBE_NAMESPACE: `changes` closes once read, and `ended` resolves. */
+	const endNamespaceSubscription = (
+		requestId: bigint,
+		end: NamespaceSubscriptionEnd,
+	): void => {
+		const active = namespaceSubscriptions.get(requestId);
+		if (active === undefined) return;
+		namespaceSubscriptions.delete(requestId);
+		active.release();
+		active.changes.end();
+		active.ended.resolve(end);
+	};
+
+	/**
+	 * Registers a SUBSCRIBE_NAMESPACE the peer answered, so that its changes
+	 * find it, and hands the signal of the call on to it.
+	 */
+	const namespaceSubscriptionFrom = (
+		requestId: bigint,
+	): NamespaceSubscription => {
+		const cancel = async (): Promise<void> => {
+			if (!namespaceSubscriptions.has(requestId)) return;
+			endNamespaceSubscription(requestId, { type: "cancelled" });
+			if (sessionClose !== undefined) return;
+			await applyVoid((s) => s.cancelRequest(requestId));
+		};
+		const ended = deferred<NamespaceSubscriptionEnd>();
+		const signal = namespaceSignals.get(requestId);
+		namespaceSignals.delete(requestId);
+		// WHY the rejection is dropped: a reset that could not be written ends
+		// the session, and `closed` and `ended` report that.
+		const onAbort = (): void => {
+			cancel().catch(() => {});
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		const changes = createObjectQueue<NamespaceChange>(
+			NAMESPACE_CHANGES_HIGH_WATER_MARK,
+			cancel,
+		);
+		namespaceSubscriptions.set(requestId, {
+			changes,
+			ended,
+			release: () => signal?.removeEventListener("abort", onAbort),
+		});
+		return {
+			requestId,
+			changes: changes.readable,
+			ended: ended.promise,
+			cancel,
+		};
 	};
 
 	/** Fails everything that waits on the session. The first cause wins. */
@@ -1455,8 +1593,12 @@ export async function connectOver(
 			...pendingPublishes.keys(),
 			...pendingSubscribes.keys(),
 			...pendingTrackStatuses.keys(),
+			...pendingNamespaceSubscriptions.keys(),
 		]) {
 			rejectPending(requestId, error);
+		}
+		for (const requestId of [...namespaceSubscriptions.keys()]) {
+			endNamespaceSubscription(requestId, { type: "session-closed", close });
 		}
 		for (const requestId of [...subscriptions.keys()]) {
 			endSubscription(requestId, { type: "session-closed", close });
@@ -2137,6 +2279,7 @@ export async function connectOver(
 				endSubscription(requestId, { type: "peer-closed" });
 				endPublish(requestId, { type: "peer-closed" });
 				endFetch(requestId, { type: "peer-closed" });
+				endNamespaceSubscription(requestId, { type: "peer-closed" });
 				return;
 			case "peer-reset":
 				rejectPending(
@@ -2151,6 +2294,13 @@ export async function connectOver(
 				endPublish(requestId, { type: "peer-reset", code: resetCode });
 				endServedFetch(requestId, { type: "peer-cancelled", code: resetCode });
 				endFetch(requestId, { type: "peer-reset", code: resetCode });
+				endNamespaceSubscription(requestId, {
+					type: "peer-reset",
+					code: resetCode,
+				});
+				return;
+			case "too-many-namespaces":
+				endNamespaceSubscription(requestId, { type: "too-many-namespaces" });
 				return;
 			case "unsupported-track-property":
 				// Happens on SUBSCRIBE_OK, where only the pending subscribe()
@@ -2241,7 +2391,7 @@ export async function connectOver(
 					earlyGoAways.set(event.requestId, notice);
 				}
 				// WHY nothing for the other requests (PUBLISH, PUBLISH_NAMESPACE,
-				// FETCH, TRACK_STATUS): no caller of this package moves one, and the peer
+				// FETCH, TRACK_STATUS, SUBSCRIBE_NAMESPACE): no caller of this package moves one, and the peer
 				// ends it after its Timeout (§10.4) as it ends any.
 				return undefined;
 			}
@@ -2393,6 +2543,31 @@ export async function connectOver(
 					}))
 					.catch(() => {});
 				return undefined;
+			}
+			case "namespaces-subscribed": {
+				const { requestId } = event;
+				const pending = pendingNamespaceSubscriptions.get(requestId);
+				pendingNamespaceSubscriptions.delete(requestId);
+				// The signal now cancels the request through the handle.
+				withdrawals.get(requestId)?.();
+				withdrawals.delete(requestId);
+				if (pending === undefined) {
+					namespaceSignals.delete(requestId);
+					return undefined;
+				}
+				pending.resolve(namespaceSubscriptionFrom(requestId));
+				return undefined;
+			}
+			case "namespace": {
+				const active = namespaceSubscriptions.get(event.requestId);
+				if (active === undefined) return undefined;
+				// The request stream is not read further until `changes` has room.
+				return {
+					settled: active.changes.push({
+						trackNamespace: event.trackNamespace,
+						done: event.done,
+					}),
+				};
 			}
 			case "track-status-ok": {
 				const { requestId } = event;
@@ -2783,6 +2958,22 @@ export async function connectOver(
 				});
 				// As for PUBLISH_NAMESPACE: registered before it is sent.
 				if (signal !== undefined) cancelOnAbort(result.value, signal);
+				return result;
+			});
+		},
+		subscribeNamespace(asked, callOptions = {}) {
+			const { signal } = callOptions;
+			if (signal?.aborted) return Promise.reject(signal.reason);
+			return request(pendingNamespaceSubscriptions, asked.parameters, (s) => {
+				const result = s.subscribeNamespace({
+					...asked,
+					parameters: authorized(asked.parameters),
+				});
+				// As for PUBLISH_NAMESPACE: registered before it is sent.
+				if (signal !== undefined) {
+					namespaceSignals.set(result.value, signal);
+					cancelOnAbort(result.value, signal);
+				}
 				return result;
 			});
 		},

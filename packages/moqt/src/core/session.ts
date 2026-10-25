@@ -25,6 +25,7 @@ import {
 	type PublishRequest,
 	type Requests,
 	type SubscribeAnswer,
+	type SubscribeNamespaceRequest,
 	type SubscribeRequest,
 	type TrackStatusRequest,
 } from "./requests.ts";
@@ -61,7 +62,7 @@ export interface SessionOptions {
  * SUBSCRIBE, a Standalone FETCH and TRACK_STATUS (they are answered with
  * REQUEST_ERROR), REQUEST_UPDATE, GOAWAY,
  * delivering Object Datagrams (their type is checked, `receiveDatagram`),
- * namespace subscription and timers. Of a FETCH this endpoint
+ * SUBSCRIBE_TRACKS and timers. Of a FETCH this endpoint
  * sends, the fetch stream is handed on as bytes; `fetch.ts` decodes them for
  * whoever wants Objects.
  */
@@ -77,6 +78,8 @@ export interface Session {
 	fetch(request: FetchRequest): SessionResult<bigint>;
 	/** Sends a TRACK_STATUS (§10.14). `Requests.trackStatus` has its answer. */
 	trackStatus(request: TrackStatusRequest): SessionResult<bigint>;
+	/** Sends a SUBSCRIBE_NAMESPACE (§10.18). `Requests.subscribeNamespace` has what comes of it. */
+	subscribeNamespace(request: SubscribeNamespaceRequest): SessionResult<bigint>;
 	/** Cancels a request this endpoint made (§3.3.2). */
 	cancelRequest(requestId: bigint): SessionOutput[];
 	/** `Requests.updateSubscription`: a REQUEST_UPDATE for an Established SUBSCRIBE of this endpoint (§10.9). */
@@ -533,6 +536,8 @@ export function createSession(options: SessionOptions = {}): Session {
 		subscribe: (request) => opening(() => requests.subscribe(request)),
 		fetch: (request) => opening(() => requests.fetch(request)),
 		trackStatus: (request) => opening(() => requests.trackStatus(request)),
+		subscribeNamespace: (request) =>
+			opening(() => requests.subscribeNamespace(request)),
 		acceptSubscribe: (requestId, answer) =>
 			whileOpen(() => requests.acceptSubscribe(requestId, answer)),
 		acceptTrackStatus: (requestId, answer) =>
