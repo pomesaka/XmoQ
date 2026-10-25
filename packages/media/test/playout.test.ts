@@ -287,17 +287,37 @@ describe("createFrameQueue", () => {
 		expect(queue.waiting()).toBe(2);
 	});
 
-	test.each<{ now: number; bufferMs: number; due: number[]; waiting: number }>([
-		{ now: 190, bufferMs: 50, due: [100, 133], waiting: 1 },
-		{ now: 190, bufferMs: 0, due: [100, 133, 166], waiting: 0 },
-		{ now: 190, bufferMs: 150, due: [], waiting: 3 },
-		{ now: 150, bufferMs: 50, due: [100], waiting: 2 },
+	// The frames are named by the order they came in, and `bases` are their
+	// times in that order.
+	test.each<{
+		bases: number[];
+		now: number;
+		bufferMs: number;
+		due: number[];
+		waiting: number;
+	}>([
+		{ bases: [100, 133, 166], now: 190, bufferMs: 50, due: [0, 1], waiting: 1 },
+		{
+			bases: [100, 133, 166],
+			now: 190,
+			bufferMs: 0,
+			due: [0, 1, 2],
+			waiting: 0,
+		},
+		{ bases: [100, 133, 166], now: 190, bufferMs: 150, due: [], waiting: 3 },
+		{ bases: [100, 133, 166], now: 150, bufferMs: 50, due: [0], waiting: 2 },
+		// The second came with a time before the first's, the fastest way having
+		// become shorter between the two: the first goes with it, and the
+		// picture does not go back to it afterwards.
+		{ bases: [200, 150, 260], now: 160, bufferMs: 0, due: [0, 1], waiting: 1 },
+		{ bases: [200, 150, 260], now: 140, bufferMs: 0, due: [], waiting: 3 },
+		{ bases: [200, 150, 260], now: 210, bufferMs: 0, due: [0, 1], waiting: 1 },
 	])(
-		"at $now with a buffer of $bufferMs the frames of $due are due",
-		({ now, bufferMs, due, waiting }) => {
+		"of the frames with the times $bases, at $now with a buffer of $bufferMs, those of $due are due",
+		({ bases, now, bufferMs, due, waiting }) => {
 			const queue = createFrameQueue<number>();
-			for (const base of [100, 133, 166]) {
-				queue.push({ frame: base, base, came: base });
+			for (const [order, base] of bases.entries()) {
+				queue.push({ frame: order, base, came: base });
 			}
 			expect(queue.due(now, bufferMs).map((each) => each.frame)).toEqual(due);
 			expect(queue.waiting()).toBe(waiting);
