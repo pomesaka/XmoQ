@@ -2,31 +2,41 @@
 //! `xmoq/chat/<room>/<name>` the relay tells of, to a `SUBSCRIBE_NAMESPACE`
 //! for `xmoq/chat/<room>` (decided on 2026-10-25), as the gatherer finds
 //! them (`crates/chat/README.md`). Only those who announce a namespace for
-//! the chat are seen: a viewer that does not take part in it is not.
-
-use std::collections::BTreeMap;
+//! the chat are seen: a viewer that does not take part in it is not. The
+//! rule across sessions is `xmoq_viewer::presence`'s, which a meeting's
+//! participants go by as well; here are the room and the reader itself.
 
 use xmoq_chat_tracks::names::Person;
+use xmoq_viewer::presence::{self, Change};
 
 use crate::events::Event;
 
-/// How long after a `SUBSCRIBE_NAMESPACE` of a new session was answered
-/// those not told of again are taken to have left. **Provisional.**
-///
-/// WHY: the relay tells of every namespace under the prefix when it is
-/// asked (§6.1), and nobody is told to have left while the reader was away;
-/// those it does not tell of again left meanwhile. WHY a wait and not the
-/// answer: draft 18 has no message that says the namespaces there were are
-/// all told.
-pub const SETTLE_MS: u64 = 2_000;
+pub use xmoq_viewer::presence::SETTLE_MS;
+
+/// The most in the chat who are kept: as many namespaces as the own relay
+/// tells of to one `SUBSCRIBE_NAMESPACE` (4,096, decided on 2026-10-24).
+/// **Provisional.**
+pub const MOST_IN_THE_CHAT: usize = 4_096;
 
 /// Who is in the chat, as told so far.
 #[derive(Debug)]
 pub struct Presence {
     room: String,
     me: String,
-    /// Each name, and whether the relay told of it on this session.
-    here: BTreeMap<String, bool>,
+    people: presence::Presence,
+}
+
+/// The event of a change.
+fn event_of(change: Change) -> Event {
+    match change {
+        Change::Came(name) => Event::Joined { name },
+        Change::Left(name) => Event::Left { name },
+        Change::TooMany(name) => Event::Error {
+            message: format!(
+                "who is in the chat: {name} came, and more than {MOST_IN_THE_CHAT} are kept"
+            ),
+        },
+    }
 }
 
 impl Presence {
@@ -36,7 +46,7 @@ impl Presence {
         Self {
             room: room.to_string(),
             me: me.to_string(),
-            here: BTreeMap::new(),
+            people: presence::Presence::new(MOST_IN_THE_CHAT),
         }
     }
 
@@ -52,10 +62,7 @@ impl Presence {
         if !self.other(person) {
             return None;
         }
-        let known = self.here.insert(person.name.clone(), true).is_some();
-        (!known).then(|| Event::Joined {
-            name: person.name.clone(),
-        })
+        self.people.named(&person.name).map(event_of)
     }
 
     /// The relay told that `person`'s namespace is gone (`NAMESPACE_DONE`).
@@ -63,32 +70,19 @@ impl Presence {
         if !self.other(person) {
             return None;
         }
-        self.here.remove(&person.name).map(|_| Event::Left {
-            name: person.name.clone(),
-        })
+        self.people.done(&person.name).map(event_of)
     }
 
     /// The session ended: whoever is told of on the next one is still
     /// there, and nobody comes or leaves for it.
     pub fn session_ended(&mut self) {
-        for told in self.here.values_mut() {
-            *told = false;
-        }
+        self.people.session_ended();
     }
 
     /// [`SETTLE_MS`] after the `SUBSCRIBE_NAMESPACE` of a session was
     /// answered: those not told of on it have left.
     pub fn settled(&mut self) -> Vec<Event> {
-        let gone: Vec<String> = self
-            .here
-            .iter()
-            .filter(|(_, told)| !**told)
-            .map(|(name, _)| name.clone())
-            .collect();
-        for name in &gone {
-            self.here.remove(name);
-        }
-        gone.into_iter().map(|name| Event::Left { name }).collect()
+        self.people.settled().into_iter().map(event_of).collect()
     }
 }
 
@@ -123,30 +117,25 @@ mod tests {
         }
     }
 
+    /// What this adds to `xmoq_viewer::presence`, whose table has the rule
+    /// across sessions: the room, the reader itself, and the events.
     #[test]
-    fn who_comes_and_who_leaves() {
+    fn who_comes_and_who_leaves_in_the_room() {
         use Step::{Done, Named, SessionEnded, Settled};
         // (what happens, in the room `r` as `me`; the events of all of it)
-        let cases: [(&[Step], Vec<Event>); 8] = [
-            (&[Named("r", "alice")], vec![joined("alice")]),
+        let cases: [(&[Step], Vec<Event>); 5] = [
             (
                 &[Named("r", "alice"), Done("r", "alice")],
                 vec![joined("alice"), left("alice")],
             ),
-            // Told twice: one came.
-            (
-                &[Named("r", "alice"), Named("r", "alice")],
-                vec![joined("alice")],
-            ),
-            // Gone without having come.
-            (&[Done("r", "alice")], vec![]),
             // The reader itself, and somebody of another room.
             (
                 &[Named("r", "me"), Named("other", "bob"), Done("r", "me")],
                 vec![],
             ),
-            // A new session tells of alice again and not of bob: bob left
-            // meanwhile, and alice was there all along.
+            (&[Named("other", "bob"), Done("other", "bob")], vec![]),
+            // The reader itself is not taken to have left on a new session.
+            (&[Named("r", "me"), SessionEnded, Settled], vec![]),
             (
                 &[
                     Named("r", "alice"),
@@ -157,13 +146,6 @@ mod tests {
                 ],
                 vec![joined("alice"), joined("bob"), left("bob")],
             ),
-            // Somebody new on the new session came.
-            (
-                &[SessionEnded, Named("r", "carol"), Settled],
-                vec![joined("carol")],
-            ),
-            // Settled on a session that told of everybody: nobody left.
-            (&[Named("r", "alice"), Settled], vec![joined("alice")]),
         ];
         for (steps, expected) in cases {
             let mut presence = Presence::new("r", "me");
@@ -178,5 +160,15 @@ mod tests {
             }
             assert_eq!(events, expected, "{steps:?}");
         }
+    }
+
+    #[test]
+    fn more_than_are_kept_is_an_error() {
+        assert_eq!(
+            event_of(Change::TooMany("carol".to_string())),
+            Event::Error {
+                message: "who is in the chat: carol came, and more than 4096 are kept".to_string()
+            }
+        );
     }
 }
