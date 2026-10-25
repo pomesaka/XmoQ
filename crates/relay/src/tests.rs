@@ -382,39 +382,74 @@ async fn a_new_group_request_of_a_subscriber_reaches_the_publisher_of_a_track_wi
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_subscriber_that_stops_reading_is_cut_off_alone() {
-    // Room for four of the Objects below in what waits for one subscriber.
-    let config = HubConfig {
-        send: SendLimits {
-            bytes: 4 * 4 * STREAM_WINDOW,
-            objects: 4096,
-            streams: 256,
-            delivery_patience: None,
-        },
-        ..HubConfig::default()
+async fn a_subscriber_that_stops_reading_is_cut_off_alone_by_each_of_the_limits() {
+    // Room for four of the Objects below in what waits for one subscription,
+    // one subscriber's session, or the relay; the others far larger.
+    let room = 4 * 4 * STREAM_WINDOW;
+    let limits = |bytes| SendLimits {
+        bytes,
+        objects: 4096,
+        streams: 256,
+        delivery_patience: None,
     };
-    let (hub, _task) = hub::spawn(config);
-    let mut publisher = Peer::connect(&hub, true).await;
-    let _publication = publisher.publish().await;
-    let mut reader = Peer::connect(&hub, true).await;
-    let (_reader_request, reader_alias) = reader.subscribe().await;
-    // The stalled subscriber never takes a unidirectional stream.
-    let mut stalled = Peer::connect(&hub, false).await;
-    let (mut stalled_request, _) = stalled.subscribe().await;
+    let large = 1 << 30;
+    // (the limit that is reached, the config)
+    let cases = [
+        (
+            "subscription",
+            HubConfig {
+                send_for_one_subscription: limits(room),
+                send: limits(large),
+                ..HubConfig::default()
+            },
+        ),
+        (
+            "session",
+            HubConfig {
+                send_for_one_subscription: limits(large),
+                send: limits(room),
+                ..HubConfig::default()
+            },
+        ),
+        (
+            "relay",
+            HubConfig {
+                send_for_one_subscription: limits(large),
+                send: limits(large),
+                send_for_the_relay_bytes: room,
+                ..HubConfig::default()
+            },
+        ),
+    ];
+    for (limit, config) in cases {
+        let (hub, _task) = hub::spawn(config);
+        let mut publisher = Peer::connect(&hub, true).await;
+        let _publication = publisher.publish().await;
+        let mut reader = Peer::connect(&hub, true).await;
+        let (_reader_request, reader_alias) = reader.subscribe().await;
+        // The stalled subscriber never takes a unidirectional stream.
+        let mut stalled = Peer::connect(&hub, false).await;
+        let (mut stalled_request, _) = stalled.subscribe().await;
 
-    // Far more than one stream's window and its queue hold.
-    let objects: Vec<_> = (0..12).map(|id| object(id, 4 * STREAM_WINDOW)).collect();
-    let data = publisher.send_objects(&objects).await;
-    data.finish();
+        // Far more than one stream's window and its queue hold.
+        let objects: Vec<_> = (0..12).map(|id| object(id, 4 * STREAM_WINDOW)).collect();
+        let data = publisher.send_objects(&objects).await;
+        data.finish();
 
-    // The one who reads gets everything.
-    assert_eq!(
-        reader.receive_stream(reader_alias).await,
-        (0..12).collect::<Vec<u64>>()
-    );
-    // The one who does not is told TOO_FAR_BEHIND (0x5), with the one stream
-    // that was opened for it.
-    assert_eq!(publish_done(&mut stalled_request).await, done(0x5, 1));
+        // The one who reads gets everything.
+        assert_eq!(
+            reader.receive_stream(reader_alias).await,
+            (0..12).collect::<Vec<u64>>(),
+            "{limit}"
+        );
+        // The one who does not is told TOO_FAR_BEHIND (0x5), with the one
+        // stream that was opened for it.
+        assert_eq!(
+            publish_done(&mut stalled_request).await,
+            done(0x5, 1),
+            "{limit}"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

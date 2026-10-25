@@ -301,8 +301,12 @@ pub enum Event {
         /// The stream whose Object, or whose opening, went over the limit.
         out_stream: OutStreamKey,
         /// For each stream to the same subscriber session that is not done,
-        /// the payload bytes it has carried. The relay ends the subscription
-        /// whose streams carry the most.
+        /// the payload bytes it has carried, where the limit of the session
+        /// was reached; none for a limit of the subscription itself and for
+        /// the relay's, where `out_stream` is one of the subscription the
+        /// I/O side chose. The relay ends the subscription whose streams
+        /// carry the most, and the one of `out_stream` where none carries
+        /// more.
         carried: Vec<(OutStreamKey, usize)>,
     },
     /// The time to wait for the last Objects of a track after `PUBLISH_DONE` is

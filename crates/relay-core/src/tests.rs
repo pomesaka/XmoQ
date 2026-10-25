@@ -1004,7 +1004,14 @@ fn the_subscription_that_carries_the_most_is_the_one_that_falls_behind() {
             },
         ]
     };
-    let cases: [FullQueueCase; 4] = [
+    let cases: [FullQueueCase; 5] = [
+        (
+            "the sound goes over a limit of its own subscription (nothing is \
+             carried for it): the sound ends, whatever the video carries",
+            0,
+            vec![],
+            ended(StreamKey(0), 0),
+        ),
         (
             "the sound goes over, the video carries more: the video ends, and \
              the sound's stream that went over is reset",

@@ -87,7 +87,7 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
 | `mise run fmt` | Apply formatting and safe fixes |
 
-The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop run start it) has these flags, read off `crates/relay/src/main.rs` on 2026-10-25. The pages' and `demo/serve.ts`'s are in [the demo's README](demo/README.md), the terminal viewer's in `USAGE` of `crates/watch/src/args.rs`.
+The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop run start it) has these flags, read off `crates/relay/src/main.rs` on 2026-10-25. The limits are there to be fitted to the machine it runs on: at worst a session holds about 23.4 MiB besides what waits to be written to it, so the relay holds `max-sessions × 23.4 MiB + min(max-sessions × session-send-bytes, relay-send-bytes)`, about 25 GiB with the defaults (the table of `HubConfig` in `crates/relay/src/hub.rs` has each part); one edge with 500 viewers took 192 MB. The pages' and `demo/serve.ts`'s are in [the demo's README](demo/README.md), the terminal viewer's in `USAGE` of `crates/watch/src/args.rs`.
 
 | Flag | What it sets | Without it |
 |---|---|---|
@@ -97,6 +97,9 @@ The relay (`cargo run -p xmoq-relay -- <flags>`; `demo/serve.ts` and the interop
 | `--setup-timeout-ms` | How long a client has for its SETUP | 10,000 |
 | `--idle-session-ms` | How long a session that has sent its SETUP may hold nothing | 30,000 |
 | `--max-sessions` | How many sessions it takes at once; more than 0 | 1,000 |
+| `--subscription-send-bytes`, `--subscription-send-objects`, `--subscription-send-streams` | What may wait to be written to one subscription before it ends (`TOO_FAR_BEHIND`); more than 0 | 4 MiB, 4,096, 1,024 |
+| `--session-send-bytes`, `--session-send-objects`, `--session-send-streams` | What may wait to be written to one session, all its subscriptions together, before the one that carries the most ends; more than 0 | 8 MiB, 16,384, 4,096 |
+| `--relay-send-bytes` | What may wait to be written to all the sessions together, before the subscription with the most waiting ends; more than 0 | 2 GiB |
 | `--when-full` | Where a session goes that comes when it is full: a GOAWAY after its SETUP names this URL with `sent-away=1` in its query, and a session that came with that is closed rather than sent on. The relay there has to have the same certificate, or one the clients take otherwise | Closed with `INTERNAL_ERROR` |
 | `--announce-at-once` | How many `PUBLISH_NAMESPACE` requests a session may send at once | 5 |
 | `--announce-every-ms` | The time in which a session gets one of them back | 1,000 |

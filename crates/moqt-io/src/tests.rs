@@ -1201,6 +1201,99 @@ impl Sending {
     }
 }
 
+/// How many Objects a stream queued, and the level of the budget that
+/// refused the next, if one did.
+type Queued = (usize, Option<usize>);
+
+#[tokio::test(start_paused = true)]
+async fn a_budget_within_another_counts_in_both_and_says_which_is_used_up() {
+    // (Objects each of two budgets within one takes, Objects the one they
+    //  are within takes; for a stream of the first budget and then one of
+    //  the second, how many of 4 Objects of 256 bytes it queues, and the
+    //  level of the budget that refused the next, if one did)
+    let limits = |objects| SendLimits {
+        bytes: 1 << 20,
+        objects,
+        streams: 8,
+        delivery_patience: None,
+    };
+    let cases: [(usize, usize, Queued, Queued); 3] = [
+        (2, 8, (2, Some(0)), (2, Some(0))),
+        (8, 3, (3, Some(1)), (0, Some(1))),
+        (8, 16, (4, None), (4, None)),
+    ];
+    for (own, shared, first, second) in cases {
+        let (local, peer) = pair();
+        let local = Arc::new(local);
+        let parent = SendBudget::new(limits(shared));
+        let budgets = [
+            SendBudget::within(limits(own), &parent),
+            SendBudget::within(limits(own), &parent),
+        ];
+        let open = |budget: &Arc<SendBudget>| {
+            OutgoingSubgroup::spawn(
+                Arc::clone(&local),
+                header(),
+                (None, 0),
+                budget,
+                |_| std::future::ready(()),
+                Trace::default(),
+                String::new(),
+            )
+            .unwrap()
+        };
+        let streams = [open(&budgets[0]), open(&budgets[1])];
+        // Nothing reads: what is queued stays.
+        let queue = |stream: &OutgoingSubgroup, up_to: usize| {
+            let mut taken = 0;
+            for id in 0..up_to {
+                match stream.send(Arc::new(object(u64::try_from(id).unwrap(), 256))) {
+                    Ok(()) => taken += 1,
+                    Err(full) => return (taken, Some(full.level)),
+                }
+            }
+            (taken, None)
+        };
+        let case = (own, shared);
+        assert_eq!(queue(&streams[0], 4), first, "{case:?}");
+        assert_eq!(queue(&streams[1], 4), second, "{case:?}");
+        assert_eq!(parent.in_use().1, first.0 + second.0, "{case:?}");
+        assert_eq!(parent.in_use().2, 2, "{case:?}");
+        drop(streams);
+        drop(peer);
+        tokio::time::sleep(SOON).await;
+        assert_eq!(parent.in_use(), (0, 0, 0), "{case:?}");
+        assert_eq!(budgets[0].in_use(), (0, 0, 0), "{case:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_is_not_opened_beyond_the_streams_of_a_budget_it_is_within() {
+    let (local, _peer) = pair();
+    let local = Arc::new(local);
+    let limits = |streams| SendLimits {
+        streams,
+        ..SendLimits::default()
+    };
+    let parent = SendBudget::new(limits(2));
+    let child = SendBudget::within(limits(8), &parent);
+    let open = || {
+        OutgoingSubgroup::spawn(
+            Arc::clone(&local),
+            header(),
+            (None, 0),
+            &child,
+            |_| std::future::ready(()),
+            Trace::default(),
+            String::new(),
+        )
+    };
+    let _first = open().unwrap();
+    let _second = open().unwrap();
+    assert_eq!(open().err(), Some(QueueFull { level: 1 }));
+    assert_eq!((child.in_use().2, parent.in_use().2), (2, 2));
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_outgoing_subgroup_writes_what_is_queued_and_finishes() {
     let mut sending = sending(8, 8);
@@ -1249,7 +1342,7 @@ async fn a_receiver_that_does_not_read_uses_up_its_budget() {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         assert_eq!(
             out.send(Arc::new(object(taken, payload_len))),
-            Err(QueueFull),
+            Err(QueueFull { level: 0 }),
             "{objects} objects of {payload_len}"
         );
     }
