@@ -11,10 +11,7 @@ use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::immutable::{Of, searched_integers};
-use xmoq_moqt::kvp::KeyValuePair;
-use xmoq_moqt::message::{
-    ControlMessage, FetchRange, GoAway, RequestError, request_error_code, setup_option,
-};
+use xmoq_moqt::message::{ControlMessage, FetchRange, GoAway, RequestError, request_error_code};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, RequestId, Session};
@@ -22,7 +19,7 @@ use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream,
-    StreamEnd, StreamStops, Trace, UniEvent, send_message,
+    StreamEnd, StreamStops, Trace, UniEvent, client, send_message,
 };
 use xmoq_msf::CatalogTrack;
 
@@ -583,35 +580,23 @@ impl Requests<'_> {
     }
 }
 
-/// The relay sent no SETUP in so many milliseconds.
-// FIXME: take `NoSetupInTime`, `setup` and `termination_code` from
-// `xmoq_moqt_io::client`, as the Rust client, the gatherer and the
-// transcriber do; `termination_code` here finds a `NoSetupInTime` that is
-// not wrapped alone.
-#[derive(Debug)]
-pub struct NoSetupInTime(pub u64);
-
-impl std::fmt::Display for NoSetupInTime {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "the relay sent no SETUP within {} ms", self.0)
+impl client::UniEvents for Events {
+    fn next_event(
+        &mut self,
+    ) -> impl std::future::Future<Output = Option<UniEvent>> + std::marker::Send {
+        self.recv()
     }
 }
 
-impl std::error::Error for NoSetupInTime {}
-
 /// Opens the control stream, sends SETUP with `token` where there is one
 /// and `implementation` as `MOQT_IMPLEMENTATION`, and hands the relay's
-/// SETUP to the session. The control stream goes into `control` as soon as
-/// it is open, also where what follows fails: it is to stay open until the
-/// session is closed, since a relay that sees it end closes the session
-/// with `PROTOCOL_VIOLATION` first (§3.3).
+/// SETUP to the session: `client::setup` of `xmoq-moqt-io`, which keeps the
+/// control stream in `control` and has the errors.
 ///
 /// # Errors
 ///
-/// A stream that does not open, a SETUP that cannot be sent, the error of
-/// an event that fails the session before the relay's SETUP (closed with its
-/// code, as a datagram of an unknown type that comes first has it, §11),
-/// something else first, and [`NoSetupInTime`].
+/// Those of `client::setup`; `client::termination_code` gives the code to
+/// close with.
 pub async fn setup(
     connection: &WtConnection,
     session: &mut Session,
@@ -621,49 +606,10 @@ pub async fn setup(
     implementation: &str,
     setup_wait_ms: u64,
 ) -> Result<()> {
-    let control = control.insert(connection.open_uni().await?);
-    // In ascending order of their types: the token (0x03), then the
-    // implementation (0x07).
-    let mut options = Vec::new();
-    if let Some(token) = token {
-        options.push(KeyValuePair::bytes(
-            setup_option::AUTHORIZATION_TOKEN,
-            token.to_vec(),
-        )?);
-    }
-    options.push(KeyValuePair::bytes(
-        setup_option::MOQT_IMPLEMENTATION,
-        implementation.as_bytes().to_vec(),
-    )?);
-    let setup = session.setup(options)?;
-    send_message(control, &setup, &Trace::default(), "control").await?;
-    match tokio::time::timeout(Duration::from_millis(setup_wait_ms), events.recv()).await {
-        Ok(Some(UniEvent::Control(message))) => {
-            session.on_control_message(message)?;
-        }
-        Ok(Some(UniEvent::Failed(error))) => return Err(error.into()),
-        Ok(other) => bail!("no SETUP from the relay: {other:?}"),
-        Err(_) => return Err(NoSetupInTime(setup_wait_ms).into()),
-    }
+    let options = client::setup_options(token, implementation)?;
+    let wait = Duration::from_millis(setup_wait_ms);
+    client::setup(connection, session, events, control, options, wait).await?;
     Ok(())
-}
-
-/// The code to close the session with after `error` (§3.5):
-/// `CONTROL_MESSAGE_TIMEOUT` for a SETUP that did not come, as `@xmoq/moqt`
-/// has it, the one a protocol error of the relay asks for (a GOAWAY that
-/// breaks the rules of §10.4 among them), and `NO_ERROR` for everything
-/// else, also a request that is given up alone.
-#[must_use]
-pub fn termination_code(error: &anyhow::Error) -> u32 {
-    if error.is::<NoSetupInTime>() {
-        return 0x11;
-    }
-    // WHY the chain: `context` wraps the cause.
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
-        .and_then(xmoq_moqt::Error::termination_code)
-        .map_or(0, xmoq_moqt::TerminationCode::code)
 }
 
 /// What the peer does on a request stream it opened, where none is served:
@@ -675,7 +621,8 @@ pub fn termination_code(error: &anyhow::Error) -> u32 {
 /// # Errors
 ///
 /// An error of the session, to be closed with its code
-/// ([`termination_code`]), and a reader that panicked.
+/// (`client::termination_code` of `xmoq-moqt-io`), and a reader that
+/// panicked.
 pub async fn refuse_peer_request<S: std::hash::BuildHasher>(
     session: &mut Session,
     refused: &mut HashMap<u64, PeerRequestId, S>,

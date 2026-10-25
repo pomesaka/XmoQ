@@ -28,11 +28,10 @@ use xmoq_agent::input::{self, Input};
 use xmoq_agent::presence::Presence;
 use xmoq_chat_tracks::names::Person;
 use xmoq_moqt_io::wt;
-use xmoq_moqt_io::{Connection, StreamConfig};
+use xmoq_moqt_io::{Connection, StreamConfig, client};
 use xmoq_viewer::reconnect::{After, BETWEEN_TRIES_MS, NextSession};
 use xmoq_viewer::room::{self, Broadcast, Relay};
 use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};
-use xmoq_viewer_io::session::termination_code;
 
 use crate::attend::{Ended, UntilClosed, attend};
 use crate::frames::Pictures;
@@ -629,7 +628,7 @@ async fn run(args: &Args, reader: &mut Reader, pictures: &mut Option<Pictures>) 
                     &mut kept,
                 ))
                 .await;
-                connection.close(attended.as_ref().err().map_or(0, termination_code), b"");
+                connection.close(client::termination_code_of(&attended), b"");
                 let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
                 attended
             }

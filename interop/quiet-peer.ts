@@ -336,7 +336,7 @@ async function noSetup(
 				String(WAIT_MS),
 			]);
 			const [line] = await viewer.waitForLine(
-				new RegExp(`the relay sent no SETUP within ${WAIT_MS} ms`),
+				new RegExp(`the peer sent no SETUP within ${WAIT_MS} ms`),
 			);
 			said = line;
 			break;

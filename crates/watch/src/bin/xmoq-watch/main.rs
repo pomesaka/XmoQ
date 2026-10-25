@@ -35,7 +35,7 @@ use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, Role, Session, Transport};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent,
+    Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent, client,
     read_request_streams, read_uni_streams,
 };
 use xmoq_picture::video_decoder::VideoDecoder;
@@ -453,8 +453,9 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
                 // closed because the peer took too long to respond to a
                 // control message." For the SETUP, as `@xmoq/moqt` has it; a
                 // request that is not answered is given up alone, and the
-                // viewer then leaves with NO_ERROR (`termination_code`).
-                connection.close(termination_code(&played), b"");
+                // viewer then leaves with NO_ERROR (`termination_code` of
+                // `xmoq-moqt-io`'s `client`).
+                connection.close(client::termination_code_of(&played), b"");
                 let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
                 played
             }
@@ -1268,11 +1269,6 @@ async fn play(
         Some(error) => Err(error),
         None => Ok(ended),
     }
-}
-
-/// The code to close the session with (`session::termination_code`).
-fn termination_code(played: &Result<Ended>) -> u32 {
-    played.as_ref().err().map_or(0, session::termination_code)
 }
 
 async fn watch(args: Args) -> Result<()> {
