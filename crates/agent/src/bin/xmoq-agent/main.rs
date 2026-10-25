@@ -11,6 +11,7 @@ mod attend;
 mod frames;
 mod output;
 mod stdin;
+mod video;
 
 use std::future::Future;
 use std::path::Path;
@@ -59,7 +60,32 @@ pub struct Reader {
     /// The newest piece of speech written, and of which transcript, from one
     /// session to the next.
     speech_had: Option<(Vec<String>, u64)>,
+    /// `--frames on`.
+    frames: bool,
+    /// The picture asked for, from one session to the next.
+    frame: FrameAsking,
 }
+
+/// The picture asked for (`/frame`), from one session to the next, as
+/// `Frames` keeps the asking (`begin_again`).
+#[derive(Default)]
+pub struct FrameAsking {
+    /// Until when it is waited for.
+    until: Option<tokio::time::Instant>,
+    /// It was asked for while no video could take it (between sessions, or
+    /// while one begins), and is to be asked for when one can.
+    unsent: bool,
+    /// It came not in time while no session could tell `Frames` to give
+    /// the asking up.
+    forgo_unsent: bool,
+}
+
+/// How long a picture that was asked for is waited for. **Provisional.**
+/// WHY 10 s: the answer waits for the frames of one Group to be decoded,
+/// or, before any came, for the first key frame, which the demo sends every
+/// second; and while the reader connects again, for the next session's
+/// video.
+pub const FRAME_WAIT: Duration = Duration::from_secs(10);
 
 /// What came from outside the session while something is waited for.
 enum Outside {
@@ -85,7 +111,15 @@ impl Reader {
         let deadline = self.deadline;
         loop {
             let stdin_open = self.stdin_open;
+            let frame_asked_until = self.frame.until;
+            let mut frame_due = false;
             tokio::select! {
+                () = async {
+                    match frame_asked_until {
+                        Some(until) => tokio::time::sleep_until(until).await,
+                        None => std::future::pending().await,
+                    }
+                } => frame_due = true,
                 changed = self.stop.wait_for(|stop| *stop) => {
                     // A sender that is gone has nothing more to say.
                     let _ = changed;
@@ -102,7 +136,31 @@ impl Reader {
                     None => self.stdin_open = false,
                 },
             }
+            if frame_due {
+                self.frame_not_in_time();
+            }
         }
+    }
+
+    /// The picture asked for came not in time: said, and the asking given up.
+    fn frame_not_in_time(&mut self) {
+        self.frame.until = None;
+        self.error(format!(
+            "frame: no picture within {} s",
+            FRAME_WAIT.as_secs()
+        ));
+        if self.frame.unsent {
+            self.frame.unsent = false;
+        } else {
+            self.frame.forgo_unsent = true;
+        }
+    }
+
+    /// `/frame`: waited for from now, where it is not already.
+    pub fn frame_asked(&mut self) {
+        self.frame
+            .until
+            .get_or_insert_with(|| tokio::time::Instant::now() + FRAME_WAIT);
     }
 
     /// A line of stdin while there is no chat to say it in.
@@ -112,7 +170,14 @@ impl Reader {
             Line::Read(text) => match input::read(&text) {
                 Input::Nothing => {}
                 Input::Say(_) => self.error(format!("said nothing: {why}")),
-                Input::Frame => self.error(format!("frame: {why}")),
+                // WHY kept for the next video and not refused: an agent
+                // that asks while the reader connects again (a GOAWAY, a
+                // broadcast that came) would otherwise have to ask again.
+                Input::Frame if self.frames => {
+                    self.frame_asked();
+                    self.frame.unsent = true;
+                }
+                Input::Frame => self.error("frame: --frames off".to_string()),
                 Input::Unknown(name) => self.unknown_command(&name),
             },
         }
@@ -424,7 +489,9 @@ async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
             Ok(Some(connection)) => {
                 let connection = Arc::new(connection);
                 let mut kept = UntilClosed::default();
-                let attended = attend(
+                // Boxed: the session's future is the largest by far, and
+                // the reader's own would grow by it.
+                let attended = Box::pin(attend(
                     args,
                     &connection,
                     &place,
@@ -432,7 +499,7 @@ async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
                     reader,
                     &mut pictures,
                     &mut kept,
-                )
+                ))
                 .await;
                 connection.close(attended.as_ref().err().map_or(0, termination_code), b"");
                 let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
@@ -486,6 +553,8 @@ async fn read(args: &Args) -> Result<()> {
         presence: Presence::new(&args.room, &args.name),
         had: None,
         speech_had: None,
+        frames: args.frames,
+        frame: FrameAsking::default(),
     };
     let ran = run(args, &mut reader).await;
     if let Err(error) = &ran {

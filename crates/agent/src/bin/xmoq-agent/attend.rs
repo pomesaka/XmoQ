@@ -31,12 +31,11 @@ use xmoq_transcript_tracks::payloads::{Speech, read_speech};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
 use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, Track};
 use xmoq_viewer_io::room_socket::RoomSocket;
-use xmoq_viewer_io::session::{
-    self, CatalogKept, Events, GoneAway, Requests, Subscription, new_url, timestamp_of,
-};
+use xmoq_viewer_io::session::{self, Events, GoneAway, Requests, new_url, timestamp_of};
 
 use crate::frames::{Job, Pictures};
 use crate::stdin::Line;
+use crate::video::{Asking as VideoAsking, Video};
 use crate::{Outside, Place, Reader, person_of};
 
 type Send = <WtConnection as Connection>::Send;
@@ -249,20 +248,8 @@ impl Chat {
     }
 }
 
-/// How long a picture that was asked for is waited for. **Provisional.**
-/// WHY 10 s: the answer waits for the frames of one Group to be decoded,
-/// or, before any came, for the first key frame, which the demo sends every
-/// second.
-const FRAME_WAIT: Duration = Duration::from_secs(10);
-
 /// What `/frame` gets once the thread of the pictures is gone (it panicked).
 const THREAD_ENDED: &str = "frame: the thread of the pictures ended";
-
-/// The video of the broadcast on this session, for its pictures.
-struct Video {
-    subscription: Subscription,
-    _catalog: CatalogKept,
-}
 
 /// Why there are no pictures on this session.
 enum NoVideo {
@@ -271,7 +258,7 @@ enum NoVideo {
     /// The session is at the room's relay for the chat, and the room has no
     /// broadcast yet.
     NoBroadcast,
-    /// The catalog or the subscription failed, or the video ended.
+    /// The catalog or the subscription failed, or the video was given up.
     Failed(String),
 }
 
@@ -285,32 +272,37 @@ impl NoVideo {
     }
 }
 
-/// Reads the catalog and subscribes to its first H.264 video track.
-///
-/// WHY the first: the demo's publisher puts its main version first, and
-/// `xmoq-watch` takes it where nothing else is asked.
-async fn subscribe_video(
-    requests: &mut Requests<'_>,
-    events: &mut Events,
-    stops: &StreamStops,
-) -> Result<Video> {
-    let (tracks, catalog) = requests.catalog(events, stops).await?;
-    let video = xmoq_msf::video_tracks(&tracks, "avc")
-        .next()
-        .ok_or_else(|| anyhow!("the catalog has no H.264 video track with LOC packaging"))?
-        .name
-        .clone();
-    let subscription = events
-        .while_waiting(requests.subscribe(&video, None))
-        .await??;
-    eprintln!(
-        "XMOQ_AGENT_VIDEO track={video} track_alias={}",
-        subscription.track_alias
-    );
-    Ok(Video {
-        subscription,
-        _catalog: catalog,
-    })
+/// Tells `Frames` what was asked for, or given up, while nothing could tell
+/// it: `/frame` before this session's video, or a wait that ran out between
+/// sessions. A `/frame` that this session has no video for is told as such.
+async fn settle_frame_asking(
+    reader: &mut Reader,
+    pictures: Option<&mut Pictures>,
+    video: &Result<Video, NoVideo>,
+) {
+    if !reader.frame.forgo_unsent && !reader.frame.unsent {
+        return;
+    }
+    let Some(pictures) = pictures else {
+        if std::mem::take(&mut reader.frame.unsent) {
+            reader.frame.until = None;
+            reader.error(THREAD_ENDED.to_string());
+        }
+        reader.frame.forgo_unsent = false;
+        return;
+    };
+    if std::mem::take(&mut reader.frame.forgo_unsent) {
+        pictures.tell(Job::Forgo).await;
+    }
+    if std::mem::take(&mut reader.frame.unsent) {
+        match video {
+            Ok(_) => pictures.tell(Job::Ask).await,
+            Err(why) => {
+                reader.frame.until = None;
+                reader.error(why.message());
+            }
+        }
+    }
 }
 
 /// An Object of the video, for the thread of its pictures.
@@ -503,16 +495,14 @@ pub async fn attend(
                 .map(|field| field.as_bytes().to_vec())
                 .collect(),
         )?;
-        let mut requests = Requests {
-            connection,
-            session: &mut session,
-            namespace: &broadcast,
-            token: place.token.as_deref(),
+        let asking_with = VideoAsking {
+            connection: Arc::clone(connection),
+            namespace: broadcast,
+            token: place.token.clone(),
             answer_wait_ms: args.answer_wait_ms,
             open_wait_ms: args.open_wait_ms,
-            rendezvous_ms: None,
         };
-        let subscribed = subscribe_video(&mut requests, &mut events, &stops);
+        let subscribed = Video::begin(asking_with, &mut session, &mut events, &stops);
         // The catalog's SUBSCRIBE and FETCH, the catalog itself, and the
         // video's SUBSCRIBE.
         let wait = Duration::from_millis(args.answer_wait_ms * 3) + Duration::from_secs(5);
@@ -627,11 +617,9 @@ pub async fn attend(
             settle_at,
             ..
         } = &mut chat;
-        let video_answers = video
-            .as_mut()
-            .ok()
-            .map(|video| &mut video.subscription.reader);
-        let asked_until = pictures.as_ref().and_then(|pictures| pictures.asked_until);
+        // What was asked for or given up while the loop could not tell
+        // `Frames`: before this session's video, or in the wait for the room.
+        settle_frame_asking(reader, pictures.as_mut(), &video).await;
         let told = pictures.as_mut().map(|pictures| &mut pictures.told);
         tokio::select! {
             outside = reader.outside() => match outside {
@@ -641,7 +629,7 @@ pub async fn attend(
                     Wants::Frame => match (pictures.as_mut(), &video) {
                         (Some(pictures), Ok(_)) => {
                             pictures.tell(Job::Ask).await;
-                            pictures.asked_until = Some(tokio::time::Instant::now() + FRAME_WAIT);
+                            reader.frame_asked();
                         }
                         (_, Err(why)) => reader.error(why.message()),
                         (None, Ok(_)) => reader.error(THREAD_ENDED.to_string()),
@@ -650,10 +638,8 @@ pub async fn attend(
             },
             event = on(told.map(mpsc::Receiver::recv)) => {
                 if let Some(event) = event {
-                    if let (Event::Frame { asked: FrameAsked::Command, .. }, Some(pictures)) =
-                        (&event, pictures.as_mut())
-                    {
-                        pictures.asked_until = None;
+                    if matches!(event, Event::Frame { asked: FrameAsked::Command, .. }) {
+                        reader.frame.until = None;
                     }
                     reader.tell(&event);
                 } else {
@@ -661,41 +647,14 @@ pub async fn attend(
                     *pictures = None;
                 }
             }
-            () = on(asked_until.map(tokio::time::sleep_until)) => {
-                if let Some(pictures) = pictures.as_mut() {
-                    pictures.asked_until = None;
-                    pictures.tell(Job::Forgo).await;
-                }
-                reader.error(format!("frame: no picture within {} s", FRAME_WAIT.as_secs()));
-            }
-            // FIXME: ask for the video again after it ends, as `xmoq-watch`
-            // does for the sound (`xmoq-again`).
-            event = on(video_answers.map(RequestReader::next_event)) => {
-                if let Ok(ended) = &video {
-                    let request = ended.subscription.request;
-                    let how = match event {
-                        Ok(RequestStreamEvent::Message(message)) => {
-                            match session.on_request_message(request, message) {
-                                Ok(RequestEvent::SubscriptionDone(done)) => {
-                                    format!("PUBLISH_DONE status_code={:#x}", done.status_code)
-                                }
-                                Ok(other) => format!("{other:?}"),
-                                Err(error) => format!("{error}"),
-                            }
-                        }
-                        Ok(RequestStreamEvent::Closed(closed)) => {
-                            session.cancel(request);
-                            format!("closed {closed:?}")
-                        }
-                        Err(error) => {
-                            session.cancel(request);
-                            format!("{error}")
-                        }
-                    };
-                    let why = NoVideo::Failed(format!("the video ended: {how}"));
+            came = on(video.as_mut().ok().map(Video::next)) => {
+                if let Ok(going) = video.as_mut()
+                    && let Err(why) = going.on(&mut session, came)
+                {
+                    let why = NoVideo::Failed(format!("given up: {why}"));
                     reader.error(why.message());
-                    if let Ok(ended) = std::mem::replace(&mut video, Err(why)) {
-                        ended.subscription.cancel();
+                    if let Ok(given_up) = std::mem::replace(&mut video, Err(why)) {
+                        given_up.cancel();
                     }
                 }
             }
@@ -769,7 +728,7 @@ pub async fn attend(
                     }
                 }
                 Some(UniEvent::Object { header, object, .. })
-                    if video.as_ref().is_ok_and(|video| video.subscription.track_alias == header.track_alias) =>
+                    if video.as_ref().ok().and_then(Video::track_alias) == Some(header.track_alias) =>
                 {
                     if let Some(pictures) = pictures.as_mut() {
                         on_video_object(pictures, reader, header.group_id, &object);
@@ -817,7 +776,7 @@ pub async fn attend(
         watching.cancel();
     }
     if let Ok(video) = video {
-        video.subscription.cancel();
+        video.cancel();
     }
     Ok(ended)
 }

@@ -46,9 +46,6 @@ pub struct Pictures {
     /// Whether Objects are being left out, which is told once each time it
     /// begins.
     pub leaving_out: bool,
-    /// Until when the picture asked for is waited for; from one session to
-    /// the next, as `Frames` keeps the asking.
-    pub asked_until: Option<tokio::time::Instant>,
 }
 
 /// Writes `taken` into `dir`, and removes what it says to.
@@ -141,7 +138,6 @@ impl Pictures {
             told,
             left_out: 0,
             leaving_out: false,
-            asked_until: None,
         })
     }
 
