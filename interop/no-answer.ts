@@ -77,6 +77,25 @@ const ANSWER_WAIT_MS = 1500;
 /** Before the relay gives the publisher up itself, after 5 seconds. */
 const GIVEN_UP_BEFORE_MS = 4000;
 
+/**
+ * When the relay took the subscriber's SUBSCRIBE: it asks the publisher,
+ * session 0, for the track then. Set up before the subscriber starts, so
+ * that the time is when the line came and not when it was looked for.
+ *
+ * WHY a client's giving up is bounded from here above and from its start
+ * below: its own wait begins before the relay has the SUBSCRIBE and after
+ * the client started, so neither bound counts the start of the process
+ * against it, and neither fails a client that kept to its wait.
+ */
+function subscribeTaken(context: RunContext): Promise<number> {
+	const taken = context.relay
+		.waitForLine(/^OPEN_REQUEST session=0 own=\d+ SUBSCRIBE$/)
+		.then(() => Date.now());
+	// Awaited later, or not at all where the run failed first.
+	taken.catch(() => {});
+	return taken;
+}
+
 /** The second session the relay opened: the publisher's is the first. */
 async function subscribersSession(context: RunContext): Promise<string> {
 	const opened = await context.relay.waitForLines(
@@ -194,6 +213,7 @@ async function withAPage(context: RunContext): Promise<string> {
 }
 
 async function withARustClient(context: RunContext): Promise<string> {
+	const taken = subscribeTaken(context);
 	const began = Date.now();
 	const client = spawnRustClient(
 		context,
@@ -210,9 +230,10 @@ async function withARustClient(context: RunContext): Promise<string> {
 		),
 	);
 	const after = Date.now() - began;
-	if (after < ANSWER_WAIT_MS || after > GIVEN_UP_BEFORE_MS) {
+	const afterTaken = Date.now() - (await taken);
+	if (after < ANSWER_WAIT_MS || afterTaken > GIVEN_UP_BEFORE_MS) {
 		throw new Error(
-			`own-rust was to give up between ${ANSWER_WAIT_MS} and ${GIVEN_UP_BEFORE_MS} ms, not after ${after}`,
+			`own-rust was to give up between ${ANSWER_WAIT_MS} and ${GIVEN_UP_BEFORE_MS} ms, not ${after} ms after it started and ${afterTaken} ms after the relay took its SUBSCRIBE`,
 		);
 	}
 	const atTheRelay = await expectCancelledAtTheRelay(context, session);
@@ -228,6 +249,7 @@ async function withARustClient(context: RunContext): Promise<string> {
 }
 
 async function withTheTerminalViewer(context: RunContext): Promise<string> {
+	const taken = subscribeTaken(context);
 	const began = Date.now();
 	// The tracks are named, so that it asks for no catalog; the video is
 	// the first it subscribes to.
@@ -254,9 +276,10 @@ async function withTheTerminalViewer(context: RunContext): Promise<string> {
 		),
 	);
 	const after = Date.now() - began;
-	if (after < ANSWER_WAIT_MS || after > GIVEN_UP_BEFORE_MS) {
+	const afterTaken = Date.now() - (await taken);
+	if (after < ANSWER_WAIT_MS || afterTaken > GIVEN_UP_BEFORE_MS) {
 		throw new Error(
-			`xmoq-watch was to give up between ${ANSWER_WAIT_MS} and ${GIVEN_UP_BEFORE_MS} ms, not after ${after}`,
+			`xmoq-watch was to give up between ${ANSWER_WAIT_MS} and ${GIVEN_UP_BEFORE_MS} ms, not ${after} ms after it started and ${afterTaken} ms after the relay took its SUBSCRIBE`,
 		);
 	}
 	const atTheRelay = await expectCancelledAtTheRelay(context, session);

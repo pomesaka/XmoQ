@@ -31,9 +31,9 @@
 //   another-publisher-comes
 //                     As publisher-returns, but the first publisher has
 //                     sent three Objects (Groups 0, 1 and 2) before its
-//                     PUBLISH_DONE, and the PUBLISH that follows, half a
-//                     second later and so while the relay still waits for
-//                     late streams, is of another own-rust process, which
+//                     PUBLISH_DONE, and the PUBLISH that follows, once the
+//                     SUBSCRIBE is held and so while the relay still waits
+//                     for late streams, is of another own-rust process, which
 //                     numbers its Groups from the time (`--first-group
 //                     now`; transport §2.4 has a publisher that resumes
 //                     "set the initial Group ID to a unique value
@@ -80,6 +80,7 @@
 
 import { parseArgs } from "node:util";
 import {
+	type LoggedProcess,
 	log,
 	MOQLIVEMOCK_SIDE_PORT_OFFSET,
 	NAMESPACE,
@@ -133,11 +134,32 @@ interface Asked {
 	object(): Promise<string>;
 }
 
+/** Sends the subscriber's SUBSCRIBE. */
+type Ask = () => Asked;
+
 async function subscribe(
 	context: RunContext,
 	subscriber: string,
 	rendezvousMs: number | undefined,
 ): Promise<Asked> {
+	return (await readyToSubscribe(context, subscriber, rendezvousMs))();
+}
+
+/**
+ * Does what takes time before the subscriber's SUBSCRIBE, with
+ * RENDEZVOUS_TIMEOUT where `rendezvousMs` is given: the page is opened and
+ * connected, own-rust started and connected (`--subscribe-on-line`).
+ *
+ * WHY apart from the SUBSCRIBE: where the SUBSCRIBE has to reach the relay
+ * within a window the relay opens (its two seconds for the late streams of
+ * a track that ended), starting a page or a process inside that window
+ * would fail the run on a slow machine for a reason that is not the relay's.
+ */
+async function readyToSubscribe(
+	context: RunContext,
+	subscriber: string,
+	rendezvousMs: number | undefined,
+): Promise<Ask> {
 	if (edgeUrl !== undefined) {
 		context = { ...context, relayUrl: edgeUrl };
 	}
@@ -147,24 +169,26 @@ async function subscribe(
 			"sub:own-browser",
 			"own-browser",
 		);
-		const answer = page
-			.evaluate(
-				([namespace, track, rendezvous]) =>
-					window.xmoq.subscribe(namespace, track, rendezvous),
-				[NAMESPACE, TRACK, rendezvousMs] satisfies [
-					string,
-					string,
-					number | undefined,
-				],
-			)
-			.then(
-				() => "ok",
-				(error: unknown) => String(error),
-			);
-		return {
-			answer,
-			object: async () =>
-				(await page.evaluate(() => window.xmoq.firstObject())).payloadHex,
+		return () => {
+			const answer = page
+				.evaluate(
+					([namespace, track, rendezvous]) =>
+						window.xmoq.subscribe(namespace, track, rendezvous),
+					[NAMESPACE, TRACK, rendezvousMs] satisfies [
+						string,
+						string,
+						number | undefined,
+					],
+				)
+				.then(
+					() => "ok",
+					(error: unknown) => String(error),
+				);
+			return {
+				answer,
+				object: async () =>
+					(await page.evaluate(() => window.xmoq.firstObject())).payloadHex,
+			};
 		};
 	}
 	if (subscriber !== "own-rust") {
@@ -182,10 +206,20 @@ async function subscribe(
 			...(rendezvousMs === undefined
 				? []
 				: ["--rendezvous-timeout-ms", String(rendezvousMs)]),
+			"--subscribe-on-line",
 			"--timeout-secs",
 			"40",
 		],
 	);
+	await rust.waitForLine(/^READY_TO_SUBSCRIBE$/);
+	return () => {
+		rust.child.stdin.write("subscribe\n");
+		return askedOf(rust);
+	};
+}
+
+/** What became of own-rust's SUBSCRIBE, and its Object. */
+function askedOf(rust: LoggedProcess): Asked {
 	const answer = Promise.race([
 		rust.waitForLine(/^SUBSCRIBED /, 40_000).then(() => "ok"),
 		rust.exited.then(
@@ -211,6 +245,38 @@ const answered = (stream: string, session = 0): RegExp =>
 	new RegExp(
 		`^SEND session=${session} stream=${stream} (SUBSCRIBE_OK|REQUEST_ERROR.*)$`,
 	);
+
+/** How long the own relay waits for late streams of a track that ended with a Stream Count it does not know (`drain_timeout` in crates/relay/src/hub.rs). */
+const DRAIN_MS = 2000;
+
+/**
+ * The relay's wait for the late streams of the first session's track:
+ * `began` resolves when the relay starts it, and `since` counts from then.
+ *
+ * WHY counted from the relay's line and not the publisher's
+ * PUBLISH_DONE_SENT: the wait is the relay's, and the publisher's line can
+ * reach the driver before or after it. WHY the wait for the line set up
+ * before the publisher is told to end: a line read before it was asked
+ * for would be counted from when it was asked for, late.
+ */
+function drainWindow(context: RunContext): {
+	began: Promise<void>;
+	since(): number;
+} {
+	let at: number | undefined;
+	const began = context.relay
+		.waitForLine(/^DRAIN_TIMER session=0 /)
+		.then(() => {
+			at = Date.now();
+		});
+	return {
+		began,
+		since: () => {
+			if (at === undefined) throw new Error("the relay began no wait");
+			return Date.now() - at;
+		},
+	};
+}
 
 async function publisherComes(
 	context: RunContext,
@@ -271,16 +337,17 @@ async function publisherReturns(
 		["--payload-hex", PAYLOAD_HEX, "--timeout-secs", "40"],
 	);
 	await publisher.waitForLine(/^PUBLISHED /);
-	publisher.child.stdin.write("publish-done\n");
-	await publisher.waitForLine(/^PUBLISH_DONE_SENT$/);
-	const ended = Date.now();
 	// The publisher's is the first session of the run.
-	const asked = await subscribe(context, subscriber, 20_000);
+	const ask = await readyToSubscribe(context, subscriber, 20_000);
+	const drain = drainWindow(context);
+	publisher.child.stdin.write("publish-done\n");
+	await drain.began;
+	const asked = ask();
 	const [, stream = ""] = await context.relay.waitForLine(
 		/^HOLD_REQUEST session=1 stream=(\d+) SUBSCRIBE$/,
 	);
-	const heldAfter = Date.now() - ended;
-	if (heldAfter >= 2000) {
+	const heldAfter = drain.since();
+	if (heldAfter >= DRAIN_MS) {
 		throw new Error(
 			`the SUBSCRIBE was to reach the relay while it waited for the track's late streams, not ${heldAfter} ms after the PUBLISH_DONE`,
 		);
@@ -318,14 +385,21 @@ async function nobodyComes(
 	context: RunContext,
 	subscriber: string,
 ): Promise<string> {
+	// WHY two clocks: the earliest the relay can have the SUBSCRIBE is when
+	// the subscriber begins, so a refusal counted from then and still under
+	// 1.5 s came too early; the latest is when the driver reads the relay's
+	// hold, so a refusal counted from then and over 4 s came too late.
+	// Neither counts the start of a page or a process against the relay.
 	const began = Date.now();
 	const asked = await subscribe(context, subscriber, 1500);
 	const [, stream = ""] = await context.relay.waitForLine(HELD);
+	const held = Date.now();
 	const answer = await withTimeout(
 		asked.answer,
 		"the held SUBSCRIBE to be refused",
 	);
 	const after = Date.now() - began;
+	const afterTheHold = Date.now() - held;
 	const [, sent = ""] = await context.relay.waitForLine(answered(stream));
 	if (!/^REQUEST_ERROR error_code=0x2\b/.test(sent)) {
 		throw new Error(
@@ -343,9 +417,9 @@ async function nobodyComes(
 			`the subscriber was to be told that it may ask again at once: ${answer}`,
 		);
 	}
-	if (answer === "ok" || after < 1500 || after > 5000) {
+	if (answer === "ok" || after < 1500 || afterTheHold > 4000) {
 		throw new Error(
-			`the subscriber was to be refused between 1.5 and 5 s, not "${answer}" after ${after} ms`,
+			`the subscriber was to be refused between 1.5 and 4 s, not "${answer}" ${after} ms after it began and ${afterTheHold} ms after the relay held its SUBSCRIBE`,
 		);
 	}
 	if (context.relay.hasPrinted(/^CLOSE_SESSION /)) {
@@ -452,13 +526,10 @@ async function anotherPublisherComes(
 		first.child.stdin.write("send\n");
 		await wait(100);
 	}
-	first.child.stdin.write("publish-done\n");
-	await first.waitForLine(/^PUBLISH_DONE_SENT$/);
-	const ended = Date.now();
-	const asked = await subscribe(context, subscriber, 20_000);
-	await context.relay.waitForLine(
-		/^HOLD_REQUEST session=1 stream=(\d+) SUBSCRIBE$/,
-	);
+	const ask = await readyToSubscribe(context, subscriber, 20_000);
+	// WHY ready before the end of the first: its process starts and
+	// connects, and announces the namespace, outside the window; within it
+	// only its PUBLISH is sent (`--publish-on-line`).
 	const second = spawnRustClient(
 		context,
 		"pub2:own-rust",
@@ -470,13 +541,23 @@ async function anotherPublisherComes(
 			PAYLOAD_HEX,
 			"--first-group",
 			"now",
+			"--publish-on-line",
 			"--timeout-secs",
 			"40",
 		],
 	);
+	await second.waitForLine(/^READY_TO_PUBLISH$/);
+	const drain = drainWindow(context);
+	first.child.stdin.write("publish-done\n");
+	await drain.began;
+	const asked = ask();
+	await context.relay.waitForLine(
+		/^HOLD_REQUEST session=1 stream=(\d+) SUBSCRIBE$/,
+	);
+	second.child.stdin.write("publish\n");
 	await second.waitForLine(/^PUBLISHED /);
-	const after = Date.now() - ended;
-	if (after >= 2000) {
+	const after = drain.since();
+	if (after >= DRAIN_MS) {
 		throw new Error(
 			`the second PUBLISH was to come while the relay waited for the track's late streams, not ${after} ms after the PUBLISH_DONE`,
 		);

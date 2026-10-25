@@ -5,8 +5,9 @@
 //
 // The publisher is `xmoq-quiet-peer --quiet half-object` (crates/quiet-peer):
 // it publishes the track `half`, sends Object 0 of Group 0 whole, then the
-// first half of Object 0 of Group 1 (512 KiB), and the rest after HOLD_MS.
-// The viewer subscribes while that Object is half there, and sends a
+// first half of Object 0 of Group 1 (512 KiB), and the rest when the driver
+// tells it to (`--hold-until-line rest`): once the relay holds the viewer's
+// FETCH. The viewer subscribes while that Object is half there, and sends a
 // Relative Joining FETCH from the Group of its Joining Location.
 //
 //   rust-finish         own-rust, without a filter (`--mode subscribe --join
@@ -28,9 +29,8 @@
 //   that the Joining Location was {1, 0}; the fetch stream has {1, 0} alone,
 //   of 524,288 bytes, and the relay wrote it from its cache
 //   (`WRITE_FETCH_STREAM … pieces=1`) and asked the publisher nothing. The
-//   answer comes after the rest of the Object, so not before HOLD_MS / 2
-//   from when the first half was sent. The subscription brings {1, 1} and
-//   not {1, 0}.
+//   answer comes after the rest of the Object, so not before the publisher
+//   was told to send it. The subscription brings {1, 1} and not {1, 0}.
 // - `rust-reset`: the relay asks the publisher for {1, 0} to {1, 1}
 //   (`OPEN_REQUEST session=0 own=N FETCH`), the publisher refuses with
 //   DOES_NOT_EXIST, and the client is refused with 0x10. The subscription
@@ -70,8 +70,6 @@ const CASES = [
 ] as const;
 type Case = (typeof CASES)[number];
 
-/** How long the publisher holds the second half of the Object back. */
-const HOLD_MS = 2000;
 /** The payload of the Object that comes in two halves. */
 const HALF_OBJECT_BYTES = 512 * 1024;
 const TRACK = "half";
@@ -92,10 +90,25 @@ async function run(which: Case): Promise<string> {
 		"publisher:quiet-peer",
 		30_000,
 		false,
-		["--quiet", "half-object", "--then", then, "--hold-ms", String(HOLD_MS)],
+		["--quiet", "half-object", "--then", then, "--hold-until-line", "rest"],
 	);
 	await publisher.waitForLine(/^HALF_OBJECT_SENT group=1 object=0$/);
-	const sentAt = Date.now();
+	// WHY the rest once the relay holds the FETCH, and not after a time: the
+	// viewer starts after the first half was sent, and has to reach the relay
+	// before the rest does, on a machine of any speed.
+	let restAt: number | undefined;
+	const restSent = context.relay.waitForLine(HELD).then(() => {
+		publisher.child.stdin.write("rest\n");
+		restAt = Date.now();
+	});
+	restSent.catch(() => {});
+	/** How long after the rest was due the FETCH was answered; negative for an answer before. */
+	const afterTheRest = (answeredAt: number): number => {
+		if (restAt === undefined) {
+			throw new Error("the relay held no FETCH, so the rest was not sent");
+		}
+		return answeredAt - restAt;
+	};
 
 	if (which === "page-finish") {
 		const page = await startSubscriber(
@@ -110,7 +123,7 @@ async function run(which: Case): Promise<string> {
 			{ type: "RelativeJoining", joiningStart: "0" },
 			STEP_TIMEOUT_MS,
 		);
-		const answeredAfterMs = Date.now() - sentAt;
+		const answeredAfterMs = afterTheRest(Date.now());
 		const items = fetched.items.map((item) =>
 			item.type === "object"
 				? `{${item.group}, ${item.object}} ${item.payloadHex.length / 2}`
@@ -144,7 +157,7 @@ async function run(which: Case): Promise<string> {
 				`the subscription was to bring {1, 1} and not {1, 0}; it brought Objects [${ids.join(", ")}] of Group 1`,
 			);
 		}
-		return `the relay held the page's Joining FETCH for {1, 0}, answered it from its cache with End Location {1, 1} ${answeredAfterMs} ms after the first half was sent, and the subscription brought {1, 1} alone`;
+		return `the relay held the page's Joining FETCH for {1, 0}, answered it from its cache with End Location {1, 1} ${answeredAfterMs} ms after the publisher was told to send the rest, and the subscription brought {1, 1} alone`;
 	}
 
 	const filter =
@@ -167,9 +180,9 @@ async function run(which: Case): Promise<string> {
 	);
 	const answer = client
 		.waitForLine(/^FETCH_(?:OK|REFUSED) request_id=\d+ .*$/)
-		.then((line) => ({ line, afterMs: Date.now() - sentAt }));
+		.then((line) => ({ line, at: Date.now() }));
 	const exit = await withTimeout(client.exited, "the viewer to exit");
-	const { line: answered, afterMs } = await answer;
+	const { line: answered, at } = await answer;
 	const seen = client
 		.matches(/^(?:FETCH_(?:OK|REFUSED|OBJECT|RANGE_END|ENDED)|OBJECT) .*$/)
 		.map((match) =>
@@ -243,13 +256,14 @@ async function run(which: Case): Promise<string> {
 			`the fetch stream did not end with a FIN after 1 Object: ${seen.join("; ")}`,
 		);
 	}
+	const afterMs = afterTheRest(at);
 	await checkHeldAndAnswered(context, afterMs);
 	if (bySubscription.join("; ") !== "{1, 1}") {
 		throw new Error(
 			`the subscription was to bring {1, 1} and not {1, 0}: [${bySubscription.join("; ")}]`,
 		);
 	}
-	return `the relay held the Joining FETCH for {1, 0}, answered it from its cache with End Location {1, 1} ${afterMs} ms after the first half was sent, and the subscription brought {1, 1} alone`;
+	return `the relay held the Joining FETCH for {1, 0}, answered it from its cache with End Location {1, 1} ${afterMs} ms after the publisher was told to send the rest, and the subscription brought {1, 1} alone`;
 }
 
 /**
@@ -287,9 +301,9 @@ async function checkHeldAndAnswered(
 			`the relay was to answer the FETCH from its cache and ask the publisher nothing; it wrote ${written.length} fetch streams and sent the publisher ${asked.length} FETCHes`,
 		);
 	}
-	if (answeredAfterMs < HOLD_MS / 2) {
+	if (answeredAfterMs < 0) {
 		throw new Error(
-			`the FETCH was answered ${answeredAfterMs} ms after the first half of the Object was sent, before the rest was due (${HOLD_MS} ms)`,
+			`the FETCH was answered ${-answeredAfterMs} ms before the publisher was told to send the rest of the Object`,
 		);
 	}
 }
