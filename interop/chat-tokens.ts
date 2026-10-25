@@ -42,12 +42,14 @@ import {
 	captureGroup,
 	type LoggedProcess,
 	log,
+	MOQLIVEMOCK_SIDE_PORT_OFFSET,
 	openPage,
 	pollFor,
 	type RunContext,
 	runCleanups,
 	spawnChatGatherer,
 	startRun,
+	startSecondOwnRelay,
 	stopEverythingOnExit,
 	withTimeout,
 } from "./harness.ts";
@@ -62,6 +64,14 @@ const { values: options } = parseArgs({
 	options: {
 		relay: { type: "string", default: "own" },
 		port: { type: "string", default: "24399" },
+		// The pages connect to a second own relay with the same key, below
+		// the relay of the run (`--upstream`), on the run's port plus
+		// MOQLIVEMOCK_SIDE_PORT_OFFSET; the gatherer stays with the relay of
+		// the run. The relay below checks the pages' tokens, passes their
+		// announcements up with a token of its own, and takes the gatherer's
+		// SUBSCRIBEs through the relay above without one; what has to be
+		// seen is as without it.
+		"through-edge": { type: "boolean", default: false },
 		verbose: { type: "boolean", default: false },
 	},
 });
@@ -227,6 +237,18 @@ async function main(): Promise<void> {
 		verbose: options.verbose,
 		relayArgs: ["--auth-key-hex", KEY_HEX],
 	});
+	const pages: RunContext = options["through-edge"]
+		? {
+				...context,
+				relayUrl: (
+					await startSecondOwnRelay(
+						String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+						context,
+						["--auth-key-hex", KEY_HEX],
+					)
+				).url,
+			}
+		: context;
 	const directory = mkdtempSync(joinPath(tmpdir(), "xmoq-chat-tokens-"));
 	let summary: string;
 	try {
@@ -238,15 +260,15 @@ async function main(): Promise<void> {
 		);
 		await gatherer.waitForLine(/^WATCHING prefix=xmoq\/chat$/);
 
-		const a = await participant(context, gatherer, "a");
-		const e = await participant(context, gatherer, "e");
+		const a = await participant(pages, gatherer, "a");
+		const e = await participant(pages, gatherer, "e");
 		await sayOne(gatherer, a, "a", 0);
 		await sayOne(gatherer, e, "e", 1);
 		const live = "0 a live, 1 e live";
 		expect("the lines of page a", await linesOf(a, 2, "page a"), live);
 		expect("the lines of page e", await linesOf(e, 2, "page e"), live);
 
-		const f = await participant(context, gatherer, "f");
+		const f = await participant(pages, gatherer, "f");
 		expect(
 			"the lines of page f, which came later",
 			await linesOf(f, 2, "page f"),
@@ -257,20 +279,20 @@ async function main(): Promise<void> {
 			throw new Error("the gatherer answered no FETCH for page f");
 		}
 
-		const b = await connected(context, "page:b", token("sub", "xmoq/chat/r"));
+		const b = await connected(pages, "page:b", token("sub", "xmoq/chat/r"));
 		expect(
 			"page b joining as b with pub for xmoq/chat/r/a",
 			refusal(await join(b, "b", token("pub", "xmoq/chat/r/a"))),
 			"refused 0x1",
 		);
-		const c = await connected(context, "page:c", token("sub", "xmoq/chat/r"));
+		const c = await connected(pages, "page:c", token("sub", "xmoq/chat/r"));
 		expect(
 			"page c joining with no token of its own",
 			refusal(await join(c, "c", undefined)),
 			"refused 0x1",
 		);
 		const ofD = token("pub", "xmoq/chat/r/d");
-		const d = await connected(context, "page:d", ofD);
+		const d = await connected(pages, "page:d", ofD);
 		expect(
 			"page d joining with pub on the connection and the same on the request",
 			await join(d, "d", ofD),
@@ -290,7 +312,10 @@ async function main(): Promise<void> {
 			.map((match) => captureGroup(match, 2))
 			.filter((name) => name !== "a" && name !== "e");
 		expect("the lines the gatherer took of others", others.join(","), "");
-		summary = `through the own relay with --auth-key-hex and the gatherer with the same key, pages a and e with sub for xmoq/chat/r on their connection and pub for their name on their PUBLISH_NAMESPACE joined, and each had both lines live (${live}); page f, which came later, had them by its Joining FETCH, which the gatherer answered (${answered[1]}); b with pub for another name and c with none were refused their PUBLISH_NAMESPACE with 0x1; d with pub alone announced and was refused its SUBSCRIBE with 0x1`;
+		const where = options["through-edge"]
+			? "with the pages at an own relay below the gatherer's, both"
+			: "through the own relay";
+		summary = `${where} with --auth-key-hex and the gatherer with the same key, pages a and e with sub for xmoq/chat/r on their connection and pub for their name on their PUBLISH_NAMESPACE joined, and each had both lines live (${live}); page f, which came later, had them by its Joining FETCH, which the gatherer answered (${answered[1]}); b with pub for another name and c with none were refused their PUBLISH_NAMESPACE with 0x1; d with pub alone announced and was refused its SUBSCRIBE with 0x1`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

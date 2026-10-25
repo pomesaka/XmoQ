@@ -660,6 +660,8 @@ export async function startSecondOwnRelay(
 	port: string,
 	/** The relay it asks for the tracks nobody announced at it (`--upstream`). */
 	upstreamOf?: RunContext,
+	/** More flags for it, after its own (`--auth-key-hex`). */
+	relayArgs: string[] = [],
 ): Promise<{ url: string; relay: RelayLog }> {
 	const config = relayNamed("own");
 	const upstream =
@@ -674,6 +676,7 @@ export async function startSecondOwnRelay(
 	const relay = spawnLogged("relay:second", config.binary, [
 		...config.args(port),
 		...upstream,
+		...relayArgs,
 	]);
 	defer(() => stopProcess(relay, "SIGINT"));
 	await relay.waitForLine(config.ready);

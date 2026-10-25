@@ -909,6 +909,7 @@ impl Relay {
         (new_group, rendezvous): (Option<u64>, Option<u64>),
         actions: &mut Vec<Action>,
     ) -> Result<Ask, u64> {
+        let token = self.token_for(publisher, crate::Operation::Subscribe);
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
@@ -936,11 +937,12 @@ impl Relay {
         // priorities out, and what a token of the subscriber means to the
         // publisher is undecided. The NEW_GROUP_REQUEST is, and the hold of
         // those that wait is, for the upstream relay
-        // (`Self::ask_the_publishers`).
+        // (`Self::ask_the_publishers`), which gets the relay's own token.
         let parameters = new_group
             .map(Parameter::NewGroupRequest)
             .into_iter()
             .chain(rendezvous.map(Parameter::RendezvousTimeout))
+            .chain(token)
             .collect();
         let Ok((id, message)) = state.moqt.subscribe(track.clone(), parameters) else {
             // The session already has a subscription to the track in this

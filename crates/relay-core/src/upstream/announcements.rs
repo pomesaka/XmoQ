@@ -27,7 +27,9 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 
 use super::Link;
 use crate::routing::RETRY_WHAT_IS_NOT_THERE_MS;
-use crate::{Action, Event, OwnRequestEnd, OwnRequestKey, Relay, SessionKey, internal_error};
+use crate::{
+    Action, Event, Operation, OwnRequestEnd, OwnRequestKey, Relay, SessionKey, internal_error,
+};
 
 /// A `PUBLISH_NAMESPACE` of the relay on the session with the upstream.
 #[derive(Debug)]
@@ -53,14 +55,6 @@ impl Relay {
             .filter(|entry| !self.is_client_session(entry.session))
             .map(|entry| entry.namespace.clone())
             .collect()
-    }
-
-    /// Whether the relay opened `session` as the client: one with an
-    /// upstream relay, now or before its GOAWAY.
-    pub(crate) fn is_client_session(&self, session: SessionKey) -> bool {
-        self.sessions
-            .get(&session)
-            .is_some_and(|state| state.moqt.role() == xmoq_moqt::session::Role::Client)
     }
 
     /// Brings what is announced upstream in line with what the sessions of
@@ -132,11 +126,16 @@ impl Relay {
         namespace: TrackNamespace,
         actions: &mut Vec<Action>,
     ) {
+        // §10.2.1: none of the parameters of the announcements here, and the
+        // relay's own token (`Relay::token_for`).
+        let parameters = self
+            .token_for(session, Operation::Publish)
+            .into_iter()
+            .collect();
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        // §10.2.1: none of the parameters of the announcements here.
-        let Ok((id, message)) = state.moqt.publish_namespace(namespace.clone(), Vec::new()) else {
+        let Ok((id, message)) = state.moqt.publish_namespace(namespace.clone(), parameters) else {
             return;
         };
         let request = OwnRequestKey(self.next_own_request);
