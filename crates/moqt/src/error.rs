@@ -29,6 +29,10 @@ pub enum TerminationCode {
     UnknownAuthTokenAlias,
     /// `EXPIRED_AUTH_TOKEN` (§10.2.2).
     ExpiredAuthToken,
+    /// `CONTROL_MESSAGE_TIMEOUT`: "The session was closed because the peer
+    /// took too long to respond to a control message" (§3.5). A client
+    /// closes with it where no SETUP came (`xmoq-moqt-io`'s `client`).
+    ControlMessageTimeout,
 }
 
 impl TerminationCode {
@@ -48,6 +52,7 @@ impl TerminationCode {
             Self::MalformedAuthToken => 0x16,
             Self::UnknownAuthTokenAlias => 0x17,
             Self::ExpiredAuthToken => 0x18,
+            Self::ControlMessageTimeout => 0x11,
         }
     }
 }

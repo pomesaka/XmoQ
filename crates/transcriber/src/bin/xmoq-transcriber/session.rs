@@ -36,10 +36,9 @@ use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::immutable::{Of, TrackRefusal, searched_integers};
-use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, ReasonPhrase, RequestOk, publish_done_status,
-    request_error_code, setup_option,
+    request_error_code,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
@@ -52,8 +51,8 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestClose, PeerRequestStreamEvent, RequestClose,
-    RequestReadError, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, read_request_streams,
-    read_uni_streams, send_message,
+    RequestReadError, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, client,
+    read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 use xmoq_speech::cut::Cut;
@@ -78,9 +77,6 @@ type Send = <WtConnection as Connection>::Send;
 
 /// A piece as a FETCH sends it: its Group ID and its payload.
 type Kept = (u64, Vec<u8>);
-
-/// How long the relay's SETUP is waited for, as the gatherer waits.
-const SETUP_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a token the transcriber makes runs, in seconds, as the
 /// gatherer's.
@@ -142,18 +138,6 @@ pub enum Ended {
     /// The relay sent GOAWAY (§10.4).
     GoAway,
 }
-
-/// The relay sent no SETUP in time.
-#[derive(Debug)]
-pub struct NoSetupInTime;
-
-impl std::fmt::Display for NoSetupInTime {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "the relay sent no SETUP within {SETUP_WAIT:?}")
-    }
-}
-
-impl std::error::Error for NoSetupInTime {}
 
 /// What a request of the transcriber is for.
 #[derive(Debug, Clone)]
@@ -347,6 +331,7 @@ async fn last_object(
 /// Runs one session on `connection` until it ends.
 pub async fn transcribe(
     connection: &Arc<WtConnection>,
+    kept: &mut client::UntilClosed<WtConnection>,
     args: &Args,
     (reader, transcripts, key, vad): (
         &mut Reader,
@@ -360,7 +345,7 @@ pub async fn transcribe(
     let stops = StreamStops::default();
     let (uni_queue, mut uni) = mpsc::channel(UNI_QUEUE);
     let stream_config = StreamConfig::default();
-    let _uni_readers = read_uni_streams(
+    let uni_readers = read_uni_streams(
         Arc::clone(connection),
         stream_config.clone(),
         stops.clone(),
@@ -368,13 +353,14 @@ pub async fn transcribe(
         |event| event,
     );
     let (peer_queue, mut peer) = mpsc::channel(PEER_REQUEST_QUEUE);
-    let _request_readers = read_request_streams(
+    let request_readers = read_request_streams(
         Arc::clone(connection),
         stream_config,
         stops.clone(),
         peer_queue,
         |event| event,
     );
+    kept.readers.extend([uni_readers, request_readers]);
     let (heard, mut heard_by_loop) = mpsc::channel(HEARD_QUEUE);
     let (fetch_done, mut fetches_done) = mpsc::channel(FETCHES_AT_ONCE);
     let (drained, mut drained_publishes) = mpsc::channel(PEER_REQUEST_QUEUE);
@@ -419,35 +405,21 @@ pub async fn transcribe(
         untimed: 0,
     };
 
-    // §3.3: one control stream that begins with SETUP.
-    let mut control = connection.open_uni().await?;
     let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-    // In ascending order of their types: the token (0x03), then the
-    // implementation (0x07). The relay looks at no namespace or role of the
-    // token of a SETUP.
-    let first_prefix = args.prefixes.first().cloned();
-    let mut options: Vec<KeyValuePair> = first_prefix
-        .and_then(|prefix| {
-            transcribing.token(&format!("{}/*", namespace_text(&prefix)), TokenRole::Sub)
-        })
-        .map(|token| KeyValuePair::bytes(setup_option::AUTHORIZATION_TOKEN, token))
-        .transpose()?
-        .into_iter()
-        .collect();
-    options.push(KeyValuePair::bytes(
-        setup_option::MOQT_IMPLEMENTATION,
-        implementation.as_bytes().to_vec(),
-    )?);
-    let setup = transcribing.session.setup(options)?;
-    send_message(&mut control, &setup, &Trace::default(), "control").await?;
-    match tokio::time::timeout(SETUP_WAIT, uni.recv()).await {
-        Ok(Some(UniEvent::Control(message))) => {
-            transcribing.session.on_control_message(message)?;
-        }
-        Ok(Some(UniEvent::Failed(error))) => return Err(error.into()),
-        Ok(other) => bail!("no SETUP from the relay: {other:?}"),
-        Err(_) => return Err(NoSetupInTime.into()),
-    }
+    // The relay looks at no namespace or role of the token of a SETUP.
+    let token = args.prefixes.first().and_then(|prefix| {
+        transcribing.token(&format!("{}/*", namespace_text(prefix)), TokenRole::Sub)
+    });
+    let options = client::setup_options(token.as_deref(), implementation)?;
+    client::setup(
+        connection.as_ref(),
+        &mut transcribing.session,
+        &mut uni,
+        &mut kept.control,
+        options,
+        client::SETUP_WAIT,
+    )
+    .await?;
     println!("SETUP_OK");
     for index in 0..transcribing.watches.len() {
         transcribing.watch(index)?;
@@ -498,7 +470,6 @@ pub async fn transcribe(
     for namespace in namespaces {
         transcribing.listen_no_more(&namespace);
     }
-    drop(control);
     Ok(ended)
 }
 

@@ -20,6 +20,7 @@
 //! FIXME: hand an `OBJECT_DATAGRAM` on. Nothing here does, so its Object is
 //! lost.
 
+pub mod client;
 #[cfg(test)]
 mod contract;
 pub mod memory;

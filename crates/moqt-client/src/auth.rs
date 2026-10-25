@@ -6,7 +6,6 @@
 //! `SUBSCRIBE_NAMESPACE`, `SUBSCRIBE_TRACKS`, `TRACK_STATUS`.)
 
 use anyhow::{Context, Result};
-use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::params::Parameter;
 
 /// The Token structure of `--auth-token-hex`, as the bytes that go into the
@@ -24,12 +23,9 @@ impl AuthFlag {
         Ok(true)
     }
 
-    /// The Setup Option with the token (0x03), where the flag gave one.
-    pub fn setup_options(&self) -> Result<Vec<KeyValuePair>> {
-        self.0
-            .iter()
-            .map(|token| Ok(KeyValuePair::bytes(0x03, token.clone())?))
-            .collect()
+    /// The token, where the flag gave one.
+    pub fn token(&self) -> Option<&[u8]> {
+        self.0.as_deref()
     }
 
     /// The parameters of a PUBLISH, a `PUBLISH_NAMESPACE`, a SUBSCRIBE or a

@@ -29,7 +29,7 @@ use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, GoAway, ReasonPhrase, RequestError, RequestOk,
-    publish_done_status, request_error_code, setup_option,
+    publish_done_status, request_error_code,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
@@ -44,7 +44,7 @@ use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
     Connection, ConnectionEnd, Direction, IdleSubgroupStreamTimeout, PeerRequestStreamEvent,
     RequestClose, RequestStreamEvent, SendStream, StreamConfig, StreamEnd, StreamStops, Trace,
-    UniEvent,
+    UniEvent, client,
 };
 
 use crate::fetching::{BodyEnd, Fetches, Happened, Note, Reading, StreamEnded, Tell};
@@ -722,7 +722,7 @@ impl Default for Waits {
     fn default() -> Self {
         Self {
             answer: xmoq_moqt::params::ANSWER_WAIT_MS,
-            setup: SETUP_WAIT_MS,
+            setup: client::SETUP_WAIT_MS,
             open: STREAM_OPEN_WAIT_MS,
             rendezvous: 0,
             idle_subgroup_stream: IdleSubgroupStreamTimeout::default(),
@@ -869,7 +869,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--object-property" => object_properties.push(parse_object_property(&value)?),
             "--serve-delay-ms" => serve_delay_ms = millis(&flag, &value)?,
             "--publish-delay-ms" => publish_delay_ms = millis(&flag, &value)?,
-            "--answer-delay-ms" => answer_delay_ms = millis(&flag, &value)?,
+            "--fetch-answer-delay-ms" => answer_delay_ms = millis(&flag, &value)?,
             "--subscription-filter" => subscription_filter = parse_subscription_filter(&value)?,
             other => {
                 if !(fetch.read(other, &value)?
@@ -1024,7 +1024,7 @@ struct Client<'a> {
     update_answer: Option<tokio::sync::oneshot::Sender<()>>,
     /// The Largest Object of the track this client publishes.
     largest: Largest,
-    /// The refusals that wait for `--answer-delay-ms`. They go with the
+    /// The refusals that wait for `--fetch-answer-delay-ms`. They go with the
     /// client: a session that is over sends nothing more.
     later: tokio::task::JoinSet<()>,
     /// The Objects this client sent, for a FETCH.
@@ -2743,7 +2743,7 @@ impl Client<'_> {
     }
 
     /// Sends the last this client says on a request stream of the peer, and
-    /// a FIN, after `--answer-delay-ms`.
+    /// a FIN, after `--fetch-answer-delay-ms`.
     ///
     /// WHY a task: the delay is there to keep a relay waiting, and the
     /// client goes on with its mode meanwhile.
@@ -3060,22 +3060,20 @@ async fn run_session(
     kept.readers = Some(readers);
 
     // §3.3: each peer opens one control stream that begins with SETUP.
+    // WHY NOT `client::setup`: this client's readers are its own
+    // (`io::start_readers`, with `--trace` and `--fetch-answer-delay-ms`), and hand
+    // the control messages on through `session_inbox`, not a channel of
+    // `UniEvent`; and its SETUP is traced.
     let control = kept.control.insert(connection.open_uni().await?);
     let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-    // In ascending order of their types: the token (0x03), where the client
-    // was given one, and the implementation (0x07).
-    let mut setup_options = args.auth.setup_options()?;
-    setup_options.push(KeyValuePair::bytes(
-        setup_option::MOQT_IMPLEMENTATION,
-        implementation.as_bytes().to_vec(),
-    )?);
+    let setup_options = client::setup_options(args.auth.token(), implementation)?;
     let setup = session.setup(setup_options)?;
     xmoq_moqt_io::send_message(control, &setup, &args.trace, "control").await?;
 
     let setup_wait = Duration::from_millis(args.waits.setup);
     let Ok(first) = tokio::time::timeout(setup_wait, session_inbox.next_control_message()).await
     else {
-        return Err(NoSetupInTime(args.waits.setup).into());
+        return Err(client::NoSetupInTime(setup_wait).into());
     };
     let ControlEvent::Setup(peer_setup) = session.on_control_message(first?)? else {
         bail!("the session took a first control message that is not SETUP");
@@ -3140,31 +3138,10 @@ async fn run_session(
     }
 }
 
-/// The code to close the session with (§3.5): the one the protocol error asks
-/// for, or `NO_ERROR` for a normal end and for failures that are not the peer's.
+/// The code to close the session with (§3.5), `NO_ERROR` for a normal end.
 fn termination_code(result: &Result<()>) -> u32 {
-    let Err(error) = result else {
-        return 0;
-    };
-    // WHY walk the chain: `anyhow::Error::context` wraps the cause, and a
-    // protocol error has to be found under any number of such wrappers.
-    if error
-        .chain()
-        .any(<dyn std::error::Error>::is::<NoSetupInTime>)
-    {
-        return CONTROL_MESSAGE_TIMEOUT;
-    }
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
-        .and_then(xmoq_moqt::Error::termination_code)
-        .map_or(0, xmoq_moqt::TerminationCode::code)
+    client::termination_code_of(result)
 }
-
-/// How long the peer's SETUP is waited for, from when this client's was
-/// written. **Provisional**, and the time `@xmoq/moqt` and the terminal
-/// viewer give it.
-const SETUP_WAIT_MS: u64 = 10_000;
 
 /// How long a subgroup stream may wait to be opened: for the peer to allow
 /// one more. **Provisional**: long against the moment a stream takes to be
@@ -3174,17 +3151,6 @@ const SUBGROUP_OPEN_WAIT: Duration = Duration::from_millis(100);
 /// How long a request may wait for its stream to be opened. **Provisional**,
 /// and the time `@xmoq/moqt` gives it (`DEFAULT_OPEN_STREAM_TIMEOUT_MS`).
 const STREAM_OPEN_WAIT_MS: u64 = 10_000;
-
-/// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11): The session was closed because
-/// the peer took too long to respond to a control message." What the
-/// session is closed with where no SETUP came, as `@xmoq/moqt` does. A
-/// request that is not answered is given up alone, and closes nothing
-/// ([`Client::in_time`]).
-const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
-
-/// The peer sent no SETUP in so many milliseconds.
-#[derive(Debug)]
-struct NoSetupInTime(u64);
 
 /// `Session::on_request_message`, where a GOAWAY on the request's stream
 /// (§10.4) ends the mode as a GOAWAY on the control stream does: this client
@@ -3224,14 +3190,6 @@ impl std::fmt::Display for GoingAway {
 }
 
 impl std::error::Error for GoingAway {}
-
-impl std::fmt::Display for NoSetupInTime {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "the peer sent no SETUP within {} ms", self.0)
-    }
-}
-
-impl std::error::Error for NoSetupInTime {}
 
 /// How long a client that failed waits to learn whether the peer closed the
 /// session, and with what ([`run`]).
@@ -3362,9 +3320,12 @@ mod tests {
         let cases: [(Result<()>, u32); 4] = [
             (Ok(()), 0x0),
             (Err(anyhow!("the peer did not answer")), 0x0),
-            (Err(NoSetupInTime(10_000).into()), 0x11),
+            (Err(client::NoSetupInTime(client::SETUP_WAIT).into()), 0x11),
             (
-                Err(anyhow::Error::from(NoSetupInTime(10_000)).context("the session")),
+                Err(
+                    anyhow::Error::from(client::NoSetupInTime(client::SETUP_WAIT))
+                        .context("the session"),
+                ),
                 0x11,
             ),
         ];

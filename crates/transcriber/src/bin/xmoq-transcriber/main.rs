@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use tokio::sync::watch;
 use xmoq_moqt_io::wt;
-use xmoq_moqt_io::{Connection, StreamConfig};
+use xmoq_moqt_io::{Connection, StreamConfig, client};
 use xmoq_speech::engine::EngineOptions;
 use xmoq_speech::model::{DEFAULT_VAD_MODEL, default_model_dir, model_file};
 use xmoq_speech::vad::Silero;
@@ -27,28 +27,11 @@ use xmoq_transcriber::args::Args;
 use xmoq_transcriber::transcript::Transcript;
 
 use crate::reader::{Reader, wall_ms};
-use crate::session::{Ended, NoSetupInTime};
+use crate::session::Ended;
 
 /// How long a closed session gets to reach the relay before the transcriber
 /// goes on, as the gatherer gives it.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
-
-/// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11)", for the SETUP.
-const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
-
-/// The code a session that failed is closed with (§3.5), as the gatherer
-/// closes it.
-fn termination_code(result: &Result<Ended>) -> u32 {
-    let Err(error) = result else { return 0 };
-    if error.is::<NoSetupInTime>() {
-        return CONTROL_MESSAGE_TIMEOUT;
-    }
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
-        .and_then(xmoq_moqt::Error::termination_code)
-        .map_or(0, xmoq_moqt::TerminationCode::code)
-}
 
 /// The directory the models are fetched into, where it is known.
 fn cache_dir() -> Option<PathBuf> {
@@ -128,8 +111,11 @@ async fn run(args: Args) -> Result<()> {
             Ok(connection) => {
                 let connection = Arc::new(connection);
                 println!("CONNECTED url={}", args.url);
+                // Dropped once the session is closed.
+                let mut kept = client::UntilClosed::default();
                 let result = session::transcribe(
                     &connection,
+                    &mut kept,
                     &args,
                     (&mut reader, &mut transcripts, key.as_ref(), vad.as_deref()),
                     &mut read,
@@ -140,7 +126,7 @@ async fn run(args: Args) -> Result<()> {
                     Ok(ended) => println!("SESSION_ENDED {ended:?}"),
                     Err(error) => println!("SESSION_FAILED {error:#}"),
                 }
-                connection.close(termination_code(&result), b"");
+                connection.close(client::termination_code_of(&result), b"");
                 let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
                 if matches!(result, Ok(Ended::Stopped)) {
                     return Ok(());
