@@ -17,6 +17,7 @@ import {
 	RequestErrorCode,
 	type SubgroupWriter,
 } from "@xmoq/moqt";
+import { DEFAULT_END_TIMEOUT_MS } from "./video-track-publisher.ts";
 
 /** PUBLISH_DONE Status Code TRACK_ENDED (transport draft 18 §10.11). */
 const TRACK_ENDED = 0x2n;
@@ -75,6 +76,8 @@ export interface AudioTrackPublisherOptions {
 	 * none and have the default of the track, 128 (§12.4).
 	 */
 	publisherPriority?: number;
+	/** How long `end` waits for what is queued to be written; 3000 ms when left out, as for video. */
+	endTimeoutMs?: number;
 }
 
 export interface AudioTrackPublisherStats {
@@ -85,13 +88,28 @@ export interface AudioTrackPublisherStats {
 }
 
 export interface AudioTrackPublisher {
-	/** For the `subscribe` handler of `MoqtConnection.serve`. False for another track. One subscription at a time, as for video. */
+	/**
+	 * For the `subscribe` handler of `MoqtConnection.serve`. False for
+	 * another track. One subscription at a time, as for video. The
+	 * SUBSCRIBE_OK has LARGEST_OBJECT, the place of the last chunk, once a
+	 * chunk was pushed; with FORWARD 0 nothing is sent to it.
+	 */
 	subscribe(request: PeerSubscribe): boolean;
-	/** For the `fetch` handler. False for another track; a FETCH for this one is refused with NOT_SUPPORTED. */
+	/** For the `fetch` handler. False for another track; a FETCH for this one is refused with NOT_SUPPORTED, and with DOES_NOT_EXIST after `end`. */
 	fetch(request: PeerFetch): boolean;
 	/** Takes the next chunk of the encoder. Does not wait for the write, and does not throw. */
 	push(chunk: AudioChunk): void;
-	/** Ends the track: what is queued is written, and the subscription gets PUBLISH_DONE. Never rejects. */
+	/**
+	 * Ends the track: what is queued is written, and the subscription gets
+	 * PUBLISH_DONE (TRACK_ENDED). A SUBSCRIBE after it is refused with
+	 * DOES_NOT_EXIST. Never rejects.
+	 *
+	 * **How long it takes at most**, as for video: `endTimeoutMs` for what
+	 * is queued; what is not written by then is not written, its stream is
+	 * reset, and what is under way then has `endTimeoutMs` once more. A
+	 * SUBSCRIBE that is being answered when `end` is called gets its
+	 * PUBLISH_DONE once the answer is out, `endTimeoutMs` at most.
+	 */
 	end(): Promise<void>;
 	stats(): AudioTrackPublisherStats;
 }
@@ -104,13 +122,32 @@ export function createAudioTrackPublisher(
 ): AudioTrackPublisher {
 	const maxPending =
 		options.maxPendingChunks ?? DEFAULT_MAX_PENDING_AUDIO_CHUNKS;
+	const endTimeoutMs = options.endTimeoutMs ?? DEFAULT_END_TIMEOUT_MS;
+	if (
+		!Number.isInteger(endTimeoutMs) ||
+		endTimeoutMs < 0 ||
+		endTimeoutMs > 2 ** 31 - 1
+	) {
+		throw new RangeError(
+			`endTimeoutMs is a whole number from 0 to ${2 ** 31 - 1}, not ${endTimeoutMs}`,
+		);
+	}
 	const stats: AudioTrackPublisherStats = { written: 0, skipped: {} };
 	const skip = (because: keyof AudioTrackPublisherStats["skipped"]): void => {
 		stats.skipped[because] = (stats.skipped[because] ?? 0) + 1;
 	};
 	let track: PublishedTrack | undefined;
-	let answering = false;
-	let ended = false;
+	/**
+	 * FORWARD 0 (transport §5.1: "The publisher does not send Objects if the
+	 * Forward State is 0") for `track`. As the SUBSCRIBE had it, as for
+	 * video: `PublishedTrack` has its parameters and no later ones.
+	 */
+	let silent = false;
+	/** A SUBSCRIBE is being answered, and has the one place; settles when that is done with. */
+	let answer: Promise<void> | undefined;
+	let ended: Promise<void> | undefined;
+	/** The place of the last chunk that was pushed, for LARGEST_OBJECT. */
+	let largest: { group: bigint; object: bigint } | undefined;
 	let nextGroup = options.firstGroup;
 	let pending = 0;
 	let queue: Promise<void> = Promise.resolve();
@@ -133,35 +170,54 @@ export function createAudioTrackPublisher(
 	return {
 		subscribe(request) {
 			if (!isThisTrack(request)) return false;
-			if (ended || track !== undefined || answering) {
+			if (ended !== undefined || track !== undefined || answer !== undefined) {
 				request
 					.reject(
-						ended
+						ended !== undefined
 							? RequestErrorCode.DOES_NOT_EXIST
 							: RequestErrorCode.DUPLICATE_SUBSCRIPTION,
 					)
 					.catch(() => {});
 				return true;
 			}
-			answering = true;
-			request.accept().then(
-				(accepted) => {
-					answering = false;
-					track = accepted;
-					void accepted.ended.then(() => {
-						if (track === accepted) track = undefined;
-					});
-				},
-				() => {
-					answering = false;
-				},
-			);
+			answer = request
+				// §10.2.11: "If Objects have been published on this Track the
+				// Publisher MUST include this parameter".
+				.accept(
+					largest === undefined
+						? undefined
+						: { parameters: { largestObject: largest } },
+				)
+				.then(
+					async (accepted) => {
+						// The track ended while the answer was sent.
+						if (ended !== undefined) {
+							await accepted.done(TRACK_ENDED, "").catch(() => {});
+							return;
+						}
+						track = accepted;
+						silent = request.parameters.forward === false;
+						void accepted.ended.then(() => {
+							if (track === accepted) track = undefined;
+						});
+					},
+					() => {},
+				)
+				.finally(() => {
+					answer = undefined;
+				});
 			return true;
 		},
 
 		fetch(request) {
 			if (!isThisTrack(request)) return false;
-			request.reject(RequestErrorCode.NOT_SUPPORTED).catch(() => {});
+			request
+				.reject(
+					ended === undefined
+						? RequestErrorCode.NOT_SUPPORTED
+						: RequestErrorCode.DOES_NOT_EXIST,
+				)
+				.catch(() => {});
 			return true;
 		},
 
@@ -176,8 +232,10 @@ export function createAudioTrackPublisher(
 				nextGroup += 1n;
 				nextObject = 0;
 			}
+			if (ended !== undefined) return skip("no-subscriber");
+			largest = { group: groupId, object: BigInt(objectId) };
 			const to = track;
-			if (ended || to === undefined) return skip("no-subscriber");
+			if (to === undefined || silent) return skip("no-subscriber");
 			if (pending >= maxPending) return skip("behind");
 			pending += 1;
 			const timestamp = options.epoch + BigInt(Math.round(chunk.timestamp));
@@ -188,18 +246,24 @@ export function createAudioTrackPublisher(
 					// Group whose stream failed is not gone on with.
 					if (objectId === 0) {
 						if (open !== undefined) await open.stream.reset().catch(() => {});
-						open = {
-							to,
-							stream: await to.openSubgroup({
-								groupId,
-								subgroupId: { mode: "Zero" },
-								...(options.publisherPriority === undefined
-									? {}
-									: { publisherPriority: options.publisherPriority }),
-								properties: true,
-								endOfGroup: false,
-							}),
-						};
+						open = undefined;
+						const opened = await to.openSubgroup({
+							groupId,
+							subgroupId: { mode: "Zero" },
+							...(options.publisherPriority === undefined
+								? {}
+								: { publisherPriority: options.publisherPriority }),
+							properties: true,
+							endOfGroup: false,
+						});
+						// WHY looked at again: `end` gave the track up while the
+						// stream was opened, and a stream left open keeps
+						// PUBLISH_DONE from being sent.
+						if (track !== to) {
+							await opened.reset().catch(() => {});
+							return;
+						}
+						open = { to, stream: opened };
 					}
 					if (open === undefined || open.to !== to) return;
 					const { stream } = open;
@@ -234,15 +298,46 @@ export function createAudioTrackPublisher(
 				});
 		},
 
-		async end() {
-			if (ended) return;
-			ended = true;
-			const to = track;
-			if (to === undefined) return;
-			await queue;
-			await open?.stream.close().catch(() => {});
-			track = undefined;
-			await to.done(TRACK_ENDED, "").catch(() => {});
+		end() {
+			ended ??= (async () => {
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				// One timer at a time: the one before has fired, or its wait
+				// is over.
+				const timeIsOver = (): Promise<"late"> =>
+					new Promise((resolve) => {
+						clearTimeout(timer);
+						timer = setTimeout(() => resolve("late"), endTimeoutMs);
+					});
+				try {
+					const to = track;
+					if (to === undefined) {
+						// A SUBSCRIBE that is being answered is told of the end
+						// when its answer is out.
+						if (answer !== undefined) {
+							await Promise.race([answer, timeIsOver()]);
+						}
+						return;
+					}
+					if ((await Promise.race([queue, timeIsOver()])) === "late") {
+						// WHY before the reset: the write that is stuck fails with
+						// it, and the chunk behind it would open a stream of its
+						// own; with `track` gone it does not (`track !== to`).
+						track = undefined;
+						// A stream that is neither closed nor reset keeps
+						// PUBLISH_DONE from being sent (transport §10.11).
+						await open?.stream.reset().catch(() => {});
+						open = undefined;
+						await Promise.race([queue, timeIsOver()]);
+					} else {
+						await open?.stream.close().catch(() => {});
+					}
+					track = undefined;
+					await to.done(TRACK_ENDED, "").catch(() => {});
+				} finally {
+					clearTimeout(timer);
+				}
+			})();
+			return ended;
 		},
 
 		stats: () => ({ ...stats, skipped: { ...stats.skipped } }),
