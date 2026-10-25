@@ -1,0 +1,23 @@
+{
+	"name": "@xmoq/meeting",
+	"version": "0.0.0",
+	"description": "A participant of a meeting over MoQ: who is there, the small video of some of them and the sound of all",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.core.json"
+	},
+	"dependencies": {
+		"@xmoq/media": "workspace:*",
+		"@xmoq/moqt": "workspace:*",
+		"@xmoq/msf": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.2",
+		"typescript": "6.0.3"
+	}
+}

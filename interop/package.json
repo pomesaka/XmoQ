@@ -9,6 +9,7 @@
 	"dependencies": {
 		"@xmoq/chat": "workspace:*",
 		"@xmoq/media": "workspace:*",
+		"@xmoq/meeting": "workspace:*",
 		"@xmoq/moqt": "workspace:*",
 		"@xmoq/msf": "workspace:*",
 		"@xmoq/transcript": "workspace:*",

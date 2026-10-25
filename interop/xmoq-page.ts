@@ -402,6 +402,15 @@ export type OwnPageExtras = {
 	/** Cancels the request of `watchNamespaces`. */
 	stopWatchingNamespaces(): Promise<void>;
 	/**
+	 * Takes part in the meeting `room` as `self` with `createMeeting` of
+	 * `@xmoq/meeting`, on the page's connection, receiving the video of the
+	 * first `mostWatched` who came. Resolves before the SUBSCRIBE_NAMESPACE
+	 * is answered; `meetingReport` has what came of it.
+	 */
+	attendMeeting(room: string, self: string, mostWatched: number): Promise<void>;
+	/** What `attendMeeting` was told and handed so far. */
+	meetingReport(): Promise<PageMeetingReport>;
+	/**
 	 * Whether the browser has a decoder for the codec, for Annex B without a
 	 * description: "supported", "not supported", or "no VideoDecoder".
 	 */
@@ -698,6 +707,21 @@ export type PageBroadcastReport = {
 	audioWritten: number;
 	/** Pieces of sound not sent, by the reason (`AudioTrackPublisherStats.skipped`), for a run that fails. */
 	audioSkipped: Record<string, number>;
+};
+
+/** What `attendMeeting` was told and handed on a page. */
+export type PageMeetingReport = {
+	/**
+	 * Each event of the meeting, in order: `came <id>`, `left <id>`,
+	 * `too-many <id>`, `receiving <id> <video|audio> <track> <times>`,
+	 * `stopped <id> <video|audio>`, `failed <id> <what> <error>`, and at its
+	 * end `ended <how>` or `refused <error>`.
+	 */
+	events: string[];
+	/** Frames decoded, by whose they were. */
+	frames: Record<string, number>;
+	/** Pieces of sound decoded, by whose they were. */
+	audio: Record<string, number>;
 };
 
 /** What `publishVideo` is started with. */

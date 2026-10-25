@@ -1,6 +1,6 @@
 # Scaling a broadcast over relays, and meetings — design draft (proposed)
 
-Everything here is **proposed**: nothing of it is built, and every choice is undecided until the project owner decides it ([open decisions](open-questions.md)). What the own relay does today was read in the code of `main` on 2026-10-25 (`bdad71ce`), and the file is named where it matters.
+Everything here is **proposed**, and undecided until the project owner decides it ([open decisions](open-questions.md)), except where a choice says it was decided. What the own relay does today was read in the code of `main` on 2026-10-25 (`bdad71ce`), and the file is named where it matters.
 
 Decided on 2026-10-25, the inputs of this draft ([requirements](requirements.md)):
 
@@ -87,7 +87,7 @@ Sound is Opus, a piece every 20 ms, each an Object on a stream of its own (decid
 | A. SUBSCRIBE_NAMESPACE | Each participant announces `xmoq/meet/<room>/<participant>` and publishes a catalog there; each subscribes to the namespaces under `xmoq/meet/<room>` and is told NAMESPACE when one comes and NAMESPACE_DONE when one goes | The relay serves it (8 a session, 4,096 namespaces under a prefix, row on SUBSCRIBE_NAMESPACE in the [implementation notes](moqt-implementation-notes.md)); the relay itself says who left; as the chat does | None was found: `@xmoq/moqt` sends SUBSCRIBE_NAMESPACE since 2026-10-25 (`MoqtConnection.subscribeNamespace`) |
 | B. The room lists them | The room's WebSocket says who is there | Nothing new in the browser library | The room believes the pages; a participant whose connection to the relay died stays listed; against the direction of carrying everything over QUIC (the chat's decision of 2026-10-24) |
 
-**Recommended: A.** The namespace prefix is the meeting's own, apart from `xmoq/chat`, and the meeting's chat is the room's chat as it is.
+**Decided on 2026-10-25: A**, provisionally. The namespace prefix is the meeting's own, apart from `xmoq/chat`, and the meeting's chat is the room's chat as it is. A page does it with `@xmoq/meeting` ([record](experiments/2026-10-25-a-meeting-of-pages.md)), and the reader for agents with `xmoq-agent --meeting`.
 
 ### Which video each one receives
 
@@ -98,7 +98,7 @@ Sound is Opus, a piece every 20 ms, each an Object on a stream of its own (decid
 | C. The relay chooses | The relay forwards versions by who speaks | — | The relay reads no media, and would have to |
 | D. One picture made by a server | A server decodes, composes and encodes | One stream a participant | A decoder and encoder for 49, and the delay of both |
 
-**Recommended: B.** With one large version and 8 small tiles a participant receives about 2.5 + 8 × 0.6 ≈ 7.3 Mbit/s; showing all 48 at once needs a smaller version still, whose bitrate was not measured. Details:
+**Recommended: B.** With one large version and 8 small tiles a participant receives about 2.5 + 8 × 0.6 ≈ 7.3 Mbit/s; showing all 48 at once needs a smaller version still, whose bitrate was not measured. **Decided on 2026-10-25 for the first version: the small version of 8, as they came, and the sound of all**; one who leaves gives the place to the next who came (`@xmoq/meeting`). The large version of who speaks is not in it, and is proposed below. Details:
 
 - The relay subscribes to a version only while somebody wants it, where the participant announces its namespace instead of sending PUBLISH, and cancels its SUBSCRIBE when the last subscriber leaves (row on the last subscriber of a track in the [implementation notes](moqt-implementation-notes.md)). So a version nobody shows is neither sent nor, if the sender stops encoding while it has no subscription, encoded.
 - On a change of speaker the participant subscribes to the new large version and keeps the small one until the large one has a key frame. It can ask for one with NEW_GROUP_REQUEST, which the relay passes on and the video sender of `@xmoq/media` answers with `dynamicGroups` (a new Group once the current one is 500 ms long).
@@ -112,7 +112,7 @@ Sound is Opus, a piece every 20 ms, each an Object on a stream of its own (decid
 | B. A mixer beside the relay | Like the gatherer of the chat: it subscribes to all and publishes a mix | One track for each listener | Each listener needs a mix without its own voice, so 49 mixes; a decode and an encode of delay; an agent gets one mix and has to tell the voices apart |
 | C. A then B | A, and a mixer for the listeners that cannot take many tracks | — | Two ways to keep |
 
-**Recommended: A, with only speech sent.** A participant sends no sound while it does not speak (a voice activity detector at the sender, or muted), so a participant receives the few that speak; at two at once that is 2 × 50 streams a second, and the relay's 117,600 become about 4,900. Who speaks is found by each participant from the sound it decodes; an audio level in an Object property, as RTP has, is the next step if decoding all of them costs too much. How Chromium's echo cancellation works with several tracks played at once was not looked at.
+**Decided on 2026-10-25 for the first version: A**, each page receiving the sound of everybody apart and mixing it itself; whether a mixer (B or C) is added later is undecided. **Recommended: A, with only speech sent.** A participant sends no sound while it does not speak (a voice activity detector at the sender, or muted), so a participant receives the few that speak; at two at once that is 2 × 50 streams a second, and the relay's 117,600 become about 4,900. Who speaks is found by each participant from the sound it decodes; an audio level in an Object property, as RTP has, is the next step if decoding all of them costs too much. How Chromium's echo cancellation works with several tracks played at once was not looked at.
 
 ### What an agent subscribes to in a meeting
 
@@ -127,6 +127,8 @@ The room of the spike gives a token to anyone, and who may get one is undecided 
 | a. Whoever has the meeting's address | An address nobody can guess; the room gives tokens to whoever asks | Nothing new | Whoever gets the address gets in |
 | b. A list of invited people | The room checks who asks | — | Needs authentication, which is undecided |
 | c. A host admits | The room holds who asks until the host lets them in | — | A host's page and a waiting state in the room |
+
+**Where the limit of 49 holds, decided on 2026-10-25: at the room.** The room counts the participants of a meeting and gives no token past 49; a page keeps 48 others besides, so that a relay that tells of more is not followed past them (`DEFAULT_MOST_OTHERS` of `@xmoq/meeting`).
 
 **Recommended: a to begin with**, with the tokens it already makes: one to publish on the participant's own namespace, `xmoq/meet/<room>/<participant>`, and one to subscribe to `xmoq/meet/<room>/*` (a `*` at the end allows the namespaces under it, decided on 2026-10-24), and the chat's two. b or c when authentication is decided. An agent is brought in by a participant, who gets a token for it from the room, so that somebody present answers for it.
 

@@ -29,6 +29,6 @@ This sequence is conceptual. Connection setup, session authentication, MoQ draft
 
 Each client uses its own connection to the relay. MoQ Track is a logical data series, not a QUIC stream. WebCodecs does not provide a complete jitter buffer or A/V synchronization pipeline.
 
-Meetings of 49 participants at most are in scope since 2026-10-25, after an agent can follow a broadcast; how they would sit on the relay, the room and the chat is a [proposed design](scale-and-meetings.md), not implemented.
+Meetings of 49 participants at most are in scope since 2026-10-25, after an agent can follow a broadcast; how they sit on the relay, the room and the chat is a [proposed design](scale-and-meetings.md). Of it, decided on 2026-10-25: every participant publishes under `xmoq/meet/<room>/<id>` and finds the others with SUBSCRIBE_NAMESPACE at the relay, the room gives no token past 49, and each receives the small video of 8 as they came and the sound of all. A page's side is `@xmoq/meeting` (layer 3, above `@xmoq/media`); the room's side is not built.
 
 See [protocol layers](protocols.md), [validation](validation.md) and [open decisions](open-questions.md).

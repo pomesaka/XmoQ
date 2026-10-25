@@ -1,0 +1,10 @@
+told-of	2	named:a	came:a
+told-gone	2	named:a done:a	came:a left:a
+told-of-twice	2	named:a named:a	came:a
+gone-without-having-come	2	done:a	-
+not-told-of-again-on-a-new-session	2	named:a named:b session-ended named:a settled	came:a came:b left:b
+told-of-first-on-a-new-session	2	session-ended named:c settled	came:c
+settled-on-the-first-session	2	named:a settled	came:a
+one-more-than-there-is-room-for	2	named:a named:b named:c done:a named:c	came:a came:b too-many:c left:a came:c
+told-of-again-while-full	2	named:a named:b named:b	came:a came:b
+room-for-none-is-room-for-one	0	named:a named:b	came:a too-many:b
