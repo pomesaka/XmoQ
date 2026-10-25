@@ -350,6 +350,12 @@ pub enum Event {
         /// The session.
         session: SessionKey,
     },
+    /// The Retry Interval of an announcement the upstream refused is over.
+    /// Answers [`Action::StartUpstreamAnnouncementTimer`].
+    UpstreamAnnouncementTimeout {
+        /// The session with the upstream.
+        session: SessionKey,
+    },
     /// The time a SUBSCRIBE is held for a publisher to appear is over
     /// (§10.2.6). Answers [`Action::StartRendezvousTimer`].
     RendezvousTimeout {
@@ -714,6 +720,15 @@ pub enum Action {
     /// announced, and gets back what it used of its allowance at that rate.
     StartAnnouncementTimer {
         /// The session.
+        session: SessionKey,
+        /// The wait, in milliseconds.
+        wait_ms: u64,
+    },
+    /// Report [`Event::UpstreamAnnouncementTimeout`] after `wait_ms`: the
+    /// upstream refused an announcement of the relay for its load, and said
+    /// when to send it again (the Retry Interval, §10.6.2).
+    StartUpstreamAnnouncementTimer {
+        /// The session with the upstream.
         session: SessionKey,
         /// The wait, in milliseconds.
         wait_ms: u64,

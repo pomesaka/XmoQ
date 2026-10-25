@@ -44,6 +44,8 @@ pub(crate) struct Upstream {
     uri: Vec<u8>,
     /// What the relay announces there, by namespace (`announcements.rs`).
     announced: BTreeMap<TrackNamespace, announcements::Passed>,
+    /// How what is to be announced there is sent (`announcements.rs`).
+    pace: announcements::Pace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,7 @@ impl Relay {
             link: Link::Absent,
             uri: Vec::new(),
             announced: BTreeMap::new(),
+            pace: announcements::Pace::AllAtOnce,
         });
     }
 

@@ -986,3 +986,123 @@ fn a_namespace_announced_upstream_carries_the_relays_own_token_and_not_its_publi
         [vec![Parameter::AuthorizationToken(b"pub".to_vec())]]
     );
 }
+
+/// The requests the relay opened upstream for announcements, with what each
+/// announces.
+fn announcements_upstream(actions: &[Action]) -> Vec<(OwnRequestKey, TrackNamespace)> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::OpenRequest {
+                session: UPSTREAM,
+                request,
+                message: ControlMessage::PublishNamespace(announced),
+            } => Some((*request, announced.track_namespace.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn answer_upstream(
+    relay: &mut Relay,
+    request: OwnRequestKey,
+    message: ControlMessage,
+) -> Vec<Action> {
+    relay.step(Event::OwnRequestMessage {
+        session: UPSTREAM,
+        request,
+        message,
+    })
+}
+
+fn refused_for_its_load() -> ControlMessage {
+    // EXCESSIVE_LOAD (0x9), Retry Interval 1,001.
+    request_error(0x9)
+}
+
+fn accepted() -> ControlMessage {
+    ControlMessage::RequestOk(xmoq_moqt::message::RequestOk::default())
+}
+
+#[test]
+fn what_the_upstream_refuses_for_its_load_is_sent_again_after_its_retry_interval_one_at_a_time() {
+    let mut relay = edge(&[]);
+    relay.step(Event::SessionOpened {
+        session: BOB,
+        role: Role::Server,
+    });
+    // Seven namespaces of the chat announced here, by three sessions (each
+    // may announce five at once here), before the session with the upstream
+    // opened: all of them go at once.
+    let announced: [(SessionKey, u64, &[u8]); 7] = [
+        (PUBLISHER, 0, b"a"),
+        (PUBLISHER, 4, b"b"),
+        (PUBLISHER, 8, b"c"),
+        (ALICE, 0, b"d"),
+        (ALICE, 4, b"e"),
+        (BOB, 0, b"f"),
+        (BOB, 4, b"g"),
+    ];
+    for (session, stream, name) in announced {
+        announce_by(&mut relay, session, stream, &[b"xmoq", b"chat", b"r", name]);
+    }
+    let sent = announcements_upstream(&upstream_opened(&mut relay));
+    assert_eq!(sent.len(), 7);
+    for (request, _) in &sent[..5] {
+        assert_eq!(answer_upstream(&mut relay, *request, accepted()), []);
+    }
+    // The sixth and the seventh are refused: one timer, of the Retry
+    // Interval less one, for both.
+    let timer = Action::StartUpstreamAnnouncementTimer {
+        session: UPSTREAM,
+        wait_ms: 1_000,
+    };
+    assert_eq!(
+        answer_upstream(&mut relay, sent[5].0, refused_for_its_load()),
+        std::slice::from_ref(&timer)
+    );
+    assert_eq!(
+        answer_upstream(&mut relay, sent[6].0, refused_for_its_load()),
+        []
+    );
+    // An eighth comes meanwhile: it waits.
+    let waits = announce_by(&mut relay, BOB, 8, &[b"xmoq", b"chat", b"r", b"h"]);
+    assert_eq!(announcements_upstream(&waits), []);
+    assert!(!relay.holds_nothing(UPSTREAM));
+    // Then one at a time, the next when the one before is answered: f is
+    // taken, g refused again and sent after the next wait, then h.
+    let mut sent_again = Vec::new();
+    let mut actions = relay.step(Event::UpstreamAnnouncementTimeout { session: UPSTREAM });
+    let answers = [accepted(), refused_for_its_load(), accepted(), accepted()];
+    for answer in answers {
+        if actions == [timer.clone()] {
+            actions = relay.step(Event::UpstreamAnnouncementTimeout { session: UPSTREAM });
+        }
+        let next = announcements_upstream(&actions);
+        assert_eq!(next.len(), 1, "{actions:?}");
+        sent_again.push(next[0].1.clone());
+        actions = answer_upstream(&mut relay, next[0].0, answer);
+    }
+    assert_eq!(actions, []);
+    let name = |last: &[u8]| namespace_of(&[b"xmoq", b"chat", b"r", last]);
+    assert_eq!(sent_again, [name(b"f"), name(b"g"), name(b"g"), name(b"h")]);
+}
+
+#[test]
+fn what_the_upstream_refuses_with_no_retry_interval_is_not_sent_again() {
+    let mut relay = edge(&[]);
+    upstream_opened(&mut relay);
+    let sent = announcements_upstream(&announce_by(
+        &mut relay,
+        PUBLISHER,
+        0,
+        &[b"xmoq", b"chat", b"r", b"a"],
+    ));
+    // UNAUTHORIZED (0x1): Retry Interval 0, "SHOULD NOT be retried".
+    assert_eq!(
+        answer_upstream(&mut relay, sent[0].0, request_error(0x1)),
+        []
+    );
+    let next = announce_by(&mut relay, PUBLISHER, 4, &[b"xmoq", b"chat", b"r", b"b"]);
+    assert_eq!(announcements_upstream(&next).len(), 1);
+}
