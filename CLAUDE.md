@@ -18,8 +18,8 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | `mise run check` | CIと同じ検査の全部 |
 | `mise run check:rust` | fmt、clippy、test |
 | `mise run check:ts` | Biome、oxlint、型検査、`bun test` |
-| `mise run check:layers`、`check:workflows` | 層の依存。actionlintとshellcheck |
-| `mise run fmt` | 整形と安全な直し |
+| `mise run check:layers`、`check:workflows`、`check:docs` | 層の依存。actionlintとshellcheck。生成した記録の索引が古くないか |
+| `mise run fmt` | 整形と安全な直し。記録の索引も書き直す（記録を足したら走らせる） |
 | `mise run interop` | `moqtail`の相手とつなぐ照合。`check`には入っていない |
 | `mise run demo` | リレーとページを立て、Chromiumで配信と視聴のページを開く |
 | `mise run watch -- <旗>` | 端末の視聴者 |
