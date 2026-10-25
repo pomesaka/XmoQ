@@ -39,6 +39,10 @@
 //     for it, and the second and the third are there.
 //   - At its end, the last `XMOQ_AGENT_FRAMES` says `taken=3`: the counts go
 //     on from one session to the next.
+//
+// Changed once the reader put the pictures of a run in a directory of its
+// own (2026-10-25): `<out>/frames` above is `<out>/frames/<ms>/`, the one
+// directory there, made when the reader begins.
 
 import {
 	existsSync,
@@ -250,6 +254,19 @@ function expectFiles(paths: string[], framesDir: string, when: string): void {
 	}
 }
 
+/**
+ * The directory of the reader's run in `frames`: there is one, named by
+ * when the run began (`<out>/frames/<ms>/`).
+ */
+function runDirectory(frames: string): string {
+	const runs = readdirSync(frames);
+	const [run] = runs;
+	if (runs.length !== 1 || run === undefined || !/^\d+$/.test(run)) {
+		throw new Error(`${frames} has ${JSON.stringify(runs)}, not one run`);
+	}
+	return join(frames, run);
+}
+
 function pictures(directory: string): string[] {
 	return existsSync(directory)
 		? readdirSync(directory).filter((name) => name.endsWith(".png"))
@@ -262,7 +279,6 @@ async function main(): Promise<void> {
 	}
 	const directory = mkdtempSync(join(tmpdir(), "xmoq-agent-frames-"));
 	const out = join(directory, "out");
-	const framesDir = join(out, "frames");
 	let summary: string;
 	try {
 		const second = await startSecondOwnRelay(
@@ -310,6 +326,7 @@ async function main(): Promise<void> {
 			"60",
 		]);
 		await agent.waitForLine(/^XMOQ_AGENT_VIDEO track=video /);
+		const framesDir = runDirectory(join(out, "frames"));
 
 		await new Promise((resolve) => setTimeout(resolve, 3000));
 		if (frameLines(agent).length !== 0 || pictures(framesDir).length !== 0) {

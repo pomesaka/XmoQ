@@ -11,8 +11,10 @@ Building it needs a C++ compiler, for the H.264 decoder that `xmoq-picture` buil
 A demo of its own, on ports apart from `mise run demo`'s (4443, 8080, 8787), then the reader in its room, in the background:
 
 ```sh
+bun install --frozen-lockfile          # once after main moved: the demo bundles the packages
 bun demo/serve.ts --relay-port 33443 --port 33080 --rooms-port 33787 --chat-store /tmp/room/chat.sqlite3 &
-# open http://localhost:33080/publish in Chromium: the broadcast
+# add --transcribe-language en (or ja, ...) where the voice's language is known: twice as fast as auto
+# open http://localhost:33080/publish?audio=mic in Chromium: the broadcast, with the microphone as its sound
 mkdir -p /tmp/room; mkfifo /tmp/room/say; sleep 86400 > /tmp/room/say &
 mise run agent -- --room http://127.0.0.1:33787/rooms/demo --name claude --out /tmp/room < /tmp/room/say &
 echo 'hello' > /tmp/room/say          # said in the chat
@@ -20,7 +22,7 @@ echo '/frame' > /tmp/room/say         # a picture of the broadcast now
 tail -f /tmp/room/events.jsonl
 ```
 
-The lines of `events.jsonl` are `chat`, `joined`, `left`, `broadcast`, `frame`, `speech`, `chat_gap` and `error` (the table below). A `frame` line's `path` is the PNG, in `/tmp/room/frames/`. The `sleep` holds the pipe open: without stdin the reader reads on and says nothing.
+The lines of `events.jsonl` are `chat`, `joined`, `left`, `broadcast`, `frame`, `speech`, `chat_gap` and `error` (the table below). A `frame` line's `path` is the PNG, in `/tmp/room/frames/<when the reader began, ms>/`. `speech` lines come where the demo has its transcriber (built with `cargo build --release -p xmoq-transcriber` and its models fetched with `mise run speech-model` and `mise run speech-model -- silero-v5.1.2`; the demo says so when it starts) and the page sends a voice: without `?audio=mic` it sends a tone, in which there are no words. The `sleep` holds the pipe open: without stdin the reader reads on and says nothing.
 
 ## Flags
 
@@ -35,7 +37,7 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
 | `--room` | | The room. Its last path segment is the room of the chat |
 | `--url`, `--cert-sha256`, `--namespace`, `--chat-room` | `xmoq/demo` for the namespace | A relay without a room, and the room of the chat on it |
 | `--name` | `agent` | The name in the chat |
-| `--out` | | The directory of `events.jsonl`, made where it is not. The file is added to, not begun anew |
+| `--out` | | The directory of `events.jsonl` and `frames/`, made where it is not. Started again in the same `--out`, the reader adds to `events.jsonl` and puts its pictures in a directory of its own (`frames/<when it began, ms>/`): nothing of a run before is written over or removed |
 | `--token no` | asked | Asks the room for no tokens |
 | `--chat-catch-up-lines` | 16 | The lines missed while away that are fetched when the subscription to `lines` is made again; 1 to 1,000 (`history_to_fetch` of `xmoq-viewer`) |
 | `--answer-wait-ms`, `--setup-wait-ms`, `--open-wait-ms` | 10,000 each | As `xmoq-watch` has them |
@@ -43,7 +45,7 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
 | `--frames off` | on | The video is not subscribed to, and `/frame` gets an `error`. On, the reader subscribes to the first H.264 video track of the broadcast's catalog and holds the latest Group's frames undecoded until a picture is asked for (`xmoq-picture`). A video subscription that ends or is refused is asked for again on the session, by the rule of `xmoq-again`, as `xmoq-watch` asks for its sound |
 | `--frame-every-ms` | none | A picture this often by the broadcast's Timestamps, unasked |
 | `--frame-longest` | 1280 | The longest side of a picture, in pixels; a larger one is made smaller |
-| `--frames-kept` | 500 | The pictures kept in `<dir>/frames/`, of every session together; the oldest file goes for the newest. Files that were there when the reader began are not counted, and not removed |
+| `--frames-kept` | 500 | The pictures kept of this run, of every session together; the oldest file goes for the newest. The directories of runs before are not counted, and not removed |
 | `--speech off` | on | No transcript is followed. On, the reader subscribes to `speech` of `xmoq/transcript/<prefix>`, held by the relay for 30 s for a transcriber to come, and asked for again when it is refused or ends |
 | `--transcript` | the room's, else the broadcast's namespace | The prefix the transcriber listens under (its `--namespace`), fields between slashes. Without it, the prefix the room's hello names (`transcript`, from the room's `TRANSCRIPT_PREFIX`), else the broadcast's namespace (`xmoq_agent::transcript::prefix` has the order). With a room that gives tokens, the reader asks it for `sub` in `xmoq/transcript/<prefix>` |
 
@@ -57,14 +59,14 @@ Every line has `type` and `at`, the reader's clock in milliseconds since the Uni
 | `chat` | `number`, `from`, `text`, `sent_at` (the sender's clock), `gathered_at` (the gatherer's clock) | A line of the room, each once, in the order of its number: the latest 16 when the reader comes, then each as it is said. The reader's own lines come back as well |
 | `chat_gap` | `after`, `before` | More lines were said while the reader was away than `--chat-catch-up-lines`: those between were not fetched |
 | `joined`, `left` | `name` | Somebody's chat namespace `xmoq/chat/<room>/<name>` was announced, or withdrawn |
-| `frame` | `path`, `group`, `object`, `timestamp_us` (the Timestamp of LOC of the frame), `width`, `height`, `asked` (`command`, `every`) | A picture of the broadcast, written as a PNG in `<dir>/frames/`: asked for with `/frame`, or every `--frame-every-ms`. It is of the latest frame that decoded, which can be older than the moment it was asked for. `/frame` that gets none within 10 s gets an `error` |
+| `frame` | `path`, `group`, `object`, `timestamp_us` (the Timestamp of LOC of the frame), `width`, `height`, `asked` (`command`, `every`) | A picture of the broadcast, written as a PNG in `<dir>/frames/<when the run began, ms>/`: asked for with `/frame`, or every `--frame-every-ms`. It is of the latest frame that decoded, which can be older than the moment it was asked for. `/frame` that gets none within 10 s gets an `error` |
 | `speech` | `number` (in the transcript), `from` (the namespace of the broadcast whose voice it was), `text`, `start_us`, `end_us` (on the clock of the Timestamps of LOC of that broadcast's audio), `read_at` (the transcriber's clock, ms) | Something said in a broadcast, as the transcriber (`xmoq-transcriber`) read it: the pieces of `speech` of `xmoq/transcript/<prefix>` (`xmoq-transcript-tracks`), each once, in the order of its number. The latest 16 when the reader comes, by a Joining FETCH, then each as it is read; those missed while away, as for the chat. Pieces not fetched are told as an `error`. With `--transcript`, the pieces of every broadcast under that prefix, each with its `from` |
 | `error` | `message` | Something went wrong, or a line of stdin was not said; the reader goes on |
 
 ```json
 {"at":1792883451092,"name":"p","type":"joined"}
 {"at":1792883451113,"from":"p","gathered_at":1792883451111,"number":0,"sent_at":1792883451110,"text":"hello from p","type":"chat"}
-{"asked":"command","at":1792884905154,"group":1792884901959,"height":360,"object":12,"path":"/tmp/room/frames/000001-g1792884901959-o12.png","timestamp_us":1792884904928000,"type":"frame","width":640}
+{"asked":"command","at":1792884905154,"group":1792884901959,"height":360,"object":12,"path":"/tmp/room/frames/1792884900120/000001-g1792884901959-o12.png","timestamp_us":1792884904928000,"type":"frame","width":640}
 {"at":1792883451182,"message":"no command /nothing: /frame is one, and // begins a line that is said","type":"error"}
 {"at":1792883451205,"name":"p","type":"left"}
 ```
@@ -92,7 +94,6 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 
 - **With a room that names no relay, the chat is there only while the room has a broadcast**: the room says where the relay is only with the broadcast then (a room run without `RELAY_URL`, `spikes/durable-objects-room/README.md`). A line said meanwhile gets an `error`.
 - **Without `--transcript` and a room that names its transcript, the transcript is that of the broadcast's namespace**: a transcriber run with a prefix above the broadcast's (`--namespace xmoq` for `xmoq/demo`) publishes `xmoq/transcript/xmoq`, and such a reader waits for `xmoq/transcript/xmoq/demo`, which does not come. A session at the room's relay for the chat alone follows the transcript the flag or the room names, and none else.
-- **A reader started again in the same `--out` writes over the pictures of the one before**: the names begin from 1 again (`000001-...`), and what the earlier run kept is neither counted nor removed.
 - Objects of the video that wait for the thread of the pictures: 256; beyond them they are left out, an `error` says so when it begins, and the frames after them in their Group give no picture.
 - Requests of the relay are refused with `NOT_SUPPORTED`, except the gatherer's SUBSCRIBE to `said`.
 
