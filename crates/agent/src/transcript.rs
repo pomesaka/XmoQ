@@ -3,15 +3,16 @@
 //! listens under.
 
 /// The prefix whose transcript is followed: `--transcript` where it is
-/// given, else the room's (its hello), else the meeting's
-/// (`xmoq/meet/<room>`), else the broadcast's namespace; `None` where none
-/// of them is there.
+/// given, else the room's (its hello's `meetingTranscript` in a meeting,
+/// `transcript` else), else the meeting's (`xmoq/meet/<room>`), else the
+/// broadcast's namespace; `None` where none of them is there.
 ///
-/// WHY the flag first: whoever starts the reader knows best where the
-/// transcriber listens. WHY the room before the meeting's own: the room is
-/// where the prefix is set (`TRANSCRIPT_PREFIX`), and a meeting's default
-/// is the same where it was set so. WHY the broadcast last: a transcriber
-/// that listens under the broadcast's namespace alone is the narrowest.
+/// WHY the flag first: it overrides, for a transcriber run another way than
+/// the room says. WHY the room before the meeting's own: the room is where
+/// the prefix is set (`MEETING_TRANSCRIPT_PREFIX`), which can be above the
+/// meeting's (`xmoq/meet` for one transcriber of every room). WHY the
+/// broadcast last: a transcriber that listens under the broadcast's
+/// namespace alone is the narrowest.
 #[must_use]
 pub fn prefix(
     flag: Option<&[String]>,

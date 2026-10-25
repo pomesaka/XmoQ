@@ -413,8 +413,13 @@ async fn place(
     let mut chat_tokens = ChatTokens::default();
     // A session for the chat alone has no broadcast whose namespace to
     // take: it follows the transcript the room or the flag names, as in a
-    // meeting, whose participants each have a broadcast of their own.
-    let hello = room.transcript();
+    // meeting, whose participants each have a broadcast of their own. The
+    // room names one for its meeting and one for its broadcast.
+    let hello = if args.meeting.is_some() {
+        room.meeting_transcript()
+    } else {
+        room.transcript()
+    };
     let transcript = match &found {
         Found::Broadcast(broadcast) => {
             transcript_of(args, hello.as_deref(), Some(&broadcast.namespace))

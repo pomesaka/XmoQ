@@ -41,11 +41,13 @@ pub enum Said {
         broadcast: Option<Broadcast>,
         /// The relay of the rooms, where the room says it.
         relay: Option<Relay>,
-        /// The prefix a transcriber listens under for the room, its fields,
-        /// where the room says it: its transcript is `speech` of
+        /// The prefix a transcriber listens under for the room's broadcast,
+        /// its fields, where the room says it: its transcript is `speech` of
         /// `xmoq/transcript/<prefix>` (decided on 2026-10-25; why, at the top
         /// of `spikes/durable-objects-room/worker.js`).
         transcript: Option<Vec<String>>,
+        /// The same for the room's meeting (`meetingTranscript`).
+        meeting_transcript: Option<Vec<String>>,
     },
     /// A publisher came, or the one that was there left.
     Broadcast(Option<Broadcast>),
@@ -187,6 +189,7 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
             broadcast: message.get("broadcast").and_then(broadcast_of),
             relay: message.get("relay").and_then(relay_of),
             transcript: message.get("transcript").and_then(fields_of),
+            meeting_transcript: message.get("meetingTranscript").and_then(fields_of),
         },
         Some("broadcast") => Said::Broadcast(message.get("broadcast").and_then(broadcast_of)),
         Some("token") => Said::Token(
@@ -305,6 +308,7 @@ mod tests {
                     broadcast: Some(broadcast()),
                     relay: None,
                     transcript: None,
+                    meeting_transcript: None,
                 },
             ),
             (
@@ -313,6 +317,7 @@ mod tests {
                     broadcast: None,
                     relay: None,
                     transcript: None,
+                    meeting_transcript: None,
                 },
             ),
             // So is a line of its chat: the chat is on tracks.
@@ -419,7 +424,8 @@ mod tests {
                 Ok(Said::Hello {
                     broadcast,
                     relay,
-                    transcript: None
+                    transcript: None,
+                    meeting_transcript: None,
                 }),
                 "{message}"
             );
@@ -427,8 +433,25 @@ mod tests {
     }
 
     #[test]
-    fn the_prefix_of_the_transcript_is_read_from_the_hello() {
-        // (the `transcript` of a hello without a broadcast; what it is read as)
+    fn the_prefixes_of_the_transcripts_are_read_from_the_hello() {
+        // Each of its own key.
+        assert_eq!(
+            read(
+                r#"{"type":"hello","broadcast":null,"transcript":["xmoq","demo"],"meetingTranscript":["xmoq","meet","r"]}"#
+            ),
+            Ok(Said::Hello {
+                broadcast: None,
+                relay: None,
+                transcript: Some(vec!["xmoq".to_string(), "demo".to_string()]),
+                meeting_transcript: Some(vec![
+                    "xmoq".to_string(),
+                    "meet".to_string(),
+                    "r".to_string(),
+                ]),
+            })
+        );
+        // (the value of both keys of a hello without a broadcast; what each
+        // is read as)
         let cases = [
             (
                 r#"["xmoq","meet","r"]"#,
@@ -447,14 +470,16 @@ mod tests {
             (r#""xmoq/meet/r""#, None),
         ];
         for (transcript, read_as) in cases {
-            let message =
-                format!(r#"{{"type":"hello","broadcast":null,"transcript":{transcript}}}"#);
+            let message = format!(
+                r#"{{"type":"hello","broadcast":null,"transcript":{transcript},"meetingTranscript":{transcript}}}"#
+            );
             assert_eq!(
                 read(&message),
                 Ok(Said::Hello {
                     broadcast: None,
                     relay: None,
-                    transcript: read_as
+                    transcript: read_as.clone(),
+                    meeting_transcript: read_as,
                 }),
                 "{message}"
             );
