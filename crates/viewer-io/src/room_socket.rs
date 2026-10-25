@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use xmoq_chat_tracks::names::Person;
-use xmoq_viewer::room::{self, Broadcast, Said};
+use xmoq_viewer::room::{self, Broadcast, Relay, Said};
 
 /// The tokens of a room for the chat on tracks ([`RoomSocket::chat_tokens`]),
 /// each as an AUTHORIZATION TOKEN; none where the room gave none.
@@ -36,6 +36,8 @@ pub struct RoomSocket {
     /// The broadcasts the room said while something else was waited for.
     kept: VecDeque<Option<Broadcast>>,
     broadcast: Option<Broadcast>,
+    /// The relay of the rooms, as the hello said it.
+    relay: Option<Relay>,
 }
 
 impl RoomSocket {
@@ -61,13 +63,21 @@ impl RoomSocket {
             socket,
             kept: VecDeque::new(),
             broadcast: None,
+            relay: None,
         };
-        // The room says hello first: the broadcast it has.
-        let Said::Hello { broadcast } = joined.message().await? else {
+        // The room says hello first: the broadcast it has, and its relay.
+        let Said::Hello { broadcast, relay } = joined.message().await? else {
             bail!("the room did not begin with hello");
         };
         joined.broadcast = broadcast;
+        joined.relay = relay;
         Ok(joined)
+    }
+
+    /// The relay of the rooms, where the room's hello said it: there with a
+    /// broadcast and without one.
+    pub fn relay(&self) -> Option<Relay> {
+        self.relay.clone()
     }
 
     async fn message(&mut self) -> Result<Said> {

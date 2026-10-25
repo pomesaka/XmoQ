@@ -12,13 +12,22 @@
 // room has no broadcast any more. Provisional: nothing is stored that could
 // outlive a publisher that vanished.
 //
-// On the WebSocket the room sends {type: "hello", connected, broadcast}
-// first, then {type: "connected", connected} when the count changes,
+// On the WebSocket the room sends {type: "hello", connected, broadcast,
+// relay} first, then {type: "connected", connected} when the count changes,
 // {type: "broadcast", broadcast} when the publisher registers or leaves,
 // and {type: "reaction", emoji} when somebody sent one (with
 // REACTION_BATCH_MS, {type: "reactions", counts} for all of that while).
 // A client sends {type: "reaction", emoji}, and a publisher the message
 // above. Any other message is not answered.
+//
+// **The relay of the rooms** (decided on 2026-10-25): `relay` of the hello
+// is {relayUrl, certSha256Hex} where the Worker has `RELAY_URL` and
+// `RELAY_CERT_SHA256_HEX`, and null where it has not. It is there with a
+// broadcast and without one, so that a participant can take part in the
+// chat (which is on the relay) before anybody broadcasts. WHY apart from
+// the broadcast: in a meeting every participant has a namespace of its own,
+// and no one broadcast says where the room's relay is. WHY NOT a flag of
+// each client: whoever uses a room would have to know the relay as well.
 
 // **Tokens, an experiment** (how the relay authorizes is undecided): where
 // the Worker has the key it shares with the relay (`AUTH_KEY_HEX`), a
@@ -96,6 +105,7 @@ export class Room {
 					type: "hello",
 					connected: this.ctx.getWebSockets().length,
 					broadcast: this.broadcast(),
+					relay: this.relay(),
 				}),
 			);
 			this.tellAll({ type: "connected", connected: this.ctx.getWebSockets().length });
@@ -108,6 +118,14 @@ export class Room {
 			});
 		}
 		return json({ error: "no such path" }, 404);
+	}
+
+	/** Where the relay of the rooms is, or null where the Worker was not told. */
+	relay() {
+		const relayUrl = this.env.RELAY_URL;
+		const certSha256Hex = this.env.RELAY_CERT_SHA256_HEX;
+		if (typeof relayUrl !== "string" || relayUrl === "" || typeof certSha256Hex !== "string" || certSha256Hex === "") return null;
+		return { relayUrl, certSha256Hex };
 	}
 
 	/** The broadcast of the publisher that is connected, the latest where there are several; null without one. */

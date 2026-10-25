@@ -17,6 +17,17 @@ pub struct Broadcast {
     pub namespace: Vec<String>,
 }
 
+/// Where the relay of the rooms is, as a room says it in its hello with a
+/// broadcast and without one (decided on 2026-10-25; why, at the top of
+/// `spikes/durable-objects-room/worker.js`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relay {
+    /// The address of the relay.
+    pub relay_url: String,
+    /// The SHA-256 of the relay's certificate, as hex.
+    pub cert_sha256_hex: String,
+}
+
 /// What a room said.
 ///
 /// The chat is not among it: it is on `MoQ` tracks (Q49, decided on
@@ -28,6 +39,8 @@ pub enum Said {
     Hello {
         /// The broadcast, where a publisher is in the room.
         broadcast: Option<Broadcast>,
+        /// The relay of the rooms, where the room says it.
+        relay: Option<Relay>,
     },
     /// A publisher came, or the one that was there left.
     Broadcast(Option<Broadcast>),
@@ -81,16 +94,27 @@ pub fn clean(text: &str, most: usize) -> String {
         .collect()
 }
 
-fn broadcast_of(value: &Value) -> Option<Broadcast> {
+fn relay_of(value: &Value) -> Option<Relay> {
     let relay_url = value.get("relayUrl")?.as_str()?;
     // WHY https alone: it is what a relay is reached by (WebTransport), and
     // an address of any other kind from a room is not one to hand a token to.
     if !relay_url.starts_with("https://") {
         return None;
     }
-    Some(Broadcast {
+    Some(Relay {
         relay_url: relay_url.to_string(),
         cert_sha256_hex: value.get("certSha256Hex")?.as_str()?.to_string(),
+    })
+}
+
+fn broadcast_of(value: &Value) -> Option<Broadcast> {
+    let Relay {
+        relay_url,
+        cert_sha256_hex,
+    } = relay_of(value)?;
+    Some(Broadcast {
+        relay_url,
+        cert_sha256_hex,
         namespace: value
             .get("namespace")?
             .as_array()?
@@ -102,8 +126,8 @@ fn broadcast_of(value: &Value) -> Option<Broadcast> {
 
 /// Reads one message of a room.
 ///
-/// A broadcast that lacks a field, has one of another type, or names a
-/// relay by anything but `https://`, is read as no broadcast: there is
+/// A broadcast or a relay that lacks a field, has one of another type, or
+/// names a relay by anything but `https://`, is read as none: there is
 /// nowhere to connect to.
 ///
 /// # Errors
@@ -115,6 +139,7 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
     Ok(match message.get("type").and_then(Value::as_str) {
         Some("hello") => Said::Hello {
             broadcast: message.get("broadcast").and_then(broadcast_of),
+            relay: message.get("relay").and_then(relay_of),
         },
         Some("broadcast") => Said::Broadcast(message.get("broadcast").and_then(broadcast_of)),
         Some("token") => Said::Token(
@@ -217,11 +242,15 @@ mod tests {
                 ),
                 Said::Hello {
                     broadcast: Some(broadcast()),
+                    relay: None,
                 },
             ),
             (
                 r#"{"type":"hello","connected":1,"broadcast":null}"#.to_string(),
-                Said::Hello { broadcast: None },
+                Said::Hello {
+                    broadcast: None,
+                    relay: None,
+                },
             ),
             // So is a line of its chat: the chat is on tracks.
             (
@@ -275,6 +304,59 @@ mod tests {
             assert_eq!(read(&message), Ok(said), "{message}");
         }
         assert!(read("{").is_err());
+    }
+
+    #[test]
+    fn the_relay_of_the_rooms_is_read_from_the_hello() {
+        let hash = "ab".repeat(32);
+        let relay = format!(r#"{{"relayUrl":"https://127.0.0.1:4443/","certSha256Hex":"{hash}"}}"#);
+        let there = format!(
+            r#"{{"relayUrl":"https://127.0.0.1:4443/","certSha256Hex":"{hash}","namespace":["xmoq","demo"]}}"#
+        );
+        let read_relay = || {
+            Some(Relay {
+                relay_url: "https://127.0.0.1:4443/".to_string(),
+                cert_sha256_hex: "ab".repeat(32),
+            })
+        };
+        // (the hello; the broadcast and the relay it is read as)
+        let cases = [
+            (
+                format!(r#"{{"type":"hello","connected":1,"broadcast":null,"relay":{relay}}}"#),
+                None,
+                read_relay(),
+            ),
+            (
+                format!(r#"{{"type":"hello","connected":1,"broadcast":{there},"relay":{relay}}}"#),
+                Some(broadcast()),
+                read_relay(),
+            ),
+            // A room that names no relay.
+            (
+                r#"{"type":"hello","connected":1,"broadcast":null,"relay":null}"#.to_string(),
+                None,
+                None,
+            ),
+            // A relay that is not reached by https, or without its certificate.
+            (
+                r#"{"type":"hello","broadcast":null,"relay":{"relayUrl":"http://h/","certSha256Hex":"00"}}"#
+                    .to_string(),
+                None,
+                None,
+            ),
+            (
+                r#"{"type":"hello","broadcast":null,"relay":{"relayUrl":"https://h/"}}"#.to_string(),
+                None,
+                None,
+            ),
+        ];
+        for (message, broadcast, relay) in cases {
+            assert_eq!(
+                read(&message),
+                Ok(Said::Hello { broadcast, relay }),
+                "{message}"
+            );
+        }
     }
 
     #[test]

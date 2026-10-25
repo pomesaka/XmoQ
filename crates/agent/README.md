@@ -2,7 +2,7 @@
 
 A reader of a room for an agent. It joins a room as a participant of its chat, and writes what happens there as lines of JSON, one event a line, on stdout and at the end of `<dir>/events.jsonl`. A line of its stdin is said in the chat under its name.
 
-It connects the way `xmoq-watch` does (`xmoq-viewer` and `xmoq-viewer-io` are the parts the two share): the room says where the broadcast is and gives the tokens, and the chat is on MoQ tracks through the gatherer (`crates/chat`), on the session of the broadcast.
+It connects the way `xmoq-watch` does (`xmoq-viewer` and `xmoq-viewer-io` are the parts the two share): the room says where the broadcast is and gives the tokens, and the chat is on MoQ tracks through the gatherer (`crates/chat`), on the session of the broadcast. **While the room has no broadcast**, the reader takes part in the chat on a session at the relay the room's hello names (`relay`, decided on 2026-10-25), with the chat's `sub` token in its SETUP; when a broadcast comes, it ends that session and connects to the broadcast. `xmoq-watch` and the pages wait for a broadcast as before.
 
 Building it needs a C++ compiler, for the H.264 decoder that `xmoq-picture` builds (`openh264`), as `xmoq-watch` does.
 
@@ -46,7 +46,7 @@ Every line has `type` and `at`, the reader's clock in milliseconds since the Uni
 
 | `type` | Fields | When |
 |---|---|---|
-| `broadcast` | `state` (`began`, `ended`), `namespace` | The reader connects to the room's broadcast, and its session ends. With `--url`, the namespace of `--namespace` |
+| `broadcast` | `state` (`began`, `ended`), `namespace` | The reader connects to the room's broadcast, and its session ends. With `--url`, the namespace of `--namespace`. Not for a session at the room's relay for the chat alone |
 | `chat` | `number`, `from`, `text`, `sent_at` (the sender's clock), `gathered_at` (the gatherer's clock) | A line of the room, each once, in the order of its number: the latest 16 when the reader comes, then each as it is said. The reader's own lines come back as well |
 | `chat_gap` | `after`, `before` | More lines were said while the reader was away than `--chat-catch-up-lines`: those between were not fetched |
 | `joined`, `left` | `name` | Somebody's chat namespace `xmoq/chat/<room>/<name>` was announced, or withdrawn |
@@ -83,7 +83,7 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 
 ## Known gaps
 
-- **With a room, the chat is there only while the room has a broadcast**: the chat is on the session of the broadcast, and the room says where the relay is only with it. A line said meanwhile gets an `error`.
+- **With a room that names no relay, the chat is there only while the room has a broadcast**: the room says where the relay is only with the broadcast then (a room run without `RELAY_URL`, `spikes/durable-objects-room/README.md`). A line said meanwhile gets an `error`.
 - No speech yet: it waits for the transcriber's track.
 - **A reader started again in the same `--out` writes over the pictures of the one before**: the names begin from 1 again (`000001-...`), and what the earlier run kept is neither counted nor removed.
 - The video that ends (PUBLISH_DONE) is not asked for again on that session; the next session asks.

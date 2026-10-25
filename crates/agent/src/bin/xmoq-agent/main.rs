@@ -27,7 +27,7 @@ use xmoq_agent::presence::Presence;
 use xmoq_chat_tracks::names::Person;
 use xmoq_moqt_io::wt;
 use xmoq_moqt_io::{Connection, StreamConfig};
-use xmoq_viewer::room::{self, Broadcast};
+use xmoq_viewer::room::{self, Broadcast, Relay};
 use xmoq_viewer_io::room_socket::{ChatTokens, RoomSocket};
 use xmoq_viewer_io::session::termination_code;
 
@@ -154,23 +154,39 @@ impl Reader {
     }
 }
 
-/// Where one broadcast is read from.
+/// Where one session goes: a broadcast, or the room's relay for its chat.
 pub struct Place {
     url: String,
     cert_sha256: [u8; 32],
-    namespace: Vec<String>,
+    /// The broadcast's namespace; `None` for a session for the chat alone.
+    namespace: Option<Vec<String>>,
     token: Option<Vec<u8>>,
     chat_tokens: ChatTokens,
     /// The broadcast of the room this is, where a room said it.
     broadcast: Option<Broadcast>,
 }
 
-/// Waits until the room has a broadcast. `None` when the reader is to end
-/// first.
-async fn broadcast_of(room: &mut RoomSocket, reader: &mut Reader) -> Result<Option<Broadcast>> {
+/// Where the reader connects in a room.
+enum Found {
+    /// The room's broadcast, at its relay.
+    Broadcast(Broadcast),
+    /// The relay of the rooms, for the chat, while the room has no
+    /// broadcast.
+    Relay(Relay),
+}
+
+/// Waits until the room has a broadcast, or names its relay. `None` when
+/// the reader is to end first.
+async fn broadcast_of(room: &mut RoomSocket, reader: &mut Reader) -> Result<Option<Found>> {
     loop {
         if let Some(broadcast) = room.current() {
-            return Ok(Some(broadcast));
+            return Ok(Some(Found::Broadcast(broadcast)));
+        }
+        // WHY at once, without a broadcast: the chat is on the relay, and
+        // the reader takes part in it before anybody broadcasts. The session
+        // ends when a broadcast comes (`attend`), for one at its relay.
+        if let Some(relay) = room.relay() {
+            return Ok(Some(Found::Relay(relay)));
         }
         tokio::select! {
             heard = room.next() => {
@@ -205,7 +221,7 @@ async fn place(
             return Ok(Some(Place {
                 url: url.clone(),
                 cert_sha256: *cert_sha256,
-                namespace: namespace.clone(),
+                namespace: Some(namespace.clone()),
                 token: None,
                 chat_tokens: ChatTokens::default(),
                 broadcast: None,
@@ -214,23 +230,25 @@ async fn place(
         (Source::Room { ask_token, .. }, Some(room)) => (room, *ask_token),
         (Source::Room { .. }, None) => bail!("the room is gone"),
     };
-    let Some(broadcast) = broadcast_of(room, reader).await? else {
+    let Some(found) = broadcast_of(room, reader).await? else {
         return Ok(None);
     };
     let mut token = None;
     let mut chat_tokens = ChatTokens::default();
     if ask_token {
-        let Some(given) = reader
-            .unless_ended(
-                "the room's token",
-                ROOM_WAIT,
-                room.token(room::TokenRole::Sub, &broadcast.namespace),
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        token = given.map(|text| room::authorization_token(&text));
+        if let Found::Broadcast(broadcast) = &found {
+            let Some(given) = reader
+                .unless_ended(
+                    "the room's token",
+                    ROOM_WAIT,
+                    room.token(room::TokenRole::Sub, &broadcast.namespace),
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            token = given.map(|text| room::authorization_token(&text));
+        }
         let Some(tokens) = reader
             .unless_ended(
                 "the room's tokens for the chat",
@@ -243,14 +261,39 @@ async fn place(
         };
         chat_tokens = tokens;
     }
-    Ok(Some(Place {
-        url: broadcast.relay_url.clone(),
-        cert_sha256: room::certificate_hash(&broadcast.cert_sha256_hex)?,
-        namespace: broadcast.namespace.clone(),
-        token,
-        chat_tokens,
-        broadcast: Some(broadcast),
+    Ok(Some(match found {
+        Found::Broadcast(broadcast) => Place {
+            url: broadcast.relay_url.clone(),
+            cert_sha256: room::certificate_hash(&broadcast.cert_sha256_hex)?,
+            namespace: Some(broadcast.namespace.clone()),
+            token,
+            chat_tokens,
+            broadcast: Some(broadcast),
+        },
+        Found::Relay(relay) => Place {
+            url: relay.relay_url,
+            cert_sha256: room::certificate_hash(&relay.cert_sha256_hex)?,
+            namespace: None,
+            // WHY the chat's `sub` in the SETUP: a relay with
+            // `--auth-key-hex` takes any token of the room there, and the
+            // session's own, `sub` in the broadcast's namespace, needs a
+            // broadcast.
+            token: chat_tokens.subscribe.clone(),
+            chat_tokens,
+            broadcast: None,
+        },
     }))
+}
+
+/// Writes that the broadcast of `place` began or ended; nothing for a
+/// session for the chat alone.
+fn tell_broadcast(reader: &mut Reader, place: &Place, state: BroadcastState) {
+    if let Some(namespace) = &place.namespace {
+        reader.tell(&Event::Broadcast {
+            state,
+            namespace: namespace.clone(),
+        });
+    }
 }
 
 /// Who the reader is in the chat.
@@ -313,10 +356,7 @@ async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
         }
         just_moved = false;
         tried = Some(Instant::now());
-        reader.tell(&Event::Broadcast {
-            state: BroadcastState::Began,
-            namespace: place.namespace.clone(),
-        });
+        tell_broadcast(reader, &place, BroadcastState::Began);
         let streams = StreamConfig::default();
         let connecting = async { Ok(wt::connect(&place.url, place.cert_sha256, &streams).await?) };
         let attended = match reader
@@ -344,10 +384,7 @@ async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
             Err(error) => Err(error),
         };
         reader.presence.session_ended();
-        reader.tell(&Event::Broadcast {
-            state: BroadcastState::Ended,
-            namespace: place.namespace.clone(),
-        });
+        tell_broadcast(reader, &place, BroadcastState::Ended);
         match attended {
             Ok(Ended::Moved(url)) => {
                 let left = moved

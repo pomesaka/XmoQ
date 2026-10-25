@@ -265,6 +265,9 @@ struct Video {
 enum NoVideo {
     /// `--frames off`.
     Off,
+    /// The session is at the room's relay for the chat, and the room has no
+    /// broadcast yet.
+    NoBroadcast,
     /// The catalog or the subscription failed, or the video ended.
     Failed(String),
 }
@@ -273,6 +276,7 @@ impl NoVideo {
     fn message(&self) -> String {
         match self {
             Self::Off => "frame: --frames off".to_string(),
+            Self::NoBroadcast => "frame: no broadcast yet".to_string(),
             Self::Failed(why) => format!("frame: no video: {why}"),
         }
     }
@@ -437,11 +441,15 @@ pub async fn attend(
     // WHY before the chat: reading the catalog takes every event of the
     // session meanwhile (`Requests::catalog`), and the chat's lines and its
     // FETCH would be taken with them.
-    let mut video = Err(NoVideo::Off);
-    if let Some(pictures) = pictures.as_mut() {
+    // Where there is a broadcast to subscribe to, this is replaced below.
+    let mut video = Err(if pictures.is_some() {
+        NoVideo::NoBroadcast
+    } else {
+        NoVideo::Off
+    });
+    if let (Some(pictures), Some(namespace)) = (pictures.as_mut(), &place.namespace) {
         let broadcast = TrackNamespace::new(
-            place
-                .namespace
+            namespace
                 .iter()
                 .map(|field| field.as_bytes().to_vec())
                 .collect(),
