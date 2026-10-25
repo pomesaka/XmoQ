@@ -26,11 +26,11 @@
 //!   and continue serving other known Objects"); a subscriber that wants
 //!   them asks for the earlier range with a FETCH of its own.
 //! - WHY the latest and not the first Groups of the range: a viewer who
-//!   comes late reads the end of what was said first; the Rust client
-//!   answers what it let go of the same way (`crates/moqt-client/src/published.rs`).
-//!   The indicator stands before the Groups in Ascending order and after
-//!   them in Descending order, where it names Object 0 of the first Group
-//!   left out, as there.
+//!   comes late reads the end of what was said first. The Rust client
+//!   answers what it let go of by the same plan ([`plan_kept`]). The
+//!   indicator stands before the Groups in Ascending order and after them
+//!   in Descending order, where it names Object 0 of the first Group left
+//!   out.
 //! - WHY NOT refuse such a FETCH: a viewer who asked for the whole history
 //!   would get none of it.
 
@@ -55,21 +55,27 @@ pub fn pieces_of(
     groups: impl IntoIterator<Item = (u64, Vec<u8>)>,
     left_out: Option<(Location, bool)>,
 ) -> Vec<Piece> {
-    let mut pieces: Vec<Piece> = groups
-        .into_iter()
-        .map(|(group_id, payload)| {
-            Piece::Object(FetchObject {
-                group_id,
-                subgroup_id: Some(0),
-                object_id: 0,
-                // §12.4: the default, which the subgroup streams of
-                // `send_group` leave to the track.
-                publisher_priority: 128,
-                properties: vec![],
-                payload,
-            })
-        })
-        .collect();
+    let objects = groups.into_iter().map(|(group_id, payload)| FetchObject {
+        group_id,
+        subgroup_id: Some(0),
+        object_id: 0,
+        // §12.4: the default, which the subgroup streams of `send_group`
+        // leave to the track.
+        publisher_priority: 128,
+        properties: vec![],
+        payload,
+    });
+    pieces_with(objects, left_out)
+}
+
+/// What the fetch stream of a FETCH carries: `objects`, Object 0 of each
+/// Group in the order they are sent, and the End of Unknown Range indicator
+/// of [`Plan::left_out`], before or after them.
+pub fn pieces_with(
+    objects: impl IntoIterator<Item = FetchObject>,
+    left_out: Option<(Location, bool)>,
+) -> Vec<Piece> {
+    let mut pieces: Vec<Piece> = objects.into_iter().map(Piece::Object).collect();
     match left_out {
         Some((location, true)) => pieces.insert(0, Piece::EndOfRange(RangeEnd::Unknown, location)),
         Some((location, false)) => pieces.push(Piece::EndOfRange(RangeEnd::Unknown, location)),
@@ -151,9 +157,56 @@ fn last_of(end: Location) -> Location {
     }
 }
 
+/// What a publisher has of a track: Object 0 of every Group from `first`
+/// to `largest`, of which it still keeps those from `first_kept`; the ones
+/// before were published and let go of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kept {
+    /// The first Group it published.
+    pub first: u64,
+    /// The first Group it still keeps.
+    pub first_kept: u64,
+    /// The largest Group: the Largest Object is Object 0 of it.
+    pub largest: u64,
+}
+
 /// What a Standalone FETCH from `start` to the End Location `end` gets of a
-/// track whose largest Group is `largest`, sending at most `most` Groups:
-/// those the publisher has, where it keeps no more than `most`.
+/// track whose largest Group is `largest`, sending at most `most` Groups,
+/// where the publisher has every Group from 0 ([`plan_kept`]).
+///
+/// # Errors
+///
+/// Those of [`plan_kept`].
+pub fn plan(
+    start: Location,
+    end: Location,
+    largest: Option<u64>,
+    most: u64,
+    order: GroupOrder,
+) -> Result<Plan, u64> {
+    let kept = largest.map(|largest| Kept {
+        first: 0,
+        first_kept: 0,
+        largest,
+    });
+    plan_kept(start, end, kept, most, order)
+}
+
+/// What a Standalone FETCH from `start` to the End Location `end` gets of
+/// what the publisher has (`kept`), sending at most `most` Groups: the
+/// latest it keeps of the range. The Groups of the range it let go of or
+/// leaves out for `most` get one End of Unknown Range indicator.
+///
+/// In Ascending order the indicator names the last of them and stands
+/// before the Groups, so it covers the range from its start, and Groups of
+/// the range before [`Kept::first`] read as unknown as well. WHY that is
+/// let be: it is not false, and to say more would take a second indicator
+/// before it, whose far end the first would cover again.
+///
+/// In Descending order it names the first of them, from [`Kept::first`] on,
+/// and follows the Groups. WHY NOT a Group before [`Kept::first`]: nothing
+/// was published there, which the stream says by leaving it out
+/// (§10.12.3), and the indicator would name a Group that never was.
 ///
 /// # Errors
 ///
@@ -162,15 +215,16 @@ fn last_of(end: Location) -> Location {
 /// for the track or Start Location is greater than the Largest Object ...
 /// the publisher MUST return `REQUEST_ERROR` with error code
 /// `INVALID_RANGE`".
-pub fn plan(
+pub fn plan_kept(
     start: Location,
     end: Location,
-    largest: Option<u64>,
+    kept: Option<Kept>,
     most: u64,
     order: GroupOrder,
 ) -> Result<Plan, u64> {
+    let kept = kept.ok_or(request_error_code::INVALID_RANGE)?;
     let largest = Location {
-        group: largest.ok_or(request_error_code::INVALID_RANGE)?,
+        group: kept.largest,
         object: 0,
     };
     if start > largest {
@@ -188,39 +242,41 @@ pub fn plan(
     } else {
         (end.group, end)
     };
-    // The first Group whose Object 0 is not before the start.
+    // The first Group whose Object 0 is not before the start, and was
+    // published.
     let first = if start.object == 0 {
         Some(start.group)
     } else {
         start.group.checked_add(1)
     };
-    let Some(first) = first.filter(|first| *first <= last) else {
+    let Some(first) = first
+        .map(|first| first.max(kept.first))
+        .filter(|first| *first <= last)
+    else {
         return Ok(Plan {
             end_location,
             groups: None,
             left_out: None,
         });
     };
-    let in_range = (last - first).saturating_add(1);
-    if in_range <= most {
-        return Ok(Plan {
-            end_location,
-            groups: Some((first, last)),
-            left_out: None,
-        });
-    }
-    // At least one Group is left out: `in_range` is more than `most`, so
-    // `kept_first` is above `first`.
-    let kept_first = (last - most).saturating_add(1);
+    // The latest `most` Groups of the range, of those kept.
+    let within_most = last.checked_sub(most).map_or(0, |before| before + 1);
+    let sent_first = first.max(kept.first_kept).max(within_most);
     let ascending = order == GroupOrder::Ascending;
-    let indicator = Location {
-        group: if ascending { kept_first - 1 } else { first },
-        object: 0,
-    };
+    // In Ascending order the indicator names the last Group left out, and
+    // stands before the Groups; in Descending order the first, after them.
+    let left_out = (sent_first > first).then(|| {
+        let group = if ascending {
+            (sent_first - 1).min(last)
+        } else {
+            first
+        };
+        (Location { group, object: 0 }, ascending)
+    });
     Ok(Plan {
         end_location,
-        groups: (most > 0).then_some((kept_first, last)),
-        left_out: Some((indicator, ascending)),
+        groups: (sent_first <= last).then_some((sent_first, last)),
+        left_out,
     })
 }
 
@@ -433,5 +489,116 @@ mod tests {
         for (case, start, end, largest, most, order, expected) in cases {
             assert_eq!(plan(start, end, largest, most, order), expected, "{case}");
         }
+    }
+
+    /// `group,object`.
+    fn location_of(text: &str) -> Location {
+        let (group, object) = text.split_once(',').unwrap();
+        at(group.parse().unwrap(), object.parse().unwrap())
+    }
+
+    /// What `pieces` carry as column 10 of the table writes it.
+    fn written(pieces: &[Piece]) -> String {
+        let shown: Vec<String> = pieces
+            .iter()
+            .map(|piece| match piece {
+                Piece::Object(object) => object.group_id.to_string(),
+                Piece::EndOfRange(RangeEnd::Unknown, at) => format!("u{},{}", at.group, at.object),
+                Piece::EndOfRange(RangeEnd::NonExistent, at) => {
+                    format!("n{},{}", at.group, at.object)
+                }
+            })
+            .collect();
+        if shown.is_empty() {
+            "-".to_string()
+        } else {
+            shown.join(" ")
+        }
+    }
+
+    /// `fixtures/published-fetch/`, which the Rust client and `@xmoq/msf`
+    /// read as well: a publisher of every Group from column 2 to column 3,
+    /// which keeps those from column 4, answers by [`plan_kept`].
+    #[test]
+    fn a_fetch_gets_what_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/published-fetch/answers.tsv");
+        let mut rows = 0;
+        let mut differing = Vec::new();
+        for row in table.lines() {
+            let columns: Vec<&str> = row.split('\t').collect();
+            let [
+                name,
+                first,
+                newest,
+                first_kept,
+                start,
+                end,
+                order,
+                answer,
+                end_location,
+                pieces,
+            ] = columns[..]
+            else {
+                panic!("a row of ten columns: {row:?}");
+            };
+            let (first, newest, first_kept): (u64, u64, u64) = (
+                first.parse().unwrap(),
+                newest.parse().unwrap(),
+                first_kept.parse().unwrap(),
+            );
+            let order = match order {
+                "ascending" => Ascending,
+                "descending" => Descending,
+                other => panic!("{name}: Group Order {other:?}"),
+            };
+            let kept = Kept {
+                first,
+                first_kept,
+                largest: newest,
+            };
+            let got = match plan_kept(
+                location_of(start),
+                location_of(end),
+                Some(kept),
+                u64::MAX,
+                order,
+            ) {
+                Err(code) => {
+                    assert_eq!(code, request_error_code::INVALID_RANGE, "{name}");
+                    (
+                        "invalid_range".to_string(),
+                        "-".to_string(),
+                        "-".to_string(),
+                    )
+                }
+                Ok(planned) => {
+                    let mut groups: Vec<(u64, Vec<u8>)> = planned
+                        .groups
+                        .map(|(from, to)| (from..=to).map(|group| (group, vec![])).collect())
+                        .unwrap_or_default();
+                    if order == Descending {
+                        groups.reverse();
+                    }
+                    let at = planned.end_location;
+                    (
+                        "ok".to_string(),
+                        format!("{},{}", at.group, at.object),
+                        written(&pieces_of(groups, planned.left_out)),
+                    )
+                }
+            };
+            if got
+                != (
+                    answer.to_string(),
+                    end_location.to_string(),
+                    pieces.to_string(),
+                )
+            {
+                differing.push(format!("{name}: {got:?}"));
+            }
+            rows += 1;
+        }
+        assert!(differing.is_empty(), "rows that differ: {differing:#?}");
+        assert_eq!(rows, 47, "the rows of the table");
     }
 }

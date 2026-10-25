@@ -25,8 +25,8 @@ use xmoq_moqt_io::{
     Connection, PeerRequestClose, SendStream, Trace, WriteError, open_fetch_stream, send_message,
 };
 
-use crate::published::Piece;
 use crate::report;
+use xmoq_track_serving::fetch::Piece;
 
 /// FETCH requests of the peer that are answered at once; one more is
 /// refused with `EXCESSIVE_LOAD`. As many as `@xmoq/moqt` answers.
@@ -64,9 +64,14 @@ pub const PEER_END_WAIT: Duration = Duration::from_secs(3);
 /// wait.
 const NOTE_QUEUE: usize = 16;
 
-/// Messages for one request stream that its task has not sent yet. One more
-/// is dropped: it is the `REQUEST_OK` of a `REQUEST_UPDATE` that changes
-/// nothing, to a peer that takes none of them.
+/// Messages for one request stream that its task has not sent yet: the
+/// `REQUEST_OK` of a `REQUEST_UPDATE` that changes nothing. None is dropped
+/// (§10.9: "exactly one"); where one more does not fit, the FETCH ends with
+/// `EXCESSIVE_LOAD` (`Answers::say`), as the gatherer's and the
+/// transcriber's do (`Fetches::updated` of `xmoq-track-serving`). WHY 16
+/// and not their 64 (`COMMAND_QUEUE`): as many writes as `@xmoq/moqt` lets
+/// be under way on one stream (`MAX_WRITES_UNDER_WAY`), so that the client
+/// the interop drives gives up where a page would. **Provisional.**
 const SAY_QUEUE: usize = 16;
 
 /// How this client answers a FETCH, from its flags: a publisher that is
@@ -97,6 +102,8 @@ pub enum Happened {
     PeerClosed(PeerRequestClose),
     /// The client leaves while the FETCH is open.
     Left,
+    /// The answer to a `REQUEST_UPDATE` did not fit ([`SAY_QUEUE`]).
+    UpdateUnanswered,
 }
 
 /// What becomes of this client's direction of the request stream.
@@ -145,6 +152,11 @@ pub fn step(happened: Happened) -> Option<Ended> {
         // This endpoint stopped the stream, or the connection is gone.
         Happened::PeerClosed(PeerRequestClose::Abandoned) => ("abandoned", None, cancelled),
         Happened::Left => ("left", None, cancelled),
+        Happened::UpdateUnanswered => (
+            "excessive_load",
+            None,
+            RequestEnd::Reset(stream_reset_code::EXCESSIVE_LOAD),
+        ),
     };
     Some(Ended { how, code, request })
 }
@@ -334,11 +346,16 @@ impl Answers {
     }
 
     /// Has the task of the request stream send a message: the `REQUEST_OK`
-    /// of a `REQUEST_UPDATE`.
-    pub fn say(&self, stream: u64, message: ControlMessage) {
-        if let Some(answered) = self.open.get(&stream) {
-            // Full, or the task is done: see `SAY_QUEUE`.
-            let _ = answered.says.try_send(message);
+    /// of a `REQUEST_UPDATE`. Where it does not fit, the FETCH ends
+    /// ([`SAY_QUEUE`]).
+    pub fn say(&mut self, stream: u64, message: ControlMessage) -> Option<Over> {
+        let answered = self.open.get(&stream)?;
+        match answered.says.try_send(message) {
+            // Closed: the task is done, and the FETCH with it.
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => None,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.happened(stream, Happened::UpdateUnanswered)
+            }
         }
     }
 
@@ -1626,6 +1643,14 @@ mod tests {
                 None,
             ),
             (Happened::Left, Some("left"), None, cancel),
+            // §10.9: "exactly one" answer; the FETCH ends where it does not
+            // fit.
+            (
+                Happened::UpdateUnanswered,
+                Some("excessive_load"),
+                None,
+                Some(RequestEnd::Reset(stream_reset_code::EXCESSIVE_LOAD)),
+            ),
         ];
         for (happened, how, code, request) in cases {
             let ended = step(happened);

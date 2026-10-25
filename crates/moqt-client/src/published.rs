@@ -3,24 +3,16 @@
 
 use std::collections::VecDeque;
 
-use xmoq_moqt::fetch::{FetchObject, RangeEnd};
-use xmoq_moqt::message::request_error_code;
+use xmoq_moqt::fetch::FetchObject;
 use xmoq_moqt::name::Location;
 use xmoq_moqt::params::GroupOrder;
+use xmoq_track_serving::fetch::{Kept, Piece, pieces_with, plan_kept};
 
 /// Objects kept at most. Provisional.
 pub const MAX_KEPT_OBJECTS: usize = 1024;
 
 /// Bytes of payload kept at most. Provisional.
 pub const MAX_KEPT_BYTES: usize = 4 * 1024 * 1024;
-
-/// What a fetch stream carries after its header, in order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Piece {
-    Object(FetchObject),
-    /// An End of Range indicator (§11.4.4.2) with this Location.
-    EndOfRange(RangeEnd, Location),
-}
 
 /// The answer to a FETCH that is accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,28 +31,9 @@ pub struct Answer {
 pub struct Published {
     kept: VecDeque<FetchObject>,
     bytes: usize,
-    /// The first Group that was published.
+    /// The first Group that was published. Those from it to the first one
+    /// kept were let go of for the limits.
     first_group: Option<u64>,
-    /// The largest Location of an Object that was let go of for the limits.
-    /// The Objects from the first Group to it were published and are not
-    /// here any more.
-    let_go_through: Option<Location>,
-}
-
-fn location(object: &FetchObject) -> Location {
-    Location {
-        group: object.group_id,
-        object: object.object_id,
-    }
-}
-
-/// The last Location an End Location covers: an End Location names the last
-/// Object plus 1, and with Object 0 the whole Group (§10.12.1).
-fn last_of(end: Location) -> Location {
-    Location {
-        group: end.group,
-        object: end.object.checked_sub(1).unwrap_or(u64::MAX),
-    }
 }
 
 impl Published {
@@ -77,14 +50,18 @@ impl Published {
             }
             if let Some(gone) = self.kept.pop_front() {
                 self.bytes = self.bytes.saturating_sub(gone.payload.len());
-                self.let_go_through = Some(location(&gone));
             }
         }
     }
 
-    /// The Largest Object (§10.7).
-    fn largest(&self) -> Option<Location> {
-        self.kept.back().map(location)
+    /// What this client has of its track: the first Group it published,
+    /// the first it keeps, and the Largest Object's (§10.7).
+    fn kept(&self) -> Option<Kept> {
+        Some(Kept {
+            first: self.first_group?,
+            first_kept: self.kept.front()?.group_id,
+            largest: self.kept.back()?.group_id,
+        })
     }
 
     /// A publisher that published Object 0 of every Group from
@@ -107,37 +84,14 @@ impl Published {
             bytes: kept.len() * 2,
             kept,
             first_group: Some(first_group),
-            let_go_through: first_kept_group
-                .checked_sub(1)
-                .and_then(|group| (group >= first_group).then_some(Location { group, object: 0 })),
         }
     }
 
     /// What a Standalone FETCH for `start` to the End Location `end` gets
-    /// (§10.12.3).
-    ///
-    /// The Objects that exist in the range, in the Group Order that was
-    /// asked for; what is missing between them does not exist, which a
-    /// fetch stream says by leaving it out ("Any gaps in the Group and
-    /// Object IDs in the response stream indicate objects that do not
-    /// exist"). WHY an End of Unknown Range indicator for what was let go
-    /// of: those Objects were published, so leaving them out would say
-    /// something false, and so would End of Non-Existent Range; what this
-    /// client can still say of them is that it does not know (§11.4.4.2).
-    ///
-    /// The indicator names Object 0 of a Group that was let go of: the last
-    /// such Group of the range in Ascending order, where it stands before
-    /// the Objects, and the first in Descending order, where it follows
-    /// them. WHERE it stands in Descending order the draft does not say: it
-    /// has an indicator cover what lies "between the last serialized
-    /// Object, if any, and this Location". None is written where no Object
-    /// that was let go of lies in the range.
-    ///
-    /// WHAT the Ascending indicator covers that was never published: it has
-    /// no near end, so the Groups of the range before the first one this
-    /// client published read as unknown too. That is not false, and to say
-    /// more would take a second indicator before it, whose far end the
-    /// first would cover again.
+    /// (§10.12.3): every Object it keeps in the range, in the Group Order
+    /// that was asked for, and an End of Unknown Range indicator for those
+    /// of the range it let go of, as the gatherer and the transcriber answer
+    /// (`plan_kept` of `xmoq-track-serving`, where the reasons are).
     ///
     /// # Errors
     ///
@@ -149,73 +103,33 @@ impl Published {
         end: Location,
         group_order: GroupOrder,
     ) -> Result<Answer, u64> {
-        let Some(largest) = self.largest() else {
-            return Err(request_error_code::INVALID_RANGE);
-        };
-        if start > largest {
-            return Err(request_error_code::INVALID_RANGE);
+        // No limit but what is kept: the answer holds no more than that.
+        let planned = plan_kept(start, end, self.kept(), u64::MAX, group_order)?;
+        let mut objects: Vec<FetchObject> = planned
+            .groups
+            .map(|(first, last)| {
+                self.kept
+                    .iter()
+                    .filter(|object| (first..=last).contains(&object.group_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if group_order == GroupOrder::Descending {
+            objects.reverse();
         }
-        // §10.13: the End Location that was asked for, unless it is beyond
-        // the Largest Object.
-        let (last, end_location) = if last_of(end) > largest {
-            let after = Location {
-                group: largest.group,
-                // This client's Objects are Object 0, which has one after
-                // it.
-                object: largest.object.saturating_add(1),
-            };
-            (largest, after)
-        } else {
-            (last_of(end), end)
-        };
-        let mut objects: Vec<Piece> = self
-            .kept
-            .iter()
-            .filter(|object| (start..=last).contains(&location(object)))
-            .cloned()
-            .map(Piece::Object)
-            .collect();
-        let unknown = |group| Piece::EndOfRange(RangeEnd::Unknown, Location { group, object: 0 });
-        let pieces = match (group_order, self.let_go_in(start, last)) {
-            (GroupOrder::Ascending, None) => objects,
-            (GroupOrder::Ascending, Some((_, to))) => {
-                let mut pieces = vec![unknown(to)];
-                pieces.append(&mut objects);
-                pieces
-            }
-            // One Object a Group, so the order of the Groups is the order of
-            // the Objects.
-            (GroupOrder::Descending, let_go) => {
-                objects.reverse();
-                objects.extend(let_go.map(|(from, _)| unknown(from)));
-                objects
-            }
-        };
         Ok(Answer {
-            end_location,
-            pieces,
+            end_location: planned.end_location,
+            pieces: pieces_with(objects, planned.left_out),
         })
-    }
-
-    /// The first and the last Group whose Object was let go of and lies in
-    /// the range from `start` to `last`.
-    fn let_go_in(&self, start: Location, last: Location) -> Option<(u64, u64)> {
-        let gone = self.let_go_through?;
-        // The first Group whose Object 0 is not before `start`.
-        let from_start = if start.object == 0 {
-            start.group
-        } else {
-            start.group.checked_add(1)?
-        };
-        let from = from_start.max(self.first_group?);
-        let to = gone.group.min(last.group);
-        (from <= to).then_some((from, to))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use xmoq_moqt::fetch::{FetchEvent, FetchHeader, FetchStreamDecoder, FetchStreamEncoder};
+    use xmoq_moqt::fetch::{
+        FetchEvent, FetchHeader, FetchStreamDecoder, FetchStreamEncoder, RangeEnd,
+    };
 
     use super::*;
 
@@ -357,13 +271,13 @@ mod tests {
         for group in 0..=5 {
             published.push(object(group, 1024 * 1024));
         }
-        assert_eq!(published.largest(), Some(at(5, 0)));
+        assert_eq!(published.kept().map(|kept| kept.largest), Some(5));
         assert_eq!(shown_of(&published, at(4, 0)), ["u1,0", "2", "3", "4"]);
 
         // One Object over the limit alone is kept: it is the Largest Object.
         let mut published = Published::default();
         published.push(object(0, 5 * 1024 * 1024));
-        assert_eq!(published.largest(), Some(at(0, 0)));
+        assert_eq!(published.kept().map(|kept| kept.largest), Some(0));
         assert_eq!(shown_of(&published, at(0, 1)), ["0"]);
 
         // And 1024 Objects at most.
