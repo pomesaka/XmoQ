@@ -11,7 +11,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 
 ## Architecture at a glance
 
-![Proposed XmoQ architecture](docs/assets/architecture.svg)
+![XmoQ architecture](docs/assets/architecture.svg)
 
 *The intended components. What of it is built is in the [architecture](docs/architecture.md).*
 
