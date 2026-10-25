@@ -2,7 +2,8 @@
 // token, the count, that it carries no chat, and a meeting of 49.
 //
 // Usage: node check.mjs [http://127.0.0.1:8787], with the AUTH_KEY_HEX,
-// RELAY_URL, RELAY_CERT_SHA256_HEX and TRANSCRIPT_PREFIX run.mjs was given,
+// RELAY_URL, RELAY_CERT_SHA256_HEX, TRANSCRIPT_PREFIX and
+// MEETING_TRANSCRIPT_PREFIX run.mjs was given,
 // if any.
 const origin = process.argv[2] ?? "http://127.0.0.1:8787";
 const room = `check-${Date.now()}`;
@@ -91,12 +92,16 @@ if (hello === undefined || "history" in hello) fail("the late one's hello is mis
 	say("the relay in the late one's hello:", hello?.relay);
 	if (JSON.stringify(hello?.relay) !== JSON.stringify(told)) fail(`the hello names the relay ${JSON.stringify(hello?.relay)}, not ${JSON.stringify(told)}`);
 	if (hello?.broadcast !== null) fail("the late one's hello has a broadcast, where nobody broadcasts");
-	// The transcript's prefix, with the room's name put in for {room}.
-	const prefix = process.env.TRANSCRIPT_PREFIX
-		? process.env.TRANSCRIPT_PREFIX.replaceAll("{room}", room).split("/")
-		: null;
-	say("the transcript in the late one's hello:", hello?.transcript);
-	if (JSON.stringify(hello?.transcript) !== JSON.stringify(prefix)) fail(`the hello names the transcript ${JSON.stringify(hello?.transcript)}, not ${JSON.stringify(prefix)}`);
+	// The transcripts' prefixes, of the broadcast and of the meeting, with the
+	// room's name put in for {room}.
+	for (const [key, setting] of [
+		["transcript", process.env.TRANSCRIPT_PREFIX],
+		["meetingTranscript", process.env.MEETING_TRANSCRIPT_PREFIX],
+	]) {
+		const prefix = setting ? setting.replaceAll("{room}", room).split("/") : null;
+		say(`the ${key} in the late one's hello:`, hello?.[key]);
+		if (JSON.stringify(hello?.[key]) !== JSON.stringify(prefix)) fail(`the hello names the ${key} ${JSON.stringify(hello?.[key])}, not ${JSON.stringify(prefix)}`);
+	}
 }
 
 // 3. The count: the late one is told that 3 are connected.

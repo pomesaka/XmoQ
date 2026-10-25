@@ -13,7 +13,7 @@
 // outlive a publisher that vanished.
 //
 // On the WebSocket the room sends {type: "hello", connected, broadcast,
-// relay, transcript} first, then {type: "connected", connected} when the count changes,
+// relay, transcript, meetingTranscript} first, then {type: "connected", connected} when the count changes,
 // {type: "broadcast", broadcast} when the publisher registers or leaves,
 // and {type: "reaction", emoji} when somebody sent one (with
 // REACTION_BATCH_MS, {type: "reactions", counts} for all of that while).
@@ -30,13 +30,23 @@
 // and no one broadcast says where the room's relay is. WHY NOT a flag of
 // each client: whoever uses a room would have to know the relay as well.
 //
-// **The transcript of a room** (decided on 2026-10-25): `transcript` of the
-// hello is the prefix a transcriber listens under for the room, its fields,
-// from `TRANSCRIPT_PREFIX` with `{room}` put in the room's name
-// (`xmoq/meet/{room}` for meetings, whose participants publish under
-// `xmoq/meet/<room>/<id>`; `xmoq/demo` for the demo's one broadcast), and
-// null without it. Its transcript is `speech` of `xmoq/transcript/<prefix>`
-// (`crates/transcript-tracks`), which a reader follows. WHY from the
+// **The transcripts of a room** (decided on 2026-10-25): `transcript` of the
+// hello is the prefix a transcriber listens under for the room's broadcast,
+// its fields, from `TRANSCRIPT_PREFIX` (`xmoq/demo` for the demo's one
+// broadcast); `meetingTranscript` the one for the room's meeting, whose
+// participants publish under `xmoq/meet/<room>/<id>`, from
+// `MEETING_TRANSCRIPT_PREFIX` (`xmoq/meet/{room}` for a transcriber of each
+// room). In both `{room}` is put in the room's name, and each is null
+// without its setting. A transcript is `speech` of
+// `xmoq/transcript/<prefix>` (`crates/transcript-tracks`), which a reader
+// follows: a reader of the meeting the one, any other the other. WHY two:
+// a room has a broadcast and a meeting, which are under prefixes of their
+// own, and a reader of one that took the other's would follow a transcript
+// of nobody it reads. WHY NOT the meeting's fixed as `xmoq/meet/<room>`,
+// though its namespaces are: which prefix a transcriber listens under is
+// how it is run, one a room (`xmoq/meet/<room>`) or one for every room
+// (`xmoq/meet`), and the room cannot tell which; fixed, it would name a
+// track that is not there for the second. WHY from the
 // Worker's settings, beside the relay: one transcriber listens under the
 // prefix to every broadcast of the room, and the room says where those are.
 // WHY NOT the transcriber telling the room over the WebSocket that it is
@@ -156,7 +166,8 @@ export class Room {
 					connected: this.ctx.getWebSockets().length,
 					broadcast: this.broadcast(),
 					relay: this.relay(),
-					transcript: this.transcript(room),
+					transcript: this.transcript(this.env.TRANSCRIPT_PREFIX, room),
+					meetingTranscript: this.transcript(this.env.MEETING_TRANSCRIPT_PREFIX, room),
 				}),
 			);
 			this.tellAll({ type: "connected", connected: this.ctx.getWebSockets().length });
@@ -181,13 +192,13 @@ export class Room {
 
 	/**
 	 * The prefix a transcriber listens under for the room named `room`, its
-	 * fields, or null where the Worker was not told. Null as well where a
+	 * fields, from the setting `prefix`, or null where the Worker was not
+	 * told. Null as well where a
 	 * field would be empty or have a `*`, which the relay reads as every
 	 * namespace under the ones before it (Q50): a room's name with a `/` or a
 	 * `*` makes no prefix.
 	 */
-	transcript(room) {
-		const prefix = this.env.TRANSCRIPT_PREFIX;
+	transcript(prefix, room) {
 		if (typeof prefix !== "string" || prefix === "") return null;
 		if (room.includes("/") || room.includes("*")) return null;
 		const fields = prefix.replaceAll("{room}", room).split("/");

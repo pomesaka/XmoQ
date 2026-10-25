@@ -189,15 +189,12 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 				// and without one.
 				RELAY_URL: `https://127.0.0.1:${options["relay-port"]}/`,
 				RELAY_CERT_SHA256_HEX: certSha256Hex,
-				// The prefix a transcriber listens under for a room: that of
-				// its meeting (`/meet`). WHY not the demo's one broadcast
-				// (`xmoq/demo`), which the transcriber reads as well: the room
-				// names one prefix, and a meeting has no other way to say
-				// where its transcript is; the watching page reads the
-				// broadcast's by its namespace, and an agent in the room of
-				// the broadcast is given `--transcript xmoq/demo`
-				// (`scripts/agent-demo.sh`).
-				TRANSCRIPT_PREFIX: "xmoq/meet/{room}",
+				// The prefixes the transcriber listens under for a room: the
+				// demo's one broadcast, whatever the room (`NAMESPACE` of
+				// `shared.ts`), and the room's meeting (`/meet`), which it
+				// reads for the room "demo" alone (`MEETING_PREFIX`).
+				TRANSCRIPT_PREFIX: NAMESPACE.join("/"),
+				MEETING_TRANSCRIPT_PREFIX: "xmoq/meet/{room}",
 			},
 		})
 	: undefined;

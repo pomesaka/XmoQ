@@ -15,14 +15,16 @@ const miniflare = new Miniflare({
 	// REACTION_BATCH_MS: a trial, the reactions of that long as one message.
 	// RELAY_URL and RELAY_CERT_SHA256_HEX: the relay the hello names, with a
 	// broadcast and without; none without them.
-	// TRANSCRIPT_PREFIX: the prefix of a room's transcript, with {room} put
-	// in its name (xmoq/meet/{room}); none without it.
+	// TRANSCRIPT_PREFIX and MEETING_TRANSCRIPT_PREFIX: the prefixes of the
+	// transcripts of a room's broadcast and of its meeting, with {room} put in
+	// its name (xmoq/demo, xmoq/meet/{room}); none without each.
 	bindings: {
 		AUTH_KEY_HEX: process.env.AUTH_KEY_HEX ?? "",
 		REACTION_BATCH_MS: process.env.REACTION_BATCH_MS ?? "0",
 		RELAY_URL: process.env.RELAY_URL ?? "",
 		RELAY_CERT_SHA256_HEX: process.env.RELAY_CERT_SHA256_HEX ?? "",
 		TRANSCRIPT_PREFIX: process.env.TRANSCRIPT_PREFIX ?? "",
+		MEETING_TRANSCRIPT_PREFIX: process.env.MEETING_TRANSCRIPT_PREFIX ?? "",
 	},
 	host: "127.0.0.1",
 	port,
