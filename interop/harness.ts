@@ -175,7 +175,9 @@ export function withTimeout<T>(
  *
  * WHY it stops looking at the limit: a loop that went on would keep the
  * process alive after the run has failed, and the run would end at the limit
- * of whoever started it and not with its own message.
+ * of whoever started it and not with its own message. WHY each look is
+ * given what is left of the time: a look that never returns, a call to a page
+ * that hangs, would otherwise hold the loop past its limit.
  */
 export async function pollFor<T>(
 	// A page is asked with a call that takes time, so `look` may be async.
@@ -185,7 +187,11 @@ export async function pollFor<T>(
 ): Promise<T> {
 	const deadline = performance.now() + timeoutMs;
 	for (;;) {
-		const found = await look();
+		const found = await withTimeout(
+			Promise.resolve(look()),
+			what,
+			Math.max(0, deadline - performance.now()),
+		);
 		if (found !== undefined) return found;
 		if (performance.now() >= deadline) {
 			throw new Error(`timed out waiting for ${what}`);
@@ -315,6 +321,7 @@ export function ensureCertificate(): { sha256Hex: string; validTo: string } {
 
 export interface LoggedProcess {
 	child: ChildProcessWithoutNullStreams;
+	/** Resolves once the process has exited and every line it printed has been read. */
 	exited: Promise<number | null>;
 	/** The first line that matches, among the lines printed so far and later. */
 	waitForLine(pattern: RegExp, timeoutMs?: number): Promise<RegExpMatchArray>;
@@ -384,8 +391,12 @@ function spawnLogged(
 		pattern: RegExp;
 		resolve: (match: RegExpMatchArray) => void;
 	}[] = [];
+	// WHY "close" and not "exit": Node fires "exit" while the child's stdio
+	// may still hold lines (the documentation of `child_process`, event
+	// 'exit'), and a driver that reads the last lines once the process is
+	// gone would miss them, or take a line printed last for one never printed.
 	const exited = new Promise<number | null>((resolve) =>
-		child.once("exit", resolve),
+		child.once("close", resolve),
 	);
 	/** Called after every line, by those that wait for more than one line. */
 	const lookers: (() => void)[] = [];
@@ -430,6 +441,24 @@ function spawnLogged(
 			const match = line.match(pattern);
 			return match === null ? [] : [match];
 		});
+	/**
+	 * `some`, where the relay dropped none of the lines it printed among
+	 * them. WHY a failure: the own relay drops lines its log queue has no
+	 * room for and says so with `LOG_DROPPED` (`Log::print` in
+	 * crates/relay/src/hub.rs), and a count of lines that lacks some is a
+	 * wrong answer and not a slow one. The relay queues the notice right
+	 * before the next line that fits, so it is among `some` when one of their
+	 * lines is missing, but for a slot that frees between those two sends.
+	 */
+	const complete = (some: string[]): string[] => {
+		const dropped = some.find((line) => /^LOG_DROPPED /.test(line));
+		if (dropped !== undefined) {
+			throw new Error(
+				`${source} dropped lines of its log (${dropped}), so they cannot be counted`,
+			);
+		}
+		return some;
+	};
 
 	const onLine = (line: string): void => {
 		// Strip the ANSI colors `tracing` adds, so the patterns can match.
@@ -455,6 +484,11 @@ function spawnLogged(
 			buffered = parts.pop() ?? "";
 			for (const part of parts) if (part.length > 0) onLine(part);
 		});
+		// A last line without a newline, as a process that is killed can leave.
+		stream.on("end", () => {
+			if (buffered.length > 0) onLine(buffered);
+			buffered = "";
+		});
 	}
 
 	return {
@@ -477,11 +511,11 @@ function spawnLogged(
 		matches: (pattern) => matchesIn(lines, pattern),
 		async waitForLines(pattern, count, timeoutMs) {
 			const last = await indexOfNth(pattern, count, timeoutMs);
-			return matchesIn(lines.slice(0, last + 1), pattern);
+			return matchesIn(complete(lines.slice(0, last + 1)), pattern);
 		},
 		async linesBefore(fence, pattern, timeoutMs) {
 			const at = await indexOfNth(fence.line, fence.nth ?? 1, timeoutMs);
-			return matchesIn(lines.slice(0, at), pattern);
+			return matchesIn(complete(lines.slice(0, at)), pattern);
 		},
 		hasPrinted: (pattern) => lines.some((line) => pattern.test(line)),
 	};
@@ -492,12 +526,17 @@ async function stopProcess(
 	target: LoggedProcess,
 	signal: "SIGINT" | "SIGTERM",
 ): Promise<void> {
-	target.child.kill(signal);
-	const escalation = setTimeout(
-		() => target.child.kill("SIGKILL"),
-		KILL_GRACE_MS,
-	);
-	await target.exited;
+	const { child } = target;
+	// WHY the process's own exit and not `exited`: nothing is read here, and
+	// a process of the child's own that holds its pipes would keep `exited`
+	// from resolving.
+	const gone =
+		child.exitCode !== null || child.signalCode !== null
+			? Promise.resolve()
+			: new Promise((resolve) => child.once("exit", resolve));
+	child.kill(signal);
+	const escalation = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+	await gone;
 	clearTimeout(escalation);
 }
 

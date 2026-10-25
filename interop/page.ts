@@ -1425,6 +1425,9 @@ window.xmoqOwn = {
 		const until = performance.now() + timeoutMs;
 		for (;;) {
 			const playing = audioPlaying;
+			if (playing === undefined && performance.now() >= until) {
+				throw new Error(`nothing was played within ${timeoutMs} ms`);
+			}
 			if (
 				playing !== undefined &&
 				(playing.pieces.length >= pieces || performance.now() >= until)
@@ -2123,6 +2126,9 @@ window.xmoqOwn = {
 		const until = performance.now() + timeoutMs;
 		for (;;) {
 			const playing = videoPlaying;
+			if (playing === undefined && performance.now() >= until) {
+				throw new Error(`nothing was played within ${timeoutMs} ms`);
+			}
 			if (
 				playing !== undefined &&
 				(playing.frames.length >= frames ||
@@ -2149,15 +2155,22 @@ window.xmoqOwn = {
 		}
 	}),
 
-	catalogEnded: withPlainErrors(async () => {
+	catalogEnded: withPlainErrors(async (timeoutMs: number) => {
+		const until = performance.now() + timeoutMs;
 		for (;;) {
 			const ended = catalogReading?.ended;
 			if (ended !== undefined) return ended;
+			if (performance.now() >= until) {
+				throw new Error(
+					`the catalog track did not end within ${timeoutMs} ms (${catalogReading === undefined ? "nothing followed" : `${catalogReading.states.length} states`})`,
+				);
+			}
 			await new Promise((resolve) => setTimeout(resolve, 20));
 		}
 	}),
 
-	catalogReport: withPlainErrors(async (states: number) => {
+	catalogReport: withPlainErrors(async (states: number, timeoutMs: number) => {
+		const until = performance.now() + timeoutMs;
 		for (;;) {
 			const reading = catalogReading;
 			if (
@@ -2169,6 +2182,11 @@ window.xmoqOwn = {
 					states: [...reading.states],
 					joiningFetch: reading.joiningFetch,
 				};
+			}
+			if (performance.now() >= until) {
+				throw new Error(
+					`the page did not have ${states} states of the catalog within ${timeoutMs} ms: ${reading === undefined ? "nothing followed" : `${reading.states.length} states, Joining FETCH ${reading.joiningFetch ?? "not over"}`}`,
+				);
 			}
 			await new Promise((resolve) => setTimeout(resolve, 20));
 		}

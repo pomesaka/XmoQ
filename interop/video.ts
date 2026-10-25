@@ -314,6 +314,7 @@ import {
 	pollFor,
 	type RunContext,
 	runCleanups,
+	STEP_TIMEOUT_MS,
 	spawnMlmsub,
 	spawnRustClient,
 	startMoqlivemockPublisher,
@@ -420,13 +421,15 @@ async function fromMlmpub(): Promise<string> {
 	const page = await openConnectedPage(context, "viewer", "own-browser");
 	const catalog = await withTimeout(
 		page.evaluate(
-			async ([namespace]) => {
+			async ([namespace, timeoutMs]) => {
 				await window.xmoqOwn.followCatalog(namespace);
-				return window.xmoqOwn.catalogReport(1);
+				return window.xmoqOwn.catalogReport(1, timeoutMs);
 			},
-			[MLMPUB_NAMESPACE] satisfies [string],
+			[MLMPUB_NAMESPACE, STEP_TIMEOUT_MS] satisfies [string, number],
 		),
 		"the page to read the catalog",
+		// The page says what it had once its own time is over.
+		2 * STEP_TIMEOUT_MS,
 	);
 	const track = catalog.states
 		.at(0)
@@ -516,13 +519,15 @@ async function codecOfTheCatalog(
 ): Promise<string> {
 	const catalog = await withTimeout(
 		viewer.evaluate(
-			async ([namespace]) => {
+			async ([namespace, timeoutMs]) => {
 				await window.xmoqOwn.followCatalog(namespace);
-				return window.xmoqOwn.catalogReport(1);
+				return window.xmoqOwn.catalogReport(1, timeoutMs);
 			},
-			[PAGE_NAMESPACE] satisfies [string],
+			[PAGE_NAMESPACE, STEP_TIMEOUT_MS] satisfies [string, number],
 		),
 		"the viewer to read the catalog",
+		// The page says what it had once its own time is over.
+		2 * STEP_TIMEOUT_MS,
 	);
 	const track = catalog.states
 		.at(0)
