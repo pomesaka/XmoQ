@@ -708,6 +708,15 @@ enum ConnectStage {
 }
 
 impl ConnectStage {
+    /// How far along the way to a session this is.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Resolving => 0,
+            Self::Handshake { .. } => 1,
+            Self::ConnectRequest { .. } => 2,
+        }
+    }
+
     fn timed_out(self, limit: Duration) -> ConnectionLost {
         ConnectionLost(match self {
             Self::Resolving => {
@@ -745,8 +754,34 @@ pub async fn connect(
     connect_within(url, cert_sha256, streams, CONNECT_TIMEOUT, None).await
 }
 
+/// How often a client begins one more attempt to connect while the ones
+/// before have no answer ([`connect`]). Provisional.
+///
+/// WHY attempts that overlap: a server that is not there yet (a relay
+/// started anew on its port, an upstream relay that comes back) gets
+/// nothing of an attempt that began before it was there but the Initial
+/// that QUIC sends again, after waits that double (1 s, then 2, then 4: an
+/// edge relay connected 3.9 s after its upstream was back, in the run of
+/// `docs/experiments/2026-10-25-a-viewer-of-an-edge-when-the-origin-goes.md`).
+/// A new attempt begins with its first Initial, so the client connects
+/// within about this long of the server's coming. The earlier attempts are
+/// kept, so that a link slow enough that one handshake takes longer than
+/// this still connects as before. WHY NOT one attempt cut short and begun
+/// anew: a handshake that needs longer than the cut would never complete.
+/// WHY NOT a smaller `initial_rtt` for quinn: the waits between the
+/// Initials would still double, only from a shorter first one.
+const CONNECT_ATTEMPT_EVERY: Duration = Duration::from_secs(1);
+
 /// [`connect`] with the time limit and the local address of the caller's
 /// choice; `None` is [`local_address_for`] the server.
+///
+/// One attempt is begun at once and one more every
+/// [`CONNECT_ATTEMPT_EVERY`] while none has its session, each on a socket of
+/// its own, within `limit` in all. The first that has its session is the
+/// one; the others are given up, and one that has a session as well is
+/// closed. An attempt that fails, rather than going unanswered, ends the
+/// connect with its error: the server answered, and would answer the next
+/// the same. With `local` given there is one attempt alone, on that socket.
 async fn connect_within(
     url: &str,
     cert_sha256: [u8; 32],
@@ -754,41 +789,56 @@ async fn connect_within(
     limit: Duration,
     local: Option<SocketAddr>,
 ) -> Result<WtConnection, ConnectionLost> {
+    let deadline = tokio::time::Instant::now() + limit;
     let url: url::Url = url.parse().map_err(|error| lost(&error))?;
     let config = client_config(cert_sha256, streams)?;
-    // WHY not a `Cell`: a reference to one held across an await would make
-    // this future one that cannot be sent to another thread, and so one that
-    // cannot be spawned.
-    let stage = std::sync::Mutex::new(ConnectStage::Resolving);
-    let at = |reached| {
-        if let Ok(mut stage) = stage.lock() {
-            *stage = reached;
+    let Ok(resolved) = tokio::time::timeout(limit, resolve(&url)).await else {
+        return Err(ConnectStage::Resolving.timed_out(limit));
+    };
+    let (server_name, remote) = resolved?;
+    // How far the attempt that got furthest came, for the message when the
+    // time is up. WHY not a `Cell`: the attempts run as tasks of their own.
+    let stage = Arc::new(std::sync::Mutex::new(ConnectStage::Resolving));
+    let mut attempts = tokio::task::JoinSet::new();
+    let mut next = tokio::time::Instant::now();
+    let established = loop {
+        if next <= tokio::time::Instant::now() && next < deadline {
+            attempts.spawn(attempt(
+                (url.clone(), server_name.clone(), remote),
+                config.clone(),
+                local.unwrap_or_else(|| local_address_for(remote)),
+                Arc::clone(&stage),
+            ));
+            next = if local.is_some() {
+                deadline
+            } else {
+                next + CONNECT_ATTEMPT_EVERY
+            };
+        }
+        tokio::select! {
+            Some(done) = attempts.join_next() => match done {
+                Ok(outcome) => break outcome,
+                // A task of an attempt does not panic, and none is aborted
+                // before the loop ends.
+                Err(error) => break Err(lost(&error)),
+            },
+            () = tokio::time::sleep_until(next.min(deadline)) => {
+                if tokio::time::Instant::now() >= deadline {
+                    let reached = stage.lock().map(|stage| *stage).unwrap_or_default();
+                    break Err(reached.timed_out(limit));
+                }
+            }
         }
     };
-    let establish = async {
-        let (server_name, remote) = resolve(&url).await?;
-        let local = local.unwrap_or_else(|| local_address_for(remote));
-        let endpoint = quinn::Endpoint::client(local).map_err(|error| lost(&error))?;
-        // The port the kernel chose, for the message.
-        let local = endpoint.local_addr().unwrap_or(local);
-        at(ConnectStage::Handshake { remote, local });
-        let connection = endpoint
-            .connect_with(config, remote, &server_name)
-            .map_err(|error| lost(&error))?
-            .await
-            .map_err(|error| lost(&error))?;
-        at(ConnectStage::ConnectRequest { remote, local });
-        let request = ConnectRequest::new(url.clone()).with_protocol(xmoq_moqt::PROTOCOL);
-        let session = Session::connect(connection, request)
-            .await
-            .map_err(|error| lost(&error))?;
-        Ok::<_, ConnectionLost>((session, endpoint))
-    };
-    // Dropping what was begun lets go of the socket and the connection.
-    let Ok(established) = tokio::time::timeout(limit, establish).await else {
-        let reached = stage.lock().map(|stage| *stage).unwrap_or_default();
-        return Err(reached.timed_out(limit));
-    };
+    // The others are given up: one under way lets go of its socket and its
+    // connection as it is dropped, and one that has its session too is
+    // closed, so that the server is not left with a session nobody uses.
+    attempts.abort_all();
+    while let Some(other) = attempts.join_next().await {
+        if let Ok(Ok((session, _))) = other {
+            session.close(0, b"");
+        }
+    }
     let (session, endpoint) = established?;
     // The library fails the connect when the server selects a protocol that
     // was not offered; a server that selects none is refused here.
@@ -803,6 +853,38 @@ async fn connect_within(
         session,
         _client: Some(endpoint),
     })
+}
+
+/// One attempt of [`connect_within`]: a socket, the QUIC handshake and the
+/// CONNECT request. `stage` is moved on as it gets further, never back.
+async fn attempt(
+    (url, server_name, remote): (url::Url, String, SocketAddr),
+    config: quinn::ClientConfig,
+    local: SocketAddr,
+    stage: Arc<std::sync::Mutex<ConnectStage>>,
+) -> Result<(Session, quinn::Endpoint), ConnectionLost> {
+    let reach = |reached: ConnectStage| {
+        if let Ok(mut stage) = stage.lock()
+            && stage.rank() < reached.rank()
+        {
+            *stage = reached;
+        }
+    };
+    let endpoint = quinn::Endpoint::client(local).map_err(|error| lost(&error))?;
+    // The port the kernel chose, for the message.
+    let local = endpoint.local_addr().unwrap_or(local);
+    reach(ConnectStage::Handshake { remote, local });
+    let connection = endpoint
+        .connect_with(config, remote, &server_name)
+        .map_err(|error| lost(&error))?
+        .await
+        .map_err(|error| lost(&error))?;
+    reach(ConnectStage::ConnectRequest { remote, local });
+    let request = ConnectRequest::new(url).with_protocol(xmoq_moqt::PROTOCOL);
+    let session = Session::connect(connection, request)
+        .await
+        .map_err(|error| lost(&error))?;
+    Ok((session, endpoint))
 }
 
 /// A WebTransport server that accepts `MoQ` Transport sessions.
@@ -937,6 +1019,16 @@ pub async fn accept(incoming: Incoming) -> Result<(WtConnection, SessionRequest)
 /// a client needs to reach it.
 #[cfg(test)]
 fn loopback_server(limits: QuicLimits) -> (WtServer, String, [u8; 32]) {
+    let (certificate, key, hash) = test_certificate();
+    let server =
+        WtServer::with_certificate(0, vec![certificate], key, limits).expect("a free port");
+    let port = server.0.local_addr().expect("a bound socket").port();
+    (server, format!("https://127.0.0.1:{port}/"), hash)
+}
+
+/// A self-signed certificate for `localhost`, its key and its SHA-256.
+#[cfg(test)]
+fn test_certificate() -> (CertificateDer<'static>, PrivateKeyDer<'static>, [u8; 32]) {
     use web_transport_quinn::quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 
     let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
@@ -950,10 +1042,7 @@ fn loopback_server(limits: QuicLimits) -> (WtServer, String, [u8; 32]) {
         .as_ref()
         .try_into()
         .expect("SHA-256 is 32 bytes");
-    let server =
-        WtServer::with_certificate(0, vec![certificate], key, limits).expect("a free port");
-    let port = server.0.local_addr().expect("a bound socket").port();
-    (server, format!("https://127.0.0.1:{port}/"), hash)
+    (certificate, key, hash)
 }
 
 /// A client and a server session connected over the loopback interface, with
@@ -1313,6 +1402,60 @@ mod tests {
                 });
             }
         })
+    }
+
+    /// [`CONNECT_ATTEMPT_EVERY`]: a server that comes 3.2 s after the client
+    /// began is reached within about a second, where the one attempt of
+    /// before would have waited for QUIC to send its Initial again at about
+    /// 7 s; and of the attempts that reach it, all but the one taken are
+    /// closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_client_reaches_a_server_that_comes_after_it_began_within_about_a_second() {
+        let (certificate, key, hash) = test_certificate();
+        let port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .and_then(|socket| socket.local_addr())
+            .expect("a free port")
+            .port();
+        let url = format!("https://127.0.0.1:{port}/");
+        let client =
+            tokio::spawn(async move { connect(&url, hash, &crate::StreamConfig::default()).await });
+        tokio::time::sleep(Duration::from_millis(3200)).await;
+        let server = WtServer::with_certificate(port, vec![certificate], key, TEST_LIMITS)
+            .expect("the port is free again");
+        let came = tokio::time::Instant::now();
+        let open = Arc::new(std::sync::atomic::AtomicIsize::new(0));
+        let accepting = tokio::spawn({
+            let open = Arc::clone(&open);
+            async move {
+                while let Some(incoming) = server.incoming().await {
+                    let open = Arc::clone(&open);
+                    tokio::spawn(async move {
+                        if let Ok((connection, _)) = accept(incoming).await {
+                            open.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            connection.closed().await;
+                            open.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                }
+            }
+        });
+        let connected = client
+            .await
+            .expect("the client runs")
+            .expect("the client connects");
+        let waited = came.elapsed();
+        assert!(
+            waited < Duration::from_millis(1500),
+            "connected {waited:?} after the server came"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            open.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "sessions left open at the server"
+        );
+        drop(connected);
+        accepting.abort();
     }
 
     #[tokio::test]
