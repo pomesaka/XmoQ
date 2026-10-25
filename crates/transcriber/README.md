@@ -18,7 +18,7 @@ It runs until Ctrl-C or SIGTERM, and connects again after a session ends (`backo
 |---|---|
 | Listens to | Every namespace announced under a prefix of `--namespace` (up to 8, none under another), found with one `SUBSCRIBE_NAMESPACE` for each prefix. Of each, the first Opus track with LOC packaging that its catalog names (MSF §5), read with a SUBSCRIBE and a Joining FETCH, as the terminal viewer reads it. A catalog that names another audio track later moves the transcriber to that track |
 | Publishes | The track `speech` of `xmoq/transcript/<prefix>` for each prefix, with PUBLISH, from the start of each session. One piece is one Group, and its payload is in [`xmoq-transcript-tracks`](../transcript-tracks/README.md) |
-| Answers | A FETCH of a transcript, from the latest `--keep` pieces it holds in memory. A range that begins before them gets them and an End of Unknown Range indicator, as the gatherer answers (`fetch` of `xmoq-track-serving`) |
+| Answers | A FETCH of a transcript, from the latest `--keep` pieces it holds in memory. The pieces of the range that were let go of get one End of Unknown Range indicator, which in Descending order names no number before the first piece, as the Rust client answers (`plan_kept` of `xmoq-track-serving`; `Transcript::fetch`) |
 
 WHY these, and WHY NOT the other choices (every namespace of the relay; a room that says where the broadcast is; a track `transcript` in the broadcast's namespace; PUBLISH_NAMESPACE): at the top of `src/bin/xmoq-transcriber/session.rs` and of `crates/transcript-tracks/src/names.rs`.
 
@@ -67,7 +67,7 @@ A piece that is not sent live is kept, and a FETCH gets it.
 
 ## What is where
 
-The library (`src/*.rs`) decides and does no input or output: what the flags mean (`args`), and the numbering and keeping of a transcript (`transcript`). The binary (`src/bin/xmoq-transcriber/`): `session.rs` (the requests and the answers on one session), `reader.rs` (the threads of the readers), `main.rs` (opening the reader, connecting again, the signals). What it prints, one line for each thing it does (`MODEL_LOADED`, `VAD_LOADED`, `WATCHING`, `BROADCAST`, `AUDIO_SUBSCRIBED`, `TRANSCRIPT_PUBLISHED`, `PIECE_CUT`, `SPEECH`, `PIECE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/transcriber.ts` waits for.
+The library (`src/*.rs`) decides and does no input or output: what the flags mean (`args`), and the numbering and keeping of a transcript, and what a FETCH of it gets (`transcript`). The binary (`src/bin/xmoq-transcriber/`): `session.rs` (the requests and the answers on one session), `reader.rs` (the threads of the readers), `main.rs` (opening the reader, connecting again, the signals). What it prints, one line for each thing it does (`MODEL_LOADED`, `VAD_LOADED`, `WATCHING`, `BROADCAST`, `AUDIO_SUBSCRIBED`, `TRANSCRIPT_PUBLISHED`, `PIECE_CUT`, `SPEECH`, `PIECE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/transcriber.ts` waits for.
 
 ## Not done
 

@@ -58,7 +58,7 @@ use xmoq_speech::vad::Silero;
 use xmoq_speech::{AudioPacket, Listener};
 use xmoq_track_serving::answers::{self, FETCHES_AT_ONCE, Fetches};
 use xmoq_track_serving::backoff::Backoff;
-use xmoq_track_serving::fetch::{Plan, pieces_of, plan};
+use xmoq_track_serving::fetch::pieces_of;
 use xmoq_track_serving::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
 use xmoq_track_serving::requests::{AskedFetch, FetchAnswer, PeerRequests};
 use xmoq_track_serving::streams::{
@@ -73,9 +73,6 @@ use xmoq_transcript_tracks::payloads::Speech;
 use crate::reader::{Read, Reader, ToRead};
 
 type Send = <WtConnection as Connection>::Send;
-
-/// A piece as a FETCH sends it: its Group ID and its payload.
-type Kept = (u64, Vec<u8>);
 
 /// How long a token the transcriber makes runs, in seconds, as the
 /// gatherer's.
@@ -1494,7 +1491,7 @@ impl Transcribing<'_> {
         let Some(transcript) = self.transcripts.get(prefix) else {
             return self.refuse(asked, request_error_code::DOES_NOT_EXIST);
         };
-        let (planned, speeches) = match Self::planned(transcript, start, end, group_order) {
+        let (planned, speeches) = match transcript.fetch(start, end, group_order) {
             Ok(planned) => planned,
             Err(code) => {
                 println!("FETCH_REFUSED prefix={prefix} error_code={code:#x}");
@@ -1523,39 +1520,6 @@ impl Transcribing<'_> {
     /// Refuses a FETCH of the relay with `code`.
     fn refuse(&mut self, asked: AskedFetch, code: u64) -> Result<()> {
         Ok(self.requests.refuse_fetch(&mut self.session, asked, code)?)
-    }
-
-    /// What a FETCH of a transcript gets: the plan, and the pieces in the
-    /// order they are sent. The pieces kept are the latest, without a gap:
-    /// a range that begins before them gets the End of Unknown Range
-    /// indicator.
-    fn planned(
-        transcript: &Transcript,
-        start: Location,
-        end: Location,
-        group_order: GroupOrder,
-    ) -> Result<(Plan, Vec<Kept>), u64> {
-        let planned = plan(
-            start,
-            end,
-            transcript.largest(),
-            transcript.kept(),
-            group_order,
-        )?;
-        let mut speeches: Vec<Kept> = planned
-            .groups
-            .map(|(first, last)| {
-                transcript
-                    .between(first, last)
-                    .into_iter()
-                    .map(|speech| (speech.number, speech.payload()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if group_order == GroupOrder::Descending {
-            speeches.reverse();
-        }
-        Ok((planned, speeches))
     }
 
     /// What the task of a FETCH said.
