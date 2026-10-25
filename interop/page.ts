@@ -43,7 +43,7 @@ import {
 	followCatalog,
 	namespaceTuple,
 } from "@xmoq/msf";
-import { followTranscript } from "@xmoq/transcript";
+import { followTranscript, keepFollowingTranscript } from "@xmoq/transcript";
 import type {
 	PageAudioReport,
 	PageBroadcastReport,
@@ -720,8 +720,10 @@ let broadcastPublishing:
 	  }
 	| undefined;
 
-/** What `followTranscript` was handed. */
+/** What `followTranscript` and `keepTranscript` were handed. */
 const transcriptPieces: PageTranscriptPiece[] = [];
+/** The states of `keepTranscript`, as `keptTranscriptReport` gives them. */
+const keptTranscript: string[] = [];
 
 /**
  * The parameters of a PUBLISH_NAMESPACE that carries a token of its own
@@ -1956,6 +1958,47 @@ window.xmoqOwn = {
 	transcriptReport: withPlainErrors(
 		async (): Promise<PageTranscriptPiece[]> => [...transcriptPieces],
 	),
+
+	keepTranscript: withPlainErrors(
+		async (relayUrl: string, certSha256Hex: string, listened: string) => {
+			let at = relayUrl;
+			void keepFollowingTranscript({
+				async connect(goAway) {
+					at = goAway?.newSessionUri || relayUrl;
+					return connectAnew(at, certSha256Hex);
+				},
+				follow: {
+					listened: listened.split("/"),
+					latest: 1,
+					onSpeech(speech) {
+						transcriptPieces.push({
+							number: speech.number.toString(),
+							from: speech.from,
+							text: speech.text,
+							how: speech.how,
+						});
+					},
+				},
+				againMs: KEPT_DELAY_MS,
+				onState(state) {
+					const said =
+						state.type === "connecting"
+							? `connecting ${state.attempt}`
+							: state.type === "reading"
+								? `reading ${state.session} ${at}`
+								: state.type === "moved"
+									? `moved ${state.goAway.newSessionUri}`
+									: state.type === "failed"
+										? `failed ${errorText(state.error)}`
+										: state.type;
+					keptTranscript.push(said);
+					console.log(`kept transcript: ${said}`);
+				},
+			});
+		},
+	),
+
+	keptTranscriptReport: () => Promise.resolve([...keptTranscript]),
 
 	voiceReport: withPlainErrors(async (): Promise<PageVoiceReport> => {
 		if (voicePublishing === undefined) {

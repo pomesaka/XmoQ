@@ -12,3 +12,10 @@ export {
 	type TranscriptReader,
 	type TranscriptStatus,
 } from "./moqt/follow.ts";
+export {
+	DEFAULT_TRANSCRIPT_AGAIN_MS,
+	type KeepFollowingTranscriptOptions,
+	type KeptTranscriptState,
+	keepFollowingTranscript,
+	type TranscriptConnection,
+} from "./moqt/keep-following.ts";

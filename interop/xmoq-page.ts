@@ -368,8 +368,24 @@ export type OwnPageExtras = {
 	 * connection, fetching `latest` pieces when it begins.
 	 */
 	followTranscript(listened: string, latest: number): Promise<void>;
-	/** The pieces `followTranscript` was handed, in order. */
+	/** The pieces `followTranscript` and `keepTranscript` were handed, in order. */
 	transcriptReport(): Promise<PageTranscriptPiece[]>;
+	/**
+	 * Follows the transcript of `listened` with `keepFollowingTranscript` of
+	 * `@xmoq/transcript`, as the demo's captions do, on connections of its
+	 * own to `relayUrl`, or to the URI of the GOAWAY that ended the session
+	 * before, with the same certificate's hash.
+	 */
+	keepTranscript(
+		relayUrl: string,
+		certSha256Hex: string,
+		listened: string,
+	): Promise<void>;
+	/**
+	 * The states of `keepTranscript`, in order: "connecting 1", "reading 1
+	 * <relay URL>", "moved <URI>", "session-ended", "failed <error>".
+	 */
+	keptTranscriptReport(): Promise<string[]>;
 	/**
 	 * As `publishTrack` of the page, with the Track Property DYNAMIC_GROUPS
 	 * = 1 (transport §12.6) on the PUBLISH, and a handler for the

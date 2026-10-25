@@ -22,6 +22,12 @@
 //     (`keepChat`). The relay above prints SESSION_SENT_AWAY a second time,
 //     with the same URI; the chat says `moved` with it, and then `joined 1`
 //     at that URI, its first session joined.
+//     Written on 2026-10-25, before `keepFollowingTranscript` of
+//     `@xmoq/transcript` followed GOAWAY: the second viewer then follows the
+//     transcript of the bars with a connection of its own to the relay
+//     above, as the demo's captions do (`keepTranscript`). The relay above
+//     prints SESSION_SENT_AWAY once more, with the same URI; the reader says
+//     `moved` with it, and then `reading 2` at that URI.
 //   - both-full: the relay below has `--max-sessions 1` and `--when-full`
 //     the relay above. The relay above sends the second viewer away once;
 //     the relay below closes it (SESSION_REFUSED) and does not send it back:
@@ -219,7 +225,42 @@ async function main(): Promise<void> {
 					`the second viewer's chat did not join where it was sent: ${chat.join(", ")}`,
 				);
 			}
-			summary = `the relay above, full with the publisher and the relay below, sent the second viewer to ${sentTo}, and it played there (${states.join(", ")}); its chat was sent there as well and joined the room there (${chat.join(", ")})`;
+			// The captions of the same page, on a session of their own (as the
+			// demo's watching page has them), are sent away as well, and follow
+			// the GOAWAY. No transcriber runs: the reader is where it was sent,
+			// whatever it reads.
+			await second.evaluate(
+				([url, hash, listened]) =>
+					window.xmoqOwn.keepTranscript(url, hash, listened),
+				[context.relayUrl, context.certSha256Hex, NAMESPACE] satisfies [
+					string,
+					string,
+					string,
+				],
+			);
+			await withTimeout(
+				// The third: the viewer's session for the video, then the chat's.
+				context.relay.waitForLines(/^SESSION_SENT_AWAY /, 3),
+				"the relay above to send the second viewer's captions away",
+			);
+			const captions = await pollFor(async () => {
+				const now = await second.evaluate(() =>
+					window.xmoqOwn.keptTranscriptReport(),
+				);
+				return now.some((said) => said.startsWith("reading 2 "))
+					? now
+					: undefined;
+			}, "the second viewer's captions to read where they were sent");
+			const captionsMovedAt = captions.indexOf(`moved ${sentTo}`);
+			if (
+				captionsMovedAt === -1 ||
+				captions.indexOf(`reading 2 ${sentTo}`) < captionsMovedAt
+			) {
+				throw new Error(
+					`the second viewer's captions did not read where they were sent: ${captions.join(", ")}`,
+				);
+			}
+			summary = `the relay above, full with the publisher and the relay below, sent the second viewer to ${sentTo}, and it played there (${states.join(", ")}); its chat was sent there as well and joined the room there (${chat.join(", ")}), and its captions read there (${captions.join(", ")})`;
 		} else {
 			await withTimeout(
 				below.relay.waitForLines(

@@ -5,6 +5,7 @@ A reader of the transcripts over MoQ tracks: the track `speech` of `xmoq/transcr
 | Export | What it is |
 |---|---|
 | `followTranscript(connection, options)` | Subscribes to the transcript of `listened` and hands on each piece once, `live` or `history`. When each subscription begins, it fetches the latest `latest` pieces with a Relative Joining FETCH (§10.12.2.1; `LATEST_PIECES`, 3, where not given; none where the SUBSCRIBE_OK says nothing was published). A subscription that ends or is refused is made again 2 s later, for as long as the connection lasts or until `stop` |
+| `keepFollowingTranscript(options)` | `followTranscript` across sessions: `connect` is called anew for each session, and the session is made again 2 s after one ended (`DEFAULT_TRANSCRIPT_AGAIN_MS`). **A GOAWAY (§10.4) ends the session with NO_ERROR**, and the next `connect` is handed it, so that the caller connects to its New Session URI with the certificate it had; it is handed the same GOAWAY until another comes, and the session after one is made at once, once in a row, as `keepPlaying` of `@xmoq/media` does. Each session fetches the latest pieces anew, so the caller passes over a number it had ([record](../../docs/experiments/2026-10-25-the-captions-follow-a-goaway.md)) |
 | `transcriptNamespace`, `TRANSCRIPT_PREFIX`, `SPEECH_TRACK` | The names, as `crates/transcript-tracks/src/names.rs` has them |
 | `Speech`, `Malformed` | A piece (`number`, `from`, `text`, `startUs`, `endUs`, `at`), and why a payload is no piece |
 
@@ -16,4 +17,4 @@ Layer 1 (`scripts/ci/check-layers.sh`): it depends on `@xmoq/moqt` and `@xmoq/js
 
 ## Checks
 
-`test/payloads.test.ts` reads the shared table. `test/follow.test.ts` checks the SUBSCRIBE it makes. The interop run `own relay: transcriber: ...` (`interop/transcriber.ts`) has a page read the transcript with `followTranscript` and be handed the same two pieces as a Rust reader, live.
+`test/payloads.test.ts` reads the shared table. `test/follow.test.ts` checks the SUBSCRIBE it makes, and `test/keep-following.test.ts` where each session after a GOAWAY goes. The interop run `own relay: transcriber: ...` (`interop/transcriber.ts`) has a page read the transcript with `followTranscript` and be handed the same two pieces as a Rust reader, live.
