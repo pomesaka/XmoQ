@@ -436,7 +436,7 @@ fn person_of(args: &Args) -> Person {
     }
 }
 
-async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
+async fn run(args: &Args, reader: &mut Reader, pictures: &mut Option<Pictures>) -> Result<()> {
     let mut room = match &args.source {
         Source::Room { address, .. } => {
             let joining = RoomSocket::join(address, &args.name);
@@ -448,14 +448,6 @@ async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
         Source::Relay { .. } => None,
     };
     let follows = room.is_some();
-    let mut pictures = if args.frames {
-        Some(Pictures::start(
-            args.pictures,
-            Path::new(&args.out).join(FRAMES_DIR),
-        )?)
-    } else {
-        None
-    };
     let mut tried: Option<Instant> = None;
     // The last GOAWAY: the URL left, and where to go instead, for as long
     // as the place is the one left (as `xmoq-watch` has it, where the reasons
@@ -507,7 +499,7 @@ async fn run(args: &Args, reader: &mut Reader) -> Result<()> {
                     &place,
                     &mut room,
                     reader,
-                    &mut pictures,
+                    pictures,
                     &mut kept,
                 ))
                 .await;
@@ -566,9 +558,22 @@ async fn read(args: &Args) -> Result<()> {
         frames: args.frames,
         frame: FrameAsking::default(),
     };
-    let ran = run(args, &mut reader).await;
+    let mut pictures = if args.frames {
+        Some(Pictures::start(
+            args.pictures,
+            Path::new(&args.out).join(FRAMES_DIR),
+        )?)
+    } else {
+        None
+    };
+    let ran = run(args, &mut reader, &mut pictures).await;
     if let Err(error) = &ran {
         reader.error(format!("{error:#}"));
+    }
+    // On every way out of `run`, before `main` returns and the process
+    // ends with the thread of the pictures.
+    if let Some(pictures) = pictures {
+        pictures.end().await;
     }
     ran
 }
