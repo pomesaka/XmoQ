@@ -97,8 +97,9 @@
 //! interop runs, sends Object 0 of Group 0 whole
 //! on a stream of its own, then writes the Subgroup Header of Group 1, the
 //! fields of its Object 0 and half of that Object's payload of 512 KiB
-//! (`HALF_OBJECT_SENT group=1 object=0`). After `--hold-ms` it writes the
-//! rest, Object 1 of 16 bytes after it, and finishes the stream (`then
+//! (`HALF_OBJECT_SENT group=1 object=0`). After `--hold-ms`, or with
+//! `--hold-until-line` when the driver writes the line `rest` on stdin, it
+//! writes the rest, Object 1 of 16 bytes after it, and finishes the stream (`then
 //! finish`); or it resets the stream with `CANCELLED` and sends Object 0 of
 //! Group 2, 16 bytes, on a stream of its own (`then reset`). It says which
 //! (`HALF_OBJECT_ENDED how=..`). The Object after it is what a subscriber
@@ -131,6 +132,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use anyhow::{Context, Result, bail};
 use xmoq_moqt::data::{
@@ -414,7 +416,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
                 stay = Some(Duration::from_millis(value.parse().context("--stay-ms")?));
             }
             // Read by `half_object_of`.
-            "--then" | "--hold-ms" => {}
+            "--then" | "--hold-ms" | "--hold-until-line" => {}
             "--quiet" if value == "half-object" => {}
             "--quiet" => quiet = Some(quiet_of(&value)?),
             other => bail!("unknown flag {other}"),
@@ -450,11 +452,42 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
     })
 }
 
-/// `--quiet half-object` with its `--then` and `--hold-ms`, where the
-/// arguments have it: a client's mode, where the other values of `--quiet`
-/// are a server's.
-fn half_object_of(args: &[String]) -> Result<Option<(Then, Duration)>> {
-    let (mut half_object, mut then, mut hold) = (false, Then::Finish, Duration::ZERO);
+/// How long `--quiet half-object` holds the rest of the Object back.
+#[derive(Clone, Copy)]
+enum Hold {
+    /// `--hold-ms`.
+    For(Duration),
+    /// `--hold-until-line rest`: until the driver writes the line `rest`.
+    ///
+    /// WHY a line: the viewer has to reach the relay while the Object is
+    /// half there, and a viewer that starts after the first half was sent
+    /// does so within a time only on a machine that is fast enough.
+    UntilLine,
+}
+
+impl Hold {
+    /// Resolves when the rest of the Object is due.
+    async fn over(self) {
+        match self {
+            Self::For(wait) => tokio::time::sleep(wait).await,
+            Self::UntilLine => {
+                let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+                match stdin.next_line().await {
+                    Ok(Some(line)) if line.trim() == "rest" => {}
+                    // The driver is gone, or wrote another line: the rest
+                    // is never due, and the run ends with `stay`.
+                    _ => std::future::pending::<()>().await,
+                }
+            }
+        }
+    }
+}
+
+/// `--quiet half-object` with its `--then` and `--hold-ms` or
+/// `--hold-until-line`, where the arguments have it: a client's mode, where
+/// the other values of `--quiet` are a server's.
+fn half_object_of(args: &[String]) -> Result<Option<(Then, Hold)>> {
+    let (mut half_object, mut then, mut hold) = (false, Then::Finish, Hold::For(Duration::ZERO));
     for pair in args.chunks(2) {
         let [flag, value] = pair else { break };
         match (flag.as_str(), value.as_str()) {
@@ -462,7 +495,11 @@ fn half_object_of(args: &[String]) -> Result<Option<(Then, Duration)>> {
             ("--then", "finish") => then = Then::Finish,
             ("--then", "reset") => then = Then::Reset,
             ("--then", other) => bail!("--then is finish or reset, not {other}"),
-            ("--hold-ms", ms) => hold = Duration::from_millis(ms.parse().context("--hold-ms")?),
+            ("--hold-ms", ms) => {
+                hold = Hold::For(Duration::from_millis(ms.parse().context("--hold-ms")?));
+            }
+            ("--hold-until-line", "rest") => hold = Hold::UntilLine,
+            ("--hold-until-line", other) => bail!("--hold-until-line is rest, not {other}"),
             _ => {}
         }
     }
@@ -1394,7 +1431,7 @@ async fn half_object(
     url: &str,
     cert_sha256: [u8; 32],
     stay: Duration,
-    (then, hold): (Then, Duration),
+    (then, hold): (Then, Hold),
 ) -> Result<()> {
     let (connection, _control) = connected(url, cert_sha256).await?;
     let publish = ControlMessage::Publish(Publish {
@@ -1445,7 +1482,7 @@ async fn half_object(
     let counts = Arc::new(Announced::default());
     let mut tasks = tokio::task::JoinSet::new();
     let mut unended = Some(stream);
-    let rest_due = tokio::time::sleep(hold);
+    let rest_due = hold.over();
     tokio::pin!(rest_due);
     loop {
         tokio::select! {
