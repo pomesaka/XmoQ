@@ -61,6 +61,10 @@ run = "cargo run --locked -p xmoq-chat --"
 description = "The transcriber: mise run transcriber -- --url https://host:port/ --cert-sha256 <hex> --namespace xmoq/demo"
 run = "cargo run --release --locked -p xmoq-transcriber --"
 
+[tasks.agent]
+description = "The reader of a room for an agent: mise run agent -- --room http://127.0.0.1:8787/rooms/demo --out /tmp/room"
+run = "cargo run --release --locked -p xmoq-agent --"
+
 [tasks.speech-model]
 description = "Fetch a model of whisper.cpp for xmoq-speech into ~/.cache/xmoq/whisper: mise run speech-model -- [tiny|small-q5_1|large-v3-turbo-q5_0] [--dir <dir>]"
 run = "crates/speech/scripts/fetch-model.sh"
