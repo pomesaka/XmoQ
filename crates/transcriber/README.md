@@ -26,6 +26,8 @@ WHY these, and WHY NOT the other choices (every namespace of the relay; a room t
 
 **One reader for every track** (`src/bin/xmoq-transcriber/reader.rs`): a thread with the model. It reads the pieces in the order they were cut. A piece that finds `--waiting` pieces waiting for it is dropped and counted (`PIECE_DROPPED`). How long a piece waited, how long whisper.cpp took, and how long after the end of the piece its words were there are in each `SPEECH` line (`waited_ms`, `took_ms`, `behind_ms`). `behind_ms` is `at` minus `endUs` (both in milliseconds), and holds where the broadcast's Timestamps are wall-clock time, as the demo's pages make them.
 
+**How many voices at once**: with the default model on a Mac (one machine, loopback), one transcriber kept up with 2 people speaking at the same moment with `--language auto`, and 4 with `--language en`. With more, the words came later and later, and with 8 and `auto` pieces were dropped ([record](../../docs/experiments/2026-10-25-how-many-voices-one-transcriber-reads.md)).
+
 An audio subscription that ends or is refused while the broadcast stays announced is asked for again, by the rule every client asks by ([`xmoq-again`](../again/README.md)). There is no count of times, as the gatherer has for a participant (why, at `audio_over` in `session.rs`).
 
 ## Flags
