@@ -8,14 +8,19 @@ Building it needs a C++ compiler, for the H.264 decoder that `xmoq-picture` buil
 
 ## Using it from an agent
 
-Run it in the background, and read the file:
+A demo of its own, on ports apart from `mise run demo`'s (4443, 8080, 8787), then the reader in its room, in the background:
 
 ```sh
-xmoq-agent --room http://127.0.0.1:8787/rooms/demo --name claude --out /tmp/room &
-tail -f /tmp/room/events.jsonl        # or wait for a line with a monitor
+bun demo/serve.ts --relay-port 33443 --port 33080 --rooms-port 33787 --chat-store /tmp/room/chat.sqlite3 &
+# open http://localhost:33080/publish in Chromium: the broadcast
+mkdir -p /tmp/room; mkfifo /tmp/room/say; sleep 86400 > /tmp/room/say &
+mise run agent -- --room http://127.0.0.1:33787/rooms/demo --name claude --out /tmp/room < /tmp/room/say &
+echo 'hello' > /tmp/room/say          # said in the chat
+echo '/frame' > /tmp/room/say         # a picture of the broadcast now
+tail -f /tmp/room/events.jsonl
 ```
 
-To say something, write a line to its stdin (a named pipe works: `mkfifo /tmp/room/say; xmoq-agent ... < /tmp/room/say &`, then `echo hello > /tmp/room/say`). Without stdin (`&` in a shell that gives it none) it reads on, and says nothing.
+The lines of `events.jsonl` are `chat`, `joined`, `left`, `broadcast`, `frame`, `speech`, `chat_gap` and `error` (the table below). A `frame` line's `path` is the PNG, in `/tmp/room/frames/`. The `sleep` holds the pipe open: without stdin the reader reads on and says nothing.
 
 ## Flags
 
