@@ -114,6 +114,8 @@ let connection: MoqtConnection | undefined;
 let published: PublishedTrack | undefined;
 /** The SUBSCRIBE_NAMESPACE of `watchNamespaces`, and the lines of what came of it. */
 let watchedNamespaces: NamespaceSubscription | undefined;
+/** Whether the voice of `publishBroadcast` is heard, where it has one. */
+let speakingNow = false;
 const namespaceLines: string[] = [];
 /** The subscription `serveTrack` accepted, once it has. */
 let served: Promise<PublishedTrack> | undefined;
@@ -1469,7 +1471,12 @@ window.xmoqOwn = {
 	}),
 
 	publishBroadcast: withPlainErrors(
-		async (namespace: string, publishNamespaceTokenHex?: string) => {
+		async (
+			namespace: string,
+			publishNamespaceTokenHex?: string,
+			voice?: string,
+			speaking?: boolean,
+		) => {
 			const moq = connected();
 			const trackNamespace = namespaceTuple(namespace);
 			const sampleRate = 48_000;
@@ -1578,6 +1585,16 @@ window.xmoqOwn = {
 			const frames = 960;
 			let phase = 0;
 			let level = 0.25;
+			// A voice and its pause, as `publishVoice` has them, where one is given.
+			const spoken = voice === undefined ? undefined : voiceAt48kHz(voice);
+			const round =
+				spoken === undefined
+					? undefined
+					: new Float32Array(
+							spoken.length + (VOICE.pauseMs * sampleRate) / 1000,
+						);
+			if (spoken !== undefined) round?.set(spoken);
+			speakingNow = speaking ?? false;
 			// Every piece is 20 ms after the one before it, whenever its timer
 			// came: a decoder wants the sound without gaps.
 			const firstPiece = audioBegan;
@@ -1587,6 +1604,12 @@ window.xmoqOwn = {
 				const loud = marked(firstPiece + piece * 20);
 				const samples = new Float32Array(frames);
 				for (let index = 0; index < frames; index++) {
+					if (round !== undefined) {
+						samples[index] = speakingNow
+							? (round[(piece * frames + index) % round.length] ?? 0)
+							: 0;
+						continue;
+					}
 					phase += (2 * Math.PI * (loud ? 1000 : 440)) / sampleRate;
 					// Towards its value and not at once: a step is a click.
 					level += ((loud ? 0.6 : 0.25) - level) * 0.02;
@@ -1613,6 +1636,11 @@ window.xmoqOwn = {
 			console.log("broadcast published");
 		},
 	),
+
+	setSpeaking: (speaking: boolean) => {
+		speakingNow = speaking;
+		return Promise.resolve();
+	},
 
 	endBroadcast: withPlainErrors(async () => {
 		if (broadcastPublishing === undefined) {
