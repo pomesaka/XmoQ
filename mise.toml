@@ -25,7 +25,7 @@ shellcheck = "0.11.0"
 # the script, not to the workflow, so local runs and CI cannot drift apart.
 [tasks.check]
 description = "Run every check that CI runs"
-depends = ["check:rust", "check:ts", "check:layers", "check:workflows"]
+depends = ["check:rust", "check:ts", "check:layers", "check:workflows", "check:docs"]
 
 [tasks."check:rust"]
 description = "cargo fmt --check, clippy and test for the workspace"
@@ -42,6 +42,10 @@ run = "scripts/ci/check-layers.sh"
 [tasks."check:workflows"]
 description = "actionlint for workflows and shellcheck for scripts/ci"
 run = "scripts/ci/check-workflows.sh"
+
+[tasks."check:docs"]
+description = "The generated parts of the documents are what their scripts write: the index of docs/experiments/"
+run = "scripts/ci/experiments-index.sh --check"
 
 # Not part of `check`: it builds the moqtail relay and needs a Chromium, which takes minutes the
 # first time. CI runs it in a job of its own.
