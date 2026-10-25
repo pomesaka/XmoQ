@@ -325,7 +325,7 @@ async function main(): Promise<void> {
 			video.publisher,
 			...(sound === undefined ? [] : [sound.publisher]),
 		],
-		delayMs: AGAIN_MS,
+		againMs: AGAIN_MS,
 		signal: full.signal,
 		onState(publishing) {
 			state.publishing =

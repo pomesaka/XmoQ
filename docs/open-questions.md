@@ -41,4 +41,5 @@ A value chosen to get going is marked **provisional** where it is set, with why 
 - What the relay holds and how many sessions it takes: `HubConfig` in `crates/relay/src/hub.rs`, each set by a flag of the relay
 - What `@xmoq/media` holds, waits for and drops when it sends and plays video and sound: [its README](../packages/media/README.md)
 - The catalog of `@xmoq/msf`: [its README](../packages/msf/README.md)
+- When a client asks again, on its session and for the next session: `packages/moqt/src/core/again.ts` and [`crates/again`](../crates/again/README.md), with the rows both read in [`fixtures/ask-again/`](../fixtures/ask-again/README.md)
 - The chat's gatherer, the transcriber and how the sound is cut: the READMEs of `crates/chat`, `crates/transcriber` and `crates/speech`

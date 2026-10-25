@@ -12,12 +12,12 @@ A participant of a meeting in a page. Every participant publishes a broadcast of
 
 What it does, in order:
 
-- NAMESPACE of `xmoq/meet/<room>/<id>` (§6.1): `id` came, unless it is `self`, or 48 others are there already (`too-many`). Its catalog is followed, with a RENDEZVOUS_TIMEOUT of 10 s, since a participant announces before its catalog is published; a catalog that ends or fails is followed again 2 s later.
+- NAMESPACE of `xmoq/meet/<room>/<id>` (§6.1): `id` came, unless it is `self`, or 48 others are there already (`too-many`). Its catalog is followed, with a RENDEZVOUS_TIMEOUT of 10 s, since a participant announces before its catalog is published; a catalog that ends or fails is followed again after 1 s, or after the Retry Interval of a refusal (`createAskAgain` of `@xmoq/moqt`).
 - With a catalog: the sound of everybody is subscribed to, and the smallest video of the first `mostWatched` who are there, in the order they came. A subscription that ends while its participant is there is made again (`keepTrackOnSession` of `@xmoq/media`). A catalog that changes the chosen tracks has them subscribed anew.
 - NAMESPACE_DONE: the participant left. Its subscriptions are cancelled, and its place among the watched goes to the next who came.
 - A new session: whoever was there is followed on it at once, and those the relay does not tell of again within `SETTLE_MS` (2 s) have left.
 
-**Provisional values**: the 10 s of the catalog's RENDEZVOUS_TIMEOUT and the 2 s before a catalog is followed again, as `@xmoq/transcript` has them, and `SETTLE_MS`. A sound track without `samplerate` is taken for 48,000 Hz, and one without `channelConfig` for one channel.
+**Provisional values**: the 10 s of the catalog's RENDEZVOUS_TIMEOUT, as `@xmoq/transcript` has it, the pauses of `createAskAgain`, and `SETTLE_MS`. A sound track without `samplerate` is taken for 48,000 Hz, and one without `channelConfig` for one channel.
 
 Layer 3 (`scripts/ci/check-layers.sh`): it depends on `@xmoq/moqt`, `@xmoq/msf` and `@xmoq/media`. The core (`src/core`) does no input or output.
 

@@ -14,7 +14,6 @@ export {
 export type { Line, Malformed } from "./core/payloads.ts";
 export {
 	type ChatConnection,
-	DEFAULT_ROOM_AGAIN_MS,
 	type KeepInTheRoomOptions,
 	keepInTheRoom,
 	type RoomState,

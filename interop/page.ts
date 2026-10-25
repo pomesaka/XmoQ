@@ -1056,7 +1056,7 @@ window.xmoqOwn = {
 				},
 				trackNamespace,
 				tracks: [encoder.publisher],
-				delayMs: KEPT_DELAY_MS,
+				againMs: KEPT_DELAY_MS,
 				onState(state) {
 					const said =
 						state.type === "publishing"
@@ -1112,7 +1112,7 @@ window.xmoqOwn = {
 					return { ended: playback.ended };
 				},
 				movedBy: (end) => (end.type === "moved" ? end.goAway : undefined),
-				delayMs: KEPT_DELAY_MS,
+				againMs: KEPT_DELAY_MS,
 				onState(state) {
 					if (state.type === "playing") session = state.session;
 					const said =
@@ -1838,7 +1838,7 @@ window.xmoqOwn = {
 						(error.errorCode === RequestErrorCode.TIMEOUT ||
 							error.errorCode === RequestErrorCode.DOES_NOT_EXIST),
 				},
-				delayMs: KEPT_DELAY_MS,
+				againMs: KEPT_DELAY_MS,
 				onState(state) {
 					if (state.type === "playing") session = state.session;
 					const said =
