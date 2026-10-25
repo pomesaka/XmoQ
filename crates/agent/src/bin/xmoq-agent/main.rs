@@ -9,6 +9,7 @@
 
 mod attend;
 mod frames;
+mod meeting;
 mod output;
 mod stdin;
 mod video;
@@ -91,6 +92,8 @@ pub struct FrameAsking {
     /// It came not in time while no session could tell `Frames` to give
     /// the asking up.
     forgo_unsent: bool,
+    /// In a meeting, whose picture was asked for while unsent (`/frame <id>`).
+    of: Option<String>,
 }
 
 /// How long a picture that was asked for is waited for. **Provisional.**
@@ -186,11 +189,12 @@ impl Reader {
                 // WHY kept for the next video and not refused: an agent
                 // that asks while the reader connects again (a GOAWAY, a
                 // broadcast that came) would otherwise have to ask again.
-                Input::Frame if self.frames => {
+                Input::Frame(of) if self.frames => {
                     self.frame_asked();
                     self.frame.unsent = true;
+                    self.frame.of = of;
                 }
-                Input::Frame => self.error("frame: --frames off".to_string()),
+                Input::Frame(_) => self.error("frame: --frames off".to_string()),
                 Input::Unknown(name) => self.unknown_command(&name),
             },
         }
@@ -285,7 +289,8 @@ fn transcript_of(
     if !args.speech {
         return None;
     }
-    xmoq_agent::transcript::prefix(args.transcript.as_deref(), hello, None, broadcast)
+    let meeting = args.meeting.as_ref().map(|(room, _)| room.as_str());
+    xmoq_agent::transcript::prefix(args.transcript.as_deref(), hello, meeting, broadcast)
 }
 
 /// Where the reader connects in a room.
@@ -340,14 +345,17 @@ async fn place(
             },
             _,
         ) => {
+            // A meeting has a broadcast for each participant, and the
+            // transcript of all of them under its prefix (`transcript_of`).
+            let namespace = args.meeting.is_none().then(|| namespace.clone());
             return Ok(Some(Place {
                 url: url.clone(),
                 cert_sha256: *cert_sha256,
-                namespace: Some(namespace.clone()),
+                transcript: transcript_of(args, None, namespace.as_deref()),
+                namespace,
                 token: None,
                 chat_tokens: ChatTokens::default(),
                 broadcast: None,
-                transcript: transcript_of(args, None, Some(namespace)),
                 transcript_token: None,
             }));
         }

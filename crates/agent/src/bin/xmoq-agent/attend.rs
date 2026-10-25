@@ -34,6 +34,7 @@ use xmoq_viewer_io::room_socket::RoomSocket;
 use xmoq_viewer_io::session::{self, Events, GoneAway, Requests, new_url, timestamp_of};
 
 use crate::frames::{Job, Pictures};
+use crate::meeting::InMeeting;
 use crate::stdin::Line;
 use crate::video::{Asking as VideoAsking, Video};
 use crate::{Outside, Place, Reader, person_of};
@@ -65,16 +66,16 @@ pub struct UntilClosed {
 
 /// The `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<room>`, which tells who is in
 /// the chat.
-struct Watching {
-    request: RequestId,
-    reader: RequestReader<Recv>,
+pub(crate) struct Watching {
+    pub(crate) request: RequestId,
+    pub(crate) reader: RequestReader<Recv>,
     /// WHY kept and not finished: a FIN of the subscriber ends a
     /// `SUBSCRIBE_NAMESPACE` (§6.1).
     send: Send,
 }
 
 impl Watching {
-    fn cancel(self) {
+    pub(crate) fn cancel(self) {
         self.send.reset(stream_reset_code::CANCELLED);
         self.reader.stop(stream_reset_code::CANCELLED);
     }
@@ -82,7 +83,7 @@ impl Watching {
 
 /// Asks for the namespaces of the room's chat. A failure is the caller's to
 /// tell, and to ask again after.
-async fn watch(
+pub(crate) async fn watch(
     connection: &WtConnection,
     session: &mut Session,
     room: &TrackNamespace,
@@ -120,7 +121,7 @@ async fn watch(
 }
 
 /// Waits for `item` where there is one, and for ever where there is none.
-async fn on<T>(item: Option<impl std::future::Future<Output = T>>) -> T {
+pub(crate) async fn on<T>(item: Option<impl std::future::Future<Output = T>>) -> T {
     match item {
         Some(future) => future.await,
         None => std::future::pending().await,
@@ -387,7 +388,8 @@ fn remember_speech(reader: &mut Reader, place: &Place, follower: &Follower<Speec
 /// What a line of stdin asks for, where the session has to do it.
 enum Wants {
     Nothing,
-    Frame,
+    /// `/frame`, and in a meeting whose picture.
+    Frame(Option<String>),
 }
 
 /// Says a line of stdin in the chat, or tells what it asks for.
@@ -416,7 +418,7 @@ fn on_line(
                 ));
             }
         }
-        Input::Frame => return Wants::Frame,
+        Input::Frame(of) => return Wants::Frame(of),
         Input::Unknown(name) => reader.unknown_command(&name),
     }
     Wants::Nothing
@@ -571,6 +573,8 @@ pub async fn attend(
     };
     chat.watch(&mut session, connection, reader).await;
     eprintln!("XMOQ_AGENT_CHAT room={} name={}", args.room, args.name);
+    let mut meeting =
+        InMeeting::begin(args, connection, place.token.clone(), &mut session, reader).await?;
     let mut speech = match &place.transcript {
         Some(prefix) => {
             let listened = TrackNamespace::new(
@@ -619,6 +623,26 @@ pub async fn attend(
         } = &mut chat;
         // What was asked for or given up while the loop could not tell
         // `Frames`: before this session's video, or in the wait for the room.
+        // In a meeting, a picture asked for then is asked for now, of whom
+        // it named.
+        if let (Some(in_meeting), Some(taking)) = (meeting.as_mut(), pictures.as_mut())
+            && std::mem::take(&mut reader.frame.unsent)
+        {
+            let of = reader.frame.of.take();
+            if let Some(ended) = in_meeting
+                .frame(
+                    of.as_deref(),
+                    &mut session,
+                    &mut events,
+                    &stops,
+                    taking,
+                    reader,
+                )
+                .await?
+            {
+                break ended;
+            }
+        }
         settle_frame_asking(reader, pictures.as_mut(), &video).await;
         let told = pictures.as_mut().map(|pictures| &mut pictures.told);
         tokio::select! {
@@ -626,7 +650,19 @@ pub async fn attend(
                 Outside::End => break Ended::Quit,
                 Outside::Line(line) => match on_line(&mut chat.tracks, connection, reader, line) {
                     Wants::Nothing => {}
-                    Wants::Frame => match (pictures.as_mut(), &video) {
+                    Wants::Frame(of) if meeting.is_some() => {
+                        if let (Some(in_meeting), Some(taking)) = (meeting.as_mut(), pictures.as_mut()) {
+                            if let Some(ended) = in_meeting
+                                .frame(of.as_deref(), &mut session, &mut events, &stops, taking, reader)
+                                .await?
+                            {
+                                break ended;
+                            }
+                        } else {
+                            reader.error(THREAD_ENDED.to_string());
+                        }
+                    }
+                    Wants::Frame(_) => match (pictures.as_mut(), &video) {
                         (Some(pictures), Ok(_)) => {
                             pictures.tell(Job::Ask).await;
                             reader.frame_asked();
@@ -637,7 +673,12 @@ pub async fn attend(
                 },
             },
             event = on(told.map(mpsc::Receiver::recv)) => {
-                if let Some(event) = event {
+                if let Some(mut event) = event {
+                    // WHY told here and not by the thread: the thread knows
+                    // the frames, and the loop whose video they are.
+                    if let (Event::Frame { of, .. }, Some(in_meeting)) = (&mut event, meeting.as_ref()) {
+                        *of = in_meeting.watching();
+                    }
                     if matches!(event, Event::Frame { asked: FrameAsked::Command, .. }) {
                         reader.frame.until = None;
                     }
@@ -645,6 +686,13 @@ pub async fn attend(
                 } else {
                     reader.error(THREAD_ENDED.to_string());
                     *pictures = None;
+                }
+            }
+            came = on(meeting.as_mut().map(InMeeting::next)) => {
+                if let Some(in_meeting) = meeting.as_mut()
+                    && let Some(ended) = in_meeting.on(&mut session, reader, came).await
+                {
+                    break ended;
                 }
             }
             came = on(video.as_mut().ok().map(Video::next)) => {
@@ -673,6 +721,9 @@ pub async fn attend(
             came = on(speech.as_mut().map(Follower::next)) => {
                 if let Some(follower) = speech.as_mut() {
                     for out in follower.on(&mut session, came).await {
+                        if let (FollowOut::Item(piece), Some(in_meeting)) = (&out, meeting.as_mut()) {
+                            in_meeting.spoke(&piece.from);
+                        }
                         on_speech(reader, out);
                     }
                     remember_speech(reader, place, follower);
@@ -722,13 +773,17 @@ pub async fn attend(
                 {
                     if let Some(follower) = speech.as_mut() {
                         if let Some(piece) = follower.live(header.group_id, &object.payload) {
+                            if let Some(in_meeting) = meeting.as_mut() {
+                                in_meeting.spoke(&piece.from);
+                            }
                             on_speech(reader, FollowOut::Item(piece));
                         }
                         remember_speech(reader, place, follower);
                     }
                 }
                 Some(UniEvent::Object { header, object, .. })
-                    if video.as_ref().ok().and_then(Video::track_alias) == Some(header.track_alias) =>
+                    if video.as_ref().ok().and_then(Video::track_alias) == Some(header.track_alias)
+                        || meeting.as_ref().and_then(InMeeting::video_alias) == Some(header.track_alias) =>
                 {
                     if let Some(pictures) = pictures.as_mut() {
                         on_video_object(pictures, reader, header.group_id, &object);
@@ -777,6 +832,9 @@ pub async fn attend(
     }
     if let Ok(video) = video {
         video.cancel();
+    }
+    if let Some(in_meeting) = meeting {
+        in_meeting.cancel();
     }
     Ok(ended)
 }

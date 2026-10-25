@@ -69,6 +69,13 @@ impl Events {
         self.received.recv().await
     }
 
+    /// Puts events that were read, and not taken, before those read ahead,
+    /// in the order they came.
+    fn put_back(&mut self, mut kept: VecDeque<UniEvent>) {
+        kept.append(&mut self.ahead);
+        self.ahead = kept;
+    }
+
     /// Waits for `answer` and reads the events meanwhile: one that fails the
     /// session (a datagram of an unknown type, a stream that breaks the
     /// protocol) ends the wait with its error, and the rest are kept for
@@ -409,6 +416,15 @@ impl Requests<'_> {
         send_message(&mut send, &message, &trace, "fetch").await?;
         let mut answers = Some(RequestReader::new(recv, &trace, "fetch"));
         let session = &mut *self.session;
+        // WHY the other events are kept, and not let go of: the catalog of a
+        // participant of a meeting is read while the session goes on, and
+        // what came meanwhile (a line of the chat, a piece of speech, an
+        // Object of a video) is the loop's. WHY reading stops when as many
+        // are kept as `Events` reads ahead, and none is dropped: a line or a
+        // piece that is dropped makes its number skip without a word, and an
+        // Object of a video the rest of its Group. Flow control holds the
+        // relay back meanwhile, and the catalog has its 5 seconds.
+        let mut kept = VecDeque::new();
 
         let payload = async {
             loop {
@@ -426,13 +442,13 @@ impl Requests<'_> {
                         }
                         RequestStreamEvent::Closed(_) => answers = None,
                     },
-                    event = events.recv() => match event.ok_or_else(|| anyhow!("the connection is gone"))? {
+                    event = events.recv(), if kept.len() < MOST_READ_AHEAD => match event.ok_or_else(|| anyhow!("the connection is gone"))? {
                         UniEvent::Object { header, object, .. }
                             if header.track_alias == subscription.track_alias =>
                         {
                             return Ok::<_, anyhow::Error>(object.payload);
                         }
-                        UniEvent::FetchOpened { stream, header } => {
+                        UniEvent::FetchOpened { stream, header } if header.request_id == fetch.value() => {
                             session.on_fetch_stream(header.request_id)?;
                             let Some(mut body) = stops.take_fetch_body(stream) else { continue };
                             let mut decoder = FetchStreamDecoder::new(CATALOG_LIMIT, GroupOrder::Ascending);
@@ -455,7 +471,11 @@ impl Requests<'_> {
                                 return Ok(payload);
                             }
                         }
-                        UniEvent::SubgroupClosed { header, .. } => {
+                        // Of another track, it is kept with its Objects, in
+                        // their order.
+                        UniEvent::SubgroupClosed { header, .. }
+                            if header.track_alias == subscription.track_alias =>
+                        {
                             session.on_data_stream_closed(header.track_alias);
                         }
                         UniEvent::Failed(error) => return Err(error.into()),
@@ -466,16 +486,16 @@ impl Requests<'_> {
                                 return Err(GoneAway(go_away).into());
                             }
                         }
-                        _ => {}
+                        other => kept.push_back(other),
                     },
                 }
             }
         };
         // The catalog's 5 seconds begin when its SUBSCRIBE was answered,
         // which a relay that holds it for a broadcast to come has done.
-        let payload = tokio::time::timeout(CATALOG_WAIT, payload)
-            .await
-            .map_err(|_| anyhow!("no catalog came within 5 s"))??;
+        let payload = tokio::time::timeout(CATALOG_WAIT, payload).await;
+        events.put_back(kept);
+        let payload = payload.map_err(|_| anyhow!("no catalog came within 5 s"))??;
         let tracks = xmoq_msf::read_catalog(&payload).context("the catalog")?;
         Ok((
             tracks,
@@ -685,6 +705,44 @@ mod tests {
         queue.send(control(3)).await.unwrap();
         for id in 1..=3 {
             assert_eq!(events.recv().await, Some(control(id)), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn what_was_put_back_comes_first_in_the_order_it_came() {
+        // (kept while the catalog was waited for; read ahead before that;
+        // still in the queue; the order they are read in)
+        type Case = (
+            &'static [u64],
+            &'static [u64],
+            &'static [u64],
+            &'static [u64],
+        );
+        let cases: [Case; 4] = [
+            (&[1, 2], &[3, 4], &[5], &[1, 2, 3, 4, 5]),
+            (&[1, 2], &[], &[3], &[1, 2, 3]),
+            (&[], &[1], &[2], &[1, 2]),
+            (&[], &[], &[], &[]),
+        ];
+        for (kept, ahead, queued, expected) in cases {
+            let (queue, received) = mpsc::channel(8);
+            let mut events = Events::new(received);
+            events.ahead = ahead.iter().map(|id| control(*id)).collect();
+            for id in queued {
+                queue.send(control(*id)).await.unwrap();
+            }
+            drop(queue);
+            events.put_back(kept.iter().map(|id| control(*id)).collect());
+            let mut read = Vec::new();
+            while let Some(event) = events.recv().await {
+                let UniEvent::Control(ControlMessage::UnsupportedRequest { request_id, .. }) =
+                    event
+                else {
+                    panic!("{event:?}");
+                };
+                read.push(request_id);
+            }
+            assert_eq!(read, expected, "{kept:?} {ahead:?} {queued:?}");
         }
     }
 

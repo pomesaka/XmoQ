@@ -55,6 +55,8 @@ The counts show what `Frames` decodes: about a quarter of the Objects that came,
 
 The whole matrix, on `b84279e3` with this change, ended 226 of 226 as expected (482.1 s), this pairing among them (6.2 s, `taken=3`).
 
+**A later run failed where the check was wrong.** In `--only "agent:"` on `main` at `pwxrmsky`, before the whole matrix of `xmoq-agent --meeting`, the third picture had 4 green pixels on the row 315 where 30 or more were expected. The page paints the square 40 wide at x = painted × 4 mod 640 (`publishBroadcast` in `interop/page.ts`), so near the right edge it is cut, and a frame can show 4 of it. The check is now 1 to 40 (`interop/agent-pictures.ts`); what the reader wrote was right.
+
 ## What was not measured or run
 
 - How long `/frame` waits for its answer: the driver does not time it, and the reader's `at` is not set against the moment of the command.

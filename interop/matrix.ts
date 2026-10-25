@@ -54,6 +54,7 @@ interface Pairing {
 		| "agent.ts"
 		| "transcriber.ts"
 		| "agent-frames.ts"
+		| "agent-meeting.ts"
 		| "rendezvous.ts"
 		| "new-group.ts"
 		| "track-status.ts";
@@ -1412,6 +1413,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		{
 			name: "own relay: agent: xmoq-agent takes no picture of a page's broadcast unasked, writes a PNG of its video for each /frame with a frame line, and keeps no more files than --frames-kept",
 			script: "agent-frames.ts",
+			args: [],
+			relay: "own",
+		},
+		{
+			name: "own relay: agent: xmoq-agent --meeting is told of two pages that publish under xmoq/meet/r/<id>, writes a PNG of each for /frame <id>, refuses /frame for nobody who spoke and for somebody not there, and writes one as left when its page goes",
+			script: "agent-meeting.ts",
 			args: [],
 			relay: "own",
 		},

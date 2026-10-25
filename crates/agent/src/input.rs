@@ -11,8 +11,10 @@
 pub enum Input {
     /// A line said in the chat.
     Say(String),
-    /// `/frame`: a picture of the broadcast now.
-    Frame,
+    /// `/frame`: a picture of the broadcast now; in a meeting, `/frame
+    /// <id>` names whose, and `/frame` alone is of the one who spoke last.
+    /// Outside a meeting the word after it is not looked at.
+    Frame(Option<String>),
     /// A command that is none of these, with its name.
     Unknown(String),
     /// An empty line, which asks for nothing.
@@ -33,11 +35,13 @@ pub fn read(line: &str) -> Input {
     let Some(command) = line.strip_prefix('/') else {
         return Input::Say(line.to_string());
     };
-    // WHY the name alone: a command takes nothing yet, and one with words
-    // after it is still the command, as a person would mean it.
-    let name = command.split_whitespace().next().unwrap_or_default();
+    // WHY the words after the first that a command takes are let be: a
+    // command with more words after it is still the command, as a person
+    // would mean it.
+    let mut words = command.split_whitespace();
+    let name = words.next().unwrap_or_default();
     match name {
-        "frame" => Input::Frame,
+        "frame" => Input::Frame(words.next().map(ToString::to_string)),
         _ => Input::Unknown(name.to_string()),
     }
 }
@@ -53,8 +57,10 @@ mod tests {
             ("hello", Input::Say("hello".to_string())),
             ("hello\r", Input::Say("hello".to_string())),
             (" /frame", Input::Say(" /frame".to_string())),
-            ("/frame", Input::Frame),
-            ("/frame now", Input::Frame),
+            ("/frame", Input::Frame(None)),
+            ("/frame p1", Input::Frame(Some("p1".to_string()))),
+            ("/frame  p1  p2", Input::Frame(Some("p1".to_string()))),
+            ("/frame\tp1", Input::Frame(Some("p1".to_string()))),
             ("//frame", Input::Say("/frame".to_string())),
             ("//", Input::Say("/".to_string())),
             ("///x", Input::Say("//x".to_string())),
