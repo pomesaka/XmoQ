@@ -101,6 +101,17 @@ Written before the run: the reader gets two pieces with "relay" in them, from `x
 
 **As expected, the first time it ran** (5.2 s, `--only "transcriber:"`): two pieces, "Hello from the relay." each, from `xmoq/voice/page`. The pairing without tokens passed in the same run. Rebased on `main` with `@xmoq/transcript` (#345), the full interop run (`mise run interop -- --base-port 36000`, with the machine's lock) ended 234 of 234 as expected (519.3 s), both pairings of the transcriber among them.
 
+### 6. The demo with `--auth` (added on 2026-10-25)
+
+`bun demo/serve.ts --auth --relay-port 36400 --port 36401 --rooms-port 36402`, with the rooms (Miniflare, `npm ci` in `spikes/durable-objects-room`) and the models in the cache, driven as in section 4 with the Japanese voice. What was to be seen, written before: the transcriber is given the relay's key (`--auth-key-hex`, by `serve.ts`), the publishing page announces with the room's `pub` token for `xmoq/demo` (`connectToRelay` of the page carries it), the watching page's captions subscribe with the room's `sub` token for `xmoq/transcript/xmoq/demo` (`startCaptions` asks the room for it), and the room gives it (its `token-for` refuses only a field with `*` or `/`).
+
+**As expected, with nothing changed**:
+
+- The watching page showed the Japanese voice as captions, as without `--auth`.
+- A watching page opened with `?token=no`, which asks the room for no token, had its captions refused: "not following the transcript (refused: ... peer-closed)". The same page without it followed the transcript. So the relay checked the captions' requests, and the room's token passed.
+- The relay refused nothing of the transcriber's. The two refusals in its log were of the watching page's Joining FETCH for the video, which the publishing page turned down (0x3) and the relay passed on as 0x10, as it does without `--auth`.
+- The token of the transcriber's SUBSCRIBE_NAMESPACE and SUBSCRIBEs, `sub` in `xmoq/demo/*`, allows the broadcast's namespace `xmoq/demo` itself: the `*` of a token allows the fields before it with none after them (`crates/room-token`, decided on 2026-10-24).
+
 ## What was not run
 
 - Linux: neither the build of whisper.cpp nor the run. CI is to do both, with the processor alone.
