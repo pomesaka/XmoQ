@@ -4,10 +4,12 @@
 //! WHY a thread and not a task: whisper.cpp holds the thread it reads on
 //! for as long as it reads, a fifth of the piece's length and more
 //! (`crates/speech/README.md`), and the session's loop must go on meanwhile.
-//! WHY one for every track: the model is loaded once (550 MiB), and one
-//! reader that keeps up is all the processor gives.
+//! WHY readers for every track and not one for each: the model is loaded
+//! once (550 MiB), and each reader is a state of its own over it
+//! (`--readers`, 1 by default; `Whisper::another`).
 
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
@@ -44,12 +46,19 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Starts the thread, with at most `waiting` pieces waiting for it.
-    /// What it reads comes on the receiver, in order.
-    pub fn start(mut whisper: Whisper, waiting: usize) -> (Self, mpsc::Receiver<Read>) {
+    /// Starts a thread for each of `whispers`, with at most `waiting`
+    /// pieces waiting for them. Each thread takes the next piece that
+    /// waits. What they read comes on the receiver, in the order each was
+    /// done: with more than one thread, a later piece can be done before
+    /// an earlier one, of the same voice as well.
+    pub fn start(whispers: Vec<Whisper>, waiting: usize) -> (Self, mpsc::Receiver<Read>) {
         let (pieces, to_read) = sync_channel(waiting);
+        let to_read = Arc::new(Mutex::new(to_read));
         let (read_by, read) = mpsc::channel(READ_QUEUE);
-        std::thread::spawn(move || run(&mut whisper, &to_read, &read_by));
+        for mut whisper in whispers {
+            let (to_read, read_by) = (Arc::clone(&to_read), read_by.clone());
+            std::thread::spawn(move || run(&mut whisper, &to_read, &read_by));
+        }
         (Self { pieces, dropped: 0 }, read)
     }
 
@@ -80,15 +89,26 @@ pub fn wall_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn run(whisper: &mut Whisper, to_read: &Receiver<(Instant, ToRead)>, read_by: &mpsc::Sender<Read>) {
-    while let Ok((
+/// The next piece that waits; `None` once the loop is gone.
+fn next(to_read: &Mutex<Receiver<(Instant, ToRead)>>) -> Option<(Instant, ToRead)> {
+    // A thread that panicked while it waited held nothing else.
+    let to_read = to_read.lock().unwrap_or_else(PoisonError::into_inner);
+    to_read.recv().ok()
+}
+
+fn run(
+    whisper: &mut Whisper,
+    to_read: &Mutex<Receiver<(Instant, ToRead)>>,
+    read_by: &mpsc::Sender<Read>,
+) {
+    while let Some((
         given,
         ToRead {
             prefix,
             from,
             piece,
         },
-    )) = to_read.recv()
+    )) = next(to_read)
     {
         let began = Instant::now();
         let text = whisper.text(&piece.samples);
