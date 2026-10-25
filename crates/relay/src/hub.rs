@@ -26,10 +26,11 @@ use xmoq_moqt::session::{MAX_PEER_REQUESTS, MAX_UNANSWERED_UPDATES};
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
     Connection, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, OutgoingEvent,
-    OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent, RecvStream, RequestClose,
-    RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendLimits, SendStream,
-    StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError, open_fetch_stream_in_order,
-    open_fetch_stream_without_header, read_request_streams, read_uni_streams, send_message,
+    OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent, QueueFull, RecvStream,
+    RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendLimits,
+    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError,
+    open_fetch_stream_in_order, open_fetch_stream_without_header, read_request_streams,
+    read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
     Action, Event, FetchPiece, FetchPipeEnd, GoingAway, OutStreamKey, OwnRequestEnd, OwnRequestKey,
@@ -40,23 +41,34 @@ use xmoq_relay_core::{
 /// them, and `XmoQ` has not decided any.
 ///
 /// What one session can make the relay hold, with the defaults here and the
-/// QUIC limits the relay is started with (`quic_limits` in `main.rs`):
+/// QUIC limits the relay is started with (`quic_limits` in `main.rs`), and
+/// what sets each:
 ///
-/// | Held | Bound |
-/// |---|---|
-/// | QUIC: received on its streams and not read yet | 9.375 MiB (`receive_window`) |
-/// | QUIC: written to its streams and not acknowledged | 4 MiB (`send_window`) |
-/// | QUIC: datagrams it sent, which nothing reads | 1500 bytes |
-/// | Read buffers of its streams | 64 + 264 streams of 16 KiB: about 5 MiB |
-/// | Undecoded bytes of its subgroup streams | 4 MiB (`session_buffer_limit`) |
-/// | Streams held for a Track Alias that is not known | 1 MiB (`MAX_EARLY_BYTES`) |
-/// | Objects waiting to be written to it | 4 MiB (`send.bytes`) |
-/// | Messages waiting to be written to it | 256 a stream |
+/// | Held | Bound | Set by |
+/// |---|---|---|
+/// | QUIC: received on its streams and not read yet | 9.375 MiB (`receive_window`) | `quic_limits` |
+/// | QUIC: written to its streams and not acknowledged | 4 MiB (`send_window`) | `quic_limits` |
+/// | QUIC: datagrams it sent, which nothing reads | 1500 bytes | the transport |
+/// | Read buffers of its streams | 64 + 264 streams of 16 KiB: about 5 MiB | `streams` |
+/// | Undecoded bytes of its subgroup streams | 4 MiB (`session_buffer_limit`) | `streams` |
+/// | Streams held for a Track Alias that is not known | 1 MiB (`MAX_EARLY_BYTES`) | `xmoq-moqt-io` |
+/// | Objects waiting to be written to it | 8 MiB (`send.bytes`); 4 MiB of one subscription (`send_for_one_subscription.bytes`) | `--session-send-bytes`, `--subscription-send-bytes` |
+/// | Messages waiting to be written to it | 256 a stream (`session_queue_len`) | here |
 ///
-/// That is about 27 MiB a session and 26 GiB for 1,000 sessions, plus what the
-/// events that wait for the hub hold (shared, 1024 events). Without the QUIC
-/// limits the first two rows are those of the transport library, which for
-/// quinn's defaults are far larger than everything else here.
+/// At worst, with the defaults, a session holds the sum, about 31 MiB, and
+/// the relay
+///
+/// `max_sessions × 23.4 MiB + min(max_sessions × send.bytes, send_for_the_relay_bytes)`
+///
+/// (23.4 MiB being the rows but the Objects that wait), about 25 GiB for
+/// 1,000 sessions, of which 2 GiB are Objects that wait, plus the messages
+/// and what the events that wait for the hub hold (shared, 1024 events).
+/// These are bounds for the flags to fit to the machine (decided on
+/// 2026-10-25: the numbers of viewers are goals of the design, and what a
+/// machine holds is set when it is started); what was measured is far
+/// less, 192 MB for an edge of 500 viewers. Without the QUIC limits the
+/// first two rows are those of the transport library, which for quinn's
+/// defaults are far larger than everything else here.
 #[derive(Clone)]
 pub struct HubConfig {
     /// Limits and deadlines of the streams of each session.
@@ -90,10 +102,60 @@ pub struct HubConfig {
     /// that wait on one of its request streams. A session that lets them pile
     /// up further is closed.
     pub session_queue_len: usize,
-    /// What may wait to be written to one subscriber, over all its subgroup
-    /// streams. A subscriber that lets more pile up loses the subscription
-    /// that hit the limit (`TOO_FAR_BEHIND`).
+    /// What may wait to be written to one subscriber's session, over all its
+    /// subgroup streams. A session that lets more pile up loses the
+    /// subscription whose streams carry the most (`TOO_FAR_BEHIND`).
+    /// **Provisional: 8 MiB, 16,384 Objects, 4,096 streams**
+    /// (`--session-send-bytes`, `--session-send-objects`,
+    /// `--session-send-streams`). Its `delivery_patience` is that of every
+    /// subgroup stream of the relay (`--delivery-patience-ms`).
+    ///
+    /// WHY 4,096 streams: a participant of a meeting of 49 receives 48
+    /// voices of an Object a stream, 2,400 streams a second, and a stream
+    /// counts until the receiver's transport acknowledged it, so that the
+    /// 256 of before were reached at a round trip of 107 ms with nothing
+    /// late; with 4,096 the round trip and the delay together may be 1.7
+    /// seconds. 16,384 Objects are 6.3 seconds of those voices and 8 videos
+    /// of 25 frames a second; 8 MiB are 9.3 seconds of them at 67 kbit/s a
+    /// voice and 500 kbit/s a video. An edge counts here as one session:
+    /// its 500 viewers of one broadcast are one subscription a track at the
+    /// relay above, which the limits of a subscription end first.
     pub send: SendLimits,
+    /// What may wait to be written to one subscription, over all its
+    /// subgroup streams. A subscription that lets more pile up ends
+    /// (`TOO_FAR_BEHIND`), and the others of its session go on.
+    /// **Provisional: 4 MiB, 4,096 Objects, 1,024 streams**
+    /// (`--subscription-send-bytes`, `--subscription-send-objects`,
+    /// `--subscription-send-streams`). Its `delivery_patience` is not read:
+    /// that of [`Self::send`] holds.
+    ///
+    /// WHY a limit of each subscription beside the session's (decided on
+    /// 2026-10-25): with the session's alone, one track that falls behind
+    /// uses up what the others of the session have, a video the sound's of
+    /// a viewer, and an edge's one track every track of its viewers. WHY
+    /// 1,024 streams: a sound of 50 Objects a second, an Object a stream,
+    /// holds them for 20.5 seconds, and a video of 2.65 Mbit/s fills its 4
+    /// MiB in 12.7: behind a narrow link the video ends first, and the
+    /// sound goes on, as a viewer lost its sound otherwise
+    /// (docs/experiments/2026-10-14-three-minutes-behind-a-narrow-link-and-the-relays-limit-for-one-viewer.md).
+    pub send_for_one_subscription: SendLimits,
+    /// The payload bytes that may wait to be written to all the
+    /// subscribers of the relay together. Where they would be more, the
+    /// subscription of the relay whose streams carry the most ends
+    /// (`TOO_FAR_BEHIND`), of whichever session. **Provisional: 2 GiB**
+    /// (`--relay-send-bytes`; decided on 2026-10-25, Q61).
+    ///
+    /// WHY a bound of the relay's own: the bound of a session times
+    /// [`Self::max_sessions`] is 8 GiB, which is what a deployment does not
+    /// size a machine for, and the sessions do not all fall behind at once
+    /// in what was measured: one edge of 500 viewers took 192 MB in all
+    /// (docs/experiments/2026-10-25-one-video-track-through-two-edges.md).
+    /// WHY the one that carries the most, of any session: it is the one
+    /// whose end frees the most, and the one that most likely holds the
+    /// rest up; ending the one that went over would end a small track
+    /// that comes often, a sound, for the sake of a large one elsewhere.
+    /// WHY bytes alone: Objects and streams are bounded by the sessions'.
+    pub send_for_the_relay_bytes: usize,
     /// How long the last Objects of a track are waited for after
     /// `PUBLISH_DONE` (§10.11 of `draft-ietf-moq-transport-18`).
     pub drain_timeout: Duration,
@@ -293,7 +355,19 @@ impl Default for HubConfig {
             when_full: None,
             event_queue_len: 1024,
             session_queue_len: 256,
-            send: SendLimits::default(),
+            send: SendLimits {
+                bytes: 8 * 1024 * 1024,
+                objects: 16_384,
+                streams: 4_096,
+                delivery_patience: None,
+            },
+            send_for_one_subscription: SendLimits {
+                bytes: 4 * 1024 * 1024,
+                objects: 4_096,
+                streams: 1_024,
+                delivery_patience: None,
+            },
+            send_for_the_relay_bytes: 2 * 1024 * 1024 * 1024,
             drain_timeout: Duration::from_secs(2),
             slow_open: Duration::from_millis(10),
             auth_key: None,
@@ -502,6 +576,11 @@ struct SessionHandle<C: Connection> {
     stops: StreamStops,
     /// What waits to be written to this session's subgroup streams.
     budget: Arc<SendBudget>,
+    /// What waits to be written to each of its subscriptions, by the Track
+    /// Alias the relay gave it, which a session never gets again; within
+    /// [`Self::budget`]. One that no stream holds is dropped when the next
+    /// stream opens.
+    subscriptions: HashMap<u64, Arc<SendBudget>>,
     /// The subgroup streams towards it that the relay was told to open and
     /// that are not open yet: they wait for the peer to allow one more
     /// stream. For the log (`DATA_OPENED`).
@@ -542,6 +621,10 @@ fn path_now<C: Connection>(connection: &C) -> String {
 /// max(3 x RTT, 100 ms) (web-transport-quinn 0.13.2, `Session::close`), so
 /// this is a bound for a connection that does not end.
 const CLOSE_REACHES_THE_PEER: Duration = Duration::from_secs(2);
+
+/// [`QueueFull::level`] of a stream's own budget, its subscription's; 1 is
+/// its session's. The relay's refuses nothing.
+const SUBSCRIPTION_BUDGET: usize = 0;
 
 /// `NO_ERROR`: "The session is being terminated without an error" (§3.5).
 const NO_ERROR: u32 = 0x0;
@@ -1018,6 +1101,14 @@ pub fn spawn_with_upstream<C: Connection>(
         relay.set_authorizer(crate::auth::RoomTokens::new(key, config.auth_setup));
     }
     let next_session = Arc::new(AtomicU64::new(0));
+    // It counts and refuses nothing: the relay's bound is kept in
+    // `Hub::keep_to_the_relay_s_bound`.
+    let relay_budget = SendBudget::new(SendLimits {
+        bytes: usize::MAX,
+        objects: usize::MAX,
+        streams: usize::MAX,
+        delivery_patience: None,
+    });
     let hub = Hub {
         relay,
         config,
@@ -1025,6 +1116,7 @@ pub fn spawn_with_upstream<C: Connection>(
         next_session: Arc::clone(&next_session),
         events: events.clone(),
         sessions: HashMap::new(),
+        budget: relay_budget,
         drained: None,
         out_streams: HashMap::new(),
         fetch_pipes: HashMap::new(),
@@ -1050,6 +1142,10 @@ struct Hub<C: Connection> {
     /// For the tasks the hub starts, which report back through it.
     events: mpsc::Sender<Envelope<C>>,
     sessions: HashMap<SessionKey, SessionHandle<C>>,
+    /// What waits to be written to all the subscribers of the relay; the
+    /// budget of every session is within it. It refuses nothing
+    /// ([`Self::keep_to_the_relay_s_bound`]).
+    budget: Arc<SendBudget>,
     /// Answered once no session is left, after GOAWAY was sent
     /// ([`HubHandle::go_away`]).
     drained: Option<oneshot::Sender<()>>,
@@ -1644,7 +1740,8 @@ impl<C: Connection> Hub<C> {
                 requests: HashMap::new(),
                 own_requests: HashMap::new(),
                 stops,
-                budget: SendBudget::new(self.config.send),
+                budget: SendBudget::within(self.config.send, &self.budget),
+                subscriptions: HashMap::new(),
                 opening: Arc::new(AtomicUsize::new(0)),
                 tasks: vec![writer, watcher, setup_due],
                 fetch_writes: Vec::new(),
@@ -1654,27 +1751,34 @@ impl<C: Connection> Hub<C> {
         );
         let mut events = VecDeque::from([Event::SessionOpened { session, role }]);
         if let Some(url) = send_to {
-            self.log(|| format!("SESSION_SENT_AWAY session={} uri={url}", session.0));
-            let due = tokio::spawn({
-                let events = self.events.clone();
-                async move {
-                    tokio::time::sleep(Duration::from_millis(SEND_AWAY_TIMEOUT_MS)).await;
-                    // The hub is gone when this fails.
-                    let _ = events.send(Envelope::SendAwayDue { session }).await;
-                }
-            });
-            if let Some(handle) = self.sessions.get_mut(&session) {
-                handle.tasks.push(due);
-            }
-            events.push_back(Event::SendAway {
-                session,
-                going_away: GoingAway {
-                    new_session_uri: url.into_bytes(),
-                    timeout_ms: SEND_AWAY_TIMEOUT_MS,
-                },
-            });
+            events.push_back(self.send_away(session, url));
         }
         self.feed(events);
+    }
+
+    /// Has the session that just opened sent to `url`
+    /// ([`HubConfig::when_full`]): what the core is told, and the timer of
+    /// its GOAWAY.
+    fn send_away(&mut self, session: SessionKey, url: String) -> Event {
+        self.log(|| format!("SESSION_SENT_AWAY session={} uri={url}", session.0));
+        let due = tokio::spawn({
+            let events = self.events.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(SEND_AWAY_TIMEOUT_MS)).await;
+                // The hub is gone when this fails.
+                let _ = events.send(Envelope::SendAwayDue { session }).await;
+            }
+        });
+        if let Some(handle) = self.sessions.get_mut(&session) {
+            handle.tasks.push(due);
+        }
+        Event::SendAway {
+            session,
+            going_away: GoingAway {
+                new_session_uri: url.into_bytes(),
+                timeout_ms: SEND_AWAY_TIMEOUT_MS,
+            },
+        }
     }
 
     /// The session that was sent away is still there: §3.6, "The sender
@@ -1860,24 +1964,66 @@ impl<C: Connection> Hub<C> {
         let full = self
             .out_streams
             .get(&out_stream)
-            .is_some_and(|(_, writer)| writer.send(object).is_err());
-        if full {
-            let session = self
-                .out_streams
-                .get(&out_stream)
-                .map(|(session, _)| *session);
-            let carried = session.map_or_else(Vec::new, |session| self.carried_to(session));
+            .and_then(|(session, writer)| writer.send(object).err().map(|full| (*session, full)));
+        if let Some((session, full)) = full {
+            let carried = self.carried_for(session, full);
             pending.push_back(Event::SendQueueFull {
                 out_stream,
                 carried,
+            });
+        }
+        self.keep_to_the_relay_s_bound(pending);
+    }
+
+    /// Where more waits to be written to all the subscribers than
+    /// [`HubConfig::send_for_the_relay_bytes`], the subscription of any
+    /// session that has the most bytes waiting ends, as one over its own
+    /// limit does.
+    ///
+    /// WHY after the Object was queued, and not by refusing it as the
+    /// limits of a session and a subscription do: the Object that goes over
+    /// is as often one of a subscriber that keeps up, whose stream would be
+    /// reset for a hole; the relay is over by that Object until the
+    /// subscription has ended. WHY the bytes waiting and not those a stream
+    /// carried, which choose within a session: a subscriber that keeps up
+    /// carries the most, having been sent the most, and what ending one
+    /// frees of this bound is what waits.
+    fn keep_to_the_relay_s_bound(&self, pending: &mut VecDeque<Event>) {
+        if self.budget.in_use().0 <= self.config.send_for_the_relay_bytes {
+            return;
+        }
+        let most = self
+            .sessions
+            .values()
+            .flat_map(|handle| handle.subscriptions.values())
+            .max_by_key(|budget| budget.in_use().0);
+        let Some(most) = most else {
+            return;
+        };
+        let stream = self
+            .out_streams
+            .iter()
+            .find(|(_, (_, writer))| writer.counts_in(most))
+            .map(|(key, _)| *key);
+        if let Some(out_stream) = stream {
+            // Nothing carried: the subscription of `out_stream` is the one
+            // that ends.
+            pending.push_back(Event::SendQueueFull {
+                out_stream,
+                carried: Vec::new(),
             });
         }
     }
 
     /// What each stream not done to `session` has carried
     /// ([`OutgoingSubgroup::carried`]), for the core to choose which
-    /// subscription to end.
-    fn carried_to(&self, session: SessionKey) -> Vec<(OutStreamKey, usize)> {
+    /// subscription to end, where the budget `full` names of a stream to
+    /// `session` is used up: none for the subscription's own, which ends;
+    /// those to `session` for the session's.
+    fn carried_for(&self, session: SessionKey, full: QueueFull) -> Vec<(OutStreamKey, usize)> {
+        if full.level == SUBSCRIPTION_BUDGET {
+            return Vec::new();
+        }
         self.out_streams
             .iter()
             .filter(|(_, (of, _))| *of == session)
@@ -2243,6 +2389,30 @@ impl<C: Connection> Hub<C> {
         }
     }
 
+    /// The budget of the subscription of `session` the relay gave
+    /// `track_alias`, made where it has none.
+    fn subscription_budget(
+        &mut self,
+        session: SessionKey,
+        track_alias: u64,
+    ) -> Option<Arc<SendBudget>> {
+        let limits = SendLimits {
+            delivery_patience: self.config.send.delivery_patience,
+            ..self.config.send_for_one_subscription
+        };
+        let handle = self.sessions.get_mut(&session)?;
+        // WHY dropped here: a budget no writer holds holds nothing, and the
+        // subscriptions of a session come and go.
+        handle
+            .subscriptions
+            .retain(|_, budget| Arc::strong_count(budget) > 1);
+        let budget = handle
+            .subscriptions
+            .entry(track_alias)
+            .or_insert_with(|| SendBudget::within(limits, &handle.budget));
+        Some(Arc::clone(budget))
+    }
+
     /// Carries out [`Action::OpenDataStream`]; another action is none of
     /// its business.
     fn open_data_stream(&mut self, opening: &Action, pending: &mut VecDeque<Event>) {
@@ -2257,6 +2427,9 @@ impl<C: Connection> Hub<C> {
             return;
         };
         let delivery_timeout = asked.map(Duration::from_millis);
+        let Some(subscription) = self.subscription_budget(session, header.track_alias) else {
+            return;
+        };
         let Some(handle) = self.sessions.get(&session) else {
             return;
         };
@@ -2327,22 +2500,26 @@ impl<C: Connection> Hub<C> {
             Arc::clone(&handle.connection),
             header,
             (delivery_timeout, send_order),
-            &handle.budget,
+            &subscription,
             report,
             self.config.streams.trace.clone(),
             format!("session#{} out#{}", session.0, out_stream.0),
         );
-        if let Ok(writer) = writer {
-            self.out_streams.insert(out_stream, (session, writer));
-        } else {
-            // Too many streams of this subscriber are not written out. No
-            // writer was started, so the hub says what one would have said.
-            let carried = self.carried_to(session);
-            pending.push_back(Event::SendQueueFull {
-                out_stream,
-                carried,
-            });
-            pending.push_back(Event::OutStreamClosed { out_stream });
+        match writer {
+            Ok(writer) => {
+                self.out_streams.insert(out_stream, (session, writer));
+            }
+            Err(full) => {
+                // Too many streams of this subscription, of this subscriber
+                // or of the relay are not written out. No writer was
+                // started, so the hub says what one would have said.
+                let carried = self.carried_for(session, full);
+                pending.push_back(Event::SendQueueFull {
+                    out_stream,
+                    carried,
+                });
+                pending.push_back(Event::OutStreamClosed { out_stream });
+            }
         }
     }
 

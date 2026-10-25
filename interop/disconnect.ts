@@ -115,22 +115,45 @@ const TOO_FAR_BEHIND = 0x5;
 const MALFORMED_TRACK = 0x12;
 
 /**
- * Objects the slow-subscriber run sends at most before it gives up. The
- * relay cuts a subscriber off at 256 streams it cannot write out (provisional,
- * `SendLimits` in crates/moqt-io), on top of the streams it could still open.
+ * The streams a subscription may have that are not written out, for the run
+ * with a stopped subscriber (`--subscription-send-streams` of the relay).
+ *
+ * WHY not the relay's 1,024: a stopped process answers nothing, and its
+ * connection ends at the relay's idle timeout of 6 seconds; with 1,024 the
+ * publishing page of CI had opened 834 streams to it by then (one Object a
+ * stream, about 140 a second), and the subscriber was never cut off for
+ * being behind. Locally it was cut off after 1,089 Objects, 4.3 seconds
+ * after the stop. WHY 256: the number the relay had before for a session,
+ * which the run was measured with, and reached in about 2.3 seconds at the
+ * rate of CI. The page that does not read keeps answering, so it is run
+ * with the relay's own number.
  */
-const SLOW_SUBSCRIBER_MAX_OBJECTS = 2000;
+const STOPPED_SUBSCRIPTION_STREAMS = 256;
+/**
+ * Objects the run with a stopped subscriber sends at most before it gives
+ * up: the streams above and the 65 the own Rust client lets the relay open,
+ * which in 6 rounds had it cut off after 321 Objects each time, 0.52 to
+ * 0.67 seconds after the first it did not take; with the 192 of margin the
+ * page's number below has. At the rate of CI the 321 take about 2.3
+ * seconds, and 513 about 3.7, both within the idle timeout.
+ *
+ * WHY so close to what was measured: as for the page, a relay that held
+ * more than it says would still cut the subscriber off, only later, and has
+ * to fail here.
+ */
+const SLOW_SUBSCRIBER_MAX_OBJECTS = 513;
 /**
  * The same for a page that does not read. The page's library takes 64
- * streams at once (`maxPeerUniStreams`) and Chromium holds some more; in 60
- * rounds the publisher had sent 577 or 641 Objects when the relay cut the
- * page off, alone or beside other runs. The number follows from counts and
- * not from time.
+ * streams at once (`maxPeerUniStreams`) and Chromium holds some more; in 6
+ * rounds the publisher had sent 1,473 or 1,537 Objects when the relay cut the
+ * page off, with 1,024 streams a subscription (577 or 641 in 60 rounds with
+ * 256 streams a session, before). The number follows from counts and not
+ * from time.
  *
  * WHY so close to what was measured: a library that takes a few hundred
  * streams more would still be cut off, only later, and has to fail here.
  */
-const UNREAD_PAGE_MAX_OBJECTS = 833;
+const UNREAD_PAGE_MAX_OBJECTS = 1729;
 /** Objects it sends before it looks whether the relay has cut the subscriber off. */
 const SLOW_SUBSCRIBER_BATCH = 64;
 
@@ -2777,6 +2800,14 @@ async function main(): Promise<void> {
 				"own-rust",
 			],
 			verbose: options.verbose,
+			...(options.slow === "stopped-own-rust" && scenario === "slow-subscriber"
+				? {
+						relayArgs: [
+							"--subscription-send-streams",
+							String(STOPPED_SUBSCRIPTION_STREAMS),
+						],
+					}
+				: {}),
 		});
 		relayVersion = context.relayVersion;
 		browserVersion = context.pages?.browser.version() ?? null;

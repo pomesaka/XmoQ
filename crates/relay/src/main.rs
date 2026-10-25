@@ -154,6 +154,8 @@ struct Args {
     /// `SUBGROUP_DELIVERY_TIMEOUT`, and the most one that set a longer one
     /// gets. Without it only a subscriber's own timeout gives a stream up.
     delivery_patience: Option<Duration>,
+    /// The limits of what waits to be written ([`SendFlags`]).
+    send: SendFlags,
     /// `--stats-every-ms`: [`HubConfig::stats_every`]. For measuring.
     stats_every: Option<Duration>,
     /// `--log-arrivals on`: [`HubConfig::log_arrivals`]. For measuring.
@@ -176,6 +178,51 @@ struct Args {
     /// relay above this one, which is asked for the tracks of that
     /// namespace nobody announced here ([`hub::Upstream`]).
     upstream: Option<UpstreamArgs>,
+}
+
+/// `--session-send-bytes`, `--session-send-objects`,
+/// `--session-send-streams` ([`HubConfig::send`]);
+/// `--subscription-send-bytes`, `--subscription-send-objects`,
+/// `--subscription-send-streams` ([`HubConfig::send_for_one_subscription`]);
+/// `--relay-send-bytes` ([`HubConfig::send_for_the_relay_bytes`]). Each is
+/// more than 0 where it is said: none of the limits can be had away with.
+#[derive(Default)]
+struct SendFlags {
+    session: [Option<usize>; 3],
+    subscription: [Option<usize>; 3],
+    relay_bytes: Option<usize>,
+}
+
+impl SendFlags {
+    /// Takes `flag` where it is one of these: true then.
+    fn take(&mut self, flag: &str, value: &str) -> Result<bool> {
+        let place = match flag {
+            "--session-send-bytes" => &mut self.session[0],
+            "--session-send-objects" => &mut self.session[1],
+            "--session-send-streams" => &mut self.session[2],
+            "--subscription-send-bytes" => &mut self.subscription[0],
+            "--subscription-send-objects" => &mut self.subscription[1],
+            "--subscription-send-streams" => &mut self.subscription[2],
+            "--relay-send-bytes" => &mut self.relay_bytes,
+            _ => return Ok(false),
+        };
+        *place = Some(more_than_none(flag, value)?);
+        Ok(true)
+    }
+
+    fn apply(&self, config: &mut HubConfig) {
+        let set = |limits: &mut xmoq_moqt_io::SendLimits,
+                   [bytes, objects, streams]: [Option<usize>; 3]| {
+            limits.bytes = bytes.unwrap_or(limits.bytes);
+            limits.objects = objects.unwrap_or(limits.objects);
+            limits.streams = streams.unwrap_or(limits.streams);
+        };
+        set(&mut config.send, self.session);
+        set(&mut config.send_for_one_subscription, self.subscription);
+        if let Some(bytes) = self.relay_bytes {
+            config.send_for_the_relay_bytes = bytes;
+        }
+    }
 }
 
 struct UpstreamArgs {
@@ -270,6 +317,7 @@ fn parse_args() -> Result<Args> {
     let mut held_beyond_cache = None;
     let mut delivery_patience = None;
     let mut stats_every = None;
+    let mut send = SendFlags::default();
     let mut log_arrivals = false;
     let mut auth_key = None;
     let mut auth_setup = true;
@@ -324,6 +372,7 @@ fn parse_args() -> Result<Args> {
             "--upstream" => upstream = Some(value),
             "--upstream-cert-sha256" => upstream_cert = Some(value),
             "--upstream-namespace" => upstream_namespace = Some(value),
+            other if send.take(other, &value)? => {}
             other => bail!("unknown flag {other}"),
         }
     }
@@ -344,6 +393,7 @@ fn parse_args() -> Result<Args> {
         cached_fetch,
         held_beyond_cache,
         delivery_patience,
+        send,
         stats_every,
         log_arrivals,
         auth_key,
@@ -389,6 +439,7 @@ async fn main() -> Result<()> {
         config.cached_fetch_least_kbps = least_kbps;
     }
     config.send.delivery_patience = args.delivery_patience;
+    args.send.apply(&mut config);
     config.stats_every = args.stats_every;
     config.log_arrivals = args.log_arrivals;
     config.auth_key = args.auth_key;

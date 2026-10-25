@@ -666,7 +666,9 @@ const DISCONNECTS: Pairing[] = [
 		// each stream and took 8 seconds to send what gets the subscriber cut
 		// off, longer than the 6 seconds after which the relay drops a silent
 		// session (9 seconds when this was measured). own-browser took 0.6
-		// seconds.
+		// seconds, with the relay holding 256 streams for the subscription
+		// (`STOPPED_SUBSCRIPTION_STREAMS` of disconnect.ts, for the same
+		// reason).
 		name: "a stopped own-rust subscriber is cut off (TOO_FAR_BEHIND); own-browser and own-rust get everything",
 		script: "disconnect.ts",
 		args: [
@@ -678,9 +680,9 @@ const DISCONNECTS: Pairing[] = [
 		],
 	},
 	{
-		// The publisher has sent 577 or 641 Objects, one a stream, when the relay
-		// cuts the page off: 256 streams wait that the browser does not let it
-		// open. The Objects are small on purpose: with one large Object a
+		// The publisher has sent 1,473 or 1,537 Objects, one a stream, when the
+		// relay cuts the page off: 1,024 streams of the subscription wait that
+		// the browser does not let it open. The Objects are small on purpose: with one large Object a
 		// stream, the page was not told that its subscription had ended
 		// (docs/experiments/2026-10-10-subscription-backlog-in-chromium.md).
 		name: "an own-browser page that does not read is cut off (TOO_FAR_BEHIND); own-browser and own-rust get everything",
@@ -694,8 +696,9 @@ const DISCONNECTS: Pairing[] = [
 			"own-browser",
 			...each("subscriber", ["own-browser", "own-rust"]),
 		],
-		// The cut-off comes within 2 seconds; the 5 seconds after it are the
-		// library's wait for late streams before it ends the subscription.
+		// The cut-off comes within 10 seconds (9.2 in one run); the 5 seconds
+		// after it are the library's wait for late streams before it ends the
+		// subscription.
 		mostlyWaits: true,
 	}, // Two sources of one track (docs/moqt-implementation-notes.md, the rows on
 	// a PUBLISH for a track that has a source, on a Subgroup from another

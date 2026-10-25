@@ -2194,10 +2194,14 @@ impl Relay {
         }
     }
 
-    /// The subscriber session of `out_stream` is over its limit. The
-    /// subscription of that session whose streams carry the most bytes ends
+    /// What waits to be written for `out_stream` is over a limit. The
+    /// subscription of that session whose streams carry the most ends
     /// (`carried`, from the I/O side), the one of `out_stream` where none
-    /// carries more.
+    /// carries more. `carried` holds nothing for a limit of the subscription
+    /// itself and for the relay's (`out_stream` is then one of the
+    /// subscription the I/O side chose), so that the subscription of
+    /// `out_stream` ends; it holds the streams of the session for the
+    /// session's limit.
     ///
     /// WHY end one subscription: its queue is the only place the delay can
     /// go without holding back the publisher and the other subscribers (§8

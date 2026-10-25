@@ -1607,7 +1607,11 @@ async fn read_request_stream<R: RecvStream, S: SendStream, T>(
 
 /// The send budget of a receiver is used up: it does not keep up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueueFull;
+pub struct QueueFull {
+    /// Which budget it is: 0 for the one the writer was given, 1 for that
+    /// one's parent ([`SendBudget::within`]), and so on.
+    pub level: usize,
+}
 
 /// How much may wait to be written to one receiver, over all its subgroup
 /// streams.
@@ -1662,11 +1666,15 @@ impl Default for SendLimits {
     }
 }
 
-/// What waits to be written to one receiver. Shared by all its
-/// [`OutgoingSubgroup`]s.
+/// What waits to be written to one receiver, or to a part of what it
+/// receives, or to many receivers. Shared by all the [`OutgoingSubgroup`]s
+/// it is given to, and by those of every budget [`within`](Self::within)
+/// it: what one of them holds counts in each budget up the line, and each
+/// one's limits hold.
 #[derive(Debug)]
 pub struct SendBudget {
     limits: SendLimits,
+    parent: Option<Arc<SendBudget>>,
     bytes: AtomicUsize,
     objects: AtomicUsize,
     streams: AtomicUsize,
@@ -1680,8 +1688,21 @@ impl SendBudget {
     /// An unused budget.
     #[must_use]
     pub fn new(limits: SendLimits) -> Arc<Self> {
+        Self::with_parent(limits, None)
+    }
+
+    /// An unused budget within `parent`: what a writer given it holds
+    /// counts in `parent` as well, and its limits hold too. Its
+    /// [`SendLimits::delivery_patience`] is this one's, not the parent's.
+    #[must_use]
+    pub fn within(limits: SendLimits, parent: &Arc<Self>) -> Arc<Self> {
+        Self::with_parent(limits, Some(Arc::clone(parent)))
+    }
+
+    fn with_parent(limits: SendLimits, parent: Option<Arc<Self>>) -> Arc<Self> {
         Arc::new(Self {
             limits,
+            parent,
             bytes: AtomicUsize::new(0),
             objects: AtomicUsize::new(0),
             streams: AtomicUsize::new(0),
@@ -1700,6 +1721,11 @@ impl SendBudget {
             self.handed.load(Ordering::Relaxed),
             self.writing.load(Ordering::Relaxed),
         )
+    }
+
+    /// This budget and every one it is within, nearest first.
+    fn line(&self) -> impl Iterator<Item = &Self> {
+        std::iter::successors(Some(self), |budget| budget.parent.as_deref())
     }
 
     /// `(bytes, objects, streams)` that wait, for tests and logs.
@@ -1736,29 +1762,34 @@ impl Share {
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
         self.objects.fetch_add(1, Ordering::Relaxed);
         self.carried.fetch_add(bytes, Ordering::Relaxed);
-        self.budget.bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.budget.objects.fetch_add(1, Ordering::Relaxed);
+        for budget in self.budget.line() {
+            budget.bytes.fetch_add(bytes, Ordering::Relaxed);
+            budget.objects.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn give_back(&self, bytes: usize) {
         self.bytes.fetch_sub(bytes, Ordering::Relaxed);
         self.objects.fetch_sub(1, Ordering::Relaxed);
-        self.budget.bytes.fetch_sub(bytes, Ordering::Relaxed);
-        self.budget.objects.fetch_sub(1, Ordering::Relaxed);
+        for budget in self.budget.line() {
+            budget.bytes.fetch_sub(bytes, Ordering::Relaxed);
+            budget.objects.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     /// Gives back whatever the writer still holds, and its stream. Called
     /// once, when the writer ends, however it ends.
     fn release(&self) {
         self.released.store(true, Ordering::Relaxed);
-        let budget = &self.budget;
-        budget
-            .bytes
-            .fetch_sub(self.bytes.swap(0, Ordering::Relaxed), Ordering::Relaxed);
-        budget
-            .objects
-            .fetch_sub(self.objects.swap(0, Ordering::Relaxed), Ordering::Relaxed);
-        budget.streams.fetch_sub(1, Ordering::Relaxed);
+        let (bytes, objects) = (
+            self.bytes.swap(0, Ordering::Relaxed),
+            self.objects.swap(0, Ordering::Relaxed),
+        );
+        for budget in self.budget.line() {
+            budget.bytes.fetch_sub(bytes, Ordering::Relaxed);
+            budget.objects.fetch_sub(objects, Ordering::Relaxed);
+            budget.streams.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1834,7 +1865,8 @@ impl OutgoingSubgroup {
     /// # Errors
     ///
     /// [`QueueFull`] when the receiver already has as many unfinished streams
-    /// as its budget allows. Nothing was started, and `report` is not called.
+    /// as its budget allows, or a budget it is within. Nothing was started,
+    /// and `report` is not called.
     pub fn spawn<C, R, F>(
         connection: Arc<C>,
         header: SubgroupHeader,
@@ -1849,10 +1881,14 @@ impl OutgoingSubgroup {
         R: Fn(OutgoingEvent) -> F + Send + Sync + 'static,
         F: Future<Output = ()> + Send,
     {
-        let streams = budget.streams.fetch_add(1, Ordering::Relaxed);
-        if streams >= budget.limits.streams {
-            budget.streams.fetch_sub(1, Ordering::Relaxed);
-            return Err(QueueFull);
+        let full = budget
+            .line()
+            .position(|budget| budget.streams.load(Ordering::Relaxed) >= budget.limits.streams);
+        if let Some(level) = full {
+            return Err(QueueFull { level });
+        }
+        for budget in budget.line() {
+            budget.streams.fetch_add(1, Ordering::Relaxed);
         }
         let share = Arc::new(Share {
             budget: Arc::clone(budget),
@@ -1918,20 +1954,28 @@ impl OutgoingSubgroup {
         self.share.carried.load(Ordering::Relaxed)
     }
 
+    /// Whether the stream was started with `budget`
+    /// ([`Self::spawn`]), and not one within it.
+    #[must_use]
+    pub fn counts_in(&self, budget: &Arc<SendBudget>) -> bool {
+        Arc::ptr_eq(&self.share.budget, budget)
+    }
+
     /// Queues an Object.
     ///
     /// # Errors
     ///
-    /// [`QueueFull`] when the Object would take the receiver over its budget.
-    /// The Object is not queued.
+    /// [`QueueFull`] when the Object would take the receiver over its budget,
+    /// or over a budget it is within. The Object is not queued.
     pub fn send(&self, object: Arc<SubgroupObject>) -> Result<(), QueueFull> {
-        let budget = &self.share.budget;
-        let (bytes, objects, _) = budget.in_use();
         let len = object.payload.len();
-        let over = objects >= budget.limits.objects
-            || (objects > 0 && bytes.saturating_add(len) > budget.limits.bytes);
-        if over {
-            return Err(QueueFull);
+        let full = self.share.budget.line().position(|budget| {
+            let (bytes, objects, _) = budget.in_use();
+            objects >= budget.limits.objects
+                || (objects > 0 && bytes.saturating_add(len) > budget.limits.bytes)
+        });
+        if let Some(level) = full {
+            return Err(QueueFull { level });
         }
         self.share.take(len);
         // An error means the writer is gone, with its share of the budget.
@@ -1979,12 +2023,19 @@ async fn counted<T, E>(
             self.0.fetch_sub(1, Ordering::Relaxed);
         }
     }
-    budget.writing.fetch_add(1, Ordering::Relaxed);
-    let _waiting = Waiting(&budget.writing);
+    let _waiting: Vec<Waiting<'_>> = budget
+        .line()
+        .map(|budget| {
+            budget.writing.fetch_add(1, Ordering::Relaxed);
+            Waiting(&budget.writing)
+        })
+        .collect();
     let written = write.await;
     if written.is_ok() {
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        budget.handed.fetch_add(len, Ordering::Relaxed);
+        for budget in budget.line() {
+            budget.handed.fetch_add(len, Ordering::Relaxed);
+        }
     }
     written
 }
