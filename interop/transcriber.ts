@@ -389,9 +389,12 @@ async function main(): Promise<void> {
 		const liveCode = await withTimeout(live.exited, "the live reader to leave");
 		if (liveCode !== 0)
 			throw new Error(`the live reader left with ${liveCode}`);
+		// In the order of the Groups: each comes on a subgroup stream of its
+		// own, and streams arrive in no order.
 		const pieces = live
 			.matches(/^OBJECT group=(\d+) object=0 .*payload_hex=(\S*)$/)
-			.map(pieceOf);
+			.map(pieceOf)
+			.sort((one, other) => one.group - other.group);
 		const [first, second] = pieces;
 		if (first === undefined || second === undefined) {
 			throw new Error(`the live reader got ${pieces.length} pieces, not 2`);
