@@ -7,6 +7,7 @@
 use xmoq_picture::frames::Settings;
 use xmoq_viewer::chat_track::{CATCH_UP_LINES, CATCH_UP_LINES_MOST, room_of_address};
 use xmoq_viewer::meeting::Limits;
+use xmoq_viewer::reconnect::{CONNECT_WAIT_MS, ROOM_WAIT_MS};
 use xmoq_viewer::room::certificate_hash;
 
 /// Where the broadcast is.
@@ -51,6 +52,10 @@ pub struct Args {
     pub setup_wait_ms: u64,
     /// `--open-wait-ms`.
     pub open_wait_ms: u64,
+    /// `--room-wait-ms`: how long the room gets for each of its answers.
+    pub room_wait_ms: u64,
+    /// `--connect-wait-ms`: how long the relay gets to be connected to.
+    pub connect_wait_ms: u64,
     /// `--seconds`: the reader ends after so long.
     pub seconds: Option<u64>,
     /// `--frames off`: the video is not subscribed to, and `/frame` gets
@@ -100,6 +105,8 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
   --answer-wait-ms <ms>             how long the relay gets to answer a request (10000)
   --setup-wait-ms <ms>              how long the relay gets for its SETUP (10000)
   --open-wait-ms <ms>               how long the relay gets to allow a stream for a request (10000)
+  --room-wait-ms <ms>               how long the room gets for each of its answers (5000)
+  --connect-wait-ms <ms>            how long the relay gets to be connected to (10000)
   --seconds <n>                     end after so long
   --frames on|off                   off: the video is not subscribed to, and /frame gets no picture (on)
   --frame-every-ms <ms>             a picture this often by the broadcast's clock, unasked (none)
@@ -153,6 +160,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
     let mut catch_up = CATCH_UP_LINES;
     let (mut answer_wait_ms, mut setup_wait_ms, mut open_wait_ms) =
         (DEFAULT_WAIT_MS, DEFAULT_WAIT_MS, DEFAULT_WAIT_MS);
+    let (mut room_wait_ms, mut connect_wait_ms) = (ROOM_WAIT_MS, CONNECT_WAIT_MS);
     let mut seconds = None;
     let (mut frames, mut pictures) = (true, Settings::default());
     let (mut speech, mut transcript) = (true, None);
@@ -206,6 +214,8 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--answer-wait-ms" => answer_wait_ms = number(&flag, &value)?,
             "--setup-wait-ms" => setup_wait_ms = number(&flag, &value)?,
             "--open-wait-ms" => open_wait_ms = number(&flag, &value)?,
+            "--room-wait-ms" => room_wait_ms = number(&flag, &value)?,
+            "--connect-wait-ms" => connect_wait_ms = number(&flag, &value)?,
             "--seconds" => seconds = Some(number(&flag, &value)?),
             "--frames" => {
                 frames = match value.as_str() {
@@ -306,6 +316,8 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         answer_wait_ms,
         setup_wait_ms,
         open_wait_ms,
+        room_wait_ms,
+        connect_wait_ms,
         seconds,
         frames,
         pictures,
@@ -335,6 +347,8 @@ mod tests {
             answer_wait_ms: 10_000,
             setup_wait_ms: 10_000,
             open_wait_ms: 10_000,
+            room_wait_ms: 5_000,
+            connect_wait_ms: 10_000,
             seconds: None,
             frames: true,
             pictures: Settings {
@@ -517,7 +531,8 @@ mod tests {
             ),
             (
                 "--room http://h/rooms/a --out o --token no --chat-catch-up-lines 1000 \
-                 --answer-wait-ms 1 --setup-wait-ms 2 --open-wait-ms 3 --seconds 4"
+                 --answer-wait-ms 1 --setup-wait-ms 2 --open-wait-ms 3 --room-wait-ms 5 \
+                 --connect-wait-ms 6 --seconds 4"
                     .to_string(),
                 Ok(Args {
                     source: Source::Room {
@@ -528,6 +543,8 @@ mod tests {
                     answer_wait_ms: 1,
                     setup_wait_ms: 2,
                     open_wait_ms: 3,
+                    room_wait_ms: 5,
+                    connect_wait_ms: 6,
                     seconds: Some(4),
                     ..in_room("a", "agent")
                 }),

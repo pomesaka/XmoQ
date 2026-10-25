@@ -14,5 +14,6 @@
 
 pub mod chat_tracks;
 pub mod follow;
+pub mod reconnect;
 pub mod room_socket;
 pub mod session;

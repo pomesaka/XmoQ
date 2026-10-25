@@ -31,7 +31,6 @@ use xmoq_again::AskAgain;
 use xmoq_chat_tracks::names::Person;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
-use xmoq_moqt::message::GoAway;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, Role, Session, Transport};
 use xmoq_moqt_io::wt::{self, WtConnection};
@@ -41,8 +40,10 @@ use xmoq_moqt_io::{
 };
 use xmoq_picture::video_decoder::VideoDecoder;
 use xmoq_viewer::chat_track::{shown, shown_gap};
+use xmoq_viewer::reconnect::{After, BETWEEN_TRIES_MS, Ended, NextSession};
 use xmoq_viewer::room::{self, Broadcast};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
+use xmoq_viewer_io::reconnect::go_away_behind;
 use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};
 use xmoq_viewer_io::session::{
     self, Events, GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, new_url,
@@ -63,11 +64,6 @@ use crate::sound::{Sound, Volume, micros_since};
 /// watching page's (`packages/media/src/core/playout-clock.ts`).
 const BUFFER_TICK: Duration = Duration::from_millis(500);
 
-/// How long the relay gets for its SETUP, a room to take the viewer in, and
-/// either to be connected to. **Provisional.** The answer to a request has
-/// its own time (`xmoq_moqt::params::answer_wait_ms`, in `session.rs`), and
-/// the catalog is waited 5 seconds for.
-const ANSWER_WAIT: Duration = Duration::from_secs(10);
 /// More than the waits for the relay at the beginning of a broadcast come
 /// to, each of which has its own time: the SETUP (10 s), the catalog (the
 /// answer to its SUBSCRIBE, 10 s, and the catalog itself, 5 s), and the
@@ -88,16 +84,10 @@ struct UntilClosed {
     requests: Option<xmoq_moqt_io::IncomingStreams>,
 }
 
-/// How long a room gets for a token.
-/// **Provisional.**
-const ROOM_WAIT: Duration = Duration::from_secs(5);
 /// How long the thread of the picture gets to end. **Provisional**: it
 /// hears of the end within 20 ms unless the terminal does not take what it
 /// writes.
 const PICTURE_WAIT: Duration = Duration::from_secs(2);
-/// The least time from one try at a broadcast to the next, however often a
-/// room names another. **Provisional.**
-const BETWEEN_TRIES: Duration = Duration::from_secs(1);
 /// The most lines of the chat that are kept for the lines under the picture.
 const CHAT_KEPT: usize = 16;
 /// The most characters of a line this program writes: an error with what
@@ -249,17 +239,6 @@ impl Ui {
     }
 }
 
-/// How a broadcast stopped being played.
-enum Ended {
-    /// The viewer is to end.
-    Quit,
-    /// The broadcast ended or moved: the room says what comes next.
-    Again,
-    /// The relay sent GOAWAY (§3.6): the viewer connects again, to the URL
-    /// it named, or to the same one where it named none.
-    Moved(Option<String>),
-}
-
 /// Where one broadcast is played from.
 struct Place {
     url: String,
@@ -321,7 +300,21 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
             }));
         }
         (Source::Room { ask_token, .. }, Some(room)) => (room, *ask_token),
-        (Source::Room { .. }, None) => bail!("the room is gone"),
+        // WHY joined again and not given up: a room that went away during
+        // a session (`play`) may be back.
+        (
+            Source::Room {
+                address,
+                name,
+                ask_token,
+            },
+            room @ None,
+        ) => {
+            let Some(joined) = join_room(args, address, name, ui).await? else {
+                return Ok(None);
+            };
+            (room.insert(joined), *ask_token)
+        }
     };
     if room.current().is_none() {
         ui.note("ROOM_BROADCAST none: waiting");
@@ -339,7 +332,7 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
         let Some(given) = ui
             .unless_ended(
                 "the room's token",
-                ROOM_WAIT,
+                Duration::from_millis(args.room_wait_ms),
                 room.token(room::TokenRole::Sub, &broadcast.namespace),
             )
             .await?
@@ -361,7 +354,7 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
         let Some(tokens) = ui
             .unless_ended(
                 "the room's tokens for the chat",
-                ROOM_WAIT,
+                Duration::from_millis(args.room_wait_ms),
                 room.chat_tokens(&person_of(chat)),
             )
             .await?
@@ -390,63 +383,48 @@ fn person_of(chat: &Chat) -> Person {
 
 async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     // With a room: where the broadcast is, and a token, are the room's to say.
-    let mut room = match &args.source {
-        Source::Room { address, name, .. } => {
-            let joining = RoomSocket::join_when_there(address, name, ROOM_COMES_WITHIN);
-            // The last try may begin as the refusals' time ends.
-            let wait = ROOM_COMES_WITHIN + ANSWER_WAIT;
-            let Some(room) = ui.unless_ended("the room", wait, joining).await? else {
-                return Ok(());
-            };
-            Some(room)
-        }
-        Source::Relay { .. } => None,
-    };
-    let follows = room.is_some();
-    let mut first = true;
-    let mut tried: Option<Instant> = None;
-    // The last GOAWAY: the URL the viewer was told to leave, and where to go
-    // instead. It holds for every try while the place is still the one left.
-    // WHY not for the next try alone: the relay that sent it is going away
-    // and refuses what comes (`GOING_AWAY`); a viewer that went back to it
-    // after one failure at the new URL was left there (`keepPlaying` of
-    // `@xmoq/media`, an interop run, 2026-10-24). WHY not where a room names
-    // another place: the room knows where the broadcast went.
-    let mut moved: Option<(String, String)> = None;
-    // Whether the last session ended with a GOAWAY.
-    let mut just_moved = false;
-    // Whether the last try was made without the wait.
-    let mut went_at_once = false;
+    let mut room = None;
+    if let Source::Room { address, name, .. } = &args.source {
+        let Some(joined) = join_room(args, address, name, ui).await? else {
+            return Ok(());
+        };
+        room = Some(joined);
+    }
+    // WHY the first failure ends the viewer, with a room as well: a person
+    // started it and looks at it, and a relay that turns it down is to be
+    // seen at once.
+    let mut rule = NextSession::new(BETWEEN_TRIES_MS, room.is_some(), true);
+    let since = Instant::now();
+    let now_ms = || u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX);
     loop {
         let Some(mut place) = place(args, &mut room, ui).await? else {
             return Ok(());
         };
-        // §10.4: "The client MUST use this URI for the new session if
-        // provided." WHY the same certificate hash: the viewer has no other
-        // for it; a relay elsewhere with another certificate turns the
-        // connection down, and the viewer goes on as after any failure.
-        match &moved {
-            Some((left, to)) if *left == place.url => place.url.clone_from(to),
-            Some(_) => moved = None,
-            None => {}
+        // WHY the same certificate hash where a GOAWAY names another URL:
+        // the viewer has no other for it; a relay elsewhere with another
+        // certificate turns the connection down, and the viewer goes on as
+        // after any failure.
+        let next = rule.next(&place.url, now_ms());
+        place.url = next.url;
+        if next.wait_ms > 0 {
+            let wait = Duration::from_millis(next.wait_ms);
+            let waiting = async {
+                tokio::time::sleep(wait).await;
+                Ok(())
+            };
+            if ui
+                .unless_ended("the wait", wait * 2, waiting)
+                .await?
+                .is_none()
+            {
+                return Ok(());
+            }
         }
-        // WHY not at once again: a room that names one broadcast after the
-        // other, or one that is gone, would have the viewer connect as fast
-        // as it can. WHY at once after a GOAWAY, and only once in a row: the
-        // picture stands still until the next session plays, and a relay
-        // that sends GOAWAY on every session would have it connect as fast
-        // as it can. `keepPlaying` of `@xmoq/media` does the same.
-        let at_once = just_moved && !went_at_once;
-        just_moved = false;
-        went_at_once = at_once;
-        if !at_once && !waited_between_tries(ui, tried).await? {
-            return Ok(());
-        }
-        tried = Some(Instant::now());
         let mut began = false;
         let streams = StreamConfig::default();
         let connecting = async { Ok(wt::connect(&place.url, place.cert_sha256, &streams).await?) };
-        let played = match ui.unless_ended("the relay", ANSWER_WAIT, connecting).await {
+        let connect_wait = Duration::from_millis(args.connect_wait_ms);
+        let played = match ui.unless_ended("the relay", connect_wait, connecting).await {
             Ok(None) => return Ok(()),
             Ok(Some(connection)) => {
                 let connection = Arc::new(connection);
@@ -482,30 +460,37 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
             }
             Err(error) => Err(error),
         };
-        match played {
-            Ok(Ended::Moved(url)) => {
-                ui.note(&format!(
-                    "MOVED {}",
-                    url.as_deref().unwrap_or("to the same URL")
-                ));
-                // The place as the room or the flags gave it, before a move.
-                let left = moved
-                    .as_ref()
-                    .map_or_else(|| place.url.clone(), |(left, _)| left.clone());
-                moved = Some((left, url.unwrap_or_else(|| place.url.clone())));
-                just_moved = true;
-            }
-            // Without a room nothing says what comes next.
-            Ok(Ended::Again) if follows => {}
-            Ok(Ended::Quit | Ended::Again) => return Ok(()),
-            // WHY the first try ends the viewer and a later one does not: a
-            // relay that turns the viewer down is to be seen, and a
-            // broadcast that broke off may come back.
-            Err(error) if !follows || (first && !began) => return Err(error),
-            Err(error) => ui.note(&format!("PLAY_ENDED {error:#}")),
+        if let Ok(Ended::Moved(url)) = &played {
+            ui.note(&format!(
+                "MOVED {}",
+                url.as_deref().unwrap_or("to the same URL")
+            ));
         }
-        first = false;
+        let end = match &played {
+            Ok(end) => end.clone(),
+            Err(_) => Ended::Failed { began },
+        };
+        match (rule.ended(end), played) {
+            (After::Connect, Err(error)) => ui.note(&format!("PLAY_ENDED {error:#}")),
+            (After::Connect, Ok(_)) => {}
+            (After::End, _) => return Ok(()),
+            (After::EndWithError, played) => return played.map(|_| ()),
+        }
     }
+}
+
+/// The room at `address`, which may begin listening only later
+/// (`ROOM_COMES_WITHIN`); `None` where the viewer is to end first.
+async fn join_room(
+    args: &Args,
+    address: &str,
+    name: &str,
+    ui: &mut Ui,
+) -> Result<Option<RoomSocket>> {
+    let joining = RoomSocket::join_when_there(address, name, ROOM_COMES_WITHIN);
+    // The last try may begin as the refusals' time ends.
+    let wait = ROOM_COMES_WITHIN + Duration::from_millis(args.room_wait_ms);
+    ui.unless_ended("the room", wait, joining).await
 }
 
 /// The subscriptions of a broadcast.
@@ -1288,51 +1273,6 @@ async fn play(
 /// The code to close the session with (`session::termination_code`).
 fn termination_code(played: &Result<Ended>) -> u32 {
     played.as_ref().err().map_or(0, session::termination_code)
-}
-
-/// Waits what is left of [`BETWEEN_TRIES`] since `tried`; false where the
-/// viewer was told to end meanwhile.
-async fn waited_between_tries(ui: &mut Ui, tried: Option<Instant>) -> Result<bool> {
-    let Some(wait) = tried.and_then(|tried| BETWEEN_TRIES.checked_sub(tried.elapsed())) else {
-        return Ok(true);
-    };
-    let waiting = async {
-        tokio::time::sleep(wait).await;
-        Ok(())
-    };
-    Ok(ui
-        .unless_ended("the wait", BETWEEN_TRIES * 2, waiting)
-        .await?
-        .is_some())
-}
-
-/// The GOAWAY behind a SUBSCRIBE refused with `GOING_AWAY` (§10.4), which
-/// travels on the control stream and may be read after the refusal; `None`
-/// where none comes within `wait_ms`. WHY a limit, the time an answer gets:
-/// `GOING_AWAY` also comes from a peer that received a GOAWAY (§10.6.2) and
-/// sends none. `@xmoq/media` waits the same.
-async fn go_away_behind(
-    session: &mut Session,
-    events: &mut Events,
-    wait_ms: u64,
-) -> Result<Option<GoAway>> {
-    let waiting = async {
-        loop {
-            match events.recv().await {
-                Some(UniEvent::Control(message)) => {
-                    if let ControlEvent::GoAway(go_away) = session.on_control_message(message)? {
-                        return Ok::<_, anyhow::Error>(go_away);
-                    }
-                }
-                Some(_) => {}
-                None => bail!("the connection is gone"),
-            }
-        }
-    };
-    match tokio::time::timeout(Duration::from_millis(wait_ms), waiting).await {
-        Ok(go_away) => Ok(Some(go_away?)),
-        Err(_) => Ok(None),
-    }
 }
 
 async fn watch(args: Args) -> Result<()> {
