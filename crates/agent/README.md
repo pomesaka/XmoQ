@@ -22,7 +22,7 @@ echo '/frame' > /tmp/room/say         # a picture of the broadcast now
 tail -f /tmp/room/events.jsonl
 ```
 
-The lines of `events.jsonl` are `chat`, `joined`, `left`, `broadcast`, `frame`, `speech`, `chat_gap` and `error` (the table below). A `frame` line's `path` is the PNG, in `/tmp/room/frames/<when the reader began, ms>/`. `speech` lines come where the demo has its transcriber (built with `cargo build --release -p xmoq-transcriber` and its models fetched with `mise run speech-model` and `mise run speech-model -- silero-v5.1.2`; the demo says so when it starts) and the page sends a voice: without `?audio=mic` it sends a tone, in which there are no words. The `sleep` holds the pipe open: without stdin the reader reads on and says nothing.
+The lines of `events.jsonl` are `chat`, `joined`, `left`, `broadcast`, `frame`, `speech`, `chat_gap` and `error` (the table below). A `frame` line's `path` is the PNG's from `--out` (`frames/<when the reader began, ms>/<file>`, in `/tmp/room` here), as the page of a meeting writes it too (`fixtures/agent-lines/`). `speech` lines come where the demo has its transcriber (built with `cargo build --release -p xmoq-transcriber` and its models fetched with `mise run speech-model` and `mise run speech-model -- silero-v5.1.2`; the demo says so when it starts) and the page sends a voice: without `?audio=mic` it sends a tone, in which there are no words. The `sleep` holds the pipe open: without stdin the reader reads on and says nothing.
 
 ## Flags
 
@@ -63,14 +63,14 @@ Every line has `type` and `at`, the reader's clock in milliseconds since the Uni
 | `chat_gap` | `after`, `before` | More lines were said while the reader was away than `--chat-catch-up-lines`: those between were not fetched |
 | `joined`, `left` | `name` | Somebody's chat namespace `xmoq/chat/<room>/<name>` was announced, or withdrawn |
 | `participant` | `state` (`joined`, `left`), `id` | With `--meeting`: a participant's broadcast `xmoq/meet/<room>/<id>` was announced, or withdrawn; on a new session, those not told of again within 2 s are written as left. `id` is not the participant's name in the chat |
-| `frame` | `path`, `group`, `object`, `timestamp_us` (the Timestamp of LOC of the frame), `width`, `height`, `asked` (`command`, `every`); with `--meeting`, `id`, whose picture it is | A picture of the broadcast, written as a PNG in `<dir>/frames/<when the run began, ms>/`: asked for with `/frame`, or every `--frame-every-ms`. It is of the latest frame that decoded, which can be older than the moment it was asked for. `/frame` that gets none within 10 s gets an `error` |
+| `frame` | `path` (from `--out`, with `/`: `frames/<when the run began, ms>/<file>`), `group`, `object`, `timestamp_us` (the Timestamp of LOC of the frame), `width`, `height`, `asked` (`command`, `every`); with `--meeting`, `id`, whose picture it is | A picture of the broadcast, written as a PNG in `<dir>/frames/<when the run began, ms>/`: asked for with `/frame`, or every `--frame-every-ms`. It is of the latest frame that decoded, which can be older than the moment it was asked for. `/frame` that gets none within 10 s gets an `error` |
 | `speech` | `number` (in the transcript), `from` (the namespace of the broadcast whose voice it was), `text`, `start_us`, `end_us` (on the clock of the Timestamps of LOC of that broadcast's audio), `read_at` (the transcriber's clock, ms) | Something said in a broadcast, as the transcriber (`xmoq-transcriber`) read it: the pieces of `speech` of `xmoq/transcript/<prefix>` (`xmoq-transcript-tracks`), each once, in the order of its number. The latest 16 when the reader comes, by a Joining FETCH, then each as it is read; those missed while away, as for the chat. Pieces not fetched are told as an `error`. With `--transcript`, the pieces of every broadcast under that prefix, each with its `from` |
 | `error` | `message` | Something went wrong, or a line of stdin was not said; the reader goes on |
 
 ```json
 {"at":1792883451092,"name":"p","type":"joined"}
 {"at":1792883451113,"from":"p","gathered_at":1792883451111,"number":0,"sent_at":1792883451110,"text":"hello from p","type":"chat"}
-{"asked":"command","at":1792884905154,"group":1792884901959,"height":360,"object":12,"path":"/tmp/room/frames/1792884900120/000001-g1792884901959-o12.png","timestamp_us":1792884904928000,"type":"frame","width":640}
+{"asked":"command","at":1792884905154,"group":1792884901959,"height":360,"object":12,"path":"frames/1792884900120/000001-g1792884901959-o12.png","timestamp_us":1792884904928000,"type":"frame","width":640}
 {"at":1792883451182,"message":"no command /nothing: /frame is one, and // begins a line that is said","type":"error"}
 {"at":1792883451205,"name":"p","type":"left"}
 ```

@@ -1,0 +1,7 @@
+a participant came	{"at":1000,"id":"p1","state":"joined","type":"participant"}
+a participant left	{"at":1000,"id":"p1","state":"left","type":"participant"}
+a line of the chat	{"at":1000,"from":"alice","gathered_at":995,"number":7,"sent_at":990,"text":"hello","type":"chat"}
+a line with what a terminal would act on, and a line break	{"at":1000,"from":"b\"ob","gathered_at":0,"number":8,"sent_at":0,"text":"a\u001b[2J\nb","type":"chat"}
+a piece of speech	{"at":1000,"end_us":20,"from":["xmoq","meet","demo","p1"],"number":3,"read_at":30,"start_us":10,"text":"こんにちは","type":"speech"}
+a picture of a participant, at a path from the folder	{"asked":"command","at":1000,"group":12,"height":180,"id":"p1","object":7,"path":"frames/1700000000000/000001-g12-o7.png","timestamp_us":1700000000000000,"type":"frame","width":320}
+an error	{"at":1000,"message":"no command /nothing: /frame is one, and // begins a line that is said","type":"error"}
