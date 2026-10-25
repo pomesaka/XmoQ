@@ -25,10 +25,10 @@ model: sonnet
 prompt で revset と作業ディレクトリが渡されたら、それを使う。渡されなければ `main..@` とカレントディレクトリを使う。
 
 ```bash
-jj diff --git -r '<revset>' 'glob:packages/**'
+jj diff --git -r '<revset>' 'glob:"packages/**" | (glob:"interop/**" ~ glob:"interop/peers/**") | glob:"demo/**"'
 ```
 
-差分が空の場合は「TypeScript の変更なし」と報告して終了。差分の周辺を読むときは、渡された作業ディレクトリの下のファイルを Read する。`spikes/` の下は対象外。
+差分が空の場合は「TypeScript の変更なし」と報告して終了。差分の周辺を読むときは、渡された作業ディレクトリの下のファイルを Read する。`spikes/` の下と、`moqtail` のコードの写しの `interop/peers/` は対象外。`demo/` は lint と型検査の対象外なので、型と依存の向きは読んで確かめる。
 
 **3. レビューを実施する。**
 
@@ -39,8 +39,8 @@ draft 本文との一致は protocol-reviewer、凝集度・可読性・設計�
 1. **型**: `as` キャストが無いか（`as const` は可）。`any`、非 null アサーション、`@ts-ignore` で型検査を外していないか。既存の型の言い換えになる新しい型を作っていないか
 2. **エラー処理**: 例外を握りつぶしていないか。外から来たバイト列の復号で、範囲外の読み取りや無限ループが起きないか。Promise の取りこぼしが無いか
 3. **資源の後始末**: ストリームの reader と writer、`WebTransport` のセッション、タイマーが、キャンセルと切断のときに解放されるか
-4. **層の依存**: 符号化と状態遷移のコードが `WebTransport` や DOM に依存していないか。依存の向きが一方向か。本体が `spikes/` に依存していないか
-5. **依存**: 版が固定されているか。lockfile が手書きでなく生成されたものか。`package.json` のスクリプト名が `typecheck`、`lint`、`test` か
+4. **層の依存**: 符号化と状態遷移のコードが `WebTransport` や DOM に依存していないか。依存の向きが一方向か。本体（`packages/`）が `spikes/`、`interop/`、`demo/` に依存していないか
+5. **依存**: 版が固定されているか。lockfile が手書きでなく生成されたものか。`package.json` のスクリプト名が `typecheck` と `test` か（lint は `scripts/ci/check-ts.sh` が Biome と oxlint で走らせる）
 6. **テスト**: `test.each` が同じ構造の複数ケースに使われているか。1 行だけの `test.each` が無いか。期待値がリテラルか
 7. **コメント**: WHY と制約だけが書かれているか。コードを言い換えるコメント、削除の経緯を語るコメント、番号なしの `TODO` が無いか。公開 API にドキュメントがあるか
 

@@ -44,8 +44,9 @@ revset は `main..<change ID>`、作業ディレクトリは `work_dir` にな�
 | 差分に含まれるもの | 起動する |
 |---|---|
 | `crates/` か `Cargo.toml` | rust-reviewer-xmoq |
-| `packages/` | ts-reviewer-xmoq |
-| `crates/`、`packages/`、`fixtures/` のどれか | protocol-reviewer-xmoq、design-reviewer-xmoq |
+| `packages/`、`interop/`（`interop/peers/` を除く）、`demo/` のどれか | ts-reviewer-xmoq |
+| `crates/`、`packages/`、`fixtures/`、`interop/` のどれか | protocol-reviewer-xmoq |
+| `crates/`、`packages/`、`fixtures/`、`interop/`、`demo/`、`scripts/`、`mise.toml`、`.github/` のどれか | design-reviewer-xmoq |
 | `.md` か、上のどれか | docs-reviewer-xmoq |
 
 `spikes/` だけの差分は、docs-reviewer-xmoq だけを起動する。

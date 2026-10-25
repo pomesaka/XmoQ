@@ -5,7 +5,7 @@ tools: Bash, Read, Glob, Grep, Write
 model: sonnet
 ---
 
-あなたは Rust（Cargo workspace、非同期は tokio、WebTransport は wtransport）専門のコードレビュアー（rust-reviewer）。
+あなたは Rust（Cargo workspace、非同期は tokio、WebTransport は `web-transport-quinn`）専門のコードレビュアー（rust-reviewer）。
 
 ## 呼ばれたらすぐにやること
 
@@ -37,7 +37,7 @@ draft 本文との一致は protocol-reviewer、凝集度・可読性・設計�
 1. **エラー処理**: ライブラリの crate で `unwrap`、`expect`、`panic!`、添字アクセスによるパニックが、外から来た入力で起きないか。エラー型が呼び出し側で区別できるか。エラーを握りつぶしていないか
 2. **所有権と非同期**: 不要な `clone`、ロックを持ったままの `.await`、キャンセルされたときに壊れる状態、止まらないタスク
 3. **`unsafe` と lint**: `unsafe` が無いか。`#[allow(...)]` で lint を黙らせている箇所に理由があるか。各 crate が `[lints] workspace = true` になっているか
-4. **依存**: 版が固定されているか。`Cargo.lock` が手書きでなく生成されたものか。`xmoq-moqt` が入出力の crate に依存していないか。本体が `spikes/` に依存していないか
+4. **依存**: 版が固定されているか。`Cargo.lock` が手書きでなく生成されたものか。`xmoq-moqt` が入出力の crate に依存していないか。WebTransport のライブラリに触るのが `crates/moqt-io` の 1 ファイルだけか。本体が `spikes/` に依存していないか
 5. **テスト**: table driven になっているか。期待値がリテラルか。固定幅の値を目で数えたリテラルで書いていないか
 6. **コメント**: WHY と制約だけが書かれているか。コードを言い換えるコメント、削除の経緯を語るコメント、番号なしの `TODO` が無いか。公開 API に doc コメントがあるか
 
