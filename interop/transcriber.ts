@@ -50,7 +50,7 @@
 // pieces whose text has "relay", from `xmoq/voice/page`: the voice reached
 // the transcript's track through a relay that checks every request.
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -69,6 +69,7 @@ import {
 	stopEverythingOnExit,
 	withTimeout,
 } from "./harness.ts";
+import { samplesOf, VOICE_FILE } from "./voice-file.ts";
 import type { OwnPageExtras } from "./xmoq-page.ts";
 
 // The driver is type-checked without the DOM library; `window` is only used
@@ -89,29 +90,6 @@ stopEverythingOnExit();
 
 const PREFIX = "xmoq/voice";
 const TRANSCRIPT = `xmoq/transcript/${PREFIX}`;
-const VOICE_FILE = join(
-	import.meta.dir,
-	"..",
-	"fixtures",
-	"speech",
-	"hello-from-the-relay.wav",
-);
-
-/** The samples of a WAV file, its `data` chunk, in base64. */
-function samplesOf(file: string): string {
-	const bytes = readFileSync(file);
-	let at = 12;
-	while (at + 8 <= bytes.length) {
-		const id = bytes.toString("latin1", at, at + 4);
-		const size = bytes.readUInt32LE(at + 4);
-		if (id === "data") {
-			return bytes.subarray(at + 8, at + 8 + size).toString("base64");
-		}
-		at += 8 + size + (size % 2);
-	}
-	throw new Error(`no data chunk in ${file}`);
-}
-
 /** A piece of the transcript as a reader got it. */
 type Piece = {
 	group: number;

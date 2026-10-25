@@ -32,7 +32,7 @@ The change was then put on `main` at `pwxrmsky` (the reader's chat on `xmoq_view
 
 ## What was not run
 
-- `/frame` alone of the one who spoke last: no transcriber runs here, so nobody's voice is read. The table test of `xmoq_viewer::meeting` alone.
+- `/frame` alone of the one who spoke last: no transcriber runs here, so nobody's voice is read. Run since in [who speaks in a meeting](2026-10-25-who-speaks-in-a-meeting.md).
 - The video let go of after `--meeting-video-linger-ms`, a participant over `--meeting-most`, and a meeting over a GOAWAY or a new session: the table tests of `xmoq_viewer::meeting` and `xmoq_viewer::presence` alone.
 - A meeting through a room (`--room`): not built, waiting for Q57. A meeting through `moqtail`'s relay.
 - How long the first picture of a participant takes (a catalog, a subscription, and a key frame): not measured.

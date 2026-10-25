@@ -306,11 +306,21 @@ export type OwnPageExtras = {
 	 * far apart picture and sound leave it by. With
 	 * `publishNamespaceTokenHex` the PUBLISH_NAMESPACE carries that token, as
 	 * in `publishVoice`.
+	 *
+	 * With `voice` (the samples of a WAV file of `fixtures/speech/`, as
+	 * `publishVoice` takes them), the sound is that voice and a pause, over
+	 * and over, in place of the tone, while the page speaks
+	 * (`setSpeaking`; it does from the start where `speaking` is true), and
+	 * silence while it does not: a participant of a meeting.
 	 */
 	publishBroadcast(
 		namespace: string,
 		publishNamespaceTokenHex?: string,
+		voice?: string,
+		speaking?: boolean,
 	): Promise<void>;
+	/** Whether the voice of `publishBroadcast` is heard from now on. */
+	setSpeaking(speaking: boolean): Promise<void>;
 	/**
 	 * Ends the three tracks of `publishBroadcast` with PUBLISH_DONE
 	 * (TRACK_ENDED), as a publisher that stops its broadcast and stays
