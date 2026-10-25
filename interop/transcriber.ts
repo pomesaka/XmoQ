@@ -20,7 +20,8 @@
 //     seconds (the voice is 1.2 s; a piece keeps up to 200 ms before it and
 //     after it), and the second begins after the first ends.
 //   - The words are there soon: `at` is no more than 3 seconds after
-//     `endUs` (the transcriber waits 600 ms of silence after the voice; the
+//     `endUs` (the transcriber waits 600 ms of silence after the voice, and
+//     tells a voice half a second at a time with the model of voice activity; the
 //     smallest model reads 1.4 s in about 0.25 s on a Mac, unmeasured on
 //     the processors of CI). The run says how long it was.
 //   - A reader that comes later FETCHes the whole transcript and gets the

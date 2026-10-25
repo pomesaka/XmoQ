@@ -5,17 +5,23 @@ The words of audio tracks, for the transcriber ([`xmoq-transcriber`](../transcri
 | Module | What it does |
 |---|---|
 | `decode` | Opus to one channel at 16 kHz, with the same decoder as the terminal viewer (`opus-rs`). The decoder gives 16 kHz itself (RFC 6716 §2), so no resampler is needed |
-| `cut` | Where a piece begins and ends: frames of 20 ms, a voice where a frame is at -40 dBFS or louder, the end after 600 ms without one, and no piece longer than 15 s. Pieces with less than 250 ms of voice are left out. 200 ms before the voice are kept. **All values are provisional**: they were chosen on voices of `say`, not on a meeting |
-| `whisper` | whisper.cpp through `whisper-rs`: the one file that uses it |
+| `frames` | The sound in frames of 20 ms, each with the Timestamp of its first sample. A Timestamp more than 100 ms from where the sound before ended is a gap, and ends the piece under way |
+| `judge` | Whether a frame has a voice. **By default by a model of voice activity** (Silero, through whisper.cpp): the frames are judged half a second at a time, together with the half second before them, and a frame has a voice where the window of 32 ms its middle is in has a probability of 0.5 or more. **Or by loudness** (`--voice loudness` of the transcriber, and the tests): -40 dBFS or louder. Why the model, below |
+| `cut` | Where a piece begins and ends: with a frame that has a voice, the end after 600 ms without one, and no piece longer than 15 s. Pieces with less than 250 ms of voice are left out. 200 ms before the voice are kept |
+| `whisper`, `vad` | whisper.cpp through `whisper-rs`, for reading and for telling a voice: the two files that use it |
 | `model` | Where a model is looked for |
 
-`Listener` (one for each track) decodes and cuts. `Words` reads a piece, and `Whisper` implements it. The transcriber has one `Whisper` for every track. The model is loaded once, and whisper.cpp reads one piece at a time.
+**All values are provisional**: they were chosen on voices of `say`, not on a meeting.
+
+`Listener` (one for each track) decodes, judges and cuts. Each track has a model of voice activity of its own, which holds what it heard of that track. `Words` reads a piece, and `Whisper` implements it. The transcriber has one `Whisper` for every track. The model is loaded once, and whisper.cpp reads one piece at a time.
 
 ```sh
 mise run speech-model                    # the default model, into ~/.cache/xmoq/whisper/
 mise run speech-model -- tiny            # or small-q5_1, large-v3-turbo-q5_0; --dir <dir> elsewhere
+mise run speech-model -- silero-v5.1.2   # the model of voice activity
 afconvert -f WAVE -d LEI16@48000 -c 1 voice.aiff voice.wav     # macOS, from `say -o voice.aiff ...`
-cargo run --release --example read-wav -p xmoq-speech -- ~/.cache/xmoq/whisper/ggml-tiny.bin en voice.wav
+cargo run --release --example read-wav -p xmoq-speech -- ~/.cache/xmoq/whisper/ggml-tiny.bin en voice.wav \
+  ~/.cache/xmoq/whisper/ggml-silero-v5.1.2.bin    # without it, a voice is told by loudness
 ```
 
 ## whisper.cpp, and what it needs to build
@@ -33,11 +39,24 @@ whisper.cpp built in 16 s for a debug build and 22 s for a release one on the Ma
 
 **Metal on macOS, the processor elsewhere** (`Cargo.toml`). The large model read 8.6 s of speech in 1.0 to 1.1 s with Metal, and in 4.0 s with the processor alone. On Linux whisper.cpp reads on the processor; it was built there by CI and not measured. The first time a model is loaded with Metal, the graphics processor's code is compiled: 9 to 10 s (`MODEL_LOADED ... ms=`). After that, loading takes 0.1 to 0.4 s, except in a run of the interop where it took 9.8 s again.
 
+## Why a voice is told by a model
+
+By loudness alone, a sound that is not a voice is cut into pieces as a voice is, and whisper.cpp makes up words for it. The demo's publisher sends a tone by default (440 Hz with a beep of 1 kHz every 2 s). By loudness it was one voice that did not end, cut every 15 s, and whisper.cpp read it as:
+
+| Model | `ja` | `auto` |
+|---|---|---|
+| `large-v3-turbo-q5_0` | 「ご視聴ありがとうございました」, 「ん」 | `*music*`, `*BEEP*` |
+| `small-q5_1` | 「(エンディング)」 | `(beeping)` |
+
+The `no_speech_probability` that whisper.cpp gives each segment was 0.000 for the tone and for the voices alike. So the made-up words cannot be told apart once they are read; they have to be kept from being read. Silero, the model of voice activity that whisper.cpp carries, gave the tone 0.00 to 0.06 a second and the voices 0.66 to 1.00. It took 0.12 ms for 32 ms of sound, on the processor. With it the tone gave no piece, and the voices were read as before ([record](../../docs/experiments/2026-10-25-the-transcriber-reads-a-voice.md)).
+
+What it costs: a piece cannot end before its frames are judged, so its words come up to half a second later. Its model is fetched as the others (`silero-v5.1.2`, 885 KB, Hugging Face's `ggml-org/whisper-vad`). WHY NOT the VAD that whisper.cpp runs inside `whisper_full` (`vad` of its parameters): it runs on what it is given to read, and the cutting into pieces, which decides when words come, is before that. WHY loudness is kept: it needs no model, and the tests of the cutting use it.
+
 ## The models
 
 The models are not in the repository. `crates/speech/scripts/fetch-model.sh` (`mise run speech-model`) fetches them from Hugging Face's `ggerganov/whisper.cpp`, the repository that whisper.cpp's own download script uses. It checks each against the sha256 written in the script, and keeps it in `${XDG_CACHE_HOME:-~/.cache}/xmoq/whisper/` unless `--dir` names another place. The transcriber looks there unless `--model` names a file.
 
-**The default is `large-v3-turbo-q5_0`** (547 MiB), decided on 2026-10-25 on the numbers below. It was the one model of the three that read Japanese and English right with punctuation, and with Metal it reads a voice in a fifth of its length. One reader can therefore keep up with about five voices at once. **`small-q5_1`** (181 MiB) reads both languages right without punctuation, in a fifteenth of the time. It is the one to take where many voices are listened to at once, or without a graphics processor. **`tiny`** (74 MiB) is what the interop runs read with: it read the English voice right and the Japanese one wrong.
+**The default is `large-v3-turbo-q5_0`** (547 MiB), decided on 2026-10-25 on the numbers below. It was the one model of the three that read Japanese and English right with punctuation, and with Metal it reads a voice in a fifth of its length. One reader can therefore keep up with about five voices at once. **`small-q5_1`** (181 MiB) reads both languages right without punctuation, in a fifteenth of the time. It is the one to take where many voices are listened to at once, or without a graphics processor. **`tiny`** (74 MiB) is what the interop runs read with: it read the English voice right and the Japanese one wrong. **`silero-v5.1.2`** (885 KB) is the model of voice activity (above); every transcriber loads it, one for each track.
 
 Read on an M3 Pro, release build, `--language` given. Each model ran 3 times on each voice made with `say` (Kyoko, Japanese, 8.6 s; Samantha, English, 5.5 s), while the machine also ran other sessions' builds ([record](../../docs/experiments/2026-10-25-the-transcriber-reads-a-voice.md)):
 

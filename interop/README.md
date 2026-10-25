@@ -33,7 +33,8 @@ cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --lock
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
 cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat -p xmoq-agent
 cargo build --locked --release -p xmoq-watch -p xmoq-transcriber
-crates/speech/scripts/fetch-model.sh tiny    # the model of the transcriber's run, into ~/.cache/xmoq/whisper/
+crates/speech/scripts/fetch-model.sh tiny    # the models of the transcriber's run, into ~/.cache/xmoq/whisper/
+crates/speech/scripts/fetch-model.sh silero-v5.1.2
 bun install --frozen-lockfile
 bun run --cwd interop playwright-core install --no-shell chromium
 bun interop/matrix.ts
@@ -97,7 +98,7 @@ In four of the others, **an own page encodes frames it paints and publishes them
 
 **The terminal viewer chats on MoQ tracks** (`watch-rust.ts --watch chat`, own relay): the gatherer (`xmoq-chat`) runs beside the relay and a page publishes the broadcast. Two terminal viewers of room `r` (`--chat-room r --say ...`): the first comes before the gatherer has published the room's `lines`, and its SUBSCRIBE is held for it (RENDEZVOUS_TIMEOUT); the second comes later and gets the first one's line by its Joining FETCH. Each shows `0 wa: a1` and `1 wb: b1`, once each. Through moqtail's relay as well (`--relay moqtail`), with the viewers naming the tracks of the broadcast, since the catalog does not come through it; whether the first viewer's SUBSCRIBE is refused before the gatherer has published the room depends on which comes first, and is not looked at.
 
-**The transcriber reads a page's voice** (`transcriber.ts`, own relay): a page publishes a broadcast of sound alone (`publishVoice`): "Hello from the relay." (`fixtures/speech/`) and 1.5 s of silence, over and over. The transcriber (`xmoq-transcriber`) listens under `xmoq/voice` with the smallest model of whisper.cpp (`ggml-tiny.bin` in `~/.cache/xmoq/whisper/`, which `scripts/ci/interop.sh` fetches and CI keeps between runs). A live reader of `speech` of `xmoq/transcript/xmoq/voice` gets two pieces with the word "relay", each there no more than 3 s after its end, and a later reader gets them by a FETCH. The transcriber is a release build, as the terminal viewer is (`TRANSCRIBER_BINARY` in `harness.ts` has why).
+**The transcriber reads a page's voice** (`transcriber.ts`, own relay): a page publishes a broadcast of sound alone (`publishVoice`): "Hello from the relay." (`fixtures/speech/`) and 1.5 s of silence, over and over. The transcriber (`xmoq-transcriber`) listens under `xmoq/voice` with the smallest model of whisper.cpp and the model of voice activity (`ggml-tiny.bin` and `ggml-silero-v5.1.2.bin` in `~/.cache/xmoq/whisper/`, which `scripts/ci/interop.sh` fetches and CI keeps between runs). A live reader of `speech` of `xmoq/transcript/xmoq/voice` gets two pieces with the word "relay", each there no more than 3 s after its end, and a later reader gets them by a FETCH. The transcriber is a release build, as the terminal viewer is (`TRANSCRIBER_BINARY` in `harness.ts` has why).
 
 **A viewer that comes late** (`--video late-viewer`, own relay): one page watches already; a second comes in the middle of a Group and plays with the Joining FETCH of `playVideoTrack`. The relay answers from the Group it keeps, and the second viewer's first frame is one that was made before it came (about 740 ms before, in the runs here), with nothing dropped as `no-key-frame`.
 

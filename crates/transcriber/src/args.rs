@@ -7,14 +7,19 @@ use xmoq_moqt::name::TrackNamespace;
 /// How the transcriber is started without a flag it does not know.
 pub const USAGE: &str = "\
 xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --namespace <a/b>...
-                 [--model <file>] [--language <code>] [--keep <n>] [--waiting <n>] [--tracks <n>]
+                 [--model <file>] [--language <code>] [--voice vad|loudness] [--vad-model <file>]
+                 [--keep <n>] [--waiting <n>] [--tracks <n>]
                  [--auth-key-hex <hex>]
 
 --namespace     a prefix whose broadcasts are listened to, its fields between slashes; up to 8,
                 none a prefix of another. Its transcript is the track speech of xmoq/transcript/<prefix>
 --model         the file of a model of whisper.cpp (~/.cache/xmoq/whisper/ggml-large-v3-turbo-q5_0.bin;
                 mise run speech-model fetches it)
---language      a language code of whisper's, or auto (auto)
+--language      a language code of whisper's, or auto (auto). A code is twice as fast as auto, and has
+                whisper.cpp read every voice in that language: English read with ja comes out in Japanese
+--voice         how a voice is told: by the model of voice activity (vad), or by loudness (vad)
+--vad-model     the file of the model of voice activity (~/.cache/xmoq/whisper/ggml-silero-v5.1.2.bin;
+                mise run speech-model -- silero-v5.1.2 fetches it)
 --keep          the latest pieces of each transcript kept for FETCH (1000)
 --waiting       pieces that wait to be read; one more is dropped and counted (16)
 --tracks        audio tracks listened to at once (16)
@@ -53,6 +58,10 @@ pub struct Args {
     pub model: Option<PathBuf>,
     /// `--language`.
     pub language: String,
+    /// `--voice`: whether a voice is told by the model of voice activity.
+    pub vad: bool,
+    /// `--vad-model`; `None` for the default in the cache.
+    pub vad_model: Option<PathBuf>,
     /// `--keep`.
     pub keep: usize,
     /// `--waiting`.
@@ -103,6 +112,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut url, mut cert_sha256, mut model, mut auth_key) = (None, None, None, None);
     let mut prefixes: Vec<TrackNamespace> = Vec::new();
     let mut language = "auto".to_string();
+    let (mut vad, mut vad_model) = (true, None);
     let (mut keep, mut waiting, mut tracks) = (1000, 16, 16);
     while let Some(flag) = flags.next() {
         let value = flags
@@ -132,6 +142,14 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--model" => model = Some(PathBuf::from(value)),
             "--language" => language = value,
+            "--voice" => {
+                vad = match value.as_str() {
+                    "vad" => true,
+                    "loudness" => false,
+                    _ => return Err(format!("--voice is vad or loudness, not {value:?}")),
+                };
+            }
+            "--vad-model" => vad_model = Some(PathBuf::from(value)),
             "--keep" => keep = number_within(&flag, &value, KEEP_MOST)?,
             "--waiting" => waiting = number_within(&flag, &value, WAITING_MOST)?,
             "--tracks" => tracks = number_within(&flag, &value, TRACKS_MOST)?,
@@ -160,6 +178,8 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
         prefixes,
         model,
         language,
+        vad,
+        vad_model,
         keep,
         waiting,
         tracks,
@@ -199,11 +219,18 @@ mod tests {
             ),
             (None, "auto", 1000, 16, 16, None)
         );
+        assert_eq!((read.vad, read.vad_model), (true, None));
+        let loudness = args(&["--namespace", "a", "--voice", "loudness"]).unwrap();
+        assert!(!loudness.vad);
     }
 
     #[test]
     fn flags_that_are_refused() {
-        let cases: [(&[&str], &str); 9] = [
+        let cases: [(&[&str], &str); 10] = [
+            (
+                &["--namespace", "a", "--voice", "quiet"],
+                "--voice is vad or loudness",
+            ),
             (&[], "--namespace is needed"),
             (&["--namespace", "a//b"], "is no namespace"),
             (

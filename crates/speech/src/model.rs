@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 /// `crates/speech/scripts/fetch-model.sh`, which fetches it.
 pub const DEFAULT_MODEL: &str = "large-v3-turbo-q5_0";
 
+/// The model of voice activity used where none is named
+/// ([`crate::judge`]). Kept the same as the name the script fetches it by.
+pub const DEFAULT_VAD_MODEL: &str = "silero-v5.1.2";
+
 /// The directory `mise run speech-model` puts the models in:
 /// `$XDG_CACHE_HOME/xmoq/whisper`, or `~/.cache/xmoq/whisper`. `None`
 /// where neither variable is set.

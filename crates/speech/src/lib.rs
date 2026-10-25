@@ -1,7 +1,9 @@
 //! The words of audio tracks: the packets of Opus of a track are decoded
-//! to one channel at 16 kHz ([`decode`]) and cut where there is a voice
-//! ([`cut`]) by a [`Listener`] of that track, and each piece is read by
-//! whisper.cpp ([`whisper`]). `xmoq-transcriber` has a listener for each
+//! to one channel at 16 kHz ([`decode`]), put into frames of 20 ms
+//! ([`frames`]), judged for a voice ([`judge`], by the model of voice
+//! activity of [`vad`] or by loudness) and cut into pieces ([`cut`]) by a
+//! [`Listener`] of that track, and each piece is read by whisper.cpp
+//! ([`whisper`]). `xmoq-transcriber` has a listener for each
 //! track and one reader for all of them.
 //!
 //! WHY one reader: a model is loaded once (the large one is 550 MiB), and
@@ -13,13 +15,18 @@
 
 pub mod cut;
 pub mod decode;
+pub mod frames;
+pub mod judge;
 pub mod model;
+pub mod vad;
 pub mod whisper;
 
 use anyhow::Result;
 
 use crate::cut::{Cut, Cutter, Piece};
 use crate::decode::Decoder;
+use crate::frames::{Framed, Framer};
+use crate::judge::Judge;
 use crate::whisper::Whisper;
 
 /// One packet of an audio track.
@@ -38,6 +45,9 @@ pub struct Left {
     pub refused: u64,
     /// Pieces with too little voice to be read ([`Cut::least_voice_ms`]).
     pub too_little_voice: u64,
+    /// Chunks of half a second the model of voice activity failed on, whose
+    /// frames were taken for silence.
+    pub judge_failed: u64,
 }
 
 /// What reads the words of a piece: whisper.cpp, or a stand-in in tests.
@@ -56,21 +66,25 @@ impl Words for Whisper {
     }
 }
 
-/// Decodes and cuts one audio track.
+/// Decodes, judges and cuts one audio track.
 pub struct Listener {
     decoder: Decoder,
+    framer: Framer,
+    judge: Judge,
     cutter: Cutter,
     refused: u64,
 }
 
 impl Listener {
-    /// A listener that cuts by `cut`.
+    /// A listener that tells a voice by `judge` and cuts by `cut`.
     ///
     /// # Errors
     /// When the decoder of Opus cannot be made.
-    pub fn new(cut: Cut) -> Result<Self> {
+    pub fn new(judge: Judge, cut: Cut) -> Result<Self> {
         Ok(Self {
             decoder: Decoder::new()?,
+            framer: Framer::default(),
+            judge,
             cutter: Cutter::new(cut),
             refused: 0,
         })
@@ -82,12 +96,39 @@ impl Listener {
             self.refused += 1;
             return Vec::new();
         };
-        self.cutter.push(packet.timestamp_us, samples)
+        let mut pieces = Vec::new();
+        for framed in self.framer.push(packet.timestamp_us, samples) {
+            match framed {
+                Framed::Frame { at, samples } => {
+                    let judged = self.judge.push(at, samples);
+                    pieces.extend(
+                        judged
+                            .into_iter()
+                            .filter_map(|frame| self.cutter.push(frame)),
+                    );
+                }
+                Framed::Gap => pieces.extend(self.flush()),
+            }
+        }
+        pieces
     }
 
-    /// The track ended: the piece under way, if it has voice enough.
-    pub fn end(&mut self) -> Option<Piece> {
-        self.cutter.end()
+    /// The track ended: the pieces under way, if they have voice enough.
+    pub fn end(&mut self) -> Vec<Piece> {
+        self.framer.end();
+        self.flush()
+    }
+
+    /// The frames not judged yet are judged and cut, and the piece under way
+    /// ends.
+    fn flush(&mut self) -> Vec<Piece> {
+        let judged = self.judge.flush();
+        let mut pieces: Vec<Piece> = judged
+            .into_iter()
+            .filter_map(|frame| self.cutter.push(frame))
+            .collect();
+        pieces.extend(self.cutter.end());
+        pieces
     }
 
     /// What was left out.
@@ -96,6 +137,7 @@ impl Listener {
         Left {
             refused: self.refused,
             too_little_voice: self.cutter.left().too_little_voice,
+            judge_failed: self.judge.failed(),
         }
     }
 }
@@ -126,7 +168,8 @@ mod tests {
 
     #[test]
     fn a_tone_between_silences_is_one_piece_on_the_clock_of_its_timestamps() {
-        let mut listener = Listener::new(Cut::default()).unwrap();
+        let mut listener =
+            Listener::new(Judge::Loudness(judge::VOICE_DBFS), Cut::default()).unwrap();
         let mut packets = tone_packets(25, 0.0);
         packets.extend(tone_packets(50, 0.3));
         packets.extend(tone_packets(50, 0.0));
@@ -154,7 +197,8 @@ mod tests {
 
     #[test]
     fn a_packet_the_decoder_refuses_is_counted() {
-        let mut listener = Listener::new(Cut::default()).unwrap();
+        let mut listener =
+            Listener::new(Judge::Loudness(judge::VOICE_DBFS), Cut::default()).unwrap();
         // A code of 3 with a frame count of 0 (RFC 6716 §3.2.5): not a packet.
         let pieces = listener.push(AudioPacket {
             timestamp_us: 0,

@@ -66,6 +66,20 @@ Loading a model with Metal took 9.3 s the first time, while the graphics process
 
 In the full runs (`mise run interop -- --base-port 36000`, with the machine's lock) the pairing took 5.6 s and 5.5 s, with the same two pieces, there 453 to 506 ms after their ends. The last full run, on the final code of this change, ended 219 of 219 as expected (448.1 s; load average 2.4 and 18.0 GB of 19.5 GB of swap in use when it began). Rebased on `main` with `xmoq-agent` (#330), it ended 226 of 226 as expected (451.1 s).
 
+### 3. A sound that is no voice (added on 2026-10-25, for the demo)
+
+The demo's publisher sends a tone by default: 440 Hz that rises and falls, and a beep of 1 kHz for the first 200 ms of every 2 s, at 0.25 and 0.6 of full scale (`tone` of `demo/publish.ts`). 20 s of it was made at 48 kHz with the same rule, and given to `read-wav`.
+
+Nothing was written before: the question came when the transcriber was to run beside the demo.
+
+- **By loudness**, the tone was a voice that did not end. It was cut every 15 s, and whisper.cpp read it as 「ご視聴ありがとうございました」 and 「ん」 (`large-v3-turbo-q5_0`, `ja`), `*music*` and `*BEEP*` (`auto`), 「(エンディング)」 (`small-q5_1`, `ja`) and `(beeping)` (`auto`).
+- The `no_speech_probability` of each segment (printed for this run alone) was 0.000 for the tone and for each of the three voices, in `ja` and in `auto`.
+- English read with `ja` came out in Japanese: "Hello everyone. Today we will talk about..." became 「こんにちは、今日のレレーでお話をします。」. The short "Hello from the relay." stayed English.
+- **Silero** (`ggml-silero-v5.1.2.bin`, through whisper.cpp's `whisper_vad_detect_speech`, over the whole file at once): the mean probability of each second was 0.00 to 0.06 for the tone, and 0.66 to 1.00 for the voices. 625 windows of 32 ms took 76 ms.
+- With the frames judged by Silero, half a second at a time (`judge` of `xmoq-speech`), the tone gave no piece. The three voices were read as before, with `large-v3-turbo-q5_0` and `auto`: Japanese right with punctuation, English right, "Hello from the relay."
+
+**Decided on this: a voice is told by Silero by default**, and by loudness with `--voice loudness`. The interop pairing with Silero passed (6.0 s). Its pieces' words were there 775 ms and 460 ms after their ends.
+
 ## What was not run
 
 - Linux: neither the build of whisper.cpp nor the run. CI is to do both, with the processor alone.
