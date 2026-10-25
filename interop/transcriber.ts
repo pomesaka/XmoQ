@@ -1,11 +1,12 @@
 // The transcriber (`crates/transcriber`, `xmoq-transcriber`) through the own
-// relay: a page publishes a broadcast of sound alone (`publishVoice`): a
-// voice that says "Hello from the relay." (`fixtures/speech/`) and 1.5 s of
-// silence, over and over. The transcriber listens under the prefix
-// `xmoq/voice` with the smallest model of whisper.cpp, and own-rust clients
-// read the transcript `speech` of `xmoq/transcript/xmoq/voice`.
+// relay, and through moqtail's for a catalog refused at first: a page
+// publishes a broadcast of sound alone (`publishVoice`): a voice that says
+// "Hello from the relay." (`fixtures/speech/`) and 1.5 s of silence, over and
+// over. The transcriber listens under the prefix `xmoq/voice` with the
+// smallest model of whisper.cpp, and own-rust clients read the transcript
+// `speech` of `xmoq/transcript/xmoq/voice`.
 //
-// Usage: bun transcriber.ts [--auth yes|no] [--engine whisper|command] [--port N] [--verbose]
+// Usage: bun transcriber.ts [--case voice|catalog-refused] [--relay own|moqtail] [--auth yes|no] [--engine whisper|command] [--port N] [--verbose]
 //
 // What has to be seen, written before the first run:
 //
@@ -58,6 +59,26 @@
 // text: a piece cut from the page's voice reached the program as a file,
 // and its output reached the track.
 
+// `--case catalog-refused`, through the own relay or moqtail's (`--relay`),
+// written before its first run (2026-10-25): the page announces its
+// namespace and refuses the catalog with DOES_NOT_EXIST, as a publisher that
+// announced before it had its catalog (`publishVoice` with
+// `catalogHeldBack`); the pieces are read with `--engine command`, as
+// above. The transcriber is told of the page (`BROADCAST`), is refused the
+// catalog (`CATALOG_NOT_SUBSCRIBED`), and says it asks again in 1,000 ms
+// (`ASKING_AGAIN ... track=catalog in_ms=1000`: the refusal names no time,
+// a Retry Interval of 0, and `xmoq-again` waits as after an end). Only
+// once that line is read is the catalog answered (`releaseCatalog`), and the
+// page takes the transcriber's SUBSCRIBE for it again. Through the own relay
+// the transcriber then has the catalog, subscribes to the sound
+// (`AUDIO_SUBSCRIBED`), and a live reader of the transcript gets a piece
+// from `xmoq/voice/page` with the script's words. Through moqtail's the run
+// ends where the page has taken the SUBSCRIBE again: that relay answers the
+// Joining FETCH from the largest Location it has seen itself, so no catalog
+// published before the subscriber came reaches it (the notes, the table of
+// how that relay answers a FETCH, row a). The page refused at least one
+// request for its catalog.
+
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,6 +89,7 @@ import {
 	openConnectedPage,
 	openPage,
 	pollFor,
+	type RunContext,
 	roomToken,
 	runCleanups,
 	spawnAgent,
@@ -87,10 +109,11 @@ declare const window: { readonly xmoqOwn: OwnPageExtras };
 const { values: options } = parseArgs({
 	options: {
 		port: { type: "string", default: "24499" },
-		// The matrix gives every driver a relay; this one is through the own.
+		// The own relay, or moqtail's for `--case catalog-refused`.
 		relay: { type: "string", default: "own" },
 		auth: { type: "string", default: "no" },
 		engine: { type: "string", default: "whisper" },
+		case: { type: "string", default: "voice" },
 		verbose: { type: "boolean", default: false },
 	},
 });
@@ -230,8 +253,8 @@ async function withTokens(): Promise<string> {
 /** What the script of `--engine command` prints for every piece. */
 const COMMAND_WORDS = "words from a command";
 
-/** `--engine command`: each piece read by a script, which says the same words. */
-async function withCommand(dir: string): Promise<string> {
+/** Writes into `dir` the script of `--engine command`, which says the same words for every piece. */
+function commandScript(dir: string): string {
 	const script = join(dir, "read-piece.sh");
 	writeFileSync(
 		script,
@@ -245,12 +268,14 @@ async function withCommand(dir: string): Promise<string> {
 		].join("\n"),
 	);
 	chmodSync(script, 0o755);
-	const context = await startRun({
-		relay: "own",
-		port: options.port,
-		clients: ["own-browser", "own-rust"],
-		verbose: options.verbose,
-	});
+	return script;
+}
+
+/** Starts the transcriber with `--engine command` and `script`, and waits until it watches the prefix. */
+async function spawnCommandTranscriber(
+	context: RunContext,
+	script: string,
+): Promise<ReturnType<typeof spawnTranscriber>> {
 	const transcriber = spawnTranscriber(
 		context,
 		"transcriber",
@@ -268,18 +293,14 @@ async function withCommand(dir: string): Promise<string> {
 	);
 	await transcriber.waitForLine(/^MODEL_LOADED engine=command /);
 	await transcriber.waitForLine(new RegExp(`^WATCHING prefix=${PREFIX}$`));
-	const namespace = `${PREFIX}/page`;
-	const page = await openConnectedPage(context, "publisher", "own-browser");
-	await withTimeout(
-		page.evaluate(([at, voice]) => window.xmoqOwn.publishVoice(at, voice), [
-			namespace,
-			samplesOf(VOICE_FILE),
-		] satisfies [string, string]),
-		"the page to publish its voice",
-	);
-	await transcriber.waitForLine(
-		new RegExp(`^AUDIO_SUBSCRIBED namespace=${namespace}$`),
-	);
+	return transcriber;
+}
+
+/** A live reader's one piece of the transcript, which has the script's words and is from `namespace`. */
+async function commandPiece(
+	context: RunContext,
+	namespace: string,
+): Promise<Piece> {
 	const live = spawnRustClient(
 		context,
 		"live",
@@ -296,6 +317,34 @@ async function withCommand(dir: string): Promise<string> {
 	if (piece === undefined) throw new Error("the live reader got no piece");
 	expect("a piece is from", piece.from.join("/"), namespace);
 	expect("a piece says", piece.text, COMMAND_WORDS);
+	return piece;
+}
+
+/** `--engine command`: each piece read by a script, which says the same words. */
+async function withCommand(dir: string): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser", "own-rust"],
+		verbose: options.verbose,
+	});
+	const transcriber = await spawnCommandTranscriber(
+		context,
+		commandScript(dir),
+	);
+	const namespace = `${PREFIX}/page`;
+	const page = await openConnectedPage(context, "publisher", "own-browser");
+	await withTimeout(
+		page.evaluate(([at, voice]) => window.xmoqOwn.publishVoice(at, voice), [
+			namespace,
+			samplesOf(VOICE_FILE),
+		] satisfies [string, string]),
+		"the page to publish its voice",
+	);
+	await transcriber.waitForLine(
+		new RegExp(`^AUDIO_SUBSCRIBED namespace=${namespace}$`),
+	);
+	const piece = await commandPiece(context, namespace);
 	expect(
 		"pieces the program failed on",
 		String(transcriber.matches(/^PIECE_NOT_READ /).length),
@@ -304,40 +353,121 @@ async function withCommand(dir: string): Promise<string> {
 	return `through the own relay, the transcriber read a piece of the page's voice under ${PREFIX} with --engine command: a script got it as a WAV file, and a live reader of ${TRANSCRIPT} got ${JSON.stringify(piece.text)} from ${namespace} in Group ${piece.group}`;
 }
 
+/** `--case catalog-refused`: the catalog is refused at first, and asked for again. */
+async function catalogRefused(dir: string): Promise<string> {
+	const context = await startRun({
+		relay: options.relay,
+		port: options.port,
+		clients: ["own-browser", "own-rust"],
+		verbose: options.verbose,
+	});
+	const transcriber = await spawnCommandTranscriber(
+		context,
+		commandScript(dir),
+	);
+	const namespace = `${PREFIX}/page`;
+	const page = await openConnectedPage(context, "publisher", "own-browser");
+	await withTimeout(
+		page.evaluate(
+			([at, voice]) => window.xmoqOwn.publishVoice(at, voice, undefined, true),
+			[namespace, samplesOf(VOICE_FILE)] satisfies [string, string],
+		),
+		"the page to publish its voice and hold its catalog back",
+	);
+	await transcriber.waitForLine(
+		new RegExp(`^BROADCAST namespace=${namespace}$`),
+	);
+	const [refused] = await transcriber.waitForLine(
+		new RegExp(`^CATALOG_NOT_SUBSCRIBED namespace=${namespace} .*$`),
+	);
+	const [, pause = ""] = await transcriber.waitForLine(
+		new RegExp(
+			`^ASKING_AGAIN namespace=${namespace} track=catalog in_ms=(\\d+)$`,
+		),
+	);
+	expect("the pause before the catalog is asked for again", pause, "1000");
+	const refusals = await withTimeout(
+		page.evaluate(() => window.xmoqOwn.releaseCatalog()),
+		"the page to answer for its catalog from now on",
+	);
+	if (refusals < 1) {
+		throw new Error("the page refused no request for its catalog");
+	}
+	await pollFor(
+		async () =>
+			(await page.evaluate(() => window.xmoqOwn.catalogAskedAfterRelease())) > 0
+				? true
+				: undefined,
+		"the page to take the transcriber's SUBSCRIBE for its catalog again",
+	);
+	// WHY the run ends here through moqtail's relay: the catalog was published
+	// before the transcriber's SUBSCRIBE that is taken now, and that relay
+	// answers its Joining FETCH from what it has seen itself, nothing (the
+	// notes, the table of how that relay answers a FETCH, row a).
+	if (options.relay === "moqtail") {
+		return `through moqtail's relay, the transcriber was refused the catalog of ${namespace} (${refused}), said it would ask again in ${pause} ms, and asked again: the page took its SUBSCRIBE once it answered for its catalog (${refusals} request(s) of it refused before)`;
+	}
+	await transcriber.waitForLine(
+		new RegExp(`^AUDIO_SUBSCRIBED namespace=${namespace}$`),
+	);
+	const piece = await commandPiece(context, namespace);
+	return `through the ${options.relay} relay, the transcriber was refused the catalog of ${namespace} (${refused}), said it would ask again in ${pause} ms, had the catalog once the page answered for it (${refusals} request(s) of it refused before), subscribed to the sound, and a live reader of ${TRANSCRIPT} got ${JSON.stringify(piece.text)} in Group ${piece.group}`;
+}
+
+/**
+ * Runs a case, and prints its RESULT and SUMMARY once what it started is
+ * stopped; `after` removes what the case made, also where it failed.
+ */
+async function report(
+	run: () => Promise<string>,
+	after: () => void = () => {},
+): Promise<void> {
+	let summary: string;
+	try {
+		summary = await run();
+	} finally {
+		await runCleanups();
+		after();
+	}
+	log("driver", "RESULT {}");
+	log("driver", `SUMMARY ${summary}`);
+}
+
+/** A directory of the run's own, removed when the case is over. */
+function scratch(name: string): { dir: string; remove: () => void } {
+	const dir = mkdtempSync(join(tmpdir(), name));
+	return { dir, remove: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
 async function main(): Promise<void> {
+	if (options.case === "catalog-refused") {
+		const { dir, remove } = scratch("xmoq-engine-command-");
+		return report(() => catalogRefused(dir), remove);
+	}
+	if (options.case !== "voice") {
+		throw new Error(`--case is voice or catalog-refused, not ${options.case}`);
+	}
+	// The relay is the own one for the voice: the cases below start it themselves.
+	if (options.relay !== "own") {
+		throw new Error(
+			`--case voice runs through the own relay, not ${options.relay}`,
+		);
+	}
 	if (options.engine === "command") {
-		let summary: string;
-		const dir = mkdtempSync(join(tmpdir(), "xmoq-engine-command-"));
-		try {
-			summary = await withCommand(dir);
-		} finally {
-			await runCleanups();
-			rmSync(dir, { recursive: true, force: true });
-		}
-		log("driver", "RESULT {}");
-		log("driver", `SUMMARY ${summary}`);
-		return;
+		const { dir, remove } = scratch("xmoq-engine-command-");
+		return report(() => withCommand(dir), remove);
 	}
 	if (options.engine !== "whisper") {
 		throw new Error(`--engine is whisper or command, not ${options.engine}`);
 	}
 	if (options.auth === "yes") {
-		let summary: string;
-		try {
-			summary = await withTokens();
-		} finally {
-			await runCleanups();
-		}
-		log("driver", "RESULT {}");
-		log("driver", `SUMMARY ${summary}`);
-		return;
+		return report(withTokens);
 	}
 	if (options.auth !== "no") {
 		throw new Error(`--auth is yes or no, not ${options.auth}`);
 	}
-	let summary: string;
-	const agentOut = mkdtempSync(join(tmpdir(), "xmoq-agent-speech-"));
-	try {
+	const agentOut = scratch("xmoq-agent-speech-");
+	await report(async () => {
 		const context = await startRun({
 			relay: "own",
 			port: options.port,
@@ -496,7 +626,7 @@ async function main(): Promise<void> {
 			"--frames",
 			"off",
 			"--out",
-			agentOut,
+			agentOut.dir,
 			"--seconds",
 			"60",
 		]);
@@ -534,13 +664,8 @@ async function main(): Promise<void> {
 			() => (report.audioEncoderError === null ? true : undefined),
 			"the page's encoder to have no error",
 		);
-		summary = `through the own relay, the transcriber listened to the page's voice under ${PREFIX} with the smallest model and published two pieces a live reader and a page with @xmoq/transcript got, Groups ${first.group} and ${second.group}, saying ${JSON.stringify(first.text)} and ${JSON.stringify(second.text)}, of ${(first.endUs - first.startUs) / 1000} and ${(second.endUs - second.startUs) / 1000} ms, there ${first.at - Math.round(first.endUs / 1000)} and ${second.at - Math.round(second.endUs / 1000)} ms after their ends; a late reader fetched ${fetched.length} pieces up to Group ${largest}; xmoq-agent, which came then, wrote the pieces ${numbers.join(",")} as speech lines, from ${fetchedByAgent.number} by its FETCH and ${liveToAgent.number} live; the page made ${report.made} pieces of sound, ${report.voices} voices`;
-	} finally {
-		await runCleanups();
-		rmSync(agentOut, { recursive: true, force: true });
-	}
-	log("driver", "RESULT {}");
-	log("driver", `SUMMARY ${summary}`);
+		return `through the own relay, the transcriber listened to the page's voice under ${PREFIX} with the smallest model and published two pieces a live reader and a page with @xmoq/transcript got, Groups ${first.group} and ${second.group}, saying ${JSON.stringify(first.text)} and ${JSON.stringify(second.text)}, of ${(first.endUs - first.startUs) / 1000} and ${(second.endUs - second.startUs) / 1000} ms, there ${first.at - Math.round(first.endUs / 1000)} and ${second.at - Math.round(second.endUs / 1000)} ms after their ends; a late reader fetched ${fetched.length} pieces up to Group ${largest}; xmoq-agent, which came then, wrote the pieces ${numbers.join(",")} as speech lines, from ${fetchedByAgent.number} by its FETCH and ${liveToAgent.number} live; the page made ${report.made} pieces of sound, ${report.voices} voices`;
+	}, agentOut.remove);
 }
 
 main().catch((error: unknown) => {

@@ -355,14 +355,22 @@ export type OwnPageExtras = {
 	 * `publishBroadcast`. With `publishNamespaceTokenHex` (the Token structure
 	 * in hex) the PUBLISH_NAMESPACE carries that token, as the demo's pages
 	 * carry the room's `pub` token; the connection's own is for the rest.
+	 * With `catalogHeldBack` the page refuses every SUBSCRIBE and FETCH for
+	 * the catalog with DOES_NOT_EXIST until `releaseCatalog`, as a publisher
+	 * that announced before it had its catalog.
 	 */
 	publishVoice(
 		namespace: string,
 		voice: string,
 		publishNamespaceTokenHex?: string,
+		catalogHeldBack?: boolean,
 	): Promise<void>;
 	/** What `publishVoice` has made so far. */
 	voiceReport(): Promise<PageVoiceReport>;
+	/** The catalog held back by `publishVoice` is answered from now on; resolves with how many of its requests were refused. */
+	releaseCatalog(): Promise<number>;
+	/** How many SUBSCRIBEs for the catalog held back by `publishVoice` the page took after `releaseCatalog`. */
+	catalogAskedAfterRelease(): Promise<number>;
 	/**
 	 * Reads the transcript of the prefix `listened` (its fields between
 	 * slashes) with `followTranscript` of `@xmoq/transcript`, on the page's
