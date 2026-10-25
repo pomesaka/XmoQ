@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use xmoq_agent::events::{Asked, Event};
 use xmoq_picture::frames::{Frames, Settings, Taken, VideoObject};
 
@@ -46,7 +46,16 @@ pub struct Pictures {
     /// Whether Objects are being left out, which is told once each time it
     /// begins.
     pub leaving_out: bool,
+    /// Told when the thread has said its counts and ended.
+    ended: oneshot::Receiver<()>,
 }
+
+/// How long the thread gets to end when the reader ends: what is queued is
+/// cheap to take (a picture is decoded only when asked for), and a picture
+/// being written takes a moment. **Provisional.** WHY waited for at all:
+/// the process ends when `main` returns, and the thread's last line
+/// (`XMOQ_AGENT_FRAMES`) was lost with it now and then (CI of #339).
+const END_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Writes `taken` into `dir`, and removes what it says to.
 fn write(dir: &std::path::Path, taken: &Taken, asked: Asked) -> Event {
@@ -79,6 +88,7 @@ impl Pictures {
         std::fs::create_dir_all(&dir)?;
         let (jobs, mut waiting) = mpsc::channel::<Job>(MOST_WAITING);
         let (tell, told) = mpsc::channel(64);
+        let (end, ended) = oneshot::channel();
         std::thread::spawn(move || {
             while let Some(job) = waiting.blocking_recv() {
                 let was_asked = frames.is_asked();
@@ -132,13 +142,27 @@ impl Pictures {
                 counts.taken,
                 counts.not_written
             );
+            let _ = end.send(());
         });
         Ok(Self {
             jobs,
             told,
             left_out: 0,
             leaving_out: false,
+            ended,
         })
+    }
+
+    /// Ends the thread and waits for it, [`END_WAIT`] at the most: what is
+    /// queued is taken, and its counts are said.
+    pub async fn end(self) {
+        let Self {
+            jobs, told, ended, ..
+        } = self;
+        // Both, so that a thread waiting to tell gives up as well.
+        drop(told);
+        drop(jobs);
+        let _ = tokio::time::timeout(END_WAIT, ended).await;
     }
 
     /// Hands an Object to the thread. `false` where it was left out, the
