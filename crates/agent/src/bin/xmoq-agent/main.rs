@@ -69,6 +69,8 @@ pub struct Reader {
     stop: watch::Receiver<bool>,
     deadline: Option<tokio::time::Instant>,
     presence: Presence,
+    /// Who is in the meeting of `--meeting`, from one session to the next.
+    meeting: Option<meeting::Kept>,
     /// The newest line of the chat written, from one session to the next.
     had: Option<u64>,
     /// The newest piece of speech written, and of which transcript, from one
@@ -654,6 +656,9 @@ async fn run(args: &Args, reader: &mut Reader, pictures: &mut Option<Pictures>) 
             Err(error) => Err(error),
         };
         reader.presence.session_ended();
+        if let Some(kept) = reader.meeting.as_mut() {
+            kept.session_ended();
+        }
         tell_broadcast(reader, &place, BroadcastState::Ended);
         match attended {
             Ok(Ended::Moved(url)) => {
@@ -697,6 +702,7 @@ async fn read(args: &Args) -> Result<()> {
             .seconds
             .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds)),
         presence: Presence::new(&args.room, &args.name),
+        meeting: meeting::Kept::of(args),
         had: None,
         speech_had: None,
         frames: args.frames,

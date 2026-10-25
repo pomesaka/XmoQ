@@ -36,9 +36,75 @@ pub enum Came {
     Video(VideoCame),
 }
 
-/// The meeting of one session.
-pub struct InMeeting {
+/// Who is in the meeting, and whose voice was read last, from one session
+/// to the next, as [`crate::Reader`]'s `presence` is for the chat.
+///
+/// WHY kept over the sessions and not made anew with each: on a new
+/// session the relay tells of everybody there again, and a meeting made
+/// anew would write each as joined once more, and never as left one who
+/// went meanwhile (`xmoq_viewer::meeting`, as `presence`).
+pub struct Kept {
     meeting: Meeting,
+    /// What the meeting's clock counts from.
+    began: tokio::time::Instant,
+}
+
+impl Kept {
+    /// The meeting of `--meeting`; `None` without the flag.
+    #[must_use]
+    pub fn of(args: &xmoq_agent::args::Args) -> Option<Self> {
+        let (room, limits) = args.meeting.as_ref()?;
+        Some(Self {
+            meeting: Meeting::new(room, *limits),
+            began: tokio::time::Instant::now(),
+        })
+    }
+
+    /// The session ended: those the next one does not tell of again within
+    /// `SETTLE_MS` have left, and no video is subscribed.
+    pub fn session_ended(&mut self) {
+        self.meeting.session_ended();
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// A piece of the transcript was of the broadcast `from`.
+pub fn spoke(reader: &mut Reader, from: &[String]) {
+    if let Some(kept) = reader.meeting.as_mut() {
+        kept.meeting.spoke(from);
+    }
+}
+
+/// The video asked for could not be had: none is subscribed.
+fn video_failed(reader: &mut Reader) {
+    if let Some(kept) = reader.meeting.as_mut() {
+        kept.meeting.video_failed();
+    }
+}
+
+/// The `SUBSCRIBE_NAMESPACE` ended within the session: as for a session
+/// that ended.
+fn session_ended(reader: &mut Reader) {
+    if let Some(kept) = reader.meeting.as_mut() {
+        kept.session_ended();
+    }
+}
+
+/// Whose video is watched, for the `id` of a `frame` line.
+#[must_use]
+pub fn watching(reader: &Reader) -> Option<String> {
+    reader
+        .meeting
+        .as_ref()
+        .and_then(|kept| kept.meeting.watching())
+        .map(ToString::to_string)
+}
+
+/// The meeting of one session: its `SUBSCRIBE_NAMESPACE` and its video.
+pub struct InMeeting {
     room: String,
     prefix: TrackNamespace,
     limits: Limits,
@@ -53,8 +119,6 @@ pub struct InMeeting {
     settle_at: Option<tokio::time::Instant>,
     video: Option<Video>,
     linger_at: Option<tokio::time::Instant>,
-    /// What the meeting's clock counts from.
-    began: tokio::time::Instant,
 }
 
 /// A namespace's fields as text, as the meeting reads them; `None` for one
@@ -68,8 +132,9 @@ fn fields(namespace: &TrackNamespace) -> Option<Vec<String>> {
 }
 
 impl InMeeting {
-    /// The meeting of `--meeting`, on a session that has nobody of it yet,
-    /// and asks for its namespaces; `None` without the flag.
+    /// The meeting of `--meeting` on a new session, which asks for its
+    /// namespaces; `None` without the flag. Who is in it is the reader's
+    /// ([`Kept`]).
     ///
     /// # Errors
     ///
@@ -93,7 +158,6 @@ impl InMeeting {
                 .collect(),
         )?;
         let mut begun = Self {
-            meeting: Meeting::new(room, limits),
             room: room.to_string(),
             prefix,
             limits,
@@ -107,15 +171,10 @@ impl InMeeting {
             settle_at: None,
             video: None,
             linger_at: None,
-            began: tokio::time::Instant::now(),
         };
         begun.watch(session, reader).await;
         eprintln!("XMOQ_AGENT_MEETING room={room}");
         Ok(Some(begun))
-    }
-
-    fn now_ms(&self) -> u64 {
-        u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     async fn watch(&mut self, session: &mut Session, reader: &mut Reader) {
@@ -150,16 +209,6 @@ impl InMeeting {
         self.video.as_ref().and_then(Video::track_alias)
     }
 
-    /// A piece of the transcript was of the broadcast `from`.
-    pub fn spoke(&mut self, from: &[String]) {
-        self.meeting.spoke(from);
-    }
-
-    /// Whose video is watched, for the `id` of a `frame` line.
-    pub fn watching(&self) -> Option<String> {
-        self.meeting.watching().map(ToString::to_string)
-    }
-
     /// What comes next.
     pub async fn next(&mut self) -> Came {
         let Self {
@@ -191,12 +240,20 @@ impl InMeeting {
             Came::WatchNow => self.watch(session, reader).await,
             Came::Settled => {
                 self.settle_at = None;
-                let changes = self.meeting.settled();
+                let changes = reader
+                    .meeting
+                    .as_mut()
+                    .map(|kept| kept.meeting.settled())
+                    .unwrap_or_default();
                 self.told(reader, changes);
             }
             Came::Linger => {
                 self.linger_at = None;
-                if let Some(id) = self.meeting.linger_over(self.now_ms()) {
+                let over = reader.meeting.as_mut().and_then(|kept| {
+                    let now_ms = kept.now_ms();
+                    kept.meeting.linger_over(now_ms)
+                });
+                if let Some(id) = over {
                     eprintln!("XMOQ_AGENT_MEETING_VIDEO_LET_GO id={id}");
                     self.let_go_of_video();
                 }
@@ -206,7 +263,7 @@ impl InMeeting {
                     && let Err(why) = video.on(session, came)
                 {
                     reader.error(format!("frame: the video is given up: {why}"));
-                    self.meeting.video_failed();
+                    video_failed(reader);
                     self.let_go_of_video();
                 }
             }
@@ -240,7 +297,7 @@ impl InMeeting {
                 )),
             }
         }
-        if self.video.is_some() && self.meeting.watching().is_none() {
+        if self.video.is_some() && watching(reader).is_none() {
             self.let_go_of_video();
         }
     }
@@ -256,7 +313,7 @@ impl InMeeting {
             Ok(RequestStreamEvent::Message(message)) => message,
             Ok(RequestStreamEvent::Closed(closed)) => {
                 session.cancel(request);
-                self.meeting.session_ended();
+                session_ended(reader);
                 self.let_go_of_video();
                 self.watch_failed(reader, &format!("the relay closed it ({closed:?})"));
                 return None;
@@ -266,7 +323,7 @@ impl InMeeting {
             // one settles.
             Err(error) => {
                 session.cancel(request);
-                self.meeting.session_ended();
+                session_ended(reader);
                 self.let_go_of_video();
                 self.watch_failed(reader, &format!("{error}"));
                 return None;
@@ -279,11 +336,21 @@ impl InMeeting {
                     Some(tokio::time::Instant::now() + Duration::from_millis(SETTLE_MS));
             }
             Ok(RequestEvent::Namespace(namespace)) => {
-                let change = fields(&namespace).and_then(|named| self.meeting.named(&named));
+                let change = fields(&namespace).and_then(|named| {
+                    reader
+                        .meeting
+                        .as_mut()
+                        .and_then(|kept| kept.meeting.named(&named))
+                });
                 self.told(reader, change);
             }
             Ok(RequestEvent::NamespaceDone(namespace)) => {
-                let change = fields(&namespace).and_then(|named| self.meeting.done(&named));
+                let change = fields(&namespace).and_then(|named| {
+                    reader
+                        .meeting
+                        .as_mut()
+                        .and_then(|kept| kept.meeting.done(&named))
+                });
                 self.told(reader, change);
             }
             Ok(RequestEvent::Rejected(error)) => {
@@ -316,7 +383,11 @@ impl InMeeting {
         pictures: &mut Pictures,
         reader: &mut Reader,
     ) -> anyhow::Result<Option<Ended>> {
-        let (id, step) = match self.meeting.asked(asked, self.now_ms()) {
+        let Some(kept) = reader.meeting.as_mut() else {
+            return Ok(None);
+        };
+        let now_ms = kept.now_ms();
+        let (id, step) = match kept.meeting.asked(asked, now_ms) {
             Ok(target) => target,
             Err(why) => {
                 reader.error(format!("frame: {why}"));
@@ -339,7 +410,7 @@ impl InMeeting {
                 Ok(namespace) => namespace,
                 Err(error) => {
                     reader.error(format!("frame: {id}: {error}"));
-                    self.meeting.video_failed();
+                    video_failed(reader);
                     return Ok(None);
                 }
             };
@@ -376,7 +447,7 @@ impl InMeeting {
                         return Err(error);
                     }
                     reader.error(format!("frame: no video of {id}: {error:#}"));
-                    self.meeting.video_failed();
+                    video_failed(reader);
                     self.linger_at = None;
                     return Ok(None);
                 }
@@ -385,7 +456,7 @@ impl InMeeting {
                         "frame: no video of {id} within {} ms",
                         wait.as_millis()
                     ));
-                    self.meeting.video_failed();
+                    video_failed(reader);
                     self.linger_at = None;
                     return Ok(None);
                 }
