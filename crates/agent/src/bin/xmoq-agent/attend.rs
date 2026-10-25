@@ -676,8 +676,8 @@ pub async fn attend(
                 if let Some(mut event) = event {
                     // WHY told here and not by the thread: the thread knows
                     // the frames, and the loop whose video they are.
-                    if let (Event::Frame { of, .. }, Some(in_meeting)) = (&mut event, meeting.as_ref()) {
-                        *of = in_meeting.watching();
+                    if let (Event::Frame { of, .. }, Some(_)) = (&mut event, meeting.as_ref()) {
+                        *of = crate::meeting::watching(reader);
                     }
                     if matches!(event, Event::Frame { asked: FrameAsked::Command, .. }) {
                         reader.frame.until = None;
@@ -723,8 +723,8 @@ pub async fn attend(
             came = on(speech.as_mut().map(Follower::next)) => {
                 if let Some(follower) = speech.as_mut() {
                     for out in follower.on(&mut session, came).await {
-                        if let (FollowOut::Item(piece), Some(in_meeting)) = (&out, meeting.as_mut()) {
-                            in_meeting.spoke(&piece.from);
+                        if let FollowOut::Item(piece) = &out {
+                            crate::meeting::spoke(reader, &piece.from);
                         }
                         on_speech(reader, out);
                     }
@@ -775,9 +775,7 @@ pub async fn attend(
                 {
                     if let Some(follower) = speech.as_mut() {
                         if let Some(piece) = follower.live(header.group_id, &object.payload) {
-                            if let Some(in_meeting) = meeting.as_mut() {
-                                in_meeting.spoke(&piece.from);
-                            }
+                            crate::meeting::spoke(reader, &piece.from);
                             on_speech(reader, FollowOut::Item(piece));
                         }
                         remember_speech(reader, place, follower);

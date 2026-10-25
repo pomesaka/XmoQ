@@ -25,6 +25,17 @@
 //     are p1`.
 //   - events.jsonl has the same lines as stdout.
 //
+// Over a GOAWAY, written before its first run (2026-10-25): the run's relay
+// names a second own relay (`--redirect-uri`), as in `agent-frames.ts`. p4
+// joins on the first relay; p1 (again) and p3 publish on the second. The
+// first relay is sent SIGTERM, and the reader moves to the second:
+//
+//   - It writes `{"id":"p4","state":"joined",...}` before the move, and
+//     after it `{"id":"p3","state":"joined",...}`, and p4 as `left` (not
+//     told of on the second within 2 s).
+//   - p1 is written as joined once in the whole run: the second relay tells
+//     of it again, and the reader kept it.
+//
 
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,11 +51,13 @@ import {
 import {
 	type LoggedProcess,
 	log,
+	MOQLIVEMOCK_SIDE_PORT_OFFSET,
 	openConnectedPage,
 	pollFor,
 	runCleanups,
 	spawnAgent,
 	startRun,
+	startSecondOwnRelay,
 	stopEverythingOnExit,
 	withTimeout,
 } from "./harness.ts";
@@ -54,6 +67,9 @@ declare const window: {
 	readonly xmoq: XmoqPage;
 	readonly xmoqOwn: OwnPageExtras;
 };
+
+/** The Timeout of the run's relay's GOAWAY (`--goaway-timeout-ms`), as `agent-frames.ts` has it. */
+const GOAWAY_TIMEOUT_MS = 10_000;
 
 const { values: options } = parseArgs({
 	options: {
@@ -104,17 +120,26 @@ async function main(): Promise<void> {
 	const out = join(directory, "out");
 	let summary: string;
 	try {
+		const second = await startSecondOwnRelay(
+			String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+		);
 		const context = await startRun({
 			relay: options.relay,
 			port: options.port,
 			clients: ["own-browser"],
 			verbose: options.verbose,
+			relayArgs: [
+				"--redirect-uri",
+				second.url,
+				"--goaway-timeout-ms",
+				String(GOAWAY_TIMEOUT_MS),
+			],
 		});
-		const pages = new Map<string, Page>();
-		for (const id of ["p1", "p2"]) {
+		/** A page that publishes the broadcast of `id` at `relayUrl`. */
+		const participant = async (id: string, relayUrl: string): Promise<Page> => {
 			const page = await openConnectedPage(
-				context,
-				`page:${id}`,
+				{ ...context, relayUrl },
+				`page:${id}@${relayUrl}`,
 				"own-browser",
 			);
 			await withTimeout(
@@ -124,7 +149,11 @@ async function main(): Promise<void> {
 				),
 				`${id} to publish its broadcast`,
 			);
-			pages.set(id, page);
+			return page;
+		};
+		const pages = new Map<string, Page>();
+		for (const id of ["p1", "p2"]) {
+			pages.set(id, await participant(id, context.relayUrl));
 		}
 		const agent = spawnAgent(context, "agent:claude", [
 			"--meeting",
@@ -182,10 +211,32 @@ async function main(): Promise<void> {
 			"p2 is not in the meeting, and there are p1",
 		);
 
+		// Over a GOAWAY: p4 is on the first relay alone, p1 and p3 on the
+		// second, and the reader keeps who was there from one session to the
+		// next.
+		await participant("p4", context.relayUrl);
+		await waitForEvent(
+			agent,
+			`{"id":"p4","state":"joined","type":"participant"}`,
+		);
+		for (const id of ["p1", "p3"]) await participant(id, second.url);
+		context.signalRelay("SIGTERM");
+		await waitForEvent(
+			agent,
+			`{"id":"p3","state":"joined","type":"participant"}`,
+		);
+		await waitForEvent(
+			agent,
+			`{"id":"p4","state":"left","type":"participant"}`,
+		);
+
 		const participants = events(agent).filter((line) =>
 			line.includes('"type":"participant"'),
 		);
-		if (participants.length !== 3) {
+		const p1Joined = participants.filter((line) =>
+			line.includes('{"id":"p1","state":"joined"'),
+		);
+		if (participants.length !== 6 || p1Joined.length !== 1) {
 			throw new Error(`the participant lines: ${JSON.stringify(participants)}`);
 		}
 		const written = events(agent);
@@ -196,7 +247,7 @@ async function main(): Promise<void> {
 		if (JSON.stringify(inFile) !== JSON.stringify(written)) {
 			throw new Error("events.jsonl is not what stdout has");
 		}
-		summary = `through the own relay, xmoq-agent --meeting r was told of p1 and p2, answered /frame alone with "nobody has spoken", /frame p1 and /frame p2 with a PNG each (${seen.join("; ")}) in ${frameLines(agent).length} frame lines, /frame p3 with "not in the meeting", and wrote p2 as left when its page closed its session; events.jsonl had the same ${written.length} lines`;
+		summary = `through the own relay, xmoq-agent --meeting r was told of p1 and p2, answered /frame alone with "nobody has spoken", /frame p1 and /frame p2 with a PNG each (${seen.join("; ")}) in ${frameLines(agent).length} frame lines, /frame p3 with "not in the meeting", and wrote p2 as left when its page closed its session; after the relay's GOAWAY it moved to the second relay, wrote p3 as joined and p4 as left, and p1, there again, not as joined a second time; events.jsonl had the same ${written.length} lines`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

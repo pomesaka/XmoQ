@@ -1440,7 +1440,7 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 		},
 		{
-			name: "own relay: agent: xmoq-agent --meeting is told of two pages that publish under xmoq/meet/r/<id>, writes a PNG of each for /frame <id>, refuses /frame for nobody who spoke and for somebody not there, and writes one as left when its page goes",
+			name: "own relay: agent: xmoq-agent --meeting is told of two pages that publish under xmoq/meet/r/<id>, writes a PNG of each for /frame <id>, refuses /frame for nobody there, and keeps who is there over a GOAWAY",
 			script: "agent-meeting.ts",
 			args: [],
 			relay: "own",
