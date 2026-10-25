@@ -2973,6 +2973,7 @@ impl Relay {
                     peer_finished: false,
                 };
                 self.put_slot(session, stream, slot, actions);
+                actions.push(Action::SubscribeHeld { session, stream });
                 // Its time to be held runs whether or not somebody is asked
                 // for the track now: the one that is asked may refuse.
                 let waits_still =
@@ -5174,6 +5175,7 @@ impl Action {
             | Self::StartRendezvousTimer { session, .. }
             | Self::StartAnnouncementTimer { session, .. }
             | Self::StartUpstreamAnnouncementTimer { session, .. }
+            | Self::SubscribeHeld { session, .. }
             | Self::StartFetchEndTimer { session, .. }
             | Self::StopRequest { session, .. }
             | Self::OpenRequest { session, .. }

@@ -1875,15 +1875,6 @@ impl<C: Connection> Hub<C> {
                     )
                 });
             }
-            // A SUBSCRIBE of a peer, for the line below.
-            let subscribe = match &event {
-                Event::RequestOpened {
-                    session,
-                    stream,
-                    first: ControlMessage::Subscribe(_),
-                } => Some((*session, *stream)),
-                _ => None,
-            };
             if let Event::FetchPipeEnded {
                 session,
                 stream,
@@ -1917,20 +1908,6 @@ impl<C: Connection> Hub<C> {
                 self.timers.stop_rendezvous(*session, *stream);
             }
             let actions = self.relay.handle(event);
-            // WHY only of a session that is there: a SUBSCRIBE that is read
-            // after its session was closed gets no answer either, and the
-            // relay keeps nothing of it.
-            if let Some((session, stream)) = subscribe
-                && self.sessions.contains_key(&session)
-                && subscribe_is_held(&actions, session, stream)
-            {
-                self.log(|| {
-                    format!(
-                        "HOLD_REQUEST session={} stream={} SUBSCRIBE",
-                        session.0, stream.0
-                    )
-                });
-            }
             for action in actions {
                 self.execute(action, &mut pending);
             }
@@ -2167,7 +2144,9 @@ impl<C: Connection> Hub<C> {
             | Action::WriteFetchStream { .. }
             | Action::AbortFetchWrite { .. }
             | Action::SetFetchSendOrder { .. }
-            | Action::NoteHeldBeyondCache { .. } => {}
+            | Action::NoteHeldBeyondCache { .. }
+            // For the log alone (`describe`).
+            | Action::SubscribeHeld { .. } => {}
         }
     }
 
@@ -3571,6 +3550,13 @@ fn log_arrival(event: &Event) {
 /// to log. An Object forwarded to a subscriber is not.
 fn describe(action: &Action) -> Option<String> {
     Some(match action {
+        // The interop run waits for it (`interop/rendezvous.ts`,
+        // `interop/catalog.ts`): the one thing the relay does with a request
+        // that none of its other lines shows.
+        Action::SubscribeHeld { session, stream } => format!(
+            "HOLD_REQUEST session={} stream={} SUBSCRIBE",
+            session.0, stream.0
+        ),
         Action::SendControl { session, message } => {
             format!("SEND session={} control {}", session.0, name(message))
         }
@@ -3831,64 +3817,6 @@ fn name(message: &ControlMessage) -> String {
         }
         ControlMessage::UnsupportedRequest { message_type, .. } => {
             format!("unsupported request {message_type:#x}")
-        }
-    }
-}
-
-/// Whether the SUBSCRIBE on `stream` of `session` waits after the step that
-/// read it and led to `actions`: it got no answer, and waits for a
-/// publisher's. The one thing the relay does with a request that none of
-/// its other lines shows. One that closed its session got no answer either,
-/// and is not held.
-fn subscribe_is_held(actions: &[Action], session: SessionKey, stream: StreamKey) -> bool {
-    !actions.iter().any(|action| match action {
-        Action::SendRequest {
-            session: to,
-            stream: on,
-            ..
-        } => (*to, *on) == (session, stream),
-        Action::CloseSession { session: of, .. } => *of == session,
-        _ => false,
-    })
-}
-
-#[cfg(test)]
-mod held_tests {
-    use xmoq_moqt::message::RequestOk;
-
-    use super::*;
-
-    #[test]
-    fn a_subscribe_is_held_when_its_step_neither_answered_it_nor_closed_its_session() {
-        let answer = |session, stream| Action::SendRequest {
-            session: SessionKey(session),
-            stream: StreamKey(stream),
-            message: ControlMessage::RequestOk(RequestOk::default()),
-        };
-        let close = |session| Action::CloseSession {
-            session: SessionKey(session),
-            code: 0x4,
-            reason: String::new(),
-        };
-        // The SUBSCRIBE is on stream 1 of session 5.
-        // (what the step led to; whether the SUBSCRIBE is held)
-        let cases = [
-            (vec![], true),
-            (vec![answer(5, 1)], false),
-            (vec![close(5)], false),
-            // Another stream of the session, the stream of that number in
-            // another session, and another session that is closed.
-            (vec![answer(5, 3)], true),
-            (vec![answer(6, 1)], true),
-            (vec![close(6)], true),
-            (vec![close(6), answer(5, 1)], false),
-        ];
-        for (actions, held) in cases {
-            assert_eq!(
-                subscribe_is_held(&actions, SessionKey(5), StreamKey(1)),
-                held,
-                "{actions:?}"
-            );
         }
     }
 }
