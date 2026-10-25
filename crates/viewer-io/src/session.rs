@@ -584,6 +584,10 @@ impl Requests<'_> {
 }
 
 /// The relay sent no SETUP in so many milliseconds.
+// FIXME: take `NoSetupInTime`, `setup` and `termination_code` from
+// `xmoq_moqt_io::client`, as the Rust client, the gatherer and the
+// transcriber do; `termination_code` here finds a `NoSetupInTime` that is
+// not wrapped alone.
 #[derive(Debug)]
 pub struct NoSetupInTime(pub u64);
 

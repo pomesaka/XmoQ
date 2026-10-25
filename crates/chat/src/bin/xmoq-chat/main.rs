@@ -19,35 +19,15 @@ use tokio::sync::watch;
 use xmoq_chat::gather::Gatherer;
 use xmoq_chat::rooms::MAX_ROOMS;
 use xmoq_moqt_io::wt;
-use xmoq_moqt_io::{Connection, StreamConfig};
+use xmoq_moqt_io::{Connection, StreamConfig, client};
 use xmoq_track_serving::backoff::Backoff;
 
-use crate::session::{Ended, NoSetupInTime};
+use crate::session::Ended;
 use crate::storage::Store;
 
 /// How long a closed session gets to reach the relay before the gatherer
 /// goes on, as the Rust client gives it (`CLOSE_GRACE`).
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
-
-/// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11): The session was closed because
-/// the peer took too long to respond to a control message", for the SETUP.
-const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
-
-/// The code a session that failed is closed with (§3.5): the one the
-/// protocol error asks for, or `NO_ERROR` for failures that are not the
-/// relay's.
-fn termination_code(result: &Result<Ended>) -> u32 {
-    let Err(error) = result else { return 0 };
-    if error.is::<NoSetupInTime>() {
-        return CONTROL_MESSAGE_TIMEOUT;
-    }
-    // WHY the chain: `context` wraps the cause.
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
-        .and_then(xmoq_moqt::Error::termination_code)
-        .map_or(0, xmoq_moqt::TerminationCode::code)
-}
 
 async fn run(args: xmoq_chat::args::Args) -> Result<()> {
     let (stopping, mut stop) = watch::channel(false);
@@ -86,8 +66,11 @@ async fn run(args: xmoq_chat::args::Args) -> Result<()> {
             Ok(connection) => {
                 let connection = Arc::new(connection);
                 println!("CONNECTED url={}", args.url);
+                // Dropped once the session is closed.
+                let mut kept = client::UntilClosed::default();
                 let result = session::gather(
                     &connection,
+                    &mut kept,
                     &store,
                     (&mut gatherer, &args.rooms, key.as_ref()),
                     args.ask_again,
@@ -98,7 +81,7 @@ async fn run(args: xmoq_chat::args::Args) -> Result<()> {
                     Ok(ended) => println!("SESSION_ENDED {ended:?}"),
                     Err(error) => println!("SESSION_FAILED {error:#}"),
                 }
-                connection.close(termination_code(&result), b"");
+                connection.close(client::termination_code_of(&result), b"");
                 let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
                 if matches!(result, Ok(Ended::Stopped)) {
                     return Ok(());

@@ -55,10 +55,9 @@ use xmoq_chat_tracks::payloads::Line;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::immutable::TrackRefusal;
-use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, ReasonPhrase, RequestOk, publish_done_status,
-    request_error_code, setup_option,
+    request_error_code,
 };
 use xmoq_moqt::name::{Location, TrackNamespace};
 use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
@@ -71,8 +70,8 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, PeerRequestClose, PeerRequestStreamEvent, RequestClose, RequestReadError,
-    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, read_request_streams,
-    read_uni_streams, send_message,
+    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, client,
+    read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 
@@ -87,11 +86,6 @@ use xmoq_track_serving::{shown, sleep_until};
 use crate::storage::Store;
 
 type Send = <WtConnection as Connection>::Send;
-
-/// How long the relay's SETUP is waited for, as the Rust client and
-/// `@xmoq/moqt` wait. Then the session is closed with
-/// `CONTROL_MESSAGE_TIMEOUT` (§3.5).
-const SETUP_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a token the gatherer makes runs, in seconds: as long as one of
 /// the room (`TOKEN_SECONDS` of `spikes/durable-objects-room/worker.js`).
@@ -159,18 +153,6 @@ pub enum Ended {
     /// The relay sent GOAWAY (§10.4).
     GoAway,
 }
-
-/// The relay sent no SETUP in time.
-#[derive(Debug)]
-pub struct NoSetupInTime;
-
-impl std::fmt::Display for NoSetupInTime {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "the relay sent no SETUP within {SETUP_WAIT:?}")
-    }
-}
-
-impl std::error::Error for NoSetupInTime {}
 
 /// A participant that is followed in this session.
 struct Followed {
@@ -316,7 +298,7 @@ fn wall_ms() -> u64 {
 }
 
 /// What the session says the peer did wrong, as an error that carries its
-/// code (`termination_code` of `main.rs`).
+/// code (`xmoq_moqt_io::client::termination_code`).
 fn fault(fault: RequestFault) -> anyhow::Error {
     match fault {
         RequestFault::Peer(error) => error.into(),
@@ -342,6 +324,7 @@ fn prefixes(taken: &Taken) -> Result<Vec<TrackNamespace>> {
 )]
 pub async fn gather(
     connection: &Arc<WtConnection>,
+    kept: &mut client::UntilClosed<WtConnection>,
     store: &Store,
     (gatherer, rooms_taken, key): (&mut Gatherer, &Taken, Option<&RoomKey>),
     ask_again: AskAgain,
@@ -353,7 +336,7 @@ pub async fn gather(
         subgroup_buffer_limit: xmoq_chat::args::PAYLOAD_MOST,
         ..StreamConfig::default()
     };
-    let _uni_readers = read_uni_streams(
+    let uni_readers = read_uni_streams(
         Arc::clone(connection),
         stream_config.clone(),
         stops.clone(),
@@ -361,13 +344,14 @@ pub async fn gather(
         |event| event,
     );
     let (peer_queue, mut peer) = mpsc::channel(PEER_REQUEST_QUEUE);
-    let _request_readers = read_request_streams(
+    let request_readers = read_request_streams(
         Arc::clone(connection),
         stream_config,
         stops.clone(),
         peer_queue,
         |event| event,
     );
+    kept.readers.extend([uni_readers, request_readers]);
     let (heard, mut heard_by_loop) = mpsc::channel(HEARD_QUEUE);
     // Each FETCH says two things to the loop, and waits when it is full.
     let (fetch_done, mut fetches_done) = mpsc::channel(FETCHES_AT_ONCE);
@@ -409,36 +393,19 @@ pub async fn gather(
         began: Instant::now(),
     };
 
-    // §3.3: each peer opens one control stream that begins with SETUP, and
-    // keeps it open for the session.
-    let mut control = connection.open_uni().await?;
     let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-    // In ascending order of their types: the token (0x03), then the
-    // implementation (0x07). The relay looks at no namespace or role of the
-    // token of a SETUP.
-    let mut options: Vec<KeyValuePair> = gathering
-        .token(TokenRole::Sub)
-        .map(|token| KeyValuePair::bytes(setup_option::AUTHORIZATION_TOKEN, token))
-        .transpose()?
-        .into_iter()
-        .collect();
-    options.push(KeyValuePair::bytes(
-        setup_option::MOQT_IMPLEMENTATION,
-        implementation.as_bytes().to_vec(),
-    )?);
-    let setup = gathering.session.setup(options)?;
-    send_message(&mut control, &setup, &Trace::default(), "control").await?;
-    match tokio::time::timeout(SETUP_WAIT, uni.recv()).await {
-        Ok(Some(UniEvent::Control(message))) => {
-            gathering.session.on_control_message(message)?;
-        }
-        // WHY the error itself, not a line about it: the session is closed
-        // with its code, as a datagram of an unknown type that comes before
-        // the SETUP has it (§11).
-        Ok(Some(UniEvent::Failed(error))) => return Err(error.into()),
-        Ok(other) => bail!("no SETUP from the relay: {other:?}"),
-        Err(_) => return Err(NoSetupInTime.into()),
-    }
+    // The relay looks at no namespace or role of the token of a SETUP.
+    let token = gathering.token(TokenRole::Sub);
+    let options = client::setup_options(token.as_deref(), implementation)?;
+    client::setup(
+        connection.as_ref(),
+        &mut gathering.session,
+        &mut uni,
+        &mut kept.control,
+        options,
+        client::SETUP_WAIT,
+    )
+    .await?;
     println!("SETUP_OK");
     // Who is in the rooms is what this session is told; the numbering of
     // the rooms goes on.
@@ -477,8 +444,6 @@ pub async fn gather(
             Some(_) = gathering.replies.join_next() => {}
         }
     };
-    // What is open goes with the session, which the caller closes.
-    drop(control);
     Ok(ended)
 }
 

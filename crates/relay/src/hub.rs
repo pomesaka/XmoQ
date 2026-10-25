@@ -646,6 +646,7 @@ const NO_ERROR: u32 = 0x0;
 /// the peer took too long to respond to a control message." What a session
 /// is closed with whose client sent no SETUP in time, as the clients of
 /// this repository close one whose server sent none.
+// FIXME: use `xmoq_moqt::TerminationCode::ControlMessageTimeout` in its place.
 const CONTROL_MESSAGE_TIMEOUT: u32 = 0x11;
 
 impl<C: Connection> Drop for SessionHandle<C> {
