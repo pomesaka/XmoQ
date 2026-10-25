@@ -430,6 +430,13 @@ impl Session {
         self.setup_sent && self.peer_setup_received
     }
 
+    /// How many requests of the peer may be open at once, in place of
+    /// [`MAX_PEER_REQUESTS`]; at least 1. For a request that is open already
+    /// it changes nothing.
+    pub fn set_most_peer_requests(&mut self, most: usize) {
+        self.peer.most = most.max(1);
+    }
+
     /// Whether the peer sent GOAWAY on its control stream. Requests are not
     /// opened after it.
     #[must_use]

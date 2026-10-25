@@ -39,9 +39,39 @@ use crate::{
     StreamKey, Subscriber, TrackEnd, TrackSource, internal_error, largest_object,
 };
 
-/// Namespaces one session may have announced at once. One more is refused
-/// with `EXCESSIVE_LOAD`. Provisional.
+/// Namespaces one session may have announced at once, where
+/// [`LimitsOfASession`] does not say otherwise. One more is refused with
+/// `EXCESSIVE_LOAD`. Provisional.
 pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
+
+/// What one session may have at the relay. The relay's own numbers unless
+/// it is told others (`Relay::set_limits_of_a_session`); each is a flag of
+/// the relay (`--peer-requests-per-session`, `--own-requests-per-session`,
+/// `--namespaces-per-session`) and holds for every session alike.
+///
+/// WHY the same for every session: the relay cannot tell a relay below it
+/// from a viewer (what would tell it is not decided). A relay above edges
+/// that carry a meeting is given larger numbers, and its viewers then have
+/// them as well (`docs/scale-and-meetings.md`, what an edge lacks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitsOfASession {
+    /// Requests of the peer open at once ([`xmoq_moqt::session::MAX_PEER_REQUESTS`]).
+    pub peer_requests: usize,
+    /// Requests the relay has open on the session ([`MAX_OWN_REQUESTS_PER_SESSION`]).
+    pub own_requests: usize,
+    /// Namespaces the session has announced ([`MAX_NAMESPACES_PER_SESSION`]).
+    pub namespaces: usize,
+}
+
+impl Default for LimitsOfASession {
+    fn default() -> Self {
+        Self {
+            peer_requests: xmoq_moqt::session::MAX_PEER_REQUESTS,
+            own_requests: MAX_OWN_REQUESTS_PER_SESSION,
+            namespaces: MAX_NAMESPACES_PER_SESSION,
+        }
+    }
+}
 
 /// `PUBLISH_NAMESPACE` requests a session may send at once. Each uses one
 /// of these, which comes back after the time the I/O side has for it (a
@@ -91,8 +121,9 @@ pub const MAX_HELD_SUBSCRIBES_PER_SESSION: usize = 16;
 /// [`MAX_HELD_SUBSCRIBES_PER_SESSION`] would be four times as many.
 pub const MAX_HELD_TRACKS: usize = 1_024;
 
-/// Requests the relay may have open on one session at once: its SUBSCRIBEs
-/// to a publisher. A publisher that has as many is passed over, and a
+/// Requests the relay may have open on one session at once, where
+/// [`LimitsOfASession`] does not say otherwise: its SUBSCRIBEs to a
+/// publisher. A publisher that has as many is passed over, and a
 /// subscriber for whose SUBSCRIBE nobody else could be asked is refused
 /// with `EXCESSIVE_LOAD`. Provisional.
 ///
@@ -627,7 +658,7 @@ impl Relay {
             .iter()
             .filter(|entry| entry.session == session)
             .count();
-        if announced >= MAX_NAMESPACES_PER_SESSION {
+        if announced >= self.limits_of_a_session.namespaces {
             return false;
         }
         // A publisher that announces again may have the tracks now that it
@@ -910,6 +941,7 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) -> Result<Ask, u64> {
         let token = self.token_for(publisher, crate::Operation::Subscribe);
+        let own_requests_most = self.limits_of_a_session.own_requests;
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
@@ -919,7 +951,7 @@ impl Relay {
         if state.moqt.peer_going_away() {
             return Err(request_error_code::DOES_NOT_EXIST);
         }
-        if state.own_requests() >= MAX_OWN_REQUESTS_PER_SESSION {
+        if state.own_requests() >= own_requests_most {
             return Err(request_error_code::EXCESSIVE_LOAD);
         }
         // §9.2: "Relays SHOULD set the Forward flag to 1 when a new

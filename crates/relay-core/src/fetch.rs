@@ -26,7 +26,7 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 use crate::cache;
 use crate::events::{Event, FetchPiece, FetchPipeEnd};
 use crate::requests::{Joinable, Subscribed};
-use crate::routing::{MAX_OWN_REQUESTS_PER_SESSION, OwnRequestKind, Refusal};
+use crate::routing::{OwnRequestKind, Refusal};
 use crate::{
     Action, OwnRequestEnd, OwnRequestKey, Relay, RequestSlot, SessionKey, StreamKey, internal_error,
 };
@@ -1092,6 +1092,7 @@ impl Relay {
         // parameters it passes on (`upstream_parameters`), which leave the
         // subscriber's out.
         let token = self.token_for(publisher, crate::Operation::Subscribe);
+        let own_requests_most = self.limits_of_a_session.own_requests;
         let Some(state) = self.sessions.get_mut(&publisher) else {
             return Err(request_error_code::DOES_NOT_EXIST);
         };
@@ -1107,7 +1108,7 @@ impl Relay {
         }
         // The relay's FETCH and SUBSCRIBE requests share the publisher's
         // session, and its patience.
-        if state.own_requests() >= MAX_OWN_REQUESTS_PER_SESSION
+        if state.own_requests() >= own_requests_most
             || state.own_fetches.len() >= MAX_OWN_FETCHES_PER_SESSION
             || for_this_session >= fetches_for_one
         {

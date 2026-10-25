@@ -33,8 +33,8 @@ use xmoq_moqt_io::{
     read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
-    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, OutStreamKey, OwnRequestEnd, OwnRequestKey,
-    Relay, RequestEnd, Role, SessionKey, StreamKey,
+    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, LimitsOfASession, OutStreamKey,
+    OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SessionKey, StreamKey,
 };
 
 /// Limits of the relay. Every value is provisional: the draft sets none of
@@ -212,6 +212,11 @@ pub struct HubConfig {
     /// the relay's own number: how many bytes the fetch streams the relay
     /// writes may keep alive of Groups its caches have let go of.
     pub held_beyond_cache_bytes: Option<usize>,
+    /// What one session may have at the relay
+    /// ([`xmoq_relay_core::LimitsOfASession`]). Where `peer_requests` is
+    /// changed, [`StreamConfig::max_request_streams`] of [`Self::streams`]
+    /// is to be [`request_streams_for`] it.
+    pub limits_of_a_session: LimitsOfASession,
     /// `xmoq_relay_core::MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`, where it is
     /// not the relay's own number: how many requests the relay has open on
     /// one publisher for one subscriber's session.
@@ -337,15 +342,22 @@ fn sent_away_url(url: &str) -> String {
     sent
 }
 
+/// The request streams of a session that are read at once, for a session
+/// that may have `peer_requests` open.
+///
+/// WHY above the session's limit on open requests: a request over that
+/// limit has to be read to be answered with `EXCESSIVE_LOAD`. With fewer
+/// readers than requests it would wait unanswered instead.
+#[must_use]
+pub fn request_streams_for(peer_requests: usize) -> usize {
+    peer_requests.saturating_add(8)
+}
+
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
             streams: StreamConfig {
-                // WHY above the session's limit on open requests: a request
-                // over that limit has to be read to be answered with
-                // EXCESSIVE_LOAD. With fewer readers than requests it would
-                // wait unanswered instead.
-                max_request_streams: MAX_PEER_REQUESTS + 8,
+                max_request_streams: request_streams_for(MAX_PEER_REQUESTS),
                 // The relay counts an Object as received from its first
                 // byte (§5.1.2): `Event::ObjectBegun`.
                 report_objects_begun: true,
@@ -383,6 +395,7 @@ impl Default for HubConfig {
             cached_fetch_whole_ms: 30_000,
             cached_fetch_least_kbps: 500,
             held_beyond_cache_bytes: None,
+            limits_of_a_session: LimitsOfASession::default(),
             requests_for_one_subscriber: None,
             fetches_for_one_subscriber: None,
             upstream_timeout: Duration::from_millis(xmoq_relay_core::UPSTREAM_ANSWER_WAIT_MS),
@@ -1097,6 +1110,7 @@ pub fn spawn_with_upstream<C: Connection>(
     relay.set_upstream_answer_wait_ms(
         u64::try_from(config.upstream_timeout.as_millis()).unwrap_or(u64::MAX),
     );
+    relay.set_limits_of_a_session(config.limits_of_a_session);
     if let Some(key) = &config.auth_key {
         relay.set_authorizer(crate::auth::RoomTokens::new(key, config.auth_setup));
     }
