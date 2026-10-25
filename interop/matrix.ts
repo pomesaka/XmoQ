@@ -1421,6 +1421,15 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			args: ["--auth", "yes"],
 			relay: "own",
 		},
+		// The same voice read by a program in place of whisper.cpp
+		// (`--engine command`): a piece reaches it as a WAV file, and what it
+		// prints reaches the transcript.
+		{
+			name: "own relay: transcriber: with --engine command, a piece of a page's voice reaches a program as a WAV file and what it prints reaches a reader of the transcript",
+			script: "transcriber.ts",
+			args: ["--engine", "command"],
+			relay: "own",
+		},
 		{
 			name: "own relay: agent: xmoq-agent takes no picture of a page's broadcast unasked, writes a PNG of its video for each /frame with a frame line, and keeps no more files than --frames-kept",
 			script: "agent-frames.ts",

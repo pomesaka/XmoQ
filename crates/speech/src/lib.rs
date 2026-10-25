@@ -14,6 +14,7 @@
 //! graphics processor. The caller keeps it off the task that reads the
 //! session.
 
+pub mod command;
 pub mod cut;
 pub mod decode;
 pub mod engine;

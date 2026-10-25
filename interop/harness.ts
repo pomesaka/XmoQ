@@ -1129,6 +1129,9 @@ export function spawnTranscriber(
 	context: RunContext,
 	label: string,
 	extraArgs: string[],
+	// `command` has the transcriber read with a program given in `extraArgs`
+	// (`--engine command`), which takes no `--model`.
+	engine: "whisper" | "command" = "whisper",
 ): LoggedProcess {
 	if (!existsSync(TRANSCRIBER_BINARY)) {
 		throw new Error(
@@ -1138,7 +1141,9 @@ export function spawnTranscriber(
 	const model = transcriberModel();
 	const vad = transcriberVadModel();
 	const needed: [string, string][] = [
-		[model, "tiny"],
+		...(engine === "whisper"
+			? [[model, "tiny"] satisfies [string, string]]
+			: []),
 		[vad, "silero-v5.1.2"],
 	];
 	for (const [file, name] of needed) {
@@ -1151,8 +1156,7 @@ export function spawnTranscriber(
 		context.relayUrl,
 		"--cert-sha256",
 		context.certSha256Hex,
-		"--model",
-		model,
+		...(engine === "whisper" ? ["--model", model] : []),
 		"--vad-model",
 		vad,
 		...extraArgs,
