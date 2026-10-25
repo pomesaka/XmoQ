@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import type { GoAwayNotice, SessionClose } from "@xmoq/moqt";
+import {
+	type GoAwayNotice,
+	RequestErrorCode,
+	RequestFailedError,
+	type SessionClose,
+} from "@xmoq/moqt";
 import {
 	type ChatConnection,
 	keepInTheRoom,
@@ -12,6 +17,10 @@ type Session =
 	| "joins-then-closes"
 	/** The relay sends GOAWAY to `uri` before it answers the PUBLISH_NAMESPACE, and refuses it after. */
 	| { goAwayBeforeAnswer: string }
+	/** The refusal with GOING_AWAY is read before the GOAWAY to `uri`, which comes after it on the control stream. */
+	| { refusedBeforeGoAway: string }
+	/** The PUBLISH_NAMESPACE is refused with GOING_AWAY, no GOAWAY comes, and the session closes. */
+	| "refused-going-away-then-closes"
 	/** The relay answers, then sends GOAWAY to `uri`. */
 	| { goAwayAfterJoined: string };
 
@@ -19,6 +28,13 @@ const notice = (uri: string): GoAwayNotice => ({
 	newSessionUri: uri,
 	timeoutMs: 2_000,
 });
+
+const goingAway = (): RequestFailedError =>
+	new RequestFailedError({
+		errorCode: RequestErrorCode.GOING_AWAY,
+		retryInterval: 0n,
+		errorReason: "the session goes away",
+	});
 
 /**
  * A session that does what `session` says. The SUBSCRIBE for `lines` is
@@ -35,7 +51,18 @@ function sessionOf(session: Session): ChatConnection["connection"] {
 		async publishNamespace() {
 			if (typeof session === "object" && "goAwayBeforeAnswer" in session) {
 				goAway.resolve(notice(session.goAwayBeforeAnswer));
-				throw new Error("refused: the session goes away");
+				throw goingAway();
+			}
+			if (typeof session === "object" && "refusedBeforeGoAway" in session) {
+				setTimeout(
+					() => goAway.resolve(notice(session.refusedBeforeGoAway)),
+					10,
+				);
+				throw goingAway();
+			}
+			if (session === "refused-going-away-then-closes") {
+				setTimeout(close, 10);
+				throw goingAway();
 			}
 			if (session === "joins-then-closes") setTimeout(close, 0);
 			else
@@ -87,6 +114,18 @@ test.each<{
 		sessions: [{ goAwayBeforeAnswer: "https://b" }, "joins-then-closes"],
 		connects: ["-", "https://b"],
 		states: ["connecting 1", "moved https://b", "connecting 2", "joined 1"],
+	},
+	{
+		name: "a refusal with GOING_AWAY read before the GOAWAY waits for it, and moves",
+		sessions: [{ refusedBeforeGoAway: "https://b" }, "joins-then-closes"],
+		connects: ["-", "https://b"],
+		states: ["connecting 1", "moved https://b", "connecting 2", "joined 1"],
+	},
+	{
+		name: "a refusal with GOING_AWAY and no GOAWAY before the session closes is a failure where it was",
+		sessions: ["refused-going-away-then-closes", "joins-then-closes"],
+		connects: ["-", "-"],
+		states: ["connecting 1", "failed", "connecting 2", "joined 1"],
 	},
 	{
 		name: "a GOAWAY after it joined moves it as well",
