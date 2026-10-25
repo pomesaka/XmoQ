@@ -74,7 +74,9 @@
 //                     well as the request stream (`cancel` of `@xmoq/moqt`),
 //                     so the relay's writer meets the stop of its own
 //                     stream: `FETCH_WRITE_ENDED … stopped pieces=K
-//                     code=0x1` with K below 83. A write that was whole says
+//                     code=0x1` with K below 83, or `aborted` when the
+//                     cancel of the request stream comes first (see the
+//                     check in `largeGroupCancelled`). A write that was whole says
 //                     `finished pieces=83`, and the run fails for it. WHY 83
 //                     Objects of 100,000 bytes: the relay had handed about
 //                     6.2 MB to the transport when the page gave up (62
@@ -865,9 +867,19 @@ async function largeGroupCancelled(): Promise<string> {
 	);
 	const ended = await context.relay.waitForLine(ENDED);
 	const [how, pieces, code] = [1, 2, 3].map((index) => ended[index]);
-	if (how !== "stopped" || code !== "0x1" || Number(pieces) >= objects) {
+	// WHY `aborted` as well: the page stops the fetch stream and the request
+	// stream together, and QUIC keeps no order between two streams. The
+	// writer ends `stopped` when the stop of its own stream comes first, and
+	// `aborted` when the relay's core has the FETCH cancelled first and
+	// orders it stopped (`AbortFetchWrite`), both with CANCELLED. `aborted`
+	// came once in a full run of 229 pairings (2026-10-25); alone, `stopped`.
+	if (
+		(how !== "stopped" && how !== "aborted") ||
+		code !== "0x1" ||
+		Number(pieces) >= objects
+	) {
 		throw new Error(
-			`the relay's writing was to end as stopped with CANCELLED (0x1), before all ${objects} Objects were written: ${ended[0]}`,
+			`the relay's writing was to end as stopped or aborted with CANCELLED (0x1), before all ${objects} Objects were written: ${ended[0]}`,
 		);
 	}
 	const asked = await context.relay.linesBefore(
