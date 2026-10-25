@@ -740,6 +740,19 @@ pub enum Action {
         /// The wait, in milliseconds.
         wait_ms: u64,
     },
+    /// A SUBSCRIBE of the peer was taken and is not answered yet: it waits
+    /// for a publisher to answer the relay, to appear (§10.2.6), or for the
+    /// session with the upstream. Nothing is to be done; it is for the log,
+    /// whose line (`HOLD_REQUEST`) the interop run waits for
+    /// (`interop/rendezvous.ts`, `interop/catalog.ts`): one that came for a
+    /// SUBSCRIBE that was answered would have a run go on at the wrong
+    /// moment.
+    SubscribeHeld {
+        /// The session.
+        session: SessionKey,
+        /// The request stream of the SUBSCRIBE.
+        stream: StreamKey,
+    },
     /// Report [`Event::UpstreamAnnouncementTimeout`] after `wait_ms`: the
     /// upstream refused an announcement of the relay for its load, and said
     /// when to send it again (the Retry Interval, §10.6.2).

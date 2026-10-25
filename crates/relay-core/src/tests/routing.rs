@@ -3689,3 +3689,99 @@ fn the_time_to_end_a_stream_is_nothing_to_a_request_that_goes_on() {
     }
     assert_eq!(relay.counts(), before);
 }
+
+#[test]
+fn a_subscribe_that_waits_is_said_to_be_held_and_one_that_is_answered_is_not() {
+    let held = |actions: &[Action]| {
+        actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::SubscribeHeld {
+                    session: ALICE,
+                    stream: StreamKey(0),
+                }
+            )
+        })
+    };
+    let alice_subscribes = |relay: &mut Relay, parameters: Vec<Parameter>| {
+        relay.handle(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first: ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: track(b"a"),
+                parameters,
+            }),
+        })
+    };
+    // (case, whether the relay has an upstream, whether a publisher
+    //  announced the namespace, whether the track is published, Alice's
+    //  RENDEZVOUS_TIMEOUT, whether her SUBSCRIBE is held)
+    let cases = [
+        (
+            "a publisher is asked: it waits for the answer",
+            false,
+            true,
+            false,
+            None,
+            true,
+        ),
+        (
+            "nobody to ask and no RENDEZVOUS_TIMEOUT: refused",
+            false,
+            false,
+            false,
+            None,
+            false,
+        ),
+        (
+            "nobody to ask, held for a publisher to appear",
+            false,
+            false,
+            false,
+            Some(5_000),
+            true,
+        ),
+        (
+            "the track is published: answered at once",
+            false,
+            false,
+            true,
+            None,
+            false,
+        ),
+        (
+            "it waits for the session with the upstream",
+            true,
+            false,
+            false,
+            None,
+            true,
+        ),
+    ];
+    for (name, upstream, announced, published, rendezvous, expected) in cases {
+        let mut relay = relay();
+        if upstream {
+            relay.set_upstream(TrackNamespace::new(vec![]).unwrap());
+        }
+        if announced {
+            announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        }
+        if published {
+            relay.step(Event::RequestOpened {
+                session: PUBLISHER,
+                stream: StreamKey(4),
+                first: publish(8, b"a"),
+            });
+        }
+        let parameters = rendezvous
+            .map(Parameter::RendezvousTimeout)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            held(&alice_subscribes(&mut relay, parameters)),
+            expected,
+            "{name}"
+        );
+    }
+}

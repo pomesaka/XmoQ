@@ -39,10 +39,27 @@ impl Relay {
     /// WHY without the timer of an announcement: it follows every first
     /// `PUBLISH_NAMESPACE` of a session, and the tests that compare what
     /// the relay does about an announcement are about the rest. The test of
-    /// the limit calls `handle`.
+    /// the limit calls `handle`. The same for the word that a SUBSCRIBE is
+    /// held, which follows every SUBSCRIBE that waits; its test calls
+    /// `handle` as well. Every step checks that the word comes for no
+    /// SUBSCRIBE the same step answers.
     fn step(&mut self, event: Event) -> Vec<Action> {
         let mut actions = self.handle(event);
-        actions.retain(|action| !matches!(action, Action::StartAnnouncementTimer { .. }));
+        for action in &actions {
+            if let Action::SubscribeHeld { session, stream } = action {
+                let answered = actions.iter().any(|other| {
+                    matches!(other, Action::SendRequest { session: to, stream: on, .. }
+                        if (to, on) == (session, stream))
+                });
+                assert!(!answered, "held and answered at once: {actions:?}");
+            }
+        }
+        actions.retain(|action| {
+            !matches!(
+                action,
+                Action::StartAnnouncementTimer { .. } | Action::SubscribeHeld { .. }
+            )
+        });
         for action in &actions {
             if let Action::OpenDataStream { out_stream, .. } = action {
                 let reported = self.handle(Event::OutStreamOpened {
