@@ -240,9 +240,13 @@ async function main(): Promise<void> {
 	if (room !== undefined) await room.broadcast;
 	// The transcriber listens under the namespace the publishing page
 	// announces (`serve.ts`), and its transcript is of that prefix.
-	startCaptions(NAMESPACE, async () =>
+	// After a GOAWAY the captions go to its URI with the same certificate's
+	// hash, as the broadcast and the chat do.
+	startCaptions(NAMESPACE, async (goAway) =>
 		connectToRelay(
-			through(HERE),
+			goAway === undefined || goAway.newSessionUri === ""
+				? through(HERE)
+				: { ...HERE, relayUrl: goAway.newSessionUri },
 			await room?.token("sub", [...TRANSCRIPT_PREFIX, ...NAMESPACE]),
 		),
 	);
