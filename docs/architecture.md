@@ -2,7 +2,7 @@
 
 ![XmoQ system architecture](assets/architecture.svg)
 
-The diagram shows the components and their boundaries; everything in it ran on one machine, and nothing is deployed. The solid arrows carry media; the dashed connection between the relay and Durable Objects is **undecided**. The violet lines are the chat on MoQ tracks: the gatherer (`xmoq-chat`), and the demo's pages and the terminal viewer, its participants. The room's WebSocket carries no chat.
+The diagram shows the components and their boundaries; everything in it ran on one machine, and nothing is deployed. Every client speaks MoQ over WebTransport to the relay, its chat included: the violet line is the chat's gatherer (`xmoq-chat`), which every page, the terminal viewer and the agent's reader say their lines to and read them from through the relay. The room's WebSocket carries no chat. The dashed connection between the relay and Durable Objects is **undecided**.
 
 ## Broadcast flow
 
