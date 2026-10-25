@@ -35,8 +35,17 @@
       "name": "@xmoq/chat",
       "version": "0.0.0",
       "dependencies": {
+        "@xmoq/json": "workspace:*",
         "@xmoq/moqt": "workspace:*",
       },
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "typescript": "6.0.3",
+      },
+    },
+    "packages/json": {
+      "name": "@xmoq/json",
+      "version": "0.0.0",
       "devDependencies": {
         "@types/bun": "1.4.2",
         "typescript": "6.0.3",
@@ -92,6 +101,8 @@
     "@xmoq/demo": ["@xmoq/demo@workspace:demo"],
 
     "@xmoq/interop": ["@xmoq/interop@workspace:interop"],
+
+    "@xmoq/json": ["@xmoq/json@workspace:packages/json"],
 
     "@xmoq/loc": ["@xmoq/loc@workspace:packages/loc"],
 

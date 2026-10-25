@@ -8,7 +8,7 @@
 // in that order. `sentAt` is the sender's clock and `at` the gatherer's, in
 // milliseconds since the Unix epoch.
 
-import { type JsonValue, readJson } from "./json.ts";
+import { type JsonValue, readJson } from "@xmoq/json";
 
 /**
  * The largest time taken: 2^53 - 1, the largest integer a JavaScript number
