@@ -28,7 +28,7 @@ WHY these, and WHY NOT the other choices (every namespace of the relay; a room t
 
 **How many voices at once**: with the default model (`small-q5_1`) on a Mac (one machine, loopback), one transcriber kept up with 8 people speaking at the same moment with `--language auto`, and 16 with `--language en`. With 16 and `auto` the words came later and later, and pieces were dropped. With `--model large-v3-turbo-q5_0` it kept up with 2 with `auto` and 4 with `en`; `--readers 2` read no more than one reader on Metal ([record](../../docs/experiments/2026-10-25-how-many-voices-one-transcriber-reads.md)). Why the default is `small-q5_1`: [`xmoq-speech`](../speech/README.md).
 
-An audio subscription that ends or is refused while the broadcast stays announced is asked for again, by the rule every client asks by ([`xmoq-again`](../again/README.md)). There is no count of times, as the gatherer has for a participant (why, at `audio_over` in `session.rs`).
+A subscription to a broadcast's catalog or sound that ends or is refused while the broadcast stays announced is asked for again (`ASKING_AGAIN ... track=catalog` or `track=audio`), by the rule every client asks by ([`xmoq-again`](../again/README.md)), so that a broadcast whose catalog was refused before its publisher had it is heard once it has (why, at `catalog_over` in `session.rs`). There is no count of times, as the gatherer has for a participant (why, at `audio_over`). A catalog that is malformed is not asked for again, and the broadcast is let go of until its namespace is announced again. A broadcast for which the session takes no more SUBSCRIBEs (after a GOAWAY) is let go of too (`BROADCAST_NOT_ASKED`), so that it holds no place of `--tracks`.
 
 ## Flags
 
