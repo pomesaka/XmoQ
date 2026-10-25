@@ -35,7 +35,7 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
 | `--chat-catch-up-lines` | 16 | The lines missed while away that are fetched when the subscription to `lines` is made again; 1 to 1,000 (`history_to_fetch` of `xmoq-viewer`) |
 | `--answer-wait-ms`, `--setup-wait-ms`, `--open-wait-ms` | 10,000 each | As `xmoq-watch` has them |
 | `--seconds` | | Ends after so long |
-| `--frames off` | on | The video is not subscribed to, and `/frame` gets an `error`. On, the reader subscribes to the first H.264 video track of the broadcast's catalog and holds the latest Group's frames undecoded until a picture is asked for (`xmoq-picture`) |
+| `--frames off` | on | The video is not subscribed to, and `/frame` gets an `error`. On, the reader subscribes to the first H.264 video track of the broadcast's catalog and holds the latest Group's frames undecoded until a picture is asked for (`xmoq-picture`). A video subscription that ends or is refused is asked for again on the session, by the rule of `xmoq-again`, as `xmoq-watch` asks for its sound |
 | `--frame-every-ms` | none | A picture this often by the broadcast's Timestamps, unasked |
 | `--frame-longest` | 1280 | The longest side of a picture, in pixels; a larger one is made smaller |
 | `--frames-kept` | 500 | The pictures kept in `<dir>/frames/`, of every session together; the oldest file goes for the newest. Files that were there when the reader began are not counted, and not removed |
@@ -73,7 +73,7 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 | The line | What happens |
 |---|---|
 | `hello` | Said in the chat. Over 512 bytes, or while 16 lines wait for the gatherer, it is not, and an `error` says so |
-| `/frame` | A picture of the broadcast now, as a `frame` line |
+| `/frame` | A picture of the broadcast now, as a `frame` line. Asked while the reader connects (again), it is kept and asked of the next session's video; within 10 s from when it was typed, or an `error` |
 | `//hello` | `/hello` is said: one `/` is taken off, so that a line can begin with `/` |
 | `/other` | An `error`: no such command |
 | An empty line | Nothing |
@@ -88,12 +88,11 @@ What the reader says about itself (the chat on tracks, a subscription asked for 
 - **With a room that names no relay, the chat is there only while the room has a broadcast**: the room says where the relay is only with the broadcast then (a room run without `RELAY_URL`, `spikes/durable-objects-room/README.md`). A line said meanwhile gets an `error`.
 - **The transcript is that of the broadcast's namespace unless `--transcript` names the prefix the transcriber listens under**: a transcriber run with a prefix above the broadcast's (`--namespace xmoq` for `xmoq/demo`) publishes `xmoq/transcript/xmoq`, and the reader without `--transcript xmoq` waits for `xmoq/transcript/xmoq/demo`, which does not come. The room does not say what the transcriber listens under. A session at the room's relay for the chat alone follows no transcript.
 - **A reader started again in the same `--out` writes over the pictures of the one before**: the names begin from 1 again (`000001-...`), and what the earlier run kept is neither counted nor removed.
-- The video that ends (PUBLISH_DONE) is not asked for again on that session; the next session asks.
 - Objects of the video that wait for the thread of the pictures: 256; beyond them they are left out, an `error` says so when it begins, and the frames after them in their Group give no picture.
 - Requests of the relay are refused with `NOT_SUPPORTED`, except the gatherer's SUBSCRIBE to `said`.
 
 ## What is where
 
-The library (`src/*.rs`) decides, and does no input or output: `events` (the lines written), `input` (what a line of stdin asks for), `presence` (who is in the chat), `args` (the flags). The binary (`src/bin/xmoq-agent/`): `main.rs` (the room, connecting again, the signals), `attend.rs` (one session: the chat, who is in it, stdin, the video), `frames.rs` (the pictures, on a thread that writes the PNG files), `output.rs` (stdout and the file), `stdin.rs` (the lines of stdin, on a thread).
+The library (`src/*.rs`) decides, and does no input or output: `events` (the lines written), `input` (what a line of stdin asks for), `presence` (who is in the chat), `args` (the flags). The binary (`src/bin/xmoq-agent/`): `main.rs` (the room, connecting again, the signals), `attend.rs` (one session: the chat, who is in it, stdin, the video), `video.rs` (the catalog and the video's subscription, asked for again), `frames.rs` (the pictures, on a thread that writes the PNG files), `output.rs` (stdout and the file), `stdin.rs` (the lines of stdin, on a thread).
 
 `interop/agent.ts` runs it against a page through the own relay and the gatherer (`mise run interop`). `interop/agent-frames.ts` asks it twice with `/frame` for a picture of a page's broadcast, and has the page decode the PNG ([record](../../docs/experiments/2026-10-25-pictures-of-a-broadcast-for-an-agent.md)).
