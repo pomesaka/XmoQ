@@ -16,4 +16,5 @@
 pub mod chat_track;
 pub mod meeting;
 pub mod presence;
+pub mod reconnect;
 pub mod room;

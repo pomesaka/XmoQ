@@ -229,6 +229,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 ### Phase 5 — An agent follows a broadcast
 
 - 2026-10-25 [How many voices one transcriber reads at once](2026-10-25-how-many-voices-one-transcriber-reads.md)
+- 2026-10-25 [One rule for the next session](2026-10-25-one-rule-for-the-next-session.md)
 - 2026-10-25 [The transcriber reads a voice](2026-10-25-the-transcriber-reads-a-voice.md)
 
 ### Phase 6 — Meetings

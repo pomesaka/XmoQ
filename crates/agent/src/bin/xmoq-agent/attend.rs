@@ -28,10 +28,12 @@ use xmoq_moqt_io::{
 };
 use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
 use xmoq_transcript_tracks::payloads::{Speech, read_speech};
+pub use xmoq_viewer::reconnect::Ended;
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
 use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, Track};
+use xmoq_viewer_io::reconnect::go_away_behind;
 use xmoq_viewer_io::room_socket::RoomSocket;
-use xmoq_viewer_io::session::{self, Events, GoneAway, Requests, new_url, timestamp_of};
+use xmoq_viewer_io::session::{self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of};
 
 use crate::frames::{Job, Pictures};
 use crate::meeting::InMeeting;
@@ -41,17 +43,6 @@ use crate::{Outside, Place, Reader, person_of};
 
 type Send = <WtConnection as Connection>::Send;
 type Recv = <WtConnection as Connection>::Recv;
-
-/// How a session ended.
-pub enum Ended {
-    /// The reader is to end.
-    Quit,
-    /// The broadcast ended or moved: the room says what comes next.
-    Again,
-    /// The relay sent GOAWAY (§3.6): the reader connects again, to the URL it
-    /// named, or to the same one where it named none.
-    Moved(Option<String>),
-}
 
 /// What has to stay until the session is closed, on every way out of
 /// [`attend`], so its caller keeps it. WHY, as in `xmoq-watch`: a relay that
@@ -521,6 +512,18 @@ pub async fn attend(
                     error.chain().find_map(|cause| cause.downcast_ref())
                 {
                     return Ok(Ended::Moved(new_url(go_away)));
+                }
+                // §10.4: a relay going away refuses with `GOING_AWAY`, and its
+                // GOAWAY, on the control stream, can come after.
+                // WHY `unless_ended`: a signal and stdin are heard meanwhile.
+                if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) {
+                    let waiting = go_away_behind(&mut session, &mut events, args.answer_wait_ms);
+                    let wait = Duration::from_millis(args.answer_wait_ms) * 2;
+                    match reader.unless_ended("the GOAWAY", wait, waiting).await? {
+                        None => return Ok(Ended::Quit),
+                        Some(Some(go_away)) => return Ok(Ended::Moved(new_url(&go_away))),
+                        Some(None) => {}
+                    }
                 }
                 if error
                     .chain()

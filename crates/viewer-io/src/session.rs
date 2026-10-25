@@ -40,7 +40,7 @@ const CATALOG_LIMIT: usize = 1024 * 1024;
 /// that are kept, while an answer is waited for ([`Events::while_waiting`]).
 /// **Provisional.** Beyond it reading pauses, and flow control holds the
 /// relay back.
-const MOST_READ_AHEAD: usize = 256;
+pub(crate) const MOST_READ_AHEAD: usize = 256;
 
 /// The events of the session's unidirectional streams, with those read
 /// ahead while an answer was waited for, which come first.
@@ -147,7 +147,7 @@ impl Events {
 
     /// Puts events that were read, and not taken, before those read ahead,
     /// in the order they came.
-    fn put_back(&mut self, mut kept: VecDeque<UniEvent>) {
+    pub(crate) fn put_back(&mut self, mut kept: VecDeque<UniEvent>) {
         kept.append(&mut self.ahead);
         self.ahead = kept;
     }

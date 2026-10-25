@@ -15,7 +15,8 @@ use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
 use xmoq_viewer::meeting::{self, Limits, Meeting, Video as VideoStep};
 use xmoq_viewer::presence::{Change, SETTLE_MS};
-use xmoq_viewer_io::session::{Events, GoneAway, new_url};
+use xmoq_viewer_io::reconnect::go_away_behind;
+use xmoq_viewer_io::session::{Events, GoingAway, GoneAway, new_url};
 
 use crate::Reader;
 use crate::attend::{Ended, Watching, on, watch};
@@ -439,6 +440,18 @@ impl InMeeting {
                         error.chain().find_map(|cause| cause.downcast_ref())
                     {
                         return Ok(Some(Ended::Moved(new_url(go_away))));
+                    }
+                    // §10.4: as for one broadcast (`attend`).
+                    if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) {
+                        let waiting = go_away_behind(session, events, self.answer_wait_ms);
+                        let wait = Duration::from_millis(self.answer_wait_ms) * 2;
+                        match reader.unless_ended("the GOAWAY", wait, waiting).await? {
+                            None => return Ok(Some(Ended::Quit)),
+                            Some(Some(go_away)) => {
+                                return Ok(Some(Ended::Moved(new_url(&go_away))));
+                            }
+                            Some(None) => {}
+                        }
                     }
                     if error
                         .chain()

@@ -1,5 +1,6 @@
 //! The flags of the viewer.
 
+use xmoq_viewer::reconnect::{CONNECT_WAIT_MS, ROOM_WAIT_MS};
 use xmoq_viewer::room::certificate_hash;
 
 use crate::tracks::VideoVersion;
@@ -103,6 +104,12 @@ pub struct Args {
     /// opened, for the relay to allow one more; 10,000 where it is not
     /// said.
     pub open_wait_ms: u64,
+    /// `--room-wait-ms`: how long the room gets for each of its answers
+    /// (`xmoq_viewer::reconnect::ROOM_WAIT_MS` where it is not said).
+    pub room_wait_ms: u64,
+    /// `--connect-wait-ms`: how long the relay gets to be connected to
+    /// (`xmoq_viewer::reconnect::CONNECT_WAIT_MS` where it is not said).
+    pub connect_wait_ms: u64,
     /// `--rendezvous-timeout-ms`: the `RENDEZVOUS_TIMEOUT` of every
     /// SUBSCRIBE the viewer sends (§10.2.6 of
     /// `draft-ietf-moq-transport-18`): how long the relay may hold one for
@@ -186,6 +193,8 @@ xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line
   --rendezvous-timeout-ms <ms>      ask the relay to hold the viewer's SUBSCRIBEs that long for a
                                     broadcast that is not there yet (not asked; the relay holds 30 s at most)
   --open-wait-ms <ms>               how long the relay gets to allow a stream for a request (10000)
+  --room-wait-ms <ms>               how long the room gets for each of its answers (5000)
+  --connect-wait-ms <ms>            how long the relay gets to be connected to (10000)
   --video-timeout-ms <ms>           ask the relay to give up a Group of the video that is not delivered
                                     that long after its last Object (not asked; 0 is not asking)
   --volume <0..1>                   (1)
@@ -294,6 +303,8 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         answer_wait_ms: DEFAULT_ANSWER_WAIT_MS,
         setup_wait_ms: DEFAULT_ANSWER_WAIT_MS,
         open_wait_ms: DEFAULT_ANSWER_WAIT_MS,
+        room_wait_ms: ROOM_WAIT_MS,
+        connect_wait_ms: CONNECT_WAIT_MS,
         rendezvous_ms: None,
         volume: 1.0,
         scale: 1,
@@ -362,6 +373,8 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--answer-wait-ms" => args.answer_wait_ms = number(&flag, &value)?,
             "--setup-wait-ms" => args.setup_wait_ms = number(&flag, &value)?,
             "--open-wait-ms" => args.open_wait_ms = number(&flag, &value)?,
+            "--room-wait-ms" => args.room_wait_ms = number(&flag, &value)?,
+            "--connect-wait-ms" => args.connect_wait_ms = number(&flag, &value)?,
             "--rendezvous-timeout-ms" => {
                 // §10.2.6: 0 is not wanting to wait, as without it.
                 let wait: u64 = number(&flag, &value)?;
@@ -491,6 +504,8 @@ mod tests {
             answer_wait_ms: 10_000,
             setup_wait_ms: 10_000,
             open_wait_ms: 10_000,
+            room_wait_ms: 5_000,
+            connect_wait_ms: 10_000,
             rendezvous_ms: None,
             volume: 1.0,
             scale: 1,
@@ -591,7 +606,7 @@ mod tests {
         assert_eq!(
             parsed(
                 "--room http://h/rooms/a --name me --say hello --token no --video v --audio a \
-                 --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --rendezvous-timeout-ms 4500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
+                 --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --room-wait-ms 600 --connect-wait-ms 700 --rendezvous-timeout-ms 4500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
                  --seconds 20 --log l --sound off --measure-demo-marks on --cut-sound-s 5"
             ),
             Ok(Args {
@@ -614,6 +629,8 @@ mod tests {
                 answer_wait_ms: 1500,
                 setup_wait_ms: 2500,
                 open_wait_ms: 3500,
+                room_wait_ms: 600,
+                connect_wait_ms: 700,
                 rendezvous_ms: Some(4500),
                 volume: 0.3,
                 scale: 2,
