@@ -4,15 +4,22 @@
 #   mise run speech-model                      # the default model
 #   mise run speech-model -- small-q5_1        # another one of the list below
 #   mise run speech-model -- --dir /some/where tiny
+#   mise run speech-model -- silero-v5.1.2     # the model of voice activity (VAD)
 #
 # The models are not in the repository: the smallest is 74 MiB. They are put in
 # ${XDG_CACHE_HOME:-~/.cache}/xmoq/whisper/, where xmoq-speech looks by default
 # (`default_model_dir` in crates/speech/src/model.rs), unless --dir says otherwise.
 set -euo pipefail
 
-# WHY Hugging Face's ggerganov/whisper.cpp: the repository whose models
-# whisper.cpp's own models/download-ggml-model.sh fetches.
-SOURCE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+# WHY Hugging Face's ggerganov/whisper.cpp and ggml-org/whisper-vad: the
+# repositories whose models whisper.cpp's own download scripts fetch
+# (models/download-ggml-model.sh, models/download-vad-model.sh).
+source_of() {
+	case "$1" in
+	silero-*) echo "https://huggingface.co/ggml-org/whisper-vad/resolve/main" ;;
+	*) echo "https://huggingface.co/ggerganov/whisper.cpp/resolve/main" ;;
+	esac
+}
 
 # The sha256 of each, as Hugging Face's API listed it (the LFS oid of the
 # file in ggerganov/whisper.cpp), read on 2026-10-25. A model that is not
@@ -24,6 +31,7 @@ sha256_expected() {
 	tiny) echo be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 ;;
 	small-q5_1) echo ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb ;;
 	large-v3-turbo-q5_0) echo 394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2 ;;
+	silero-v5.1.2) echo 29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf ;;
 	*) echo "" ;;
 	esac
 }
@@ -48,7 +56,7 @@ done
 
 expected="$(sha256_expected "${name}")"
 if [[ -z "${expected}" ]]; then
-	echo "unknown model: ${name} (known: tiny, small-q5_1, large-v3-turbo-q5_0)" >&2
+	echo "unknown model: ${name} (known: tiny, small-q5_1, large-v3-turbo-q5_0, silero-v5.1.2)" >&2
 	exit 1
 fi
 
@@ -66,7 +74,7 @@ fi
 
 mkdir -p "${dir}"
 partial="${target}.partial"
-curl --fail --location --show-error --progress-bar --output "${partial}" "${SOURCE}/${file}"
+curl --fail --location --show-error --progress-bar --output "${partial}" "$(source_of "${name}")/${file}"
 actual="$(sha256_of "${partial}")"
 if [[ "${actual}" != "${expected}" ]]; then
 	rm -f "${partial}"

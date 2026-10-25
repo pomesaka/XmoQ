@@ -19,7 +19,8 @@ use anyhow::{Context as _, Result};
 use tokio::sync::watch;
 use xmoq_moqt_io::wt;
 use xmoq_moqt_io::{Connection, StreamConfig};
-use xmoq_speech::model::{DEFAULT_MODEL, default_model_dir, model_file};
+use xmoq_speech::model::{DEFAULT_MODEL, DEFAULT_VAD_MODEL, default_model_dir, model_file};
+use xmoq_speech::vad::Silero;
 use xmoq_speech::whisper::Whisper;
 use xmoq_track_serving::backoff::Backoff;
 use xmoq_transcriber::args::Args;
@@ -49,14 +50,14 @@ fn termination_code(result: &Result<Ended>) -> u32 {
         .map_or(0, xmoq_moqt::TerminationCode::code)
 }
 
-/// `--model`, or the default model in the cache.
-fn model(args: &Args) -> Result<PathBuf> {
-    if let Some(model) = &args.model {
+/// The file a flag gives, or the model `name` in the cache.
+fn model_path(given: Option<&PathBuf>, name: &str) -> Result<PathBuf> {
+    if let Some(model) = given {
         return Ok(model.clone());
     }
     let dir = default_model_dir(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
-        .context("neither XDG_CACHE_HOME nor HOME is set: give --model")?;
-    Ok(model_file(&dir, DEFAULT_MODEL))
+        .context("neither XDG_CACHE_HOME nor HOME is set: give the model's file")?;
+    Ok(model_file(&dir, name))
 }
 
 async fn run(args: Args) -> Result<()> {
@@ -72,7 +73,17 @@ async fn run(args: Args) -> Result<()> {
         }
         let _ = stopping.send(true);
     });
-    let model = model(&args)?;
+    let model = model_path(args.model.as_ref(), DEFAULT_MODEL)?;
+    // Each broadcast loads one of its own; loaded once here, a model that is
+    // missing stops the transcriber at the start.
+    let vad = if args.vad {
+        let vad = model_path(args.vad_model.as_ref(), DEFAULT_VAD_MODEL)?;
+        Silero::open(&vad).context("mise run speech-model -- silero-v5.1.2 fetches it")?;
+        println!("VAD_LOADED path={}", vad.display());
+        Some(vad)
+    } else {
+        None
+    };
     let loading = Instant::now();
     let whisper = Whisper::open(&model, &args.language)
         .context("mise run speech-model fetches the default model")?;
@@ -106,7 +117,7 @@ async fn run(args: Args) -> Result<()> {
                 let result = session::transcribe(
                     &connection,
                     &args,
-                    (&mut reader, &mut transcripts, key.as_ref()),
+                    (&mut reader, &mut transcripts, key.as_ref(), vad.as_deref()),
                     &mut read,
                     &mut stop,
                 )

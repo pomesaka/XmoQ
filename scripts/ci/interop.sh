@@ -81,9 +81,10 @@ need_libclang
 cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat -p xmoq-agent
 # WHY --release for these: interop/harness.ts, at `TERMINAL_VIEWER_BINARY` and `TRANSCRIBER_BINARY`.
 cargo build --locked --release -p xmoq-watch -p xmoq-transcriber
-# The model the transcriber's runs read with (`transcriberModel` of interop/harness.ts); fetched
-# once, and checked by its sha256.
+# The models the transcriber's runs read with and tell a voice by (`transcriberModel` of
+# interop/harness.ts); fetched once, and checked by their sha256.
 crates/speech/scripts/fetch-model.sh tiny
+crates/speech/scripts/fetch-model.sh silero-v5.1.2
 
 bun install --frozen-lockfile
 

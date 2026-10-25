@@ -3,19 +3,22 @@
 //!
 //! ```sh
 //! afconvert -f WAVE -d LEI16@48000 -c 1 voice.aiff voice.wav   # macOS; `say -o voice.aiff ...`
-//! cargo run --release --example read-wav -p xmoq-speech -- <model file> <language> voice.wav
+//! cargo run --release --example read-wav -p xmoq-speech -- <model file> <language> voice.wav [<model of voice activity>]
 //! ```
 //!
 //! The file is one channel of 16-bit samples at 48 kHz. It is encoded to
 //! packets of Opus of 20 ms, as a browser sends them, and the packets are
 //! given to a [`Listener`] one after another, and each piece is read as
-//! soon as it is cut.
+//! soon as it is cut. A voice is told by the model of voice activity where
+//! its file is given, and by loudness where it is not.
 
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use xmoq_speech::cut::{Cut, Piece};
+use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
+use xmoq_speech::vad::Silero;
 use xmoq_speech::whisper::Whisper;
 use xmoq_speech::{AudioPacket, Listener};
 
@@ -65,13 +68,22 @@ fn samples(bytes: &[u8]) -> Result<Vec<f32>> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [model, language, wav] = args.as_slice() else {
-        bail!("read-wav <model file> <language> <wav file>");
+    let (model, language, wav, vad) = match args.as_slice() {
+        [model, language, wav] => (model, language, wav, None),
+        [model, language, wav, vad] => (model, language, wav, Some(vad)),
+        _ => bail!("read-wav <model file> <language> <wav file> [<model of voice activity>]"),
     };
     let pcm = samples(&std::fs::read(wav)?)?;
     let loading = Instant::now();
     let mut whisper = Whisper::open(Path::new(model), language)?;
-    let mut listener = Listener::new(Cut::default())?;
+    let judge = match vad {
+        Some(vad) => Judge::Model(ModelJudge::new(
+            Box::new(Silero::open(Path::new(vad))?),
+            0.5,
+        )),
+        None => Judge::Loudness(VOICE_DBFS),
+    };
+    let mut listener = Listener::new(judge, Cut::default())?;
     println!("loaded in {} ms", loading.elapsed().as_millis());
     let mut encoder = opus_rs::OpusEncoder::new(48_000, 1, opus_rs::Application::Voip)
         .map_err(|error| anyhow!("{error}"))?;
@@ -92,7 +104,7 @@ fn main() -> Result<()> {
         timestamp_us += 20_000;
     }
     let ended = Instant::now();
-    if let Some(piece) = listener.end() {
+    for piece in listener.end() {
         say(&mut whisper, &piece, ended)?;
     }
     println!(

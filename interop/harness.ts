@@ -1081,13 +1081,23 @@ const TRANSCRIBER_BINARY = join(
  * and keeps it between runs.
  */
 export function transcriberModel(): string {
+	return join(whisperCache(), "ggml-tiny.bin");
+}
+
+/** The model of voice activity the runs tell a voice by (`mise run speech-model -- silero-v5.1.2`). */
+export function transcriberVadModel(): string {
+	return join(whisperCache(), "ggml-silero-v5.1.2.bin");
+}
+
+/** Where `xmoq-speech` keeps its models. */
+function whisperCache(): string {
 	const cache = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
-	return join(cache, "xmoq", "whisper", "ggml-tiny.bin");
+	return join(cache, "xmoq", "whisper");
 }
 
 /**
- * Starts `xmoq-transcriber` towards the relay of the run, with the model of
- * `transcriberModel`. It is stopped with the run.
+ * Starts `xmoq-transcriber` towards the relay of the run, with the models of
+ * `transcriberModel` and `transcriberVadModel`. It is stopped with the run.
  */
 export function spawnTranscriber(
 	context: RunContext,
@@ -1100,8 +1110,15 @@ export function spawnTranscriber(
 		);
 	}
 	const model = transcriberModel();
-	if (!existsSync(model)) {
-		throw new Error(`${model} is missing: mise run speech-model -- tiny`);
+	const vad = transcriberVadModel();
+	const needed: [string, string][] = [
+		[model, "tiny"],
+		[vad, "silero-v5.1.2"],
+	];
+	for (const [file, name] of needed) {
+		if (!existsSync(file)) {
+			throw new Error(`${file} is missing: mise run speech-model -- ${name}`);
+		}
 	}
 	const spawned = spawnLogged(label, TRANSCRIBER_BINARY, [
 		"--url",
@@ -1110,6 +1127,8 @@ export function spawnTranscriber(
 		context.certSha256Hex,
 		"--model",
 		model,
+		"--vad-model",
+		vad,
 		...extraArgs,
 	]);
 	defer(() => stopProcess(spawned, "SIGTERM"));

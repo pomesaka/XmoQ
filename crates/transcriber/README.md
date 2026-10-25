@@ -4,6 +4,7 @@ The transcriber (decided on 2026-10-25). It is a client of the relay beside it, 
 
 ```sh
 mise run speech-model                       # the default model, once
+mise run speech-model -- silero-v5.1.2      # and the model of voice activity
 mise run transcriber -- --url https://127.0.0.1:4443/ --cert-sha256 <64 hex digits> --namespace xmoq/demo
 ```
 
@@ -31,7 +32,9 @@ An audio subscription that ends or is refused while the broadcast stays announce
 |---|---|---|---|
 | `--namespace` | (needed) | A prefix to listen under, its fields between slashes | 1 to 8; none the same as another, a prefix of it, or under it; 30 fields at the most |
 | `--model` | `~/.cache/xmoq/whisper/ggml-large-v3-turbo-q5_0.bin` | The file of the model | |
-| `--language` | `auto` | A language code of whisper's (`ja`, `en`), or `auto`, with which whisper.cpp finds the language of each piece first (twice as slow, [`xmoq-speech`](../speech/README.md)) | |
+| `--language` | `auto` | A language code of whisper's (`ja`, `en`), or `auto`, with which whisper.cpp finds the language of each piece first (twice as slow, [`xmoq-speech`](../speech/README.md)). With a code, every voice is read in that language: an English voice read with `ja` came out in Japanese | |
+| `--voice` | `vad` | How a voice is told: by the model of voice activity, or by `loudness` (why the model: [`xmoq-speech`](../speech/README.md)) | `vad`, `loudness` |
+| `--vad-model` | `~/.cache/xmoq/whisper/ggml-silero-v5.1.2.bin` | The file of the model of voice activity. Loaded once at the start, so that a missing one stops the transcriber there, and once more for each broadcast | |
 | `--keep` | 1,000 | The latest pieces of each transcript kept for FETCH | 1 to 100,000 |
 | `--waiting` | 16 | Pieces that wait for the reader | 1 to 256 |
 | `--tracks` | 16 | Broadcasts listened to at once; one more is passed over (`BROADCAST_IGNORED`) | 1 to 100 |
@@ -55,7 +58,7 @@ A piece that is not sent live is kept, and a FETCH gets it.
 
 ## What is where
 
-The library (`src/*.rs`) decides and does no input or output: what the flags mean (`args`), and the numbering and keeping of a transcript (`transcript`). The binary (`src/bin/xmoq-transcriber/`): `session.rs` (the requests and the answers on one session), `reader.rs` (the thread of whisper.cpp), `main.rs` (the model, connecting again, the signals). What it prints, one line for each thing it does (`MODEL_LOADED`, `WATCHING`, `BROADCAST`, `AUDIO_SUBSCRIBED`, `TRANSCRIPT_PUBLISHED`, `PIECE_CUT`, `SPEECH`, `PIECE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/transcriber.ts` waits for.
+The library (`src/*.rs`) decides and does no input or output: what the flags mean (`args`), and the numbering and keeping of a transcript (`transcript`). The binary (`src/bin/xmoq-transcriber/`): `session.rs` (the requests and the answers on one session), `reader.rs` (the thread of whisper.cpp), `main.rs` (the model, connecting again, the signals). What it prints, one line for each thing it does (`MODEL_LOADED`, `VAD_LOADED`, `WATCHING`, `BROADCAST`, `AUDIO_SUBSCRIBED`, `TRANSCRIPT_PUBLISHED`, `PIECE_CUT`, `SPEECH`, `PIECE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/transcriber.ts` waits for.
 
 ## Not done
 

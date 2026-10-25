@@ -22,6 +22,7 @@
 //! comes before the broadcast finds the track.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -55,6 +56,8 @@ use xmoq_moqt_io::{
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 use xmoq_speech::cut::Cut;
+use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
+use xmoq_speech::vad::Silero;
 use xmoq_speech::{AudioPacket, Listener};
 use xmoq_track_serving::backoff::Backoff;
 use xmoq_track_serving::fetch::{Held, Plan, payload_bytes, pieces_of, plan};
@@ -119,6 +122,10 @@ const MAX_BYTES_HELD: usize = 16 * 1000 * 1024;
 /// How long a transcript whose PUBLISH failed waits before it is published
 /// again. Provisional.
 const PUBLISH_AGAIN_AFTER: Duration = Duration::from_secs(5);
+
+/// The probability of a voice from which a frame has one: whisper.cpp's
+/// default (`whisper_vad_default_params`). Provisional.
+const VAD_THRESHOLD: f32 = 0.5;
 
 /// The name of the catalog track (MSF §5).
 const CATALOG: &[u8] = b"catalog";
@@ -258,6 +265,8 @@ struct Transcribing<'a> {
     reader: &'a mut Reader,
     transcripts: &'a mut [Transcript],
     key: Option<&'a RoomKey>,
+    /// The model of voice activity; `None` with `--voice loudness`.
+    vad: Option<&'a Path>,
     session: Session,
     stops: StreamStops,
     own: HashMap<u64, Own>,
@@ -332,7 +341,12 @@ async fn last_object(
 pub async fn transcribe(
     connection: &Arc<WtConnection>,
     args: &Args,
-    (reader, transcripts, key): (&mut Reader, &mut [Transcript], Option<&RoomKey>),
+    (reader, transcripts, key, vad): (
+        &mut Reader,
+        &mut [Transcript],
+        Option<&RoomKey>,
+        Option<&Path>,
+    ),
     read: &mut mpsc::Receiver<Read>,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<Ended> {
@@ -364,6 +378,7 @@ pub async fn transcribe(
         reader,
         transcripts,
         key,
+        vad,
         session: Session::new(Role::Client, Transport::WebTransport),
         stops,
         own: HashMap::new(),
@@ -831,7 +846,7 @@ impl Transcribing<'_> {
                 catalog_fetch: None,
                 audio_name: None,
                 audio: None,
-                listener: Listener::new(Cut::default())?,
+                listener: Listener::new(self.judge()?, Cut::default())?,
                 again: AskAgain::default(),
             },
         );
@@ -850,6 +865,18 @@ impl Transcribing<'_> {
             broadcast.catalog = Some(token);
         }
         Ok(())
+    }
+
+    /// How a broadcast's voice is told: by a model of voice activity of its
+    /// own, which holds what it heard of that broadcast alone.
+    fn judge(&self) -> Result<Judge> {
+        Ok(match self.vad {
+            Some(model) => Judge::Model(ModelJudge::new(
+                Box::new(Silero::open(model)?),
+                VAD_THRESHOLD,
+            )),
+            None => Judge::Loudness(VOICE_DBFS),
+        })
     }
 
     /// The parameters of a SUBSCRIBE under a prefix. Without a filter, as
@@ -976,13 +1003,13 @@ impl Transcribing<'_> {
         let Some(broadcast) = self.broadcasts.get_mut(namespace) else {
             return;
         };
-        if let Some(piece) = broadcast.listener.end() {
-            let to_read = ToRead {
-                prefix: broadcast.prefix,
-                from: broadcast.from.clone(),
+        let (prefix, from) = (broadcast.prefix, broadcast.from.clone());
+        for piece in broadcast.listener.end() {
+            self.give(ToRead {
+                prefix,
+                from: from.clone(),
                 piece,
-            };
-            self.give(to_read);
+            });
         }
     }
 
