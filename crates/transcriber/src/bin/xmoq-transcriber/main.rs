@@ -1,6 +1,6 @@
 //! The transcriber (`crates/transcriber/README.md`): a client of the relay
 //! that listens to the audio tracks of the broadcasts announced under its
-//! prefixes, reads their words with whisper.cpp, and publishes them. It goes
+//! prefixes, reads their words (whisper.cpp by default, `--engine`), and publishes them. It goes
 //! on until it is told to stop (Ctrl-C, SIGTERM), and connects again after
 //! a session ends.
 //!
@@ -19,9 +19,9 @@ use anyhow::{Context as _, Result};
 use tokio::sync::watch;
 use xmoq_moqt_io::wt;
 use xmoq_moqt_io::{Connection, StreamConfig};
-use xmoq_speech::model::{DEFAULT_MODEL, DEFAULT_VAD_MODEL, default_model_dir, model_file};
+use xmoq_speech::engine::EngineOptions;
+use xmoq_speech::model::{DEFAULT_VAD_MODEL, default_model_dir, model_file};
 use xmoq_speech::vad::Silero;
-use xmoq_speech::whisper::Whisper;
 use xmoq_track_serving::backoff::Backoff;
 use xmoq_transcriber::args::Args;
 use xmoq_transcriber::transcript::Transcript;
@@ -50,13 +50,18 @@ fn termination_code(result: &Result<Ended>) -> u32 {
         .map_or(0, xmoq_moqt::TerminationCode::code)
 }
 
+/// The directory the models are fetched into, where it is known.
+fn cache_dir() -> Option<PathBuf> {
+    default_model_dir(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+}
+
 /// The file a flag gives, or the model `name` in the cache.
 fn model_path(given: Option<&PathBuf>, name: &str) -> Result<PathBuf> {
     if let Some(model) = given {
         return Ok(model.clone());
     }
-    let dir = default_model_dir(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
-        .context("neither XDG_CACHE_HOME nor HOME is set: give the model's file")?;
+    let dir =
+        cache_dir().context("neither XDG_CACHE_HOME nor HOME is set: give the model's file")?;
     Ok(model_file(&dir, name))
 }
 
@@ -73,7 +78,6 @@ async fn run(args: Args) -> Result<()> {
         }
         let _ = stopping.send(true);
     });
-    let model = model_path(args.model.as_ref(), DEFAULT_MODEL)?;
     // Each broadcast loads one of its own; loaded once here, a model that is
     // missing stops the transcriber at the start.
     let vad = if args.vad {
@@ -85,20 +89,21 @@ async fn run(args: Args) -> Result<()> {
         None
     };
     let loading = Instant::now();
-    let whisper = Whisper::open(&model, &args.language)
-        .context("mise run speech-model fetches the default model")?;
+    let opened = xmoq_speech::engine::open(
+        args.engine,
+        &EngineOptions {
+            model: args.model.clone(),
+            cache: cache_dir(),
+            language: args.language.clone(),
+        },
+        args.readers,
+    )?;
     println!(
-        "MODEL_LOADED path={} language={} ms={}",
-        model.display(),
-        args.language,
+        "MODEL_LOADED {} ms={}",
+        opened.said,
         loading.elapsed().as_millis()
     );
-    let mut whispers = Vec::with_capacity(args.readers);
-    for _ in 1..args.readers {
-        whispers.push(whisper.another()?);
-    }
-    whispers.push(whisper);
-    let (mut reader, mut read) = Reader::start(whispers, args.waiting);
+    let (mut reader, mut read) = Reader::start(opened.readers, args.waiting);
     let first = wall_ms();
     let mut transcripts: Vec<Transcript> = args
         .prefixes

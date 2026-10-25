@@ -2,9 +2,10 @@
 //! to one channel at 16 kHz ([`decode`]), put into frames of 20 ms
 //! ([`frames`]), judged for a voice ([`judge`], by the model of voice
 //! activity of [`vad`] or by loudness) and cut into pieces ([`cut`]) by a
-//! [`Listener`] of that track, and each piece is read by whisper.cpp
-//! ([`whisper`]). `xmoq-transcriber` has a listener for each
-//! track and one reader for all of them.
+//! [`Listener`] of that track, and each piece is read by a reader of
+//! [`Words`], which [`engine`] opens: whisper.cpp by default.
+//! `xmoq-transcriber` has a listener for each track and one reader for all
+//! of them.
 //!
 //! WHY one reader: a model is loaded once (the large one is 550 MiB), and
 //! whisper.cpp reads one piece at a time as fast as it reads several
@@ -15,11 +16,12 @@
 
 pub mod cut;
 pub mod decode;
+pub mod engine;
 pub mod frames;
 pub mod judge;
 pub mod model;
 pub mod vad;
-pub mod whisper;
+mod whisper;
 
 use anyhow::Result;
 
@@ -27,7 +29,6 @@ use crate::cut::{Cut, Cutter, Piece};
 use crate::decode::Decoder;
 use crate::frames::{Framed, Framer};
 use crate::judge::Judge;
-use crate::whisper::Whisper;
 
 /// One packet of an audio track.
 #[derive(Clone, Copy)]
@@ -50,7 +51,8 @@ pub struct Left {
     pub judge_failed: u64,
 }
 
-/// What reads the words of a piece: whisper.cpp, or a stand-in in tests.
+/// What reads the words of a piece: a reader [`engine`] opens, or a
+/// stand-in in tests.
 pub trait Words {
     /// The words of `samples`, one channel at 16 kHz, trimmed; empty where
     /// there are none.
@@ -58,12 +60,6 @@ pub trait Words {
     /// # Errors
     /// When they cannot be read.
     fn text(&mut self, samples: &[f32]) -> Result<String>;
-}
-
-impl Words for Whisper {
-    fn text(&mut self, samples: &[f32]) -> Result<String> {
-        Whisper::text(self, samples)
-    }
 }
 
 /// Decodes, judges and cuts one audio track.

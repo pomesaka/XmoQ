@@ -17,10 +17,10 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use xmoq_speech::cut::{Cut, Piece};
+use xmoq_speech::engine::{Engine, EngineOptions};
 use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
 use xmoq_speech::vad::Silero;
-use xmoq_speech::whisper::Whisper;
-use xmoq_speech::{AudioPacket, Listener};
+use xmoq_speech::{AudioPacket, Listener, Words};
 
 /// `N` bytes of `bytes` from `at`.
 fn bytes_at<const N: usize>(bytes: &[u8], at: usize) -> Result<[u8; N]> {
@@ -75,7 +75,13 @@ fn main() -> Result<()> {
     };
     let pcm = samples(&std::fs::read(wav)?)?;
     let loading = Instant::now();
-    let mut whisper = Whisper::open(Path::new(model), language)?;
+    let options = EngineOptions {
+        model: Some(model.into()),
+        cache: None,
+        language: language.clone(),
+    };
+    let mut readers = xmoq_speech::engine::open(Engine::Whisper, &options, 1)?.readers;
+    let whisper = readers.first_mut().context("a reader")?;
     let judge = match vad {
         Some(vad) => Judge::Model(ModelJudge::new(
             Box::new(Silero::open(Path::new(vad))?),
@@ -99,13 +105,13 @@ fn main() -> Result<()> {
         let pushed = Instant::now();
         let opus = packet.get(..len).context("encoder")?;
         for piece in listener.push(AudioPacket { timestamp_us, opus }) {
-            say(&mut whisper, &piece, pushed)?;
+            say(whisper.as_mut(), &piece, pushed)?;
         }
         timestamp_us += 20_000;
     }
     let ended = Instant::now();
     for piece in listener.end() {
-        say(&mut whisper, &piece, ended)?;
+        say(whisper.as_mut(), &piece, ended)?;
     }
     println!(
         "{} ms of sound in {} ms; {:?}",
@@ -116,7 +122,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn say(whisper: &mut Whisper, piece: &Piece, pushed: Instant) -> Result<()> {
+fn say(whisper: &mut dyn Words, piece: &Piece, pushed: Instant) -> Result<()> {
     let text = whisper.text(&piece.samples)?;
     let seconds = |us: u64| f64::from(u32::try_from(us / 1000).unwrap_or(u32::MAX)) / 1000.0;
     println!(

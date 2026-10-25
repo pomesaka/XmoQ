@@ -12,6 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
+
+use crate::Words;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
@@ -99,5 +101,11 @@ impl Whisper {
             text.push_str(&words);
         }
         Ok(text.trim().to_owned())
+    }
+}
+
+impl Words for Whisper {
+    fn text(&mut self, samples: &[f32]) -> Result<String> {
+        Whisper::text(self, samples)
     }
 }
