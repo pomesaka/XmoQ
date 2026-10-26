@@ -234,10 +234,8 @@ fn a_second_stream_of_a_subgroup_from_the_same_publisher() {
         }
         assert_eq!(relay.counts().in_streams, 0, "{first:?}");
         assert_eq!(
-            relay
-                .step(Event::SessionClosed { session: PUBLISHER })
-                .last(),
-            done_actions(ALICE, 0x2, streams).last(),
+            relay.step(Event::SessionClosed { session: PUBLISHER }),
+            done_actions(ALICE, 0x2, streams),
             "{first:?}"
         );
     }
