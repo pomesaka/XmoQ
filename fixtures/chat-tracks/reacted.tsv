@@ -1,0 +1,15 @@
+one emoji	{"emoji":"👍","sentAt":1761300000000}	"👍"	1761300000000	-	yes
+an emoji with a modifier, 4 UTF-16 units	{"emoji":"👍🏽","sentAt":5}	"👍🏽"	5	-	yes
+8 UTF-16 units, the most	{"emoji":"👨‍👩‍👧","sentAt":5}	"👨‍👩‍👧"	5	-	yes
+11 UTF-16 units	{"emoji":"👨‍👩‍👧‍👦","sentAt":5}	-	-	emoji	-
+an empty emoji	{"emoji":"","sentAt":5}	-	-	emoji	-
+a text of 8 characters: what it is is not looked at	{"emoji":"abcdefgh","sentAt":5}	"abcdefgh"	5	-	yes
+an emoji that is a number	{"emoji":5,"sentAt":5}	-	-	emoji	-
+no emoji	{"sentAt":5}	-	-	emoji	-
+no time	{"emoji":"👍"}	-	-	sent-at	-
+a time with a fraction	{"emoji":"👍","sentAt":1.5}	-	-	sent-at	-
+a time too large	{"emoji":"👍","sentAt":9007199254740992}	-	-	sent-at	-
+a member more	{"emoji":"👍","sentAt":5,"to":"b"}	"👍"	5	-	no
+an escaped pair of surrogates	{"emoji":"\ud83d\udc4d","sentAt":5}	"👍"	5	-	no
+an array	["👍",5]	-	-	not-an-object	-
+not JSON	👍	-	-	not-an-object	-
