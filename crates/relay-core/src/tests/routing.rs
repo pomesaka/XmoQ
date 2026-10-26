@@ -3886,3 +3886,114 @@ fn a_subscribe_that_waits_is_said_to_be_held_and_one_that_is_answered_is_not() {
         );
     }
 }
+
+/// §10.2.6: "If the timeout expires without a publisher, the relay SHOULD
+/// respond with `REQUEST_ERROR` with error code TIMEOUT." A publisher that
+/// is asked and has not answered is one that became available ("the relay
+/// proceeds with the subscription normally"), and a SUBSCRIBE that was
+/// answered has nothing left to time.
+#[test]
+fn a_held_subscribe_whose_time_is_over_is_refused_only_where_nobody_is_asked() {
+    // (case, whether a publisher announced the namespace, whether the track
+    //  is published, what Alice's SUBSCRIBE comes to, the code she is
+    //  refused with when her time is over)
+    let cases = [
+        (
+            "nobody is asked: TIMEOUT",
+            false,
+            false,
+            "0 asked",
+            Some(0x2),
+        ),
+        (
+            "a publisher is asked and has not answered",
+            true,
+            false,
+            "1 asked",
+            None,
+        ),
+        ("answered at once", false, true, "0 asked", None),
+    ];
+    for (name, announced, published, subscribed, expected) in cases {
+        let mut relay = relay();
+        if announced {
+            announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        }
+        if published {
+            relay.step(Event::RequestOpened {
+                session: PUBLISHER,
+                stream: StreamKey(4),
+                first: publish(8, b"a"),
+            });
+        }
+        assert_eq!(
+            asks_for(&mut relay, ALICE, 0, "a", Some(5_000)),
+            subscribed,
+            "{name}"
+        );
+        let actions = relay.step(Event::RendezvousTimeout {
+            session: ALICE,
+            stream: StreamKey(0),
+        });
+        let refused = actions.iter().find_map(|action| match action {
+            Action::SendRequest {
+                session: ALICE,
+                message: ControlMessage::RequestError(error),
+                ..
+            } => Some(error.error_code),
+            _ => None,
+        });
+        assert_eq!(refused, expected, "{name}");
+    }
+}
+
+/// A session has no more than `MAX_HELD_SUBSCRIBES_PER_SESSION` SUBSCRIBEs
+/// held for a publisher to appear: the next is answered as one that does
+/// not want to wait (§10.2.6, `DOES_NOT_EXIST` with nobody to ask). Another
+/// session has its own.
+#[test]
+fn a_session_has_sixteen_subscribes_held_and_the_next_is_not() {
+    assert_eq!(crate::routing::MAX_HELD_SUBSCRIBES_PER_SESSION, 16);
+    let mut relay = relay();
+    for stream in 0..16 {
+        let name = format!("h{stream}");
+        assert_eq!(
+            asks_for(&mut relay, ALICE, stream, &name, Some(5_000)),
+            "0 asked",
+            "{name}"
+        );
+    }
+    assert_eq!(asks_for(&mut relay, ALICE, 16, "h16", Some(5_000)), "0x10");
+    assert_eq!(asks_for(&mut relay, BOB, 0, "h16", Some(5_000)), "0 asked");
+}
+
+/// The relay holds SUBSCRIBEs for a publisher to appear on no more than
+/// `MAX_HELD_TRACKS` tracks: one for another track is answered as one that
+/// does not want to wait, and one for a track that is held already waits
+/// with the others.
+#[test]
+fn the_relay_holds_subscribes_on_1024_tracks_and_not_on_the_next() {
+    assert_eq!(crate::routing::MAX_HELD_TRACKS, 1_024);
+    let mut relay = relay();
+    // 64 sessions of 16 each.
+    for holder in 0..64 {
+        let session = SessionKey(100 + holder);
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+        for stream in 0..16 {
+            let name = format!("t{holder}.{stream}");
+            assert_eq!(
+                asks_for(&mut relay, session, stream, &name, Some(5_000)),
+                "0 asked",
+                "{name}"
+            );
+        }
+    }
+    assert_eq!(asks_for(&mut relay, ALICE, 0, "t64.0", Some(5_000)), "0x10");
+    assert_eq!(
+        asks_for(&mut relay, ALICE, 1, "t0.0", Some(5_000)),
+        "0 asked"
+    );
+}
