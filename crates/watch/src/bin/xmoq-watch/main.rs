@@ -776,7 +776,7 @@ async fn play(
         )
         .await?;
         let mut requests = Requests {
-            connection,
+            connection: connection.as_ref(),
             session: &mut session,
             namespace: &namespace,
             token: place.token.as_deref(),
@@ -858,7 +858,7 @@ async fn play(
         Some(chat) => {
             let begun = async {
                 let requests = Requests {
-                    connection,
+                    connection: connection.as_ref(),
                     session: &mut session,
                     namespace: &namespace,
                     token: place.chat_tokens.subscribe.as_deref(),

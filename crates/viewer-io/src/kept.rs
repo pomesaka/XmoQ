@@ -41,18 +41,19 @@ use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestEvent, RequestId, Session};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
-use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
+use xmoq_moqt_io::{Connection, RequestReadError, RequestStreamEvent, StreamStops};
 
 use crate::session::{Asked, NotSubscribed, Requests, Sent, Subscription, send_subscribe, settle};
 
 /// A SUBSCRIBE on its way, and what came of it.
-type Answer =
-    std::pin::Pin<Box<dyn std::future::Future<Output = (Asked, Result<Sent>)> + std::marker::Send>>;
+type Answer<C> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = (Asked, Result<Sent<C>>)> + std::marker::Send>,
+>;
 
 /// What the requests are sent with.
-pub struct Asking {
+pub struct Asking<C: Connection = WtConnection> {
     /// Where their streams are opened.
-    pub connection: Arc<WtConnection>,
+    pub connection: Arc<C>,
     /// Where the limit on the track's Objects is given, and a FETCH's
     /// stream is taken.
     pub stops: StreamStops,
@@ -88,13 +89,13 @@ pub struct Wanted {
 }
 
 /// What the kept track has to be told of, from the loop of the session.
-pub enum Came {
+pub enum Came<C: Connection = WtConnection> {
     /// What came on the stream of the subscription.
     Answer(Result<RequestStreamEvent, RequestReadError>),
     /// The time to ask for the track (again) has come.
     AskNow,
     /// What came of the SUBSCRIBE, boxed: it is the largest by far.
-    Settled(Box<(Asked, Result<Sent>)>),
+    Settled(Box<(Asked, Result<Sent<C>>)>),
 }
 
 /// What became of the track, for the caller to tell.
@@ -185,12 +186,13 @@ fn answered(
 }
 
 /// One track kept on one session.
-pub struct KeptTrack {
+pub struct KeptTrack<C: Connection = WtConnection> {
     wanted: Wanted,
-    asking_with: Asking,
+    asking_with: Asking<C>,
     /// The subscription, while there is one.
-    subscription: Option<Subscription>,
-    asking: Option<Answer>,
+    subscription: Option<Subscription<C>>,
+    /// The SUBSCRIBE on its way, with the session's handle of it.
+    asking: Option<(RequestId, Answer<C>)>,
     ask_at: Option<tokio::time::Instant>,
     again: AskAgain,
 }
@@ -203,10 +205,10 @@ pub(crate) async fn on<T>(item: Option<impl std::future::Future<Output = T>>) ->
     }
 }
 
-impl KeptTrack {
+impl<C: Connection> KeptTrack<C> {
     /// A track that is asked for at once, from the loop ([`Came::AskNow`]).
     #[must_use]
-    pub fn new(wanted: Wanted, asking_with: Asking) -> Self {
+    pub fn new(wanted: Wanted, asking_with: Asking<C>) -> Self {
         Self {
             wanted,
             asking_with,
@@ -221,7 +223,11 @@ impl KeptTrack {
     /// without it is of no use. That one is told of by no
     /// [`Said::Subscribed`]: the caller has it.
     #[must_use]
-    pub fn subscribed(wanted: Wanted, asking_with: Asking, subscription: Subscription) -> Self {
+    pub fn subscribed(
+        wanted: Wanted,
+        asking_with: Asking<C>,
+        subscription: Subscription<C>,
+    ) -> Self {
         let mut kept = Self {
             wanted,
             asking_with,
@@ -236,14 +242,14 @@ impl KeptTrack {
 
     /// The subscription, while there is one.
     #[must_use]
-    pub fn subscription(&self) -> Option<&Subscription> {
+    pub fn subscription(&self) -> Option<&Subscription<C>> {
         self.subscription.as_ref()
     }
 
     /// What the requests are sent with, for the caller's own requests of
     /// the track (a FETCH).
     #[must_use]
-    pub fn asking_with(&self) -> &Asking {
+    pub fn asking_with(&self) -> &Asking<C> {
         &self.asking_with
     }
 
@@ -256,7 +262,7 @@ impl KeptTrack {
     }
 
     /// What comes next.
-    pub async fn next(&mut self) -> Came {
+    pub async fn next(&mut self) -> Came<C> {
         let Self {
             subscription,
             ask_at,
@@ -266,7 +272,7 @@ impl KeptTrack {
         tokio::select! {
             event = on(subscription.as_mut().map(|subscription| subscription.reader.next_event())) => Came::Answer(event),
             () = on(ask_at.map(tokio::time::sleep_until)) => Came::AskNow,
-            settled = on(asking.as_mut()) => Came::Settled(Box::new(settled)),
+            settled = on(asking.as_mut().map(|(_, answer)| answer)) => Came::Settled(Box::new(settled)),
         }
     }
 
@@ -277,7 +283,11 @@ impl KeptTrack {
     /// A message on the subscription's stream, or an answer to its
     /// SUBSCRIBE, that breaks the protocol: the session is to be closed with
     /// its code.
-    pub fn on(&mut self, session: &mut Session, came: Came) -> Result<Option<Said>, RequestFault> {
+    pub fn on(
+        &mut self,
+        session: &mut Session,
+        came: Came<C>,
+    ) -> Result<Option<Said>, RequestFault> {
         match came {
             Came::Answer(event) => self.on_answer(session, event),
             Came::AskNow => {
@@ -325,9 +335,16 @@ impl KeptTrack {
         ))
     }
 
-    /// Gives the subscription up, where there is one.
-    pub fn cancel(mut self) {
+    /// Gives the track up: its subscription, or the SUBSCRIBE that waits for
+    /// its answer. Both are ended in `session` too, which would otherwise
+    /// hold them and refuse the next SUBSCRIBE for the track there
+    /// (`Session::subscribe`: one subscription a track).
+    pub fn cancel(mut self, session: &mut Session) {
+        if let Some((request, _)) = self.asking.take() {
+            session.cancel(request);
+        }
         if let Some(subscription) = self.let_go() {
+            session.cancel(subscription.request);
             subscription.cancel();
         }
     }
@@ -335,7 +352,7 @@ impl KeptTrack {
     /// Sends the SUBSCRIBE.
     fn ask(&mut self, session: &mut Session) -> Option<Said> {
         let mut requests = Requests {
-            connection: &self.asking_with.connection,
+            connection: &*self.asking_with.connection,
             session,
             namespace: &self.wanted.namespace,
             token: self.asking_with.token.as_deref(),
@@ -347,10 +364,12 @@ impl KeptTrack {
             Ok(asked) => {
                 let connection = Arc::clone(&self.asking_with.connection);
                 let open_wait_ms = self.asking_with.open_wait_ms;
-                self.asking = Some(Box::pin(async move {
-                    let sent = send_subscribe(&connection, open_wait_ms, &asked).await;
+                let request = asked.request();
+                let answer: Answer<C> = Box::pin(async move {
+                    let sent = send_subscribe(&*connection, open_wait_ms, &asked).await;
                     (asked, sent)
-                }));
+                });
+                self.asking = Some((request, answer));
                 None
             }
             Err(error) => Some(self.not_sent(format!("{error:#}"))),
@@ -374,7 +393,7 @@ impl KeptTrack {
         &mut self,
         session: &mut Session,
         asked: &Asked,
-        sent: Result<Sent>,
+        sent: Result<Sent<C>>,
     ) -> Result<Said, RequestFault> {
         Ok(match settle(session, asked, sent) {
             Ok(subscription) => {
@@ -424,7 +443,7 @@ impl KeptTrack {
         Said::Ended { how, pause_ms }
     }
 
-    fn take(&mut self, subscription: Subscription) {
+    fn take(&mut self, subscription: Subscription<C>) {
         if let Some(most) = self.wanted.payload_most {
             self.asking_with
                 .stops
@@ -433,7 +452,7 @@ impl KeptTrack {
         self.subscription = Some(subscription);
     }
 
-    fn let_go(&mut self) -> Option<Subscription> {
+    fn let_go(&mut self) -> Option<Subscription<C>> {
         let subscription = self.subscription.take()?;
         if self.wanted.payload_most.is_some() {
             self.asking_with
@@ -453,7 +472,8 @@ mod tests {
     use xmoq_moqt::message::{ControlMessage, GoAway, PublishDone, ReasonPhrase, SubscribeOk};
     use xmoq_moqt::name::FullTrackName;
     use xmoq_moqt::session::{RequestState, Role, Transport};
-    use xmoq_moqt_io::RequestClose;
+    use xmoq_moqt_io::memory;
+    use xmoq_moqt_io::{ReadError, RecvStream, RequestClose, Trace, send_message};
 
     use super::*;
 
@@ -533,6 +553,75 @@ mod tests {
                 (Err(RequestFault::Peer(_)), Expected::Peer) => {}
                 (other, expected) => panic!("{name}: {other:?}, not {expected:?}"),
             }
+        }
+    }
+
+    /// Reads `recv` until it ends: at its FIN, or with an error.
+    async fn read_to_end(recv: &mut impl RecvStream) -> Result<(), ReadError> {
+        let mut buffer = [0; 256];
+        while recv.read(&mut buffer).await?.is_some() {}
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_track_given_up_can_be_subscribed_to_again_on_the_session() {
+        // (the case; whether the relay answers the SUBSCRIBE before the
+        // track is given up)
+        let cases = [
+            ("while its SUBSCRIBE waits for the answer", false),
+            ("once it is subscribed to", true),
+        ];
+        for (name, answered) in cases {
+            let (ours, relay) = memory::pair();
+            // The session's, which outlives the track given up.
+            let ours = Arc::new(ours);
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            let namespace = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
+            let mut kept = KeptTrack::new(
+                Wanted {
+                    namespace: namespace.clone(),
+                    name: "video".to_string(),
+                    rendezvous_ms: None,
+                    payload_most: None,
+                    again_after_failure: false,
+                },
+                Asking {
+                    connection: Arc::clone(&ours),
+                    stops: StreamStops::default(),
+                    token: None,
+                    answer_wait_ms: 10_000,
+                    open_wait_ms: 10_000,
+                },
+            );
+            let ask_now = kept.next().await;
+            assert!(kept.on(&mut session, ask_now).unwrap().is_none(), "{name}");
+            // The SUBSCRIBE is written, and waits for its answer.
+            let (mut relay_send, mut relay_recv) = tokio::select! {
+                _ = kept.next() => panic!("{name}: nothing is to come before the relay answers"),
+                accepted = relay.accept_bi() => accepted.unwrap(),
+            };
+            if answered {
+                let (answer, trace) = (subscribe_ok(), Trace::default());
+                let answering = send_message(&mut relay_send, &answer, &trace, "relay");
+                let (settled, written) = tokio::join!(kept.next(), answering);
+                written.unwrap();
+                assert!(
+                    matches!(
+                        kept.on(&mut session, settled),
+                        Ok(Some(Said::Subscribed { track_alias: 1 }))
+                    ),
+                    "{name}"
+                );
+            }
+            kept.cancel(&mut session);
+            let track = FullTrackName::new(namespace, b"video".to_vec()).unwrap();
+            assert!(session.subscribe(track, vec![]).is_ok(), "{name}");
+            // §3.3.2: the relay's stream is ended abruptly, with CANCELLED.
+            assert_eq!(
+                read_to_end(&mut relay_recv).await,
+                Err(ReadError::Reset(Some(stream_reset_code::CANCELLED))),
+                "{name}"
+            );
         }
     }
 }

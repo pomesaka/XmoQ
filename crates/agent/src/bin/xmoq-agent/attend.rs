@@ -717,7 +717,7 @@ pub async fn attend(
                     let why = NoVideo::Failed(format!("given up: {why}"));
                     reader.error(why.message());
                     if let Ok(given_up) = std::mem::replace(&mut video, Err(why)) {
-                        given_up.cancel();
+                        given_up.cancel(&mut session);
                     }
                 }
             }
@@ -875,10 +875,10 @@ pub async fn attend(
         watching.cancel();
     }
     if let Ok(video) = video {
-        video.cancel();
+        video.cancel(&mut session);
     }
     if let Some(in_meeting) = meeting {
-        in_meeting.cancel();
+        in_meeting.cancel(&mut session);
     }
     Ok(ended)
 }
