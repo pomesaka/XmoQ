@@ -397,6 +397,14 @@ function spawnLogged(
 	env: Record<string, string> = {},
 ): LoggedProcess & RelayLog {
 	const child = spawn(command, args, { env: { ...process.env, ...env } });
+	// WHY listened to: a command that cannot be started (a binary not built)
+	// emits "error" and, under Bun 1.3.12 and 1.3.14, "close" but no "exit";
+	// unheard, the error ends the driver as an uncaught exception.
+	let notStarted: string | undefined;
+	child.once("error", (error) => {
+		notStarted = `could not be started (${error.message})`;
+		log(source, notStarted);
+	});
 	const lines: string[] = [];
 	const waiters: {
 		pattern: RegExp;
@@ -413,7 +421,9 @@ function spawnLogged(
 	const lookers: (() => void)[] = [];
 	const died = (what: string): Promise<never> =>
 		exited.then((code): never => {
-			throw new Error(`${source} exited with code ${code} before ${what}`);
+			throw new Error(
+				`${source} ${notStarted ?? `exited with code ${code}`} before ${what}`,
+			);
 		});
 	/** The index of the `nth` line that matches, once it is there. */
 	const indexOfNth = (
@@ -555,6 +565,8 @@ async function stopProcess(
 	signal: "SIGINT" | "SIGTERM",
 ): Promise<void> {
 	const { child } = target;
+	// A process that was never started has no "exit" to wait for.
+	if (child.pid === undefined) return;
 	// WHY the process's own exit and not `exited`: nothing is read here, and
 	// a process of the child's own that holds its pipes would keep `exited`
 	// from resolving.

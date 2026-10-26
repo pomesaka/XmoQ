@@ -217,28 +217,28 @@ async function main(): Promise<void> {
 			`--relay is own: only the own relay checks tokens, not ${options.relay}`,
 		);
 	}
-	const context = await startRun({
-		relay: options.relay,
-		port: options.port,
-		clients: ["own-browser"],
-		verbose: options.verbose,
-		relayArgs: ["--auth-key-hex", KEY_HEX],
-	});
-	const pages: RunContext = options["through-edge"]
-		? {
-				...context,
-				relayUrl: (
-					await startSecondOwnRelay(
-						String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
-						context,
-						["--auth-key-hex", KEY_HEX],
-					)
-				).url,
-			}
-		: context;
 	const directory = mkdtempSync(joinPath(tmpdir(), "xmoq-chat-tokens-"));
 	let summary: string;
 	try {
+		const context = await startRun({
+			relay: options.relay,
+			port: options.port,
+			clients: ["own-browser"],
+			verbose: options.verbose,
+			relayArgs: ["--auth-key-hex", KEY_HEX],
+		});
+		const pages: RunContext = options["through-edge"]
+			? {
+					...context,
+					relayUrl: (
+						await startSecondOwnRelay(
+							String(Number(options.port) + MOQLIVEMOCK_SIDE_PORT_OFFSET),
+							context,
+							["--auth-key-hex", KEY_HEX],
+						)
+					).url,
+				}
+			: context;
 		const gatherer = spawnChatGatherer(
 			context,
 			"gatherer",
