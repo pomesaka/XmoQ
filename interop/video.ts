@@ -1189,7 +1189,15 @@ async function audio(): Promise<string> {
 	const report = await withTimeout(
 		viewer.evaluate(
 			async ([namespace, timeoutMs]) => {
-				await window.xmoqOwn.playAudio(namespace, "audio");
+				// WHY the viewer holds a piece for the ones before it as long as
+				// it waits for the report: a chunk is a Group and a stream of its
+				// own, and nothing keeps the order of two streams. One that came
+				// before the stream of the piece ahead of it went on at once, and
+				// that piece was dropped as late. The demo's viewer holds a piece
+				// too (`holdForOrderMs` of `createPlayout`). WHY a limit and not
+				// none: a wait of the receiving side has one; a piece that never
+				// comes leaves the pieces short, which fails the run.
+				await window.xmoqOwn.playAudio(namespace, "audio", timeoutMs);
 				return window.xmoqOwn.audioReport(100, timeoutMs);
 			},
 			[PAGE_NAMESPACE, PLAY_TIMEOUT_MS] satisfies [string, number],

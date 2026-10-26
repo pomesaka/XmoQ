@@ -289,8 +289,17 @@ export type OwnPageExtras = {
 	audioPublishReport(): Promise<PageAudioPublishReport>;
 	/** Stops the tone and ends the audio track. */
 	stopAudio(): Promise<void>;
-	/** Plays the audio track with `playAudioTrack` of `@xmoq/media`; nothing is sounded: what the decoder gives is noted and closed. */
-	playAudio(namespace: string, trackName: string): Promise<void>;
+	/**
+	 * Plays the audio track with `playAudioTrack` of `@xmoq/media`; nothing
+	 * is sounded: what the decoder gives is noted and closed. An Object
+	 * after a gap waits `holdForOrderMs` for the ones before it, and none
+	 * waits where it is left out.
+	 */
+	playAudio(
+		namespace: string,
+		trackName: string,
+		holdForOrderMs?: number,
+	): Promise<void>;
 	/** What `playAudio` has so far, once it has `pieces` pieces or `timeoutMs` are over; rejects when nothing played by then. */
 	audioReport(pieces: number, timeoutMs: number): Promise<PageAudioReport>;
 	/** What the encoder and the publisher started with `publishVideo` have counted so far. */
