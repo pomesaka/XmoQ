@@ -164,6 +164,12 @@ pub enum MessageKind {
     /// `REQUEST_OK` answering `TRACK_STATUS`: `LARGEST_OBJECT` alone
     /// (§10.2.11).
     TrackStatusOk,
+    /// `REQUEST_OK` answering a `REQUEST_UPDATE` (`REQUEST_UPDATE_OK`):
+    /// `EXPIRES` and `LARGEST_OBJECT` (§10.2.10, §10.2.11).
+    RequestUpdateOk,
+    /// `REQUEST_OK` answering `SUBSCRIBE_NAMESPACE`. No parameter of the
+    /// draft lists it.
+    SubscribeNamespaceOk,
 }
 
 impl Parameter {
@@ -190,7 +196,8 @@ impl Parameter {
     fn allowed_in(&self, kind: MessageKind) -> bool {
         use MessageKind::{
             Fetch, FetchUpdate, NamespaceUpdate, Publish, PublishNamespace, PublishOk,
-            RequestUpdate, Subscribe, SubscribeNamespace, SubscribeOk, TrackStatus, TrackStatusOk,
+            RequestUpdate, RequestUpdateOk, Subscribe, SubscribeNamespace, SubscribeOk,
+            TrackStatus, TrackStatusOk,
         };
         // WHY `FetchUpdate` in three lists only: §10.2.2, §10.2.3 and §10.2.4
         // name `REQUEST_UPDATE` without saying of which request, and §10.2.7
@@ -213,8 +220,8 @@ impl Parameter {
                 TrackStatus,
             ],
             Self::RendezvousTimeout(_) => &[Subscribe],
-            Self::Expires(_) => &[SubscribeOk, Publish, PublishOk],
-            Self::LargestObject(_) => &[SubscribeOk, Publish, TrackStatusOk],
+            Self::Expires(_) => &[SubscribeOk, Publish, PublishOk, RequestUpdateOk],
+            Self::LargestObject(_) => &[SubscribeOk, Publish, RequestUpdateOk, TrackStatusOk],
             Self::FillTimeout(_) => &[Fetch],
             Self::Forward(_) => &[Subscribe, RequestUpdate, Publish, PublishOk],
             Self::SubscriberPriority(_) => {
@@ -884,91 +891,80 @@ mod tests {
     }
 
     #[test]
-    fn checks_which_message_a_parameter_may_appear_in() {
-        let cases: &[(Parameter, MessageKind, bool)] = &[
-            (Parameter::Forward(true), MessageKind::Subscribe, true),
-            (Parameter::Forward(true), MessageKind::PublishOk, true),
-            (Parameter::Forward(true), MessageKind::SubscribeOk, false),
+    fn a_parameter_may_appear_in_the_messages_the_shared_table_names() {
+        // `fixtures/parameter-scopes/scopes.tsv`, which `@xmoq/moqt` reads as
+        // well: each parameter, its type, and every message it may appear in
+        // (§10.2.1); in any other it is a `PROTOCOL_VIOLATION`.
+        let table = include_str!("../../../fixtures/parameter-scopes/scopes.tsv");
+        assert!(table.ends_with('\n') && !table.ends_with("\n\n"));
+        let kinds = [
+            ("SUBSCRIBE", MessageKind::Subscribe),
+            ("SUBSCRIBE_OK", MessageKind::SubscribeOk),
+            ("PUBLISH", MessageKind::Publish),
+            ("PUBLISH_OK", MessageKind::PublishOk),
+            ("PUBLISH_NAMESPACE", MessageKind::PublishNamespace),
+            ("PUBLISH_NAMESPACE_OK", MessageKind::PublishNamespaceOk),
+            ("REQUEST_UPDATE", MessageKind::RequestUpdate),
+            ("REQUEST_UPDATE_OF_FETCH", MessageKind::FetchUpdate),
             (
-                Parameter::GroupOrder(GroupOrder::Ascending),
-                MessageKind::PublishOk,
-                true,
+                "REQUEST_UPDATE_OF_SUBSCRIBE_NAMESPACE",
+                MessageKind::NamespaceUpdate,
             ),
-            (
-                Parameter::GroupOrder(GroupOrder::Ascending),
-                MessageKind::Publish,
-                false,
-            ),
-            (Parameter::Expires(0), MessageKind::SubscribeOk, true),
-            (Parameter::Expires(0), MessageKind::Subscribe, false),
-            (
-                Parameter::AuthorizationToken(vec![]),
-                MessageKind::PublishNamespace,
-                true,
-            ),
-            (
-                Parameter::Forward(true),
-                MessageKind::PublishNamespaceOk,
-                false,
-            ),
-            // What an update of a subscription may change, and what it may not.
-            (Parameter::Forward(false), MessageKind::RequestUpdate, true),
-            (
-                Parameter::SubscriberPriority(1),
-                MessageKind::RequestUpdate,
-                true,
-            ),
-            (
-                Parameter::SubscriptionFilter(SubscriptionFilter::LargestObject),
-                MessageKind::RequestUpdate,
-                true,
-            ),
-            (
-                Parameter::ObjectDeliveryTimeout(1),
-                MessageKind::RequestUpdate,
-                true,
-            ),
-            (
-                Parameter::SubgroupDeliveryTimeout(1),
-                MessageKind::RequestUpdate,
-                true,
-            ),
-            (
-                Parameter::NewGroupRequest(1),
-                MessageKind::RequestUpdate,
-                true,
-            ),
-            (
-                Parameter::AuthorizationToken(vec![]),
-                MessageKind::RequestUpdate,
-                true,
-            ),
-            (
-                Parameter::GroupOrder(GroupOrder::Ascending),
-                MessageKind::RequestUpdate,
-                false,
-            ),
-            (Parameter::Expires(0), MessageKind::RequestUpdate, false),
-            (
-                Parameter::LargestObject(Location {
+            ("REQUEST_UPDATE_OK", MessageKind::RequestUpdateOk),
+            ("FETCH", MessageKind::Fetch),
+            ("FETCH_OK", MessageKind::FetchOk),
+            ("SUBSCRIBE_NAMESPACE", MessageKind::SubscribeNamespace),
+            ("SUBSCRIBE_NAMESPACE_OK", MessageKind::SubscribeNamespaceOk),
+            ("TRACK_STATUS", MessageKind::TrackStatus),
+            ("TRACK_STATUS_OK", MessageKind::TrackStatusOk),
+        ];
+        let mut rows = 0;
+        for row in table.lines() {
+            let [name, ty, messages] = row.split('\t').collect::<Vec<_>>()[..] else {
+                panic!("a row of three columns: {row}");
+            };
+            let parameter = match name {
+                "AUTHORIZATION_TOKEN" => Parameter::AuthorizationToken(vec![]),
+                "SUBGROUP_DELIVERY_TIMEOUT" => Parameter::SubgroupDeliveryTimeout(1),
+                "OBJECT_DELIVERY_TIMEOUT" => Parameter::ObjectDeliveryTimeout(1),
+                "FILL_TIMEOUT" => Parameter::FillTimeout(1),
+                "RENDEZVOUS_TIMEOUT" => Parameter::RendezvousTimeout(1),
+                "SUBSCRIBER_PRIORITY" => Parameter::SubscriberPriority(1),
+                "GROUP_ORDER" => Parameter::GroupOrder(GroupOrder::Ascending),
+                "SUBSCRIPTION_FILTER" => {
+                    Parameter::SubscriptionFilter(SubscriptionFilter::LargestObject)
+                }
+                "EXPIRES" => Parameter::Expires(0),
+                "LARGEST_OBJECT" => Parameter::LargestObject(Location {
                     group: 0,
                     object: 0,
                 }),
-                MessageKind::RequestUpdate,
-                false,
-            ),
-            (
-                Parameter::RendezvousTimeout(1),
-                MessageKind::RequestUpdate,
-                false,
-            ),
-        ];
-        for (parameter, kind, allowed) in cases {
-            assert_eq!(
-                all_allowed(std::slice::from_ref(parameter), *kind),
-                *allowed,
-                "{parameter:?} in {kind:?}"
-            );
+                "FORWARD" => Parameter::Forward(true),
+                "NEW_GROUP_REQUEST" => Parameter::NewGroupRequest(1),
+                "TRACK_NAMESPACE_PREFIX" => Parameter::TrackNamespacePrefix(
+                    TrackNamespace::new(vec![b"a".to_vec()]).unwrap(),
+                ),
+                other => panic!("a parameter the test does not know: {other}"),
+            };
+            let ty = u64::from_str_radix(ty.trim_start_matches("0x"), 16).unwrap();
+            assert_eq!(parameter.ty(), ty, "{name}");
+            let listed: Vec<&str> = messages.split(',').collect();
+            for message in &listed {
+                assert!(
+                    kinds.iter().any(|(known, _)| known == message),
+                    "{name}: a message the test does not know: {message}"
+                );
+            }
+            for (message, kind) in kinds {
+                assert_eq!(
+                    parameter.allowed_in(kind),
+                    listed.contains(&message),
+                    "{name} in {message}"
+                );
+            }
+            rows += 1;
         }
+        // A table that lost rows would pass.
+        assert_eq!(rows, 13);
     }
 }

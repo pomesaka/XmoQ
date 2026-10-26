@@ -1259,9 +1259,11 @@ fn check_update_of_publish(live: &Request, message: &ControlMessage) -> Result<(
 }
 
 /// The `REQUEST_OK` of a `SUBSCRIBE_NAMESPACE` of this endpoint. No parameter
-/// of §10.2 lists it, and no Track Property belongs to one.
+/// of §10.2 lists it ([`MessageKind::SubscribeNamespaceOk`]), and no Track
+/// Property belongs to one.
 fn answered_namespaces(established: &mut bool, ok: &RequestOk) -> Result<RequestEvent, Error> {
-    if !ok.parameters.is_empty() || !ok.track_properties.is_empty() {
+    let parameters_allowed = params::all_allowed(&ok.parameters, MessageKind::SubscribeNamespaceOk);
+    if !parameters_allowed || !ok.track_properties.is_empty() {
         return Err(Error::ProtocolViolation(
             "a REQUEST_OK of SUBSCRIBE_NAMESPACE with parameters or properties",
         ));
@@ -1443,12 +1445,7 @@ fn update_answered(
     let event = match answer {
         ControlMessage::RequestError(error) => RequestEvent::UpdateFailed(error),
         ControlMessage::RequestOk(ok) => {
-            // What a REQUEST_UPDATE_OK may carry: §10.2.10, §10.2.11.
-            let allowed = ok
-                .parameters
-                .iter()
-                .all(|each| matches!(each, Parameter::Expires(_) | Parameter::LargestObject(_)));
-            if !allowed {
+            if !params::all_allowed(&ok.parameters, MessageKind::RequestUpdateOk) {
                 return Err(Error::ProtocolViolation(
                     "parameter not allowed in this message",
                 ));
