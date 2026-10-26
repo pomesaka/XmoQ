@@ -93,6 +93,9 @@ const { values: options } = parseArgs({
 		// a second (provisional, the gatherer's defaults).
 		"chat-text-bytes": { type: "string", default: "512" },
 		"chat-lines-per-second": { type: "string", default: "5" },
+		// How many reactions one person may say in a second: the pages keep
+		// one over it back (provisional, decided on 2026-10-26: 5).
+		"chat-reactions-per-second": { type: "string", default: "5" },
 		// Whose video a page of the meeting receives at once, the first that
 		// many as they came (decided on 2026-10-25: 8); 0 for none.
 		"meeting-most-watched": { type: "string", default: "8" },
@@ -106,6 +109,7 @@ const here = import.meta.dir;
 const chatLimitsOfTheRun = chatLimits({
 	textBytes: Number(options["chat-text-bytes"]),
 	linesPerSecond: Number(options["chat-lines-per-second"]),
+	reactionsPerSecond: Number(options["chat-reactions-per-second"]),
 });
 const mostWatched = Number(options["meeting-most-watched"]);
 if (!Number.isSafeInteger(mostWatched) || mostWatched < 0) {
@@ -257,6 +261,9 @@ const chat = existsSync(chatBinary)
 					String(chatLimitsOfTheRun.textBytes),
 					"--lines-per-second",
 					String(chatLimitsOfTheRun.linesPerSecond),
+					// FIXME: give the gatherer --reactions-per-second (and
+					// --reaction-batch-ms, --reaction-kinds) once it takes them;
+					// a gatherer exits on a flag it does not know.
 					...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
 				],
 				// Its lines, one for each thing it does, are not shown.

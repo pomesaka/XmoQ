@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	linePayload,
+	presentPayload,
+	reactedPayload,
+	reactionsPayload,
 	readLine,
+	readPresent,
+	readReacted,
+	readReactions,
 	readSaid,
 	saidPayload,
 } from "../src/core/payloads.ts";
@@ -36,13 +42,83 @@ const untyped = (read: unknown): unknown => read;
 describe("fixtures/chat-tracks", () => {
 	const said = sharedRows("said.tsv", 6);
 	const lines = sharedRows("lines.tsv", 9);
+	const reacted = sharedRows("reacted.tsv", 6);
+	const reactions = sharedRows("reactions.tsv", 6);
+	const present = sharedRows("present.tsv", 6);
 
 	test("the tables have the rows both readers count on", () => {
-		expect({ said: said.length, lines: lines.length }).toEqual({
+		expect({
+			said: said.length,
+			lines: lines.length,
+			reacted: reacted.length,
+			reactions: reactions.length,
+			present: present.length,
+		}).toEqual({
 			said: 27,
 			lines: 14,
+			reacted: 15,
+			reactions: 17,
+			present: 12,
 		});
 	});
+
+	test.each(reacted)(
+		"reacted: %s",
+		(_case, payload, emoji, sentAt, malformed, written) => {
+			const read = readReacted(bytes(payload));
+			if (malformed !== "-") {
+				expect(untyped(read)).toEqual({ ok: false, why: malformed });
+				return;
+			}
+			expect(untyped(read)).toEqual({
+				ok: true,
+				value: { emoji: textOf(emoji), sentAt: timeOf(sentAt) },
+			});
+			if (!read.ok) return;
+			const back = new TextDecoder().decode(reactedPayload(read.value));
+			expect(back === payload).toBe(written === "yes");
+		},
+	);
+
+	test.each(reactions)(
+		"reactions: %s",
+		(_case, payload, counts, at, malformed, written) => {
+			const read = readReactions(bytes(payload));
+			if (malformed !== "-") {
+				expect(untyped(read)).toEqual({ ok: false, why: malformed });
+				return;
+			}
+			if (!read.ok) throw new Error(`not read: ${read.why}`);
+			// The order of the members is part of what is read.
+			const expected: unknown = JSON.parse(counts ?? "");
+			expect(untyped([[...read.value.counts], read.value.at])).toEqual([
+				Object.entries(
+					typeof expected === "object" && expected !== null ? expected : {},
+				),
+				timeOf(at),
+			]);
+			const back = new TextDecoder().decode(reactionsPayload(read.value));
+			expect(back === payload).toBe(written === "yes");
+		},
+	);
+
+	test.each(present)(
+		"present: %s",
+		(_case, payload, count, at, malformed, written) => {
+			const read = readPresent(bytes(payload));
+			if (malformed !== "-") {
+				expect(untyped(read)).toEqual({ ok: false, why: malformed });
+				return;
+			}
+			expect(untyped(read)).toEqual({
+				ok: true,
+				value: { count: timeOf(count), at: timeOf(at) },
+			});
+			if (!read.ok) return;
+			const back = new TextDecoder().decode(presentPayload(read.value));
+			expect(back === payload).toBe(written === "yes");
+		},
+	);
 
 	test.each(said)(
 		"said: %s",
@@ -134,5 +210,31 @@ describe("what is not written", () => {
 		["a time beyond 2^53 - 1", "x", 2 ** 53],
 	])("said: %s throws a RangeError", (_case, text, sentAt) => {
 		expect(() => saidPayload({ text, sentAt })).toThrow(RangeError);
+	});
+
+	test.each([
+		["an empty emoji", ""],
+		["an emoji of 11 UTF-16 units", "👨‍👩‍👧‍👦"],
+		["a lone surrogate", "\ud800"],
+	])("reacted: %s throws a RangeError", (_case, emoji) => {
+		expect(() => reactedPayload({ emoji, sentAt: 5 })).toThrow(RangeError);
+	});
+
+	test.each<[string, [string, number][]]>([
+		["no emoji", []],
+		["a count of 0", [["👏", 0]]],
+		["a count with a fraction", [["👏", 1.5]]],
+		["an empty emoji", [["", 1]]],
+	])("reactions: %s throws a RangeError", (_case, counts) => {
+		expect(() => reactionsPayload({ counts: new Map(counts), at: 5 })).toThrow(
+			RangeError,
+		);
+	});
+
+	test.each([
+		["a count below 0", -1],
+		["a count with a fraction", 1.5],
+	])("present: %s throws a RangeError", (_case, count) => {
+		expect(() => presentPayload({ count, at: 5 })).toThrow(RangeError);
 	});
 });

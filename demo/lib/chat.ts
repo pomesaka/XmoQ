@@ -9,7 +9,7 @@ import {
 	type ChatRoom,
 	type ChatSaying,
 	catchUpLines,
-	type ReceivedLine,
+	type ShowChatOptions,
 	showChat,
 } from "@xmoq/chat";
 import type { GoAwayNotice } from "@xmoq/moqt";
@@ -40,7 +40,15 @@ export function startChat(
 	room: ChatRoom,
 	name: string,
 	connectForChat: (goAway?: GoAwayNotice) => Promise<ChatConnection>,
-	{ shownLines, onLine }: { shownLines: number; onLine?(line: ReceivedLine): void },
+	{
+		shownLines,
+		onLine,
+		onReactions,
+		onPresent,
+	}: Pick<
+		ShowChatOptions,
+		"shownLines" | "onLine" | "onReactions" | "onPresent"
+	>,
 ): ChatSaying | undefined {
 	const log = document.getElementById("chat");
 	const note = document.getElementById("chat-note");
@@ -67,6 +75,8 @@ export function startChat(
 			catchUpLines: catchUp,
 			shownLines,
 			...(onLine === undefined ? {} : { onLine }),
+			...(onReactions === undefined ? {} : { onReactions }),
+			...(onPresent === undefined ? {} : { onPresent }),
 		},
 	);
 }

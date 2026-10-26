@@ -161,3 +161,138 @@ test("a subscription that is made after the participant stopped is cancelled", a
 	for (let turn = 0; turn < 10; turn++) await Promise.resolve();
 	expect(late.cancelled()).toBe(1);
 });
+
+/** A subscription that has the Objects given, in their Groups, and ends after them. */
+function subscriptionOf(
+	payloads: string[],
+	parameters: Subscription["parameters"] = {},
+): Subscription {
+	const objects = new ReadableStream<ReceivedObject>({
+		start(controller) {
+			for (const [group, payload] of payloads.entries()) {
+				controller.enqueue({
+					groupId: BigInt(group),
+					subgroupId: 0n,
+					publisherPriority: undefined,
+					object: {
+						objectId: 0n,
+						properties: [],
+						status: "Normal",
+						payload: new TextEncoder().encode(payload),
+					},
+				});
+			}
+			controller.close();
+		},
+	});
+	return {
+		requestId: 0n,
+		trackAlias: 0n,
+		parameters,
+		trackProperties: [],
+		objects,
+		ended: Promise.resolve({ type: "cancelled" }),
+		goAway: new Promise(() => {}),
+		cancel: async () => {},
+		update: () => Promise.reject(new Error("no update in this test")),
+	};
+}
+
+// The tracks of the room besides `lines` are subscribed to where the caller
+// asks for them alone, and what is on them is handed on as it is read.
+test.each<{
+	name: string;
+	reactions: boolean;
+	present: boolean;
+	asked: string[];
+	got: string[];
+}>([
+	{
+		name: "neither asked for: lines alone",
+		reactions: false,
+		present: false,
+		asked: ["lines"],
+		got: [],
+	},
+	{
+		name: "both asked for, and what is no payload of its track passed over",
+		reactions: true,
+		present: true,
+		asked: ["lines", "reactions", "present"],
+		got: ["present 3 8", 'reactions [["👍",2]] 7'],
+	},
+])("$name", async ({ reactions, present, asked, got }) => {
+	const subscribed: string[] = [];
+	const handed: string[] = [];
+	const stop = new AbortController();
+	const tracks: Record<string, string[]> = {
+		reactions: ['{"counts":{},"at":6}', '{"counts":{"👍":2},"at":7}'],
+		present: ['{"count":-1,"at":5}', '{"count":3,"at":8}'],
+	};
+	await joinChat(
+		{
+			serve() {},
+			async publishNamespace() {},
+			async subscribe(request) {
+				const name = new TextDecoder().decode(request.trackName);
+				subscribed.push(name);
+				const payloads = tracks[name];
+				if (payloads === undefined) throw new Error("refused by the test");
+				// Once: the next is never answered, so that the test ends.
+				tracks[name] = [];
+				if (payloads.length === 0) return new Promise(() => {});
+				return subscriptionOf(payloads);
+			},
+			fetch: () => Promise.reject(new Error("no FETCH in this test")),
+			close() {},
+			closed: new Promise(() => {}),
+		},
+		{
+			room: { kind: "broadcast", name: "blue" },
+			name: "ann",
+			onLine() {},
+			...(reactions
+				? {
+						onReactions: (read) =>
+							handed.push(
+								`reactions ${JSON.stringify([...read.counts])} ${read.at}`,
+							),
+					}
+				: {}),
+			...(present
+				? {
+						onPresent: (read) =>
+							handed.push(`present ${read.count} ${read.at}`),
+					}
+				: {}),
+			signal: stop.signal,
+		},
+	);
+	for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+	stop.abort();
+	expect([new Set(subscribed), handed.sort()]).toEqual([new Set(asked), got]);
+});
+
+test.each<{ name: string; emoji: string; outcome: unknown }>([
+	{
+		name: "an empty emoji is kept back",
+		emoji: "",
+		outcome: { type: "kept-back", why: "not-an-emoji" },
+	},
+	{
+		name: "a reaction nobody subscribed to is not sent",
+		emoji: "👍",
+		outcome: { type: "not-sent", why: "nobody-subscribed" },
+	},
+])("react: $name", async ({ emoji, outcome }) => {
+	const stop = new AbortController();
+	const participant = await joinChat(recording().connection, {
+		room: { kind: "broadcast", name: "blue" },
+		name: "ann",
+		onLine() {},
+		signal: stop.signal,
+	});
+	const reacted: unknown = await participant.react(emoji);
+	stop.abort();
+	expect(reacted).toEqual(outcome);
+});
