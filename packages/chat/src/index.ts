@@ -32,3 +32,9 @@ export {
 	type ReceivedLine,
 	type SayOutcome,
 } from "./moqt/participant.ts";
+export {
+	type ChatSaying,
+	type ChatView,
+	type ShowChatOptions,
+	showChat,
+} from "./web/chat-view.ts";

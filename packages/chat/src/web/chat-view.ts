@@ -1,63 +1,61 @@
-// The chat under the picture of the pages, over MoQ tracks alone
-// (decided on 2026-10-24).
-//
-// The page is a participant (`joinChat` of `@xmoq/chat`): it announces
-// `xmoq/chat/<kind>/<room>/<name>`, says its lines on `said`, and reads the
-// room's `lines` from the gatherer (`xmoq-chat`, which `serve.ts` starts),
-// with the newest 16 by a Joining FETCH when it comes, and the lines it
-// missed (200 at the most, `?chatCatchUpLines=N`) when it subscribes or
-// connects again. Where it missed more, one line says so above them.
+// The chat of a room shown in a page, over MoQ tracks alone (decided on
+// 2026-10-24): a participant (`keepInTheRoom`) that announces
+// `xmoq/chat/<kind>/<room>/<name>`, says what is typed in a form on
+// `said`, and shows the room's `lines` from the gatherer, by their numbers,
+// with the newest by a Joining FETCH when it comes and the ones it missed
+// when it subscribes or connects again; where it missed more, one dimmed
+// line says so above them. Which elements, which limits and how many lines
+// are the page's to say: an application gives them.
 
+import type { GoAwayNotice } from "@xmoq/moqt";
+import type { LinesGap } from "../core/history.ts";
+import type { ChatLimits, KeptBack } from "../core/limits.ts";
+import type { ChatRoom } from "../core/names.ts";
 import {
 	type ChatConnection,
-	type ChatLimits,
-	type ChatParticipant,
-	type ChatRoom,
-	catchUpLines,
-	chatLimits,
-	type KeptBack,
 	keepInTheRoom,
-	type LinesGap,
-	type ReceivedLine,
-	type SayOutcome,
-} from "@xmoq/chat";
-import type { GoAwayNotice } from "@xmoq/moqt";
+} from "../moqt/keep-in-the-room.ts";
+import type {
+	ChatParticipant,
+	ReceivedLine,
+	SayOutcome,
+} from "../moqt/participant.ts";
 
-declare const XMOQ_DEMO: { chatTracks: boolean };
-
-/**
- * How many lines the page shows; the oldest go. The participant catches up
- * as many by default (`CATCH_UP_LINES` of `@xmoq/chat`).
- * Not a flag: what a page holds is bounded whatever the address says.
- */
-const SHOWN_LINES = 200;
-
-/**
- * `?chatTextBytes=N` and `?chatLinesPerSecond=N`: the limits of a line,
- * which the gatherer has from its flags (`--text-bytes`,
- * `--lines-per-second`). The page keeps a line over them back and says so,
- * as the gatherer would drop it; set them as the gatherer is run. The
- * defaults are the gatherer's.
- */
-function limitsOfTheAddress(): ChatLimits {
-	const query = new URLSearchParams(location.search);
-	const given: Partial<ChatLimits> = {};
-	const textBytes = query.get("chatTextBytes");
-	const linesPerSecond = query.get("chatLinesPerSecond");
-	if (textBytes !== null) given.textBytes = Number(textBytes);
-	if (linesPerSecond !== null) given.linesPerSecond = Number(linesPerSecond);
-	return chatLimits(given);
+/** The elements the chat is shown in. */
+export interface ChatView {
+	/** The lines, one `div` each, the oldest first; `data-lines` says how many. */
+	log: HTMLElement;
+	/** One line on how the chat goes, and why a line was not sent. */
+	note?: HTMLElement | null;
+	/** A form with one input, whose text is said when it is sent. */
+	form?: HTMLFormElement | null;
 }
 
-/**
- * `?chatCatchUpLines=N`: how many of the lines it missed the page fetches
- * at the most when it subscribes or connects again, from 1 to 1,000
- * (`catchUpLines` of `@xmoq/chat`); 200 when left out. More than the page
- * shows are fetched and the oldest go.
- */
-function catchUpOfTheAddress(): number {
-	const given = new URLSearchParams(location.search).get("chatCatchUpLines");
-	return catchUpLines(given === null ? undefined : Number(given));
+export interface ShowChatOptions {
+	room: ChatRoom;
+	name: string;
+	/**
+	 * A connection for the chat, with the GOAWAY that ended the session
+	 * before, where one did. WHY a connection of its own, and not one of a
+	 * broadcast: the participant names the `serve` handlers of its
+	 * connection, which a publisher needs for its own tracks, and the chat
+	 * goes on while a viewer changes its broadcast or connects again for it.
+	 */
+	connect(goAway?: GoAwayNotice): Promise<ChatConnection>;
+	/** What a line may be: the gatherer's (`chatLimits`), as it is run. */
+	limits: ChatLimits;
+	/** How many lines it missed are fetched at the most (`catchUpLines`). */
+	catchUpLines: number;
+	/** How many lines are shown; the oldest go. Bounds what the page holds. */
+	shownLines: number;
+	/** Called once for each line that comes, before it is shown. */
+	onLine?(line: ReceivedLine): void;
+}
+
+/** Says a line in the chat from elsewhere than its form (an agent's inbox). */
+export interface ChatSaying {
+	/** Why it was not sent (without a "not sent"), or undefined where it was. */
+	say(text: string): Promise<string | undefined>;
 }
 
 const KEPT_BACK: Record<KeptBack, (limits: ChatLimits) => string> = {
@@ -83,46 +81,24 @@ const shownTime = (at: number): string =>
 	new Date(at).toTimeString().slice(0, 8);
 
 /**
- * Shows the chat of the room `room` as `name`, and says what is typed in
- * the form, on a connection of `connectForChat` (with the GOAWAY that ended
- * the session before, where one did). Does nothing where the page has no
- * chat (`serve.ts` runs no gatherer).
- *
- * WHY a connection of its own, and not the one of the broadcast: the
- * participant names the `serve` handlers of its connection, which the
- * publishing page needs for its own tracks, and the chat goes on while the
- * watching page changes its broadcast or connects again for it.
+ * Shows the chat of `options.room` as `options.name` in `view`, and says
+ * what is typed in its form.
  */
-export function startChat(
-	room: ChatRoom,
-	name: string,
-	connectForChat: (goAway?: GoAwayNotice) => Promise<ChatConnection>,
-	onLine?: (line: ReceivedLine) => void,
-): ChatSaying | undefined {
-	const log = document.getElementById("chat");
-	const note = document.getElementById("chat-note");
-	if (!XMOQ_DEMO.chatTracks || log === null) return undefined;
+export function showChat(
+	{ log, note, form }: ChatView,
+	{
+		room,
+		name,
+		connect,
+		limits,
+		catchUpLines,
+		shownLines,
+		onLine,
+	}: ShowChatOptions,
+): ChatSaying {
 	const say = (text: string): void => {
-		if (note !== null) note.textContent = text;
+		if (note) note.textContent = text;
 	};
-	let limits: ChatLimits;
-	try {
-		limits = limitsOfTheAddress();
-	} catch (error) {
-		say(
-			`the chat's limits of the address: ${String(error)}; the defaults are used`,
-		);
-		limits = chatLimits();
-	}
-	let catchUp: number;
-	try {
-		catchUp = catchUpOfTheAddress();
-	} catch (error) {
-		say(
-			`the chat's catching up of the address: ${String(error)}; the default is used`,
-		);
-		catchUp = catchUpLines();
-	}
 
 	/** The newest line number shown, for the participant of the next connection (`lastHad`). */
 	let lastHad: bigint | undefined;
@@ -141,11 +117,9 @@ export function startChat(
 			return isGap ? theirs >= number : theirs > number;
 		});
 		log.insertBefore(shown, after ?? null);
-		while (log.childElementCount > SHOWN_LINES) log.firstElementChild?.remove();
+		while (log.childElementCount > shownLines) log.firstElementChild?.remove();
 		if (after === undefined) log.scrollTop = log.scrollHeight;
-		document.body.dataset.chatLines = String(
-			log.querySelectorAll("div[data-how]").length,
-		);
+		log.dataset.lines = String(log.querySelectorAll("div[data-how]").length);
 	};
 	const add = (line: ReceivedLine): void => {
 		onLine?.(line);
@@ -169,12 +143,12 @@ export function startChat(
 	// Each participant is told the newest line shown (`lastHad`), so that it
 	// fetches the lines the page missed while it was away.
 	void keepInTheRoom({
-		connect: connectForChat,
+		connect,
 		join: () => ({
 			room,
 			name,
 			limits,
-			catchUpLines: catchUp,
+			catchUpLines,
 			lastHad,
 			onLine: add,
 			onGap: addGap,
@@ -210,7 +184,6 @@ export function startChat(
 		if (outcome.type === "not-sent") return outcome.why;
 		return undefined;
 	};
-	const form = document.querySelector("form");
 	form?.addEventListener("submit", (event) => {
 		event.preventDefault();
 		const input = form.querySelector("input");
@@ -228,9 +201,4 @@ export function startChat(
 		})();
 	});
 	return { say: sayLine };
-}
-
-/** Says a line in the chat of `startChat` from elsewhere than its form (an agent's inbox). */
-export interface ChatSaying {
-	say(text: string): Promise<string | undefined>;
 }

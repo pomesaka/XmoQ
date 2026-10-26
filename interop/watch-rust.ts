@@ -286,8 +286,9 @@ async function fromPage(): Promise<string> {
 		NAMESPACE,
 		...HEADLESS,
 		// The marks of the demo's publishing page (`marked` and `MARK` in
-		// demo/shared.ts): a square at (580, 60) of 640x360 and a beep of
-		// 0.6 over a tone of 0.25, every 2 s.
+		// demo/broadcast/picture.ts, the tone in demo/broadcast/publish.ts):
+		// a square at (580, 60) of 640x360 and a beep of 0.6 over a tone of
+		// 0.25, every 2 s.
 		"--measure-marks",
 		"x=580,y=60,w=640,h=360,every-ms=2000,beep=0.6,ground=0.25",
 	]);

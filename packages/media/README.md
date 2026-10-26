@@ -2,7 +2,7 @@
 
 What stands between a LOC video track and the codecs of a browser: from a subscription to a decoder, and from the chunks of an encoder to a subscription. "LOC" is `draft-ietf-moq-loc-04`, "MSF" `draft-ietf-moq-msf-01`, and "transport" `draft-ietf-moq-transport-18`.
 
-Status: partly implemented. A page plays the H.264 video of `moqlivemock`'s publisher with this in Chromium, in the interop run ([record](../../docs/experiments/2026-10-11-a-page-plays-the-video-of-mlmpub.md)): a subscription, the receiver, the decoder of WebCodecs. A page encodes frames with the H.264 encoder of WebCodecs and publishes them, and another page plays them, through the own relay and the moqtail relay, in the interop run ([record](../../docs/experiments/2026-10-11-pages-send-and-play-video.md)). Drawing a frame and taking one from a camera are the caller's: the demo's pages draw the frames, and the publishing page takes them from a camera with `?source=camera` (`demo/publish.ts`).
+Status: partly implemented. A page plays the H.264 video of `moqlivemock`'s publisher with this in Chromium, in the interop run ([record](../../docs/experiments/2026-10-11-a-page-plays-the-video-of-mlmpub.md)): a subscription, the receiver, the decoder of WebCodecs. A page encodes frames with the H.264 encoder of WebCodecs and publishes them, and another page plays them, through the own relay and the moqtail relay, in the interop run ([record](../../docs/experiments/2026-10-11-pages-send-and-play-video.md)). Drawing a frame and taking one from a camera are the caller's: the demo's pages draw the frames, and the publishing page takes them from a camera with `?source=camera` (`demo/broadcast/publish.ts`).
 
 ## Scope
 

@@ -8,7 +8,7 @@ mise run speech-model -- silero-v5.1.2      # and the model of voice activity
 mise run transcriber -- --url https://127.0.0.1:4443/ --cert-sha256 <64 hex digits> --namespace xmoq/broadcast/demo
 ```
 
-The demo (`mise run demo`) starts it beside the relay, and the watching page shows its transcript as captions (`demo/serve.ts`, `demo/captions.ts`).
+The demo (`mise run demo`) starts it beside the relay, and the watching page shows its transcript as captions (`demo/serve.ts`, `showCaptions` of `@xmoq/transcript`).
 
 It runs until Ctrl-C or SIGTERM, and connects again after a session ends, as the gatherer does, also after a GOAWAY (`Pause::SERVING` of [`xmoq-again`](../again/README.md)). The model is loaded once, at the start, and stays over the sessions. With a flag it does not know it prints its flags (`USAGE` in `src/args.rs`). **Building it needs a C++ compiler and cmake**, for whisper.cpp ([`xmoq-speech`](../speech/README.md)).
 

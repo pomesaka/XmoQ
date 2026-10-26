@@ -312,7 +312,7 @@ export type OwnPageExtras = {
 	 * track `BROADCAST.video` and the Opus track `BROADCAST.audio`. The
 	 * picture is grey with a white square, and the sound a tone with a loud
 	 * beep, for the first 200 ms of every 2 seconds of the page's clock
-	 * (`marked` and `MARK` of `demo/shared.ts`): what a viewer measures how
+	 * (`marked` and `MARK` of `demo/broadcast/picture.ts`): what a viewer measures how
 	 * far apart picture and sound leave it by. With
 	 * `publishNamespaceTokenHex` the PUBLISH_NAMESPACE carries that token, as
 	 * in `publishVoice`.

@@ -13,7 +13,7 @@ When an item is decided, remove it here and write the decision where it takes ef
   - What a receiver does when a chunk is missing (H.264 and VP8 decoders show corrupt pictures without an error)
   - `latencyMode` and `optimizeForLatency`; whether `duration` travels; whether the resolution may change during a broadcast
   - Whether the Opus `description` is passed to the decoder (Chromium decodes without it, [record](experiments/2026-10-11-opus-audio-page-to-page.md))
-- Whether `playVideoTrack` of `@xmoq/media` asks for a delivery timeout on a video track without being told. Today it asks for nothing unless told; the demo's watching page asks for 150 ms (`demo/watch.ts`). Measurements are in [the A/V demo and its limits](av-demo.md).
+- Whether `playVideoTrack` of `@xmoq/media` asks for a delivery timeout on a video track without being told. Today it asks for nothing unless told; the demo's watching page asks for 150 ms (`demo/broadcast/watch.ts`). Measurements are in [the A/V demo and its limits](av-demo.md).
 - Whether a browser client ends a subscription itself when its application does not read. Today it reads a bounded number of streams and leaves the rest to the transport, so that the relay ends the subscription (`TOO_FAR_BEHIND`); a page that never reads is not told and loses its session later ([record](experiments/2026-10-10-subscription-backlog-in-chromium.md)).
 - Whether a Subgroup whose stream was cut short is continued from another source of the track. Not done; the draft allows it (§2.2, §11.4.3).
 - Supported browsers beyond Chromium on desktop, operating systems, Ghostty versions
