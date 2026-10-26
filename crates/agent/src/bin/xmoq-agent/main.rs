@@ -30,9 +30,9 @@ use xmoq_agent::input::{self, Input};
 use xmoq_agent::presence::Presence;
 use xmoq_chat_tracks::names::Person;
 use xmoq_moqt_io::StreamConfig;
+use xmoq_moqt_io::client::{self, CloseWait, Signals};
 use xmoq_moqt_io::wt;
 use xmoq_viewer::room::{self, NoSeat, Refusal};
-use xmoq_viewer_io::ending::{self, UntilClosed};
 use xmoq_viewer_io::follow::RENDEZVOUS_MS;
 use xmoq_viewer_io::room_client::{ChatTokens, HeldSeat, ROOM_COMES_WITHIN, RoomClient};
 
@@ -700,20 +700,21 @@ async fn run(
             Ok(Some(connection)) => {
                 connected = true;
                 let connection = Arc::new(connection);
-                let mut kept = UntilClosed::default();
-                // Boxed: the session's future is the largest by far, and
-                // the reader's own would grow by it.
-                let attended = Box::pin(attend(
-                    args,
+                // The peer's end of a session that failed is not written:
+                // the error of the session is (below).
+                let (attended, _) = client::on_connection(
                     &connection,
-                    &place,
-                    seat,
-                    reader,
-                    pictures,
-                    &mut kept,
-                ))
+                    CloseWait::VIEWER,
+                    async |connection, kept| {
+                        // Boxed: the session's future is the largest by
+                        // far, and the reader's own would grow by it.
+                        Box::pin(attend(
+                            args, connection, &place, seat, reader, pictures, kept,
+                        ))
+                        .await
+                    },
+                )
                 .await;
-                ending::close(&connection, &attended).await;
                 attended
             }
             Err(error) => Err(error),
@@ -760,7 +761,7 @@ fn at_relay(args: &Args, url: &str, cert_sha256: [u8; 32], namespace: Option<&[S
 }
 
 async fn read(args: &Args) -> Result<()> {
-    let stop = ending::on_signals();
+    let stop = client::on_signals(Signals::VIEWER);
     let mut reader = Reader {
         out: Output::open(Path::new(&args.out))?,
         lines: stdin::lines(),

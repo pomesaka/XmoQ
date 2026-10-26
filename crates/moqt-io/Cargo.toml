@@ -17,7 +17,7 @@ quic = ["dep:web-transport-quinn", "dep:url", "tokio/net"]
 
 [dependencies]
 xmoq-moqt = { path = "../moqt" }
-tokio = { version = "=1.49.0", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "=1.49.0", features = ["macros", "rt", "signal", "sync", "time"] }
 # WHY `ring` and not the default `aws-lc-rs`: one crypto backend in the binary.
 # With both compiled in, the library's default lookup panics unless a
 # process-wide provider is installed (web-transport-quinn 0.13.2,

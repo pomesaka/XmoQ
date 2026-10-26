@@ -1,0 +1,6 @@
+the GOAWAY behind the refusal, read after it	GOING_AWAY	goaway@100	1000	goaway
+what came before the GOAWAY is given back	GOING_AWAY	object@10 object@20 goaway@100	1000	goaway
+no GOAWAY within the wait	GOING_AWAY	goaway@1500	1000	none
+nothing comes	GOING_AWAY	-	1000	none
+the connection is gone	GOING_AWAY	closed@100	1000	none
+another refusal is not waited on	NOT_SUPPORTED	goaway@100	1000	none

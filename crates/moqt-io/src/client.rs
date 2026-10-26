@@ -1,27 +1,31 @@
 //! The start and the end of a client's session: the SETUP it sends and the
-//! one it waits for (§3.3), what is kept until the session is closed, and
-//! the code it closes the session with (§3.5). Every client of this
-//! repository that is not the relay takes them from here: the gatherer of
-//! the chat, the transcriber, and the viewers (`xmoq-viewer-io`, for the
-//! terminal viewer and the agent). The Rust client (`xmoq-moqt-client`)
-//! takes the options of its SETUP and the code, and waits for the peer's
-//! SETUP itself (why, where it does).
+//! one it waits for (§3.3), what is kept until the session is closed, the
+//! code it closes the session with (§3.5) and how long it waits for the
+//! close to reach the peer, the GOAWAY behind a refusal (§10.4), and the
+//! signals that end the program. Every client of this repository that is
+//! not the relay takes them from here: the gatherer of the chat, the
+//! transcriber, the viewers (`xmoq-viewer-io`, for the terminal viewer and
+//! the agent) and the Rust client (`xmoq-moqt-client`), which waits for the
+//! peer's SETUP itself (why, where it does).
 //!
 //! WHY here, once: the clients start and close a session the same way, and
 //! a copy of the rule in each would part from the others (a SETUP that did
 //! not come is found under any number of wrappers here, [`termination_code`]).
 
+use std::collections::VecDeque;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use xmoq_moqt::kvp::KeyValuePair;
-use xmoq_moqt::message::setup_option;
+use xmoq_moqt::message::{GoAway, request_error_code, setup_option};
 use xmoq_moqt::session::{ControlEvent, Session};
 use xmoq_moqt::{TerminationCode, UsageError};
 
 use crate::{
-    Connection, ConnectionLost, IncomingStreams, SendError, Trace, UniEvent, send_message,
+    Connection, ConnectionEnd, ConnectionLost, IncomingStreams, SendError, Trace, UniEvent,
+    send_message,
 };
 
 /// How long the peer's SETUP is waited for, from when this client's was
@@ -193,14 +197,15 @@ pub fn setup_options(
 /// stream that is dropped is finished (quinn 0.11.12, `Drop for
 /// SendStream`); a stream that is no longer read is stopped. Kept, the
 /// session is closed with the code its failure asks for.
-pub struct UntilClosed<C: Connection> {
+pub struct UntilClosed<C: Connection, R = IncomingStreams> {
     /// The control stream.
     pub control: Option<C::Send>,
-    /// The readers of the peer's streams.
-    pub readers: Vec<IncomingStreams>,
+    /// The readers of the peer's streams: this crate's, or a client's own
+    /// that hold them (the Rust client's).
+    pub readers: Vec<R>,
 }
 
-impl<C: Connection> Default for UntilClosed<C> {
+impl<C: Connection, R> Default for UntilClosed<C, R> {
     fn default() -> Self {
         Self {
             control: None,
@@ -221,6 +226,227 @@ impl UniEvents for mpsc::Receiver<UniEvent> {
     fn next_event(&mut self) -> impl Future<Output = Option<UniEvent>> + Send {
         self.recv()
     }
+}
+
+/// Events that can be given back, to come again before what is still to
+/// come: what a wait read and did not take ([`go_away_behind`]).
+pub trait PutBack: UniEvents {
+    /// Puts `kept`, read and not taken, before what comes next, in its
+    /// order.
+    fn put_back(&mut self, kept: VecDeque<UniEvent>);
+}
+
+/// The events of a channel with those given back in front of them.
+#[derive(Debug)]
+pub struct ReadAhead {
+    received: mpsc::Receiver<UniEvent>,
+    ahead: VecDeque<UniEvent>,
+}
+
+impl ReadAhead {
+    /// The events of `received`.
+    #[must_use]
+    pub fn new(received: mpsc::Receiver<UniEvent>) -> Self {
+        Self {
+            received,
+            ahead: VecDeque::new(),
+        }
+    }
+}
+
+impl UniEvents for ReadAhead {
+    async fn next_event(&mut self) -> Option<UniEvent> {
+        match self.ahead.pop_front() {
+            Some(event) => Some(event),
+            None => self.received.recv().await,
+        }
+    }
+}
+
+impl PutBack for ReadAhead {
+    fn put_back(&mut self, mut kept: VecDeque<UniEvent>) {
+        kept.append(&mut self.ahead);
+        self.ahead = kept;
+    }
+}
+
+/// The most events [`go_away_behind`] keeps while it waits: past them the
+/// wait ends as one in which no GOAWAY came. **Provisional.**
+pub const MOST_READ_AHEAD: usize = 256;
+
+/// The GOAWAY behind a request refused with `refusal_code`, where that is
+/// `GOING_AWAY` (§10.4): the GOAWAY travels on the control stream and the
+/// refusal on the request's, between which QUIC keeps no order, so the
+/// refusal can be read first. `None` for any other code, where no GOAWAY
+/// comes within `wait`, and where the connection is gone. WHY a limit, the
+/// time an answer gets: `GOING_AWAY` also comes from a peer that received a
+/// GOAWAY (§10.6.2) and sends none. WHY `None` for a connection that is
+/// gone and no error: the caller's loop finds that at once, and
+/// `goAwayBehind` of `@xmoq/moqt` says the same; both are tested with
+/// `fixtures/ask-again/go-away-behind.tsv`.
+///
+/// What else comes meanwhile is given back to `events` ([`PutBack`]),
+/// before what comes after, in its order: where no GOAWAY comes the session
+/// goes on, and an Object of another track read in the wait is still that
+/// track's. Control messages are taken by `session`, as the caller's loop
+/// would.
+///
+/// # Errors
+///
+/// A control message that breaks the session.
+pub async fn go_away_behind<E: PutBack>(
+    session: &mut Session,
+    events: &mut E,
+    refusal_code: u64,
+    wait: Duration,
+) -> Result<Option<GoAway>, xmoq_moqt::Error> {
+    if refusal_code != request_error_code::GOING_AWAY {
+        return Ok(None);
+    }
+    let until = tokio::time::Instant::now() + wait;
+    let mut kept = VecDeque::new();
+    let found = loop {
+        if kept.len() >= MOST_READ_AHEAD {
+            break Ok(None);
+        }
+        let Ok(event) = tokio::time::timeout_at(until, events.next_event()).await else {
+            break Ok(None);
+        };
+        match event {
+            Some(UniEvent::Control(message)) => match session.on_control_message(message) {
+                Ok(ControlEvent::GoAway(go_away)) => break Ok(Some(go_away)),
+                Ok(_) => {}
+                Err(error) => break Err(error),
+            },
+            Some(event) => kept.push_back(event),
+            None => break Ok(None),
+        }
+    };
+    events.put_back(kept);
+    found
+}
+
+/// How long a client waits, after it closed its session, for the close to
+/// reach the peer, before it goes on or exits: a process that exits before
+/// that leaves the peer with a lost connection. Each role has its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseWait(pub Duration);
+
+impl CloseWait {
+    /// The terminal viewer's and the agent's: 500 ms. **Provisional.** WHY
+    /// shorter: a person waits for the next session.
+    pub const VIEWER: Self = Self(Duration::from_millis(500));
+
+    /// The gatherer's, the transcriber's and the Rust client's: 2 s.
+    /// **Provisional.**
+    pub const SERVING: Self = Self(Duration::from_secs(2));
+}
+
+/// Closes the session with the code `ended` asks for, and waits `wait` at
+/// most for the close to reach the peer.
+///
+/// §3.5: "`CONTROL_MESSAGE_TIMEOUT` (0x11): The session was closed because
+/// the peer took too long to respond to a control message." For the SETUP,
+/// as `@xmoq/moqt` has it; a request that is not answered is given up
+/// alone, and the client then leaves with `NO_ERROR`
+/// ([`termination_code`]).
+pub async fn close<C: Connection, T, E>(connection: &C, ended: &Result<T, E>, wait: CloseWait)
+where
+    E: AsRef<dyn std::error::Error + Send + Sync + 'static>,
+{
+    connection.close(termination_code_of(ended), b"");
+    let _ = tokio::time::timeout(wait.0, connection.closed()).await;
+}
+
+/// How long a client whose session failed waits to learn whether the peer
+/// closed it, and with what ([`peer_close`]). **Provisional.**
+pub const PEER_CLOSE_WAIT: Duration = Duration::from_millis(500);
+
+/// How the connection ended where it ends within [`PEER_CLOSE_WAIT`]. WHY:
+/// what failed first in a client is one of several things (a stream that
+/// ended, a read that was lost), and none of them says why; the connection
+/// does, a moment later.
+pub async fn peer_close<C: Connection>(connection: &C) -> Option<ConnectionEnd> {
+    tokio::time::timeout(PEER_CLOSE_WAIT, connection.closed())
+        .await
+        .ok()
+}
+
+/// A session on `connection` from its start to its close: `run` is given
+/// what has to stay until the session is closed ([`UntilClosed`]); where it
+/// fails, how the peer ended the connection is waited for ([`peer_close`]);
+/// then the session is closed with the code its end asks for, and the close
+/// waited for by `wait` ([`close`]). Returns what `run` returned, with how
+/// the peer ended the connection where it failed and the peer did.
+pub async fn on_connection<C, R, T, E>(
+    connection: &Arc<C>,
+    wait: CloseWait,
+    run: impl AsyncFnOnce(&Arc<C>, &mut UntilClosed<C, R>) -> Result<T, E>,
+) -> (Result<T, E>, Option<ConnectionEnd>)
+where
+    C: Connection,
+    E: AsRef<dyn std::error::Error + Send + Sync + 'static>,
+{
+    let mut kept = UntilClosed::default();
+    let ran = run(connection, &mut kept).await;
+    let peer = match &ran {
+        Ok(_) => None,
+        Err(_) => peer_close(connection.as_ref()).await,
+    };
+    close(connection.as_ref(), &ran, wait).await;
+    drop(kept);
+    (ran, peer)
+}
+
+/// The signals a program ends at. Each role has its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Signals {
+    /// Whether SIGHUP is one.
+    pub hangup: bool,
+}
+
+impl Signals {
+    /// The terminal viewer's and the agent's: Ctrl-C, SIGTERM and SIGHUP.
+    /// WHY SIGHUP: they run in a terminal, and end with it.
+    pub const VIEWER: Self = Self { hangup: true };
+
+    /// The gatherer's and the transcriber's: Ctrl-C and SIGTERM. WHY NOT
+    /// SIGHUP: they serve the room, and a terminal they were started from
+    /// that closes is not told to end them.
+    pub const SERVING: Self = Self { hangup: false };
+}
+
+/// A receiver that becomes `true` at one of `signals`.
+#[must_use]
+pub fn on_signals(signals: Signals) -> watch::Receiver<bool> {
+    let (stopping, stop) = watch::channel(false);
+    tokio::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+            return;
+        };
+        let mut hangup = if signals.hangup {
+            match signal(SignalKind::hangup()) {
+                Ok(hangup) => Some(hangup),
+                Err(_) => return,
+            }
+        } else {
+            None
+        };
+        let hung_up = async {
+            match hangup.as_mut() {
+                Some(hangup) => hangup.recv().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+            _ = hung_up => {}
+        }
+        let _ = stopping.send(true);
+    });
+    stop
 }
 
 /// Opens the control stream, sends SETUP with `options`, and hands the
@@ -317,7 +543,7 @@ mod tests {
     use xmoq_moqt::data::{
         ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
     };
-    use xmoq_moqt::message::{ControlMessage, RequestOk, Setup};
+    use xmoq_moqt::message::{ControlMessage, GoAway, RequestOk, Setup};
     use xmoq_moqt::session::{Role, Transport};
 
     use super::*;
@@ -350,6 +576,97 @@ mod tests {
         ];
         for (error, code) in cases {
             assert_eq!(termination_code(error.as_ref()), code, "{error}");
+        }
+    }
+
+    /// The rows of `fixtures/ask-again/go-away-behind.tsv`, which
+    /// `goAwayBehind` of `@xmoq/moqt` is tested with too.
+    #[tokio::test(start_paused = true)]
+    async fn the_goaway_behind_a_refusal_is_as_the_shared_table_says() {
+        let path = format!(
+            "{}/../../fixtures/ask-again/go-away-behind.tsv",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let table =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        assert!(table.ends_with('\n') && !table.ends_with("\n\n"), "{path}");
+        let rows: Vec<Vec<&str>> = table.lines().map(|row| row.split('\t').collect()).collect();
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 6, "{path}");
+        for row in rows {
+            let [case, refusal, comes, wait_ms, expected] = row.as_slice() else {
+                panic!("a row of five columns: {row:?}");
+            };
+            let refusal_code = match *refusal {
+                "GOING_AWAY" => request_error_code::GOING_AWAY,
+                "NOT_SUPPORTED" => request_error_code::NOT_SUPPORTED,
+                other => panic!("a code the test does not know: {other}"),
+            };
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            session
+                .on_control_message(ControlMessage::Setup(Setup {
+                    setup_options: vec![],
+                }))
+                .unwrap();
+            let (send, received) = mpsc::channel(16);
+            let steps: Vec<(String, u64)> = comes
+                .split(' ')
+                .filter(|step| *step != "-")
+                .map(|step| {
+                    let (what, at) = step.split_once('@').expect("what@T");
+                    (what.to_string(), at.parse().expect("a time"))
+                })
+                .collect();
+            let objects = steps.iter().filter(|(what, _)| what == "object").count();
+            tokio::spawn(async move {
+                let began = tokio::time::Instant::now();
+                for (what, at) in steps {
+                    tokio::time::sleep_until(began + Duration::from_millis(at)).await;
+                    let event = match what.as_str() {
+                        "goaway" => UniEvent::Control(ControlMessage::GoAway(GoAway {
+                            new_session_uri: b"https://b/".to_vec(),
+                            timeout_ms: 0,
+                            request_id: Some(0),
+                        })),
+                        "object" => UniEvent::SubgroupOpened {
+                            stream: at,
+                            header: SubgroupHeader {
+                                track_alias: 0,
+                                group_id: at,
+                                subgroup_id: SubgroupId::Zero,
+                                publisher_priority: None,
+                                properties: false,
+                                end_of_group: false,
+                                first_object: false,
+                            },
+                        },
+                        // The readers are gone, and the channel with them.
+                        "closed" => return,
+                        other => panic!("a step the test does not know: {other}"),
+                    };
+                    let _ = send.send(event).await;
+                }
+                // Nothing more comes, and the connection stays.
+                std::future::pending::<()>().await;
+            });
+            let mut events = ReadAhead::new(received);
+            let wait = Duration::from_millis(wait_ms.parse().expect("a wait"));
+            let got = go_away_behind(&mut session, &mut events, refusal_code, wait)
+                .await
+                .unwrap();
+            let got = if got.is_some() { "goaway" } else { "none" };
+            assert_eq!(got, *expected, "{case}");
+            // What came before the GOAWAY comes again, in its order.
+            if *expected == "goaway" {
+                for index in 0..objects {
+                    let again = events.ahead.get(index);
+                    assert!(
+                        matches!(again, Some(UniEvent::SubgroupOpened { .. })),
+                        "{case}: {again:?}"
+                    );
+                }
+                assert_eq!(events.ahead.len(), objects, "{case}");
+            }
         }
     }
 

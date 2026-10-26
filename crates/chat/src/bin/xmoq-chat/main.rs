@@ -15,33 +15,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::watch;
 use xmoq_again::next_session::{Ended, NextSession, Pause};
 use xmoq_chat::gather::Gatherer;
 use xmoq_chat::rooms::MAX_ROOMS;
 use xmoq_moqt_io::wt;
-use xmoq_moqt_io::{Connection, StreamConfig, client};
+use xmoq_moqt_io::{StreamConfig, client};
 
 use crate::session::SessionEnd;
 use crate::storage::Store;
 
-/// How long a closed session gets to reach the relay before the gatherer
-/// goes on, as the Rust client gives it (`CLOSE_GRACE`).
-const CLOSE_GRACE: Duration = Duration::from_secs(2);
-
 async fn run(args: xmoq_chat::args::Args) -> Result<()> {
-    let (stopping, mut stop) = watch::channel(false);
-    tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let Ok(mut terminate) = signal(SignalKind::terminate()) else {
-            return;
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
-        }
-        let _ = stopping.send(true);
-    });
+    let mut stop = client::on_signals(client::Signals::SERVING);
     let store = Store::open(Path::new(&args.store))?;
     let mut gatherer = Gatherer::new(args.limits);
     println!(
@@ -83,8 +67,7 @@ async fn run(args: xmoq_chat::args::Args) -> Result<()> {
                     Ok(ended) => println!("SESSION_ENDED {ended:?}"),
                     Err(error) => println!("SESSION_FAILED {error:#}"),
                 }
-                connection.close(client::termination_code_of(&result), b"");
-                let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
+                client::close(connection.as_ref(), &result, client::CloseWait::SERVING).await;
                 match result {
                     Ok(SessionEnd::Stopped) => return Ok(()),
                     Ok(SessionEnd::Moved(to)) => Ended::Moved(to),

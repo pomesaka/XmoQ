@@ -48,13 +48,16 @@ export const waitFor = (ms: number, signal: AbortSignal): Promise<void> =>
  * arrive after the GOAWAY, MUST be rejected with REQUEST_ERROR using error
  * code GOING_AWAY"; the GOAWAY travels on the control stream and the refusal
  * on the request's, between which QUIC keeps no order, so the refusal can be
- * read first. WHY a limit, the time an answer gets (`DEFAULT_ANSWER_WAIT_MS`):
- * GOING_AWAY also comes from a peer that received a GOAWAY (§10.6.2) and
- * sends none. The Rust clients wait in the same way.
+ * read first. WHY a limit, the time an answer gets (`waitMs`,
+ * `DEFAULT_ANSWER_WAIT_MS` by default): GOING_AWAY also comes from a peer
+ * that received a GOAWAY (§10.6.2) and sends none. The Rust clients wait in
+ * the same way (`client::go_away_behind` of `xmoq-moqt-io`); both are tested
+ * with `fixtures/ask-again/go-away-behind.tsv`.
  */
 export async function goAwayBehind(
 	connection: Pick<MoqtConnection, "goAway" | "closed">,
 	error: unknown,
+	waitMs: number = DEFAULT_ANSWER_WAIT_MS,
 ): Promise<GoAwayNotice | undefined> {
 	if (
 		!(error instanceof RequestFailedError) ||
@@ -67,7 +70,7 @@ export async function goAwayBehind(
 		return await Promise.race([
 			connection.goAway,
 			connection.closed.then(() => undefined),
-			waitFor(DEFAULT_ANSWER_WAIT_MS, given.signal).then(() => undefined),
+			waitFor(waitMs, given.signal).then(() => undefined),
 		]);
 	} finally {
 		given.abort();

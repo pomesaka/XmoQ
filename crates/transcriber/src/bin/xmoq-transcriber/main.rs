@@ -16,10 +16,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use tokio::sync::watch;
 use xmoq_again::next_session::{Ended, NextSession, Pause};
 use xmoq_moqt_io::wt;
-use xmoq_moqt_io::{Connection, StreamConfig, client};
+use xmoq_moqt_io::{StreamConfig, client};
 use xmoq_speech::engine::EngineOptions;
 use xmoq_speech::model::{DEFAULT_VAD_MODEL, default_model_dir, model_file};
 use xmoq_speech::vad::Silero;
@@ -28,10 +27,6 @@ use xmoq_transcriber::transcript::Transcript;
 
 use crate::reader::{ReaderPool, wall_ms};
 use crate::session::SessionEnd;
-
-/// How long a closed session gets to reach the relay before the transcriber
-/// goes on, as the gatherer gives it.
-const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
 /// The directory the models are fetched into, where it is known.
 fn cache_dir() -> Option<PathBuf> {
@@ -49,18 +44,7 @@ fn model_path(given: Option<&PathBuf>, name: &str) -> Result<PathBuf> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    let (stopping, mut stop) = watch::channel(false);
-    tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let Ok(mut terminate) = signal(SignalKind::terminate()) else {
-            return;
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
-        }
-        let _ = stopping.send(true);
-    });
+    let mut stop = client::on_signals(client::Signals::SERVING);
     // Each broadcast loads one of its own; loaded once here, a model that is
     // missing stops the transcriber at the start.
     let vad = if args.vad {
@@ -131,8 +115,7 @@ async fn run(args: Args) -> Result<()> {
                     Ok(ended) => println!("SESSION_ENDED {ended:?}"),
                     Err(error) => println!("SESSION_FAILED {error:#}"),
                 }
-                connection.close(client::termination_code_of(&result), b"");
-                let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
+                client::close(connection.as_ref(), &result, client::CloseWait::SERVING).await;
                 match result {
                     Ok(SessionEnd::Stopped) => return Ok(()),
                     Ok(SessionEnd::Moved(to)) => Ended::Moved(to),

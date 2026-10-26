@@ -10,14 +10,15 @@ use std::time::Duration;
 use xmoq_again::AskAgain;
 use xmoq_agent::events::{Event, ParticipantState};
 use xmoq_moqt::RequestFault;
+use xmoq_moqt::message::request_error_code;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestEvent, RequestId, Session};
+use xmoq_moqt_io::client;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
 use xmoq_viewer::meeting::{self, Limits, Meeting, Video as VideoStep};
 use xmoq_viewer::presence::{Change, SETTLE_MS};
 use xmoq_viewer_io::kept::{Asking, Came as VideoCame};
-use xmoq_viewer_io::reconnect::go_away_behind;
 use xmoq_viewer_io::session::{Events, GoingAway, GoneAway, new_url};
 
 use crate::Reader;
@@ -468,7 +469,15 @@ impl InMeeting {
                     }
                     // §10.4: as for one broadcast (`attend`).
                     if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) {
-                        let waiting = go_away_behind(session, events, self.answer_wait_ms);
+                        let waiting = async {
+                            Ok(client::go_away_behind(
+                                session,
+                                events,
+                                request_error_code::GOING_AWAY,
+                                Duration::from_millis(self.answer_wait_ms),
+                            )
+                            .await?)
+                        };
                         let wait = Duration::from_millis(self.answer_wait_ms) * 2;
                         match reader.unless_ended("the GOAWAY", wait, waiting).await? {
                             None => return Ok(Some(Ended::Quit)),
