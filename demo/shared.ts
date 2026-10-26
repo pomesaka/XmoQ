@@ -226,7 +226,7 @@ export function joinRoom(as: string): Room | undefined {
 	// room's `lines`, which the connection carries, and `pub` for its own
 	// namespace, which only its PUBLISH_NAMESPACE carries. WHY asked again
 	// each time: a token runs out (10 minutes), and the relay checks the
-	// SETUP of the new connection. Without --auth the room gives none, and
+	// SETUP of the new connection. With --no-auth the room gives none, and
 	// both are undefined. After a GOAWAY the next session goes to its URI
 	// with the same certificate's hash, as the broadcast's does (the relay
 	// that sends it away, `--when-full`, names one with the same certificate).

@@ -18,7 +18,7 @@ work=$(mktemp -d)
 # The rooms' dependencies, Miniflare among them, are the workspace's.
 (cd "$root" && mise exec -- bun install --frozen-lockfile > /dev/null)
 bun=$(cd "$root/interop" && mise which bun)
-(cd "$root" && exec "$bun" demo/serve.ts --auth --relay-port "$port" --port "$((port + 1))" --rooms-port "$((port + 2))") > "$work/demo.log" 2>&1 &
+(cd "$root" && exec "$bun" demo/serve.ts --relay-port "$port" --port "$((port + 1))" --rooms-port "$((port + 2))") > "$work/demo.log" 2>&1 &
 demo=$!
 trap 'kill -INT "${page:-}" 2>/dev/null || true; kill -INT "$demo" 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$work"' EXIT
 for _ in $(seq 1 60); do

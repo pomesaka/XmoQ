@@ -23,7 +23,7 @@ work=$(mktemp -d)
 (cd "$root" && cargo build --release --quiet --locked -p xmoq-watch && cargo build --quiet --locked -p xmoq-relay)
 bun=$(cd "$root/interop" && mise which bun)
 node=$(command -v node || echo "$bun")
-(cd "$root" && exec "$bun" demo/serve.ts --relay-port "$port" --port "$((port + 1))" --rooms-port "$((port + 2))") > "$work/demo.log" 2>&1 &
+(cd "$root" && exec "$bun" demo/serve.ts --no-auth --relay-port "$port" --port "$((port + 1))" --rooms-port "$((port + 2))") > "$work/demo.log" 2>&1 &
 demo=$!
 trap 'kill -INT "${page:-}" 2>/dev/null || true; kill "${proxy:-}" 2>/dev/null || true; kill -INT "$demo" 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$work"' EXIT
 for _ in $(seq 1 40); do grep -q "^publish:" "$work/demo.log" && break; sleep 0.5; done
