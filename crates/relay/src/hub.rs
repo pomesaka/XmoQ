@@ -7,7 +7,7 @@
 //! queue, and a queue that is full ends that session or that subscription
 //! instead of holding up the others.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -501,13 +501,6 @@ enum Envelope<C: Connection> {
     SetupDue {
         session: SessionKey,
     },
-    /// The time a session may hold nothing is over
-    /// ([`HubConfig::idle_session_timeout`]), counted from the moment
-    /// `since` names.
-    IdleDue {
-        session: SessionKey,
-        since: u64,
-    },
     /// The relay is to stop.
     Stop(Stopping),
     /// A test asks what the hub holds.
@@ -582,9 +575,9 @@ struct SessionHandle<C: Connection> {
     /// A message came on the client's control stream: its SETUP, or what
     /// the relay closes the session for.
     said_something: bool,
-    /// Since when the session holds nothing, as a number that names the
-    /// moment; `None` while it holds something, or has sent no SETUP.
-    idle_since: Option<u64>,
+    /// When the time the session may hold nothing is over, as it is in
+    /// [`Hub::idle`]; `None` while it holds something, or has sent no SETUP.
+    idle_until: Option<Instant>,
     /// The writers of the request streams the peer has open.
     requests: HashMap<StreamKey, RequestWriter>,
     /// The tasks of the request streams the relay has open on the session.
@@ -1140,7 +1133,7 @@ pub fn spawn_with_upstream<C: Connection>(
         fetch_pipes: HashMap::new(),
         timers: Timers::default(),
         drains: HashMap::new(),
-        idle_moments: 0,
+        idle: BTreeSet::new(),
         closing: std::collections::HashSet::new(),
     };
     let task = tokio::spawn(hub.run(inbox));
@@ -1182,8 +1175,15 @@ struct Hub<C: Connection> {
     /// the time with the relay's wait, and the driver reads the lines too
     /// late to time them itself (`interop/disconnect.ts`, publish-anew).
     drains: HashMap<(SessionKey, u64), Instant>,
-    /// The next number that names a moment a session began to hold nothing.
-    idle_moments: u64,
+    /// The sessions that hold nothing, by when their time to is over.
+    ///
+    /// WHY here and not a task that sleeps: a peer decides how often its
+    /// session comes to hold nothing (a SUBSCRIBE that is refused, and its
+    /// FIN), and a task could not be taken back when the session holds
+    /// something again; here a session has one entry at most. WHY NOT in
+    /// [`Timers`]: those hand their events to the core and count against
+    /// the timers a session may have, and this one is the hub's own.
+    idle: BTreeSet<(Instant, SessionKey)>,
     /// The sessions the relay closed itself and has not forgotten yet: their
     /// streams are held by a task until the close has reached the peer
     /// ([`Self::close`]).
@@ -1459,6 +1459,15 @@ impl<C: Connection> Hub<C> {
                     self.feed(events);
                     continue;
                 }
+                () = async {
+                    match self.idle.first() {
+                        Some(&(until, _)) => tokio::time::sleep_until(until).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.idle_due();
+                    continue;
+                }
             };
             let Some(envelope) = envelope else { return };
             match envelope {
@@ -1522,7 +1531,6 @@ impl<C: Connection> Hub<C> {
                     self.feed(pending);
                 }
                 Envelope::SetupDue { session } => self.setup_due(session),
-                Envelope::IdleDue { session, since } => self.idle_due(session, since),
                 Envelope::Stop(stopping) => self.stop(stopping),
                 #[cfg(test)]
                 Envelope::Inspect(answer) => {
@@ -1587,41 +1595,37 @@ impl<C: Connection> Hub<C> {
         let wait = self.config.idle_session_timeout;
         for (session, handle) in &mut self.sessions {
             let idle = handle.said_something && self.relay.holds_nothing(*session);
-            match (handle.idle_since, idle) {
+            match (handle.idle_until, idle) {
                 (None, true) => {
-                    let since = self.idle_moments;
-                    self.idle_moments = self.idle_moments.wrapping_add(1);
-                    handle.idle_since = Some(since);
-                    let (events, session) = (self.events.clone(), *session);
-                    handle.tasks.retain(|task| !task.is_finished());
-                    handle.tasks.push(tokio::spawn(async move {
-                        tokio::time::sleep(wait).await;
-                        // The hub is gone when this fails.
-                        let _ = events.send(Envelope::IdleDue { session, since }).await;
-                    }));
+                    let until = Instant::now() + wait;
+                    handle.idle_until = Some(until);
+                    self.idle.insert((until, *session));
                 }
-                (Some(_), false) => handle.idle_since = None,
+                (Some(until), false) => {
+                    handle.idle_until = None;
+                    self.idle.remove(&(until, *session));
+                }
                 _ => {}
             }
         }
     }
 
-    /// The time a session may hold nothing is over: it is closed, unless
-    /// it has held something since.
+    /// The time the sessions in [`Self::idle`] may hold nothing is over for
+    /// those due by now: they are closed.
     ///
     /// WHY `NO_ERROR`: §3.5 has no code for it ("`NO_ERROR` (0x0): The
     /// session is being terminated without an error"), and the peer did
     /// nothing wrong.
-    fn idle_due(&mut self, session: SessionKey, since: u64) {
-        let still = self
-            .sessions
-            .get(&session)
-            .is_some_and(|handle| handle.idle_since == Some(since));
-        if still {
-            let mut pending = VecDeque::new();
+    fn idle_due(&mut self) {
+        let now = Instant::now();
+        let mut pending = VecDeque::new();
+        while let Some(&(until, session)) = self.idle.first()
+            && until <= now
+        {
+            self.idle.pop_first();
             self.close(session, NO_ERROR, "the session held nothing", &mut pending);
-            self.feed(pending);
         }
+        self.feed(pending);
     }
 
     /// The time a client has for its SETUP is over: a session that has
@@ -1764,7 +1768,7 @@ impl<C: Connection> Hub<C> {
                 connection,
                 control,
                 said_something: false,
-                idle_since: None,
+                idle_until: None,
                 requests: HashMap::new(),
                 own_requests: HashMap::new(),
                 stops,
@@ -2913,6 +2917,9 @@ impl<C: Connection> Hub<C> {
         let Some(handle) = self.sessions.remove(&session) else {
             return;
         };
+        if let Some(until) = handle.idle_until {
+            self.idle.remove(&(until, session));
+        }
         self.log(|| {
             format!(
                 "CLOSE_SESSION session={} code={code:#x} reason={reason:?}",
@@ -2953,7 +2960,14 @@ impl<C: Connection> Hub<C> {
     }
 
     fn forget_session(&mut self, session: SessionKey) {
-        if self.sessions.remove(&session).is_some() | self.closing.remove(&session) {
+        let idle_until = self
+            .sessions
+            .remove(&session)
+            .map(|handle| handle.idle_until);
+        if let Some(Some(until)) = idle_until {
+            self.idle.remove(&(until, session));
+        }
+        if idle_until.is_some() | self.closing.remove(&session) {
             self.log(|| format!("SESSION_CLOSED session={}", session.0));
         }
         // Every writer of the session, also one that was finished and has not
