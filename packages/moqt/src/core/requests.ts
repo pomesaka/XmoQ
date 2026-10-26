@@ -1843,12 +1843,21 @@ export function createRequests(options: RequestsOptions): Requests {
 	};
 
 	/**
-	 * A subscription this endpoint is the publisher of, whose subscriber can
-	 * end its direction of the request stream and leave the subscription as
-	 * it is: answered or not.
+	 * A request this endpoint made or serves as the publisher, whose peer can
+	 * end its direction of the request stream and leave the request as it
+	 * is: a subscription, answered or not, and a namespace that was announced.
+	 *
+	 * WHY a PUBLISH_NAMESPACE once it has its REQUEST_OK: §6.2 has "A
+	 * PUBLISH_NAMESPACE is withdrawn by cancelling the request (see Section
+	 * 3.3.2)", which is a reset or STOP_SENDING, and names no FIN, where the
+	 * FIN is named as an end for SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS
+	 * alone; §11.4.1 has "Termination of a bidi request stream" end it, and
+	 * the FIN of one direction does not terminate the stream. A FIN before the
+	 * answer still ends the request: the answer can no longer come.
 	 */
 	const outlivesPeerFin = (request: RequestEntry): boolean =>
 		(request.kind === "PUBLISH" && request.state === "Established") ||
+		(request.kind === "PUBLISH_NAMESPACE" && request.state === "Established") ||
 		(request.kind === "PEER_SUBSCRIBE" && request.state === "Pending") ||
 		// The subscriber of a FETCH has said everything with the FETCH, and
 		// that of a TRACK_STATUS with it (§10.14: "the first and only
