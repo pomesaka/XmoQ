@@ -5,7 +5,7 @@ import {
 } from "../core/fetch.ts";
 import { resolveLimits } from "../core/limits.ts";
 import type { SubgroupStreamLimits } from "../core/subgroup.ts";
-import type { Fetch, MoqtConnection } from "./connection.ts";
+import { type Fetch, failSession, type MoqtConnection } from "./connection.ts";
 
 /** What a fetch stream holds after its header: Objects and End of Range indicators (§11.4.4). */
 export type FetchItem = Exclude<FetchStreamItem, { type: "header" }>;
@@ -44,7 +44,7 @@ export interface DecodeFetchBodyOptions {
  *
  * | The bytes | What is done | The result fails with |
  * |---|---|---|
- * | break a rule the draft closes the session for (§11.4.4.1: Serialization Flags it does not define, a first Object that refers to a prior one; a stream that ends inside an Object) | the session is closed with PROTOCOL_VIOLATION | the `MoqtError` |
+ * | break a rule the draft closes the session for (§11.4.4.1: Serialization Flags it does not define, a first Object that refers to a prior one; a stream that ends inside an Object) | the session is closed with PROTOCOL_VIOLATION, as for a fault the session finds (`closed` says the error) | the `MoqtError` |
  * | make the Track malformed (§2.4.2), or have an Object over a limit | the FETCH is cancelled | `FetchBodyError` |
  */
 export function decodeFetchBody(
@@ -87,7 +87,7 @@ export function decodeFetchBody(
 						if (error === undefined) {
 							controller.close();
 						} else {
-							connection.close(error.code, error.message);
+							failSession(connection, error);
 							controller.error(error);
 						}
 						return;
@@ -102,7 +102,7 @@ export function decodeFetchBody(
 					if (failure !== undefined) {
 						ending = async (failed) => {
 							if (failure.scope === "session") {
-								connection.close(failure.error.code, failure.error.message);
+								failSession(connection, failure.error);
 								failed.error(failure.error);
 								return;
 							}

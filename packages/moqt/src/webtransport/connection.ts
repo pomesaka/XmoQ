@@ -1205,6 +1205,28 @@ function objectsOutcome(end: SubscriptionEnd): "close" | "discard" | "fail" {
 	}
 }
 
+/** How each connection `connectOver` made ends its session for a fault of the peer. */
+const sessionFailures = new WeakMap<object, (error: MoqtError) => void>();
+
+/**
+ * Closes the session of `connection` for `error`, a fault of the peer that
+ * was found outside the session (in `decodeFetchBody`), as the session closes
+ * for one it finds itself: `closed` says `error`, and the subscriptions of
+ * the session hand on what is left before they fail. WHY NOT the public
+ * `close()`: that is the application's own ending, `local`, and a
+ * subscription ended so drops what it did not hand on (`objectsOutcome`).
+ * A connection `connectOver` did not make (a test's) is closed by its
+ * `close()`. Not exported from the package.
+ */
+export function failSession(
+	connection: Pick<MoqtConnection, "close">,
+	error: MoqtError,
+): void {
+	const fail = sessionFailures.get(connection);
+	if (fail === undefined) connection.close(error.code, error.message);
+	else fail(error);
+}
+
 /**
  * Runs a MOQT session over an established transport session. This module
  * pairs requests with their responses and gives the application its objects;
@@ -2864,7 +2886,7 @@ export async function connectOver(
 		};
 	};
 
-	return {
+	const connection: MoqtConnection = {
 		serve(handlers) {
 			serveHandlers = handlers;
 		},
@@ -2988,4 +3010,6 @@ export async function connectOver(
 			transport.close({ closeCode: sentCode, reason: sentReason });
 		},
 	};
+	sessionFailures.set(connection, (error) => fatal(error, error.code));
+	return connection;
 }
