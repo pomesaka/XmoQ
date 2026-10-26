@@ -17,7 +17,7 @@ xmoq-moqt-io = { path = "../moqt-io" }
 xmoq-msf = { path = "../msf" }
 xmoq-viewer = { path = "../viewer" }
 anyhow = "=1.0.100"
-tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 # The room's WebSocket. No TLS: the rooms are a Worker run locally (ws://).
 tokio-tungstenite = "=0.30.0"
 futures-util = "=0.3.31"

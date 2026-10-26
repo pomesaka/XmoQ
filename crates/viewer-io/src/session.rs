@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use xmoq_loc::draft_04 as loc;
+use xmoq_moqt::RequestFault;
 use xmoq_moqt::data::SubgroupObject;
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
@@ -276,6 +277,9 @@ pub enum NotSubscribed {
     /// It was not sent, not answered in time, or answered with something
     /// else.
     Failed(anyhow::Error),
+    /// Its answer broke the protocol: the session is to be closed with its
+    /// code, as for any message of the peer that does (`RequestFault::Peer`).
+    Peer(RequestFault),
 }
 
 /// A SUBSCRIBE the relay refused with `GOING_AWAY` (§10.4): it has sent
@@ -369,26 +373,44 @@ pub fn settle(
             "the relay closed the SUBSCRIBE of {name} without an answer"
         )));
     };
+    let (track_alias, largest) = answer_of(session, request, name, response)?;
+    Ok(Subscription {
+        request,
+        track_alias,
+        largest,
+        reader: sent.reader,
+        send: sent.send,
+    })
+}
+
+/// What the session makes of `response`, the answer to the SUBSCRIBE
+/// `request` of `name`: the Track Alias of the subscription and the
+/// `LARGEST_OBJECT` of its `SUBSCRIBE_OK`, or why there is none.
+fn answer_of(
+    session: &mut Session,
+    request: RequestId,
+    name: &str,
+    response: ControlMessage,
+) -> Result<(u64, Option<Location>), NotSubscribed> {
     match session
         .on_request_message(request, response)
-        .map_err(|error| failed(error.into()))?
-    {
+        .map_err(|fault| match fault {
+            RequestFault::Peer(_) => NotSubscribed::Peer(fault),
+            RequestFault::Usage(_) => NotSubscribed::Failed(fault.into()),
+        })? {
         RequestEvent::SubscribeEstablished {
             track_alias,
             parameters,
             ..
-        } => Ok(Subscription {
-            request,
+        } => Ok((
             track_alias,
-            largest: parameters.iter().find_map(|parameter| match parameter {
+            parameters.iter().find_map(|parameter| match parameter {
                 Parameter::LargestObject(location) => Some(*location),
                 _ => None,
             }),
-            reader: sent.reader,
-            send: sent.send,
-        }),
+        )),
         RequestEvent::Rejected(error) => Err(NotSubscribed::Refused(error)),
-        other => Err(failed(anyhow!(
+        other => Err(NotSubscribed::Failed(anyhow!(
             "SUBSCRIBE of {name} was answered with {other:?}"
         ))),
     }
@@ -415,6 +437,7 @@ impl Requests<'_> {
                 anyhow!("SUBSCRIBE of {name} was refused: {error:?}")
             }
             NotSubscribed::Failed(error) => error,
+            NotSubscribed::Peer(fault) => fault.into(),
         })
     }
 
@@ -789,5 +812,86 @@ mod tests {
         // The one beyond the limit waits in the queue.
         assert_eq!(events.ahead.len(), MOST_READ_AHEAD);
         assert_eq!(events.received.len(), 1);
+    }
+
+    #[test]
+    fn the_answer_to_a_subscribe_makes_a_subscription_a_refusal_or_an_end_of_the_session() {
+        use xmoq_moqt::message::{ReasonPhrase, RequestOk, SubscribeOk};
+
+        /// What the answer is to give.
+        #[derive(Debug)]
+        enum Expected {
+            /// A subscription of this Track Alias.
+            Subscribed(u64),
+            /// A refusal of this Error Code.
+            Refused(u64),
+            /// No subscription, and the session goes on.
+            Failed,
+            /// The session is to be closed.
+            Peer,
+        }
+        let cases = [
+            (
+                "SUBSCRIBE_OK",
+                ControlMessage::SubscribeOk(SubscribeOk {
+                    track_alias: 3,
+                    parameters: vec![],
+                    track_properties: vec![],
+                }),
+                Expected::Subscribed(3),
+            ),
+            (
+                "REQUEST_ERROR",
+                ControlMessage::RequestError(RequestError {
+                    error_code: 0x10,
+                    retry_interval: 0,
+                    error_reason: ReasonPhrase::default(),
+                    redirect: None,
+                }),
+                Expected::Refused(0x10),
+            ),
+            (
+                "a GOAWAY before the answer",
+                ControlMessage::GoAway(GoAway {
+                    new_session_uri: vec![],
+                    timeout_ms: 0,
+                    request_id: None,
+                }),
+                Expected::Failed,
+            ),
+            // A REQUEST_OK answers no SUBSCRIBE.
+            (
+                "REQUEST_OK",
+                ControlMessage::RequestOk(RequestOk::default()),
+                Expected::Peer,
+            ),
+        ];
+        for (name, response, expected) in cases {
+            let mut session = Session::new(
+                xmoq_moqt::session::Role::Client,
+                xmoq_moqt::session::Transport::WebTransport,
+            );
+            let track = FullTrackName::new(
+                TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+                b"audio".to_vec(),
+            )
+            .unwrap();
+            let (request, _) = session.subscribe(track, vec![]).unwrap();
+            match (
+                answer_of(&mut session, request, "audio", response),
+                expected,
+            ) {
+                (Ok((alias, None)), Expected::Subscribed(expected)) => {
+                    assert_eq!(alias, expected, "{name}");
+                }
+                (Err(NotSubscribed::Refused(error)), Expected::Refused(code)) => {
+                    assert_eq!(error.error_code, code, "{name}");
+                }
+                (Err(NotSubscribed::Failed(_)), Expected::Failed)
+                | (Err(NotSubscribed::Peer(RequestFault::Peer(_))), Expected::Peer) => {}
+                (Ok(answer), expected) => panic!("{name}: {answer:?}, not {expected:?}"),
+                (Err(_), expected) => panic!("{name}: another error, not {expected:?}"),
+            }
+        }
     }
 }

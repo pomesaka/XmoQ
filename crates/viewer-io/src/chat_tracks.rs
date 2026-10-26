@@ -11,6 +11,7 @@ use anyhow::{Result, anyhow, bail};
 use xmoq_chat_tracks::limits::TEXT_BYTES;
 use xmoq_chat_tracks::names::{LINES, Person, SAID, person_namespace, room_namespace};
 use xmoq_chat_tracks::payloads::{Line, Said, read_line};
+use xmoq_moqt::RequestFault;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
@@ -88,7 +89,7 @@ pub struct ChatTracks {
 impl ChatTracks {
     /// Announces the viewer's namespace and waits for the answer, so that a
     /// relay that refuses it is said at once. `lines` is asked for from the
-    /// loop ([`Came::AskNow`]), where the broadcast plays meanwhile. `had` is
+    /// loop ([`Self::next`]), where the broadcast plays meanwhile. `had` is
     /// the newest line shown on the sessions before, so that what was
     /// missed between them is fetched (`history_to_fetch`), `catch_up` of
     /// them at the most. `requests` carries the `sub` token of the room's
@@ -190,17 +191,26 @@ impl ChatTracks {
     }
 
     /// What came, and what the loop is to do with it.
-    pub async fn on(&mut self, session: &mut Session, came: Came) -> Vec<Out> {
-        self.lines
+    ///
+    /// # Errors
+    ///
+    /// As [`Follower::on`]: the session is to be closed.
+    pub async fn on(
+        &mut self,
+        session: &mut Session,
+        came: Came,
+    ) -> Result<Vec<Out>, RequestFault> {
+        Ok(self
+            .lines
             .on(session, came)
-            .await
+            .await?
             .into_iter()
             .map(|out| match out {
                 follow::Out::Item(line) => Out::Line(line),
                 follow::Out::Gap(gap) => Out::Gap(gap),
                 follow::Out::Note(note) => Out::Note(note),
             })
-            .collect()
+            .collect())
     }
 
     /// Reads the stream of the FETCH on a task of its own; its lines come
