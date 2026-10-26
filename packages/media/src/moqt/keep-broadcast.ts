@@ -5,7 +5,7 @@
 
 import {
 	type GoAwayNotice,
-	keepMoving,
+	keepSessions,
 	type MoqtConnection,
 	type MovingOutcome,
 	type PeerFetch,
@@ -65,10 +65,9 @@ export interface KeepPublishingOptions {
  *   them: the relay gets a track it knew with later Groups.
  */
 export function keepPublishing(options: KeepPublishingOptions): Promise<void> {
-	let sessions = 0;
-	return keepMoving<{ connection: MoqtConnection }, SessionClose>({
+	return keepSessions<{ connection: MoqtConnection }, SessionClose>({
 		connect: async (goAway) => ({ connection: await options.connect(goAway) }),
-		async run({ connection }) {
+		async run({ connection }, _signal, began) {
 			connection.serve({
 				subscribe(request) {
 					if (options.tracks.some((track) => track.subscribe(request))) return;
@@ -85,13 +84,13 @@ export function keepPublishing(options: KeepPublishingOptions): Promise<void> {
 			// publisher do: one publisher in two sessions is two sources of
 			// its tracks at the relay.
 			await connection.publishNamespace(options.trackNamespace);
-			sessions += 1;
-			options.onState?.({ type: "publishing", session: sessions, connection });
+			options.onState?.({ type: "publishing", session: began(), connection });
 			return connection.closed;
 		},
 		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
 		...(options.signal === undefined ? {} : { signal: options.signal }),
-		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
+		onConnecting: (attempt) =>
+			options.onState?.({ type: "connecting", attempt }),
 		onOutcome: (outcome) => options.onState?.(sessionMovingOutcome(outcome)),
 	});
 }
@@ -248,19 +247,18 @@ export interface KeepPlayingOptions<E> {
  * wait for the relay to close: it may wait for as long as its Timeout says.
  */
 export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
-	let sessions = 0;
 	type Over =
 		| { type: "session-ended"; close: SessionClose }
 		| { type: "playing-ended"; end: E }
 		/** What was played ended for a GOAWAY on its stream. */
 		| { type: "track-moved"; goAway: GoAwayNotice };
-	return keepMoving<{ connection: MoqtConnection }, Over>({
+	return keepSessions<{ connection: MoqtConnection }, Over>({
 		async connect(goAway) {
 			const connection = await options.connect(goAway);
 			if (connection === undefined) throw new NothingToPlay();
 			return { connection };
 		},
-		async run({ connection }, signal) {
+		async run({ connection }, signal, began) {
 			/** Resolved when what was played ended for a GOAWAY on its stream. */
 			let trackMoved: (notice: GoAwayNotice) => void = () => {};
 			const moved = new Promise<GoAwayNotice>((resolve) => {
@@ -284,7 +282,6 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 			]);
 			const { stay } = options;
 			if (stay !== undefined) {
-				const session = sessions + 1;
 				const over = await stayOnSession<E, Over>({
 					play,
 					closed: gone,
@@ -295,8 +292,11 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 					stopped: () => signal.aborted,
 					...(stay.againMs === undefined ? {} : { againMs: stay.againMs }),
 					onPlaying() {
-						sessions = session;
-						options.onState?.({ type: "playing", session, connection });
+						options.onState?.({
+							type: "playing",
+							session: began(),
+							connection,
+						});
 					},
 					onNotYet: (error) => options.onState?.({ type: "not-yet", error }),
 					onEnded: (end) => options.onState?.({ type: "playing-ended", end }),
@@ -305,8 +305,7 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 				return over.type === "session-ended" ? over.close : await gone;
 			}
 			const { ended } = await play();
-			sessions += 1;
-			options.onState?.({ type: "playing", session: sessions, connection });
+			options.onState?.({ type: "playing", session: began(), connection });
 			return await Promise.race([
 				gone,
 				ended.then((end): Over => ({ type: "playing-ended", end })),
@@ -324,7 +323,8 @@ export function keepPlaying<E>(options: KeepPlayingOptions<E>): Promise<void> {
 		},
 		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
 		...(options.signal === undefined ? {} : { signal: options.signal }),
-		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
+		onConnecting: (attempt) =>
+			options.onState?.({ type: "connecting", attempt }),
 		onOutcome(outcome) {
 			options.onState?.(playingStateOf(outcome));
 		},

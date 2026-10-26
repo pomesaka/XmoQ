@@ -5,7 +5,7 @@
 
 import {
 	type GoAwayNotice,
-	keepMoving,
+	keepSessions,
 	type MoqtConnection,
 	type MovingConnection,
 	type NamespaceSubscriptionEnd,
@@ -70,22 +70,18 @@ export interface KeepAttendingOptions<
 export async function keepAttending<
 	C extends MovingConnection = MoqtConnection,
 >(options: KeepAttendingOptions<C>): Promise<void> {
-	const signal = options.signal ?? new AbortController().signal;
-	let sessions = 0;
-	await keepMoving<{ connection: C }, NamespaceSubscriptionEnd>({
+	await keepSessions<{ connection: C }, NamespaceSubscriptionEnd>({
 		connect: async (goAway) => ({ connection: await options.connect(goAway) }),
-		run({ connection }, running) {
+		run({ connection }, running, began) {
 			return options.meeting.attend(connection, running, () => {
-				sessions += 1;
-				options.onState?.({ type: "attending", session: sessions, connection });
+				options.onState?.({ type: "attending", session: began(), connection });
 			});
 		},
 		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
-		signal,
-		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
+		...(options.signal === undefined ? {} : { signal: options.signal }),
+		onConnecting: (attempt) =>
+			options.onState?.({ type: "connecting", attempt }),
 		onOutcome(outcome) {
-			// A session the caller's `signal` closed is the caller's end.
-			if (outcome.type !== "moved" && signal.aborted) return;
 			options.onState?.(
 				outcome.type === "done"
 					? { type: "attending-ended", ended: outcome.result }

@@ -5,7 +5,7 @@
 
 import {
 	type GoAwayNotice,
-	keepMoving,
+	keepSessions,
 	type MoqtConnection,
 	type SessionClose,
 	sessionMovingOutcome,
@@ -71,28 +71,21 @@ export interface KeepFollowingTranscriptOptions {
 export async function keepFollowingTranscript(
 	options: KeepFollowingTranscriptOptions,
 ): Promise<void> {
-	const signal = options.signal ?? new AbortController().signal;
-	let sessions = 0;
-	await keepMoving<{ connection: TranscriptConnection }, SessionClose>({
+	await keepSessions<{ connection: TranscriptConnection }, SessionClose>({
 		connect: async (goAway) => ({ connection: await options.connect(goAway) }),
-		async run({ connection }) {
+		async run({ connection }, _running, began) {
 			const reader = followTranscript(connection, options.follow);
 			try {
-				sessions += 1;
-				options.onState?.({ type: "reading", session: sessions, reader });
+				options.onState?.({ type: "reading", session: began(), reader });
 				return await connection.closed;
 			} finally {
 				reader.stop();
 			}
 		},
 		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
-		signal,
-		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
-		onOutcome(outcome) {
-			const state = sessionMovingOutcome(outcome);
-			// A session the caller's `signal` closed is the caller's end.
-			if (state.type !== "moved" && signal.aborted) return;
-			options.onState?.(state);
-		},
+		...(options.signal === undefined ? {} : { signal: options.signal }),
+		onConnecting: (attempt) =>
+			options.onState?.({ type: "connecting", attempt }),
+		onOutcome: (outcome) => options.onState?.(sessionMovingOutcome(outcome)),
 	});
 }

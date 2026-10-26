@@ -118,7 +118,9 @@ export {
 export {
 	goAwayBehind,
 	type KeepMovingOptions,
+	type KeepSessionsOptions,
 	keepMoving,
+	keepSessions,
 	type MovingConnection,
 	type MovingOutcome,
 	type MovingSession,
