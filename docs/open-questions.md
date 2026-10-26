@@ -18,7 +18,7 @@ When an item is decided, remove it here and write the decision where it takes ef
 - Whether a Subgroup whose stream was cut short is continued from another source of the track. Not done; the draft allows it (§2.2, §11.4.3).
 - Supported browsers beyond Chromium on desktop, operating systems, Ghostty versions
 - The CLI's audio output. `cpal` is used, in `crates/watch/src/bin/xmoq-watch/audio_output.rs` alone, so that it can be changed; nobody has listened to it ([record](experiments/2026-10-12-opus-decoded-and-played-with-rust-crates.md)).
-- Authorization beyond the form of the token (a token of the room on every request and on SETUP, `crates/relay/src/auth.rs`): who may get a token (the room, `packages/room`, gives one to anyone who asks, in the namespaces of that room alone: its chat, its transcripts and the broadcasts of `BROADCAST_NAMESPACES`; provisional, 2026-10-26), how long one lives, and what happens to a subscription whose token has expired
+- Authorization beyond the form of the token (a token of the room on every request and on SETUP, `crates/relay/src/auth.rs`): who may get a token (the room, `packages/room`, gives one to anyone who asks, in the namespaces of that room alone: its chat, its transcripts and the broadcasts of `BROADCAST_NAMESPACES`, decided on 2026-10-26), how long one lives, and what happens to a subscription whose token has expired
 - Authentication and SSO, privacy and moderation
 - What the relay and the room say to each other once there is authorization, and where the room lives: a Durable Object can neither accept nor open a WebTransport session
 - Hosting, TLS, monitoring and operating costs

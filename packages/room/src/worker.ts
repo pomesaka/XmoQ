@@ -79,9 +79,10 @@
 // without a key, and beyond it {type: "meeting-full", most}. Those counted
 // are the sockets that joined, until they close; the same socket asking
 // again with its id is answered again, with new tokens, full or not, since
-// it is counted already. Not answered: an id that is empty,
-// longer than 64, or has a `/` or a `*`; another id on a socket that joined;
-// an id another open socket has; a room whose name has a `/` or a `*`.
+// it is counted already. Refused with {type: "meeting-refused", why}
+// (`SeatRefusal`): an id that is empty, longer than 64, or has a `/` or a
+// `*`; another id on a socket that joined; an id another open socket has; a
+// room whose name has a `/` or a `*`.
 // WHY here and not at the relay: the room hands out the tokens, and one it
 // does not give is a participant the relay never sees; the relay knows
 // namespaces and sessions, not meetings, and would have to be told which
@@ -358,7 +359,7 @@ export class Room {
 		}
 	}
 
-	/** Answers join-meeting from `socket` for the participant `id`, or leaves it unanswered (`seatFor`). */
+	/** Answers join-meeting from `socket` for the participant `id` (`seatFor`). */
 	async joinMeeting(socket: WebSocket, id: unknown): Promise<void> {
 		const attachment = attachmentOf(socket);
 		const others = this.ctx
@@ -367,7 +368,10 @@ export class Room {
 			.map((each) => attachmentOf(each).meeting);
 		const answer = seatFor(id, attachment.room, attachment.meeting, others);
 		switch (answer.type) {
-			case "unanswered":
+			case "refused":
+				socket.send(
+					JSON.stringify({ type: "meeting-refused", why: answer.why }),
+				);
 				return;
 			case "full":
 				socket.send(

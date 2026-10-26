@@ -228,7 +228,7 @@ await wait(200);
 	const meeting = `${room}-meeting`;
 	type Client = ReturnType<typeof join>;
 	const answers = (client: Client): unknown[] =>
-		ofType(client.got, "meeting", "meeting-full");
+		ofType(client.got, "meeting", "meeting-full", "meeting-refused");
 	const ask = (client: Client, participant: unknown): void =>
 		client.socket.send(JSON.stringify({ type: "join-meeting", participant }));
 	const in49 = Array.from({ length: 49 }, () => join(meeting));
@@ -289,20 +289,27 @@ await wait(200);
 	if (!same(answers(fiftieth), [{ type: "meeting-full", most: 49 }]))
 		fail("the 50th was not told the meeting is full");
 
-	// Not answered: what cannot be an id, and another id on a socket that
-	// joined.
-	const unanswered: [Client, unknown][] = [
+	// Refused, with why: what cannot be an id, and another id on a socket
+	// that joined.
+	const refused: [Client, unknown][] = [
 		[fiftieth, ""],
 		[fiftieth, "x".repeat(65)],
 		[fiftieth, "a/b"],
 		[fiftieth, "*"],
 		[fiftieth, 7],
-		[p1, "another"],
 	];
-	for (const [client, participant] of unanswered) ask(client, participant);
+	for (const [client, participant] of refused) ask(client, participant);
+	ask(p1, "another");
 	await wait(500);
-	if (answers(fiftieth).length !== 1 || answers(p1).length !== 1)
-		fail("one of those not to be answered was answered");
+	const whys = (client: Client): unknown[] =>
+		answers(client)
+			.filter((answer) => at(answer, "type") === "meeting-refused")
+			.map((answer) => at(answer, "why"));
+	if (
+		!same(whys(fiftieth), Array(5).fill("not-a-participant")) ||
+		!same(whys(p1), ["another-participant"])
+	)
+		fail("one of those to be refused was not refused, or not for its reason");
 
 	// One that joined, asking again while it is full: its meeting again.
 	ask(p3, "p3");
@@ -317,11 +324,11 @@ await wait(200);
 	// One goes: the 50th gets in, and its id with it.
 	p0.socket.close();
 	await wait(500);
-	// With room for it, an id another open socket has is still not answered.
+	// With room for it, an id another open socket has is still refused.
 	ask(fiftieth, "p2");
 	await wait(300);
-	if (answers(fiftieth).length !== 1)
-		fail("an id another socket has was answered");
+	if (!same(whys(fiftieth).at(-1), "taken"))
+		fail("an id another socket has was not refused as taken");
 	ask(fiftieth, "p49");
 	await wait(300);
 	const last = answers(fiftieth).at(-1);
@@ -335,8 +342,12 @@ await wait(200);
 	await slashed.opened;
 	ask(slashed, "p0");
 	await wait(300);
-	if (answers(slashed).length !== 0)
-		fail("a room whose name has a / answered join-meeting");
+	if (
+		!same(answers(slashed), [
+			{ type: "meeting-refused", why: "not-a-meeting-room" },
+		])
+	)
+		fail("a room whose name has a / did not refuse join-meeting");
 	slashed.socket.close();
 	await wait(200);
 }

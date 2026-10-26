@@ -280,7 +280,7 @@ test.each<{
 		room: "blue",
 		mine: undefined,
 		others: [],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for an id over 64",
@@ -288,7 +288,7 @@ test.each<{
 		room: "blue",
 		mine: undefined,
 		others: [],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for an id with a /",
@@ -296,7 +296,7 @@ test.each<{
 		room: "blue",
 		mine: undefined,
 		others: [],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for an id *",
@@ -304,7 +304,7 @@ test.each<{
 		room: "blue",
 		mine: undefined,
 		others: [],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for an id that is not text",
@@ -312,7 +312,7 @@ test.each<{
 		room: "blue",
 		mine: undefined,
 		others: [],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for another id on a socket that joined",
@@ -320,7 +320,7 @@ test.each<{
 		room: "blue",
 		mine: "ann",
 		others: [],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "another-participant" },
 	},
 	{
 		name: "not for an id another socket has",
@@ -328,7 +328,7 @@ test.each<{
 		room: "blue",
 		mine: undefined,
 		others: ["bob"],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "taken" },
 	},
 	{
 		name: "not in a room whose name has a /",
@@ -336,7 +336,7 @@ test.each<{
 		room: "a/b",
 		mine: undefined,
 		others: [],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "not-a-meeting-room" },
 	},
 	{
 		name: "not in a room with no name",
@@ -344,7 +344,7 @@ test.each<{
 		room: "",
 		mine: undefined,
 		others: [],
-		answer: { type: "unanswered" },
+		answer: { type: "refused", why: "not-a-meeting-room" },
 	},
 ])("join-meeting: $name", ({ id, room, mine, others, answer }) => {
 	expect(seatFor(id, room, mine, others)).toEqual(answer);
