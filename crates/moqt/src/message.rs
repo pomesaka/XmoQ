@@ -163,9 +163,6 @@ pub mod retry_interval {
     /// "A Retry Interval value of 1 indicates the request can be retried
     /// immediately."
     pub const AT_ONCE: u64 = 1;
-    /// The longest wait a caller is handed, in milliseconds: the longest
-    /// delay a timer of a browser takes, as for the waits for an answer.
-    pub const LONGEST_WAIT_MS: u64 = 2_147_483_647;
     /// What an endpoint that refuses for its own load gives: a second.
     /// **Provisional.**
     const WHEN_LOADED_MS: u64 = 1_000;
@@ -568,11 +565,11 @@ impl RequestError {
     }
 
     /// The same as a wait a timer takes: no more than
-    /// [`retry_interval::LONGEST_WAIT_MS`].
+    /// [`crate::LONGEST_TIMER_MS`].
     #[must_use]
     pub fn retry_wait_ms(&self) -> Option<u64> {
         self.retry_after_ms()
-            .map(|ms| ms.min(retry_interval::LONGEST_WAIT_MS))
+            .map(|ms| ms.min(crate::LONGEST_TIMER_MS))
     }
 
     fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {

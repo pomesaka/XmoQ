@@ -32,5 +32,12 @@ pub mod varint;
 
 pub use error::{Error, ErrorScope, RequestFault, TerminationCode, UsageError, stream_reset_code};
 
+/// The longest delay a timer of a browser takes, in milliseconds: 2^31 - 1
+/// (the HTML timers clamp a larger one, and `@xmoq/moqt` has the same
+/// constant). Every wait an endpoint of this repository is handed or takes
+/// is no longer: a Retry Interval, the wait for an answer, the time a stream
+/// may be silent.
+pub const LONGEST_TIMER_MS: u64 = 2_147_483_647;
+
 /// Version identifier offered in `WT-Available-Protocols` and as the QUIC ALPN (§3.1).
 pub const PROTOCOL: &str = "moqt-18";

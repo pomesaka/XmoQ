@@ -149,8 +149,8 @@ impl Default for StreamConfig {
 pub struct IdleSubgroupStreamTimeout(Duration);
 
 impl IdleSubgroupStreamTimeout {
-    /// The most milliseconds, 2^31 - 1, as `@xmoq/moqt` takes them.
-    pub const MAX_MS: u64 = 2_147_483_647;
+    /// The most milliseconds, as `@xmoq/moqt` takes them.
+    pub const MAX_MS: u64 = xmoq_moqt::LONGEST_TIMER_MS;
 
     /// The time of `ms` milliseconds, or `None` outside 1 to [`Self::MAX_MS`].
     #[must_use]

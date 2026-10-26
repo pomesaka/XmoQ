@@ -4,6 +4,7 @@
 // a chunk comes in as numbers and bytes.
 
 import {
+	LONGEST_TIMER_MS,
 	type PeerFetch,
 	type PeerSubscribe,
 	PublishEndedError,
@@ -263,9 +264,9 @@ export function createVideoTrackPublisher(
 		["endTimeoutMs", endTimeoutMs, 0],
 		["dynamicGroups.shortestGroupMs", shortestGroupMs ?? 0, 0],
 	] as const) {
-		if (!Number.isInteger(value) || value < least || value > 2 ** 31 - 1) {
+		if (!Number.isInteger(value) || value < least || value > LONGEST_TIMER_MS) {
 			throw new RangeError(
-				`${name} is a whole number from ${least} to ${2 ** 31 - 1}, not ${value}`,
+				`${name} is a whole number from ${least} to ${LONGEST_TIMER_MS}, not ${value}`,
 			);
 		}
 	}

@@ -21,7 +21,11 @@ export type { FetchRange, Redirect } from "./core/control-message.ts";
 export { RequestErrorCode } from "./core/error.ts";
 export type { FetchObject, RangeEnd } from "./core/fetch.ts";
 export type { KeyValuePair } from "./core/key-value-pair.ts";
-export { DEFAULT_ANSWER_WAIT_MS, type SessionLimits } from "./core/limits.ts";
+export {
+	DEFAULT_ANSWER_WAIT_MS,
+	LONGEST_TIMER_MS,
+	type SessionLimits,
+} from "./core/limits.ts";
 export type {
 	OutgoingObject,
 	SubgroupOptions,

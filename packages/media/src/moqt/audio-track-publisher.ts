@@ -11,6 +11,7 @@
 
 import { locProperties } from "@xmoq/loc";
 import {
+	LONGEST_TIMER_MS,
 	type PeerFetch,
 	type PeerSubscribe,
 	type PublishedTrack,
@@ -126,10 +127,10 @@ export function createAudioTrackPublisher(
 	if (
 		!Number.isInteger(endTimeoutMs) ||
 		endTimeoutMs < 0 ||
-		endTimeoutMs > 2 ** 31 - 1
+		endTimeoutMs > LONGEST_TIMER_MS
 	) {
 		throw new RangeError(
-			`endTimeoutMs is a whole number from 0 to ${2 ** 31 - 1}, not ${endTimeoutMs}`,
+			`endTimeoutMs is a whole number from 0 to ${LONGEST_TIMER_MS}, not ${endTimeoutMs}`,
 		);
 	}
 	const stats: AudioTrackPublisherStats = { written: 0, skipped: {} };

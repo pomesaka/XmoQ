@@ -3,6 +3,7 @@
 // unless they say "transport", which is draft-ietf-moq-transport-18.
 
 import {
+	LONGEST_TIMER_MS,
 	type PeerFetch,
 	type PeerSubscribe,
 	PublishEndedError,
@@ -182,10 +183,10 @@ export function createCatalogPublisher(
 	if (
 		!Number.isInteger(endTimeoutMs) ||
 		endTimeoutMs < 0 ||
-		endTimeoutMs > 2 ** 31 - 1
+		endTimeoutMs > LONGEST_TIMER_MS
 	) {
 		throw new RangeError(
-			`endTimeoutMs is a whole number from 0 to ${2 ** 31 - 1}, not ${String(endTimeoutMs)}`,
+			`endTimeoutMs is a whole number from 0 to ${LONGEST_TIMER_MS}, not ${String(endTimeoutMs)}`,
 		);
 	}
 	const subscribers = new Set<Subscriber>();

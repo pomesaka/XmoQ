@@ -88,8 +88,14 @@ export function resolveLimits(
  */
 export const DEFAULT_ANSWER_WAIT_MS = 10_000;
 
-/** The longest an answer is waited for: the longest delay `setTimeout` takes (HTML, "timer initialization steps"). */
-export const MAX_ANSWER_WAIT_MS = 2 ** 31 - 1;
+/**
+ * The longest delay `setTimeout` takes, in milliseconds (HTML, "timer
+ * initialization steps": a signed 32-bit number). Every wait the session is
+ * handed or takes is no longer: a Retry Interval, the wait for an answer, the
+ * waits of the connect options. The Rust implementation has the same
+ * (`LONGEST_TIMER_MS` of crates/moqt).
+ */
+export const LONGEST_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * How long the answer to a request with these parameters is waited for, in
@@ -111,5 +117,5 @@ export function answerWaitMs(
 	const asked =
 		(parameters?.rendezvousTimeout ?? 0n) + (parameters?.fillTimeout ?? 0n);
 	const wait = BigInt(baseMs) + asked;
-	return wait > BigInt(MAX_ANSWER_WAIT_MS) ? MAX_ANSWER_WAIT_MS : Number(wait);
+	return wait > BigInt(LONGEST_TIMER_MS) ? LONGEST_TIMER_MS : Number(wait);
 }

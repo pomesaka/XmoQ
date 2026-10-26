@@ -1,3 +1,5 @@
+import { LONGEST_TIMER_MS } from "./limits.ts";
+
 /**
  * Session termination error codes (draft-ietf-moq-transport-18 §3.5). Only the
  * codes this implementation raises are listed.
@@ -57,9 +59,6 @@ export const RequestErrorCode = {
 /** What an endpoint that refuses for its own load gives as the wait before a retry. **Provisional.** */
 const RETRY_WHEN_LOADED_MS = 1000n;
 
-/** The longest wait a caller is handed, in milliseconds: the longest delay a timer of a browser takes. */
-export const LONGEST_RETRY_WAIT_MS = 2_147_483_647;
-
 /**
  * The Retry Interval of a REQUEST_ERROR this endpoint makes up itself, by
  * its Error Code (`fixtures/retry-interval/made-up.tsv`, which the Rust
@@ -87,13 +86,11 @@ export function retryAfterMs(retryInterval: bigint): bigint | undefined {
 	return retryInterval === 0n ? undefined : retryInterval - 1n;
 }
 
-/** The same as a wait a timer takes: no more than `LONGEST_RETRY_WAIT_MS`. */
+/** The same as a wait a timer takes: no more than `LONGEST_TIMER_MS`. */
 export function retryWaitMs(retryInterval: bigint): number | undefined {
 	const after = retryAfterMs(retryInterval);
 	if (after === undefined) return undefined;
-	return after > BigInt(LONGEST_RETRY_WAIT_MS)
-		? LONGEST_RETRY_WAIT_MS
-		: Number(after);
+	return after > BigInt(LONGEST_TIMER_MS) ? LONGEST_TIMER_MS : Number(after);
 }
 
 /**
