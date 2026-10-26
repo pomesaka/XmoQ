@@ -50,14 +50,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use xmoq_moqt::TerminationCode;
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::request_error_code as code;
+use xmoq_moqt::message::setup_option;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::token::Token;
 use xmoq_relay_core::{Authorizer, Denied, Operation};
 use xmoq_room_token::{Fault, Grant, Role, RoomKey, namespace_fits};
-
-/// The Setup Option AUTHORIZATION TOKEN (§10.3.1.4).
-const SETUP_AUTHORIZATION_TOKEN: u64 = 0x03;
 
 /// The relay's check of the tokens a room made with `key`.
 pub struct RoomTokens {
@@ -192,7 +190,7 @@ impl Authorizer for RoomTokens {
             let Value::Bytes(bytes) = option.value() else {
                 continue;
             };
-            if option.ty() != SETUP_AUTHORIZATION_TOKEN {
+            if option.ty() != setup_option::AUTHORIZATION_TOKEN {
                 continue;
             }
             let (token_type, value) = match Token::decode(bytes) {

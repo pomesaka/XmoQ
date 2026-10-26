@@ -27,7 +27,6 @@ use xmoq_room_token::{key_of_hex, unhex};
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::Semaphore;
 use xmoq_moqt::name::TrackNamespace;
-use xmoq_moqt_io::StreamConfig;
 use xmoq_moqt_io::wt::{self, Congestion, QuicLimits, WtConnection, WtServer, accept};
 
 use crate::hub::{Arrival, GOAWAY_TIMEOUT, HubConfig, HubHandle, Log};
@@ -136,14 +135,15 @@ xmoq-relay --port <port> --cert-file <pem> --key-file <pem> [flags]
 /// 256 KiB of before: the connection would need about 18 MiB, some 18 GiB
 /// for the 1,000 sessions a relay takes by default (`--max-sessions`);
 /// with 128 KiB the worst is about 9.2 GiB (9.375 MiB a session).
-fn quic_limits(
-    streams: &StreamConfig,
-    idle_timeout: Duration,
-    congestion: Congestion,
-) -> QuicLimits {
+///
+/// WHY of a whole `HubConfig`: the request streams read at once follow its
+/// limit on the requests a session has open (`HubConfig::stream_config`),
+/// which a `StreamConfig` alone does not say.
+fn quic_limits(config: &HubConfig, idle_timeout: Duration, congestion: Congestion) -> QuicLimits {
     const STREAM_RECEIVE_WINDOW: u32 = 128 * 1024;
     const SEND_WINDOW: u32 = 4 * 1024 * 1024;
-    let (max_uni_streams, max_bi_streams) = xmoq_moqt_io::wt::streams_read_at_once(streams);
+    let (max_uni_streams, max_bi_streams) =
+        xmoq_moqt_io::wt::streams_read_at_once(&config.stream_config());
     QuicLimits {
         max_uni_streams,
         max_bi_streams,
@@ -318,7 +318,6 @@ impl SessionFlags {
         limits.peer_requests = self.peer_requests.unwrap_or(limits.peer_requests);
         limits.own_requests = self.own_requests.unwrap_or(limits.own_requests);
         limits.namespaces = self.namespaces.unwrap_or(limits.namespaces);
-        config.streams.max_request_streams = hub::request_streams_for(limits.peer_requests);
     }
 }
 
@@ -553,11 +552,11 @@ async fn main() -> Result<()> {
     config.log_arrivals = args.log_arrivals;
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
-    let limits = quic_limits(&config.streams, args.idle_timeout, args.congestion);
+    let limits = quic_limits(&config, args.idle_timeout, args.congestion);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
     let upstream = args.upstream.map(|upstream| {
-        let streams = config.streams.clone();
+        let streams = config.stream_config();
         let (url, cert_sha256) = (Arc::new(upstream.url), upstream.cert_sha256);
         let connect: hub::Connect<WtConnection> = Arc::new(move |moved_to: Option<String>| {
             let (url, streams) = (Arc::clone(&url), streams.clone());
