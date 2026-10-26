@@ -4,6 +4,8 @@
 //! client in interoperability runs: they wait for `SUBSCRIBED`, `PUBLISHED` and
 //! `SENT`, and read the payload from `OBJECT`. The other lines are for people
 //! reading a log. Keeping all of them here keeps that contract in one place.
+//! What a peer chose (a namespace, a URI, a name of its catalog) is printed
+//! with `xmoq_moqt::printable`, so that it cannot make a line of its own.
 
 use xmoq_moqt::Error as MoqtError;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
@@ -12,6 +14,7 @@ use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{GoAway, PublishDone, Setup};
 use xmoq_moqt::name::{Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
+use xmoq_moqt::printable::{printable, printable_namespace};
 
 use xmoq_moqt_io::{Direction, RequestClose};
 
@@ -43,23 +46,15 @@ pub fn namespaces_subscribed() {
     println!("NAMESPACES_SUBSCRIBED");
 }
 
-/// A namespace as `NAMESPACE`, `NAMESPACE_DONE` print it: its fields, as
-/// text, joined by `/`.
-fn fields(namespace: &TrackNamespace) -> String {
-    namespace
-        .fields()
-        .iter()
-        .map(|field| String::from_utf8_lossy(field).into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 pub fn namespace(namespace: &TrackNamespace) {
-    println!("NAMESPACE namespace={}", fields(namespace));
+    println!("NAMESPACE namespace={}", printable_namespace(namespace));
 }
 
 pub fn namespace_done(namespace: &TrackNamespace) {
-    println!("NAMESPACE_DONE namespace={}", fields(namespace));
+    println!(
+        "NAMESPACE_DONE namespace={}",
+        printable_namespace(namespace)
+    );
 }
 
 pub fn connected(url: &str) {
@@ -79,7 +74,7 @@ pub fn closed_for_a_request_of_the_peer(code: u32, error: &MoqtError) {
 pub fn request_go_away(go_away: &GoAway) {
     println!(
         "REQUEST_GOAWAY uri={} timeout_ms={}",
-        String::from_utf8_lossy(&go_away.new_session_uri),
+        printable(&go_away.new_session_uri),
         go_away.timeout_ms
     );
 }
@@ -87,7 +82,7 @@ pub fn request_go_away(go_away: &GoAway) {
 pub fn go_away(go_away: &GoAway) {
     println!(
         "GOAWAY uri={} timeout_ms={} request_id={}",
-        String::from_utf8_lossy(&go_away.new_session_uri),
+        printable(&go_away.new_session_uri),
         go_away.timeout_ms,
         go_away
             .request_id
@@ -100,8 +95,11 @@ pub fn catalog_track(track: &xmoq_msf::CatalogTrack) {
     let size = |n: Option<u64>| n.map_or("none".to_string(), |n| n.to_string());
     println!(
         "CATALOG_TRACK name={} codec={} width={} height={}",
-        track.name,
-        track.codec.as_deref().unwrap_or("none"),
+        printable(track.name.as_bytes()),
+        track
+            .codec
+            .as_deref()
+            .map_or("none".to_string(), |codec| printable(codec.as_bytes())),
         size(track.width),
         size(track.height),
     );
