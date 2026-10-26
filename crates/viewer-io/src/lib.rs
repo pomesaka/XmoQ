@@ -1,13 +1,9 @@
 //! What a viewer of a room does on its sockets, for the viewer of the
 //! terminal (`xmoq-watch`) and the reader for an agent (`xmoq-agent`): the
-//! room's HTTP API ([`room_client`]), the requests of a session and the
-//! catalog ([`session`]), the catalog of a broadcast that may not be there
-//! yet ([`catalog`]), a track kept on a session ([`kept`]), the chat on
-//! tracks ([`chat_tracks`]), the following of a track of one item a Group,
-//! and the chat's `lines` and a transcript's `speech` ([`follow`]). The
-//! start and the end of a session, and the GOAWAY behind a refusal, are
-//! `client` of `xmoq-moqt-io`'s, as every client's.
-//! What they decide is `xmoq-viewer`'s, where its tests are.
+//! room's HTTP API ([`room_client`]) and the chat on tracks
+//! ([`chat_tracks`]). The tracks of others they read are `xmoq-subscriber`'s,
+//! and the start and the end of a session `client` of `xmoq-moqt-io`'s, as
+//! every client's. What they decide is `xmoq-viewer`'s, where its tests are.
 //!
 //! WHY a crate of its own apart from `xmoq-viewer`, as `xmoq-moqt-io` is
 //! apart from `xmoq-moqt`: the library of `xmoq-watch` touches no socket,
@@ -19,9 +15,5 @@
 // both programs, each with the `unless_ended` of its own loop; one here
 // once a wait that their signal ends is shared.
 
-pub mod catalog;
 pub mod chat_tracks;
-pub mod follow;
-pub mod kept;
 pub mod room_client;
-pub mod session;

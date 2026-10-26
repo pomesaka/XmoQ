@@ -20,7 +20,7 @@ test.each([
 
 /**
  * The rows of `fixtures/chat-history/history-to-fetch.tsv`, which the
- * terminal viewer reads too (`history_to_fetch` of `crates/watch`).
+ * terminal viewer reads too (`past_to_fetch` of `crates/subscriber`).
  */
 function sharedRows(): string[][] {
 	const table = readFileSync(

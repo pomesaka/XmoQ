@@ -4,7 +4,7 @@
 //! publisher may come later, and its latest items by an Absolute Joining
 //! FETCH; each item is given once, in the order of its number, and what was
 //! missed while the subscription was away is fetched when it is made again
-//! (`xmoq_viewer::chat_track` decides). The subscription is kept as
+//! ([`crate::followed`] decides). The subscription is kept as
 //! [`crate::kept`] keeps a track.
 //!
 //! WHY one follower for both: the gatherer and the transcriber publish their
@@ -13,6 +13,7 @@
 
 use std::time::Duration;
 
+use crate::followed::{Gap, Items, past_to_fetch};
 use anyhow::{Result, bail};
 use tokio::sync::mpsc;
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
@@ -26,7 +27,6 @@ use xmoq_moqt_io::{
     Connection, FetchChunk, RequestReader, RequestStreamEvent, SendStream, StreamEnd, Trace,
     send_message,
 };
-use xmoq_viewer::chat_track::{LinesGap, Shown, history_to_fetch};
 
 pub use crate::kept::Asking;
 use crate::kept::{self, KeptTrack, Said, Wanted, on};
@@ -61,7 +61,7 @@ pub enum Out<T> {
     /// An item, each once, in the order of its number.
     Item(T),
     /// Items that were not fetched, told before the items after them.
-    Gap(LinesGap),
+    Gap(Gap),
     /// A line for the program's log, about the following itself.
     Note(String),
 }
@@ -79,8 +79,11 @@ pub struct Track<T> {
     pub payload_most: usize,
     /// The most bytes of the stream of a FETCH.
     pub fetch_most: usize,
+    /// How many of the latest items are fetched where none was had, and wait
+    /// while the FETCH is open ([`Items`]).
+    pub recent: u64,
     /// How many of the items missed are fetched when the subscription is
-    /// made again (`history_to_fetch`).
+    /// made again ([`past_to_fetch`]).
     pub catch_up: u64,
     /// What the notes begin with: `<note>` for the subscription,
     /// `<note>_...` for what becomes of it, and `<fetch_note>_...` for the
@@ -97,7 +100,7 @@ pub struct Track<T> {
 pub struct Follower<T, C: Connection = WtConnection> {
     track: Track<T>,
     kept: KeptTrack<C>,
-    shown: Shown<T>,
+    shown: Items<T>,
     /// The Joining FETCH, while its answer may still come.
     fetch: Option<(RequestId, RequestReader<C::Recv>)>,
     /// The Joining FETCH of the subscription, while its items may still
@@ -139,6 +142,7 @@ impl<T, C: Connection> Follower<T, C> {
     /// missed between them is fetched.
     #[must_use]
     pub fn new(track: Track<T>, asking_with: Asking<C>, had: Option<u64>) -> Self {
+        let recent = track.recent;
         let wanted = Wanted {
             namespace: track.namespace.clone(),
             name: track.name.to_string(),
@@ -149,7 +153,7 @@ impl<T, C: Connection> Follower<T, C> {
         Self {
             track,
             kept: KeptTrack::new(wanted, asking_with),
-            shown: Shown::fetching_after(had),
+            shown: Items::fetching_after(had, recent),
             fetch: None,
             joining: None,
             fetch_stream: None,
@@ -236,7 +240,7 @@ impl<T, C: Connection> Follower<T, C> {
     /// FETCH of this track, its streams are reset and stopped with
     /// `MALFORMED_TRACK` (§2.4.2), and the subscription is asked for again
     /// ([`KeptTrack::malformed`]). The Joining FETCH that was still open is
-    /// given up ([`Shown::fetch_given_up`]): the next one asks for its lines
+    /// given up ([`Items::fetch_given_up`]): the next one asks for its lines
     /// again. `None` where it is another's: a FETCH of this track that is
     /// over or was given up is not named, the session holds it no more.
     pub fn malformed(&mut self, request: RequestId) -> Option<Vec<Out<T>>> {
@@ -312,9 +316,10 @@ impl<T, C: Connection> Follower<T, C> {
             "{} track_alias={}",
             self.track.note, subscription.track_alias
         ))];
-        let plan = history_to_fetch(
+        let plan = past_to_fetch(
             self.shown.last(),
             subscription.largest.map(|largest| largest.group),
+            self.track.recent,
             self.track.catch_up,
         );
         let joining_request_id = subscription.request.value();
@@ -547,6 +552,7 @@ mod tests {
             rendezvous_ms: None,
             payload_most: 1024,
             fetch_most: 1024,
+            recent: 16,
             catch_up: 10,
             note: "LINES",
             fetch_note: "HISTORY",

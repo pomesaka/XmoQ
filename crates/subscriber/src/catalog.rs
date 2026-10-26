@@ -19,13 +19,12 @@
 use anyhow::{Result, anyhow};
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestId, Session};
-use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::Connection;
 use xmoq_moqt_io::wt::WtConnection;
-use xmoq_msf::CatalogTrack;
+use xmoq_msf::{CATALOG_TRACK, CatalogTrack, MAX_CATALOG_LENGTH};
 
 use crate::kept::{Asking, Came, KeptTrack, Said, Wanted};
-use crate::session::{CATALOG, CATALOG_LIMIT, CatalogFetch, CatalogNotRead, Events, Requests};
+use crate::session::{CatalogNotRead, Events, Requests};
 
 /// What became of the broadcast, by its catalog.
 #[derive(Debug)]
@@ -51,12 +50,7 @@ pub enum Became {
 pub struct FollowedCatalog<C: Connection = WtConnection> {
     namespace: TrackNamespace,
     kept: KeptTrack<C>,
-    /// The FETCH the catalog was read with, while it is held.
-    fetch: Option<CatalogFetch<C>>,
     /// Whether [`Became::Began`] was said and no [`Became::Ended`] since.
-    /// WHY apart from `fetch`: the FETCH can be given up (a malformed
-    /// track) while the subscription goes on, and the end of the
-    /// subscription is the end of the broadcast all the same.
     began: bool,
 }
 
@@ -71,9 +65,9 @@ impl<C: Connection> FollowedCatalog<C> {
     ) -> Self {
         let wanted = Wanted {
             namespace: namespace.clone(),
-            name: CATALOG.to_string(),
+            name: CATALOG_TRACK.to_string(),
             rendezvous_ms,
-            payload_most: Some(CATALOG_LIMIT),
+            payload_most: Some(MAX_CATALOG_LENGTH),
             // WHY: a broadcast that is not there yet is what is waited for,
             // and a SUBSCRIBE the relay held and did not answer is one.
             again_after_failure: true,
@@ -81,7 +75,6 @@ impl<C: Connection> FollowedCatalog<C> {
         Self {
             namespace,
             kept: KeptTrack::new(wanted, asking_with),
-            fetch: None,
             began: false,
         }
     }
@@ -90,12 +83,6 @@ impl<C: Connection> FollowedCatalog<C> {
     #[must_use]
     pub fn is_there(&self) -> bool {
         self.began
-    }
-
-    /// The catalog's FETCH, while it is held.
-    #[cfg(test)]
-    fn fetch_request(&self) -> Option<RequestId> {
-        self.fetch.as_ref().map(CatalogFetch::request)
     }
 
     /// The Track Alias of the catalog, while it is subscribed to.
@@ -130,7 +117,7 @@ impl<C: Connection> FollowedCatalog<C> {
         };
         Ok(match said {
             Said::Subscribed { .. } => return self.read(session, events).await,
-            Said::Ended { how, pause_ms } => self.ended(session, how, pause_ms),
+            Said::Ended { how, pause_ms } => self.ended(how, pause_ms),
             Said::Refused {
                 error_code,
                 pause_ms,
@@ -146,21 +133,11 @@ impl<C: Connection> FollowedCatalog<C> {
 
     /// The session ended `request` for a malformed track
     /// (`Session::cancel_malformed`): what became of the broadcast where it
-    /// was the catalog's SUBSCRIBE (asked for again) or FETCH (the catalog
-    /// came already); `None` where it is another's.
-    pub fn malformed(&mut self, session: &mut Session, request: RequestId) -> Option<Became> {
+    /// was the catalog's SUBSCRIBE, which is asked for again; `None` where
+    /// it is another's. Its FETCH was closed once the catalog was read.
+    pub fn malformed(&mut self, request: RequestId) -> Option<Became> {
         if let Some(Said::Ended { how, pause_ms }) = self.kept.malformed(request) {
-            return Some(self.ended(session, how, pause_ms));
-        }
-        if self
-            .fetch
-            .as_ref()
-            .is_some_and(|fetch| fetch.request() == request)
-        {
-            if let Some(fetch) = self.fetch.take() {
-                fetch.end(stream_reset_code::MALFORMED_TRACK);
-            }
-            return Some(Became::Nothing);
+            return Some(self.ended(how, pause_ms));
         }
         None
     }
@@ -168,16 +145,10 @@ impl<C: Connection> FollowedCatalog<C> {
     /// Gives the catalog up, in `session` too.
     pub fn cancel(self, session: &mut Session) {
         self.kept.cancel(session);
-        if let Some(fetch) = self.fetch {
-            fetch.cancel(session);
-        }
     }
 
     /// The subscription ended: the broadcast where it had come.
-    fn ended(&mut self, session: &mut Session, how: String, pause_ms: u64) -> Became {
-        if let Some(fetch) = self.fetch.take() {
-            fetch.cancel(session);
-        }
+    fn ended(&mut self, how: String, pause_ms: u64) -> Became {
         if std::mem::take(&mut self.began) {
             Became::Ended(how)
         } else {
@@ -206,8 +177,7 @@ impl<C: Connection> FollowedCatalog<C> {
             .read_catalog(request, track_alias, events, &stops)
             .await
         {
-            Ok((tracks, fetch)) => {
-                self.fetch = Some(fetch);
+            Ok(tracks) => {
                 self.began = true;
                 Ok(Became::Began(tracks))
             }
@@ -251,9 +221,6 @@ mod tests {
         Gives,
         /// Ends the subscription it gave with `PUBLISH_DONE`.
         Ends,
-        /// The track of the catalog's FETCH is found malformed
-        /// (`Session::cancel_malformed`), the FETCH alone.
-        BreaksTheFetch,
     }
 
     /// What `became` is written as in the table.
@@ -324,12 +291,6 @@ mod tests {
         let mut subscriptions = Vec::new();
         let mut became = Vec::new();
         for step in steps {
-            if let Relay::BreaksTheFetch = step {
-                let request = catalog.fetch_request().expect("a FETCH");
-                let malformed = catalog.malformed(&mut session, request);
-                became.push(malformed.map_or_else(|| "none".to_string(), |b| written(&b)));
-                continue;
-            }
             if let Relay::Ends = step {
                 let mut send: <MemoryConnection as Connection>::Send =
                     subscriptions.pop().expect("a subscription to end");
@@ -390,7 +351,7 @@ mod tests {
     async fn the_catalog_is_asked_for_until_it_comes_and_again_when_it_ends() {
         // (what the relay does, in order; what became of the broadcast after
         //  each)
-        let cases: [(&[Relay], &[&str]); 5] = [
+        let cases: [(&[Relay], &[&str]); 4] = [
             (&[Relay::Gives], &["began 13"]),
             (
                 &[
@@ -414,12 +375,6 @@ mod tests {
             (
                 &[Relay::Gives, Relay::Ends],
                 &["began 13", "ended PUBLISH_DONE status_code=0x2"],
-            ),
-            // The broadcast ends with its subscription, whatever became of
-            // the catalog's FETCH.
-            (
-                &[Relay::Gives, Relay::BreaksTheFetch, Relay::Ends],
-                &["began 13", "nothing", "ended PUBLISH_DONE status_code=0x2"],
             ),
         ];
         for (steps, expected) in cases {
@@ -521,7 +476,53 @@ mod tests {
         assert_eq!(end_of(&mut fetch_recv).await, "Reset(Some(1))");
         assert_eq!(stop_of(&mut fetch_send).await, "Stopped(Some(1))");
         let track =
-            xmoq_moqt::name::FullTrackName::new(namespace, CATALOG.as_bytes().to_vec()).unwrap();
+            xmoq_moqt::name::FullTrackName::new(namespace, CATALOG_TRACK.as_bytes().to_vec())
+                .unwrap();
         assert!(session.subscribe(track, vec![]).is_ok());
+    }
+
+    /// A catalog that came on the subscription before its FETCH was
+    /// answered: the FETCH is not wanted any more, and is cancelled
+    /// (§3.3.2), as a followed track closes its Joining FETCH once it is not.
+    #[tokio::test]
+    async fn a_catalog_that_came_on_the_subscription_first_cancels_its_fetch() {
+        let (ours, relay) = memory::pair();
+        let mut session = Session::new(Role::Client, Transport::WebTransport);
+        let (queue, received) = mpsc::channel(8);
+        let mut events = Events::new(received);
+        let namespace = TrackNamespace::new(vec![b"xmoq".to_vec(), b"demo".to_vec()]).unwrap();
+        let mut catalog = FollowedCatalog::new(
+            namespace,
+            None,
+            Asking {
+                connection: Arc::new(ours),
+                stops: StreamStops::default(),
+                token: None,
+                answer_wait_ms: 10_000,
+                open_wait_ms: 10_000,
+            },
+        );
+        let ask_now = catalog.next().await;
+        catalog
+            .on(&mut session, &mut events, ask_now)
+            .await
+            .unwrap();
+        let subscribe_ok = ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: 1,
+            parameters: vec![],
+            track_properties: vec![],
+        });
+        let (settled, _subscription) = tokio::join!(catalog.next(), answer(&relay, subscribe_ok));
+        queue.send(catalog_object(1)).await.unwrap();
+        let (read, fetch) = tokio::join!(
+            catalog.on(&mut session, &mut events, settled),
+            relay.accept_bi()
+        );
+        let (mut fetch_send, mut fetch_recv) = fetch.unwrap();
+        assert_eq!(written(&read.unwrap()), "began 13");
+        assert!(catalog.is_there());
+        // CANCELLED (0x1) both ways.
+        assert_eq!(end_of(&mut fetch_recv).await, "Reset(Some(1))");
+        assert_eq!(stop_of(&mut fetch_send).await, "Stopped(Some(1))");
     }
 }

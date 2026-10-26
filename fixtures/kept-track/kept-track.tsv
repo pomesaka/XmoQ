@@ -1,0 +1,16 @@
+a subscription that ends with PUBLISH_DONE is asked again after the pause	again	subscribed publish-done	subscribed again:1000
+a FIN of the publisher without PUBLISH_DONE ends it as well	again	subscribed fin	subscribed again:1000
+a reset of its stream ends it	again	subscribed reset	subscribed again:1000
+a connection lost while it is read ends it	again	subscribed lost	subscribed again:1000
+a GOAWAY on its stream has it asked again on this session	again	subscribed goaway	subscribed again:1000
+a track found malformed is asked again after the pause	again	subscribed malformed	subscribed again:1000
+a refusal without a time	again	refused:0x10	again:1000
+a refusal that names 3 s	again	refused:0x10:3000	again:3000
+refusals that say at once double from 100 ms, and a subscription begins them anew	again	refused:0x5:0 refused:0x5:0 subscribed publish-done refused:0x5:0	again:100 again:200 subscribed again:1000 again:100
+a SUBSCRIBE that could not be sent is asked again as a refusal without a time	again	not-sent	again:1000
+a SUBSCRIBE not answered, the same	again	not-answered	again:1000
+a track that gives up on a failure: not sent	give-up	not-sent	given-up
+a track that gives up on a failure: not answered	give-up	not-answered	given-up
+an end has it asked again whatever it does on a failure	give-up	subscribed publish-done	subscribed again:1000
+a message that breaks the protocol on its stream closes the session	again	subscribed violation	subscribed closed:0x3
+an answer that breaks the protocol closes the session	give-up	violation	closed:0x3

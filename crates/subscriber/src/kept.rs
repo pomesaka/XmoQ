@@ -17,13 +17,8 @@
 //!   subscription's stream or as the answer to its SUBSCRIBE, is the caller's
 //!   error, and the session is closed for it.
 //!
-//! FIXME: the rule is read against the pages' only by eye; a table of what
-//! comes and what becomes of it in `fixtures/ask-again/`, read by a test
-//! here and by those of `keepTrackOnSession` (`@xmoq/media`), `@xmoq/chat`
-//! and `@xmoq/transcript`, would hold the two together. WHY NOT yet: the
-//! decision takes the session of `xmoq-moqt`, which `xmoq-viewer` does not
-//! depend on, and the three on the TypeScript side have no shape in common
-//! to read it with.
+//! What becomes of each is [`decide`], without input or output, and the
+//! rows of `fixtures/kept-track/kept-track.tsv` are read in its test.
 //!
 //! WHY a GOAWAY asks again on this session, also where it names a URI
 //! (§10.4 has the request sent there): the rest of the session stays here,
@@ -134,6 +129,56 @@ pub enum Said {
     GivenUp(String),
     /// A message on its stream that leaves the subscription as it is.
     Other(RequestEvent),
+}
+
+/// What happened to a kept track: the steps of
+/// `fixtures/kept-track/kept-track.tsv` (its README names each).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Happened {
+    /// Its SUBSCRIBE was answered with `SUBSCRIBE_OK`.
+    Subscribed,
+    /// Its subscription ended: `PUBLISH_DONE`, its stream closed (a FIN, a
+    /// reset, a lost connection), a GOAWAY on its stream (§10.4), or the
+    /// track found malformed (§2.4.2).
+    Ended,
+    /// Its SUBSCRIBE was refused, with the wait its Retry Interval names
+    /// (`RequestError::retry_wait_ms`; `None` for none).
+    Refused(Option<u64>),
+    /// Its SUBSCRIBE could not be sent, or was not answered.
+    NotSent,
+}
+
+/// What becomes of a kept track after what happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Becomes {
+    /// It is subscribed to.
+    Subscribed,
+    /// It is asked for again after this pause, in milliseconds.
+    Again(u64),
+    /// It is not asked for again on this session.
+    GivenUp,
+}
+
+/// What becomes of a track after `happened`, by the rule `again` keeps of
+/// the pauses (`AskAgain` of `xmoq-again`); `again_after_failure` is
+/// [`Wanted::again_after_failure`]. A message that breaks the protocol is
+/// not one of these: it is the caller's error, and the session is closed
+/// with its code (`client::termination_code` of `xmoq-moqt-io`).
+///
+/// WHY a failure is paused for as a refusal without a Retry Interval is,
+/// where the track is asked again: as the pages that ask again
+/// (`afterRefusal` of `@xmoq/moqt`).
+pub fn decide(happened: Happened, again_after_failure: bool, again: &mut AskAgain) -> Becomes {
+    match happened {
+        Happened::Subscribed => {
+            again.subscribed();
+            Becomes::Subscribed
+        }
+        Happened::Ended => Becomes::Again(again.after_end()),
+        Happened::Refused(named_ms) => Becomes::Again(again.after_refusal(named_ms)),
+        Happened::NotSent if again_after_failure => Becomes::Again(again.after_refusal(None)),
+        Happened::NotSent => Becomes::GivenUp,
+    }
 }
 
 /// What a thing on the subscription's stream does to it.
@@ -381,14 +426,25 @@ impl<C: Connection> KeptTrack<C> {
 
     /// A SUBSCRIBE that could not be sent, or was not answered, for `why`.
     fn not_sent(&mut self, why: String) -> Said {
-        if !self.wanted.again_after_failure {
-            return Said::GivenUp(why);
+        match decide(
+            Happened::NotSent,
+            self.wanted.again_after_failure,
+            &mut self.again,
+        ) {
+            Becomes::Again(pause_ms) => {
+                self.ask_in(pause_ms);
+                Said::Failed { why, pause_ms }
+            }
+            Becomes::GivenUp | Becomes::Subscribed => Said::GivenUp(why),
         }
-        // As the pages that ask again: a failure is paused for as a refusal
-        // without a Retry Interval is (`afterRefusal` of `@xmoq/moqt`).
-        let pause_ms = self.again.after_refusal(None);
-        self.ask_in(pause_ms);
-        Said::Failed { why, pause_ms }
+    }
+
+    /// The pause [`decide`] gives after `happened`, where it is one.
+    fn pause_after(&mut self, happened: Happened) -> u64 {
+        match decide(happened, self.wanted.again_after_failure, &mut self.again) {
+            Becomes::Again(pause_ms) => pause_ms,
+            Becomes::Subscribed | Becomes::GivenUp => 0,
+        }
     }
 
     /// What came of the SUBSCRIBE.
@@ -400,13 +456,17 @@ impl<C: Connection> KeptTrack<C> {
     ) -> Result<Said, RequestFault> {
         Ok(match settle(session, asked, sent) {
             Ok(subscription) => {
-                self.again.subscribed();
+                decide(
+                    Happened::Subscribed,
+                    self.wanted.again_after_failure,
+                    &mut self.again,
+                );
                 let track_alias = subscription.track_alias;
                 self.take(subscription);
                 Said::Subscribed { track_alias }
             }
             Err(NotSubscribed::Refused(error)) => {
-                let pause_ms = self.again.after_refusal(error.retry_wait_ms());
+                let pause_ms = self.pause_after(Happened::Refused(error.retry_wait_ms()));
                 self.ask_in(pause_ms);
                 Said::Refused {
                     error_code: error.error_code,
@@ -441,7 +501,7 @@ impl<C: Connection> KeptTrack<C> {
         if let Some(subscription) = self.let_go() {
             subscription.cancel_with(code);
         }
-        let pause_ms = self.again.after_end();
+        let pause_ms = self.pause_after(Happened::Ended);
         self.ask_in(pause_ms);
         Said::Ended { how, pause_ms }
     }
@@ -479,6 +539,64 @@ mod tests {
     use xmoq_moqt_io::{ReadError, RecvStream, RequestClose, Trace, send_message};
 
     use super::*;
+
+    /// The rows of `fixtures/kept-track/kept-track.tsv`, which
+    /// `@xmoq/tracks` is to read too.
+    #[test]
+    fn what_becomes_of_a_kept_track_is_as_the_shared_table_says() {
+        let path = format!(
+            "{}/../../fixtures/kept-track/kept-track.tsv",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let table =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        assert!(table.ends_with('\n') && !table.ends_with("\n\n"), "{path}");
+        let rows: Vec<Vec<&str>> = table.lines().map(|row| row.split('\t').collect()).collect();
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 16, "{path}");
+        for row in rows {
+            let [case, failure, steps, expected] = row.as_slice() else {
+                panic!("a row of four columns: {row:?}");
+            };
+            let again_after_failure = match *failure {
+                "again" => true,
+                "give-up" => false,
+                other => panic!("{case}: {other}"),
+            };
+            let mut again = AskAgain::default();
+            let got: Vec<String> = steps
+                .split(' ')
+                .map(|step| {
+                    let happened = match step {
+                        "subscribed" => Happened::Subscribed,
+                        "publish-done" | "fin" | "reset" | "lost" | "goaway" | "malformed" => {
+                            Happened::Ended
+                        }
+                        "not-sent" | "not-answered" => Happened::NotSent,
+                        // The caller's error: the session is closed with its
+                        // code.
+                        "violation" => {
+                            let error = xmoq_moqt::Error::ProtocolViolation("a message");
+                            let code = xmoq_moqt_io::client::termination_code(&error);
+                            return format!("closed:{code:#x}");
+                        }
+                        refused => {
+                            let mut fields = refused.split(':');
+                            assert_eq!(fields.next(), Some("refused"), "{case}: {step}");
+                            let _code = fields.next().expect("a code");
+                            Happened::Refused(fields.next().map(|ms| ms.parse().expect("ms")))
+                        }
+                    };
+                    match decide(happened, again_after_failure, &mut again) {
+                        Becomes::Subscribed => "subscribed".to_string(),
+                        Becomes::Again(pause_ms) => format!("again:{pause_ms}"),
+                        Becomes::GivenUp => "given-up".to_string(),
+                    }
+                })
+                .collect();
+            assert_eq!(got.join(" "), *expected, "{case}");
+        }
+    }
 
     /// What the thing on the stream is to do.
     #[derive(Debug)]

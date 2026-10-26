@@ -1,7 +1,7 @@
 //! The chat on `MoQ` tracks, on the session of the broadcast
 //! (`xmoq_viewer::chat_track` decides): the viewer announces its namespace
 //! and publishes `said` to the gatherer that subscribes to it, and follows
-//! the room's `lines` ([`crate::follow`]). Nothing of it ends the session:
+//! the room's `lines` (`xmoq_subscriber::follow`). Nothing of it ends the session:
 //! what fails is said, and the broadcast plays on.
 
 use std::sync::Arc;
@@ -26,12 +26,13 @@ use xmoq_moqt_io::{
     Connection, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream, StreamStops,
     Trace, send_message,
 };
-use xmoq_viewer::chat_track::{LinesGap, Say, Saying};
+use xmoq_subscriber::followed::Gap;
+use xmoq_viewer::chat_track::{Say, Saying};
 
-use crate::follow::{self, Asking, Follower, Track, send_request};
-use crate::session::Requests;
+use xmoq_subscriber::follow::{self, Asking, Follower, Track, send_request};
+use xmoq_subscriber::session::Requests;
 
-pub use crate::follow::Came;
+pub use xmoq_subscriber::follow::Came;
 
 type Send = <WtConnection as Connection>::Send;
 type Recv = <WtConnection as Connection>::Recv;
@@ -56,7 +57,7 @@ pub enum Out {
     /// A line of the room, each once, in the order of its number.
     Line(Line),
     /// Lines that were not fetched, told before the lines after them.
-    Gap(LinesGap),
+    Gap(Gap),
     /// A line for the program's log, about the chat on tracks itself.
     Note(String),
 }
@@ -96,7 +97,7 @@ impl ChatTracks {
     /// relay that refuses it is said at once. `lines` is asked for from the
     /// loop ([`Self::next`]), where the broadcast plays meanwhile. `had` is
     /// the newest line shown on the sessions before, so that what was
-    /// missed between them is fetched (`history_to_fetch`), `catch_up` of
+    /// missed between them is fetched (`past_to_fetch`), `catch_up` of
     /// them at the most. `requests` carries the `sub` token of the room's
     /// namespace.
     ///
@@ -160,6 +161,7 @@ impl ChatTracks {
                 rendezvous_ms: Some(follow::RENDEZVOUS_MS),
                 payload_most: LINES_PAYLOAD_MOST,
                 fetch_most: FETCH_LIMIT,
+                recent: xmoq_viewer::chat_track::RECENT_LINES,
                 catch_up,
                 note: "CHAT_TRACKS_LINES",
                 fetch_note: "CHAT_TRACKS",

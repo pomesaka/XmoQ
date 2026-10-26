@@ -31,13 +31,15 @@ use xmoq_moqt_io::{
     UniEvent, read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_msf::CatalogTrack;
+use xmoq_subscriber::catalog::{Became, FollowedCatalog};
+use xmoq_subscriber::follow::{Asking, Follower, Out as FollowOut, RENDEZVOUS_MS, Track};
+use xmoq_subscriber::session::{
+    self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of,
+};
 use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
 use xmoq_transcript_tracks::payloads::{Speech, read_speech};
-use xmoq_viewer_io::catalog::{Became, FollowedCatalog};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
-use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, RENDEZVOUS_MS, Track};
 use xmoq_viewer_io::room_client::{HeldSeat, SeatLost};
-use xmoq_viewer_io::session::{self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of};
 
 use crate::frames::{Job, Pictures};
 use crate::meeting::InMeeting;
@@ -175,7 +177,7 @@ impl Chat {
     /// What came on the stream of the `SUBSCRIBE_NAMESPACE`.
     ///
     /// FIXME: one keeping of a `SUBSCRIBE_NAMESPACE` for this and for the
-    /// other (`meeting::InMeeting::on_watching`), as `xmoq_viewer_io::kept` is for a track, where only
+    /// other (`meeting::InMeeting::on_watching`), as `xmoq_subscriber::kept` is for a track, where only
     /// more namespaces than the session keeps ask again, and any other
     /// message that breaks the protocol closes the session.
     fn on_watching(
@@ -690,6 +692,7 @@ pub async fn attend(
                     rendezvous_ms: Some(RENDEZVOUS_MS),
                     payload_most: SPEECH_PAYLOAD_MOST,
                     fetch_most: SPEECH_FETCH_MOST,
+                    recent: xmoq_viewer::chat_track::RECENT_LINES,
                     catch_up: SPEECH_CATCH_UP,
                     note: "XMOQ_AGENT_SPEECH",
                     fetch_note: "XMOQ_AGENT_SPEECH",
@@ -966,7 +969,7 @@ pub async fn attend(
                         {
                             continue;
                         }
-                        if let Some(became) = catalog.as_mut().and_then(|followed| followed.malformed(&mut session, request)) {
+                        if let Some(became) = catalog.as_mut().and_then(|followed| followed.malformed(request)) {
                             eprintln!("XMOQ_AGENT_CATALOG_MALFORMED");
                             if let Became::Ended(_) = became {
                                 broadcast_ended(reader, place, &mut video, &mut session, pictures.is_some());

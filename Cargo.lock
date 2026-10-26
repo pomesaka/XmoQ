@@ -2817,6 +2817,7 @@ dependencies = [
  "xmoq-msf",
  "xmoq-picture",
  "xmoq-room-token",
+ "xmoq-subscriber",
  "xmoq-transcript-tracks",
  "xmoq-viewer",
  "xmoq-viewer-io",
@@ -2954,6 +2955,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "xmoq-subscriber"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "xmoq-again",
+ "xmoq-loc",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
+ "xmoq-msf",
+]
+
+[[package]]
 name = "xmoq-transcriber"
 version = "0.0.0"
 dependencies = [
@@ -3002,6 +3016,7 @@ dependencies = [
  "xmoq-moqt-io",
  "xmoq-msf",
  "xmoq-room-token",
+ "xmoq-subscriber",
  "xmoq-viewer",
 ]
 
@@ -3023,6 +3038,7 @@ dependencies = [
  "xmoq-msf",
  "xmoq-picture",
  "xmoq-room-token",
+ "xmoq-subscriber",
  "xmoq-viewer",
  "xmoq-viewer-io",
 ]

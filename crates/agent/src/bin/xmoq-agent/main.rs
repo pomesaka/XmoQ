@@ -33,8 +33,8 @@ use xmoq_moqt_io::StreamConfig;
 use xmoq_moqt_io::client::{self, CloseWait, Signals};
 use xmoq_moqt_io::wt;
 use xmoq_room_token::Role;
+use xmoq_subscriber::follow::RENDEZVOUS_MS;
 use xmoq_viewer::room::{self, NoSeat, Refusal};
-use xmoq_viewer_io::follow::RENDEZVOUS_MS;
 use xmoq_viewer_io::room_client::{ChatTokens, HeldSeat, ROOM_COMES_WITHIN, RoomClient};
 
 use crate::attend::{Ended, attend};

@@ -46,16 +46,16 @@ use xmoq_moqt_io::{
 };
 use xmoq_msf::CatalogTrack;
 use xmoq_picture::video_decoder::VideoDecoder;
-use xmoq_viewer::chat_track::{shown, shown_gap};
-use xmoq_viewer::room;
-use xmoq_viewer_io::catalog::{Became, FollowedCatalog};
-use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
-use xmoq_viewer_io::follow::RENDEZVOUS_MS;
-use xmoq_viewer_io::kept::{Asking, KeptTrack, Said, Wanted};
-use xmoq_viewer_io::room_client::{ChatTokens, ROOM_COMES_WITHIN, RoomClient};
-use xmoq_viewer_io::session::{
+use xmoq_subscriber::catalog::{Became, FollowedCatalog};
+use xmoq_subscriber::follow::RENDEZVOUS_MS;
+use xmoq_subscriber::kept::{Asking, KeptTrack, Said, Wanted};
+use xmoq_subscriber::session::{
     self, Events, GoingAway, GoneAway, Requests, Subscription, new_url, timestamp_of,
 };
+use xmoq_viewer::chat_track::{shown, shown_gap};
+use xmoq_viewer::room;
+use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
+use xmoq_viewer_io::room_client::{ChatTokens, ROOM_COMES_WITHIN, RoomClient};
 use xmoq_watch::args::{Args, Chat, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
 use xmoq_watch::keys::{Asked, Keys};
@@ -731,7 +731,7 @@ fn tell_chat(ui: &mut Ui, out: ChatOut) {
                 "CHAT_GAP after={} before={}",
                 gap.after, gap.before
             ));
-            ui.chat(shown_gap(gap));
+            ui.chat(shown_gap(gap.after, gap.before));
         }
         ChatOut::Note(line) => ui.note(&line),
     }
@@ -882,7 +882,7 @@ async fn play(
     // one that falls behind), and a new session would stop the picture for
     // the sake of the sound. The watching page does the same
     // (`keepTrackOnSession` of `@xmoq/media`), by the same rule
-    // (`xmoq_viewer_io::kept`).
+    // (`xmoq_subscriber::kept`).
     let mut audio = KeptTrack::subscribed(
         Wanted {
             namespace: namespace.clone(),
@@ -1218,7 +1218,7 @@ async fn play(
                             video_malformed = true;
                         } else if let Some(said) = audio.malformed(request) {
                             tell_audio(ui, said);
-                        } else if catalog.as_mut().is_some_and(|catalog| catalog.malformed(&mut session, request).is_some()) {
+                        } else if catalog.as_mut().is_some_and(|catalog| catalog.malformed(request).is_some()) {
                             ui.note("CATALOG_MALFORMED");
                         } else if let Some(outs) = chat.as_mut().and_then(|tracks| tracks.malformed(request)) {
                             for out in outs {

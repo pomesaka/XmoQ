@@ -19,6 +19,7 @@ xmoq-msf = { path = "../msf" }
 xmoq-picture = { path = "../picture" }
 xmoq-room-token = { path = "../room-token" }
 xmoq-viewer = { path = "../viewer" }
+xmoq-subscriber = { path = "../subscriber" }
 xmoq-viewer-io = { path = "../viewer-io" }
 anyhow = "=1.0.100"
 serde_json = "=1.0.152"
