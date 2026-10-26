@@ -1132,7 +1132,7 @@ impl Client<'_> {
             .open_request(request_id, &message, "track-status")
             .await?;
         let answer = self
-            .response(request_id, &mut stream, "track-status", &parameters)
+            .response_stopping_data(request_id, &mut stream, "track-status", &parameters)
             .await?;
         stream.finish();
         match answer {
@@ -1155,7 +1155,7 @@ impl Client<'_> {
             .open_request(request_id, &message, "subscribe-namespace")
             .await?;
         match self
-            .response(request_id, &mut stream, "subscribe-namespace", &parameters)
+            .response_stopping_data(request_id, &mut stream, "subscribe-namespace", &parameters)
             .await?
         {
             RequestEvent::NamespacesSubscribed => report::namespaces_subscribed(),
@@ -1171,6 +1171,8 @@ impl Client<'_> {
                     stream.finish();
                     return Ok(());
                 },
+                // Nothing on a data stream was asked for (`response_stopping_data`).
+                event = self.objects.next_event() => self.on_unasked_stream(event?)?,
                 event = stream.next_event() => match event? {
                     RequestStreamEvent::Message(message) => {
                         match on_request(&mut self.session, request_id, message)? {
@@ -1631,6 +1633,31 @@ impl Client<'_> {
         let event = self
             .in_time(label, parameters, stream.next_event())
             .await??;
+        self.on_response(request_id, event, label)
+    }
+
+    /// [`Self::response`], for a mode that asks for nothing on data streams:
+    /// what they bring meanwhile is stopped ([`Self::on_unasked_stream`]).
+    /// WHY taken at all: the readers wait while what they brought is not
+    /// taken, and the control stream comes through them too, a GOAWAY and
+    /// its end among it (`io::start_readers`).
+    async fn response_stopping_data(
+        &mut self,
+        request_id: RequestId,
+        stream: &mut RequestStream,
+        label: &str,
+        parameters: &[Parameter],
+    ) -> Result<RequestEvent> {
+        let wait = xmoq_moqt::params::answer_wait_ms(self.args.waits.answer, parameters);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(wait);
+        let event = loop {
+            tokio::select! {
+                answer = tokio::time::timeout_at(deadline, stream.next_event()) => {
+                    break answer.map_err(|_| not_answered(label, wait))??;
+                }
+                event = self.objects.next_event() => self.on_unasked_stream(event?)?,
+            }
+        };
         self.on_response(request_id, event, label)
     }
 
@@ -3028,7 +3055,14 @@ impl Client<'_> {
                 if self.args.on_line.subscribe {
                     report::ready_to_subscribe();
                     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
-                    wait_for_line(&mut stdin, "subscribe").await?;
+                    // Nothing on a data stream is asked for before the
+                    // SUBSCRIBE (`response_stopping_data`).
+                    loop {
+                        tokio::select! {
+                            line = wait_for_line(&mut stdin, "subscribe") => break line?,
+                            event = self.objects.next_event() => self.on_unasked_stream(event?)?,
+                        }
+                    }
                 }
                 self.subscribe(*objects).await?;
                 if !self.args.video.stay_after.is_zero() {
@@ -3075,7 +3109,7 @@ async fn run_session(
         args.mode,
         Mode::Publish { .. } | Mode::PublishNamespace { .. }
     );
-    let (mut session_inbox, objects, peer_requests, readers) = io::start_readers(
+    let (mut session_inbox, mut objects, peer_requests, readers) = io::start_readers(
         Arc::clone(connection),
         args.trace.clone(),
         stops.clone(),
@@ -3097,8 +3131,8 @@ async fn run_session(
     xmoq_moqt_io::send_message(control, &setup, &args.trace, "control").await?;
 
     let setup_wait = Duration::from_millis(args.waits.setup);
-    let Ok(first) = tokio::time::timeout(setup_wait, session_inbox.next_control_message()).await
-    else {
+    let waited = io::first_control_message(&mut session_inbox, &mut objects);
+    let Ok(first) = tokio::time::timeout(setup_wait, waited).await else {
         return Err(client::NoSetupInTime(setup_wait).into());
     };
     let ControlEvent::Setup(peer_setup) = session.on_control_message(first?)? else {
