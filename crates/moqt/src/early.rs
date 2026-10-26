@@ -71,10 +71,15 @@ pub enum Arrival {
 
 /// What becomes of an Object of an alias in `alias`, while `held` bytes are
 /// held for the session, where it is counted at `bytes`.
+///
+/// `alias_may_come`: whether an answer may still give the alias. At a
+/// client, while a `SUBSCRIBE` of its waits for its answer; at the relay
+/// always, its own timer (`early_stream_timeout` of `xmoq-relay`'s hub)
+/// ending the wait.
 #[must_use]
 pub fn arrival(
     alias: SubscribedAlias<'_>,
-    subscribe_pending: bool,
+    alias_may_come: bool,
     held: usize,
     bytes: usize,
 ) -> Arrival {
@@ -82,9 +87,7 @@ pub fn arrival(
         SubscribedAlias::Established(_) | SubscribedAlias::Draining(_) => Arrival::Deliver,
         // §11.1: Objects of a subscription that is over are not wanted.
         SubscribedAlias::Retired => Arrival::Stop(stream_reset_code::CANCELLED),
-        SubscribedAlias::Unknown if !subscribe_pending => {
-            Arrival::Stop(stream_reset_code::CANCELLED)
-        }
+        SubscribedAlias::Unknown if !alias_may_come => Arrival::Stop(stream_reset_code::CANCELLED),
         // WHY INTERNAL_ERROR, as `@xmoq/moqt`: the limit is this side's.
         SubscribedAlias::Unknown if held.saturating_add(bytes) > MOST_HELD_BYTES => {
             Arrival::Stop(stream_reset_code::INTERNAL_ERROR)
@@ -105,10 +108,11 @@ pub enum Settle {
     Stop(u32),
 }
 
-/// What becomes of Objects held for an alias that is now `alias`.
+/// What becomes of Objects held for an alias that is now `alias`;
+/// `alias_may_come` as for [`arrival`].
 #[must_use]
-pub fn settle(alias: SubscribedAlias<'_>, subscribe_pending: bool) -> Settle {
-    match arrival(alias, subscribe_pending, 0, 0) {
+pub fn settle(alias: SubscribedAlias<'_>, alias_may_come: bool) -> Settle {
+    match arrival(alias, alias_may_come, 0, 0) {
         Arrival::Deliver => Settle::Release,
         Arrival::Hold => Settle::Keep,
         Arrival::Stop(code) => Settle::Stop(code),
