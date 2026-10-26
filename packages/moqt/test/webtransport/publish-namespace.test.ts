@@ -131,6 +131,17 @@ describe("withdrawing a namespace with the signal of publishNamespace (§6.2)", 
 			},
 			call: "resolved",
 		},
+		{
+			// §6.2: the namespace is withdrawn "by cancelling the request (see
+			// Section 3.3.2)", STOP_SENDING among the ways.
+			name: "stopped by the peer after the answer",
+			end: async (stream) => {
+				await stream.reply.write(hex(REQUEST_OK));
+				await flush();
+				await stream.sent.cancel(fakeStreamError(5, "stop"));
+			},
+			call: "resolved",
+		},
 	])(
 		"$name: the request lets go of the signal, which then does nothing",
 		async ({ end, call }) => {
@@ -152,6 +163,27 @@ describe("withdrawing a namespace with the signal of publishNamespace (§6.2)", 
 			await announcesAgain(peer, connection);
 		},
 	);
+
+	test("a FIN of the peer after the answer withdraws nothing: the signal still withdraws the namespace", async () => {
+		const { peer, connection } = await connected();
+		const { controller, removed } = countedSignal();
+		const announcing = connection.publishNamespace(NAMESPACE, undefined, {
+			signal: controller.signal,
+		});
+		const stream = await peer.clientBidi();
+		expect(await sentHex(stream)).toBe(ANNOUNCE_0);
+		await stream.reply.write(hex(REQUEST_OK));
+		expect(await state(announcing)).toBe("resolved");
+		await stream.reply.close();
+		await flush();
+		expect(removed).toEqual([]);
+		controller.abort();
+		expect(await state(stream.sent.read())).toMatchObject({
+			streamErrorCode: 1,
+		});
+		expect(removed).toEqual(["abort"]);
+		expect(await state(connection.closed)).toBe("pending");
+	});
 
 	test("the session closed: the request lets go of the signal", async () => {
 		const { peer, connection } = await connected();
