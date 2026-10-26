@@ -114,7 +114,7 @@ pub enum PeerRequestOpened {
 pub enum AfterRefusal {
     /// Nothing: the peer is the publisher and ends the subscription itself.
     Nothing,
-    /// End the subscription with [`Session::subscribe_done`] and the status
+    /// End the subscription with [`Session::publish_done_on_subscribe`] and the status
     /// `UPDATE_FAILED`. The session takes no other status.
     PublishDone,
     /// End the stream with a FIN. The request is over.
@@ -1249,7 +1249,7 @@ impl Session {
     ///
     /// Fails unless `request` is an accepted SUBSCRIBE, and for a status other
     /// than `UPDATE_FAILED` once a `REQUEST_UPDATE` was refused (§10.9.1).
-    pub fn subscribe_done(
+    pub fn publish_done_on_subscribe(
         &mut self,
         request: PeerRequestId,
         status_code: u64,
@@ -1936,7 +1936,7 @@ mod tests {
             ("ended with PUBLISH_DONE", |session, request| {
                 session.accept_subscribe(request, vec![], vec![]).unwrap();
                 session
-                    .subscribe_done(request, 0x2, 0, ReasonPhrase::default())
+                    .publish_done_on_subscribe(request, 0x2, 0, ReasonPhrase::default())
                     .unwrap();
             }),
             ("rejected", |session, request| {
@@ -2093,7 +2093,7 @@ mod tests {
                 let request = handed(&mut session);
                 session.accept_subscribe(request, vec![], vec![]).unwrap();
                 session
-                    .subscribe_done(request, 0x2, 0, ReasonPhrase::default())
+                    .publish_done_on_subscribe(request, 0x2, 0, ReasonPhrase::default())
                     .unwrap();
             }
             "subscribe-rejected" => {
@@ -2786,7 +2786,7 @@ mod tests {
             let ended = opened(&mut session, subscribe(4, b"c"));
             session.accept_subscribe(ended, vec![], vec![]).unwrap();
             session
-                .subscribe_done(ended, 0x2, 0, ReasonPhrase::default())
+                .publish_done_on_subscribe(ended, 0x2, 0, ReasonPhrase::default())
                 .unwrap();
             opened(&mut session, publish(6, b"d", 0));
             opened(&mut session, publish_namespace(8));
@@ -3119,7 +3119,7 @@ mod tests {
         let of_the_ended = opened(&mut session, joining(10, 8));
         session.accept_subscribe(ended, vec![], vec![]).unwrap();
         session
-            .subscribe_done(ended, 0x2, 0, ReasonPhrase::default())
+            .publish_done_on_subscribe(ended, 0x2, 0, ReasonPhrase::default())
             .unwrap();
         for fetch in [of_the_rejected, of_the_ended] {
             assert_eq!(
@@ -3141,7 +3141,7 @@ mod tests {
         assert_eq!(session.peer_subscription_alias(request), None);
         // Nothing to end before the SUBSCRIBE is answered.
         assert_eq!(
-            session.subscribe_done(request, 0x2, 0, ReasonPhrase::default()),
+            session.publish_done_on_subscribe(request, 0x2, 0, ReasonPhrase::default()),
             Err(UsageError("PUBLISH_DONE ends an accepted SUBSCRIBE"))
         );
 
@@ -3162,7 +3162,7 @@ mod tests {
         );
 
         assert_eq!(
-            session.subscribe_done(request, 0x2, 1, ReasonPhrase::default()),
+            session.publish_done_on_subscribe(request, 0x2, 1, ReasonPhrase::default()),
             Ok(ControlMessage::PublishDone(done(1)))
         );
         assert_eq!(session.peer_subscription_alias(request), None);
@@ -3679,7 +3679,7 @@ mod tests {
                 ));
                 assert!(
                     session
-                        .subscribe_done(request, 0x2, 0, ReasonPhrase::default())
+                        .publish_done_on_subscribe(request, 0x2, 0, ReasonPhrase::default())
                         .is_ok()
                 );
             }
@@ -3715,14 +3715,14 @@ mod tests {
             Ok(PeerRequestEvent::UpdateAlreadyRefused)
         );
         assert_eq!(
-            session.subscribe_done(request, 0x2, 0, ReasonPhrase::default()),
+            session.publish_done_on_subscribe(request, 0x2, 0, ReasonPhrase::default()),
             Err(UsageError(
                 "a refused REQUEST_UPDATE ends the subscription with UPDATE_FAILED"
             ))
         );
         assert!(
             session
-                .subscribe_done(request, 0x8, 0, ReasonPhrase::default())
+                .publish_done_on_subscribe(request, 0x8, 0, ReasonPhrase::default())
                 .is_ok()
         );
 

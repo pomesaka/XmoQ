@@ -4677,7 +4677,7 @@ impl Relay {
         } else {
             subscriber.streams_started
         };
-        let done = state.moqt.subscribe_done(
+        let done = state.moqt.publish_done_on_subscribe(
             subscriber.request,
             status_code,
             stream_count,
