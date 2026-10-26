@@ -114,6 +114,9 @@ impl Relay {
         let (link, pace) = (upstream.link, upstream.pace);
         for passed in gone {
             self.withdraw_upstream(&passed, actions);
+            // Its answer, if one comes, is for no announcement any more, so
+            // the next goes now; what is missing goes with it, one at a time.
+            self.answered_one_at_a_time(passed.session, passed.request, actions);
         }
         if missing.is_empty() {
             return;
@@ -267,8 +270,8 @@ impl Relay {
         })
     }
 
-    /// The request of the relay that went one at a time was answered, or
-    /// ended: the next goes.
+    /// The request of the relay that went one at a time was answered,
+    /// ended, or withdrawn: the next goes.
     fn answered_one_at_a_time(
         &mut self,
         session: SessionKey,
