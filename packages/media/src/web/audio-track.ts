@@ -9,6 +9,7 @@ import {
 	type MoqtConnection,
 	type SubscriptionEnd,
 } from "@xmoq/moqt";
+import { MAX_DECODER_TIME } from "../core/decoder-time.ts";
 import {
 	type DeliveryTimeouts,
 	deliveryTimeoutParameters,
@@ -255,14 +256,22 @@ export interface AudioPlaybackStats {
 	decoded: number;
 	/**
 	 * Objects that were not decoded: "late" (one with a later time was
-	 * decoded already), "no-time", "empty", "not-of-the-clock" (its time is
-	 * more than 10 seconds from where the fastest one puts it,
-	 * `createFastestWay`) and "decoder-behind" (more than
-	 * `MAX_AUDIO_DECODE_QUEUE` chunks waited in the decoder).
+	 * decoded already), "no-time", "beyond-time" (a time past
+	 * `MAX_DECODER_TIME`, which no decoder takes), "empty",
+	 * "not-of-the-clock" (its time is more than 10 seconds from where the
+	 * fastest one puts it, `createFastestWay`), "decoder-behind" (more than
+	 * `MAX_AUDIO_DECODE_QUEUE` chunks waited in the decoder) and
+	 * "decoder-refused" (the decoder threw for it; `decoderError` says why).
 	 */
 	dropped: Partial<
 		Record<
-			"late" | "no-time" | "empty" | "not-of-the-clock" | "decoder-behind",
+			| "late"
+			| "no-time"
+			| "beyond-time"
+			| "empty"
+			| "not-of-the-clock"
+			| "decoder-behind"
+			| "decoder-refused",
 			number
 		>
 	>;
@@ -410,8 +419,18 @@ export async function playAudioTrack(
 			drop("decoder-behind");
 			return;
 		}
+		// WHY caught here: this is called from the subscription's reading,
+		// from the Joining FETCH's and from a timer, and what throws there
+		// would leave `ended` rejected and nothing closed, or be lost. The
+		// time goes in with the chunk alone: one that threw has no output.
+		try {
+			decoder.decode(new EncodedAudioChunk({ type: "key", ...chunk }));
+		} catch (error) {
+			stats.decoderError ??= String(error);
+			drop("decoder-refused");
+			return;
+		}
 		timesIn.push(chunk.timestamp);
-		decoder.decode(new EncodedAudioChunk({ type: "key", ...chunk }));
 	};
 	const order = createInOrder<{ timestamp: number; data: Uint8Array }>({
 		holdMs: options.holdForOrderMs ?? (() => 0),
@@ -451,7 +470,12 @@ export async function playAudioTrack(
 			drop("no-time");
 			return;
 		}
-		const timestamp = Number(microsecondsOf(read.timing));
+		const microseconds = microsecondsOf(read.timing);
+		if (microseconds > MAX_DECODER_TIME) {
+			drop("beyond-time");
+			return;
+		}
+		const timestamp = Number(microseconds);
 		// The time is the publisher's to say. One that is far from the
 		// others would be taken for the latest, and every piece after it
 		// dropped as late; it is left out, and after 30 of them in a row the

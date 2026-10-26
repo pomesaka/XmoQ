@@ -165,6 +165,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-15 [What the sound waits behind on a narrow link](2026-10-15-what-the-sound-waits-behind-on-a-narrow-link.md)
 - 2026-10-24 [A GOAWAY on the stream of one request, and how soon the next session stands](2026-10-24-a-goaway-on-the-stream-of-one-request.md)
 - 2026-10-24 [A GOAWAY the clients take](2026-10-24-a-goaway-the-clients-take.md)
+- 2026-10-26 [A time no audio decoder takes](2026-10-26-a-time-no-audio-decoder-takes.md)
 
 ### Phase 3 — Ghostty CLI
 

@@ -11,6 +11,7 @@ import {
 	readLocTiming,
 	toAnnexB,
 } from "@xmoq/loc";
+import { MAX_DECODER_TIME } from "./decoder-time.ts";
 
 /**
  * An Object of the track as a subscription delivers it. The shape of
@@ -165,8 +166,6 @@ function limit(name: string, value: number, most: number): number {
 const MOST_HELD_OBJECTS = 4096;
 /** 2^64 - 1, the largest integer a property carries. */
 const MAX_VALUE = 2n ** 64n - 1n;
-/** The largest time that is handed on: the largest whole number a JavaScript number has exactly. */
-const MAX_TIMESTAMP = BigInt(Number.MAX_SAFE_INTEGER);
 
 /**
  * Orders the Objects of a video track and says which a decoder gets.
@@ -356,7 +355,7 @@ export function createVideoReceiver(
 				? { ...read.timing, timescale: trackTimescale }
 				: read.timing;
 		const timestamp = microsecondsOf(timing);
-		if (timestamp > MAX_TIMESTAMP) {
+		if (timestamp > MAX_DECODER_TIME) {
 			return unusable("a time beyond 2^53 - 1 microseconds");
 		}
 		const annexB = toAnnexB(object.payload);

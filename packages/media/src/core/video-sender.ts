@@ -10,6 +10,7 @@ import {
 	type LocProperty,
 	locProperties,
 } from "@xmoq/loc";
+import { MAX_DECODER_TIME } from "./decoder-time.ts";
 
 /**
  * A chunk as an encoder gives it: the fields of `EncodedVideoChunk` of
@@ -182,8 +183,6 @@ export interface VideoSender {
 
 /** 2^64 - 1, the largest ID MoQ Transport carries. */
 const MAX_ID = 2n ** 64n - 1n;
-/** The largest time that is sent: what the receiver of this package hands on, the largest whole number a JavaScript number has exactly. */
-const MAX_TIMESTAMP = BigInt(Number.MAX_SAFE_INTEGER);
 
 /**
  * Says for each chunk of an encoder which Object of the track it is.
@@ -232,7 +231,7 @@ export function createVideoSender(options: VideoSenderOptions): VideoSender {
 	) {
 		throw new RangeError(`${String(firstGroup)} is no Group ID`);
 	}
-	if (typeof epoch !== "bigint" || epoch < 0n || epoch > MAX_TIMESTAMP) {
+	if (typeof epoch !== "bigint" || epoch < 0n || epoch > MAX_DECODER_TIME) {
 		throw new RangeError(
 			`${String(epoch)} is no time since the Unix epoch that can be sent`,
 		);
@@ -275,7 +274,8 @@ export function createVideoSender(options: VideoSenderOptions): VideoSender {
 			if (!beginsWithStartCode(chunk.data)) return skip("not-annex-b");
 			if (!Number.isSafeInteger(chunk.timestamp)) return skip("no-time");
 			const timestamp = epoch + BigInt(chunk.timestamp);
-			if (timestamp < 0n || timestamp > MAX_TIMESTAMP) return skip("no-time");
+			if (timestamp < 0n || timestamp > MAX_DECODER_TIME)
+				return skip("no-time");
 			// Before anything is changed for the chunk: the Group before it
 			// ends as with any chunk that is not sent.
 			if (chunk.type === "key" && nextGroup > MAX_ID) {
