@@ -2447,7 +2447,7 @@ impl Client<'_> {
         let Some(mut ended) = serving.take() else {
             return Ok(());
         };
-        let done = self.session.subscribe_done(
+        let done = self.session.publish_done_on_subscribe(
             ended.request,
             status,
             ended.streams,
@@ -2473,7 +2473,7 @@ impl Client<'_> {
         let Some(mut ended) = serving else {
             return Ok(());
         };
-        let done = self.session.subscribe_done(
+        let done = self.session.publish_done_on_subscribe(
             ended.request,
             publish_done_status::TRACK_ENDED,
             ended.streams,
