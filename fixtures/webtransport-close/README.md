@@ -13,7 +13,7 @@ Reasons an application closes a session with, and the bytes a browser sent for e
 | 3 | The reason an application gives, in hexadecimal digits. With `utf8`, its UTF-8 bytes. With `utf16`, its UTF-16 code units, two bytes each, high byte first; these rows hold half of a surrogate pair, which is not valid text |
 | 4 | The reason as it was sent, in hexadecimal digits of UTF-8. Empty for an empty reason |
 
-An implementation whose strings are always valid text, as Rust's, cannot build the input of a `utf16` row and skips those rows.
+An implementation whose strings are always valid text, as Rust's, cannot build the input of a `utf16` row: the Rust test checks the cut on the 12 `utf8` rows, and reads the 2 `utf16` rows only for their form, counting both kinds.
 
 ## Source
 

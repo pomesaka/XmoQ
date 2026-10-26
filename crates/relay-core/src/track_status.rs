@@ -66,6 +66,11 @@ impl Relay {
     /// draft has that parameter "in a SUBSCRIBE message" alone (§10.2.6), a
     /// wait would be the "downstream subscription state" a `TRACK_STATUS` does
     /// not create, and what is asked is how the track stands now.
+    ///
+    /// WHY NOT a subscription upstream to learn how the track stands: it
+    /// would bring Objects nobody asked for. `moqtail` 0.15.0 answers a track
+    /// it has with `LARGEST_OBJECT` alone and asks the first publisher it
+    /// finds otherwise (`fixtures/moqt-18/`, capture P).
     pub(crate) fn on_track_status(
         &mut self,
         session: SessionKey,

@@ -92,7 +92,9 @@ impl Default for LimitsOfASession {
 /// second and use 0.87 of a core (measured 2026-10-13). WHY NOT a limit on
 /// requests of every kind: 100 a second is no more than a viewer may send,
 /// and would not have stopped this. WHY NOT by namespace: the session
-/// announces another name.
+/// announces another name. WHY NOT close the session: the draft has a code
+/// for a responder that has too much to do, and nothing that makes many
+/// requests an error of the session.
 pub const MAX_ANNOUNCEMENTS_AT_ONCE: u32 = 5;
 
 /// The time after which a session has back one of the announcements it
@@ -127,8 +129,10 @@ pub const MAX_HELD_SUBSCRIBES_PER_SESSION: usize = 16;
 pub const MAX_HELD_TRACKS: usize = 1_024;
 
 /// Requests the relay may have open on one session at once, where
-/// [`LimitsOfASession`] does not say otherwise: its SUBSCRIBEs to a
-/// publisher. A publisher that has as many is passed over, and a
+/// [`LimitsOfASession`] does not say otherwise: its SUBSCRIBE, FETCH and
+/// `TRACK_STATUS` requests to a publisher together (§13.1, §13.5); a
+/// `PUBLISH_NAMESPACE` passed to the parent does not count
+/// (`own::Counted::No`). A publisher that has as many is passed over, and a
 /// subscriber for whose SUBSCRIBE nobody else could be asked is refused
 /// with `EXCESSIVE_LOAD`. Provisional.
 ///
@@ -216,6 +220,10 @@ pub(crate) struct OwnRequest {
 /// `AbsoluteRange`: the Start Location they give, which "MAY be less than the
 /// Largest Object observed at the publisher". Where an `AbsoluteRange`
 /// filter ends is [`filter_end_group`].
+///
+/// The Largest Object is raised at the first byte of an Object
+/// (`Relay::on_object_begun`), so Next Group Start passes over a Group whose
+/// first Object the relay is receiving.
 pub(crate) fn filter_start(
     filter: Option<SubscriptionFilter>,
     largest: Option<Location>,
@@ -445,6 +453,12 @@ pub(crate) struct PendingTrack {
 /// and only one that is no source; [`Tracks::add_source`](crate::Tracks)
 /// takes out the one that becomes a source; [`Relay::ask_the_publishers`]
 /// asks nobody who is in here.
+///
+/// Why one is remembered is at [`Relay::ask_is_over`]. So a publisher that
+/// was only slow, and did not answer in the time an answer gets
+/// ([`crate::UPSTREAM_ANSWER_WAIT_MS`]), is not asked for that track again
+/// until it announces the namespace again; the relay keeps no time after
+/// which it tries again.
 #[derive(Debug, Default)]
 pub(crate) struct Declined(VecDeque<SessionKey>);
 
@@ -785,6 +799,10 @@ impl Relay {
     /// waits first is taken. A publisher that has
     /// [`MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`] requests of the relay for that
     /// session is passed over.
+    ///
+    /// One `PUBLISH_NAMESPACE` opens at most [`MAX_OWN_REQUESTS_PER_SESSION`]
+    /// requests on the publisher that sent it, and at most as many on each
+    /// of the others; there is no limit for the event as a whole.
     pub(crate) fn ask_the_publishers(
         &mut self,
         track: &FullTrackName,
@@ -917,7 +935,14 @@ impl Relay {
     ///
     /// WHY: a session may have 16 SUBSCRIBEs held and has 8 requests on a
     /// publisher. When that publisher announces, the relay asks it for 8 of
-    /// the tracks, and the others would wait out their time unasked.
+    /// the tracks, and the others would wait out their time unasked. It
+    /// asks for one more each time one of those requests ends without a
+    /// source, and not when one ends with `SUBSCRIBE_OK` or the subscriber
+    /// gives one of its SUBSCRIBEs up.
+    ///
+    /// What it costs: with 1,024 tracks without a source an announcement
+    /// goes through them 1,024 times, which [`MAX_ANNOUNCEMENTS_AT_ONCE`]
+    /// keeps to once a second for a session.
     fn ask_for_what_was_passed_over(&mut self, subscriber: SessionKey, actions: &mut Vec<Action>) {
         // By name, so that the same events lead to the same actions.
         let unasked: BTreeSet<FullTrackName> = self
@@ -1293,6 +1318,11 @@ impl Relay {
     ///
     /// WHY the last one: a track another publisher was asked for may still
     /// come. And a track that has a source loses nothing with an ask.
+    ///
+    /// So a refusal that says the request can be tried again is hidden when
+    /// another comes after it: a publisher's `EXCESSIVE_LOAD` with a Retry
+    /// Interval, followed by another publisher's `DOES_NOT_EXIST` with 0,
+    /// reaches the subscribers as `DOES_NOT_EXIST` with 0.
     fn ask_is_over(
         &mut self,
         track_name: &FullTrackName,
@@ -1450,6 +1480,12 @@ impl Relay {
     /// A publisher that was asked for the track sent PUBLISH for it: the
     /// relay's SUBSCRIBE to it is cancelled (§5.1). What is asked of other
     /// publishers is still asked.
+    ///
+    /// §9.5's "if the relay is holding a downstream SUBSCRIBE awaiting a
+    /// publisher for this Track (see Section 10.2.6), it MUST proceed with
+    /// the SUBSCRIBE" is about a SUBSCRIBE held under `RENDEZVOUS_TIMEOUT`,
+    /// and is not what a PUBLISH of another session is accepted for: that
+    /// one is a further source (`Tracks::add_source`).
     pub(crate) fn give_way_to_publish(
         &mut self,
         track_name: &FullTrackName,

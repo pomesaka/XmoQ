@@ -19,6 +19,16 @@
 //!   a `WT_CLOSE_SESSION` capsule, which is what a browser reads them from.
 //! * The subprotocol is negotiated through the `wt-available-protocols` and
 //!   `wt-protocol` header fields (`draft-ietf-moq-transport-18` §3.1.3).
+//! * A peer is taken only when its CONNECT sends the older token:
+//!   `web-transport-proto` 0.6.2 wants `:protocol` to be `webtransport`, and
+//!   a peer that sends `webtransport-h3`, the token of
+//!   `draft-ietf-webtrans-http3-15` §3.2, is turned away during the handshake
+//!   (`HANDSHAKE_FAILED … expected webtransport, got: Some("webtransport-h3")`).
+//!   `moqlivemock`'s clients send the newer token, and connect only with one
+//!   line changed (`interop/peers/moqlivemock/README.md`). Chromium 156
+//!   connects, so it sends the older token. When a browser changes the
+//!   token, the relay stops taking it until the library does
+//!   (`docs/experiments/2026-10-10-webtransport-library-switch.md`).
 //!
 //! What a peer that does not map its stream codes looks like: `wtransport`
 //! 0.7.2, which the `moqtail` relay and clients are built on, puts a code on

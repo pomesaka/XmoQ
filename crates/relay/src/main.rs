@@ -595,6 +595,15 @@ async fn main() -> Result<()> {
     // to the URI it used would come back to this relay at once, again and
     // again, until it ends; refused, it waits and tries again, and finds the
     // relay that takes this one's place.
+    //
+    // WHY the relay ends before the Timeout when nobody is left: the Timeout
+    // is "the time in milliseconds the sender will wait for graceful
+    // closure", and nothing is left to wait for. WHY the relay does not
+    // unsubscribe upstream first, though §3.6 has "When the server is a
+    // subscriber, it SHOULD send a GOAWAY message to downstream subscribers
+    // prior to unsubscribing from upstream publishers": it does not
+    // unsubscribe at all, and its upstream subscriptions end with the
+    // sessions.
     let timeout = Duration::from_millis(args.goaway_timeout_ms);
     tokio::select! {
         () = refuse_sessions(&server) => {}

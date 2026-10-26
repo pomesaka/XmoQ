@@ -146,8 +146,9 @@ pub struct HubConfig {
     /// The payload bytes that may wait to be written to all the
     /// subscribers of the relay together. Where they would be more, the
     /// subscription of the relay whose streams carry the most ends
-    /// (`TOO_FAR_BEHIND`), of whichever session. **Provisional: 2 GiB**
-    /// (`--relay-send-bytes`; decided on 2026-10-25).
+    /// (`TOO_FAR_BEHIND`), of whichever session; the Object that took the
+    /// relay over is queued all the same (`keep_to_the_relay_s_bound`).
+    /// **Provisional: 2 GiB** (`--relay-send-bytes`; decided on 2026-10-25).
     ///
     /// WHY a bound of the relay's own: the bound of a session times
     /// [`Self::max_sessions`] is 8 GiB, which is what a deployment does not
@@ -183,12 +184,36 @@ pub struct HubConfig {
     /// the relay finished its own with its last word on the request: a
     /// refusal, `PUBLISH_DONE` or the end of a FETCH
     /// ([`Action::FinishRequest`]). Then the relay stops the stream.
+    /// **Provisional: 2 seconds**, also for a request the session did not
+    /// keep. What was read before the stop took effect is dropped, and the
+    /// session stays open.
+    ///
+    /// WHY a limit: the draft does not make the subscriber close the stream,
+    /// and until it does the request counts against the limit of open ones
+    /// (`MAX_PEER_REQUESTS` of `xmoq-moqt`): a peer that sends requests which
+    /// are refused and ends none of their streams fills it with them, after
+    /// which every request of that session gets `EXCESSIVE_LOAD`. WHY 2
+    /// seconds: it is the time a subscriber has after `PUBLISH_DONE`
+    /// ([`Self::drain_timeout`]).
+    ///
+    /// The wait is one of the [`Self::max_timers_per_session`] timers; a
+    /// session that has that many gets the direction stopped at once. A
+    /// request stream the relay resets is not timed: the request is
+    /// forgotten then or at once (`end_answered_fetch` of `xmoq-relay-core`).
     pub request_close_timeout: Duration,
     /// How long the relay goes on reading what had arrived on a connection
     /// after the connection is gone, before it treats the session as closed.
     pub closed_read_timeout: Duration,
     /// Timers one session may have running at once. A timer beyond that is
     /// not started and its event is reported at once.
+    ///
+    /// What that does is at `Hub::set_timer`: the subscribers of an
+    /// unanswered upstream SUBSCRIBE get `TIMEOUT`, a held stream is
+    /// stopped, a draining track ends, a peer's direction of a request
+    /// stream the relay finished is stopped. The timer for that last one,
+    /// and the one for the wait before the relay finishes the request stream
+    /// of a FETCH it served, go when the peer ended its direction, so a peer
+    /// that ends its streams holds none.
     pub max_timers_per_session: usize,
     /// `xmoq_relay_core::ANNOUNCEMENT_EVERY_MS`, where it is not the relay's
     /// own number: the time in which a session may send one
@@ -255,6 +280,13 @@ pub struct HubConfig {
     /// SETUP may be one that is about to announce, or a viewer between two
     /// broadcasts. §13.6.1 has a client "Accept that idle connections can
     /// close and implement reconnection logic when needed".
+    ///
+    /// The own clients do not come to it in what they do: a publisher
+    /// announces as soon as it is connected and holds that; a viewer
+    /// subscribes at once, and where its SUBSCRIBE is refused or its
+    /// subscription ends it closes its session and connects again or leaves;
+    /// the demo's pages and the terminal viewer with a room connect when the
+    /// room has a broadcast.
     pub idle_session_timeout: Duration,
     /// Sent as `MOQT_IMPLEMENTATION`.
     pub implementation: String,
@@ -275,6 +307,12 @@ impl HubConfig {
     /// has 134 seconds, four times that. WHY a least rate, and not only a
     /// time: the time a slow reader may keep a Group alive is then in
     /// proportion to what it is given.
+    ///
+    /// What it does not reach: what fits into the windows of the connection
+    /// is written at once and waits there, so a small Group is never slow; a
+    /// fetch stream that is passed on from a publisher; and the Groups
+    /// several such streams keep alive together (known gap on a sender with
+    /// several sessions in `docs/moqt-implementation-notes.md`).
     fn cached_fetch_whole(&self, bytes: usize) -> Duration {
         let bits = u64::try_from(bytes).unwrap_or(u64::MAX).saturating_mul(8);
         // kbit/s is bits a millisecond.
@@ -780,6 +818,17 @@ impl<C: Connection> FetchWrite<C> {
     /// WHY an Object is copied to be encoded, one at a time: the cache
     /// shares it with the subgroup streams, and a fetch stream encodes it
     /// with other fields before it (§11.4.4.1).
+    ///
+    /// Not verified against a real connection: giving up while the
+    /// `FETCH_HEADER` is not all written is tested on an in-memory
+    /// connection whose streams hold one byte, and on no real one, where the
+    /// wait is more likely inside the opening of the stream, with nothing to
+    /// reset. The clocks of the opening and of each piece run in tests on
+    /// in-memory connections only, and so does the stop of such a stream
+    /// when its FETCH is cancelled or its track found malformed: the stream
+    /// is a few bytes, which a real transport takes before a cancellation
+    /// can arrive. A reset while a write waits is tested over loopback as
+    /// well (`xmoq-moqt-io`).
     async fn run(self, mut aborted: oneshot::Receiver<u32>) -> Written {
         let ended = |how, pieces| Written { how, pieces };
         // WHY not simply added: a time for the whole that somebody set to
@@ -3236,6 +3285,15 @@ fn connection_ended_line(session: SessionKey, end: &ConnectionEnd) -> String {
 /// this report goes to, so waiting for them keeps the order.
 /// WHY a limit on the wait: a reader that is held back by a full queue must
 /// not keep a dead session.
+///
+/// "Had arrived" means what the QUIC stack had received when the
+/// WebTransport library read the publisher's `CLOSE_WEBTRANSPORT_SESSION`
+/// capsule; stream data in a later packet is dropped below this code
+/// (`web-transport-quinn` 0.13.2 `src/session.rs`, `quinn-proto` 0.11.19,
+/// read on 2026-10-11). A publisher that needs its last Object to arrive
+/// says `PUBLISH_DONE` and waits for the relay's FIN. Seen once in CI and in
+/// 2 of 400 runs on a loaded machine
+/// (`docs/experiments/2026-10-10-disconnects-through-own-relay.md`).
 async fn watch_session<C: Connection>(
     session: SessionKey,
     connection: Arc<C>,
@@ -3763,7 +3821,11 @@ struct PipeWaits {
 /// The waits start anew with every read and every write, and a FETCH has no
 /// time limit as a whole. How slowly a subscriber may read without being
 /// cut is its transport's to say as well: the relay can write only as the
-/// subscriber's side gives it room.
+/// subscriber's side gives it room. On a real connection a slow subscriber
+/// is cut much sooner than on an in-memory one: one that read 16 KiB every 2
+/// seconds was cut as taking nothing, where one that read the same every
+/// half second was not (`docs/experiments/2026-10-11-rust-client-fetch.md`).
+/// Where the line lies was not measured.
 struct FetchPipe<C: Connection> {
     connection: Arc<C>,
     header: FetchHeader,

@@ -51,6 +51,11 @@ pub(crate) const MAX_CACHED_OBJECTS_OF_A_TRACK: usize = 4_096;
 /// WHY nothing is evicted for it: which track to take from would be one
 /// more thing to decide, and a track that does not fit is served as every
 /// track was before there was a cache.
+///
+/// It does not count what an Object takes beside its payload and Object
+/// Properties (its IDs, its place in the map), nor what fetch streams keep
+/// after the cache let go of their Group
+/// ([`crate::MAX_BYTES_HELD_BEYOND_THE_CACHE`]).
 pub(crate) const MAX_CACHED_BYTES: usize = 256 * 1024 * 1024;
 
 /// Prior Object ID Gap (§12.9).
@@ -260,6 +265,20 @@ impl Cache {
     ///   not malformed" (§2.1), and "A caching relay SHOULD NOT cache or
     ///   forward the Object in this case" (§9.1). It is not kept, and the
     ///   Group is given up.
+    ///
+    /// Which of the two an Object above an End of Group is depends on the
+    /// order the streams of the publisher are read in: Object 2 and then an
+    /// End of Group at 1 gives the Group up, the End of Group and then
+    /// Object 2 is a malformed track. An Object at the very Object ID of an
+    /// End of Group goes to the subscribers as it came, since §9.4 has "A
+    /// relay MUST NOT reorder or drop objects received on a multi-object
+    /// stream". Where the border lies between an Object above an End of
+    /// Group or inside an announced gap, which is malformed, and one at the
+    /// very Location of such a statement, which is not, is a ruling of
+    /// `XmoQ`, not a rule of the draft; that a status above an End of Group
+    /// or inside a gap is not malformed reads the draft more narrowly than
+    /// its words. The clients and `@xmoq/moqt` keep no Objects and do none
+    /// of this.
     ///
     /// `sure_of_subgroup` is false for an Object of a stream that leaves
     /// its Subgroup ID to its first Object and does not say that this

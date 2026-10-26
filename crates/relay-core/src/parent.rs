@@ -15,6 +15,15 @@
 //! session opened at the start and kept: the parent would have to tell an
 //! edge from a viewer to leave its session open, and without that the edge
 //! would connect again every 30 seconds for nothing.
+//!
+//! A GOAWAY of the parent moves the session ([`Parent::uri`]); with
+//! `--auth-key-hex` the relay makes its own tokens for the parent
+//! (`own_token` of `xmoq-relay`). The parent counts this relay as one session
+//! in the requests and namespaces of a session, whose flags are the same for
+//! every session (`HubConfig::limits_of_a_session` of `xmoq-relay`); what a
+//! meeting over edges needs is in `docs/scale-and-meetings.md`. Not done:
+//! PUBLISH to the parent, a GOAWAY on a request stream, asking again for a
+//! held SUBSCRIBE the parent refused.
 
 mod announcements;
 
