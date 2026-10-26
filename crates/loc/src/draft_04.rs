@@ -89,9 +89,19 @@ pub fn wall_clock_timestamp(
 }
 
 /// Makes a start code of every length prefix of a video payload (§2.1.3,
-/// §2.1.4). A payload that has start codes already comes out with the same
-/// bytes: "A length value of 1 SHOULD be interpreted as a start code rather
-/// than a length" (§2.1.3), and what follows one is left alone.
+/// §2.1.4). A payload that has start codes of 4 bytes already comes out
+/// with the same bytes: "A length value of 1 SHOULD be interpreted as a
+/// start code rather than a length" (§2.1.3), and what follows one is left
+/// alone. `toAnnexB` of `@xmoq/loc` does the same.
+///
+/// **A start code of 3 bytes is not known**: its first four bytes are read
+/// as a length. §2.1.4 lets a track use one "if the track never uses length
+/// prefixes or any Video Config", and nothing in a payload says which a
+/// track uses: `00 00 01` begins a 3-byte start code and a length of 256 to
+/// 511 bytes alike. A caller that knows its track has start codes does not
+/// call this. Most such payloads are [`Invalid`]; one whose first four
+/// bytes happen to be the number of bytes that follow comes out with the
+/// first byte of its NAL unit overwritten.
 ///
 /// # Errors
 ///
@@ -131,7 +141,8 @@ pub fn to_annex_b(payload: &[u8]) -> Result<Vec<u8>, Invalid> {
 }
 
 /// The NAL unit type (the low 5 bits of its first byte) of every NAL unit
-/// of a payload in the form [`to_annex_b`] gives, for H.264.
+/// of a payload in the form [`to_annex_b`] gives, for H.264: after a start
+/// code of 4 bytes, as that form has.
 #[must_use]
 pub fn h264_nal_unit_types(annex_b: &[u8]) -> Vec<u8> {
     annex_b
