@@ -447,8 +447,8 @@ export function createPeerRequests(options: PeerRequestsOptions): PeerRequests {
 			// Before the request is looked at: a message that will never be
 			// whole is not answered.
 			if (fin && missing > 0) throw endedInside();
-			// FIXME: serve a FETCH (§10.12). It is refused below, like a request
-			// that is not decoded.
+			// FIXME: serve a Joining FETCH (§10.12.2). `fetchRefusal` refuses it with
+			// NOT_SUPPORTED; a Standalone one is handed on.
 			//
 			// WHY a FETCH, a SUBSCRIBE, a TRACK_STATUS and a
 			// SUBSCRIBE_NAMESPACE are decoded whole first, where the others are

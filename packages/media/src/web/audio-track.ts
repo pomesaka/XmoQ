@@ -1,7 +1,8 @@
 // A LOC audio track in a browser, both ways: `AudioData` into an encoder of
 // WebCodecs and on to the audio publisher of this package, and the Objects
-// of a subscription into a decoder. Minimal: no buffer for playback, no
-// sync with video, no reordering.
+// of a subscription into a decoder, in the order of their times
+// (`src/core/in-order.ts`). The buffer for playback and the step with the
+// video are `createPlayout`'s.
 
 import { microsecondsOf, readLocTiming } from "@xmoq/loc";
 import {

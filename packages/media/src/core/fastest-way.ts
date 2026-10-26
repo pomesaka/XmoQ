@@ -15,8 +15,8 @@
  */
 export const MOST_FROM_THE_FASTEST_MS = 10_000;
 /**
- * After so many Objects in a row that are not of the clock, the clock
- * begins anew with the next: the publisher's clock has moved (it began
+ * The Object that is the so many-th in a row not of the clock begins the
+ * clock anew, and is taken: the publisher's clock has moved (it began
  * again), or the first Object was the one that was wrong. **Provisional**,
  * and the value of `crates/watch`: a second of video, more or less.
  */
