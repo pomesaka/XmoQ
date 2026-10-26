@@ -1057,7 +1057,7 @@ const { values: options } = parseArgs({
 	},
 });
 
-/** After SIGTERM, how long `run.ts` gets to stop what it started. */
+/** After SIGTERM, how long a driver gets to stop what it started before `killEverything`. */
 const KILL_GRACE_MS = 10_000;
 
 /** The pairings that are running, so that a signal to this process reaches them. */
@@ -1072,6 +1072,58 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		interrupted = true;
 		for (const child of running) child.kill(signal);
 	});
+}
+
+/** The parent and the process group of each process on this machine, by its PID. */
+function processes(): Map<number, { parent: number; group: number }> {
+	const listed = Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid=,pgid="]);
+	const found = new Map<number, { parent: number; group: number }>();
+	for (const line of listed.stdout.toString().split("\n")) {
+		const [pid, parent, group] = line.trim().split(/\s+/).map(Number);
+		if (pid === undefined || parent === undefined || group === undefined) {
+			continue;
+		}
+		found.set(pid, { parent, group });
+	}
+	return found;
+}
+
+/**
+ * Kills a driver whose teardown did not end in its grace period, with
+ * everything it started: its own process group (the relays and the clients)
+ * and the group of each child that leads one of its own.
+ *
+ * WHY the children's groups: playwright-core 1.64.0 starts Chromium in a
+ * group of its own, and Chromium stays when its driver is killed (measured
+ * under Bun 1.3.14 on macOS on 2026-10-26: its parent became 1, and it was
+ * still there 5 seconds later). WHY found by their parent and not by name:
+ * Chromium of another run, or the user's, has the same name. WHY each child
+ * is looked at again right before its group is killed, and the driver is
+ * killed last: while the driver lives, a process whose parent it is is its
+ * child, and not another that was given the PID of one that ended.
+ */
+function killEverything(driver: number): void {
+	const leaders = [...processes()].filter(
+		([pid, { parent, group }]) => parent === driver && group === pid,
+	);
+	for (const [pid] of leaders) {
+		const now = processes().get(pid);
+		if (now?.parent === driver && now.group === pid) killGroup(pid);
+	}
+	killGroup(driver);
+}
+
+/** SIGKILL to a process group, which may have ended by itself meanwhile. */
+function killGroup(group: number): void {
+	try {
+		process.kill(-group, "SIGKILL");
+	} catch (error) {
+		if (
+			!(error instanceof Error && "code" in error && error.code === "ESRCH")
+		) {
+			throw error;
+		}
+	}
 }
 
 /** A pairing and the relay it runs through; the name begins with the relay. */
@@ -1144,6 +1196,9 @@ async function runPairing(
 			env: { ...process.env, ...pairing.env },
 			stdout: "pipe",
 			stderr: "pipe",
+			// A process group of its own, which `killEverything` ends with what
+			// the driver started.
+			detached: true,
 		},
 	);
 	running.add(child);
@@ -1153,7 +1208,7 @@ async function runPairing(
 	const limit = setTimeout(() => {
 		timedOut = true;
 		child.kill("SIGTERM");
-		killer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+		killer = setTimeout(() => killEverything(child.pid), KILL_GRACE_MS);
 	}, timeoutMs);
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(child.stdout).text(),
