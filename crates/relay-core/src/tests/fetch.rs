@@ -2546,7 +2546,7 @@ impl Ending {
                 },
                 Event::SendQueueFull {
                     out_stream: OutStreamKey(0),
-                    over: Over::Subscription,
+                    limit: SendLimit::Subscription,
                     held: vec![],
                 },
             ],

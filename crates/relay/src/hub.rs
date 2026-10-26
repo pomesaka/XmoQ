@@ -34,8 +34,8 @@ use xmoq_moqt_io::{
     read_uni_streams, send_message,
 };
 use xmoq_relay_core::{
-    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, LimitsOfASession, OutStreamKey, Over,
-    OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SessionKey, StreamKey,
+    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, LimitsOfASession, OutStreamKey,
+    OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SendLimit, SessionKey, StreamKey,
 };
 
 /// Limits of the relay. Every value is provisional: the draft sets none of
@@ -629,7 +629,7 @@ struct SessionHandle<C: Connection> {
 
 /// What waits to be written to one subscription, and the stream of it that
 /// was opened last, which names the subscription to the core
-/// ([`Over::Relay`]).
+/// ([`SendLimit::Relay`]).
 struct SubscriptionBudget {
     budget: Arc<SendBudget>,
     latest: OutStreamKey,
@@ -2032,7 +2032,7 @@ impl<C: Connection> Hub<C> {
 
     /// Where more waits to be written to all the subscribers than
     /// [`HubConfig::send_for_the_relay_bytes`], the core is told so
-    /// (`Over::Relay`) with the bytes waiting for each subscription that
+    /// (`SendLimit::Relay`) with the bytes waiting for each subscription that
     /// has some, named by its stream opened last, and chooses the one that
     /// ends.
     ///
@@ -2055,7 +2055,7 @@ impl<C: Connection> Hub<C> {
             .collect();
         pending.push_back(Event::SendQueueFull {
             out_stream,
-            over: Over::Relay,
+            limit: SendLimit::Relay,
             held,
         });
     }
@@ -2068,7 +2068,7 @@ impl<C: Connection> Hub<C> {
         if full.level == SUBSCRIPTION_BUDGET {
             return Event::SendQueueFull {
                 out_stream,
-                over: Over::Subscription,
+                limit: SendLimit::Subscription,
                 held: Vec::new(),
             };
         }
@@ -2080,7 +2080,7 @@ impl<C: Connection> Hub<C> {
             .collect();
         Event::SendQueueFull {
             out_stream,
-            over: Over::Session,
+            limit: SendLimit::Session,
             held,
         }
     }

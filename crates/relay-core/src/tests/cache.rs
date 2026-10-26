@@ -159,7 +159,7 @@ fn a_fetch_within_the_latest_group_is_answered_from_the_cache() {
 
 /// The End Location of `FETCH_OK`, the Object IDs on the stream and End Of
 /// Track.
-type Ended = (Location, &'static [u64], bool);
+type FetchAnswer = (Location, &'static [u64], bool);
 
 #[test]
 fn a_fetch_from_the_cache_that_reaches_the_end_of_the_track_says_so() {
@@ -172,7 +172,7 @@ fn a_fetch_from_the_cache_that_reaches_the_end_of_the_track_says_so() {
     };
     // (Start Location; End Location; the End Location of FETCH_OK, the
     //  Object IDs on the stream and End Of Track)
-    let cases: [(Location, Location, Ended); 5] = [
+    let cases: [(Location, Location, FetchAnswer); 5] = [
         // §10.13: the End Location is the final Object, {3, 3}, plus 1.
         (at(3, 0), at(3, 0), (at(3, 4), &[0, 1, 2], true)),
         (at(3, 0), at(3, 4), (at(3, 4), &[0, 1, 2], true)),

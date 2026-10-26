@@ -831,9 +831,9 @@ mod tests {
 
     /// The Objects of a Group that came, as (Object ID, Prior Object ID
     /// Gap).
-    type Came = &'static [(u64, u64)];
+    type GroupObjects = &'static [(u64, u64)];
     /// The first and the last Object ID a FETCH asks for.
-    type Asked = (u64, u64);
+    type ObjectRange = (u64, u64);
     /// The Object IDs of an answer; `None` where the cache has none.
     type Answer = Option<&'static [u64]>;
 
@@ -853,7 +853,7 @@ mod tests {
         // (the Objects of Group 5 that came, as (Object ID, Prior Object ID
         //  Gap); the first and the last Object ID that are asked for; the
         //  Object IDs of the answer, `None` where the cache has none)
-        let cases: [(Came, Asked, Answer); 15] = [
+        let cases: [(GroupObjects, ObjectRange, Answer); 15] = [
             (&[(0, 0), (1, 0), (2, 0)], (0, 2), Some(&[0, 1, 2])),
             (&[(0, 0), (1, 0), (2, 0)], (1, 1), Some(&[1])),
             (&[(0, 0), (1, 0), (2, 0)], (0, 0), Some(&[0])),
@@ -899,7 +899,7 @@ mod tests {
             let ended = vec![object(5, 0, 0), object(5, 1, 0), status(5, 2, end)];
             let (cache, _) = cache_of(ended);
             // (the first and the last Object ID asked for; the answer)
-            let cases: [(Asked, Answer); 5] = [
+            let cases: [(ObjectRange, Answer); 5] = [
                 ((0, 1), Some(&[0, 1])),
                 ((0, 2), Some(&[0, 1])),
                 ((1, 900), Some(&[1])),
@@ -1067,9 +1067,9 @@ mod tests {
 
     /// What a test says of an Object: (Object ID; Prior Object ID Gap;
     /// the length of its payload, or `None` for an End of Group).
-    type Said = (u64, u64, Option<usize>);
+    type ObjectShape = (u64, u64, Option<usize>);
 
-    fn said(group_id: u64, (object_id, gap, payload): Said) -> CachedObject {
+    fn said(group_id: u64, (object_id, gap, payload): ObjectShape) -> CachedObject {
         match payload {
             Some(len) => sized(group_id, object_id, gap, len),
             None => status(group_id, object_id, ObjectStatus::EndOfGroup),
@@ -1084,7 +1084,7 @@ mod tests {
         // (the Objects of Group 5 that are kept; the Object that comes; what
         //  it shows of the track; whether the Group still answers a FETCH
         //  for its first Object)
-        let cases: [(&[Said], Said, Verdict, bool); 24] = [
+        let cases: [(&[ObjectShape], ObjectShape, Verdict, bool); 24] = [
             // The same Object again.
             (&[(0, 0, two), (1, 0, two)], (1, 0, two), Fine, true),
             // With another payload: of another length, and of none.

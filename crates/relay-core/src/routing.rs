@@ -413,7 +413,7 @@ pub(crate) struct Ask {
 }
 
 /// What [`Relay::ask_the_publishers`] did.
-pub(crate) struct Asked {
+pub(crate) struct PublishersAsked {
     pub(crate) asks: Vec<Ask>,
     /// The Error Code of the first publisher that could not be asked.
     pub(crate) nobody_because: Option<u64>,
@@ -791,7 +791,7 @@ impl Relay {
         first: Option<SessionKey>,
         newcomer: Option<&Waiter>,
         actions: &mut Vec<Action>,
-    ) -> Asked {
+    ) -> PublishersAsked {
         // §10.2.13: "A relay that receives a NEW_GROUP_REQUEST for a Track
         // without an Established subscription MUST include the
         // NEW_GROUP_REQUEST when subscribing upstream." WHY the largest of
@@ -853,7 +853,7 @@ impl Relay {
                 publishers.push(publisher);
             }
         }
-        let mut asked = Asked {
+        let mut asked = PublishersAsked {
             asks: Vec::new(),
             nobody_because: None,
         };
