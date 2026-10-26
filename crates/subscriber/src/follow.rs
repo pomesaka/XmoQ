@@ -29,7 +29,7 @@ use xmoq_moqt_io::{
 };
 
 pub use crate::kept::Asking;
-use crate::kept::{self, KeptTrack, Said, Wanted, on};
+use crate::kept::{self, KeptTrack, KeptTrackChange, Wanted, on};
 
 /// The `RENDEZVOUS_TIMEOUT` (§10.2.6) of the SUBSCRIBE of a track that is
 /// followed and whose publisher may come after the reader: the chat's
@@ -41,7 +41,7 @@ use crate::kept::{self, KeptTrack, Said, Wanted, on};
 pub const RENDEZVOUS_MS: u64 = 30_000;
 
 /// What the follower has to be told of, from the loop of the session.
-pub enum Came<C: Connection = WtConnection> {
+pub enum FollowerInput<C: Connection = WtConnection> {
     /// An item of the FETCH, by its number.
     Fetched(u64, Vec<u8>),
     /// The FETCH's stream ended.
@@ -53,11 +53,11 @@ pub enum Came<C: Connection = WtConnection> {
     /// What came on the FETCH's request stream.
     FetchAnswer(Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>),
     /// What came of the subscription, or the time to ask for it.
-    Kept(kept::Came<C>),
+    Kept(kept::KeptTrackInput<C>),
 }
 
 /// What the loop is to do with what came.
-pub enum Out<T> {
+pub enum FollowOutcome<T> {
     /// An item, each once, in the order of its number.
     Item(T),
     /// Items that were not fetched, told before the items after them.
@@ -111,7 +111,10 @@ pub struct Follower<T, C: Connection = WtConnection> {
     joining: Option<(RequestId, C::Send)>,
     /// The stream of the Joining FETCH's items, while it is read.
     fetch_stream: Option<(RequestId, u64)>,
-    fetched: (mpsc::Sender<Came<C>>, mpsc::Receiver<Came<C>>),
+    fetched: (
+        mpsc::Sender<FollowerInput<C>>,
+        mpsc::Receiver<FollowerInput<C>>,
+    ),
 }
 
 /// Opens the stream of a request and sends its message, within `wait_ms`.
@@ -177,7 +180,7 @@ impl<T, C: Connection> Follower<T, C> {
     }
 
     /// What comes next.
-    pub async fn next(&mut self) -> Came<C> {
+    pub async fn next(&mut self) -> FollowerInput<C> {
         let Self {
             fetched,
             fetch,
@@ -185,9 +188,9 @@ impl<T, C: Connection> Follower<T, C> {
             ..
         } = self;
         tokio::select! {
-            came = fetched.1.recv() => came.unwrap_or(Came::FetchEnded { whole: false }),
-            answer = on(fetch.as_mut().map(|(_, answers)| answers.next_event())) => Came::FetchAnswer(answer),
-            came = kept.next() => Came::Kept(came),
+            came = fetched.1.recv() => came.unwrap_or(FollowerInput::FetchEnded { whole: false }),
+            answer = on(fetch.as_mut().map(|(_, answers)| answers.next_event())) => FollowerInput::FetchAnswer(answer),
+            came = kept.next() => FollowerInput::Kept(came),
         }
     }
 
@@ -200,11 +203,13 @@ impl<T, C: Connection> Follower<T, C> {
     pub async fn on(
         &mut self,
         session: &mut Session,
-        came: Came<C>,
-    ) -> Result<Vec<Out<T>>, RequestFault> {
+        came: FollowerInput<C>,
+    ) -> Result<Vec<FollowOutcome<T>>, RequestFault> {
         Ok(match came {
-            Came::Fetched(number, payload) => self.fetched(number, &payload).into_iter().collect(),
-            Came::FetchEnded { whole: true } => {
+            FollowerInput::Fetched(number, payload) => {
+                self.fetched(number, &payload).into_iter().collect()
+            }
+            FollowerInput::FetchEnded { whole: true } => {
                 // Over in the session once it was answered too, so that
                 // `cancel_malformed` does not name it later.
                 if let Some((request, _)) = self.fetch_stream.take() {
@@ -212,14 +217,14 @@ impl<T, C: Connection> Follower<T, C> {
                 }
                 self.fetch_ended()
             }
-            Came::FetchEnded { whole: false } => {
+            FollowerInput::FetchEnded { whole: false } => {
                 self.give_up_fetch(session);
                 self.fetch_ended()
             }
-            Came::FetchAnswer(answer) => match self.on_fetch_answer(session, answer) {
+            FollowerInput::FetchAnswer(answer) => match self.on_fetch_answer(session, answer) {
                 Ok(shown) => shown,
                 Err(error) => {
-                    let mut out = vec![Out::Note(format!(
+                    let mut out = vec![FollowOutcome::Note(format!(
                         "{}_FETCH_FAILED {error:#}",
                         self.track.fetch_note
                     ))];
@@ -228,7 +233,7 @@ impl<T, C: Connection> Follower<T, C> {
                     out
                 }
             },
-            Came::Kept(came) => match self.kept.on(session, came)? {
+            FollowerInput::Kept(came) => match self.kept.on(session, came)? {
                 Some(said) => self.said(session, said).await,
                 None => Vec::new(),
             },
@@ -243,7 +248,7 @@ impl<T, C: Connection> Follower<T, C> {
     /// given up ([`Items::fetch_given_up`]): the next one asks for its lines
     /// again. `None` where it is another's: a FETCH of this track that is
     /// over or was given up is not named, the session holds it no more.
-    pub fn malformed(&mut self, request: RequestId) -> Option<Vec<Out<T>>> {
+    pub fn malformed(&mut self, request: RequestId) -> Option<Vec<FollowOutcome<T>>> {
         if let Some(said) = self.kept.malformed(request) {
             return Some(self.note_of(said).into_iter().collect());
         }
@@ -270,49 +275,53 @@ impl<T, C: Connection> Follower<T, C> {
         // next FETCH brings it again.
         self.fetched = mpsc::channel(32);
         self.shown.fetch_given_up();
-        Some(vec![Out::Note(format!(
+        Some(vec![FollowOutcome::Note(format!(
             "{}_FETCH_ENDED MALFORMED_TRACK",
             self.track.fetch_note
         ))])
     }
 
     /// What became of the subscription: on a new one, its Joining FETCH.
-    async fn said(&mut self, session: &mut Session, said: Said) -> Vec<Out<T>> {
+    async fn said(
+        &mut self,
+        session: &mut Session,
+        said: KeptTrackChange,
+    ) -> Vec<FollowOutcome<T>> {
         match said {
-            Said::Subscribed { .. } => self.subscribed(session).await,
+            KeptTrackChange::Subscribed { .. } => self.subscribed(session).await,
             said => self.note_of(said).into_iter().collect(),
         }
     }
 
     /// The line for what became of the subscription; none for a new one,
     /// which [`Self::subscribed`] tells of.
-    fn note_of(&self, said: Said) -> Option<Out<T>> {
+    fn note_of(&self, said: KeptTrackChange) -> Option<FollowOutcome<T>> {
         let note = self.track.note;
         Some(match said {
-            Said::Subscribed { .. } => return None,
-            Said::Ended { how, pause_ms } => {
-                Out::Note(format!("{note}_ENDED {how}; asking again in {pause_ms} ms"))
+            KeptTrackChange::Subscribed { .. } => return None,
+            KeptTrackChange::Ended { how, pause_ms } => {
+                FollowOutcome::Note(format!("{note}_ENDED {how}; asking again in {pause_ms} ms"))
             }
-            Said::Refused {
+            KeptTrackChange::Refused {
                 error_code,
                 pause_ms,
-            } => Out::Note(format!(
+            } => FollowOutcome::Note(format!(
                 "{note}_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"
             )),
-            Said::Failed { why, pause_ms } => Out::Note(format!(
+            KeptTrackChange::Failed { why, pause_ms } => FollowOutcome::Note(format!(
                 "{note}_FAILED {why}; asking again in {pause_ms} ms"
             )),
-            Said::GivenUp(why) => Out::Note(format!("{note}_GIVEN_UP {why}")),
-            Said::Other(other) => Out::Note(format!("{note}_SAID {other:?}")),
+            KeptTrackChange::GivenUp(why) => FollowOutcome::Note(format!("{note}_GIVEN_UP {why}")),
+            KeptTrackChange::Other(other) => FollowOutcome::Note(format!("{note}_SAID {other:?}")),
         })
     }
 
     /// A subscription was made: the Joining FETCH of what was missed.
-    async fn subscribed(&mut self, session: &mut Session) -> Vec<Out<T>> {
+    async fn subscribed(&mut self, session: &mut Session) -> Vec<FollowOutcome<T>> {
         let Some(subscription) = self.kept.subscription() else {
             return Vec::new();
         };
-        let mut out = vec![Out::Note(format!(
+        let mut out = vec![FollowOutcome::Note(format!(
             "{} track_alias={}",
             self.track.note, subscription.track_alias
         ))];
@@ -325,7 +334,7 @@ impl<T, C: Connection> Follower<T, C> {
         let joining_request_id = subscription.request.value();
         if plan.forget {
             self.shown.forget();
-            out.push(Out::Note(format!(
+            out.push(FollowOutcome::Note(format!(
                 "{}_NUMBERED_ANEW",
                 self.track.fetch_note
             )));
@@ -338,7 +347,7 @@ impl<T, C: Connection> Follower<T, C> {
         };
         // Told before the items after it come.
         if let Some(gap) = gap {
-            out.push(Out::Gap(gap));
+            out.push(FollowOutcome::Gap(gap));
         }
         let range = FetchRange::AbsoluteJoining {
             joining_request_id,
@@ -369,7 +378,7 @@ impl<T, C: Connection> Follower<T, C> {
                 self.fetch = Some((fetch, answers));
             }
             Err(error) => {
-                out.push(Out::Note(format!(
+                out.push(FollowOutcome::Note(format!(
                     "{}_FETCH_FAILED {error:#}",
                     self.track.fetch_note
                 )));
@@ -408,7 +417,7 @@ impl<T, C: Connection> Follower<T, C> {
                         match decoder.next_event() {
                             Ok(Some(FetchEvent::Object(object))) => {
                                 let _ = to
-                                    .send(Came::Fetched(object.group_id, object.payload))
+                                    .send(FollowerInput::Fetched(object.group_id, object.payload))
                                     .await;
                             }
                             Ok(Some(_)) => {}
@@ -430,7 +439,7 @@ impl<T, C: Connection> Follower<T, C> {
                     }
                 }
             }
-            let _ = to.send(Came::FetchEnded { whole }).await;
+            let _ = to.send(FollowerInput::FetchEnded { whole }).await;
         });
     }
 
@@ -441,7 +450,7 @@ impl<T, C: Connection> Follower<T, C> {
         &mut self,
         session: &mut Session,
         answer: Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>,
-    ) -> Result<Vec<Out<T>>> {
+    ) -> Result<Vec<FollowOutcome<T>>> {
         let Some((fetch, _)) = self.fetch.as_ref() else {
             return Ok(Vec::new());
         };
@@ -493,7 +502,7 @@ impl<T, C: Connection> Follower<T, C> {
     }
 
     /// The FETCH is over: the items that waited.
-    fn fetch_ended(&mut self) -> Vec<Out<T>> {
+    fn fetch_ended(&mut self) -> Vec<FollowOutcome<T>> {
         self.fetch = None;
         if let Some((_, send)) = self.joining.take() {
             send.finish();
@@ -501,15 +510,15 @@ impl<T, C: Connection> Follower<T, C> {
         self.shown
             .fetch_ended()
             .into_iter()
-            .map(|(_, item)| Out::Item(item))
+            .map(|(_, item)| FollowOutcome::Item(item))
             .collect()
     }
 
     /// An item of the FETCH, if it is given.
-    fn fetched(&mut self, number: u64, payload: &[u8]) -> Option<Out<T>> {
+    fn fetched(&mut self, number: u64, payload: &[u8]) -> Option<FollowOutcome<T>> {
         let item = (self.track.read)(number, payload)?;
         let (_, item) = self.shown.fetched(number, item)?;
-        Some(Out::Item(item))
+        Some(FollowOutcome::Item(item))
     }
 
     /// An Object of the track, the Group `number`: the item, if it is given.
@@ -701,7 +710,7 @@ mod tests {
             };
             if let Some(whole) = whole {
                 follower
-                    .on(&mut session, Came::FetchEnded { whole })
+                    .on(&mut session, FollowerInput::FetchEnded { whole })
                     .await
                     .unwrap();
             }

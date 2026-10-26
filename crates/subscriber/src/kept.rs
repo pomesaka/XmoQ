@@ -39,11 +39,13 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{Connection, RequestReadError, RequestStreamEvent, StreamStops};
 
-use crate::session::{Asked, NotSubscribed, Requests, Sent, Subscription, send_subscribe, settle};
+use crate::session::{
+    NotSubscribed, Requests, Sent, Subscription, UnsentSubscribe, send_subscribe, settle,
+};
 
 /// A SUBSCRIBE on its way, and what came of it.
 type Answer<C> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = (Asked, Result<Sent<C>>)> + std::marker::Send>,
+    Box<dyn std::future::Future<Output = (UnsentSubscribe, Result<Sent<C>>)> + std::marker::Send>,
 >;
 
 /// What the requests are sent with.
@@ -85,18 +87,18 @@ pub struct Wanted {
 }
 
 /// What the kept track has to be told of, from the loop of the session.
-pub enum Came<C: Connection = WtConnection> {
+pub enum KeptTrackInput<C: Connection = WtConnection> {
     /// What came on the stream of the subscription.
     Answer(Result<RequestStreamEvent, RequestReadError>),
     /// The time to ask for the track (again) has come.
     AskNow,
     /// What came of the SUBSCRIBE, boxed: it is the largest by far.
-    Settled(Box<(Asked, Result<Sent<C>>)>),
+    Settled(Box<(UnsentSubscribe, Result<Sent<C>>)>),
 }
 
 /// What became of the track, for the caller to tell.
 #[derive(Debug)]
-pub enum Said {
+pub enum KeptTrackChange {
     /// It is subscribed to (again), with this Track Alias
     /// ([`KeptTrack::subscription`]).
     Subscribed {
@@ -339,7 +341,7 @@ pub(crate) async fn on<T>(item: Option<impl std::future::Future<Output = T>>) ->
 }
 
 impl<C: Connection> KeptTrack<C> {
-    /// A track that is asked for at once, from the loop ([`Came::AskNow`]).
+    /// A track that is asked for at once, from the loop ([`KeptTrackInput::AskNow`]).
     #[must_use]
     pub fn new(wanted: Wanted, asking_with: Asking<C>) -> Self {
         Self {
@@ -354,7 +356,7 @@ impl<C: Connection> KeptTrack<C> {
 
     /// A track whose first subscription the caller made, where a session
     /// without it is of no use. That one is told of by no
-    /// [`Said::Subscribed`]: the caller has it.
+    /// [`KeptTrackChange::Subscribed`]: the caller has it.
     #[must_use]
     pub fn subscribed(
         wanted: Wanted,
@@ -395,7 +397,7 @@ impl<C: Connection> KeptTrack<C> {
     }
 
     /// What comes next.
-    pub async fn next(&mut self) -> Came<C> {
+    pub async fn next(&mut self) -> KeptTrackInput<C> {
         let Self {
             subscription,
             ask_at,
@@ -403,9 +405,9 @@ impl<C: Connection> KeptTrack<C> {
             ..
         } = self;
         tokio::select! {
-            event = on(subscription.as_mut().map(|subscription| subscription.reader.next_event())) => Came::Answer(event),
-            () = on(ask_at.map(tokio::time::sleep_until)) => Came::AskNow,
-            settled = on(asking.as_mut().map(|(_, answer)| answer)) => Came::Settled(Box::new(settled)),
+            event = on(subscription.as_mut().map(|subscription| subscription.reader.next_event())) => KeptTrackInput::Answer(event),
+            () = on(ask_at.map(tokio::time::sleep_until)) => KeptTrackInput::AskNow,
+            settled = on(asking.as_mut().map(|(_, answer)| answer)) => KeptTrackInput::Settled(Box::new(settled)),
         }
     }
 
@@ -419,15 +421,15 @@ impl<C: Connection> KeptTrack<C> {
     pub fn on(
         &mut self,
         session: &mut Session,
-        came: Came<C>,
-    ) -> Result<Option<Said>, RequestFault> {
+        came: KeptTrackInput<C>,
+    ) -> Result<Option<KeptTrackChange>, RequestFault> {
         match came {
-            Came::Answer(event) => self.on_answer(session, event),
-            Came::AskNow => {
+            KeptTrackInput::Answer(event) => self.on_answer(session, event),
+            KeptTrackInput::AskNow => {
                 self.ask_at = None;
                 Ok(self.ask(session))
             }
-            Came::Settled(settled) => {
+            KeptTrackInput::Settled(settled) => {
                 self.asking = None;
                 let (asked, sent) = *settled;
                 self.settled(session, &asked, sent).map(Some)
@@ -437,7 +439,7 @@ impl<C: Connection> KeptTrack<C> {
 
     /// Ends the subscription from this side, and asks for the track again
     /// after the pause; `None` where there is none.
-    pub fn cut(&mut self, session: &mut Session) -> Option<Said> {
+    pub fn cut(&mut self, session: &mut Session) -> Option<KeptTrackChange> {
         let subscription = self.subscription.as_ref()?;
         session.cancel(subscription.request);
         Some(self.ended(
@@ -462,7 +464,7 @@ impl<C: Connection> KeptTrack<C> {
     /// tracks, and send an Object after the End of a Group, and wait for
     /// `TRACK_MALFORMED` and the track asked for again in the logs of
     /// `xmoq-watch` and `xmoq-agent`.
-    pub fn malformed(&mut self, request: RequestId) -> Option<Said> {
+    pub fn malformed(&mut self, request: RequestId) -> Option<KeptTrackChange> {
         if self.subscription.as_ref()?.request != request {
             return None;
         }
@@ -488,7 +490,7 @@ impl<C: Connection> KeptTrack<C> {
     }
 
     /// Sends the SUBSCRIBE.
-    fn ask(&mut self, session: &mut Session) -> Option<Said> {
+    fn ask(&mut self, session: &mut Session) -> Option<KeptTrackChange> {
         let mut requests = Requests {
             connection: &*self.asking_with.connection,
             session,
@@ -515,13 +517,13 @@ impl<C: Connection> KeptTrack<C> {
     }
 
     /// A SUBSCRIBE that could not be sent, or was not answered, for `why`.
-    fn not_sent(&mut self, why: String) -> Said {
+    fn not_sent(&mut self, why: String) -> KeptTrackChange {
         match decide(Happened::NotSent, self.keeping(), &mut self.tries) {
             Becomes::Again(pause_ms) => {
                 self.ask_in(pause_ms);
-                Said::Failed { why, pause_ms }
+                KeptTrackChange::Failed { why, pause_ms }
             }
-            Becomes::GivenUp | Becomes::Subscribed => Said::GivenUp(why),
+            Becomes::GivenUp | Becomes::Subscribed => KeptTrackChange::GivenUp(why),
         }
     }
 
@@ -548,15 +550,15 @@ impl<C: Connection> KeptTrack<C> {
     fn settled(
         &mut self,
         session: &mut Session,
-        asked: &Asked,
+        asked: &UnsentSubscribe,
         sent: Result<Sent<C>>,
-    ) -> Result<Said, RequestFault> {
+    ) -> Result<KeptTrackChange, RequestFault> {
         Ok(match settle(session, asked, sent) {
             Ok(subscription) => {
                 decide(Happened::Subscribed, self.keeping(), &mut self.tries);
                 let track_alias = subscription.track_alias;
                 self.take(subscription);
-                Said::Subscribed { track_alias }
+                KeptTrackChange::Subscribed { track_alias }
             }
             Err(NotSubscribed::Refused(error)) => {
                 let pause_ms = self.pause_after(Happened::Refused {
@@ -564,7 +566,7 @@ impl<C: Connection> KeptTrack<C> {
                     named_ms: error.retry_wait_ms(),
                 });
                 self.ask_in(pause_ms);
-                Said::Refused {
+                KeptTrackChange::Refused {
                     error_code: error.error_code,
                     pause_ms,
                 }
@@ -579,7 +581,7 @@ impl<C: Connection> KeptTrack<C> {
         &mut self,
         session: &mut Session,
         event: Result<RequestStreamEvent, RequestReadError>,
-    ) -> Result<Option<Said>, RequestFault> {
+    ) -> Result<Option<KeptTrackChange>, RequestFault> {
         let Some(subscription) = self.subscription.as_ref() else {
             return Ok(None);
         };
@@ -588,20 +590,20 @@ impl<C: Connection> KeptTrack<C> {
                 Answered::Ended(how) => {
                     self.ended(how, Happened::Ended, stream_reset_code::CANCELLED)
                 }
-                Answered::Other(other) => Said::Other(other),
+                Answered::Other(other) => KeptTrackChange::Other(other),
             },
         ))
     }
 
     /// The subscription is over, `how`: asked for again after the pause.
     /// Its streams are reset and stopped with `code`.
-    fn ended(&mut self, how: String, happened: Happened, code: u32) -> Said {
+    fn ended(&mut self, how: String, happened: Happened, code: u32) -> KeptTrackChange {
         if let Some(subscription) = self.let_go() {
             subscription.cancel_with(code);
         }
         let pause_ms = self.pause_after(happened);
         self.ask_in(pause_ms);
-        Said::Ended { how, pause_ms }
+        KeptTrackChange::Ended { how, pause_ms }
     }
 
     fn take(&mut self, subscription: Subscription<C>) {
@@ -844,7 +846,7 @@ mod tests {
                 assert!(
                     matches!(
                         kept.on(&mut session, settled),
-                        Ok(Some(Said::Subscribed { track_alias: 1 }))
+                        Ok(Some(KeptTrackChange::Subscribed { track_alias: 1 }))
                     ),
                     "{name}"
                 );

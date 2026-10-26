@@ -23,7 +23,7 @@ use xmoq_moqt_io::Connection;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_msf::{CATALOG_TRACK, CatalogTrack, MAX_CATALOG_LENGTH};
 
-use crate::kept::{Asking, Came, KeptTrack, Said, Wanted};
+use crate::kept::{Asking, KeptTrack, KeptTrackChange, KeptTrackInput, Wanted};
 use crate::session::{CatalogNotRead, Events, Requests};
 
 /// What became of the broadcast, by its catalog.
@@ -92,7 +92,7 @@ impl<C: Connection> FollowedCatalog<C> {
     }
 
     /// What comes next.
-    pub async fn next(&mut self) -> Came<C> {
+    pub async fn next(&mut self) -> KeptTrackInput<C> {
         self.kept.next().await
     }
 
@@ -110,24 +110,26 @@ impl<C: Connection> FollowedCatalog<C> {
         &mut self,
         session: &mut Session,
         events: &mut Events,
-        came: Came<C>,
+        came: KeptTrackInput<C>,
     ) -> Result<Became> {
         let Some(said) = self.kept.on(session, came)? else {
             return Ok(Became::Nothing);
         };
         Ok(match said {
-            Said::Subscribed { .. } => return self.read(session, events).await,
-            Said::Ended { how, pause_ms } => self.ended(how, pause_ms),
-            Said::Refused {
+            KeptTrackChange::Subscribed { .. } => return self.read(session, events).await,
+            KeptTrackChange::Ended { how, pause_ms } => self.ended(how, pause_ms),
+            KeptTrackChange::Refused {
                 error_code,
                 pause_ms,
             } => Became::Waiting {
                 why: format!("refused error_code={error_code:#x}"),
                 pause_ms,
             },
-            Said::Failed { why, pause_ms } => Became::Waiting { why, pause_ms },
-            Said::GivenUp(why) => return Err(anyhow!("the catalog was given up: {why}")),
-            Said::Other(_) => Became::Nothing,
+            KeptTrackChange::Failed { why, pause_ms } => Became::Waiting { why, pause_ms },
+            KeptTrackChange::GivenUp(why) => {
+                return Err(anyhow!("the catalog was given up: {why}"));
+            }
+            KeptTrackChange::Other(_) => Became::Nothing,
         })
     }
 
@@ -136,7 +138,7 @@ impl<C: Connection> FollowedCatalog<C> {
     /// was the catalog's SUBSCRIBE, which is asked for again; `None` where
     /// it is another's. Its FETCH was closed once the catalog was read.
     pub fn malformed(&mut self, request: RequestId) -> Option<Became> {
-        if let Some(Said::Ended { how, pause_ms }) = self.kept.malformed(request) {
+        if let Some(KeptTrackChange::Ended { how, pause_ms }) = self.kept.malformed(request) {
             return Some(self.ended(how, pause_ms));
         }
         None
@@ -183,7 +185,7 @@ impl<C: Connection> FollowedCatalog<C> {
             }
             Err(error) if error.downcast_ref::<CatalogNotRead>().is_some() => {
                 let pause_ms = match self.kept.cut(session) {
-                    Some(Said::Ended { pause_ms, .. }) => pause_ms,
+                    Some(KeptTrackChange::Ended { pause_ms, .. }) => pause_ms,
                     _ => 0,
                 };
                 Ok(Became::Waiting {

@@ -358,7 +358,7 @@ async fn open_stream<C: Connection>(
 }
 
 /// A SUBSCRIBE the session made and that is not sent yet.
-pub struct Asked {
+pub struct UnsentSubscribe {
     name: String,
     request: RequestId,
     message: ControlMessage,
@@ -434,7 +434,7 @@ impl std::error::Error for GoneAway {}
 pub async fn send_subscribe<C: Connection>(
     connection: &C,
     open_wait_ms: u64,
-    asked: &Asked,
+    asked: &UnsentSubscribe,
 ) -> Result<Sent<C>> {
     let (send, recv) = open_stream(connection, open_wait_ms, &asked.name).await?;
     let trace = Trace::default();
@@ -495,7 +495,7 @@ impl<C: Connection> Drop for Unanswered<C> {
 /// [`NotSubscribed`].
 pub fn settle<C: Connection>(
     session: &mut Session,
-    asked: &Asked,
+    asked: &UnsentSubscribe,
     sent: Result<Sent<C>>,
 ) -> Result<Subscription<C>, NotSubscribed> {
     let (request, name) = (asked.request, &asked.name);
@@ -565,7 +565,7 @@ fn answer_of(
     }
 }
 
-impl Asked {
+impl UnsentSubscribe {
     /// The session's handle of the SUBSCRIBE.
     #[must_use]
     pub fn request(&self) -> RequestId {
@@ -581,7 +581,7 @@ impl<C: Connection> Requests<'_, C> {
     ///
     /// A name that makes no Full Track Name, and a session that can make no
     /// more requests.
-    pub fn ask(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<Asked> {
+    pub fn ask(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<UnsentSubscribe> {
         let full_name = FullTrackName::new(self.namespace.clone(), name.as_bytes().to_vec())?;
         let mut parameters = vec![
             Parameter::Forward(true),
@@ -599,7 +599,7 @@ impl<C: Connection> Requests<'_, C> {
         }
         let wait_ms = answer_wait_ms(self.answer_wait_ms, &parameters);
         let (request, message) = self.session.subscribe(full_name, parameters)?;
-        Ok(Asked {
+        Ok(UnsentSubscribe {
             name: name.to_string(),
             request,
             message,
