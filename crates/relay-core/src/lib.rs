@@ -3580,6 +3580,9 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
+        // WHY the kinds that are finished are named and not those that are
+        // not: a kind added later is finished here only where whoever adds
+        // it says so; the others end the relay's direction below, or have.
         if finish
             && matches!(
                 slot,
@@ -3587,6 +3590,7 @@ impl Relay {
                     RequestSlot::Subscribe { .. }
                         | RequestSlot::Publish { .. }
                         | RequestSlot::PublishNamespace { .. }
+                        | RequestSlot::SubscribeNamespace { .. }
                         | RequestSlot::Waiting { .. }
                         | RequestSlot::TrackStatus { .. }
                 )
