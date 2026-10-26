@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 
 use crate::Error;
-use crate::coding::{ReadError, Reader};
+use crate::coding::{ByteReader, ReadError};
 use crate::kvp::{self, KeyValuePair, Value};
 
 /// Property Type of Immutable Properties (§12.7).
@@ -113,7 +113,7 @@ pub(crate) fn properties_to_search(
         let Value::Bytes(value) = property.value() else {
             continue;
         };
-        let pairs = match kvp::decode_all(&mut Reader::new(value)) {
+        let pairs = match kvp::decode_all(&mut ByteReader::new(value)) {
             Ok(pairs) => pairs,
             Err(ReadError::Short) => {
                 return Ok(Err(

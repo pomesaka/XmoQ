@@ -173,7 +173,7 @@ pub enum Tell {
 /// How a FETCH ended: what `FETCH_ENDED` prints, and what becomes of its
 /// streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ended {
+pub struct FetchEnd {
     pub how: &'static str,
     /// The code of the reset that ended it, where one did.
     pub code: Option<u32>,
@@ -189,7 +189,7 @@ pub struct Step {
     pub progress: Progress,
     pub tell: Option<Tell>,
     /// Set once for every FETCH: `FETCH_ENDED` is printed for it.
-    pub ended: Option<Ended>,
+    pub ended: Option<FetchEnd>,
 }
 
 /// The whole of what the client decides about a FETCH of its own, apart from
@@ -227,7 +227,7 @@ pub fn step(progress: Progress, happened: Happened) -> Step {
             ..progress
         },
         tell,
-        ended: Some(Ended { how, code, cancel }),
+        ended: Some(FetchEnd { how, code, cancel }),
     };
     // Answered and its stream ended: over, and how the stream ended is how
     // the FETCH did. This client finishes its direction of the request
@@ -244,7 +244,7 @@ pub fn step(progress: Progress, happened: Happened) -> Step {
                 ..progress
             },
             tell,
-            ended: ended.map(|(how, code)| Ended {
+            ended: ended.map(|(how, code)| FetchEnd {
                 how,
                 code,
                 cancel: false,
@@ -339,7 +339,7 @@ fn printed(lines: &Mutex<Printed>) -> MutexGuard<'_, Printed> {
 impl OwnFetch {
     /// Prints `FETCH_ENDED` for the FETCH, once, with the number of Object
     /// lines printed before it.
-    pub fn print_ended(&self, ended: Ended) {
+    pub fn print_ended(&self, ended: FetchEnd) {
         let mut lines = printed(&self.printed);
         if !lines.ended {
             lines.ended = true;

@@ -5,7 +5,7 @@
 //! FIXME: decode `OBJECT_DATAGRAM`. Nothing here does, so its Object is lost.
 
 use crate::coding::{
-    ReadError, ReadResult, Reader, ReceiveBuffer, parse_exact, put_length_prefixed,
+    ByteReader, ReadError, ReadResult, ReceiveBuffer, parse_exact, put_length_prefixed,
 };
 use crate::immutable;
 use crate::kvp::{self, KeyValuePair, Value};
@@ -105,7 +105,7 @@ pub struct SubgroupHeader {
 }
 
 impl SubgroupHeader {
-    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         let ty = reader.varint()?;
         if !is_subgroup_header_type(ty) {
             return Err(Error::ProtocolViolation("not a subgroup header type").into());
@@ -484,7 +484,7 @@ impl SubgroupStreamDecoder {
         }
         let parsed = match self.header {
             None => {
-                let mut reader = Reader::new(self.buffer.unread());
+                let mut reader = ByteReader::new(self.buffer.unread());
                 SubgroupHeader::decode(&mut reader)
                     .map(|header| (SubgroupEvent::Header(header), reader.position()))
             }
@@ -555,7 +555,7 @@ impl SubgroupStreamDecoder {
         let head = if let Some(head) = self.head.take() {
             head
         } else {
-            let mut reader = Reader::new(self.buffer.unread());
+            let mut reader = ByteReader::new(self.buffer.unread());
             let (object_id, properties, payload_len) =
                 self.decode_object_head(&mut reader, header)?;
             #[cfg(test)]
@@ -570,7 +570,7 @@ impl SubgroupStreamDecoder {
             }
         };
         let unread = self.buffer.unread();
-        let mut reader = Reader::new(unread.get(head.len..).unwrap_or_default());
+        let mut reader = ByteReader::new(unread.get(head.len..).unwrap_or_default());
         // The Object Status field exists only when the payload is empty.
         let rest = if head.payload_len == 0 {
             reader.varint().and_then(|code| {
@@ -613,7 +613,7 @@ impl SubgroupStreamDecoder {
     /// Properties and its Object Payload Length.
     fn decode_object_head(
         &self,
-        reader: &mut Reader<'_>,
+        reader: &mut ByteReader<'_>,
         header: &SubgroupHeader,
     ) -> ReadResult<(u64, Vec<KeyValuePair>, usize)> {
         let delta = reader.varint()?;
@@ -659,7 +659,7 @@ impl SubgroupStreamDecoder {
     /// buffer has filled up. A length at or just under the limit cannot be
     /// satisfied either, because the fields before it take room too; that case
     /// is left to `push`, which fails once the buffer is full.
-    fn announced_length(&self, reader: &mut Reader<'_>) -> ReadResult<usize> {
+    fn announced_length(&self, reader: &mut ByteReader<'_>) -> ReadResult<usize> {
         let len = reader.length()?;
         if len > self.buffer_limit {
             return Err(Error::ObjectTooLarge {

@@ -67,7 +67,7 @@ impl Default for Settings {
 
 /// How a subscription to a participant's `said` came to an end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Over {
+pub enum SubscriptionEnd {
     /// It ended (`PUBLISH_DONE`, its stream), was not answered in time, or
     /// could not be sent.
     Ended,
@@ -109,14 +109,14 @@ impl SaidAgain {
     /// Its subscription is over: the pause in milliseconds before it is
     /// asked again, or `None` where it is not, until its NAMESPACE comes
     /// again.
-    pub fn over(&mut self, over: Over) -> Option<u64> {
+    pub fn over(&mut self, over: SubscriptionEnd) -> Option<u64> {
         if self.asked >= self.times {
             return None;
         }
         let pause = match over {
-            Over::Ended => self.rule.after_end(),
-            Over::Refused(named) => self.rule.after_refusal(named),
-            Over::Malformed => return None,
+            SubscriptionEnd::Ended => self.rule.after_end(),
+            SubscriptionEnd::Refused(named) => self.rule.after_refusal(named),
+            SubscriptionEnd::Malformed => return None,
         };
         self.asked += 1;
         Some(pause)
@@ -129,15 +129,15 @@ mod tests {
 
     /// What happens to the subscription, in order, with the pause expected.
     enum Step {
-        Over(Over, Option<u64>),
+        Over(SubscriptionEnd, Option<u64>),
         Subscribed,
     }
 
     #[test]
     fn a_participant_is_asked_again_by_the_rule_up_to_the_times_set() {
         use Step::Subscribed;
-        let ended = |pause| Step::Over(Over::Ended, pause);
-        let refused = |named, pause| Step::Over(Over::Refused(named), pause);
+        let ended = |pause| Step::Over(SubscriptionEnd::Ended, pause);
+        let refused = |named, pause| Step::Over(SubscriptionEnd::Refused(named), pause);
         let settings = |times, pause_ms| Settings { times, pause_ms };
         let cases: [(&str, Settings, Vec<Step>); 8] = [
             ("an end", Settings::default(), vec![ended(Some(1000))]),
@@ -154,7 +154,7 @@ mod tests {
             (
                 "a malformed track is not asked again",
                 Settings::default(),
-                vec![Step::Over(Over::Malformed, None)],
+                vec![Step::Over(SubscriptionEnd::Malformed, None)],
             ),
             (
                 "two times, then not again",

@@ -4,7 +4,7 @@
 //! definition and not from the parity of its type, and a block is bounded by a
 //! count. A receiver therefore has to know every type it is sent.
 
-use crate::coding::{ReadResult, Reader, parse_exact, put_count, put_length_prefixed};
+use crate::coding::{ByteReader, ReadResult, parse_exact, put_count, put_length_prefixed};
 use crate::name::{Location, TrackNamespace};
 use crate::{Error, UsageError, varint};
 
@@ -320,7 +320,7 @@ pub fn subscription_filter(parameters: &[Parameter]) -> Option<SubscriptionFilte
 ///
 /// More than [`MAX_PARAMETERS`] are [`Error::TooManyParameters`], which ends the
 /// session.
-pub(crate) fn decode_all(reader: &mut Reader<'_>) -> ReadResult<Vec<Parameter>> {
+pub(crate) fn decode_all(reader: &mut ByteReader<'_>) -> ReadResult<Vec<Parameter>> {
     let count = reader.varint()?;
     if usize::try_from(count).map_or(true, |count| count > MAX_PARAMETERS) {
         return Err(Error::TooManyParameters {
@@ -346,7 +346,7 @@ pub(crate) fn decode_all(reader: &mut Reader<'_>) -> ReadResult<Vec<Parameter>> 
     Ok(parameters)
 }
 
-fn decode_value(ty: u64, reader: &mut Reader<'_>) -> ReadResult<Parameter> {
+fn decode_value(ty: u64, reader: &mut ByteReader<'_>) -> ReadResult<Parameter> {
     Ok(match ty {
         OBJECT_DELIVERY_TIMEOUT => Parameter::ObjectDeliveryTimeout(reader.varint()?),
         AUTHORIZATION_TOKEN => {
@@ -394,7 +394,7 @@ fn decode_value(ty: u64, reader: &mut Reader<'_>) -> ReadResult<Parameter> {
     })
 }
 
-fn decode_filter(reader: &mut Reader<'_>) -> ReadResult<SubscriptionFilter> {
+fn decode_filter(reader: &mut ByteReader<'_>) -> ReadResult<SubscriptionFilter> {
     Ok(match reader.varint()? {
         FILTER_NEXT_GROUP_START => SubscriptionFilter::NextGroupStart,
         FILTER_LARGEST_OBJECT => SubscriptionFilter::LargestObject,

@@ -543,7 +543,7 @@ enum Step {
 
 /// The receiving half of a stream with its read buffer, its trace label and
 /// the signals that end reading early.
-struct Reader<R> {
+struct StreamBeingRead<R> {
     recv: R,
     chunk: Vec<u8>,
     trace: Trace,
@@ -553,7 +553,7 @@ struct Reader<R> {
     deadline: Option<Instant>,
 }
 
-impl<R: RecvStream> Reader<R> {
+impl<R: RecvStream> StreamBeingRead<R> {
     fn new(recv: R, config: &StreamConfig, stops: &StreamStops, kind: &str) -> Self {
         let registration = stops.register();
         Self {
@@ -676,7 +676,7 @@ impl std::error::Error for RequestReadError {
 /// dropped receiving half sends `STOP_SENDING` with code 0 (`impl Drop for
 /// SendStream` and `for RecvStream`; read 2026-10-10).
 pub struct RequestReader<R> {
-    reader: Reader<R>,
+    reader: StreamBeingRead<R>,
     decoder: MessageDecoder,
 }
 
@@ -688,7 +688,7 @@ impl<R: RecvStream> RequestReader<R> {
             trace: trace.clone(),
             ..StreamConfig::default()
         };
-        let mut reader = Reader::new(recv, &config, &StreamStops::default(), "request");
+        let mut reader = StreamBeingRead::new(recv, &config, &StreamStops::default(), "request");
         reader.label = label.to_string();
         // How long to wait for a response is the caller's to decide.
         reader.deadline = None;
@@ -916,7 +916,7 @@ pub fn read_uni_streams<C: Connection, T: Send + 'static>(
             let budget = Arc::clone(&budget);
             async move {
                 let recv = connection.accept_uni().await.ok()?;
-                let reader = Reader::new(recv, &config, &stops, "uni");
+                let reader = StreamBeingRead::new(recv, &config, &stops, "uni");
                 let read: ReaderTask = Box::pin(async move {
                     let _permit = permit;
                     read_uni_stream(reader, &config, &budget, &sink).await;
@@ -1027,7 +1027,7 @@ pub fn read_request_streams<C: Connection, T: Send + 'static>(
             let sink = sink.clone();
             async move {
                 let (send, recv) = connection.accept_bi().await.ok()?;
-                let reader = Reader::new(recv, &config, &stops, "bi");
+                let reader = StreamBeingRead::new(recv, &config, &stops, "bi");
                 let read: ReaderTask = Box::pin(async move {
                     let _permit = permit;
                     read_request_stream(reader, send, &sink).await;
@@ -1127,7 +1127,7 @@ impl Drop for Held<'_> {
 }
 
 async fn read_uni_stream<R: RecvStream, T>(
-    mut reader: Reader<R>,
+    mut reader: StreamBeingRead<R>,
     config: &StreamConfig,
     budget: &ReceiveBudget,
     sink: &Sink<UniEvent, T>,
@@ -1185,7 +1185,7 @@ async fn read_uni_stream<R: RecvStream, T>(
 }
 
 async fn read_control_stream<R: RecvStream, T>(
-    mut reader: Reader<R>,
+    mut reader: StreamBeingRead<R>,
     head: &[u8],
     sink: &Sink<UniEvent, T>,
 ) {
@@ -1231,7 +1231,7 @@ async fn read_control_stream<R: RecvStream, T>(
 /// Reads the header of a fetch stream, announces the stream, and then moves
 /// its bytes to whoever takes the [`FetchBody`], waiting for them.
 async fn read_fetch_stream<R: RecvStream, T>(
-    mut reader: Reader<R>,
+    mut reader: StreamBeingRead<R>,
     mut head: Vec<u8>,
     sink: &Sink<UniEvent, T>,
 ) {
@@ -1353,7 +1353,7 @@ async fn read_fetch_stream<R: RecvStream, T>(
 /// protocol error ends the session: a reset is how streams are cancelled
 /// (§11.4.1), and an oversized Object or a malformed track stops this stream.
 async fn read_subgroup_stream<R: RecvStream, T>(
-    mut reader: Reader<R>,
+    mut reader: StreamBeingRead<R>,
     head: &[u8],
     config: &StreamConfig,
     budget: &ReceiveBudget,
@@ -1456,7 +1456,7 @@ async fn read_subgroup_stream<R: RecvStream, T>(
 /// `Err(Some(_))` is what the decoder made of the bytes.
 async fn deliver_decoded<R: RecvStream, T>(
     decoder: &mut SubgroupStreamDecoder,
-    reader: &mut Reader<R>,
+    reader: &mut StreamBeingRead<R>,
     sink: &Sink<UniEvent, T>,
 ) -> Result<(), Option<Error>> {
     let stream = reader.stream();
@@ -1526,7 +1526,7 @@ async fn close_subgroup<T>(
 }
 
 async fn read_request_stream<R: RecvStream, S: SendStream, T>(
-    mut reader: Reader<R>,
+    mut reader: StreamBeingRead<R>,
     send: S,
     sink: &Sink<PeerRequestStreamEvent<S>, T>,
 ) {

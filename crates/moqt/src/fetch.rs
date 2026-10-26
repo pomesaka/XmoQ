@@ -6,7 +6,7 @@
 //! So the stream is decoded and encoded in order, with that Object in mind.
 
 use crate::coding::{
-    ReadError, ReadResult, Reader, ReceiveBuffer, parse_exact, put_length_prefixed,
+    ByteReader, ReadError, ReadResult, ReceiveBuffer, parse_exact, put_length_prefixed,
 };
 use crate::data::{
     STREAM_TYPE_FETCH_HEADER, object_properties_fault, object_properties_usage_fault,
@@ -137,7 +137,7 @@ impl Prior {
 ///
 /// [`Error::ProtocolViolation`] when the stream is of another type.
 pub fn decode_fetch_header(buf: &[u8]) -> Result<Option<(FetchHeader, usize)>, Error> {
-    let mut reader = Reader::new(buf);
+    let mut reader = ByteReader::new(buf);
     match FetchStreamDecoder::decode_header(&mut reader) {
         Ok(header) => Ok(Some((header, reader.position()))),
         Err(ReadError::Short) => Ok(None),
@@ -204,7 +204,7 @@ impl FetchStreamDecoder {
     /// closes the session: Serialization Flags the draft does not define, a
     /// field taken from an Object that was not there, an ID past 64 bits.
     pub fn next_event(&mut self) -> Result<Option<FetchEvent>, Error> {
-        let mut reader = Reader::new(self.buffer.unread());
+        let mut reader = ByteReader::new(self.buffer.unread());
         let parsed = match self.header {
             None => Self::decode_header(&mut reader).map(FetchEvent::Header),
             Some(_) => self.decode_item(&mut reader),
@@ -249,7 +249,7 @@ impl FetchStreamDecoder {
         }
     }
 
-    fn decode_header(reader: &mut Reader<'_>) -> ReadResult<FetchHeader> {
+    fn decode_header(reader: &mut ByteReader<'_>) -> ReadResult<FetchHeader> {
         if reader.varint()? != STREAM_TYPE_FETCH_HEADER {
             return Err(Error::ProtocolViolation("not a fetch stream").into());
         }
@@ -258,7 +258,7 @@ impl FetchStreamDecoder {
         })
     }
 
-    fn decode_item(&self, reader: &mut Reader<'_>) -> ReadResult<FetchEvent> {
+    fn decode_item(&self, reader: &mut ByteReader<'_>) -> ReadResult<FetchEvent> {
         let flags = reader.varint()?;
         if flags >= FIRST_VALUE_THAT_IS_NO_FLAGS {
             let kind = match flags {
@@ -277,7 +277,7 @@ impl FetchStreamDecoder {
         self.decode_object(flags, reader).map(FetchEvent::Object)
     }
 
-    fn decode_object(&self, flags: u64, reader: &mut Reader<'_>) -> ReadResult<FetchObject> {
+    fn decode_object(&self, flags: u64, reader: &mut ByteReader<'_>) -> ReadResult<FetchObject> {
         // §11.4.4.1: "If the first Object in the FETCH response uses a flag
         // that references fields in the prior Object, the Subscriber MUST
         // close the session with a PROTOCOL_VIOLATION."
@@ -370,7 +370,7 @@ impl FetchStreamDecoder {
 
     /// A length field of an Object; one over the limit is refused when it is
     /// read, as on a subgroup stream.
-    fn announced_length(&self, reader: &mut Reader<'_>) -> ReadResult<usize> {
+    fn announced_length(&self, reader: &mut ByteReader<'_>) -> ReadResult<usize> {
         let len = reader.length()?;
         if len > self.buffer_limit {
             return Err(Error::ObjectTooLarge {
