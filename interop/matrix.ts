@@ -665,8 +665,8 @@ const DISCONNECTS: Pairing[] = [
 	{
 		// WHY own-browser publishes: own-rust waits for the acknowledgement of
 		// each stream and took 8 seconds to send what gets the subscriber cut
-		// off, longer than the 6 seconds after which the relay drops a silent
-		// session (9 seconds when this was measured). own-browser took 0.6
+		// off, all of it while the subscriber is stopped (`STOPPED_IDLE_TIMEOUT_MS`
+		// of disconnect.ts). own-browser took 0.6
 		// seconds, with the relay holding 256 streams for the subscription
 		// (`STOPPED_SUBSCRIPTION_STREAMS` of disconnect.ts, for the same
 		// reason).

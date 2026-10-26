@@ -397,12 +397,14 @@ async function nobodyComes(
 	subscriber: string,
 ): Promise<string> {
 	// WHY two clocks: the earliest the relay can have the SUBSCRIBE is when
-	// the subscriber begins, so a refusal counted from then and still under
-	// 1.5 s came too early; the latest is when the driver reads the relay's
-	// hold, so a refusal counted from then and over 4 s came too late.
-	// Neither counts the start of a page or a process against the relay.
+	// the subscriber is told to send it, so a refusal counted from then and
+	// still under 1.5 s came too early; the latest is when the driver reads
+	// the relay's hold, so a refusal counted from then and over 4 s came too
+	// late. Neither counts the start of a page or a process: counted from
+	// before it, a refusal at once would pass where the start took 1.5 s.
+	const ask = await readyToSubscribe(context, subscriber, 1500);
 	const began = Date.now();
-	const asked = await subscribe(context, subscriber, 1500);
+	const asked = ask();
 	const [, stream = ""] = await context.relay.waitForLine(HELD);
 	const held = Date.now();
 	const answer = await withTimeout(
@@ -430,7 +432,7 @@ async function nobodyComes(
 	}
 	if (answer === "ok" || after < 1500 || afterTheHold > 4000) {
 		throw new Error(
-			`the subscriber was to be refused between 1.5 and 4 s, not "${answer}" ${after} ms after it began and ${afterTheHold} ms after the relay held its SUBSCRIBE`,
+			`the subscriber was to be refused between 1.5 and 4 s, not "${answer}" ${after} ms after it was told to subscribe and ${afterTheHold} ms after the relay held its SUBSCRIBE`,
 		);
 	}
 	// The subscriber's session is 0.
@@ -441,7 +443,7 @@ async function nobodyComes(
 	if (closed.length > 0) {
 		throw new Error("the relay was to close no session over it");
 	}
-	return `${subscriber} subscribed to a track nobody publishes with a RENDEZVOUS_TIMEOUT of 1.5 s: the relay held the SUBSCRIBE and refused it with TIMEOUT (0x2) ${after} ms after the subscriber began: ${answer}`;
+	return `${subscriber} subscribed to a track nobody publishes with a RENDEZVOUS_TIMEOUT of 1.5 s: the relay held the SUBSCRIBE and refused it with TIMEOUT (0x2) ${after} ms after the subscriber was told to send it: ${answer}`;
 }
 
 async function notAsked(

@@ -216,6 +216,7 @@ import { parseArgs } from "node:util";
 import {
 	connectedNow,
 	type Fence,
+	type LoggedProcess,
 	log,
 	NAMESPACE,
 	openPage,
@@ -261,6 +262,45 @@ stopEverythingOnExit();
 
 const WAIT_MS = 1500;
 const BEFORE_MS = 5000;
+
+/**
+ * The driver's time when `printer` prints a line that matches.
+ *
+ * WHY the latest of a wait is counted from the line of a session and the
+ * earliest from before the client starts: counted from the start, the latest
+ * held the start of a page or a process too, which took seconds while the
+ * machine was busy; and a session begins after its client starts, so a close
+ * not later than its wait from the start is not later than it either.
+ */
+function whenPrinted(
+	printer: Pick<LoggedProcess, "waitForLine">,
+	pattern: RegExp,
+): Promise<number> {
+	const at = printer.waitForLine(pattern).then(() => Date.now());
+	// Awaited after the run's own step, whose failure is the one to tell.
+	at.catch(() => {});
+	return at;
+}
+
+/**
+ * Checks that `who` closed now, no sooner than `WAIT_MS` after `began` and no
+ * later than `BEFORE_MS` after `sessionBegan` (`whenPrinted`), and says when.
+ */
+function closedWithin(
+	began: number,
+	sessionBegan: number,
+	who: string,
+): string {
+	const now = Date.now();
+	const after = now - began;
+	const afterTheSession = now - sessionBegan;
+	if (after < WAIT_MS || afterTheSession > BEFORE_MS) {
+		throw new Error(
+			`${who} was to close no sooner than ${WAIT_MS} ms after the client began and no later than ${BEFORE_MS} ms after its session began, not ${after} and ${afterTheSession} ms after them`,
+		);
+	}
+	return `${after} ms after the client began and ${afterTheSession} ms after its session began`;
+}
 const CLIENTS = ["own-browser", "own-rust", "xmoq-watch"] as const;
 type QuietClient = (typeof CLIENTS)[number];
 
@@ -311,6 +351,7 @@ async function noSetup(
 	client: QuietClient,
 ): Promise<string> {
 	const began = Date.now();
+	const sessionBegan = whenPrinted(context.relay, /^SESSION session=0 /);
 	let said: string;
 	switch (client) {
 		case "own-browser": {
@@ -354,13 +395,8 @@ async function noSetup(
 	await context.relay.waitForLine(
 		/^SESSION_ENDED session=0 ClosedByPeer \{ code: 17,/,
 	);
-	const after = Date.now() - began;
-	if (after < WAIT_MS || after > BEFORE_MS) {
-		throw new Error(
-			`${client} was to close between ${WAIT_MS} and ${BEFORE_MS} ms, not after ${after}`,
-		);
-	}
-	return `${client} closed its session with CONTROL_MESSAGE_TIMEOUT (0x11), which the peer received, ${after} ms after it began (its wait: ${WAIT_MS} ms): ${said}`;
+	const after = closedWithin(began, await sessionBegan, client);
+	return `${client} closed its session with CONTROL_MESSAGE_TIMEOUT (0x11), which the peer received, ${after} (its wait: ${WAIT_MS} ms): ${said}`;
 }
 
 async function noPublishAnswer(
@@ -1192,20 +1228,16 @@ async function relayNoSetup(): Promise<string> {
 	});
 	const began = Date.now();
 	const client = spawnQuietClient(context, "client:quiet-peer", 20_000);
+	const sessionBegan = whenPrinted(client, /^CONNECTED$/);
 	// 17 is 0x11, CONTROL_MESSAGE_TIMEOUT.
 	const [said] = await client.waitForLine(
 		/^SESSION_ENDED ClosedByPeer \{ code: 17, reason: "no SETUP in time" \}$/,
 	);
-	const after = Date.now() - began;
-	if (after < WAIT_MS || after > BEFORE_MS) {
-		throw new Error(
-			`the relay was to close between ${WAIT_MS} and ${BEFORE_MS} ms, not after ${after}`,
-		);
-	}
+	const after = closedWithin(began, await sessionBegan, "the relay");
 	await context.relay.waitForLine(
 		/^CLOSE_SESSION session=0 code=0x11 reason="no SETUP in time"$/,
 	);
-	return `the own relay closed the session of a client that sent no SETUP with CONTROL_MESSAGE_TIMEOUT (0x11) ${after} ms after the client began (the relay's wait: ${WAIT_MS} ms): ${said}`;
+	return `the own relay closed the session of a client that sent no SETUP with CONTROL_MESSAGE_TIMEOUT (0x11) ${after} (the relay's wait: ${WAIT_MS} ms): ${said}`;
 }
 
 /**
@@ -1277,15 +1309,11 @@ async function relayIdleSession(): Promise<string> {
 	await publisher.waitForLine(/^NAMESPACE_PUBLISHED/);
 	const began = Date.now();
 	const client = spawnQuietClient(context, "client:quiet-peer", 20_000, true);
+	const sessionBegan = whenPrinted(client, /^CONNECTED$/);
 	const [said] = await client.waitForLine(
 		/^SESSION_ENDED ClosedByPeer \{ code: 0, reason: "the session held nothing" \}$/,
 	);
-	const after = Date.now() - began;
-	if (after < WAIT_MS || after > BEFORE_MS) {
-		throw new Error(
-			`the relay was to close between ${WAIT_MS} and ${BEFORE_MS} ms, not after ${after}`,
-		);
-	}
+	const after = closedWithin(began, await sessionBegan, "the relay");
 	const closed =
 		/^CLOSE_SESSION session=1 code=0x0 reason="the session held nothing"$/;
 	const others = await context.relay.linesBefore(
@@ -1295,7 +1323,7 @@ async function relayIdleSession(): Promise<string> {
 	if (others.length > 0) {
 		throw new Error("the publisher that announced was to stay");
 	}
-	return `the own relay closed a session that sent its SETUP and held nothing with NO_ERROR ${after} ms after the client began (the relay's wait: ${WAIT_MS} ms), and kept the session of a publisher that had announced a namespace: ${said}`;
+	return `the own relay closed a session that sent its SETUP and held nothing with NO_ERROR ${after} (the relay's wait: ${WAIT_MS} ms), and kept the session of a publisher that had announced a namespace: ${said}`;
 }
 
 /**
@@ -1412,12 +1440,20 @@ async function relayOneSessionAsksForMuch(): Promise<string> {
 			muchAsked,
 			"--cancel",
 			"answered",
+			"--say-each",
+			"yes",
 		]);
-		await new Promise((resolve) => setTimeout(resolve, 1000));
+		// The viewer comes when the one session is over its share: when it is
+		// first refused for it, by EXCESSIVE_LOAD (0x9).
+		await much.waitForLine(/^ANSWER n=\d+ after_ms=\d+ 0x9$/);
+		// WHY a stay of 9 s: the relay answers a request it passed on 5 s
+		// after it came, so three of the viewer's requests are answered within
+		// 9 s, and the two the check needs have 2.5 s or more to spare. In
+		// 7.5 s only two are, the second with 1 s to spare for FETCH.
 		const viewer = spawnQuietClient(
 			context,
 			`viewer:${viewerAsked}`,
-			7500,
+			9000,
 			false,
 			["--ask-every-ms", every, "--ask", viewerAsked, "--cancel", "answered"],
 		);

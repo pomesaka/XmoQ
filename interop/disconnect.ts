@@ -119,8 +119,9 @@ const MALFORMED_TRACK = 0x12;
  * with a stopped subscriber (`--subscription-send-streams` of the relay).
  *
  * WHY not the relay's 1,024: a stopped process answers nothing, and its
- * connection ends at the relay's idle timeout of 6 seconds; with 1,024 the
- * publishing page of CI had opened 834 streams to it by then (one Object a
+ * connection ends at the relay's idle timeout, 6 seconds unless told
+ * (`STOPPED_IDLE_TIMEOUT_MS`); with 1,024 the
+ * publishing page of CI had opened 834 streams to it in 6 seconds (one Object a
  * stream, about 140 a second), and the subscriber was never cut off for
  * being behind. Locally it was cut off after 1,089 Objects, 4.3 seconds
  * after the stop. WHY 256: the number the relay had before for a session,
@@ -129,6 +130,21 @@ const MALFORMED_TRACK = 0x12;
  * with the relay's own number.
  */
 const STOPPED_SUBSCRIPTION_STREAMS = 256;
+/**
+ * The relay's idle timeout for the run with a stopped subscriber
+ * (`--idle-timeout-ms`).
+ *
+ * WHY longer than the relay's 6 seconds: the run has to cut the subscriber
+ * off, send the next Group to the others and look at the relay's log before
+ * it lets the subscriber go on, all while it is stopped (about 1.4 s
+ * here); on a machine busy enough for that to pass 6 seconds, the relay
+ * would close the session for idleness, and the run would fail as though
+ * the relay had dropped it. The stopped client does not end its own session
+ * for idleness: stopped for 15 seconds, it read the PUBLISH_DONE when it went
+ * on and closed with NO_ERROR
+ * (docs/experiments/2026-10-26-what-the-interop-runs-wait-for-and-leave-behind.md).
+ */
+const STOPPED_IDLE_TIMEOUT_MS = 30_000;
 /**
  * Objects the run with a stopped subscriber sends at most before it gives
  * up: the streams above and the 65 the own Rust client lets the relay open,
@@ -1125,7 +1141,7 @@ async function slowSubscriber(run: Run): Promise<ScenarioResult> {
 	);
 	if (dropped.length > 0) {
 		throw new Error(
-			`the relay dropped the session of ${slow.label}, where it had to end its subscription only`,
+			`the relay dropped the session of ${slow.label}, where it had to end its subscription only (${Math.round(performance.now() - stopped)} ms after it stopped reading, and cut off ${msUntilCutOff} ms after)`,
 		);
 	}
 	if (!unread) await slow.setStopped(false);
@@ -2850,6 +2866,8 @@ async function main(): Promise<void> {
 						relayArgs: [
 							"--subscription-send-streams",
 							String(STOPPED_SUBSCRIPTION_STREAMS),
+							"--idle-timeout-ms",
+							String(STOPPED_IDLE_TIMEOUT_MS),
 						],
 					}
 				: {}),
