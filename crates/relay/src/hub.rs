@@ -52,7 +52,7 @@ use xmoq_relay_core::{
 /// | QUIC: datagrams it sent, which nothing reads | 1500 bytes | the transport |
 /// | Read buffers of its streams | 64 + 264 streams of 16 KiB: about 5 MiB | `streams` |
 /// | Undecoded bytes of its subgroup streams | 4 MiB (`session_buffer_limit`) | `streams` |
-/// | Streams held for a Track Alias that is not known | 1 MiB (`MAX_EARLY_BYTES`) | `xmoq-moqt-io` |
+/// | Streams held for a Track Alias that is not known | 1 MiB, counted with `held_bytes` (`MOST_HELD_BYTES`) | `xmoq-moqt`'s `early` |
 /// | Objects waiting to be written to it | 8 MiB (`send.bytes`); 4 MiB of one subscription (`send_for_one_subscription.bytes`) | `--session-send-bytes`, `--subscription-send-bytes` |
 /// | Messages waiting to be written to it | 256 a stream (`session_queue_len`) | here |
 ///

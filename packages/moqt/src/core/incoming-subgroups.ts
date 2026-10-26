@@ -196,7 +196,10 @@ const unknownAlias: StopReason = {
 /**
  * What becomes of an Object of an alias in the state `alias`, while
  * `heldBytes` are held for the session and the Object is counted at
- * `objectBytes` (`heldBytesOf`).
+ * `objectBytes` (`heldBytesOf`). `aliasMayCome`: whether an answer may still
+ * give the alias. At a client, while a SUBSCRIBE of its waits for its
+ * answer; at the relay always, its own timer (`early_stream_timeout` of
+ * `xmoq-relay`'s hub) ending the wait.
  *
  * §11.4.2: "If an endpoint receives a subgroup with an unknown Track Alias,
  * it MAY abandon the stream, or choose to buffer it for a brief period to
@@ -210,7 +213,7 @@ const unknownAlias: StopReason = {
  */
 export function arrivalOf(
 	alias: EarlyAlias,
-	subscribePending: boolean,
+	aliasMayCome: boolean,
 	heldBytes: number,
 	objectBytes: number,
 	maxHeldBytes: number,
@@ -223,7 +226,7 @@ export function arrivalOf(
 		case "retired":
 			return { type: "stop", ...subscriptionEnded };
 		case "unknown":
-			if (!subscribePending) return { type: "stop", ...unknownAlias };
+			if (!aliasMayCome) return { type: "stop", ...unknownAlias };
 			if (heldBytes + objectBytes > maxHeldBytes) {
 				return {
 					type: "stop",
@@ -242,8 +245,8 @@ export type Settle =
 	| ({ type: "stop" } & StopReason);
 
 /** What becomes of Objects held for an alias that is now in the state `alias`. */
-export function settleOf(alias: EarlyAlias, subscribePending: boolean): Settle {
-	const arrival = arrivalOf(alias, subscribePending, 0, 0, 0);
+export function settleOf(alias: EarlyAlias, aliasMayCome: boolean): Settle {
+	const arrival = arrivalOf(alias, aliasMayCome, 0, 0, 0);
 	switch (arrival.type) {
 		case "deliver":
 			return { type: "release" };

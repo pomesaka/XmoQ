@@ -1963,42 +1963,6 @@ fn an_early_stream_is_held_for_a_while_only() {
 }
 
 #[test]
-fn early_objects_are_held_up_to_a_number_of_bytes() {
-    // The expectation below is spelled out for a limit of 1 MiB.
-    assert_eq!(super::MAX_EARLY_BYTES, 1_048_576);
-    let mut relay = Relay::new("test/0");
-    relay.step(Event::SessionOpened {
-        session: PUBLISHER,
-        role: Role::Server,
-    });
-    data_stream_opened(&mut relay, 7);
-    let large = |object_id| Event::Object {
-        session: PUBLISHER,
-        stream: StreamKey(7),
-        object: SubgroupObject {
-            payload: vec![0; 600_000],
-            ..object(object_id)
-        },
-    };
-    assert_eq!(relay.step(large(0)), []);
-    // The second one takes the session over 1 MiB.
-    assert_eq!(
-        relay.step(large(1)),
-        [
-            Action::StopEarlyTimer {
-                session: PUBLISHER,
-                stream: StreamKey(7),
-            },
-            Action::StopDataStream {
-                session: PUBLISHER,
-                stream: StreamKey(7),
-                code: 0x0,
-            }
-        ]
-    );
-}
-
-#[test]
 fn the_relay_takes_the_role_it_is_given() {
     // (the relay's role, a Request ID the peer may use, one it may not)
     let cases = [(Role::Server, 0, 1), (Role::Client, 1, 0)];
@@ -2086,43 +2050,84 @@ fn the_timer_of_a_request_that_is_still_live_does_nothing() {
 }
 
 #[test]
-fn early_objects_count_with_their_properties() {
-    // The expectation below is spelled out for a limit of 1 MiB.
-    assert_eq!(super::MAX_EARLY_BYTES, 1_048_576);
-    let mut relay = Relay::new("test/0");
-    relay.step(Event::SessionOpened {
-        session: PUBLISHER,
-        role: Role::Server,
-    });
-    data_stream_opened(&mut relay, 7);
-    // No payload, and ten properties of 60,000 bytes: 600,160 bytes held.
-    let heavy = |object_id| Event::Object {
-        session: PUBLISHER,
-        stream: StreamKey(7),
-        object: SubgroupObject {
-            properties: (0..10)
-                .map(|_| KeyValuePair::bytes(0x21, vec![0; 60_000]).unwrap())
-                .collect(),
-            payload: vec![],
-            ..object(object_id)
-        },
-    };
-    assert_eq!(relay.step(heavy(0)), []);
-    // The second one takes the session over 1 MiB.
-    assert_eq!(
-        relay.step(heavy(1)),
-        [
-            Action::StopEarlyTimer {
-                session: PUBLISHER,
-                stream: StreamKey(7),
+fn early_objects_are_held_up_to_a_number_of_bytes_counted_as_a_client_counts_them() {
+    // The length of an Object's payload and those of its property values.
+    type Sizes = (usize, &'static [usize]);
+    // The rows are spelled out for a limit of 1 MiB, and for 64 bytes an
+    // Object and 16 a property besides their bytes (`held_bytes` of
+    // `xmoq-moqt`).
+    assert_eq!(xmoq_moqt::early::MOST_HELD_BYTES, 1_048_576);
+    // (name, the first Object, the second, whether the second stops the
+    // stream)
+    let rows: [(&str, Sizes, Sizes, bool); 5] = [
+        (
+            "two that come to 1 MiB",
+            (524_224, &[]),
+            (524_224, &[]),
+            false,
+        ),
+        (
+            "one byte over with the 64 bytes of each, under without them",
+            (524_224, &[]),
+            (524_225, &[]),
+            true,
+        ),
+        (
+            "two that come to 1 MiB, one with a property",
+            (524_224, &[]),
+            (523_208, &[1_000]),
+            false,
+        ),
+        (
+            "one byte over, with the 16 bytes of a property",
+            (524_224, &[]),
+            (523_208, &[1_001]),
+            true,
+        ),
+        (
+            "properties without a payload",
+            (0, &[60_000; 10]),
+            (0, &[60_000; 10]),
+            true,
+        ),
+    ];
+    for (name, first, second, stopped) in rows {
+        let mut relay = Relay::new("test/0");
+        relay.step(Event::SessionOpened {
+            session: PUBLISHER,
+            role: Role::Server,
+        });
+        data_stream_opened(&mut relay, 7);
+        let arrived = |object_id, (payload, properties): Sizes| Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            object: SubgroupObject {
+                properties: properties
+                    .iter()
+                    .map(|length| KeyValuePair::bytes(0x21, vec![0; *length]).unwrap())
+                    .collect(),
+                payload: vec![0; payload],
+                ..object(object_id)
             },
-            Action::StopDataStream {
-                session: PUBLISHER,
-                stream: StreamKey(7),
-                code: 0x0,
-            }
-        ]
-    );
+        };
+        assert_eq!(relay.step(arrived(0, first)), [], "{name}");
+        let expected = if stopped {
+            vec![
+                Action::StopEarlyTimer {
+                    session: PUBLISHER,
+                    stream: StreamKey(7),
+                },
+                Action::StopDataStream {
+                    session: PUBLISHER,
+                    stream: StreamKey(7),
+                    code: 0x0,
+                },
+            ]
+        } else {
+            vec![]
+        };
+        assert_eq!(relay.step(arrived(1, second)), expected, "{name}");
+    }
 }
 
 #[test]

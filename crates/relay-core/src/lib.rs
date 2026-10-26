@@ -66,6 +66,7 @@ pub use routing::{
 };
 use routing::{Announcement, Ask, Declined, OwnRequest, PendingTrack, Refusal, Waiter};
 use xmoq_moqt::data::{ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject};
+use xmoq_moqt::early::{self, Arrival, Settle};
 use xmoq_moqt::immutable::{Of, searched_properties};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{
@@ -82,22 +83,22 @@ use xmoq_moqt::session::{
 use xmoq_moqt::{Error, RequestFault, TerminationCode, UsageError, stream_reset_code};
 
 /// Subgroup streams of one session that are held because their Track Alias is
-/// not known yet: the PUBLISH travels on another stream and may be read
-/// later. §11.4.2 lets a receiver "buffer it for a brief period"; the I/O side
-/// runs that period ([`Action::StartEarlyTimer`]).
+/// not known yet: the PUBLISH or the `SUBSCRIBE_OK` travels on another stream
+/// and may be read later. §11.4.2 lets a receiver "buffer it for a brief
+/// period"; the I/O side runs that period ([`Action::StartEarlyTimer`]).
+/// What is held is counted in bytes as a client counts it, up to
+/// [`early::MOST_HELD_BYTES`] ([`early::arrival`]).
 ///
 /// Provisional: the draft sets no limit, and `XmoQ` has not decided one.
+///
+/// WHY a limit of streams, one of Objects ([`MAX_EARLY_OBJECTS`]) and a time
+/// on top of the bytes a client holds by: the relay is a shared place, and
+/// what it takes in is not to be looser than what a client takes in.
 pub const MAX_EARLY_STREAMS: usize = 8;
 
-/// Objects held across the early streams of one session. Provisional.
+/// Objects held across the early streams of one session. Provisional, as
+/// [`MAX_EARLY_STREAMS`].
 pub const MAX_EARLY_OBJECTS: usize = 32;
-
-/// Bytes of payload and properties held across the early streams of one
-/// session. Provisional.
-///
-/// WHY bytes on top of the count: one Object can be as large as the I/O side
-/// lets through, so a count alone bounds nothing.
-pub const MAX_EARLY_BYTES: usize = 1024 * 1024;
 
 /// Groups of a track, counted back from the newest one seen, for which the
 /// relay remembers which stream it took each Subgroup from. Provisional.
@@ -317,6 +318,32 @@ impl SessionState {
     /// request goes on.
     fn peer_finished(&self, stream: StreamKey) -> bool {
         self.requests.peer_finished(stream)
+    }
+
+    /// Holds a stream whose Track Alias is not known yet, within
+    /// [`MAX_EARLY_STREAMS`].
+    fn hold_early_stream(
+        &mut self,
+        session: SessionKey,
+        stream: StreamKey,
+        header: SubgroupHeader,
+        actions: &mut Vec<Action>,
+    ) {
+        if self.early.len() >= MAX_EARLY_STREAMS {
+            actions.push(Action::StopDataStream {
+                session,
+                stream,
+                code: stream_reset_code::INTERNAL_ERROR,
+            });
+        } else {
+            self.early.push_back(EarlyStream {
+                stream,
+                header,
+                objects: Vec::new(),
+                end: None,
+            });
+            actions.push(Action::StartEarlyTimer { session, stream });
+        }
     }
 
     /// Lets go of the early streams that carry `track_alias`, when the PUBLISH
@@ -3379,6 +3406,11 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
+        // WHY a stream to stop is replayed too: `on_data_stream_opened` reads
+        // the same rule and stops it with its code.
+        if early::settle(state.moqt.subscribed_alias(track_alias), true) == Settle::Keep {
+            return;
+        }
         let (ready, waiting): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut state.early)
             .into_iter()
             .partition(|early| early.header.track_alias == track_alias);
@@ -3817,35 +3849,27 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        let track_name = match state.moqt.subscribed_alias(header.track_alias) {
-            // §10.11: Objects of a track that PUBLISH_DONE ended still belong
-            // to it while the alias drains.
-            SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => track.clone(),
-            // §11.1: late streams of an ended subscription are unwanted.
-            SubscribedAlias::Retired => {
+        let alias = state.moqt.subscribed_alias(header.track_alias);
+        // WHY an answer may always still come (`true`): the relay ends the
+        // wait with its own timer ([`Action::StartEarlyTimer`]).
+        let track_name = match early::arrival(alias, true, 0, 0) {
+            Arrival::Deliver => match alias {
+                SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
+                    track.clone()
+                }
+                // Not reached: `arrival` delivers only these two.
+                SubscribedAlias::Retired | SubscribedAlias::Unknown => return,
+            },
+            Arrival::Stop(code) => {
                 actions.push(Action::StopDataStream {
                     session,
                     stream,
-                    code: stream_reset_code::CANCELLED,
+                    code,
                 });
                 return;
             }
-            SubscribedAlias::Unknown => {
-                if state.early.len() >= MAX_EARLY_STREAMS {
-                    actions.push(Action::StopDataStream {
-                        session,
-                        stream,
-                        code: stream_reset_code::INTERNAL_ERROR,
-                    });
-                } else {
-                    state.early.push_back(EarlyStream {
-                        stream,
-                        header,
-                        objects: Vec::new(),
-                        end: None,
-                    });
-                    actions.push(Action::StartEarlyTimer { session, stream });
-                }
+            Arrival::Hold => {
+                state.hold_early_stream(session, stream, header, actions);
                 return;
             }
         };
@@ -5156,15 +5180,17 @@ fn reset_out_stream(
 }
 
 /// What an Object counts for in bytes against every limit of the relay that
-/// counts bytes ([`MAX_EARLY_BYTES`], the cache's, and
-/// `MAX_BYTES_HELD_BEYOND_THE_CACHE`), and in the time a subscriber has for
-/// a fetch stream of the relay's cache (`HubConfig` of `xmoq-relay`): its
-/// payload and its properties.
+/// counts bytes (the cache's and `MAX_BYTES_HELD_BEYOND_THE_CACHE`), and in
+/// the time a subscriber has for a fetch stream of the relay's cache
+/// (`HubConfig` of `xmoq-relay`): its payload and its properties.
 ///
 /// WHY the properties too: an Object can carry them without a payload, 64 of
 /// them with values of up to 64 KiB each. WHY one function: limits that
 /// count the same Object apart let what one of them keeps out through
-/// another.
+/// another. WHY NOT for the Objects held for an alias not known yet: they
+/// are counted with [`early::held_bytes`], as a client counts them, which is
+/// 64 bytes an Object more than this; what that limit keeps out, the
+/// others never let through.
 #[must_use]
 pub fn object_size(object: &SubgroupObject) -> usize {
     // What a pair takes apart from the bytes of its value: the type and a
@@ -5192,17 +5218,29 @@ fn hold_early_object(
     };
     let held = state.early.iter().flat_map(|early| &early.objects);
     let (objects, bytes) = held.fold((0usize, 0usize), |(objects, bytes), object| {
-        (objects + 1, bytes.saturating_add(object_size(object)))
+        (objects + 1, bytes.saturating_add(early::held_bytes(object)))
     });
-    let over = objects >= MAX_EARLY_OBJECTS
-        || bytes.saturating_add(object_size(&object)) > MAX_EARLY_BYTES;
-    if over {
+    let stop = if objects >= MAX_EARLY_OBJECTS {
+        Some(stream_reset_code::INTERNAL_ERROR)
+    } else {
+        match early::arrival(
+            SubscribedAlias::Unknown,
+            true,
+            bytes,
+            early::held_bytes(&object),
+        ) {
+            Arrival::Stop(code) => Some(code),
+            // `Deliver` is not reached for an alias that is not known.
+            Arrival::Hold | Arrival::Deliver => None,
+        }
+    };
+    if let Some(code) = stop {
         state.early.remove(position);
         actions.push(Action::StopEarlyTimer { session, stream });
         actions.push(Action::StopDataStream {
             session,
             stream,
-            code: stream_reset_code::INTERNAL_ERROR,
+            code,
         });
     } else if let Some(early) = state.early.get_mut(position) {
         early.objects.push(object);
