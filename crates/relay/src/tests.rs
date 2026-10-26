@@ -1198,10 +1198,13 @@ async fn a_subscribe_namespace_whose_messages_pile_up_is_reset_alone() {
     let (hub, _task) = hub::spawn(config);
     let mut publisher = Peer::connect(&hub, true).await;
     let _namespace = publisher.publish_namespace().await;
-    let mut watcher = Peer::connect(&hub, true).await;
+    let mut namespace_subscriber = Peer::connect(&hub, true).await;
     let prefix = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
-    let (_, message) = watcher.session.subscribe_namespace(prefix, vec![]).unwrap();
-    let (mut send, recv) = watcher.connection.open_bi().await.unwrap();
+    let (_, message) = namespace_subscriber
+        .session
+        .subscribe_namespace(prefix, vec![])
+        .unwrap();
+    let (mut send, recv) = namespace_subscriber.connection.open_bi().await.unwrap();
     send_message(&mut send, &message, &Trace::default(), "request")
         .await
         .unwrap();
@@ -1225,7 +1228,7 @@ async fn a_subscribe_namespace_whose_messages_pile_up_is_reset_alone() {
         Ok(WriteError::Stopped(Some(0x9)))
     );
     tokio::time::sleep(SOON).await;
-    assert_eq!(watcher.connection.close_info(), None);
+    assert_eq!(namespace_subscriber.connection.close_info(), None);
 }
 
 /// What a publisher does at its end: the last Object on a new stream, then
