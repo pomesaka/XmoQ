@@ -161,7 +161,7 @@ fn last_of(end: Location) -> Location {
 /// to `largest`, of which it still keeps those from `first_kept`; the ones
 /// before were published and let go of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Kept {
+pub struct PublishedGroups {
     /// The first Group it published.
     pub first: u64,
     /// The first Group it still keeps.
@@ -184,7 +184,7 @@ pub fn plan(
     most: u64,
     order: GroupOrder,
 ) -> Result<Plan, u64> {
-    let kept = largest.map(|largest| Kept {
+    let kept = largest.map(|largest| PublishedGroups {
         first: 0,
         first_kept: 0,
         largest,
@@ -199,12 +199,12 @@ pub fn plan(
 ///
 /// In Ascending order the indicator names the last of them and stands
 /// before the Groups, so it covers the range from its start, and Groups of
-/// the range before [`Kept::first`] read as unknown as well. WHY that is
+/// the range before [`PublishedGroups::first`] read as unknown as well. WHY that is
 /// let be: it is not false, and to say more would take a second indicator
 /// before it, whose far end the first would cover again.
 ///
-/// In Descending order it names the first of them, from [`Kept::first`] on,
-/// and follows the Groups. WHY NOT a Group before [`Kept::first`]: nothing
+/// In Descending order it names the first of them, from [`PublishedGroups::first`] on,
+/// and follows the Groups. WHY NOT a Group before [`PublishedGroups::first`]: nothing
 /// was published there, which the stream says by leaving it out
 /// (§10.12.3), and the indicator would name a Group that never was.
 ///
@@ -218,7 +218,7 @@ pub fn plan(
 pub fn plan_kept(
     start: Location,
     end: Location,
-    kept: Option<Kept>,
+    kept: Option<PublishedGroups>,
     most: u64,
     order: GroupOrder,
 ) -> Result<Plan, u64> {
@@ -551,7 +551,7 @@ mod tests {
                 "descending" => Descending,
                 other => panic!("{name}: Group Order {other:?}"),
             };
-            let kept = Kept {
+            let kept = PublishedGroups {
                 first,
                 first_kept,
                 largest: newest,

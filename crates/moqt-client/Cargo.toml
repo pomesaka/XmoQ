@@ -13,6 +13,6 @@ xmoq-loc = { path = "../loc" }
 xmoq-moqt = { path = "../moqt" }
 xmoq-msf = { path = "../msf" }
 xmoq-moqt-io = { path = "../moqt-io" }
-xmoq-track-serving = { path = "../track-serving" }
+xmoq-publisher = { path = "../publisher" }
 anyhow = "=1.0.100"
 tokio = { version = "=1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

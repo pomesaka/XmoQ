@@ -172,7 +172,7 @@ const DEFAULT_PUBLISH_DONE_TIMEOUT_MS = 5_000;
  * waits for every stream to be closed (§10.11), and an application that
  * closes none would hold it for good. WHY 5 s: what the Rust publishers
  * give a Group to be written (`GROUP_WRITE_WAIT` of
- * `crates/track-serving/src/streams.rs`). **Provisional.**
+ * `crates/publisher/src/streams.rs`). **Provisional.**
  */
 const UPDATE_REFUSED_WAIT_MS = 5_000;
 

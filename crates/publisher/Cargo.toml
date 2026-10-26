@@ -1,5 +1,5 @@
 [package]
-name = "xmoq-track-serving"
+name = "xmoq-publisher"
 version = "0.0.0"
 description = "What a client of the relay needs to serve tracks of one Object a Group: the tasks that write its request, subgroup and fetch streams, what a FETCH gets, and the wait before asking again."
 edition.workspace = true

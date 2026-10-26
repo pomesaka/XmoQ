@@ -21,7 +21,7 @@ use xmoq_moqt_io::{
     Connection, PeerRequestStreamEvent, SendStream, StreamStops, Trace, send_message,
 };
 
-use crate::answers::{self, Answer, Answers, Bounds, Happened, Note, Over, Pace};
+use crate::answers::{self, Answer, Answers, Bounds, Conclusion, Happened, Note, Pace};
 use crate::fetch::Piece;
 
 /// Why the session cannot go on after a request of the relay.
@@ -308,7 +308,7 @@ impl PeerRequests {
 
     /// The FETCH on `stream` is over, or a step after that: the log, the
     /// session and the subscriber's direction.
-    fn over(&mut self, session: &mut Session, stops: &StreamStops, stream: u64, over: &Over) {
+    fn over(&mut self, session: &mut Session, stops: &StreamStops, stream: u64, over: &Conclusion) {
         if let Some(served) = over.served {
             println!("{served}");
         }

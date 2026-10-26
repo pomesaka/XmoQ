@@ -52,20 +52,20 @@ use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestStreamEvent, RequestClose, RequestReadError, StreamConfig,
     StreamEnd, StreamStops, UniEvent, client, read_request_streams, read_uni_streams,
 };
+use xmoq_publisher::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
+use xmoq_publisher::fetch::pieces_of;
+use xmoq_publisher::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
+use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
+use xmoq_publisher::streams::{
+    COMMAND_QUEUE, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request,
+    send_group,
+};
+use xmoq_publisher::{shown, sleep_until};
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 use xmoq_speech::cut::Cut;
 use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
 use xmoq_speech::vad::Silero;
 use xmoq_speech::{AudioPacket, Listener};
-use xmoq_track_serving::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
-use xmoq_track_serving::fetch::pieces_of;
-use xmoq_track_serving::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
-use xmoq_track_serving::requests::{AskedFetch, FetchAnswer, PeerRequests};
-use xmoq_track_serving::streams::{
-    COMMAND_QUEUE, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request,
-    send_group,
-};
-use xmoq_track_serving::{shown, sleep_until};
 use xmoq_transcriber::args::Args;
 use xmoq_transcriber::transcript::Transcript;
 use xmoq_transcript_tracks::names::{listened_of, speech_track, transcript_namespace};
@@ -103,7 +103,7 @@ const PIECES_WAITING_FOR_A_PUBLISH: usize = 64;
 const PIECES_BEING_SENT: usize = 64;
 
 /// The bytes of payload the FETCH answers being written hold together
-/// (`Held` of `xmoq-track-serving`): 16 answers of the default 1,000 pieces
+/// (`Held` of `xmoq-publisher`): 16 answers of the default 1,000 pieces
 /// of 1 KB. Provisional.
 const MAX_BYTES_HELD: usize = 16 * 1000 * 1024;
 
@@ -577,7 +577,7 @@ impl Transcribing<'_> {
 
     // FIXME: take the steps of a PUBLISH (`publish` to `publish_done`,
     // `send_live`) and of the transcriber's own requests (`open`, `tell`,
-    // `let_go`, `watch`, `watch_again`) from `xmoq-track-serving`; the
+    // `let_go`, `watch`, `watch_again`) from `xmoq-publisher`; the
     // gatherer has a copy of each.
     /// Publishes the transcript of a prefix, unless it is published or waits
     /// to be published again.
@@ -1375,7 +1375,7 @@ impl Transcribing<'_> {
 
     /// The fetch stream of a broadcast's catalog was read: its request is
     /// finished, and the relay's direction is waited for
-    /// (`xmoq_track_serving::answers::PEER_END_WAIT`). WHY: a request left
+    /// (`xmoq_publisher::answers::PEER_END_WAIT`). WHY: a request left
     /// open for each broadcast stays in the session, which holds 256 at the
     /// most.
     fn catalog_fetched(&mut self, namespace: &TrackNamespace) {
@@ -1559,7 +1559,7 @@ impl Transcribing<'_> {
     }
 
     /// A FETCH of the relay: for a range of a transcript, which is answered
-    /// from the pieces kept ([`xmoq_track_serving::fetch`]).
+    /// from the pieces kept ([`xmoq_publisher::fetch`]).
     fn on_fetch(&mut self, asked: AskedFetch<Send>) -> Result<()> {
         // A Joining FETCH is refused, as the gatherer refuses it: the relay
         // turns a viewer's into a Standalone one before it asks.

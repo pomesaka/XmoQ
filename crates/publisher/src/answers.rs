@@ -149,7 +149,7 @@ pub enum RequestEnd {
 /// How an answered FETCH ended: what `FETCH_SERVED` prints, and what
 /// becomes of its streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ended {
+pub struct AnswerEnd {
     /// The word of `FETCH_SERVED`.
     pub how: &'static str,
     /// The code the subscriber gave, where it ended the FETCH with one.
@@ -171,7 +171,7 @@ pub struct Ended {
 /// own that way. A subscriber that only finishes its direction of the
 /// request stream has given nothing up (§3.3.2).
 #[must_use]
-pub fn step(happened: Happened) -> Option<Ended> {
+pub fn step(happened: Happened) -> Option<AnswerEnd> {
     let cancelled = RequestEnd::Reset(stream_reset_code::CANCELLED);
     let (how, code, request) = match happened {
         Happened::Written => ("fin", None, RequestEnd::Finish),
@@ -195,7 +195,7 @@ pub fn step(happened: Happened) -> Option<Ended> {
             RequestEnd::Reset(stream_reset_code::EXCESSIVE_LOAD),
         ),
     };
-    Some(Ended { how, code, request })
+    Some(AnswerEnd { how, code, request })
 }
 
 /// What a task has to tell the client about the FETCH on this request
@@ -246,7 +246,7 @@ struct Answered {
 /// A FETCH that is over, or a step after that, for the client to tell its
 /// session ([`conclude`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Over {
+pub struct Conclusion {
     /// The FETCH.
     pub request: PeerRequestId,
     /// Whether the subscriber's direction of the request stream is over as
@@ -266,7 +266,7 @@ pub struct Over {
 pub struct Served {
     /// The Request ID of the FETCH.
     pub request_id: u64,
-    /// How ([`Ended::how`]).
+    /// How ([`AnswerEnd::how`]).
     pub how: &'static str,
     /// The code the subscriber gave, where it ended the FETCH with one.
     pub code: Option<u32>,
@@ -296,7 +296,7 @@ impl std::fmt::Display for Served {
 /// itself, for what still comes on that direction (`on_refused_message` and
 /// `on_refused_closed` of `xmoq-moqt-io`), until it is over.
 pub fn conclude<H: BuildHasher>(
-    over: &Over,
+    over: &Conclusion,
     stream: u64,
     session: &mut Session,
     ended: &mut HashMap<u64, PeerRequestId, H>,
@@ -481,7 +481,7 @@ impl Answers {
     /// Has the task of the request stream send a message: the `REQUEST_OK`
     /// of a `REQUEST_UPDATE`. Where it does not fit, the FETCH ends
     /// ([`Bounds::say_queue`]).
-    pub fn say(&mut self, stream: u64, message: ControlMessage) -> Option<Over> {
+    pub fn say(&mut self, stream: u64, message: ControlMessage) -> Option<Conclusion> {
         let answered = self.open.get(&stream)?;
         match answered.says.try_send(message) {
             // Closed: the task is done, and the FETCH with it.
@@ -496,7 +496,7 @@ impl Answers {
     /// [`step`] says so, and says how the answer ended (`served`), once for
     /// every FETCH. Does nothing for a stream that has no FETCH that is
     /// answered or waited on.
-    pub fn happened(&mut self, stream: u64, happened: Happened) -> Option<Over> {
+    pub fn happened(&mut self, stream: u64, happened: Happened) -> Option<Conclusion> {
         let Some(answered) = self.open.get_mut(&stream) else {
             return match happened {
                 // The subscriber's direction of a FETCH that is over has
@@ -512,7 +512,7 @@ impl Answers {
                 // that is cancelled while it is answered.
                 Happened::RequestStopped(_) | Happened::PeerEndTimedOut => {
                     let (request, _) = self.lingering.remove(&stream)?;
-                    Some(Over {
+                    Some(Conclusion {
                         request,
                         peer_gone: false,
                         stop_peer: Some(stream_reset_code::CANCELLED),
@@ -565,7 +565,7 @@ impl Answers {
                 stop_peer = Some(stream_reset_code::CANCELLED);
             }
         }
-        Some(Over {
+        Some(Conclusion {
             request: answered.request,
             peer_gone,
             stop_peer,
@@ -574,7 +574,7 @@ impl Answers {
     }
 
     /// The client leaves: every FETCH that is open ends.
-    pub fn leave(&mut self) -> Vec<Over> {
+    pub fn leave(&mut self) -> Vec<Conclusion> {
         let mut streams: Vec<u64> = self.open.keys().copied().collect();
         streams.sort_unstable();
         streams
@@ -682,7 +682,7 @@ async fn speak<S: SendStream>(speaker: Speaker<S>) {
                                     // The connection is gone, and the stream.
                                     WriteError::Lost(_) => return,
                                 },
-                                // Ended, nobody left to say so, or time.
+                                // AnswerEnd, nobody left to say so, or time.
                                 waited = tokio::time::timeout(end_wait, peer_ended) => {
                                     timed_out = waited.is_err();
                                 }
@@ -1226,7 +1226,7 @@ mod tests {
         let stopped = answers.happened(0, Happened::RequestStopped(Some(0x77)));
         assert_eq!(
             stopped,
-            Some(Over {
+            Some(Conclusion {
                 request: over.request,
                 peer_gone: false,
                 stop_peer: Some(0x1),
@@ -1496,7 +1496,7 @@ mod tests {
             assert_eq!(seen, own, "{name}");
             let stopped = stops_peer.map_or("-".to_string(), |code| format!("stop:{code:#x}"));
             assert_eq!(stopped, peer, "{name}");
-            // Ended once: nothing is put on the direction after its FIN or
+            // AnswerEnd once: nothing is put on the direction after its FIN or
             // its reset, whatever comes later.
             tokio::time::sleep(ms(4_000)).await;
             let ends = done.0.lock().unwrap().clone();
@@ -1551,7 +1551,7 @@ mod tests {
                 // (0x1), and nothing waits for the stream any more.
                 assert_eq!(
                     answers.happened(0, happened),
-                    Some(Over {
+                    Some(Conclusion {
                         request,
                         peer_gone: false,
                         stop_peer: Some(0x1),
@@ -1934,7 +1934,7 @@ mod tests {
             );
             assert!(over.served.is_some(), "{before:?} {happened:?}");
             assert_eq!(ends[0].0.try_recv(), Ok(request), "{before:?} {happened:?}");
-            // Over: whatever comes after finds no FETCH.
+            // Conclusion: whatever comes after finds no FETCH.
             assert_eq!(answers.happened(0, Happened::Left), None);
             assert_eq!(answers.request_on(0), None);
         }

@@ -160,7 +160,7 @@ crate_layer() {
 	case "$1" in
 	xmoq-moqt | xmoq-loc | xmoq-msf | xmoq-again) echo 0 ;;
 	xmoq-moqt-io | xmoq-room-token | xmoq-chat-tracks | xmoq-transcript-tracks | xmoq-picture | xmoq-speech) echo 1 ;;
-	xmoq-track-serving | xmoq-relay-core | xmoq-viewer) echo 2 ;;
+	xmoq-publisher | xmoq-relay-core | xmoq-viewer) echo 2 ;;
 	xmoq-viewer-io) echo 3 ;;
 	# The programs: nothing of the workspace depends on them.
 	xmoq-relay | xmoq-watch | xmoq-agent | xmoq-chat | xmoq-transcriber | xmoq-moqt-client | xmoq-quiet-peer) echo 4 ;;

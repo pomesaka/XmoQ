@@ -1,4 +1,4 @@
-# xmoq-track-serving
+# xmoq-publisher
 
 What a client of the relay needs to serve tracks of its own on a session it also subscribes on. The gatherer of the chat ([`xmoq-chat`](../chat/README.md)) and the transcriber ([`xmoq-transcriber`](../transcriber/README.md)) use it. Such a client is told of namespaces under a prefix, subscribes to a track of each, publishes one track for each prefix with one Object in each Group, and answers the relay's FETCH for it.
 
