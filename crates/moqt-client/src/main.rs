@@ -1050,20 +1050,24 @@ fn fetch_to_answer(answering: Option<Pace>, request: &PeerRequest) -> Option<&Fe
 /// where it serves none of that kind. `serves`: the mode that serves a
 /// SUBSCRIBE for its track, for which this is asked about any other.
 ///
-/// WHY one code for every request in the mode that sends PUBLISH: it serves
-/// none, and said so with this code before it asked its session about them.
+/// WHY `NOT_SUPPORTED` for a PUBLISH and a `PUBLISH_NAMESPACE` in every mode:
+/// the client takes neither of any track (§4: "Limited endpoints SHOULD
+/// respond to any unsupported messages with the appropriate `NOT_SUPPORTED`
+/// error code"). WHY NOT `UNINTERESTED`: that is a subscriber's that takes
+/// PUBLISH and does not want this track (§10.10), which would read as if
+/// another track were taken.
 fn refusal_code(serves: bool, request: &PeerRequest) -> u64 {
     match request {
+        // A track other than the one it announced.
+        PeerRequest::Subscribe(_) if serves => request_error_code::DOES_NOT_EXIST,
         // TRACK_STATUS: the client answers none (decided on 2026-10-24),
         // and a relay passes the refusal on.
-        PeerRequest::Fetch(_)
+        PeerRequest::Subscribe(_)
+        | PeerRequest::Fetch(_)
         | PeerRequest::SubscribeNamespace(_)
-        | PeerRequest::TrackStatus(_) => request_error_code::NOT_SUPPORTED,
-        _ if !serves => request_error_code::NOT_SUPPORTED,
-        PeerRequest::Subscribe(_) => request_error_code::DOES_NOT_EXIST,
-        PeerRequest::Publish(_) | PeerRequest::PublishNamespace(_) => {
-            request_error_code::UNINTERESTED
-        }
+        | PeerRequest::TrackStatus(_)
+        | PeerRequest::Publish(_)
+        | PeerRequest::PublishNamespace(_) => request_error_code::NOT_SUPPORTED,
     }
 }
 
