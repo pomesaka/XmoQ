@@ -2614,6 +2614,48 @@ mod tests {
         assert!(early.is_empty());
     }
 
+    /// The rows of `reused-alias.tsv`, which `@xmoq/moqt` reads as well.
+    #[test]
+    fn a_held_object_of_a_retired_alias_is_not_given_to_the_track_that_takes_it() {
+        use crate::early::{Arrived, EarlyObjects};
+        let rows = crate::early::tests::rows("reused-alias.tsv");
+        assert_eq!(rows.len(), 4);
+        for row in rows {
+            let [name, end, retired, outcome] = row.as_slice() else {
+                panic!("a row of four columns: {row:?}");
+            };
+            let mut session = client();
+            let mut early = EarlyObjects::default();
+            let (first, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+            let (second, _) = session.subscribe(track(b"b"), vec![]).unwrap();
+            assert!(matches!(
+                early.arrive(&session, 1, 7, 64, "object"),
+                Arrived::Held
+            ));
+            // As a caller does at a FIN: the early store keeps what it holds,
+            // and the session counts the stream as one of the alias.
+            if end == "fin" {
+                early.stream_closed(1, false);
+                session.on_data_stream_closed(7);
+            }
+            let mut released = Vec::new();
+            session
+                .feed(
+                    first,
+                    subscribe_ok(
+                        retired.parse().unwrap(),
+                        vec![KeyValuePair::varint(0x4000, 1).unwrap()],
+                    ),
+                )
+                .unwrap();
+            released.extend(early.settle(&session).released);
+            session.feed(second, subscribe_ok(7, vec![])).unwrap();
+            released.extend(early.settle(&session).released);
+            let given = if released.is_empty() { "none" } else { "given" };
+            assert_eq!(given, outcome, "{name}");
+        }
+    }
+
     #[test]
     fn a_track_alias_names_one_subscribed_track() {
         let mut session = client();
