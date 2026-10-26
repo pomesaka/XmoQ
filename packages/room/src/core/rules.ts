@@ -125,10 +125,21 @@ export function relayOf(
 	return { relayUrl, certSha256Hex };
 }
 
+/** Why a join-meeting gets no seat, other than a full meeting. */
+export type SeatRefusal =
+	/** The id is no participant's (`participantId`). */
+	| "not-a-participant"
+	/** The name of the room is empty, or has a `/` or a `*`: it makes no namespace of a meeting. */
+	| "not-a-meeting-room"
+	/** The socket joined as another participant. */
+	| "another-participant"
+	/** Another socket of the room has the id. */
+	| "taken";
+
 /** What a join-meeting gets. */
 export type SeatAnswer =
-	/** Nothing: the ask is not one the room answers. */
-	| { type: "unanswered" }
+	/** `{type: "meeting-refused", why}`. */
+	| { type: "refused"; why: SeatRefusal }
 	/** `{type: "meeting-full", most}`. */
 	| { type: "full" }
 	/** A seat, and its two namespaces; `counted` where the socket is counted from now on. */
@@ -138,9 +149,15 @@ export type SeatAnswer =
  * The answer to join-meeting for the participant `id`, on a socket of the
  * room `room` that joined as `mine` (undefined where it has not), while the
  * other sockets of the room joined as `others` (undefined for one that has
- * not). Unanswered: an id that is no participant's, a room whose name has a
+ * not). Refused: an id that is no participant's, a room whose name has a
  * `/` or a `*`, another id on a socket that joined, and an id another socket
  * has. The same id on the same socket is answered again, full or not.
+ *
+ * WHY every join-meeting is answered, a refusal too: a reader matches the
+ * answers to its asks by their order (`asked` of
+ * `crates/viewer-io/src/room_socket.rs`, `ask` of `demo/room-socket.ts`),
+ * and one ask left unanswered has it wait for ever, or take the answer of
+ * the ask after it for this one, as for token-for.
  */
 export function seatFor(
 	id: unknown,
@@ -148,11 +165,14 @@ export function seatFor(
 	mine: string | undefined,
 	others: readonly (string | undefined)[],
 ): SeatAnswer {
-	if (!participantId(id) || room === "" || !fieldOfANamespace(room)) {
-		return { type: "unanswered" };
+	if (!participantId(id)) return { type: "refused", why: "not-a-participant" };
+	if (room === "" || !fieldOfANamespace(room)) {
+		return { type: "refused", why: "not-a-meeting-room" };
 	}
-	if (mine !== undefined && mine !== id) return { type: "unanswered" };
-	if (others.includes(id)) return { type: "unanswered" };
+	if (mine !== undefined && mine !== id) {
+		return { type: "refused", why: "another-participant" };
+	}
+	if (others.includes(id)) return { type: "refused", why: "taken" };
 	const counted = mine === undefined;
 	if (counted) {
 		const seated = others.filter((other) => other !== undefined).length;

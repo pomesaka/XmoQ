@@ -93,6 +93,7 @@ type RoomMessage =
 			subscribe: { token: string | null };
 	  }
 	| { type: "meeting-full"; most: number }
+	| { type: "meeting-refused"; why: string }
 	| { type: "token"; token: string | null };
 
 /** What the page shows of itself, and a script that looks at it reads. */
@@ -180,12 +181,19 @@ function seats(): {
 		const answer = await socket.ask({ type: "join-meeting", participant: self }, [
 			"meeting",
 			"meeting-full",
+			"meeting-refused",
 		]);
 		if (answer === undefined) throw new Error("the room's socket closed");
 		if (answer.type === "meeting-full") {
 			seated = false;
 			state.seat = `the meeting is full: it takes ${answer.most}`;
 			document.body.dataset.full = "true";
+			show();
+			throw new Error(state.seat);
+		}
+		if (answer.type === "meeting-refused") {
+			seated = false;
+			state.seat = `the room refused the seat: ${answer.why}`;
 			show();
 			throw new Error(state.seat);
 		}

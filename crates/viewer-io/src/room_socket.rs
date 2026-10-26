@@ -195,6 +195,7 @@ impl RoomSocket {
             | Said::Token(_)
             | Said::Seat(_)
             | Said::MeetingFull(_)
+            | Said::MeetingRefused(_)
             | Said::Other => false,
         }
     }
@@ -248,22 +249,22 @@ impl RoomSocket {
     }
 
     /// A seat in the room's meeting as `participant`: asked again, the same
-    /// on the same WebSocket, it has a new token. A room that does not take
-    /// the id does not answer, and this waits for ever.
+    /// on the same WebSocket, it has a new token.
     ///
     /// # Errors
     ///
-    /// As [`Self::token`]; a meeting that is full ([`MeetingFull`]); a seat
-    /// for another participant.
+    /// As [`Self::token`]; a meeting that is full ([`MeetingFull`]); a room
+    /// that refuses the seat (an id it does not take, or one another
+    /// participant has); a seat for another participant.
     pub async fn seat(&mut self, participant: &str) -> Result<Seat> {
         let seat = self
             .asked(room::ask_for_a_seat(participant), |said| match said {
                 Said::Seat(seat) => Some(Ok(seat.clone())),
-                Said::MeetingFull(most) => Some(Err(*most)),
+                Said::MeetingFull(most) => Some(Err(anyhow::Error::new(MeetingFull(*most)))),
+                Said::MeetingRefused(why) => Some(Err(anyhow!("the room refused the seat: {why}"))),
                 _ => None,
             })
-            .await?
-            .map_err(MeetingFull)?;
+            .await??;
         if seat.participant != participant {
             bail!(
                 "the room gave a seat for {}, not for {participant}",
@@ -432,6 +433,12 @@ mod tests {
                 Err("the meeting is full: it takes 49"),
                 false,
                 true,
+            ),
+            (
+                vec![r#"{"type":"meeting-refused","why":"taken"}"#.to_string()],
+                Err("the room refused the seat: taken"),
+                false,
+                false,
             ),
             (
                 vec![another],

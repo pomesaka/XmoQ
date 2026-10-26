@@ -59,6 +59,10 @@ pub enum Said {
     /// The answer to [`ask_for_a_seat`] where the meeting was full: how many
     /// it takes.
     MeetingFull(u64),
+    /// The answer to [`ask_for_a_seat`] where the room takes no such seat:
+    /// why, in the room's words (`SeatRefusal` of
+    /// `packages/room/src/core/rules.ts`).
+    MeetingRefused(String),
     /// Something the viewer has no use for.
     Other,
 }
@@ -205,6 +209,10 @@ pub fn read(text: &str) -> Result<Said, Invalid> {
             .get("most")
             .and_then(Value::as_u64)
             .map_or(Said::Other, Said::MeetingFull),
+        Some("meeting-refused") => message
+            .get("why")
+            .and_then(Value::as_str)
+            .map_or(Said::Other, |why| Said::MeetingRefused(why.to_string())),
         _ => Said::Other,
     })
 }
@@ -522,6 +530,12 @@ mod tests {
                 Said::Other,
             ),
             (r#"{"type":"meeting-full"}"#, Said::Other),
+            (
+                r#"{"type":"meeting-refused","why":"taken"}"#,
+                Said::MeetingRefused("taken".to_string()),
+            ),
+            // A refusal that does not say why.
+            (r#"{"type":"meeting-refused"}"#, Said::Other),
         ];
         for (message, said) in cases {
             assert_eq!(read(message), Ok(said), "{message}");
