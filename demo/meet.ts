@@ -29,6 +29,7 @@ import type { GoAwayNotice } from "@xmoq/moqt";
 import { createCatalogPublisher } from "@xmoq/msf";
 import { keepFollowingTranscript } from "@xmoq/transcript";
 import { startChat } from "./room-chat.ts";
+import { openRoomSocket, tokenOf } from "./room-socket.ts";
 import {
 	AUDIO_TRACK,
 	type Broadcast,
@@ -90,10 +91,6 @@ type RoomMessage =
 	| { type: "meeting-full"; most: number }
 	| { type: "token"; token: string | null };
 
-/** §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value. */
-const tokenOf = (text: string | null): Uint8Array | undefined =>
-	text === null ? undefined : new Uint8Array([0x03, 0x00, ...utf8.encode(text)]);
-
 /** What the page shows of itself, and a script that looks at it reads. */
 const state: {
 	self: string;
@@ -135,73 +132,73 @@ function seats(): {
 	if (roomsUrl === null) {
 		throw new Error("no rooms: a meeting takes its seat from the room");
 	}
-	const socket = new WebSocket(
+	/** The relay the room named last; null where it names none. */
+	let relay: Broadcast | null | undefined;
+	/** Who waits for the first hello, or for the socket to close before it. */
+	const greeters: (() => void)[] = [];
+	const greeted = (): Promise<void> =>
+		relay === undefined
+			? new Promise((resolve) => {
+					greeters.push(resolve);
+				})
+			: Promise.resolve();
+	/** Whether a seat was given: asked for again on a socket opened again, as the room counts the sockets that joined. */
+	let seated = false;
+	const socket = openRoomSocket<RoomMessage>(
 		`${roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(room)}/ws`,
+		{
+			open() {
+				if (seated) seat().catch(() => {});
+			},
+			message(message) {
+				if (message.type !== "hello") return;
+				relay = message.relay === null ? null : { ...message.relay, namespace: [] };
+				for (const greet of greeters.splice(0)) greet();
+			},
+			close() {
+				for (const greet of greeters.splice(0)) greet();
+				state.seat = "the room's socket closed: joining it again";
+				show();
+			},
+		},
 	);
-	let relay: Broadcast | undefined;
-	let hello: () => void = () => {};
-	const greeted = new Promise<void>((resolve) => {
-		hello = resolve;
-	});
-	/** Who waits for the answer to join-meeting, in the order they asked. */
-	const waiting: ((message: RoomMessage) => void)[] = [];
-	/** Who waits for the answer to token-for, in the order they asked. */
-	const tokens: ((token: string | null) => void)[] = [];
-	socket.addEventListener("message", (event) => {
-		const message: RoomMessage = JSON.parse(String(event.data));
-		if (message.type === "hello") {
-			if (message.relay !== null) {
-				relay = { ...message.relay, namespace: [] };
-			}
-			hello();
+	async function seat(): Promise<Seat> {
+		await greeted();
+		const at = relay;
+		if (at === undefined) throw new Error("the room's socket closed");
+		if (at === null) {
+			throw new Error("the room names no relay, where its meeting would be");
 		}
-		if (message.type === "meeting" || message.type === "meeting-full") {
-			waiting.shift()?.(message);
+		const answer = await socket.ask({ type: "join-meeting", participant: self }, [
+			"meeting",
+			"meeting-full",
+		]);
+		if (answer === undefined) throw new Error("the room's socket closed");
+		if (answer.type === "meeting-full") {
+			seated = false;
+			state.seat = `the meeting is full: it takes ${answer.most}`;
+			document.body.dataset.full = "true";
+			show();
+			throw new Error(state.seat);
 		}
-		if (message.type === "token") tokens.shift()?.(message.token);
-	});
-	// A seat asked for after this is never answered: the page has to be
-	// opened again.
-	socket.addEventListener("close", () => {
-		state.seat = "the room's socket closed: open the page again";
+		if (answer.type !== "meeting") throw new Error("no seat");
+		seated = true;
+		state.seat = "seated";
 		show();
-	});
+		return {
+			relay: at,
+			publish: tokenOf(answer.publish.token),
+			subscribe: tokenOf(answer.subscribe.token),
+		};
+	}
 	return {
 		// The chat's tokens, as the other pages ask for them (`joinRoom` of
 		// `shared.ts`); the room gives none for a namespace with a `*`.
 		async token(role, namespace) {
-			await greeted;
-			const text = await new Promise<string | null>((resolve) => {
-				tokens.push(resolve);
-				socket.send(JSON.stringify({ type: "token-for", role, namespace }));
-			});
-			return tokenOf(text);
+			const answer = await socket.ask({ type: "token-for", role, namespace }, ["token"]);
+			return answer?.type === "token" ? tokenOf(answer.token) : undefined;
 		},
-		async seat() {
-			await greeted;
-			const at = relay;
-			if (at === undefined) {
-				throw new Error("the room names no relay, where its meeting would be");
-			}
-			const answer = await new Promise<RoomMessage>((resolve) => {
-				waiting.push(resolve);
-				socket.send(JSON.stringify({ type: "join-meeting", participant: self }));
-			});
-			if (answer.type === "meeting-full") {
-				state.seat = `the meeting is full: it takes ${answer.most}`;
-				document.body.dataset.full = "true";
-				show();
-				throw new Error(state.seat);
-			}
-			if (answer.type !== "meeting") throw new Error("no seat");
-			state.seat = "seated";
-			show();
-			return {
-				relay: at,
-				publish: tokenOf(answer.publish.token),
-				subscribe: tokenOf(answer.subscribe.token),
-			};
-		},
+		seat,
 	};
 }
 

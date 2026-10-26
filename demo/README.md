@@ -62,7 +62,7 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 **Reactions** (over the room's WebSocket): four buttons under the chat; an emoji somebody presses stands on every page of the room for two seconds ([record](../docs/experiments/2026-10-12-reactions-over-the-rooms-websocket.md)).
 
-**A room** comes with it: the spike in `spikes/durable-objects-room`, a Durable Object run locally with Miniflare (`mise run demo` installs it there the first time). Under the picture is how many are connected, and the watching page learns from the room where the broadcast is; `?room=NAME` on both pages is another room. The broadcast is known to the room as long as the publishing page is open.
+**A room** comes with it: the spike in `spikes/durable-objects-room`, a Durable Object run locally with Miniflare (`mise run demo` installs it there the first time). Under the picture is how many are connected, and the watching page learns from the room where the broadcast is; `?room=NAME` on both pages is another room. The broadcast is known to the room as long as the publishing page is open. When a page's socket to the room closes, the page joins again 1 s after its try before began (`demo/room-socket.ts`), and says again where it publishes, or asks again for its seat in the meeting; a token asked for while it is closed is none, and the connection that wanted it is refused by a relay with `--auth` and made again ([record](../docs/experiments/2026-10-26-the-pages-join-their-room-again.md)).
 
 **A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again after `DEFAULT_RECONNECT_DELAY_MS` of `@xmoq/moqt` (`keepPublishing` and `keepPlaying` of `@xmoq/media`).
 
