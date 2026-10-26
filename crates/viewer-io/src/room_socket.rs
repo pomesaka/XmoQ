@@ -34,6 +34,18 @@ const KEPT: usize = 256;
 /// 128 KiB.
 const MOST_A_MESSAGE: usize = 256 * 1024;
 
+/// The room's meeting has no seat left: it takes this many.
+#[derive(Debug)]
+pub struct MeetingFull(pub u64);
+
+impl std::fmt::Display for MeetingFull {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "the meeting is full: it takes {}", self.0)
+    }
+}
+
+impl std::error::Error for MeetingFull {}
+
 /// A room joined over its WebSocket, and the broadcast it has.
 pub struct RoomSocket {
     socket: Socket,
@@ -241,8 +253,8 @@ impl RoomSocket {
     ///
     /// # Errors
     ///
-    /// As [`Self::token`]; a meeting that is full; a seat for another
-    /// participant.
+    /// As [`Self::token`]; a meeting that is full ([`MeetingFull`]); a seat
+    /// for another participant.
     pub async fn seat(&mut self, participant: &str) -> Result<Seat> {
         let seat = self
             .asked(room::ask_for_a_seat(participant), |said| match said {
@@ -251,7 +263,7 @@ impl RoomSocket {
                 _ => None,
             })
             .await?
-            .map_err(|most| anyhow!("the meeting is full: it takes {most}"))?;
+            .map_err(MeetingFull)?;
         if seat.participant != participant {
             bail!(
                 "the room gave a seat for {}, not for {participant}",
@@ -399,9 +411,10 @@ mod tests {
         let seat = r#"{"type":"meeting","participant":"a1","publish":{"namespace":["xmoq","meet","r","a1"],"token":null},"subscribe":{"namespace":["xmoq","meet","r","*"],"token":"v1|t"}}"#;
         let another = seat.replace(r#""participant":"a1""#, r#""participant":"b2""#);
         // (what the room says after join-meeting; the seat's token, or the
-        // error; whether a broadcast is kept for `next`)
+        // error; whether a broadcast is kept for `next`; whether the error
+        // is `MeetingFull`, which ends an agent where the others join anew)
         let cases = [
-            (vec![seat.to_string()], Ok(Some("v1|t")), false),
+            (vec![seat.to_string()], Ok(Some("v1|t")), false, false),
             // What the room says meanwhile is not the answer, and a broadcast
             // among it is kept.
             (
@@ -412,19 +425,22 @@ mod tests {
                 ],
                 Ok(Some("v1|t")),
                 true,
+                false,
             ),
             (
                 vec![r#"{"type":"meeting-full","most":49}"#.to_string()],
                 Err("the meeting is full: it takes 49"),
                 false,
+                true,
             ),
             (
                 vec![another],
                 Err("the room gave a seat for b2, not for a1"),
                 false,
+                false,
             ),
         ];
-        for (answers, expected, kept) in cases {
+        for (answers, expected, kept, full) in cases {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let room = room_answering(listener, answers);
@@ -440,6 +456,12 @@ mod tests {
                 "{expected:?}"
             );
             assert_eq!(joined.kept.is_empty(), !kept, "{expected:?}");
+            assert_eq!(
+                got.as_ref()
+                    .is_err_and(|error| error.downcast_ref::<MeetingFull>().is_some()),
+                full,
+                "{expected:?}"
+            );
             drop(joined);
             assert_eq!(
                 room.await.unwrap(),
