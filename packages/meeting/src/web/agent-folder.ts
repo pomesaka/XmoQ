@@ -26,6 +26,34 @@ export const AGENT_ROOT = "~/Documents/xmoq";
  */
 export const FLUSH_EVERY_MS = 1000;
 
+/** How many times a file is read before its NotFoundError is let through (`readWhole`). */
+const READS_OF_A_FILE = 3;
+
+/**
+ * The bytes of a file of the folder, read again where it was written anew
+ * while it was read. WHY: a writable's `close` moves what was written over
+ * the file, and in the page's own storage (OPFS) that deletes the old
+ * backing file of the name (`ObfuscatedFileUtil::CopyOrMoveFile`, "Delete
+ * target entry's old backing file", Chromium's main, read on 2026-10-26).
+ * A `File` taken before it then fails to be read with a NotFoundError: in
+ * Chromium of Playwright 1.64.0, 24 and 32 of about 560 reads did, while
+ * the file was written 300 times. The file under its name is whole all the
+ * while, and the next `getFile` has it.
+ */
+export async function readWhole(
+	file: Pick<FileSystemFileHandle, "getFile">,
+): Promise<Uint8Array> {
+	for (let read = 1; ; read++) {
+		try {
+			return new Uint8Array(await (await file.getFile()).arrayBuffer());
+		} catch (error) {
+			const replaced =
+				error instanceof DOMException && error.name === "NotFoundError";
+			if (!replaced || read >= READS_OF_A_FILE) throw error;
+		}
+	}
+}
+
 const DATABASE = "xmoq-agent-folder";
 const STORE = "handles";
 const ROOT_KEY = "root";
@@ -224,8 +252,6 @@ export async function openAgentFolder(
 				await writable.close();
 			}
 		},
-		async readInbox() {
-			return new Uint8Array(await (await inbox.getFile()).arrayBuffer());
-		},
+		readInbox: () => readWhole(inbox),
 	};
 }

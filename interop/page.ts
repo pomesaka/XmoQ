@@ -24,6 +24,7 @@ import {
 	keepAttending,
 	type MeetingEvent,
 	openAgentFolder,
+	readWhole,
 } from "@xmoq/meeting";
 import {
 	connect,
@@ -1066,9 +1067,10 @@ window.xmoqOwn = {
 			const folder = await (
 				await root.getDirectoryHandle(room ?? "")
 			).getDirectoryHandle(self ?? "");
-			const events = await (
-				await (await folder.getFileHandle("events.jsonl")).getFile()
-			).text();
+			// `readWhole`: the bridge writes `events.jsonl` anew every second.
+			const events = new TextDecoder().decode(
+				await readWhole(await folder.getFileHandle("events.jsonl")),
+			);
 			const lines = events.split("\n").filter((line) => line !== "");
 			// The first bytes of each picture a `frame` line names: a PNG begins
 			// with 0x89 "PNG".
@@ -1080,9 +1082,7 @@ window.xmoqOwn = {
 				const names = path.split("/");
 				const name = names.pop() ?? "";
 				for (const dir of names) at = await at.getDirectoryHandle(dir);
-				const bytes = new Uint8Array(
-					await (await (await at.getFileHandle(name)).getFile()).arrayBuffer(),
-				);
+				const bytes = await readWhole(await at.getFileHandle(name));
 				pictures[path] =
 					`${bytes.length} ${new TextDecoder().decode(bytes.subarray(1, 4))}`;
 			}

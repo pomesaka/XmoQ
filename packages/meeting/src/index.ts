@@ -37,6 +37,7 @@ export {
 	chooseRoot,
 	openAgentFolder,
 	type RootState,
+	readWhole,
 	rememberedRoot,
 } from "./web/agent-folder.ts";
 export {
