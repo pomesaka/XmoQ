@@ -37,6 +37,13 @@ export const STEP_TIMEOUT_MS = 20_000;
  */
 export const DISCONNECT_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 5_000;
+/**
+ * A step of the teardown that takes longer is named with its time
+ * (`runCleanups`), where the lines of the run would else not say which step
+ * the time went to. The steps took 0.3 s at most where nothing hung
+ * (measured 2026-10-26, macOS, also beside a full interop run).
+ */
+const SLOW_CLEANUP_MS = 1_000;
 
 export type BrowserClient = "own-browser" | "moqtail-browser";
 export type RustClient = "own-rust" | "moqtail-rust";
@@ -207,14 +214,14 @@ export function captureGroup(match: RegExpMatchArray, index: number): string {
 	return value;
 }
 
-type Cleanup = () => Promise<unknown>;
+type Cleanup = { what: string; undo: () => Promise<unknown> };
 
 const cleanups: Cleanup[] = [];
 let cleanedUp: Promise<void> | undefined;
 
 /** Registers what undoes a step. Cleanups run in reverse order of registration. */
-function defer(cleanup: Cleanup): void {
-	cleanups.push(cleanup);
+function defer(what: string, undo: () => Promise<unknown>): void {
+	cleanups.push({ what, undo });
 }
 
 /**
@@ -230,9 +237,16 @@ export function runCleanups(): Promise<void> {
 			cleanup !== undefined;
 			cleanup = cleanups.pop()
 		) {
-			await cleanup().catch((error: unknown) =>
-				log("driver", `cleanup failed: ${String(error)}`),
-			);
+			const began = performance.now();
+			await cleanup
+				.undo()
+				.catch((error: unknown) =>
+					log("driver", `cleanup failed: ${cleanup.what}: ${String(error)}`),
+				);
+			const tookMs = Math.round(performance.now() - began);
+			if (tookMs > SLOW_CLEANUP_MS) {
+				log("driver", `cleanup took ${tookMs} ms: ${cleanup.what}`);
+			}
 		}
 	})();
 	return cleanedUp;
@@ -320,6 +334,8 @@ export function ensureCertificate(): { sha256Hex: string; validTo: string } {
 }
 
 export interface LoggedProcess {
+	/** What its lines are printed under: `[label] …`. */
+	label: string;
 	child: ChildProcessWithoutNullStreams;
 	/** Resolves once the process has exited and every line it printed has been read. */
 	exited: Promise<number | null>;
@@ -487,6 +503,7 @@ function spawnLogged(
 	}
 
 	return {
+		label: source,
 		child,
 		exited,
 		waitForLine(pattern, timeoutMs) {
@@ -596,7 +613,7 @@ async function servePages(clients: BrowserClient[]): Promise<string> {
 			});
 		},
 	});
-	defer(() => server.stop(true));
+	defer("stop the server of the pages", () => server.stop(true));
 	// WHY localhost: it is a secure context, which WebTransport requires.
 	return `http://localhost:${server.port}`;
 }
@@ -623,7 +640,17 @@ async function startBrowser(
 		handleSIGINT: false,
 		handleSIGTERM: false,
 	});
-	defer(() => browser.close());
+	// WHY a limit, and nothing more done where it is met: `browser.close()`
+	// has none, and the rest of the teardown, the relay among it, would wait
+	// for it. Chromium is not left behind: playwright-core 1.64.0 kills the
+	// process group of every browser it launched when the driver exits (its
+	// `exitHandler`, which `handleSIGINT: false` leaves in place), also under
+	// Bun 1.3.14 (seen: the browser's process was gone after an exit without
+	// a close). WHY NOT kill it here: Playwright gives the driver no PID of
+	// the browser it launched.
+	defer("close Chromium", () =>
+		withTimeout(browser.close(), "Chromium to close"),
+	);
 	log("driver", `browser=chromium version=${browser.version()}`);
 	return { origin, browser };
 }
@@ -689,7 +716,7 @@ export async function startRun(setup: {
 		);
 	let relay = startRelay();
 	// The one that runs at the end: a run can start it anew.
-	defer(() => stopProcess(relay, "SIGINT"));
+	defer(`stop ${relay.label}`, () => stopProcess(relay, "SIGINT"));
 	const relayVersion = captureGroup(await relay.waitForLine(config.ready), 1);
 	const pages = await startBrowser([
 		...new Set(setup.clients.filter(isBrowserClient)),
@@ -741,7 +768,7 @@ export async function startSecondOwnRelay(
 		...upstream,
 		...relayArgs,
 	]);
-	defer(() => stopProcess(relay, "SIGINT"));
+	defer(`stop ${relay.label}`, () => stopProcess(relay, "SIGINT"));
 	await relay.waitForLine(config.ready);
 	return { url: `https://127.0.0.1:${port}`, relay };
 }
@@ -795,7 +822,7 @@ export async function startQuietPeer(setup: {
 		"--quiet",
 		setup.quiet,
 	]);
-	defer(() => stopProcess(peer, "SIGTERM"));
+	defer(`stop ${peer.label}`, () => stopProcess(peer, "SIGTERM"));
 	await peer.waitForLine(/^LISTENING port=/);
 	const pages = await startBrowser([
 		...new Set(setup.clients.filter(isBrowserClient)),
@@ -847,7 +874,7 @@ export function spawnQuietClient(
 		...(sendsSetup ? ["--send-setup", "yes"] : []),
 		...further,
 	]);
-	defer(() => stopProcess(spawned, "SIGTERM"));
+	defer(`stop ${spawned.label}`, () => stopProcess(spawned, "SIGTERM"));
 	return spawned;
 }
 
@@ -895,7 +922,7 @@ export async function startMoqlivemockPublisher(setup: {
 		join(logDir, `mlmpub-${setup.port}.qlog`),
 		...(setup.verbose ? ["-loglevel", "debug"] : []),
 	]);
-	defer(() => stopProcess(publisher, "SIGINT"));
+	defer(`stop ${publisher.label}`, () => stopProcess(publisher, "SIGINT"));
 	await publisher.waitForLine(/Starting MoQ server/);
 	// WHY asked until it answers, and not once after that line: mlmpub
 	// v0.16.1 starts the server of the fingerprint in a goroutine of its own,
@@ -984,7 +1011,7 @@ export function spawnMlmsub(
 		join(logDir, `mlmsub-${port}.qlog`),
 		...extraArgs,
 	]);
-	defer(() => stopProcess(spawned, "SIGINT"));
+	defer(`stop ${spawned.label}`, () => stopProcess(spawned, "SIGINT"));
 	return { process: spawned, catalogOut };
 }
 
@@ -1079,7 +1106,7 @@ export function spawnMoqtailTestPublisher(
 			"3",
 		],
 	);
-	defer(() => stopProcess(spawned, "SIGTERM"));
+	defer(`stop ${spawned.label}`, () => stopProcess(spawned, "SIGTERM"));
 	return spawned;
 }
 
@@ -1121,7 +1148,7 @@ export function spawnTerminalViewer(
 		server?.certSha256Hex ?? context.certSha256Hex,
 		...extraArgs,
 	]);
-	defer(() => stopProcess(spawned, "SIGTERM"));
+	defer(`stop ${spawned.label}`, () => stopProcess(spawned, "SIGTERM"));
 	return spawned;
 }
 
@@ -1147,7 +1174,7 @@ export function spawnAgent(
 		context.certSha256Hex,
 		...extraArgs,
 	]);
-	defer(() => stopProcess(spawned, "SIGTERM"));
+	defer(`stop ${spawned.label}`, () => stopProcess(spawned, "SIGTERM"));
 	return spawned;
 }
 
@@ -1248,7 +1275,7 @@ export function spawnTranscriber(
 		vad,
 		...extraArgs,
 	]);
-	defer(() => stopProcess(spawned, "SIGTERM"));
+	defer(`stop ${spawned.label}`, () => stopProcess(spawned, "SIGTERM"));
 	return spawned;
 }
 
@@ -1280,7 +1307,7 @@ export function spawnChatGatherer(
 		...extraArgs,
 	]);
 	const stop = (): Promise<void> => stopProcess(spawned, "SIGTERM");
-	defer(stop);
+	defer(`stop ${spawned.label}`, stop);
 	return { ...spawned, stop };
 }
 
@@ -1319,7 +1346,7 @@ export function spawnRustClient(
 		// Only the own client can print the bytes of every stream.
 		...(context.verbose && client === "own-rust" ? ["--trace"] : []),
 	]);
-	defer(async () => {
+	defer(`stop ${spawned.label}`, async () => {
 		spawned.child.stdin.end();
 		await stopProcess(spawned, "SIGTERM");
 	});
