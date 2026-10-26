@@ -39,7 +39,7 @@ Not implemented: a source of frames (a camera, a screen), a canvas of its own (t
 
 ## Layer rules
 
-`@xmoq/media` is layer 2 of the packages (`package_layer` in `scripts/ci/check-layers.sh`): it may use `@xmoq/loc`, `@xmoq/moqt` and `@xmoq/msf`, and of the packages only `@xmoq/meeting`, layer 3, may use it. `src/core` is numbers and bytes: it imports `@xmoq/loc` alone, no connection and no WebCodecs. `tsconfig.core.json` type-checks it without the DOM library, and `noRestrictedImports` in the root `biome.jsonc` keeps `@xmoq/moqt`, `@xmoq/msf` and `src/web` out of it. An Object goes in with the shape of `ReceivedObject` of `@xmoq/moqt`, which a test hands in as that type. `src/moqt` uses a connection of `@xmoq/moqt` and no WebCodecs. `src/web` is the part that needs a browser: a connection of `@xmoq/moqt` and WebCodecs.
+`@xmoq/media` is layer 2 of the packages (`package_layer` in `scripts/ci/check-layers.sh`): it may use `@xmoq/loc`, `@xmoq/moqt`, `@xmoq/msf` and `@xmoq/tracks`, and of the packages only `@xmoq/meeting`, layer 3, may use it. `src/core` is numbers and bytes: it imports `@xmoq/loc` alone, no connection and no WebCodecs. `tsconfig.core.json` type-checks it without the DOM library, and `noRestrictedImports` in the root `biome.jsonc` keeps `@xmoq/moqt`, `@xmoq/msf` and `src/web` out of it. An Object goes in with the shape of `ReceivedObject` of `@xmoq/moqt`, which a test hands in as that type. `src/moqt` uses a connection of `@xmoq/moqt` and no WebCodecs. `src/web` is the part that needs a browser: a connection of `@xmoq/moqt` and WebCodecs.
 
 ## How the receiver decides
 

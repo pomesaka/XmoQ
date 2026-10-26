@@ -64,21 +64,25 @@ export interface KeepFollowingTranscriptOptions {
  * §3.6 lets a client: the relay refuses the SUBSCRIBE that follows an end
  * of `speech` (GOING_AWAY), and a full relay that sends a session away
  * (`--when-full`) closes it only after its Timeout. Each session's reader
- * fetches the latest pieces anew (`follow.latest`), so a piece the session
- * before handed on can be handed on again: the caller passes over a number
- * it had (as the demo's captions do).
+ * catches up from the newest piece the session before had (its `lastHad`),
+ * as the agent does across its sessions.
  */
 export async function keepFollowingTranscript(
 	options: KeepFollowingTranscriptOptions,
 ): Promise<void> {
+	let had = options.follow.lastHad;
 	await keepSessions<{ connection: TranscriptConnection }, SessionClose>({
 		connect: async (goAway) => ({ connection: await options.connect(goAway) }),
 		async run({ connection }, _running, began) {
-			const reader = followTranscript(connection, options.follow);
+			const reader = followTranscript(connection, {
+				...options.follow,
+				...(had === undefined ? {} : { lastHad: had }),
+			});
 			try {
 				options.onState?.({ type: "reading", session: began(), reader });
 				return await connection.closed;
 			} finally {
+				had = reader.had() ?? had;
 				reader.stop();
 			}
 		},

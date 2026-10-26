@@ -8,7 +8,7 @@
 // are the page's to say: an application gives them.
 
 import type { GoAwayNotice } from "@xmoq/moqt";
-import type { LinesGap } from "../core/history.ts";
+import type { FollowGap } from "@xmoq/tracks";
 import type { ChatLimits, KeptBack } from "../core/limits.ts";
 import type { ChatRoom } from "../core/names.ts";
 import type { Present, Reactions } from "../core/payloads.ts";
@@ -140,7 +140,7 @@ export function showChat(
 		shown.textContent = `${shownTime(line.at)} ${line.number} ${line.name}: ${line.text}`;
 		place(shown, line.number, false);
 	};
-	const addGap = (gap: LinesGap): void => {
+	const addGap = (gap: FollowGap): void => {
 		const shown = document.createElement("div");
 		shown.dataset.number = gap.before.toString();
 		shown.dataset.gap = "";

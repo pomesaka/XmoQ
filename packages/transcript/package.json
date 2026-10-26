@@ -13,7 +13,8 @@
 	},
 	"dependencies": {
 		"@xmoq/json": "workspace:*",
-		"@xmoq/moqt": "workspace:*"
+		"@xmoq/moqt": "workspace:*",
+		"@xmoq/tracks": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/bun": "1.4.2",

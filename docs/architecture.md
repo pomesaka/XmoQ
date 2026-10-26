@@ -12,7 +12,7 @@ This is the order of the messages of a broadcast. It ran on one machine (the dem
 
 ## Responsibilities
 
-- **Browser:** capture, encode, subscribe, decode and render. TypeScript and WebCodecs. A page is a participant of the chat with `@xmoq/chat` (layer 1, on `@xmoq/moqt`), over a connection of its own: it announces `xmoq/chat/<room>/<name>`, says its lines on `said`, and reads the room's `lines` with a Joining FETCH for the newest 16.
+- **Browser:** capture, encode, subscribe, decode and render. TypeScript and WebCodecs. A page is a participant of the chat with `@xmoq/chat` (layer 2, on `@xmoq/tracks`), over a connection of its own: it announces `xmoq/chat/<room>/<name>`, says its lines on `said`, and reads the room's `lines` with a Joining FETCH for the newest 16.
 - **Rust Relay:** media subscription and fan-out. The MoQ layer is implemented in this repository (see [protocol layers](protocols.md)). A minimal relay exists: it registers published tracks, answers subscriptions, forwards Objects to every subscriber and ends the subscription of a subscriber that falls too far behind. It keeps the latest Group of a track, where the track's publishers allow it, and answers a FETCH that lies in it itself; any other FETCH it passes on to one publisher, and that publisher's fetch stream back to the subscriber as it is. For a Joining FETCH it works out the range from the subscription the FETCH names. The cache does not outlive the track's last publisher. Given a key (`--auth-key-hex`), the relay checks a token of the room on every request and on SETUP. It can take another relay as its parent for the tracks nobody announced at it (`--parent`), and send a session that comes when it is full to another relay (`--when-full`). Deployment remains open.
 
   A slow subscriber has its own subscription ended (`TOO_FAR_BEHIND`), and the application can subscribe again and resume at the next key frame. What counts as slow is measured for each subscription, for its session and for the relay as a whole (`HubConfig` in `crates/relay/src/hub.rs`), so a track that falls behind ends alone where it reaches its own limit. The publisher is not made to wait, because one viewer that does not read would stall the broadcast for everyone. Queued Objects are not dropped one by one, because a missing delta frame makes H.264 and VP8 decoders show corrupt pictures without an error (see the [WebCodecs record](experiments/2026-10-10-webcodecs-loopback.md)).
@@ -34,7 +34,7 @@ Decided on 2026-10-26, not implemented. Three jobs are the same in every client,
 |---|---|---|---|---|
 | **Published track**: a track this endpoint is the publisher of | Taking or refusing a SUBSCRIBE, the PUBLISH and its PUBLISH_OK, a Group on a subgroup stream, answering or refusing a FETCH, the Stream Count of PUBLISH_DONE and the wait at the end; the requests of the peer passed to the track by its Full Track Name | `xmoq-publisher` | `@xmoq/tracks` (planned) | the Rust client (`published.rs`) beside `xmoq-publisher`, which it answers a FETCH by; the video and the sound publishers of `@xmoq/media`, the catalog's of `@xmoq/msf` and the answer to `said` of `@xmoq/chat` |
 | **Kept track**: a track of another endpoint, kept on a session | The SUBSCRIBE and its answer, asking again after an end or a refusal, a request a GOAWAY ended, what giving up ends in the session, a malformed track (§2.4.2) | `xmoq-subscriber` (`kept`) | `@xmoq/tracks`, in part (`keepTrackOnSession`, `stayOnSession`) | `KeptTrack` of `xmoq-subscriber`, by the rows of `fixtures/kept-track/`; `SaidAgain` of the gatherer, the catalog and the sound of the transcriber; `stayOnSession` and `keepTrackOnSession` of `@xmoq/tracks`, the loops of `@xmoq/chat`, `@xmoq/transcript` and `@xmoq/meeting` |
-| **Followed track**: a kept track of one numbered item a Group, read from a point in its past | A Joining FETCH for the past, the live Objects after it, each item once and in order by its Group ID, and the gap between them | `xmoq-subscriber` (`follow`, `followed`) | `@xmoq/tracks` (planned) | `Follower`, `Items` and `past_to_fetch` of `xmoq-subscriber`; the `follow` of `@xmoq/chat` and of `@xmoq/transcript` |
+| **Followed track**: a kept track of one numbered item a Group, read from a point in its past | A Joining FETCH for the past, the live Objects after it, each item once and in order by its Group ID, and the gap between them | `xmoq-subscriber` (`follow`, `followed`) | `@xmoq/tracks` (`followTrack`, `followPlan`) | `Follower`, `Items` and `past_to_fetch` of `xmoq-subscriber`; `followTrack` of `@xmoq/tracks`, which `@xmoq/chat` and `@xmoq/transcript` follow their tracks by |
 | **Ask again** and **next session** | When a request is asked for again on the same session; where and when the next session goes after a session ends, the New Session URI of a GOAWAY first (§10.4) | `xmoq-again` | `@xmoq/moqt` (`createAskAgain`, `createNextSession`, `keepMoving`) | the same, and with a `Pause` for each role |
 
 The beginning and the end of a client's session (SETUP, the GOAWAY behind a GOING_AWAY refusal, closing and waiting for the peer to see it, the signals) are `xmoq-moqt-io`'s `client`. Today `UntilClosed` is in three crates and the wait for the GOAWAY in two.
@@ -44,7 +44,7 @@ WHY: the audits found the same job written in two places or more, one of them ri
 Also decided on 2026-10-26:
 
 - One rule for the next session, with values for each role: one for the viewers and the agent, one for the gatherer and the transcriber. All four go by `NextSession` of `xmoq-again`, for where, for the try at once after a GOAWAY, and for the pause from the try before after any other end: 1 s for the viewers (`Pause::VIEWER`), 1 s doubling to 30 s for the gatherer and the transcriber (`Pause::SERVING`).
-- What both implementations of a followed track wait and ask for: a subscription that comes before the track's publisher waits 30 s (RENDEZVOUS_TIMEOUT), where `@xmoq/chat` and `@xmoq/transcript` ask for 10 s; a transcript is read on from where the last subscription left it (Absolute Joining FETCH), as the chat's lines are, where `@xmoq/transcript` asks for the latest pieces anew.
+- What both implementations of a followed track wait and ask for: a subscription that comes before the track's publisher waits 30 s (RENDEZVOUS_TIMEOUT); a transcript is read on from where the last subscription, or the session before, left it (Absolute Joining FETCH), as the chat's lines are. The values are in [`fixtures/followed-track/`](../fixtures/followed-track/README.md).
 - The names of a meeting's namespaces (`xmoq/meet/<room>/<id>`) are a crate of their own, `xmoq-meeting-tracks`, as the chat's are `xmoq-chat-tracks` and the transcript's `xmoq-transcript-tracks`; the room takes them from `@xmoq/meeting/names`. WHY: the names of each kind of a room's tracks are then in a crate of the same form, one that a part which is not a viewer can depend on.
 
 ### Where the parts sit
@@ -54,12 +54,12 @@ The TypeScript packages, as `scripts/ci/check-layers.sh` checks them (`package_l
 | Layer | Packages |
 |---|---|
 | 0 | `@xmoq/moqt`, `@xmoq/loc`, `@xmoq/json`, `@xmoq/room-client` |
-| 1 | `@xmoq/tracks`: a track kept on one session, and the tracks a connection serves; `@xmoq/msf`, `@xmoq/chat`, `@xmoq/transcript` |
-| 2 | `@xmoq/media` |
+| 1 | `@xmoq/tracks`: a track kept on one session, a followed track, and the tracks a connection serves; `@xmoq/msf` |
+| 2 | `@xmoq/chat`, `@xmoq/transcript`, `@xmoq/media`: each keeps or follows its tracks by `@xmoq/tracks` |
 | 3 | `@xmoq/meeting` |
 | 4 | `@xmoq/room` |
 
-A package goes above `@xmoq/tracks` when it uses it, in the change that makes it do so: the chat's and the transcript's following of their tracks are to go on `@xmoq/tracks`, and the two then go above it. `@xmoq/msf` serves its catalog track as a `ServedTrack` does without naming the type.
+A package goes above `@xmoq/tracks` when it uses it, in the change that makes it do so. `@xmoq/msf` serves its catalog track as a `ServedTrack` does without naming the type.
 
 The Rust crates, by the same rule (a crate depends on those of a lower layer alone, dev-dependencies aside); `scripts/ci/check-layers.sh` checks the crates of today (`crate_layer`):
 

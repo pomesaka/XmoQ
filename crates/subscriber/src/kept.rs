@@ -80,7 +80,7 @@ pub struct Wanted {
     /// agent reads, for hours on one session, and `@xmoq/chat` and
     /// `@xmoq/transcript` ask for them again whatever kept them away. The
     /// sound beside a picture is given up, as `keepTrackOnSession` of
-    /// `@xmoq/media` gives it up: the next session asks for it again.
+    /// `@xmoq/tracks` gives it up: the next session asks for it again.
     pub again_after_failure: bool,
 }
 
