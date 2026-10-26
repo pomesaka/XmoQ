@@ -1,6 +1,6 @@
 // The reader of a room for an agent (`crates/agent`, `xmoq-agent`) through
 // the own relay and the gatherer (`xmoq-chat`): a page takes part in the chat
-// of room r as `p`, and `xmoq-agent --chat-room r --name claude` writes what
+// of room r as `p`, and `xmoq-agent --chat-room broadcast/r --name claude` writes what
 // happens as lines of JSON on stdout and in `<dir>/events.jsonl`.
 //
 // Usage: bun agent.ts [--relay own] [--port N] [--verbose]
@@ -22,6 +22,10 @@
 // Changed once `xmoq-picture` was in (2026-10-25): the reader runs with
 // `--frames off`, there being no broadcast, and `/frame` is written as the
 // error `frame: --frames off`. The pictures are another pairing's.
+//
+// Changed when a `broadcast` line came to say that the broadcast's catalog
+// came (2026-10-26): nobody publishes `xmoq/broadcast/r` here, and none is
+// written.
 
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -116,8 +120,10 @@ async function main(): Promise<void> {
 		await gatherer.waitForLine(/^SUBSCRIBED room="r" name="p"$/);
 
 		const agent = spawnAgent(context, "agent:claude", [
+			"--namespace",
+			"xmoq/broadcast/r",
 			"--chat-room",
-			"r",
+			"broadcast/r",
 			"--name",
 			"claude",
 			"--out",
@@ -160,7 +166,7 @@ async function main(): Promise<void> {
 		const written = events(agent);
 		expect(
 			"the joined line",
-			written[1] ?? "none",
+			written[0] ?? "none",
 			'{"name":"p","type":"joined"}',
 		);
 		const ofP = written.find((line) => line.includes('"from":"p"')) ?? "none";
@@ -175,11 +181,11 @@ async function main(): Promise<void> {
 		expect(
 			"the kinds of lines written",
 			kinds,
-			"broadcast,joined,chat,chat,chat,error,error,left",
+			"joined,chat,chat,chat,error,error,left",
 		);
 		expect(
 			"the error of /frame",
-			written[5] ?? "none",
+			written[4] ?? "none",
 			'{"message":"frame: --frames off","type":"error"}',
 		);
 		if (written.some((line) => line.includes('"name":"claude"'))) {

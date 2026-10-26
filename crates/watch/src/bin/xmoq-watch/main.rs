@@ -42,14 +42,17 @@ use xmoq_moqt_io::{
     Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent,
     read_request_streams, read_uni_streams,
 };
+use xmoq_msf::CatalogTrack;
 use xmoq_picture::video_decoder::VideoDecoder;
 use xmoq_viewer::chat_track::{shown, shown_gap};
-use xmoq_viewer::room::{self, Broadcast};
+use xmoq_viewer::room;
+use xmoq_viewer_io::catalog::{Became, FollowedCatalog};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
 use xmoq_viewer_io::ending::{self, UntilClosed};
+use xmoq_viewer_io::follow::RENDEZVOUS_MS;
 use xmoq_viewer_io::kept::{Asking, KeptTrack, Said, Wanted};
 use xmoq_viewer_io::reconnect::go_away_behind;
-use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};
+use xmoq_viewer_io::room_client::{ChatTokens, ROOM_COMES_WITHIN, RoomClient};
 use xmoq_viewer_io::session::{
     self, Events, GoingAway, GoneAway, Requests, Subscription, new_url, timestamp_of,
 };
@@ -140,9 +143,14 @@ impl Ui {
             tokio::select! {
                 done = &mut doing => return done.map(Some),
                 () = &mut late => bail!("{what} took more than {} s", limit.as_secs()),
-                // A line for the chat that is typed meanwhile is let go.
-                asked = self.asked() => if !matches!(asked, Asked::Say(_)) {
-                    return Ok(None);
+                // A line for the chat that is typed meanwhile is let go, and
+                // said so: the chat is on the session that is not there yet.
+                asked = self.asked() => match asked {
+                    Asked::Say(text) => self.note(&format!(
+                        "SAID nothing: waiting for {what} ({})",
+                        room::clean(&text, room::LINE_LIMIT)
+                    )),
+                    _ => return Ok(None),
                 },
             }
         }
@@ -238,39 +246,15 @@ struct Place {
     token: Option<Vec<u8>>,
     /// The tokens of the room for the chat on tracks, where it gave them.
     chat_tokens: ChatTokens,
-    /// The broadcast of the room this is, where a room said it.
-    broadcast: Option<Broadcast>,
+    /// The `RENDEZVOUS_TIMEOUT` of the catalog's SUBSCRIBE, where a room
+    /// names the broadcast, which may not have begun.
+    catalog_rendezvous_ms: Option<u64>,
 }
 
-/// Waits until the room has a broadcast. `None` when the viewer is to end
-/// first.
-async fn broadcast_of(room: &mut RoomSocket, ui: &mut Ui) -> Result<Option<Broadcast>> {
-    loop {
-        if let Some(broadcast) = room.current() {
-            return Ok(Some(broadcast));
-        }
-        tokio::select! {
-            heard = room.next() => {
-                heard?;
-            }
-            asked = ui.asked() => match asked {
-                // The chat is on the broadcast's session, which there is
-                // none of yet.
-                Asked::Say(text) => ui.note(&format!(
-                    "SAID nothing: no broadcast yet ({})",
-                    room::clean(&text, room::LINE_LIMIT)
-                )),
-                _ => return Ok(None),
-            },
-        }
-    }
-}
-
-/// Where the broadcast is now: of the flags, or as the room says, with a
-/// token of the room. `None` when the viewer is to end before a room has
-/// one.
-async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Result<Option<Place>> {
-    let (room, ask_token) = match (&args.source, room) {
+/// Where the broadcast is: of the flags, or as the room says, with a token
+/// of the room. `None` when the viewer is to end first.
+async fn place(args: &Args, client: Option<&RoomClient>, ui: &mut Ui) -> Result<Option<Place>> {
+    let (client, ask_token) = match (&args.source, client) {
         (
             Source::Relay {
                 url,
@@ -286,35 +270,26 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
                 namespace: namespace.split('/').map(str::to_string).collect(),
                 token: None,
                 chat_tokens: ChatTokens::default(),
-                broadcast: None,
+                catalog_rendezvous_ms: None,
             }));
         }
-        (Source::Room { ask_token, .. }, Some(room)) => (room, *ask_token),
-        // WHY joined again and not given up: a room that went away during
-        // a session (`play`) may be back.
-        (
-            Source::Room {
-                address,
-                name,
-                ask_token,
-            },
-            room @ None,
-        ) => {
-            let Some(joined) = join_room(args, address, name, ui).await? else {
-                return Ok(None);
-            };
-            (room.insert(joined), *ask_token)
-        }
+        (Source::Room { ask_token, .. }, Some(client)) => (client, *ask_token),
+        (Source::Room { .. }, None) => bail!("a room without its client"),
     };
-    if room.current().is_none() {
-        ui.note("ROOM_BROADCAST none: waiting");
-    }
-    let Some(broadcast) = broadcast_of(room, ui).await? else {
+    // WHY asked on every session and not once: the room may name another
+    // relay after it was restarted.
+    let Some(answered) = ask_room(args, client, ui).await? else {
         return Ok(None);
     };
+    let room::Room::Broadcast(broadcast) = answered else {
+        bail!("the room answered as a meeting's");
+    };
+    let relay = broadcast
+        .relay
+        .ok_or_else(|| anyhow!("the room names no relay"))?;
     ui.note(&format!(
         "ROOM_BROADCAST relay={} namespace={}",
-        room::clean(&broadcast.relay_url, room::LINE_LIMIT),
+        room::clean(&relay.relay_url, room::LINE_LIMIT),
         room::clean(&broadcast.namespace.join("/"), room::LINE_LIMIT)
     ));
     let mut token = None;
@@ -323,7 +298,7 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
             .unless_ended(
                 "the room's token",
                 Duration::from_millis(args.room_wait_ms),
-                room.token(room::TokenRole::Sub, &broadcast.namespace),
+                client.token(room::TokenRole::Sub, &broadcast.namespace),
             )
             .await?
         else {
@@ -345,7 +320,7 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
             .unless_ended(
                 "the room's tokens for the chat",
                 Duration::from_millis(args.room_wait_ms),
-                room.chat_tokens(&person_of(chat)),
+                client.chat_tokens(&person_of(chat)),
             )
             .await?
         else {
@@ -354,12 +329,14 @@ async fn place(args: &Args, room: &mut Option<RoomSocket>, ui: &mut Ui) -> Resul
         chat_tokens = tokens;
     }
     Ok(Some(Place {
-        url: broadcast.relay_url.clone(),
-        cert_sha256: room::certificate_hash(&broadcast.cert_sha256_hex)?,
-        namespace: broadcast.namespace.clone(),
+        url: relay.relay_url,
+        cert_sha256: room::certificate_hash(&relay.cert_sha256_hex)?,
+        namespace: broadcast.namespace,
         token,
         chat_tokens,
-        broadcast: Some(broadcast),
+        // WHY the rendezvous: the room names its broadcast whether it has
+        // begun or not, and says nothing when it begins.
+        catalog_rendezvous_ms: Some(RENDEZVOUS_MS),
     }))
 }
 
@@ -373,21 +350,21 @@ fn person_of(chat: &Chat) -> Person {
 
 async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     // With a room: where the broadcast is, and a token, are the room's to say.
-    let mut room = None;
-    if let Source::Room { address, name, .. } = &args.source {
-        let Some(joined) = join_room(args, address, name, ui).await? else {
-            return Ok(());
-        };
-        room = Some(joined);
-    }
+    let client = match &args.source {
+        Source::Room { address, .. } => Some(RoomClient::new(
+            address.clone(),
+            Duration::from_millis(args.room_wait_ms),
+        )?),
+        Source::Relay { .. } => None,
+    };
     // WHY the first failure ends the viewer, with a room as well: a person
     // started it and looks at it, and a relay that turns it down is to be
     // seen at once.
-    let mut rule = NextSession::new(Pause::VIEWER, room.is_some(), true);
+    let mut rule = NextSession::new(Pause::VIEWER, client.is_some(), true);
     let since = Instant::now();
     let now_ms = || u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX);
     loop {
-        let Some(mut place) = place(args, &mut room, ui).await? else {
+        let Some(mut place) = place(args, client.as_ref(), ui).await? else {
             return Ok(());
         };
         // WHY the same certificate hash where a GOAWAY names another URL:
@@ -419,16 +396,7 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
             Ok(Some(connection)) => {
                 let connection = Arc::new(connection);
                 let mut kept = UntilClosed::default();
-                let played = play(
-                    args,
-                    &connection,
-                    &place,
-                    &mut room,
-                    ui,
-                    &mut began,
-                    &mut kept,
-                )
-                .await;
+                let played = play(args, &connection, &place, ui, &mut began, &mut kept).await;
                 if played.is_err()
                     && let Ok(end) =
                         tokio::time::timeout(Duration::from_millis(500), connection.closed()).await
@@ -463,18 +431,13 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     }
 }
 
-/// The room at `address`, which may begin listening only later
+/// The room of `client`, which may begin listening only later
 /// (`ROOM_COMES_WITHIN`); `None` where the viewer is to end first.
-async fn join_room(
-    args: &Args,
-    address: &str,
-    name: &str,
-    ui: &mut Ui,
-) -> Result<Option<RoomSocket>> {
-    let joining = RoomSocket::join_when_there(address, name, ROOM_COMES_WITHIN);
+async fn ask_room(args: &Args, client: &RoomClient, ui: &mut Ui) -> Result<Option<room::Room>> {
+    let asking = client.room_when_there(ROOM_COMES_WITHIN);
     // The last try may begin as the refusals' time ends.
     let wait = ROOM_COMES_WITHIN + Duration::from_millis(args.room_wait_ms);
-    ui.unless_ended("the room", wait, joining).await
+    ui.unless_ended("the room", wait, asking).await
 }
 
 /// The subscriptions of a broadcast.
@@ -483,49 +446,43 @@ struct Subscribed {
     audio: Subscription,
     /// The name of the sound's track, to ask for it again.
     audio_name: String,
-    /// What keeps the catalog's requests open.
-    catalog: Option<session::CatalogKept>,
     /// What the catalog had, as a line for the log; `None` where the tracks
     /// were named.
     found: Option<String>,
 }
 
-/// The tracks to play: by name, or the first of each kind the catalog has.
+/// The tracks to play: by name, or the first of each kind of `catalog`.
 async fn subscriptions(
     args: &Args,
     requests: &mut Requests<'_>,
     events: &mut Events,
-    stops: &StreamStops,
+    catalog: Option<&[CatalogTrack]>,
 ) -> Result<Subscribed> {
-    let (video, audio, kept, found) = if let Some((video, audio)) = &args.tracks {
-        (video.clone(), audio.clone(), None, None)
-    } else {
-        let (catalog, kept) = requests.catalog(events, stops).await?;
-        let chosen = tracks::choose(&catalog, &args.video_version)?;
-        let (video, audio) = (chosen.video, chosen.audio);
-        // WHY said and not acted on: Opus is decoded at 48 kHz whatever it
-        // was made from, and the decoder mixes two channels into the one
-        // that is played.
-        let line = format!(
-            "CATALOG tracks={} video={} codec={} size={}x{} audio={} codec={} samplerate={} channel_config={}",
-            catalog.len(),
-            room::clean(&video.name, 60),
-            room::clean(video.codec.as_deref().unwrap_or("-"), 30),
-            video.width.unwrap_or(0),
-            video.height.unwrap_or(0),
-            room::clean(&audio.name, 60),
-            room::clean(audio.codec.as_deref().unwrap_or("-"), 30),
-            audio
-                .samplerate
-                .map_or("-".to_string(), |rate| rate.to_string()),
-            room::clean(audio.channel_config.as_deref().unwrap_or("-"), 30),
-        );
-        (
-            video.name.clone(),
-            audio.name.clone(),
-            Some(kept),
-            Some(line),
-        )
+    let (video, audio, found) = match (&args.tracks, catalog) {
+        (Some((video, audio)), _) => (video.clone(), audio.clone(), None),
+        (None, None) => bail!("neither the tracks nor the catalog"),
+        (None, Some(catalog)) => {
+            let chosen = tracks::choose(catalog, &args.video_version)?;
+            let (video, audio) = (chosen.video, chosen.audio);
+            // WHY said and not acted on: Opus is decoded at 48 kHz whatever it
+            // was made from, and the decoder mixes two channels into the one
+            // that is played.
+            let line = format!(
+                "CATALOG tracks={} video={} codec={} size={}x{} audio={} codec={} samplerate={} channel_config={}",
+                catalog.len(),
+                room::clean(&video.name, 60),
+                room::clean(video.codec.as_deref().unwrap_or("-"), 30),
+                video.width.unwrap_or(0),
+                video.height.unwrap_or(0),
+                room::clean(&audio.name, 60),
+                room::clean(audio.codec.as_deref().unwrap_or("-"), 30),
+                audio
+                    .samplerate
+                    .map_or("-".to_string(), |rate| rate.to_string()),
+                room::clean(audio.channel_config.as_deref().unwrap_or("-"), 30),
+            );
+            (video.name.clone(), audio.name.clone(), Some(line))
+        }
     };
     Ok(Subscribed {
         // WHY the video alone: a Group of it is a second of frames that
@@ -538,9 +495,86 @@ async fn subscriptions(
             .while_waiting(requests.subscribe(&audio, None))
             .await??,
         audio_name: audio,
-        catalog: kept,
         found,
     })
+}
+
+/// What a failure before the broadcast plays comes to: the relay's GOAWAY,
+/// read then or behind a `GOING_AWAY`, moves the session; any other is its
+/// error.
+async fn beginning_failed(
+    error: anyhow::Error,
+    session: &mut Session,
+    events: &mut Events,
+    ui: &mut Ui,
+    args: &Args,
+) -> Result<Ended> {
+    if let Some(GoneAway(go_away)) = error.chain().find_map(|cause| cause.downcast_ref()) {
+        ui.note(&format!("GOAWAY timeout_ms={}", go_away.timeout_ms));
+        return Ok(Ended::Moved(new_url(go_away)));
+    }
+    if error.chain().any(<dyn std::error::Error>::is::<GoingAway>)
+        && let Some(go_away) = go_away_behind(session, events, args.answer_wait_ms).await?
+    {
+        ui.note(&format!(
+            "GOAWAY timeout_ms={} after GOING_AWAY",
+            go_away.timeout_ms
+        ));
+        return Ok(Ended::Moved(new_url(&go_away)));
+    }
+    Err(error)
+}
+
+/// The broadcast's catalog, followed until it comes (`FollowedCatalog`):
+/// with a room, a catalog that is not there is waited for, as the room
+/// names its broadcast before it begins; without one, it ends the session
+/// with its error. `None` where the viewer is to end first.
+async fn catalog_of(
+    followed: &mut FollowedCatalog,
+    session: &mut Session,
+    events: &mut Events,
+    ui: &mut Ui,
+    waits: bool,
+) -> Result<Option<Vec<CatalogTrack>>> {
+    loop {
+        // WHY no limit: the broadcast is waited for as long as the viewer
+        // is not told to end, and each SUBSCRIBE has its own time.
+        let Some(came) = ui
+            .unless_ended(
+                "the broadcast",
+                Duration::MAX,
+                events.while_waiting(followed.next()),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(became) = ui
+            .unless_ended(
+                "the catalog",
+                BEGINNING_AT_MOST,
+                followed.on(session, events, came),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        match became {
+            Became::Began(tracks) => return Ok(Some(tracks)),
+            Became::Waiting { why, pause_ms } if waits => {
+                ui.note(&format!(
+                    "ROOM_BROADCAST none: waiting, asking again in {pause_ms} ms ({why})"
+                ));
+            }
+            Became::Ended(why) if waits => {
+                ui.note(&format!("ROOM_BROADCAST none: waiting ({why})"));
+            }
+            Became::Waiting { why, .. } | Became::Ended(why) => {
+                bail!("the catalog: {why}")
+            }
+            Became::Nothing => {}
+        }
+    }
 }
 
 /// The screen the picture is written to.
@@ -721,7 +755,6 @@ async fn play(
     args: &Args,
     connection: &Arc<WtConnection>,
     place: &Place,
-    room: &mut Option<RoomSocket>,
     ui: &mut Ui,
     began_playing: &mut bool,
     kept: &mut UntilClosed,
@@ -761,66 +794,76 @@ async fn play(
     // answer to each SUBSCRIBE what `answer_wait_ms` says, the catalog 5.
     // WHY all of it under `unless_ended`: the viewer has to end when it is
     // told to at any point of it.
-    let beginning = async {
-        // §3.3: each peer opens one control stream that begins with SETUP.
-        let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-        // 10 seconds, as `@xmoq/moqt` gives the peer's SETUP.
-        session::setup(
-            connection,
-            &mut session,
-            &mut events,
-            control_kept,
-            place.token.as_deref(),
-            implementation,
-            args.setup_wait_ms,
-        )
-        .await?;
-        let mut requests = Requests {
-            connection: connection.as_ref(),
-            session: &mut session,
-            namespace: &namespace,
-            token: place.token.as_deref(),
-            answer_wait_ms: args.answer_wait_ms,
-            open_wait_ms: args.open_wait_ms,
-            rendezvous_ms: args.rendezvous_ms,
-        };
-        let subscribed = subscriptions(args, &mut requests, &mut events, &stops).await?;
-        Ok(subscribed)
+    // §3.3: each peer opens one control stream that begins with SETUP.
+    let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+    // 10 seconds, as `@xmoq/moqt` gives the peer's SETUP.
+    let setting_up = session::setup(
+        connection,
+        &mut session,
+        &mut events,
+        control_kept,
+        place.token.as_deref(),
+        implementation,
+        args.setup_wait_ms,
+    );
+    match ui
+        .unless_ended("the relay's SETUP", BEGINNING_AT_MOST, setting_up)
+        .await
+    {
+        Ok(Some(())) => {}
+        Ok(None) => return Ok(Ended::Quit),
+        Err(error) => return beginning_failed(error, &mut session, &mut events, ui, args).await,
+    }
+    let mut catalog = None;
+    let mut tracks = None;
+    if args.tracks.is_none() {
+        let followed = catalog.insert(FollowedCatalog::new(
+            namespace.clone(),
+            place.catalog_rendezvous_ms.or(args.rendezvous_ms),
+            Asking {
+                connection: Arc::clone(connection),
+                stops: stops.clone(),
+                token: place.token.clone(),
+                answer_wait_ms: args.answer_wait_ms,
+                open_wait_ms: args.open_wait_ms,
+            },
+        ));
+        let waits = place.catalog_rendezvous_ms.is_some();
+        match catalog_of(followed, &mut session, &mut events, ui, waits).await {
+            Ok(Some(came)) => tracks = Some(came),
+            Ok(None) => return Ok(Ended::Quit),
+            Err(error) => {
+                return beginning_failed(error, &mut session, &mut events, ui, args).await;
+            }
+        }
+    }
+    let mut requests = Requests {
+        connection: connection.as_ref(),
+        session: &mut session,
+        namespace: &namespace,
+        token: place.token.as_deref(),
+        answer_wait_ms: args.answer_wait_ms,
+        open_wait_ms: args.open_wait_ms,
+        rendezvous_ms: args.rendezvous_ms,
     };
-    let beginning_ended = ui
-        // Each of the three SUBSCRIBEs may be held that much longer.
+    let subscribing = subscriptions(args, &mut requests, &mut events, tracks.as_deref());
+    let subscribed = match ui
+        // Each of the two SUBSCRIBEs may be held that much longer.
         .unless_ended(
             "the relay's answers",
-            BEGINNING_AT_MOST + Duration::from_millis(args.rendezvous_ms.unwrap_or(0)) * 3,
-            beginning,
+            BEGINNING_AT_MOST + Duration::from_millis(args.rendezvous_ms.unwrap_or(0)) * 2,
+            subscribing,
         )
-        .await;
-    let subscribed = match beginning_ended {
+        .await
+    {
         Ok(Some(subscribed)) => subscribed,
         Ok(None) => return Ok(Ended::Quit),
-        Err(error) => {
-            if let Some(GoneAway(go_away)) = error.chain().find_map(|cause| cause.downcast_ref()) {
-                ui.note(&format!("GOAWAY timeout_ms={}", go_away.timeout_ms));
-                return Ok(Ended::Moved(new_url(go_away)));
-            }
-            if error.chain().any(<dyn std::error::Error>::is::<GoingAway>)
-                && let Some(go_away) =
-                    go_away_behind(&mut session, &mut events, args.answer_wait_ms).await?
-            {
-                ui.note(&format!(
-                    "GOAWAY timeout_ms={} after GOING_AWAY",
-                    go_away.timeout_ms
-                ));
-                return Ok(Ended::Moved(new_url(&go_away)));
-            }
-            return Err(error);
-        }
+        Err(error) => return beginning_failed(error, &mut session, &mut events, ui, args).await,
     };
     let Subscribed {
         mut video,
         audio,
         audio_name,
-        mut catalog,
         found,
     } = subscribed;
     // WHY the sound is asked for again on this session, and the picture
@@ -852,8 +895,8 @@ async fn play(
     if let Some(line) = found {
         ui.note(&line);
     }
-    // The chat on tracks, beside the room's WebSocket: what fails of
-    // it is said, and the broadcast plays on without it.
+    // The chat on tracks: what fails of it is said, and the broadcast plays
+    // on without it.
     let mut chat = match &args.chat {
         Some(chat) => {
             let begun = async {
@@ -882,7 +925,7 @@ async fn play(
                 Ok(mut tracks) => {
                     ui.note(&format!(
                         "CHAT_TRACKS room={} name={}",
-                        room::clean(&chat.room, room::LINE_LIMIT),
+                        room::clean(&chat.room.to_string(), room::LINE_LIMIT),
                         room::clean(&chat.name, room::LINE_LIMIT)
                     ));
                     if let Some(text) = &chat.say {
@@ -986,26 +1029,6 @@ async fn play(
                     ui.note("SAID nothing: no chat");
                 }
             }
-            heard = async {
-                match room.as_mut() {
-                    Some(room) => room.next().await,
-                    None => std::future::pending().await,
-                }
-            } => match heard {
-                Ok(broadcast) => {
-                    if broadcast.is_some() && broadcast != place.broadcast {
-                        break "the room has another broadcast";
-                    }
-                    if broadcast.is_none() {
-                        ui.note("ROOM_BROADCAST none");
-                    }
-                }
-                // The room is gone; the broadcast is watched on without it.
-                Err(error) => {
-                    ui.note(&format!("ROOM_LOST {error:#}"));
-                    *room = None;
-                }
-            },
             event = video.reader.next_event() => {
                 match event {
                     Ok(RequestStreamEvent::Message(message)) => {
@@ -1185,7 +1208,7 @@ async fn play(
                             video_malformed = true;
                         } else if let Some(said) = audio.malformed(request) {
                             tell_audio(ui, said);
-                        } else if catalog.as_mut().is_some_and(|catalog| catalog.malformed(request)) {
+                        } else if catalog.as_mut().is_some_and(|catalog| catalog.malformed(&mut session, request).is_some()) {
                             ui.note("CATALOG_MALFORMED");
                         } else if let Some(outs) = chat.as_mut().and_then(|tracks| tracks.malformed(request)) {
                             for out in outs {

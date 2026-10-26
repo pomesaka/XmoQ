@@ -1,8 +1,8 @@
 //! What a viewer of a room does on its sockets, for the viewer of the
 //! terminal (`xmoq-watch`) and the reader for an agent (`xmoq-agent`): the
-//! room's WebSocket ([`room_socket`]), the room's HTTP API ([`room_client`]),
-//! the requests of a session and the
-//! catalog ([`session`]), a track kept on a session ([`kept`]), the chat on
+//! room's HTTP API ([`room_client`]), the requests of a session and the
+//! catalog ([`session`]), the catalog of a broadcast that may not be there
+//! yet ([`catalog`]), a track kept on a session ([`kept`]), the chat on
 //! tracks ([`chat_tracks`]), the following of a track of one item a Group,
 //! the chat's `lines` and a transcript's `speech` ([`follow`]), and the end
 //! of a session and of the program ([`ending`]).
@@ -14,11 +14,11 @@
 //! I/O and what decides would be in one library. WHY NOT a copy in each
 //! program: the two would drift.
 
+pub mod catalog;
 pub mod chat_tracks;
 pub mod ending;
 pub mod follow;
 pub mod kept;
 pub mod reconnect;
 pub mod room_client;
-pub mod room_socket;
 pub mod session;

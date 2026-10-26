@@ -20,9 +20,39 @@ use anyhow::{Context, Result, anyhow, bail};
 use reqwest::header::CONTENT_TYPE;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
+use xmoq_again::AskAgain;
+use xmoq_chat_tracks::names::Person;
 use xmoq_viewer::room::{
     self, Answer, NoSeat, Request, Room, RoomAddress, RoomKind, TakenSeat, TokenRole,
 };
+
+/// How long a room that refuses the connection is asked again, from the
+/// first try. **Provisional.** WHY asked again at all: rooms often start
+/// after the readers that ask them (a demo started beside them, a Worker
+/// restarted), and a reader that gives up at the first refusal has to be
+/// started again by hand. WHY a limit: a wrong address would otherwise be
+/// tried for ever without a word.
+pub const ROOM_COMES_WITHIN: Duration = Duration::from_secs(30);
+
+/// The tokens of a room for the chat on tracks ([`RoomClient::chat_tokens`]),
+/// each as an AUTHORIZATION TOKEN; none where the room gave none.
+#[derive(Debug, Default, Clone)]
+pub struct ChatTokens {
+    /// `pub` in `xmoq/chat/<kind>/<room>/<name>`.
+    pub publish: Option<Vec<u8>>,
+    /// `sub` in `xmoq/chat/<kind>/<room>`.
+    pub subscribe: Option<Vec<u8>>,
+}
+
+/// Whether the connection was refused: nobody listens there (yet).
+fn refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+    })
+}
 
 /// The most bytes of one answer of a room. Its largest, a seat with two
 /// tokens, is under 1 KiB; the bound keeps a server that is no room from
@@ -131,6 +161,30 @@ impl RoomClient {
         }
     }
 
+    /// [`Self::room`], asked again by the rule of `xmoq-again` (a refusal
+    /// that names no time) while the connection is refused, for `within`
+    /// from the first try. Any other failure ends it at once.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::room`]; a refusal that lasts `within`.
+    pub async fn room_when_there(&self, within: Duration) -> Result<Room> {
+        let until = Instant::now() + within;
+        let mut again = AskAgain::default();
+        loop {
+            match self.room().await {
+                Err(error) if refused(&error) => {
+                    let pause = Duration::from_millis(again.after_refusal(None));
+                    if Instant::now() + pause > until {
+                        return Err(error.context(format!("refused for {} s", within.as_secs())));
+                    }
+                    tokio::time::sleep(pause).await;
+                }
+                answered => return answered,
+            }
+        }
+    }
+
     /// A token for `role` in `namespace`; none where the room makes none.
     ///
     /// # Errors
@@ -141,6 +195,41 @@ impl RoomClient {
             Answer::Token(token) => Ok(token),
             other => Err(anyhow!("the room answered {other:?} for a token")),
         }
+    }
+
+    /// The two tokens the chat on tracks needs of the room: `pub` in the
+    /// person's namespace `xmoq/chat/<kind>/<room>/<name>`, for its
+    /// `PUBLISH_NAMESPACE`, and `sub` in `xmoq/chat/<kind>/<room>`, for its
+    /// SUBSCRIBE and FETCH of `lines` (and the reader's
+    /// `SUBSCRIBE_NAMESPACE`).
+    ///
+    /// WHY tokens of their own on the chat's requests, and not the session's
+    /// token as well: that one is `sub` in the broadcast's namespace or the
+    /// meeting's, which allows none of them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::room`].
+    pub async fn chat_tokens(&self, person: &Person) -> Result<ChatTokens> {
+        let room_fields: Vec<String> = xmoq_chat_tracks::names::PREFIX
+            .iter()
+            .map(|field| (*field).to_string())
+            .chain([
+                person.room.kind.field().to_string(),
+                person.room.name.clone(),
+            ])
+            .collect();
+        let mine: Vec<String> = room_fields
+            .iter()
+            .cloned()
+            .chain([person.name.clone()])
+            .collect();
+        let publish = self.token(TokenRole::Pub, &mine).await?;
+        let subscribe = self.token(TokenRole::Sub, &room_fields).await?;
+        Ok(ChatTokens {
+            publish: publish.map(|text| room::authorization_token(&text)),
+            subscribe: subscribe.map(|text| room::authorization_token(&text)),
+        })
     }
 
     /// A seat in the meeting for `participant`, held and renewed until it is
@@ -218,6 +307,12 @@ impl HeldSeat {
             // The task ended without a word: it panicked.
             Err(_) => SeatLost::Failed("the renewal of the seat stopped".to_string()),
         }
+    }
+
+    /// Whether the seat is lost already ([`Self::lost`]).
+    #[must_use]
+    pub fn is_lost(&self) -> bool {
+        self.lost.borrow().is_some() || self.renewing.is_finished()
     }
 
     /// Stops renewing the seat and leaves it: the room frees it at once.
@@ -353,6 +448,11 @@ mod tests {
     async fn fake_room(answers: Vec<(u16, String)>) -> (SocketAddr, mpsc::UnboundedReceiver<Sent>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
         let address = listener.local_addr().expect("its address");
+        (address, serve(listener, answers))
+    }
+
+    /// [`fake_room`] on `listener`.
+    fn serve(listener: TcpListener, answers: Vec<(u16, String)>) -> mpsc::UnboundedReceiver<Sent> {
         let (sent, told) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut answers = answers.into_iter();
@@ -380,7 +480,13 @@ mod tests {
                 let _ = stream.shutdown().await;
             }
         });
-        (address, told)
+        told
+    }
+
+    /// A port that nobody listens on: bound, then let go.
+    async fn free_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        listener.local_addr().expect("its address").port()
     }
 
     fn client(address: SocketAddr, room: &str, wait: Duration) -> RoomClient {
@@ -560,5 +666,96 @@ mod tests {
         let (address, _told) = fake_room(Vec::new()).await;
         let answered = client(address, "broadcasts/blue", WAIT).seat("a1").await;
         assert!(answered.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_room_that_begins_listening_later_is_asked() {
+        let port = free_port().await;
+        let later = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let listener = TcpListener::bind(("127.0.0.1", port))
+                .await
+                .expect("the port");
+            serve(listener, vec![row("broadcast")])
+        });
+        let answered = client(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            "broadcasts/blue",
+            WAIT,
+        )
+        .room_when_there(ROOM_COMES_WITHIN)
+        .await
+        .expect("the room");
+        assert!(matches!(answered, Room::Broadcast(_)), "{answered:?}");
+        later.await.expect("the room listened");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_lasts_ends_it() {
+        let port = free_port().await;
+        let error = client(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            "broadcasts/blue",
+            WAIT,
+        )
+        .room_when_there(Duration::ZERO)
+        .await
+        .expect_err("refused");
+        assert!(refused(&error), "{error:#}");
+        assert_eq!(error.to_string(), "refused for 0 s");
+    }
+
+    #[tokio::test]
+    async fn a_connection_closed_without_a_word_is_not_asked_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let address = listener.local_addr().expect("its address");
+        let closing = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("a connection");
+            drop(stream);
+        });
+        let error = client(address, "broadcasts/blue", WAIT)
+            .room_when_there(ROOM_COMES_WITHIN)
+            .await
+            .expect_err("closed");
+        assert!(!refused(&error), "{error:#}");
+        closing.await.expect("closed");
+    }
+
+    #[tokio::test]
+    async fn the_tokens_of_the_chat_are_asked_for() {
+        let (address, mut told) = fake_room(vec![row("token"), row("token-none")]).await;
+        let person = Person {
+            room: xmoq_chat_tracks::names::Room {
+                kind: xmoq_chat_tracks::names::Kind::Meeting,
+                name: "blue".to_string(),
+            },
+            name: "agent".to_string(),
+        };
+        let tokens = client(address, "meetings/blue", WAIT)
+            .chat_tokens(&person)
+            .await
+            .expect("the tokens");
+        assert_eq!(
+            tokens.publish,
+            Some(room::authorization_token(
+                "v1|xmoq/chat/meeting/blue|sub|1793000000|abababababababababababababababababababababababababababababababab"
+            ))
+        );
+        assert_eq!(tokens.subscribe, None);
+        // (the body of each request, in order)
+        let bodies = [
+            r#"{"namespace":["xmoq","chat","meeting","blue","agent"],"role":"pub"}"#,
+            r#"{"namespace":["xmoq","chat","meeting","blue"],"role":"sub"}"#,
+        ];
+        for body in bodies {
+            assert_eq!(
+                told.recv().await,
+                Some((
+                    "POST".to_string(),
+                    "/meetings/blue/tokens".to_string(),
+                    body.to_string()
+                ))
+            );
+        }
     }
 }

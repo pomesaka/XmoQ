@@ -9,7 +9,7 @@
 #
 # `--meeting N` (1 to 8): N participants of the meeting of the room "demo"
 # (`/meet`) in place of the publishing page, each saying the voice 2 s after
-# the one before, and the reader in the meeting (`--meeting demo`).
+# the one before, and the reader in the meeting's room (`/meetings/demo`).
 # The ports default apart from `mise run demo`'s (4443, 8080, 8787). `start`
 # writes each process it starts into DIR/pids (its PID, when it began and its
 # command, as `ps` tells them); `stop` ends those, and only those that are
@@ -224,10 +224,10 @@ start() {
 	local holder=$!
 	local events="${out}/events.jsonl" before=0
 	[[ ! -f ${events} ]] || before=$(wc -l <"${events}")
-	local in_meeting=()
-	[[ ${meeting} -eq 0 ]] || in_meeting=(--meeting demo)
-	nohup target/release/xmoq-agent --room "http://127.0.0.1:${rooms_port}/rooms/demo" \
-		--name "${name}" --out "${out}" ${in_meeting[@]+"${in_meeting[@]}"} \
+	local room="http://127.0.0.1:${rooms_port}/broadcasts/demo"
+	[[ ${meeting} -eq 0 ]] || room="http://127.0.0.1:${rooms_port}/meetings/demo"
+	nohup target/release/xmoq-agent --room "${room}" \
+		--name "${name}" --out "${out}" \
 		<"${say}" >"${out}/agent.log" 2>&1 &
 	local agent=$!
 	record "${holder}" "sleep"
@@ -244,7 +244,7 @@ start() {
 		wait_for_line "${before}" "${events}" '"state":"began","type":"broadcast"' 60 "${agent}"
 		grep -E "^(no )?captions:" "${out}/demo.log" || true
 		cat <<EOF
-the reader is in http://127.0.0.1:${rooms_port}/rooms/demo as ${name}, and the broadcast began
+the reader is in ${room} as ${name}, and the broadcast began
   say:    echo 'hello' > ${say}      (/frame for a picture)
   read:   ${events}
   logs:   ${out}/demo.log, ${out}/agent.log, ${out}/page.log
@@ -275,7 +275,7 @@ EOF
 	done
 	grep -E "^(no )?captions:" "${out}/demo.log" || true
 	cat <<EOF
-the reader is in the meeting of http://127.0.0.1:${rooms_port}/rooms/demo as ${name}, with ${meeting} participants: ${ids[*]}
+the reader is in ${room} as ${name}, with ${meeting} participants: ${ids[*]}
   say:    echo 'hello' > ${say}      (said in the room's chat)
   frame:  echo '/frame ${ids[0]}' > ${say}   (a picture of that participant; /frame alone, of the one who spoke last)
   who:    grep '"type":"participant"' ${events}   (each one's id, as it joins and leaves)

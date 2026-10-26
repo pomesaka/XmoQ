@@ -31,6 +31,15 @@ use xmoq_viewer::chat_track::{LinesGap, Shown, history_to_fetch};
 pub use crate::kept::Asking;
 use crate::kept::{self, KeptTrack, Said, Wanted, on};
 
+/// The `RENDEZVOUS_TIMEOUT` (§10.2.6) of the SUBSCRIBE of a track that is
+/// followed and whose publisher may come after the reader: the chat's
+/// `lines`, a transcript's `speech`, and the catalog of a broadcast that has
+/// not begun ([`crate::session::Requests::catalog`]). **Provisional.** WHY
+/// 30 s: the value decided for a followed track on 2026-10-26
+/// (`docs/architecture.md`, "The roles of an endpoint"), the most the own
+/// relay holds a SUBSCRIBE (`MAX_RENDEZVOUS_MS` of `xmoq-relay-core`).
+pub const RENDEZVOUS_MS: u64 = 30_000;
+
 /// What the follower has to be told of, from the loop of the session.
 pub enum Came<C: Connection = WtConnection> {
     /// An item of the FETCH, by its number.

@@ -4,11 +4,12 @@
 //! playing (the buffer, the sound, the terminal), and the two would be one
 //! parser of flags that each program uses half of.
 
+use xmoq_chat_tracks::names::{Kind, Room};
 use xmoq_picture::frames::Settings;
-use xmoq_viewer::chat_track::{CATCH_UP_LINES, CATCH_UP_LINES_MOST, room_of_address};
+use xmoq_viewer::chat_track::{CATCH_UP_LINES, CATCH_UP_LINES_MOST};
 use xmoq_viewer::meeting::Limits;
 use xmoq_viewer::reconnect::{CONNECT_WAIT_MS, ROOM_WAIT_MS};
-use xmoq_viewer::room::certificate_hash;
+use xmoq_viewer::room::{RoomAddress, RoomKind, certificate_hash, room_address};
 
 /// Where the broadcast is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,13 +20,15 @@ pub enum Source {
         url: String,
         /// `--cert-sha256`.
         cert_sha256: [u8; 32],
-        /// `--namespace`, its fields.
-        namespace: Vec<String>,
+        /// `--namespace`, its fields; `None` in a meeting (`--meeting`).
+        namespace: Option<Vec<String>>,
     },
-    /// A room that says where the broadcast is and gives tokens.
+    /// A room that says where the broadcast or the meeting is and gives
+    /// tokens, and in a meeting a seat.
     Room {
-        /// `--room`: `http://host:port/rooms/<name>`.
-        address: String,
+        /// `--room`: `http(s)://host:port/broadcasts/<name>` or
+        /// `.../meetings/<name>`.
+        address: RoomAddress,
         /// `--token no` asks the room for none.
         ask_token: bool,
     },
@@ -36,9 +39,9 @@ pub enum Source {
 pub struct Args {
     /// Where the broadcast is.
     pub source: Source,
-    /// The room of the chat: with `--room`, the last segment of its
-    /// address; with `--url`, `--chat-room`.
-    pub room: String,
+    /// The room of the chat: with `--room`, the room's kind and name; with
+    /// `--url`, `--chat-room`, else `meeting/<--meeting>`.
+    pub room: Room,
     /// `--name`: the reader's name in the chat.
     pub name: String,
     /// `--out`: the directory of `events.jsonl` and what it names.
@@ -70,9 +73,10 @@ pub struct Args {
     /// transcript `xmoq/transcript/<prefix>` is followed, its fields. `None`:
     /// the broadcast's namespace.
     pub transcript: Option<Vec<String>>,
-    /// `--meeting`: the room of a meeting, whose participants publish under
-    /// `xmoq/meet/<room>/<id>`, in place of one broadcast; with the limits
-    /// of `--meeting-most` and `--meeting-video-linger-ms`.
+    /// `--meeting`, or the name of a meeting's room of `--room`: the room of
+    /// a meeting, whose participants publish under `xmoq/meet/<room>/<id>`,
+    /// in place of one broadcast; with the limits of `--meeting-most` and
+    /// `--meeting-video-linger-ms`.
     pub meeting: Option<(String, Limits)>,
 }
 
@@ -97,9 +101,13 @@ pub const DEFAULT_NAME: &str = "agent";
 
 /// The flags, each of which takes a value.
 pub const USAGE: &str = "\
-xmoq-agent --room http://host:port/rooms/<name> --out <dir> [--name agent] [--token no | --meeting <name>]
-xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
-           (--chat-room <room> | --meeting <room>) --out <dir> [--name agent]
+xmoq-agent --room http(s)://host:port/broadcasts/<name> --out <dir> [--name agent] [--token no]
+xmoq-agent --room http(s)://host:port/meetings/<name> --out <dir> [--name agent]
+xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> --namespace <a/b> --out <dir>
+           --chat-room broadcast/<name>|meeting/<name> [--name agent]
+xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> --meeting <room> --out <dir>
+           [--chat-room broadcast/<name>|meeting/<name>] [--name agent]
+  --chat-room <kind>/<name>         the chat's room with --url (with --room, the room's)
   --out <dir>                       where events.jsonl is written (made where it is not)
   --chat-catch-up-lines <n>         the lines missed while away that are fetched (16; 1 to 1000)
   --answer-wait-ms <ms>             how long the relay gets to answer a request (10000)
@@ -112,9 +120,9 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
   --frame-every-ms <ms>             a picture this often by the broadcast's clock, unasked (none)
   --frame-longest <n>               the longest side of a picture, in pixels (1280)
   --frames-kept <n>                 the pictures kept in <dir>/frames; the oldest goes (500)
-  --meeting <room>                  a meeting's participants under xmoq/meet/<room>, in place of
-                                    --namespace; /frame <id> asks for one's picture; with --room,
-                                    the room's name, and the room gives the reader a seat of its 49
+  --meeting <room>                  with --url, a meeting's participants under xmoq/meet/<room>, in
+                                    place of --namespace, and the chat of meeting/<room>; /frame <id>
+                                    asks for one's picture (with --room, the room's address says it)
   --meeting-most <n>                the participants kept (49; 1 or more)
   --meeting-video-linger-ms <ms>    how long a participant's video stays after its picture (30000)
   --speech on|off                   off: no transcript is followed (on)
@@ -148,14 +156,15 @@ fn size(flag: &str, value: &str) -> Result<usize, Invalid> {
 ///
 /// [`Invalid`] for a flag that is not one, a flag without its value, a
 /// value a flag does not take, neither or both of `--url` and `--room`,
-/// `--url` without `--cert-sha256` or `--chat-room`, `--chat-room` with
-/// `--room`, a room's address without the room's name, and no `--out`.
+/// `--url` without `--cert-sha256` or `--chat-room`, `--chat-room` or
+/// `--meeting` with `--room`, an address that is no room's, `--token no`
+/// with the room of a meeting, and no `--out`.
 #[expect(
     clippy::too_many_lines,
     reason = "one arm a flag: cut in two, the list of the flags would be in two places"
 )]
 pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
-    let (mut url, mut cert_sha256, mut namespace) = (None, None, "xmoq/demo".to_string());
+    let (mut url, mut cert_sha256, mut namespace) = (None, None, None);
     let (mut room, mut chat_room, mut ask_token) = (None, None, true);
     let (mut name, mut out) = (DEFAULT_NAME.to_string(), None);
     let mut catch_up = CATCH_UP_LINES;
@@ -165,7 +174,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
     let mut seconds = None;
     let (mut frames, mut pictures) = (true, Settings::default());
     let (mut speech, mut transcript) = (true, None);
-    let (mut meeting, mut limits, mut named_namespace) = (None, Limits::default(), false);
+    let (mut meeting, mut limits) = (None, Limits::default());
     while let Some(flag) = given.next() {
         let value = given
             .next()
@@ -178,10 +187,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                         .map_err(|error| Invalid(format!("--cert-sha256: {error}")))?,
                 );
             }
-            "--namespace" => {
-                namespace = value;
-                named_namespace = true;
-            }
+            "--namespace" => namespace = Some(value),
             "--meeting" => {
                 if value.is_empty() || value.contains('/') {
                     return Err(Invalid(format!("--meeting {value}: one field, not empty")));
@@ -191,7 +197,13 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--meeting-most" => limits.most_participants = size(&flag, &value)?,
             "--meeting-video-linger-ms" => limits.video_linger_ms = number(&flag, &value)?,
             "--room" => room = Some(value),
-            "--chat-room" => chat_room = Some(value),
+            "--chat-room" => {
+                chat_room = Some(Room::parse(&value).ok_or_else(|| {
+                    Invalid(format!(
+                        "--chat-room {value}: broadcast/<name> or meeting/<name>"
+                    ))
+                })?);
+            }
             "--token" => {
                 ask_token = match value.as_str() {
                     "yes" => true,
@@ -254,54 +266,71 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         }
     }
     let out = out.ok_or_else(|| Invalid("--out <dir> is needed".to_string()))?;
-    let (source, room) = match (url, room) {
-        (Some(url), None) => (
-            Source::Relay {
+    // WHY no default namespace: the components hold no value of an
+    // application, and the caller names the broadcast (decided on
+    // 2026-10-26).
+    let named_namespace = namespace.is_some();
+    let (source, room, meeting) = match (url, room) {
+        (Some(url), None) => {
+            // A meeting's chat is the meeting's room unless it is named.
+            let room = chat_room
+                .or_else(|| {
+                    meeting.clone().map(|name| Room {
+                        kind: Kind::Meeting,
+                        name,
+                    })
+                })
+                .ok_or_else(|| Invalid("--url needs --chat-room or --meeting".to_string()))?;
+            if namespace.is_none() && meeting.is_none() {
+                return Err(Invalid(
+                    "--url needs --namespace (or --meeting): the broadcast is not assumed"
+                        .to_string(),
+                ));
+            }
+            let source = Source::Relay {
                 url,
                 cert_sha256: cert_sha256
                     .ok_or_else(|| Invalid("--url needs --cert-sha256".to_string()))?,
                 // The flag has the fields between slashes.
-                namespace: namespace.split('/').map(str::to_string).collect(),
-            },
-            // A meeting's chat is the meeting's room unless it is named.
-            chat_room
-                .or_else(|| meeting.clone())
-                .ok_or_else(|| Invalid("--url needs --chat-room or --meeting".to_string()))?,
-        ),
+                namespace: namespace.map(|text| text.split('/').map(str::to_string).collect()),
+            };
+            (source, room, meeting)
+        }
         (None, Some(address)) => {
             if chat_room.is_some() {
                 return Err(Invalid(
                     "--chat-room is for --url; with --room the chat is the room's".to_string(),
                 ));
             }
-            let room = room_of_address(&address)
-                .ok_or_else(|| {
-                    Invalid(format!(
-                        "--room {address}: http://host:port/rooms/<name> is needed"
-                    ))
-                })?
-                .to_string();
-            (Source::Room { address, ask_token }, room)
+            if meeting.is_some() {
+                return Err(Invalid(
+                    "--meeting is for --url; with --room the room's address says it is a meeting's"
+                        .to_string(),
+                ));
+            }
+            let address =
+                room_address(&address).map_err(|error| Invalid(format!("--room: {error}")))?;
+            let (kind, meeting) = match address.kind {
+                RoomKind::Broadcast => (Kind::Broadcast, None),
+                RoomKind::Meeting => (Kind::Meeting, Some(address.name.clone())),
+            };
+            // WHY not without tokens: the seat is taken with them, and a
+            // reader that asks for none takes no seat of the meeting's.
+            if meeting.is_some() && !ask_token {
+                return Err(Invalid(
+                    "--token no with the room of a meeting: its seat is taken with tokens"
+                        .to_string(),
+                ));
+            }
+            let room = Room {
+                kind,
+                name: address.name.clone(),
+            };
+            (Source::Room { address, ask_token }, room, meeting)
         }
         (None, None) => return Err(Invalid("--url or --room is needed".to_string())),
         (Some(_), Some(_)) => return Err(Invalid("--url or --room, not both".to_string())),
     };
-    if let (Some(meeting), Source::Room { ask_token, .. }) = (&meeting, &source) {
-        // The room gives the seats of its own meeting alone
-        // (`xmoq/meet/<room>/*`).
-        if *meeting != room {
-            return Err(Invalid(format!(
-                "--meeting {meeting} with --room: a room's meeting is its own, {room}"
-            )));
-        }
-        // WHY not without tokens: the seat the room gives is the token,
-        // and a reader that asks for none takes no seat of the 49.
-        if !ask_token {
-            return Err(Invalid(
-                "--token no with --meeting: the room's seat in its meeting is a token".to_string(),
-            ));
-        }
-    }
     if meeting.is_some() && named_namespace {
         return Err(Invalid(
             "--meeting or --namespace: a meeting has a broadcast for each participant".to_string(),
@@ -335,13 +364,29 @@ mod tests {
         parse(line.split_whitespace().map(str::to_string))
     }
 
+    fn address(kind: RoomKind, name: &str) -> RoomAddress {
+        RoomAddress {
+            base: "http://h/".to_string(),
+            kind,
+            name: name.to_string(),
+        }
+    }
+
+    fn chat_room(kind: Kind, name: &str) -> Room {
+        Room {
+            kind,
+            name: name.to_string(),
+        }
+    }
+
+    /// The defaults in the room of the broadcast `room`, as `name`.
     fn in_room(room: &str, name: &str) -> Args {
         Args {
             source: Source::Room {
-                address: format!("http://h/rooms/{room}"),
+                address: address(RoomKind::Broadcast, room),
                 ask_token: true,
             },
-            room: room.to_string(),
+            room: chat_room(Kind::Broadcast, room),
             name: name.to_string(),
             out: "o".to_string(),
             catch_up: 16,
@@ -367,31 +412,37 @@ mod tests {
     fn the_flags_of_a_meeting_are_read() {
         let hash = "0f".repeat(32);
         let relay = format!("--url https://h:1/ --cert-sha256 {hash} --out o");
-        let at_relay = |room: &str, meeting: Option<(&str, Limits)>| Args {
+        let at_relay = |room: Room, meeting: Option<(&str, Limits)>| Args {
             source: Source::Relay {
                 url: "https://h:1/".to_string(),
                 cert_sha256: [0x0f; 32],
-                namespace: vec!["xmoq".to_string(), "demo".to_string()],
+                namespace: None,
             },
-            room: room.to_string(),
+            room,
             meeting: meeting.map(|(room, limits)| (room.to_string(), limits)),
-            ..in_room(room, "agent")
+            ..in_room("a", "agent")
         };
         // (the flags after `relay`; what they are read as)
         let cases = [
             (
                 "--meeting m",
-                Ok(at_relay("m", Some(("m", Limits::default())))),
+                Ok(at_relay(
+                    chat_room(Kind::Meeting, "m"),
+                    Some(("m", Limits::default())),
+                )),
             ),
             // The chat of another room than the meeting's.
             (
-                "--meeting m --chat-room c",
-                Ok(at_relay("c", Some(("m", Limits::default())))),
+                "--meeting m --chat-room broadcast/c",
+                Ok(at_relay(
+                    chat_room(Kind::Broadcast, "c"),
+                    Some(("m", Limits::default())),
+                )),
             ),
             (
                 "--meeting m --meeting-most 3 --meeting-video-linger-ms 0",
                 Ok(at_relay(
-                    "m",
+                    chat_room(Kind::Meeting, "m"),
                     Some((
                         "m",
                         Limits {
@@ -425,42 +476,72 @@ mod tests {
         for (flags, expected) in cases {
             assert_eq!(parsed(&format!("{relay} {flags}")), expected, "{flags}");
         }
-        // (the flags after `--room http://h/rooms/a --out o`; what they are
-        // read as)
+    }
+
+    #[test]
+    fn the_room_of_a_meeting_is_read() {
+        // (the flags after `--out o`; what they are read as)
         let in_a_room = [
             (
-                "--meeting a",
+                "--room http://h/meetings/a",
                 Ok(Args {
+                    source: Source::Room {
+                        address: address(RoomKind::Meeting, "a"),
+                        ask_token: true,
+                    },
+                    room: chat_room(Kind::Meeting, "a"),
                     meeting: Some(("a".to_string(), Limits::default())),
                     ..in_room("a", "agent")
                 }),
             ),
             (
-                "--meeting m",
+                "--room http://h/meetings/a --meeting-most 3",
+                Ok(Args {
+                    source: Source::Room {
+                        address: address(RoomKind::Meeting, "a"),
+                        ask_token: true,
+                    },
+                    room: chat_room(Kind::Meeting, "a"),
+                    meeting: Some((
+                        "a".to_string(),
+                        Limits {
+                            most_participants: 3,
+                            ..Limits::default()
+                        },
+                    )),
+                    ..in_room("a", "agent")
+                }),
+            ),
+            (
+                "--room http://h/broadcasts/a --meeting a",
                 Err(Invalid(
-                    "--meeting m with --room: a room's meeting is its own, a".to_string(),
+                    "--meeting is for --url; with --room the room's address says it is a meeting's"
+                        .to_string(),
                 )),
             ),
             (
-                "--meeting a --token no",
+                "--room http://h/meetings/a --token no",
                 Err(Invalid(
-                    "--token no with --meeting: the room's seat in its meeting is a token"
+                    "--token no with the room of a meeting: its seat is taken with tokens"
+                        .to_string(),
+                )),
+            ),
+            (
+                "--room http://h/meetings/a --namespace xmoq/demo",
+                Err(Invalid(
+                    "--meeting or --namespace: a meeting has a broadcast for each participant"
                         .to_string(),
                 )),
             ),
         ];
         for (flags, expected) in in_a_room {
-            assert_eq!(
-                parsed(&format!("--room http://h/rooms/a --out o {flags}")),
-                expected,
-                "{flags}"
-            );
+            assert_eq!(parsed(&format!("--out o {flags}")), expected, "{flags}");
         }
     }
 
     #[test]
     fn the_flags_of_the_pictures_are_read() {
-        let room = "--room http://h/rooms/a --out o";
+        let room = "--room http://h/broadcasts/a --out o";
         // (the flags after `room`; what they are read as)
         let cases = [
             (
@@ -519,25 +600,24 @@ mod tests {
 
     #[test]
     fn the_flags_are_read() {
-        let hash = "0f".repeat(32);
         // (the flags; what they are read as)
         let cases = [
             (
-                "--room http://h/rooms/a --out o".to_string(),
+                "--room http://h/broadcasts/a --out o".to_string(),
                 Ok(in_room("a", "agent")),
             ),
             (
-                "--room http://h/rooms/a --out o --name claude".to_string(),
+                "--room http://h/broadcasts/a --out o --name claude".to_string(),
                 Ok(in_room("a", "claude")),
             ),
             (
-                "--room http://h/rooms/a --out o --token no --chat-catch-up-lines 1000 \
+                "--room http://h/broadcasts/a --out o --token no --chat-catch-up-lines 1000 \
                  --answer-wait-ms 1 --setup-wait-ms 2 --open-wait-ms 3 --room-wait-ms 5 \
                  --connect-wait-ms 6 --seconds 4"
                     .to_string(),
                 Ok(Args {
                     source: Source::Room {
-                        address: "http://h/rooms/a".to_string(),
+                        address: address(RoomKind::Broadcast, "a"),
                         ask_token: false,
                     },
                     catch_up: 1000,
@@ -551,29 +631,70 @@ mod tests {
                 }),
             ),
             (
-                format!("--url https://h:1/ --cert-sha256 {hash} --chat-room r --out o"),
+                "--room http://h/broadcasts/a".to_string(),
+                Err(Invalid("--out <dir> is needed".to_string())),
+            ),
+            (
+                "--room http://h/rooms/a --out o".to_string(),
+                Err(Invalid(
+                    "--room: a room is http(s)://host/broadcasts/<name> or http(s)://host/meetings/<name>, not http://h/rooms/a".to_string(),
+                )),
+            ),
+            (
+                "--room http://h/broadcasts/a --out o --chat-catch-up-lines 0".to_string(),
+                Err(Invalid(
+                    "--chat-catch-up-lines is a whole number from 1 to 1000, not 0".to_string(),
+                )),
+            ),
+            (
+                "--room http://h/broadcasts/a --out o --token maybe".to_string(),
+                Err(Invalid("--token maybe: yes or no".to_string())),
+            ),
+            (
+                "--room http://h/broadcasts/a --out".to_string(),
+                Err(Invalid("--out needs a value".to_string())),
+            ),
+            (
+                "--room http://h/broadcasts/a --out o --say hi".to_string(),
+                Err(Invalid("unknown flag --say".to_string())),
+            ),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(parsed(&line), expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn the_flags_of_a_relay_without_a_room_are_read() {
+        let hash = "0f".repeat(32);
+        // (the flags; what they are read as)
+        let cases = [
+            (
+                format!(
+                    "--url https://h:1/ --cert-sha256 {hash} --namespace xmoq/broadcast/demo --chat-room meeting/r --out o"
+                ),
                 Ok(Args {
                     source: Source::Relay {
                         url: "https://h:1/".to_string(),
                         cert_sha256: [0x0f; 32],
-                        namespace: vec!["xmoq".to_string(), "demo".to_string()],
+                        namespace: Some(vec![
+                            "xmoq".to_string(),
+                            "broadcast".to_string(),
+                            "demo".to_string(),
+                        ]),
                     },
-                    room: "r".to_string(),
+                    room: chat_room(Kind::Meeting, "r"),
                     ..in_room("a", "agent")
                 }),
             ),
             (
-                "--room http://h/rooms/a".to_string(),
-                Err(Invalid("--out <dir> is needed".to_string())),
-            ),
-            (
-                "--room http://h --out o".to_string(),
+                format!("--url https://h:1/ --cert-sha256 {hash} --chat-room r --out o"),
                 Err(Invalid(
-                    "--room http://h: http://host:port/rooms/<name> is needed".to_string(),
+                    "--chat-room r: broadcast/<name> or meeting/<name>".to_string(),
                 )),
             ),
             (
-                "--room http://h/rooms/a --chat-room r --out o".to_string(),
+                "--room http://h/broadcasts/a --chat-room broadcast/r --out o".to_string(),
                 Err(Invalid(
                     "--chat-room is for --url; with --room the chat is the room's".to_string(),
                 )),
@@ -583,30 +704,19 @@ mod tests {
                 Err(Invalid("--url needs --chat-room or --meeting".to_string())),
             ),
             (
-                "--url https://h:1/ --chat-room r --out o".to_string(),
+                format!("--url https://h:1/ --cert-sha256 {hash} --chat-room broadcast/r --out o"),
+                Err(Invalid(
+                    "--url needs --namespace (or --meeting): the broadcast is not assumed"
+                        .to_string(),
+                )),
+            ),
+            (
+                "--url https://h:1/ --namespace a/b --chat-room broadcast/r --out o".to_string(),
                 Err(Invalid("--url needs --cert-sha256".to_string())),
             ),
             (
                 "--out o".to_string(),
                 Err(Invalid("--url or --room is needed".to_string())),
-            ),
-            (
-                "--room http://h/rooms/a --out o --chat-catch-up-lines 0".to_string(),
-                Err(Invalid(
-                    "--chat-catch-up-lines is a whole number from 1 to 1000, not 0".to_string(),
-                )),
-            ),
-            (
-                "--room http://h/rooms/a --out o --token maybe".to_string(),
-                Err(Invalid("--token maybe: yes or no".to_string())),
-            ),
-            (
-                "--room http://h/rooms/a --out".to_string(),
-                Err(Invalid("--out needs a value".to_string())),
-            ),
-            (
-                "--room http://h/rooms/a --out o --say hi".to_string(),
-                Err(Invalid("unknown flag --say".to_string())),
             ),
         ];
         for (line, expected) in cases {

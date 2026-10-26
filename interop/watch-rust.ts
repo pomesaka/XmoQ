@@ -89,7 +89,7 @@
 //
 // `--watch chat`. The chat on MoQ tracks, through the own relay with
 // the gatherer (`xmoq-chat`) beside it, while a page publishes the broadcast
-// as in `--watch page`. Two viewers of room `r`, each with `--chat-room r`
+// as in `--watch page`. Two viewers of room `r`, each with `--chat-room broadcast/r`
 // and a line to say (`--say`). Written before the first run:
 //
 //   - Viewer `wa` comes first, when the gatherer has published no `lines` of
@@ -477,7 +477,7 @@ function chatViewer(
 		"--fit",
 		"none",
 		"--chat-room",
-		"r",
+		"broadcast/r",
 		"--name",
 		name,
 		"--say",

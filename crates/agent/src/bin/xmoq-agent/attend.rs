@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 use xmoq_again::AskAgain;
 pub use xmoq_again::next_session::Ended;
-use xmoq_agent::events::{Asked as FrameAsked, Event};
+use xmoq_agent::events::{Asked as FrameAsked, BroadcastState, Event};
 use xmoq_agent::input::{self, Input};
 use xmoq_agent::presence::SETTLE_MS;
 use xmoq_chat_tracks::names::{person_of as person_of_namespace, room_namespace};
@@ -28,13 +28,15 @@ use xmoq_moqt_io::{
     Connection, RequestReader, RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace,
     UniEvent, read_request_streams, read_uni_streams, send_message,
 };
+use xmoq_msf::CatalogTrack;
 use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
 use xmoq_transcript_tracks::payloads::{Speech, read_speech};
+use xmoq_viewer_io::catalog::{Became, FollowedCatalog};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
 use xmoq_viewer_io::ending::UntilClosed;
-use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, Track};
+use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, RENDEZVOUS_MS, Track};
 use xmoq_viewer_io::reconnect::go_away_behind;
-use xmoq_viewer_io::room_socket::RoomSocket;
+use xmoq_viewer_io::room_client::{HeldSeat, SeatLost};
 use xmoq_viewer_io::session::{self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of};
 
 use crate::frames::{Job, Pictures};
@@ -243,8 +245,8 @@ const THREAD_ENDED: &str = "frame: the thread of the pictures ended";
 enum NoVideo {
     /// `--frames off`.
     Off,
-    /// The session is at the room's relay for the chat, and the room has no
-    /// broadcast yet.
+    /// The session is in a meeting, whose participants' pictures are
+    /// `InMeeting`'s; or the broadcast's catalog has not come (yet).
     NoBroadcast,
     /// The catalog or the subscription failed, or the video was given up.
     Failed(String),
@@ -325,12 +327,6 @@ fn on_video_object(
     }
     pictures.leaving_out = !given;
 }
-
-/// How long the relay is asked to hold the SUBSCRIBE to `speech` for a
-/// transcriber to publish it: the most the own relay holds, as for the
-/// chat's `lines`. WHY held: a transcriber that starts after the reader has
-/// its pieces read from the start.
-const SPEECH_RENDEZVOUS_MS: u64 = 30_000;
 
 /// The most an Object of `speech` may be. **Provisional**: a piece of a few
 /// seconds is some hundred bytes of text.
@@ -427,6 +423,122 @@ fn on_line(
     Wants::Nothing
 }
 
+/// What the requests of a track of the session are sent with.
+fn asking_with(
+    args: &xmoq_agent::args::Args,
+    connection: &Arc<WtConnection>,
+    stops: &StreamStops,
+    token: Option<Vec<u8>>,
+) -> Asking {
+    Asking {
+        connection: Arc::clone(connection),
+        stops: stops.clone(),
+        token,
+        answer_wait_ms: args.answer_wait_ms,
+        open_wait_ms: args.open_wait_ms,
+    }
+}
+
+/// The broadcast's catalog ended within the session: written, and its
+/// video given up, to be asked for when the catalog comes again.
+fn broadcast_ended(
+    reader: &mut Reader,
+    place: &Place,
+    video: &mut Result<Video, NoVideo>,
+    session: &mut Session,
+    frames: bool,
+) {
+    if std::mem::take(&mut reader.broadcast_began) {
+        crate::tell_broadcast(reader, place, BroadcastState::Ended);
+    }
+    let none = if frames {
+        NoVideo::NoBroadcast
+    } else {
+        NoVideo::Off
+    };
+    if let Ok(ended) = std::mem::replace(video, Err(none)) {
+        ended.cancel(session);
+    }
+}
+
+/// What came of subscribing to the broadcast's video.
+enum Started {
+    /// Boxed: it is the largest by far.
+    Video(Box<Video>),
+    /// None on this session, for this, which is told.
+    No(NoVideo),
+    /// The relay is going away: the session ends so.
+    SessionEnds(Ended),
+}
+
+/// Subscribes to the video of `tracks`, the broadcast's catalog, that came
+/// on the session.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parts of the session the loop holds apart, borrowed for one call"
+)]
+async fn start_video(
+    args: &xmoq_agent::args::Args,
+    connection: &Arc<WtConnection>,
+    stops: &StreamStops,
+    place: &Place,
+    tracks: &[CatalogTrack],
+    session: &mut Session,
+    events: &mut Events,
+    pictures: &mut Pictures,
+    reader: &mut Reader,
+) -> Result<Started> {
+    let Some(namespace) = &place.namespace else {
+        return Ok(Started::No(NoVideo::NoBroadcast));
+    };
+    let namespace = TrackNamespace::new(
+        namespace
+            .iter()
+            .map(|field| field.as_bytes().to_vec())
+            .collect(),
+    )?;
+    let asking = asking_with(args, connection, stops, place.token.clone());
+    let subscribed = Video::of(asking, namespace, tracks, None, session, events);
+    let wait = Duration::from_millis(args.answer_wait_ms) * 2;
+    match reader.unless_ended("the video", wait, subscribed).await {
+        Ok(None) => Ok(Started::SessionEnds(Ended::Quit)),
+        Ok(Some(video)) => {
+            // Before the first Object of this video reaches the thread: the
+            // Objects go through the loop.
+            pictures.tell(Job::BeginAgain).await;
+            Ok(Started::Video(Box::new(video)))
+        }
+        Err(error) => {
+            if let Some(GoneAway(go_away)) = error.chain().find_map(|cause| cause.downcast_ref()) {
+                return Ok(Started::SessionEnds(Ended::Moved(new_url(go_away))));
+            }
+            // §10.4: a relay going away refuses with `GOING_AWAY`, and its
+            // GOAWAY, on the control stream, can come after.
+            // WHY `unless_ended`: a signal and stdin are heard meanwhile.
+            if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) {
+                let waiting = go_away_behind(session, events, args.answer_wait_ms);
+                let wait = Duration::from_millis(args.answer_wait_ms) * 2;
+                match reader.unless_ended("the GOAWAY", wait, waiting).await? {
+                    None => return Ok(Started::SessionEnds(Ended::Quit)),
+                    Some(Some(go_away)) => {
+                        return Ok(Started::SessionEnds(Ended::Moved(new_url(&go_away))));
+                    }
+                    Some(None) => {}
+                }
+            }
+            if error
+                .chain()
+                .any(<dyn std::error::Error>::is::<xmoq_moqt::Error>)
+            {
+                return Err(error);
+            }
+            let why = NoVideo::Failed(format!("{error:#}"));
+            reader.error(why.message());
+            Ok(Started::No(why))
+        }
+    }
+}
+
 /// Reads one broadcast's session until it ends, moves, or the reader is
 /// ended.
 #[expect(
@@ -438,7 +550,7 @@ pub async fn attend(
     args: &xmoq_agent::args::Args,
     connection: &Arc<WtConnection>,
     place: &Place,
-    room: &mut Option<RoomSocket>,
+    seat: &mut Option<HeldSeat>,
     reader: &mut Reader,
     pictures: &mut Option<Pictures>,
     kept: &mut UntilClosed,
@@ -484,71 +596,29 @@ pub async fn attend(
     {
         return Ok(Ended::Quit);
     }
-    // WHY before the chat: reading the catalog takes every event of the
-    // session meanwhile (`Requests::catalog`), and the chat's lines and its
-    // FETCH would be taken with them.
-    // Where there is a broadcast to subscribe to, this is replaced below.
+    // In a meeting, and until the broadcast's catalog comes.
     let mut video = Err(if pictures.is_some() {
         NoVideo::NoBroadcast
     } else {
         NoVideo::Off
     });
-    if let (Some(pictures), Some(namespace)) = (pictures.as_mut(), &place.namespace) {
-        let broadcast = TrackNamespace::new(
-            namespace
-                .iter()
-                .map(|field| field.as_bytes().to_vec())
-                .collect(),
-        )?;
-        let asking_with = Asking {
-            connection: Arc::clone(connection),
-            stops: stops.clone(),
-            token: place.token.clone(),
-            answer_wait_ms: args.answer_wait_ms,
-            open_wait_ms: args.open_wait_ms,
-        };
-        let subscribed = Video::begin(asking_with, broadcast, &mut session, &mut events);
-        // The catalog's SUBSCRIBE and FETCH, the catalog itself, and the
-        // video's SUBSCRIBE.
-        let wait = Duration::from_millis(args.answer_wait_ms * 3) + Duration::from_secs(5);
-        video = match reader.unless_ended("the video", wait, subscribed).await {
-            Ok(None) => return Ok(Ended::Quit),
-            Ok(Some(video)) => {
-                // Before the first Object of this session's video reaches
-                // the thread: the Objects go through the loop below.
-                pictures.tell(Job::BeginAgain).await;
-                Ok(video)
-            }
-            Err(error) => {
-                if let Some(GoneAway(go_away)) =
-                    error.chain().find_map(|cause| cause.downcast_ref())
-                {
-                    return Ok(Ended::Moved(new_url(go_away)));
-                }
-                // §10.4: a relay going away refuses with `GOING_AWAY`, and its
-                // GOAWAY, on the control stream, can come after.
-                // WHY `unless_ended`: a signal and stdin are heard meanwhile.
-                if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) {
-                    let waiting = go_away_behind(&mut session, &mut events, args.answer_wait_ms);
-                    let wait = Duration::from_millis(args.answer_wait_ms) * 2;
-                    match reader.unless_ended("the GOAWAY", wait, waiting).await? {
-                        None => return Ok(Ended::Quit),
-                        Some(Some(go_away)) => return Ok(Ended::Moved(new_url(&go_away))),
-                        Some(None) => {}
-                    }
-                }
-                if error
-                    .chain()
-                    .any(<dyn std::error::Error>::is::<xmoq_moqt::Error>)
-                {
-                    return Err(error);
-                }
-                let why = NoVideo::Failed(format!("{error:#}"));
-                reader.error(why.message());
-                Err(why)
-            }
-        };
-    }
+    // WHY the catalog is followed also with `--frames off`: it says when the
+    // broadcast begins and ends (`broadcast` lines). WHY on the loop and not
+    // waited for here: the room names its broadcast before it begins, and
+    // the chat goes on meanwhile.
+    let mut catalog = match &place.namespace {
+        Some(namespace) => Some(FollowedCatalog::new(
+            TrackNamespace::new(
+                namespace
+                    .iter()
+                    .map(|field| field.as_bytes().to_vec())
+                    .collect(),
+            )?,
+            place.catalog_rendezvous_ms,
+            asking_with(args, connection, &stops, place.token.clone()),
+        )),
+        None => None,
+    };
     let room_namespace = room_namespace(&args.room)?;
     let person = person_of(args);
     let begun = ChatTracks::begin(
@@ -607,7 +677,9 @@ pub async fn attend(
                 Track {
                     namespace: transcript_namespace(&listened)?,
                     name: SPEECH,
-                    rendezvous_ms: Some(SPEECH_RENDEZVOUS_MS),
+                    // WHY held: a transcriber that starts after the reader
+                    // has its pieces read from the start.
+                    rendezvous_ms: Some(RENDEZVOUS_MS),
                     payload_most: SPEECH_PAYLOAD_MOST,
                     fetch_most: SPEECH_FETCH_MOST,
                     catch_up: SPEECH_CATCH_UP,
@@ -710,6 +782,46 @@ pub async fn attend(
                     break ended;
                 }
             }
+            came = on(catalog.as_mut().map(FollowedCatalog::next)) => {
+                let Some(followed) = catalog.as_mut() else { continue };
+                // WHY under `unless_ended`: where the SUBSCRIBE was answered,
+                // `on` reads the catalog (a stream for its FETCH, then 5 s at
+                // most), and a signal and `--seconds` are heard meanwhile.
+                let reading = followed.on(&mut session, &mut events, came);
+                let wait = Duration::from_millis(args.open_wait_ms + args.answer_wait_ms)
+                    + Duration::from_secs(5);
+                let became = match reader.unless_ended("the catalog", wait, reading).await {
+                    Ok(Some(became)) => became,
+                    Ok(None) => break Ended::Quit,
+                    Err(error) => {
+                        if let Some(GoneAway(go_away)) = error.chain().find_map(|cause| cause.downcast_ref()) {
+                            break Ended::Moved(new_url(go_away));
+                        }
+                        return Err(error);
+                    }
+                };
+                match became {
+                    Became::Began(tracks) => {
+                        reader.broadcast_began = true;
+                        crate::tell_broadcast(reader, place, BroadcastState::Began);
+                        if let Some(taking) = pictures.as_mut() {
+                            match start_video(args, connection, &stops, place, &tracks, &mut session, &mut events, taking, reader).await? {
+                                Started::Video(started) => video = Ok(*started),
+                                Started::No(why) => video = Err(why),
+                                Started::SessionEnds(ended) => break ended,
+                            }
+                        }
+                    }
+                    Became::Ended(how) => {
+                        eprintln!("XMOQ_AGENT_CATALOG_ENDED {how}");
+                        broadcast_ended(reader, place, &mut video, &mut session, pictures.is_some());
+                    }
+                    Became::Waiting { why, pause_ms } => {
+                        eprintln!("XMOQ_AGENT_CATALOG_WAITING {why}; asking again in {pause_ms} ms");
+                    }
+                    Became::Nothing => {}
+                }
+            }
             came = on(video.as_mut().ok().map(Video::next)) => {
                 if let Ok(going) = video.as_mut()
                     && let Some(why) = going.on(&mut session, came)?
@@ -721,20 +833,17 @@ pub async fn attend(
                     }
                 }
             }
-            heard = on(room.as_mut().map(RoomSocket::next)) => match heard {
-                Ok(broadcast) => {
-                    // In a meeting the room's broadcast is nobody's of it,
-                    // and the session stays.
-                    if meeting.is_none() && broadcast.is_some() && broadcast != place.broadcast {
-                        break Ended::Again;
-                    }
-                }
-                // The room is gone; the chat goes on without it.
-                Err(error) => {
-                    reader.error(format!("the room is gone: {error:#}"));
-                    *room = None;
-                }
-            },
+            lost = on(seat.as_ref().map(HeldSeat::lost)) => {
+                // WHY the session ends: its token is the seat's, and the
+                // next session takes a seat again.
+                let why = match lost {
+                    SeatLost::Gone => "it ran out".to_string(),
+                    SeatLost::Failed(why) => why,
+                };
+                reader.error(format!("the seat in the meeting was lost: {why}; taking one again"));
+                *seat = None;
+                break Ended::Again;
+            }
             came = on(speech.as_mut().map(Follower::next)) => {
                 if let Some(follower) = speech.as_mut() {
                     for out in follower.on(&mut session, came).await? {
@@ -849,6 +958,13 @@ pub async fn attend(
                         {
                             continue;
                         }
+                        if let Some(became) = catalog.as_mut().and_then(|followed| followed.malformed(&mut session, request)) {
+                            eprintln!("XMOQ_AGENT_CATALOG_MALFORMED");
+                            if let Became::Ended(_) = became {
+                                broadcast_ended(reader, place, &mut video, &mut session, pictures.is_some());
+                            }
+                            continue;
+                        }
                         if let Some(outs) = chat.tracks.malformed(request) {
                             for out in outs {
                                 on_chat(reader, out);
@@ -879,6 +995,9 @@ pub async fn attend(
     }
     if let Ok(video) = video {
         video.cancel(&mut session);
+    }
+    if let Some(followed) = catalog {
+        followed.cancel(&mut session);
     }
     if let Some(in_meeting) = meeting {
         in_meeting.cancel(&mut session);

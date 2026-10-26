@@ -36,7 +36,7 @@ for _ in $(seq 1 40); do
   grep -q "^PUBLISHING" "$work/page.log" && break
   sleep 0.5
 done
-room="http://127.0.0.1:$((port + 2))/rooms/$name"
+room="http://127.0.0.1:$((port + 2))/broadcasts/$name"
 echo "--- with a token of the room"
 "$root/target/release/xmoq-watch" --room "$room" --say "hello from the terminal" \
   --seconds "$seconds" --volume 0 --medium direct --out "${OUT:-/dev/null}" 2>&1 | grep -E "ROOM_|CATALOG|CHAT|AV_PLAYED|SESSION_ENDED|Error" || true

@@ -1,7 +1,7 @@
 //! What a viewer of a room decides, for the viewer of the terminal
 //! (`xmoq-watch`) and the reader for an agent (`xmoq-agent`): what a room
-//! says and is told ([`room`]: on its WebSocket, and over its HTTP API,
-//! whose answers it reads by the rows of `fixtures/room-api/`), which lines of the chat on tracks are
+//! is asked and answers ([`room`]: over its HTTP API, whose answers it
+//! reads by the rows of `fixtures/room-api/`), which lines of the chat on tracks are
 //! fetched, shown and said ([`chat_track`]), who is there by the namespaces
 //! the relay tells of ([`presence`]), and whose picture of a meeting is
 //! taken ([`meeting`]). Nothing here reads a clock or a
