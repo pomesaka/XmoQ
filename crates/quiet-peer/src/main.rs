@@ -37,6 +37,25 @@
 //! nothing more, and keeps it open until the client stops it
 //! (`SUBGROUP_HEADER_SENT ..`, then `STOP_SENDING_RECEIVED session=N
 //! code=0x.. after_ms=M`). The session stays.
+//! `--quiet update-while-writing`: it answers a `PUBLISH_NAMESPACE` with
+//! `REQUEST_OK` and subscribes to the track `served` of that namespace
+//! (`SUBSCRIBED session=N`). It does not read the first subgroup stream of
+//! it (`SUBGROUP_STREAM_HELD session=N`), sends a `REQUEST_UPDATE` the
+//! client refuses, with a `SUBSCRIBER_PRIORITY` (`UPDATE_SENT session=N
+//! request_id=3`), and reads nothing of that stream for half a second after
+//! the `REQUEST_ERROR`; then it reads it to its end
+//! (`SUBGROUP_STREAM_ENDED session=N`) and says whether the `PUBLISH_DONE`
+//! came before that (`PUBLISH_DONE session=N before_the_stream_ended=..`,
+//! `none` where none came within 10 seconds). §10.11: "A sender MUST NOT
+//! send `PUBLISH_DONE` until it has closed all streams it will ever open".
+//! `--quiet withdraw-namespace`: it answers a `PUBLISH_NAMESPACE` with
+//! `REQUEST_OK` and a FIN (`NAMESPACE_FINISHED session=N stream=S`), and a
+//! second later stops the client's direction with `CANCELLED`
+//! (`NAMESPACE_STOPPED session=N stream=S`): the FIN gives nothing up, the
+//! stop withdraws the namespace (§6.2, §3.3.2).
+//! `--quiet withdraw-namespace-reset`: it answers a `PUBLISH_NAMESPACE` with
+//! `REQUEST_OK`, and a second later resets its direction with `CANCELLED`
+//! (`NAMESPACE_RESET session=N stream=S`), which withdraws it as well.
 //!
 //! `--connect <url> --cert-sha256 <hex> --stay-ms <n>`: the other way
 //! round. It connects to a relay as a client, sends no SETUP and opens no
@@ -210,6 +229,18 @@ enum Quiet {
     /// alias with its Subgroup Header and nothing after it, kept open until
     /// the client stops it.
     SilentSubgroup,
+    /// A `PUBLISH_NAMESPACE` is answered with `REQUEST_OK`, and the track
+    /// `served` of its namespace is subscribed to; its first subgroup stream
+    /// is held unread while a `REQUEST_UPDATE` the client refuses is sent.
+    /// No reader of unidirectional streams is started: this peer accepts
+    /// them itself.
+    UpdateWhileWriting,
+    /// A `PUBLISH_NAMESPACE` is answered with `REQUEST_OK` and a FIN, and a
+    /// second later the client's direction is stopped.
+    WithdrawNamespace,
+    /// A `PUBLISH_NAMESPACE` is answered with `REQUEST_OK`, and a second
+    /// later this peer's direction is reset.
+    WithdrawNamespaceByReset,
 }
 
 /// What the program is asked to be.
@@ -521,8 +552,11 @@ fn quiet_of(value: &str) -> Result<Quiet> {
         "datagram" => Quiet::Datagram,
         "datagram-before-setup" => Quiet::DatagramBeforeSetup,
         "silent-subgroup" => Quiet::SilentSubgroup,
+        "update-while-writing" => Quiet::UpdateWhileWriting,
+        "withdraw-namespace" => Quiet::WithdrawNamespace,
+        "withdraw-namespace-reset" => Quiet::WithdrawNamespaceByReset,
         other => bail!(
-            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity, request-id-again, datagram, datagram-before-setup or silent-subgroup, not {other}"
+            "--quiet is setup, requests, publish, streams, subgroups, goaway, goaway-request, request-id-parity, request-id-again, datagram, datagram-before-setup, silent-subgroup, update-while-writing, withdraw-namespace or withdraw-namespace-reset, not {other}"
         ),
     })
 }
@@ -578,6 +612,13 @@ async fn read_request(
 ) {
     let (mut unanswered, recv) = halves;
     let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    if matches!(
+        quiet,
+        Quiet::UpdateWhileWriting | Quiet::WithdrawNamespace | Quiet::WithdrawNamespaceByReset
+    ) {
+        return answer_a_namespace((session, stream), quiet, (unanswered, reader), connection)
+            .await;
+    }
     loop {
         match reader.next_event().await {
             Ok(RequestStreamEvent::Message(message)) => {
@@ -716,6 +757,157 @@ async fn say_nothing_on_a_subgroup(connection: &WtConnection, session: u64, trac
     }
 }
 
+/// The request stream of a session of [`Quiet::UpdateWhileWriting`],
+/// [`Quiet::WithdrawNamespace`] or [`Quiet::WithdrawNamespaceByReset`]: a
+/// `PUBLISH_NAMESPACE` is answered with
+/// `REQUEST_OK`, and what follows is that of the mode.
+async fn answer_a_namespace(
+    (session, stream): (u64, u64),
+    quiet: Quiet,
+    (mut send, mut reader): (
+        <WtConnection as Connection>::Send,
+        RequestReader<<WtConnection as Connection>::Recv>,
+    ),
+    connection: Arc<WtConnection>,
+) {
+    let Ok(RequestStreamEvent::Message(message)) = reader.next_event().await else {
+        return;
+    };
+    println!(
+        "REQUEST session={session} stream={stream} {}",
+        described(&message)
+    );
+    let ControlMessage::PublishNamespace(announced) = message else {
+        return std::future::pending().await;
+    };
+    if quiet == Quiet::WithdrawNamespace {
+        return withdraw_namespace((session, stream), send, reader).await;
+    }
+    let ok = ControlMessage::RequestOk(RequestOk::default());
+    let _ = send_message(&mut send, &ok, &Trace::default(), "request").await;
+    if quiet == Quiet::WithdrawNamespaceByReset {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        send.reset(xmoq_moqt::stream_reset_code::CANCELLED);
+        println!("NAMESPACE_RESET session={session} stream={stream}");
+        // The receiving half is kept, as the client's direction is the
+        // client's to end.
+        let _reader = reader;
+        return std::future::pending().await;
+    }
+    update_while_writing(connection, session, announced.track_namespace).await;
+}
+
+/// [`Quiet::WithdrawNamespace`] on the stream of a `PUBLISH_NAMESPACE`.
+async fn withdraw_namespace(
+    (session, stream): (u64, u64),
+    mut send: <WtConnection as Connection>::Send,
+    reader: RequestReader<<WtConnection as Connection>::Recv>,
+) {
+    let ok = ControlMessage::RequestOk(RequestOk::default());
+    let _ = send_message(&mut send, &ok, &Trace::default(), "request").await;
+    // WHY: a sending half that is let go of is finished as well, but this
+    // one has to be finished now and not reset.
+    send.finish();
+    println!("NAMESPACE_FINISHED session={session} stream={stream}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    reader.stop(xmoq_moqt::stream_reset_code::CANCELLED);
+    println!("NAMESPACE_STOPPED session={session} stream={stream}");
+    std::future::pending::<()>().await;
+}
+
+/// [`Quiet::UpdateWhileWriting`] on a session whose `PUBLISH_NAMESPACE` of
+/// `namespace` was answered.
+async fn update_while_writing(
+    connection: Arc<WtConnection>,
+    session: u64,
+    namespace: TrackNamespace,
+) {
+    // The client's control stream comes first: kept, and not read.
+    let Ok(_control) = connection.accept_uni().await else {
+        return;
+    };
+    let Ok(full_track_name) = FullTrackName::new(namespace, b"served".to_vec()) else {
+        return;
+    };
+    let Ok((mut send, recv)) = connection.open_bi().await else {
+        return;
+    };
+    // A server's first Request ID (§10.1).
+    let subscribe = ControlMessage::Subscribe(Subscribe {
+        request_id: 1,
+        full_track_name,
+        parameters: vec![],
+    });
+    if send_message(&mut send, &subscribe, &Trace::default(), "request")
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut reader = RequestReader::new(recv, &Trace::default(), "request");
+    match reader.next_event().await {
+        Ok(RequestStreamEvent::Message(ControlMessage::SubscribeOk(_))) => {
+            println!("SUBSCRIBED session={session}");
+        }
+        other => {
+            println!("NOT_SUBSCRIBED session={session} {other:?}");
+            return;
+        }
+    }
+    let Ok(mut subgroup) = connection.accept_uni().await else {
+        return;
+    };
+    println!("SUBGROUP_STREAM_HELD session={session}");
+    // The client accepts no update but of the delivery timeouts and
+    // NEW_GROUP_REQUEST (§10.9.1: then "the publisher MUST ... terminate the
+    // subscription").
+    let update = ControlMessage::RequestUpdate(RequestUpdate {
+        request_id: 3,
+        parameters: vec![Parameter::SubscriberPriority(1)],
+    });
+    if send_message(&mut send, &update, &Trace::default(), "request")
+        .await
+        .is_err()
+    {
+        return;
+    }
+    println!("UPDATE_SENT session={session} request_id=3");
+    let mut done = None;
+    let mut refused = false;
+    // The REQUEST_ERROR, and what comes in the half second after it.
+    let within = tokio::time::Instant::now() + Duration::from_secs(10);
+    while done.is_none() {
+        let wait = if refused {
+            Duration::from_millis(500)
+        } else {
+            within.saturating_duration_since(tokio::time::Instant::now())
+        };
+        match tokio::time::timeout(wait, reader.next_event()).await {
+            Ok(Ok(RequestStreamEvent::Message(ControlMessage::RequestError(_)))) => refused = true,
+            Ok(Ok(RequestStreamEvent::Message(ControlMessage::PublishDone(_)))) => {
+                done = Some(true);
+            }
+            Ok(other) => {
+                println!("ANSWERED session={session} {other:?}");
+                return;
+            }
+            Err(_) => break,
+        }
+    }
+    let mut buffer = vec![0u8; 64 * 1024];
+    while let Ok(Some(_)) = subgroup.read(&mut buffer).await {}
+    println!("SUBGROUP_STREAM_ENDED session={session}");
+    if done.is_none()
+        && let Ok(Ok(RequestStreamEvent::Message(ControlMessage::PublishDone(_)))) =
+            tokio::time::timeout(Duration::from_secs(10), reader.next_event()).await
+    {
+        done = Some(false);
+    }
+    let said = done.map_or_else(|| "none".to_string(), |early| early.to_string());
+    println!("PUBLISH_DONE session={session} before_the_stream_ended={said}");
+    std::future::pending::<()>().await;
+}
+
 /// Sends the client a SUBSCRIBE with `request_id` for the track `t` of
 /// `(xmoq)`, prints its answer (`ANSWERED session=N ...`), and with `again`
 /// sends a `REQUEST_UPDATE` with the same Request ID on its stream
@@ -790,13 +982,15 @@ async fn serve(
     } else {
         StreamConfig::default()
     };
-    let _readers = read_uni_streams(
-        Arc::clone(&connection),
-        reading,
-        StreamStops::default(),
-        queue,
-        |event| event,
-    );
+    let _readers = (quiet != Quiet::UpdateWhileWriting).then(|| {
+        read_uni_streams(
+            Arc::clone(&connection),
+            reading,
+            StreamStops::default(),
+            queue,
+            |event| event,
+        )
+    });
     // Kept to the end: a control stream that is let go of is finished,
     // which closes the session for the client (§3.3).
     let mut control = None;

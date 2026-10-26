@@ -1651,6 +1651,24 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "none",
 		},
 		{
+			name: "no relay: quiet peer: own-rust sends the PUBLISH_DONE of an update it refuses while it writes a subgroup stream once that stream is closed",
+			script: "quiet-peer.ts",
+			args: ["--case", "update-while-writing", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust keeps its namespace published after a FIN that follows its REQUEST_OK, and withdraws it at a STOP_SENDING",
+			script: "quiet-peer.ts",
+			args: ["--case", "withdraw-namespace", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
+			name: "no relay: quiet peer: own-rust withdraws its namespace when the peer resets its direction after the REQUEST_OK",
+			script: "quiet-peer.ts",
+			args: ["--case", "withdraw-namespace-reset", "--client", "own-rust"],
+			relay: "none",
+		},
+		{
 			name: "no relay: quiet peer: own-browser gives up a FETCH nobody answers, and resets its request stream",
 			script: "quiet-peer.ts",
 			args: ["--case", "no-fetch-answer", "--client", "own-browser"],
