@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use xmoq_watch::marks::sound_is_marked;
+use xmoq_watch::marks::Marks;
 use xmoq_watch::playout::{Counts, Packet, Playout, RATE};
 
 use crate::audio_output::AudioOutput;
@@ -154,18 +154,18 @@ impl Sound {
     /// Decodes one packet and queues it: `due_us` is its own time, and it
     /// is played there or after the packet before it
     /// ([`xmoq_watch::playout::place`]). Says
-    /// whether the beep of the demo begins with it (`marks`).
+    /// whether the beep of `marks` begins with it.
     ///
     /// WHY decoded by the caller, on the task that reads the session, and
     /// outside the lock the output takes: 2.5 ms for a packet of 20 ms, and
     /// the output must not wait for it.
-    pub fn take(&mut self, packet: &[u8], due_us: u64) -> bool {
+    pub fn take(&mut self, packet: &[u8], due_us: u64, marks: Option<&Marks>) -> bool {
         let Ok(samples) = self.decoder.decode(packet, MOST_SAMPLES, &mut self.pcm) else {
             self.refused += 1;
             return false;
         };
         let samples = self.pcm.get(..samples).unwrap_or_default().to_vec();
-        let marked = sound_is_marked(&samples);
+        let marked = marks.is_some_and(|marks| marks.sound_is_marked(&samples));
         let begins = marked && !self.was_marked;
         self.was_marked = marked;
         let now_us = micros_since(self.began, Instant::now());
