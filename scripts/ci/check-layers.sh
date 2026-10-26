@@ -17,6 +17,20 @@ SANS_IO_CRATES=("xmoq-moqt:crates/moqt" "xmoq-relay-core:crates/relay-core")
 # crate (bytes, thiserror), and the review of that edit is the same judgement this list encodes.
 IO_CRATES=(mio socket2 polling async-io quinn-udp web-transport-quinn quinn)
 
+# Crates that must stay free of others, as "package name:what it stays free of:banned crates".
+# WHY cc, cmake and bindgen for a C compiler: a crate that builds C calls one of them from its
+# build script (ring 0.17.14, libsqlite3-sys 0.38.2, whisper-rs-sys 0.15.0 and openh264-sys2 0.9.8
+# of Cargo.lock all do). The tracks are read by programs that are to build without one.
+# WHY libsqlite3-sys for SQLite: rusqlite reaches SQLite through it.
+FREE_OF=(
+	"xmoq-chat-tracks:C compiler:cc cmake bindgen"
+	"xmoq-transcript-tracks:C compiler:cc cmake bindgen"
+	"xmoq-watch:SQLite:libsqlite3-sys"
+)
+
+# A program that is there for interop/ alone; no crate of the workspace depends on it.
+INTEROP_ONLY_CRATES=(xmoq-quiet-peer)
+
 errors=0
 report() {
 	echo "FAIL: $*" >&2
@@ -101,6 +115,39 @@ check_rust() {
 		done
 		if [[ ${errors} -eq ${before} ]]; then
 			ran "I/O-free check for ${name}"
+		fi
+	done
+
+	local free_of
+	for entry in "${FREE_OF[@]}"; do
+		name="${entry%%:*}"
+		free_of="${entry#*:}"
+		free_of="${free_of%%:*}"
+		if ! jq -e --arg name "${name}" '.packages[] | select(.name == $name)' <<<"${metadata}" >/dev/null; then
+			report "the workspace has no package named ${name}; update FREE_OF in this script"
+			continue
+		fi
+		# WHY normal and build edges, with every feature: as for the I/O-free crates above.
+		tree="$(cargo tree --package "${name}" --edges normal,build --all-features --prefix none --format '{p}' --locked | awk '{print $1}' | sort -u)"
+		before=${errors}
+		for banned in ${entry##*:}; do
+			if grep -Fxq "${banned}" <<<"${tree}"; then
+				report "${name} must need no ${free_of} but depends on ${banned}; see the path with 'cargo tree --package ${name} --edges normal,build --all-features --invert ${banned}'"
+			fi
+		done
+		if [[ ${errors} -eq ${before} ]]; then
+			ran "${name} needs no ${free_of}"
+		fi
+	done
+
+	local dependents
+	for name in "${INTEROP_ONLY_CRATES[@]}"; do
+		# WHY every edge, dev ones too: a test of a crate that reaches the program builds it as well.
+		dependents="$(cargo tree --workspace --invert "${name}" --edges all --prefix none --format '{p}' --locked | awk '{print $1}' | sort -u | grep -Fxv "${name}" || true)"
+		if [[ -n "${dependents}" ]]; then
+			report "${name} is for interop/ alone, and these depend on it: ${dependents//$'\n'/, }"
+		else
+			ran "No crate depends on ${name}"
 		fi
 	done
 }
