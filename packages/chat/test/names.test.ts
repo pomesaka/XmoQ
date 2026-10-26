@@ -4,9 +4,17 @@ import { join } from "node:path";
 import {
 	type ChatRoom,
 	LINES_TRACK,
+	PRESENT_TRACK,
 	personNamespace,
+	REACTED_TRACK,
+	REACTIONS_TRACK,
 	roomNamespace,
+	SAID_TRACK,
 } from "../src/core/names.ts";
+
+/** The tracks of a room and of a participant, by the word the table reads them as. */
+const ROOM_TRACKS = [LINES_TRACK, REACTIONS_TRACK, PRESENT_TRACK];
+const PARTICIPANT_TRACKS = [SAID_TRACK, REACTED_TRACK];
 
 /**
  * The rows of `fixtures/chat-tracks/names.tsv`, which `xmoq-chat-tracks`
@@ -53,12 +61,12 @@ function roomOf(text: string): ChatRoom {
 const table = rows();
 
 test("the table has its rows", () => {
-	expect(table.length).toBe(14);
+	expect(table.length).toBe(21);
 });
 
 // This side makes the names and reads none: the rows of a participant and
-// of a room's lines are what it makes; the rows of nobody's are the
-// reader's, the gatherer's (`crates/chat-tracks`).
+// of the tracks are what it makes; the rows of nobody's are the reader's,
+// the gatherer's (`crates/chat-tracks`).
 test.each(table)("%s", (_case, fields, track, read) => {
 	const [what, room, name, ...rest] = (read ?? "").split(" ");
 	const parsed: unknown = JSON.parse(fields ?? "");
@@ -72,15 +80,21 @@ test.each(table)("%s", (_case, fields, track, read) => {
 				namespace,
 			);
 			break;
-		case "lines":
-			expect(name).toBeUndefined();
-			expect(track).toBe(LINES_TRACK);
-			expect(textOf(roomNamespace(roomOf(room ?? "")))).toEqual(namespace);
-			break;
 		case "none":
 			expect(room).toBeUndefined();
 			break;
 		default:
-			throw new Error(`no reading ${read}`);
+			// A track: the word is its name, of a room's or of a participant's.
+			expect(rest).toEqual([]);
+			expect(track ?? "").toBe(what ?? "");
+			if (name === undefined) {
+				expect(ROOM_TRACKS).toContain(what ?? "");
+				expect(textOf(roomNamespace(roomOf(room ?? "")))).toEqual(namespace);
+			} else {
+				expect(PARTICIPANT_TRACKS).toContain(what ?? "");
+				expect(textOf(personNamespace(roomOf(room ?? ""), name))).toEqual(
+					namespace,
+				);
+			}
 	}
 });

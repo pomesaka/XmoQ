@@ -16,7 +16,7 @@ import { type JsonValue, readJson } from "@xmoq/json";
  */
 export const MAX_TIME = Number.MAX_SAFE_INTEGER;
 
-/** Why a payload of `said` or `lines` is no line: the words of `Malformed::word` on the Rust side. */
+/** Why a payload of a track of the chat is none: the words of `Malformed::word` on the Rust side. */
 export type Malformed =
 	/** Not UTF-8, not JSON, or no JSON object. */
 	| "not-an-object"
@@ -26,8 +26,14 @@ export type Malformed =
 	| "sent-at"
 	/** Of `lines` only: `name` is missing or no string. */
 	| "name"
-	/** Of `lines` only: `at` is missing, no integer, below 0 or above `MAX_TIME`. */
-	| "at";
+	/** Of `lines`, `reactions` and `present`: `at` is missing, no integer, below 0 or above `MAX_TIME`. */
+	| "at"
+	/** Of `reacted` only: `emoji` is missing, no string, or not of 1 to `MOST_EMOJI_UNITS` UTF-16 units. */
+	| "emoji"
+	/** Of `reactions` only: `counts` is missing, no object, empty, or has an emoji or a count no reader takes. */
+	| "counts"
+	/** Of `present` only: `count` is missing, no integer, below 0 or above `MAX_TIME`. */
+	| "count";
 
 /** A line as its sender said it. */
 export interface Said {
@@ -175,4 +181,142 @@ export function linePayload(line: Line): Uint8Array {
 	return encoder.encode(
 		`{"name":${jsonString(line.name)},"text":${jsonString(line.text)},"sentAt":${line.sentAt},"at":${line.at}}`,
 	);
+}
+
+// The reactions and the count of a room (the payloads decided on
+// 2026-10-26): a participant says a reaction on its track `reacted`, one
+// Object a press, `{"emoji": string, "sentAt": number}`; the gatherer
+// counts them over a while on the room's `reactions`,
+// `{"counts": {emoji: number, ...}, "at": number}`, and how many it follows
+// in the room on `present`, `{"count": number, "at": number}`. How fast one
+// may react and how many emoji a while has are the gatherer's to bound, not
+// the reader's.
+
+/**
+ * The most UTF-16 units of an emoji: one with its modifiers, and no text.
+ * The form the room had for a reaction (2026-10-12), and the one of
+ * `crates/chat-tracks`; what it shows is not looked at.
+ */
+export const MOST_EMOJI_UNITS = 8;
+
+/** A reaction as a participant said it. */
+export interface Reacted {
+	emoji: string;
+	/** The sender's clock; only its form is checked. */
+	sentAt: number;
+}
+
+/** The reactions of a room over a while, as the gatherer publishes them. */
+export interface Reactions {
+	/** Each emoji with how many times it was said, in the order of the payload. */
+	counts: Map<string, number>;
+	/** The gatherer's clock when the while ended. */
+	at: number;
+}
+
+/** How many the gatherer follows in a room. */
+export interface Present {
+	count: number;
+	/** The gatherer's clock when it changed. */
+	at: number;
+}
+
+const isEmoji = (text: string): boolean =>
+	text.length >= 1 && text.length <= MOST_EMOJI_UNITS;
+
+/** Reads a payload of `reacted`. Members other than the two are passed over. */
+export function readReacted(payload: Uint8Array): Read<Reacted> {
+	const object = members(payload);
+	if (object === undefined) return { ok: false, why: "not-an-object" };
+	const emoji = string(object.get("emoji"));
+	if (emoji === undefined || !isEmoji(emoji))
+		return { ok: false, why: "emoji" };
+	const sentAt = time(object.get("sentAt"));
+	if (sentAt === undefined) return { ok: false, why: "sent-at" };
+	return { ok: true, value: { emoji, sentAt } };
+}
+
+/**
+ * Reads a payload of `reactions`. A count is a whole number from 1; an emoji
+ * twice has the last count, as any member twice.
+ */
+export function readReactions(payload: Uint8Array): Read<Reactions> {
+	const object = members(payload);
+	if (object === undefined) return { ok: false, why: "not-an-object" };
+	const given = object.get("counts");
+	if (given?.kind !== "object" || given.members.size === 0) {
+		return { ok: false, why: "counts" };
+	}
+	const counts = new Map<string, number>();
+	for (const [emoji, value] of given.members) {
+		const count = time(value);
+		if (!isEmoji(emoji) || count === undefined || count < 1) {
+			return { ok: false, why: "counts" };
+		}
+		counts.set(emoji, count);
+	}
+	const at = time(object.get("at"));
+	if (at === undefined) return { ok: false, why: "at" };
+	return { ok: true, value: { counts, at } };
+}
+
+/** Reads a payload of `present`. Members other than the two are passed over. */
+export function readPresent(payload: Uint8Array): Read<Present> {
+	const object = members(payload);
+	if (object === undefined) return { ok: false, why: "not-an-object" };
+	const count = time(object.get("count"));
+	if (count === undefined) return { ok: false, why: "count" };
+	const at = time(object.get("at"));
+	if (at === undefined) return { ok: false, why: "at" };
+	return { ok: true, value: { count, at } };
+}
+
+function checkEmoji(emoji: string): void {
+	if (!isEmoji(emoji)) {
+		throw new RangeError(
+			`an emoji is 1 to ${MOST_EMOJI_UNITS} UTF-16 units, not ${emoji.length}`,
+		);
+	}
+}
+
+/**
+ * The payload of a reaction on `reacted`. Throws a `RangeError` for an emoji
+ * no reader takes, and as `saidPayload`.
+ */
+export function reactedPayload(reacted: Reacted): Uint8Array {
+	checkEmoji(reacted.emoji);
+	checkTime("sentAt", reacted.sentAt);
+	return encoder.encode(
+		`{"emoji":${jsonString(reacted.emoji)},"sentAt":${reacted.sentAt}}`,
+	);
+}
+
+/**
+ * The payload of the counts on `reactions`, the emoji in the order of the
+ * map; the gatherer writes it, and the tests write it back to see that it
+ * is the gatherer's form. Throws as `reactedPayload`, and for no emoji or a
+ * count below 1.
+ */
+export function reactionsPayload(reactions: Reactions): Uint8Array {
+	if (reactions.counts.size === 0) {
+		throw new RangeError("the counts of reactions have one emoji at least");
+	}
+	const counts: string[] = [];
+	for (const [emoji, count] of reactions.counts) {
+		checkEmoji(emoji);
+		checkTime("a count", count);
+		if (count < 1) throw new RangeError("a count of reactions is from 1");
+		counts.push(`${jsonString(emoji)}:${count}`);
+	}
+	checkTime("at", reactions.at);
+	return encoder.encode(
+		`{"counts":{${counts.join(",")}},"at":${reactions.at}}`,
+	);
+}
+
+/** The payload of the count on `present`. Throws as `saidPayload`. */
+export function presentPayload(present: Present): Uint8Array {
+	checkTime("count", present.count);
+	checkTime("at", present.at);
+	return encoder.encode(`{"count":${present.count},"at":${present.at}}`);
 }

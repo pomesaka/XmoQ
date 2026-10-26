@@ -17,7 +17,13 @@ export {
 	roomFields,
 	roomNamespace,
 } from "./core/names.ts";
-export type { Line, Malformed } from "./core/payloads.ts";
+export {
+	type Line,
+	type Malformed,
+	MOST_EMOJI_UNITS,
+	type Present,
+	type Reactions,
+} from "./core/payloads.ts";
 export {
 	type ChatConnection,
 	type KeepInTheRoomOptions,

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { chatLimits, keepBack, RateWindow } from "../src/core/limits.ts";
+import {
+	chatLimits,
+	keepBack,
+	keepBackReaction,
+	RateWindow,
+} from "../src/core/limits.ts";
 
 describe("RateWindow", () => {
 	// The cases of `no_more_than_the_limit_is_taken_in_any_second` of
@@ -61,11 +66,34 @@ describe("keepBack", () => {
 			keepBack("x", limits, window, 0),
 		]).toEqual(["too-long", undefined, "too-fast"]);
 	});
+
+	test("a reaction is kept back for its form before its rate, as a line is", () => {
+		const window = new RateWindow(1);
+		expect([
+			keepBackReaction("", window, 0),
+			keepBackReaction("👨‍👩‍👧‍👦", window, 0),
+			keepBackReaction("\ud800", window, 0),
+			keepBackReaction("👍", window, 0),
+			keepBackReaction("👍", window, 0),
+			keepBackReaction("👍", window, 1_000),
+		]).toEqual([
+			"not-an-emoji",
+			"not-an-emoji",
+			"not-well-formed",
+			undefined,
+			"too-fast",
+			undefined,
+		]);
+	});
 });
 
 describe("chatLimits", () => {
 	test("the defaults are the gatherer's", () => {
-		expect(chatLimits()).toEqual({ textBytes: 512, linesPerSecond: 5 });
+		expect(chatLimits()).toEqual({
+			textBytes: 512,
+			linesPerSecond: 5,
+			reactionsPerSecond: 5,
+		});
 	});
 
 	test.each([
@@ -75,6 +103,8 @@ describe("chatLimits", () => {
 		["not a number", { textBytes: Number.NaN }],
 		["no line a second", { linesPerSecond: 0 }],
 		["more than 1,000 lines a second", { linesPerSecond: 1_001 }],
+		["no reaction a second", { reactionsPerSecond: 0 }],
+		["more than 1,000 reactions a second", { reactionsPerSecond: 1_001 }],
 	])("%s is refused", (_case, given) => {
 		expect(() => chatLimits(given)).toThrow(RangeError);
 	});
@@ -83,12 +113,17 @@ describe("chatLimits", () => {
 		[
 			"the most bytes",
 			{ textBytes: 8_192 },
-			{ textBytes: 8_192, linesPerSecond: 5 },
+			{ textBytes: 8_192, linesPerSecond: 5, reactionsPerSecond: 5 },
 		],
 		[
 			"one line a second",
 			{ linesPerSecond: 1 },
-			{ textBytes: 512, linesPerSecond: 1 },
+			{ textBytes: 512, linesPerSecond: 1, reactionsPerSecond: 5 },
+		],
+		[
+			"one reaction a second",
+			{ reactionsPerSecond: 1 },
+			{ textBytes: 512, linesPerSecond: 5, reactionsPerSecond: 1 },
 		],
 	])("%s is taken", (_case, given, limits) => {
 		expect(chatLimits(given)).toEqual(limits);

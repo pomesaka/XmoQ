@@ -1,7 +1,7 @@
 // The room of a broadcast, as the pages of the broadcast go by it: where
 // its relay and its one broadcast are, tokens, and the chat of the room.
 
-import { type ChatRoom, roomFields } from "@xmoq/chat";
+import { type ChatRoom, type Reactions, roomFields } from "@xmoq/chat";
 import { DEFAULT_RECONNECT_DELAY_MS, waitFor } from "@xmoq/moqt";
 import {
 	type BroadcastRoom,
@@ -18,6 +18,35 @@ import { type Broadcast, connectToRelay, tokenOf } from "../lib/relay.ts";
  * flag: what a page holds is bounded whatever the address says.
  */
 const SHOWN_LINES = 200;
+
+/** How long a reaction stands on the page. */
+const REACTION_SHOWN_MS = 2_000;
+/** The most reactions that stand at once: how many come in two seconds is the room's to decide. */
+const MOST_SHOWN_REACTIONS = 50;
+
+/** The reactions shown since the page opened. */
+let reacted = 0;
+
+/**
+ * Shows the reactions of a while in `#reactions`, each emoji with how many
+ * (`👍×12`), for `REACTION_SHOWN_MS`, and counts them for a script that
+ * looks at the page (`data-reactions`, all that were shown).
+ */
+function showReactions(reactions: Reactions): void {
+	const shown = document.getElementById("reactions");
+	for (const [emoji, count] of reactions.counts) {
+		reacted += count;
+		if (shown === null) continue;
+		const one = document.createElement("span");
+		one.textContent = count === 1 ? emoji : `${emoji}×${count}`;
+		shown.append(one);
+		while (shown.childElementCount > MOST_SHOWN_REACTIONS) {
+			shown.firstElementChild?.remove();
+		}
+		setTimeout(() => one.remove(), REACTION_SHOWN_MS);
+	}
+	document.body.dataset.reactions = String(reacted);
+}
 
 /** The relay, and the rooms where they run, as `serve.ts` wrote them into the page. */
 declare const XMOQ_DEMO: {
@@ -126,7 +155,7 @@ export async function joinRoom(as: string): Promise<Room> {
 	// with the same certificate's hash, as the broadcast's does (the relay
 	// that sends it away, `--when-full`, names one with the same certificate).
 	const chatRoom: ChatRoom = { kind: "broadcast", name: ROOM_NAME };
-	startChat(chatRoom, as, async (goAway) => {
+	const chat = startChat(chatRoom, as, async (goAway) => {
 		const [sub, pub] = await Promise.all([
 			token("sub", roomFields(chatRoom)),
 			token("pub", [...roomFields(chatRoom), as]),
@@ -139,7 +168,26 @@ export async function joinRoom(as: string): Promise<Room> {
 			connection: await connectToRelay(to, sub),
 			...(pub === undefined ? {} : { publishNamespaceToken: pub }),
 		};
-	}, { shownLines: SHOWN_LINES });
+	}, {
+		shownLines: SHOWN_LINES,
+		onReactions: showReactions,
+		onPresent: (present) => {
+			if (line !== null) {
+				line.textContent = `room “${ROOM_NAME}”: ${present.count} in the chat`;
+			}
+			document.body.dataset.present = String(present.count);
+		},
+	});
+	for (const button of document.querySelectorAll<HTMLButtonElement>(
+		"button[data-reaction]",
+	)) {
+		button.addEventListener("click", () => {
+			const emoji = button.dataset.reaction ?? "";
+			void chat?.react(emoji).then((why) => {
+				if (why !== undefined) button.title = `not sent: ${why}`;
+			});
+		});
+	}
 	return { broadcast, transcript: described.transcript, token };
 }
 

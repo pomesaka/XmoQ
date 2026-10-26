@@ -11,6 +11,7 @@ import type { GoAwayNotice } from "@xmoq/moqt";
 import type { LinesGap } from "../core/history.ts";
 import type { ChatLimits, KeptBack } from "../core/limits.ts";
 import type { ChatRoom } from "../core/names.ts";
+import type { Present, Reactions } from "../core/payloads.ts";
 import {
 	type ChatConnection,
 	keepInTheRoom,
@@ -50,12 +51,18 @@ export interface ShowChatOptions {
 	shownLines: number;
 	/** Called once for each line that comes, before it is shown. */
 	onLine?(line: ReceivedLine): void;
+	/** The reactions of the room over each while; left out, they are not followed (`onReactions` of `joinChat`). */
+	onReactions?(reactions: Reactions): void;
+	/** How many are in the room's chat; left out, it is not followed (`onPresent` of `joinChat`). */
+	onPresent?(present: Present): void;
 }
 
 /** Says a line in the chat from elsewhere than its form (an agent's inbox). */
 export interface ChatSaying {
 	/** Why it was not sent (without a "not sent"), or undefined where it was. */
 	say(text: string): Promise<string | undefined>;
+	/** Says a reaction: why it was not sent, or undefined where it was. */
+	react(emoji: string): Promise<string | undefined>;
 }
 
 const KEPT_BACK: Record<KeptBack, (limits: ChatLimits) => string> = {
@@ -63,6 +70,7 @@ const KEPT_BACK: Record<KeptBack, (limits: ChatLimits) => string> = {
 	"too-fast": (limits) =>
 		`more than ${limits.linesPerSecond} lines in a second`,
 	"not-well-formed": () => "the text has a broken character",
+	"not-an-emoji": () => "no emoji",
 };
 
 /**
@@ -94,6 +102,8 @@ export function showChat(
 		catchUpLines,
 		shownLines,
 		onLine,
+		onReactions,
+		onPresent,
 	}: ShowChatOptions,
 ): ChatSaying {
 	const say = (text: string): void => {
@@ -152,6 +162,8 @@ export function showChat(
 			lastHad,
 			onLine: add,
 			onGap: addGap,
+			...(onReactions === undefined ? {} : { onReactions }),
+			...(onPresent === undefined ? {} : { onPresent }),
 			onMalformed: (number, why) =>
 				say(`line ${number} of the track is no line: ${why}`),
 			onStatus: (status) =>
@@ -200,5 +212,16 @@ export function showChat(
 			say("sent");
 		})();
 	});
-	return { say: sayLine };
+	const react = async (emoji: string): Promise<string | undefined> => {
+		if (participant === undefined) return "not in the room's chat yet";
+		const outcome: SayOutcome = await participant.react(emoji);
+		if (outcome.type === "kept-back") {
+			return outcome.why === "too-fast"
+				? `more than ${limits.reactionsPerSecond} reactions in a second`
+				: KEPT_BACK[outcome.why](limits);
+		}
+		if (outcome.type === "not-sent") return outcome.why;
+		return undefined;
+	};
+	return { say: sayLine, react };
 }

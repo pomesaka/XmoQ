@@ -1,6 +1,7 @@
 // A participant of a room of the chat over a connection of @xmoq/moqt:
-// it says its lines on its own track `said` and reads the room's `lines`,
-// which the gatherer (`crates/chat`) publishes. Section numbers are of
+// it says its lines on its own track `said` and its reactions on `reacted`,
+// and reads the room's `lines`, and where it is asked to, its `reactions`
+// and `present`, which the gatherer (`crates/chat`) publishes. Section numbers are of
 // draft-ietf-moq-transport-18.
 
 import {
@@ -25,19 +26,28 @@ import {
 	chatLimits,
 	type KeptBack,
 	keepBack,
+	keepBackReaction,
 	RateWindow,
 } from "../core/limits.ts";
 import {
 	type ChatRoom,
 	LINES_TRACK,
+	PRESENT_TRACK,
 	personNamespace,
+	REACTED_TRACK,
+	REACTIONS_TRACK,
 	roomNamespace,
 	SAID_TRACK,
 } from "../core/names.ts";
 import {
 	type Line,
 	type Malformed,
+	type Present,
+	type Reactions,
+	reactedPayload,
 	readLine,
+	readPresent,
+	readReactions,
 	saidPayload,
 } from "../core/payloads.ts";
 import { SeenLines } from "../core/seen-lines.ts";
@@ -168,6 +178,19 @@ export interface JoinChatOptions {
 	lastHad?: bigint;
 	/** Called for an Object of `lines` that is no line, with its Group ID and why. */
 	onMalformed?(number: bigint, why: Malformed): void;
+	/**
+	 * Called with the reactions of the room over each while, as the gatherer
+	 * counts them on `reactions` (decided on 2026-10-26). Left out, the
+	 * track is not subscribed to. They come live alone: nothing of them is
+	 * kept.
+	 */
+	onReactions?(reactions: Reactions): void;
+	/**
+	 * Called with how many the gatherer follows in the room, from `present`:
+	 * the latest when the subscription is made, and each change after it.
+	 * Left out, the track is not subscribed to.
+	 */
+	onPresent?(present: Present): void;
 	/** Called when `status()` changes. */
 	onStatus?(status: ChatStatus): void;
 	/**
@@ -184,6 +207,8 @@ export interface JoinChatOptions {
 export interface ChatParticipant {
 	/** Says one line, if the limits let it. Never rejects. */
 	say(text: string): Promise<SayOutcome>;
+	/** Says one reaction on `reacted`, if the limits let it (`reactionsPerSecond`). Never rejects. */
+	react(emoji: string): Promise<SayOutcome>;
 	status(): ChatStatus;
 }
 
@@ -243,7 +268,7 @@ export async function joinChat(
 	options.signal?.addEventListener("abort", () => stop.abort(), { once: true });
 	void connection.closed.then(() => stop.abort());
 	const ours = personNamespace(options.room, options.name);
-	const said = new TextEncoder().encode(SAID_TRACK);
+	const utf8 = new TextEncoder();
 
 	const status: ChatStatus = {
 		heard: false,
@@ -255,27 +280,39 @@ export async function joinChat(
 		options.onStatus?.({ ...status });
 	};
 
-	/** The relay's subscription to `said`; one at a time, as the library refuses a second (§5.1). */
-	let listener: PublishedTrack | undefined;
-	/**
-	 * The Group of the next line. WHY from the time in milliseconds: a page
-	 * that comes again on the same name is a new publisher of the same
-	 * track, and §2.4 has one that "intends to resume publishing on the
-	 * same Track" "set the initial Group ID to a unique value guaranteed to
-	 * be larger than all previously used groups ... based on the current
-	 * time", as the demo's other tracks do.
-	 */
-	let nextGroup = BigInt(now());
-	/** The Group of the last line written, for the LARGEST_OBJECT of a later SUBSCRIBE_OK (§10.2.11). */
-	let lastGroup: bigint | undefined;
+	/** A track of this participant: `said` or `reacted`, one Object a Group. */
+	interface Ours {
+		name: Uint8Array;
+		/** The relay's subscription to it; one at a time, as the library refuses a second (§5.1). */
+		listener: PublishedTrack | undefined;
+		/**
+		 * The Group of the next Object. WHY from the time in milliseconds: a
+		 * page that comes again on the same name is a new publisher of the
+		 * same track, and §2.4 has one that "intends to resume publishing on
+		 * the same Track" "set the initial Group ID to a unique value
+		 * guaranteed to be larger than all previously used groups ... based
+		 * on the current time", as the demo's other tracks do.
+		 */
+		nextGroup: bigint;
+		/** The Group of the last Object written, for the LARGEST_OBJECT of a later SUBSCRIBE_OK (§10.2.11). */
+		lastGroup: bigint | undefined;
+	}
+	const ourTrack = (name: string): Ours => ({
+		name: utf8.encode(name),
+		listener: undefined,
+		nextGroup: BigInt(now()),
+		lastGroup: undefined,
+	});
+	const said = ourTrack(SAID_TRACK);
+	const reacted = ourTrack(REACTED_TRACK);
+	/** Lines and reactions being written: one stream each. */
 	let writing = 0;
 
 	const answer = (request: PeerSubscribe): void => {
-		const asked =
-			same(request.trackNamespace, ours) &&
-			same([request.trackName], [said]) &&
-			!stop.signal.aborted;
-		if (!asked) {
+		const track = same(request.trackNamespace, ours)
+			? [said, reacted].find((each) => same([request.trackName], [each.name]))
+			: undefined;
+		if (track === undefined || stop.signal.aborted) {
 			void request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
 			return;
 		}
@@ -284,17 +321,18 @@ export async function joinChat(
 				// §10.2.11: "If Objects have been published on this Track the
 				// Publisher MUST include this parameter".
 				parameters:
-					lastGroup === undefined
+					track.lastGroup === undefined
 						? {}
-						: { largestObject: { group: lastGroup, object: 0n } },
+						: { largestObject: { group: track.lastGroup, object: 0n } },
 			})
-			.then((track) => {
-				listener = track;
-				changed({ heard: true });
-				void track.ended.then(() => {
-					if (listener !== track) return;
-					listener = undefined;
-					changed({ heard: false });
+			.then((published) => {
+				track.listener = published;
+				// The gatherer is heard by its subscription to `said`.
+				if (track === said) changed({ heard: true });
+				void published.ended.then(() => {
+					if (track.listener !== published) return;
+					track.listener = undefined;
+					if (track === said) changed({ heard: false });
 				});
 			})
 			.catch(() => {});
@@ -409,7 +447,7 @@ export async function joinChat(
 			try {
 				subscription = await connection.subscribe({
 					trackNamespace: roomNamespace(options.room),
-					trackName: new TextEncoder().encode(LINES_TRACK),
+					trackName: utf8.encode(LINES_TRACK),
 					parameters: { rendezvousTimeout: BigInt(RENDEZVOUS_MS) },
 					// A longer Object ends its stream before it is gathered,
 					// and the subscription goes on.
@@ -450,42 +488,173 @@ export async function joinChat(
 	};
 	void follow();
 
-	const window = new RateWindow(limits.linesPerSecond);
+	/**
+	 * Follows a track of the room that is live alone (`reactions`,
+	 * `present`): each Object 0 of a Group is handed to `take`, and where
+	 * `latest`, the largest Group when the subscription is made, by a
+	 * Relative Joining FETCH of none before it (§10.12.2), so that a
+	 * participant that comes has the count at once. Subscribed again after
+	 * it ends, as `lines` is.
+	 */
+	const followLive = async (
+		trackName: string,
+		latest: boolean,
+		take: (payload: Uint8Array) => void,
+	): Promise<void> => {
+		const again = createAskAgain();
+		while (!stop.signal.aborted) {
+			let subscription: Subscription;
+			try {
+				subscription = await connection.subscribe({
+					trackNamespace: roomNamespace(options.room),
+					trackName: utf8.encode(trackName),
+					parameters: { rendezvousTimeout: BigInt(RENDEZVOUS_MS) },
+					maxObjectPayloadLength: MAX_LINE_PAYLOAD,
+				});
+			} catch (error) {
+				await waitFor(
+					again.afterRefusal(
+						error instanceof RequestFailedError ? error.retryWaitMs : undefined,
+					),
+					stop.signal,
+				);
+				continue;
+			}
+			const cancel = (): void => {
+				void subscription.cancel().catch(() => {});
+			};
+			if (stop.signal.aborted) {
+				cancel();
+				return;
+			}
+			stop.signal.addEventListener("abort", cancel, { once: true });
+			again.subscribed();
+			const fetched =
+				latest && subscription.parameters.largestObject !== undefined
+					? latestOf(subscription, take).catch(() => {})
+					: undefined;
+			const reader = subscription.objects.getReader();
+			for (;;) {
+				const next = await reader.read().catch(() => undefined);
+				if (next === undefined || next.done) break;
+				const { object } = next.value;
+				if (object.status !== "Normal" || object.objectId !== 0n) continue;
+				take(object.payload);
+			}
+			await subscription.ended;
+			await fetched;
+			stop.signal.removeEventListener("abort", cancel);
+			await waitFor(again.afterEnd(), stop.signal);
+		}
+	};
+
+	/** The Object 0 of the largest Group of `subscription`, by a Relative Joining FETCH of none before it. */
+	const latestOf = async (
+		subscription: Subscription,
+		take: (payload: Uint8Array) => void,
+	): Promise<void> => {
+		const fetch = await connection.fetch(
+			{
+				range: {
+					fetchType: "RelativeJoining",
+					joiningRequestId: subscription.requestId,
+					joiningStart: 0n,
+				},
+			},
+			{
+				signal: AbortSignal.any([
+					stop.signal,
+					AbortSignal.timeout(FETCH_TIMEOUT_MS),
+				]),
+			},
+		);
+		await fetch.response;
+		const reader = decodeFetchBody(connection, fetch, {
+			limits: { maxObjectPayloadLength: MAX_LINE_PAYLOAD },
+		}).getReader();
+		for (;;) {
+			const next = await reader.read();
+			if (next.done) return;
+			if (next.value.type !== "object" || next.value.object.objectId !== 0n) {
+				continue;
+			}
+			take(next.value.object.payload);
+			// One Group was asked for: what comes after it is not read.
+			await reader.cancel();
+			return;
+		}
+	};
+
+	const { onReactions, onPresent } = options;
+	if (onReactions !== undefined) {
+		void followLive(REACTIONS_TRACK, false, (payload) => {
+			const read = readReactions(payload);
+			if (read.ok) onReactions(read.value);
+		});
+	}
+	if (onPresent !== undefined) {
+		// WHY the newest alone: a FETCH and the live Objects can come in
+		// either order, and a count older than the one shown is no news.
+		let newest = -1;
+		void followLive(PRESENT_TRACK, true, (payload) => {
+			const read = readPresent(payload);
+			if (!read.ok || read.value.at < newest) return;
+			newest = read.value.at;
+			onPresent(read.value);
+		});
+	}
+
+	/** Writes `payload` as the Object 0 of the next Group of `track`, the whole of that Group. */
+	const write = async (
+		track: Ours,
+		payload: () => Uint8Array,
+	): Promise<SayOutcome> => {
+		const published = track.listener;
+		if (published === undefined)
+			return { type: "not-sent", why: "nobody-subscribed" };
+		if (writing >= MAX_WRITING) return { type: "not-sent", why: "busy" };
+		const group = track.nextGroup;
+		track.nextGroup += 1n;
+		writing += 1;
+		try {
+			const stream = await published.openSubgroup({
+				groupId: group,
+				subgroupId: { mode: "Zero" },
+				properties: false,
+				// One line, or one reaction, is the whole of its Group.
+				endOfGroup: true,
+			});
+			try {
+				await stream.write({ objectId: 0n, payload: payload() });
+				await stream.close();
+			} catch (error) {
+				await stream.reset().catch(() => {});
+				throw error;
+			}
+			if (track.lastGroup === undefined || group > track.lastGroup) {
+				track.lastGroup = group;
+			}
+			return { type: "sent", group };
+		} catch (error) {
+			return { type: "not-sent", why: "failed", error };
+		} finally {
+			writing -= 1;
+		}
+	};
+
+	const lines = new RateWindow(limits.linesPerSecond);
+	const reactions = new RateWindow(limits.reactionsPerSecond);
 	return {
 		status: () => ({ ...status }),
 		async say(text) {
-			const why = keepBack(text, limits, window, now());
+			const why = keepBack(text, limits, lines, now());
 			if (why !== undefined) return { type: "kept-back", why };
-			const track = listener;
-			if (track === undefined)
-				return { type: "not-sent", why: "nobody-subscribed" };
-			if (writing >= MAX_WRITING) return { type: "not-sent", why: "busy" };
-			const group = nextGroup;
-			nextGroup += 1n;
-			writing += 1;
-			try {
-				const payload = saidPayload({ text, sentAt: now() });
-				const stream = await track.openSubgroup({
-					groupId: group,
-					subgroupId: { mode: "Zero" },
-					properties: false,
-					// One line is the whole of its Group.
-					endOfGroup: true,
-				});
-				try {
-					await stream.write({ objectId: 0n, payload });
-					await stream.close();
-				} catch (error) {
-					await stream.reset().catch(() => {});
-					throw error;
-				}
-				if (lastGroup === undefined || group > lastGroup) lastGroup = group;
-				return { type: "sent", group };
-			} catch (error) {
-				return { type: "not-sent", why: "failed", error };
-			} finally {
-				writing -= 1;
-			}
+			return write(said, () => saidPayload({ text, sentAt: now() }));
+		},
+		async react(emoji) {
+			const why = keepBackReaction(emoji, reactions, now());
+			if (why !== undefined) return { type: "kept-back", why };
+			return write(reacted, () => reactedPayload({ emoji, sentAt: now() }));
 		},
 	};
 }

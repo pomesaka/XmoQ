@@ -12,6 +12,15 @@ export const SAID_TRACK = "said";
 /** The track of a room: its lines, numbered. */
 export const LINES_TRACK = "lines";
 
+/** The track of a participant: its reactions, one Object a press (decided on 2026-10-26). */
+export const REACTED_TRACK = "reacted";
+
+/** The track of a room: its reactions, counted over a while (decided on 2026-10-26). */
+export const REACTIONS_TRACK = "reactions";
+
+/** The track of a room: how many the gatherer follows in it (decided on 2026-10-26). */
+export const PRESENT_TRACK = "present";
+
 import { type ChatRoom, roomFields } from "./room-names.ts";
 
 export { CHAT_PREFIX, type ChatRoom, roomFields } from "./room-names.ts";

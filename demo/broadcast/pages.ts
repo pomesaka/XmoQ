@@ -5,6 +5,9 @@
 import { join } from "node:path";
 import { chatHtml, type Page, pageHtml, type Served } from "../lib/shell.ts";
 
+/** The reactions a page offers: the demo's choice. */
+const REACTIONS = ["👍", "❤️", "😂", "👏"];
+
 const LINKS = [
 	{ href: "/publish", text: "publish (a clock)" },
 	{ href: "/publish?source=camera", text: "publish (camera)" },
@@ -16,7 +19,12 @@ const roomHtml = (served: Served): string =>
 	served.roomsUrl === null
 		? "<p>no rooms: bun install, and start again</p>"
 		: `<p id="room"></p>
-		${served.noChat === undefined ? chatHtml("8em") : `<p>${served.noChat}</p>`}`;
+		${
+			served.noChat === undefined
+				? `${chatHtml("8em")}
+		<p>${REACTIONS.map((emoji) => `<button data-reaction="${emoji}">${emoji}</button>`).join(" ")} <span id="reactions"></span></p>`
+				: `<p>${served.noChat}</p>`
+		}`;
 
 export const BROADCAST_PAGES: Record<string, Page> = {
 	"/publish": {
