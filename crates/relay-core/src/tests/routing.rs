@@ -2040,6 +2040,48 @@ fn a_publish_whose_stream_is_finished_without_publish_done_is_over() {
     );
 }
 
+/// A request the peer's FIN ends is over for the relay too, which finishes
+/// its own direction; else the stream is held until the session ends. §6.1
+/// has a FIN cancel a `SUBSCRIBE_NAMESPACE`, and a PUBLISH whose direction is
+/// finished can have no `PUBLISH_DONE` (§5.1).
+#[test]
+fn a_request_the_peers_fin_ends_has_the_relays_direction_finished() {
+    let watching = || {
+        let mut relay = relay();
+        relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first: ControlMessage::SubscribeNamespace(xmoq_moqt::message::SubscribeNamespace {
+                request_id: 0,
+                track_namespace_prefix: namespace_of(&[b"xmoq"]),
+                parameters: vec![],
+            }),
+        });
+        relay
+    };
+    let cases = [
+        ("SUBSCRIBE_NAMESPACE", watching(), ALICE),
+        ("PUBLISH", relay_with_track(), PUBLISHER),
+    ];
+    for (name, mut relay, session) in cases {
+        let before = relay.counts().requests;
+        let actions = relay.step(Event::RequestClosed {
+            session,
+            stream: StreamKey(0),
+            how: RequestEnd::Fin,
+        });
+        assert_eq!(
+            actions.first(),
+            Some(&Action::FinishRequest {
+                session,
+                stream: StreamKey(0),
+            }),
+            "{name}"
+        );
+        assert_eq!(relay.counts().requests, before - 1, "{name}");
+    }
+}
+
 #[test]
 fn nothing_of_the_routing_is_left_when_everyone_is_gone() {
     let mut relay = relay_with_routed_track();
