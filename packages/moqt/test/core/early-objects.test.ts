@@ -10,7 +10,9 @@ import {
 } from "../../src/core/incoming-subgroups.ts";
 import type { KeyValuePair } from "../../src/core/key-value-pair.ts";
 import { resolveLimits } from "../../src/core/limits.ts";
+import { createSession } from "../../src/core/session.ts";
 import type { SubgroupObject } from "../../src/core/subgroup.ts";
+import { hex, utf8 } from "../helpers.ts";
 
 /** A table of `fixtures/early-objects/`, which the Rust implementation reads too. */
 function rows(file: string): string[][] {
@@ -111,5 +113,40 @@ describe("Objects whose Track Alias is not known yet", () => {
 			payload: new Uint8Array(Number(payload)),
 		};
 		expect(heldBytesOf(object)).toBe(Number(bytes));
+	});
+
+	const reused = rows("reused-alias.tsv");
+	test("the reused-alias table has its rows", () => {
+		expect(reused.length).toBe(4);
+	});
+	test.each(reused)("%s", (_name, end, retired, outcome) => {
+		// The alias is written as one byte below: a varint of 0 to 63.
+		expect(Number(retired)).toBeLessThan(64);
+		const session = createSession();
+		session.start();
+		// Request ID 0 on stream 1, Request ID 2 on stream 2.
+		session.subscribe({ trackNamespace: [utf8("t")], trackName: utf8("a") });
+		session.subscribe({ trackNamespace: [utf8("t")], trackName: utf8("b") });
+		const outputs = [
+			// One Object of Track Alias 7.
+			...session.receivePeerUniStreamData(
+				0,
+				hex("14 07 00 00 00 00 01 61"),
+				end === "fin",
+			),
+			// With the Mandatory Track Property 0x4000.
+			...session.receiveRequestStreamData(
+				1,
+				hex(`04 00 06 ${retired?.padStart(2, "0")} 00 c0 40 00 01`),
+				false,
+			),
+			...session.receiveRequestStreamData(2, hex("04 00 02 07 00"), false),
+		];
+		// To any subscription, as the Rust test counts what is released: the
+		// first one, which is over, must not get it either.
+		const given = outputs.some(
+			(output) => output.type === "event" && output.event.type === "object",
+		);
+		expect(given ? "given" : "none").toBe(outcome ?? "");
 	});
 });

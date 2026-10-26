@@ -672,13 +672,28 @@ export function createIncomingSubgroups(
 			const finished = finishedHeld;
 			finishedHeld = [];
 			for (const stream of finished) {
+				// Not reached: a stream is put here once its header was read.
+				if (stream.header === undefined) {
+					dropHeld(stream);
+					continue;
+				}
 				if (deliverHeld(stream, out)) {
 					countEnded(stream, out);
-				} else if (stillPending) {
-					finishedHeld.push(stream);
-				} else {
+					continue;
+				}
+				// The same rule as for a stream still open: Objects of a retired
+				// alias are of a subscription that is over, and not of a track
+				// that takes the alias later (§11.1: "Subscribers SHOULD retain
+				// sufficient state to quickly discard these unwanted Objects").
+				const settle = settleOf(
+					earlyAlias(stream.header.trackAlias),
+					stillPending,
+				);
+				if (settle.type === "stop") {
 					dropHeld(stream);
-					out.push(abandonedEvent(stream, unknownAlias.reason));
+					out.push(abandonedEvent(stream, settle.reason));
+				} else {
+					finishedHeld.push(stream);
 				}
 			}
 			// With no SUBSCRIBE Pending, nothing can claim the counted streams.

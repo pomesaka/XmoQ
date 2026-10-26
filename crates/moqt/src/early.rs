@@ -263,12 +263,13 @@ impl<T> EarlyObjects<T> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::kvp::KeyValuePair;
     use crate::name::FullTrackName;
 
-    fn rows(file: &str) -> Vec<Vec<String>> {
+    /// A table of `fixtures/early-objects/`, which `@xmoq/moqt` reads too.
+    pub(crate) fn rows(file: &str) -> Vec<Vec<String>> {
         let path = format!(
             "{}/../../fixtures/early-objects/{file}",
             env!("CARGO_MANIFEST_DIR")

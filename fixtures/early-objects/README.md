@@ -34,8 +34,16 @@ Tab-separated, no header, one line feed after every row. Column 1 is the name of
 | 3 | Its properties, comma-separated: `v` for one with a varint value, `bN` for one whose value is N bytes; `-` for none |
 | 4 | The bytes |
 
+`reused-alias.tsv`: the rule of `settle.tsv` in a session, for a Track Alias the publisher gives to another track once a subscription of it is over (§11.1 forbids only two tracks "simultaneously"). Two SUBSCRIBEs wait; an Object of alias 7 is held; the first SUBSCRIBE_OK names a Mandatory Track Property, so its subscription ends at once and its alias is retired; the second SUBSCRIBE_OK gives alias 7.
+
+| Column | Content |
+|---|---|
+| 2 | The stream of the held Object before the first SUBSCRIBE_OK: `open`, or `fin` (it ended with its FIN) |
+| 3 | The Track Alias of the first SUBSCRIBE_OK, the one that is retired |
+| 4 | What the second subscription gets of the held Object: `given`, `none` |
+
 ## What is not in the tables
 
-- A stream reset while it holds Objects lets go of them; one that ended with its FIN keeps them for its alias (`reset` of `incoming-subgroups.ts`; a test of `crates/moqt/src/session.rs`).
+- A stream reset while it holds Objects lets go of them; one that ended with its FIN keeps them for its alias, by the rule of `settle.tsv` as a stream still open (`reused-alias.tsv` has such rows) (`reset` of `incoming-subgroups.ts`; a test of `crates/moqt/src/session.rs`).
 - Held Objects stay on a stream once one of its Objects is held, so that its Objects stay in their order.
 - Where a stream is stopped for being over the limit, what it held is let go of and no longer counted.
