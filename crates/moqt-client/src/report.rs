@@ -7,6 +7,8 @@
 //! What a peer chose (a namespace, a URI, a name of its catalog) is printed
 //! with `xmoq_moqt::printable`, so that it cannot make a line of its own.
 
+use std::time::Duration;
+
 use xmoq_moqt::Error as MoqtError;
 use xmoq_moqt::data::{SubgroupHeader, SubgroupObject};
 use xmoq_moqt::fetch::{FetchObject, RangeEnd};
@@ -273,6 +275,15 @@ pub fn stop_sending_received(what: &str, code: Option<u32>) {
 /// its Subgroup.
 pub fn subgroup_not_sent(group_id: u64) {
     println!("NOT_SENT group={group_id} object=0");
+}
+
+/// A subgroup stream the peer took nothing of for `waited`, and which was
+/// reset.
+pub fn subgroup_not_taken(group_id: u64, waited: Duration) {
+    println!(
+        "NOT_TAKEN group={group_id} object=0 after_ms={}",
+        waited.as_millis()
+    );
 }
 
 pub fn sent(group_id: u64, payload_len: usize) {
