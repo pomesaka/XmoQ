@@ -32,7 +32,7 @@ Decided on 2026-10-26, not implemented. Three jobs are the same in every client,
 
 | Job | What it decides | Rust | TypeScript | Where it is today |
 |---|---|---|---|---|
-| **Published track**: a track this endpoint is the publisher of | Taking or refusing a SUBSCRIBE, the PUBLISH and its PUBLISH_OK, a Group on a subgroup stream, answering or refusing a FETCH, the Stream Count of PUBLISH_DONE and the wait at the end; the requests of the peer passed to the track by its Full Track Name | `xmoq-publisher` | `@xmoq/tracks` (planned) | the Rust client (`published.rs`) beside `xmoq-publisher`, which it answers a FETCH by; the video and the sound publishers of `@xmoq/media`, the catalog's of `@xmoq/msf` and the answer to `said` of `@xmoq/chat` |
+| **Published track**: a track this endpoint is the publisher of | Taking or refusing a SUBSCRIBE, the PUBLISH and its PUBLISH_OK, a Group on a subgroup stream, answering or refusing a FETCH, the Stream Count of PUBLISH_DONE and the wait at the end; the requests of the peer passed to the track by its Full Track Name | `xmoq-publisher` | `@xmoq/tracks` (`publishTrack`, `serveTracks`; the TypeScript clients send no PUBLISH) | the Rust client (`published.rs`) beside `xmoq-publisher`, which it answers a FETCH by; `publishTrack` of `@xmoq/tracks`, which the video and the sound publishers of `@xmoq/media`, the catalog's of `@xmoq/msf` and `said` and `reacted` of `@xmoq/chat` take the requests of the peer by |
 | **Kept track**: a track of another endpoint, kept on a session | The SUBSCRIBE and its answer, asking again after an end or a refusal, a request a GOAWAY ended, what giving up ends in the session, a malformed track (§2.4.2) | `xmoq-subscriber` (`kept`) | `@xmoq/tracks`, in part (`keepTrackOnSession`, `stayOnSession`) | `KeptTrack` of `xmoq-subscriber`, by the rows of `fixtures/kept-track/`; `SaidAgain` of the gatherer, the catalog and the sound of the transcriber; `stayOnSession` and `keepTrackOnSession` of `@xmoq/tracks`, the loops of `@xmoq/chat`, `@xmoq/transcript` and `@xmoq/meeting` |
 | **Followed track**: a kept track of one numbered item a Group, read from a point in its past | A Joining FETCH for the past, the live Objects after it, each item once and in order by its Group ID, and the gap between them | `xmoq-subscriber` (`follow`, `followed`) | `@xmoq/tracks` (`followTrack`, `followPlan`) | `Follower`, `Items` and `past_to_fetch` of `xmoq-subscriber`; `followTrack` of `@xmoq/tracks`, which `@xmoq/chat` and `@xmoq/transcript` follow their tracks by |
 | **Ask again** and **next session** | When a request is asked for again on the same session; where and when the next session goes after a session ends, the New Session URI of a GOAWAY first (§10.4) | `xmoq-again` | `@xmoq/moqt` (`createAskAgain`, `createNextSession`, `keepMoving`) | the same, and with a `Pause` for each role |
@@ -54,12 +54,13 @@ The TypeScript packages, as `scripts/ci/check-layers.sh` checks them (`package_l
 | Layer | Packages |
 |---|---|
 | 0 | `@xmoq/moqt`, `@xmoq/loc`, `@xmoq/json`, `@xmoq/room-client` |
-| 1 | `@xmoq/tracks`: a track kept on one session, a followed track, and the tracks a connection serves; `@xmoq/msf` |
-| 2 | `@xmoq/chat`, `@xmoq/transcript`, `@xmoq/media`: each keeps or follows its tracks by `@xmoq/tracks` |
-| 3 | `@xmoq/meeting` |
-| 4 | `@xmoq/room` |
+| 1 | `@xmoq/tracks`: a published track, a track kept on one session, a followed track, and the tracks a connection serves |
+| 2 | `@xmoq/msf`, `@xmoq/chat`, `@xmoq/transcript`: each publishes or follows its tracks by `@xmoq/tracks` |
+| 3 | `@xmoq/media`: it publishes its catalog by `@xmoq/msf` |
+| 4 | `@xmoq/meeting` |
+| 5 | `@xmoq/room` |
 
-A package goes above `@xmoq/tracks` when it uses it, in the change that makes it do so. `@xmoq/msf` serves its catalog track as a `ServedTrack` does without naming the type.
+A package goes above `@xmoq/tracks` when it uses it, in the change that makes it do so.
 
 The Rust crates, by the same rule (a crate depends on those of a lower layer alone, dev-dependencies aside); `scripts/ci/check-layers.sh` checks the crates of today (`crate_layer`):
 

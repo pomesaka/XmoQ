@@ -4,14 +4,14 @@
 // and `present`, which the gatherer (`crates/chat`) publishes. Section numbers are of
 // draft-ietf-moq-transport-18.
 
+import type { MoqtConnection, PublishedTrack } from "@xmoq/moqt";
 import {
-	type MoqtConnection,
-	type PeerSubscribe,
-	type PublishedTrack,
-	RequestErrorCode,
-	sameFullTrackName,
-} from "@xmoq/moqt";
-import { type FollowGap, followTrack } from "@xmoq/tracks";
+	type FollowGap,
+	followTrack,
+	type PublishingTrack,
+	publishTrack,
+	serveTracks,
+} from "@xmoq/tracks";
 import { catchUpLines, HISTORY_LINES } from "../core/history.ts";
 import {
 	type ChatLimits,
@@ -205,8 +205,10 @@ export interface ChatParticipant {
  * participant's SUBSCRIBE would otherwise come before the room's PUBLISH
  * and be refused.
  *
- * **It names the connection's `serve` handlers**: a SUBSCRIBE for another
- * track, and every FETCH, are refused. Give it a connection of its own.
+ * **It names the connection's `serve` handlers** (`serveTracks` of
+ * `@xmoq/tracks`): a request for another track is refused with
+ * DOES_NOT_EXIST, and a FETCH for `said` or `reacted` with NOT_SUPPORTED.
+ * Give it a connection of its own.
  *
  * Resolves once the namespace is announced; rejects as
  * `publishNamespace` does, or with a `RangeError` for limits or
@@ -244,7 +246,7 @@ export async function joinChat(
 	/** A track of this participant: `said` or `reacted`, one Object a Group. */
 	interface Ours {
 		name: Uint8Array;
-		/** The relay's subscription to it; one at a time, as the library refuses a second (§5.1). */
+		/** The relay's subscription to it; one at a time (`publishTrack` of `one`). */
 		listener: PublishedTrack | undefined;
 		/**
 		 * The Group of the next Object. WHY from the time in milliseconds: a
@@ -269,27 +271,23 @@ export async function joinChat(
 	/** Lines and reactions being written: one stream each. */
 	let writing = 0;
 
-	const answer = (request: PeerSubscribe): void => {
-		const track = [said, reacted].find((each) =>
-			sameFullTrackName(request, {
-				trackNamespace: ours,
-				trackName: each.name,
-			}),
-		);
-		if (track === undefined || stop.signal.aborted) {
-			void request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-			return;
-		}
-		void request
-			.accept({
-				// §10.2.11: "If Objects have been published on this Track the
-				// Publisher MUST include this parameter".
-				parameters:
-					track.lastGroup === undefined
-						? {}
-						: { largestObject: { group: track.lastGroup, object: 0n } },
-			})
-			.then((published) => {
+	/** `track` as the relay asks for it: the one subscription of the gatherer. */
+	const publishing = (track: Ours): PublishingTrack =>
+		publishTrack({
+			trackNamespace: ours,
+			trackName: track.name,
+			subscribers: "one",
+			// §10.2.11: "If Objects have been published on this Track the
+			// Publisher MUST include this parameter".
+			answer: () =>
+				track.lastGroup === undefined
+					? {}
+					: {
+							parameters: {
+								largestObject: { group: track.lastGroup, object: 0n },
+							},
+						},
+			subscribed(published) {
 				track.listener = published;
 				// The gatherer is heard by its subscription to `said`.
 				if (track === said) changed({ heard: true });
@@ -298,10 +296,19 @@ export async function joinChat(
 					track.listener = undefined;
 					if (track === said) changed({ heard: false });
 				});
-			})
-			.catch(() => {});
-	};
-	connection.serve({ subscribe: answer });
+			},
+		});
+	const served = [publishing(said), publishing(reacted)];
+	// After the stop, a SUBSCRIBE for either is refused with DOES_NOT_EXIST.
+	stop.signal.addEventListener(
+		"abort",
+		() => {
+			for (const track of served) void track.end();
+		},
+		{ once: true },
+	);
+	if (stop.signal.aborted) for (const track of served) void track.end();
+	serveTracks(connection, served);
 	// Withdrawn when the participant stops (§6.2): the relay tells the
 	// gatherer NAMESPACE_DONE, and the gatherer ends its SUBSCRIBE for
 	// `said`, which ends `listener`.

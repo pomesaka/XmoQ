@@ -4,6 +4,9 @@
 // the encoder makes necessary; which chunk becomes which Object is the
 // sender's, and what is written when is the publisher's.
 
+// How long `end` waits for the encoder to give what it holds is what the
+// publisher waits for its writes (`DEFAULT_END_TIMEOUT_MS`).
+import { DEFAULT_END_TIMEOUT_MS } from "@xmoq/tracks";
 import { createStamp, type StampClock } from "../core/stamp.ts";
 import type {
 	VideoSkipReason,
@@ -36,11 +39,6 @@ const OF_THE_CHUNK: readonly VideoSkipReason[] = [
 	"no-time",
 	"no-group-id",
 ];
-/**
- * How long `end` waits for the encoder to give what it holds, in
- * milliseconds. Provisional: what the publisher waits for its writes.
- */
-const DEFAULT_END_TIMEOUT_MS = 3000;
 
 export interface VideoTrackEncoderOptions {
 	trackNamespace: readonly Uint8Array[];

@@ -20,7 +20,7 @@ What it does, in order:
 
 **Provisional values**: the 10 s of the catalog's RENDEZVOUS_TIMEOUT, as `@xmoq/transcript` has it, the pauses of `createAskAgain`, and `SETTLE_MS`. A sound track without `samplerate` is taken for 48,000 Hz, and one without `channelConfig` for one channel.
 
-Layer 3 (`scripts/ci/check-layers.sh`): it depends on `@xmoq/moqt`, `@xmoq/msf` and `@xmoq/media`. The core (`src/core`) does no input or output.
+Layer 4 (`scripts/ci/check-layers.sh`): it depends on `@xmoq/moqt`, `@xmoq/tracks`, `@xmoq/msf` and `@xmoq/media`. The core (`src/core`) does no input or output.
 
 ## Writing for an agent: what to know
 

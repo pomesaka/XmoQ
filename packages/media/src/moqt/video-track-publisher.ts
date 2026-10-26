@@ -3,18 +3,19 @@
 // what it says is written to the subscription a relay made. No WebCodecs:
 // a chunk comes in as numbers and bytes.
 
-import {
-	LONGEST_TIMER_MS,
-	type PeerFetch,
-	type PeerSubscribe,
-	PublishDoneCode,
-	PublishEndedError,
-	type PublishedTrack,
-	RequestErrorCode,
-	SessionClosedError,
-	type SubgroupWriter,
-	sameFullTrackName,
+import type {
+	PeerFetch,
+	PeerSubscribe,
+	PublishedTrack,
+	SubgroupWriter,
 } from "@xmoq/moqt";
+import {
+	DEFAULT_END_TIMEOUT_MS,
+	endedByThePeer,
+	publishTrack,
+	tellEnd,
+	wholeNumber,
+} from "@xmoq/tracks";
 import {
 	createVideoSender,
 	DEFAULT_MAX_PAYLOAD_LENGTH,
@@ -46,12 +47,6 @@ export const DEFAULT_SHORTEST_GROUP_MS = 500;
 export const DEFAULT_MAX_PENDING_OBJECTS = 32;
 /** How many bytes of payload may wait to be written. **Provisional, not measured**: the relay's limit for one subscriber. */
 export const DEFAULT_MAX_PENDING_BYTES = 4 * 1024 * 1024;
-/**
- * How long `end` waits for what is queued to be written, in milliseconds.
- * Provisional: the time `@xmoq/moqt` gives a peer to end a request stream.
- */
-export const DEFAULT_END_TIMEOUT_MS = 3000;
-
 export interface VideoTrackPublisherOptions {
 	trackNamespace: readonly Uint8Array[];
 	trackName: Uint8Array;
@@ -67,7 +62,7 @@ export interface VideoTrackPublisherOptions {
 	maxPendingObjects?: number;
 	/** `DEFAULT_MAX_PENDING_BYTES` when left out. Not below the longest payload that is sent. */
 	maxPendingBytes?: number;
-	/** How long `end` waits for what is queued to be written; 3000 ms when left out. */
+	/** How long `end` waits for what is queued to be written; `DEFAULT_END_TIMEOUT_MS` of `@xmoq/tracks` (3000 ms) when left out. */
 	endTimeoutMs?: number;
 	/**
 	 * With it, the SUBSCRIBE_OK says DYNAMIC_GROUPS = 1 (transport §12.6),
@@ -166,10 +161,6 @@ export interface VideoTrackPublisher {
 	stats(): VideoTrackPublisherStats;
 }
 
-/** Whether a call on the subscription failed because the subscriber ended it, or the session is over. */
-const endedByThePeer = (error: unknown): boolean =>
-	error instanceof PublishEndedError || error instanceof SessionClosedError;
-
 /** A subgroup stream, and the Group it is of. */
 interface OpenStream {
 	groupId: bigint;
@@ -255,17 +246,11 @@ export function createVideoTrackPublisher(
 		options.dynamicGroups === undefined
 			? undefined
 			: (options.dynamicGroups.shortestGroupMs ?? DEFAULT_SHORTEST_GROUP_MS);
-	for (const [name, value, least] of [
-		["maxPendingObjects", maxPendingObjects, 1],
-		["maxPendingBytes", maxPendingBytes, 1],
-		["endTimeoutMs", endTimeoutMs, 0],
-		["dynamicGroups.shortestGroupMs", shortestGroupMs ?? 0, 0],
-	] as const) {
-		if (!Number.isInteger(value) || value < least || value > LONGEST_TIMER_MS) {
-			throw new RangeError(
-				`${name} is a whole number from ${least} to ${LONGEST_TIMER_MS}, not ${value}`,
-			);
-		}
+	wholeNumber("maxPendingObjects", maxPendingObjects, 1);
+	wholeNumber("maxPendingBytes", maxPendingBytes, 1);
+	wholeNumber("endTimeoutMs", endTimeoutMs, 0);
+	if (shortestGroupMs !== undefined) {
+		wholeNumber("dynamicGroups.shortestGroupMs", shortestGroupMs, 0);
 	}
 
 	const maxPayloadLength =
@@ -298,15 +283,7 @@ export function createVideoTrackPublisher(
 	let newGroupWanted = false;
 	/** The time of the key chunk the Group that is being sent began with. */
 	let groupBegan: number | undefined;
-	/** A SUBSCRIBE is being answered, and has the one place; settles when that is done with. */
-	let answer: Promise<void> | undefined;
 	let ended: Promise<void> | undefined;
-
-	const isThisTrack = (request: PeerSubscribe | PeerFetch): boolean =>
-		sameFullTrackName(request, {
-			trackNamespace: options.trackNamespace,
-			trackName: options.trackName,
-		});
 
 	const skip = (because: VideoPushSkipReason): void => {
 		stats.skipped[because] = (stats.skipped[because] ?? 0) + 1;
@@ -330,17 +307,6 @@ export function createVideoTrackPublisher(
 		}
 		for (const step of sender.endGroup("write-failed")) queueStep(to, step);
 	};
-
-	/** PUBLISH_DONE for a subscription; does not reject. */
-	const tellEnd = (track: PublishedTrack): Promise<void> =>
-		track.done(PublishDoneCode.TRACK_ENDED, "").then(
-			() => {},
-			(error: unknown) => {
-				// `reportError` is the global of HTML for an error nobody is
-				// there to take: it goes where an uncaught one goes.
-				if (!endedByThePeer(error)) reportError(error);
-			},
-		);
 
 	/** Does one step of the sender for the subscriber; rejects as the transport does. */
 	const write = async (
@@ -444,99 +410,60 @@ export function createVideoTrackPublisher(
 			});
 	};
 
-	return {
-		subscribe(request) {
-			if (!isThisTrack(request)) return false;
-			if (ended !== undefined) {
-				request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-				return true;
-			}
-			if (subscriber !== undefined || answer !== undefined) {
-				request
-					.reject(
-						RequestErrorCode.DUPLICATE_SUBSCRIPTION,
-						"the track has its one subscription",
-					)
-					.catch(() => {});
-				return true;
-			}
-			// From here on, so that a second SUBSCRIBE that comes while this
-			// one is answered is refused.
-			const answered = request
-				.accept({
-					// §10.2.11: a publisher that has published Objects of the
-					// Track says how far it is.
-					...(largest === undefined
-						? {}
-						: { parameters: { largestObject: largest } }),
-					...(shortestGroupMs === undefined
-						? {}
-						: { trackProperties: [{ type: DYNAMIC_GROUPS, value: 1n }] }),
-				})
-				.then(
-					(track) => {
-						// The track ended while the answer was sent.
-						if (ended !== undefined) return tellEnd(track);
-						const accepted: Subscriber = {
-							track,
-							started: false,
-							askedToStart: false,
-							// Transport §5.1: "The publisher does not send Objects
-							// if the Forward State is 0".
-							silent: request.parameters.forward === false,
-							open: undefined,
-							writing: undefined,
-							cut: new Set(),
-							pendingObjects: 0,
-							pendingBytes: 0,
-							queue: Promise.resolve(),
-						};
-						subscriber = accepted;
-						if (shortestGroupMs !== undefined) {
-							track.onNewGroupRequest((group) => {
-								if (subscriber !== accepted) return;
-								// §10.2.13: "a value of 0 or a value larger than the
-								// current Group" asks for a new one; a smaller one
-								// was met already.
-								const current = needsKey ? undefined : largest?.group;
-								if (group !== 0n && current !== undefined && group <= current)
-									return;
-								stats.newGroupsAskedFor += 1;
-								newGroupWanted = true;
-							});
-						}
-						void track.ended.then(() => {
-							if (subscriber !== accepted) return;
-							subscriber = undefined;
-							newGroupWanted = false;
-						});
-					},
-					(error: unknown) => {
-						// The request went before it was answered.
-						if (request.signal.aborted) return;
-						// The answer was not sent, and the request waits for one.
-						request.reject(RequestErrorCode.INTERNAL_ERROR).catch(() => {});
-						reportError(error);
-					},
-				)
-				.finally(() => {
-					answer = undefined;
+	// The subscriber gets nothing of the Group that is being sent when it
+	// comes: its first Object is the next key chunk, which `push` asks for.
+	const published = publishTrack({
+		trackNamespace: options.trackNamespace,
+		trackName: options.trackName,
+		subscribers: "one",
+		answer: () => ({
+			// §10.2.11: a publisher that has published Objects of the Track
+			// says how far it is.
+			...(largest === undefined
+				? {}
+				: { parameters: { largestObject: largest } }),
+			...(shortestGroupMs === undefined
+				? {}
+				: { trackProperties: [{ type: DYNAMIC_GROUPS, value: 1n }] }),
+		}),
+		subscribed(track, request) {
+			const accepted: Subscriber = {
+				track,
+				started: false,
+				askedToStart: false,
+				// Transport §5.1: "The publisher does not send Objects if the
+				// Forward State is 0".
+				silent: request.parameters.forward === false,
+				open: undefined,
+				writing: undefined,
+				cut: new Set(),
+				pendingObjects: 0,
+				pendingBytes: 0,
+				queue: Promise.resolve(),
+			};
+			subscriber = accepted;
+			if (shortestGroupMs !== undefined) {
+				track.onNewGroupRequest((group) => {
+					if (subscriber !== accepted) return;
+					// §10.2.13: "a value of 0 or a value larger than the current
+					// Group" asks for a new one; a smaller one was met already.
+					const current = needsKey ? undefined : largest?.group;
+					if (group !== 0n && current !== undefined && group <= current) return;
+					stats.newGroupsAskedFor += 1;
+					newGroupWanted = true;
 				});
-			answer = answered;
-			return true;
+			}
+			void track.ended.then(() => {
+				if (subscriber !== accepted) return;
+				subscriber = undefined;
+				newGroupWanted = false;
+			});
 		},
+	});
 
-		fetch(request) {
-			if (!isThisTrack(request)) return false;
-			request
-				.reject(
-					ended === undefined
-						? RequestErrorCode.NOT_SUPPORTED
-						: RequestErrorCode.DOES_NOT_EXIST,
-				)
-				.catch(() => {});
-			return true;
-		},
+	return {
+		subscribe: (request) => published.subscribe(request),
+		fetch: (request) => published.fetch(request),
 
 		push(chunk) {
 			if (ended !== undefined) {
@@ -624,6 +551,7 @@ export function createVideoTrackPublisher(
 
 		end() {
 			ended ??= (async () => {
+				const answered = published.end();
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				// One timer at a time: the one before has fired, or its wait
 				// is over.
@@ -636,10 +564,8 @@ export function createVideoTrackPublisher(
 					const to = subscriber;
 					if (to === undefined) {
 						// A SUBSCRIBE that is being answered is told of the end
-						// when its answer is out.
-						if (answer !== undefined) {
-							await Promise.race([answer, timeIsOver()]);
-						}
+						// when its answer is out (`publishTrack`).
+						await Promise.race([answered, timeIsOver()]);
 						return;
 					}
 					if (!to.silent) {
