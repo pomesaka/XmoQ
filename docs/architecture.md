@@ -1,4 +1,4 @@
-# Architecture — proposed; the MoQ layer and a minimal relay are implemented
+# Architecture
 
 ![XmoQ system architecture](assets/architecture.svg)
 

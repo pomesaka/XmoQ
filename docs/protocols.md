@@ -25,12 +25,12 @@ Where draft 18 is silent or contradicts itself, both implementations follow [MoQ
 
 - **Why own implementation:** the goal of the project is to understand and own the protocol. The Phase 0 runs also showed limits in each library: `moq-dev/moq` keeps the moq-lite model in MOQT mode with deliberate deviations and failed most browser-to-browser late joins; the `moqtail` crate has no client API, so a Rust client already has to drive SETUP and request streams itself.
 - **Why not moq-lite:** it is an individual draft with its own wire format, not IETF MoQ Transport.
-- **Why draft 18:** it is the version that passed in Phase 0 with both `moqtail` and `moq-dev/moq`, and the current target of the cross-implementation interop runner. Draft 22 is current, but the published `moq-dev/moq` packages encode it as draft 21, so no tested peer for it exists here.
+- **Why draft 18:** it is the version that passed in Phase 0 with both `moqtail` and `moq-dev/moq`, and the current target of the cross-implementation interop runner. Draft 22 was the newest when the libraries were surveyed on 2026-10-10 ([survey](moq-libraries.md)), but the published `moq-dev/moq` packages encoded it as draft 21, so no tested peer for it exists here.
 - **How conformance is checked:** the `moqtail` relay and browser client from Phase 0 stay as interop peers. Writing both ends alone would let the same misreading pass on both sides. Each own component is first run against a `moqtail` peer.
 
 The libraries that were considered, and what each Phase 0 run showed, are in [MoQ library candidates](moq-libraries.md).
 
-The implementation follows the draft text, not library behaviour and not model memory. The scope starts with SETUP, PUBLISH_NAMESPACE, PUBLISH, SUBSCRIBE and subgroup streams; other messages are added when a roadmap item needs them.
+The implementation follows the draft text, not library behaviour and not model memory. What each implementation does and does not do of the draft is in the [implementation notes](moqt-implementation-notes.md).
 
 ## Streaming format: decided, the catalog partly implemented
 

@@ -2,7 +2,7 @@
 
 Status: **survey closed; no library was selected.** After the Phase 0 runs the project owner decided to implement MoQ Transport draft 18 in this repository and to keep `moqtail` as an interop peer; see [Protocols and layers](protocols.md). The sections "Recommended pair" and "Decisions needed" below are kept as the input to that decision and are no longer open.
 
-The survey itself is from documentation and source reading. Two pairs were then run locally: [moq-dev](experiments/2026-10-10-moq-dev-object-transfer.md) and [moqtail](experiments/2026-10-10-moqtail-object-transfer.md). Statements changed by the moq-dev run are marked "(run 2026-10-10)". The moqtail run corrected three statements here that are not edited in place: no `mkcert` or browser flag is needed when `serverCertificateHashes` is used, the relay and moqtail-ts did interoperate on draft 18 with Chromium 156 and Chrome 155, and the `moqtail` crate has no client API.
+The survey itself is from documentation and source reading. Two pairs were then run locally: [moq-dev](experiments/2026-10-10-moq-dev-object-transfer.md) and [moqtail](experiments/2026-10-10-moqtail-object-transfer.md). Statements changed by the two runs are marked "(run 2026-10-10)".
 
 All facts below were checked on **2026-10-10** against the sources in [Sources](#sources). `[n]` refers to that list. "Last commit" is the default branch unless noted.
 
@@ -24,7 +24,7 @@ MOQT drafts are not wire compatible with each other. Draft 15 and later select t
 | Candidate | Protocol and versions | Relay | WebTransport stack | Latest release | Last commit | License |
 |---|---|---|---|---|---|---|
 | [moq-dev/moq](https://github.com/moq-dev/moq) (`moq-net`, `moq-relay`, `moq-cli`; formerly `kixelated/moq-rs`) | moq-lite 01–06 **and** MOQT drafts 14–22, negotiated per session. moq-lite is preferred by default [4] | Yes (`moq-relay`) | `web-transport-moq` on the project's own QUIC fork `moq-noq`: 2.0.2 on `main` [5], 1.3.4 in the released `moq-tokio` 0.19.23 (run 2026-10-10) | `moq-relay` 0.17.2 (2026-10-06), `moq-net` 0.3.10 on crates.io [6] | 2026-10-09 | MIT OR Apache-2.0 |
-| [moqtail/moqtail](https://github.com/moqtail/moqtail) (`moqtail` crate, `relay`) | MOQT only. Release 0.15.0 = draft 18. `main` = draft 22, marked work in progress [7] | Yes | `wtransport` 0.7.2 (quinn) [8] | `relay@0.15.0`, `moqtail-rs@0.15.0` (2026-10-04) | 2026-10-08 | Apache-2.0 |
+| [moqtail/moqtail](https://github.com/moqtail/moqtail) (`moqtail` crate, `relay`) | MOQT only. Release 0.15.0 = draft 18. `main` = draft 22, marked work in progress [7]. The crate has no client API (run 2026-10-10) | Yes | `wtransport` 0.7.2 (quinn) [8] | `relay@0.15.0`, `moqtail-rs@0.15.0` (2026-10-04) | 2026-10-08 | Apache-2.0 |
 | [cloudflare/moq-rs](https://github.com/cloudflare/moq-rs) (`moq-transport`, `moq-relay-ietf`; formerly `englishm/moq-rs`) | MOQT only. `main` = draft 16. Branches for draft 14 and draft 18 (dev) [9] | Yes | `web-transport-quinn` 0.11.8, `quinn` 0.11.9 [10] | `moq-transport` 0.16.4 (2026-10-06) | 2026-10-06 | MIT OR Apache-2.0 |
 | [nttcom/moq-wasm](https://github.com/nttcom/moq-wasm) (`moqt`, `relay`) | MOQT draft 14 [11] | Yes | `web-transport-quinn` 0.11 | No release or tag | 2026-10-09 | MIT |
 | [shiguredo/moqt-rs](https://github.com/shiguredo/moqt-rs) | MOQT draft 22, sans-I/O codec and session state machine [12] | **No** ("relay は別途用意") | None in the library | No release | 2026-10-09 (last push) | Apache-2.0 |
@@ -45,7 +45,7 @@ MOQT drafts are not wire compatible with each other. Draft 15 and later select t
 | Candidate | Documented method |
 |---|---|
 | moq-dev/moq | The relay serves `GET /certificate.sha256`. Given an `http://` URL, `@moq/net` fetches that fingerprint and pins it through `serverCertificateHashes`. A hash or PEM can also be passed directly [17] |
-| moqtail | `mkcert`, then enable `chrome://flags/#webtransport-developer-mode` (Chrome) or set an `about:config` flag (Firefox) [18] |
+| moqtail | None with `serverCertificateHashes` (run 2026-10-10). Its README asks for `mkcert`, then enable `chrome://flags/#webtransport-developer-mode` (Chrome) or set an `about:config` flag (Firefox) [18] |
 | cloudflare/moq-rs | `./dev/relay` generates certificates with `mkcert`. No browser steps in this repository; it points to `video-dev/moq-js` for playback [19] |
 | nttcom/moq-wasm | `make chrome` launches Chrome trusting the relay certificate [11] |
 | openmoq/moq-playa | `certHash` option (SHA-256) [14] |
@@ -57,7 +57,7 @@ MOQT drafts are not wire compatible with each other. Draft 15 and later select t
 | Rust side | Browser side | Shared versions | Evidence |
 |---|---|---|---|
 | moq-dev `moq-relay` / `moq-net` | `@moq/net` | moq-lite 01–06, MOQT 14–22 | **Tested, same author.** Nightly in-tree matrix runs headless Chromium against `moq-relay`, plus byte-level Rust↔JS codec checks for MOQT datagrams on drafts 14–22 [20] |
-| moqtail `relay` 0.15.0 | `moqtail` npm 0.13.0 | MOQT 18 | Same author, same repository. Interop record: unconfirmed |
+| moqtail `relay` 0.15.0 | `moqtail` npm 0.13.0 | MOQT 18 | **Tested** (run 2026-10-10): they interoperate on draft 18 with Chromium 156 and Chrome 155. Same author, same repository |
 | moqtail `main` | moqtail-ts `main` | MOQT 22 | Same author. Marked work in progress [7] |
 | nttcom `relay` | nttcom wasm | MOQT 14 | Same author, browser E2E target exists [11] |
 | cloudflare `moq-relay-ietf` (`main`) | `@moq/net`, `@openmoq/*` | MOQT 16 | On paper |
@@ -132,11 +132,11 @@ MOQT draft 15 and later, and moq-lite 03 and later, are selected through `protoc
 
 ## Unconfirmed
 
-- Only the moq-dev pair was executed. Every other pairing is from documentation and source reading.
+- Only the moq-dev and moqtail pairs were executed. Every other pairing is from documentation and source reading.
 - Whether `moq-dev/moq` `main` implements the draft-22 `LOCATION_FILTER` on the JS side. The released `@moq/net` 0.4.2 and `moq-net` 0.3.10 do not; the Rust side of `main` has a test for it.
 - The cause of the browser-to-browser late-join failure in `@moq/net` 0.4.2, and whether it is fixed on `main`.
 - Published pass/fail results from moq-interop-runner, and any cross-implementation result that involves a real browser.
-- moqtail: interop test records between its relay and moqtail-ts; which draft the `ghcr.io/moqtail/relay:latest` image speaks.
+- moqtail: which draft the `ghcr.io/moqtail/relay:latest` image speaks.
 - `@openmoq/*` package availability and version on npm (the registry lookup failed).
 - Lineage and maintenance of `moq-noq` / `web-transport-moq` beyond the comment that it is the project's fork of `noq`.
 - Cloudflare relay: datagram support, raw QUIC versus WebTransport details, and limits after beta.

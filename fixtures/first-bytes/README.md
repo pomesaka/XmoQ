@@ -32,7 +32,7 @@ A stream that is stopped gets STOP_SENDING `INTERNAL_ERROR` (`0x0`) where it is 
 
 ## Source
 
-**The second and third column were written for this table, and the fourth is a decision, not an observation.** No other implementation was asked: the time is XmoQ's own. The decision is the row "A stream of the peer that does not say what it is" in [the implementation notes](../../docs/moqt-implementation-notes.md), and it follows where the Rust reader cleared its deadline when the table was written (`crates/moqt-io/src/streams.rs`).
+**The second and third column were written for this table, and the fourth is a decision, not an observation.** No other implementation was asked: the time is XmoQ's own. The decision is the row "A stream of the peer that does not say what it is" in [the implementation notes](../../docs/moqt-implementation-notes.md) (`crates/moqt-io/src/streams.rs`).
 
 Where the bytes come from:
 

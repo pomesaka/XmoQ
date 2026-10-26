@@ -2,7 +2,7 @@
 
 What the two players of this repository agree on: `@xmoq/media` (`packages/media/src/core/playout-clock.ts`, `audio-seam.ts`), which the watching page plays by, and `crates/watch` (`src/clock.rs`, `src/playout.rs`), the viewer for the terminal. No draft says any of it. Both read these tables in their tests; a row is changed for both or for neither.
 
-The rows are those of the tests `@xmoq/media` had before the table was shared (`packages/media/test/playout.test.ts`), written out in whole numbers. **Every value in them is provisional**, as it is where it is defined.
+The values are written out in whole numbers. **Every value in them is provisional**, as it is where it is defined.
 
 ## `auto-buffer.tsv`: the buffer that follows how late things come
 
