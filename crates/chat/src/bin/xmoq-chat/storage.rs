@@ -13,8 +13,7 @@
 //! a line cut off by a crash in the middle of a write is the reader's to
 //! find and mend.
 //!
-//! **Provisional, not decided**: the schema, and that nothing is ever taken
-//! out of the file.
+//! **Provisional, not decided**: the schema.
 
 use std::path::Path;
 
