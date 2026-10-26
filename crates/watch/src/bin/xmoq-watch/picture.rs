@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use xmoq_picture::order::InOrder;
 use xmoq_picture::video_decoder::{Decoded, VideoDecoder};
 use xmoq_watch::args::Medium;
-use xmoq_watch::marks::Recent;
-use xmoq_watch::{fit, kitty, marks};
+use xmoq_watch::marks::{Marks, Recent};
+use xmoq_watch::{fit, kitty};
 
 use crate::sound::micros_since;
 
@@ -78,7 +78,7 @@ pub struct Seen {
     /// For the last frames drawn: how long after it was due each was
     /// written, in microseconds.
     pub after_due_us: Vec<i64>,
-    /// With `--measure-demo-marks`: when a frame with the white square was
+    /// With `--measure-marks`: when a frame with the white square was
     /// written after one without.
     pub marks_us: Vec<u64>,
     /// Bytes written to the terminal, and to the files it reads.
@@ -232,7 +232,7 @@ pub struct Picture {
     pub decoder: VideoDecoder,
     /// Times are counted from here.
     pub began: Instant,
-    pub measure_marks: bool,
+    pub measure_marks: Option<Marks>,
     /// Set when the thread is to end without drawing what waits.
     pub stop: Arc<AtomicBool>,
 }
@@ -313,8 +313,8 @@ pub fn run(picture: Picture) -> Seen {
             i64::try_from(micros_since(frame.due, now)).unwrap_or(i64::MAX)
                 - i64::try_from(micros_since(now, frame.due)).unwrap_or(i64::MAX),
         );
-        if measure_marks {
-            let marked = marks::picture_is_marked(&rgb, size);
+        if let Some(marks) = &measure_marks {
+            let marked = marks.picture_is_marked(&rgb, size);
             if marked && !was_marked && seen.marks_us.len() < MOST_COUNTED {
                 seen.marks_us.push(micros_since(began, now));
             }

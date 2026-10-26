@@ -657,7 +657,9 @@ impl Played {
         } else {
             f64::from(seen.drawn.saturating_sub(1)) / seen.shown_for.as_secs_f64()
         };
-        let apart = marks::picture_after_sound_us(&seen.marks_us, &self.sound_marks_us);
+        let apart = args.measure_marks.map_or_else(Vec::new, |marks| {
+            marks.picture_after_sound_us(&seen.marks_us, &self.sound_marks_us)
+        });
         let samples_ms = |samples: u64| samples * 1000 / u64::from(xmoq_watch::playout::RATE);
         format!(
             "AV_PLAYED why=\"{}\" seconds={:.1} buffer_ms={} buffer_auto={} buffer_ms_least/most={}/{} output_lead_ms={} volume={:.1} muted={} \
@@ -951,7 +953,7 @@ async fn play(
     // WHY a queue with an end: frames come at the publisher's pace, and
     // are drawn at the terminal's.
     let (frames, for_picture) = std_mpsc::sync_channel(MOST_FRAMES_WAITING);
-    let measure = args.measure_demo_marks;
+    let measure = args.measure_marks;
     // For measuring: the viewer's clock at another speed (`--clock-skew-ppm`).
     sound::CLOCK_SKEW_PPM.store(args.clock_skew_ppm, std::sync::atomic::Ordering::Relaxed);
     let stop_picture = Arc::new(AtomicBool::new(false));
@@ -1139,8 +1141,7 @@ async fn play(
                     } else {
                         played.audio_over_least_us.push(over_least);
                         let due_us = after_us(clock.audio_buffer_us());
-                        if sound.take(&object.payload, due_us)
-                            && measure
+                        if sound.take(&object.payload, due_us, measure.as_ref())
                             && played.sound_marks_us.len() < MOST_COUNTED
                         {
                             played.sound_marks_us.push(due_us);

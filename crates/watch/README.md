@@ -25,7 +25,7 @@ The library (`src/*.rs`) decides, and does no input or output: it is given its t
 | `kitty` | The bytes written to the terminal |
 | `tracks` | Which tracks of a catalog are played |
 | `keys` | What a key asks for |
-| `marks` | For measuring with the demo's publisher (`--measure-demo-marks`). `--clock-skew-ppm <n>`, also for measuring, has the viewer's clock run n parts in a million faster (`sound.rs`, `micros_since`) |
+| `marks` | For measuring with a publisher that marks its picture with a white square and its sound with a beep at the same moments (`--measure-marks`, where the square is and how loud the beep; the demo's publishing page has such marks, `marked` and `MARK` in `demo/shared.ts`). `--clock-skew-ppm <n>`, also for measuring, has the viewer's clock run n parts in a million faster (`sound.rs`, `micros_since`) |
 
 What the viewer shares with `xmoq-agent` is in two crates of its own. `xmoq-viewer` (`crates/viewer`) decides, without input or output: `room` (the requests and answers of the room's HTTP API, by the rows of `fixtures/room-api/`, and a line made safe for a terminal) and `chat_track` (the chat on MoQ tracks: the Groups of `said` and the lines that wait for the gatherer, which lines of `lines` are shown and in what order, and how a line is shown; the names and the JSON are `xmoq-chat-tracks`'s). `xmoq-viewer-io` (`crates/viewer-io`) does their input and output: `session.rs` (the requests on the MoQ Transport session, and the catalog), `room_client.rs` (the room's HTTP API, with a seat of a meeting renewed on a task of its own, which `xmoq-agent` takes), `chat_tracks.rs` (the chat on MoQ tracks).
 

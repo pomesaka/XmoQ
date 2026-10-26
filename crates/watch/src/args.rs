@@ -137,11 +137,11 @@ pub struct Args {
     /// counted is counted; nothing is heard. For a machine without an
     /// output.
     pub sound: bool,
-    /// `--measure-demo-marks on`: for measuring with the demo's
-    /// publisher, whose picture has a white square and whose sound a beep
-    /// at the same moments; how far apart the two leave the viewer is
-    /// reported at the end.
-    pub measure_demo_marks: bool,
+    /// `--measure-marks`: for measuring with a publisher whose picture has a
+    /// white square and whose sound a beep at the same moments, where and
+    /// how loud ([`crate::marks::Marks`]); how far apart the two leave the
+    /// viewer is reported at the end.
+    pub measure_marks: Option<crate::marks::Marks>,
     /// `--clock-skew-ppm`: for measuring. The viewer's clock runs so many
     /// parts in a million faster than the machine's (slower with a
     /// negative number), as that of a viewer on another machine does
@@ -206,8 +206,10 @@ xmoq-watch --room http(s)://host:port/broadcasts/<name> [--name terminal] [--say
   --seconds <n>                     end after so long
   --log <file>                      the lines about the room and the keys
   --sound on|off                    off: the sound is decoded and counted, and no output is opened (on)
-  --measure-demo-marks on|off       for measuring with the demo's publisher: how far apart the
-                                    white square and the beep leave the viewer (off)
+  --measure-marks x=,y=,w=,h=,every-ms=,beep=,ground=
+                                    for measuring: how far apart a publisher's white square, at
+                                    (x, y) of w x h, and its beep, beep over ground, leave the
+                                    viewer, a mark every every-ms (none)
   --clock-skew-ppm <n>              for measuring: the viewer's clock runs n parts in a million
                                     faster than the machine's (0)
   --cut-sound-s <n>                 for measuring: the sound's subscription is cancelled once, n s
@@ -316,7 +318,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         seconds: None,
         log: None,
         sound: true,
-        measure_demo_marks: false,
+        measure_marks: None,
         clock_skew_ppm: 0,
         cut_sound_s: None,
     };
@@ -414,8 +416,10 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             "--cut-sound-s" => args.cut_sound_s = Some(number(&flag, &value)?),
             "--log" => args.log = Some(value),
             "--sound" => args.sound = one_of(&flag, &value, &[("on", true), ("off", false)])?,
-            "--measure-demo-marks" => {
-                args.measure_demo_marks = one_of(&flag, &value, &[("on", true), ("off", false)])?;
+            "--measure-marks" => {
+                let marks = crate::marks::Marks::parse(&value)
+                    .map_err(|why| Invalid(format!("--measure-marks {value}: {why}")))?;
+                args.measure_marks = Some(marks);
             }
             "--clock-skew-ppm" => {
                 args.clock_skew_ppm = number(&flag, &value)?;
@@ -542,7 +546,7 @@ mod tests {
             seconds: None,
             log: None,
             sound: true,
-            measure_demo_marks: false,
+            measure_marks: None,
             clock_skew_ppm: 0,
             cut_sound_s: None,
         }
@@ -629,6 +633,17 @@ mod tests {
         }
     }
 
+    /// What `--measure-marks` gives in [`the_flags_are_read`].
+    const MARKS: crate::marks::Marks = crate::marks::Marks {
+        x: 580,
+        y: 60,
+        w: 640,
+        h: 360,
+        every_ms: 2000,
+        beep: 0.6,
+        ground: 0.25,
+    };
+
     #[test]
     fn the_flags_are_read() {
         let hash = "0f".repeat(32);
@@ -647,7 +662,8 @@ mod tests {
             parsed(
                 "--room http://h/broadcasts/a --name me --say hello --token no --video v --audio a \
                  --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --room-wait-ms 600 --connect-wait-ms 700 --rendezvous-timeout-ms 4500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
-                 --seconds 20 --log l --sound off --measure-demo-marks on --cut-sound-s 5"
+                 --seconds 20 --log l --sound off \
+                 --measure-marks x=580,y=60,w=640,h=360,every-ms=2000,beep=0.6,ground=0.25 --cut-sound-s 5"
             ),
             Ok(Args {
                 source: Source::Room {
@@ -683,7 +699,7 @@ mod tests {
                 seconds: Some(20),
                 log: Some("l".to_string()),
                 sound: false,
-                measure_demo_marks: true,
+                measure_marks: Some(MARKS),
                 clock_skew_ppm: 0,
                 cut_sound_s: Some(5),
             })
@@ -824,8 +840,8 @@ mod tests {
                 "--sound loud: on or off",
             ),
             (
-                "--room http://h/broadcasts/a --measure-demo-marks 1".to_string(),
-                "--measure-demo-marks 1: on or off",
+                "--room http://h/broadcasts/a --measure-marks x=1".to_string(),
+                "--measure-marks x=1: y is missing",
             ),
         ];
         for (flags, said) in cases {
