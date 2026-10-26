@@ -55,29 +55,30 @@ describe("which tracks of a catalog are received", () => {
 });
 
 describe("the limits of a meeting", () => {
-	const meeting = (mostWatched?: number, mostOthers?: number) => () =>
+	const meeting = (mostWatched: number, mostOthers: number) => () =>
 		createMeeting({
 			room: "r",
 			self: "me",
-			...(mostWatched === undefined ? {} : { mostWatched }),
-			...(mostOthers === undefined ? {} : { mostOthers }),
+			mostWatched,
+			mostOthers,
 			onFrame: () => {},
 			onAudio: () => {},
 		});
 
 	test.each([
-		["no video at all", 0, undefined],
-		["one other", undefined, 1],
-		["the defaults", undefined, undefined],
+		["no video at all", 0, 48],
+		["one other", 8, 1],
+		["more videos than others", 8, 4],
 	])("%s is taken", (_case, mostWatched, mostOthers) => {
 		expect(meeting(mostWatched, mostOthers)).not.toThrow();
 	});
 
 	test.each([
-		["fewer than no videos", -1, undefined],
-		["part of a video", 1.5, undefined],
-		["no others", undefined, 0],
-		["no number of others", undefined, Number.NaN],
+		["fewer than no videos", -1, 48],
+		["part of a video", 1.5, 48],
+		["no others", 8, 0],
+		["no number of others", 8, Number.NaN],
+		["no number of videos", Number.POSITIVE_INFINITY, 48],
 	])("%s is refused", (_case, mostWatched, mostOthers) => {
 		expect(meeting(mostWatched, mostOthers)).toThrow(RangeError);
 	});

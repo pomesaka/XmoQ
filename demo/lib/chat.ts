@@ -1,7 +1,7 @@
 // The chat under the picture of the pages, as the demo shows it
 // (`showChat` of `@xmoq/chat`): its elements are `#chat`, `#chat-note` and
-// the page's form, and its limits come from the address. Where `serve.ts`
-// runs no gatherer, the page has no chat.
+// the page's form, and its limits are those `serve.ts` started the gatherer
+// with. Where `serve.ts` runs no gatherer, the page has no chat.
 
 import {
 	type ChatConnection,
@@ -9,30 +9,17 @@ import {
 	type ChatRoom,
 	type ChatSaying,
 	catchUpLines,
-	chatLimits,
 	type ReceivedLine,
 	showChat,
 } from "@xmoq/chat";
 import type { GoAwayNotice } from "@xmoq/moqt";
 
-declare const XMOQ_DEMO: { chatTracks: boolean };
-
 /**
- * `?chatTextBytes=N` and `?chatLinesPerSecond=N`: the limits of a line,
- * which the gatherer has from its flags (`--text-bytes`,
- * `--lines-per-second`). The page keeps a line over them back and says so,
- * as the gatherer would drop it; set them as the gatherer is run. The
- * defaults are the gatherer's.
+ * Whether the gatherer runs, and the limits of a line it was started with
+ * (`--chat-text-bytes`, `--chat-lines-per-second` of `serve.ts`): a page
+ * keeps a line over them back and says so, as the gatherer would drop it.
  */
-function limitsOfTheAddress(): ChatLimits {
-	const query = new URLSearchParams(location.search);
-	const given: Partial<ChatLimits> = {};
-	const textBytes = query.get("chatTextBytes");
-	const linesPerSecond = query.get("chatLinesPerSecond");
-	if (textBytes !== null) given.textBytes = Number(textBytes);
-	if (linesPerSecond !== null) given.linesPerSecond = Number(linesPerSecond);
-	return chatLimits(given);
-}
+declare const XMOQ_DEMO: { chatTracks: boolean; chatLimits: ChatLimits };
 
 /**
  * `?chatCatchUpLines=N`: how many of the lines it missed the page fetches
@@ -61,15 +48,6 @@ export function startChat(
 	const say = (text: string): void => {
 		if (note !== null) note.textContent = text;
 	};
-	let limits: ChatLimits;
-	try {
-		limits = limitsOfTheAddress();
-	} catch (error) {
-		say(
-			`the chat's limits of the address: ${String(error)}; the defaults are used`,
-		);
-		limits = chatLimits();
-	}
 	let catchUp: number;
 	try {
 		catchUp = catchUpOfTheAddress();
@@ -85,7 +63,7 @@ export function startChat(
 			room,
 			name,
 			connect: connectForChat,
-			limits,
+			limits: XMOQ_DEMO.chatLimits,
 			catchUpLines: catchUp,
 			shownLines,
 			...(onLine === undefined ? {} : { onLine }),

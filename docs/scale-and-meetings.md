@@ -127,7 +127,7 @@ The room of the spike gives a token to anyone, and who may get one is undecided 
 | b. A list of invited people | The room checks who asks | — | Needs authentication, which is undecided |
 | c. A host admits | The room holds who asks until the host lets them in | — | A host's page and a waiting state in the room |
 
-**Where the limit of 49 holds, decided on 2026-10-25: at the room.** The room counts the participants of a meeting and gives no token past 49; a page keeps 48 others besides, so that a relay that tells of more is not followed past them (`DEFAULT_MOST_OTHERS` of `@xmoq/meeting`).
+**Where the limit of 49 holds, decided on 2026-10-25: at the room.** The room counts the participants of a meeting and gives no token past 49; a page keeps 48 others besides, so that a relay that tells of more is not followed past them (`mostOthers` of `createMeeting`, which the demo's page takes from the seats its room says).
 
 **Recommended: a to begin with**, with the tokens it already makes: one to publish on the participant's own namespace, `xmoq/meet/<room>/<participant>`, and one to subscribe to `xmoq/meet/<room>/*` (a `*` at the end allows the namespaces under it, decided on 2026-10-24), and the chat's two. b or c when authentication is decided. An agent is brought in by a participant, who gets a token for it from the room, so that somebody present answers for it.
 

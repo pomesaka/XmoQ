@@ -28,16 +28,6 @@ import {
 } from "../core/presence.ts";
 import { type ChosenTracks, chooseTracks } from "../core/tracks.ts";
 
-/** Whose video is received at once: decided on 2026-10-25, the small version of 8 as they came. */
-export const DEFAULT_MOST_WATCHED = 8;
-
-/**
- * The others kept. Decided on 2026-10-25: the room counts the participants
- * and gives no token past 49, and a page keeps 48 others besides, so that a
- * relay that tells of more is not followed past them.
- */
-export const DEFAULT_MOST_OTHERS = 48;
-
 /**
  * How long the SUBSCRIBE for a participant's catalog asks the relay to wait
  * for it (RENDEZVOUS_TIMEOUT, §10.2.6): a participant announces its
@@ -75,10 +65,14 @@ export interface MeetingOptions {
 	room: string;
 	/** This participant's id, whose own broadcast is not received. */
 	self: string;
-	/** `DEFAULT_MOST_WATCHED` when left out; 0 receives no video. */
-	mostWatched?: number;
-	/** `DEFAULT_MOST_OTHERS` when left out. */
-	mostOthers?: number;
+	/** Whose video is received at once, the first that many as they came; 0 receives no video. The application's to choose: a video costs the page a decoder. */
+	mostWatched: number;
+	/**
+	 * The others kept, from 1: a relay that tells of more is not followed
+	 * past them. The application's to choose; one below the seats of the
+	 * meeting's room keeps everybody the room lets in.
+	 */
+	mostOthers: number;
 	/** Each decoded frame of `id`, and where it came from; **the callee closes it**, as `PlayVideoTrackOptions.onFrame`. */
 	onFrame(id: string, frame: VideoFrame, at: FrameOrigin | undefined): void;
 	/** Each decoded piece of the sound of `id`; **the callee closes it**, as `PlayAudioTrackOptions.onData`. */
@@ -133,16 +127,8 @@ function wholeFrom(name: string, value: number, least: number): number {
  * is no whole number from 0, or a `mostOthers` from 1.
  */
 export function createMeeting(options: MeetingOptions): Meeting {
-	const mostWatched = wholeFrom(
-		"mostWatched",
-		options.mostWatched ?? DEFAULT_MOST_WATCHED,
-		0,
-	);
-	const mostOthers = wholeFrom(
-		"mostOthers",
-		options.mostOthers ?? DEFAULT_MOST_OTHERS,
-		1,
-	);
+	const mostWatched = wholeFrom("mostWatched", options.mostWatched, 0);
+	const mostOthers = wholeFrom("mostOthers", options.mostOthers, 1);
 	const presence = createPresence(mostOthers);
 	const tell = (event: MeetingEvent): void => options.onEvent?.(event);
 

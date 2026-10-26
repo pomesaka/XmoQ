@@ -78,6 +78,11 @@ import { BROADCAST, KEPT_DELAY_MS, VOICE } from "./xmoq-page.ts";
 /** Provisional: any value works, the relay maps it to its own alias per subscriber. */
 const PUBLISH_TRACK_ALIAS = 1n;
 
+/** The others a meeting of the runs keeps: the demo's, one below the 49 seats of a meeting's room. */
+const MOST_OTHERS = 48;
+/** The videos a kept meeting (`keepMeeting`) receives at once: the demo's. */
+const KEPT_MEETING_WATCHED = 8;
+
 function fromHex(hex: string): Uint8Array<ArrayBuffer> {
 	if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) {
 		throw new Error(`not a hex string of whole bytes: "${hex}"`);
@@ -1013,6 +1018,7 @@ window.xmoqOwn = {
 				room,
 				self,
 				mostWatched,
+				mostOthers: MOST_OTHERS,
 				onFrame(id, frame, at) {
 					bridge.frame(id, frame, at);
 					frame.close();
@@ -2143,6 +2149,8 @@ window.xmoqOwn = {
 			const meeting = createMeeting({
 				room,
 				self,
+				mostWatched: KEPT_MEETING_WATCHED,
+				mostOthers: MOST_OTHERS,
 				onFrame: (_id, frame) => frame.close(),
 				onAudio: (_id, data) => data.close(),
 			});
