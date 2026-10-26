@@ -32,7 +32,7 @@ Read off `src/main.rs` on 2026-10-25. The limits are there to be fitted to the m
 | `--held-beyond-cache-bytes` | How many bytes the fetch streams it writes may keep alive of Groups its cache has let go of; a session has an eighth | 268,435,456 |
 | `--cached-fetch-least-kbps` | The rate it has to take such a stream at, at the least: a larger Group has as long as it takes at that rate | 500 |
 | `--delivery-patience-ms` | Experiment: what a subscriber gets that asked for no delivery timeout | Off |
-| `--auth-key-hex`, `--auth-setup off` | Experiment: the key tokens are checked with, and whether SETUP is asked for one | No tokens; on with a key |
+| `--auth-key-hex`, `--auth-setup off` | Experiment: the key tokens are checked with (hex, one byte at least: an empty one is refused), and whether SETUP is asked for one | No tokens; on with a key |
 | `--upstream`, `--upstream-cert-sha256`, `--upstream-namespace` | The relay above this one, asked for the tracks under that namespace that nobody announced here; the first two go together | No upstream; every namespace with `--upstream` alone |
 | `--redirect-uri` | The New Session URI of the GOAWAY the relay sends when it is told to stop | Empty: the URI the client used |
 | `--goaway-timeout-ms` | The Timeout of that GOAWAY, and how long the relay waits before it closes the sessions that are left | 10,000 |

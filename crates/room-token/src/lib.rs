@@ -124,6 +124,17 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// The bytes of the key given as `--auth-key-hex`: none for text that is not
+/// hex, or is empty. WHY not an empty key: anybody makes the mac of a key of
+/// no bytes, and the room (`worker.js`, `token`) takes an empty
+/// `AUTH_KEY_HEX` for no key at all, so an empty flag (a variable left
+/// unset) would have a relay that lets everybody in look like one that asks
+/// for tokens.
+#[must_use]
+pub fn key_of_hex(text: &str) -> Option<Vec<u8>> {
+    unhex(text).filter(|key| !key.is_empty())
+}
+
 /// Whether the namespace a token names, its fields joined with `/`, allows
 /// the namespace `asked`: the same fields, or, where the last field of the
 /// token is `*`, the fields before it, followed by any or none. Field by
@@ -175,6 +186,20 @@ mod tests {
             RoomKey::new(b"another key").read(made.as_bytes()),
             Err(Fault::NotOfTheKey)
         );
+    }
+
+    #[test]
+    fn a_key_is_hex_of_one_byte_at_least() {
+        let cases: [(&str, Option<&[u8]>); 5] = [
+            ("00ff", Some(&[0x00, 0xff])),
+            ("AB", Some(&[0xab])),
+            ("", None),
+            ("abc", None),
+            ("zz", None),
+        ];
+        for (text, key) in cases {
+            assert_eq!(key_of_hex(text).as_deref(), key, "{text:?}");
+        }
     }
 
     #[test]

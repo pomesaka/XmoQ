@@ -22,7 +22,7 @@ mod tests;
 
 use std::sync::Arc;
 use std::time::Duration;
-use xmoq_room_token::unhex;
+use xmoq_room_token::{key_of_hex, unhex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::Semaphore;
@@ -335,6 +335,11 @@ fn more_than_none(flag: &str, value: &str) -> Result<usize> {
     Ok(count)
 }
 
+/// The key a flag gives (`key_of_hex`).
+fn key(flag: &str, value: &str) -> Result<Vec<u8>> {
+    key_of_hex(value).with_context(|| format!("{flag} is hex of one byte at least"))
+}
+
 /// What a flag of `on` or `off` gives.
 fn on_or_off(flag: &str, value: &str) -> Result<bool> {
     match value {
@@ -412,9 +417,7 @@ fn parse_args() -> Result<Args> {
             "--delivery-patience-ms" => delivery_patience = Some(millis(&flag, &value)?),
             "--stats-every-ms" => stats_every = Some(millis(&flag, &value)?),
             "--log-arrivals" => log_arrivals = on_or_off(&flag, &value)?,
-            "--auth-key-hex" => {
-                auth_key = Some(unhex(&value).context("--auth-key-hex is not hex")?);
-            }
+            "--auth-key-hex" => auth_key = Some(key(&flag, &value)?),
             "--auth-setup" => auth_setup = on_or_off(&flag, &value)?,
             "--redirect-uri" => redirect_uri = value.into_bytes(),
             "--goaway-timeout-ms" => goaway_timeout_ms = number(&flag, &value)?,

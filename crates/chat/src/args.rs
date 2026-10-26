@@ -162,8 +162,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--auth-key-hex" => {
                 auth_key = Some(
-                    xmoq_room_token::unhex(&value)
-                        .filter(|key| !key.is_empty())
+                    xmoq_room_token::key_of_hex(&value)
                         .ok_or_else(|| format!("--auth-key-hex is hex digits, not {value:?}"))?,
                 );
             }
