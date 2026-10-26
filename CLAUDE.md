@@ -15,9 +15,9 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 
 | コマンド | いつ走らせるか |
 |---|---|
-| `mise run check` | 終わったと報告する前。CIと同じ検査の全部 |
+| `mise run check` | CIと同じ検査の全部。全体はPRのCIが走らせるので、ローカルでは走らせなくてよい |
 | `mise run fmt` | 整形した後と、記録か照合の台本を足した後（生成する索引も書き直す） |
-| `mise run interop` | `crates/`、`packages/`、`interop/`、`fixtures/`を変えた後。`check`には入っていない |
+| `mise run interop` | `check`には入っていない。全体はPRのCIが走らせる。ローカルでは触った部品の場面を`--only`で走らせる |
 
 タスクの一覧と説明は`mise tasks`が出す。説明は`mise.toml`のdescriptionにだけ書き、ほかの文書に写さない。旗と既定値は各プログラムの`USAGE`（無ければ`Args`のdoc）、旗の組み合わせと手順は各部品のREADMEにある。
 
@@ -62,7 +62,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 
 本体のコード（`crates/`、`packages/`）は、次の順で`main`に入れる。
 
-1. 実装する。終わったと報告する前に`mise run check`を実際に走らせ、その出力を報告に含める。通っていない状態で終わったと報告しない。`crates/`、`packages/`、`interop/`、`fixtures/`を変えたら`mise run interop`も走らせる
+1. 実装する。終わったと報告する前に、触った範囲の検査を実際に走らせ、その出力を報告に含める。触ったcrateの`cargo test -p`と`cargo clippy -p`、触ったパッケージの`bun test`と型検査、照合は触った部品の場面を`--only`で。通っていない状態で終わったと報告しない。検査の全体（`mise run check`と照合の全体）はPRのCIが走らせ、CIが通ってからマージする。WHY: 全体をローカルとCIで2度走らせない。照合の全体は1回10分かかり、同じマシンでは1つずつしか走らせられない
 2. 実装者とは別のレビュアーがコードを読む（`/review-team-xmoq`）。レビュアーには実装者の報告を渡さず、差分だけを渡す
 3. 指摘は実装者が直す。直したことは差分と検査の再実行で確かめる
 4. ブランチをPRにする。CIが通ってからマージする。`main`へ直接pushしない
