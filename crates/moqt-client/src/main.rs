@@ -3346,7 +3346,9 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmoq_moqt::message::{Publish, PublishDone, PublishNamespace, Subscribe};
+    use xmoq_moqt::message::{
+        Publish, PublishDone, PublishNamespace, Subscribe, SubscribeNamespace,
+    };
 
     #[test]
     fn the_first_group_is_a_number_or_the_time() {
@@ -3455,28 +3457,56 @@ mod tests {
         let fetch = PeerRequest::Fetch(Fetch {
             request_id: 1,
             range: FetchRange::Standalone {
-                full_track_name: track,
+                full_track_name: track.clone(),
                 start: at(0, 0),
                 end: at(1, 0),
             },
             parameters: vec![],
         });
-        // NOT_SUPPORTED (0x3), DOES_NOT_EXIST (0x10), UNINTERESTED (0x20).
-        // (the request; in the mode that sends PUBLISH; in the mode that
-        //  serves a SUBSCRIBE)
-        let cases = [
-            (&subscribe, 0x3, 0x10),
-            (&publish, 0x3, 0x20),
-            (&publish_namespace, 0x3, 0x20),
-            (&fetch, 0x3, 0x3),
-        ];
-        for (request, publishing, serving) in cases {
-            assert_eq!(
-                (refusal_code(false, request), refusal_code(true, request)),
-                (publishing, serving),
-                "{request:?}"
-            );
+        let subscribe_namespace = PeerRequest::SubscribeNamespace(SubscribeNamespace {
+            request_id: 1,
+            track_namespace_prefix: track.namespace().clone(),
+            parameters: vec![],
+        });
+        let track_status = PeerRequest::TrackStatus(Subscribe {
+            request_id: 1,
+            full_track_name: track,
+            parameters: vec![],
+        });
+        // The rows of `fixtures/client-refusals/refusals.tsv`, which
+        // `@xmoq/moqt` reads as well.
+        let table = include_str!("../../../fixtures/client-refusals/refusals.tsv");
+        let mut read = 0;
+        for line in table.lines() {
+            let [name, serves, code] = line.split('\t').collect::<Vec<_>>()[..] else {
+                panic!("a row of three fields: {line}");
+            };
+            let request = match name {
+                "subscribe" => &subscribe,
+                "publish" => &publish,
+                "publish-namespace" => &publish_namespace,
+                "fetch" => &fetch,
+                "subscribe-namespace" => &subscribe_namespace,
+                "track-status" => &track_status,
+                other => panic!("no request {other}"),
+            };
+            let code = u64::from_str_radix(code.trim_start_matches("0x"), 16).unwrap();
+            let serves = match serves {
+                "yes" => true,
+                "no" => false,
+                other => panic!("no serves {other}"),
+            };
+            assert_eq!(refusal_code(serves, request), code, "{line}");
+            read += 1;
         }
+        assert_eq!(read, 11);
+        // Not in the table: a SUBSCRIBE in the mode that serves one is the
+        // application's to answer in `@xmoq/moqt`; this client refuses one
+        // for another track with DOES_NOT_EXIST.
+        assert_eq!(
+            refusal_code(true, &subscribe),
+            request_error_code::DOES_NOT_EXIST
+        );
     }
 
     #[test]
