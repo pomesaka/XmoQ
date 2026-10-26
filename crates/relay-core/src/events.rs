@@ -350,10 +350,10 @@ pub enum Event {
         /// The session.
         session: SessionKey,
     },
-    /// The Retry Interval of an announcement the upstream refused is over.
-    /// Answers [`Action::StartUpstreamAnnouncementTimer`].
-    UpstreamAnnouncementTimeout {
-        /// The session with the upstream.
+    /// The Retry Interval of an announcement the parent refused is over.
+    /// Answers [`Action::StartParentAnnouncementTimer`].
+    ParentAnnouncementTimeout {
+        /// The session with the parent.
         session: SessionKey,
     },
     /// The time a SUBSCRIBE is held for a publisher to appear is over
@@ -401,9 +401,9 @@ pub enum Event {
         /// The session.
         session: SessionKey,
     },
-    /// No session with the upstream relay came of
-    /// [`Action::ConnectUpstream`].
-    UpstreamFailed,
+    /// No session with the parent relay came of
+    /// [`Action::ConnectParent`].
+    ParentFailed,
     /// The relay is to stop: every session is told with GOAWAY (§3.6, §10.4),
     /// and a session that opens later is told after its SETUP. A session of
     /// which the relay is the client gets an empty New Session URI (§10.4: "A
@@ -742,7 +742,7 @@ pub enum Action {
     },
     /// A SUBSCRIBE of the peer was taken and is not answered yet: it waits
     /// for a publisher to answer the relay, to appear (§10.2.6), or for the
-    /// session with the upstream. Nothing is to be done; it is for the log,
+    /// session with the parent. Nothing is to be done; it is for the log,
     /// whose line (`HOLD_REQUEST`) the interop run waits for
     /// (`interop/rendezvous.ts`, `interop/catalog.ts`): one that came for a
     /// SUBSCRIBE that was answered would have a run go on at the wrong
@@ -753,11 +753,11 @@ pub enum Action {
         /// The request stream of the SUBSCRIBE.
         stream: StreamKey,
     },
-    /// Report [`Event::UpstreamAnnouncementTimeout`] after `wait_ms`: the
-    /// upstream refused an announcement of the relay for its load, and said
+    /// Report [`Event::ParentAnnouncementTimeout`] after `wait_ms`: the
+    /// parent refused an announcement of the relay for its load, and said
     /// when to send it again (the Retry Interval, §10.6.2).
-    StartUpstreamAnnouncementTimer {
-        /// The session with the upstream.
+    StartParentAnnouncementTimer {
+        /// The session with the parent.
         session: SessionKey,
         /// The wait, in milliseconds.
         wait_ms: u64,
@@ -904,12 +904,12 @@ pub enum Action {
         /// Why, for the log and for the peer.
         reason: String,
     },
-    /// Connect to the upstream relay ([`Relay::set_upstream`](crate::Relay::set_upstream)).
+    /// Connect to the parent relay ([`Relay::set_parent`](crate::Relay::set_parent)).
     /// The I/O side reports [`Event::SessionOpened`] with [`Role::Client`]
-    /// once the session is there, or [`Event::UpstreamFailed`]. It is asked
+    /// once the session is there, or [`Event::ParentFailed`]. It is asked
     /// for again only after one of the two.
-    ConnectUpstream {
-        /// Where: the New Session URI of a GOAWAY of the upstream (§10.4),
+    ConnectParent {
+        /// Where: the New Session URI of a GOAWAY of the parent (§10.4),
         /// and empty for the place the relay was given.
         uri: Vec<u8>,
         /// How long to wait before connecting, in milliseconds.

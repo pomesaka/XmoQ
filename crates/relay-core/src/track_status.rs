@@ -44,7 +44,7 @@ pub(crate) struct Relayed {
 
 /// The subscribers' `TRACK_STATUS` requests that wait for a publisher, by
 /// their session and request stream; and those that wait for the session
-/// with the upstream relay to be there (`upstream.rs`), to be asked then.
+/// with the parent relay to be there (`parent.rs`), to be asked then.
 #[derive(Debug, Default)]
 pub(crate) struct TrackStatuses(
     HashMap<(SessionKey, StreamKey), Relayed>,
@@ -116,7 +116,7 @@ impl Relay {
             }
             // Asked once its session is there, or refused when none comes
             // of it, within the time of a connect.
-            Err(None) if self.waits_for_upstream(track, actions) => {
+            Err(None) if self.waits_for_parent(track, actions) => {
                 self.track_statuses
                     .1
                     .insert((session, stream), (request, asked.clone()));
@@ -133,17 +133,17 @@ impl Relay {
         }
     }
 
-    /// The session with the upstream is there: the `TRACK_STATUS` requests
+    /// The session with the parent is there: the `TRACK_STATUS` requests
     /// that waited for it are taken as when they came.
-    pub(crate) fn ask_track_statuses_held_for_upstream(&mut self, actions: &mut Vec<Action>) {
+    pub(crate) fn ask_track_statuses_held_for_parent(&mut self, actions: &mut Vec<Action>) {
         for ((session, stream), (request, asked)) in std::mem::take(&mut self.track_statuses.1) {
             self.on_track_status(session, stream, request, &asked, actions);
         }
     }
 
-    /// No session with the upstream came: the `TRACK_STATUS` requests that
+    /// No session with the parent came: the `TRACK_STATUS` requests that
     /// waited for it are refused.
-    pub(crate) fn refuse_track_statuses_held_for_upstream(
+    pub(crate) fn refuse_track_statuses_held_for_parent(
         &mut self,
         refusal: &Refusal,
         actions: &mut Vec<Action>,
@@ -219,7 +219,7 @@ impl Relay {
             .copied()
             .unwrap_or(0);
         let over_a_share = for_this_session >= self.requests_for_one;
-        // The relay's own token alone, for the upstream relay.
+        // The relay's own token alone, for the parent relay.
         let parameters = self
             .token_for(publisher, crate::Operation::Subscribe)
             .into_iter()

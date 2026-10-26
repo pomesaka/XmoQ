@@ -1,5 +1,5 @@
 #!/bin/sh
-# One publisher at an origin relay, two edge relays below it (--upstream), and N viewers of one
+# One publisher at an origin relay, two edge relays below it (--parent), and N viewers of one
 # video track at each edge; or, with EDGES=0, the 2N viewers at the origin itself, to compare.
 # What reaches the origin, how many copies of each Group it sends, what each relay takes of the
 # machine, and how late the frames come. As spikes/fanout/run.sh, which it follows.
@@ -40,7 +40,7 @@ relay() { # <port> <log> [flags]
 relay "$port" origin
 n=1
 while [ "$n" -le "$edges" ]; do
-  relay $((port + n)) "edge$n" --upstream "https://127.0.0.1:$port" --upstream-cert-sha256 "$sha"
+  relay $((port + n)) "edge$n" --parent "https://127.0.0.1:$port" --parent-cert-sha256 "$sha"
   n=$((n + 1))
 done
 sleep 1
@@ -101,7 +101,7 @@ def groups(name):
     for g in re.findall(r"^OPEN_DATA session=\d+ out=\d+ track_alias=\d+ group=(\d+)", text, re.M):
         by[g] = by.get(g, 0) + 1
     counts = sorted(by.values())
-    return (statistics.median(counts) if counts else 0, len(re.findall(r"^UPSTREAM_CONNECTED", text, re.M)),
+    return (statistics.median(counts) if counts else 0, len(re.findall(r"^PARENT_CONNECTED", text, re.M)),
             len(re.findall(r"^SESSION_OPENED", text, re.M)))
 o = ps("origin"); og = groups("origin")
 line = ("EDGE_FANOUT edges=%d viewers_at_each=%d viewers=%d frames=%d origin_sessions=%d origin_copies_a_group=%s "

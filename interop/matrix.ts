@@ -157,7 +157,7 @@ const ANNOUNCE_ONLY: Pairing[] = ["moqtail-rust", "own-rust"].map(
 );
 
 /**
- * Two relays, the run's above an own one (`--upstream` of the own relay,
+ * Two relays, the run's above an own one (`--parent` of the own relay,
  * `docs/scale-and-meetings.md`): the publisher is at the run's relay, the
  * subscribers at the own relay below it, which asks the one above for the
  * track. "edge: " lets `--only` pick these runs alone.
@@ -1402,7 +1402,7 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		},
 		{
 			// "edge: " lets `--only` pick it with the others through two relays.
-			name: "own relay: edge: chat: the gatherer at the relay above hears and numbers the participants at an own relay below, which announces their namespaces upstream once each and withdraws them as they leave",
+			name: "own relay: edge: chat: the gatherer at the relay above hears and numbers the participants at an own relay below, which announces their namespaces to it once each and withdraws them as they leave",
 			script: "chat-edge.ts",
 			args: [],
 			relay: "own",
@@ -1824,7 +1824,7 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 		},
 		{
 			// "edge: " lets `--only` pick it with the others through two relays.
-			name: "own relay: edge: auth: both relays ask for tokens, the one below makes its own for its SETUP and its SUBSCRIBE upstream, and checks its viewers as before",
+			name: "own relay: edge: auth: both relays ask for tokens, the one below makes its own for its SETUP and its SUBSCRIBE to the one above, and checks its viewers as before",
 			script: "auth-edge.ts",
 			args: [],
 			relay: "own",

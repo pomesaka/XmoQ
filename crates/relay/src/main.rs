@@ -74,7 +74,7 @@ xmoq-relay --port <port> --cert-file <pem> --key-file <pem> [flags]
   --peer-requests-per-session <n>       the requests a session may have open at the relay (256)
   --own-requests-per-session <n>        the requests the relay may have open on a session: SUBSCRIBE,
                                         FETCH and TRACK_STATUS, not the namespaces it announces
-                                        upstream (64)
+                                        to the parent (64)
   --namespaces-per-session <n>          the namespaces a session may have announced (64)
   --requests-for-one-session <n>        the requests the relay has open on one publisher for one
                                         subscriber's session (8)
@@ -87,10 +87,10 @@ xmoq-relay --port <port> --cert-file <pem> --key-file <pem> [flags]
                                         streams may keep alive; a session has an eighth (256 MiB)
   --auth-key-hex <hex>                  an experiment: the key tokens are checked with (no tokens)
   --auth-setup on|off                   with a key, whether a SETUP is asked for a token (on)
-  --upstream <url>, --upstream-cert-sha256 <hex>
+  --parent <url>, --parent-cert-sha256 <hex>
                                         the relay above this one, asked for the tracks nobody
                                         announced here; the two go together (none)
-  --upstream-namespace <a/b>            the namespace asked of it (every namespace)
+  --parent-namespace <a/b>              the namespace asked of it (every namespace)
   --redirect-uri <uri>                  the New Session URI of the GOAWAY sent when the relay is told
                                         to stop (empty: the URI the client used)
   --goaway-timeout-ms <ms>              the Timeout of that GOAWAY, and the wait before the sessions
@@ -239,10 +239,10 @@ struct Args {
     /// relay waits before it closes the sessions that are left
     /// ([`GOAWAY_TIMEOUT_MS`] where it is not said).
     goaway_timeout_ms: u64,
-    /// `--upstream`, `--upstream-cert-sha256`, `--upstream-namespace`: the
+    /// `--parent`, `--parent-cert-sha256`, `--parent-namespace`: the
     /// relay above this one, which is asked for the tracks of that
-    /// namespace nobody announced here ([`hub::Upstream`]).
-    upstream: Option<UpstreamArgs>,
+    /// namespace nobody announced here ([`hub::Parent`]).
+    parent: Option<ParentArgs>,
 }
 
 /// `--session-send-bytes`, `--session-send-objects`,
@@ -321,38 +321,38 @@ impl SessionFlags {
     }
 }
 
-struct UpstreamArgs {
+struct ParentArgs {
     url: String,
     /// The SHA-256 of its certificate, which is pinned.
     cert_sha256: [u8; 32],
-    /// Every namespace where `--upstream-namespace` is not said; its fields
+    /// Every namespace where `--parent-namespace` is not said; its fields
     /// are separated by `/`.
     namespace: TrackNamespace,
 }
 
-/// The upstream flags, all or none of the first two.
-fn upstream_args(
+/// The parent flags, all or none of the first two.
+fn parent_args(
     url: Option<String>,
     cert_sha256: Option<String>,
     namespace: Option<String>,
-) -> Result<Option<UpstreamArgs>> {
+) -> Result<Option<ParentArgs>> {
     let (url, cert_sha256) = match (url, cert_sha256) {
         (None, None) if namespace.is_none() => return Ok(None),
         (Some(url), Some(cert_sha256)) => (url, cert_sha256),
-        _ => bail!("--upstream and --upstream-cert-sha256 go together"),
+        _ => bail!("--parent and --parent-cert-sha256 go together"),
     };
     let cert_sha256 = unhex(&cert_sha256)
-        .context("--upstream-cert-sha256 is not hex")?
+        .context("--parent-cert-sha256 is not hex")?
         .try_into()
-        .map_err(|_| anyhow!("--upstream-cert-sha256 must be 32 bytes"))?;
+        .map_err(|_| anyhow!("--parent-cert-sha256 must be 32 bytes"))?;
     let fields = namespace
         .unwrap_or_default()
         .split('/')
         .filter(|field| !field.is_empty())
         .map(|field| field.as_bytes().to_vec())
         .collect();
-    let namespace = TrackNamespace::new(fields).context("--upstream-namespace")?;
-    Ok(Some(UpstreamArgs {
+    let namespace = TrackNamespace::new(fields).context("--parent-namespace")?;
+    Ok(Some(ParentArgs {
         url,
         cert_sha256,
         namespace,
@@ -425,7 +425,7 @@ fn parse_args() -> Result<Args> {
     let mut auth_setup = true;
     let mut redirect_uri = Vec::new();
     let mut goaway_timeout_ms = GOAWAY_TIMEOUT_MS;
-    let (mut upstream, mut upstream_cert, mut upstream_namespace) = (None, None, None);
+    let (mut parent, mut parent_cert, mut parent_namespace) = (None, None, None);
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -469,9 +469,9 @@ fn parse_args() -> Result<Args> {
             "--auth-setup" => auth_setup = on_or_off(&flag, &value)?,
             "--redirect-uri" => redirect_uri = value.into_bytes(),
             "--goaway-timeout-ms" => goaway_timeout_ms = number(&flag, &value)?,
-            "--upstream" => upstream = Some(value),
-            "--upstream-cert-sha256" => upstream_cert = Some(value),
-            "--upstream-namespace" => upstream_namespace = Some(value),
+            "--parent" => parent = Some(value),
+            "--parent-cert-sha256" => parent_cert = Some(value),
+            "--parent-namespace" => parent_namespace = Some(value),
             other if send.take(other, &value)? || session.take(other, &value)? => {}
             other => bail!("unknown flag {other}"),
         }
@@ -501,7 +501,7 @@ fn parse_args() -> Result<Args> {
         auth_setup,
         redirect_uri,
         goaway_timeout_ms,
-        upstream: upstream_args(upstream, upstream_cert, upstream_namespace)?,
+        parent: parent_args(parent, parent_cert, parent_namespace)?,
     })
 }
 
@@ -555,9 +555,9 @@ async fn main() -> Result<()> {
     let limits = quic_limits(&config, args.idle_timeout, args.congestion);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
     println!("LISTENING {} port={}", config.implementation, args.port);
-    let upstream = args.upstream.map(|upstream| {
+    let parent = args.parent.map(|parent| {
         let streams = config.stream_config();
-        let (url, cert_sha256) = (Arc::new(upstream.url), upstream.cert_sha256);
+        let (url, cert_sha256) = (Arc::new(parent.url), parent.cert_sha256);
         let connect: hub::Connect<WtConnection> = Arc::new(move |moved_to: Option<String>| {
             let (url, streams) = (Arc::clone(&url), streams.clone());
             Box::pin(async move {
@@ -570,12 +570,12 @@ async fn main() -> Result<()> {
                     .map_err(|error| error.to_string())
             })
         });
-        hub::Upstream {
-            namespace: upstream.namespace,
+        hub::Parent {
+            namespace: parent.namespace,
             connect,
         }
     });
-    let (hub, mut hub_task) = hub::spawn_with_upstream(config, upstream);
+    let (hub, mut hub_task) = hub::spawn_with_parent(config, parent);
     tokio::select! {
         () = accept_sessions(&server, &hub, &log) => bail!("the server stopped accepting"),
         () = told_to_stop() => {}

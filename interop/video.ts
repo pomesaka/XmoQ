@@ -1424,10 +1424,10 @@ function checkShown(report: PageKeptReport, session: number): number {
 }
 
 /**
- * `throughEdge`: the viewer connects to a second own relay whose upstream is
- * the relay of the run (`--upstream`), on the run's port plus
+ * `throughEdge`: the viewer connects to a second own relay whose parent is
+ * the relay of the run (`--parent`), on the run's port plus
  * `MOQLIVEMOCK_SIDE_PORT_OFFSET`, and only the relay above is stopped. The
- * relay below loses its upstream, ends the track for the viewer, refuses
+ * relay below loses its parent, ends the track for the viewer, refuses
  * its SUBSCRIBEs while the one above is gone, and connects to it again when
  * it is back.
  */

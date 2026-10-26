@@ -756,28 +756,28 @@ export async function startRun(setup: {
 /**
  * A second relay, the own one, on `port` and with the certificate of the
  * run: where a GOAWAY of the run's relay sends its clients, or a relay below
- * the run's (`upstreamOf`). Stopped by `runCleanups`.
+ * the run's (`parent`). Stopped by `runCleanups`.
  */
 export async function startSecondOwnRelay(
 	port: string,
-	/** The relay it asks for the tracks nobody announced at it (`--upstream`). */
-	upstreamOf?: RunContext,
+	/** The relay it asks for the tracks nobody announced at it (`--parent`). */
+	parent?: RunContext,
 	/** More flags for it, after its own (`--auth-key-hex`). */
 	relayArgs: string[] = [],
 ): Promise<{ url: string; relay: RelayLog }> {
 	const config = relayNamed("own");
-	const upstream =
-		upstreamOf === undefined
+	const parentFlags =
+		parent === undefined
 			? []
 			: [
-					"--upstream",
-					upstreamOf.relayUrl,
-					"--upstream-cert-sha256",
-					upstreamOf.certSha256Hex,
+					"--parent",
+					parent.relayUrl,
+					"--parent-cert-sha256",
+					parent.certSha256Hex,
 				];
 	const relay = spawnLogged("relay:second", config.binary, [
 		...config.args(port),
-		...upstream,
+		...parentFlags,
 		...relayArgs,
 	]);
 	defer(`stop ${relay.label}`, () => stopProcess(relay, "SIGINT"));

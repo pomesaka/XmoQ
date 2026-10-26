@@ -503,8 +503,8 @@ enum Envelope<C: Connection> {
         first: ControlMessage,
     },
     Core(Event),
-    /// What came of [`Action::ConnectUpstream`].
-    Upstream(Result<Arc<C>, String>),
+    /// What came of [`Action::ConnectParent`].
+    Parent(Result<Arc<C>, String>),
     /// The session cannot go on, for a reason found on the I/O side.
     Broken {
         session: SessionKey,
@@ -623,7 +623,7 @@ struct SessionHandle<C: Connection> {
     /// [`HubConfig::when_full`]; it counts for [`MAX_SENDING_AWAY`] and not
     /// for [`HubConfig::max_sessions`].
     sent_away: bool,
-    /// The relay's: [`Role::Client`] for its session with the upstream.
+    /// The relay's: [`Role::Client`] for its session with the parent.
     role: Role,
 }
 
@@ -1066,16 +1066,16 @@ impl<C: Connection> HubHandle<C> {
     }
 }
 
-/// Makes a connection to the upstream relay, or says why it could not: to
-/// the URI it is given (the New Session URI of a GOAWAY of the upstream,
+/// Makes a connection to the parent relay, or says why it could not: to
+/// the URI it is given (the New Session URI of a GOAWAY of the parent,
 /// §10.4), or to the place it was made for where it is given none.
 pub type Connect<C> = Arc<
     dyn Fn(Option<String>) -> Pin<Box<dyn Future<Output = Result<C, String>> + Send>> + Send + Sync,
 >;
 
-/// The relay above this one ([`spawn_with_upstream`]).
-pub struct Upstream<C> {
-    /// The tracks it is asked for ([`Relay::set_upstream`]).
+/// The relay above this one ([`spawn_with_parent`]).
+pub struct Parent<C> {
+    /// The tracks it is asked for ([`Relay::set_parent`]).
     pub namespace: TrackNamespace,
     /// Called each time a session with it is wanted.
     pub connect: Connect<C>,
@@ -1087,22 +1087,22 @@ pub struct Upstream<C> {
 #[cfg(test)]
 #[must_use]
 pub fn spawn<C: Connection>(config: HubConfig) -> (HubHandle<C>, JoinHandle<()>) {
-    spawn_with_upstream(config, None)
+    spawn_with_parent(config, None)
 }
 
 /// Starts the hub of a relay, as `spawn` of the tests does, for a relay that
-/// asks `upstream` for the tracks none of its own sessions announced.
+/// asks `parent` for the tracks none of its own sessions announced.
 #[must_use]
-pub fn spawn_with_upstream<C: Connection>(
+pub fn spawn_with_parent<C: Connection>(
     config: HubConfig,
-    upstream: Option<Upstream<C>>,
+    parent: Option<Parent<C>>,
 ) -> (HubHandle<C>, JoinHandle<()>) {
     let mut config = config;
     config.streams = config.stream_config();
     let (events, inbox) = mpsc::channel(config.event_queue_len);
     let mut relay = Relay::new(&config.implementation);
-    if let Some(upstream) = &upstream {
-        relay.set_upstream(upstream.namespace.clone());
+    if let Some(parent) = &parent {
+        relay.set_parent(parent.namespace.clone());
     }
     if let Some(bytes) = config.held_beyond_cache_bytes {
         relay.set_held_beyond_the_cache(bytes);
@@ -1142,7 +1142,7 @@ pub fn spawn_with_upstream<C: Connection>(
     let hub = Hub {
         relay,
         config,
-        upstream,
+        parent,
         next_session: Arc::clone(&next_session),
         events: events.clone(),
         sessions: HashMap::new(),
@@ -1166,9 +1166,9 @@ pub fn spawn_with_upstream<C: Connection>(
 struct Hub<C: Connection> {
     relay: Relay,
     config: HubConfig,
-    upstream: Option<Upstream<C>>,
+    parent: Option<Parent<C>>,
     /// Shared with [`HubHandle`]: the hub names its session with the
-    /// upstream from the same numbers.
+    /// parent from the same numbers.
     next_session: Arc<AtomicU64>,
     /// For the tasks the hub starts, which report back through it.
     events: mpsc::Sender<Envelope<C>>,
@@ -1496,7 +1496,7 @@ impl<C: Connection> Hub<C> {
                     arrival,
                 } => self.add_session(session, connection, Role::Server, arrival),
                 Envelope::SendAwayDue { session } => self.send_away_due(session),
-                Envelope::Upstream(connected) => self.upstream_connected(connected),
+                Envelope::Parent(connected) => self.parent_connected(connected),
                 Envelope::RequestOpened {
                     session,
                     stream,
@@ -1669,47 +1669,47 @@ impl<C: Connection> Hub<C> {
         }
     }
 
-    /// Starts the connection [`Action::ConnectUpstream`] asks for. The relay
-    /// is told [`Event::UpstreamFailed`] at once where it has no upstream.
-    fn connect_upstream(&mut self, uri: Vec<u8>, after: Duration, pending: &mut VecDeque<Event>) {
-        let Some(upstream) = &self.upstream else {
-            pending.push_back(Event::UpstreamFailed);
+    /// Starts the connection [`Action::ConnectParent`] asks for. The relay
+    /// is told [`Event::ParentFailed`] at once where it has no parent.
+    fn connect_parent(&mut self, uri: Vec<u8>, after: Duration, pending: &mut VecDeque<Event>) {
+        let Some(parent) = &self.parent else {
+            pending.push_back(Event::ParentFailed);
             return;
         };
         let Ok(uri) = String::from_utf8(uri) else {
-            self.log(|| "UPSTREAM_FAILED the New Session URI is not UTF-8".to_string());
-            pending.push_back(Event::UpstreamFailed);
+            self.log(|| "PARENT_FAILED the New Session URI is not UTF-8".to_string());
+            pending.push_back(Event::ParentFailed);
             return;
         };
         let uri = (!uri.is_empty()).then_some(uri);
-        let (connect, events) = (Arc::clone(&upstream.connect), self.events.clone());
+        let (connect, events) = (Arc::clone(&parent.connect), self.events.clone());
         // WHY not among the tasks of a session: it is of none yet. It ends
         // by itself, within the time the connection has to be made.
         tokio::spawn(async move {
             tokio::time::sleep(after).await;
             let connected = connect(uri).await.map(Arc::new);
             // The hub is gone when this fails.
-            let _ = events.send(Envelope::Upstream(connected)).await;
+            let _ = events.send(Envelope::Parent(connected)).await;
         });
     }
 
-    /// What came of [`Self::connect_upstream`].
-    fn upstream_connected(&mut self, connected: Result<Arc<C>, String>) {
+    /// What came of [`Self::connect_parent`].
+    fn parent_connected(&mut self, connected: Result<Arc<C>, String>) {
         match connected {
             Ok(connection) => {
                 let session = SessionKey(self.next_session.fetch_add(1, Ordering::Relaxed));
-                self.log(|| format!("UPSTREAM_CONNECTED session={}", session.0));
+                self.log(|| format!("PARENT_CONNECTED session={}", session.0));
                 self.add_session(session, connection, Role::Client, Arrival::First);
             }
             Err(reason) => {
-                self.log(|| format!("UPSTREAM_FAILED reason={reason:?}"));
-                self.feed(VecDeque::from([Event::UpstreamFailed]));
+                self.log(|| format!("PARENT_FAILED reason={reason:?}"));
+                self.feed(VecDeque::from([Event::ParentFailed]));
             }
         }
     }
 
     /// `role` is the relay's: [`Role::Client`] for its session with the
-    /// upstream relay, which is not refused for [`HubConfig::max_sessions`],
+    /// parent relay, which is not refused for [`HubConfig::max_sessions`],
     /// since without it nobody of this relay gets the tracks it carries.
     fn add_session(
         &mut self,
@@ -1959,14 +1959,14 @@ impl<C: Connection> Hub<C> {
                 .values()
                 .all(|handle| handle.role == Role::Client)
         {
-            self.upstream_drained();
+            self.parent_drained();
         }
     }
 
     /// The clients of the relay that goes away are gone: the sessions with
-    /// the upstream that are left are closed, and the relay is drained.
+    /// the parent that are left are closed, and the relay is drained.
     ///
-    /// WHY not waited for: the upstream was told the relay goes (§10.4, a
+    /// WHY not waited for: the parent was told the relay goes (§10.4, a
     /// client's GOAWAY "intends to close the session soon") and has no
     /// reason to close; it would be closed with `GOAWAY_TIMEOUT` (§3.5:
     /// "The session was closed because the peer took too long to close the
@@ -1974,13 +1974,13 @@ impl<C: Connection> Hub<C> {
     /// relay would stop that much later. WHY `NO_ERROR`: neither side did
     /// anything wrong. WHY kept until now: the clients that were still
     /// there got their tracks through it.
-    fn upstream_drained(&mut self) {
+    fn parent_drained(&mut self) {
         let Some(drained) = self.drained.take() else {
             return;
         };
-        let upstream: Vec<SessionKey> = self.sessions.keys().copied().collect();
+        let parent_sessions: Vec<SessionKey> = self.sessions.keys().copied().collect();
         let mut pending = VecDeque::new();
-        for session in upstream {
+        for session in parent_sessions {
             self.close(session, NO_ERROR, "the relay is stopping", &mut pending);
         }
         self.feed(pending);
@@ -2184,7 +2184,7 @@ impl<C: Connection> Hub<C> {
             | Action::StopReceiptTimer { .. }
             | Action::StartRendezvousTimer { .. }
             | Action::StartAnnouncementTimer { .. }
-            | Action::StartUpstreamAnnouncementTimer { .. }
+            | Action::StartParentAnnouncementTimer { .. }
             | Action::StartFetchEndTimer { .. }
             | Action::StartUpstreamTimer { .. }
             | Action::StartFetchStreamTimer { .. }
@@ -2194,8 +2194,8 @@ impl<C: Connection> Hub<C> {
                 code,
                 reason,
             } => self.close(session, code, &reason, pending),
-            Action::ConnectUpstream { uri, after_ms } => {
-                self.connect_upstream(uri, Duration::from_millis(after_ms), pending);
+            Action::ConnectParent { uri, after_ms } => {
+                self.connect_parent(uri, Duration::from_millis(after_ms), pending);
             }
             // Taken by `execute_upstream` above.
             Action::OpenRequest { .. }
@@ -2686,10 +2686,10 @@ impl<C: Connection> Hub<C> {
                 Duration::from_millis(wait_ms),
                 Event::AnnouncementTimeout { session },
             ),
-            Action::StartUpstreamAnnouncementTimer { session, wait_ms } => (
+            Action::StartParentAnnouncementTimer { session, wait_ms } => (
                 session,
                 Duration::from_millis(wait_ms),
-                Event::UpstreamAnnouncementTimeout { session },
+                Event::ParentAnnouncementTimeout { session },
             ),
             Action::StartRendezvousTimer {
                 session,
@@ -2745,10 +2745,10 @@ impl<C: Connection> Hub<C> {
         // may would have every announcement back at once, and the limit on
         // announcements would not hold for it. There is one such timer for
         // a session at most.
-        // The same for the one after which an announcement upstream is sent
-        // again: one that ran out at once would send it again at once.
+        // The same for the one after which an announcement to the parent is
+        // sent again: one that ran out at once would send it again at once.
         match event {
-            Event::AnnouncementTimeout { .. } | Event::UpstreamAnnouncementTimeout { .. } => {
+            Event::AnnouncementTimeout { .. } | Event::ParentAnnouncementTimeout { .. } => {
                 usize::MAX
             }
             _ => self.config.max_timers_per_session,
@@ -3739,12 +3739,12 @@ fn describe(action: &Action) -> Option<String> {
         | Action::StartAnnouncementTimer { .. }
         | Action::StartCheckTimer { .. }
         | Action::StartEarlyTimer { .. } => return None,
-        Action::StartUpstreamAnnouncementTimer { session, wait_ms } => format!(
-            "ANNOUNCE_UPSTREAM_LATER session={} after_ms={wait_ms}",
+        Action::StartParentAnnouncementTimer { session, wait_ms } => format!(
+            "ANNOUNCE_TO_PARENT_LATER session={} after_ms={wait_ms}",
             session.0
         ),
-        Action::ConnectUpstream { uri, after_ms } => format!(
-            "CONNECT_UPSTREAM uri={} after_ms={after_ms}",
+        Action::ConnectParent { uri, after_ms } => format!(
+            "CONNECT_PARENT uri={} after_ms={after_ms}",
             printable(uri)
         ),
     })
@@ -3931,11 +3931,11 @@ mod line_tests {
                 "SEND session=1 control NAMESPACE_DONE suffix=a\\x2fb",
             ),
             (
-                Action::ConnectUpstream {
+                Action::ConnectParent {
                     uri: b"https://b.example\nSESSION_OPENED".to_vec(),
                     after_ms: 0,
                 },
-                "CONNECT_UPSTREAM uri=https://b.example\\x0aSESSION_OPENED after_ms=0",
+                "CONNECT_PARENT uri=https://b.example\\x0aSESSION_OPENED after_ms=0",
             ),
         ];
         for (action, line) in cases {

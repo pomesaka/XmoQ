@@ -20,7 +20,8 @@
 //! *subscriber* one that has its `SUBSCRIBE_OK`. A *source* of a track is an
 //! upstream subscription that is Established: a PUBLISH the relay accepted,
 //! or a SUBSCRIBE of the relay that a publisher accepted. An *ask* is a
-//! SUBSCRIBE of the relay that is not a source yet.
+//! SUBSCRIBE of the relay that is not a source yet. The relay above this one,
+//! which it connects to as a client, is its *parent* (`parent.rs`).
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -60,8 +61,8 @@ pub struct LimitsOfASession {
     pub peer_requests: usize,
     /// Requests the relay has open on the session
     /// ([`MAX_OWN_REQUESTS_PER_SESSION`]): SUBSCRIBE, FETCH and
-    /// `TRACK_STATUS`; a `PUBLISH_NAMESPACE` upstream does not count
-    /// (`own::Counted`).
+    /// `TRACK_STATUS`; a `PUBLISH_NAMESPACE` to the parent does not
+    /// count (`own::Counted`).
     pub own_requests: usize,
     /// Namespaces the session has announced ([`MAX_NAMESPACES_PER_SESSION`]).
     pub namespaces: usize,
@@ -424,8 +425,8 @@ pub(crate) struct Asked {
 #[derive(Debug)]
 pub(crate) struct PendingTrack {
     /// Empty only while every waiter is held for a publisher to appear
-    /// (§10.2.6) and none has, or while the relay connects to the upstream
-    /// relay that is to be asked ([`Relay::waits_for_upstream`]): once a publisher was asked, the track is as
+    /// (§10.2.6) and none has, or while the relay connects to the parent
+    /// relay that is to be asked ([`Relay::waits_for_parent`]): once a publisher was asked, the track is as
     /// any other that waits, and when its last ask is over, the waiters are
     /// refused and the track is forgotten.
     pub(crate) asks: Vec<Ask>,
@@ -589,7 +590,8 @@ impl Refusal {
             | code::UNSUPPORTED_EXTENSION
             // FIXME: decide what a subscriber gets for these three. As they
             // are, they tell a subscriber to mend its token and try again,
-            // which cannot help: the relay sends no token upstream. What to
+            // which cannot help: the subscriber's token is not passed on, and
+            // the relay sends a publisher none and the parent its own. What to
             // do instead follows from the decision on authorization
             // (`docs/open-questions.md`).
             | code::UNAUTHORIZED
@@ -688,8 +690,8 @@ impl Relay {
     }
 
     /// The sessions that announced a namespace the track is in, in the order
-    /// they announced it; where none did, the upstream relay when it takes
-    /// the track and its session is open ([`Relay::set_upstream`]).
+    /// they announced it; where none did, the parent relay when it takes
+    /// the track and its session is open ([`Relay::set_parent`]).
     ///
     /// §9.5: Namespace Prefix Matching, field by field. §9.5 also has a
     /// publisher announce a namespace explicitly to get subscriptions routed
@@ -702,7 +704,7 @@ impl Relay {
             .iter()
             .filter(|entry| entry.namespace.is_prefix_of(track.namespace()))
             .map(|entry| entry.session)
-            .chain(self.upstream_for(track))
+            .chain(self.parent_for(track))
     }
 
     /// Lets one more subscriber wait for the answer to an upstream SUBSCRIBE
@@ -802,14 +804,14 @@ impl Relay {
             .chain(newcomer)
             .filter_map(|waiter| waiter.asked.new_group_request)
             .max();
-        // §10.2.6 for the upstream relay: "the relay SHOULD hold the
+        // §10.2.6 for the parent relay: "the relay SHOULD hold the
         // subscription and wait for a publisher to appear", which the relay
         // above can do only if it is asked to. WHY passed on, where "Message
         // Parameters are always intended for the peer endpoint only and are
         // not forwarded by Relays" (§10.2.1): the sentence goes on "though
         // relays can consider received parameter values when making a
         // request", and this relay makes a request of its own, held for as
-        // long as the longest of those it holds. WHY to the upstream alone: a
+        // long as the longest of those it holds. WHY to the parent alone: a
         // publisher that announced the namespace is the one that would
         // appear, and it is there.
         let held_ms = self
@@ -865,7 +867,7 @@ impl Relay {
                     .get_or_insert(request_error_code::EXCESSIVE_LOAD);
                 continue;
             }
-            let rendezvous = held_ms.filter(|_| self.upstream_for(track) == Some(publisher));
+            let rendezvous = held_ms.filter(|_| self.parent_for(track) == Some(publisher));
             match self.ask(publisher, track, (new_group, rendezvous), actions) {
                 Ok(ask) => asked.asks.push(ask),
                 Err(error_code) => {
@@ -962,7 +964,7 @@ impl Relay {
         // Nothing else of the downstream SUBSCRIBE is copied: §7 keeps its
         // priorities out, and what a token of the subscriber means to the
         // publisher is undecided. The NEW_GROUP_REQUEST is, and the hold of
-        // those that wait is, for the upstream relay
+        // those that wait is, for the parent relay
         // (`Self::ask_the_publishers`), which gets the relay's own token.
         let parameters = new_group
             .map(Parameter::NewGroupRequest)

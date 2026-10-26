@@ -8,7 +8,7 @@
 //
 //   With --through-edge (publisher-comes alone): the subscriber connects to
 //   a second own relay, on the run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET,
-//   whose upstream is the relay of the run (`--upstream`); the publisher
+//   whose parent is the relay of the run (`--parent`); the publisher
 //   stays with the relay of the run. The relay below holds the SUBSCRIBE and
 //   asks the one above with a RENDEZVOUS_TIMEOUT of its own, which the one
 //   above holds as the lines say (its session 0 is the relay below), and the
