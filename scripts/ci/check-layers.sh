@@ -58,6 +58,8 @@ check_rust() {
 		fi
 	done <<<"${members}"
 
+	check_crate_layers "${metadata}"
+
 	shopt -s nullglob
 	local crate_manifests=(crates/*/Cargo.toml)
 	shopt -u nullglob
@@ -150,6 +152,44 @@ check_rust() {
 			ran "No crate depends on ${name}"
 		fi
 	done
+}
+
+# The layer of a crate of the workspace, a number; empty for a name that is none of them. The
+# table is that of docs/architecture.md ("The Rust crates"), which says what each layer is.
+crate_layer() {
+	case "$1" in
+	xmoq-moqt | xmoq-loc | xmoq-msf | xmoq-again) echo 0 ;;
+	xmoq-moqt-io | xmoq-room-token | xmoq-chat-tracks | xmoq-transcript-tracks | xmoq-picture | xmoq-speech) echo 1 ;;
+	xmoq-track-serving | xmoq-relay-core | xmoq-viewer) echo 2 ;;
+	xmoq-viewer-io) echo 3 ;;
+	# The programs: nothing of the workspace depends on them.
+	xmoq-relay | xmoq-watch | xmoq-agent | xmoq-chat | xmoq-transcriber | xmoq-moqt-client | xmoq-quiet-peer) echo 4 ;;
+	*) echo "" ;;
+	esac
+}
+
+# The crates are layers: one depends on the crates of a lower layer alone. WHY normal and build
+# dependencies and not dev ones: a test may use a crate above (a program's test harness), which
+# the crate itself does not build on.
+check_crate_layers() {
+	local metadata="$1" name layer dep dep_layer before=${errors}
+	while IFS= read -r name; do
+		layer="$(crate_layer "${name}")"
+		if [[ -z "${layer}" ]]; then
+			report "the crate ${name} has no layer; add it to crate_layer in this script and to the table of docs/architecture.md"
+			continue
+		fi
+		while IFS= read -r dep; do
+			dep_layer="$(crate_layer "${dep}")"
+			# Empty: a crate from outside the workspace.
+			if [[ -n "${dep_layer}" ]] && ((dep_layer >= layer)); then
+				report "${name} (layer ${layer}) depends on ${dep} (layer ${dep_layer}); a crate depends on crates of a lower layer alone (docs/architecture.md)"
+			fi
+		done < <(jq -r --arg name "${name}" '.packages[] | select(.name == $name) | .dependencies[] | select(.kind != "dev") | .name' <<<"${metadata}")
+	done < <(jq -r '.packages[].name' <<<"${metadata}")
+	if [[ ${errors} -eq ${before} ]]; then
+		ran "The layers of the Rust crates"
+	fi
 }
 
 # Dependencies of a package.json as "name: version" lines.

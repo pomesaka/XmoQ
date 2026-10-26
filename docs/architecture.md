@@ -61,7 +61,7 @@ The TypeScript packages, once `@xmoq/tracks` is there; `scripts/ci/check-layers.
 | 4 | `@xmoq/meeting` |
 | 5 | `@xmoq/room` |
 
-The Rust crates, by the same rule (a crate depends on those of a lower layer alone, dev-dependencies aside). Nothing checks it yet:
+The Rust crates, by the same rule (a crate depends on those of a lower layer alone, dev-dependencies aside); `scripts/ci/check-layers.sh` checks the crates of today (`crate_layer`):
 
 | Layer | Crates |
 |---|---|
