@@ -47,7 +47,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 - whisper.cppのモデルはリポジトリに入れない（`mise run speech-model`がユーザーのキャッシュに取る）
 - 本体（`crates/`、`packages/`）から`spikes/`、`demo/`、`interop/`、照合のためだけの`xmoq-quiet-peer`に依存させない（`xmoq-quiet-peer`は`check:layers`が検査する）。`spikes/`と`demo/`はlintと型検査の対象外。`interop/`は対象で、`interop/peers/`は`spikes/moqtail/`の写し（`moqtail`のライブラリで書いた自前の相手役）で、spikeとの差分を読めるように整形もlintもしない。自前のコードなのでレビューの対象に入る
 - 断りや終わりの後にいつ頼み直すかの規則は、Rustは`xmoq-again`、TypeScriptは`@xmoq/moqt`（`createAskAgain`、`createNextSession`、GOAWAYで移るループの`keepMoving`）にある。層0のパッケージどうしは依存できないので、TypeScriptの側は`@xmoq/moqt`に置く。表は`fixtures/ask-again/`で、両方のテストが読む。クライアントごとに書き直さず、これを使う
-- 部屋のトークンの形は`xmoq-room-token`にあり、部屋（`spikes/durable-objects-room/worker.js`）がJavaScriptで同じ形を別に書いている。変えるときは両方を直す
+- 部屋のトークンの形は、Rustは`xmoq-room-token`、TypeScriptは`@xmoq/room`の`src/token.ts`にある。表は`fixtures/room-token/`で、両方のテストが読む。部屋は`packages/room`にあり、Miniflareで動かす（`node packages/room/run.ts`）
 
 ## 実装の決まり
 
