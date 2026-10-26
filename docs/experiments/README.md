@@ -289,3 +289,4 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-26 [A slow teardown, and a decoder behind on mlmpub's video](2026-10-26-a-slow-teardown-and-a-decoder-behind-on-mlmpubs-video.md)
 - 2026-10-26 [The audio run drops a piece that comes after the next](2026-10-26-the-audio-run-drops-a-piece-that-comes-after-the-next.md)
 - 2026-10-26 [What the interop runs wait for, and what they leave behind](2026-10-26-what-the-interop-runs-wait-for-and-leave-behind.md)
+- 2026-10-27 [The moqtail relay turns the moqtail Rust client away in HTTP/3, once](2026-10-27-the-moqtail-relay-turns-the-moqtail-rust-client-away-in-http3.md)
