@@ -17,6 +17,9 @@
 //     of 640x360 that a page decodes to the grey and the green square it
 //     painted, as `agent-frames.ts` checks them.
 //   - `/frame p2` then, with a `frame` line of `"id":"p2"` and such a PNG.
+//   - `/frame p1` again (written before its first run, 2026-10-26): p1's
+//     video was let go of for p2's, and is subscribed to again on the same
+//     session, with a `frame` line of `"id":"p1"` and such a PNG.
 //   - `/frame p3`: the error `frame: p3 is not in the meeting, and there are
 //     p1, p2`.
 //   - The page of p2 closes its session: the reader writes
@@ -183,7 +186,9 @@ async function main(): Promise<void> {
 		const decoder = pages.get("p1");
 		if (decoder === undefined) throw new Error("no page of p1");
 		const seen: string[] = [];
-		for (const [index, id] of ["p1", "p2"].entries()) {
+		// p1 again: the video let go of for p2's is asked for anew on the same
+		// session.
+		for (const [index, id] of ["p1", "p2", "p1"].entries()) {
 			const line = await askForFrame(agent, index, `/frame ${id}`);
 			const raw = events(agent).filter((each) =>
 				each.includes('"type":"frame"'),
@@ -247,7 +252,7 @@ async function main(): Promise<void> {
 		if (JSON.stringify(inFile) !== JSON.stringify(written)) {
 			throw new Error("events.jsonl is not what stdout has");
 		}
-		summary = `through the own relay, xmoq-agent --meeting r was told of p1 and p2, answered /frame alone with "nobody has spoken", /frame p1 and /frame p2 with a PNG each (${seen.join("; ")}) in ${frameLines(agent).length} frame lines, /frame p3 with "not in the meeting", and wrote p2 as left when its page closed its session; after the relay's GOAWAY it moved to the second relay, wrote p3 as joined and p4 as left, and p1, there again, not as joined a second time; events.jsonl had the same ${written.length} lines`;
+		summary = `through the own relay, xmoq-agent --meeting r was told of p1 and p2, answered /frame alone with "nobody has spoken", /frame p1, /frame p2 and /frame p1 again with a PNG each (${seen.join("; ")}) in ${frameLines(agent).length} frame lines, /frame p3 with "not in the meeting", and wrote p2 as left when its page closed its session; after the relay's GOAWAY it moved to the second relay, wrote p3 as joined and p4 as left, and p1, there again, not as joined a second time; events.jsonl had the same ${written.length} lines`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

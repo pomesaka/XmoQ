@@ -20,13 +20,12 @@ use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::refuse::{Refusal, refusal};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, FetchChunk, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream,
-    StreamEnd, StreamStops, Trace, UniEvent, client, send_message,
+    Connection, FetchChunk, PeerRequestStreamEvent, RecvStream, RequestReader, RequestStreamEvent,
+    SendStream, StreamEnd, StreamStops, Trace, UniEvent, client, send_message,
 };
 use xmoq_msf::CatalogTrack;
 
 type Send = <WtConnection as Connection>::Send;
-type Recv = <WtConnection as Connection>::Recv;
 
 /// The name of the catalog track (MSF §5).
 const CATALOG: &str = "catalog";
@@ -209,7 +208,7 @@ impl Events {
 
 /// A subscription: its request stream, kept open for as long as the track
 /// is wanted.
-pub struct Subscription {
+pub struct Subscription<C: Connection = WtConnection> {
     /// The session's handle of the SUBSCRIBE.
     pub request: RequestId,
     /// What its Objects come with.
@@ -217,11 +216,11 @@ pub struct Subscription {
     /// The `LARGEST_OBJECT` of its `SUBSCRIBE_OK`, where it had one.
     pub largest: Option<Location>,
     /// What the relay says on its stream after the answer: `PUBLISH_DONE`.
-    pub reader: RequestReader<Recv>,
-    send: Send,
+    pub reader: RequestReader<C::Recv>,
+    send: C::Send,
 }
 
-impl Subscription {
+impl<C: Connection> Subscription<C> {
     /// Gives the subscription up on the stream: a reset of this side and
     /// `STOP_SENDING` for the other, with `CANCELLED` (§3.3.2). The session's
     /// half is `Session::cancel`.
@@ -240,12 +239,20 @@ impl Subscription {
 /// What has to stay open for as long as the session after the catalog was
 /// read: the subscription to the catalog track and the request stream of
 /// the FETCH.
-pub struct CatalogKept {
-    subscription: Option<Subscription>,
-    fetch: Option<(RequestId, Send)>,
+pub struct CatalogKept<C: Connection = WtConnection> {
+    subscription: Option<Subscription<C>>,
+    fetch: Option<CatalogFetch<C>>,
 }
 
-impl CatalogKept {
+/// The catalog's FETCH, with the halves of its request stream that are open.
+struct CatalogFetch<C: Connection> {
+    request: RequestId,
+    send: C::Send,
+    /// Where the relay had not ended its direction when the catalog came.
+    answers: Option<RequestReader<C::Recv>>,
+}
+
+impl<C: Connection> CatalogKept<C> {
     /// Resets the stream of `request` with `MALFORMED_TRACK`, where it is
     /// the catalog's SUBSCRIBE or FETCH, which the session ended for a
     /// malformed track (`Session::cancel_malformed`); whether it was. The
@@ -265,21 +272,57 @@ impl CatalogKept {
         if self
             .fetch
             .as_ref()
-            .is_some_and(|(fetch, _)| *fetch == request)
+            .is_some_and(|fetch| fetch.request == request)
         {
-            if let Some((_, send)) = self.fetch.take() {
-                send.reset(stream_reset_code::MALFORMED_TRACK);
+            if let Some(fetch) = self.fetch.take() {
+                end_request_stream(
+                    fetch.send,
+                    fetch.answers,
+                    stream_reset_code::MALFORMED_TRACK,
+                );
             }
             return true;
         }
         false
     }
+
+    /// Gives the catalog up, in `session` too, which would otherwise hold
+    /// its subscription and refuse the next SUBSCRIBE for the catalog there
+    /// (`Session::subscribe`: one subscription a track), as
+    /// [`crate::kept::KeptTrack::cancel`] gives a track up.
+    pub fn cancel(self, session: &mut Session) {
+        if let Some(subscription) = self.subscription {
+            session.cancel(subscription.request);
+            subscription.cancel();
+        }
+        if let Some(fetch) = self.fetch {
+            session.cancel(fetch.request);
+            end_request_stream(fetch.send, fetch.answers, stream_reset_code::CANCELLED);
+        }
+    }
+}
+
+/// Ends the directions of a request stream that are open with `code`: a
+/// reset of this side, and `STOP_SENDING` for the other where it was not
+/// over. §3.3.2: "Implementations SHOULD cancel requests by abruptly
+/// terminating any directions of a stream that are still open"; §5.2 has a
+/// subscriber that cancels a FETCH send `STOP_SENDING` for its request
+/// stream.
+fn end_request_stream<S: SendStream, R: RecvStream>(
+    send: S,
+    answers: Option<RequestReader<R>>,
+    code: u32,
+) {
+    send.reset(code);
+    if let Some(answers) = answers {
+        answers.stop(code);
+    }
 }
 
 /// What the requests of a session are sent with.
-pub struct Requests<'a> {
+pub struct Requests<'a, C: Connection = WtConnection> {
     /// Where the streams of the requests are opened.
-    pub connection: &'a WtConnection,
+    pub connection: &'a C,
     /// What makes the requests and reads their answers.
     pub session: &'a mut Session,
     /// The namespace of the tracks asked for.
@@ -302,11 +345,11 @@ pub struct Requests<'a> {
 /// "connecting" for good. The page and the Rust client give a request the
 /// same time (the row "A request that waits for a stream" of
 /// docs/moqt-implementation-notes.md).
-async fn open_stream(
-    connection: &WtConnection,
+async fn open_stream<C: Connection>(
+    connection: &C,
     open_wait_ms: u64,
     what: &str,
-) -> Result<(Send, Recv)> {
+) -> Result<(C::Send, C::Recv)> {
     let wait = Duration::from_millis(open_wait_ms);
     let Ok(opened) = tokio::time::timeout(wait, connection.open_bi()).await else {
         bail!("the relay allowed no stream for {what} within {open_wait_ms} ms");
@@ -325,9 +368,9 @@ pub struct Asked {
 
 /// A SUBSCRIBE that was sent, and the first thing that came on its stream,
 /// or nothing within its time.
-pub struct Sent {
-    send: Send,
-    reader: RequestReader<Recv>,
+pub struct Sent<C: Connection = WtConnection> {
+    send: C::Send,
+    reader: RequestReader<C::Recv>,
     answer: Option<Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>>,
 }
 
@@ -375,27 +418,59 @@ impl std::error::Error for GoneAway {}
 ///
 /// A stream the relay does not allow in time, and one that breaks before
 /// the SUBSCRIBE is written.
-pub async fn send_subscribe(
-    connection: &WtConnection,
+pub async fn send_subscribe<C: Connection>(
+    connection: &C,
     open_wait_ms: u64,
     asked: &Asked,
-) -> Result<Sent> {
-    let (mut send, recv) = open_stream(connection, open_wait_ms, &asked.name).await?;
+) -> Result<Sent<C>> {
+    let (send, recv) = open_stream(connection, open_wait_ms, &asked.name).await?;
     let trace = Trace::default();
-    send_message(&mut send, &asked.message, &trace, &asked.name).await?;
-    let mut reader = RequestReader::new(recv, &trace, &asked.name);
-    // WHY from here, and the request alone given up: the row "A request
-    // the peer does not answer" of docs/moqt-implementation-notes.md,
-    // which the page and the Rust client go by as well. What the viewer
-    // makes of a track it did not get is its caller's.
-    let answer = tokio::time::timeout(Duration::from_millis(asked.wait_ms), reader.next_event())
-        .await
-        .ok();
+    let mut open = Unanswered::<C>(Some((send, RequestReader::new(recv, &trace, &asked.name))));
+    let answer = match open.0.as_mut() {
+        Some((send, reader)) => {
+            send_message(send, &asked.message, &trace, &asked.name).await?;
+            // WHY from here, and the request alone given up: the row "A
+            // request the peer does not answer" of
+            // docs/moqt-implementation-notes.md, which the page and the Rust
+            // client go by as well. What the viewer makes of a track it did
+            // not get is its caller's.
+            tokio::time::timeout(Duration::from_millis(asked.wait_ms), reader.next_event())
+                .await
+                .ok()
+        }
+        None => None,
+    };
+    let Some((send, reader)) = open.0.take() else {
+        bail!("the stream of the SUBSCRIBE of {} is gone", asked.name);
+    };
     Ok(Sent {
         send,
         reader,
         answer,
     })
+}
+
+/// The stream of a SUBSCRIBE while it is written and its answer waited
+/// for: where the wait is given up (the caller drops it, or the SUBSCRIBE
+/// could not be written), both directions are ended with `CANCELLED`, as
+/// for a subscription given up ([`Subscription::cancel`]). §3.3.2:
+/// "Implementations SHOULD cancel requests by abruptly terminating any
+/// directions of a stream that are still open".
+///
+/// WHY NOT leave it to the halves being dropped: what the peer sees then is
+/// the transport's (`xmoq_moqt_io::SendStream`). quinn 0.11.12 ends a
+/// dropped sending half with a FIN (`impl Drop for SendStream`,
+/// `src/send_stream.rs`, read 2026-10-26), which in the middle of the
+/// SUBSCRIBE is a message cut short to the peer.
+struct Unanswered<C: Connection>(Option<(C::Send, RequestReader<C::Recv>)>);
+
+impl<C: Connection> Drop for Unanswered<C> {
+    fn drop(&mut self) {
+        if let Some((send, reader)) = self.0.take() {
+            send.reset(stream_reset_code::CANCELLED);
+            reader.stop(stream_reset_code::CANCELLED);
+        }
+    }
 }
 
 /// Hands what came of a SUBSCRIBE to the session: a subscription, or why
@@ -405,11 +480,11 @@ pub async fn send_subscribe(
 /// # Errors
 ///
 /// [`NotSubscribed`].
-pub fn settle(
+pub fn settle<C: Connection>(
     session: &mut Session,
     asked: &Asked,
-    sent: Result<Sent>,
-) -> Result<Subscription, NotSubscribed> {
+    sent: Result<Sent<C>>,
+) -> Result<Subscription<C>, NotSubscribed> {
     let (request, name) = (asked.request, &asked.name);
     let failed = |error: anyhow::Error| NotSubscribed::Failed(error);
     let mut sent = match sent {
@@ -477,31 +552,15 @@ fn answer_of(
     }
 }
 
-impl Requests<'_> {
-    /// Subscribes to a track of the namespace. With `timeout_ms` the
-    /// SUBSCRIBE carries a `SUBGROUP_DELIVERY_TIMEOUT` (§10.2.3): the
-    /// publisher gives up a Subgroup that is not delivered that long after
-    /// its last Object (§8).
-    ///
-    /// # Errors
-    ///
-    /// A SUBSCRIBE that is refused ([`GoingAway`] for `GOING_AWAY`), not
-    /// sent, or not answered in time.
-    pub async fn subscribe(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<Subscription> {
-        let asked = self.ask(name, timeout_ms)?;
-        let sent = send_subscribe(self.connection, self.open_wait_ms, &asked).await;
-        settle(self.session, &asked, sent).map_err(|not| match not {
-            NotSubscribed::Refused(error) if error.error_code == request_error_code::GOING_AWAY => {
-                GoingAway(name.to_string()).into()
-            }
-            NotSubscribed::Refused(error) => {
-                anyhow!("SUBSCRIBE of {name} was refused: {error:?}")
-            }
-            NotSubscribed::Failed(error) => error,
-            NotSubscribed::Peer(fault) => fault.into(),
-        })
+impl Asked {
+    /// The session's handle of the SUBSCRIBE.
+    #[must_use]
+    pub fn request(&self) -> RequestId {
+        self.request
     }
+}
 
+impl<C: Connection> Requests<'_, C> {
     /// The SUBSCRIBE for a track of the namespace, made by the session and
     /// not sent yet ([`send_subscribe`]).
     ///
@@ -534,6 +593,33 @@ impl Requests<'_> {
             wait_ms,
         })
     }
+}
+
+impl Requests<'_> {
+    /// Subscribes to a track of the namespace. With `timeout_ms` the
+    /// SUBSCRIBE carries a `SUBGROUP_DELIVERY_TIMEOUT` (§10.2.3): the
+    /// publisher gives up a Subgroup that is not delivered that long after
+    /// its last Object (§8).
+    ///
+    /// # Errors
+    ///
+    /// A SUBSCRIBE that is refused ([`GoingAway`] for `GOING_AWAY`), not
+    /// sent, or not answered in time.
+    pub async fn subscribe(&mut self, name: &str, timeout_ms: Option<u64>) -> Result<Subscription> {
+        let asked = self.ask(name, timeout_ms)?;
+        let sent = send_subscribe(self.connection, self.open_wait_ms, &asked).await;
+        settle(self.session, &asked, sent).map_err(|not| match not {
+            NotSubscribed::Refused(error) if error.error_code == request_error_code::GOING_AWAY => {
+                GoingAway(name.to_string()).into()
+            }
+            NotSubscribed::Refused(error) => {
+                anyhow!("SUBSCRIBE of {name} was refused: {error:?}")
+            }
+            NotSubscribed::Failed(error) => error,
+            NotSubscribed::Peer(fault) => fault.into(),
+        })
+    }
+
     /// Reads the catalog of the namespace: its tracks.
     ///
     /// WHY a Joining FETCH: the catalog is one Object that was published
@@ -662,7 +748,11 @@ impl Requests<'_> {
             tracks,
             CatalogKept {
                 subscription: Some(subscription),
-                fetch: Some((fetch, send)),
+                fetch: Some(CatalogFetch {
+                    request: fetch,
+                    send,
+                    answers,
+                }),
             },
         ))
     }
@@ -941,6 +1031,129 @@ mod tests {
                 (Ok(answer), expected) => panic!("{name}: {answer:?}, not {expected:?}"),
                 (Err(_), expected) => panic!("{name}: another error, not {expected:?}"),
             }
+        }
+    }
+
+    /// What `stream` ends with: a FIN, the code of a reset, or `None` where
+    /// it is still open after a second.
+    async fn end_of(stream: &mut impl RecvStream) -> Option<Result<(), xmoq_moqt_io::ReadError>> {
+        let reading = async {
+            let mut buffer = [0; 256];
+            loop {
+                match stream.read(&mut buffer).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), reading)
+            .await
+            .ok()
+    }
+
+    /// A catalog given up is let go of in the session as well, which takes
+    /// the next SUBSCRIBE for it; both directions of the streams of its
+    /// SUBSCRIBE and its FETCH are ended with `CANCELLED` (§3.3.2, §5.2).
+    #[tokio::test]
+    async fn a_catalog_given_up_can_be_subscribed_to_again_and_its_streams_are_ended() {
+        use xmoq_moqt::message::{FetchOk, SubscribeOk};
+        use xmoq_moqt::session::{Role, Transport};
+        use xmoq_moqt_io::{ReadError, WriteError, memory};
+
+        let (ours, relay) = memory::pair();
+        let mut session = Session::new(Role::Client, Transport::WebTransport);
+        let catalog = FullTrackName::new(
+            TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+            CATALOG.as_bytes().to_vec(),
+        )
+        .unwrap();
+        let trace = Trace::default();
+        // Each request on a stream of its own, answered by the relay.
+        let mut streams = Vec::new();
+        let mut opened = Vec::new();
+        let (subscribe, message) = session.subscribe(catalog.clone(), vec![]).unwrap();
+        let fetch_range = FetchRange::Standalone {
+            full_track_name: catalog.clone(),
+            start: Location {
+                group: 0,
+                object: 0,
+            },
+            end: Location {
+                group: 1,
+                object: 0,
+            },
+        };
+        let answers = [
+            ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: 1,
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+            ControlMessage::FetchOk(FetchOk {
+                end_of_track: false,
+                end_location: Location {
+                    group: 1,
+                    object: 0,
+                },
+                parameters: vec![],
+                track_properties: vec![],
+            }),
+        ];
+        for (index, answer) in answers.into_iter().enumerate() {
+            let (request, message) = if index == 0 {
+                (subscribe, message.clone())
+            } else {
+                session.fetch(fetch_range.clone(), vec![]).unwrap()
+            };
+            let (mut send, recv) = ours.open_bi().await.unwrap();
+            send_message(&mut send, &message, &trace, "ours")
+                .await
+                .unwrap();
+            let (mut relay_send, relay_recv) = relay.accept_bi().await.unwrap();
+            send_message(&mut relay_send, &answer, &trace, "relay")
+                .await
+                .unwrap();
+            let mut reader = RequestReader::new(recv, &trace, "ours");
+            let Some(Ok(RequestStreamEvent::Message(answer))) =
+                tokio::time::timeout(Duration::from_secs(1), reader.next_event())
+                    .await
+                    .ok()
+            else {
+                panic!("no answer to request {index}");
+            };
+            session.on_request_message(request, answer).unwrap();
+            opened.push((request, send, reader));
+            streams.push((relay_send, relay_recv));
+        }
+        let (fetch, fetch_send, fetch_reader) = opened.pop().unwrap();
+        let (request, send, reader) = opened.pop().unwrap();
+        let kept: CatalogKept<memory::MemoryConnection> = CatalogKept {
+            subscription: Some(Subscription {
+                request,
+                track_alias: 1,
+                largest: None,
+                reader,
+                send,
+            }),
+            fetch: Some(CatalogFetch {
+                request: fetch,
+                send: fetch_send,
+                answers: Some(fetch_reader),
+            }),
+        };
+        kept.cancel(&mut session);
+        assert!(session.subscribe(catalog, vec![]).is_ok());
+        // (the SUBSCRIBE's streams, then the FETCH's)
+        for (relay_send, relay_recv) in &mut streams {
+            assert_eq!(
+                end_of(relay_recv).await,
+                Some(Err(ReadError::Reset(Some(stream_reset_code::CANCELLED))))
+            );
+            assert_eq!(
+                relay_send.stopped().await,
+                WriteError::Stopped(Some(stream_reset_code::CANCELLED))
+            );
         }
     }
 }

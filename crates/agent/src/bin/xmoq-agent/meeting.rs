@@ -253,7 +253,7 @@ impl InMeeting {
                     .as_mut()
                     .map(|kept| kept.meeting.settled())
                     .unwrap_or_default();
-                self.told(reader, changes);
+                self.told(session, reader, changes);
             }
             Came::Linger => {
                 self.linger_at = None;
@@ -263,7 +263,7 @@ impl InMeeting {
                 });
                 if let Some(id) = over {
                     eprintln!("XMOQ_AGENT_MEETING_VIDEO_LET_GO id={id}");
-                    self.let_go_of_video();
+                    self.let_go_of_video(session);
                 }
             }
             Came::Video(came) => {
@@ -272,7 +272,7 @@ impl InMeeting {
                 {
                     reader.error(format!("frame: the video is given up: {why}"));
                     video_failed(reader);
-                    self.let_go_of_video();
+                    self.let_go_of_video(session);
                 }
             }
         }
@@ -287,16 +287,21 @@ impl InMeeting {
             .is_some_and(|video| video.malformed(request))
     }
 
-    fn let_go_of_video(&mut self) {
+    fn let_go_of_video(&mut self, session: &mut Session) {
         self.linger_at = None;
         if let Some(video) = self.video.take() {
-            video.cancel();
+            video.cancel(session);
         }
     }
 
     /// Writes the comings and goings, and lets go of a video whose
     /// participant left.
-    fn told(&mut self, reader: &mut Reader, changes: impl IntoIterator<Item = Change>) {
+    fn told(
+        &mut self,
+        session: &mut Session,
+        reader: &mut Reader,
+        changes: impl IntoIterator<Item = Change>,
+    ) {
         for change in changes {
             match change {
                 Change::Came(id) => reader.tell(&Event::Participant {
@@ -314,7 +319,7 @@ impl InMeeting {
             }
         }
         if self.video.is_some() && watching(reader).is_none() {
-            self.let_go_of_video();
+            self.let_go_of_video(session);
         }
     }
 
@@ -334,7 +339,7 @@ impl InMeeting {
             Ok(RequestStreamEvent::Closed(closed)) => {
                 session.cancel(request);
                 session_ended(reader);
-                self.let_go_of_video();
+                self.let_go_of_video(session);
                 self.watch_failed(reader, &format!("the relay closed it ({closed:?})"));
                 return None;
             }
@@ -344,7 +349,7 @@ impl InMeeting {
             Err(error) => {
                 session.cancel(request);
                 session_ended(reader);
-                self.let_go_of_video();
+                self.let_go_of_video(session);
                 self.watch_failed(reader, &format!("{error}"));
                 return None;
             }
@@ -362,7 +367,7 @@ impl InMeeting {
                         .as_mut()
                         .and_then(|kept| kept.meeting.named(&named))
                 });
-                self.told(reader, change);
+                self.told(session, reader, change);
             }
             Ok(RequestEvent::NamespaceDone(namespace)) => {
                 let change = fields(&namespace).and_then(|named| {
@@ -371,7 +376,7 @@ impl InMeeting {
                         .as_mut()
                         .and_then(|kept| kept.meeting.done(&named))
                 });
-                self.told(reader, change);
+                self.told(session, reader, change);
             }
             Ok(RequestEvent::Rejected(error)) => {
                 session.cancel(request);
@@ -418,7 +423,7 @@ impl InMeeting {
             Some(tokio::time::Instant::now() + Duration::from_millis(self.limits.video_linger_ms));
         if let VideoStep::Subscribe { cancel, .. } = &step {
             if cancel.is_some() {
-                self.let_go_of_video();
+                self.let_go_of_video(session);
             }
             let namespace = match TrackNamespace::new(
                 meeting::prefix(&self.room)
@@ -501,12 +506,12 @@ impl InMeeting {
     }
 
     /// The session ended: the watch and the video go with it.
-    pub fn cancel(self) {
+    pub fn cancel(self, session: &mut Session) {
         if let Some(watching) = self.watching {
             watching.cancel();
         }
         if let Some(video) = self.video {
-            video.cancel();
+            video.cancel(session);
         }
     }
 }

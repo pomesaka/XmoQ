@@ -28,7 +28,7 @@ impl Video {
         events: &mut Events,
     ) -> Result<Self> {
         let mut requests = Requests {
-            connection: &asking_with.connection,
+            connection: asking_with.connection.as_ref(),
             session,
             namespace: &namespace,
             token: asking_with.token.as_deref(),
@@ -102,9 +102,11 @@ impl Video {
         of_the_catalog
     }
 
-    /// Gives the subscription up, where there is one.
-    pub fn cancel(self) {
-        self.kept.cancel();
+    /// Gives the video up ([`KeptTrack::cancel`]), and its catalog
+    /// ([`CatalogKept::cancel`]).
+    pub fn cancel(self, session: &mut Session) {
+        self.kept.cancel(session);
+        self.catalog.cancel(session);
     }
 }
 
