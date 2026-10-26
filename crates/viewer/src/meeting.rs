@@ -1,9 +1,10 @@
 //! A reader in a meeting: every participant publishes a broadcast of its
 //! own under `xmoq/meet/<room>/<id>`, and the reader is told of them with
-//! one `SUBSCRIBE_NAMESPACE` for `xmoq/meet/<room>` (draft 18 §6.1). It
-//! follows nobody's sound: the transcriber listens to every broadcast under
-//! the prefix and says who spoke (`from` of `speech`). It subscribes to one
-//! participant's video at a time, the one a picture is asked for.
+//! one `SUBSCRIBE_NAMESPACE` for `xmoq/meet/<room>` (draft 18 §6.1); the
+//! names are `xmoq-meeting-tracks`'. It follows nobody's sound: the
+//! transcriber listens to every broadcast under the prefix and says who
+//! spoke (`from` of `speech`). It subscribes to one participant's video at
+//! a time, the one a picture is asked for.
 //!
 //! **Proposed** (`docs/scale-and-meetings.md`, Part 2); how the participants
 //! find each other is undecided, and this is the side that reads the
@@ -14,10 +15,9 @@
 //! kept a while after a picture: the next picture of the same participant
 //! needs no new subscription, and no key frame to wait for.
 
-use crate::presence::{Change, Presence};
+use xmoq_meeting_tracks::participant_of;
 
-/// The first two fields of a meeting's namespace.
-pub const MEET: [&str; 2] = ["xmoq", "meet"];
+use crate::presence::{Change, Presence};
 
 /// What the reader of a meeting is bounded by. **Provisional**, each set by
 /// a flag of the reader.
@@ -40,28 +40,6 @@ impl Default for Limits {
             most_participants: 49,
             video_linger_ms: 30_000,
         }
-    }
-}
-
-/// The prefix of a meeting's broadcasts: `xmoq/meet/<room>`.
-#[must_use]
-pub fn prefix(room: &str) -> Vec<String> {
-    MEET.iter()
-        .map(ToString::to_string)
-        .chain(std::iter::once(room.to_string()))
-        .collect()
-}
-
-/// The participant a namespace is the broadcast of: the field after the
-/// meeting's prefix, where the namespace has exactly one more. `None` for
-/// any other, the prefix itself and a deeper one among them.
-#[must_use]
-pub fn participant_of<'a>(room: &str, namespace: &'a [String]) -> Option<&'a str> {
-    match namespace {
-        [xmoq, meet, of_room, id] if [xmoq.as_str(), meet.as_str()] == MEET && of_room == room => {
-            Some(id.as_str())
-        }
-        _ => None,
     }
 }
 
@@ -257,29 +235,6 @@ mod tests {
 
     fn fields(path: &str) -> Vec<String> {
         path.split('/').map(ToString::to_string).collect()
-    }
-
-    /// The rows of `fixtures/meeting-presence/participant-of.tsv`, which
-    /// `@xmoq/meeting` reads as well.
-    #[test]
-    fn a_participant_is_the_field_after_the_prefix() {
-        let rows = include_str!("../../../fixtures/meeting-presence/participant-of.tsv");
-        let mut read = 0;
-        for row in rows.lines() {
-            let fields: Vec<&str> = row.split('\t').collect();
-            let [name, room, namespace, expected] = fields[..] else {
-                panic!("a row of four fields: {row}");
-            };
-            let namespace: Vec<String> = namespace.split(' ').map(ToString::to_string).collect();
-            assert_eq!(
-                participant_of(room, &namespace),
-                (expected != "-").then_some(expected),
-                "{name}"
-            );
-            read += 1;
-        }
-        assert_eq!(read, 6);
-        assert_eq!(prefix("r"), fields("xmoq/meet/r"));
     }
 
     #[derive(Debug, Clone, Copy)]

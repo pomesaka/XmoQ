@@ -1,0 +1,6 @@
+prefix-r	r	-	prefix	xmoq meet r
+prefix-blue	blue	-	prefix	xmoq meet blue
+participant-r	r	p1	participant	xmoq meet r p1
+participant-blue	blue	p1	participant	xmoq meet blue p1
+seat-subscribe-r	r	-	seat-subscribe	xmoq meet r *
+seat-subscribe-blue	blue	-	seat-subscribe	xmoq meet blue *

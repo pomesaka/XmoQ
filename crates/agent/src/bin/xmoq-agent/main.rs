@@ -522,7 +522,7 @@ async fn place_in(
             )
         }
         room::Room::Meeting(meeting) => {
-            let expected = xmoq_viewer::meeting::prefix(&client.address().name);
+            let expected = xmoq_meeting_tracks::prefix(&client.address().name);
             if meeting.namespace != expected {
                 bail!(
                     "the room's meeting is under {}, not {}",
@@ -626,10 +626,7 @@ async fn seat_token_of(
             return Ok(None);
         };
         let held = answered.map_err(NoSeatGiven)?;
-        let expected: Vec<String> = xmoq_viewer::meeting::prefix(&client.address().name)
-            .into_iter()
-            .chain(["*".to_string()])
-            .collect();
+        let expected = xmoq_meeting_tracks::seat_subscribe(&client.address().name);
         let subscribe = held.seat().borrow().subscribe.clone();
         if subscribe != expected {
             bail!(

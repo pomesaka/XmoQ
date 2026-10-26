@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	holdsSeat,
 	relayOf,
@@ -362,6 +364,43 @@ test.each<{
 ])("a seat: $name", ({ id, room, seats, answer }) => {
 	expect(seatFor(id, room, seats, 500)).toEqual(answer);
 });
+
+/** The rows of `fixtures/meeting-presence/namespaces.tsv`, which `crates/meeting-tracks` and `@xmoq/meeting` read too. */
+const namespaceRows = readFileSync(
+	join(
+		import.meta.dir,
+		"..",
+		"..",
+		"..",
+		"fixtures",
+		"meeting-presence",
+		"namespaces.tsv",
+	),
+	"utf8",
+)
+	.split("\n")
+	.filter((row) => row !== "")
+	.map((row) => row.split("\t"));
+
+/** The fields of the shared row `seat-subscribe` of `room`. */
+const seatSubscribeRow = (room: string): string[] => {
+	const fields = namespaceRows.find(
+		([, ofRoom, , what]) => ofRoom === room && what === "seat-subscribe",
+	)?.[4];
+	if (fields === undefined) throw new Error(`no seat-subscribe row of ${room}`);
+	return fields.split(" ");
+};
+
+test.each(namespaceRows.filter(([, , , what]) => what === "participant"))(
+	"a seat's namespaces are the shared rows: %s",
+	(_name, room, id, _what, namespace) => {
+		expect(seatFor(id, room ?? "", new Map(), 500)).toEqual({
+			type: "seat",
+			publish: (namespace ?? "").split(" "),
+			subscribe: seatSubscribeRow(room ?? ""),
+		});
+	},
+);
 
 test.each<{ name: string; id: string; lease: unknown; holds: boolean }>([
 	{

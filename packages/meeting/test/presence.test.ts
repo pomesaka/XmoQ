@@ -1,14 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { participantOf } from "../src/core/names.ts";
+import {
+	meetingPrefix,
+	participantNamespace,
+	participantOf,
+	seatSubscribeNamespace,
+} from "../src/core/names.ts";
 import {
 	createPresence,
 	type PresenceChange,
 	watchedOf,
 } from "../src/core/presence.ts";
 
-/** The rows of a table of `fixtures/meeting-presence/`, which `crates/viewer` reads too. */
+/** The rows of a table of `fixtures/meeting-presence/`, which `crates/viewer` and `crates/meeting-tracks` read too. */
 function sharedRows(file: string): string[][] {
 	const table = readFileSync(
 		join(
@@ -79,6 +84,36 @@ describe("the participant of a namespace: fixtures/meeting-presence", () => {
 	test("the table has its 6 rows of 4 columns", () => {
 		expect(sharedRows("participant-of.tsv").map((row) => row.length)).toEqual([
 			4, 4, 4, 4, 4, 4,
+		]);
+	});
+});
+
+describe("the namespaces of a meeting: fixtures/meeting-presence", () => {
+	const namespaceOf = (room: string, id: string, what: string): string[] => {
+		switch (what) {
+			case "prefix":
+				return meetingPrefix(room);
+			case "participant":
+				return participantNamespace(room, id);
+			case "seat-subscribe":
+				return seatSubscribeNamespace(room);
+			default:
+				throw new Error(`no such namespace: ${what}`);
+		}
+	};
+
+	test.each(sharedRows("namespaces.tsv"))(
+		"%s",
+		(_name, room, id, what, namespace) => {
+			expect(namespaceOf(room ?? "", id ?? "", what ?? "").join(" ")).toBe(
+				namespace ?? "",
+			);
+		},
+	);
+
+	test("the table has its 6 rows of 5 columns", () => {
+		expect(sharedRows("namespaces.tsv").map((row) => row.length)).toEqual([
+			5, 5, 5, 5, 5, 5,
 		]);
 	});
 });

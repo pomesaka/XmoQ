@@ -2812,6 +2812,7 @@ dependencies = [
  "xmoq-again",
  "xmoq-chat-tracks",
  "xmoq-loc",
+ "xmoq-meeting-tracks",
  "xmoq-moqt",
  "xmoq-moqt-io",
  "xmoq-msf",
@@ -2850,6 +2851,10 @@ dependencies = [
 
 [[package]]
 name = "xmoq-loc"
+version = "0.0.0"
+
+[[package]]
+name = "xmoq-meeting-tracks"
 version = "0.0.0"
 
 [[package]]
@@ -2997,6 +3002,7 @@ name = "xmoq-viewer"
 version = "0.0.0"
 dependencies = [
  "serde_json",
+ "xmoq-meeting-tracks",
  "xmoq-moqt",
  "xmoq-room-token",
 ]

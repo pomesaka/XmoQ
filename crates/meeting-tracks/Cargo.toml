@@ -1,0 +1,11 @@
+[package]
+name = "xmoq-meeting-tracks"
+version = "0.0.0"
+description = "The namespaces of a meeting: the prefix of a room's meeting, the namespace a participant publishes under, the one a seat subscribes to, and the participant a namespace is of. Without I/O."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,8 +1,9 @@
 //! A meeting on one session (`--meeting`): who is in it, by one
 //! `SUBSCRIBE_NAMESPACE` for `xmoq/meet/<room>`, and the video of the one
-//! participant whose picture was asked for last. What is decided, and why
-//! one video at a time, is `xmoq_viewer::meeting`'s; the sound is the
-//! transcriber's, whose `speech` the session follows as for one broadcast.
+//! participant whose picture was asked for last. The names are
+//! `xmoq_meeting_tracks`'; what is decided, and why one video at a time, is
+//! `xmoq_viewer::meeting`'s; the sound is the transcriber's, whose `speech`
+//! the session follows as for one broadcast.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +19,7 @@ use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
 use xmoq_subscriber::kept::{Asking, Came as VideoCame};
 use xmoq_subscriber::session::{Events, GoingAway, GoneAway, new_url};
-use xmoq_viewer::meeting::{self, Limits, Meeting, Video as VideoStep};
+use xmoq_viewer::meeting::{Limits, Meeting, Video as VideoStep};
 use xmoq_viewer::presence::{Change, SETTLE_MS};
 
 use crate::Reader;
@@ -156,7 +157,7 @@ impl InMeeting {
         let (room, limits) = (room.as_str(), *limits);
         let (answer_wait_ms, open_wait_ms) = (args.answer_wait_ms, args.open_wait_ms);
         let prefix = TrackNamespace::new(
-            meeting::prefix(room)
+            xmoq_meeting_tracks::prefix(room)
                 .into_iter()
                 .map(String::into_bytes)
                 .collect(),
@@ -427,9 +428,8 @@ impl InMeeting {
                 self.let_go_of_video(session);
             }
             let namespace = match TrackNamespace::new(
-                meeting::prefix(&self.room)
+                xmoq_meeting_tracks::participant(&self.room, &id)
                     .into_iter()
-                    .chain(std::iter::once(id.clone()))
                     .map(String::into_bytes)
                     .collect(),
             ) {

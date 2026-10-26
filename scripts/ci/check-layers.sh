@@ -28,6 +28,7 @@ FREE_OF=(
 	"xmoq-chat-tracks:C compiler:cc cmake bindgen"
 	"xmoq-transcript-tracks:C compiler:cc cmake bindgen"
 	"xmoq-viewer:C compiler:cc cmake bindgen"
+	"xmoq-meeting-tracks:C compiler:cc cmake bindgen"
 	"xmoq-watch:SQLite:libsqlite3-sys"
 )
 
@@ -162,7 +163,7 @@ check_rust() {
 crate_layer() {
 	case "$1" in
 	xmoq-moqt | xmoq-loc | xmoq-msf | xmoq-again) echo 0 ;;
-	xmoq-moqt-io | xmoq-room-token | xmoq-chat-tracks | xmoq-transcript-tracks | xmoq-picture | xmoq-speech) echo 1 ;;
+	xmoq-moqt-io | xmoq-room-token | xmoq-chat-tracks | xmoq-transcript-tracks | xmoq-meeting-tracks | xmoq-picture | xmoq-speech) echo 1 ;;
 	xmoq-publisher | xmoq-subscriber | xmoq-relay-core | xmoq-viewer) echo 2 ;;
 	xmoq-viewer-io) echo 3 ;;
 	# The programs: nothing of the workspace depends on them.

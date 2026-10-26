@@ -22,11 +22,7 @@ pub fn prefix(
 ) -> Option<Vec<String>> {
     flag.or(hello)
         .map(<[String]>::to_vec)
-        .or_else(|| {
-            // The meeting's prefix is `xmoq_viewer::meeting`'s, as the
-            // reader's namespace of the meeting is.
-            meeting.map(xmoq_viewer::meeting::prefix)
-        })
+        .or_else(|| meeting.map(xmoq_meeting_tracks::prefix))
         .or_else(|| broadcast.map(<[String]>::to_vec))
 }
 

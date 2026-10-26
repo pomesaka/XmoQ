@@ -45,7 +45,7 @@ Also decided on 2026-10-26:
 
 - One rule for the next session, with values for each role: one for the viewers and the agent, one for the gatherer and the transcriber. All four go by `NextSession` of `xmoq-again`, for where, for the try at once after a GOAWAY, and for the pause from the try before after any other end: 1 s for the viewers (`Pause::VIEWER`), 1 s doubling to 30 s for the gatherer and the transcriber (`Pause::SERVING`).
 - What both implementations of a followed track wait and ask for: a subscription that comes before the track's publisher waits 30 s (RENDEZVOUS_TIMEOUT), where `@xmoq/chat` and `@xmoq/transcript` ask for 10 s; a transcript is read on from where the last subscription left it (Absolute Joining FETCH), as the chat's lines are, where `@xmoq/transcript` asks for the latest pieces anew.
-- The names of a meeting's namespaces (`xmoq/meet/<room>/<id>`), in `xmoq-viewer` today, go to a crate of their own, `xmoq-meeting-tracks` (planned), as the chat's are `xmoq-chat-tracks` and the transcript's `xmoq-transcript-tracks`. WHY: the names of each kind of a room's tracks are then in a crate of the same form, one that a part which is not a viewer can depend on.
+- The names of a meeting's namespaces (`xmoq/meet/<room>/<id>`) are a crate of their own, `xmoq-meeting-tracks`, as the chat's are `xmoq-chat-tracks` and the transcript's `xmoq-transcript-tracks`; the room takes them from `@xmoq/meeting/names`. WHY: the names of each kind of a room's tracks are then in a crate of the same form, one that a part which is not a viewer can depend on.
 
 ### Where the parts sit
 
@@ -65,7 +65,7 @@ The Rust crates, by the same rule (a crate depends on those of a lower layer alo
 | Layer | Crates |
 |---|---|
 | 0 | `xmoq-moqt`, `xmoq-loc`, `xmoq-msf`, `xmoq-again` |
-| 1 | `xmoq-moqt-io`, `xmoq-room-token`, `xmoq-chat-tracks`, `xmoq-transcript-tracks`, `xmoq-meeting-tracks` (planned), `xmoq-picture`, `xmoq-speech` |
+| 1 | `xmoq-moqt-io`, `xmoq-room-token`, `xmoq-chat-tracks`, `xmoq-transcript-tracks`, `xmoq-meeting-tracks`, `xmoq-picture`, `xmoq-speech` |
 | 2 | `xmoq-publisher`, `xmoq-subscriber`, `xmoq-relay-core`, `xmoq-viewer` |
 | 3 | `xmoq-viewer-io` |
 | 4 | the programs: `xmoq-relay`, `xmoq-watch`, `xmoq-agent`, `xmoq-chat`, `xmoq-transcriber`, `xmoq-moqt-client`, `xmoq-quiet-peer` |
