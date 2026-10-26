@@ -1122,15 +1122,15 @@ async function updateWhileWriting(
 		throw new Error("own-rust alone serves a SUBSCRIBE in this run");
 	}
 	// More than the peer's stream window of 128 KiB: the Object is being
-	// written when the update comes.
-	const payload = "00".repeat(256 * 1024);
+	// written when the update comes. By its size: its hex would be more than
+	// one argument of a process holds on Linux (128 KiB).
 	const rust = spawnRustClient(
 		context,
 		"client:own-rust",
 		client,
 		"publish-namespace",
 		"served",
-		["--payload-hex", payload],
+		["--payload-zeros", String(256 * 1024)],
 	);
 	await rust.waitForLine(/^SERVING /);
 	rust.child.stdin.write("send\n");
