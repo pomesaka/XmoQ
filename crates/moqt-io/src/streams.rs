@@ -1742,27 +1742,55 @@ impl SendBudget {
 }
 
 /// What one writer holds of its receiver's budget.
+///
+/// WHY one lock over what it holds and whether it is released: `send` takes
+/// on the caller's thread while the writer's task releases on its own. With
+/// a flag apart, a `take` that read it before the release and added after
+/// the release had given everything back left its bytes and its Object in
+/// every budget it is within for good, and a receiver's budget was used up
+/// the sooner the longer the session went on.
 struct Share {
     budget: Arc<SendBudget>,
-    bytes: AtomicUsize,
-    objects: AtomicUsize,
+    taken: Mutex<Taken>,
+}
+
+/// What a [`Share`] holds.
+#[derive(Default)]
+struct Taken {
+    bytes: usize,
+    objects: usize,
     /// Payload bytes ever queued on the stream, written out or not: what the
     /// stream carries towards the receiver while it is not done
     /// ([`OutgoingSubgroup::carried`]).
-    carried: AtomicUsize,
+    carried: usize,
     /// The writer is done and gave everything back. Its handle may live on;
     /// what is sent through it after that is dropped and counts for nothing.
-    released: AtomicBool,
+    released: bool,
 }
 
 impl Share {
+    fn new(budget: Arc<SendBudget>) -> Self {
+        Self {
+            budget,
+            taken: Mutex::new(Taken::default()),
+        }
+    }
+
+    /// A panic while the lock was held leaves the counts as good as they get.
+    fn taken(&self) -> std::sync::MutexGuard<'_, Taken> {
+        self.taken
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn take(&self, bytes: usize) {
-        if self.released.load(Ordering::Relaxed) {
+        let mut taken = self.taken();
+        if taken.released {
             return;
         }
-        self.bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.objects.fetch_add(1, Ordering::Relaxed);
-        self.carried.fetch_add(bytes, Ordering::Relaxed);
+        taken.bytes += bytes;
+        taken.objects += 1;
+        taken.carried += bytes;
         for budget in self.budget.line() {
             budget.bytes.fetch_add(bytes, Ordering::Relaxed);
             budget.objects.fetch_add(1, Ordering::Relaxed);
@@ -1770,21 +1798,32 @@ impl Share {
     }
 
     fn give_back(&self, bytes: usize) {
-        self.bytes.fetch_sub(bytes, Ordering::Relaxed);
-        self.objects.fetch_sub(1, Ordering::Relaxed);
+        let mut taken = self.taken();
+        if taken.released {
+            return;
+        }
+        taken.bytes -= bytes;
+        taken.objects -= 1;
         for budget in self.budget.line() {
             budget.bytes.fetch_sub(bytes, Ordering::Relaxed);
             budget.objects.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
+    /// Payload bytes the stream carried, 0 once it is released.
+    fn carried(&self) -> usize {
+        let taken = self.taken();
+        if taken.released { 0 } else { taken.carried }
+    }
+
     /// Gives back whatever the writer still holds, and its stream. Called
     /// once, when the writer ends, however it ends.
     fn release(&self) {
-        self.released.store(true, Ordering::Relaxed);
+        let mut taken = self.taken();
+        taken.released = true;
         let (bytes, objects) = (
-            self.bytes.swap(0, Ordering::Relaxed),
-            self.objects.swap(0, Ordering::Relaxed),
+            std::mem::take(&mut taken.bytes),
+            std::mem::take(&mut taken.objects),
         );
         for budget in self.budget.line() {
             budget.bytes.fetch_sub(bytes, Ordering::Relaxed);
@@ -1891,13 +1930,7 @@ impl OutgoingSubgroup {
         for budget in budget.line() {
             budget.streams.fetch_add(1, Ordering::Relaxed);
         }
-        let share = Arc::new(Share {
-            budget: Arc::clone(budget),
-            bytes: AtomicUsize::new(0),
-            objects: AtomicUsize::new(0),
-            carried: AtomicUsize::new(0),
-            released: AtomicBool::new(false),
-        });
+        let share = Arc::new(Share::new(Arc::clone(budget)));
         // The channel has no bound of its own; `send` keeps the budget.
         let (queue, commands) = mpsc::unbounded_channel();
         let (reset, reset_signal) = watch::channel(None);
@@ -1949,10 +1982,7 @@ impl OutgoingSubgroup {
     /// those behind a video that holds the transport.
     #[must_use]
     pub fn carried(&self) -> usize {
-        if self.share.released.load(Ordering::Relaxed) {
-            return 0;
-        }
-        self.share.carried.load(Ordering::Relaxed)
+        self.share.carried()
     }
 
     /// Queues an Object.
@@ -2274,6 +2304,38 @@ impl Writer {
                     return;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::*;
+
+    #[test]
+    fn what_is_taken_as_the_writer_ends_is_given_back_or_not_taken() {
+        let parent = SendBudget::new(SendLimits::default());
+        let budget = SendBudget::within(SendLimits::default(), &parent);
+        // WHY many rounds on two threads: the take that ran into the
+        // release was a matter of a few instructions.
+        for _ in 0..2_000 {
+            for each in budget.line() {
+                each.streams.fetch_add(1, Ordering::Relaxed);
+            }
+            let share = Arc::new(Share::new(Arc::clone(&budget)));
+            let sender = Arc::clone(&share);
+            let sending = std::thread::spawn(move || {
+                for _ in 0..50 {
+                    sender.take(10);
+                }
+            });
+            share.take(10);
+            share.give_back(10);
+            share.release();
+            sending.join().expect("the sending thread");
+            assert_eq!(budget.in_use(), (0, 0, 0));
+            assert_eq!(parent.in_use(), (0, 0, 0));
+            assert_eq!(share.carried(), 0);
         }
     }
 }
