@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 import {
 	broadcastNamespaces,
+	holdsSeat,
 	relayOf,
 	type SeatAnswer,
 	seatFor,
+	seatTimesOf,
 	tokenForNamespace,
 	transcriptPrefix,
 } from "../src/core/rules.ts";
@@ -229,125 +231,188 @@ test.each<{
 	expect(transcriptPrefix(prefix, room)).toEqual(fields);
 });
 
-/** The others of a room of 49 seated, p0 to p48. */
+/** Seats that hold until `expiresAt`, by id. */
+const held = (ids: readonly string[], expiresAt: number) =>
+	new Map(ids.map((id) => [id, { lease: `lease-${id}`, expiresAt }]));
+
+/** 49 seats, p0 to p48, that hold until 1,000. */
 const seated49 = Array.from({ length: 49 }, (_, index) => `p${index}`);
 
+// The seats are looked at at 500; one that holds until 500 has run out.
 test.each<{
 	name: string;
 	id: unknown;
 	room: string;
-	mine: string | undefined;
-	others: (string | undefined)[];
+	seats: Map<string, { lease: string; expiresAt: number }>;
 	answer: SeatAnswer;
 }>([
 	{
-		name: "a seat, counted from now on",
+		name: "a seat",
 		id: "ann",
 		room: "blue",
-		mine: undefined,
-		others: [undefined, "bob"],
+		seats: held(["bob"], 1000),
 		answer: {
 			type: "seat",
 			publish: ["xmoq", "meet", "blue", "ann"],
 			subscribe: ["xmoq", "meet", "blue", "*"],
-			counted: true,
-		},
-	},
-	{
-		name: "the same id on the same socket again, full or not",
-		id: "p3",
-		room: "blue",
-		mine: "p3",
-		others: seated49.filter((id) => id !== "p3"),
-		answer: {
-			type: "seat",
-			publish: ["xmoq", "meet", "blue", "p3"],
-			subscribe: ["xmoq", "meet", "blue", "*"],
-			counted: false,
 		},
 	},
 	{
 		name: "the 50th is told it is full",
 		id: "p49",
 		room: "blue",
-		mine: undefined,
-		others: seated49,
+		seats: held(seated49, 1000),
 		answer: { type: "full" },
+	},
+	{
+		name: "a seat that ran out leaves its place to another",
+		id: "p49",
+		room: "blue",
+		seats: new Map([...held(seated49.slice(1), 1000), ...held(["p0"], 500)]),
+		answer: {
+			type: "seat",
+			publish: ["xmoq", "meet", "blue", "p49"],
+			subscribe: ["xmoq", "meet", "blue", "*"],
+		},
+	},
+	{
+		name: "and its id",
+		id: "p0",
+		room: "blue",
+		seats: held(["p0"], 500),
+		answer: {
+			type: "seat",
+			publish: ["xmoq", "meet", "blue", "p0"],
+			subscribe: ["xmoq", "meet", "blue", "*"],
+		},
+	},
+	{
+		name: "not for an id a seat that holds has",
+		id: "bob",
+		room: "blue",
+		seats: held(["bob"], 1000),
+		answer: { type: "refused", why: "taken" },
 	},
 	{
 		name: "not for an empty id",
 		id: "",
 		room: "blue",
-		mine: undefined,
-		others: [],
+		seats: held([], 1000),
 		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for an id over 64",
 		id: "x".repeat(65),
 		room: "blue",
-		mine: undefined,
-		others: [],
+		seats: held([], 1000),
 		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for an id with a /",
 		id: "a/b",
 		room: "blue",
-		mine: undefined,
-		others: [],
+		seats: held([], 1000),
 		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for an id *",
 		id: "*",
 		room: "blue",
-		mine: undefined,
-		others: [],
+		seats: held([], 1000),
 		answer: { type: "refused", why: "not-a-participant" },
 	},
 	{
 		name: "not for an id that is not text",
 		id: 7,
 		room: "blue",
-		mine: undefined,
-		others: [],
+		seats: held([], 1000),
 		answer: { type: "refused", why: "not-a-participant" },
-	},
-	{
-		name: "not for another id on a socket that joined",
-		id: "other",
-		room: "blue",
-		mine: "ann",
-		others: [],
-		answer: { type: "refused", why: "another-participant" },
-	},
-	{
-		name: "not for an id another socket has",
-		id: "bob",
-		room: "blue",
-		mine: undefined,
-		others: ["bob"],
-		answer: { type: "refused", why: "taken" },
 	},
 	{
 		name: "not in a room whose name has a /",
 		id: "ann",
 		room: "a/b",
-		mine: undefined,
-		others: [],
+		seats: held([], 1000),
 		answer: { type: "refused", why: "not-a-meeting-room" },
 	},
 	{
 		name: "not in a room with no name",
 		id: "ann",
 		room: "",
-		mine: undefined,
-		others: [],
+		seats: held([], 1000),
 		answer: { type: "refused", why: "not-a-meeting-room" },
 	},
-])("join-meeting: $name", ({ id, room, mine, others, answer }) => {
-	expect(seatFor(id, room, mine, others)).toEqual(answer);
+])("a seat: $name", ({ id, room, seats, answer }) => {
+	expect(seatFor(id, room, seats, 500)).toEqual(answer);
+});
+
+test.each<{ name: string; id: string; lease: unknown; holds: boolean }>([
+	{
+		name: "with its lease, before it runs out",
+		id: "bob",
+		lease: "lease-bob",
+		holds: true,
+	},
+	{
+		name: "not with another's lease",
+		id: "bob",
+		lease: "lease-ann",
+		holds: false,
+	},
+	{ name: "not without a lease", id: "bob", lease: undefined, holds: false },
+	{ name: "not once it ran out", id: "ann", lease: "lease-ann", holds: false },
+	{
+		name: "not for a seat nobody has",
+		id: "cid",
+		lease: "lease-cid",
+		holds: false,
+	},
+])("renewing or leaving a seat: $name", ({ id, lease, holds }) => {
+	const seats = new Map([...held(["bob"], 1000), ...held(["ann"], 500)]);
+	expect(holdsSeat(id, lease, seats, 500)).toBe(holds);
+});
+
+test.each<{
+	name: string;
+	seatMs: string | undefined;
+	renewMs: string | undefined;
+	times: { seatMs: number; renewMs: number } | string;
+}>([
+	{
+		name: "the defaults",
+		seatMs: undefined,
+		renewMs: "",
+		times: { seatMs: 60000, renewMs: 20000 },
+	},
+	{
+		name: "both set",
+		seatMs: "30000",
+		renewMs: "10000",
+		times: { seatMs: 30000, renewMs: 10000 },
+	},
+	{
+		name: "a seat of no time",
+		seatMs: "0",
+		renewMs: undefined,
+		times: "MEETING_SEAT_MS is a whole number of milliseconds from 1, not 0",
+	},
+	{
+		name: "a renewal of a fraction",
+		seatMs: undefined,
+		renewMs: "1.5",
+		times: "MEETING_RENEW_MS is a whole number of milliseconds from 1, not 1.5",
+	},
+	{
+		name: "a renewal as long as the seat",
+		seatMs: "20000",
+		renewMs: undefined,
+		times:
+			"MEETING_RENEW_MS (20000) is to be shorter than MEETING_SEAT_MS (20000)",
+	},
+])("the times of a seat: $name", ({ seatMs, renewMs, times }) => {
+	if (typeof times === "string") {
+		expect(() => seatTimesOf(seatMs, renewMs)).toThrow(new RangeError(times));
+	} else expect(seatTimesOf(seatMs, renewMs)).toEqual(times);
 });
 
 test.each<{

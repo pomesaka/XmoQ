@@ -1,6 +1,6 @@
 // The meeting page of the demo: a participant of the meeting of the room
-// `?room=NAME` ("demo" when left out). It asks the room for a seat
-// (`join-meeting`, at most 49, `packages/room/src/worker.ts`),
+// `?room=NAME` ("demo" when left out). It asks the room of the meeting for
+// a seat (`/meetings/<name>/seats`, at most 49, `packages/room/src/worker.ts`),
 // publishes its own picture and voice under `xmoq/meet/<room>/<id>`, and
 // shows the others it receives with `createMeeting` of `@xmoq/meeting`: the
 // sound of all of them, and the small video of the first 8 who came.
@@ -27,9 +27,17 @@ import {
 } from "@xmoq/meeting";
 import type { GoAwayNotice } from "@xmoq/moqt";
 import { createCatalogPublisher } from "@xmoq/msf";
+import {
+	type KeptSeat,
+	keepSeat,
+	type MeetingRoom,
+	meetingRoom,
+	takeSeat,
+	tokenOfARoom,
+} from "@xmoq/room-client";
 import { keepFollowingTranscript, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
 import { startChat } from "./room-chat.ts";
-import { openRoomSocket, tokenOf } from "./room-socket.ts";
+import { tokenOf } from "./room-socket.ts";
 import {
 	AUDIO_TRACK,
 	type Broadcast,
@@ -79,23 +87,6 @@ const movedTo = (relay: Broadcast, goAway?: GoAwayNotice): Broadcast =>
 		? relay
 		: { ...relay, relayUrl: goAway.newSessionUri };
 
-/** What the room says that this page reads. */
-type RoomMessage =
-	| {
-			type: "hello";
-			relay: { relayUrl: string; certSha256Hex: string } | null;
-			meetingTranscript: string[] | null;
-	  }
-	| {
-			type: "meeting";
-			participant: string;
-			publish: { token: string | null };
-			subscribe: { token: string | null };
-	  }
-	| { type: "meeting-full"; most: number }
-	| { type: "meeting-refused"; why: string }
-	| { type: "token"; token: string | null };
-
 /** What the page shows of itself, and a script that looks at it reads. */
 const state: {
 	self: string;
@@ -124,10 +115,11 @@ const show = (): void => {
 };
 
 /**
- * The room's socket, and a seat from it whenever one is asked for. WHY
- * asked again for every connection: a token is good for 600 s, and the
- * room gives the same seat with new tokens to the same id on the same
- * socket.
+ * The room of the meeting, asked over HTTP, and a seat from it whenever one
+ * is asked for: taken once and kept by renewing it (`keepSeat` of
+ * `@xmoq/room-client`), and taken again with the next connection where it
+ * was lost. WHY asked for every connection: a token is good for 600 s, and
+ * a renewal gives new ones.
  */
 function seats(): {
 	seat(): Promise<Seat>;
@@ -135,94 +127,86 @@ function seats(): {
 		role: "pub" | "sub",
 		namespace: string[],
 	): Promise<Uint8Array | undefined>;
-	/** The prefix the room says a transcriber listens under for its meeting (`meetingTranscript` of its hello); null without one. */
+	/** The prefix the room says a transcriber listens under for its meeting; null without one. */
 	meetingTranscript(): Promise<string[] | null>;
 } {
 	const roomsUrl = XMOQ_DEMO.roomsUrl;
 	if (roomsUrl === null) {
 		throw new Error("no rooms: a meeting takes its seat from the room");
 	}
-	/** The relay the room named last; null where it names none. */
-	let relay: Broadcast | null | undefined;
-	let meetingTranscript: string[] | null = null;
-	/** Who waits for the first hello, or for the socket to close before it. */
-	const greeters: (() => void)[] = [];
-	const greeted = (): Promise<void> =>
-		relay === undefined
-			? new Promise((resolve) => {
-					greeters.push(resolve);
-				})
-			: Promise.resolve();
-	/** Whether a seat was given: asked for again on a socket opened again, as the room counts the sockets that joined. */
-	let seated = false;
-	const socket = openRoomSocket<RoomMessage>(
-		`${roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(room)}/ws`,
-		{
-			open() {
-				if (seated) seat().catch(() => {});
-			},
-			message(message) {
-				if (message.type !== "hello") return;
-				meetingTranscript = message.meetingTranscript;
-				relay =
-					message.relay === null ? null : { ...message.relay, namespace: [] };
-				for (const greet of greeters.splice(0)) greet();
-			},
-			close() {
-				for (const greet of greeters.splice(0)) greet();
-				state.seat = "the room's socket closed: joining it again";
-				show();
-			},
-		},
-	);
+	const address = { rooms: roomsUrl, name: room };
+	/** What the room said of the meeting, asked for again after a failure. */
+	let described: Promise<MeetingRoom> | undefined;
+	const meeting = (): Promise<MeetingRoom> => {
+		described ??= meetingRoom(address).catch((error: unknown) => {
+			described = undefined;
+			throw error;
+		});
+		return described;
+	};
+	/**
+	 * The seat, taken once for every connection that asks at the same time:
+	 * a second ask for the same id would be refused as taken.
+	 */
+	let kept: Promise<KeptSeat> | undefined;
+	const keptSeat = (): Promise<KeptSeat> => {
+		if (kept !== undefined) return kept;
+		const taking = takeSeat(address, self).then((answer): KeptSeat => {
+			switch (answer.type) {
+				case "full":
+					state.seat = `the meeting is full: it takes ${answer.most}`;
+					document.body.dataset.full = "true";
+					show();
+					throw new Error(state.seat);
+				case "refused":
+					state.seat = `the room refused the seat: ${answer.why}`;
+					show();
+					throw new Error(state.seat);
+				case "gone":
+					throw new Error("the room gave no seat");
+				case "seat": {
+					const keeping = keepSeat(address, answer.seat);
+					void keeping.lost.then((lost) => {
+						if (kept === taking) kept = undefined;
+						state.seat = `the seat was lost (${lost.type}): taken again with the next connection`;
+						show();
+					});
+					return keeping;
+				}
+			}
+		});
+		kept = taking;
+		taking.catch(() => {
+			if (kept === taking) kept = undefined;
+		});
+		return taking;
+	};
 	async function seat(): Promise<Seat> {
-		await greeted();
-		const at = relay;
-		if (at === undefined) throw new Error("the room's socket closed");
-		if (at === null) {
+		const { relay } = await meeting();
+		if (relay === null) {
 			throw new Error("the room names no relay, where its meeting would be");
 		}
-		const answer = await socket.ask(
-			{ type: "join-meeting", participant: self },
-			["meeting", "meeting-full", "meeting-refused"],
-		);
-		if (answer === undefined) throw new Error("the room's socket closed");
-		if (answer.type === "meeting-full") {
-			seated = false;
-			state.seat = `the meeting is full: it takes ${answer.most}`;
-			document.body.dataset.full = "true";
-			show();
-			throw new Error(state.seat);
-		}
-		if (answer.type === "meeting-refused") {
-			seated = false;
-			state.seat = `the room refused the seat: ${answer.why}`;
-			show();
-			throw new Error(state.seat);
-		}
-		if (answer.type !== "meeting") throw new Error("no seat");
-		seated = true;
+		const keeping = await keptSeat();
 		state.seat = "seated";
 		show();
 		return {
-			relay: at,
-			publish: tokenOf(answer.publish.token),
-			subscribe: tokenOf(answer.subscribe.token),
+			relay: {
+				relayUrl: relay.url,
+				certSha256Hex: relay.certSha256Hex,
+				namespace: [],
+			},
+			publish: tokenOf(keeping.seat.publishToken),
+			subscribe: tokenOf(keeping.seat.subscribeToken),
 		};
 	}
 	return {
-		// The chat's tokens, as the other pages ask for them (`joinRoom` of
-		// `shared.ts`); the room gives none for a namespace with a `*`.
+		// The chat's tokens, and the transcript's, from the meeting's room.
 		async token(role, namespace) {
-			const answer = await socket.ask({ type: "token-for", role, namespace }, [
-				"token",
-			]);
-			return answer?.type === "token" ? tokenOf(answer.token) : undefined;
+			return tokenOf(await tokenOfARoom("meetings", address, role, namespace));
 		},
 		seat,
 		async meetingTranscript() {
-			await greeted();
-			return meetingTranscript;
+			return (await meeting()).transcript;
 		},
 	};
 }

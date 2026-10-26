@@ -125,63 +125,138 @@ export function relayOf(
 	return { relayUrl, certSha256Hex };
 }
 
-/** Why a join-meeting gets no seat, other than a full meeting. */
+/** Why a meeting gives no seat, other than a full meeting. */
 export type SeatRefusal =
 	/** The id is no participant's (`participantId`). */
 	| "not-a-participant"
 	/** The name of the room is empty, or has a `/` or a `*`: it makes no namespace of a meeting. */
 	| "not-a-meeting-room"
-	/** The socket joined as another participant. */
-	| "another-participant"
-	/** Another socket of the room has the id. */
+	/** A seat that has not run out has the id. */
 	| "taken";
 
-/** What a join-meeting gets. */
+/** A seat of a meeting, as the room holds it. */
+export interface HeldSeat {
+	/** What it is renewed and left with. */
+	lease: string;
+	/** When it runs out, in milliseconds since the Unix epoch. */
+	expiresAt: number;
+}
+
+/** What asking for a seat gets. */
 export type SeatAnswer =
-	/** `{type: "meeting-refused", why}`. */
 	| { type: "refused"; why: SeatRefusal }
-	/** `{type: "meeting-full", most}`. */
 	| { type: "full" }
-	/** A seat, and its two namespaces; `counted` where the socket is counted from now on. */
-	| { type: "seat"; publish: string[]; subscribe: string[]; counted: boolean };
+	/** A seat, and its two namespaces. */
+	| { type: "seat"; publish: string[]; subscribe: string[] };
+
+/** The seats that have not run out at `now`. */
+const heldAt = (
+	seats: ReadonlyMap<string, HeldSeat>,
+	now: number,
+): [string, HeldSeat][] =>
+	[...seats].filter(([, seat]) => seat.expiresAt > now);
 
 /**
- * The answer to join-meeting for the participant `id`, on a socket of the
- * room `room` that joined as `mine` (undefined where it has not), while the
- * other sockets of the room joined as `others` (undefined for one that has
- * not). Refused: an id that is no participant's, a room whose name has a
- * `/` or a `*`, another id on a socket that joined, and an id another socket
- * has. The same id on the same socket is answered again, full or not.
+ * The answer to asking for a seat for the participant `id` in the meeting of
+ * the room `room`, while `seats` are held, at `now`. A seat that ran out
+ * counts for nothing: its id can be taken, and its place is free.
  *
- * WHY every join-meeting is answered, a refusal too: a reader matches the
- * answers to its asks by their order (`asked` of
- * `crates/viewer-io/src/room_socket.rs`, `ask` of `demo/room-socket.ts`),
- * and one ask left unanswered has it wait for ever, or take the answer of
- * the ask after it for this one, as for token-for.
+ * WHY a seat holds by its lease and not by a connection: the room is asked
+ * over HTTP, and nothing of it stays open while a participant is there
+ * (decided on 2026-10-26). A participant that leaves without saying so
+ * holds its seat until it runs out (`seatTimesOf`). WHY NOT the namespaces
+ * the relay announces: the room does not talk to the relay, and a token
+ * outlives a seat for its 600 s, so a participant that left may stay at the
+ * relay that long; the room counts who it gives a token to now.
  */
 export function seatFor(
 	id: unknown,
 	room: string,
-	mine: string | undefined,
-	others: readonly (string | undefined)[],
+	seats: ReadonlyMap<string, HeldSeat>,
+	now: number,
 ): SeatAnswer {
 	if (!participantId(id)) return { type: "refused", why: "not-a-participant" };
 	if (room === "" || !fieldOfANamespace(room)) {
 		return { type: "refused", why: "not-a-meeting-room" };
 	}
-	if (mine !== undefined && mine !== id) {
-		return { type: "refused", why: "another-participant" };
+	const held = heldAt(seats, now);
+	if (held.some(([each]) => each === id)) {
+		return { type: "refused", why: "taken" };
 	}
-	if (others.includes(id)) return { type: "refused", why: "taken" };
-	const counted = mine === undefined;
-	if (counted) {
-		const seated = others.filter((other) => other !== undefined).length;
-		if (seated >= MOST_IN_A_MEETING) return { type: "full" };
-	}
+	if (held.length >= MOST_IN_A_MEETING) return { type: "full" };
 	return {
 		type: "seat",
 		publish: ["xmoq", "meet", room, id],
 		subscribe: ["xmoq", "meet", room, "*"],
-		counted,
 	};
+}
+
+/**
+ * Whether the seat of `id` can be renewed, or left, with `lease` at `now`:
+ * it has not run out, and the lease is its own. WHY the lease and not the
+ * id alone: any client can name any id, and would take another's seat.
+ */
+export function holdsSeat(
+	id: string,
+	lease: unknown,
+	seats: ReadonlyMap<string, HeldSeat>,
+	now: number,
+): boolean {
+	const seat = seats.get(id);
+	return seat !== undefined && seat.expiresAt > now && seat.lease === lease;
+}
+
+/** How long a seat holds, and how often a participant renews it, in milliseconds. */
+export interface SeatTimes {
+	seatMs: number;
+	renewMs: number;
+}
+
+/**
+ * **Provisional** (2026-10-26): a seat holds 60 s, and is renewed every 20 s,
+ * so that two renewals can fail before it runs out. Short, so that the seat
+ * of a participant that left without saying so is free soon; long beside
+ * the time a renewal takes. Changed with `MEETING_SEAT_MS` and
+ * `MEETING_RENEW_MS`.
+ */
+export const DEFAULT_SEAT_TIMES: SeatTimes = {
+	seatMs: 60_000,
+	renewMs: 20_000,
+};
+
+/**
+ * The times of the settings `MEETING_SEAT_MS` and `MEETING_RENEW_MS`, the
+ * default for one that is not set or is empty. Throws a `RangeError` for one
+ * that is no whole number from 1, or a renewal that is not shorter than the
+ * seat, which would let a seat run out between two renewals; as for a key
+ * that is set and is none (`keyOfSetting`).
+ */
+export function seatTimesOf(
+	seatMs: string | undefined,
+	renewMs: string | undefined,
+): SeatTimes {
+	const time = (
+		name: string,
+		value: string | undefined,
+		by: number,
+	): number => {
+		if (value === undefined || value === "") return by;
+		const ms = Number(value);
+		if (!Number.isSafeInteger(ms) || ms < 1) {
+			throw new RangeError(
+				`${name} is a whole number of milliseconds from 1, not ${value}`,
+			);
+		}
+		return ms;
+	};
+	const times = {
+		seatMs: time("MEETING_SEAT_MS", seatMs, DEFAULT_SEAT_TIMES.seatMs),
+		renewMs: time("MEETING_RENEW_MS", renewMs, DEFAULT_SEAT_TIMES.renewMs),
+	};
+	if (times.renewMs >= times.seatMs) {
+		throw new RangeError(
+			`MEETING_RENEW_MS (${times.renewMs}) is to be shorter than MEETING_SEAT_MS (${times.seatMs})`,
+		);
+	}
+	return times;
 }

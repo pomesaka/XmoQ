@@ -10,7 +10,8 @@
 		"@xmoq/moqt": "workspace:*",
 		"@xmoq/msf": "workspace:*",
 		"@xmoq/transcript": "workspace:*",
-		"playwright-core": "1.64.0"
+		"playwright-core": "1.64.0",
+		"@xmoq/room-client": "workspace:*"
 	},
 	"scripts": {
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.page.json"

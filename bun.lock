@@ -14,6 +14,7 @@
         "@xmoq/meeting": "workspace:*",
         "@xmoq/moqt": "workspace:*",
         "@xmoq/msf": "workspace:*",
+        "@xmoq/room-client": "workspace:*",
         "@xmoq/transcript": "workspace:*",
         "playwright-core": "1.64.0",
       },
@@ -116,10 +117,21 @@
     "packages/room": {
       "name": "@xmoq/room",
       "version": "0.0.0",
+      "dependencies": {
+        "@xmoq/room-client": "workspace:*",
+      },
       "devDependencies": {
         "@cloudflare/workers-types": "4.20260702.1",
         "@types/bun": "1.4.2",
         "miniflare": "4.20260730.0",
+        "typescript": "6.0.3",
+      },
+    },
+    "packages/room-client": {
+      "name": "@xmoq/room-client",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@types/bun": "1.4.2",
         "typescript": "6.0.3",
       },
     },
@@ -246,6 +258,8 @@
     "@xmoq/msf": ["@xmoq/msf@workspace:packages/msf"],
 
     "@xmoq/room": ["@xmoq/room@workspace:packages/room"],
+
+    "@xmoq/room-client": ["@xmoq/room-client@workspace:packages/room-client"],
 
     "@xmoq/transcript": ["@xmoq/transcript@workspace:packages/transcript"],
 

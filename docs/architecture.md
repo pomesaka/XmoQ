@@ -53,7 +53,7 @@ The TypeScript packages, once `@xmoq/tracks` is there; `scripts/ci/check-layers.
 
 | Layer | Packages |
 |---|---|
-| 0 | `@xmoq/moqt`, `@xmoq/loc`, `@xmoq/json` |
+| 0 | `@xmoq/moqt`, `@xmoq/loc`, `@xmoq/json`, `@xmoq/room-client` |
 | 1 | `@xmoq/tracks` (planned): the roles of an endpoint |
 | 2 | `@xmoq/msf`, `@xmoq/chat`, `@xmoq/transcript` |
 | 3 | `@xmoq/media` |
@@ -78,6 +78,6 @@ Each client uses its own connection to the relay. MoQ Track is a logical data se
 
 **Parts and applications** (decided on 2026-10-26): what any application over MoQ can use is a part, in `crates/` and `packages/`; what puts the parts together into an application, and the values that application chooses, is in `demo/`, and handed to the parts. The Rust programs stay in `crates/` as tools that take their settings by flags, and `demo/serve.ts` passes the demo's values to them. `demo/` is formatted, linted and type-checked as the parts are. WHY: a value chosen for the demo and kept in a part (a default, a limit) is chosen for every other application of that part too, and nobody sees it chosen; in the application, it is said where the application is put together. WHY NOT the parts without defaults at all: a part keeps the defaults and the bounds that come from what it is (a limit of what it holds, a time the protocol asks for), and only takes from the application what the application decides.
 
-Meetings of 49 participants at most are in scope since 2026-10-25, after an agent can follow a broadcast; how they sit on the relay, the room and the chat is a [proposed design](scale-and-meetings.md). Of it, decided on 2026-10-25: every participant publishes under `xmoq/meet/<room>/<id>` and finds the others with SUBSCRIBE_NAMESPACE at the relay, the room gives no token past 49, and each receives the small video of 8 as they came and the sound of all. A page's side is `@xmoq/meeting` (layer 3, above `@xmoq/media`); the room's side is `join-meeting` of the room (`seatFor` of `packages/room/src/core/rules.ts`), which counts the participants to `MOST_IN_A_MEETING` and gives each its tokens.
+Meetings of 49 participants at most are in scope since 2026-10-25, after an agent can follow a broadcast; how they sit on the relay, the room and the chat is a [proposed design](scale-and-meetings.md). Of it, decided on 2026-10-25: every participant publishes under `xmoq/meet/<room>/<id>` and finds the others with SUBSCRIBE_NAMESPACE at the relay, the room gives no token past 49, and each receives the small video of 8 as they came and the sound of all. A page's side is `@xmoq/meeting` (layer 3, above `@xmoq/media`); the room's side is the room of the meeting (`MeetingRoom` of `packages/room/src/worker.ts`, asked over HTTP since 2026-10-26, [`fixtures/room-api/`](../fixtures/room-api/README.md)), which gives a seat with its tokens to `MOST_IN_A_MEETING` participants, each held by a lease that is renewed (`seatFor` of `packages/room/src/core/rules.ts`).
 
 See [protocol layers](protocols.md), [validation](validation.md) and [open decisions](open-questions.md).
