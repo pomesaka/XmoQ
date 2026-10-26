@@ -8,18 +8,18 @@
 //   ?join=no    waits for the next key frame, as without the Joining FETCH
 
 import {
-	type AudioPlayback,
 	AUTO_MARGIN_MS,
 	AUTO_WINDOW_MS,
+	type AudioPlayback,
 	createFastestWay,
 	createPlayout,
 	createQualitySwitch,
-	keepPlaying,
-	keepTrackOnSession,
 	DEFAULT_AUDIO_MIN_MS,
 	DEFAULT_AUTO_MAX_MS,
 	DEFAULT_AUTO_SHARE,
 	DEFAULT_PLAYOUT_BUFFER_MS,
+	keepPlaying,
+	keepTrackOnSession,
 	playAudioTrack,
 	playVideoTrack,
 	type VideoPlayback,
@@ -36,19 +36,19 @@ import {
 	AGAIN,
 	type Broadcast,
 	connectToRelay,
+	every,
 	firstBytes,
 	HERE,
+	joinRoom,
 	MARK,
 	NAMESPACE,
 	namespace,
-	joinRoom,
+	perSecond,
 	SAMPLE_RATE,
-	WIDTH,
 	say,
 	through,
+	WIDTH,
 	why,
-	every,
-	perSecond,
 } from "./shared.ts";
 
 const query = new URLSearchParams(location.search);
@@ -133,7 +133,6 @@ const WAIT_MS = 30_000;
 const VIDEO_TIMEOUT_THEN = query.get("videoTimeoutThen");
 const VIDEO_TIMEOUT_AFTER_S = Number(query.get("videoTimeoutAfter") ?? 10);
 
-
 /** The last 200 values of something measured, for its median and its largest. */
 function measured(): {
 	add(value: number): void;
@@ -195,11 +194,13 @@ async function tracksOf(
 	try {
 		for (;;) {
 			const next = await Promise.race([reader.read(), late]);
-			if (next.done) throw new Error("the catalog track ended without a catalog");
+			if (next.done)
+				throw new Error("the catalog track ended without a catalog");
 			const tracks = next.value.current?.catalog.tracks;
 			if (tracks === undefined) continue;
 			const video = tracks.find((track) => track.role === "video");
-			if (video === undefined) throw new Error("the catalog has no video track");
+			if (video === undefined)
+				throw new Error("the catalog has no video track");
 			document.body.dataset.catalog = JSON.stringify(tracks);
 			// The versions of the video: the tracks of its alternate group
 			// (MSF §5.2.12), the one that takes the most room first.
@@ -393,7 +394,8 @@ async function main(): Promise<void> {
 			firstAudioAfterMs ??= Math.round(performance.now() - audioSince);
 			const timeMs = piece.timestampUs / 1000;
 			arrived.audio.add(piece.now - timeMs);
-			if (query.get("diag") !== null) audioCameAll.push(Math.round(piece.now - timeMs));
+			if (query.get("diag") !== null)
+				audioCameAll.push(Math.round(piece.now - timeMs));
 			const loud = piece.samples.some((sample) => Math.abs(sample) > 0.3);
 			if (loud && !markHeard) {
 				marks.audio.push({ time: timeMs, played: piece.due });
@@ -549,9 +551,7 @@ async function main(): Promise<void> {
 		listener.getFloatTimeDomainData(samples);
 		const from = samples.length - Math.round(sound.sampleRate * 0.04);
 		for (let index = Math.max(from, 1); index < samples.length; index++) {
-			const step = Math.abs(
-				(samples[index] ?? 0) - (samples[index - 1] ?? 0),
-			);
+			const step = Math.abs((samples[index] ?? 0) - (samples[index - 1] ?? 0));
 			if (step > BREAK) {
 				breaks += 1;
 				breaksNow.count();
@@ -719,7 +719,11 @@ async function main(): Promise<void> {
 			// has ended, so that the next call on the session can subscribe
 			// anew. Without it the session is closed then, as before.
 			const playing = new AbortController();
-			const tracks = await tracksOf(connection, playingNamespace, playing.signal);
+			const tracks = await tracksOf(
+				connection,
+				playingNamespace,
+				playing.signal,
+			);
 			const utf8 = new TextEncoder();
 			// `?video=no` plays the sound alone, for looking into it.
 			const playVersion = (
@@ -811,8 +815,13 @@ async function main(): Promise<void> {
 						triedLate[Math.floor(triedLate.length / 2)],
 					);
 					const trying = chooser.trying();
-					const triedTrack = trying === undefined ? undefined : versions[trying];
-					if (trying !== undefined && triedTrack !== undefined && tried === undefined) {
+					const triedTrack =
+						trying === undefined ? undefined : versions[trying];
+					if (
+						trying !== undefined &&
+						triedTrack !== undefined &&
+						tried === undefined
+					) {
 						// The try begins: the higher version comes next to the one
 						// that is shown, and its frames are closed unseen.
 						const began: NonNullable<typeof trial> = {

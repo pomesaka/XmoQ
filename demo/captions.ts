@@ -12,7 +12,10 @@
 // picture's moment there is nothing yet to show.
 
 import type { GoAwayNotice } from "@xmoq/moqt";
-import { keepFollowingTranscript, type TranscriptConnection } from "@xmoq/transcript";
+import {
+	keepFollowingTranscript,
+	type TranscriptConnection,
+} from "@xmoq/transcript";
 
 declare const XMOQ_DEMO: { transcript: boolean };
 
@@ -50,7 +53,8 @@ export function startCaptions(
 				// Nor a piece of the FETCH that was read long ago: the
 				// transcript keeps what was said minutes before.
 				// `at` is the transcriber's clock, the same machine's in the demo.
-				if (speech.how === "history" && Date.now() - speech.at > SHOWN_MS) return;
+				if (speech.how === "history" && Date.now() - speech.at > SHOWN_MS)
+					return;
 				newest = speech.number;
 				shown.textContent = speech.text;
 				clearTimeout(clear);
@@ -65,8 +69,10 @@ export function startCaptions(
 			},
 		},
 		onState(state) {
-			if (state.type === "moved") shown.title = `captions: the relay sent them to ${state.goAway.newSessionUri || "itself"}`;
-			if (state.type === "failed") shown.title = `captions: ${String(state.error).slice(0, 120)}`;
+			if (state.type === "moved")
+				shown.title = `captions: the relay sent them to ${state.goAway.newSessionUri || "itself"}`;
+			if (state.type === "failed")
+				shown.title = `captions: ${String(state.error).slice(0, 120)}`;
 		},
 	});
 }

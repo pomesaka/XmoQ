@@ -214,26 +214,25 @@ const roomsUrl =
 // `--no-auth`.
 const chatBinary = join(here, "..", "target", "debug", "xmoq-chat");
 const chatStore = options["chat-store"] ?? join(here, ".chat", "chat.sqlite3");
-const chat =
-	existsSync(chatBinary)
-		? (() => {
-				mkdirSync(dirname(chatStore), { recursive: true });
-				return spawn(
-					chatBinary,
-					[
-						"--url",
-						`https://127.0.0.1:${options["relay-port"]}/`,
-						"--cert-sha256",
-						certSha256Hex,
-						"--store",
-						chatStore,
-						...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
-					],
-					// Its lines, one for each thing it does, are not shown.
-					{ stdio: ["ignore", "ignore", "inherit"] },
-				);
-			})()
-		: undefined;
+const chat = existsSync(chatBinary)
+	? (() => {
+			mkdirSync(dirname(chatStore), { recursive: true });
+			return spawn(
+				chatBinary,
+				[
+					"--url",
+					`https://127.0.0.1:${options["relay-port"]}/`,
+					"--cert-sha256",
+					certSha256Hex,
+					"--store",
+					chatStore,
+					...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
+				],
+				// Its lines, one for each thing it does, are not shown.
+				{ stdio: ["ignore", "ignore", "inherit"] },
+			);
+		})()
+	: undefined;
 chat?.on("exit", (code) => {
 	// The pages have no chat without it; the run goes on.
 	console.log(`the gatherer of the chat exited with ${code}`);
@@ -362,8 +361,8 @@ const html = (path: string): string => `<!doctype html>
 						}
 		<p><button id="agent-link">link a folder for Claude Code</button> <button id="agent-call">call Claude Code</button> <span id="agent-note"></span></p>`
 				: roomsUrl === null
-				? "<p>no rooms: bun install, and start again</p>"
-				: `<p id="connected"></p>
+					? "<p>no rooms: bun install, and start again</p>"
+					: `<p id="connected"></p>
 		${
 			chat === undefined
 				? `<p>${noChat}</p>`

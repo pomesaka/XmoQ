@@ -8,8 +8,8 @@
 import {
 	type AudioTrackEncoder,
 	createAudioTrackEncoder,
-	keepPublishing,
 	createVideoTrackEncoder,
+	keepPublishing,
 } from "@xmoq/media";
 import { createCatalogPublisher } from "@xmoq/msf";
 import {
@@ -19,29 +19,28 @@ import {
 	connectToRelay,
 	DECODER_CODEC,
 	ENCODER_CODEC,
-	TRACK,
+	every,
+	HEIGHT,
 	HERE,
+	joinRoom,
 	MARK,
 	marked,
-	SAMPLE_RATE,
-	HEIGHT,
 	namespace,
-	joinRoom,
-	say,
-	through,
-	why,
-	trackName,
-	SIZES,
-	WIDTH,
-	every,
 	perSecond,
+	SAMPLE_RATE,
+	SIZES,
+	say,
+	TRACK,
+	through,
+	trackName,
+	WIDTH,
+	why,
 } from "./shared.ts";
 
 const FRAMES_A_SECOND = 30;
 /** `?size=360|720|1080`: the size the picture is sent at; 360 when left out, or for a size that is none. */
 const asked = new URLSearchParams(location.search).get("size");
-const SIZE =
-	asked === "720" || asked === "1080" ? SIZES[asked] : SIZES["360"];
+const SIZE = asked === "720" || asked === "1080" ? SIZES[asked] : SIZES["360"];
 
 /** Not in the DOM library of TypeScript yet: a track of a `MediaStream` as a stream of frames (Chromium has it). */
 declare class MediaStreamTrackProcessor {
@@ -65,7 +64,9 @@ declare class MediaStreamTrackProcessor {
  * N), as a microphone does whose samples are counted by a clock of its own.
  */
 const TONE_PACE =
-	1 + Number(new URLSearchParams(location.search).get("toneSkewPpm") ?? 0) / 1_000_000;
+	1 +
+	Number(new URLSearchParams(location.search).get("toneSkewPpm") ?? 0) /
+		1_000_000;
 
 function tone(onData: (data: AudioData) => void): void {
 	const frames = SAMPLE_RATE / 50;
@@ -111,7 +112,9 @@ function tone(onData: (data: AudioData) => void): void {
 }
 
 /** Calls `onData` with the audio of the microphone. */
-async function fromMicrophone(onData: (data: AudioData) => void): Promise<void> {
+async function fromMicrophone(
+	onData: (data: AudioData) => void,
+): Promise<void> {
 	const media = await navigator.mediaDevices.getUserMedia({
 		audio: { sampleRate: SAMPLE_RATE, channelCount: 1 },
 	});
@@ -126,11 +129,21 @@ async function fromMicrophone(onData: (data: AudioData) => void): Promise<void> 
 	}
 }
 
-const preview = document.querySelector("canvas");
-const context = preview?.getContext("2d");
-if (preview === null || context === null || context === undefined) {
-	throw new Error("no canvas");
+/** The page's canvas and its context, which the page cannot be without. */
+function canvasOfThePage(): {
+	preview: HTMLCanvasElement;
+	context: CanvasRenderingContext2D;
+} {
+	const canvas = document.querySelector("canvas");
+	const drawing = canvas?.getContext("2d");
+	if (canvas === null || drawing === null || drawing === undefined) {
+		throw new Error("no canvas");
+	}
+	return { preview: canvas, context: drawing };
 }
+// WHY through a function: the functions below are called later, and a check
+// at the top level does not narrow `null` away inside them.
+const { preview, context } = canvasOfThePage();
 preview.width = SIZE.width;
 preview.height = SIZE.height;
 // It is shown at one size whatever it is sent at.
@@ -168,13 +181,19 @@ async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
 		// When the camera took the frame, on this page's clock, where the
 		// browser says (Chromium does, `captureTime`): how long the frame
 		// took to get to the encoder. The viewer cannot see this part.
-		const taken: unknown = Reflect.get(next.value.metadata(), "captureTime");
+		// WHY through Reflect: `VideoFrame.metadata()` is not in the DOM
+		// library of TypeScript 6.0.3.
+		const metadata: unknown = Reflect.get(next.value, "metadata");
+		const taken: unknown =
+			typeof metadata === "function"
+				? Reflect.get(Reflect.apply(metadata, next.value, []), "captureTime")
+				: undefined;
 		if (typeof taken === "number") {
 			cameraToEncoderMs.push(performance.now() - taken);
 			if (cameraToEncoderMs.length > 200) cameraToEncoderMs.shift();
 		}
 		next.value.close();
-		onFrame(new VideoFrame(preview as HTMLCanvasElement, { timestamp }));
+		onFrame(new VideoFrame(preview, { timestamp }));
 	}
 }
 
@@ -207,7 +226,9 @@ const canvasNow =
 		? () => performance.now()
 		: () => Date.now();
 const CLOCK_SKEW =
-	1 + Number(new URLSearchParams(location.search).get("clockSkewPpm") ?? 0) / 1_000_000;
+	1 +
+	Number(new URLSearchParams(location.search).get("clockSkewPpm") ?? 0) /
+		1_000_000;
 
 function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	// WHY `Date.now()` and not `performance.now()`: the tone counts its
@@ -247,7 +268,7 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 		context.fillText(`frame ${painted}`, 40, 170);
 		painted += 1;
 		onFrame(
-			new VideoFrame(preview as HTMLCanvasElement, {
+			new VideoFrame(preview, {
 				timestamp: Math.round(elapsed * 1000 * CLOCK_SKEW),
 			}),
 		);
@@ -506,7 +527,9 @@ async function main(): Promise<void> {
 			}${low === undefined ? "" : `\nvideo-low (${LOW.width}x${LOW.height}, ${LOW.bitrate / 1000} kbit/s): encoded ${low.stats().encoded} frames (${low.stats().keyChunks} key), ${Math.round(low.stats().encodedBytes / 1024)} KiB; sent ${low.publisher.stats().written} Objects`}\nvideo: encoded ${stats.encoded} frames (${stats.keyChunks} key), ${Math.round(stats.encodedBytes / 1024)} KiB; sent ${sent.written} Objects;${SHORTEST_GROUP_MS === null ? "" : ` new Groups asked for ${sent.newGroupsAskedFor}, begun ${sent.newGroupsBegun};`} not sent ${JSON.stringify(stats.notSent)}; not encoded ${JSON.stringify(stats.notEncoded)} · audio: ${audio === undefined ? "none" : `encoded ${audio.stats().encoded} chunks, sent ${audio.publisher.stats().written}, skipped ${JSON.stringify(audio.publisher.stats().skipped)}`}`,
 		);
 	});
-	void encoder.failed.then((error) => say(`the encoder failed: ${String(error)}`));
+	void encoder.failed.then((error) =>
+		say(`the encoder failed: ${String(error)}`),
+	);
 }
 
 main().catch((error: unknown) => {

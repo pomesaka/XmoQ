@@ -45,7 +45,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 - 差し替えるかもしれない依存は1ファイルだけが触る: 映像のデコーダ（`crates/picture/src/video_decoder.rs`）、音の出力（`crates/watch/src/bin/xmoq-watch/audio_output.rs`）
 - `xmoq-chat-tracks`と`xmoq-transcript-tracks`はCコンパイラを要らない形に保ち、`xmoq-watch`をSQLiteに依存させない（`check:layers`が依存の木で検査する）
 - whisper.cppのモデルはリポジトリに入れない（`mise run speech-model`がユーザーのキャッシュに取る）
-- 本体（`crates/`、`packages/`）から`spikes/`、`demo/`、`interop/`、照合のためだけの`xmoq-quiet-peer`に依存させない（`xmoq-quiet-peer`は`check:layers`が検査する）。`spikes/`と`demo/`はlintと型検査の対象外。`interop/`は対象で、`interop/peers/`は`spikes/moqtail/`の写し（`moqtail`のライブラリで書いた自前の相手役）で、spikeとの差分を読めるように整形もlintもしない。自前のコードなのでレビューの対象に入る
+- 本体（`crates/`、`packages/`）から`spikes/`、`demo/`、`interop/`、照合のためだけの`xmoq-quiet-peer`に依存させない（`xmoq-quiet-peer`は`check:layers`が検査する）。`spikes/`はlintと型検査の対象外。`demo/`と`interop/`は対象で、`interop/peers/`は`spikes/moqtail/`の写し（`moqtail`のライブラリで書いた自前の相手役）で、spikeとの差分を読めるように整形もlintもしない。自前のコードなのでレビューの対象に入る
 - 断りや終わりの後にいつ頼み直すかの規則は、Rustは`xmoq-again`、TypeScriptは`@xmoq/moqt`（`createAskAgain`、`createNextSession`、GOAWAYで移るループの`keepMoving`）にある。層0のパッケージどうしは依存できないので、TypeScriptの側は`@xmoq/moqt`に置く。表は`fixtures/ask-again/`で、両方のテストが読む。クライアントごとに書き直さず、これを使う
 - 部屋のトークンの形は、Rustは`xmoq-room-token`、TypeScriptは`@xmoq/room`の`src/token.ts`にある。表は`fixtures/room-token/`で、両方のテストが読む。部屋は`packages/room`にあり、Miniflareで動かす（`node packages/room/run.ts`）
 

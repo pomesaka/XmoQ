@@ -85,7 +85,7 @@ type RoomMessage =
 			type: "hello";
 			relay: { relayUrl: string; certSha256Hex: string } | null;
 			meetingTranscript: string[] | null;
-		}
+	  }
 	| {
 			type: "meeting";
 			participant: string;
@@ -131,7 +131,10 @@ const show = (): void => {
  */
 function seats(): {
 	seat(): Promise<Seat>;
-	token(role: "pub" | "sub", namespace: string[]): Promise<Uint8Array | undefined>;
+	token(
+		role: "pub" | "sub",
+		namespace: string[],
+	): Promise<Uint8Array | undefined>;
 	/** The prefix the room says a transcriber listens under for its meeting (`meetingTranscript` of its hello); null without one. */
 	meetingTranscript(): Promise<string[] | null>;
 } {
@@ -161,7 +164,8 @@ function seats(): {
 			message(message) {
 				if (message.type !== "hello") return;
 				meetingTranscript = message.meetingTranscript;
-				relay = message.relay === null ? null : { ...message.relay, namespace: [] };
+				relay =
+					message.relay === null ? null : { ...message.relay, namespace: [] };
 				for (const greet of greeters.splice(0)) greet();
 			},
 			close() {
@@ -178,11 +182,10 @@ function seats(): {
 		if (at === null) {
 			throw new Error("the room names no relay, where its meeting would be");
 		}
-		const answer = await socket.ask({ type: "join-meeting", participant: self }, [
-			"meeting",
-			"meeting-full",
-			"meeting-refused",
-		]);
+		const answer = await socket.ask(
+			{ type: "join-meeting", participant: self },
+			["meeting", "meeting-full", "meeting-refused"],
+		);
 		if (answer === undefined) throw new Error("the room's socket closed");
 		if (answer.type === "meeting-full") {
 			seated = false;
@@ -211,7 +214,9 @@ function seats(): {
 		// The chat's tokens, as the other pages ask for them (`joinRoom` of
 		// `shared.ts`); the room gives none for a namespace with a `*`.
 		async token(role, namespace) {
-			const answer = await socket.ask({ type: "token-for", role, namespace }, ["token"]);
+			const answer = await socket.ask({ type: "token-for", role, namespace }, [
+				"token",
+			]);
 			return answer?.type === "token" ? tokenOf(answer.token) : undefined;
 		},
 		seat,
@@ -228,7 +233,9 @@ declare class MediaStreamTrackProcessor {
 	readonly readable: ReadableStream<VideoFrame | AudioData>;
 }
 
-async function fromMicrophone(onData: (data: AudioData) => void): Promise<void> {
+async function fromMicrophone(
+	onData: (data: AudioData) => void,
+): Promise<void> {
 	const media = await navigator.mediaDevices.getUserMedia({
 		audio: { sampleRate: SAMPLE_RATE, channelCount: 1 },
 	});
@@ -245,7 +252,9 @@ async function fromMicrophone(onData: (data: AudioData) => void): Promise<void> 
 
 /** The tile of a participant: a canvas, made when its first frame comes. */
 function tileOf(id: string): HTMLCanvasElement {
-	const found = document.querySelector<HTMLCanvasElement>(`canvas[data-id="${id}"]`);
+	const found = document.querySelector<HTMLCanvasElement>(
+		`canvas[data-id="${id}"]`,
+	);
 	if (found !== null) return found;
 	const tile = document.createElement("canvas");
 	tile.width = WIDTH;
@@ -310,7 +319,8 @@ async function main(): Promise<void> {
 		framerate: FRAMES_A_SECOND,
 		keyFrameIntervalMs: 1000,
 	});
-	const withSound = new URLSearchParams(location.search).get("audio") !== "none";
+	const withSound =
+		new URLSearchParams(location.search).get("audio") !== "none";
 	const sound = withSound
 		? await createAudioTrackEncoder({
 				trackNamespace: fields(mine),
@@ -322,10 +332,12 @@ async function main(): Promise<void> {
 			})
 		: undefined;
 	if (sound !== undefined) {
-		void fromMicrophone((data) => sound.encode(data)).catch((error: unknown) => {
-			state.publishing = `the microphone failed: ${String(error)}`;
-			show();
-		});
+		void fromMicrophone((data) => sound.encode(data)).catch(
+			(error: unknown) => {
+				state.publishing = `the microphone failed: ${String(error)}`;
+				show();
+			},
+		);
 	}
 	const catalog = createCatalogPublisher({
 		namespace: fields(mine),
@@ -440,15 +452,21 @@ async function main(): Promise<void> {
 				tellAgent(`not linked: make ${AGENT_ROOT} and choose it`);
 				return;
 			case "granted":
-				tellAgent(`linked: Claude Code reads ${AGENT_ROOT}/${room}/${self}/ once called`);
+				tellAgent(
+					`linked: Claude Code reads ${AGENT_ROOT}/${room}/${self}/ once called`,
+				);
 				return;
 			case "to-allow":
-				tellAgent(`linked to ${AGENT_ROOT}; the page asks to write there again when Claude Code is called`);
+				tellAgent(
+					`linked to ${AGENT_ROOT}; the page asks to write there again when Claude Code is called`,
+				);
 		}
 	};
 	void showRoot();
 	linkButton?.addEventListener("click", () => {
-		chooseRoot().then(showRoot, (error: unknown) => tellAgent(`not linked: ${why(error)}`));
+		chooseRoot().then(showRoot, (error: unknown) =>
+			tellAgent(`not linked: ${why(error)}`),
+		);
 	});
 
 	/** Begins writing for Claude Code, choosing the root or allowing it again where it has to be. */
@@ -457,14 +475,18 @@ async function main(): Promise<void> {
 		let root: FileSystemDirectoryHandle;
 		switch (remembered.type) {
 			case "unsupported":
-				throw new Error("this browser cannot write into a folder: Chromium can");
+				throw new Error(
+					"this browser cannot write into a folder: Chromium can",
+				);
 			case "none":
 				root = await chooseRoot();
 				break;
 			case "to-allow":
 				root = remembered.root;
 				if (!(await allowRoot(root))) {
-					throw new Error(`not allowed to write in ${AGENT_ROOT}: call again to be asked again`);
+					throw new Error(
+						`not allowed to write in ${AGENT_ROOT}: call again to be asked again`,
+					);
 				}
 				break;
 			case "granted":
@@ -475,7 +497,8 @@ async function main(): Promise<void> {
 		});
 		const bridge = createAgentBridge({
 			folder,
-			say: (text) => chat?.say(text) ?? Promise.resolve("this page has no chat"),
+			say: (text) =>
+				chat?.say(text) ?? Promise.resolve("this page has no chat"),
 		});
 		for (const id of meeting.ids()) bridge.participant("joined", id);
 		const stop = new AbortController();
@@ -485,7 +508,11 @@ async function main(): Promise<void> {
 		let newest = -1n;
 		// The prefix the room names, which it gives a token in; the room's
 		// meeting where it names none.
-		const listened = (await theRoom.meetingTranscript()) ?? ["xmoq", "meet", room];
+		const listened = (await theRoom.meetingTranscript()) ?? [
+			"xmoq",
+			"meet",
+			room,
+		];
 		void keepFollowingTranscript({
 			connect: async (goAway) => {
 				const seat = await theRoom.seat();
@@ -506,7 +533,9 @@ async function main(): Promise<void> {
 			},
 			signal: stop.signal,
 		});
-		tellAgent(`Claude Code reads ${AGENT_ROOT}/${folder.path}/ and writes lines into inbox.txt there`);
+		tellAgent(
+			`Claude Code reads ${AGENT_ROOT}/${folder.path}/ and writes lines into inbox.txt there`,
+		);
 		// What was written stays.
 		return () => {
 			bridge.stop();
@@ -524,7 +553,8 @@ async function main(): Promise<void> {
 					state.type === "on" ? "stop Claude Code" : "call Claude Code";
 				callButton.toggleAttribute("disabled", state.type === "calling");
 			}
-			if (state.type === "failed") tellAgent(`Claude Code not called: ${why(state.error)}`);
+			if (state.type === "failed")
+				tellAgent(`Claude Code not called: ${why(state.error)}`);
 			if (state.type === "idle") void showRoot();
 		},
 	});
@@ -551,7 +581,10 @@ async function main(): Promise<void> {
 			}
 			if (event.type === "came") others(event.id);
 			if (event.type === "came" || event.type === "left") {
-				agent.bridge?.participant(event.type === "came" ? "joined" : "left", event.id);
+				agent.bridge?.participant(
+					event.type === "came" ? "joined" : "left",
+					event.id,
+				);
 			}
 			if (event.type === "failed") {
 				state.failed = [

@@ -4,13 +4,16 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "${REPO_ROOT}"
 
-# The TypeScript projects of the Bun workspace in the root package.json: the packages, and the
-# interop runner that drives them against other implementations.
+# The TypeScript projects of the Bun workspace in the root package.json: the packages, the
+# interop runner that drives them against other implementations, and the demo's applications.
 shopt -s nullglob
 manifests=(packages/*/package.json)
 shopt -u nullglob
 if [[ -f interop/package.json ]]; then
 	manifests+=(interop/package.json)
+fi
+if [[ -f demo/package.json ]]; then
+	manifests+=(demo/package.json)
 fi
 
 # WHY per directory, and before anything else: a directory under packages/ without a package.json
@@ -38,14 +41,14 @@ fi
 
 # WHY: a nested config can switch off any rule for its package (Biome with "root": false,
 # oxlint by nesting), which would make the root rules optional.
-nested_configs="$(find packages interop \( -name 'biome.json' -o -name 'biome.jsonc' -o -name '.oxlintrc.json' -o -name '.oxlintrc.jsonc' -o -name 'oxlint.config.*' \) -not -path '*/node_modules/*' 2>/dev/null || true)"
+nested_configs="$(find packages interop demo \( -name 'biome.json' -o -name 'biome.jsonc' -o -name '.oxlintrc.json' -o -name '.oxlintrc.jsonc' -o -name 'oxlint.config.*' \) -not -path '*/node_modules/*' 2>/dev/null || true)"
 if [[ -n "${nested_configs}" ]]; then
 	fail "lint configuration belongs in the repository root only; remove: ${nested_configs//$'\n'/, }"
 fi
 
 # WHY: with one lockfile per project, interop's lockfile embedded the devDependencies of the
 # package it depends on, and a change to one made --frozen-lockfile fail in the other.
-nested_locks="$(find packages interop \( -name 'bun.lock' -o -name 'bun.lockb' \) -not -path '*/node_modules/*' 2>/dev/null || true)"
+nested_locks="$(find packages interop demo \( -name 'bun.lock' -o -name 'bun.lockb' \) -not -path '*/node_modules/*' 2>/dev/null || true)"
 if [[ -n "${nested_locks}" ]]; then
 	fail "the workspace has one bun.lock in the repository root; remove: ${nested_locks//$'\n'/, }"
 fi
@@ -56,7 +59,7 @@ fi
 # WHY no path argument: biome.jsonc decides what is covered (and why spikes/ and interop/peers/ are not).
 biome ci --error-on-warnings
 # WHY a second linter: Biome 2.5 has no rule that bans `as` assertions. See .oxlintrc.jsonc.
-oxlint --deny-warnings packages interop
+oxlint --deny-warnings packages interop demo
 
 bun install --frozen-lockfile
 
@@ -79,8 +82,9 @@ for manifest in "${manifests[@]}"; do
 	(
 		cd "${dir}"
 		bun run typecheck
-		# WHY not for interop: it has no unit tests. What it checks is the run against other
-		# implementations, which needs a relay and a browser and is not part of this job.
+		# WHY not for interop and demo: they have no unit tests. What interop checks is the run
+		# against other implementations, and the demo is checked by running it (demo/check.ts); both
+		# need a relay and a browser, which are not part of this job.
 		if [[ "${dir}" == packages/* ]]; then
 			bun test
 		fi
