@@ -1858,8 +1858,12 @@ pub const UPSTREAM_ANSWER_WAIT_MS: u64 = 5_000;
 pub enum Operation {
     /// PUBLISH and `PUBLISH_NAMESPACE`.
     Publish,
-    /// SUBSCRIBE and FETCH.
+    /// SUBSCRIBE, `TRACK_STATUS` and FETCH.
     Subscribe,
+    /// `SUBSCRIBE_NAMESPACE`, of the prefix it names. Apart from
+    /// [`Self::Subscribe`]: it tells of every namespace under the prefix,
+    /// and the authorization may ask more of it.
+    SubscribeNamespace,
 }
 
 /// Why something is not allowed, and what ends for it.
@@ -2645,7 +2649,7 @@ impl Relay {
                 &publish_namespace.parameters,
             ),
             PeerRequest::SubscribeNamespace(subscribe_namespace) => (
-                Operation::Subscribe,
+                Operation::SubscribeNamespace,
                 Some(&subscribe_namespace.track_namespace_prefix),
                 &subscribe_namespace.parameters,
             ),

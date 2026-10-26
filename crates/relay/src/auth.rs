@@ -8,9 +8,9 @@
 //! the AUTHORIZATION TOKEN parameter of a PUBLISH, a `PUBLISH_NAMESPACE`, a
 //! SUBSCRIBE, a `SUBSCRIBE_NAMESPACE`, a `TRACK_STATUS` or a FETCH (what the
 //! relay asks it on is `Relay::allowed` in `xmoq-relay-core`; the session
-//! with the parent relay is not asked): a Token structure with Alias Type `USE_VALUE`
-//! (0x3), Token Type 0 ("negotiated out-of-band"), and as its value the
-//! text
+//! with the parent relay is not asked): a Token structure with Alias Type
+//! `USE_VALUE` (0x3), Token Type 0 ("negotiated out-of-band"), and as its
+//! value the text
 //!
 //! ```text
 //! v1|<namespace, its fields joined with />|<pub or sub>|<expiry, seconds since 1970>|<mac, hex>
@@ -22,17 +22,9 @@
 //! `TRACK_STATUS` and FETCH) in that namespace, until its expiry: in exactly
 //! that namespace, or, where its last field is `*`, in those under the
 //! fields before it ([`namespace_fits`], decided on 2026-10-24, so that a
-//! room's chat can be allowed). A Joining FETCH names no namespace, and any
-//! `sub` token allows it: it joins a subscription that was allowed.
-//!
-//! A `SUBSCRIBE_NAMESPACE` is checked by its prefix alone, so a token of
-//! exactly `a/b` allows watching the prefix `a/b`, and the relay then names
-//! the namespaces under it (`a/b/x`) that were announced, though the token
-//! allows no SUBSCRIBE or FETCH there.
-//!
-//! FIXME: whether a token of exactly a namespace showing the names under it
-//! is meant, or watching a prefix is to need a `*` token, waits for the
-//! user's answer (2026-10-26).
+//! room's chat can be allowed). A `SUBSCRIBE_NAMESPACE` takes a token whose
+//! last field is `*` ([`allows_under`]). A Joining FETCH names no namespace,
+//! and any `sub` token allows it: it joins a subscription that was allowed.
 //!
 //! WHY a token on every request (decided on 2026-10-11): the room's
 //! namespace is the unit, and the relay keeps no state of it. WHY NOT on
@@ -159,9 +151,13 @@ impl Authorizer for RoomTokens {
             let allows = self.read(token_type, &value).and_then(|(named, role)| {
                 let role_fits = matches!(
                     (role, operation),
-                    ("pub", Operation::Publish) | ("sub", Operation::Subscribe)
+                    ("pub", Operation::Publish)
+                        | ("sub", Operation::Subscribe | Operation::SubscribeNamespace)
                 );
-                let fits = namespace.is_none_or(|asked| namespace_fits(asked, named));
+                let fits = namespace.is_none_or(|asked| {
+                    namespace_fits(asked, named)
+                        && (operation != Operation::SubscribeNamespace || allows_under(named))
+                });
                 if role_fits && fits {
                     Ok(())
                 } else {
@@ -240,7 +236,7 @@ impl Authorizer for RoomTokens {
     fn own_token(&self, operation: Operation) -> Option<Vec<u8>> {
         let role = match operation {
             Operation::Publish => Role::Pub,
-            Operation::Subscribe => Role::Sub,
+            Operation::Subscribe | Operation::SubscribeNamespace => Role::Sub,
         };
         let expiry = (self.now)().saturating_add(OWN_TOKEN_SECONDS);
         let text = self.key.make("*", role, expiry);
@@ -258,6 +254,17 @@ impl Authorizer for RoomTokens {
 /// room makes (`TOKEN_SECONDS` of `packages/room/src/token.ts`)
 /// and one the gatherer makes. Provisional.
 const OWN_TOKEN_SECONDS: u64 = 600;
+
+/// Whether the namespace a token names allows what is under it (its last
+/// field is `*`, [`namespace_fits`]), as a `SUBSCRIBE_NAMESPACE` has to.
+///
+/// WHY (decided on 2026-10-26): the relay answers a `SUBSCRIBE_NAMESPACE`
+/// with the namespaces announced under its prefix, which are the names of
+/// who is there; a token of exactly a namespace allows no SUBSCRIBE under
+/// it, and is not to tell who is there either.
+fn allows_under(named: &str) -> bool {
+    named.rsplit('/').next() == Some("*")
+}
 
 #[cfg(test)]
 mod tests {
@@ -397,6 +404,53 @@ mod tests {
                 Subscribe,
                 true,
                 Ok(()),
+            ),
+        ];
+        check(cases);
+    }
+
+    #[test]
+    fn a_subscribe_namespace_is_allowed_by_a_token_of_what_is_under_its_prefix() {
+        use Operation::SubscribeNamespace;
+        let request = |code| Err(Denied::Request(code));
+        // (as in the test above; the prefix is rooms/blue)
+        let cases = [
+            (
+                vec![token(KEY, "v1|rooms/blue/*|sub|1800000060")],
+                SubscribeNamespace,
+                true,
+                Ok(()),
+            ),
+            (
+                vec![token(KEY, "v1|rooms/*|sub|1800000060")],
+                SubscribeNamespace,
+                true,
+                Ok(()),
+            ),
+            (
+                vec![token(KEY, "v1|*|sub|1800000060")],
+                SubscribeNamespace,
+                true,
+                Ok(()),
+            ),
+            // Exactly the prefix: it would tell who is under it.
+            (
+                vec![token(KEY, GOOD)],
+                SubscribeNamespace,
+                true,
+                request(0x1),
+            ),
+            (
+                vec![token(KEY, "v1|rooms/blue/red/*|sub|1800000060")],
+                SubscribeNamespace,
+                true,
+                request(0x1),
+            ),
+            (
+                vec![token(KEY, "v1|rooms/blue/*|pub|1800000060")],
+                SubscribeNamespace,
+                true,
+                request(0x1),
             ),
         ];
         check(cases);
