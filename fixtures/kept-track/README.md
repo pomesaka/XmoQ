@@ -12,7 +12,7 @@ No header, six columns separated by tabs, every row ends with one line feed.
 | 2 | What the track does where its SUBSCRIBE could not be sent or was not answered: `again` (asked for again) or `give-up` (not asked for again on this session; the next session asks for it). It bears on `not-sent` and `not-answered` alone |
 | 3 | What happens, in order, separated by spaces (below) |
 | 4 | What becomes of the track after each, in order: `subscribed`, `again:<ms>` (asked for again after that pause), `given-up`, `closed:<code>` (the session is closed with that Session Termination Error Code, §3.5) |
-| 5 | The most times in a row it is asked again without a subscription between, or `-` for no limit. An end (`malformed` among them), a refusal and a failure that is asked again count; once the times are reached, the next is `given-up` (the gatherer asks again when the participant's namespace comes again). `0`: never asked again |
+| 5 | The most times in a row it is asked again without a subscription between, or `-` for no limit. An end (`malformed` among them), a refusal and a failure that is asked again count; once the times are reached, the next is `given-up` (the gatherer asks again when the participant's namespace comes again, the transcriber its catalog). `0`: never asked again. The times it is found `malformed` in a row are held to the same limit, and are not counted anew by `subscribed`, only by another end |
 | 6 | `required`, or `optional` for a track its publisher need not publish (the gatherer's `reacted`): a refusal with `DOES_NOT_EXIST` (`0x10`) gives it up |
 
 What can happen, column 3:

@@ -39,14 +39,9 @@ use xmoq_again::Pauses;
 use xmoq_chat_tracks::names::PersonTrack;
 use xmoq_subscriber::kept::{Keeping, Tries};
 
-/// How many times in a row a participant is asked again by default,
-/// without a subscription that was established between. **Provisional**:
-/// against the own relay, which refuses a `said` nobody publishes with
-/// `DOES_NOT_EXIST` and a Retry Interval of 1,001, about two minutes.
-pub const TIMES: u32 = 30;
-
-/// The most `--ask-again-times`. 0 is the least: never asked again.
-pub const TIMES_MOST: u32 = 10_000;
+/// `--ask-again-times` by default, and its most: the transcriber's are the
+/// same.
+pub use xmoq_subscriber::kept::{TIMES, TIMES_MOST};
 
 /// The pause after an end, and after a refusal that names no time, by
 /// default: the rule's.

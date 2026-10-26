@@ -29,7 +29,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
-use xmoq_again::AskAgain;
 use xmoq_again::next_session::{Pause, new_url};
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
@@ -37,7 +36,7 @@ use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::immutable::{Of, TrackRefusal, searched_integers};
 use xmoq_moqt::message::{
-    ControlMessage, FetchRange, ReasonPhrase, publish_done_status, request_error_code,
+    ControlMessage, FetchRange, ReasonPhrase, RequestError, publish_done_status, request_error_code,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter};
@@ -64,8 +63,10 @@ use xmoq_speech::cut::Cut;
 use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
 use xmoq_speech::vad::Silero;
 use xmoq_speech::{AudioPacket, Listener};
+use xmoq_subscriber::kept::{Becomes, Happened};
 use xmoq_subscriber::namespaces::KeptNamespace;
 use xmoq_transcriber::args::Args;
+use xmoq_transcriber::listen::{Broadcast, BroadcastTrack, CatalogSays, from_of};
 use xmoq_transcriber::transcript::Transcript;
 use xmoq_transcript_tracks::names::{listened_of, speech_track, transcript_namespace};
 use xmoq_transcript_tracks::payloads::Speech;
@@ -142,39 +143,6 @@ fn watch_ended(prefix: &TrackNamespace, why: &str, wait_ms: u64) {
     );
 }
 
-/// How the subscription to a catalog or a sound ended.
-#[derive(Debug, Clone, Copy)]
-enum SubscriptionEnd {
-    /// It ended, or was not answered.
-    Ended,
-    /// It was refused, with the Retry Interval the refusal names, if any.
-    Refused(Option<u64>),
-}
-
-/// A track of a broadcast that the transcriber subscribes to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum BroadcastTrack {
-    Catalog,
-    Audio,
-}
-
-/// A broadcast that is listened to.
-struct Broadcast {
-    /// The prefix it is under.
-    prefix: usize,
-    /// Its namespace, each field as UTF-8: `from` of its pieces.
-    from: Vec<String>,
-    catalog: Option<u64>,
-    catalog_again: AskAgain,
-    catalog_fetch: Option<u64>,
-    /// The name of the audio track the catalog names.
-    audio_name: Option<Vec<u8>>,
-    /// The token of its SUBSCRIBE, while it has one.
-    audio: Option<u64>,
-    listener: Listener,
-    audio_again: AskAgain,
-}
-
 /// Everything of one session.
 struct Transcribing<'a> {
     connection: &'a Arc<WtConnection>,
@@ -191,7 +159,7 @@ struct Transcribing<'a> {
     published: Vec<Publication<Speech>>,
     next_track_alias: u64,
     watches: Vec<KeptNamespace>,
-    broadcasts: HashMap<TrackNamespace, Broadcast>,
+    broadcasts: HashMap<TrackNamespace, Broadcast<Listener>>,
     /// The tracks of broadcasts to be asked for again, and when.
     asking_again: HashMap<(TrackNamespace, BroadcastTrack), Instant>,
     /// The broadcast each catalog FETCH is for, by its Request ID.
@@ -219,15 +187,6 @@ fn fault(fault: RequestFault) -> anyhow::Error {
         RequestFault::Peer(error) => error.into(),
         RequestFault::Usage(error) => anyhow!("the transcriber used its session wrongly: {error}"),
     }
-}
-
-/// The fields of a namespace as UTF-8; `None` where one is not.
-fn fields_of(namespace: &TrackNamespace) -> Option<Vec<String>> {
-    namespace
-        .fields()
-        .iter()
-        .map(|field| String::from_utf8(field.clone()).ok())
-        .collect()
 }
 
 /// Reads a catalog's fetch stream to its end: the last Object, which is the
@@ -487,7 +446,7 @@ impl Transcribing<'_> {
             && let Some(purpose) =
                 self.let_go(token, Command::Cancel(stream_reset_code::EXCESSIVE_LOAD))
         {
-            self.request_over(token, &purpose, "its queue was full");
+            self.request_over(token, &purpose, Happened::Ended, "its queue was full");
         }
     }
 
@@ -669,8 +628,7 @@ impl Transcribing<'_> {
         if self.broadcasts.contains_key(namespace) {
             return Ok(());
         }
-        // WHY UTF-8: the fields go into the JSON of a piece as strings.
-        let Some(from) = fields_of(namespace) else {
+        let Some(from) = from_of(namespace) else {
             println!(
                 "BROADCAST_IGNORED namespace={} why=not-utf-8",
                 shown(namespace)
@@ -687,17 +645,12 @@ impl Transcribing<'_> {
         println!("BROADCAST namespace={}", shown(namespace));
         self.broadcasts.insert(
             namespace.clone(),
-            Broadcast {
+            Broadcast::new(
                 prefix,
                 from,
-                catalog: None,
-                catalog_again: AskAgain::default(),
-                catalog_fetch: None,
-                audio_name: None,
-                audio: None,
-                listener: Listener::new(self.judge()?, Cut::default())?,
-                audio_again: AskAgain::default(),
-            },
+                Listener::new(self.judge()?, Cut::default())?,
+                self.args.ask_again_times,
+            ),
         );
         self.subscribe_catalog(namespace)
     }
@@ -780,35 +733,30 @@ impl Transcribing<'_> {
     /// The catalog of a broadcast: its audio track is listened to, or the one
     /// it names now in place of another.
     fn on_catalog(&mut self, namespace: &TrackNamespace, payload: &[u8]) -> Result<()> {
-        let tracks = match xmoq_msf::read_catalog(payload) {
-            Ok(tracks) => tracks,
-            Err(error) => {
+        let Some(broadcast) = self.broadcasts.get_mut(namespace) else {
+            return Ok(());
+        };
+        match broadcast.on_catalog(payload) {
+            CatalogSays::Unread(error) => {
                 println!(
                     "CATALOG_UNREAD namespace={} error={error}",
                     shown(namespace)
                 );
-                return Ok(());
+                Ok(())
             }
-        };
-        let Some(name) = xmoq_msf::first_audio_track(&tracks, "opus")
-            .map(|track| track.name.clone().into_bytes())
-        else {
-            println!("CATALOG_WITHOUT_AUDIO namespace={}", shown(namespace));
-            return Ok(());
-        };
-        let Some(broadcast) = self.broadcasts.get_mut(namespace) else {
-            return Ok(());
-        };
-        if broadcast.audio_name.as_ref() == Some(&name) {
-            return Ok(());
+            CatalogSays::WithoutAudio => {
+                println!("CATALOG_WITHOUT_AUDIO namespace={}", shown(namespace));
+                Ok(())
+            }
+            CatalogSays::Same => Ok(()),
+            CatalogSays::Listen { instead_of } => {
+                if let Some(token) = instead_of {
+                    self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
+                    self.end_piece(namespace);
+                }
+                self.subscribe_audio(namespace)
+            }
         }
-        broadcast.audio_name = Some(name);
-        let old = broadcast.audio.take();
-        if let Some(token) = old {
-            self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-            self.end_piece(namespace);
-        }
-        self.subscribe_audio(namespace)
     }
 
     /// Subscribes to the audio track of a broadcast.
@@ -818,7 +766,8 @@ impl Transcribing<'_> {
         let Some(broadcast) = self.broadcasts.get(namespace) else {
             return Ok(());
         };
-        let (Some(name), None) = (broadcast.audio_name.clone(), broadcast.audio) else {
+        let (Some(name), None) = (broadcast.audio_name().map(<[u8]>::to_vec), broadcast.audio)
+        else {
             return Ok(());
         };
         let parameters = self.subscribe_parameters(broadcast.prefix);
@@ -838,64 +787,72 @@ impl Transcribing<'_> {
         Ok(())
     }
 
-    /// The audio subscription of a broadcast that stays announced is over:
-    /// the piece under way is read, and the track is asked for again after
-    /// a pause by the rule every client asks by (`xmoq-again`).
-    ///
-    /// WHY no count of times, as the gatherer has for a participant's `said`:
-    /// a broadcast without sound names no audio track in its catalog, and
-    /// is not asked; one that names it is meant to be heard.
-    fn audio_over(&mut self, namespace: &TrackNamespace, over: SubscriptionEnd, why: &str) {
-        println!(
-            "AUDIO_NOT_SUBSCRIBED namespace={} why={why:?}",
-            shown(namespace)
-        );
-        self.end_piece(namespace);
-        let Some(broadcast) = self.broadcasts.get_mut(namespace) else {
-            return;
+    /// A request of the transcriber was refused, and was let go of.
+    fn refused(&mut self, token: u64, purpose: &Purpose, error: &RequestError) {
+        let why = format!("refused with {:#x}", error.error_code);
+        let over = Happened::Refused {
+            error_code: error.error_code,
+            named_ms: error.retry_wait_ms(),
         };
-        broadcast.audio = None;
-        let pause = match over {
-            SubscriptionEnd::Refused(named) => broadcast.audio_again.after_refusal(named),
-            SubscriptionEnd::Ended => broadcast.audio_again.after_end(),
-        };
-        self.ask_later(namespace, BroadcastTrack::Audio, pause);
+        match purpose {
+            Purpose::Watch(index) => {
+                if let Some(watch) = self.watches.get_mut(*index) {
+                    let wait = watch.refused(error.retry_wait_ms(), Instant::now());
+                    watch_ended(watch.prefix(), &why, wait);
+                }
+            }
+            Purpose::Audio(namespace) => {
+                self.track_over(&namespace.clone(), BroadcastTrack::Audio, over, &why);
+            }
+            Purpose::Catalog(namespace) => {
+                self.track_over(&namespace.clone(), BroadcastTrack::Catalog, over, &why);
+            }
+            _ => self.request_over(token, purpose, Happened::Ended, &why),
+        }
     }
 
-    /// The catalog subscription of a broadcast that stays announced is
-    /// over, and is asked for again by the same rule as its sound.
-    ///
-    /// WHY again, and WHY NOT the broadcast let go of until its NAMESPACE
-    /// comes again: a NAMESPACE comes again only "when there are changes to
-    /// the namespaces being published" (§10.18), so a broadcast whose
-    /// catalog was refused before its publisher had it (a relay without a
-    /// rendezvous) would not be heard until the publisher announced again.
-    /// Its sound, if it has one, is listened to meanwhile.
-    fn catalog_over(&mut self, namespace: &TrackNamespace, over: SubscriptionEnd, why: &str) {
+    /// A track of a broadcast that stays announced is over: the piece under
+    /// way is read where it is the audio track, and the track is asked for
+    /// again after a pause by the rule every client asks by, or the
+    /// broadcast listened to no more until its NAMESPACE comes again
+    /// (`listen::keeping`).
+    fn track_over(
+        &mut self,
+        namespace: &TrackNamespace,
+        track: BroadcastTrack,
+        happened: Happened,
+        why: &str,
+    ) {
+        let word = track.word().to_uppercase();
         println!(
-            "CATALOG_NOT_SUBSCRIBED namespace={} why={why:?}",
+            "{word}_NOT_SUBSCRIBED namespace={} why={why:?}",
             shown(namespace)
         );
+        if track == BroadcastTrack::Audio {
+            self.end_piece(namespace);
+        }
         let Some(broadcast) = self.broadcasts.get_mut(namespace) else {
             return;
         };
-        broadcast.catalog = None;
-        let pause = match over {
-            SubscriptionEnd::Refused(named) => broadcast.catalog_again.after_refusal(named),
-            SubscriptionEnd::Ended => broadcast.catalog_again.after_end(),
-        };
-        self.ask_later(namespace, BroadcastTrack::Catalog, pause);
+        match broadcast.on(track, happened) {
+            Becomes::Again(pause) => self.ask_later(namespace, track, pause),
+            Becomes::GivenUp | Becomes::Subscribed => {
+                println!(
+                    "NOT_ASKING_AGAIN namespace={} track={}",
+                    shown(namespace),
+                    track.word()
+                );
+                self.listen_no_more(namespace);
+            }
+        }
     }
 
     /// A track of a broadcast is asked for again in `pause_ms`.
     fn ask_later(&mut self, namespace: &TrackNamespace, track: BroadcastTrack, pause_ms: u64) {
-        let what = match track {
-            BroadcastTrack::Catalog => "catalog",
-            BroadcastTrack::Audio => "audio",
-        };
         println!(
-            "ASKING_AGAIN namespace={} track={what} in_ms={pause_ms}",
-            shown(namespace)
+            "ASKING_AGAIN namespace={} track={} in_ms={pause_ms}",
+            shown(namespace),
+            track.word()
         );
         self.asking_again.insert(
             (namespace.clone(), track),
@@ -955,10 +912,7 @@ impl Transcribing<'_> {
         let Some(broadcast) = self.broadcasts.remove(namespace) else {
             return;
         };
-        for token in [broadcast.catalog, broadcast.catalog_fetch, broadcast.audio]
-            .into_iter()
-            .flatten()
-        {
+        for token in broadcast.tokens() {
             self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
         }
         self.catalog_fetches
@@ -1011,7 +965,7 @@ impl Transcribing<'_> {
         if track.name() == CATALOG_TRACK.as_bytes() {
             return self.on_catalog(&namespace.clone(), &object.payload);
         }
-        if broadcast.audio_name.as_deref() == Some(track.name()) {
+        if broadcast.audio_name() == Some(track.name()) {
             self.on_audio(&namespace.clone(), object);
         }
         Ok(())
@@ -1121,12 +1075,17 @@ impl Transcribing<'_> {
             Heard::NotOpened(why) => {
                 self.session.cancel(request);
                 self.own.forget(token);
-                self.request_over(token, &purpose, &format!("not sent: {why}"));
+                self.request_over(
+                    token,
+                    &purpose,
+                    Happened::NotSent,
+                    &format!("not sent: {why}"),
+                );
                 Ok(None)
             }
             Heard::NotAnswered => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, &purpose, "not answered in time");
+                self.request_over(token, &purpose, Happened::NotSent, "not answered in time");
                 Ok(None)
             }
             Heard::Message(message) => {
@@ -1146,12 +1105,22 @@ impl Transcribing<'_> {
             }
             Heard::Closed(how) => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, &purpose, &format!("its stream ended ({how})"));
+                self.request_over(
+                    token,
+                    &purpose,
+                    Happened::Ended,
+                    &format!("its stream ended ({how})"),
+                );
                 Ok(None)
             }
             Heard::Stopped(code) => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, &purpose, &format!("stopped ({code:?})"));
+                self.request_over(
+                    token,
+                    &purpose,
+                    Happened::Ended,
+                    &format!("stopped ({code:?})"),
+                );
                 Ok(None)
             }
             Heard::Failed(RequestReadError::Peer(error)) => Err(error.into()),
@@ -1175,18 +1144,23 @@ impl Transcribing<'_> {
             return;
         };
         match &purpose {
-            // §2.4.2: the same catalog would be malformed again, and is not
-            // asked for again; the broadcast comes back with its next
-            // NAMESPACE.
             Purpose::Catalog(namespace) => {
-                let namespace = namespace.clone();
-                println!(
-                    "CATALOG_NOT_SUBSCRIBED namespace={} why={WHY:?}",
-                    shown(&namespace)
+                self.track_over(
+                    &namespace.clone(),
+                    BroadcastTrack::Catalog,
+                    Happened::Malformed,
+                    WHY,
                 );
-                self.listen_no_more(&namespace);
             }
-            purpose => self.request_over(token, purpose, WHY),
+            Purpose::Audio(namespace) => {
+                self.track_over(
+                    &namespace.clone(),
+                    BroadcastTrack::Audio,
+                    Happened::Malformed,
+                    WHY,
+                );
+            }
+            purpose => self.request_over(token, purpose, Happened::Ended, WHY),
         }
     }
 
@@ -1216,12 +1190,12 @@ impl Transcribing<'_> {
             }
             purpose => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, purpose, "GOAWAY");
+                self.request_over(token, purpose, Happened::Ended, "GOAWAY");
             }
         }
     }
 
-    fn request_over(&mut self, token: u64, purpose: &Purpose, why: &str) {
+    fn request_over(&mut self, token: u64, purpose: &Purpose, end: Happened, why: &str) {
         match purpose {
             Purpose::Watch(index) => {
                 if let Some(watch) = self.watches.get_mut(*index) {
@@ -1230,7 +1204,7 @@ impl Transcribing<'_> {
                 }
             }
             Purpose::Catalog(namespace) => {
-                self.catalog_over(&namespace.clone(), SubscriptionEnd::Ended, why);
+                self.track_over(&namespace.clone(), BroadcastTrack::Catalog, end, why);
             }
             Purpose::CatalogFetch(namespace) => {
                 if let Some(broadcast) = self.broadcasts.get_mut(namespace) {
@@ -1238,7 +1212,7 @@ impl Transcribing<'_> {
                 }
             }
             Purpose::Audio(namespace) => {
-                self.audio_over(&namespace.clone(), SubscriptionEnd::Ended, why);
+                self.track_over(&namespace.clone(), BroadcastTrack::Audio, end, why);
             }
             Purpose::Speech(prefix) => {
                 println!("TRANSCRIPT_NOT_PUBLISHED prefix={prefix} why={why:?}");
@@ -1255,7 +1229,7 @@ impl Transcribing<'_> {
         // subgroup stream may hold alone.
         self.stops.limit_payload(track_alias, MAX_CATALOG_LENGTH);
         let Some(catalog) = self.broadcasts.get_mut(namespace).and_then(|broadcast| {
-            broadcast.catalog_again.subscribed();
+            broadcast.on(BroadcastTrack::Catalog, Happened::Subscribed);
             broadcast.catalog
         }) else {
             return Ok(());
@@ -1384,7 +1358,7 @@ impl Transcribing<'_> {
             (Purpose::Audio(namespace), RequestEvent::SubscribeEstablished { .. }) => {
                 println!("AUDIO_SUBSCRIBED namespace={}", shown(namespace));
                 if let Some(broadcast) = self.broadcasts.get_mut(namespace) {
-                    broadcast.audio_again.subscribed();
+                    broadcast.on(BroadcastTrack::Audio, Happened::Subscribed);
                 }
                 self.take_early()?;
             }
@@ -1409,31 +1383,17 @@ impl Transcribing<'_> {
             }
             (_, RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
-                let why = format!("refused with {:#x}", error.error_code);
-                let over = SubscriptionEnd::Refused(error.retry_wait_ms());
-                match purpose {
-                    Purpose::Watch(index) => {
-                        if let Some(watch) = self.watches.get_mut(*index) {
-                            let wait = watch.refused(error.retry_wait_ms(), Instant::now());
-                            watch_ended(watch.prefix(), &why, wait);
-                        }
-                    }
-                    Purpose::Audio(namespace) => self.audio_over(&namespace.clone(), over, &why),
-                    Purpose::Catalog(namespace) => {
-                        self.catalog_over(&namespace.clone(), over, &why);
-                    }
-                    _ => self.request_over(token, purpose, &why),
-                }
+                self.refused(token, purpose, &error);
             }
             (Purpose::Audio(namespace), RequestEvent::SubscriptionDone(done)) => {
                 let namespace = namespace.clone();
                 self.let_go(token, Command::Finish);
                 let why = format!("PUBLISH_DONE {:#x}", done.status_code);
-                self.audio_over(&namespace, SubscriptionEnd::Ended, &why);
+                self.track_over(&namespace, BroadcastTrack::Audio, Happened::Ended, &why);
             }
             (_, RequestEvent::SubscriptionDone(_)) => {
                 self.let_go(token, Command::Finish);
-                self.request_over(token, purpose, "PUBLISH_DONE");
+                self.request_over(token, purpose, Happened::Ended, "PUBLISH_DONE");
             }
             (
                 _,
@@ -1452,7 +1412,12 @@ impl Transcribing<'_> {
                 RequestEvent::TrackNotProcessed { .. } | RequestEvent::TooManyNamespaces { .. },
             ) => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, purpose, "the session could not take its answer");
+                self.request_over(
+                    token,
+                    purpose,
+                    Happened::Ended,
+                    "the session could not take its answer",
+                );
             }
             // LateMessage, the FETCH_OK of a catalog (the catalog comes on its
             // fetch stream), and what is no answer to a request of its kind.
