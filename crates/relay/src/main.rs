@@ -559,7 +559,7 @@ async fn main() -> Result<()> {
     config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config, args.idle_timeout, args.congestion);
     let server = WtServer::bind(args.port, &args.cert_file, &args.key_file, limits)?;
-    println!("LISTENING {} port={}", config.implementation, args.port);
+    println!("{}", listening_line(&config.implementation, args.port));
     let parent = args.parent.map(|parent| {
         let streams = config.stream_config();
         let (url, cert_sha256) = (Arc::new(parent.url), parent.cert_sha256);
@@ -604,6 +604,12 @@ async fn main() -> Result<()> {
     hub.stop_with(GOAWAY_TIMEOUT, "the GOAWAY's time is over")
         .await;
     Ok(())
+}
+
+/// The relay is ready for sessions. `interop/harness.ts` waits for it and
+/// reads the implementation from it; `hub::line_tests` pins it.
+fn listening_line(implementation: &str, port: u16) -> String {
+    format!("LISTENING {implementation} port={port}")
 }
 
 /// Refuses every connection attempt, for a relay that has sent its GOAWAY.
