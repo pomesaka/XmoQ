@@ -13,12 +13,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Miniflare } from "miniflare";
+import { broadcastNamespaces } from "./src/core/rules.ts";
 import { keyOfSetting } from "./src/token.ts";
 
 // Before anything is started: a key that is set and is none stops the
-// rooms, as it stops the relay (`keyOfSetting`).
+// rooms, as it stops the relay (`keyOfSetting`), and so do namespaces of
+// broadcasts that are none (`broadcastNamespaces`).
 try {
 	keyOfSetting(process.env.AUTH_KEY_HEX);
+	broadcastNamespaces(process.env.BROADCAST_NAMESPACES);
 } catch (error) {
 	console.error(String(error));
 	process.exit(1);
@@ -61,6 +64,8 @@ const miniflare = new Miniflare({
 	// REACTION_BATCH_MS: a trial, the reactions of that long as one message.
 	// RELAY_URL and RELAY_CERT_SHA256_HEX: the relay the hello names, with a
 	// broadcast and without; none without them.
+	// BROADCAST_NAMESPACES: the namespaces of broadcasts tokens are given in,
+	// separated by ","; none where it is not set.
 	// TRANSCRIPT_PREFIX and MEETING_TRANSCRIPT_PREFIX: the prefixes of the
 	// transcripts of a room's broadcast and of its meeting, with {room} put in
 	// its name (xmoq/demo, xmoq/meet/{room}); none without each.
@@ -69,6 +74,9 @@ const miniflare = new Miniflare({
 		...(process.env.AUTH_KEY_HEX === undefined
 			? {}
 			: { AUTH_KEY_HEX: process.env.AUTH_KEY_HEX }),
+		...(process.env.BROADCAST_NAMESPACES === undefined
+			? {}
+			: { BROADCAST_NAMESPACES: process.env.BROADCAST_NAMESPACES }),
 		REACTION_BATCH_MS: process.env.REACTION_BATCH_MS ?? "0",
 		RELAY_URL: process.env.RELAY_URL ?? "",
 		RELAY_CERT_SHA256_HEX: process.env.RELAY_CERT_SHA256_HEX ?? "",

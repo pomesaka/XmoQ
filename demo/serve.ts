@@ -186,6 +186,9 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 				...process.env,
 				// Not set without --auth: the rooms then have no key (an empty one would stop them).
 				...(authKeyHex === undefined ? {} : { AUTH_KEY_HEX: authKeyHex }),
+				// The namespace of the demo's one broadcast, whatever the room:
+				// the room gives tokens for broadcasts in it alone.
+				BROADCAST_NAMESPACES: NAMESPACE.join("/"),
 				// The relay the rooms name in their hello, with a broadcast
 				// and without one.
 				RELAY_URL: `https://127.0.0.1:${options["relay-port"]}/`,

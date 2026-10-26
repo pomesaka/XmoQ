@@ -27,7 +27,7 @@ import {
 } from "@xmoq/meeting";
 import type { GoAwayNotice } from "@xmoq/moqt";
 import { createCatalogPublisher } from "@xmoq/msf";
-import { keepFollowingTranscript } from "@xmoq/transcript";
+import { keepFollowingTranscript, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
 import { startChat } from "./room-chat.ts";
 import { openRoomSocket, tokenOf } from "./room-socket.ts";
 import {
@@ -81,7 +81,11 @@ const movedTo = (relay: Broadcast, goAway?: GoAwayNotice): Broadcast =>
 
 /** What the room says that this page reads. */
 type RoomMessage =
-	| { type: "hello"; relay: { relayUrl: string; certSha256Hex: string } | null }
+	| {
+			type: "hello";
+			relay: { relayUrl: string; certSha256Hex: string } | null;
+			meetingTranscript: string[] | null;
+		}
 	| {
 			type: "meeting";
 			participant: string;
@@ -127,6 +131,8 @@ const show = (): void => {
 function seats(): {
 	seat(): Promise<Seat>;
 	token(role: "pub" | "sub", namespace: string[]): Promise<Uint8Array | undefined>;
+	/** The prefix the room says a transcriber listens under for its meeting (`meetingTranscript` of its hello); null without one. */
+	meetingTranscript(): Promise<string[] | null>;
 } {
 	const roomsUrl = XMOQ_DEMO.roomsUrl;
 	if (roomsUrl === null) {
@@ -134,6 +140,7 @@ function seats(): {
 	}
 	/** The relay the room named last; null where it names none. */
 	let relay: Broadcast | null | undefined;
+	let meetingTranscript: string[] | null = null;
 	/** Who waits for the first hello, or for the socket to close before it. */
 	const greeters: (() => void)[] = [];
 	const greeted = (): Promise<void> =>
@@ -152,6 +159,7 @@ function seats(): {
 			},
 			message(message) {
 				if (message.type !== "hello") return;
+				meetingTranscript = message.meetingTranscript;
 				relay = message.relay === null ? null : { ...message.relay, namespace: [] };
 				for (const greet of greeters.splice(0)) greet();
 			},
@@ -199,6 +207,10 @@ function seats(): {
 			return answer?.type === "token" ? tokenOf(answer.token) : undefined;
 		},
 		seat,
+		async meetingTranscript() {
+			await greeted();
+			return meetingTranscript;
+		},
 	};
 }
 
@@ -463,16 +475,19 @@ async function main(): Promise<void> {
 		// The meeting's transcript, for Claude Code alone: the people there
 		// hear the voices, and the page shows no captions.
 		let newest = -1n;
+		// The prefix the room names, which it gives a token in; the room's
+		// meeting where it names none.
+		const listened = (await theRoom.meetingTranscript()) ?? ["xmoq", "meet", room];
 		void keepFollowingTranscript({
 			connect: async (goAway) => {
 				const seat = await theRoom.seat();
 				return connectToRelay(
 					movedTo(seat.relay, goAway),
-					await theRoom.token("sub", ["xmoq", "transcript", "xmoq", "meet", room]),
+					await theRoom.token("sub", [...TRANSCRIPT_PREFIX, ...listened]),
 				);
 			},
 			follow: {
-				listened: ["xmoq", "meet", room],
+				listened,
 				latest: 1,
 				onSpeech(speech) {
 					// A new session fetches the latest piece again.
