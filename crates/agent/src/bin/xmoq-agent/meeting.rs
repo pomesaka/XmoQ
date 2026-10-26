@@ -9,19 +9,21 @@ use std::time::Duration;
 
 use xmoq_again::AskAgain;
 use xmoq_agent::events::{Event, ParticipantState};
+use xmoq_moqt::RequestFault;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestEvent, Session};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
 use xmoq_viewer::meeting::{self, Limits, Meeting, Video as VideoStep};
 use xmoq_viewer::presence::{Change, SETTLE_MS};
+use xmoq_viewer_io::kept::{Asking, Came as VideoCame};
 use xmoq_viewer_io::reconnect::go_away_behind;
 use xmoq_viewer_io::session::{Events, GoingAway, GoneAway, new_url};
 
 use crate::Reader;
 use crate::attend::{Ended, Watching, on, watch};
 use crate::frames::{Job, Pictures};
-use crate::video::{Asking as VideoAsking, Came as VideoCame, Video};
+use crate::video::Video;
 
 /// What the meeting has to be told of, from the loop of the session.
 pub enum Came {
@@ -230,14 +232,19 @@ impl InMeeting {
     }
 
     /// What came. `Some` where the session is to end for it.
+    ///
+    /// # Errors
+    ///
+    /// A message on the video's stream that breaks the protocol: the
+    /// session is to be closed with its code.
     pub async fn on(
         &mut self,
         session: &mut Session,
         reader: &mut Reader,
         came: Came,
-    ) -> Option<Ended> {
+    ) -> Result<Option<Ended>, RequestFault> {
         match came {
-            Came::Watching(event) => return self.on_watching(session, reader, event),
+            Came::Watching(event) => return Ok(self.on_watching(session, reader, event)),
             Came::WatchNow => self.watch(session, reader).await,
             Came::Settled => {
                 self.settle_at = None;
@@ -261,7 +268,7 @@ impl InMeeting {
             }
             Came::Video(came) => {
                 if let Some(video) = self.video.as_mut()
-                    && let Err(why) = video.on(session, came)
+                    && let Some(why) = video.on(session, came)?
                 {
                     reader.error(format!("frame: the video is given up: {why}"));
                     video_failed(reader);
@@ -269,7 +276,7 @@ impl InMeeting {
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     fn let_go_of_video(&mut self) {
@@ -303,6 +310,10 @@ impl InMeeting {
         }
     }
 
+    /// FIXME: one keeping of a `SUBSCRIBE_NAMESPACE` for this and for the
+    /// other (`attend::Chat::on_watching`), as `xmoq_viewer_io::kept` is for a track, where only
+    /// more namespaces than the session keeps ask again, and any other
+    /// message that breaks the protocol closes the session.
     fn on_watching(
         &mut self,
         session: &mut Session,
@@ -415,9 +426,9 @@ impl InMeeting {
                     return Ok(None);
                 }
             };
-            let asking_with = VideoAsking {
+            let asking_with = Asking {
                 connection: Arc::clone(&self.connection),
-                namespace,
+                stops: stops.clone(),
                 token: self.token.clone(),
                 answer_wait_ms: self.answer_wait_ms,
                 open_wait_ms: self.open_wait_ms,
@@ -426,7 +437,8 @@ impl InMeeting {
             // video's SUBSCRIBE, as for one broadcast.
             let wait = Duration::from_millis(self.answer_wait_ms * 3) + Duration::from_secs(5);
             let begun =
-                tokio::time::timeout(wait, Video::begin(asking_with, session, events, stops)).await;
+                tokio::time::timeout(wait, Video::begin(asking_with, namespace, session, events))
+                    .await;
             match begun {
                 Ok(Ok(video)) => {
                     eprintln!("XMOQ_AGENT_MEETING_VIDEO id={id}");

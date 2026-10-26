@@ -27,13 +27,14 @@ use xmoq_agent::events::{BroadcastState, Event};
 use xmoq_agent::input::{self, Input};
 use xmoq_agent::presence::Presence;
 use xmoq_chat_tracks::names::Person;
+use xmoq_moqt_io::StreamConfig;
 use xmoq_moqt_io::wt;
-use xmoq_moqt_io::{Connection, StreamConfig, client};
 use xmoq_viewer::reconnect::{After, BETWEEN_TRIES_MS, NextSession};
 use xmoq_viewer::room::{self, Broadcast, Relay};
+use xmoq_viewer_io::ending::{self, UntilClosed};
 use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};
 
-use crate::attend::{Ended, UntilClosed, attend};
+use crate::attend::{Ended, attend};
 use crate::frames::Pictures;
 
 use crate::output::{Output, now_ms};
@@ -638,8 +639,7 @@ async fn run(args: &Args, reader: &mut Reader, pictures: &mut Option<Pictures>) 
                     &mut kept,
                 ))
                 .await;
-                connection.close(client::termination_code_of(&attended), b"");
-                let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
+                ending::close(&connection, &attended).await;
                 attended
             }
             Err(error) => Err(error),
@@ -743,22 +743,7 @@ async fn join_room(args: &Args, address: &str, reader: &mut Reader) -> Result<Op
 }
 
 async fn read(args: &Args) -> Result<()> {
-    let (stopping, stop) = watch::channel(false);
-    tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let (Ok(mut terminate), Ok(mut hangup)) = (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::hangup()),
-        ) else {
-            return;
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
-            _ = hangup.recv() => {}
-        }
-        let _ = stopping.send(true);
-    });
+    let stop = ending::on_signals();
     let mut reader = Reader {
         out: Output::open(Path::new(&args.out))?,
         lines: stdin::lines(),

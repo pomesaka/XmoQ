@@ -27,7 +27,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
-use xmoq_again::AskAgain;
 use xmoq_chat_tracks::names::Person;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
@@ -35,7 +34,7 @@ use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, Role, Session, Transport};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent, client,
+    Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent,
     read_request_streams, read_uni_streams,
 };
 use xmoq_picture::video_decoder::VideoDecoder;
@@ -43,11 +42,12 @@ use xmoq_viewer::chat_track::{shown, shown_gap};
 use xmoq_viewer::reconnect::{After, BETWEEN_TRIES_MS, Ended, NextSession};
 use xmoq_viewer::room::{self, Broadcast};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
+use xmoq_viewer_io::ending::{self, UntilClosed};
+use xmoq_viewer_io::kept::{Asking, KeptTrack, Said, Wanted};
 use xmoq_viewer_io::reconnect::go_away_behind;
 use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};
 use xmoq_viewer_io::session::{
-    self, Events, GoingAway, GoneAway, NotSubscribed, Requests, Sent, Subscription, new_url,
-    timestamp_of,
+    self, Events, GoingAway, GoneAway, Requests, Subscription, new_url, timestamp_of,
 };
 use xmoq_watch::args::{Args, Chat, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
@@ -69,20 +69,6 @@ const BUFFER_TICK: Duration = Duration::from_millis(500);
 /// answer to its SUBSCRIBE, 10 s, and the catalog itself, 5 s), and the
 /// answers to the SUBSCRIBEs of the video and of the sound (10 s each).
 const BEGINNING_AT_MOST: Duration = Duration::from_secs(60);
-
-/// What has to stay until the session is closed, on every way out of
-/// [`play`], so its caller keeps it.
-///
-/// WHY: a stream that is let go of is finished or stopped, and the close
-/// of the session takes a moment to reach the relay. A relay that sees the
-/// viewer's control stream end, or its own stopped, closes the session
-/// first, with `PROTOCOL_VIOLATION` (§3.3).
-#[derive(Default)]
-struct UntilClosed {
-    control: Option<<WtConnection as Connection>::Send>,
-    readers: Option<xmoq_moqt_io::IncomingStreams>,
-    requests: Option<xmoq_moqt_io::IncomingStreams>,
-}
 
 /// How long the thread of the picture gets to end. **Provisional**: it
 /// hears of the end within 20 ms unless the terminal does not take what it
@@ -449,14 +435,7 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
                         say(&format!("SESSION_ENDED {end:?}"));
                     }
                 }
-                // §3.5: "CONTROL_MESSAGE_TIMEOUT (0x11): The session was
-                // closed because the peer took too long to respond to a
-                // control message." For the SETUP, as `@xmoq/moqt` has it; a
-                // request that is not answered is given up alone, and the
-                // viewer then leaves with NO_ERROR (`termination_code` of
-                // `xmoq-moqt-io`'s `client`).
-                connection.close(client::termination_code_of(&played), b"");
-                let _ = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
+                ending::close(&connection, &played).await;
                 played
             }
             Err(error) => Err(error),
@@ -694,8 +673,23 @@ impl Played {
     }
 }
 
-/// A SUBSCRIBE for the sound that was sent again, on its way to its answer.
-type Answer = std::pin::Pin<Box<dyn Future<Output = (session::Asked, Result<Sent>)> + Send>>;
+/// Writes what became of the sound kept on the session.
+fn tell_audio(ui: &mut Ui, said: Said) {
+    let line = match said {
+        Said::Subscribed { track_alias } => format!("AUDIO_AGAIN track_alias={track_alias}"),
+        Said::Ended { how, pause_ms } => {
+            format!("AUDIO_ENDED {how}; asking again in {pause_ms} ms")
+        }
+        Said::Refused {
+            error_code,
+            pause_ms,
+        } => format!("AUDIO_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"),
+        // As the page: not asked for again on this session.
+        Said::GivenUp(why) | Said::Failed { why, .. } => format!("AUDIO_GIVEN_UP {why}"),
+        Said::Other(other) => format!("AUDIO_SAID {other:?}"),
+    };
+    ui.note(&line);
+}
 
 /// Plays one broadcast until it ends, moves, or the viewer is ended.
 /// `began_playing` is set when its first Object came.
@@ -815,11 +809,24 @@ async fn play(
     // one that falls behind), and a new session would stop the picture for
     // the sake of the sound. The watching page does the same
     // (`keepTrackOnSession` of `@xmoq/media`), by the same rule
-    // (`xmoq-again`).
-    let mut audio = Some(audio);
-    let mut again = AskAgain::default();
-    let mut ask_at: Option<tokio::time::Instant> = None;
-    let mut asking: Option<Answer> = None;
+    // (`xmoq_viewer_io::kept`).
+    let mut audio = KeptTrack::subscribed(
+        Wanted {
+            namespace: namespace.clone(),
+            name: audio_name,
+            rendezvous_ms: args.rendezvous_ms,
+            payload_most: None,
+            again_after_failure: false,
+        },
+        Asking {
+            connection: Arc::clone(connection),
+            stops: stops.clone(),
+            token: place.token.clone(),
+            answer_wait_ms: args.answer_wait_ms,
+            open_wait_ms: args.open_wait_ms,
+        },
+        audio,
+    );
     let mut cut_at = args
         .cut_sound_s
         .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
@@ -1001,43 +1008,10 @@ async fn play(
                 }
                 break "the video track ended";
             }
-            event = async {
-                match audio.as_mut() {
-                    Some(audio) => audio.reader.next_event().await,
-                    None => std::future::pending().await,
+            came = audio.next() => {
+                if let Some(said) = audio.on(&mut session, came)? {
+                    tell_audio(ui, said);
                 }
-            } => {
-                let Some(ended) = audio.take() else { continue };
-                let how = match event {
-                    Ok(RequestStreamEvent::Message(message)) => {
-                        let line = format!("{message:?}");
-                        // The sound alone is asked for again on this session,
-                        // also where a URI is named (§10.4 has it sent there):
-                        // the picture stays here, and the sound plays by its
-                        // clock. `keepTrackOnSession` of the page does the same.
-                        if let RequestEvent::GoAway(_) =
-                            session.on_request_message(ended.request, message)?
-                        {
-                            session.cancel(ended.request);
-                            ended.cancel();
-                        }
-                        line
-                    }
-                    // Without PUBLISH_DONE the session still has the
-                    // subscription, which would stand in the way of the
-                    // next SUBSCRIBE for the track.
-                    Ok(RequestStreamEvent::Closed(closed)) => {
-                        session.cancel(ended.request);
-                        format!("closed {closed:?}")
-                    }
-                    Err(error) => {
-                        session.cancel(ended.request);
-                        format!("{error}")
-                    }
-                };
-                let pause = again.after_end();
-                ui.note(&format!("AUDIO_ENDED {how}; asking again in {pause} ms"));
-                ask_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause));
             }
             () = async {
                 match cut_at {
@@ -1046,69 +1020,8 @@ async fn play(
                 }
             } => {
                 cut_at = None;
-                if let Some(cut) = audio.take() {
-                    session.cancel(cut.request);
-                    // Dropping it resets the request stream (`cancel` above
-                    // is the session's half).
-                    cut.cancel();
-                    let pause = again.after_end();
-                    ui.note(&format!("AUDIO_ENDED cut; asking again in {pause} ms"));
-                    ask_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause));
-                }
-            }
-            () = async {
-                match ask_at {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                ask_at = None;
-                let mut requests = Requests {
-                    connection,
-                    session: &mut session,
-                    namespace: &namespace,
-                    token: place.token.as_deref(),
-                    answer_wait_ms: args.answer_wait_ms,
-                    open_wait_ms: args.open_wait_ms,
-                    rendezvous_ms: args.rendezvous_ms,
-                };
-                match requests.ask(&audio_name, None) {
-                    Ok(asked) => {
-                        let connection = Arc::clone(connection);
-                        let open_wait_ms = args.open_wait_ms;
-                        asking = Some(Box::pin(async move {
-                            let sent = session::send_subscribe(&connection, open_wait_ms, &asked).await;
-                            (asked, sent)
-                        }));
-                    }
-                    Err(error) => ui.note(&format!("AUDIO_GIVEN_UP {error:#}")),
-                }
-            }
-            (asked, sent) = async {
-                match asking.as_mut() {
-                    Some(answer) => answer.await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                asking = None;
-                match session::settle(&mut session, &asked, sent) {
-                    Ok(subscription) => {
-                        again.subscribed();
-                        ui.note(&format!("AUDIO_AGAIN track_alias={}", subscription.track_alias));
-                        audio = Some(subscription);
-                    }
-                    Err(NotSubscribed::Refused(error)) => {
-                        let pause = again.after_refusal(error.retry_wait_ms());
-                        ui.note(&format!(
-                            "AUDIO_REFUSED error_code={:#x}; asking again in {pause} ms",
-                            error.error_code
-                        ));
-                        ask_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause));
-                    }
-                    // As the page: not asked for again on this session.
-                    Err(NotSubscribed::Failed(error)) => {
-                        ui.note(&format!("AUDIO_GIVEN_UP {error:#}"));
-                    }
+                if let Some(said) = audio.cut(&mut session) {
+                    tell_audio(ui, said);
                 }
             }
             Some(event) = asked.recv() => {
@@ -1127,7 +1040,7 @@ async fn play(
                 }
             } => {
                 let Some(tracks) = chat.as_mut() else { continue };
-                for out in tracks.on(&mut session, came).await {
+                for out in tracks.on(&mut session, came).await? {
                     match out {
                         ChatOut::Line(line) => ui.chat(shown(line.number, &line.name, &line.text)),
                         ChatOut::Gap(gap) => {
@@ -1154,9 +1067,7 @@ async fn play(
                     let of_video = header.track_alias == video.track_alias;
                     if object.status != ObjectStatus::Normal
                         || !(of_video
-                            || audio
-                                .as_ref()
-                                .is_some_and(|audio| audio.track_alias == header.track_alias))
+                            || audio.track_alias() == Some(header.track_alias))
                     {
                         continue;
                     }
@@ -1274,22 +1185,7 @@ async fn play(
 async fn watch(args: Args) -> Result<()> {
     // Told to end by a signal: the loop ends, and what is below puts the
     // terminal back.
-    let (stopping, stop) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let (Ok(mut terminate), Ok(mut hangup)) = (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::hangup()),
-        ) else {
-            return;
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
-            _ = hangup.recv() => {}
-        }
-        let _ = stopping.send(true);
-    });
+    let stop = ending::on_signals();
     // The terminal is put back when `_raw` is dropped, on every way out of
     // this function.
     let (_raw, pressed) = match terminal::keys() {

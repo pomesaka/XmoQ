@@ -30,6 +30,7 @@ use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
 use xmoq_transcript_tracks::payloads::{Speech, read_speech};
 pub use xmoq_viewer::reconnect::Ended;
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
+use xmoq_viewer_io::ending::UntilClosed;
 use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, Track};
 use xmoq_viewer_io::reconnect::go_away_behind;
 use xmoq_viewer_io::room_socket::RoomSocket;
@@ -38,22 +39,11 @@ use xmoq_viewer_io::session::{self, Events, GoingAway, GoneAway, Requests, new_u
 use crate::frames::{Job, Pictures};
 use crate::meeting::InMeeting;
 use crate::stdin::Line;
-use crate::video::{Asking as VideoAsking, Video};
+use crate::video::Video;
 use crate::{Outside, Place, Reader, person_of};
 
 type Send = <WtConnection as Connection>::Send;
 type Recv = <WtConnection as Connection>::Recv;
-
-/// What has to stay until the session is closed, on every way out of
-/// [`attend`], so its caller keeps it. WHY, as in `xmoq-watch`: a relay that
-/// sees the control stream end, or its own stopped, closes the session
-/// first, with `PROTOCOL_VIOLATION` (§3.3).
-#[derive(Default)]
-pub struct UntilClosed {
-    control: Option<Send>,
-    readers: Option<xmoq_moqt_io::IncomingStreams>,
-    requests: Option<xmoq_moqt_io::IncomingStreams>,
-}
 
 /// The `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<room>`, which tells who is in
 /// the chat.
@@ -180,6 +170,11 @@ impl Chat {
     }
 
     /// What came on the stream of the `SUBSCRIBE_NAMESPACE`.
+    ///
+    /// FIXME: one keeping of a `SUBSCRIBE_NAMESPACE` for this and for the
+    /// other (`meeting::InMeeting::on_watching`), as `xmoq_viewer_io::kept` is for a track, where only
+    /// more namespaces than the session keeps ask again, and any other
+    /// message that breaks the protocol closes the session.
     fn on_watching(
         &mut self,
         session: &mut Session,
@@ -488,14 +483,14 @@ pub async fn attend(
                 .map(|field| field.as_bytes().to_vec())
                 .collect(),
         )?;
-        let asking_with = VideoAsking {
+        let asking_with = Asking {
             connection: Arc::clone(connection),
-            namespace: broadcast,
+            stops: stops.clone(),
             token: place.token.clone(),
             answer_wait_ms: args.answer_wait_ms,
             open_wait_ms: args.open_wait_ms,
         };
-        let subscribed = Video::begin(asking_with, &mut session, &mut events, &stops);
+        let subscribed = Video::begin(asking_with, broadcast, &mut session, &mut events);
         // The catalog's SUBSCRIBE and FETCH, the catalog itself, and the
         // video's SUBSCRIBE.
         let wait = Duration::from_millis(args.answer_wait_ms * 3) + Duration::from_secs(5);
@@ -693,14 +688,14 @@ pub async fn attend(
             }
             came = on(meeting.as_mut().map(InMeeting::next)) => {
                 if let Some(in_meeting) = meeting.as_mut()
-                    && let Some(ended) = in_meeting.on(&mut session, reader, came).await
+                    && let Some(ended) = in_meeting.on(&mut session, reader, came).await?
                 {
                     break ended;
                 }
             }
             came = on(video.as_mut().ok().map(Video::next)) => {
                 if let Ok(going) = video.as_mut()
-                    && let Err(why) = going.on(&mut session, came)
+                    && let Some(why) = going.on(&mut session, came)?
                 {
                     let why = NoVideo::Failed(format!("given up: {why}"));
                     reader.error(why.message());
@@ -725,7 +720,7 @@ pub async fn attend(
             },
             came = on(speech.as_mut().map(Follower::next)) => {
                 if let Some(follower) = speech.as_mut() {
-                    for out in follower.on(&mut session, came).await {
+                    for out in follower.on(&mut session, came).await? {
                         if let FollowOut::Item(piece) = &out {
                             crate::meeting::spoke(reader, &piece.from);
                         }
@@ -735,7 +730,7 @@ pub async fn attend(
                 }
             }
             came = tracks.next() => {
-                for out in chat.tracks.on(&mut session, came).await {
+                for out in chat.tracks.on(&mut session, came).await? {
                     match out {
                         Out::Line(line) => reader.tell(&chat_event(line)),
                         Out::Gap(gap) => reader.tell(&Event::ChatGap { after: gap.after, before: gap.before }),
