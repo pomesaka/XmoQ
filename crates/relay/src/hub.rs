@@ -199,11 +199,11 @@ pub struct HubConfig {
     /// For measuring: every so often, a line for each session of what its
     /// transport and its subgroup streams have (`STATS`). None: no line.
     pub stats_every: Option<Duration>,
-    /// For measuring: an `ARRIVED_STREAM` line on stderr for every subgroup
-    /// stream of a peer, and an `ARRIVED` line for every Object on one, with
-    /// the time the hub took it. The other end is `--log-written` of the
-    /// Rust client's publisher.
-    pub log_arrivals: bool,
+    /// For measuring: where an `ARRIVED_STREAM` line for every subgroup
+    /// stream of a peer goes, and an `ARRIVED` line for every Object on one,
+    /// with the time the hub took it. The other end is `--log-written` of
+    /// the Rust client's publisher. None: no line.
+    pub log_arrivals: Option<Log>,
     /// How long a subscriber has for the whole of a fetch stream the relay
     /// writes from its cache, at the least. Provisional.
     pub cached_fetch_whole_ms: u64,
@@ -409,7 +409,7 @@ impl Default for HubConfig {
             announcement_every_ms: None,
             announcements_at_once: None,
             stats_every: None,
-            log_arrivals: false,
+            log_arrivals: None,
             cached_fetch_whole_ms: 30_000,
             cached_fetch_least_kbps: 500,
             held_beyond_cache_bytes: None,
@@ -446,19 +446,34 @@ impl Log {
         (log, collected)
     }
 
-    /// A log that prints to stdout from a task of its own.
-    ///
-    /// WHY a task: the hub is one task for all sessions, and a write to a
-    /// stdout that nobody reads would stop it, and all sessions with it. Lines
-    /// that do not fit in the queue are dropped, and their number is printed
-    /// when there is room again.
+    /// A log that prints to stdout, 1,024 lines at most waiting.
     #[must_use]
     pub fn stdout() -> Self {
-        const QUEUE: usize = 1024;
-        let (lines, mut queued) = mpsc::channel::<String>(QUEUE);
-        tokio::spawn(async move {
-            while let Some(line) = queued.recv().await {
-                println!("{line}");
+        Self::writing_to(std::io::stdout(), 1024)
+    }
+
+    /// A log that prints to stderr, `queue` lines at most waiting.
+    #[must_use]
+    pub fn stderr(queue: usize) -> Self {
+        Self::writing_to(std::io::stderr(), queue)
+    }
+
+    /// A log whose lines a thread of its own writes to `out`.
+    ///
+    /// WHY a thread: the hub is one task for all sessions, and a write to an
+    /// output that nobody reads would stop it, and all sessions with it; on
+    /// a task of the runtime, it would stop a worker of it. Lines that do not
+    /// fit in the queue are dropped, and their number is printed when there
+    /// is room again. A write that fails ends the thread, and the lines after
+    /// it go nowhere, as they would.
+    fn writing_to(out: impl std::io::Write + Send + 'static, queue: usize) -> Self {
+        let (lines, mut queued) = mpsc::channel::<String>(queue);
+        std::thread::spawn(move || {
+            let mut out = out;
+            while let Some(line) = queued.blocking_recv() {
+                if writeln!(out, "{line}").is_err() {
+                    break;
+                }
             }
         });
         Self {
@@ -1511,8 +1526,8 @@ impl<C: Connection> Hub<C> {
                     }]));
                 }
                 Envelope::Core(event) => {
-                    if self.config.log_arrivals {
-                        log_arrival(&event);
+                    if let Some(arrivals) = &self.config.log_arrivals {
+                        log_arrival(arrivals, &event);
                     }
                     if let Event::ControlMessage { session, .. } = &event
                         && let Some(handle) = self.sessions.get_mut(session)
@@ -3605,11 +3620,13 @@ fn stop_code(code: Option<u32>) -> String {
 /// [`HubConfig::log_arrivals`]: a subgroup stream or an Object of a peer the
 /// hub takes, with the microseconds since 1970 then.
 ///
-/// WHY stderr and not [`Log`]: the log drops lines when it is full, which a
-/// relay that falls behind makes it, and this is for finding out why. WHY
-/// the Object's own fields only: the relay does not read the payload's
-/// packaging (LOC); the publisher's line has the Timestamp.
-fn log_arrival(event: &Event) {
+/// WHY a log of its own, and not [`HubConfig::log`]: there is a line for
+/// every Object, which would crowd the other lines out of that log's queue.
+/// The time is taken here, so a line that waits in the queue still says when
+/// the hub took the Object; one that does not fit is dropped and counted
+/// (`LOG_DROPPED`). WHY the Object's own fields only: the relay does not read
+/// the payload's packaging (LOC); the publisher's line has the Timestamp.
+fn log_arrival(arrivals: &Log, event: &Event) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_micros());
@@ -3618,18 +3635,18 @@ fn log_arrival(event: &Event) {
             session,
             stream,
             header,
-        } => eprintln!(
+        } => arrivals.print(format!(
             "ARRIVED_STREAM session={} stream={} alias={} group={} subgroup={:?} at_us={now}",
             session.0, stream.0, header.track_alias, header.group_id, header.subgroup_id
-        ),
+        )),
         Event::Object {
             session,
             stream,
             object,
-        } => eprintln!(
+        } => arrivals.print(format!(
             "ARRIVED session={} stream={} object={} at_us={now}",
             session.0, stream.0, object.object_id
-        ),
+        )),
         _ => {}
     }
 }
