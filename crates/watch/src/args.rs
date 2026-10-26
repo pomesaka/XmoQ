@@ -62,7 +62,7 @@ pub struct Chat {
     pub say: Option<String>,
     /// `--chat-catch-up-lines`: how many of the lines it missed are fetched
     /// when the subscription to `lines` is made again
-    /// ([`xmoq_viewer::chat_track::history_to_fetch`]); 1 to
+    /// (`past_to_fetch` of `xmoq-subscriber`); 1 to
     /// [`xmoq_viewer::chat_track::CATCH_UP_LINES_MOST`].
     pub catch_up: u64,
 }

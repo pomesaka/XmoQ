@@ -16,10 +16,10 @@ use xmoq_moqt::session::{RequestEvent, RequestId, Session};
 use xmoq_moqt_io::client;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
+use xmoq_subscriber::kept::{Asking, Came as VideoCame};
+use xmoq_subscriber::session::{Events, GoingAway, GoneAway, new_url};
 use xmoq_viewer::meeting::{self, Limits, Meeting, Video as VideoStep};
 use xmoq_viewer::presence::{Change, SETTLE_MS};
-use xmoq_viewer_io::kept::{Asking, Came as VideoCame};
-use xmoq_viewer_io::session::{Events, GoingAway, GoneAway, new_url};
 
 use crate::Reader;
 use crate::attend::{Ended, Watching, on, watch};
@@ -325,7 +325,7 @@ impl InMeeting {
     }
 
     /// FIXME: one keeping of a `SUBSCRIBE_NAMESPACE` for this and for the
-    /// other (`attend::Chat::on_watching`), as `xmoq_viewer_io::kept` is for a track, where only
+    /// other (`attend::Chat::on_watching`), as `xmoq_subscriber::kept` is for a track, where only
     /// more namespaces than the session keeps ask again, and any other
     /// message that breaks the protocol closes the session.
     fn on_watching(

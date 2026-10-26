@@ -1,14 +1,14 @@
 //! The video of a broadcast on one session, for its pictures: of the
 //! catalog read once, its first H.264 track kept on the session
-//! (`xmoq_viewer_io::kept`), as `xmoq-watch` keeps its sound.
+//! (`xmoq_subscriber::kept`), as `xmoq-watch` keeps its sound.
 
 use anyhow::{Result, anyhow};
 use xmoq_moqt::RequestFault;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestId, Session};
 use xmoq_msf::CatalogTrack;
-use xmoq_viewer_io::kept::{Asking, Came, KeptTrack, Said, Wanted};
-use xmoq_viewer_io::session::{CatalogKept, Events, Requests};
+use xmoq_subscriber::kept::{Asking, Came, KeptTrack, Said, Wanted};
+use xmoq_subscriber::session::{CatalogKept, Events, Requests};
 
 /// The video of one session.
 pub struct Video {

@@ -1,0 +1,18 @@
+[package]
+name = "xmoq-subscriber"
+version = "0.0.0"
+description = "What a client of the relay needs to read tracks of others on its session: a kept track, asked for again by one rule, a followed track of one numbered item a Group, the catalog of a broadcast, and the requests and the events of the session they go by."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-again = { path = "../again" }
+xmoq-loc = { path = "../loc" }
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+xmoq-msf = { path = "../msf" }
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "sync", "time"] }

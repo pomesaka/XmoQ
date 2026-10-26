@@ -16,6 +16,7 @@ xmoq-moqt = { path = "../moqt" }
 xmoq-moqt-io = { path = "../moqt-io" }
 xmoq-msf = { path = "../msf" }
 xmoq-room-token = { path = "../room-token" }
+xmoq-subscriber = { path = "../subscriber" }
 xmoq-viewer = { path = "../viewer" }
 anyhow = "=1.0.100"
 tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

@@ -13,6 +13,9 @@ use serde_json::Value;
 /// The one MSF version that is read (§5.1.1), as in `@xmoq/msf`.
 pub const MSF_VERSION: &str = "draft-01";
 
+/// The name of the catalog track of a broadcast (§5), as in `@xmoq/msf`.
+pub const CATALOG_TRACK: &str = "catalog";
+
 /// The `packaging` of a track whose Objects are LOC (§4.1).
 pub const LOC_PACKAGING: &str = "loc";
 
