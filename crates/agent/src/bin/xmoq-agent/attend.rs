@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 pub use xmoq_again::next_session::Ended;
 use xmoq_again::next_session::Pause;
-use xmoq_agent::events::{Asked as FrameAsked, BroadcastState, Event};
+use xmoq_agent::events::{BroadcastState, Event, FrameReason};
 use xmoq_agent::input::{self, Input};
 use xmoq_agent::presence::SETTLE_MS;
 use xmoq_chat_tracks::names::{person_of as person_of_namespace, room_namespace};
@@ -39,7 +39,7 @@ use xmoq_subscriber::session::{
 };
 use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
 use xmoq_transcript_tracks::payloads::{Speech, read_speech};
-use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
+use xmoq_viewer_io::chat_tracks::{ChatOutcome, ChatTracks};
 use xmoq_viewer_io::room_client::{HeldSeat, SeatLost};
 
 use crate::frames::{Job, Pictures};
@@ -382,14 +382,14 @@ fn on_speech(reader: &mut Reader, out: FollowOut<Speech>) {
 }
 
 /// Writes what came of the chat on tracks.
-fn on_chat(reader: &mut Reader, out: Out) {
+fn on_chat(reader: &mut Reader, out: ChatOutcome) {
     match out {
-        Out::Line(line) => reader.tell(&chat_event(line)),
-        Out::Gap(gap) => reader.tell(&Event::ChatGap {
+        ChatOutcome::Line(line) => reader.tell(&chat_event(line)),
+        ChatOutcome::Gap(gap) => reader.tell(&Event::ChatGap {
             after: gap.after,
             before: gap.before,
         }),
-        Out::Note(note) => eprintln!("{note}"),
+        ChatOutcome::Note(note) => eprintln!("{note}"),
     }
 }
 
@@ -789,7 +789,7 @@ pub async fn attend(
                     if let (Event::Frame { of, .. }, Some(_)) = (&mut event, meeting.as_ref()) {
                         *of = crate::meeting::watching(reader);
                     }
-                    if matches!(event, Event::Frame { asked: FrameAsked::Command, .. }) {
+                    if matches!(event, Event::Frame { asked: FrameReason::Command, .. }) {
                         reader.frame.until = None;
                     }
                     reader.tell(&event);

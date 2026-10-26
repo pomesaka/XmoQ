@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use tokio::sync::{mpsc, oneshot};
-use xmoq_agent::events::{Asked, Event};
+use xmoq_agent::events::{Event, FrameReason};
 use xmoq_picture::frames::{Frames, Settings, Taken, VideoObject};
 
 /// The jobs that may wait for the thread. **Provisional.** Beyond them an
@@ -59,7 +59,7 @@ const END_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Writes `taken` into `dir`, and removes what it says to. `run` is `dir`
 /// from `--out`, as the line says it.
-fn write(dir: &std::path::Path, run: &str, taken: &Taken, asked: Asked) -> Event {
+fn write(dir: &std::path::Path, run: &str, taken: &Taken, asked: FrameReason) -> Event {
     let path = dir.join(&taken.file_name);
     if let Err(error) = std::fs::write(&path, &taken.png) {
         return Event::Error {
@@ -120,15 +120,15 @@ impl Pictures {
                         })
                         .map(|taken| {
                             let asked = if was_asked {
-                                Asked::Command
+                                FrameReason::Command
                             } else {
-                                Asked::Every
+                                FrameReason::Every
                             };
                             write(&dir, &run, &taken, asked)
                         }),
                     Job::Ask => frames
                         .ask()
-                        .map(|taken| write(&dir, &run, &taken, Asked::Command)),
+                        .map(|taken| write(&dir, &run, &taken, FrameReason::Command)),
                     Job::Forgo => {
                         frames.forgo();
                         None

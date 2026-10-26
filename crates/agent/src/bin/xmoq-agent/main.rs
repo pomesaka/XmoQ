@@ -69,7 +69,7 @@ pub struct Reader {
     deadline: Option<tokio::time::Instant>,
     presence: Presence,
     /// Who is in the meeting of `--meeting`, from one session to the next.
-    meeting: Option<meeting::Kept>,
+    meeting: Option<meeting::KeptMeeting>,
     /// How long the room gets for each of its answers (`--room-wait-ms`).
     room_wait: Duration,
     /// The newest line of the chat written, from one session to the next.
@@ -770,7 +770,7 @@ async fn read(args: &Args) -> Result<()> {
             .seconds
             .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds)),
         presence: Presence::new(&args.room, &args.name),
-        meeting: meeting::Kept::of(args),
+        meeting: meeting::KeptMeeting::of(args),
         room_wait: Duration::from_millis(args.room_wait_ms),
         had: None,
         speech_had: None,

@@ -54,11 +54,11 @@ use xmoq_subscriber::session::{
 };
 use xmoq_viewer::chat_track::{shown, shown_gap};
 use xmoq_viewer::room;
-use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
+use xmoq_viewer_io::chat_tracks::{ChatOutcome, ChatTracks};
 use xmoq_viewer_io::room_client::{ChatTokens, ROOM_COMES_WITHIN, RoomClient};
 use xmoq_watch::args::{Args, Chat, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
-use xmoq_watch::keys::{Asked, Keys};
+use xmoq_watch::keys::{KeyCommand, Keys};
 use xmoq_watch::marks::Recent;
 use xmoq_watch::{marks, tracks};
 
@@ -146,7 +146,7 @@ impl Ui {
                 // A line for the chat that is typed meanwhile is let go, and
                 // said so: the chat is on the session that is not there yet.
                 asked = self.asked() => match asked {
-                    Asked::Say(text) => self.note(&format!(
+                    KeyCommand::Say(text) => self.note(&format!(
                         "SAID nothing: waiting for {what} ({})",
                         room::clean(&text, room::LINE_LIMIT)
                     )),
@@ -188,7 +188,7 @@ impl Ui {
     /// The next thing that is not the broadcast's: a key that asks for
     /// something beyond the volume, the end of the time, or the order to
     /// end.
-    async fn asked(&mut self) -> Asked {
+    async fn asked(&mut self) -> KeyCommand {
         loop {
             let pressed = async {
                 match self.pressed.as_mut() {
@@ -203,8 +203,8 @@ impl Ui {
                 }
             };
             tokio::select! {
-                () = deadline => return Asked::Quit,
-                _ = self.stop.changed() => return Asked::Quit,
+                () = deadline => return KeyCommand::Quit,
+                _ = self.stop.changed() => return KeyCommand::Quit,
                 byte = pressed => {
                     // Stdin is over: no more keys.
                     let Some(byte) = byte else {
@@ -213,14 +213,14 @@ impl Ui {
                     };
                     let asked = self.keys.press(byte);
                     match &asked {
-                        Some(Asked::Louder) => self.volume.change(0.1),
-                        Some(Asked::Quieter) => self.volume.change(-0.1),
-                        Some(Asked::Mute) => self.volume.mute(),
+                        Some(KeyCommand::Louder) => self.volume.change(0.1),
+                        Some(KeyCommand::Quieter) => self.volume.change(-0.1),
+                        Some(KeyCommand::Mute) => self.volume.mute(),
                         _ => {}
                     }
                     self.show();
                     match asked {
-                        Some(Asked::Louder | Asked::Quieter | Asked::Mute) => {
+                        Some(KeyCommand::Louder | KeyCommand::Quieter | KeyCommand::Mute) => {
                             let line = format!(
                                 "VOLUME level={:.1} muted={}",
                                 self.volume.level(),
@@ -723,17 +723,17 @@ impl Played {
 }
 
 /// Shows or writes what came of the chat on tracks.
-fn tell_chat(ui: &mut Ui, out: ChatOut) {
+fn tell_chat(ui: &mut Ui, out: ChatOutcome) {
     match out {
-        ChatOut::Line(line) => ui.chat(shown(line.number, &line.name, &line.text)),
-        ChatOut::Gap(gap) => {
+        ChatOutcome::Line(line) => ui.chat(shown(line.number, &line.name, &line.text)),
+        ChatOutcome::Gap(gap) => {
             ui.note(&format!(
                 "CHAT_GAP after={} before={}",
                 gap.after, gap.before
             ));
             ui.chat(shown_gap(gap.after, gap.before));
         }
-        ChatOut::Note(line) => ui.note(&line),
+        ChatOutcome::Note(line) => ui.note(&line),
     }
 }
 
@@ -1025,7 +1025,7 @@ async fn play(
                 played.buffer_us = (played.buffer_us.0.min(now), played.buffer_us.1.max(now), now);
             }
             asked = ui.asked() => {
-                let Asked::Say(text) = asked else {
+                let KeyCommand::Say(text) = asked else {
                     ended = Ended::Quit;
                     break "the viewer was ended";
                 };

@@ -28,7 +28,7 @@ pub enum ParticipantState {
 
 /// Why a frame was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Asked {
+pub enum FrameReason {
     /// The agent asked for it (`/frame`).
     Command,
     /// `--frame-every-ms`.
@@ -100,7 +100,7 @@ pub enum Event {
         /// Its size.
         height: u32,
         /// Why it was taken.
-        asked: Asked,
+        asked: FrameReason,
         /// In a meeting, whose picture it is: written as `id`, and left out
         /// otherwise.
         of: Option<String>,
@@ -189,8 +189,8 @@ impl Event {
                 "width": width,
                 "height": height,
                 "asked": match asked {
-                    Asked::Command => "command",
-                    Asked::Every => "every",
+                    FrameReason::Command => "command",
+                    FrameReason::Every => "every",
                 },
                 });
                 if let (Some(of), Value::Object(fields)) = (of, &mut frame) {
@@ -294,7 +294,7 @@ mod tests {
                     timestamp_us: 1_700_000_000_000_000,
                     width: 320,
                     height: 180,
-                    asked: Asked::Command,
+                    asked: FrameReason::Command,
                     of: Some("p1".to_string()),
                 },
             ),
@@ -395,7 +395,7 @@ mod tests {
                     timestamp_us: 1_700_000_000_000_000,
                     width: 1280,
                     height: 720,
-                    asked: Asked::Command,
+                    asked: FrameReason::Command,
                     of: None,
                 },
                 r#"{"asked":"command","at":1000,"group":12,"height":720,"object":7,"path":"frames/1700000000000/000003-g12-o7.png","timestamp_us":1700000000000000,"type":"frame","width":1280}"#,
@@ -435,7 +435,7 @@ mod tests {
                     timestamp_us: 0,
                     width: 1,
                     height: 1,
-                    asked: Asked::Every,
+                    asked: FrameReason::Every,
                     of: None,
                 },
                 r#"{"asked":"every","at":1000,"group":0,"height":1,"object":0,"path":"f.png","timestamp_us":0,"type":"frame","width":1}"#,
@@ -448,7 +448,7 @@ mod tests {
                     timestamp_us: 0,
                     width: 1,
                     height: 1,
-                    asked: Asked::Command,
+                    asked: FrameReason::Command,
                     of: Some("p1".to_string()),
                 },
                 r#"{"asked":"command","at":1000,"group":0,"height":1,"id":"p1","object":0,"path":"f.png","timestamp_us":0,"type":"frame","width":1}"#,

@@ -24,7 +24,9 @@ use tokio::time::Instant;
 use xmoq_again::AskAgain;
 use xmoq_chat_tracks::names::Person;
 use xmoq_room_token::Role;
-use xmoq_viewer::room::{self, Answer, NoSeat, Request, Room, RoomAddress, RoomKind, TakenSeat};
+use xmoq_viewer::room::{
+    self, NoSeat, Request, Room, RoomAddress, RoomAnswer, RoomKind, TakenSeat,
+};
 
 /// How long a room that refuses the connection is asked again, from the
 /// first try. **Provisional.** WHY asked again at all: rooms often start
@@ -115,7 +117,7 @@ impl RoomClient {
         &self.room
     }
 
-    async fn ask(&self, request: Request) -> Result<Answer> {
+    async fn ask(&self, request: Request) -> Result<RoomAnswer> {
         let url = self
             .base
             .join(&request.path)
@@ -158,7 +160,7 @@ impl RoomClient {
     /// the room.
     pub async fn room(&self) -> Result<Room> {
         match self.ask(self.room.ask_for_the_room()).await? {
-            Answer::Room(room) => Ok(room),
+            RoomAnswer::Room(room) => Ok(room),
             other => Err(anyhow!("the room answered {other:?} for itself")),
         }
     }
@@ -194,7 +196,7 @@ impl RoomClient {
     /// As [`Self::room`].
     pub async fn token(&self, role: Role, namespace: &[String]) -> Result<Option<String>> {
         match self.ask(self.room.ask_for_a_token(role, namespace)).await? {
-            Answer::Token(token) => Ok(token),
+            RoomAnswer::Token(token) => Ok(token),
             other => Err(anyhow!("the room answered {other:?} for a token")),
         }
     }
@@ -242,8 +244,8 @@ impl RoomClient {
             bail!("the room of a broadcast has no seats: {}", self.room.name);
         }
         match self.ask(self.room.ask_for_a_seat(participant)).await? {
-            Answer::Seat(seat) => Ok(Ok(HeldSeat::hold(self.clone(), seat))),
-            Answer::NoSeat(no_seat) => Ok(Err(no_seat)),
+            RoomAnswer::Seat(seat) => Ok(Ok(HeldSeat::hold(self.clone(), seat))),
+            RoomAnswer::NoSeat(no_seat) => Ok(Err(no_seat)),
             other => Err(anyhow!("the room answered {other:?} for a seat")),
         }
     }
@@ -329,7 +331,7 @@ impl HeldSeat {
         };
         let request = self.client.room.leave_a_seat(&participant, &lease);
         match self.client.ask(request).await? {
-            Answer::Left => Ok(()),
+            RoomAnswer::Left => Ok(()),
             other => Err(anyhow!("the room answered {other:?} for leaving a seat")),
         }
     }
@@ -357,11 +359,11 @@ async fn renew(
             .ask(client.room.renew_a_seat(&participant, &lease))
             .await
         {
-            Ok(Answer::Seat(renewed)) => {
+            Ok(RoomAnswer::Seat(renewed)) => {
                 seat.send_replace(renewed);
                 continue;
             }
-            Ok(Answer::NoSeat(NoSeat::Gone)) => SeatLost::Gone,
+            Ok(RoomAnswer::NoSeat(NoSeat::Gone)) => SeatLost::Gone,
             Ok(other) => SeatLost::Failed(format!("the room answered {other:?} for a renewal")),
             Err(error) => SeatLost::Failed(format!("{error:#}")),
         };
