@@ -4,9 +4,9 @@
 //! part they share (`xmoq-viewer-io`), the gatherer (`xmoq-chat`) and the
 //! transcriber (`xmoq-transcriber`).
 //!
-//! The rule and the default values are those of the pages
-//! (`createAskAgain` in `packages/moqt/src/core/again.ts`), so that every
-//! client asks a relay as often; both are tested with the rows of
+//! The rule and the default values are the components' shared defaults, the
+//! same as `createAskAgain` in `packages/moqt/src/core/again.ts`, so that
+//! every client asks a relay as often; both are tested with the rows of
 //! `fixtures/ask-again/same-session.tsv`. All of them are provisional.
 //!
 //! WHY a crate of its own: the terminal viewer and the gatherer both ask
@@ -41,7 +41,8 @@ pub const MOST_SHORTEST_MS: u64 = 5000;
 /// a client told to come back much later has in effect been told to go.
 pub const MOST_NAMED_MS: u64 = 30_000;
 
-/// The pauses of the rule, in milliseconds. The default is the page's.
+/// The pauses of the rule, in milliseconds. The default is the shared one
+/// (`createAskAgain` of `@xmoq/moqt` has the same).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pauses {
     /// After an end, and after a refusal that names no time.

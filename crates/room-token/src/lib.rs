@@ -7,8 +7,9 @@
 //!
 //! where the mac is HMAC-SHA-256, with the key the relay shares with the
 //! room, over the text before the last `|`. The relay reads it, and the
-//! gatherer of the chat makes its own with the key of the demo (provisional),
-//! as the room (`@xmoq/room`, `packages/room/src/token.ts`) does.
+//! gatherer of the chat makes its own with a key the relay shares with it
+//! (provisional), as the room (`@xmoq/room`, `packages/room/src/token.ts`)
+//! does.
 //!
 //! WHY one crate for the Rust ones that make it and read it: one function
 //! for each half leaves no second copy of the format to drift. The room's

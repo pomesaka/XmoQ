@@ -2,7 +2,7 @@
 
 When a track that ended, or was refused, is asked for again on the same session, and when and where the next session goes after one ended (`next_session`: the URI of a GOAWAY, and the try at once after it; read with [`fixtures/ask-again/next-session.tsv`](../../fixtures/ask-again/README.md), as `createNextSession` of `@xmoq/moqt` is). No input or output, and no dependencies. The terminal viewer ([`xmoq-watch`](../watch/README.md)), the agent ([`xmoq-agent`](../agent/README.md)), the part they share (`xmoq-viewer-io`), the chat's gatherer ([`xmoq-chat`](../chat/README.md), a participant's `said`) and the transcriber ([`xmoq-transcriber`](../transcriber/README.md)) ask by it.
 
-The rule and its default values are the pages' (`createAskAgain` of `@xmoq/moqt`, `packages/moqt/src/core/again.ts`), all **provisional**; both are tested with the rows of [`fixtures/ask-again/same-session.tsv`](../../fixtures/ask-again/README.md):
+The rule and its default values are the components' shared defaults, the same as `createAskAgain` of `@xmoq/moqt` (`packages/moqt/src/core/again.ts`), all **provisional**; both are tested with the rows of [`fixtures/ask-again/same-session.tsv`](../../fixtures/ask-again/README.md):
 
 | Value | Default | Where |
 |---|---|---|
