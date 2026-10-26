@@ -3,14 +3,14 @@
 # for some seconds with the picture written to a file nobody looks at and the sound at volume 0.
 # Prints AV_PLAYED and what the viewer cost (/usr/bin/time -l).
 #
-#   crates/watch/scripts/try.sh [seconds, 20] [more flags of xmoq-watch]     # from the repository root
+#   demo/broadcast/scripts/try.sh [seconds, 20] [more flags of xmoq-watch]     # from the repository root
 #
 # Needs `mise run interop` once (Playwright's Chromium). PORT (48900) and two more are used.
 set -eu
 seconds=${1:-20}
 [ $# -gt 0 ] && shift
 root=$(cd "$(dirname "$0")/../../.." && pwd)
-here="$root/crates/watch/scripts"
+here="$root/demo/broadcast/scripts"
 port=${PORT:-48900}
 work=$(mktemp -d)
 (cd "$root" && cargo build --release --quiet --locked -p xmoq-watch && cargo build --quiet --locked -p xmoq-relay)

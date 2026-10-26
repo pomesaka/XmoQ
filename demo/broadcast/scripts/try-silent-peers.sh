@@ -3,7 +3,7 @@
 # nobody is behind. The viewer has to end when it is told to (--seconds, SIGTERM) while it
 # waits for either, and of itself after its own limit.
 #
-#   crates/watch/scripts/try-silent-peers.sh            # from the repository root
+#   demo/broadcast/scripts/try-silent-peers.sh            # from the repository root
 #
 # Needs nothing but Python. PORT (48940) and one more are used. Prints one line a case: how the
 # viewer ended and after how long.

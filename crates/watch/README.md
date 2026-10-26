@@ -6,7 +6,7 @@ A viewer for the terminal: it subscribes to the video and the audio track of a b
 
 ```sh
 mise run watch -- --room http://127.0.0.1:8787/broadcasts/demo # next to `mise run demo`, with its rooms
-crates/watch/scripts/watch-demo.sh                              # the same demo without a room
+demo/broadcast/scripts/watch-demo.sh                            # the same demo without a room
 mise run watch -- --url https://host:port/ --cert-sha256 <64 hex digits> --namespace a/b
 ```
 

@@ -22,7 +22,7 @@ work=$(mktemp -d)
 demo=$!
 trap 'kill -INT "${page:-}" "${mlmpub:-}" 2>/dev/null || true; kill -INT "$demo" 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$work"' EXIT
 for _ in $(seq 1 40); do grep -q "^publish:" "$work/demo.log" && break; sleep 0.5; done
-(cd "$root" && exec "$bun" crates/watch/scripts/publish-headless.ts "http://localhost:$((port + 1))") > "$work/page.log" 2>&1 &
+(cd "$root" && exec "$bun" demo/broadcast/scripts/publish-headless.ts "http://localhost:$((port + 1))") > "$work/page.log" 2>&1 &
 page=$!
 for _ in $(seq 1 40); do grep -q "^PUBLISHING" "$work/page.log" && break; sleep 0.5; done
 sha=$(openssl x509 -in "$root/demo/.cert/cert.pem" -outform der | shasum -a 256 | cut -d' ' -f1)

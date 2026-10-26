@@ -4,13 +4,13 @@
 # again) and the viewer following it, `q`; then the ends that are not `q`: Ctrl-C and SIGTERM.
 # After each the terminal's line mode is read back.
 #
-#   crates/watch/scripts/try-keys.sh            # from the repository root
+#   demo/broadcast/scripts/try-keys.sh            # from the repository root
 #
 # Needs what try-room.sh needs. PORT (48920) and two more are used. Nobody looks at the
 # pseudo-terminal: what is checked is the log of the viewer, the page's chat, and the mode.
 set -eu
 root=$(cd "$(dirname "$0")/../../.." && pwd)
-here="$root/crates/watch/scripts"
+here="$root/demo/broadcast/scripts"
 port=${PORT:-48920}
 name="keys-$$"
 work=$(mktemp -d)
