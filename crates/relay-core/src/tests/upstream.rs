@@ -1114,6 +1114,42 @@ fn what_the_upstream_refuses_with_no_retry_interval_is_not_sent_again() {
     assert_eq!(announcements_upstream(&next).len(), 1);
 }
 
+/// A namespace withdrawn (§6.2) while it is the one sent at a time has no
+/// answer to wait for: the next goes then, and with none left, what comes
+/// later goes at once again.
+#[test]
+fn a_namespace_withdrawn_while_it_goes_one_at_a_time_lets_the_next_go() {
+    let mut relay = edge(&[]);
+    upstream_opened(&mut relay);
+    let fields = |last: &'static [u8]| -> [&'static [u8]; 4] { [b"xmoq", b"chat", b"r", last] };
+    let names = |actions: &[Action]| -> Vec<TrackNamespace> {
+        announcements_upstream(actions)
+            .into_iter()
+            .map(|(_, namespace)| namespace)
+            .collect()
+    };
+    let sent = announcements_upstream(&announce_by(&mut relay, PUBLISHER, 0, &fields(b"a")));
+    answer_upstream(&mut relay, sent[0].0, refused_for_its_load());
+    announce_by(&mut relay, PUBLISHER, 4, &fields(b"b"));
+    let again = relay.step(Event::UpstreamAnnouncementTimeout { session: UPSTREAM });
+    assert_eq!(names(&again), [namespace_of(&fields(b"a"))]);
+
+    let actions = withdraw(&mut relay, PUBLISHER, 0);
+    assert_eq!(cancelled_upstream(&actions), 1);
+    assert_eq!(names(&actions), [namespace_of(&fields(b"b"))]);
+    let actions = withdraw(&mut relay, PUBLISHER, 4);
+    assert_eq!((cancelled_upstream(&actions), names(&actions)), (1, vec![]));
+    assert!(relay.holds_nothing(UPSTREAM));
+
+    // Two at once, the first not answered.
+    let first = announce_by(&mut relay, PUBLISHER, 8, &fields(b"c"));
+    let second = announce_by(&mut relay, ALICE, 0, &fields(b"d"));
+    assert_eq!(
+        [names(&first), names(&second)],
+        [[namespace_of(&fields(b"c"))], [namespace_of(&fields(b"d"))]]
+    );
+}
+
 #[test]
 fn an_announcement_the_upstream_refuses_or_ends_is_closed_once() {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
