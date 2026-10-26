@@ -68,7 +68,7 @@ test.each<{
 	const { connection, publishNamespace, subscribed } = recording();
 	const stop = new AbortController();
 	await joinChat(connection, {
-		room: "blue",
+		room: { kind: "broadcast", name: "blue" },
 		name: "ann",
 		publishNamespaceToken,
 		onLine() {},
@@ -148,7 +148,12 @@ test("a subscription that is made after the participant stopped is cancelled", a
 			close() {},
 			closed: new Promise(() => {}),
 		},
-		{ room: "blue", name: "ann", onLine() {}, signal: stop.signal },
+		{
+			room: { kind: "broadcast", name: "blue" },
+			name: "ann",
+			onLine() {},
+			signal: stop.signal,
+		},
 	);
 	await late.asked;
 	stop.abort();

@@ -11,6 +11,12 @@ export {
 	keepBack,
 	RateWindow,
 } from "./core/limits.ts";
+export {
+	type ChatRoom,
+	personNamespace,
+	roomFields,
+	roomNamespace,
+} from "./core/names.ts";
 export type { Line, Malformed } from "./core/payloads.ts";
 export {
 	type ChatConnection,

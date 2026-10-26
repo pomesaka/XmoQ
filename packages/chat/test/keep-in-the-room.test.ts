@@ -169,7 +169,11 @@ test.each<{
 			if (session === undefined) throw new Error("no more sessions");
 			return { connection: sessionOf(session) };
 		},
-		join: () => ({ room: "blue", name: "ann", onLine() {} }),
+		join: () => ({
+			room: { kind: "broadcast", name: "blue" },
+			name: "ann",
+			onLine() {},
+		}),
 		againMs: 1,
 		signal: stop.signal,
 		onState(state) {
