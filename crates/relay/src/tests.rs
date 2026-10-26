@@ -4472,12 +4472,12 @@ fn the_peer_may_open_a_request_stream_more_than_it_may_have_requests_open() {
     }
 }
 
-/// A relay with another relay above it (`xmoq-relay-core`'s `upstream.rs`),
+/// A relay with another relay above it (`xmoq-relay-core`'s `parent.rs`),
 /// both on in-memory connections.
-mod upstream {
+mod parent {
     use super::*;
 
-    /// An edge whose upstream is `origin`: each session the edge asks for is
+    /// An edge whose parent is `origin`: each session the edge asks for is
     /// a new connection to it, of which the edge is the client.
     fn edge_of(origin: &HubHandle<MemoryConnection>) -> HubHandle<MemoryConnection> {
         let origin = origin.clone();
@@ -4489,14 +4489,14 @@ mod upstream {
                 Ok(local)
             })
         });
-        let upstream = hub::Upstream {
+        let parent = hub::Parent {
             namespace: TrackNamespace::new(vec![]).unwrap(),
             connect,
         };
-        hub::spawn_with_upstream(HubConfig::default(), Some(upstream)).0
+        hub::spawn_with_parent(HubConfig::default(), Some(parent)).0
     }
 
-    /// An edge whose upstream is `first`, and `second` where a GOAWAY of
+    /// An edge whose parent is `first`, and `second` where a GOAWAY of
     /// `first` names the URI `second`.
     fn edge_of_two(
         first: &HubHandle<MemoryConnection>,
@@ -4514,11 +4514,11 @@ mod upstream {
                 Ok(local)
             })
         });
-        let upstream = hub::Upstream {
+        let parent = hub::Parent {
             namespace: TrackNamespace::new(vec![]).unwrap(),
             connect,
         };
-        hub::spawn_with_upstream(HubConfig::default(), Some(upstream)).0
+        hub::spawn_with_parent(HubConfig::default(), Some(parent)).0
     }
 
     /// §3.6 at an edge: the origin's GOAWAY has the edge take the track from

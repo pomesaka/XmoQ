@@ -3815,7 +3815,7 @@ fn a_subscribe_that_waits_is_said_to_be_held_and_one_that_is_answered_is_not() {
             }),
         })
     };
-    // (case, whether the relay has an upstream, whether a publisher
+    // (case, whether the relay has a parent, whether a publisher
     //  announced the namespace, whether the track is published, Alice's
     //  RENDEZVOUS_TIMEOUT, whether her SUBSCRIBE is held)
     let cases = [
@@ -3852,7 +3852,7 @@ fn a_subscribe_that_waits_is_said_to_be_held_and_one_that_is_answered_is_not() {
             false,
         ),
         (
-            "it waits for the session with the upstream",
+            "it waits for the session with the parent",
             true,
             false,
             false,
@@ -3860,10 +3860,10 @@ fn a_subscribe_that_waits_is_said_to_be_held_and_one_that_is_answered_is_not() {
             true,
         ),
     ];
-    for (name, upstream, announced, published, rendezvous, expected) in cases {
+    for (name, parent, announced, published, rendezvous, expected) in cases {
         let mut relay = relay();
-        if upstream {
-            relay.set_upstream(TrackNamespace::new(vec![]).unwrap());
+        if parent {
+            relay.set_parent(TrackNamespace::new(vec![]).unwrap());
         }
         if announced {
             announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);

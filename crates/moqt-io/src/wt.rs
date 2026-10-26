@@ -768,10 +768,10 @@ pub async fn connect(
 /// before have no answer ([`connect`]). Provisional.
 ///
 /// WHY attempts that overlap: a server that is not there yet (a relay
-/// started anew on its port, an upstream relay that comes back) gets
+/// started anew on its port, a parent relay that comes back) gets
 /// nothing of an attempt that began before it was there but the Initial
 /// that QUIC sends again, after waits that double (1 s, then 2, then 4: an
-/// edge relay connected 3.9 s after its upstream was back, in the run of
+/// edge relay connected 3.9 s after its parent was back, in the run of
 /// `docs/experiments/2026-10-25-a-viewer-of-an-edge-when-the-origin-goes.md`).
 /// A new attempt begins with its first Initial, so the client connects
 /// within about this long of the server's coming. The earlier attempts are

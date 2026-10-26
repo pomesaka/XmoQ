@@ -3,10 +3,10 @@
 // query, and a relay that is full itself closes a session that came so
 // rather than send it on. The relay of the run is the one above
 // (`--max-sessions 2`, `--when-full` the second); the second is below it
-// (`--upstream`), on the run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET. A page
+// (`--parent`), on the run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET. A page
 // publishes the bars at the relay above, a first viewer plays them at the
-// relay below, which makes the relay below's session upstream the second of
-// the relay above, and a second viewer comes to the relay above.
+// relay below, whose session with its parent becomes the second of the relay
+// above, and a second viewer comes to the relay above.
 //
 // Usage: bun when-full.ts --case moves|both-full [--relay own] [--port N] [--verbose]
 //

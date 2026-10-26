@@ -1,11 +1,11 @@
-//! A relay with an upstream relay (`upstream.rs`): which requests go to it,
+//! A relay with a parent relay (`parent.rs`): which requests go to it,
 //! and the session with it, which is opened when a request needs it.
 
 use super::*;
 use xmoq_moqt::message::GoAway;
 
-/// The relay's session with the upstream relay, of which it is the client.
-const UPSTREAM: SessionKey = SessionKey(9);
+/// The relay's session with the parent relay, of which it is the client.
+const PARENT: SessionKey = SessionKey(9);
 
 /// The Error Codes of §10.6.2 these tests see.
 const INTERNAL_ERROR: u64 = 0x0;
@@ -19,10 +19,10 @@ fn track_in(fields: &[&[u8]]) -> FullTrackName {
     FullTrackName::new(namespace_of(fields), b"a".to_vec()).unwrap()
 }
 
-/// A relay whose upstream takes `upstream`, with the publisher and Alice.
-fn edge(upstream: &[&[u8]]) -> Relay {
+/// A relay whose parent takes `parent`, with the publisher and Alice.
+fn edge(parent: &[&[u8]]) -> Relay {
     let mut relay = Relay::new("test/0");
-    relay.set_upstream(namespace_of(upstream));
+    relay.set_parent(namespace_of(parent));
     for session in [PUBLISHER, ALICE] {
         relay.step(Event::SessionOpened {
             session,
@@ -66,9 +66,9 @@ fn subscribe_to(
     })
 }
 
-fn upstream_opened(relay: &mut Relay) -> Vec<Action> {
+fn parent_opened(relay: &mut Relay) -> Vec<Action> {
     relay.step(Event::SessionOpened {
-        session: UPSTREAM,
+        session: PARENT,
         role: Role::Client,
     })
 }
@@ -106,13 +106,13 @@ fn refusals(actions: &[Action]) -> Vec<u64> {
 fn connects(actions: &[Action]) -> usize {
     actions
         .iter()
-        .filter(|action| matches!(action, Action::ConnectUpstream { .. }))
+        .filter(|action| matches!(action, Action::ConnectParent { .. }))
         .count()
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Routed {
-    /// The session with the upstream is asked for.
+    /// The session with the parent is asked for.
     Connects,
     /// The SUBSCRIBE goes to these sessions.
     Asks(Vec<SessionKey>),
@@ -132,10 +132,10 @@ fn routed(actions: &[Action]) -> Routed {
 }
 
 #[test]
-fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_announced() {
+fn a_subscribe_goes_to_the_parent_only_for_its_namespace_and_where_nobody_announced() {
     struct Row {
         name: &'static str,
-        upstream: &'static [&'static [u8]],
+        parent: &'static [&'static [u8]],
         announced: Option<&'static [&'static [u8]]>,
         opened: bool,
         track: &'static [&'static [u8]],
@@ -144,7 +144,7 @@ fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_anno
     let rows = [
         Row {
             name: "every namespace, no session yet",
-            upstream: &[],
+            parent: &[],
             announced: None,
             opened: false,
             track: &[b"xmoq", b"live"],
@@ -152,7 +152,7 @@ fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_anno
         },
         Row {
             name: "within the prefix, no session yet",
-            upstream: &[b"xmoq"],
+            parent: &[b"xmoq"],
             announced: None,
             opened: false,
             track: &[b"xmoq", b"live"],
@@ -160,7 +160,7 @@ fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_anno
         },
         Row {
             name: "outside the prefix",
-            upstream: &[b"xmoq"],
+            parent: &[b"xmoq"],
             announced: None,
             opened: false,
             track: &[b"other"],
@@ -169,7 +169,7 @@ fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_anno
         Row {
             // Field by field, as Namespace Prefix Matching (§9.5).
             name: "a field that begins as the prefix does",
-            upstream: &[b"xmoq"],
+            parent: &[b"xmoq"],
             announced: None,
             opened: false,
             track: &[b"xmoqq"],
@@ -177,7 +177,7 @@ fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_anno
         },
         Row {
             name: "announced here, no session yet",
-            upstream: &[],
+            parent: &[],
             announced: Some(&[b"xmoq"]),
             opened: false,
             track: &[b"xmoq", b"live"],
@@ -185,15 +185,15 @@ fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_anno
         },
         Row {
             name: "the session is open",
-            upstream: &[],
+            parent: &[],
             announced: None,
             opened: true,
             track: &[b"xmoq", b"live"],
-            routed: Routed::Asks(vec![UPSTREAM]),
+            routed: Routed::Asks(vec![PARENT]),
         },
         Row {
             name: "the session is open and the namespace announced here",
-            upstream: &[],
+            parent: &[],
             announced: Some(&[b"xmoq", b"live"]),
             opened: true,
             track: &[b"xmoq", b"live"],
@@ -201,20 +201,20 @@ fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_anno
         },
         Row {
             name: "the session is open and another namespace announced here",
-            upstream: &[],
+            parent: &[],
             announced: Some(&[b"xmoq", b"chat"]),
             opened: true,
             track: &[b"xmoq", b"live"],
-            routed: Routed::Asks(vec![UPSTREAM]),
+            routed: Routed::Asks(vec![PARENT]),
         },
     ];
     for row in rows {
-        let mut relay = edge(row.upstream);
+        let mut relay = edge(row.parent);
         if let Some(announced) = row.announced {
             announce(&mut relay, announced);
         }
         if row.opened {
-            upstream_opened(&mut relay);
+            parent_opened(&mut relay);
         }
         let actions = subscribe_to(&mut relay, 0, row.track, None);
         assert_eq!(routed(&actions), row.routed, "{}", row.name);
@@ -222,7 +222,7 @@ fn a_subscribe_goes_to_the_upstream_only_for_its_namespace_and_where_nobody_anno
 }
 
 #[test]
-fn the_subscribes_that_came_while_the_relay_connected_go_upstream_once_it_has() {
+fn the_subscribes_that_came_while_the_relay_connected_go_to_the_parent_once_it_has() {
     let mut relay = edge(&[]);
     assert_eq!(
         connects(&subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None)),
@@ -237,13 +237,13 @@ fn the_subscribes_that_came_while_the_relay_connected_go_upstream_once_it_has() 
         connects(&subscribe_to(&mut relay, 2, &[b"xmoq", b"b"], None)),
         0
     );
-    let opened = upstream_opened(&mut relay);
+    let opened = parent_opened(&mut relay);
     // §10.1: the client's Request IDs are even.
     let ids: Vec<u64> = opened
         .iter()
         .filter_map(|action| match action {
             Action::OpenRequest {
-                session: UPSTREAM,
+                session: PARENT,
                 message: ControlMessage::Subscribe(subscribe),
                 ..
             } => Some(subscribe.request_id),
@@ -254,7 +254,7 @@ fn the_subscribes_that_came_while_the_relay_connected_go_upstream_once_it_has() 
     assert!(matches!(
         opened.first(),
         Some(Action::SendControl {
-            session: UPSTREAM,
+            session: PARENT,
             message: ControlMessage::Setup(_),
         })
     ));
@@ -262,11 +262,11 @@ fn the_subscribes_that_came_while_the_relay_connected_go_upstream_once_it_has() 
 }
 
 #[test]
-fn what_waits_for_an_upstream_that_cannot_be_reached_is_refused_but_a_held_subscribe() {
+fn what_waits_for_a_parent_that_cannot_be_reached_is_refused_but_a_held_subscribe() {
     let mut relay = edge(&[]);
     subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None);
     subscribe_to(&mut relay, 1, &[b"xmoq", b"b"], Some(5_000));
-    let failed = relay.step(Event::UpstreamFailed);
+    let failed = relay.step(Event::ParentFailed);
     let errors: Vec<&RequestError> = failed
         .iter()
         .filter_map(|action| match action {
@@ -286,15 +286,15 @@ fn what_waits_for_an_upstream_that_cannot_be_reached_is_refused_but_a_held_subsc
         1
     );
     // The held one is asked for with the others.
-    assert_eq!(asked_of(&upstream_opened(&mut relay)), [UPSTREAM, UPSTREAM]);
+    assert_eq!(asked_of(&parent_opened(&mut relay)), [PARENT, PARENT]);
 }
 
 #[test]
-fn a_session_with_the_upstream_that_went_is_opened_again_for_the_next_request() {
+fn a_session_with_the_parent_that_went_is_opened_again_for_the_next_request() {
     let mut relay = edge(&[]);
     subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None);
-    upstream_opened(&mut relay);
-    let gone = relay.step(Event::SessionClosed { session: UPSTREAM });
+    parent_opened(&mut relay);
+    let gone = relay.step(Event::SessionClosed { session: PARENT });
     // What was asked of it will not be answered.
     assert_eq!(refusals(&gone), [DOES_NOT_EXIST]);
     assert_eq!(
@@ -335,14 +335,14 @@ fn fetch_and_track_status() -> [(&'static str, ControlMessage); 2] {
     ]
 }
 
-/// What the relay opened on the session with the upstream, by the kind of
+/// What the relay opened on the session with the parent, by the kind of
 /// its first message.
-fn opened_upstream(actions: &[Action]) -> Vec<&'static str> {
+fn opened_at_parent(actions: &[Action]) -> Vec<&'static str> {
     actions
         .iter()
         .filter_map(|action| match action {
             Action::OpenRequest {
-                session: UPSTREAM,
+                session: PARENT,
                 message,
                 ..
             } => Some(match message {
@@ -357,7 +357,7 @@ fn opened_upstream(actions: &[Action]) -> Vec<&'static str> {
 }
 
 #[test]
-fn a_fetch_or_track_status_waits_for_the_session_with_the_upstream_like_a_subscribe() {
+fn a_fetch_or_track_status_waits_for_the_session_with_the_parent_like_a_subscribe() {
     for (name, first) in fetch_and_track_status() {
         let mut relay = edge(&[]);
         let came = relay.step(Event::RequestOpened {
@@ -366,12 +366,12 @@ fn a_fetch_or_track_status_waits_for_the_session_with_the_upstream_like_a_subscr
             first,
         });
         assert_eq!((connects(&came), refusals(&came).len()), (1, 0), "{name}");
-        assert_eq!(opened_upstream(&upstream_opened(&mut relay)), [name]);
+        assert_eq!(opened_at_parent(&parent_opened(&mut relay)), [name]);
     }
 }
 
 #[test]
-fn a_fetch_or_track_status_that_waited_for_an_upstream_that_cannot_be_reached_is_refused() {
+fn a_fetch_or_track_status_that_waited_for_a_parent_that_cannot_be_reached_is_refused() {
     for (name, first) in fetch_and_track_status() {
         let mut relay = edge(&[]);
         relay.step(Event::RequestOpened {
@@ -380,7 +380,7 @@ fn a_fetch_or_track_status_that_waited_for_an_upstream_that_cannot_be_reached_is
             first,
         });
         assert_eq!(
-            refusals(&relay.step(Event::UpstreamFailed)),
+            refusals(&relay.step(Event::ParentFailed)),
             [INTERNAL_ERROR],
             "{name}"
         );
@@ -402,7 +402,7 @@ fn rendezvous_of(actions: &[Action]) -> Vec<Option<u64>> {
 }
 
 #[test]
-fn a_subscribe_held_for_a_publisher_to_appear_is_held_by_the_upstream_as_well() {
+fn a_subscribe_held_for_a_publisher_to_appear_is_held_by_the_parent_as_well() {
     struct Row {
         name: &'static str,
         announced: bool,
@@ -442,27 +442,27 @@ fn a_subscribe_held_for_a_publisher_to_appear_is_held_by_the_upstream_as_well() 
         if row.announced {
             announce(&mut relay, &[b"xmoq"]);
         }
-        upstream_opened(&mut relay);
+        parent_opened(&mut relay);
         let actions = subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], row.rendezvous_ms);
         assert_eq!(rendezvous_of(&actions), [row.asked], "{}", row.name);
     }
 }
 
 #[test]
-fn a_subscribe_held_while_the_relay_connects_is_held_by_the_upstream_as_well() {
+fn a_subscribe_held_while_the_relay_connects_is_held_by_the_parent_as_well() {
     let mut relay = edge(&[]);
     subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], Some(5_000));
-    assert_eq!(rendezvous_of(&upstream_opened(&mut relay)), [Some(5_000)]);
+    assert_eq!(rendezvous_of(&parent_opened(&mut relay)), [Some(5_000)]);
 }
 
-/// The GOAWAY of the upstream, on its control stream, naming `uri`.
-fn upstream_goes_away(relay: &mut Relay, uri: &[u8]) -> Vec<Action> {
+/// The GOAWAY of the parent, on its control stream, naming `uri`.
+fn parent_goes_away(relay: &mut Relay, uri: &[u8]) -> Vec<Action> {
     relay.step(Event::ControlMessage {
-        session: UPSTREAM,
+        session: PARENT,
         message: ControlMessage::Setup(Setup::default()),
     });
     relay.step(Event::ControlMessage {
-        session: UPSTREAM,
+        session: PARENT,
         message: ControlMessage::GoAway(GoAway {
             new_session_uri: uri.to_vec(),
             timeout_ms: 10_000,
@@ -472,7 +472,7 @@ fn upstream_goes_away(relay: &mut Relay, uri: &[u8]) -> Vec<Action> {
 }
 
 #[test]
-fn a_goaway_of_the_upstream_has_the_relay_connect_where_it_says_for_what_it_carries() {
+fn a_goaway_of_the_parent_has_the_relay_connect_where_it_says_for_what_it_carries() {
     struct Row {
         name: &'static str,
         /// Alice subscribed before the GOAWAY.
@@ -503,15 +503,15 @@ fn a_goaway_of_the_upstream_has_the_relay_connect_where_it_says_for_what_it_carr
     ];
     for row in rows {
         let mut relay = edge(&[]);
-        upstream_opened(&mut relay);
+        parent_opened(&mut relay);
         if row.subscribed {
             subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None);
         }
-        let gone = upstream_goes_away(&mut relay, row.uri);
+        let gone = parent_goes_away(&mut relay, row.uri);
         let connects_to: Vec<&[u8]> = gone
             .iter()
             .filter_map(|action| match action {
-                Action::ConnectUpstream { uri, .. } => Some(uri.as_slice()),
+                Action::ConnectParent { uri, .. } => Some(uri.as_slice()),
                 _ => None,
             })
             .collect();
@@ -526,13 +526,13 @@ fn a_goaway_of_the_upstream_has_the_relay_connect_where_it_says_for_what_it_carr
 
 #[test]
 fn the_session_that_replaces_one_that_went_away_is_asked_for_the_tracks_the_old_one_carries() {
-    const NEW_UPSTREAM: SessionKey = SessionKey(10);
+    const NEW_PARENT: SessionKey = SessionKey(10);
     let mut relay = edge(&[]);
-    upstream_opened(&mut relay);
+    parent_opened(&mut relay);
     subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None);
-    // The upstream accepts: the track has its source, and Alice her answer.
+    // The parent accepts: the track has its source, and Alice her answer.
     relay.step(Event::OwnRequestMessage {
-        session: UPSTREAM,
+        session: PARENT,
         request: OwnRequestKey(0),
         message: ControlMessage::SubscribeOk(SubscribeOk {
             track_alias: 1,
@@ -540,16 +540,16 @@ fn the_session_that_replaces_one_that_went_away_is_asked_for_the_tracks_the_old_
             track_properties: vec![],
         }),
     });
-    upstream_goes_away(&mut relay, b"https://127.0.0.1:4444/");
+    parent_goes_away(&mut relay, b"https://127.0.0.1:4444/");
     let opened = relay.step(Event::SessionOpened {
-        session: NEW_UPSTREAM,
+        session: NEW_PARENT,
         role: Role::Client,
     });
-    assert_eq!(asked_of(&opened), [NEW_UPSTREAM]);
+    assert_eq!(asked_of(&opened), [NEW_PARENT]);
     // And nothing more of the old one.
     assert_eq!(
         routed(&subscribe_to(&mut relay, 1, &[b"xmoq", b"b"], None)),
-        Routed::Asks(vec![NEW_UPSTREAM])
+        Routed::Asks(vec![NEW_PARENT])
     );
 }
 
@@ -580,13 +580,13 @@ fn withdraw(relay: &mut Relay, session: SessionKey, stream: u64) -> Vec<Action> 
     })
 }
 
-/// The namespaces the relay announced on the session with the upstream.
-fn announced_upstream(actions: &[Action]) -> Vec<TrackNamespace> {
+/// The namespaces the relay announced on the session with the parent.
+fn announced_to_parent(actions: &[Action]) -> Vec<TrackNamespace> {
     actions
         .iter()
         .filter_map(|action| match action {
             Action::OpenRequest {
-                session: UPSTREAM,
+                session: PARENT,
                 message: ControlMessage::PublishNamespace(announced),
                 ..
             } => Some(announced.track_namespace.clone()),
@@ -595,14 +595,14 @@ fn announced_upstream(actions: &[Action]) -> Vec<TrackNamespace> {
         .collect()
 }
 
-fn cancelled_upstream(actions: &[Action]) -> usize {
+fn cancelled_at_parent(actions: &[Action]) -> usize {
     actions
         .iter()
         .filter(|action| {
             matches!(
                 action,
                 Action::CancelOwnRequest {
-                    session: UPSTREAM,
+                    session: PARENT,
                     ..
                 }
             )
@@ -611,37 +611,37 @@ fn cancelled_upstream(actions: &[Action]) -> usize {
 }
 
 #[test]
-fn a_namespace_announced_here_is_announced_upstream_once_whoever_announces_it() {
+fn a_namespace_announced_here_is_announced_to_the_parent_once_whoever_announces_it() {
     struct Row {
         name: &'static str,
-        upstream: &'static [&'static [u8]],
+        parent: &'static [&'static [u8]],
         announced: &'static [&'static [u8]],
         passed: bool,
     }
     let rows = [
         Row {
             name: "within the prefix",
-            upstream: &[b"xmoq"],
+            parent: &[b"xmoq"],
             announced: &[b"xmoq", b"chat", b"r", b"a"],
             passed: true,
         },
         Row {
             name: "every namespace",
-            upstream: &[],
+            parent: &[],
             announced: &[b"xmoq", b"chat", b"r", b"a"],
             passed: true,
         },
         Row {
             name: "outside the prefix",
-            upstream: &[b"xmoq"],
+            parent: &[b"xmoq"],
             announced: &[b"other"],
             passed: false,
         },
     ];
     for row in rows {
-        let mut relay = edge(row.upstream);
-        upstream_opened(&mut relay);
-        let passed = announced_upstream(&announce_by(&mut relay, PUBLISHER, 0, row.announced));
+        let mut relay = edge(row.parent);
+        parent_opened(&mut relay);
+        let passed = announced_to_parent(&announce_by(&mut relay, PUBLISHER, 0, row.announced));
         let expected: Vec<TrackNamespace> = if row.passed {
             vec![namespace_of(row.announced)]
         } else {
@@ -652,59 +652,59 @@ fn a_namespace_announced_here_is_announced_upstream_once_whoever_announces_it() 
 }
 
 #[test]
-fn a_namespace_two_announce_is_withdrawn_upstream_when_the_last_of_them_withdraws() {
+fn a_namespace_two_announce_is_withdrawn_from_the_parent_when_the_last_of_them_withdraws() {
     let mut relay = edge(&[]);
-    upstream_opened(&mut relay);
+    parent_opened(&mut relay);
     let fields: &[&[u8]] = &[b"xmoq", b"chat", b"r", b"a"];
     assert_eq!(
-        announced_upstream(&announce_by(&mut relay, PUBLISHER, 0, fields)).len(),
+        announced_to_parent(&announce_by(&mut relay, PUBLISHER, 0, fields)).len(),
         1
     );
     assert_eq!(
-        announced_upstream(&announce_by(&mut relay, ALICE, 0, fields)).len(),
+        announced_to_parent(&announce_by(&mut relay, ALICE, 0, fields)).len(),
         0
     );
-    assert_eq!(cancelled_upstream(&withdraw(&mut relay, PUBLISHER, 0)), 0);
+    assert_eq!(cancelled_at_parent(&withdraw(&mut relay, PUBLISHER, 0)), 0);
     // The last one goes with its session.
     assert_eq!(
-        cancelled_upstream(&relay.step(Event::SessionClosed { session: ALICE })),
+        cancelled_at_parent(&relay.step(Event::SessionClosed { session: ALICE })),
         1
     );
 }
 
 #[test]
-fn an_announcement_opens_the_session_with_the_upstream_and_keeps_it() {
+fn an_announcement_opens_the_session_with_the_parent_and_keeps_it() {
     let mut relay = edge(&[]);
     let fields: &[&[u8]] = &[b"xmoq", b"chat", b"r", b"a"];
     assert_eq!(connects(&announce_by(&mut relay, PUBLISHER, 0, fields)), 1);
     assert_eq!(
-        announced_upstream(&upstream_opened(&mut relay)),
+        announced_to_parent(&parent_opened(&mut relay)),
         [namespace_of(fields)]
     );
     // It holds something there, so it is not closed as idle.
-    assert!(!relay.holds_nothing(UPSTREAM));
+    assert!(!relay.holds_nothing(PARENT));
     withdraw(&mut relay, PUBLISHER, 0);
-    assert!(relay.holds_nothing(UPSTREAM));
+    assert!(relay.holds_nothing(PARENT));
 }
 
 #[test]
-fn what_is_announced_upstream_is_announced_again_on_the_next_session() {
+fn what_is_announced_to_the_parent_is_announced_again_on_the_next_session() {
     const NEXT: SessionKey = SessionKey(10);
     let mut relay = edge(&[]);
-    upstream_opened(&mut relay);
+    parent_opened(&mut relay);
     let fields: &[&[u8]] = &[b"xmoq", b"chat", b"r", b"a"];
     announce_by(&mut relay, PUBLISHER, 0, fields);
     // It went: asked for again at once, for the announcement.
     assert_eq!(
-        connects(&relay.step(Event::SessionClosed { session: UPSTREAM })),
+        connects(&relay.step(Event::SessionClosed { session: PARENT })),
         1
     );
     // And again a second later while none comes.
-    let failed = relay.step(Event::UpstreamFailed);
+    let failed = relay.step(Event::ParentFailed);
     assert!(
         failed.iter().any(|action| matches!(
             action,
-            Action::ConnectUpstream {
+            Action::ConnectParent {
                 after_ms: 1_000,
                 ..
             }
@@ -730,13 +730,13 @@ fn what_is_announced_upstream_is_announced_again_on_the_next_session() {
 }
 
 #[test]
-fn a_subscribe_of_the_upstream_goes_to_who_announced_here_and_never_back_up() {
+fn a_subscribe_of_the_parent_goes_to_who_announced_here_and_never_back_up() {
     let mut relay = edge(&[]);
-    upstream_opened(&mut relay);
+    parent_opened(&mut relay);
     announce_by(&mut relay, PUBLISHER, 0, &[b"xmoq", b"chat", b"r", b"a"]);
     let asked = |relay: &mut Relay, stream: u64, fields: &[&[u8]]| {
         relay.step(Event::RequestOpened {
-            session: UPSTREAM,
+            session: PARENT,
             stream: StreamKey(stream),
             first: ControlMessage::Subscribe(Subscribe {
                 request_id: stream * 2 + 1,
@@ -755,7 +755,7 @@ fn a_subscribe_of_the_upstream_goes_to_who_announced_here_and_never_back_up() {
         refused.iter().any(|action| matches!(
             action,
             Action::SendRequest {
-                session: UPSTREAM,
+                session: PARENT,
                 message: ControlMessage::RequestError(error),
                 ..
             } if error.error_code == DOES_NOT_EXIST
@@ -810,13 +810,13 @@ fn edge_with_tokens() -> Relay {
 }
 
 /// The AUTHORIZATION TOKENs of the requests the relay opened on the
-/// session with the upstream, by the kind of request.
-fn tokens_upstream(actions: &[Action]) -> Vec<(&'static str, Vec<Vec<u8>>)> {
+/// session with the parent, by the kind of request.
+fn tokens_to_parent(actions: &[Action]) -> Vec<(&'static str, Vec<Vec<u8>>)> {
     actions
         .iter()
         .filter_map(|action| match action {
             Action::OpenRequest {
-                session: UPSTREAM,
+                session: PARENT,
                 message,
                 ..
             } => {
@@ -841,7 +841,7 @@ fn tokens_upstream(actions: &[Action]) -> Vec<(&'static str, Vec<Vec<u8>>)> {
 }
 
 #[test]
-fn the_relay_carries_a_token_of_its_own_to_the_upstream_and_none_of_its_subscribers() {
+fn the_relay_carries_a_token_of_its_own_to_the_parent_and_none_of_its_subscribers() {
     let token = Parameter::AuthorizationToken(b"of the subscriber".to_vec());
     let subscribe = ControlMessage::Subscribe(Subscribe {
         request_id: 0,
@@ -866,14 +866,14 @@ fn the_relay_carries_a_token_of_its_own_to_the_upstream_and_none_of_its_subscrib
         ("TRACK_STATUS", with_token(track_status)),
     ] {
         let mut relay = edge_with_tokens();
-        upstream_opened(&mut relay);
+        parent_opened(&mut relay);
         let actions = relay.step(Event::RequestOpened {
             session: ALICE,
             stream: StreamKey(0),
             first,
         });
         assert_eq!(
-            tokens_upstream(&actions),
+            tokens_to_parent(&actions),
             [(name, vec![b"sub".to_vec()])],
             "{name}"
         );
@@ -881,9 +881,9 @@ fn the_relay_carries_a_token_of_its_own_to_the_upstream_and_none_of_its_subscrib
 }
 
 #[test]
-fn the_relays_setup_to_the_upstream_carries_its_token_and_one_to_a_viewer_does_not() {
+fn the_relays_setup_to_the_parent_carries_its_token_and_one_to_a_viewer_does_not() {
     let mut relay = edge_with_tokens();
-    let opened = upstream_opened(&mut relay);
+    let opened = parent_opened(&mut relay);
     let Some(Action::SendControl {
         message: ControlMessage::Setup(setup),
         ..
@@ -913,12 +913,12 @@ fn the_relays_setup_to_the_upstream_carries_its_token_and_one_to_a_viewer_does_n
 }
 
 #[test]
-fn what_the_upstream_sends_is_not_checked_for_a_token_but_what_a_viewer_sends_is() {
+fn what_the_parent_sends_is_not_checked_for_a_token_but_what_a_viewer_sends_is() {
     let mut relay = edge_with_tokens();
-    upstream_opened(&mut relay);
-    // The upstream's SETUP, without a token: the session stays.
+    parent_opened(&mut relay);
+    // The parent's SETUP, without a token: the session stays.
     let setup = relay.step(Event::ControlMessage {
-        session: UPSTREAM,
+        session: PARENT,
         message: ControlMessage::Setup(Setup::default()),
     });
     assert_eq!(setup, []);
@@ -936,12 +936,12 @@ fn what_the_upstream_sends_is_not_checked_for_a_token_but_what_a_viewer_sends_is
         session,
         stream: StreamKey(4),
         first: ControlMessage::Subscribe(Subscribe {
-            request_id: if session == UPSTREAM { 9 } else { 8 },
+            request_id: if session == PARENT { 9 } else { 8 },
             full_track_name: track_in(&[b"xmoq", b"chat"]),
             parameters: vec![],
         }),
     };
-    assert_eq!(asked_of(&relay.step(without_token(UPSTREAM))), [PUBLISHER]);
+    assert_eq!(asked_of(&relay.step(without_token(PARENT))), [PUBLISHER]);
     let refused = relay.step(without_token(ALICE));
     assert_eq!(asked_of(&refused), [SessionKey(0); 0]);
     assert!(
@@ -958,9 +958,9 @@ fn what_the_upstream_sends_is_not_checked_for_a_token_but_what_a_viewer_sends_is
 }
 
 #[test]
-fn a_namespace_announced_upstream_carries_the_relays_own_token_and_not_its_publishers() {
+fn a_namespace_announced_to_the_parent_carries_the_relays_own_token_and_not_its_publishers() {
     let mut relay = edge_with_tokens();
-    upstream_opened(&mut relay);
+    parent_opened(&mut relay);
     let announced = relay.step(Event::RequestOpened {
         session: PUBLISHER,
         stream: StreamKey(0),
@@ -974,7 +974,7 @@ fn a_namespace_announced_upstream_carries_the_relays_own_token_and_not_its_publi
         .iter()
         .filter_map(|action| match action {
             Action::OpenRequest {
-                session: UPSTREAM,
+                session: PARENT,
                 message: ControlMessage::PublishNamespace(passed),
                 ..
             } => Some(passed.parameters.clone()),
@@ -987,14 +987,14 @@ fn a_namespace_announced_upstream_carries_the_relays_own_token_and_not_its_publi
     );
 }
 
-/// The requests the relay opened upstream for announcements, with what each
-/// announces.
-fn announcements_upstream(actions: &[Action]) -> Vec<(OwnRequestKey, TrackNamespace)> {
+/// The requests the relay opened at the parent for announcements, with what
+/// each announces.
+fn announcements_to_parent(actions: &[Action]) -> Vec<(OwnRequestKey, TrackNamespace)> {
     actions
         .iter()
         .filter_map(|action| match action {
             Action::OpenRequest {
-                session: UPSTREAM,
+                session: PARENT,
                 request,
                 message: ControlMessage::PublishNamespace(announced),
             } => Some((*request, announced.track_namespace.clone())),
@@ -1003,13 +1003,13 @@ fn announcements_upstream(actions: &[Action]) -> Vec<(OwnRequestKey, TrackNamesp
         .collect()
 }
 
-fn answer_upstream(
+fn answer_at_parent(
     relay: &mut Relay,
     request: OwnRequestKey,
     message: ControlMessage,
 ) -> Vec<Action> {
     relay.step(Event::OwnRequestMessage {
-        session: UPSTREAM,
+        session: PARENT,
         request,
         message,
     })
@@ -1025,14 +1025,14 @@ fn accepted() -> ControlMessage {
 }
 
 #[test]
-fn what_the_upstream_refuses_for_its_load_is_sent_again_after_its_retry_interval_one_at_a_time() {
+fn what_the_parent_refuses_for_its_load_is_sent_again_after_its_retry_interval_one_at_a_time() {
     let mut relay = edge(&[]);
     relay.step(Event::SessionOpened {
         session: BOB,
         role: Role::Server,
     });
     // Seven namespaces of the chat announced here, by three sessions (each
-    // may announce five at once here), before the session with the upstream
+    // may announce five at once here), before the session with the parent
     // opened: all of them go at once.
     let announced: [(SessionKey, u64, &[u8]); 7] = [
         (PUBLISHER, 0, b"a"),
@@ -1046,46 +1046,46 @@ fn what_the_upstream_refuses_for_its_load_is_sent_again_after_its_retry_interval
     for (session, stream, name) in announced {
         announce_by(&mut relay, session, stream, &[b"xmoq", b"chat", b"r", name]);
     }
-    let sent = announcements_upstream(&upstream_opened(&mut relay));
+    let sent = announcements_to_parent(&parent_opened(&mut relay));
     assert_eq!(sent.len(), 7);
     for (request, _) in &sent[..5] {
-        assert_eq!(answer_upstream(&mut relay, *request, accepted()), []);
+        assert_eq!(answer_at_parent(&mut relay, *request, accepted()), []);
     }
     // The sixth and the seventh are refused, and their requests finished:
     // one timer, of the Retry Interval less one, for both.
-    let timer = Action::StartUpstreamAnnouncementTimer {
-        session: UPSTREAM,
+    let timer = Action::StartParentAnnouncementTimer {
+        session: PARENT,
         wait_ms: 1_000,
     };
     let finished = |request| Action::FinishOwnRequest {
-        session: UPSTREAM,
+        session: PARENT,
         request,
     };
     assert_eq!(
-        answer_upstream(&mut relay, sent[5].0, refused_for_its_load()),
+        answer_at_parent(&mut relay, sent[5].0, refused_for_its_load()),
         [finished(sent[5].0), timer.clone()]
     );
     assert_eq!(
-        answer_upstream(&mut relay, sent[6].0, refused_for_its_load()),
+        answer_at_parent(&mut relay, sent[6].0, refused_for_its_load()),
         [finished(sent[6].0)]
     );
     // An eighth comes meanwhile: it waits.
     let waits = announce_by(&mut relay, BOB, 8, &[b"xmoq", b"chat", b"r", b"h"]);
-    assert_eq!(announcements_upstream(&waits), []);
-    assert!(!relay.holds_nothing(UPSTREAM));
+    assert_eq!(announcements_to_parent(&waits), []);
+    assert!(!relay.holds_nothing(PARENT));
     // Then one at a time, the next when the one before is answered: f is
     // taken, g refused again and sent after the next wait, then h.
     let mut sent_again = Vec::new();
-    let mut actions = relay.step(Event::UpstreamAnnouncementTimeout { session: UPSTREAM });
+    let mut actions = relay.step(Event::ParentAnnouncementTimeout { session: PARENT });
     let answers = [accepted(), refused_for_its_load(), accepted(), accepted()];
     for answer in answers {
         if actions.contains(&timer) {
-            actions = relay.step(Event::UpstreamAnnouncementTimeout { session: UPSTREAM });
+            actions = relay.step(Event::ParentAnnouncementTimeout { session: PARENT });
         }
-        let next = announcements_upstream(&actions);
+        let next = announcements_to_parent(&actions);
         assert_eq!(next.len(), 1, "{actions:?}");
         sent_again.push(next[0].1.clone());
-        actions = answer_upstream(&mut relay, next[0].0, answer);
+        actions = answer_at_parent(&mut relay, next[0].0, answer);
     }
     assert_eq!(actions, []);
     let name = |last: &[u8]| namespace_of(&[b"xmoq", b"chat", b"r", last]);
@@ -1093,10 +1093,10 @@ fn what_the_upstream_refuses_for_its_load_is_sent_again_after_its_retry_interval
 }
 
 #[test]
-fn what_the_upstream_refuses_with_no_retry_interval_is_not_sent_again() {
+fn what_the_parent_refuses_with_no_retry_interval_is_not_sent_again() {
     let mut relay = edge(&[]);
-    upstream_opened(&mut relay);
-    let sent = announcements_upstream(&announce_by(
+    parent_opened(&mut relay);
+    let sent = announcements_to_parent(&announce_by(
         &mut relay,
         PUBLISHER,
         0,
@@ -1104,14 +1104,14 @@ fn what_the_upstream_refuses_with_no_retry_interval_is_not_sent_again() {
     ));
     // UNAUTHORIZED (0x1): Retry Interval 0, "SHOULD NOT be retried".
     assert_eq!(
-        answer_upstream(&mut relay, sent[0].0, request_error(0x1)),
+        answer_at_parent(&mut relay, sent[0].0, request_error(0x1)),
         [Action::FinishOwnRequest {
-            session: UPSTREAM,
+            session: PARENT,
             request: sent[0].0,
         }]
     );
     let next = announce_by(&mut relay, PUBLISHER, 4, &[b"xmoq", b"chat", b"r", b"b"]);
-    assert_eq!(announcements_upstream(&next).len(), 1);
+    assert_eq!(announcements_to_parent(&next).len(), 1);
 }
 
 /// A namespace withdrawn (§6.2) while it is the one sent at a time has no
@@ -1120,26 +1120,29 @@ fn what_the_upstream_refuses_with_no_retry_interval_is_not_sent_again() {
 #[test]
 fn a_namespace_withdrawn_while_it_goes_one_at_a_time_lets_the_next_go() {
     let mut relay = edge(&[]);
-    upstream_opened(&mut relay);
+    parent_opened(&mut relay);
     let fields = |last: &'static [u8]| -> [&'static [u8]; 4] { [b"xmoq", b"chat", b"r", last] };
     let names = |actions: &[Action]| -> Vec<TrackNamespace> {
-        announcements_upstream(actions)
+        announcements_to_parent(actions)
             .into_iter()
             .map(|(_, namespace)| namespace)
             .collect()
     };
-    let sent = announcements_upstream(&announce_by(&mut relay, PUBLISHER, 0, &fields(b"a")));
-    answer_upstream(&mut relay, sent[0].0, refused_for_its_load());
+    let sent = announcements_to_parent(&announce_by(&mut relay, PUBLISHER, 0, &fields(b"a")));
+    answer_at_parent(&mut relay, sent[0].0, refused_for_its_load());
     announce_by(&mut relay, PUBLISHER, 4, &fields(b"b"));
-    let again = relay.step(Event::UpstreamAnnouncementTimeout { session: UPSTREAM });
+    let again = relay.step(Event::ParentAnnouncementTimeout { session: PARENT });
     assert_eq!(names(&again), [namespace_of(&fields(b"a"))]);
 
     let actions = withdraw(&mut relay, PUBLISHER, 0);
-    assert_eq!(cancelled_upstream(&actions), 1);
+    assert_eq!(cancelled_at_parent(&actions), 1);
     assert_eq!(names(&actions), [namespace_of(&fields(b"b"))]);
     let actions = withdraw(&mut relay, PUBLISHER, 4);
-    assert_eq!((cancelled_upstream(&actions), names(&actions)), (1, vec![]));
-    assert!(relay.holds_nothing(UPSTREAM));
+    assert_eq!(
+        (cancelled_at_parent(&actions), names(&actions)),
+        (1, vec![])
+    );
+    assert!(relay.holds_nothing(PARENT));
 
     // Two at once, the first not answered.
     let first = announce_by(&mut relay, PUBLISHER, 8, &fields(b"c"));
@@ -1151,7 +1154,7 @@ fn a_namespace_withdrawn_while_it_goes_one_at_a_time_lets_the_next_go() {
 }
 
 #[test]
-fn an_announcement_the_upstream_refuses_or_ends_is_closed_once() {
+fn an_announcement_the_parent_refuses_or_ends_is_closed_once() {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Closed {
         Finished,
@@ -1197,8 +1200,8 @@ fn an_announcement_the_upstream_refuses_or_ends_is_closed_once() {
     ];
     for (name, answer, closed, cancelled_when_withdrawn) in cases {
         let mut relay = edge(&[]);
-        upstream_opened(&mut relay);
-        let sent = announcements_upstream(&announce_by(
+        parent_opened(&mut relay);
+        let sent = announcements_to_parent(&announce_by(
             &mut relay,
             PUBLISHER,
             0,
@@ -1206,9 +1209,9 @@ fn an_announcement_the_upstream_refuses_or_ends_is_closed_once() {
         ));
         let request = sent[0].0;
         let actions = match answer {
-            Answer::Message(message) => answer_upstream(&mut relay, request, message),
+            Answer::Message(message) => answer_at_parent(&mut relay, request, message),
             Answer::Ended(how) => relay.step(Event::OwnRequestClosed {
-                session: UPSTREAM,
+                session: PARENT,
                 request,
                 how,
             }),
@@ -1217,11 +1220,11 @@ fn an_announcement_the_upstream_refuses_or_ends_is_closed_once() {
             .iter()
             .filter_map(|action| match action {
                 Action::FinishOwnRequest {
-                    session: UPSTREAM,
+                    session: PARENT,
                     request: closed,
                 } if *closed == request => Some(Closed::Finished),
                 Action::CancelOwnRequest {
-                    session: UPSTREAM,
+                    session: PARENT,
                     request: closed,
                     code: xmoq_moqt::stream_reset_code::CANCELLED,
                 } if *closed == request => Some(Closed::Cancelled),
@@ -1230,35 +1233,35 @@ fn an_announcement_the_upstream_refuses_or_ends_is_closed_once() {
             .collect();
         assert_eq!(closes, closed, "{name}");
         assert_eq!(
-            cancelled_upstream(&withdraw(&mut relay, PUBLISHER, 0)),
+            cancelled_at_parent(&withdraw(&mut relay, PUBLISHER, 0)),
             cancelled_when_withdrawn,
             "{name}"
         );
     }
 }
 
-/// A `PUBLISH_NAMESPACE` the relay passes upstream does not count among the
-/// requests it may have open on the session with the upstream
+/// A `PUBLISH_NAMESPACE` the relay passes to the parent does not count among
+/// the requests it may have open on the session with the parent
 /// (`own::Counted::No`): with room for one, and that one taken by a
 /// SUBSCRIBE, the next SUBSCRIBE is refused and an announcement still goes.
 #[test]
-fn an_announcement_upstream_is_not_held_back_by_the_relays_own_requests_there() {
+fn an_announcement_to_the_parent_is_not_held_back_by_the_relays_own_requests_there() {
     let mut relay = Relay::new("test/0");
     relay.set_limits_of_a_session(crate::LimitsOfASession {
         own_requests: 1,
         ..crate::LimitsOfASession::default()
     });
-    relay.set_upstream(namespace_of(&[]));
+    relay.set_parent(namespace_of(&[]));
     for session in [PUBLISHER, ALICE] {
         relay.step(Event::SessionOpened {
             session,
             role: Role::Server,
         });
     }
-    upstream_opened(&mut relay);
+    parent_opened(&mut relay);
     assert_eq!(
         routed(&subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None)),
-        Routed::Asks(vec![UPSTREAM])
+        Routed::Asks(vec![PARENT])
     );
     // EXCESSIVE_LOAD (0x9).
     assert_eq!(
@@ -1267,7 +1270,7 @@ fn an_announcement_upstream_is_not_held_back_by_the_relays_own_requests_there() 
     );
     let announced = announce_by(&mut relay, PUBLISHER, 0, &[b"xmoq", b"chat", b"r", b"a"]);
     assert_eq!(
-        announced_upstream(&announced),
+        announced_to_parent(&announced),
         [namespace_of(&[b"xmoq", b"chat", b"r", b"a"])]
     );
 }

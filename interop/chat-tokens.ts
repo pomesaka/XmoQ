@@ -65,7 +65,7 @@ const { values: options } = parseArgs({
 		relay: { type: "string", default: "own" },
 		port: { type: "string", default: "24399" },
 		// The pages connect to a second own relay with the same key, below
-		// the relay of the run (`--upstream`), on the run's port plus
+		// the relay of the run (`--parent`), on the run's port plus
 		// MOQLIVEMOCK_SIDE_PORT_OFFSET; the gatherer stays with the relay of
 		// the run. The relay below checks the pages' tokens, passes their
 		// announcements up with a token of its own, and takes the gatherer's

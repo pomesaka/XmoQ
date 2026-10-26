@@ -1,32 +1,32 @@
 //! The namespaces the sessions of this relay announce, passed on to the
-//! upstream relay (§9.5: "Relays MUST forward `PUBLISH_NAMESPACE` or PUBLISH
+//! parent relay (§9.5: "Relays MUST forward `PUBLISH_NAMESPACE` or PUBLISH
 //! messages to all matching subscribers"), so that what is asked there for
 //! them comes down to their publishers here: the chat's gatherer above, and
 //! participants of the chat below.
 //!
-//! One `PUBLISH_NAMESPACE` of the relay on the session with the upstream for
-//! each namespace of the upstream's prefix that at least one session of its
+//! One `PUBLISH_NAMESPACE` of the relay on the session with the parent for
+//! each namespace of the parent's prefix that at least one session of its
 //! own announced, whoever and however many they are; it is withdrawn, by
 //! cancelling it (§6.2), when the last of them withdraws or goes. A session
-//! with the upstream that is new (after one went, or after a GOAWAY) is sent
-//! them all again. The upstream's own sessions are left out: what the
-//! upstream announces it has.
+//! with the parent that is new (after one went, or after a GOAWAY) is sent
+//! them all again. The parent's own sessions are left out: what the
+//! parent announces it has.
 //!
-//! WHY one for a namespace: the upstream asks the relay for a track of it
+//! WHY one for a namespace: the parent asks the relay for a track of it
 //! once, whoever has it here, and the relay asks its own publishers.
 //!
-//! **What the upstream refuses with a Retry Interval is sent again after
+//! **What the parent refuses with a Retry Interval is sent again after
 //! it** (§10.6.2: "The minimum time (in milliseconds) before the request
 //! SHOULD be sent again, plus one"), and from the first such refusal on the
 //! session the rest go one at a time, the next when the one before is
 //! answered ([`Pace`]). What it refuses with none (0, "SHOULD NOT be
-//! retried") is not sent again on that session. WHY: the upstream counts
+//! retried") is not sent again on that session. WHY: the parent counts
 //! this relay as one session, and the own relay takes five announcements of
 //! a session at once and one more a second (`MAX_ANNOUNCEMENTS_AT_ONCE`);
 //! the relay sends what its sessions announce all at once when its session
-//! with the upstream opens, so that the sixth participant of a chat below
+//! with the parent opens, so that the sixth participant of a chat below
 //! was refused and never heard above. WHY one at a time after a refusal:
-//! all of them again after each Retry Interval would have the upstream
+//! all of them again after each Retry Interval would have the parent
 //! refuse all but one each time, as many refusals a second as there are
 //! waiting. WHY NOT one announcement of a prefix for all of them: the
 //! chat's gatherer above finds its participants by the namespace each one
@@ -49,10 +49,10 @@ use crate::{
     Action, Event, Operation, OwnRequestEnd, OwnRequestKey, Relay, SessionKey, internal_error,
 };
 
-/// How the namespaces to be announced upstream are sent.
+/// How the namespaces to be announced to the parent are sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pace {
-    /// As soon as they are there: nothing was refused for the upstream's
+    /// As soon as they are there: nothing was refused for the parent's
     /// load on this session.
     AllAtOnce,
     /// Until the Retry Interval of a refusal is over, nothing.
@@ -61,43 +61,43 @@ pub(crate) enum Pace {
     OneAtATime(OwnRequestKey),
 }
 
-/// A `PUBLISH_NAMESPACE` of the relay on the session with the upstream.
+/// A `PUBLISH_NAMESPACE` of the relay on the session with the parent.
 #[derive(Debug)]
 pub(crate) struct Passed {
     session: SessionKey,
     request: OwnRequestKey,
     id: RequestId,
-    /// The upstream refused it without a Retry Interval, or ended its
+    /// The parent refused it without a Retry Interval, or ended its
     /// stream: it is not sent again on that session, which would get the
     /// same answer.
     over: bool,
 }
 
 impl Relay {
-    /// The namespaces to be announced upstream: those of its prefix that a
-    /// session announced which the relay is not the client of.
+    /// The namespaces to be announced to the parent: those of its prefix
+    /// that a session announced which the relay is not the client of.
     fn to_pass_on(&self) -> BTreeSet<TrackNamespace> {
-        let Some(upstream) = &self.upstream else {
+        let Some(parent) = &self.parent else {
             return BTreeSet::new();
         };
         self.namespaces
             .iter()
-            .filter(|entry| upstream.namespace.is_prefix_of(&entry.namespace))
+            .filter(|entry| parent.namespace.is_prefix_of(&entry.namespace))
             .filter(|entry| !self.is_client_session(entry.session))
             .map(|entry| entry.namespace.clone())
             .collect()
     }
 
-    /// Brings what is announced upstream in line with what the sessions of
-    /// the relay announce: withdraws what nobody announces any more, and
-    /// announces what is new, on the session with the upstream, which is
-    /// asked for where there is none.
-    pub(crate) fn pass_announcements_upstream(&mut self, actions: &mut Vec<Action>) {
+    /// Brings what is announced to the parent in line with what the
+    /// sessions of the relay announce: withdraws what nobody announces any
+    /// more, and announces what is new, on the session with the parent,
+    /// which is asked for where there is none.
+    pub(crate) fn pass_announcements_to_parent(&mut self, actions: &mut Vec<Action>) {
         let wanted = self.to_pass_on();
-        let Some(upstream) = self.upstream.as_mut() else {
+        let Some(parent) = self.parent.as_mut() else {
             return;
         };
-        let withdrawn: Vec<TrackNamespace> = upstream
+        let withdrawn: Vec<TrackNamespace> = parent
             .announced
             .keys()
             .filter(|namespace| !wanted.contains(*namespace))
@@ -105,15 +105,15 @@ impl Relay {
             .collect();
         let gone: Vec<Passed> = withdrawn
             .iter()
-            .filter_map(|namespace| upstream.announced.remove(namespace))
+            .filter_map(|namespace| parent.announced.remove(namespace))
             .collect();
         let missing: Vec<TrackNamespace> = wanted
             .into_iter()
-            .filter(|namespace| !upstream.announced.contains_key(namespace))
+            .filter(|namespace| !parent.announced.contains_key(namespace))
             .collect();
-        let (link, pace) = (upstream.link, upstream.pace);
+        let (link, pace) = (parent.link, parent.pace);
         for passed in gone {
-            self.withdraw_upstream(&passed, actions);
+            self.withdraw_from_parent(&passed, actions);
             // Its answer, if one comes, is for no announcement any more, so
             // the next goes now; what is missing goes with it, one at a time.
             self.answered_one_at_a_time(passed.session, passed.request, actions);
@@ -124,73 +124,73 @@ impl Relay {
         match link {
             Link::Open(session) if pace == Pace::AllAtOnce => {
                 for namespace in missing {
-                    self.announce_upstream(session, namespace, actions);
+                    self.announce_to_parent(session, namespace, actions);
                 }
             }
             // What is missing goes when the one sent is answered, or when
             // the Retry Interval is over; or when the session is there.
             Link::Open(_) | Link::Connecting => {}
-            Link::Absent => self.connect_upstream_after(0, actions),
+            Link::Absent => self.connect_parent_after(0, actions),
         }
     }
 
-    /// Asks for the session with the upstream, `after_ms` from now.
-    pub(crate) fn connect_upstream_after(&mut self, after_ms: u64, actions: &mut Vec<Action>) {
-        let Some(upstream) = self.upstream.as_mut() else {
+    /// Asks for the session with the parent, `after_ms` from now.
+    pub(crate) fn connect_parent_after(&mut self, after_ms: u64, actions: &mut Vec<Action>) {
+        let Some(parent) = self.parent.as_mut() else {
             return;
         };
-        upstream.link = Link::Connecting;
-        actions.push(Action::ConnectUpstream {
-            uri: upstream.uri.clone(),
+        parent.link = Link::Connecting;
+        actions.push(Action::ConnectParent {
+            uri: parent.uri.clone(),
             after_ms,
         });
     }
 
-    /// No session with the upstream came, and namespaces wait to be
+    /// No session with the parent came, and namespaces wait to be
     /// announced there: it is asked for again after a second, and so on
     /// while they wait. WHY: a participant of the chat here is not heard
     /// above until it is announced, and nothing else would ask.
     pub(crate) fn connect_again_for_announcements(&mut self, actions: &mut Vec<Action>) {
         if !self.to_pass_on().is_empty() {
-            self.connect_upstream_after(RETRY_WHAT_IS_NOT_THERE_MS, actions);
+            self.connect_parent_after(RETRY_WHAT_IS_NOT_THERE_MS, actions);
         }
     }
 
     /// Sends the first of what is to be announced and is not, alone, and
     /// goes on one at a time; with nothing to send, all at once again.
-    fn announce_next_upstream(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
+    fn announce_next_to_parent(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
         let wanted = self.to_pass_on();
-        let Some(upstream) = self.upstream.as_mut() else {
+        let Some(parent) = self.parent.as_mut() else {
             return;
         };
         let next = wanted
             .into_iter()
-            .find(|namespace| !upstream.announced.contains_key(namespace));
-        upstream.pace = Pace::AllAtOnce;
+            .find(|namespace| !parent.announced.contains_key(namespace));
+        parent.pace = Pace::AllAtOnce;
         if let Some(namespace) = next
-            && let Some(request) = self.announce_upstream(session, namespace, actions)
-            && let Some(upstream) = self.upstream.as_mut()
+            && let Some(request) = self.announce_to_parent(session, namespace, actions)
+            && let Some(parent) = self.parent.as_mut()
         {
-            upstream.pace = Pace::OneAtATime(request);
+            parent.pace = Pace::OneAtATime(request);
         }
     }
 
-    /// [`Event::UpstreamAnnouncementTimeout`].
-    pub(crate) fn on_upstream_announcement_timeout(
+    /// [`Event::ParentAnnouncementTimeout`].
+    pub(crate) fn on_parent_announcement_timeout(
         &mut self,
         session: SessionKey,
         actions: &mut Vec<Action>,
     ) {
-        let waiting = self.upstream.as_ref().is_some_and(|upstream| {
-            upstream.pace == Pace::Waiting && upstream.link == Link::Open(session)
+        let waiting = self.parent.as_ref().is_some_and(|parent| {
+            parent.pace == Pace::Waiting && parent.link == Link::Open(session)
         });
         if waiting {
-            self.announce_next_upstream(session, actions);
+            self.announce_next_to_parent(session, actions);
         }
     }
 
     /// The request the announcement went in, where it went.
-    fn announce_upstream(
+    fn announce_to_parent(
         &mut self,
         session: SessionKey,
         namespace: TrackNamespace,
@@ -202,7 +202,7 @@ impl Relay {
             .token_for(session, Operation::Publish)
             .into_iter()
             .collect();
-        // The upstream's GOAWAY moves the link to the next session, which is
+        // The parent's GOAWAY moves the link to the next session, which is
         // sent what is announced (`Relay::forget_announcements_on`); the old
         // one is not asked here, and `open_own_request` would refuse it.
         let mut opened = None;
@@ -218,11 +218,11 @@ impl Relay {
                 actions,
             )
             .ok()?;
-        // Kept in `Upstream` and not in the session's state, so after the
-        // call; the callers found the upstream there.
-        debug_assert!(self.upstream.is_some(), "announced without an upstream");
-        if let (Some(upstream), Some(id)) = (self.upstream.as_mut(), opened) {
-            upstream.announced.insert(
+        // Kept in `Parent` and not in the session's state, so after the
+        // call; the callers found the parent there.
+        debug_assert!(self.parent.is_some(), "announced without a parent");
+        if let (Some(parent), Some(id)) = (self.parent.as_mut(), opened) {
+            parent.announced.insert(
                 namespace,
                 Passed {
                     session,
@@ -236,7 +236,7 @@ impl Relay {
     }
 
     /// §6.2: a `PUBLISH_NAMESPACE` is withdrawn "by cancelling the request".
-    fn withdraw_upstream(&mut self, passed: &Passed, actions: &mut Vec<Action>) {
+    fn withdraw_from_parent(&mut self, passed: &Passed, actions: &mut Vec<Action>) {
         if passed.over {
             return;
         }
@@ -250,20 +250,20 @@ impl Relay {
     /// What was announced on `session` is no longer: it went, or is going
     /// away. The next session is sent it all again.
     pub(crate) fn forget_announcements_on(&mut self, session: SessionKey) {
-        if let Some(upstream) = self.upstream.as_mut() {
-            upstream
+        if let Some(parent) = self.parent.as_mut() {
+            parent
                 .announced
                 .retain(|_, passed| passed.session != session);
-            upstream.pace = Pace::AllAtOnce;
+            parent.pace = Pace::AllAtOnce;
         }
     }
 
     /// Whether the relay announces something on `session`, or waits to,
     /// which then holds something (`Relay::holds_nothing`).
-    pub(crate) fn announces_upstream_on(&self, session: SessionKey) -> bool {
-        self.upstream.as_ref().is_some_and(|upstream| {
-            (upstream.link == Link::Open(session) && upstream.pace != Pace::AllAtOnce)
-                || upstream
+    pub(crate) fn announces_to_parent_on(&self, session: SessionKey) -> bool {
+        self.parent.as_ref().is_some_and(|parent| {
+            (parent.link == Link::Open(session) && parent.pace != Pace::AllAtOnce)
+                || parent
                     .announced
                     .values()
                     .any(|passed| passed.session == session && !passed.over)
@@ -279,24 +279,24 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let its_turn = self
-            .upstream
+            .parent
             .as_ref()
-            .is_some_and(|upstream| upstream.pace == Pace::OneAtATime(request));
+            .is_some_and(|parent| parent.pace == Pace::OneAtATime(request));
         if its_turn {
-            self.announce_next_upstream(session, actions);
+            self.announce_next_to_parent(session, actions);
         }
     }
 
     fn passed_of(&mut self, session: SessionKey, request: OwnRequestKey) -> Option<&mut Passed> {
-        self.upstream
+        self.parent
             .as_mut()?
             .announced
             .values_mut()
             .find(|passed| passed.session == session && passed.request == request)
     }
 
-    /// Takes the events about the relay's announcements upstream. Returns
-    /// every other event.
+    /// Takes the events about the relay's announcements to the parent.
+    /// Returns every other event.
     pub(crate) fn on_announcement_event(
         &mut self,
         event: Event,
@@ -316,7 +316,7 @@ impl Relay {
                 request,
                 how,
             } if self.passed_of(session, request).is_some() => {
-                // A STOP_SENDING leaves the upstream's direction, and the
+                // A STOP_SENDING leaves the parent's direction, and the
                 // announcement with it (§3.3.2).
                 if how != OwnRequestEnd::Stopped
                     && let Some(passed) = self.passed_of(session, request)
@@ -364,7 +364,7 @@ impl Relay {
                 self.answered_one_at_a_time(session, request, actions);
             }
             // Accepted, or a GOAWAY on its stream, which the relay does not
-            // take as one of the upstream (known gap).
+            // take as one of the parent (known gap).
             Ok(_) => self.answered_one_at_a_time(session, request, actions),
             Err(RequestFault::Peer(error)) => self.fail_session(session, &error, actions),
             Err(RequestFault::Usage(error)) => {
@@ -374,7 +374,7 @@ impl Relay {
         }
     }
 
-    /// The upstream refused an announcement and says it may be sent again
+    /// The parent refused an announcement and says it may be sent again
     /// in `wait_ms`: it is to be announced again, and what is to be sent
     /// waits that long and then goes one at a time. The timer is started
     /// once for the refusals of a burst.
@@ -385,15 +385,15 @@ impl Relay {
         wait_ms: u64,
         actions: &mut Vec<Action>,
     ) {
-        let Some(upstream) = self.upstream.as_mut() else {
+        let Some(parent) = self.parent.as_mut() else {
             return;
         };
-        upstream
+        parent
             .announced
             .retain(|_, passed| !(passed.session == session && passed.request == request));
-        if upstream.pace != Pace::Waiting {
-            upstream.pace = Pace::Waiting;
-            actions.push(Action::StartUpstreamAnnouncementTimer { session, wait_ms });
+        if parent.pace != Pace::Waiting {
+            parent.pace = Pace::Waiting;
+            actions.push(Action::StartParentAnnouncementTimer { session, wait_ms });
         }
     }
 }

@@ -1,6 +1,6 @@
 // How long a viewer's picture stands still when the relay above its relay goes and comes back,
 // and where the time goes. A page publishes the bars at the relay of the run (keepPublishing),
-// another plays them (keepPlaying) at an own relay below it (`--upstream`, the run's port plus
+// another plays them (keepPlaying) at an own relay below it (`--parent`, the run's port plus
 // MOQLIVEMOCK_SIDE_PORT_OFFSET), or, with `--through origin`, at the relay of the run itself, to
 // compare. Once the viewer plays, the relay of the run is stopped (`--stop sigint`, which sends
 // GOAWAY and closes, or `--stop sigkill`, which vanishes), kept down for `--down-ms`, and started
@@ -12,8 +12,8 @@
 //   stall_ms: the longest time between two frames the viewer drew, from a second before the stop on
 //   last_frame_ms, first_frame_ms: the frames on either side of it
 //   down_ms, up_ms: when the relay was gone, and when it printed that it listens again
-//   edge: when the relay below printed that its session upstream ended, each CONNECT_UPSTREAM,
-//     UPSTREAM_FAILED and UPSTREAM_CONNECTED after the stop
+//   edge: when the relay below printed that its session upstream ended, each CONNECT_PARENT,
+//     PARENT_FAILED and PARENT_CONNECTED after the stop
 //   states: when each state of the two pages first showed (keepPublishing, keepPlaying), as seen
 //     by asking them every 50 ms
 // A throwaway: not part of the interop run.
@@ -134,7 +134,7 @@ async function main(): Promise<void> {
 	};
 	let upstreamSession = "";
 	if (edge !== undefined) {
-		const [connected] = await edge.relay.waitForLines(/^UPSTREAM_CONNECTED session=(\d+)/, 1);
+		const [connected] = await edge.relay.waitForLines(/^PARENT_CONNECTED session=(\d+)/, 1);
 		upstreamSession = connected?.[1] ?? "";
 	}
 	const states: { at: number; who: string; state: string }[] = [];
@@ -146,12 +146,12 @@ async function main(): Promise<void> {
 		const long = 60_000;
 		stamp("upstream_session_ended", edge.relay.waitForLines(new RegExp(`^SESSION_CLOSED session=${upstreamSession}$`), 1, long));
 		for (const nth of [2, 3, 4]) {
-			stamp(`connect_upstream_${nth}`, edge.relay.waitForLines(/^CONNECT_UPSTREAM/, nth, long));
+			stamp(`connect_upstream_${nth}`, edge.relay.waitForLines(/^CONNECT_PARENT/, nth, long));
 		}
 		for (const nth of [1, 2]) {
-			stamp(`upstream_failed_${nth}`, edge.relay.waitForLines(/^UPSTREAM_FAILED/, nth, long));
+			stamp(`upstream_failed_${nth}`, edge.relay.waitForLines(/^PARENT_FAILED/, nth, long));
 		}
-		stamp("upstream_connected_2", edge.relay.waitForLines(/^UPSTREAM_CONNECTED/, 2, long));
+		stamp("upstream_connected_2", edge.relay.waitForLines(/^PARENT_CONNECTED/, 2, long));
 	}
 	const watcher = (async () => {
 		while (watching) {

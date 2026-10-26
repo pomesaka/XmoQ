@@ -5,7 +5,7 @@
 //! leave a step out, and a request the relay does not close keeps a task
 //! and a stream on the I/O side until the session ends. Where each request
 //! is kept (`SessionState::own`, `own_fetches`, `own_track_statuses`,
-//! `Upstream::announced`) stays with what it asks for.
+//! `Parent::announced`) stays with what it asks for.
 
 use xmoq_moqt::message::{ControlMessage, request_error_code};
 use xmoq_moqt::session::{RequestId, Session};
@@ -19,8 +19,8 @@ pub(crate) enum Counted {
     /// It counts, and `over_a_share` is a limit of its kind that the
     /// caller found reached: either refuses it with `EXCESSIVE_LOAD`.
     Yes { over_a_share: bool },
-    /// It does not: a `PUBLISH_NAMESPACE` upstream. WHY not: the upstream
-    /// bounds them itself, taking no more namespaces of this relay's
+    /// It does not: a `PUBLISH_NAMESPACE` to the parent. WHY not: the
+    /// parent bounds them itself, taking no more namespaces of this relay's
     /// session than its `--namespaces-per-session` (decided on 2026-10-26);
     /// and an announcement that waited for room among the relay's own
     /// SUBSCRIBE and FETCH requests would leave a participant below unheard

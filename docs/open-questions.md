@@ -27,7 +27,7 @@ When an item is decided, remove it here and write the decision where it takes ef
   - What the CLI writes and in what form, and whether an agent is given pictures. `xmoq-agent` writes lines of JSON and pictures asked for ([its README](../crates/agent/README.md)), as a first version
   - Whether an agent ever speaks with a voice
   - How the people present learn that an agent takes part and transcribes them, whether they have to agree to it, and where their sound may be sent
-- Spreading a broadcast over relays: who sends a viewer to which relay, and whether an edge learns the namespaces of its upstream with SUBSCRIBE_NAMESPACE ([design draft](scale-and-meetings.md))
+- Spreading a broadcast over relays: who sends a viewer to which relay, and whether an edge learns the namespaces of its parent with SUBSCRIBE_NAMESPACE ([design draft](scale-and-meetings.md))
 - A meeting beyond its first version: the large video of who speaks, whether a mixer beside the relay is added, who may enter, and the meeting's delay ([design draft](scale-and-meetings.md))
 - Recording, replay, captions and accessibility: **not discussed**
 - The contract with events of a separately developed SNS: **not discussed**

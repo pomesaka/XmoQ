@@ -60,7 +60,7 @@ const { values: options } = parseArgs({
 		// accept it before the Object is sent.
 		"update-subgroup-timeout-ms": { type: "string", default: "" },
 		// The subscribers connect to a second relay, the own one, whose
-		// upstream is the relay of the run (`--upstream`), on the run's port
+		// parent is the relay of the run (`--parent`), on the run's port
 		// plus MOQLIVEMOCK_SIDE_PORT_OFFSET; the publisher stays with the
 		// relay of the run.
 		"through-edge": { type: "boolean", default: false },

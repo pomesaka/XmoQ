@@ -222,7 +222,7 @@ impl Authorizer for RoomTokens {
 
     /// A token for the namespace `*`, which allows every namespace
     /// ([`namespace_fits`]), for [`OWN_TOKEN_SECONDS`] from now: what the
-    /// relay puts on its SETUP and requests to an upstream relay that
+    /// relay puts on its SETUP and requests to a parent relay that
     /// shares the key. Made anew for each, as the chat's gatherer makes its
     /// own (`crates/chat`): a relay runs for longer than one token.
     fn own_token(&self, operation: Operation) -> Option<Vec<u8>> {

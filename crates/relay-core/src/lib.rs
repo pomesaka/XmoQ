@@ -38,12 +38,12 @@ mod discovery;
 mod events;
 mod fetch;
 mod own;
+mod parent;
 mod requests;
 mod routing;
 #[cfg(test)]
 mod tests;
 mod track_status;
-mod upstream;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -286,7 +286,8 @@ struct SessionState {
 impl SessionState {
     /// Requests the relay has open on this session that count towards
     /// [`MAX_OWN_REQUESTS_PER_SESSION`]: SUBSCRIBE, FETCH and `TRACK_STATUS`
-    /// together; a `PUBLISH_NAMESPACE` upstream does not (`own::Counted`).
+    /// together; a `PUBLISH_NAMESPACE` to the parent does not
+    /// (`own::Counted`).
     fn own_requests(&self) -> usize {
         self.own.len() + self.own_fetches.len() + self.own_track_statuses.len()
     }
@@ -1843,8 +1844,8 @@ pub struct Relay {
     cache_let_go: bool,
     /// [`Self::set_upstream_answer_wait_ms`].
     upstream_answer_wait_ms: u64,
-    /// [`Self::set_upstream`].
-    upstream: Option<upstream::Upstream>,
+    /// [`Self::set_parent`].
+    parent: Option<parent::Parent>,
 }
 
 /// How long the I/O side waits for a publisher's answer to a request of the
@@ -1901,7 +1902,7 @@ pub trait Authorizer: Send {
 
     /// A token of the relay's own for `operation` in every namespace, as
     /// the value of an AUTHORIZATION TOKEN (a Token structure, §10.2.2),
-    /// for what it sends the upstream relay: its SETUP and its requests.
+    /// for what it sends the parent relay: its SETUP and its requests.
     /// `None` where the relay has none to give.
     fn own_token(&self, _operation: Operation) -> Option<Vec<u8>> {
         None
@@ -1946,7 +1947,7 @@ impl Relay {
             held_beyond_cache_limit: fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE,
             cache_let_go: false,
             upstream_answer_wait_ms: UPSTREAM_ANSWER_WAIT_MS,
-            upstream: None,
+            parent: None,
         }
     }
 
@@ -2137,8 +2138,8 @@ impl Relay {
             Event::AnnouncementTimeout { session } => {
                 self.on_announcement_timeout(session, &mut actions);
             }
-            Event::UpstreamAnnouncementTimeout { session } => {
-                self.on_upstream_announcement_timeout(session, &mut actions);
+            Event::ParentAnnouncementTimeout { session } => {
+                self.on_parent_announcement_timeout(session, &mut actions);
             }
             Event::RendezvousTimeout { session, stream } => {
                 self.on_rendezvous_timeout(session, stream, &mut actions);
@@ -2147,7 +2148,7 @@ impl Relay {
                 self.fail_session(session, &error, &mut actions);
             }
             Event::SessionClosed { session } => self.drop_session(session, &mut actions),
-            Event::UpstreamFailed => self.upstream_failed(&mut actions),
+            Event::ParentFailed => self.parent_failed(&mut actions),
             Event::GoingAway(going_away) => self.on_going_away(going_away, &mut actions),
             Event::SendAway {
                 session,
@@ -2515,10 +2516,10 @@ impl Relay {
                 announcement_timer: false,
             },
         );
-        // The relay is the client of none but the upstream relay
-        // ([`Action::ConnectUpstream`]).
+        // The relay is the client of none but the parent relay
+        // ([`Action::ConnectParent`]).
         if role == Role::Client {
-            self.upstream_opened(session, actions);
+            self.parent_opened(session, actions);
         }
         self.go_away(session, actions);
     }
@@ -2610,14 +2611,14 @@ impl Relay {
             return Ok(());
         };
         // WHY a session the relay opened as the client is not checked, its
-        // SETUP neither (`on_control_message`): it is the upstream relay
-        // this relay chose (`--upstream` and its pinned certificate hash, or
+        // SETUP neither (`on_control_message`): it is the parent relay
+        // this relay chose (`--parent` and its pinned certificate hash, or
         // the URI of its GOAWAY) and authenticated with TLS, and what it
         // asks for comes of requests it checked itself, a gatherer's
         // SUBSCRIBE of a participant this relay announced to it. What it
-        // costs: an upstream that is taken over can ask the publishers here
+        // costs: a parent that is taken over can ask the publishers here
         // for anything announced up, which by then is a broadcast nobody
-        // can trust anyway. WHY NOT have the upstream put a token of its own
+        // can trust anyway. WHY NOT have the parent put a token of its own
         // on what it asks: it would put one on its SUBSCRIBEs to every
         // publisher, not knowing which session is a relay, and how peers
         // that are not ours take a parameter they do not expect is not known
@@ -2685,7 +2686,7 @@ impl Relay {
         if let Err(error) = state.moqt.on_control_message(message) {
             self.fail_session(session, &error, actions);
         } else if let Some(uri) = moved_to {
-            self.upstream_going_away(session, uri, actions);
+            self.parent_going_away(session, uri, actions);
         } else if let (Some(options), Some(Authorization(authorizer)), false) = (
             setup_options,
             &self.authorizer,
@@ -2832,7 +2833,7 @@ impl Relay {
                     self.ask_the_publishers(&track, Some(session), None, actions);
                 }
                 self.tell_the_namespace_subscriptions(actions);
-                self.pass_announcements_upstream(actions);
+                self.pass_announcements_to_parent(actions);
             }
         }
     }
@@ -2912,7 +2913,7 @@ impl Relay {
                 // is asked for it: a subscriber waits there by its own
                 // RENDEZVOUS_TIMEOUT or not at all (§10.2.6, as below).
                 let nobody_yet = self.tracks.asks(track_name).is_empty();
-                if nobody_yet && hold.is_none() && !self.waits_for_upstream(track_name, actions) {
+                if nobody_yet && hold.is_none() && !self.waits_for_parent(track_name, actions) {
                     Err(request_error_code::DOES_NOT_EXIST)
                 } else {
                     let waits = self.wait_with_the_others(track_name, waiter);
@@ -2932,10 +2933,10 @@ impl Relay {
                 // asked: one has appeared, and the code says why it is not
                 // asked.
                 let holds = hold.is_some() && asked.nobody_because.is_none();
-                // The upstream is asked once its session is there.
-                let for_upstream =
-                    asked.nobody_because.is_none() && self.waits_for_upstream(track_name, actions);
-                if asked.asks.is_empty() && (holds || for_upstream) {
+                // The parent is asked once its session is there.
+                let for_parent =
+                    asked.nobody_because.is_none() && self.waits_for_parent(track_name, actions);
+                if asked.asks.is_empty() && (holds || for_parent) {
                     let pending = PendingTrack {
                         asks: Vec::new(),
                         waiters: vec![waiter],
@@ -3635,7 +3636,7 @@ impl Relay {
                 // §9.5: cancelling the request withdraws the namespace.
                 self.withdraw_namespace(session, stream);
                 self.tell_the_namespace_subscriptions(actions);
-                self.pass_announcements_upstream(actions);
+                self.pass_announcements_to_parent(actions);
             }
             Some(RequestSlot::SubscribeNamespace { request }) => {
                 if stream_gone {
@@ -4764,7 +4765,7 @@ impl Relay {
         if self.sessions.remove(&session).is_none() {
             return;
         }
-        self.upstream_gone(session);
+        self.parent_gone(session);
         let own_streams: HashSet<OutStreamKey> = self
             .out_streams
             .iter()
@@ -4787,7 +4788,7 @@ impl Relay {
             self.source_gone(&track, on_the_session, TrackEnd::SourceGone, actions);
         }
         self.drop_routing_of(session, actions);
-        self.pass_announcements_upstream(actions);
+        self.pass_announcements_to_parent(actions);
         self.drop_fetches_of(session, actions);
         self.drop_track_statuses_of(session, actions);
         let subscribed: BTreeSet<FullTrackName> = self
@@ -4836,7 +4837,7 @@ impl Relay {
         self.sessions
             .get(&session)
             .is_some_and(|state| state.requests.len() == 0 && state.own_requests() == 0)
-            && !self.announces_upstream_on(session)
+            && !self.announces_to_parent_on(session)
     }
 
     /// What the relay holds.
@@ -5183,7 +5184,7 @@ impl Action {
             | Self::StopReceiptTimer { session, .. }
             | Self::StartRendezvousTimer { session, .. }
             | Self::StartAnnouncementTimer { session, .. }
-            | Self::StartUpstreamAnnouncementTimer { session, .. }
+            | Self::StartParentAnnouncementTimer { session, .. }
             | Self::SubscribeHeld { session, .. }
             | Self::StartFetchEndTimer { session, .. }
             | Self::StopRequest { session, .. }
@@ -5205,7 +5206,7 @@ impl Action {
             | Self::FinishDataStream { out_stream }
             | Self::ResetDataStream { out_stream, .. } => Target::OutStream(*out_stream),
             Self::CloseSession { .. } => Target::Closing,
-            Self::ConnectUpstream { .. } => Target::Relay,
+            Self::ConnectParent { .. } => Target::Relay,
         }
     }
 }

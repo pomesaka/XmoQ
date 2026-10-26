@@ -1,9 +1,9 @@
 // Two own relays that both ask for tokens (`--auth-key-hex`, the same key):
-// the relay of the run, and a second one below it (`--upstream`), on the
+// the relay of the run, and a second one below it (`--parent`), on the
 // run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET. A page publishes at the relay
 // above with a token of the room, and pages at the relay below subscribe
 // with theirs. The relay below makes tokens of its own with the key for what
-// it sends upstream (`own_token` of `crates/relay/src/auth.rs`): its SETUP
+// it sends its parent (`own_token` of `crates/relay/src/auth.rs`): its SETUP
 // and its SUBSCRIBE, in the namespace `*`.
 //
 // Usage: bun auth-edge.ts [--relay own] [--port N] [--verbose]
@@ -13,7 +13,7 @@
 //   - The publishing page connects to the relay above with `pub` for
 //     `xmoq/auth/*` and publishes `xmoq/auth`/`object`.
 //   - A page at the relay below with `sub` for `xmoq/auth/*` subscribes: the
-//     relay below connects upstream and is let in with its own token (no
+//     relay below connects to its parent and is let in with its own token (no
 //     `UNAUTHORIZED`, no session closed for authorization at the relay
 //     above), its SUBSCRIBE is accepted, and the page gets the Object the
 //     publisher sends.
@@ -194,7 +194,7 @@ async function main(): Promise<void> {
 			);
 		}
 
-		summary = `both relays asked for tokens: the relay below was let in upstream with its own, its viewer with a token of the room got the Object of a page publishing above, and a viewer with a token for another namespace was refused at the relay below (${refused})`;
+		summary = `both relays asked for tokens: the relay below was let in above with its own, its viewer with a token of the room got the Object of a page publishing above, and a viewer with a token for another namespace was refused at the relay below (${refused})`;
 	} finally {
 		await runCleanups();
 	}

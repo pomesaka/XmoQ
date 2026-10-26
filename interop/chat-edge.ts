@@ -1,6 +1,6 @@
 // The chat through two relays: the gatherer (`xmoq-chat`) at the own relay of
 // the run, and the participants and the viewers at a second own relay below
-// it (`--upstream`), on the run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET. The
+// it (`--parent`), on the run's port plus MOQLIVEMOCK_SIDE_PORT_OFFSET. The
 // relay below passes the namespaces its participants announce on to the one
 // above (§9.5), where the gatherer is told of them by its
 // SUBSCRIBE_NAMESPACE, and the gatherer's SUBSCRIBE for each `said` comes
@@ -10,11 +10,11 @@
 //
 // What has to be seen with `--case many`, written before the first run: 7
 // participants that come at the relay below at once, before it has a
-// session upstream, are all announced upstream though the relay above takes
-// 5 announcements of a session at once and one more a second: the relay
-// below is refused the others (`EXCESSIVE_LOAD`), says when it sends them
-// again (`ANNOUNCE_UPSTREAM_LATER ... after_ms=1000`), and does; the gatherer
-// subscribes to all 7 and numbers a line of each, 0 to 6.
+// session with its parent, are all announced to the parent though the relay
+// above takes 5 announcements of a session at once and one more a second:
+// the relay below is refused the others (`EXCESSIVE_LOAD`), says when it
+// sends them again (`ANNOUNCE_TO_PARENT_LATER ... after_ms=1000`), and does;
+// the gatherer subscribes to all 7 and numbers a line of each, 0 to 6.
 //
 // What has to be seen with `--case two` (the default), written before the
 // first run:
@@ -22,14 +22,14 @@
 //   - The gatherer is told of `a` and `b`, both at the relay below, and
 //     subscribes to each one's `said` (`SUBSCRIBED`); each participant serves
 //     the subscription (`SERVING`).
-//   - The relay below announces each namespace upstream once
+//   - The relay below announces each namespace to its parent once
 //     (`OPEN_REQUEST ... PUBLISH_NAMESPACE`, two in all).
 //   - Lines of `a` and `b`, one after the other, are numbered 0 to 3, and a
 //     viewer at the relay below subscribed to `lines` gets them live: Groups
 //     0 to 3, whose JSON names a, b, a, b.
 //   - A viewer at the relay below that comes then FETCHes 0 to 100 and gets
 //     Groups 0 to 3, with `FETCH_OK` ending at {3, 1}.
-//   - When `a` leaves, the relay below withdraws its namespace upstream
+//   - When `a` leaves, the relay below withdraws its namespace from its parent
 //     (`CANCEL_OWN_REQUEST`), and the relay above tells the gatherer
 //     (`NAMESPACE_DONE`).
 
@@ -139,11 +139,11 @@ async function many(
 		names.map((name) => participant(below, gatherer, name, `from ${name}`)),
 	);
 	const [later] = await edge.waitForLines(
-		/^ANNOUNCE_UPSTREAM_LATER session=\d+ after_ms=(\d+)$/,
+		/^ANNOUNCE_TO_PARENT_LATER session=\d+ after_ms=(\d+)$/,
 		1,
 	);
 	if (later === undefined)
-		throw new Error("the relay below printed no ANNOUNCE_UPSTREAM_LATER");
+		throw new Error("the relay below printed no ANNOUNCE_TO_PARENT_LATER");
 	for (const [index, name] of names.entries()) {
 		const who = participants[index];
 		if (who === undefined) throw new Error(`no participant ${name}`);
@@ -286,7 +286,7 @@ async function two(
 		/^SEND session=\d+ stream=\d+ NAMESPACE_DONE /,
 	);
 
-	return `the gatherer at the relay above was told of a and b at the relay below, which announced their namespaces upstream once each, and subscribed to them through it; it numbered their lines 0 to 3, which a viewer at the relay below got live (${seenLive}) and a late one fetched (${fetched}, FETCH_OK ${end}); when a left, the relay below withdrew its namespace upstream and the gatherer was told`;
+	return `the gatherer at the relay above was told of a and b at the relay below, which announced their namespaces to it once each, and subscribed to them through it; it numbered their lines 0 to 3, which a viewer at the relay below got live (${seenLive}) and a late one fetched (${fetched}, FETCH_OK ${end}); when a left, the relay below withdrew its namespace from it and the gatherer was told`;
 }
 
 main().catch((error: unknown) => {
