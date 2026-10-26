@@ -959,7 +959,9 @@ export async function openPage(
 	// WHY: a call to a page that crashed fails with "Target crashed" and no
 	// name, and a driver may be waiting on several pages at once.
 	page.on("crash", () => log(label, "CRASHED: the page's process is gone"));
-	await page.goto(`${origin}${BROWSER_PAGES[client].path}`);
+	// The own page prints the bytes of its streams only when asked.
+	const query = context.verbose ? "?bytes" : "";
+	await page.goto(`${origin}${BROWSER_PAGES[client].path}${query}`);
 	await page.waitForFunction(() => typeof window.xmoq === "object");
 	return page;
 }

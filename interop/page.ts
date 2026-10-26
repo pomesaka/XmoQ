@@ -257,11 +257,20 @@ const diagnostics: Diagnostics = {
 			console.log(`event ${describe(event)}`);
 		}
 	},
-	onBytes(direction, stream, data) {
-		console.log(
-			`bytes ${direction} ${stream} (${data.length}): ${toHex(data, " ")}`,
-		);
-	},
+	// WHY only when the driver asks (`--verbose`): this is every chunk of
+	// every stream in hex, payloads too, and a FETCH of 8 MB becomes 24 MB of
+	// text through the console, Playwright and the driver. The fixtures are
+	// taken from these lines (fixtures/moqt-18/README.md), by a run with
+	// `--verbose`.
+	...(new URLSearchParams(location.search).has("bytes")
+		? {
+				onBytes(direction, stream, data) {
+					console.log(
+						`bytes ${direction} ${stream} (${data.length}): ${toHex(data, " ")}`,
+					);
+				},
+			}
+		: {}),
 };
 
 function toKeyValuePair(property: PageProperty): KeyValuePair {
