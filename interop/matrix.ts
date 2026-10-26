@@ -67,8 +67,9 @@ interface Pairing {
 	 * Set where the run spends most of its time waiting: for the relay to give
 	 * up on a client that vanished (6 to 9 seconds each, measured), or for a
 	 * page to give up on late streams (5 seconds). These run
-	 * beside the others, so that the matrix does not grow by the sum of the
-	 * waits.
+	 * beside each other after all the others, so that the matrix does not grow
+	 * by the sum of the waits. Not for a run that moves much: it would load
+	 * the runs beside it.
 	 */
 	mostlyWaits?: boolean;
 	/**
@@ -1726,12 +1727,14 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			relay: "own",
 			mostlyWaits: true,
 		},
+		// WHY NOT `mostlyWaits` for these two: they spend their time moving
+		// 8 MiB through the relay, not waiting, and would load the runs beside
+		// them.
 		{
 			name: "own relay: quiet peer: a reader that takes a fetch stream from the relay's cache too slowly as a whole is cut with TOO_FAR_BEHIND, and one that reads gets it",
 			script: "quiet-peer.ts",
 			args: ["--case", "relay-slow-cached-fetch", "--client", "quiet-peer"],
 			relay: "own",
-			mostlyWaits: true,
 		},
 		{
 			name: "own relay: quiet peer: a fetch stream that keeps a Group the cache has let go of, beyond its session's share, is stopped with EXCESSIVE_LOAD, and another reader is answered",
@@ -1743,7 +1746,6 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 				"quiet-peer",
 			],
 			relay: "own",
-			mostlyWaits: true,
 		},
 		// A SUBSCRIBE that comes before its publisher (RENDEZVOUS_TIMEOUT).
 		{
@@ -2149,20 +2151,23 @@ async function main(): Promise<void> {
 	};
 	// WHY the pairings one after the other: a failure is easier to read alone,
 	// and a run that has the machine to itself does not fail for lack of it.
-	// The runs that mostly wait are the exception. They start together when
-	// the first of them is reached, which is after the pairings that move one
-	// Object, and go on beside the pairings that follow.
-	let waiting: Promise<void>[] = [];
+	// The runs that mostly wait are the exception: they start together after
+	// the last of the others, so that the matrix grows by the longest wait
+	// and not by their sum.
+	// WHY NOT beside the others: a run that counts time missed it in CI with
+	// pages running beside it (`FETCHES`), many others count time (the frames
+	// of a video, a GOAWAY's moves), and a mark on each that does would be
+	// forgotten on the next.
 	for (const pairing of pairings) {
 		// A signal stops the pairings that are running; the rest is not started.
 		if (interrupted) break;
-		if (pairing.mostlyWaits !== true) {
-			await run(pairing);
-		} else if (waiting.length === 0) {
-			waiting = pairings.filter((each) => each.mostlyWaits === true).map(run);
-		}
+		if (pairing.mostlyWaits !== true) await run(pairing);
 	}
-	await Promise.all(waiting);
+	if (!interrupted) {
+		await Promise.all(
+			pairings.filter((each) => each.mostlyWaits === true).map(run),
+		);
+	}
 
 	const outcomes = pairings.flatMap((pairing) => finished.get(pairing) ?? []);
 	const failed = outcomes.filter((outcome) => !outcome.ok);
