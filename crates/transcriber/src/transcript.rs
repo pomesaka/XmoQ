@@ -24,7 +24,7 @@ pub struct Transcript {
 
 /// A piece as it was read, before it is numbered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Said {
+pub struct ReadPiece {
     /// The namespace of the broadcast, each field as UTF-8.
     pub from: Vec<String>,
     /// The words.
@@ -62,7 +62,7 @@ impl Transcript {
 
     /// Numbers a piece and keeps it, letting go of the oldest past
     /// [`Self::new`]'s `keep`.
-    pub fn add(&mut self, said: Said) -> Speech {
+    pub fn add(&mut self, said: ReadPiece) -> Speech {
         let speech = Speech {
             number: self.next,
             from: said.from,
@@ -138,8 +138,8 @@ mod tests {
 
     use super::*;
 
-    fn said(text: &str) -> Said {
-        Said {
+    fn said(text: &str) -> ReadPiece {
+        ReadPiece {
             from: vec!["xmoq".into(), "demo".into()],
             text: text.into(),
             start_us: 1,

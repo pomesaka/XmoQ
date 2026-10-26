@@ -1,6 +1,6 @@
 //! Track Namespace, Track Name and Location (§1.4.2, §2.4.1).
 
-use crate::coding::{ReadResult, Reader, put_count, put_length_prefixed};
+use crate::coding::{ByteReader, ReadResult, put_count, put_length_prefixed};
 use crate::{Error, UsageError, varint};
 
 /// Most Track Namespace Fields a Track Namespace may hold (§2.4.1).
@@ -22,7 +22,7 @@ pub struct Location {
 }
 
 impl Location {
-    pub(crate) fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    pub(crate) fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         Ok(Self {
             group: reader.varint()?,
             object: reader.varint()?,
@@ -70,7 +70,7 @@ impl TrackNamespace {
         total_len(&self.0)
     }
 
-    pub(crate) fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    pub(crate) fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         let count = reader.length()?;
         // Checked before the loop so that the field count the peer announces
         // never sizes an allocation.
@@ -149,7 +149,7 @@ impl FullTrackName {
 
     /// Reads `Track Namespace, Track Name Length, Track Name`, the order every
     /// message in this crate uses.
-    pub(crate) fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    pub(crate) fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         let namespace = TrackNamespace::decode(reader)?;
         let name_len = reader.length()?;
         let name = reader.bytes(name_len)?;

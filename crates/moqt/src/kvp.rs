@@ -1,6 +1,6 @@
 //! Key-Value-Pairs (§1.4.3), the serialization of Setup Options and Properties.
 
-use crate::coding::{ReadResult, Reader, put_length_prefixed};
+use crate::coding::{ByteReader, ReadResult, put_length_prefixed};
 use crate::{Error, UsageError, varint};
 
 /// Largest byte value a Key-Value-Pair may carry (§1.4.3).
@@ -98,7 +98,7 @@ impl KeyValuePair {
 /// More than [`MAX_PAIRS`] pairs are [`Error::TooManyKeyValuePairs`], which ends
 /// the session. A caller decoding the Properties of an Object turns that into
 /// an error that ends only the stream.
-pub(crate) fn decode_all(reader: &mut Reader<'_>) -> ReadResult<Vec<KeyValuePair>> {
+pub(crate) fn decode_all(reader: &mut ByteReader<'_>) -> ReadResult<Vec<KeyValuePair>> {
     let mut pairs = Vec::new();
     let mut previous_type = 0u64;
     while !reader.is_empty() {

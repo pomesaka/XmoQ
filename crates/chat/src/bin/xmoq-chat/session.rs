@@ -42,7 +42,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use xmoq_chat::args::Rooms as Taken;
 use xmoq_chat::gather::Left;
-use xmoq_chat::said_again::{Over, SaidAgain, Settings as AskAgain};
+use xmoq_chat::said_again::{SaidAgain, Settings as AskAgain, SubscriptionEnd};
 use xmoq_moqt::params::SubscriptionFilter;
 
 use anyhow::{Result, anyhow, bail};
@@ -132,7 +132,7 @@ const MAX_BYTES_HELD: usize = 64 * 1024 * 1024;
 
 /// How a session ended without an error.
 #[derive(Debug)]
-pub enum Ended {
+pub enum SessionEnd {
     /// The gatherer was told to stop.
     Stopped,
     /// The relay sent GOAWAY on the control stream (§10.4), with the URL
@@ -257,7 +257,7 @@ pub async fn gather(
     (gatherer, rooms_taken, key): (&mut Gatherer, &Taken, Option<&RoomKey>),
     ask_again: AskAgain,
     stop: &mut watch::Receiver<bool>,
-) -> Result<Ended> {
+) -> Result<SessionEnd> {
     let stops = StreamStops::default();
     let (uni_queue, mut uni) = mpsc::channel(UNI_QUEUE);
     let stream_config = StreamConfig {
@@ -353,7 +353,7 @@ pub async fn gather(
         tokio::select! {
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
-                    break Ended::Stopped;
+                    break SessionEnd::Stopped;
                 }
             }
             event = uni.recv() => {
@@ -677,7 +677,7 @@ impl Gathering<'_> {
     /// The `said` of a participant that stays announced is over: it is
     /// asked for again after a pause, or not until its NAMESPACE comes
     /// again ([`SaidAgain`]).
-    fn said_over(&mut self, person: &Person, over: Over, why: &str) {
+    fn said_over(&mut self, person: &Person, over: SubscriptionEnd, why: &str) {
         println!(
             "NOT_SUBSCRIBED room={:?} name={:?} why={why:?}",
             person.room, person.name
@@ -924,7 +924,7 @@ impl Gathering<'_> {
     }
 
     /// An event of the relay's unidirectional streams.
-    fn on_uni(&mut self, event: UniEvent) -> Result<Option<Ended>> {
+    fn on_uni(&mut self, event: UniEvent) -> Result<Option<SessionEnd>> {
         // What a SUBSCRIBE that ended meanwhile left held is let go of before
         // what came after it.
         self.settle_early()?;
@@ -932,7 +932,7 @@ impl Gathering<'_> {
             UniEvent::Control(message) => match self.session.on_control_message(message)? {
                 ControlEvent::GoAway(go_away) => {
                     println!("GOAWAY");
-                    return Ok(Some(Ended::Moved(new_url(&go_away.new_session_uri))));
+                    return Ok(Some(SessionEnd::Moved(new_url(&go_away.new_session_uri))));
                 }
                 ControlEvent::Setup(_) => bail!("the session took a second SETUP"),
             },
@@ -1003,7 +1003,7 @@ impl Gathering<'_> {
     }
 
     /// What the task of one of the gatherer's request streams heard.
-    fn on_heard(&mut self, token: u64, heard: Heard) -> Result<Option<Ended>> {
+    fn on_heard(&mut self, token: u64, heard: Heard) -> Result<Option<SessionEnd>> {
         let Some(own) = self.own.get(&token) else {
             return Ok(None);
         };
@@ -1104,7 +1104,7 @@ impl Gathering<'_> {
                     watch.again = Some(Instant::now() + wait);
                 }
             }
-            Purpose::Said(person) => self.said_over(person, Over::Ended, why),
+            Purpose::Said(person) => self.said_over(person, SubscriptionEnd::Ended, why),
             Purpose::Lines(room) => {
                 let room = room.clone();
                 println!("ROOM_NOT_PUBLISHED room={room:?} why={why:?}");
@@ -1131,7 +1131,7 @@ impl Gathering<'_> {
         };
         match &purpose {
             Purpose::Said(person) => {
-                self.said_over(person, Over::Malformed, "the track is malformed");
+                self.said_over(person, SubscriptionEnd::Malformed, "the track is malformed");
             }
             purpose => self.request_over(token, purpose, "the track is malformed"),
         }
@@ -1143,7 +1143,7 @@ impl Gathering<'_> {
         token: u64,
         purpose: &Purpose,
         event: RequestEvent,
-    ) -> Result<Option<Ended>> {
+    ) -> Result<Option<SessionEnd>> {
         match (purpose, event) {
             (_, RequestEvent::GoAway(_)) => {
                 println!("GOAWAY on a request stream");
@@ -1200,7 +1200,11 @@ impl Gathering<'_> {
             (Purpose::Said(person), RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
                 let why = format!("refused with {:#x}", error.error_code);
-                self.said_over(person, Over::Refused(error.retry_wait_ms()), &why);
+                self.said_over(
+                    person,
+                    SubscriptionEnd::Refused(error.retry_wait_ms()),
+                    &why,
+                );
             }
             (_, RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
@@ -1213,7 +1217,7 @@ impl Gathering<'_> {
                     person.room, person.name, done.status_code
                 );
                 self.let_go(token, Command::Finish);
-                self.said_over(person, Over::Ended, "PUBLISH_DONE");
+                self.said_over(person, SubscriptionEnd::Ended, "PUBLISH_DONE");
             }
             (
                 _,

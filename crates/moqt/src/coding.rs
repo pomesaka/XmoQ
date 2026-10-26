@@ -18,13 +18,13 @@ impl From<Error> for ReadError {
 
 pub(crate) type ReadResult<T> = Result<T, ReadError>;
 
-pub(crate) struct Reader<'a> {
+pub(crate) struct ByteReader<'a> {
     /// What is left to read.
     rest: &'a [u8],
     consumed: usize,
 }
 
-impl<'a> Reader<'a> {
+impl<'a> ByteReader<'a> {
     pub(crate) fn new(buf: &'a [u8]) -> Self {
         Self {
             rest: buf,
@@ -92,9 +92,9 @@ impl<'a> Reader<'a> {
 /// not match the content, which is a `PROTOCOL_VIOLATION` for control messages (§10).
 pub(crate) fn parse_exact<T>(
     region: &[u8],
-    parse: impl FnOnce(&mut Reader<'_>) -> ReadResult<T>,
+    parse: impl FnOnce(&mut ByteReader<'_>) -> ReadResult<T>,
 ) -> Result<T, Error> {
-    let mut reader = Reader::new(region);
+    let mut reader = ByteReader::new(region);
     let value = match parse(&mut reader) {
         Ok(value) => value,
         Err(ReadError::Short) => {

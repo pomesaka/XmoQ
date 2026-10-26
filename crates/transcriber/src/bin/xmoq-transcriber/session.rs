@@ -72,7 +72,7 @@ use xmoq_transcriber::transcript::Transcript;
 use xmoq_transcript_tracks::names::{listened_of, speech_track, transcript_namespace};
 use xmoq_transcript_tracks::payloads::Speech;
 
-use crate::reader::{Read, Reader, ToRead};
+use crate::reader::{Read, ReaderPool, ToRead};
 
 type Send = <WtConnection as Connection>::Send;
 
@@ -120,7 +120,7 @@ const CATALOG_LIMIT: usize = 1024 * 1024;
 
 /// How a session ended without an error.
 #[derive(Debug)]
-pub enum Ended {
+pub enum SessionEnd {
     /// The transcriber was told to stop.
     Stopped,
     /// The relay sent GOAWAY on the control stream (§10.4), with the URL
@@ -163,7 +163,7 @@ struct Watch {
 
 /// How the subscription to a catalog or a sound ended.
 #[derive(Debug, Clone, Copy)]
-enum Over {
+enum SubscriptionEnd {
     /// It ended, or was not answered.
     Ended,
     /// It was refused, with the Retry Interval the refusal names, if any.
@@ -172,7 +172,7 @@ enum Over {
 
 /// A track of a broadcast that the transcriber subscribes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Asked {
+enum BroadcastTrack {
     Catalog,
     Audio,
 }
@@ -198,7 +198,7 @@ struct Broadcast {
 struct Transcribing<'a> {
     connection: &'a Arc<WtConnection>,
     args: &'a Args,
-    reader: &'a mut Reader,
+    reader: &'a mut ReaderPool,
     transcripts: &'a mut [Transcript],
     key: Option<&'a RoomKey>,
     /// The model of voice activity; `None` with `--voice loudness`.
@@ -214,7 +214,7 @@ struct Transcribing<'a> {
     watches: Vec<Watch>,
     broadcasts: HashMap<TrackNamespace, Broadcast>,
     /// The tracks of broadcasts to be asked for again, and when.
-    asking_again: HashMap<(TrackNamespace, Asked), Instant>,
+    asking_again: HashMap<(TrackNamespace, BroadcastTrack), Instant>,
     /// The broadcast each catalog FETCH is for, by its Request ID.
     catalog_fetches: HashMap<u64, TrackNamespace>,
     catalogs: mpsc::Sender<(TrackNamespace, RequestId, Option<Vec<u8>>)>,
@@ -282,14 +282,14 @@ pub async fn transcribe(
     kept: &mut client::UntilClosed<WtConnection>,
     args: &Args,
     (reader, transcripts, key, vad): (
-        &mut Reader,
+        &mut ReaderPool,
         &mut [Transcript],
         Option<&RoomKey>,
         Option<&Path>,
     ),
     read: &mut mpsc::Receiver<Read>,
     stop: &mut watch::Receiver<bool>,
-) -> Result<Ended> {
+) -> Result<SessionEnd> {
     let stops = StreamStops::default();
     let (uni_queue, mut uni) = mpsc::channel(UNI_QUEUE);
     let stream_config = StreamConfig::default();
@@ -390,7 +390,7 @@ pub async fn transcribe(
         tokio::select! {
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
-                    break Ended::Stopped;
+                    break SessionEnd::Stopped;
                 }
             }
             event = uni.recv() => {
@@ -774,7 +774,7 @@ impl Transcribing<'_> {
     /// Subscribes to the catalog of a broadcast.
     fn subscribe_catalog(&mut self, namespace: &TrackNamespace) -> Result<()> {
         self.asking_again
-            .remove(&(namespace.clone(), Asked::Catalog));
+            .remove(&(namespace.clone(), BroadcastTrack::Catalog));
         let Some(broadcast) = self.broadcasts.get(namespace) else {
             return Ok(());
         };
@@ -882,7 +882,8 @@ impl Transcribing<'_> {
 
     /// Subscribes to the audio track of a broadcast.
     fn subscribe_audio(&mut self, namespace: &TrackNamespace) -> Result<()> {
-        self.asking_again.remove(&(namespace.clone(), Asked::Audio));
+        self.asking_again
+            .remove(&(namespace.clone(), BroadcastTrack::Audio));
         let Some(broadcast) = self.broadcasts.get(namespace) else {
             return Ok(());
         };
@@ -913,7 +914,7 @@ impl Transcribing<'_> {
     /// WHY no count of times, as the gatherer has for a participant's `said`:
     /// a broadcast without sound names no audio track in its catalog, and
     /// is not asked; one that names it is meant to be heard.
-    fn audio_over(&mut self, namespace: &TrackNamespace, over: Over, why: &str) {
+    fn audio_over(&mut self, namespace: &TrackNamespace, over: SubscriptionEnd, why: &str) {
         println!(
             "AUDIO_NOT_SUBSCRIBED namespace={} why={why:?}",
             shown(namespace)
@@ -924,10 +925,10 @@ impl Transcribing<'_> {
         };
         broadcast.audio = None;
         let pause = match over {
-            Over::Refused(named) => broadcast.audio_again.after_refusal(named),
-            Over::Ended => broadcast.audio_again.after_end(),
+            SubscriptionEnd::Refused(named) => broadcast.audio_again.after_refusal(named),
+            SubscriptionEnd::Ended => broadcast.audio_again.after_end(),
         };
-        self.ask_later(namespace, Asked::Audio, pause);
+        self.ask_later(namespace, BroadcastTrack::Audio, pause);
     }
 
     /// The catalog subscription of a broadcast that stays announced is
@@ -939,7 +940,7 @@ impl Transcribing<'_> {
     /// catalog was refused before its publisher had it (a relay without a
     /// rendezvous) would not be heard until the publisher announced again.
     /// Its sound, if it has one, is listened to meanwhile.
-    fn catalog_over(&mut self, namespace: &TrackNamespace, over: Over, why: &str) {
+    fn catalog_over(&mut self, namespace: &TrackNamespace, over: SubscriptionEnd, why: &str) {
         println!(
             "CATALOG_NOT_SUBSCRIBED namespace={} why={why:?}",
             shown(namespace)
@@ -949,17 +950,17 @@ impl Transcribing<'_> {
         };
         broadcast.catalog = None;
         let pause = match over {
-            Over::Refused(named) => broadcast.catalog_again.after_refusal(named),
-            Over::Ended => broadcast.catalog_again.after_end(),
+            SubscriptionEnd::Refused(named) => broadcast.catalog_again.after_refusal(named),
+            SubscriptionEnd::Ended => broadcast.catalog_again.after_end(),
         };
-        self.ask_later(namespace, Asked::Catalog, pause);
+        self.ask_later(namespace, BroadcastTrack::Catalog, pause);
     }
 
     /// A track of a broadcast is asked for again in `pause_ms`.
-    fn ask_later(&mut self, namespace: &TrackNamespace, track: Asked, pause_ms: u64) {
+    fn ask_later(&mut self, namespace: &TrackNamespace, track: BroadcastTrack, pause_ms: u64) {
         let what = match track {
-            Asked::Catalog => "catalog",
-            Asked::Audio => "audio",
+            BroadcastTrack::Catalog => "catalog",
+            BroadcastTrack::Audio => "audio",
         };
         println!(
             "ASKING_AGAIN namespace={} track={what} in_ms={pause_ms}",
@@ -977,7 +978,7 @@ impl Transcribing<'_> {
 
     fn ask_again(&mut self) -> Result<()> {
         let now = Instant::now();
-        let due: Vec<(TrackNamespace, Asked)> = self
+        let due: Vec<(TrackNamespace, BroadcastTrack)> = self
             .asking_again
             .iter()
             .filter(|(_, at)| **at <= now)
@@ -985,8 +986,8 @@ impl Transcribing<'_> {
             .collect();
         for (namespace, track) in due {
             match track {
-                Asked::Catalog => self.subscribe_catalog(&namespace)?,
-                Asked::Audio => self.subscribe_audio(&namespace)?,
+                BroadcastTrack::Catalog => self.subscribe_catalog(&namespace)?,
+                BroadcastTrack::Audio => self.subscribe_audio(&namespace)?,
             }
         }
         Ok(())
@@ -1086,7 +1087,7 @@ impl Transcribing<'_> {
     }
 
     /// An event of the relay's unidirectional streams.
-    fn on_uni(&mut self, event: UniEvent) -> Result<Option<Ended>> {
+    fn on_uni(&mut self, event: UniEvent) -> Result<Option<SessionEnd>> {
         // What a SUBSCRIBE that ended meanwhile left held is let go of before
         // what came after it.
         self.take_early()?;
@@ -1094,7 +1095,7 @@ impl Transcribing<'_> {
             UniEvent::Control(message) => match self.session.on_control_message(message)? {
                 ControlEvent::GoAway(go_away) => {
                     println!("GOAWAY");
-                    return Ok(Some(Ended::Moved(new_url(&go_away.new_session_uri))));
+                    return Ok(Some(SessionEnd::Moved(new_url(&go_away.new_session_uri))));
                 }
                 ControlEvent::Setup(_) => bail!("the session took a second SETUP"),
             },
@@ -1179,7 +1180,7 @@ impl Transcribing<'_> {
     }
 
     /// What the task of one of the transcriber's request streams heard.
-    fn on_heard(&mut self, token: u64, heard: Heard) -> Result<Option<Ended>> {
+    fn on_heard(&mut self, token: u64, heard: Heard) -> Result<Option<SessionEnd>> {
         let Some(own) = self.own.get(&token) else {
             return Ok(None);
         };
@@ -1305,13 +1306,17 @@ impl Transcribing<'_> {
                     watch.again = Some(Instant::now() + wait);
                 }
             }
-            Purpose::Catalog(namespace) => self.catalog_over(&namespace.clone(), Over::Ended, why),
+            Purpose::Catalog(namespace) => {
+                self.catalog_over(&namespace.clone(), SubscriptionEnd::Ended, why);
+            }
             Purpose::CatalogFetch(namespace) => {
                 if let Some(broadcast) = self.broadcasts.get_mut(namespace) {
                     broadcast.catalog_fetch = None;
                 }
             }
-            Purpose::Audio(namespace) => self.audio_over(&namespace.clone(), Over::Ended, why),
+            Purpose::Audio(namespace) => {
+                self.audio_over(&namespace.clone(), SubscriptionEnd::Ended, why);
+            }
             Purpose::Speech(prefix) => {
                 println!("TRANSCRIPT_NOT_PUBLISHED prefix={prefix} why={why:?}");
                 self.unpublish(*prefix, token);
@@ -1428,7 +1433,7 @@ impl Transcribing<'_> {
         token: u64,
         purpose: &Purpose,
         event: RequestEvent,
-    ) -> Result<Option<Ended>> {
+    ) -> Result<Option<SessionEnd>> {
         match (purpose, event) {
             (_, RequestEvent::GoAway(_)) => {
                 println!("GOAWAY on a request stream");
@@ -1481,7 +1486,7 @@ impl Transcribing<'_> {
             (_, RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
                 let why = format!("refused with {:#x}", error.error_code);
-                let over = Over::Refused(error.retry_wait_ms());
+                let over = SubscriptionEnd::Refused(error.retry_wait_ms());
                 match purpose {
                     Purpose::Audio(namespace) => self.audio_over(&namespace.clone(), over, &why),
                     Purpose::Catalog(namespace) => {
@@ -1494,7 +1499,7 @@ impl Transcribing<'_> {
                 let namespace = namespace.clone();
                 self.let_go(token, Command::Finish);
                 let why = format!("PUBLISH_DONE {:#x}", done.status_code);
-                self.audio_over(&namespace, Over::Ended, &why);
+                self.audio_over(&namespace, SubscriptionEnd::Ended, &why);
             }
             (_, RequestEvent::SubscriptionDone(_)) => {
                 self.let_go(token, Command::Finish);

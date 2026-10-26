@@ -16,14 +16,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::watch;
-use xmoq_again::next_session::Ended as SessionEnded;
+use xmoq_again::next_session::Ended;
 use xmoq_chat::gather::Gatherer;
 use xmoq_chat::rooms::MAX_ROOMS;
 use xmoq_moqt_io::wt;
 use xmoq_moqt_io::{Connection, StreamConfig, client};
 use xmoq_track_serving::backoff::NextTry;
 
-use crate::session::Ended;
+use crate::session::SessionEnd;
 use crate::storage::Store;
 
 /// How long a closed session gets to reach the relay before the gatherer
@@ -85,14 +85,14 @@ async fn run(args: xmoq_chat::args::Args) -> Result<()> {
                 connection.close(client::termination_code_of(&result), b"");
                 let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
                 match result {
-                    Ok(Ended::Stopped) => return Ok(()),
-                    Ok(Ended::Moved(to)) => SessionEnded::Moved(to),
-                    Err(_) => SessionEnded::Failed { began: true },
+                    Ok(SessionEnd::Stopped) => return Ok(()),
+                    Ok(SessionEnd::Moved(to)) => Ended::Moved(to),
+                    Err(_) => Ended::Failed { began: true },
                 }
             }
             Err(error) => {
                 println!("NOT_CONNECTED {error}");
-                SessionEnded::Failed { began: false }
+                Ended::Failed { began: false }
             }
         };
         let wait;

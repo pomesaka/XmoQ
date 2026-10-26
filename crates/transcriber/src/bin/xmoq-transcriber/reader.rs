@@ -16,7 +16,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use xmoq_speech::Words;
 use xmoq_speech::cut::Piece;
-use xmoq_transcriber::transcript::Said;
+use xmoq_transcriber::transcript::ReadPiece;
 
 /// What the reader has read and the loop has not taken yet; the reader
 /// waits when it is full.
@@ -34,19 +34,19 @@ pub struct ToRead {
 /// A piece that was read.
 pub struct Read {
     pub prefix: usize,
-    pub said: Said,
+    pub said: ReadPiece,
     /// How long it waited for the reader, and how long the reader took.
     pub waited_ms: u128,
     pub took_ms: u128,
 }
 
 /// The loop's side of the reader: where pieces are given.
-pub struct Reader {
+pub struct ReaderPool {
     pieces: SyncSender<(Instant, ToRead)>,
     dropped: u64,
 }
 
-impl Reader {
+impl ReaderPool {
     /// Starts a thread for each of `readers`, with at most `waiting`
     /// pieces waiting for them. Each thread takes the next piece that
     /// waits. What they read comes on the receiver, in the order each was
@@ -133,7 +133,7 @@ fn run(
                 continue;
             }
         };
-        let said = Said {
+        let said = ReadPiece {
             from,
             text,
             start_us: piece.start_us,

@@ -1,7 +1,7 @@
 //! Control messages (§10) and their framing on control and request streams.
 
 use crate::coding::{
-    ReadError, ReadResult, Reader, ReceiveBuffer, parse_exact, put_length_prefixed,
+    ByteReader, ReadError, ReadResult, ReceiveBuffer, parse_exact, put_length_prefixed,
 };
 use crate::immutable;
 use crate::kvp::{self, KeyValuePair};
@@ -73,7 +73,9 @@ const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
 /// the session. The properties are handed on as they came, Immutable
 /// Properties as one property with its bytes: §12.7 has "the serialization
 /// ... of the Key-Value-Pairs MUST NOT change".
-pub(crate) fn decode_track_properties(reader: &mut Reader<'_>) -> ReadResult<Vec<KeyValuePair>> {
+pub(crate) fn decode_track_properties(
+    reader: &mut ByteReader<'_>,
+) -> ReadResult<Vec<KeyValuePair>> {
     let properties = kvp::decode_all(reader)?;
     let Ok(searched) = immutable::properties_to_search(&properties, immutable::Of::Track)? else {
         return Ok(properties);
@@ -255,7 +257,7 @@ impl ReasonPhrase {
         &self.0
     }
 
-    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         let len = reader.length()?;
         if len > MAX_REASON_PHRASE_LEN {
             return Err(Error::ProtocolViolation("reason phrase longer than 1024 bytes").into());
@@ -286,7 +288,7 @@ pub struct Subscribe {
 impl Subscribe {
     /// The payload of a SUBSCRIBE or a `TRACK_STATUS` (`kind`), whose
     /// parameters are checked as of that kind.
-    fn decode(reader: &mut Reader<'_>, kind: MessageKind) -> ReadResult<Self> {
+    fn decode(reader: &mut ByteReader<'_>, kind: MessageKind) -> ReadResult<Self> {
         let request_id = reader.varint()?;
         let full_track_name = FullTrackName::decode(reader)?;
         let parameters = params::decode_all(reader)?;
@@ -479,7 +481,7 @@ pub struct GoAway {
 }
 
 impl GoAway {
-    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         let uri_len = reader.length()?;
         if uri_len > MAX_NEW_SESSION_URI_LEN {
             return Err(Error::ProtocolViolation("New Session URI longer than 8192 bytes").into());
@@ -575,7 +577,7 @@ impl RequestError {
             .map(|ms| ms.min(retry_interval::LONGEST_WAIT_MS))
     }
 
-    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         let error_code = reader.varint()?;
         let retry_interval = reader.varint()?;
         let error_reason = ReasonPhrase::decode(reader)?;
@@ -636,7 +638,7 @@ impl Fetch {
         params::encode_all(&self.parameters, out)
     }
 
-    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         let request_id = reader.varint()?;
         let range = match reader.varint()? {
             FETCH_TYPE_STANDALONE => FetchRange::Standalone {
@@ -675,7 +677,7 @@ impl FetchOk {
         Ok(())
     }
 
-    fn decode(reader: &mut Reader<'_>) -> ReadResult<Self> {
+    fn decode(reader: &mut ByteReader<'_>) -> ReadResult<Self> {
         // §10.13 gives the field 8 bits and the values 1 and 0. WHY any other
         // value is a violation: nothing says what it would mean, and FORWARD,
         // the other field of that kind, is read so (§10.2.12).
@@ -758,7 +760,7 @@ impl ControlMessage {
     /// type this crate does not decode, as soon as the type has arrived, and a
     /// protocol error for a payload that does not match its type or its length.
     pub fn decode(buf: &[u8]) -> Result<Option<(Self, usize)>, Error> {
-        let mut reader = Reader::new(buf);
+        let mut reader = ByteReader::new(buf);
         let (ty, payload) = match split_frame(&mut reader) {
             Ok(frame) => frame,
             Err(ReadError::Short) => {
@@ -895,7 +897,7 @@ impl ControlMessage {
 }
 
 /// Cuts `Message Type, Message Length, Message Payload` off the front (§10).
-fn split_frame<'a>(reader: &mut Reader<'a>) -> ReadResult<(u64, &'a [u8])> {
+fn split_frame<'a>(reader: &mut ByteReader<'a>) -> ReadResult<(u64, &'a [u8])> {
     let ty = reader.varint()?;
     let len = usize::from(reader.u16()?);
     Ok((ty, reader.bytes(len)?))
@@ -926,7 +928,7 @@ fn check_parameters(parameters: &[Parameter], kind: MessageKind) -> Result<(), E
     }
 }
 
-fn decode_payload(ty: u64, reader: &mut Reader<'_>) -> ReadResult<ControlMessage> {
+fn decode_payload(ty: u64, reader: &mut ByteReader<'_>) -> ReadResult<ControlMessage> {
     Ok(match ty {
         SETUP => ControlMessage::Setup(Setup {
             setup_options: kvp::decode_all(reader)?,
