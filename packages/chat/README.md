@@ -14,7 +14,7 @@ const participant = await joinChat(connection, {
 const outcome = await participant.say("hello"); // sent, kept-back (too-long, too-fast), or not-sent
 ```
 
-`joinChat` announces `xmoq/chat/<kind>/<room>/<name>` (PUBLISH_NAMESPACE), accepts the relay's SUBSCRIBE for `said` there, and subscribes to `lines` of `xmoq/chat/<kind>/<room>`. **It names the `serve` handlers of the connection**, so it wants a connection of its own: a SUBSCRIBE for another track, and every FETCH, are refused. When its `signal` aborts, the participant withdraws its namespace (§6.2), and the relay tells the gatherer with NAMESPACE_DONE, which has the gatherer end its SUBSCRIBE for `said`; the session stays open.
+`joinChat` announces `xmoq/chat/<kind>/<room>/<name>` (PUBLISH_NAMESPACE), accepts the relay's SUBSCRIBE for `said` and `reacted` there (`publishTrack` of [`@xmoq/tracks`](../tracks/README.md): one subscription each, and a SUBSCRIBE whose answer cannot be sent is refused with INTERNAL_ERROR and reported), and subscribes to `lines` of `xmoq/chat/<kind>/<room>`. **It names the `serve` handlers of the connection** (`serveTracks`), so it wants a connection of its own: a request for another track is refused with DOES_NOT_EXIST, and a FETCH for `said` or `reacted` with NOT_SUPPORTED. When its `signal` aborts, the participant withdraws its namespace (§6.2), and the relay tells the gatherer with NAMESPACE_DONE, which has the gatherer end its SUBSCRIBE for `said`; the session stays open.
 
 ## What it does
 

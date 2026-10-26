@@ -217,15 +217,16 @@ package_layer() {
 	# The reader of JSON is one that the packages of the tracks share. The client of a room
 	# is asked over HTTP and needs none of the others.
 	@xmoq/moqt | @xmoq/loc | @xmoq/json | @xmoq/room-client) echo 0 ;;
-	# What an endpoint does with tracks, whatever they carry, and the streaming format, built
-	# on the transport alone.
-	@xmoq/msf | @xmoq/tracks) echo 1 ;;
-	# The chat and the transcript follow their tracks by @xmoq/tracks; media keeps and serves
-	# its tracks by it.
-	@xmoq/chat | @xmoq/transcript | @xmoq/media) echo 2 ;;
-	@xmoq/meeting) echo 3 ;;
+	# What an endpoint does with tracks, whatever they carry, built on the transport alone.
+	@xmoq/tracks) echo 1 ;;
+	# Each publishes or follows its tracks by @xmoq/tracks: the catalog, the chat's tracks
+	# and a transcript's.
+	@xmoq/msf | @xmoq/chat | @xmoq/transcript) echo 2 ;;
+	# Media publishes its catalog by @xmoq/msf.
+	@xmoq/media) echo 3 ;;
+	@xmoq/meeting) echo 4 ;;
 	# The room is run, not built on: nothing depends on it.
-	@xmoq/room) echo 4 ;;
+	@xmoq/room) echo 5 ;;
 	*) echo "" ;;
 	esac
 }

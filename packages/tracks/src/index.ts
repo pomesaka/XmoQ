@@ -19,5 +19,14 @@ export {
 	type KeptTrackState,
 	keepTrackOnSession,
 } from "./keep-track.ts";
+export {
+	DEFAULT_END_TIMEOUT_MS,
+	endedByThePeer,
+	type PublishingTrack,
+	type PublishTrackOptions,
+	publishTrack,
+	tellEnd,
+	wholeNumber,
+} from "./publish.ts";
 export { type ServedTrack, serveTracks } from "./serve.ts";
 export { type StayOptions, stayOnSession } from "./stay-on-session.ts";

@@ -174,3 +174,51 @@ describe("createAudioTrackPublisher: how it answers, as the video publisher does
 		}).toEqual({ answers, log });
 	});
 });
+
+describe("createAudioTrackPublisher: its options", () => {
+	test.each([
+		["maxPendingChunks of 0", { maxPendingChunks: 0 }],
+		["a fraction of maxPendingChunks", { maxPendingChunks: 1.5 }],
+		["chunksPerGroup of 0", { chunksPerGroup: 0 }],
+		["a fraction of chunksPerGroup", { chunksPerGroup: 2.5 }],
+		["chunksPerGroup that is no number", { chunksPerGroup: Number.NaN }],
+		["an endTimeoutMs below 0", { endTimeoutMs: -1 }],
+	])("%s is refused", (_case, given) => {
+		expect(() =>
+			createAudioTrackPublisher({
+				trackNamespace: NAMESPACE.map(utf8),
+				trackName: utf8("audio"),
+				firstGroup: 5n,
+				epoch: 1000000n,
+				...given,
+			}),
+		).toThrow(RangeError);
+	});
+});
+
+test("a SUBSCRIBE whose answer cannot be sent is refused with INTERNAL_ERROR, and reported, as the video publisher does", async () => {
+	const publisher = createAudioTrackPublisher({
+		trackNamespace: NAMESPACE.map(utf8),
+		trackName: utf8("audio"),
+		firstGroup: 5n,
+		epoch: 1000000n,
+	});
+	const { request, answers } = fakeSubscribe(NAMESPACE, "audio", {
+		acceptFails: new RangeError("a value that does not fit"),
+	});
+	const errors: unknown[] = [];
+	const original = globalThis.reportError;
+	globalThis.reportError = (error: unknown) => {
+		errors.push(error);
+	};
+	try {
+		publisher.subscribe(request);
+		await settle();
+	} finally {
+		globalThis.reportError = original;
+	}
+	expect({ answers, reports: errors.length }).toEqual({
+		answers: ["REQUEST_ERROR 0"],
+		reports: 1,
+	});
+});

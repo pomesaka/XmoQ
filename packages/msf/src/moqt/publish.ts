@@ -3,20 +3,22 @@
 // unless they say "transport", which is draft-ietf-moq-transport-18.
 
 import {
-	LONGEST_TIMER_MS,
 	type PeerFetch,
 	type PeerSubscribe,
-	PublishDoneCode,
-	PublishEndedError,
 	type PublishedTrack,
 	RequestErrorCode,
-	ServedFetchEndedError,
-	SessionClosedError,
 	SubgroupClosedError,
 	type SubgroupWriter,
-	sameFullTrackName,
+	type SubscribeAnswer,
 	type TrackNamespace,
 } from "@xmoq/moqt";
+import {
+	DEFAULT_END_TIMEOUT_MS,
+	endedByThePeer,
+	publishTrack,
+	tellEnd,
+	wholeNumber,
+} from "@xmoq/tracks";
 import type { Catalog } from "../core/catalog.ts";
 import {
 	answerCatalogFetch,
@@ -36,24 +38,6 @@ const CATALOG_TRACK_NAME = new TextEncoder().encode("catalog");
  */
 const FETCH_PUBLISHER_PRIORITY = 128;
 
-/**
- * How long `end` waits for a subscriber to take the last catalog, when no
- * other time is given. Provisional: the time `@xmoq/moqt` gives a peer to
- * end its direction of a request stream, for the same reason, a peer that
- * does not do its part. Not chosen by a measurement.
- */
-const DEFAULT_END_TIMEOUT_MS = 3000;
-
-/**
- * Whether a call on a request, a subscription or a fetch stream failed
- * because the peer ended it, or the session is over: nothing is left to do
- * then, and it is no fault of anyone here.
- */
-const endedByThePeer = (error: unknown): boolean =>
-	error instanceof PublishEndedError ||
-	error instanceof ServedFetchEndedError ||
-	error instanceof SessionClosedError;
-
 export interface CatalogPublisherOptions {
 	/** The namespace of the catalog track: the one the broadcast is in. */
 	namespace: TrackNamespace;
@@ -72,8 +56,9 @@ export interface CatalogPublisherOptions {
 	firstGroup?: bigint;
 	/**
 	 * How long `end` waits for a subscriber to take the catalog that is
-	 * being written to it, in milliseconds; 3000 when left out. A whole
-	 * number from 0 to 2^31 - 1, or a `RangeError`.
+	 * being written to it, in milliseconds; `DEFAULT_END_TIMEOUT_MS` of
+	 * `@xmoq/tracks` (3000) when left out. A whole number from 0 to
+	 * 2^31 - 1, or a `RangeError`.
 	 */
 	endTimeoutMs?: number;
 }
@@ -173,29 +158,16 @@ export function createCatalogPublisher(
 		options.firstGroup ?? BigInt(Date.now()),
 		options.namespace,
 	);
-	const endTimeoutMs = options.endTimeoutMs ?? DEFAULT_END_TIMEOUT_MS;
-	// As the timers of @xmoq/moqt: NaN and a fraction are no time, and
-	// `setTimeout` takes a signed 32-bit number of milliseconds.
-	if (
-		!Number.isInteger(endTimeoutMs) ||
-		endTimeoutMs < 0 ||
-		endTimeoutMs > LONGEST_TIMER_MS
-	) {
-		throw new RangeError(
-			`endTimeoutMs is a whole number from 0 to ${LONGEST_TIMER_MS}, not ${String(endTimeoutMs)}`,
-		);
-	}
+	const endTimeoutMs = wholeNumber(
+		"endTimeoutMs",
+		options.endTimeoutMs ?? DEFAULT_END_TIMEOUT_MS,
+		0,
+	);
 	const subscribers = new Set<Subscriber>();
 	/** The subscriptions with FORWARD 0: nothing is sent on them but PUBLISH_DONE. */
 	const silent = new Set<PublishedTrack>();
 	/** Set by `end`, which this settles with. */
 	let ending: Promise<void> | undefined;
-
-	const isCatalogTrack = (request: PeerSubscribe | PeerFetch): boolean =>
-		sameFullTrackName(request, {
-			trackNamespace: options.namespace,
-			trackName: CATALOG_TRACK_NAME,
-		});
 
 	/**
 	 * A failure that is nobody's doing on the other side: it is reported
@@ -281,13 +253,7 @@ export function createCatalogPublisher(
 
 	/** Ends a subscription once it has the newest catalog, or its time for that is over. */
 	const tell = async (subscriber: Subscriber): Promise<void> => {
-		const done = (): Promise<void> =>
-			subscriber.track.done(PublishDoneCode.TRACK_ENDED, "").then(
-				() => {},
-				(error: unknown) => {
-					if (!endedByThePeer(error)) fault(error);
-				},
-			);
+		const done = (): Promise<void> => tellEnd(subscriber.track);
 		send(subscriber);
 		const first = late();
 		const outcome = await Promise.race([subscriber.writing, first.over]);
@@ -321,75 +287,58 @@ export function createCatalogPublisher(
 		await done();
 	};
 
-	return {
-		subscribe(request) {
-			if (!isCatalogTrack(request)) return false;
-			if (ending !== undefined) {
-				// A request that went meanwhile needs no answer.
-				request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-				return true;
-			}
-			const told = publication.at;
-			request.accept({ parameters: { largestObject: told } }).then(
-				(track) => {
-					// Transport §5.1: "The publisher does not send Objects if the
-					// Forward State is 0". The subscription is kept for its
-					// PUBLISH_DONE alone.
-					if (request.parameters.forward === false) {
-						if (ending !== undefined) {
-							void track.done(PublishDoneCode.TRACK_ENDED, "").catch(() => {});
-							return;
-						}
-						silent.add(track);
-						void track.ended.then(() => silent.delete(track));
-						return;
-					}
-					const subscriber: Subscriber = {
-						track,
-						sentGroup: told.group,
-						busy: false,
-						writing: Promise.resolve(),
-						stream: undefined,
-					};
-					subscribers.add(subscriber);
-					if (ending !== undefined) {
-						// The track ended while the answer was on its way: the
-						// subscription gets a catalog that was published in
-						// that time, and its PUBLISH_DONE. `end` does not wait
-						// for it.
-						void tell(subscriber);
-						return;
-					}
-					void track.ended.then(() => subscribers.delete(subscriber));
-					// A catalog that was published while the answer was on its
-					// way.
-					send(subscriber);
-				},
-				(error: unknown) => {
-					// The request went before it was answered.
-					if (request.signal.aborted) return;
-					// The answer was not sent, and the request still waits for
-					// one: without this the peer waits until it gives up.
-					request.reject(RequestErrorCode.INTERNAL_ERROR).catch(() => {});
-					fault(error);
-				},
-			);
-			return true;
-		},
+	/** A subscription that is sent catalogs, from the Group its SUBSCRIBE_OK said. */
+	const subscriberOf = (
+		track: PublishedTrack,
+		answer: SubscribeAnswer,
+	): Subscriber => ({
+		track,
+		sentGroup: answer.parameters?.largestObject?.group ?? publication.at.group,
+		busy: false,
+		writing: Promise.resolve(),
+		stream: undefined,
+	});
 
-		fetch(request) {
-			if (!isCatalogTrack(request)) return false;
-			if (ending !== undefined) {
-				request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
-				return true;
+	const published = publishTrack({
+		trackNamespace: options.namespace,
+		trackName: CATALOG_TRACK_NAME,
+		subscribers: "many",
+		answer: () => ({ parameters: { largestObject: publication.at } }),
+		subscribed(track, request, answer) {
+			// Transport §5.1: "The publisher does not send Objects if the
+			// Forward State is 0". The subscription is kept for its
+			// PUBLISH_DONE alone.
+			if (request.parameters.forward === false) {
+				silent.add(track);
+				void track.ended.then(() => silent.delete(track));
+				return;
 			}
+			const subscriber = subscriberOf(track, answer);
+			subscribers.add(subscriber);
+			void track.ended.then(() => subscribers.delete(subscriber));
+			// A catalog that was published while the answer was on its way.
+			send(subscriber);
+		},
+		subscribedLate(track, request, answer) {
+			if (request.parameters.forward === false) {
+				void tellEnd(track);
+				return;
+			}
+			// The track ended while the answer was on its way: the subscription
+			// gets a catalog that was published in that time, and its
+			// PUBLISH_DONE. `end` does not wait for it.
+			const subscriber = subscriberOf(track, answer);
+			subscribers.add(subscriber);
+			void tell(subscriber);
+		},
+		fetch(request) {
 			// What is published now: a catalog that replaces it while the
 			// stream is written does not change the answer.
 			const { at, payload } = publication;
 			const answer = answerCatalogFetch(publication, request);
 			if (answer.type === "invalid-range") {
 				request.reject(RequestErrorCode.INVALID_RANGE).catch(() => {});
-				return true;
+				return;
 			}
 			request.accept({ endLocation: answer.endLocation }).then(
 				async (writer) => {
@@ -424,11 +373,15 @@ export function createCatalogPublisher(
 					fault(error);
 				},
 			);
-			return true;
 		},
+	});
+
+	return {
+		subscribe: (request) => published.subscribe(request),
+		fetch: (request) => published.fetch(request),
 
 		update(catalog) {
-			if (ending !== undefined) {
+			if (published.ended) {
 				throw new RangeError("the catalog track has ended");
 			}
 			publication = nextPublication(publication, catalog);
@@ -446,10 +399,12 @@ export function createCatalogPublisher(
 
 		end() {
 			ending ??= (async () => {
+				// The answers on their way are not waited for: each gets the
+				// last catalog and its PUBLISH_DONE when it comes
+				// (`subscribedLate`).
+				void published.end();
 				const told = [...subscribers].map(tell);
-				const quiet = [...silent].map((track) =>
-					track.done(PublishDoneCode.TRACK_ENDED, "").catch(() => {}),
-				);
+				const quiet = [...silent].map(tellEnd);
 				silent.clear();
 				await Promise.all([...told, ...quiet]);
 			})();

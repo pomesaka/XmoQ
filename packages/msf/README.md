@@ -16,7 +16,7 @@ Not implemented: delta updates (told apart, not applied), compression (§12.1), 
 
 ## Layer rules
 
-`src/core` is JSON and bytes: it uses no I/O and does not import `@xmoq/moqt`. `src/moqt` is the part that uses a `MoqtConnection`, through the public entry of `@xmoq/moqt` alone. The entry `@xmoq/msf/catalog` is `src/core/catalog.ts` by itself, for code that is type-checked without the types of a browser. `tsconfig.core.json` type-checks it without the DOM library, and `noRestrictedImports` in the root `biome.jsonc` keeps the import out. `@xmoq/moqt` does not depend on this package (`scripts/ci/check-layers.sh`).
+`src/core` is JSON and bytes: it uses no I/O and does not import `@xmoq/moqt`. `src/moqt` is the part that uses a `MoqtConnection`, through the public entry of `@xmoq/moqt` alone. The entry `@xmoq/msf/catalog` is `src/core/catalog.ts` by itself, for code that is type-checked without the types of a browser. `tsconfig.core.json` type-checks it without the DOM library, and `noRestrictedImports` in the root `biome.jsonc` keeps the import out. `@xmoq/moqt` does not depend on this package. It is in layer 2, above `@xmoq/tracks`, whose `publishTrack` the catalog publisher takes the requests of the peer by (`scripts/ci/check-layers.sh`).
 
 ## How the draft is read
 

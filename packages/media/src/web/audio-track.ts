@@ -10,6 +10,7 @@ import {
 	type MoqtConnection,
 	type SubscriptionEnd,
 } from "@xmoq/moqt";
+import { DEFAULT_END_TIMEOUT_MS } from "@xmoq/tracks";
 import { MAX_DECODER_TIME } from "../core/decoder-time.ts";
 import {
 	type DeliveryTimeouts,
@@ -23,7 +24,6 @@ import {
 	createAudioTrackPublisher,
 } from "../moqt/audio-track-publisher.ts";
 import { locProperties } from "../moqt/loc-properties.ts";
-import { DEFAULT_END_TIMEOUT_MS } from "../moqt/video-track-publisher.ts";
 
 export interface AudioTrackEncoderOptions {
 	trackNamespace: readonly Uint8Array[];
