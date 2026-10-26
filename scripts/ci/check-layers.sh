@@ -20,11 +20,14 @@ IO_CRATES=(mio socket2 polling async-io quinn-udp web-transport-quinn quinn)
 # Crates that must stay free of others, as "package name:what it stays free of:banned crates".
 # WHY cc, cmake and bindgen for a C compiler: a crate that builds C calls one of them from its
 # build script (ring 0.17.14, libsqlite3-sys 0.38.2, whisper-rs-sys 0.15.0 and openh264-sys2 0.9.8
-# of Cargo.lock all do). The tracks are read by programs that are to build without one.
+# of Cargo.lock all do). The tracks are read by programs that are to build without one, and
+# xmoq-viewer does no input or output and has no need of one (it takes xmoq-room-token without
+# its feature "keys", which needs ring).
 # WHY libsqlite3-sys for SQLite: rusqlite reaches SQLite through it.
 FREE_OF=(
 	"xmoq-chat-tracks:C compiler:cc cmake bindgen"
 	"xmoq-transcript-tracks:C compiler:cc cmake bindgen"
+	"xmoq-viewer:C compiler:cc cmake bindgen"
 	"xmoq-watch:SQLite:libsqlite3-sys"
 )
 

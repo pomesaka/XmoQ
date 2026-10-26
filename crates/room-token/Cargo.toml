@@ -11,4 +11,9 @@ workspace = true
 [dependencies]
 xmoq-moqt = { path = "../moqt" }
 # HMAC-SHA-256. Already built, under quinn.
-ring = "=0.17.14"
+ring = { version = "=0.17.14", optional = true }
+
+[features]
+default = ["keys"]
+# The key, and making and reading a token with it (lib.rs has why apart).
+keys = ["dep:ring"]

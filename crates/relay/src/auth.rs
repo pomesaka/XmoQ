@@ -229,8 +229,8 @@ impl Authorizer for RoomTokens {
     }
 
     /// A token for the namespace `*`, which allows every namespace
-    /// ([`namespace_fits`]), for [`OWN_TOKEN_SECONDS`] from now: what the
-    /// relay puts on its SETUP and requests to a parent relay that
+    /// ([`namespace_fits`]), from now ([`RoomKey::authorization_token`]):
+    /// what the relay puts on its SETUP and requests to a parent relay that
     /// shares the key. Made anew for each, as the chat's gatherer makes its
     /// own (`crates/chat`): a relay runs for longer than one token.
     fn own_token(&self, operation: Operation) -> Option<Vec<u8>> {
@@ -238,22 +238,9 @@ impl Authorizer for RoomTokens {
             Operation::Publish => Role::Pub,
             Operation::Subscribe | Operation::SubscribeNamespace => Role::Sub,
         };
-        let expiry = (self.now)().saturating_add(OWN_TOKEN_SECONDS);
-        let text = self.key.make("*", role, expiry);
-        Some(
-            Token::UseValue {
-                token_type: 0,
-                value: text.into_bytes(),
-            }
-            .encode(),
-        )
+        Some(self.key.authorization_token("*", role, (self.now)()))
     }
 }
-
-/// How long a token the relay makes for itself runs: as long as one the
-/// room makes (`TOKEN_SECONDS` of `packages/room/src/token.ts`)
-/// and one the gatherer makes. Provisional.
-const OWN_TOKEN_SECONDS: u64 = 600;
 
 /// Whether the namespace a token names allows what is under it (its last
 /// field is `*`, [`namespace_fits`]), as a `SUBSCRIBE_NAMESPACE` has to.

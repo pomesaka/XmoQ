@@ -298,7 +298,7 @@ async fn place(args: &Args, client: Option<&RoomClient>, ui: &mut Ui) -> Result<
             .unless_ended(
                 "the room's token",
                 Duration::from_millis(args.room_wait_ms),
-                client.token(room::TokenRole::Sub, &broadcast.namespace),
+                client.token(xmoq_room_token::Role::Sub, &broadcast.namespace),
             )
             .await?
         else {
@@ -330,7 +330,8 @@ async fn place(args: &Args, client: Option<&RoomClient>, ui: &mut Ui) -> Result<
     }
     Ok(Some(Place {
         url: relay.relay_url,
-        cert_sha256: room::certificate_hash(&relay.cert_sha256_hex)?,
+        cert_sha256: wt::certificate_hash(&relay.cert_sha256_hex)
+            .ok_or_else(|| anyhow!("the hash of a certificate is 64 hex digits"))?,
         namespace: broadcast.namespace,
         token,
         chat_tokens,

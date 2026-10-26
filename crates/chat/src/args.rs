@@ -26,6 +26,7 @@ xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file
 --auth-key-hex      the key the relay checks tokens with; the gatherer makes its own tokens (where the relay shares its key with it)";
 
 use xmoq_chat_tracks::names::Room;
+use xmoq_moqt_io::wt::certificate_hash;
 
 use crate::said_again::{PAUSE_MS_LEAST, PAUSE_MS_MOST, Settings, TIMES_MOST};
 
@@ -91,19 +92,6 @@ pub struct Args {
     pub auth_key: Option<Vec<u8>>,
     /// `--ask-again-times`, `--ask-again-ms`.
     pub ask_again: Settings,
-}
-
-/// Reads 64 hexadecimal digits.
-fn certificate_hash(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 || !text.is_ascii() {
-        return None;
-    }
-    let mut hash = [0; 32];
-    for (index, byte) in hash.iter_mut().enumerate() {
-        let digits = text.get(index * 2..index * 2 + 2)?;
-        *byte = u8::from_str_radix(digits, 16).ok()?;
-    }
-    Some(hash)
 }
 
 /// A number between 1 and `most`.

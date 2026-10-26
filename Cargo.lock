@@ -2816,6 +2816,7 @@ dependencies = [
  "xmoq-moqt-io",
  "xmoq-msf",
  "xmoq-picture",
+ "xmoq-room-token",
  "xmoq-transcript-tracks",
  "xmoq-viewer",
  "xmoq-viewer-io",
@@ -2982,6 +2983,8 @@ name = "xmoq-viewer"
 version = "0.0.0"
 dependencies = [
  "serde_json",
+ "xmoq-moqt",
+ "xmoq-room-token",
 ]
 
 [[package]]
@@ -2998,6 +3001,7 @@ dependencies = [
  "xmoq-moqt",
  "xmoq-moqt-io",
  "xmoq-msf",
+ "xmoq-room-token",
  "xmoq-viewer",
 ]
 
@@ -3018,6 +3022,7 @@ dependencies = [
  "xmoq-moqt-io",
  "xmoq-msf",
  "xmoq-picture",
+ "xmoq-room-token",
  "xmoq-viewer",
  "xmoq-viewer-io",
 ]

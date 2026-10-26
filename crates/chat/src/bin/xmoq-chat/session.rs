@@ -68,7 +68,6 @@ use xmoq_moqt::session::{
     ControlEvent, MalformedRequest, RequestEvent, RequestId, Role, Session, SubscribedAlias,
     Transport,
 };
-use xmoq_moqt::token::Token;
 use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
@@ -92,10 +91,6 @@ use xmoq_publisher::{shown, sleep_until};
 use crate::storage::Store;
 
 type Send = <WtConnection as Connection>::Send;
-
-/// How long a token the gatherer makes runs, in seconds: as long as one of
-/// the room (`TOKEN_SECONDS` of `packages/room/src/token.ts`).
-const TOKEN_SECONDS: u64 = 600;
 
 /// How long a request may wait for the relay to allow its stream, as the
 /// Rust client waits (`STREAM_OPEN_WAIT_MS`). Provisional.
@@ -485,9 +480,8 @@ pub async fn gather(
 
 impl Gathering<'_> {
     /// A token of the gatherer's own for `role` in every namespace of the
-    /// chat (`xmoq/chat/*`) that runs for [`TOKEN_SECONDS`] from now,
-    /// carried as an AUTHORIZATION TOKEN (§10.2.2: Alias Type `USE_VALUE`,
-    /// Token Type 0); `None` without `--auth-key-hex`.
+    /// chat (`xmoq/chat/*`) from now, as an AUTHORIZATION TOKEN
+    /// ([`RoomKey::authorization_token`]); `None` without `--auth-key-hex`.
     ///
     /// WHY made anew for each request: the relay checks a request when it
     /// comes (`crates/relay/src/auth.rs`), and a gatherer runs for longer
@@ -501,14 +495,7 @@ impl Gathering<'_> {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
         let namespace = format!("{}/*", names::PREFIX.join("/"));
-        let text = key.make(&namespace, role, now.saturating_add(TOKEN_SECONDS));
-        Some(
-            Token::UseValue {
-                token_type: 0,
-                value: text.into_bytes(),
-            }
-            .encode(),
-        )
+        Some(key.authorization_token(&namespace, role, now))
     }
 
     /// [`Self::token`] as the parameter of a request.

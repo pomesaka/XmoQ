@@ -17,6 +17,7 @@ xmoq-moqt-io = { path = "../moqt-io" }
 xmoq-msf = { path = "../msf" }
 # The video decoder (`openh264`) is there, in one file.
 xmoq-picture = { path = "../picture" }
+xmoq-room-token = { path = "../room-token" }
 xmoq-viewer = { path = "../viewer" }
 xmoq-viewer-io = { path = "../viewer-io" }
 anyhow = "=1.0.100"
