@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use xmoq_moqt::message::{ControlMessage, Fetch, ReasonPhrase, request_error_code};
+use xmoq_moqt::message::{ControlMessage, Fetch, ReasonPhrase, request_error_code, retry_interval};
 use xmoq_moqt::name::Location;
 use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::session::{
@@ -216,7 +216,10 @@ impl PeerRequests {
         request: PeerRequestId,
         code: u64,
     ) -> Result<(), RequestError> {
-        let response = session.reject(request, code, 0, ReasonPhrase::default())?;
+        // EXCESSIVE_LOAD with a Retry Interval: room comes back once other
+        // answers are written.
+        let retry = retry_interval::made_up(code);
+        let response = session.reject(request, code, retry, ReasonPhrase::default())?;
         self.refused.insert(stream, request);
         self.reply(send, response);
         Ok(())
