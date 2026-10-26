@@ -25,10 +25,10 @@ model: sonnet
 prompt で revset と作業ディレクトリが渡されたら、それを使う。渡されなければ `main..@` とカレントディレクトリを使う。
 
 ```bash
-jj diff --git -r '<revset>' 'glob:"packages/**" | (glob:"interop/**" ~ glob:"interop/peers/**") | glob:"demo/**"'
+jj diff --git -r '<revset>' 'glob:"packages/**" | glob:"interop/**" | glob:"demo/**"'
 ```
 
-差分が空の場合は「TypeScript の変更なし」と報告して終了。差分の周辺を読むときは、渡された作業ディレクトリの下のファイルを Read する。`spikes/` の下と、`moqtail` のコードの写しの `interop/peers/` は対象外。`demo/` は lint と型検査の対象外なので、型と依存の向きは読んで確かめる。
+差分が空の場合は「TypeScript の変更なし」と報告して終了。差分の周辺を読むときは、渡された作業ディレクトリの下のファイルを Read する。`spikes/` の下は対象外。`demo/` は lint と型検査の対象外、`interop/peers/`（`spikes/moqtail/` の写し）は整形と lint の対象外なので、どちらも型と依存の向きは読んで確かめる。
 
 **3. レビューを実施する。**
 

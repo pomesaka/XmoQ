@@ -25,7 +25,7 @@ prompt で revset と作業ディレクトリが渡されたら、それを使�
 jj diff --git -r '<revset>'
 ```
 
-差分が空の場合は「変更なし」と報告して終了。差分の周辺を読むときは、渡された作業ディレクトリの下のファイルを Read する。`spikes/` の下、`moqtail` のコードの写しの `interop/peers/`、lockfile は対象外。
+差分が空の場合は「変更なし」と報告して終了。差分の周辺を読むときは、渡された作業ディレクトリの下のファイルを Read する。`spikes/` の下と lockfile は対象外。`interop/peers/` は `spikes/moqtail/` の写しの自前のコードなので対象に入る。
 
 **3. レビューを実施する。**
 
