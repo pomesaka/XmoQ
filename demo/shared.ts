@@ -3,11 +3,17 @@
 // page puts out; the namespace, the sample rate of the sound and the mark
 // are agreed on here.
 
-import { connect, type MoqtConnection } from "@xmoq/moqt";
+import {
+	connect,
+	DEFAULT_RECONNECT_DELAY_MS,
+	type MoqtConnection,
+} from "@xmoq/moqt";
 import { NAMESPACE } from "./namespace.ts";
 import { startChat } from "./room-chat.ts";
 
 export { NAMESPACE };
+/** The pause between sessions, as a page says it: what `keepPublishing` and `keepPlaying` wait where they are given no `againMs`. */
+export const AGAIN = `${DEFAULT_RECONNECT_DELAY_MS / 1000} s`;
 export const TRACK = "video";
 export const AUDIO_TRACK = "audio";
 export const SAMPLE_RATE = 48_000;

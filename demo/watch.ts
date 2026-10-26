@@ -33,6 +33,7 @@ import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
 import { TRANSCRIPT_PREFIX } from "@xmoq/transcript";
 import { startCaptions } from "./captions.ts";
 import {
+	AGAIN,
 	type Broadcast,
 	connectToRelay,
 	firstBytes,
@@ -674,14 +675,14 @@ async function main(): Promise<void> {
 	});
 	// One session after the other (`keepPlaying` of @xmoq/media): when the
 	// session ends, or the tracks do (their publisher went), the page says
-	// so and connects again after two seconds, asking the room anew where
+	// so and connects again after `AGAIN`, asking the room anew where
 	// the broadcast is.
 	await keepPlaying({
 		async connect(goAway) {
 			// Where the room names no broadcast, the page waits for the
 			// room's word that one has begun, which comes as it happens.
-			// WHY NOT ask again after the pause, as before: the pause is 2
-			// seconds, and the picture began up to that much late.
+			// WHY NOT ask again after the pause: the picture would begin up to
+			// the pause late.
 			let found: Broadcast;
 			if (room === undefined) found = HERE;
 			else if (WAIT) found = room.current() ?? HERE;
@@ -1007,7 +1008,7 @@ async function main(): Promise<void> {
 					link = "connecting";
 					return;
 				case "nothing-to-play":
-					link = "nobody publishes in this room; asking again every 2 s";
+					link = `nobody publishes in this room; asking again every ${AGAIN}`;
 					return;
 				case "playing":
 					sessions = state.session;
@@ -1015,15 +1016,15 @@ async function main(): Promise<void> {
 					link = `playing (session ${sessions})`;
 					return;
 				case "session-ended":
-					link = `the session ended (${state.close.type}) at ${at}; connecting again every 2 s`;
+					link = `the session ended (${state.close.type}) at ${at}; connecting again every ${AGAIN}`;
 					return;
 				case "playing-ended":
 					link = WAIT
 						? `the video track ended (${state.end}) at ${at}; waiting for it on this session`
-						: `the video track ended (${state.end}) at ${at}; connecting again every 2 s`;
+						: `the video track ended (${state.end}) at ${at}; connecting again every ${AGAIN}`;
 					return;
 				case "failed":
-					link = `could not play (${why(state.error)}); trying again every 2 s`;
+					link = `could not play (${why(state.error)}); trying again every ${AGAIN}`;
 					return;
 			}
 		},
