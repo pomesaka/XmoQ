@@ -13,7 +13,14 @@ import {
 	ServedFetchEndedError,
 	SessionClosedError,
 } from "../../src/webtransport/endings.ts";
-import { fixture, hex, MOQTAIL_RELAY_SETUP, toHex, utf8 } from "../helpers.ts";
+import {
+	fixture,
+	fixtureTable,
+	hex,
+	MOQTAIL_RELAY_SETUP,
+	toHex,
+	utf8,
+} from "../helpers.ts";
 import {
 	createFakePeer,
 	type FakePeer,
@@ -817,6 +824,119 @@ describe("serve: the wait after `close()`", () => {
 			await writer.close();
 			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
 			expect(jest.getTimerCount()).toBe(1);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+});
+
+// The rows of `fixtures/peer-fetch/served-end.tsv`, which the relay and the
+// Rust client read as well. The time the subscriber is waited for is
+// `peerStreamEndTimeoutMs` of `connected`, 20 ms here.
+describe("serve: the request stream of a FETCH served to its end (served-end.tsv)", () => {
+	const rows = fixtureTable("peer-fetch", "served-end.tsv");
+	test("the table has its rows", () => {
+		expect(rows.length).toBe(10);
+	});
+	test.each(rows)("%s", async (_name, before, after, own, peerSide, update) => {
+		const { stream, writer } = await serving();
+		switch (before) {
+			case "fin":
+				await stream.reply.close();
+				await settle();
+				break;
+			case "-":
+				break;
+			default:
+				throw new Error(`no before ${before}`);
+		}
+		jest.useFakeTimers();
+		try {
+			const turns = async (): Promise<void> => {
+				for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			};
+			const finished = stream.sent.read();
+			const isOpen = async (): Promise<boolean> =>
+				(await Promise.race([finished, Promise.resolve("open")])) === "open";
+			/** The publisher finishes its direction when the wait is over, and not before. */
+			const finishesAfterTheWait = async (): Promise<void> => {
+				expect(await isOpen()).toBe(true);
+				jest.advanceTimersByTime(20);
+				await turns();
+				expect(await isOpen()).toBe(false);
+				expect(await finished).toEqual(END);
+			};
+			await writer.close();
+			await turns();
+			let waited = false;
+			for (const step of (after ?? "").split(",")) {
+				switch (step) {
+					case "nothing":
+						break;
+					case "fin":
+						void stream.reply.close().catch(() => {});
+						break;
+					case "reset":
+						void stream.reply
+							.abort(fakeStreamError(1, "reset"))
+							.catch(() => {});
+						break;
+					case "stop-sending":
+						void stream.sent.cancel(fakeStreamError(1, "stop"));
+						break;
+					case "update":
+						await stream.reply.write(REQUEST_UPDATE);
+						break;
+					case "wait":
+						await finishesAfterTheWait();
+						waited = true;
+						break;
+					default:
+						throw new Error(`no step ${step}`);
+				}
+				await turns();
+			}
+			switch (own) {
+				case "fin":
+					// At once, and nothing before the FIN: no answer to an update.
+					expect(await isOpen()).toBe(false);
+					expect(await finished).toEqual(END);
+					break;
+				case "wait>fin":
+					if (!waited) await finishesAfterTheWait();
+					break;
+				case "reset:0x1":
+					// The subscriber stopped this direction, and cannot read what
+					// becomes of it (the README of the table).
+					break;
+				default:
+					throw new Error(`no own ${own}`);
+			}
+			switch (peerSide) {
+				case "stop:0x1":
+					expect(
+						await rejection(stream.reply.write(new Uint8Array(1))),
+					).toMatchObject({ streamErrorCode: 1 });
+					break;
+				case "-":
+					// Nothing at once; what follows the wait is not a row (the
+					// README of the table).
+					break;
+				default:
+					throw new Error(`no peer ${peerSide}`);
+			}
+			switch (update) {
+				case "no":
+					// The first thing read of the publisher's direction is its
+					// end: nothing was written before it, no REQUEST_OK and no
+					// REQUEST_ERROR.
+					expect(await finished).toEqual(END);
+					break;
+				case "-":
+					break;
+				default:
+					throw new Error(`no update ${update}`);
+			}
 		} finally {
 			jest.useRealTimers();
 		}
