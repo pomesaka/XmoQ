@@ -10,6 +10,7 @@ import type { KeyValuePair } from "../core/key-value-pair.ts";
 import {
 	answerWaitMs,
 	DEFAULT_ANSWER_WAIT_MS,
+	LONGEST_TIMER_MS,
 	type SessionLimits,
 } from "../core/limits.ts";
 import type {
@@ -186,9 +187,6 @@ const UPDATE_REFUSED_WAIT_MS = 5_000;
  */
 const DEFAULT_PEER_STREAM_END_TIMEOUT_MS = 3_000;
 
-/** The longest delay `setTimeout` takes (HTML, "timer initialization steps": a signed 32-bit number of milliseconds). */
-const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
-
 /**
  * A wait of the connect options, checked for what a timer takes.
  *
@@ -197,9 +195,9 @@ const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
  * that was asked for and does not happen is not noticed.
  */
 function timerDelay(name: string, value: number, least = 0): number {
-	if (!Number.isInteger(value) || value < least || value > MAX_TIMER_DELAY_MS) {
+	if (!Number.isInteger(value) || value < least || value > LONGEST_TIMER_MS) {
 		throw new RangeError(
-			`${name} is a whole number from ${least} to ${MAX_TIMER_DELAY_MS}, not ${String(value)}`,
+			`${name} is a whole number from ${least} to ${LONGEST_TIMER_MS}, not ${String(value)}`,
 		);
 	}
 	return value;
@@ -304,7 +302,7 @@ export interface SessionConnectOptions {
 	 * long is stopped with STOP_SENDING `INTERNAL_ERROR` (`0x0`), and the
 	 * Objects held of it are dropped; **the subscription and the session
 	 * stay**, and the stream counts as ended for PUBLISH_DONE. Fetch
-	 * streams do not have this time. A whole number from 1 to 2147483647,
+	 * streams do not have this time. A whole number from 1 to `LONGEST_TIMER_MS`,
 	 * or `connect` rejects with a `RangeError`.
 	 *
 	 * WHY from 1, where the other waits take 0: there is no value that
@@ -318,7 +316,7 @@ export interface SessionConnectOptions {
 	/**
 	 * How long to wait for the peer's SETUP before closing with
 	 * CONTROL_MESSAGE_TIMEOUT. Like the two waits below, a whole number from
-	 * 0 to 2147483647, the longest delay a timer takes, or `connect` rejects
+	 * 0 to `LONGEST_TIMER_MS`, the longest delay a timer takes, or `connect` rejects
 	 * with a `RangeError`. With 0, only a SETUP that has arrived already is
 	 * in time.
 	 */

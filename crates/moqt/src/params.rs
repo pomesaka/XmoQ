@@ -421,10 +421,6 @@ fn decode_filter(reader: &mut ByteReader<'_>) -> ReadResult<SubscriptionFilter> 
 /// time the peer's SETUP gets. **Provisional.**
 pub const ANSWER_WAIT_MS: u64 = 10_000;
 
-/// The longest an answer is waited for: the longest delay a timer of a
-/// browser takes, which is what `@xmoq/moqt` can wait.
-pub const MOST_ANSWER_WAIT_MS: u64 = 2_147_483_647;
-
 /// How long the answer to a request with these parameters is waited for,
 /// in milliseconds: `base_ms`, and as long again as the request itself
 /// tells a relay to wait.
@@ -447,7 +443,8 @@ pub fn answer_wait_ms(base_ms: u64, parameters: &[Parameter]) -> u64 {
             _ => 0,
         })
         .fold(0u64, u64::saturating_add);
-    base_ms.saturating_add(asked).min(MOST_ANSWER_WAIT_MS)
+    // No longer than `@xmoq/moqt` can wait.
+    base_ms.saturating_add(asked).min(crate::LONGEST_TIMER_MS)
 }
 
 /// Appends `Number of Parameters` and the parameters, in ascending type order as
