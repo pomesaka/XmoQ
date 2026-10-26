@@ -4590,6 +4590,35 @@ mod upstream {
         );
     }
 
+    /// §3.6 at an edge that goes away: it is drained once its own clients
+    /// are gone, and its session with the origin is closed then, not when
+    /// the GOAWAY's Timeout is over.
+    #[tokio::test(start_paused = true)]
+    async fn an_edge_that_goes_away_is_drained_once_its_clients_are_gone() {
+        let (origin, _task) = hub::spawn(HubConfig::default());
+        let edge = edge_of(&origin);
+        let mut publisher = Peer::connect(&origin, true).await;
+        let _namespace = publisher.publish_namespace().await;
+        let mut alice = Peer::connect(&edge, true).await;
+        let mut request = alice.start_subscribing().await;
+        let _upstream = publisher.accept_relay_subscribe().await;
+        alice.answer(&mut request).await;
+
+        let going_away = {
+            let edge = edge.clone();
+            tokio::spawn(async move { edge.go_away(Vec::new(), 10_000).await })
+        };
+        tokio::time::sleep(SOON).await;
+        assert!(!going_away.is_finished());
+        alice.connection.close(0, b"");
+        assert!(timeout(SOON, going_away).await.is_ok());
+        tokio::time::sleep(SOON).await;
+        assert_eq!(
+            (origin.held().await.sessions, edge.held().await.sessions),
+            (1, 0)
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_edge_that_held_nothing_connects_again_for_its_next_subscriber() {
         let (origin, _task) = hub::spawn(HubConfig::default());
