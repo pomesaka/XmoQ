@@ -50,13 +50,6 @@ const LINES_PAYLOAD_MOST: usize = 64 * 1024;
 /// Object of a live track (the Rust client's `SUBGROUP_OPEN_WAIT`).
 const SAID_OPEN_WAIT: Duration = Duration::from_secs(2);
 
-/// How long the relay is asked to hold the SUBSCRIBE to `lines` for the
-/// gatherer to publish it: the most the own relay holds
-/// (`MAX_RENDEZVOUS_MS`). WHY held: the gatherer publishes `lines` of a room
-/// once a participant has come, and the viewer that comes first would
-/// otherwise be refused before its own announcement reached the gatherer.
-const LINES_RENDEZVOUS_MS: u64 = 30_000;
-
 /// What the loop is to do with what came. How a line is shown is the
 /// program's: the terminal and the agent's file show it differently.
 pub enum Out {
@@ -160,7 +153,11 @@ impl ChatTracks {
             Track {
                 namespace: room,
                 name: LINES,
-                rendezvous_ms: Some(LINES_RENDEZVOUS_MS),
+                // WHY held: the gatherer publishes `lines` of a room once a
+                // participant has come, and the viewer that comes first
+                // would otherwise be refused before its own announcement
+                // reached the gatherer.
+                rendezvous_ms: Some(follow::RENDEZVOUS_MS),
                 payload_most: LINES_PAYLOAD_MOST,
                 fetch_most: FETCH_LIMIT,
                 catch_up,

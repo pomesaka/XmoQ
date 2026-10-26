@@ -37,7 +37,7 @@ curl -s "http://127.0.0.1:$control/set?loss=0&delay=${DELAY:-50}&rate=${RATE:-20
 page=$!
 for _ in $(seq 1 40); do grep -q "^PUBLISHING" "$work/page.log" && break; sleep 0.5; done
 sha=$(openssl x509 -in "$root/demo/.cert/cert.pem" -outform der | shasum -a 256 | cut -d' ' -f1)
-"$root/target/release/xmoq-watch" --url "https://127.0.0.1:$link/" --cert-sha256 "$sha" --namespace xmoq/demo \
+"$root/target/release/xmoq-watch" --url "https://127.0.0.1:$link/" --cert-sha256 "$sha" --namespace xmoq/broadcast/demo \
   --seconds "$seconds" --sound off --medium direct --fit none --out /dev/null "$@" 2> "$work/watch.log" || true
 grep -E "AV_PLAYED|Error|SESSION_ENDED" "$work/watch.log" || cat "$work/watch.log"
 echo "LINK $(curl -s "http://127.0.0.1:$control/stats")"

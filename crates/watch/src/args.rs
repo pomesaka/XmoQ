@@ -1,7 +1,8 @@
 //! The flags of the viewer.
 
+use xmoq_chat_tracks::names::{Kind, Room};
 use xmoq_viewer::reconnect::{CONNECT_WAIT_MS, ROOM_WAIT_MS};
-use xmoq_viewer::room::certificate_hash;
+use xmoq_viewer::room::{RoomAddress, RoomKind, certificate_hash, room_address};
 
 use crate::tracks::VideoVersion;
 
@@ -38,12 +39,10 @@ pub enum Source {
         /// `--namespace`, its fields between slashes.
         namespace: String,
     },
-    /// A room that says where the broadcast is and gives a token.
+    /// The room of a broadcast, which says where it is and gives tokens.
     Room {
-        /// `--room`: `http://host:port/rooms/<name>`.
-        address: String,
-        /// `--name`: what the viewer is called in the chat.
-        name: String,
+        /// `--room`: `http(s)://host:port/broadcasts/<name>`.
+        address: RoomAddress,
         /// `--token no` asks the room for none.
         ask_token: bool,
     },
@@ -53,9 +52,9 @@ pub enum Source {
 /// viewer's name in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chat {
-    /// With `--room`, the last segment of its address; with `--url`,
+    /// With `--room`, the room of its broadcast; with `--url`,
     /// `--chat-room`.
-    pub room: String,
+    pub room: Room,
     /// `--name`.
     pub name: String,
     /// `--say`: a line said on `said` once the chat on tracks has begun.
@@ -178,9 +177,11 @@ impl std::error::Error for Invalid {}
 
 /// The flags, each of which takes a value.
 pub const USAGE: &str = "\
-xmoq-watch --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace xmoq/demo]
-           [--chat-room <room> [--name terminal] [--say <a line>]] [--chat-catch-up-lines 16]
-xmoq-watch --room http://host:port/rooms/<name> [--name terminal] [--say <a line>] [--token no]
+xmoq-watch --url https://host:port/ --cert-sha256 <64 hex digits> --namespace <a/b>
+           [--chat-room broadcast/<name>|meeting/<name> [--name terminal] [--say <a line>]]
+           [--chat-catch-up-lines 16]
+xmoq-watch --room http(s)://host:port/broadcasts/<name> [--name terminal] [--say <a line>] [--token no]
+  --chat-room <kind>/<name>         the chat's room with --url (with --room, the room's)
   --video <track> --audio <track>   the tracks by name; without them, those of the catalog
   --video-version first|name:<track>|height:<n>|bitrate:<n>
                                     which version of the video of the catalog: the first (first), the
@@ -275,24 +276,25 @@ fn fit(value: &str) -> Result<Fit, Invalid> {
 ///
 /// [`Invalid`] for a flag that is not one, a flag without its value, a
 /// value a flag does not take, neither or both of `--url` and `--room`,
-/// `--url` without `--cert-sha256`, and one of `--video` and `--audio`
-/// without the other.
+/// `--url` without `--cert-sha256`, an address that is no room of a
+/// broadcast's, `--chat-room` with `--room`, and one of `--video` and
+/// `--audio` without the other.
 #[allow(
     clippy::too_many_lines,
     reason = "one arm a flag: cut in two, the list of the flags would be in two places"
 )]
 pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
-    let (mut url, mut cert_sha256, mut namespace) = (None, None, "xmoq/demo".to_string());
+    let (mut url, mut cert_sha256, mut namespace) = (None, None, None);
     let (mut room, mut name, mut say, mut ask_token) = (None, "terminal".to_string(), None, true);
     let (mut video, mut audio) = (None, None);
     let mut chat_room = None;
     let mut catch_up = xmoq_viewer::chat_track::CATCH_UP_LINES;
     let mut args = Args {
         // Replaced below: a source is asked for.
-        source: Source::Room {
-            address: String::new(),
-            name: String::new(),
-            ask_token: true,
+        source: Source::Relay {
+            url: String::new(),
+            cert_sha256: [0; 32],
+            namespace: String::new(),
         },
         chat: None,
         tracks: None,
@@ -330,8 +332,14 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                         .map_err(|error| Invalid(format!("--cert-sha256: {error}")))?,
                 );
             }
-            "--namespace" => namespace = value,
-            "--chat-room" => chat_room = Some(value),
+            "--namespace" => namespace = Some(value),
+            "--chat-room" => {
+                chat_room = Some(Room::parse(&value).ok_or_else(|| {
+                    Invalid(format!(
+                        "--chat-room {value}: broadcast/<name> or meeting/<name>"
+                    ))
+                })?);
+            }
             "--chat-catch-up-lines" => {
                 catch_up = value
                     .parse()
@@ -422,21 +430,32 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             other => return Err(Invalid(format!("unknown flag {other}"))),
         }
     }
-    args.chat = match (&room, chat_room) {
-        (Some(address), None) => {
-            xmoq_viewer::chat_track::room_of_address(address).map(|room| Chat {
-                room: room.to_string(),
-                name: name.clone(),
-                say: say.clone(),
-                catch_up,
-            })
-        }
-        (None, Some(room)) => Some(Chat {
-            room,
-            name: name.clone(),
-            say: say.clone(),
-            catch_up,
-        }),
+    let address = room
+        .map(|text| {
+            let address =
+                room_address(&text).map_err(|error| Invalid(format!("--room: {error}")))?;
+            // WHY not a meeting's: the viewer plays one broadcast, and a
+            // meeting has one for each participant.
+            if address.kind == RoomKind::Meeting {
+                return Err(Invalid(format!(
+                    "--room {text}: the room of a broadcast, not of a meeting"
+                )));
+            }
+            Ok(address)
+        })
+        .transpose()?;
+    let chat_of = |room: Room| Chat {
+        room,
+        name: name.clone(),
+        say: say.clone(),
+        catch_up,
+    };
+    args.chat = match (&address, chat_room) {
+        (Some(address), None) => Some(chat_of(Room {
+            kind: Kind::Broadcast,
+            name: address.name.clone(),
+        })),
+        (None, Some(room)) => Some(chat_of(room)),
         (None, None) => None,
         (Some(_), Some(_)) => {
             return Err(Invalid(
@@ -444,18 +463,19 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
             ));
         }
     };
-    args.source = match (url, room) {
+    args.source = match (url, address) {
         (Some(url), None) => Source::Relay {
             url,
             cert_sha256: cert_sha256
                 .ok_or_else(|| Invalid("--url needs --cert-sha256".to_string()))?,
-            namespace,
+            // WHY no default: the components hold no value of an
+            // application, and the caller names the broadcast (decided on
+            // 2026-10-26).
+            namespace: namespace.ok_or_else(|| {
+                Invalid("--url needs --namespace: the broadcast is not assumed".to_string())
+            })?,
         },
-        (None, Some(address)) => Source::Room {
-            address,
-            name,
-            ask_token,
-        },
+        (None, Some(address)) => Source::Room { address, ask_token },
         (None, None) => return Err(Invalid("--url or --room is needed".to_string())),
         (Some(_), Some(_)) => return Err(Invalid("--url or --room, not both".to_string())),
     };
@@ -484,11 +504,18 @@ mod tests {
         parse(line.split_whitespace().map(str::to_string))
     }
 
+    fn chat_room(kind: Kind, name: &str) -> Room {
+        Room {
+            kind,
+            name: name.to_string(),
+        }
+    }
+
     /// The defaults with `source`; with a room, the chat of the room
     /// `a` as `terminal`.
     fn defaults(source: Source) -> Args {
         let chat = matches!(source, Source::Room { .. }).then(|| Chat {
-            room: "a".to_string(),
+            room: chat_room(Kind::Broadcast, "a"),
             name: "terminal".to_string(),
             say: None,
             catch_up: 16,
@@ -524,55 +551,63 @@ mod tests {
     #[test]
     fn the_chat_on_tracks_is_of_the_room_or_of_chat_room() {
         let hash = "0f".repeat(32);
-        let url = format!("--url https://h:1/ --cert-sha256 {hash}");
-        let chat = |room: &str, name: &str| {
+        let url =
+            format!("--url https://h:1/ --cert-sha256 {hash} --namespace xmoq/broadcast/demo");
+        let chat = |room: Room, name: &str, say: Option<&str>, catch_up: u64| {
             Some(Chat {
-                room: room.to_string(),
+                room,
                 name: name.to_string(),
-                say: None,
-                catch_up: 16,
+                say: say.map(str::to_string),
+                catch_up,
             })
         };
         // (the flags; the chat, or what is wrong)
         let cases = [
             (url.clone(), Ok(None)),
-            (format!("{url} --chat-room r"), Ok(chat("r", "terminal"))),
             (
-                format!("{url} --chat-room r --name me"),
-                Ok(chat("r", "me")),
+                format!("{url} --chat-room broadcast/r"),
+                Ok(chat(chat_room(Kind::Broadcast, "r"), "terminal", None, 16)),
             ),
             (
-                format!("{url} --chat-room r --say hi"),
-                Ok(Some(Chat {
-                    room: "r".to_string(),
-                    name: "terminal".to_string(),
-                    say: Some("hi".to_string()),
-                    catch_up: 16,
-                })),
+                format!("{url} --chat-room meeting/r --name me"),
+                Ok(chat(chat_room(Kind::Meeting, "r"), "me", None, 16)),
             ),
             (
-                format!("{url} --chat-room r --chat-catch-up-lines 1000"),
-                Ok(Some(Chat {
-                    room: "r".to_string(),
-                    name: "terminal".to_string(),
-                    say: None,
-                    catch_up: 1000,
-                })),
+                format!("{url} --chat-room broadcast/r --say hi"),
+                Ok(chat(
+                    chat_room(Kind::Broadcast, "r"),
+                    "terminal",
+                    Some("hi"),
+                    16,
+                )),
             ),
             (
-                format!("{url} --chat-room r --chat-catch-up-lines 0"),
+                format!("{url} --chat-room broadcast/r --chat-catch-up-lines 1000"),
+                Ok(chat(
+                    chat_room(Kind::Broadcast, "r"),
+                    "terminal",
+                    None,
+                    1000,
+                )),
+            ),
+            (
+                format!("{url} --chat-room broadcast/r --chat-catch-up-lines 0"),
                 Err(Invalid(
                     "--chat-catch-up-lines is a whole number from 1 to 1000, not 0".to_string(),
                 )),
             ),
             (
-                "--room http://h/rooms/b --name me".to_string(),
-                Ok(chat("b", "me")),
+                format!("{url} --chat-room r"),
+                Err(Invalid(
+                    "--chat-room r: broadcast/<name> or meeting/<name>".to_string(),
+                )),
             ),
-            // An address without the room's name has no chat on tracks.
-            ("--room http://h".to_string(), Ok(None)),
             (
-                "--room http://h/rooms/b --chat-room r".to_string(),
+                "--room http://h/broadcasts/b --name me".to_string(),
+                Ok(chat(chat_room(Kind::Broadcast, "b"), "me", None, 16)),
+            ),
+            (
+                "--room http://h/broadcasts/b --chat-room broadcast/r".to_string(),
                 Err(Invalid(
                     "--chat-room is for --url; with --room the chat is the room's".to_string(),
                 )),
@@ -585,8 +620,11 @@ mod tests {
 
     fn room() -> Source {
         Source::Room {
-            address: "http://h/rooms/a".to_string(),
-            name: "terminal".to_string(),
+            address: RoomAddress {
+                base: "http://h/".to_string(),
+                kind: RoomKind::Broadcast,
+                name: "a".to_string(),
+            },
             ask_token: true,
         }
     }
@@ -595,28 +633,33 @@ mod tests {
     fn the_flags_are_read() {
         let hash = "0f".repeat(32);
         assert_eq!(
-            parsed(&format!("--url https://h:1/ --cert-sha256 {hash}")),
+            parsed(&format!(
+                "--url https://h:1/ --cert-sha256 {hash} --namespace xmoq/broadcast/demo"
+            )),
             Ok(defaults(Source::Relay {
                 url: "https://h:1/".to_string(),
                 cert_sha256: [0x0f; 32],
-                namespace: "xmoq/demo".to_string(),
+                namespace: "xmoq/broadcast/demo".to_string(),
             }))
         );
-        assert_eq!(parsed("--room http://h/rooms/a"), Ok(defaults(room())));
+        assert_eq!(parsed("--room http://h/broadcasts/a"), Ok(defaults(room())));
         assert_eq!(
             parsed(
-                "--room http://h/rooms/a --name me --say hello --token no --video v --audio a \
+                "--room http://h/broadcasts/a --name me --say hello --token no --video v --audio a \
                  --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --room-wait-ms 600 --connect-wait-ms 700 --rendezvous-timeout-ms 4500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
                  --seconds 20 --log l --sound off --measure-demo-marks on --cut-sound-s 5"
             ),
             Ok(Args {
                 source: Source::Room {
-                    address: "http://h/rooms/a".to_string(),
-                    name: "me".to_string(),
+                    address: RoomAddress {
+                        base: "http://h/".to_string(),
+                        kind: RoomKind::Broadcast,
+                        name: "a".to_string(),
+                    },
                     ask_token: false,
                 },
                 chat: Some(Chat {
-                    room: "a".to_string(),
+                    room: chat_room(Kind::Broadcast, "a"),
                     name: "me".to_string(),
                     say: Some("hello".to_string()),
                     catch_up: 16,
@@ -646,7 +689,7 @@ mod tests {
             })
         );
         assert_eq!(
-            parsed("--room http://h/rooms/a --fit none").map(|args| args.fit),
+            parsed("--room http://h/broadcasts/a --fit none").map(|args| args.fit),
             Ok(Fit::AsItIs)
         );
         // (the value of `--video-version`; what it is read as)
@@ -661,25 +704,27 @@ mod tests {
         ];
         for (value, expected) in versions {
             assert_eq!(
-                parsed(&format!("--room http://h/rooms/a --video-version {value}"))
-                    .map(|args| args.video_version),
+                parsed(&format!(
+                    "--room http://h/broadcasts/a --video-version {value}"
+                ))
+                .map(|args| args.video_version),
                 Ok(expected),
                 "{value}"
             );
         }
         assert_eq!(
-            parsed("--room http://h/rooms/a --buffer-ms 300 --buffer-ms auto")
+            parsed("--room http://h/broadcasts/a --buffer-ms 300 --buffer-ms auto")
                 .map(|args| (args.buffer_ms, args.buffer_auto)),
             Ok((150, true))
         );
         assert_eq!(
-            parsed("--room http://h/rooms/a --buffer-ms auto --buffer-ms 300")
+            parsed("--room http://h/broadcasts/a --buffer-ms auto --buffer-ms 300")
                 .map(|args| (args.buffer_ms, args.buffer_auto)),
             Ok((300, false))
         );
         // 0 is the draft's way of asking for no timeout.
         assert_eq!(
-            parsed("--room http://h/rooms/a --video-timeout-ms 0")
+            parsed("--room http://h/broadcasts/a --video-timeout-ms 0")
                 .map(|args| args.video_timeout_ms),
             Ok(None)
         );
@@ -693,7 +738,11 @@ mod tests {
             (String::new(), "--url or --room is needed"),
             ("--url https://h/".to_string(), "--url needs --cert-sha256"),
             (
-                format!("--url https://h/ --cert-sha256 {hash} --room http://h/rooms/a"),
+                format!("--url https://h/ --cert-sha256 {hash}"),
+                "--url needs --namespace: the broadcast is not assumed",
+            ),
+            (
+                format!("--url https://h/ --cert-sha256 {hash} --room http://h/broadcasts/a"),
                 "--url or --room, not both",
             ),
             (
@@ -701,79 +750,108 @@ mod tests {
                 "--cert-sha256: the hash of a certificate is 64 hex digits",
             ),
             ("--room".to_string(), "--room needs a value"),
-            ("--room r --nothing 1".to_string(), "unknown flag --nothing"),
             (
-                "--room r --video v".to_string(),
+                "--room http://h/broadcasts/a --nothing 1".to_string(),
+                "unknown flag --nothing",
+            ),
+            (
+                "--room http://h/broadcasts/a --video v".to_string(),
                 "--video and --audio are given together, or neither",
             ),
             (
-                "--room r --buffer-ms soon".to_string(),
+                "--room http://h/broadcasts/a --buffer-ms soon".to_string(),
                 "--buffer-ms soon: not a number it takes",
             ),
             (
-                "--room r --buffer-ms -1".to_string(),
+                "--room http://h/broadcasts/a --buffer-ms -1".to_string(),
                 "--buffer-ms -1: not a number it takes",
             ),
             (
-                "--room r --buffer-ms 10001".to_string(),
+                "--room http://h/broadcasts/a --buffer-ms 10001".to_string(),
                 "--buffer-ms 10001: 10000 at most",
             ),
             (
-                "--room r --clock-skew-ppm -1000000".to_string(),
+                "--room http://h/broadcasts/a --clock-skew-ppm -1000000".to_string(),
                 "--clock-skew-ppm -1000000: from -999999 to 1000000",
             ),
             (
-                "--room r --volume 1.5".to_string(),
+                "--room http://h/broadcasts/a --volume 1.5".to_string(),
                 "--volume 1.5: from 0 to 1",
             ),
             (
-                "--room r --volume NaN".to_string(),
+                "--room http://h/broadcasts/a --volume NaN".to_string(),
                 "--volume NaN: from 0 to 1",
             ),
-            ("--room r --scale 0".to_string(), "--scale 0: 1 or more"),
             (
-                "--room r --video-version low".to_string(),
+                "--room http://h/broadcasts/a --scale 0".to_string(),
+                "--scale 0: 1 or more",
+            ),
+            (
+                "--room http://h/broadcasts/a --video-version low".to_string(),
                 "--video-version low: first, name:<track>, height:<n> or bitrate:<n>",
             ),
             (
-                "--room r --video-version name:".to_string(),
+                "--room http://h/broadcasts/a --video-version name:".to_string(),
                 "--video-version name:: first, name:<track>, height:<n> or bitrate:<n>",
             ),
             (
-                "--room r --video-version height:tall".to_string(),
+                "--room http://h/broadcasts/a --video-version height:tall".to_string(),
                 "--video-version height:tall: not a number it takes",
             ),
             (
-                "--room r --video v --audio a --video-version height:360".to_string(),
+                "--room http://h/broadcasts/a --video v --audio a --video-version height:360"
+                    .to_string(),
                 "--video names the track; --video-version chooses one of the catalog",
             ),
             (
-                "--room r --medium paper".to_string(),
+                "--room http://h/broadcasts/a --medium paper".to_string(),
                 "--medium paper: file or direct",
             ),
             (
-                "--room r --fit 0x10".to_string(),
+                "--room http://h/broadcasts/a --fit 0x10".to_string(),
                 "--fit 0x10: terminal, none or <width>x<height>",
             ),
             (
-                "--room r --fit wide".to_string(),
+                "--room http://h/broadcasts/a --fit wide".to_string(),
                 "--fit wide: terminal, none or <width>x<height>",
             ),
             (
-                "--room r --token maybe".to_string(),
+                "--room http://h/broadcasts/a --token maybe".to_string(),
                 "--token maybe: yes or no",
             ),
             (
-                "--room r --sound loud".to_string(),
+                "--room http://h/broadcasts/a --sound loud".to_string(),
                 "--sound loud: on or off",
             ),
             (
-                "--room r --measure-demo-marks 1".to_string(),
+                "--room http://h/broadcasts/a --measure-demo-marks 1".to_string(),
                 "--measure-demo-marks 1: on or off",
             ),
         ];
         for (flags, said) in cases {
             assert_eq!(parsed(&flags), Err(Invalid(said.to_string())), "{flags}");
+        }
+    }
+
+    #[test]
+    fn an_address_that_is_no_room_of_a_broadcast_is_turned_down() {
+        // (the address; what is said of it)
+        let cases = [
+            (
+                "http://h/rooms/a",
+                "--room: a room is http(s)://host/broadcasts/<name> or http(s)://host/meetings/<name>, not http://h/rooms/a",
+            ),
+            (
+                "http://h/meetings/a",
+                "--room http://h/meetings/a: the room of a broadcast, not of a meeting",
+            ),
+        ];
+        for (address, said) in cases {
+            assert_eq!(
+                parsed(&format!("--room {address}")),
+                Err(Invalid(said.to_string())),
+                "{address}"
+            );
         }
     }
 }

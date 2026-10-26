@@ -1,12 +1,13 @@
 //! Who is in the chat of the room: those whose namespace
-//! `xmoq/chat/<room>/<name>` the relay tells of, to a `SUBSCRIBE_NAMESPACE`
-//! for `xmoq/chat/<room>` (decided on 2026-10-25), as the gatherer finds
+//! `xmoq/chat/<kind>/<room>/<name>` the relay tells of, to a
+//! `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<kind>/<room>` (decided on
+//! 2026-10-25), as the gatherer finds
 //! them (`crates/chat/README.md`). Only those who announce a namespace for
 //! the chat are seen: a viewer that does not take part in it is not. The
 //! rule across sessions is `xmoq_viewer::presence`'s, which a meeting's
 //! participants go by as well; here are the room and the reader itself.
 
-use xmoq_chat_tracks::names::Person;
+use xmoq_chat_tracks::names::{Person, Room};
 use xmoq_viewer::presence::{self, Change};
 
 use crate::events::Event;
@@ -21,7 +22,7 @@ pub const MOST_IN_THE_CHAT: usize = 4_096;
 /// Who is in the chat, as told so far.
 #[derive(Debug)]
 pub struct Presence {
-    room: String,
+    room: Room,
     me: String,
     people: presence::Presence,
 }
@@ -42,9 +43,9 @@ fn event_of(change: Change) -> Event {
 impl Presence {
     /// Nobody yet, in `room`, where the reader is `me`.
     #[must_use]
-    pub fn new(room: &str, me: &str) -> Self {
+    pub fn new(room: &Room, me: &str) -> Self {
         Self {
-            room: room.to_string(),
+            room: room.clone(),
             me: me.to_string(),
             people: presence::Presence::new(MOST_IN_THE_CHAT),
         }
@@ -98,9 +99,10 @@ mod tests {
         Settled,
     }
 
+    /// A person of the room `room`, as `<kind>/<room>`.
     fn person(room: &str, name: &str) -> Person {
         Person {
-            room: room.to_string(),
+            room: Room::parse(room).expect("a room"),
             name: name.to_string(),
         }
     }
@@ -122,33 +124,49 @@ mod tests {
     #[test]
     fn who_comes_and_who_leaves_in_the_room() {
         use Step::{Done, Named, SessionEnded, Settled};
-        // (what happens, in the room `r` as `me`; the events of all of it)
-        let cases: [(&[Step], Vec<Event>); 5] = [
+        // (what happens, in the room `broadcast/r` as `me`; the events of all
+        // of it)
+        let cases: [(&[Step], Vec<Event>); 6] = [
             (
-                &[Named("r", "alice"), Done("r", "alice")],
+                &[Named("broadcast/r", "alice"), Done("broadcast/r", "alice")],
                 vec![joined("alice"), left("alice")],
             ),
             // The reader itself, and somebody of another room.
             (
-                &[Named("r", "me"), Named("other", "bob"), Done("r", "me")],
+                &[
+                    Named("broadcast/r", "me"),
+                    Named("broadcast/other", "bob"),
+                    Done("broadcast/r", "me"),
+                ],
                 vec![],
             ),
-            (&[Named("other", "bob"), Done("other", "bob")], vec![]),
-            // The reader itself is not taken to have left on a new session.
-            (&[Named("r", "me"), SessionEnded, Settled], vec![]),
             (
                 &[
-                    Named("r", "alice"),
-                    Named("r", "bob"),
+                    Named("broadcast/other", "bob"),
+                    Done("broadcast/other", "bob"),
+                ],
+                vec![],
+            ),
+            // A room of the same name and of the other kind is another.
+            (
+                &[Named("meeting/r", "bob"), Done("meeting/r", "bob")],
+                vec![],
+            ),
+            // The reader itself is not taken to have left on a new session.
+            (&[Named("broadcast/r", "me"), SessionEnded, Settled], vec![]),
+            (
+                &[
+                    Named("broadcast/r", "alice"),
+                    Named("broadcast/r", "bob"),
                     SessionEnded,
-                    Named("r", "alice"),
+                    Named("broadcast/r", "alice"),
                     Settled,
                 ],
                 vec![joined("alice"), joined("bob"), left("bob")],
             ),
         ];
         for (steps, expected) in cases {
-            let mut presence = Presence::new("r", "me");
+            let mut presence = Presence::new(&person("broadcast/r", "me").room, "me");
             let mut events = Vec::new();
             for step in steps {
                 match *step {

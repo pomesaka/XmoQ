@@ -1,6 +1,5 @@
-//! What a room says, and what is said to it: the messages of the room's
-//! WebSocket (`packages/room`), as text, and the requests and
-//! answers of its HTTP API (`@xmoq/room`), whose forms are
+//! What is asked of a room and what it answers: the requests and answers of
+//! its HTTP API (`@xmoq/room`), whose forms are
 //! `fixtures/room-api/README.md`.
 
 use serde_json::{Map, Value, json};
@@ -8,20 +7,7 @@ use serde_json::{Map, Value, json};
 /// The most characters of a line of the chat that are shown.
 pub const LINE_LIMIT: usize = 120;
 
-/// Where a broadcast is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Broadcast {
-    /// The address of the relay.
-    pub relay_url: String,
-    /// The SHA-256 of the relay's certificate, as hex.
-    pub cert_sha256_hex: String,
-    /// The fields of the Track Namespace.
-    pub namespace: Vec<String>,
-}
-
-/// Where the relay of the rooms is, as a room says it in its hello with a
-/// broadcast and without one (decided on 2026-10-25; why, at the top of
-/// `packages/room/src/worker.ts`).
+/// Where a room's relay is: its address, and the SHA-256 of its certificate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay {
     /// The address of the relay.
@@ -30,60 +16,7 @@ pub struct Relay {
     pub cert_sha256_hex: String,
 }
 
-/// What a room said.
-///
-/// The chat is not among it: it is on `MoQ` tracks (decided on
-/// 2026-10-24; [`crate::chat_track`]). A room that still sends its chat, or
-/// a history of it in its hello, has it passed over.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Said {
-    /// The first message: the broadcast the room has.
-    Hello {
-        /// The broadcast, where a publisher is in the room.
-        broadcast: Option<Broadcast>,
-        /// The relay of the rooms, where the room says it.
-        relay: Option<Relay>,
-        /// The prefix a transcriber listens under for the room's broadcast,
-        /// its fields, where the room says it: its transcript is `speech` of
-        /// `xmoq/transcript/<prefix>` (decided on 2026-10-25; why, at the top
-        /// of `packages/room/src/worker.ts`).
-        transcript: Option<Vec<String>>,
-        /// The same for the room's meeting (`meetingTranscript`).
-        meeting_transcript: Option<Vec<String>>,
-    },
-    /// A publisher came, or the one that was there left.
-    Broadcast(Option<Broadcast>),
-    /// The answer to [`ask_for_a_token`]: the token as text, or none where
-    /// the room has no key.
-    Token(Option<String>),
-    /// The answer to [`ask_for_a_seat`] where the meeting had room.
-    Seat(Seat),
-    /// The answer to [`ask_for_a_seat`] where the meeting was full: how many
-    /// it takes.
-    MeetingFull(u64),
-    /// The answer to [`ask_for_a_seat`] where the room takes no such seat:
-    /// why, in the room's words (`SeatRefusal` of
-    /// `packages/room/src/core/rules.ts`).
-    MeetingRefused(String),
-    /// Something the viewer has no use for.
-    Other,
-}
-
-/// A participant's seat in a room's meeting (decided on 2026-10-25):
-/// what of the room's `meeting` a reader that announces nothing there has
-/// a use for. Its `publish`, the participant's own namespace, is passed
-/// over.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Seat {
-    /// The participant's id, as it was asked for.
-    pub participant: String,
-    /// The namespace `subscribe` allows, its fields: `xmoq/meet/<room>/*`.
-    pub subscribe: Vec<String>,
-    /// `sub` in it, or none where the room has no key.
-    pub subscribe_token: Option<String>,
-}
-
-/// What is no message of a room.
+/// What is no answer of a room, and no address of one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invalid(pub String);
 
@@ -136,89 +69,6 @@ fn fields_of(value: &Value) -> Option<Vec<String>> {
     (!fields.is_empty() && fields.iter().all(|field| !field.is_empty())).then_some(fields)
 }
 
-fn relay_of(value: &Value) -> Option<Relay> {
-    let relay_url = value.get("relayUrl")?.as_str()?;
-    // WHY https alone: it is what a relay is reached by (WebTransport), and
-    // an address of any other kind from a room is not one to hand a token to.
-    if !relay_url.starts_with("https://") {
-        return None;
-    }
-    Some(Relay {
-        relay_url: relay_url.to_string(),
-        cert_sha256_hex: value.get("certSha256Hex")?.as_str()?.to_string(),
-    })
-}
-
-fn seat_of(message: &Value) -> Option<Seat> {
-    let subscribe = message.get("subscribe")?;
-    Some(Seat {
-        participant: message.get("participant")?.as_str()?.to_string(),
-        subscribe: fields_of(subscribe.get("namespace")?)?,
-        subscribe_token: subscribe
-            .get("token")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    })
-}
-
-fn broadcast_of(value: &Value) -> Option<Broadcast> {
-    let Relay {
-        relay_url,
-        cert_sha256_hex,
-    } = relay_of(value)?;
-    Some(Broadcast {
-        relay_url,
-        cert_sha256_hex,
-        namespace: value
-            .get("namespace")?
-            .as_array()?
-            .iter()
-            .map(|field| field.as_str().map(str::to_string))
-            .collect::<Option<_>>()?,
-    })
-}
-
-/// Reads one message of a room.
-///
-/// A broadcast or a relay that lacks a field, has one of another type, or
-/// names a relay by anything but `https://`, is read as none: there is
-/// nowhere to connect to.
-///
-/// # Errors
-///
-/// [`Invalid`] for text that is no JSON.
-pub fn read(text: &str) -> Result<Said, Invalid> {
-    let message: Value =
-        serde_json::from_str(text).map_err(|error| Invalid(format!("no JSON: {error}")))?;
-    Ok(match message.get("type").and_then(Value::as_str) {
-        Some("hello") => Said::Hello {
-            broadcast: message.get("broadcast").and_then(broadcast_of),
-            relay: message.get("relay").and_then(relay_of),
-            transcript: message.get("transcript").and_then(fields_of),
-            meeting_transcript: message.get("meetingTranscript").and_then(fields_of),
-        },
-        Some("broadcast") => Said::Broadcast(message.get("broadcast").and_then(broadcast_of)),
-        Some("token") => Said::Token(
-            message
-                .get("token")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        ),
-        // A seat without its participant or its namespace is none: there is
-        // nothing to subscribe to.
-        Some("meeting") => seat_of(&message).map_or(Said::Other, Said::Seat),
-        Some("meeting-full") => message
-            .get("most")
-            .and_then(Value::as_u64)
-            .map_or(Said::Other, Said::MeetingFull),
-        Some("meeting-refused") => message
-            .get("why")
-            .and_then(Value::as_str)
-            .map_or(Said::Other, |why| Said::MeetingRefused(why.to_string())),
-        _ => Said::Other,
-    })
-}
-
 /// What a token of a room allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenRole {
@@ -226,40 +76,6 @@ pub enum TokenRole {
     Sub,
     /// The viewer's own chat namespace.
     Pub,
-}
-
-/// The message that asks a room for a token for `role` in a namespace.
-#[must_use]
-pub fn ask_for_a_token(role: TokenRole, namespace: &[String]) -> String {
-    let role = match role {
-        TokenRole::Sub => "sub",
-        TokenRole::Pub => "pub",
-    };
-    json!({"type": "token-for", "role": role, "namespace": namespace}).to_string()
-}
-
-/// The message that asks a room for a seat in its meeting as `participant`,
-/// a random id the asker made (decided on 2026-10-25).
-#[must_use]
-pub fn ask_for_a_seat(participant: &str) -> String {
-    json!({"type": "join-meeting", "participant": participant}).to_string()
-}
-
-/// The address of a room's WebSocket, from the address of the room
-/// (`http://host:port/rooms/<name>`) and the name to be known by there.
-///
-/// WHY only letters and digits of the name are kept: it goes into the
-/// address as it is.
-///
-/// # Errors
-///
-/// [`Invalid`] for an address that does not begin with `http`.
-pub fn websocket_address(room: &str, name: &str) -> Result<String, Invalid> {
-    let rest = room
-        .strip_prefix("http")
-        .ok_or_else(|| Invalid("a room is http://host:port/rooms/<name>".to_string()))?;
-    let name: String = name.chars().filter(char::is_ascii_alphanumeric).collect();
-    Ok(format!("ws{}/ws?name={name}", rest.trim_end_matches('/')))
 }
 
 /// The AUTHORIZATION TOKEN (§10.2.2 of `draft-ietf-moq-transport-18`) that
@@ -579,8 +395,8 @@ pub enum Answer {
 fn api_relay_of(value: &Value) -> Option<Relay> {
     let url = value.get("url")?.as_str()?;
     let hex = value.get("certSha256Hex")?.as_str()?;
-    // WHY https alone, as `relay_of` has it: an address of any other kind
-    // from a room is not one to hand a token to. WHY the hash read here: a
+    // WHY https alone: a relay is reached by WebTransport, and an address
+    // of any other kind from a room is not one to hand a token to. WHY the hash read here: a
     // relay that cannot be pinned is no relay to connect to.
     if !url.starts_with("https://") || certificate_hash(hex).is_err() {
         return None;
@@ -626,11 +442,25 @@ fn meeting_room_of(body: &Map<String, Value>) -> Option<MeetingRoom> {
     })
 }
 
+/// A participant's id that can be a segment of a path: not empty, `.` or
+/// `..`.
+///
+/// WHY refused and not percent-encoded: the id goes into the path of the
+/// seat's renewal and of its leaving ([`path_segment`]), where `.` and `..`
+/// are dot-segments that joining the path takes out (RFC 3986 §5.2.4), and
+/// `%2E` is one as well to a URL parser of the URL Standard (its "single-dot
+/// URL path segment"); `..` would have the DELETE of a seat go to the
+/// meeting's own path. No page makes such an id.
+fn participant_of(value: &Value) -> Option<String> {
+    let id = value.as_str()?;
+    (!matches!(id, "" | "." | "..")).then(|| id.to_string())
+}
+
 fn taken_seat_of(body: &Map<String, Value>) -> Option<TakenSeat> {
     let publish = body.get("publish")?;
     let subscribe = body.get("subscribe")?;
     Some(TakenSeat {
-        participant: body.get("participant")?.as_str()?.to_string(),
+        participant: participant_of(body.get("participant")?)?,
         publish: fields_of(publish.get("namespace")?)?,
         publish_token: nullable(publish.get("token")?, text_of).ok()?,
         subscribe: fields_of(subscribe.get("namespace")?)?,
@@ -713,258 +543,6 @@ pub fn read_answer(asked: Asked, status: u16, body: &str) -> Result<Answer, Inva
 mod tests {
     use super::*;
 
-    fn broadcast() -> Broadcast {
-        Broadcast {
-            relay_url: "https://127.0.0.1:4443/".to_string(),
-            cert_sha256_hex: "ab".repeat(32),
-            namespace: vec!["xmoq".to_string(), "demo".to_string()],
-        }
-    }
-
-    #[test]
-    fn the_messages_of_a_room_are_read() {
-        let hash = "ab".repeat(32);
-        let there = format!(
-            r#"{{"relayUrl":"https://127.0.0.1:4443/","certSha256Hex":"{hash}","namespace":["xmoq","demo"],"since":1}}"#
-        );
-        // (the message; what it is read as)
-        let cases = [
-            // A history of the chat, from a room that still keeps one, is
-            // passed over.
-            (
-                format!(
-                    r#"{{"type":"hello","history":[{{"type":"chat","seq":1,"from":"a","text":"hi"}}],"connected":2,"broadcast":{there}}}"#
-                ),
-                Said::Hello {
-                    broadcast: Some(broadcast()),
-                    relay: None,
-                    transcript: None,
-                    meeting_transcript: None,
-                },
-            ),
-            (
-                r#"{"type":"hello","connected":1,"broadcast":null}"#.to_string(),
-                Said::Hello {
-                    broadcast: None,
-                    relay: None,
-                    transcript: None,
-                    meeting_transcript: None,
-                },
-            ),
-            // So is a line of its chat: the chat is on tracks.
-            (
-                r#"{"type":"chat","seq":7,"from":"publisher","text":"hello","at":1}"#.to_string(),
-                Said::Other,
-            ),
-            (
-                format!(r#"{{"type":"broadcast","broadcast":{there}}}"#),
-                Said::Broadcast(Some(broadcast())),
-            ),
-            (
-                r#"{"type":"broadcast","broadcast":null}"#.to_string(),
-                Said::Broadcast(None),
-            ),
-            // A relay that is not reached by https.
-            (
-                r#"{"type":"broadcast","broadcast":{"relayUrl":"http://h/","certSha256Hex":"00","namespace":["a"]}}"#
-                    .to_string(),
-                Said::Broadcast(None),
-            ),
-            (
-                r#"{"type":"broadcast","broadcast":{"relayUrl":"file:///etc/passwd","certSha256Hex":"00","namespace":["a"]}}"#
-                    .to_string(),
-                Said::Broadcast(None),
-            ),
-            // A broadcast without its certificate, and one whose namespace is no strings.
-            (
-                r#"{"type":"broadcast","broadcast":{"relayUrl":"https://h/","namespace":["a"]}}"#
-                    .to_string(),
-                Said::Broadcast(None),
-            ),
-            (
-                r#"{"type":"broadcast","broadcast":{"relayUrl":"https://h/","certSha256Hex":"00","namespace":["a",1]}}"#
-                    .to_string(),
-                Said::Broadcast(None),
-            ),
-            (
-                r#"{"type":"token","role":"sub","namespace":["a"],"token":"v1|a|sub|1|ff"}"#
-                    .to_string(),
-                Said::Token(Some("v1|a|sub|1|ff".to_string())),
-            ),
-            (
-                r#"{"type":"token","role":"sub","namespace":["a"],"token":null}"#.to_string(),
-                Said::Token(None),
-            ),
-            (r#"{"type":"connected","connected":3}"#.to_string(), Said::Other),
-            (r#"{"type":7}"#.to_string(), Said::Other),
-            ("[]".to_string(), Said::Other),
-        ];
-        for (message, said) in cases {
-            assert_eq!(read(&message), Ok(said), "{message}");
-        }
-        assert!(read("{").is_err());
-    }
-
-    #[test]
-    fn the_relay_of_the_rooms_is_read_from_the_hello() {
-        let hash = "ab".repeat(32);
-        let relay = format!(r#"{{"relayUrl":"https://127.0.0.1:4443/","certSha256Hex":"{hash}"}}"#);
-        let there = format!(
-            r#"{{"relayUrl":"https://127.0.0.1:4443/","certSha256Hex":"{hash}","namespace":["xmoq","demo"]}}"#
-        );
-        let read_relay = || {
-            Some(Relay {
-                relay_url: "https://127.0.0.1:4443/".to_string(),
-                cert_sha256_hex: "ab".repeat(32),
-            })
-        };
-        // (the hello; the broadcast and the relay it is read as)
-        let cases = [
-            (
-                format!(r#"{{"type":"hello","connected":1,"broadcast":null,"relay":{relay}}}"#),
-                None,
-                read_relay(),
-            ),
-            (
-                format!(r#"{{"type":"hello","connected":1,"broadcast":{there},"relay":{relay}}}"#),
-                Some(broadcast()),
-                read_relay(),
-            ),
-            // A room that names no relay.
-            (
-                r#"{"type":"hello","connected":1,"broadcast":null,"relay":null}"#.to_string(),
-                None,
-                None,
-            ),
-            // A relay that is not reached by https, or without its certificate.
-            (
-                r#"{"type":"hello","broadcast":null,"relay":{"relayUrl":"http://h/","certSha256Hex":"00"}}"#
-                    .to_string(),
-                None,
-                None,
-            ),
-            (
-                r#"{"type":"hello","broadcast":null,"relay":{"relayUrl":"https://h/"}}"#.to_string(),
-                None,
-                None,
-            ),
-        ];
-        for (message, broadcast, relay) in cases {
-            assert_eq!(
-                read(&message),
-                Ok(Said::Hello {
-                    broadcast,
-                    relay,
-                    transcript: None,
-                    meeting_transcript: None,
-                }),
-                "{message}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_prefixes_of_the_transcripts_are_read_from_the_hello() {
-        // Each of its own key.
-        assert_eq!(
-            read(
-                r#"{"type":"hello","broadcast":null,"transcript":["xmoq","demo"],"meetingTranscript":["xmoq","meet","r"]}"#
-            ),
-            Ok(Said::Hello {
-                broadcast: None,
-                relay: None,
-                transcript: Some(vec!["xmoq".to_string(), "demo".to_string()]),
-                meeting_transcript: Some(vec![
-                    "xmoq".to_string(),
-                    "meet".to_string(),
-                    "r".to_string(),
-                ]),
-            })
-        );
-        // (the value of both keys of a hello without a broadcast; what each
-        // is read as)
-        let cases = [
-            (
-                r#"["xmoq","meet","r"]"#,
-                Some(vec![
-                    "xmoq".to_string(),
-                    "meet".to_string(),
-                    "r".to_string(),
-                ]),
-            ),
-            (r#"["xmoq"]"#, Some(vec!["xmoq".to_string()])),
-            ("null", None),
-            // No fields, an empty field, a field that is no string, and no array.
-            ("[]", None),
-            (r#"["xmoq",""]"#, None),
-            (r#"["xmoq",1]"#, None),
-            (r#""xmoq/meet/r""#, None),
-        ];
-        for (transcript, read_as) in cases {
-            let message = format!(
-                r#"{{"type":"hello","broadcast":null,"transcript":{transcript},"meetingTranscript":{transcript}}}"#
-            );
-            assert_eq!(
-                read(&message),
-                Ok(Said::Hello {
-                    broadcast: None,
-                    relay: None,
-                    transcript: read_as.clone(),
-                    meeting_transcript: read_as,
-                }),
-                "{message}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_answers_to_a_seat_are_read() {
-        let seat = |token: Option<&str>| {
-            Said::Seat(Seat {
-                participant: "a1".to_string(),
-                subscribe: ["xmoq", "meet", "r", "*"].map(str::to_string).to_vec(),
-                subscribe_token: token.map(str::to_string),
-            })
-        };
-        // (the message, as `packages/room/src/worker.ts` sends it;
-        // what it is read as)
-        let cases = [
-            (
-                r#"{"type":"meeting","participant":"a1","publish":{"namespace":["xmoq","meet","r","a1"],"token":"v1|xmoq/meet/r/a1|pub|1|ff"},"subscribe":{"namespace":["xmoq","meet","r","*"],"token":"v1|xmoq/meet/r/*|sub|1|ff"}}"#,
-                seat(Some("v1|xmoq/meet/r/*|sub|1|ff")),
-            ),
-            // A room without a key.
-            (
-                r#"{"type":"meeting","participant":"a1","publish":{"namespace":["xmoq","meet","r","a1"],"token":null},"subscribe":{"namespace":["xmoq","meet","r","*"],"token":null}}"#,
-                seat(None),
-            ),
-            (
-                r#"{"type":"meeting-full","most":49}"#,
-                Said::MeetingFull(49),
-            ),
-            // Without the participant, without the namespace, and a full
-            // meeting that does not say how many it takes.
-            (
-                r#"{"type":"meeting","subscribe":{"namespace":["xmoq","meet","r","*"],"token":null}}"#,
-                Said::Other,
-            ),
-            (
-                r#"{"type":"meeting","participant":"a1","subscribe":{"token":null}}"#,
-                Said::Other,
-            ),
-            (r#"{"type":"meeting-full"}"#, Said::Other),
-            (
-                r#"{"type":"meeting-refused","why":"taken"}"#,
-                Said::MeetingRefused("taken".to_string()),
-            ),
-            // A refusal that does not say why.
-            (r#"{"type":"meeting-refused"}"#, Said::Other),
-        ];
-        for (message, said) in cases {
-            assert_eq!(read(message), Ok(said), "{message}");
-        }
-    }
-
     #[test]
     fn a_line_is_made_safe_for_a_terminal() {
         // (the text; the most characters; what is written)
@@ -987,49 +565,6 @@ mod tests {
         ];
         for (text, most, written) in cases {
             assert_eq!(clean(text, most), written, "{text:?}");
-        }
-    }
-
-    #[test]
-    fn what_is_said_to_a_room() {
-        assert_eq!(
-            ask_for_a_token(TokenRole::Sub, &["xmoq".to_string(), "demo".to_string()]),
-            r#"{"namespace":["xmoq","demo"],"role":"sub","type":"token-for"}"#
-        );
-        assert_eq!(
-            ask_for_a_token(TokenRole::Pub, &["xmoq".to_string(), "chat".to_string()]),
-            r#"{"namespace":["xmoq","chat"],"role":"pub","type":"token-for"}"#
-        );
-        assert_eq!(
-            ask_for_a_seat("a1"),
-            r#"{"participant":"a1","type":"join-meeting"}"#
-        );
-    }
-
-    #[test]
-    fn the_address_of_a_rooms_websocket() {
-        // (the room; the name; the address)
-        let cases = [
-            (
-                "http://127.0.0.1:8787/rooms/demo",
-                "terminal",
-                Ok("ws://127.0.0.1:8787/rooms/demo/ws?name=terminal"),
-            ),
-            (
-                "https://rooms.example/rooms/a/",
-                "t e&r=m/1",
-                Ok("wss://rooms.example/rooms/a/ws?name=term1"),
-            ),
-            ("http://h/rooms/a", "", Ok("ws://h/rooms/a/ws?name=")),
-            ("ws://h/rooms/a", "t", Err(())),
-            ("", "t", Err(())),
-        ];
-        for (room, name, address) in cases {
-            assert_eq!(
-                websocket_address(room, name).map_err(|_| ()),
-                address.map(str::to_string),
-                "{room}"
-            );
         }
     }
 
@@ -1381,6 +916,28 @@ mod tests {
                 read_answer(Asked::Room(RoomKind::Broadcast), 200, &body).is_ok(),
                 read,
                 "{relay}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seat_whose_participant_is_no_segment_of_a_path_is_not_read() {
+        // (the participant the room answers with; whether the seat is read)
+        let cases = [
+            ("a1", true),
+            ("a.b", true),
+            ("", false),
+            (".", false),
+            ("..", false),
+        ];
+        for (participant, read) in cases {
+            let body = format!(
+                r#"{{"participant":"{participant}","publish":{{"namespace":["xmoq","meet","blue","a1"],"token":null}},"subscribe":{{"namespace":["xmoq","meet","blue","*"],"token":null}},"lease":"0f","expiresAt":1,"renewMs":1}}"#
+            );
+            assert_eq!(
+                read_answer(Asked::Seat, 200, &body).is_ok(),
+                read,
+                "{participant}"
             );
         }
     }

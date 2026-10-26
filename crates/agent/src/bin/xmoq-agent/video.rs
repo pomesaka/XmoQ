@@ -1,26 +1,25 @@
-//! The video of a broadcast on one session, for its pictures: the catalog
-//! is read once, and its first H.264 track kept on the session
+//! The video of a broadcast on one session, for its pictures: of the
+//! catalog read once, its first H.264 track kept on the session
 //! (`xmoq_viewer_io::kept`), as `xmoq-watch` keeps its sound.
 
 use anyhow::{Result, anyhow};
 use xmoq_moqt::RequestFault;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestId, Session};
+use xmoq_msf::CatalogTrack;
 use xmoq_viewer_io::kept::{Asking, Came, KeptTrack, Said, Wanted};
 use xmoq_viewer_io::session::{CatalogKept, Events, Requests};
 
 /// The video of one session.
 pub struct Video {
     kept: KeptTrack,
-    catalog: CatalogKept,
+    /// The catalog's requests, where the video read the catalog itself.
+    catalog: Option<CatalogKept>,
 }
 
 impl Video {
     /// Reads the catalog of `namespace` and subscribes to its first H.264
-    /// video track.
-    ///
-    /// WHY the first: the demo's publisher puts its main version first, and
-    /// `xmoq-watch` takes it where nothing else is asked.
+    /// video track ([`Self::of`]).
     pub async fn begin(
         asking_with: Asking,
         namespace: TrackNamespace,
@@ -37,7 +36,40 @@ impl Video {
             rendezvous_ms: None,
         };
         let (tracks, catalog) = requests.catalog(events, &asking_with.stops).await?;
-        let name = xmoq_msf::video_tracks(&tracks, "avc")
+        Self::of(
+            asking_with,
+            namespace,
+            &tracks,
+            Some(catalog),
+            session,
+            events,
+        )
+        .await
+    }
+
+    /// Subscribes to the first H.264 video track of `tracks`, the catalog of
+    /// `namespace`, read with `catalog` where it is this video's to keep.
+    ///
+    /// WHY the first: the demo's publisher puts its main version first, and
+    /// `xmoq-watch` takes it where nothing else is asked.
+    pub async fn of(
+        asking_with: Asking,
+        namespace: TrackNamespace,
+        tracks: &[CatalogTrack],
+        catalog: Option<CatalogKept>,
+        session: &mut Session,
+        events: &mut Events,
+    ) -> Result<Self> {
+        let mut requests = Requests {
+            connection: asking_with.connection.as_ref(),
+            session,
+            namespace: &namespace,
+            token: asking_with.token.as_deref(),
+            answer_wait_ms: asking_with.answer_wait_ms,
+            open_wait_ms: asking_with.open_wait_ms,
+            rendezvous_ms: None,
+        };
+        let name = xmoq_msf::video_tracks(tracks, "avc")
             .next()
             .ok_or_else(|| anyhow!("the catalog has no H.264 video track with LOC packaging"))?
             .name
@@ -95,7 +127,10 @@ impl Video {
             tell(said);
             return true;
         }
-        let of_the_catalog = self.catalog.malformed(request);
+        let of_the_catalog = self
+            .catalog
+            .as_mut()
+            .is_some_and(|catalog| catalog.malformed(request));
         if of_the_catalog {
             eprintln!("XMOQ_AGENT_CATALOG_MALFORMED");
         }
@@ -106,7 +141,9 @@ impl Video {
     /// ([`CatalogKept::cancel`]).
     pub fn cancel(self, session: &mut Session) {
         self.kept.cancel(session);
-        self.catalog.cancel(session);
+        if let Some(catalog) = self.catalog {
+            catalog.cancel(session);
+        }
     }
 }
 

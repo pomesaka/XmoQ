@@ -23,7 +23,7 @@ while True:
 silent=$!
 trap 'kill "$silent" 2>/dev/null || true' EXIT
 sleep 0.5
-room="http://127.0.0.1:$port/rooms/x"
+room="http://127.0.0.1:$port/broadcasts/x"
 nobody="https://127.0.0.1:$((port + 1))/"
 zeros=0000000000000000000000000000000000000000000000000000000000000000
 
@@ -40,7 +40,7 @@ timed() { # <what> <seconds before SIGTERM, or -> <flags of xmoq-watch...>
 
 timed "a silent room, --seconds 2" - --room "$room" --seconds 2
 timed "a silent room, SIGTERM after 1 s" 1 --room "$room"
-timed "a silent room, nothing to end it (its limit is 10 s)" - --room "$room"
+timed "a silent room, nothing to end it (its limit is --room-wait-ms, 5 s)" - --room "$room"
 timed "a relay nobody is behind, --seconds 2" - --url "$nobody" --cert-sha256 "$zeros" --seconds 2
 timed "a relay nobody is behind, SIGTERM after 1 s" 1 --url "$nobody" --cert-sha256 "$zeros"
 timed "a relay nobody is behind, nothing to end it (10 s)" - --url "$nobody" --cert-sha256 "$zeros"

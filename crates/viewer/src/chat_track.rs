@@ -1,9 +1,9 @@
-//! The chat on `MoQ` tracks (the room's WebSocket carries none): what the
+//! The chat on `MoQ` tracks (the room carries none): what the
 //! viewer says on its track `said`, and which lines of the room's track
 //! `lines` it shows, and in what order.
 //!
 //! Decided on 2026-10-24: on the session of the broadcast; with a room, its
-//! name and the viewer's name in the chat, without one only with
+//! kind and name and the viewer's name in the chat, without one only with
 //! `--chat-room`; the 16 latest lines by a Joining FETCH, and the lines
 //! missed when the subscription is made again ([`history_to_fetch`]).
 
@@ -132,16 +132,6 @@ pub fn shown_gap(gap: LinesGap) -> String {
         gap.after + 1,
         gap.before - 1
     )
-}
-
-/// The name of the room of an address of a room, `http://host:port/rooms/<name>`:
-/// its last path segment. `None` where it has none.
-#[must_use]
-pub fn room_of_address(address: &str) -> Option<&str> {
-    let path = address.split_once("://").map_or(address, |(_, rest)| rest);
-    let path = path.split(['?', '#']).next().unwrap_or(path);
-    let name = path.rsplit('/').next()?;
-    (!name.is_empty() && path.contains('/')).then_some(name)
 }
 
 /// A line of `lines` as it is shown: its number in the room, who said it,
@@ -320,20 +310,6 @@ impl<T> Shown<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_room_is_the_last_segment_of_its_address() {
-        let cases = [
-            ("http://h:8787/rooms/a", Some("a")),
-            ("http://h/rooms/demo-1?x=1", Some("demo-1")),
-            ("https://h/rooms/b#top", Some("b")),
-            ("http://h/rooms/", None),
-            ("http://h", None),
-        ];
-        for (address, room) in cases {
-            assert_eq!(room_of_address(address), room, "{address}");
-        }
-    }
 
     /// The rows of `fixtures/chat-history/`, which `@xmoq/chat` reads as
     /// well.

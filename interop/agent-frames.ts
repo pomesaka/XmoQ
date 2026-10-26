@@ -136,7 +136,7 @@ async function main(): Promise<void> {
 			"--namespace",
 			NAMESPACE,
 			"--chat-room",
-			"r",
+			"broadcast/r",
 			"--out",
 			out,
 			"--frames-kept",

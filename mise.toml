@@ -54,7 +54,7 @@ description = "Build the interop peers and the own parts, and run every driver o
 run = "scripts/ci/interop.sh"
 
 [tasks.watch]
-description = "The viewer for the terminal: mise run watch -- --room http://127.0.0.1:8787/rooms/demo"
+description = "The viewer for the terminal: mise run watch -- --room http://127.0.0.1:8787/broadcasts/demo"
 run = "cargo run --release --locked -p xmoq-watch --"
 
 [tasks.chat]
@@ -66,7 +66,7 @@ description = "The transcriber: mise run transcriber -- --url https://host:port/
 run = "cargo run --release --locked -p xmoq-transcriber --"
 
 [tasks.agent]
-description = "The reader of a room for an agent: mise run agent -- --room http://127.0.0.1:8787/rooms/demo --out /tmp/room"
+description = "The reader of a room for an agent: mise run agent -- --room http://127.0.0.1:8787/broadcasts/demo --out /tmp/room"
 run = "cargo run --release --locked -p xmoq-agent --"
 
 [tasks.agent-demo]

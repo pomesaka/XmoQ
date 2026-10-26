@@ -9,7 +9,7 @@
 //! with LOC packaging its catalog names (MSF §5). WHY NOT every namespace
 //! the relay has: whoever announces would have the transcriber's processor.
 //! WHY NOT where a room says the broadcast is: that ties the transcriber to
-//! the room's WebSocket, and a meeting has a broadcast for each person.
+//! the room, and a meeting has a broadcast for each person.
 //!
 //! **What is published**: the track `speech` of `xmoq/transcript/<prefix>`
 //! for each prefix, with PUBLISH, from the start of the session to its end,

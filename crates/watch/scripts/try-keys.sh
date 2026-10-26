@@ -32,7 +32,7 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 watch="$root/target/release/xmoq-watch"
-room="http://127.0.0.1:$((port + 2))/rooms/$name"
+room="http://127.0.0.1:$((port + 2))/broadcasts/$name"
 echo "--- keys: + + m m - , a line for the chat, the page loaded anew, q"
 python3 "$here/keys-on-a-pty.py" wait:4 keys:++ wait:0.5 keys:m wait:0.5 keys:m wait:0.5 keys:- wait:0.5 \
   'keys:ttyped in the termx\x7fnal\r' wait:2 "signal:SIGUSR1:$page" wait:9 keys:q -- \

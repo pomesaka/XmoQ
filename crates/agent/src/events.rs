@@ -10,9 +10,10 @@ use serde_json::{Value, json};
 /// Whether a broadcast began or ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadcastState {
-    /// The room has a broadcast, and the reader connects to it.
+    /// The broadcast's catalog came on the session: it is there.
     Began,
-    /// The broadcast left, or its session ended.
+    /// The catalog's subscription ended (the broadcast left), or the
+    /// session ended, after it began.
     Ended,
 }
 

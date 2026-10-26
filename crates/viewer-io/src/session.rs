@@ -4,7 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::RequestFault;
@@ -28,11 +28,11 @@ use xmoq_msf::CatalogTrack;
 type Send = <WtConnection as Connection>::Send;
 
 /// The name of the catalog track (MSF §5).
-const CATALOG: &str = "catalog";
+pub(crate) const CATALOG: &str = "catalog";
 /// How long the catalog has to come, as the watching page waits.
 const CATALOG_WAIT: Duration = Duration::from_secs(5);
 /// The most a catalog may be.
-const CATALOG_LIMIT: usize = 1024 * 1024;
+pub(crate) const CATALOG_LIMIT: usize = 1024 * 1024;
 
 /// Events of the session's unidirectional streams read ahead of their turn
 /// that are kept, while an answer is waited for ([`Events::while_waiting`]).
@@ -245,7 +245,7 @@ pub struct CatalogKept<C: Connection = WtConnection> {
 }
 
 /// The catalog's FETCH, with the halves of its request stream that are open.
-struct CatalogFetch<C: Connection> {
+pub(crate) struct CatalogFetch<C: Connection> {
     request: RequestId,
     send: C::Send,
     /// Where the relay had not ended its direction when the catalog came.
@@ -275,11 +275,7 @@ impl<C: Connection> CatalogKept<C> {
             .is_some_and(|fetch| fetch.request == request)
         {
             if let Some(fetch) = self.fetch.take() {
-                end_request_stream(
-                    fetch.send,
-                    fetch.answers,
-                    stream_reset_code::MALFORMED_TRACK,
-                );
+                fetch.end(stream_reset_code::MALFORMED_TRACK);
             }
             return true;
         }
@@ -296,9 +292,26 @@ impl<C: Connection> CatalogKept<C> {
             subscription.cancel();
         }
         if let Some(fetch) = self.fetch {
-            session.cancel(fetch.request);
-            end_request_stream(fetch.send, fetch.answers, stream_reset_code::CANCELLED);
+            fetch.cancel(session);
         }
+    }
+}
+
+impl<C: Connection> CatalogFetch<C> {
+    /// The session's handle of the FETCH.
+    pub(crate) fn request(&self) -> RequestId {
+        self.request
+    }
+
+    /// Ends its request stream with `code`.
+    pub(crate) fn end(self, code: u32) {
+        end_request_stream(self.send, self.answers, code);
+    }
+
+    /// Gives it up, in `session` too.
+    pub(crate) fn cancel(self, session: &mut Session) {
+        session.cancel(self.request);
+        self.end(stream_reset_code::CANCELLED);
     }
 }
 
@@ -385,6 +398,19 @@ pub enum NotSubscribed {
     /// code, as for any message of the peer that does (`RequestFault::Peer`).
     Peer(RequestFault),
 }
+
+/// A catalog that did not come in time after its SUBSCRIBE was answered,
+/// or that is no catalog that is read: the session is not at fault.
+#[derive(Debug)]
+pub struct CatalogNotRead(pub String);
+
+impl std::fmt::Display for CatalogNotRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CatalogNotRead {}
 
 /// A SUBSCRIBE the relay refused with `GOING_AWAY` (§10.4): it has sent
 /// GOAWAY, which may come after the refusal on the control stream.
@@ -620,12 +646,9 @@ impl Requests<'_> {
         })
     }
 
-    /// Reads the catalog of the namespace: its tracks.
-    ///
-    /// WHY a Joining FETCH: the catalog is one Object that was published
-    /// before the viewer came, so a SUBSCRIBE alone does not bring it
-    /// (§10.12.2: the latest Group of the track the SUBSCRIBE is for), as
-    /// `followCatalog` of `@xmoq/msf` does.
+    /// Reads the catalog of the namespace, a broadcast that is there: its
+    /// tracks, by a Joining FETCH (`read_catalog`). One that may not be
+    /// there yet is [`crate::catalog::FollowedCatalog`]'s.
     ///
     /// # Errors
     ///
@@ -643,8 +666,33 @@ impl Requests<'_> {
         // to the 1 MiB undecoded of every subgroup stream alone. It stays for
         // the session, as the subscription does.
         stops.limit_payload(subscription.track_alias, CATALOG_LIMIT);
+        let (tracks, fetch) = self
+            .read_catalog(
+                subscription.request,
+                subscription.track_alias,
+                events,
+                stops,
+            )
+            .await?;
+        Ok((
+            tracks,
+            CatalogKept {
+                subscription: Some(subscription),
+                fetch: Some(fetch),
+            },
+        ))
+    }
+}
+
+impl<C: Connection> Requests<'_, C> {
+    /// The catalog's Joining FETCH for the subscription `request`, made and
+    /// sent: its handle, and the halves of its request stream.
+    async fn send_catalog_fetch(
+        &mut self,
+        request: RequestId,
+    ) -> Result<(RequestId, C::Send, RequestReader<C::Recv>)> {
         let range = FetchRange::RelativeJoining {
-            joining_request_id: subscription.request.value(),
+            joining_request_id: request.value(),
             joining_start: 0,
         };
         let parameters = self
@@ -653,11 +701,51 @@ impl Requests<'_> {
             .into_iter()
             .collect();
         let (fetch, message) = self.session.fetch(range, parameters)?;
+        // WHY the FETCH is cancelled in the session on every way out that
+        // fails: a caller that asks for the catalog again
+        // (`FollowedCatalog`) would otherwise leave one more request in the
+        // session each time, against the peer's MAX_REQUEST_ID.
         let (mut send, recv) =
-            open_stream(self.connection, self.open_wait_ms, "the catalog's FETCH").await?;
+            match open_stream(self.connection, self.open_wait_ms, "the catalog's FETCH").await {
+                Ok(opened) => opened,
+                Err(error) => {
+                    self.session.cancel(fetch);
+                    return Err(error);
+                }
+            };
         let trace = Trace::default();
-        send_message(&mut send, &message, &trace, "fetch").await?;
-        let mut answers = Some(RequestReader::new(recv, &trace, "fetch"));
+        if let Err(error) = send_message(&mut send, &message, &trace, "fetch").await {
+            self.session.cancel(fetch);
+            send.reset(stream_reset_code::CANCELLED);
+            return Err(error.into());
+        }
+        Ok((fetch, send, RequestReader::new(recv, &trace, "fetch")))
+    }
+
+    /// The catalog of the subscription `request` to the catalog track, whose
+    /// Objects come with `track_alias`: asked for with a Joining FETCH, and
+    /// taken from the FETCH or from the subscription, whichever brings it
+    /// first; with the FETCH, which is kept open for the session. The limit
+    /// on the catalog's Objects is the caller's.
+    ///
+    /// WHY a Joining FETCH: the catalog is one Object that was published
+    /// before the viewer came, so a SUBSCRIBE alone does not bring it
+    /// (§10.12.2: the latest Group of the track the SUBSCRIBE is for), as
+    /// `followCatalog` of `@xmoq/msf` does.
+    ///
+    /// # Errors
+    ///
+    /// A FETCH that cannot be sent; a catalog that does not come within 5 s
+    /// or cannot be read; a session the peer broke meanwhile; [`GoneAway`].
+    pub(crate) async fn read_catalog(
+        &mut self,
+        request: RequestId,
+        track_alias: u64,
+        events: &mut Events,
+        stops: &StreamStops,
+    ) -> Result<(Vec<CatalogTrack>, CatalogFetch<C>)> {
+        let (fetch, send, answers) = self.send_catalog_fetch(request).await?;
+        let mut answers = Some(answers);
         let session = &mut *self.session;
         // WHY the other events are kept, and not let go of: the catalog of a
         // participant of a meeting is read while the session goes on, and
@@ -687,7 +775,7 @@ impl Requests<'_> {
                     },
                     event = events.recv(), if kept.len() < MOST_READ_AHEAD => match event.ok_or_else(|| anyhow!("the connection is gone"))? {
                         UniEvent::Object { header, object, .. }
-                            if header.track_alias == subscription.track_alias =>
+                            if header.track_alias == track_alias =>
                         {
                             return Ok::<_, anyhow::Error>(object.payload);
                         }
@@ -720,7 +808,7 @@ impl Requests<'_> {
                         // Of another track, it is kept with its Objects, in
                         // their order.
                         UniEvent::SubgroupClosed { stream, header, .. }
-                            if header.track_alias == subscription.track_alias =>
+                            if header.track_alias == track_alias =>
                         {
                             events.open.remove(&stream);
                             session.on_data_stream_closed(header.track_alias);
@@ -742,19 +830,29 @@ impl Requests<'_> {
         // which a relay that holds it for a broadcast to come has done.
         let payload = tokio::time::timeout(CATALOG_WAIT, payload).await;
         events.put_back(kept);
-        let payload = payload.map_err(|_| anyhow!("no catalog came within 5 s"))??;
-        let tracks = xmoq_msf::read_catalog(&payload).context("the catalog")?;
-        Ok((
-            tracks,
-            CatalogKept {
-                subscription: Some(subscription),
-                fetch: Some(CatalogFetch {
-                    request: fetch,
-                    send,
-                    answers,
-                }),
-            },
-        ))
+        let read = payload
+            .map_err(|_| CatalogNotRead("no catalog came within 5 s".to_string()).into())
+            .and_then(|payload| payload)
+            .and_then(|payload| {
+                xmoq_msf::read_catalog(&payload)
+                    .map_err(|error| CatalogNotRead(format!("the catalog: {error}")).into())
+            });
+        let fetch = CatalogFetch {
+            request: fetch,
+            send,
+            answers,
+        };
+        match read {
+            Ok(tracks) => Ok((tracks, fetch)),
+            Err(error) => {
+                // §3.3.2: "Implementations SHOULD cancel requests by abruptly
+                // terminating any directions of a stream that are still
+                // open"; §5.2 has the subscriber that cancels a FETCH send
+                // STOP_SENDING.
+                fetch.cancel(self.session);
+                Err(error)
+            }
+        }
     }
 }
 

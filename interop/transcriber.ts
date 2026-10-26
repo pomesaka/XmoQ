@@ -620,7 +620,7 @@ async function main(): Promise<void> {
 			"--transcript",
 			PREFIX,
 			"--chat-room",
-			"r",
+			"broadcast/r",
 			"--name",
 			"claude",
 			"--frames",

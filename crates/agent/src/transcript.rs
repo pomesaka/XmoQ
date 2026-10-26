@@ -3,8 +3,8 @@
 //! listens under.
 
 /// The prefix whose transcript is followed: `--transcript` where it is
-/// given, else the room's (its hello's `meetingTranscript` in a meeting,
-/// `transcript` else), else the meeting's (`xmoq/meet/<room>`), else the
+/// given, else the room's (the `transcript` its room of a broadcast or of a
+/// meeting answers with), else the meeting's (`xmoq/meet/<room>`), else the
 /// broadcast's namespace; `None` where none of them is there.
 ///
 /// WHY the flag first: it overrides, for a transcriber run another way than
@@ -61,8 +61,7 @@ mod tests {
             (None, None, Some("m"), Some(&broadcast), Some("xmoq/meet/m")),
             (None, None, None, Some(&broadcast), Some("xmoq/demo")),
             (Some(&flag), None, None, None, Some("x/flag")),
-            // A session at the room's relay for the chat alone, in a room
-            // that names no transcript.
+            // None of them.
             (None, None, None, None, None),
         ];
         for (flag, hello, meeting, broadcast, expected) in cases {
