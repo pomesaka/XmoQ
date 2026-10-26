@@ -580,6 +580,113 @@ pub(crate) async fn opening_waits_at_the_peers_stream_limit<C: Connection>(
     assert!(soon("open_uni", a.open_uni()).await.is_ok());
 }
 
+/// A stream holds its place among those the peer lets this end have open
+/// until it is over for the peer, also once the peer has accepted it: a peer
+/// that accepts streams and reads none keeps this end from opening more.
+/// The places come back once the streams are over.
+pub(crate) async fn a_stream_holds_its_place_until_it_is_over<C: Connection>(
+    a: C,
+    b: C,
+    limit: usize,
+) {
+    let mut open = Vec::new();
+    let mut accepted = Vec::new();
+    for _ in 0..limit {
+        let mut send = soon("open_uni", a.open_uni()).await.expect("open");
+        send.write_all(b"x").await.expect("write");
+        open.push(send);
+        accepted.push(soon("accept_uni", b.accept_uni()).await.expect("accept"));
+    }
+    // Every stream accepted, none over: there is no place.
+    assert!(timeout(A_WHILE, a.open_uni()).await.is_err());
+    // Read to their ends and let go of, they make room. WHY all of them, and
+    // not one: quinn-proto 0.11.19 gives places back once more than an
+    // eighth of the limit is free (`queue_max_stream_id`), not one by one.
+    for send in open {
+        send.finish();
+    }
+    for mut recv in accepted {
+        assert_eq!(read_to_end(&mut recv).await, (b"x".to_vec(), Ok(())));
+    }
+    assert!(
+        soon("open_uni after they are over", a.open_uni())
+            .await
+            .is_ok()
+    );
+}
+
+/// A bidirectional stream the peer opened holds its place until the peer's
+/// own direction is over too: a peer that read this end's request to its
+/// end and keeps its own direction open, as a peer does that answers a
+/// request, keeps this end from opening more.
+pub(crate) async fn a_request_stream_holds_its_place_until_the_answer_is_over<C: Connection>(
+    a: C,
+    b: C,
+) {
+    // More than either connection lets open; a pair that never waits is the
+    // fault this case is for.
+    const MORE_THAN_THE_LIMIT: usize = 64;
+    let mut held = Vec::new();
+    loop {
+        assert!(
+            held.len() < MORE_THAN_THE_LIMIT,
+            "{} request streams were opened without waiting",
+            held.len()
+        );
+        let Ok(opened) = timeout(A_WHILE, a.open_bi()).await else {
+            break;
+        };
+        let (mut send, recv) = opened.expect("open");
+        send.write_all(b"x").await.expect("write");
+        send.finish();
+        let (answer, mut request) = soon("accept_bi", b.accept_bi()).await.expect("accept");
+        assert_eq!(read_to_end(&mut request).await, (b"x".to_vec(), Ok(())));
+        drop(request);
+        held.push((recv, answer));
+    }
+    assert!(!held.is_empty(), "no request stream could be opened");
+    // The answers end, and make room.
+    for (_recv, answer) in held {
+        answer.finish();
+    }
+    assert!(
+        soon("open_bi after the answers are over", a.open_bi())
+            .await
+            .is_ok()
+    );
+}
+
+/// A stream the peer stopped before this end finished or reset it holds its
+/// place until this end does: quinn-proto keeps a stopped stream "until
+/// they're finished or reset".
+pub(crate) async fn a_stopped_stream_holds_its_place_until_the_sender_ends_it<C: Connection>(
+    a: C,
+    b: C,
+    limit: usize,
+) {
+    let mut open = Vec::new();
+    for _ in 0..limit {
+        let mut send = soon("open_uni", a.open_uni()).await.expect("open");
+        send.write_all(b"x").await.expect("write");
+        open.push(send);
+        let recv = soon("accept_uni", b.accept_uni()).await.expect("accept");
+        recv.stop(0x1);
+    }
+    assert!(timeout(A_WHILE, a.open_uni()).await.is_err());
+    for mut send in open {
+        assert!(matches!(
+            soon("stopped", send.stopped()).await,
+            WriteError::Stopped(_)
+        ));
+        send.reset(0x1);
+    }
+    assert!(
+        soon("open_uni after the resets", a.open_uni())
+            .await
+            .is_ok()
+    );
+}
+
 /// A reset that has arrived takes the bytes the receiver had not read.
 pub(crate) async fn a_reset_takes_what_was_not_read<C: Connection>(a: C, b: C) {
     let (mut send, mut recv) = uni(&a, &b, b"abc").await;
@@ -756,12 +863,26 @@ macro_rules! contract_tests {
                 a_long_close_reason_is_cut_at_a_character,
                 finish_until_is_over_when_the_peers_transport_has_the_stream,
                 finish_until_is_over_on_a_stopped_stream,
+                a_request_stream_holds_its_place_until_the_answer_is_over,
             ]);
 
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
             async fn opening_waits_at_the_peers_stream_limit() {
                 let (a, b, _keep) = $pair.await;
                 super::opening_waits_at_the_peers_stream_limit(a, b, $streams).await;
+            }
+
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn a_stopped_stream_holds_its_place_until_the_sender_ends_it() {
+                let (a, b, _keep) = $pair.await;
+                super::a_stopped_stream_holds_its_place_until_the_sender_ends_it(a, b, $streams)
+                    .await;
+            }
+
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn a_stream_holds_its_place_until_it_is_over() {
+                let (a, b, _keep) = $pair.await;
+                super::a_stream_holds_its_place_until_it_is_over(a, b, $streams).await;
             }
 
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -802,8 +923,10 @@ macro_rules! contract_tests {
 
 contract_tests!(
     memory,
+    // As many places as streams that may wait to be accepted, so that one
+    // number is reached by both cases of the limit.
     pair: async {
-        let (a, b) = crate::memory::pair();
+        let (a, b) = crate::memory::pair_with_stream_limit(crate::memory::ACCEPT_QUEUE);
         (a, b, ())
     },
     streams_before_opening_waits: crate::memory::ACCEPT_QUEUE,

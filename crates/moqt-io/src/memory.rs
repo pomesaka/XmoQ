@@ -30,13 +30,18 @@
 //! It models nothing else of QUIC: no packets, no loss, no timing. Its windows
 //! are far smaller than real ones ([`STREAM_WINDOW`] bytes a stream and
 //! [`ACCEPT_QUEUE`] streams waiting to be accepted, against about 1.25 MB and
-//! 100 with quinn's defaults), so that tests reach them with little data.
+//! 100 with quinn's defaults), so that tests reach them with little data. Of
+//! the streams that are open, accepted or not, it lets the peer have
+//! [`STREAM_LIMIT`] of each kind, as quinn does by default
+//! ([`pair_with_stream_limit`] for fewer), and a stream holds its place by
+//! quinn's conditions; quinn gives places back once an eighth of the limit is
+//! free, this pair one by one.
 
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 use crate::{
     Connection, ConnectionEnd, ConnectionLost, ReadError, RecvStream, SendStream, WriteError,
@@ -49,6 +54,26 @@ pub const STREAM_WINDOW: usize = 64;
 /// Streams of one kind that wait to be accepted. Opening waits beyond that, as
 /// the peer's stream limit makes it wait on a real connection.
 pub const ACCEPT_QUEUE: usize = 4;
+
+/// Streams of one kind the peer lets this end have open at once in [`pair`],
+/// whether they were accepted or not. Opening waits beyond that, as the
+/// peer's stream limit makes it wait on a real connection (quinn's default,
+/// 100). [`pair_with_stream_limit`] has fewer.
+///
+/// A stream holds its place until it is over for the receiver, by the
+/// conditions of quinn-proto 0.11.19 (`stream_freed` and `RecvStream::stop`,
+/// read on 2026-10-26): its receiving half has read the FIN or the reset, or
+/// was let go of or stopped once the sender had finished or reset it, and for
+/// a bidirectional stream the receiver's sending half is finished, reset or
+/// let go of as well. WHY not where the stream is accepted: a peer that
+/// accepts a stream and does not read it keeps the place on a real
+/// connection, and a test that counts on the place coming back sooner passes
+/// here and fails there.
+pub const STREAM_LIMIT: usize = 100;
+
+/// The place of a stream among those the peer may have open
+/// ([`STREAM_LIMIT`]): given back when every half that holds it is done.
+type Place = Arc<OwnedSemaphorePermit>;
 
 /// A stream half was ended without a FIN, with this code if one was given.
 #[derive(Clone, Copy)]
@@ -67,6 +92,9 @@ struct Pipe {
     stopped: Option<Aborted>,
     /// What the sender last said with [`SendStream::set_send_order`].
     send_order: Option<i32>,
+    /// The place of a stream the receiver stopped before the sender had
+    /// finished or reset it: kept until the sender does.
+    place_until_the_sender_ends: Option<Place>,
 }
 
 struct Shared {
@@ -95,6 +123,9 @@ pub struct MemorySend {
     /// Of a stream of [`pair_that_delivers_when_told`]: a finished stream
     /// counts as delivered when this is notified.
     delivers_when_told: Option<Arc<Notify>>,
+    /// The place of a bidirectional stream the peer opened, which this half
+    /// holds with the receiving half of the stream.
+    place: Option<Place>,
 }
 
 /// The receiving half of an in-memory stream.
@@ -103,6 +134,9 @@ pub struct MemoryRecv {
     closed: watch::Receiver<bool>,
     /// `stop` was called.
     ended: bool,
+    /// The place of the stream among those the peer may have open
+    /// ([`STREAM_LIMIT`]).
+    place: Option<Place>,
 }
 
 fn pipe(closed: &watch::Receiver<bool>, window: usize) -> (MemorySend, MemoryRecv) {
@@ -117,11 +151,13 @@ fn pipe(closed: &watch::Receiver<bool>, window: usize) -> (MemorySend, MemoryRec
             closed: closed.clone(),
             ended: false,
             delivers_when_told: None,
+            place: None,
         },
         MemoryRecv {
             shared,
             closed: closed.clone(),
             ended: false,
+            place: None,
         },
     )
 }
@@ -160,7 +196,11 @@ impl SendStream for MemorySend {
 
     fn finish(mut self) {
         self.ended = true;
-        self.shared.lock().finished = true;
+        {
+            let mut pipe = self.shared.lock();
+            pipe.finished = true;
+            pipe.place_until_the_sender_ends = None;
+        }
         self.shared.changed.notify_waiters();
     }
 
@@ -214,6 +254,7 @@ impl SendStream for MemorySend {
                 // What was written is in the pipe, which stands for the peer's
                 // transport: nothing is left to wait for.
                 pipe.finished = true;
+                pipe.place_until_the_sender_ends = None;
                 pipe.arrived = true;
                 Ok(())
             }
@@ -256,6 +297,7 @@ impl MemorySend {
             // A reset drops what the receiver has not read yet.
             pipe.bytes.clear();
         }
+        pipe.place_until_the_sender_ends = None;
         drop(pipe);
         self.shared.changed.notify_waiters();
     }
@@ -282,6 +324,7 @@ impl RecvStream for MemoryRecv {
                     return Err(ReadError::Lost(CLOSED.to_string()));
                 }
                 if let Some(Aborted(code)) = pipe.reset {
+                    self.place = None;
                     return Err(ReadError::Reset(code));
                 }
                 if !pipe.bytes.is_empty() {
@@ -293,6 +336,7 @@ impl RecvStream for MemoryRecv {
                     return Ok(Some(len));
                 }
                 if pipe.finished {
+                    self.place = None;
                     return Ok(None);
                 }
                 if closed {
@@ -321,11 +365,15 @@ impl MemoryRecv {
         self.shared.lock().send_order
     }
 
-    fn halt(&self, code: Option<u32>) {
+    fn halt(&mut self, code: Option<u32>) {
         let mut pipe = self.shared.lock();
         if pipe.stopped.is_none() {
             pipe.stopped = Some(Aborted(code));
             pipe.bytes.clear();
+        }
+        // quinn-proto keeps a stopped stream "until they're finished or reset".
+        if !pipe.finished && pipe.reset.is_none() {
+            pipe.place_until_the_sender_ends = self.place.take();
         }
         drop(pipe);
         self.shared.changed.notify_waiters();
@@ -382,6 +430,10 @@ pub struct MemoryConnection {
     /// [`pair_that_delivers_when_told`], for the unidirectional streams this
     /// end opens.
     delivers_when_told: Option<Arc<Notify>>,
+    /// The places of the streams of each kind this end may have open towards
+    /// the peer ([`STREAM_LIMIT`]).
+    uni_places: Arc<Semaphore>,
+    bi_places: Arc<Semaphore>,
 }
 
 /// Two connected ends.
@@ -418,6 +470,19 @@ pub fn pair_that_delivers_when_told() -> (MemoryConnection, MemoryConnection, Ar
 /// its windows are used up, and [`pair`] never does.
 #[must_use]
 pub fn pair_with_window(window: usize) -> (MemoryConnection, MemoryConnection) {
+    pair_with(window, STREAM_LIMIT)
+}
+
+/// Two connected ends each of which lets the other have `limit` streams of
+/// each kind open at once, where [`pair`] has [`STREAM_LIMIT`]. WHY: a test
+/// of what an endpoint does about a peer that holds streams open reaches
+/// the limit with a few.
+#[must_use]
+pub fn pair_with_stream_limit(limit: usize) -> (MemoryConnection, MemoryConnection) {
+    pair_with(STREAM_WINDOW, limit)
+}
+
+fn pair_with(window: usize, limit: usize) -> (MemoryConnection, MemoryConnection) {
     let (a_uni, b_incoming_uni) = mpsc::channel(ACCEPT_QUEUE);
     let (b_uni, a_incoming_uni) = mpsc::channel(ACCEPT_QUEUE);
     let (a_bi, b_incoming_bi) = mpsc::channel(ACCEPT_QUEUE);
@@ -443,6 +508,8 @@ pub fn pair_with_window(window: usize) -> (MemoryConnection, MemoryConnection) {
             closed: closed.clone(),
             close: Arc::clone(&close),
             delivers_when_told: None,
+            uni_places: Arc::new(Semaphore::new(limit)),
+            bi_places: Arc::new(Semaphore::new(limit)),
         };
     (
         end(
@@ -487,6 +554,16 @@ impl MemoryConnection {
         ConnectionLost(CLOSED.to_string())
     }
 
+    /// A place among `places`, once there is one; fails once the connection
+    /// is gone.
+    async fn place(&self, places: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit, ConnectionLost> {
+        tokio::select! {
+            biased;
+            () = self.until_closed() => Err(Self::lost()),
+            place = Arc::clone(places).acquire_owned() => place.map_err(|_| Self::lost()),
+        }
+    }
+
     async fn until_closed(&self) {
         let mut closed = self.closed.clone();
         // An error means the sender is gone, which is closed as well.
@@ -499,7 +576,9 @@ impl Connection for MemoryConnection {
     type Recv = MemoryRecv;
 
     async fn open_uni(&self) -> Result<MemorySend, ConnectionLost> {
-        let (mut send, recv) = pipe(&self.closed, self.window);
+        let place = self.place(&self.uni_places).await?;
+        let (mut send, mut recv) = pipe(&self.closed, self.window);
+        recv.place = Some(Arc::new(place));
         send.delivers_when_told.clone_from(&self.delivers_when_told);
         tokio::select! {
             biased;
@@ -510,8 +589,13 @@ impl Connection for MemoryConnection {
     }
 
     async fn open_bi(&self) -> Result<(MemorySend, MemoryRecv), ConnectionLost> {
-        let (send, peer_recv) = pipe(&self.closed, self.window);
-        let (peer_send, recv) = pipe(&self.closed, self.window);
+        let place = Arc::new(self.place(&self.bi_places).await?);
+        let (send, mut peer_recv) = pipe(&self.closed, self.window);
+        let (mut peer_send, recv) = pipe(&self.closed, self.window);
+        // Both halves of the peer's: the stream is over for the peer when its
+        // own direction is too (`stream_freed` of quinn-proto).
+        peer_recv.place = Some(Arc::clone(&place));
+        peer_send.place = Some(place);
         tokio::select! {
             biased;
             () = self.until_closed() => return Err(Self::lost()),

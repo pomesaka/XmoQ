@@ -22,6 +22,7 @@ use xmoq_moqt::session::{
 };
 use xmoq_moqt_io::memory::{
     MemoryConnection, MemoryRecv, MemorySend, STREAM_WINDOW, pair, pair_that_delivers_when_told,
+    pair_with_stream_limit,
 };
 use xmoq_moqt_io::{
     Connection, FetchBody, FetchChunk, FetchStreamWriter, IdleSubgroupStreamTimeout,
@@ -2590,22 +2591,35 @@ async fn a_publisher_that_answers_a_fetch_and_opens_no_stream_costs_the_subscrib
 
 #[tokio::test(start_paused = true)]
 async fn fetches_nobody_reads_do_not_keep_the_publisher_from_publishing() {
-    // One session takes all 16 FETCH requests the relay has for a
-    // publisher: the limit for one session is not the one looked at.
+    // Two sessions take the 16 FETCH requests the relay has for a publisher
+    // between them, 8 each: neither the limit of a session's own FETCHes (16)
+    // nor that of one subscriber's at a publisher is the one looked at.
     let (hub, _task) = hub::spawn(HubConfig {
         fetches_for_one_subscriber: Some(16),
         ..HubConfig::default()
     });
-    let mut publisher = Peer::connect(&hub, true).await;
+    // The relay lets the publisher have as many unidirectional streams open
+    // as this test needs and no more: its control stream, the 16 fetch
+    // streams that get stuck, and the subgroup stream below. A stuck stream
+    // keeps its place, as on a real connection, so that one more of them
+    // would keep the subgroup stream out.
+    let (local, remote) = pair_with_stream_limit(18);
+    let mut publisher = Peer::connect_over(&hub, local, remote, true, Arrival::First).await;
     let _publication = publisher.publish().await;
     let mut bob = Peer::connect(&hub, true).await;
     let (_bob_request, bob_alias) = bob.subscribe().await;
-    // Alice asks for as many FETCHes as a session may, reads none of them,
-    // and the publisher answers each with a stream that gets stuck.
+    // Alice and Carol ask for 8 FETCHes each, read none of them, and the
+    // publisher answers each with a stream that gets stuck.
     let mut alice = Peer::connect(&hub, false).await;
+    let mut carol = Peer::connect(&hub, false).await;
     let mut stuck = Vec::new();
-    for _ in 0..16 {
-        let request = alice.start_fetching(vec![]).await;
+    for asked in 0..16 {
+        let asking = if asked % 2 == 0 {
+            &mut alice
+        } else {
+            &mut carol
+        };
+        let request = asking.start_fetching(vec![]).await;
         let mut upstream = publisher.relay_fetch().await;
         publisher.accept_relay_fetch(&mut upstream).await;
         let mut stream = publisher.open_fetch_stream(&upstream).await;
@@ -2614,7 +2628,8 @@ async fn fetches_nobody_reads_do_not_keep_the_publisher_from_publishing() {
     }
     tokio::time::sleep(SOON).await;
     assert_eq!(hub.held().await.fetch_pipes, 16);
-    // One more is refused: EXCESSIVE_LOAD (0x9).
+    // One more is refused for the publisher's limit (16 of the relay's own
+    // FETCHes on its session), though Alice has 8: EXCESSIVE_LOAD (0x9).
     let mut one_more = alice.start_fetching(vec![]).await;
     let RequestStreamEvent::Message(response) = request_end(&mut one_more.reader).await else {
         panic!("no answer");
@@ -2624,9 +2639,16 @@ async fn fetches_nobody_reads_do_not_keep_the_publisher_from_publishing() {
         matches!(&answer, Ok(RequestEvent::Rejected(error)) if error.error_code == 0x9),
         "{answer:?}"
     );
-    // The publisher's subgroup stream is read all the same, and reaches Bob.
-    publisher.send_objects(&[object(0, 3)]).await.finish();
-    assert_eq!(bob.receive_stream(bob_alias).await, [0]);
+    // The publisher's subgroup stream is read all the same, and reaches Bob
+    // at once: not once the relay has given up a stuck FETCH, whose stream
+    // would make room for it. WHY a time is no race: on the paused clock of
+    // this test no time passes but what the tasks wait for, and the relay
+    // gives up a FETCH later than SOON.
+    let sending = async {
+        publisher.send_objects(&[object(0, 3)]).await.finish();
+        bob.receive_stream(bob_alias).await
+    };
+    assert_eq!(timeout(SOON, sending).await.expect("in time"), [0]);
 }
 
 #[tokio::test(start_paused = true)]
