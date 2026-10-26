@@ -84,7 +84,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 
 | ファイル/ディレクトリ | 種別 | 目的 |
 |---|---|---|
-| README.md | 入り口 | 概要、文書の一覧、検査とリレーの旗 |
+| README.md | 入り口 | 概要、文書と部品の一覧、検査 |
 | CLAUDE.md、docs/agent-guide.md | エージェントへの指示 | 作業の決まりとコマンド。agent-guideが優先する |
 | docs/vision.md | 仕様 | 目指す方向と範囲外 |
 | docs/requirements.md | 仕様 | 要件ごとの状態と、状態を表す語の定義 |
