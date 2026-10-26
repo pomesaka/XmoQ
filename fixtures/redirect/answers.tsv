@@ -1,0 +1,15 @@
+subscribe-none	subscribe	05 00 03 10 00 00	rejected
+subscribe-empty	subscribe	05 00 06 34 00 00 00 00 00	rejected
+subscribe-track-name	subscribe	05 00 07 34 00 00 00 00 01 62	rejected
+subscribe-namespace	subscribe	05 00 08 34 00 00 00 01 01 61 00	rejected
+subscribe-connect-uri	subscribe	05 00 07 34 00 00 01 68 00 00	rejected
+publish-namespace-none	publish-namespace	05 00 03 10 00 00	rejected
+publish-namespace-empty	publish-namespace	05 00 06 34 00 00 00 00 00	rejected
+publish-namespace-track-name	publish-namespace	05 00 07 34 00 00 00 00 01 62	closed 0x3
+publish-namespace-namespace	publish-namespace	05 00 08 34 00 00 00 01 01 61 00	rejected
+publish-namespace-connect-uri	publish-namespace	05 00 07 34 00 00 01 68 00 00	rejected
+subscribe-namespace-none	subscribe-namespace	05 00 03 10 00 00	rejected
+subscribe-namespace-empty	subscribe-namespace	05 00 06 34 00 00 00 00 00	rejected
+subscribe-namespace-track-name	subscribe-namespace	05 00 07 34 00 00 00 00 01 62	closed 0x3
+subscribe-namespace-namespace	subscribe-namespace	05 00 08 34 00 00 00 01 01 61 00	rejected
+subscribe-namespace-connect-uri	subscribe-namespace	05 00 07 34 00 00 01 68 00 00	rejected

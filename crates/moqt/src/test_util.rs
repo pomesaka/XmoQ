@@ -34,12 +34,17 @@ fn read_hex(directory: &str, name: &str) -> Vec<u8> {
         env!("CARGO_MANIFEST_DIR")
     );
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    from_hex(&text)
+}
+
+/// The bytes of hex digits, which may be separated by white space.
+pub(crate) fn from_hex(text: &str) -> Vec<u8> {
     let digits: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     digits
         .chunks(2)
         .map(|pair| {
-            let pair = std::str::from_utf8(pair).unwrap_or_else(|e| panic!("{path}: {e}"));
-            u8::from_str_radix(pair, 16).unwrap_or_else(|e| panic!("{path}: {pair}: {e}"))
+            let pair = std::str::from_utf8(pair).unwrap_or_else(|e| panic!("{text}: {e}"));
+            u8::from_str_radix(pair, 16).unwrap_or_else(|e| panic!("{text}: {pair}: {e}"))
         })
         .collect()
 }
