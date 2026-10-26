@@ -22,6 +22,7 @@ use xmoq_moqt::fetch::{FetchHeader, FetchObject, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::GroupOrder;
+use xmoq_moqt::printable::{printable, printable_namespace};
 use xmoq_moqt::session::{MAX_PEER_REQUESTS, MAX_UNANSWERED_UPDATES};
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
@@ -1677,7 +1678,7 @@ impl<C: Connection> Hub<C> {
                 self.add_session(session, connection, Role::Client, Arrival::First);
             }
             Err(reason) => {
-                self.log(|| format!("UPSTREAM_FAILED {reason}"));
+                self.log(|| format!("UPSTREAM_FAILED reason={reason:?}"));
                 self.feed(VecDeque::from([Event::UpstreamFailed]));
             }
         }
@@ -3683,7 +3684,7 @@ fn describe(action: &Action) -> Option<String> {
         ),
         Action::ConnectUpstream { uri, after_ms } => format!(
             "CONNECT_UPSTREAM uri={} after_ms={after_ms}",
-            String::from_utf8_lossy(uri)
+            printable(uri)
         ),
     })
 }
@@ -3810,16 +3811,6 @@ fn describe_fetch(action: &Action) -> Option<String> {
     })
 }
 
-/// The fields of a Track Namespace, as text, joined by `/`.
-fn fields_of(namespace: &xmoq_moqt::name::TrackNamespace) -> String {
-    namespace
-        .fields()
-        .iter()
-        .map(|field| String::from_utf8_lossy(field).into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn name(message: &ControlMessage) -> String {
     match message {
         ControlMessage::Setup(_) => "SETUP".to_string(),
@@ -3841,12 +3832,53 @@ fn name(message: &ControlMessage) -> String {
         ControlMessage::FetchOk(_) => "FETCH_OK".to_string(),
         ControlMessage::GoAway(go_away) => format!("GOAWAY timeout_ms={}", go_away.timeout_ms),
         ControlMessage::SubscribeNamespace(_) => "SUBSCRIBE_NAMESPACE".to_string(),
-        ControlMessage::Namespace(suffix) => format!("NAMESPACE suffix={}", fields_of(suffix)),
+        ControlMessage::Namespace(suffix) => {
+            format!("NAMESPACE suffix={}", printable_namespace(suffix))
+        }
         ControlMessage::NamespaceDone(suffix) => {
-            format!("NAMESPACE_DONE suffix={}", fields_of(suffix))
+            format!("NAMESPACE_DONE suffix={}", printable_namespace(suffix))
         }
         ControlMessage::UnsupportedRequest { message_type, .. } => {
             format!("unsupported request {message_type:#x}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+
+    #[test]
+    fn what_a_peer_named_stays_on_its_line_and_in_its_value() {
+        let namespace = |fields: &[&[u8]]| {
+            TrackNamespace::new(fields.iter().map(|field| field.to_vec()).collect()).unwrap()
+        };
+        let forged: &[&[u8]] = &[b"xmoq", b"a\nCLOSE_SESSION session=0 code=0x3"];
+        let cases = [
+            (
+                Action::SendControl {
+                    session: SessionKey(1),
+                    message: ControlMessage::Namespace(namespace(forged)),
+                },
+                "SEND session=1 control NAMESPACE suffix=xmoq/a\\x0aCLOSE_SESSION\\x20session=0\\x20code=0x3",
+            ),
+            (
+                Action::SendControl {
+                    session: SessionKey(1),
+                    message: ControlMessage::NamespaceDone(namespace(&[b"a/b"])),
+                },
+                "SEND session=1 control NAMESPACE_DONE suffix=a\\x2fb",
+            ),
+            (
+                Action::ConnectUpstream {
+                    uri: b"https://b.example\nSESSION_OPENED".to_vec(),
+                    after_ms: 0,
+                },
+                "CONNECT_UPSTREAM uri=https://b.example\\x0aSESSION_OPENED after_ms=0",
+            ),
+        ];
+        for (action, line) in cases {
+            assert_eq!(describe(&action).as_deref(), Some(line));
         }
     }
 }

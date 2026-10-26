@@ -23,6 +23,7 @@ pub mod kvp;
 pub mod message;
 pub mod name;
 pub mod params;
+pub mod printable;
 pub mod session;
 #[cfg(test)]
 mod test_util;
