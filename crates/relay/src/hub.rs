@@ -1137,6 +1137,7 @@ pub fn spawn_with_upstream<C: Connection>(
         out_streams: HashMap::new(),
         fetch_pipes: HashMap::new(),
         timers: Timers::default(),
+        drains: HashMap::new(),
         idle_moments: 0,
         closing: std::collections::HashSet::new(),
     };
@@ -1173,6 +1174,12 @@ struct Hub<C: Connection> {
     /// it short and to reorder it. Dropping that cuts it short as well.
     fetch_pipes: HashMap<(SessionKey, StreamKey), FetchControl>,
     timers: Timers,
+    /// When each wait for the last streams of a source began, by its session
+    /// and number, for the line that says how long it ran (`DRAIN_ENDED`).
+    /// WHY kept here and not read from the timer: the interop run compares
+    /// the time with the relay's wait, and the driver reads the lines too
+    /// late to time them itself (`interop/disconnect.ts`, publish-anew).
+    drains: HashMap<(SessionKey, u64), Instant>,
     /// The next number that names a moment a session began to hold nothing.
     idle_moments: u64,
     /// The sessions the relay closed itself and has not forgotten yet: their
@@ -1872,6 +1879,9 @@ impl<C: Connection> Hub<C> {
                     )
                 });
             }
+            if let Event::DrainTimeout { session, wait, .. } = &event {
+                self.drain_ended(*session, *wait, "timeout");
+            }
             if let Event::FetchPipeEnded {
                 session,
                 stream,
@@ -2107,8 +2117,11 @@ impl<C: Connection> Hub<C> {
                     handle.stops.stop(stream.0, code);
                 }
             }
-            Action::StartDrainTimer { .. }
-            | Action::StopDrainTimer { .. }
+            Action::StartDrainTimer { session, wait, .. } => {
+                self.drains.insert((session, wait), Instant::now());
+                self.set_timer(&action, pending);
+            }
+            Action::StopDrainTimer { .. }
             | Action::StopEarlyTimer { .. }
             | Action::StopJoiningFetchTimer { .. }
             | Action::StartEarlyTimer { .. }
@@ -2543,7 +2556,10 @@ impl<C: Connection> Hub<C> {
             Action::StopUpstreamTimer { session, request } => {
                 self.timers.stop_upstream(session, request);
             }
-            Action::StopDrainTimer { session, wait } => self.timers.stop_drain(session, wait),
+            Action::StopDrainTimer { session, wait } => {
+                self.timers.stop_drain(session, wait);
+                self.drain_ended(session, wait, "stop");
+            }
             Action::StopEarlyTimer { session, stream } => self.timers.stop_early(session, stream),
             Action::StopJoiningFetchTimer { session, stream } => {
                 self.timers.stop_joining(session, stream);
@@ -2948,6 +2964,23 @@ impl<C: Connection> Hub<C> {
             *owner != session
         });
         self.timers.forget_session(session);
+        self.drains.retain(|(owner, _), _| *owner != session);
+    }
+
+    /// Says that a wait for the last streams of a source is over, and how
+    /// long it ran by the relay's clock: `by` is "timeout" where it ran out,
+    /// and "stop" where the source was over before it.
+    fn drain_ended(&mut self, session: SessionKey, wait: u64, by: &str) {
+        let Some(began) = self.drains.remove(&(session, wait)) else {
+            return;
+        };
+        let after_ms = began.elapsed().as_millis();
+        self.log(|| {
+            format!(
+                "DRAIN_ENDED session={} after_ms={after_ms} by={by}",
+                session.0
+            )
+        });
     }
 }
 
