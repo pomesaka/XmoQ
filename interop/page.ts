@@ -1485,32 +1485,37 @@ window.xmoqOwn = {
 		await audioPublishing.encoder.end();
 	}),
 
-	playAudio: withPlainErrors(async (namespace: string, trackName: string) => {
-		const pieces: PageAudioReport["pieces"] = [];
-		const playback = await playAudioTrack(connected(), {
-			trackNamespace: namespaceTuple(namespace),
-			trackName: utf8.encode(trackName),
-			codec: "opus",
-			sampleRate: 48_000,
-			numberOfChannels: 1,
-			onData(data) {
-				const samples = new Float32Array(data.numberOfFrames);
-				data.copyTo(samples, { planeIndex: 0, format: "f32-planar" });
-				pieces.push({
-					timestamp: data.timestamp,
-					frames: data.numberOfFrames,
-					sampleRate: data.sampleRate,
-					channels: data.numberOfChannels,
-					peak: samples.reduce(
-						(peak, sample) => Math.max(peak, Math.abs(sample)),
-						0,
-					),
-				});
-				data.close();
-			},
-		});
-		audioPlaying = { playback, pieces };
-	}),
+	playAudio: withPlainErrors(
+		async (namespace: string, trackName: string, holdForOrderMs?: number) => {
+			const pieces: PageAudioReport["pieces"] = [];
+			const playback = await playAudioTrack(connected(), {
+				trackNamespace: namespaceTuple(namespace),
+				trackName: utf8.encode(trackName),
+				codec: "opus",
+				sampleRate: 48_000,
+				numberOfChannels: 1,
+				...(holdForOrderMs === undefined
+					? {}
+					: { holdForOrderMs: () => holdForOrderMs }),
+				onData(data) {
+					const samples = new Float32Array(data.numberOfFrames);
+					data.copyTo(samples, { planeIndex: 0, format: "f32-planar" });
+					pieces.push({
+						timestamp: data.timestamp,
+						frames: data.numberOfFrames,
+						sampleRate: data.sampleRate,
+						channels: data.numberOfChannels,
+						peak: samples.reduce(
+							(peak, sample) => Math.max(peak, Math.abs(sample)),
+							0,
+						),
+					});
+					data.close();
+				},
+			});
+			audioPlaying = { playback, pieces };
+		},
+	),
 
 	audioReport: withPlainErrors(async (pieces: number, timeoutMs: number) => {
 		const until = performance.now() + timeoutMs;
