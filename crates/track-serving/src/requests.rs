@@ -54,7 +54,10 @@ impl std::error::Error for RequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Peer(error) => Some(error),
-            Self::Usage(_) | Self::ReaderPanicked => None,
+            Self::Usage(_) => None,
+            // What the code of the close is found by (`termination_code` of
+            // `xmoq-moqt-io`'s `client`).
+            Self::ReaderPanicked => Some(&xmoq_moqt_io::client::ReaderPanicked),
         }
     }
 }

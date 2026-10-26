@@ -92,13 +92,14 @@ pub fn refusal<T, H: BuildHasher>(
         // A stream that breaks the protocol in its bytes is reported here
         // alone, by the reader of the peer's request streams.
         PeerRequestStreamEvent::Failed(error) => Refusal::closed(error),
-        // The stream is lost, and what the peer sent on it: as the reader of
-        // the peer's other streams has it (`UniEvent::ReaderPanicked`), the
-        // session ends without a code of the peer's fault.
+        // The stream is lost, and what the peer sent on it: the session
+        // cannot go on with a hole in it, and the fault is on this side, as
+        // the reader of the peer's other streams has it
+        // (`UniEvent::ReaderPanicked`). §3.5: "INTERNAL_ERROR (0x1): An
+        // implementation specific error occurred".
         PeerRequestStreamEvent::ReaderPanicked => Refusal::Close {
-            // NO_ERROR (§3.5).
-            code: 0,
-            why: "a reader of a request stream panicked".to_owned(),
+            code: TerminationCode::InternalError.code(),
+            why: crate::client::ReaderPanicked.to_string(),
             error: None,
         },
     }
@@ -213,7 +214,7 @@ mod tests {
             (
                 "a reader that panicked",
                 PeerRequestStreamEvent::ReaderPanicked,
-                "close 0x0",
+                "close 0x1",
             ),
         ];
         for (name, event, expected) in cases {

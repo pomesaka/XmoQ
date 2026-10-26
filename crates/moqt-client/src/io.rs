@@ -196,7 +196,7 @@ impl SessionInbox {
         match self.events.recv().await {
             Some(UniEvent::Control(message)) => Ok(message),
             Some(UniEvent::Failed(error)) => Err(error.into()),
-            Some(UniEvent::ReaderPanicked) => Err(anyhow!("a stream reader panicked")),
+            Some(UniEvent::ReaderPanicked) => Err(xmoq_moqt_io::client::ReaderPanicked.into()),
             Some(other) => Err(anyhow!("misrouted event {other:?}")),
             None => Err(anyhow!("connection closed")),
         }

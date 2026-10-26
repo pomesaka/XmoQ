@@ -820,7 +820,8 @@ pub async fn refuse_peer_request<S: std::hash::BuildHasher>(
         Refusal::Close {
             error: Some(error), ..
         } => Err(error.into()),
-        Refusal::Close { why, .. } => Err(anyhow!(why)),
+        // The one close that is no fault of the peer.
+        Refusal::Close { error: None, .. } => Err(xmoq_moqt_io::client::ReaderPanicked.into()),
     }
 }
 

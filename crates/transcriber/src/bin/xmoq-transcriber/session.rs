@@ -1167,7 +1167,7 @@ impl Transcribing<'_> {
             }
             UniEvent::SubgroupOpened { .. } | UniEvent::ObjectBegun { .. } => {}
             UniEvent::Failed(error) => return Err(error.into()),
-            UniEvent::ReaderPanicked => bail!("a reader of a stream panicked"),
+            UniEvent::ReaderPanicked => return Err(client::ReaderPanicked.into()),
         }
         Ok(None)
     }
