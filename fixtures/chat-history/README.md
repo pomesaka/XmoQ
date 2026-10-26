@@ -1,6 +1,6 @@
 # What a participant of the chat fetches of the lines before its subscription
 
-A participant of a room subscribes to the track `lines` of `xmoq/chat/<room>` (`crates/chat/README.md`), and asks for lines said before by an Absolute Joining FETCH (§10.12.2.2), when it comes and each time its subscription is made again. Two implementations decide what to ask for by the same rule: `historyToFetch` of `@xmoq/chat` (`packages/chat/src/core/history.ts`) and `history_to_fetch` of the terminal viewer and the reader for agents (`crates/viewer/src/chat_track.rs`), where its reasons are. These rows pin it.
+A participant of a room subscribes to the track `lines` of `xmoq/chat/<room>` (`crates/chat/README.md`), and asks for lines said before by an Absolute Joining FETCH (§10.12.2.1), when it comes and each time its subscription is made again. Two implementations decide what to ask for by the same rule: `historyToFetch` of `@xmoq/chat` (`packages/chat/src/core/history.ts`) and `history_to_fetch` of the terminal viewer and the reader for agents (`crates/viewer/src/chat_track.rs`), where its reasons are. These rows pin it.
 
 The rule, decided on 2026-10-24, with `catchUp` the most lines a participant catches up (its own default, 1 to 1,000):
 

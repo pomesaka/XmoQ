@@ -25,7 +25,7 @@ Read off `src/main.rs` on 2026-10-25. The limits are there to be fitted to the m
 | `--when-full` | Where a session goes that comes when it is full: a GOAWAY after its SETUP names this URL with `sent-away=1` in its query, and a session that came with that is closed rather than sent on. The relay there has to have the same certificate, or one the clients take otherwise | Closed with `INTERNAL_ERROR` |
 | `--announce-at-once` | How many `PUBLISH_NAMESPACE` requests a session may send at once | 5 |
 | `--announce-every-ms` | The time in which a session gets one of them back | 1,000 |
-| `--peer-requests-per-session`, `--own-requests-per-session`, `--namespaces-per-session` | How many requests a session may have open at the relay, how many the relay may have open on it (SUBSCRIBE, FETCH and TRACK_STATUS; not the namespaces it announces upstream), and how many namespaces it may have announced; for every session alike, so a relay above edges that carry a meeting is given more, and its viewers have as much ([design draft](docs/scale-and-meetings.md)); more than 0 | 256, 64, 64 |
+| `--peer-requests-per-session`, `--own-requests-per-session`, `--namespaces-per-session` | How many requests a session may have open at the relay, how many the relay may have open on it (SUBSCRIBE, FETCH and TRACK_STATUS; not the namespaces it announces upstream), and how many namespaces it may have announced; for every session alike, so a relay above edges that carry a meeting is given more, and its viewers have as much ([design draft](../../docs/scale-and-meetings.md)); more than 0 | 256, 64, 64 |
 | `--requests-for-one-session` | How many requests the relay has open on one publisher for one subscriber's session | 8 |
 | `--fetches-for-one-session` | How many of them are FETCH requests | 4 |
 | `--cached-fetch-whole-ms` | How long a subscriber has for the whole of a fetch stream the relay writes from its cache, at the least | 30,000 |
@@ -37,4 +37,4 @@ Read off `src/main.rs` on 2026-10-25. The limits are there to be fitted to the m
 | `--redirect-uri` | The New Session URI of the GOAWAY the relay sends when it is told to stop | Empty: the URI the client used |
 | `--goaway-timeout-ms` | The Timeout of that GOAWAY, and how long the relay waits before it closes the sessions that are left | 10,000 |
 | `--stats-every-ms`, `--log-arrivals on` | For measuring: a `STATS` line for each session at that interval, and an `ARRIVED` line on stderr for every Object that arrives | Off |
-| `--slow-open-ms` | For a run that looks at how long streams take to open; 0 logs every stream | Not logged |
+| `--slow-open-ms` | A `DATA_OPENED` line for each subgroup stream towards a subscriber that took at least this long to open; 0 logs every stream | 10 |
