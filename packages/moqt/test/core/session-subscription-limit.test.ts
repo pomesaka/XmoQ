@@ -13,6 +13,7 @@ const LIMITS: SessionLimits = {
 	maxPeerRequests: 64,
 	maxPeerFetches: 16,
 	maxHeldSubgroupBytes: 1024,
+	maxSessionSubgroupBytes: 1024,
 };
 
 /** SUBGROUP_HEADER with Subgroup ID 0 and no properties, Group 0, for this Track Alias. */

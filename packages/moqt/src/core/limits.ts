@@ -5,10 +5,6 @@ import type { SubgroupStreamLimits } from "./subgroup.ts";
  * The limits an application can set. The fixed limits of the implementation
  * (how many Track Aliases are remembered, how many Key-Value-Pairs a message
  * may hold) are constants next to the code they bound.
- *
- * FIXME: bound the bytes all subgroup streams of the session hold together,
- * as the Rust session does (`session-subgroup-bytes` of `fixtures/limits/`);
- * each stream holds up to one Object of `maxObjectPayloadLength` meanwhile.
  */
 export interface SessionLimits extends SubgroupStreamLimits {
 	/**
@@ -18,6 +14,22 @@ export interface SessionLimits extends SubgroupStreamLimits {
 	 * overhead, so Objects without a payload are bounded too.
 	 */
 	maxHeldSubgroupBytes: number;
+	/**
+	 * Bytes all the subgroup streams of the session hold together of Objects
+	 * and headers that have not arrived whole; a stream whose bytes would
+	 * take the session over it is stopped (`STOP_SENDING` with
+	 * INTERNAL_ERROR), and the session goes on. A finite number from 1:
+	 * `resolveLimits` takes no other, so that it cannot be left unbounded.
+	 *
+	 * WHY on top of `maxObjectPayloadLength`: each stream holds up to one
+	 * Object meanwhile, and the I/O layer reads 64 streams at once
+	 * (`maxPeerUniStreams`), which is about 1 GiB for a peer that sends 64
+	 * Objects of 16 MiB slowly. **Provisional**: 4 MiB, the Rust session's
+	 * (`session_buffer_limit`, row `session-subgroup-bytes` of
+	 * `fixtures/limits/`); an Object larger than it is not received whole by
+	 * default, whatever `maxObjectPayloadLength` allows.
+	 */
+	maxSessionSubgroupBytes: number;
 	/**
 	 * Requests of the peer that are kept at once: the ones that wait for the
 	 * application's answer, the subscriptions and FETCHes it accepted, and
@@ -59,9 +71,18 @@ const DEFAULT_SESSION_LIMITS: SessionLimits = {
 	maxObjectPayloadLength: 16 * 1024 * 1024,
 	maxObjectPropertiesLength: 64 * 1024,
 	maxHeldSubgroupBytes: 1024 * 1024,
+	maxSessionSubgroupBytes: 4 * 1024 * 1024,
 	maxPeerRequests: 64,
 	maxPeerFetches: 32,
 };
+
+/** `value` where it is a whole number from 1; a `RangeError` for any other, `Infinity` among them. */
+function boundOf(name: string, value: number): number {
+	if (!Number.isSafeInteger(value) || value < 1) {
+		throw new RangeError(`${name} is a whole number from 1, not ${value}`);
+	}
+	return value;
+}
 
 /** The limits to run with: the defaults, with what the application set on top. */
 export function resolveLimits(
@@ -77,6 +98,11 @@ export function resolveLimits(
 		maxHeldSubgroupBytes:
 			limits.maxHeldSubgroupBytes ??
 			DEFAULT_SESSION_LIMITS.maxHeldSubgroupBytes,
+		maxSessionSubgroupBytes: boundOf(
+			"maxSessionSubgroupBytes",
+			limits.maxSessionSubgroupBytes ??
+				DEFAULT_SESSION_LIMITS.maxSessionSubgroupBytes,
+		),
 		maxPeerRequests:
 			limits.maxPeerRequests ?? DEFAULT_SESSION_LIMITS.maxPeerRequests,
 		maxPeerFetches:

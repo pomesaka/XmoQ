@@ -28,6 +28,7 @@ const SMALL_LIMITS: SessionLimits = {
 	maxPeerRequests: 64,
 	maxPeerFetches: 16,
 	maxHeldSubgroupBytes: 64,
+	maxSessionSubgroupBytes: 1024,
 };
 
 function started(limits?: SessionLimits): Session {
