@@ -1,5 +1,9 @@
 # 2026-10-10 — moqtail: one Object between browser and Rust (MOQT draft 18)
 
+- Date: 2026-10-10
+- Commit SHA: eba38d89, the commit that adds this record
+- Roadmap item: Phase 0, "Transfer one MoQ Object and document reproducible commands"
+
 ## Objective
 
 Phase 0 gate from [the roadmap](../roadmap.md): transfer one MoQ Object between a real Chromium and a Rust client through a relay, using moqtail pinned to MOQT draft 18, and check that the received payload equals the sent one.

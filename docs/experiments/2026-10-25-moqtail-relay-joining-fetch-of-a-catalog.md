@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, meetings (`interop/meeting-pages.ts`), and every run that reads a page's MSF catalog through `moqtail`'s relay.
+- Roadmap item: Phase 6, meetings (`interop/meeting-pages.ts`), and every run that reads a page's MSF catalog through `moqtail`'s relay.
 
 ## Objective
 

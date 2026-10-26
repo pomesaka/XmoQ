@@ -1,5 +1,7 @@
 # Roadmap (proposed, no committed dates)
 
+A Phase keeps its number, and a new one is added at the end: the records in [experiments](experiments/README.md) name the Phase they were for by its number, and their index files them by it.
+
 ## Phase 0 — Feasibility
 - [x] Select candidate Rust and browser MoQ libraries; record supported draft revisions. See [MoQ library candidates](moq-libraries.md).
 - [x] Establish browser ↔ Rust WebTransport/MoQ connectivity.

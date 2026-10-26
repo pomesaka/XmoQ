@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, meetings, the page's side (`packages/meeting`). How participants find each other (SUBSCRIBE_NAMESPACE), where the limit of 49 holds (the room, and 48 others in a page) and what each one receives at first (the small video of 8 as they came, the sound of all) were decided on 2026-10-25 ([design](../scale-and-meetings.md)).
+- Roadmap item: Phase 6, meetings, the page's side (`packages/meeting`). How participants find each other (SUBSCRIBE_NAMESPACE), where the limit of 49 holds (the room, and 48 others in a page) and what each one receives at first (the small video of 8 as they came, the sound of all) were decided on 2026-10-25 ([design](../scale-and-meetings.md)).
 
 ## Objective
 

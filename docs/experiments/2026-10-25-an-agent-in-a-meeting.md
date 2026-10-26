@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, meetings, the reader for agents (`crates/agent`, `crates/viewer`). The meeting is **proposed** (`docs/scale-and-meetings.md`, Part 2); how its participants find each other is undecided, and this is the side that reads the relay's namespaces.
+- Roadmap item: Phase 6, meetings, the reader for agents (`crates/agent`, `crates/viewer`). The meeting is **proposed** (`docs/scale-and-meetings.md`, Part 2); how its participants find each other is undecided, and this is the side that reads the relay's namespaces.
 
 ## Objective
 

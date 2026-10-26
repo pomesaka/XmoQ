@@ -1,6 +1,8 @@
 # An hour of the demo
 
-Date: 2026-10-13
+- Date: 2026-10-13
+- Commit SHA: 5fe6011a, the commit that adds this record
+- Roadmap item: Phase 2, "Measure latency, drops, stalls and recovery under loss"
 
 ## Objective
 

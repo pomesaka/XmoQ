@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, meetings, the reader for agents. The meeting is **proposed** (`docs/scale-and-meetings.md`, Part 2). What [the record of an agent in a meeting](2026-10-25-an-agent-in-a-meeting.md) left out: the transcript of each participant, and `/frame` alone.
+- Roadmap item: Phase 6, meetings, the reader for agents. The meeting is **proposed** (`docs/scale-and-meetings.md`, Part 2). What [the record of an agent in a meeting](2026-10-25-an-agent-in-a-meeting.md) left out: the transcript of each participant, and `/frame` alone.
 
 ## Objective
 
