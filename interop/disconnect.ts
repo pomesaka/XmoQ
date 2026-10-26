@@ -2724,10 +2724,28 @@ async function publishAnew(run: Run): Promise<ScenarioResult> {
 			`${publisher.label}: the relay reset the first PUBLISH stream with "${anew.peerEnd}", not with CANCELLED (${RESET_BY_RELAY})`,
 		);
 	}
-	const atOnce = anew.peerEndAfterMs < RELAY_DRAIN_TIMEOUT_MS - 500;
-	if (sameAlias !== atOnce) {
+	// WHY the relay's own lines, and not the time this driver read them at:
+	// the relay's wait runs by its clock, and the driver reads a line later
+	// by as much as it is busy. The relay writes one stream of lines, so
+	// their order is the order it acted in. Under the same alias it resets
+	// the first PUBLISH stream before its wait runs out (the wait is not
+	// stopped, and runs out all the same); under another it resets the
+	// stream when the wait has run out, after the line that says so.
+	const drainEnded = new RegExp(
+		`^DRAIN_ENDED session=${publisherSession} after_ms=(\\d+) by=(\\w+)$`,
+	);
+	const [drainLine, ranMs = "", by = ""] =
+		await run.context.relay.waitForLine(drainEnded);
+	const ran = Number(ranMs);
+	const resetBefore = await run.context.relay.linesBefore(
+		{ line: drainEnded },
+		new RegExp(`^RESET_REQUEST session=${publisherSession} `),
+	);
+	const atOnce = resetBefore.length > 0;
+	const ranOut = by === "timeout" && ran >= RELAY_DRAIN_TIMEOUT_MS;
+	if (sameAlias ? !atOnce : atOnce || !ranOut) {
 		throw new Error(
-			`${publisher.label}: the relay ended the first PUBLISH stream ${seconds(anew.peerEndAfterMs)} after the new PUBLISH was asked for; ${sameAlias ? "under the same alias it has to be at once" : `under another alias the first source drains for ${seconds(RELAY_DRAIN_TIMEOUT_MS)}`}`,
+			`${publisher.label}: ${sameAlias ? "under the same alias the relay was to reset the first PUBLISH stream before its wait for the first source ran out" : `under another alias the first source was to drain for ${seconds(RELAY_DRAIN_TIMEOUT_MS)}, and its stream to be reset after that`}: ${drainLine}, ${resetBefore.length} resets of the session before it`,
 		);
 	}
 
@@ -2761,12 +2779,13 @@ async function publishAnew(run: Run): Promise<ScenarioResult> {
 	);
 
 	return {
-		summary: `the subscribers stayed through a new PUBLISH under ${sameAlias ? "the same" : "another"} Track Alias and got Group ${first} before it and Group ${second} after; the relay ended the first PUBLISH stream by "${anew.peerEnd}" after ${seconds(anew.peerEndAfterMs)}`,
+		summary: `the subscribers stayed through a new PUBLISH under ${sameAlias ? "the same" : "another"} Track Alias and got Group ${first} before it and Group ${second} after; the relay ended the first PUBLISH stream by "${anew.peerEnd}" after ${seconds(anew.peerEndAfterMs)}, and its wait for the first source ended by ${by} after ${ran} ms`,
 		subscriptions: subscriptionsOf(ended),
 		measured: {
 			"ms from the relay reading PUBLISH_DONE to the new PUBLISH":
 				anew.publishedAfterMs,
 			"ms until the first PUBLISH stream ended": anew.peerEndAfterMs,
+			"ms the relay waited for the first source": ran,
 		},
 	};
 }
