@@ -12,9 +12,9 @@ impl InOrder {
     /// after the frames this was told of. One that can is the last it was
     /// told of; one that cannot leaves it as it was.
     ///
-    /// WHY the first of a Group: the publishers this runs with (the demo's
-    /// page, `moqlivemock`, `fixtures/loc-04/`) begin every Group with a
-    /// key frame. WHY not that of an older Group: it would take the picture
+    /// WHY the first of a Group: the publishers this runs with
+    /// (`@xmoq/media`'s, `moqlivemock`, `fixtures/loc-04/`) begin every
+    /// Group with a key frame. WHY not that of an older Group: it would take the picture
     /// back. WHY a frame that does not follow is left out: the decoder would
     /// make a picture of it from the wrong one before.
     pub fn take(&mut self, group: u64, object: u64) -> bool {

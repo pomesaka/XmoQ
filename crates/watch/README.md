@@ -80,7 +80,7 @@ The relay, the publisher behind it and the room all say things the viewer acts o
 | `--buffer-ms` | 10,000; `auto` goes to 400 ms | The same 10 s; the page's limit | `args`, `clock` |
 | Arrivals the automatic buffer goes by | 1,600, the newest | The page's: 10 seconds of 30 frames and 50 packets, twice over | `clock` |
 | Frames that wait to be decoded and drawn | 30; one more is left out, and the picture goes on at the next Group | What the watching page holds | `picture.rs` |
-| The pixels of a decoded picture | 3840x2160; a larger one is not drawn (`pictures_too_large` in `AV_PLAYED`) | Four times the largest the demo sends. What the decoder holds itself for such a picture is not bounded here | `xmoq-picture` |
+| The pixels of a decoded picture | 3840x2160; a larger one is not drawn (`pictures_too_large` in `AV_PLAYED`) | Four times 1080p. What the decoder holds itself for such a picture is not bounded here | `xmoq-picture` |
 | Packets of sound that wait | 100 (2 s); the oldest goes | | `playout` |
 | The relay's SETUP | 10 s (`--setup-wait-ms`); without it the session is closed with `CONTROL_MESSAGE_TIMEOUT` (`0x11`) | As `@xmoq/moqt` | `main.rs` |
 | Connecting to the relay | 10 s (`--connect-wait-ms`, `CONNECT_WAIT_MS` of `xmoq_viewer::reconnect`, as `xmoq-agent` has it) | **Provisional** | `main.rs` |

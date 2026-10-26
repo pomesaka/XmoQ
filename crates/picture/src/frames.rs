@@ -34,7 +34,8 @@ pub struct Settings {
 impl Default for Settings {
     /// **All provisional.** WHY no picture unless asked for: a reader that
     /// is given pictures it did not ask for reads them all. WHY 1280: the
-    /// demo's largest picture is 1920x1080, which is then 960x540. WHY 500:
+    /// width of 720p; a picture of 1080p is then made 960x540, the least
+    /// whole number that fits (`fit`). WHY 500:
     /// a PNG of 1280x720 is no larger than its pixels and a little more,
     /// 2.8 MB, and 500 of them 1.4 GB.
     fn default() -> Self {
@@ -50,8 +51,8 @@ impl Default for Settings {
 /// Beyond them the frames held are decoded at once and let go, and the
 /// latest picture is kept in their place.
 ///
-/// WHY 16 MiB: the demo's Group of a second at 2.5 Mbit/s is 300 KiB, and
-/// a Group of 10 s at 8 Mbit/s 10 MiB.
+/// WHY 16 MiB: a Group of a second at 2.5 Mbit/s (a 720p video) is
+/// 300 KiB, and a Group of 10 s at 8 Mbit/s 10 MiB.
 pub const MOST_HELD_BYTES: usize = 16 << 20;
 
 /// The most frames that are held undecoded, for the same reason as

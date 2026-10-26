@@ -119,8 +119,8 @@ pub struct FrameAsking {
 
 /// How long a picture that was asked for is waited for. **Provisional.**
 /// WHY 10 s: the answer waits for the frames of one Group to be decoded,
-/// or, before any came, for the first key frame, which the demo sends every
-/// second; and while the reader connects again, for the next session's
+/// or, before any came, for the first key frame, which begins the next
+/// Group; and while the reader connects again, for the next session's
 /// video.
 pub const FRAME_WAIT: Duration = Duration::from_secs(10);
 

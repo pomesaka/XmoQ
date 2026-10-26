@@ -50,8 +50,10 @@ impl Video {
     /// Subscribes to the first H.264 video track of `tracks`, the catalog of
     /// `namespace`, read with `catalog` where it is this video's to keep.
     ///
-    /// WHY the first: the demo's publisher puts its main version first, and
-    /// `xmoq-watch` takes it where nothing else is asked.
+    /// WHY the first: as `xmoq-watch` takes it where nothing else is asked
+    /// (`xmoq_watch::tracks`): MSF-01 gives the order of a catalog's tracks
+    /// no meaning, and a publisher that wants a version taken unasked lists
+    /// it first.
     pub async fn of(
         asking_with: Asking,
         namespace: TrackNamespace,

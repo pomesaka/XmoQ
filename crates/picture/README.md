@@ -19,10 +19,10 @@ Pictures of an H.264 video track: decoded to RGB, made smaller by a whole number
 | What | Default | Why |
 |---|---|---|
 | A picture without being asked for | None (`Settings::every_us`) | A reader that is given pictures it did not ask for reads them all |
-| The longest side | 1280 (`longest_side`); a larger picture is made smaller by the least whole number that fits (1920x1080 is 960x540) | The demo's largest picture is 1920x1080 |
+| The longest side | 1280 (`longest_side`); a larger picture is made smaller by the least whole number that fits (1920x1080 is 960x540) | The width of 720p; 1920x1080 is made 960x540 |
 | The files kept | 500 (`most_kept`); `Taken::removed` names the oldest beyond them | A PNG of 1280x720 is at most its pixels and a little more, 2.8 MB: 1.4 GB |
 | The frames held undecoded | 16 MiB and 600 frames (`MOST_HELD_BYTES`, `MOST_HELD_FRAMES`); beyond them they are decoded at once and let go | A Group of 10 s at 8 Mbit/s is 10 MiB |
-| The pixels of a picture | 3840x2160 (`fit::MOST_PIXELS`); a larger one is not given | Four times the largest the demo sends |
+| The pixels of a picture | 3840x2160 (`fit::MOST_PIXELS`); a larger one is not given | Four times 1080p |
 
 All the values are provisional.
 
