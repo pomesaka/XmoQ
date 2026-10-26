@@ -4,7 +4,13 @@ import {
 	connectOver,
 	type MoqtConnection,
 } from "../../src/webtransport/connection.ts";
-import { fixture, hex, MOQTAIL_RELAY_SETUP } from "../helpers.ts";
+import {
+	fixture,
+	fixtureTable,
+	fromALibrary,
+	hex,
+	MOQTAIL_RELAY_SETUP,
+} from "../helpers.ts";
 import { flush, pass, state } from "./clock.ts";
 import { createFakePeer, type FakePeer } from "./fake-transport.ts";
 
@@ -113,6 +119,61 @@ test("a TRACK_STATUS of the peer is refused with NOT_SUPPORTED, and a FIN", asyn
 	expect(await request.sent.read()).toEqual({ done: true, value: undefined });
 	expect(await state(connection.closed)).toBe("pending");
 });
+
+/** A captured request with the Request ID 1, the server's first. */
+function withRequestIdOne(name: string): Uint8Array {
+	const pairs = fixture(name).split(" ");
+	pairs[3] = "01";
+	return hex(pairs.join(" "));
+}
+
+/** The requests of `fixtures/client-refusals/refusals.tsv`, as the peer sends them. */
+const REQUESTS: Record<string, Uint8Array> = {
+	subscribe: subscribeBytes(1),
+	publish: withRequestIdOne("publish-moqtail-rs"),
+	"publish-namespace": withRequestIdOne("publish-namespace-moqtail-ts"),
+	fetch: fetchBytes(1),
+	// Request ID 1 already.
+	"subscribe-namespace": hex(fromALibrary("subscribe-namespace-moqtail-ts")),
+	"track-status": hex(fixture("track-status-moqtail-relay")),
+};
+
+const CLIENT_REFUSALS = fixtureTable("client-refusals", "refusals.tsv");
+
+test("the table of client refusals has its rows", () => {
+	expect(CLIENT_REFUSALS.length).toBe(11);
+});
+
+// The rows of `fixtures/client-refusals/refusals.tsv`, which the Rust client
+// reads as well (`refusal_code`).
+test.each(CLIENT_REFUSALS)(
+	"a request %s of the peer, served %s, is refused with %s",
+	async (name, serves, code) => {
+		const { peer, connection } = await connected();
+		switch (serves) {
+			case "yes":
+				connection.serve({ subscribe: () => {} });
+				break;
+			case "no":
+				break;
+			default:
+				throw new Error(`no serves ${serves}`);
+		}
+		const bytes = REQUESTS[name ?? ""];
+		if (bytes === undefined) throw new Error(`no request ${name}`);
+		const request = peer.openBidi();
+		await request.reply.write(bytes);
+		await flush();
+		const answer = (await request.sent.read()).value;
+		expect(
+			answer === undefined ? undefined : decodeControlMessage(answer),
+		).toMatchObject({
+			status: "ok",
+			value: { type: "REQUEST_ERROR", errorCode: BigInt(code ?? "no code") },
+		});
+		expect(await state(connection.closed)).toBe("pending");
+	},
+);
 
 describe("a request of the peer that was refused, whose peer does not end its direction", () => {
 	test.each(REFUSED)(

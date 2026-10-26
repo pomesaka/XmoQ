@@ -1,0 +1,11 @@
+subscribe	no	0x3
+publish	no	0x3
+publish	yes	0x3
+publish-namespace	no	0x3
+publish-namespace	yes	0x3
+fetch	no	0x3
+fetch	yes	0x3
+subscribe-namespace	no	0x3
+subscribe-namespace	yes	0x3
+track-status	no	0x3
+track-status	yes	0x3
