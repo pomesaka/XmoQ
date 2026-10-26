@@ -116,6 +116,33 @@
 //                     has no end of its session). own-browser and own-rust.
 //                     (The row "A subgroup stream of the peer that sends
 //                     nothing after its header".)
+//   update-while-writing
+//                     own-rust in the mode that serves a SUBSCRIBE: the
+//                     peer answers its PUBLISH_NAMESPACE, subscribes to the
+//                     track `served`, and does not read the subgroup stream
+//                     of the Object it is sent (256 KiB, over the peer's
+//                     stream window of 128 KiB) while it sends a
+//                     REQUEST_UPDATE the client refuses, and for half a
+//                     second after the REQUEST_ERROR. The client's
+//                     PUBLISH_DONE comes after that stream ended: the peer
+//                     prints `PUBLISH_DONE session=0
+//                     before_the_stream_ended=false` (§10.11: "A sender MUST
+//                     NOT send PUBLISH_DONE until it has closed all streams
+//                     it will ever open").
+//   withdraw-namespace
+//                     own-rust in the same mode: the peer answers its
+//                     PUBLISH_NAMESPACE with REQUEST_OK and a FIN, and a
+//                     second later stops the client's direction. The FIN
+//                     withdraws nothing: half a second after it the client
+//                     has printed no `NAMESPACE_WITHDRAWN`; the stop does,
+//                     and the client prints `NAMESPACE_WITHDRAWN how=..`
+//                     (§6.2: "A subscriber can cancel the request (see
+//                     Section 3.3.2) to revoke acceptance").
+//   withdraw-namespace-reset
+//                     The same, with the peer's direction reset a second
+//                     after its REQUEST_OK in place of the FIN and the stop:
+//                     the client prints `NAMESPACE_WITHDRAWN how=..` after
+//                     the peer's `NAMESPACE_RESET`.
 //   request-id-again  The same, with a SUBSCRIBE of the Request ID 1, which
 //                     the client refuses, and then a REQUEST_UPDATE with the
 //                     same Request ID on its stream.
@@ -1045,7 +1072,10 @@ const CASES: Record<
 			| "request-id-again"
 			| "datagram"
 			| "datagram-before-setup"
-			| "silent-subgroup";
+			| "silent-subgroup"
+			| "update-while-writing"
+			| "withdraw-namespace"
+			| "withdraw-namespace-reset";
 		run: (context: RunContext, client: QuietClient) => Promise<string>;
 	}
 > = {
@@ -1065,7 +1095,117 @@ const CASES: Record<
 		run: unknownDatagram,
 	},
 	"silent-subgroup": { quiet: "silent-subgroup", run: silentSubgroup },
+	"update-while-writing": {
+		quiet: "update-while-writing",
+		run: updateWhileWriting,
+	},
+	"withdraw-namespace": {
+		quiet: "withdraw-namespace",
+		run: withdrawNamespace,
+	},
+	"withdraw-namespace-reset": {
+		quiet: "withdraw-namespace-reset",
+		run: withdrawNamespaceByReset,
+	},
 };
+
+/**
+ * The PUBLISH_DONE of an update the client refuses while it writes a
+ * subgroup stream, after that stream (§10.11). The own Rust client alone
+ * serves a SUBSCRIBE on its PUBLISH_NAMESPACE.
+ */
+async function updateWhileWriting(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	if (client !== "own-rust") {
+		throw new Error("own-rust alone serves a SUBSCRIBE in this run");
+	}
+	// More than the peer's stream window of 128 KiB: the Object is being
+	// written when the update comes.
+	const payload = "00".repeat(256 * 1024);
+	const rust = spawnRustClient(
+		context,
+		"client:own-rust",
+		client,
+		"publish-namespace",
+		"served",
+		["--payload-hex", payload],
+	);
+	await rust.waitForLine(/^SERVING /);
+	rust.child.stdin.write("send\n");
+	await context.relay.waitForLine(/^SUBGROUP_STREAM_HELD session=0$/);
+	await rust.waitForLine(/^UPDATE_REFUSED$/);
+	const [line, early] = await context.relay.waitForLine(
+		/^PUBLISH_DONE session=0 before_the_stream_ended=(\w+)$/,
+	);
+	rust.child.stdin.end();
+	if (early !== "false") {
+		throw new Error(
+			`the PUBLISH_DONE was to come after the subgroup stream ended: ${line}`,
+		);
+	}
+	return `own-rust refused an update while it wrote a subgroup stream, and sent its PUBLISH_DONE once that stream was closed: ${line}`;
+}
+
+/**
+ * A reset of the responder's direction after the REQUEST_OK of a
+ * PUBLISH_NAMESPACE withdraws the namespace (§6.2, §3.3.2).
+ */
+async function withdrawNamespaceByReset(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	if (client !== "own-rust") {
+		throw new Error("own-rust alone is run against this peer");
+	}
+	const rust = spawnRustClient(
+		context,
+		"client:own-rust",
+		client,
+		"publish-namespace",
+		TRACK,
+		["--payload-hex", "00"],
+	);
+	await rust.waitForLine(/^NAMESPACE_PUBLISHED$/);
+	await context.relay.waitForLine(/^NAMESPACE_RESET session=0 /);
+	const [line] = await rust.waitForLine(/^NAMESPACE_WITHDRAWN how=.+$/);
+	rust.child.stdin.end();
+	return `own-rust withdrew its namespace at the peer's reset of its direction: ${line}`;
+}
+
+/**
+ * A FIN after the REQUEST_OK of a PUBLISH_NAMESPACE withdraws nothing, and
+ * a STOP_SENDING withdraws the namespace (§6.2, §3.3.2).
+ */
+async function withdrawNamespace(
+	context: RunContext,
+	client: QuietClient,
+): Promise<string> {
+	if (client !== "own-rust") {
+		throw new Error("own-rust alone is run against this peer");
+	}
+	const rust = spawnRustClient(
+		context,
+		"client:own-rust",
+		client,
+		"publish-namespace",
+		TRACK,
+		["--payload-hex", "00"],
+	);
+	await rust.waitForLine(/^NAMESPACE_PUBLISHED$/);
+	await context.relay.waitForLine(/^NAMESPACE_FINISHED session=0 /);
+	// The peer stops the stream a second after its FIN: half of it has the
+	// FIN alone.
+	await new Promise((resolve) => setTimeout(resolve, 500));
+	if (rust.matches(/^NAMESPACE_WITHDRAWN /).length > 0) {
+		throw new Error("a FIN after the REQUEST_OK was to withdraw nothing");
+	}
+	await context.relay.waitForLine(/^NAMESPACE_STOPPED session=0 /);
+	const [line] = await rust.waitForLine(/^NAMESPACE_WITHDRAWN how=.+$/);
+	rust.child.stdin.end();
+	return `own-rust kept its namespace published after the peer's FIN and withdrew it at the peer's STOP_SENDING: ${line}`;
+}
 
 /** The idle time the clients are given in `silent-subgroup`; 30 seconds by themselves. */
 const IDLE_MS = 1000;
