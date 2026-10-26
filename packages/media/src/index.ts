@@ -84,16 +84,11 @@ export {
 export {
 	type KeepPlayingOptions,
 	type KeepPublishingOptions,
-	type KeepTrackOnSessionOptions,
-	type KeptTrackState,
 	keepPlaying,
 	keepPublishing,
-	keepTrackOnSession,
 	type PlayingState,
 	type PublishingState,
-	type ServedTrack,
 } from "./moqt/keep-broadcast.ts";
-export { type StayOptions, stayOnSession } from "./moqt/stay-on-session.ts";
 export {
 	createVideoTrackPublisher,
 	DEFAULT_MAX_PENDING_BYTES,

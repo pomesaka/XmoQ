@@ -6,6 +6,7 @@ import {
 	LONGEST_TIMER_MS,
 	type PeerFetch,
 	type PeerSubscribe,
+	PublishDoneCode,
 	PublishEndedError,
 	type PublishedTrack,
 	RequestErrorCode,
@@ -13,6 +14,7 @@ import {
 	SessionClosedError,
 	SubgroupClosedError,
 	type SubgroupWriter,
+	sameFullTrackName,
 	type TrackNamespace,
 } from "@xmoq/moqt";
 import type { Catalog } from "../core/catalog.ts";
@@ -26,9 +28,6 @@ import type { CatalogLocation } from "../core/catalog-track.ts";
 
 /** §5: "The catalog track MUST have a case-sensitive Track Name of "catalog"." */
 const CATALOG_TRACK_NAME = new TextEncoder().encode("catalog");
-
-/** PUBLISH_DONE Status Code TRACK_ENDED (transport §10.11). */
-const TRACK_ENDED = 0x2n;
 
 /**
  * The Publisher Priority of the catalog Object on a fetch stream, where an
@@ -54,9 +53,6 @@ const endedByThePeer = (error: unknown): boolean =>
 	error instanceof PublishEndedError ||
 	error instanceof ServedFetchEndedError ||
 	error instanceof SessionClosedError;
-
-const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
-	a.length === b.length && a.every((byte, index) => byte === b[index]);
 
 export interface CatalogPublisherOptions {
 	/** The namespace of the catalog track: the one the broadcast is in. */
@@ -196,11 +192,9 @@ export function createCatalogPublisher(
 	let ending: Promise<void> | undefined;
 
 	const isCatalogTrack = (request: PeerSubscribe | PeerFetch): boolean =>
-		sameBytes(request.trackName, CATALOG_TRACK_NAME) &&
-		request.trackNamespace.length === options.namespace.length &&
-		request.trackNamespace.every((field, index) => {
-			const own = options.namespace[index];
-			return own !== undefined && sameBytes(field, own);
+		sameFullTrackName(request, {
+			trackNamespace: options.namespace,
+			trackName: CATALOG_TRACK_NAME,
 		});
 
 	/**
@@ -288,7 +282,7 @@ export function createCatalogPublisher(
 	/** Ends a subscription once it has the newest catalog, or its time for that is over. */
 	const tell = async (subscriber: Subscriber): Promise<void> => {
 		const done = (): Promise<void> =>
-			subscriber.track.done(TRACK_ENDED, "").then(
+			subscriber.track.done(PublishDoneCode.TRACK_ENDED, "").then(
 				() => {},
 				(error: unknown) => {
 					if (!endedByThePeer(error)) fault(error);
@@ -343,7 +337,7 @@ export function createCatalogPublisher(
 					// PUBLISH_DONE alone.
 					if (request.parameters.forward === false) {
 						if (ending !== undefined) {
-							void track.done(TRACK_ENDED, "").catch(() => {});
+							void track.done(PublishDoneCode.TRACK_ENDED, "").catch(() => {});
 							return;
 						}
 						silent.add(track);
@@ -454,7 +448,7 @@ export function createCatalogPublisher(
 			ending ??= (async () => {
 				const told = [...subscribers].map(tell);
 				const quiet = [...silent].map((track) =>
-					track.done(TRACK_ENDED, "").catch(() => {}),
+					track.done(PublishDoneCode.TRACK_ENDED, "").catch(() => {}),
 				);
 				silent.clear();
 				await Promise.all([...told, ...quiet]);

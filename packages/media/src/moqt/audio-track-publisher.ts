@@ -14,14 +14,14 @@ import {
 	LONGEST_TIMER_MS,
 	type PeerFetch,
 	type PeerSubscribe,
+	PublishDoneCode,
 	type PublishedTrack,
 	RequestErrorCode,
 	type SubgroupWriter,
+	sameFullTrackName,
 } from "@xmoq/moqt";
 import { DEFAULT_END_TIMEOUT_MS } from "./video-track-publisher.ts";
 
-/** PUBLISH_DONE Status Code TRACK_ENDED (transport draft 18 §10.11). */
-const TRACK_ENDED = 0x2n;
 /** How many chunks may wait to be written before one is left out. **Provisional, not measured**: half a second of chunks of 20 ms. */
 export const DEFAULT_MAX_PENDING_AUDIO_CHUNKS = 25;
 
@@ -115,9 +115,6 @@ export interface AudioTrackPublisher {
 	stats(): AudioTrackPublisherStats;
 }
 
-const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
-	a.length === b.length && a.every((byte, index) => byte === b[index]);
-
 export function createAudioTrackPublisher(
 	options: AudioTrackPublisherOptions,
 ): AudioTrackPublisher {
@@ -161,11 +158,9 @@ export function createAudioTrackPublisher(
 	let open: { to: PublishedTrack; stream: SubgroupWriter } | undefined;
 
 	const isThisTrack = (request: PeerSubscribe | PeerFetch): boolean =>
-		sameBytes(request.trackName, options.trackName) &&
-		request.trackNamespace.length === options.trackNamespace.length &&
-		request.trackNamespace.every((field, index) => {
-			const own = options.trackNamespace[index];
-			return own !== undefined && sameBytes(field, own);
+		sameFullTrackName(request, {
+			trackNamespace: options.trackNamespace,
+			trackName: options.trackName,
 		});
 
 	return {
@@ -193,7 +188,9 @@ export function createAudioTrackPublisher(
 					async (accepted) => {
 						// The track ended while the answer was sent.
 						if (ended !== undefined) {
-							await accepted.done(TRACK_ENDED, "").catch(() => {});
+							await accepted
+								.done(PublishDoneCode.TRACK_ENDED, "")
+								.catch(() => {});
 							return;
 						}
 						track = accepted;
@@ -333,7 +330,7 @@ export function createAudioTrackPublisher(
 						await open?.stream.close().catch(() => {});
 					}
 					track = undefined;
-					await to.done(TRACK_ENDED, "").catch(() => {});
+					await to.done(PublishDoneCode.TRACK_ENDED, "").catch(() => {});
 				} finally {
 					clearTimeout(timer);
 				}

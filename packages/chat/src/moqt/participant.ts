@@ -14,6 +14,7 @@ import {
 	RequestFailedError,
 	type Subscription,
 	type SubscriptionEnd,
+	sameFullTrackName,
 	waitFor,
 } from "@xmoq/moqt";
 import {
@@ -212,14 +213,6 @@ export interface ChatParticipant {
 	status(): ChatStatus;
 }
 
-const same = (a: readonly Uint8Array[], b: readonly Uint8Array[]): boolean =>
-	a.length === b.length &&
-	a.every(
-		(field, index) =>
-			field.length === b[index]?.length &&
-			field.every((byte, at) => byte === b[index]?.[at]),
-	);
-
 function described(end: SubscriptionEnd): string {
 	switch (end.type) {
 		case "publish-done":
@@ -309,9 +302,12 @@ export async function joinChat(
 	let writing = 0;
 
 	const answer = (request: PeerSubscribe): void => {
-		const track = same(request.trackNamespace, ours)
-			? [said, reacted].find((each) => same([request.trackName], [each.name]))
-			: undefined;
+		const track = [said, reacted].find((each) =>
+			sameFullTrackName(request, {
+				trackNamespace: ours,
+				trackName: each.name,
+			}),
+		);
 		if (track === undefined || stop.signal.aborted) {
 			void request.reject(RequestErrorCode.DOES_NOT_EXIST).catch(() => {});
 			return;

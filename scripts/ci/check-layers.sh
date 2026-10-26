@@ -217,7 +217,7 @@ package_layer() {
 	# is asked over HTTP and needs none of the others.
 	@xmoq/moqt | @xmoq/loc | @xmoq/json | @xmoq/room-client) echo 0 ;;
 	# The chat is built on the transport alone, as the streaming format is.
-	@xmoq/msf | @xmoq/chat | @xmoq/transcript) echo 1 ;;
+	@xmoq/msf | @xmoq/chat | @xmoq/transcript | @xmoq/tracks) echo 1 ;;
 	@xmoq/media) echo 2 ;;
 	@xmoq/meeting) echo 3 ;;
 	# The room is run, not built on: nothing depends on it.

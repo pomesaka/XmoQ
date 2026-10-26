@@ -33,7 +33,7 @@ Decided on 2026-10-26, not implemented. Three jobs are the same in every client,
 | Job | What it decides | Rust | TypeScript | Where it is today |
 |---|---|---|---|---|
 | **Published track**: a track this endpoint is the publisher of | Taking or refusing a SUBSCRIBE, the PUBLISH and its PUBLISH_OK, a Group on a subgroup stream, answering or refusing a FETCH, the Stream Count of PUBLISH_DONE and the wait at the end; the requests of the peer passed to the track by its Full Track Name | `xmoq-publisher` | `@xmoq/tracks` (planned) | the Rust client (`published.rs`) beside `xmoq-publisher`, which it answers a FETCH by; the video and the sound publishers of `@xmoq/media`, the catalog's of `@xmoq/msf` and the answer to `said` of `@xmoq/chat` |
-| **Kept track**: a track of another endpoint, kept on a session | The SUBSCRIBE and its answer, asking again after an end or a refusal, a request a GOAWAY ended, what giving up ends in the session, a malformed track (§2.4.2) | `xmoq-subscriber` (`kept`) | `@xmoq/tracks` (planned) | `KeptTrack` of `xmoq-subscriber`, by the rows of `fixtures/kept-track/`; `SaidAgain` of the gatherer, the catalog and the sound of the transcriber; `stayOnSession` and `keepTrackOnSession` of `@xmoq/media`, the loops of `@xmoq/chat`, `@xmoq/transcript` and `@xmoq/meeting` |
+| **Kept track**: a track of another endpoint, kept on a session | The SUBSCRIBE and its answer, asking again after an end or a refusal, a request a GOAWAY ended, what giving up ends in the session, a malformed track (§2.4.2) | `xmoq-subscriber` (`kept`) | `@xmoq/tracks`, in part (`keepTrackOnSession`, `stayOnSession`) | `KeptTrack` of `xmoq-subscriber`, by the rows of `fixtures/kept-track/`; `SaidAgain` of the gatherer, the catalog and the sound of the transcriber; `stayOnSession` and `keepTrackOnSession` of `@xmoq/tracks`, the loops of `@xmoq/chat`, `@xmoq/transcript` and `@xmoq/meeting` |
 | **Followed track**: a kept track of one numbered item a Group, read from a point in its past | A Joining FETCH for the past, the live Objects after it, each item once and in order by its Group ID, and the gap between them | `xmoq-subscriber` (`follow`, `followed`) | `@xmoq/tracks` (planned) | `Follower`, `Items` and `past_to_fetch` of `xmoq-subscriber`; the `follow` of `@xmoq/chat` and of `@xmoq/transcript` |
 | **Ask again** and **next session** | When a request is asked for again on the same session; where and when the next session goes after a session ends, the New Session URI of a GOAWAY first (§10.4) | `xmoq-again` | `@xmoq/moqt` (`createAskAgain`, `createNextSession`, `keepMoving`) | the same, and with a `Pause` for each role |
 
@@ -49,16 +49,17 @@ Also decided on 2026-10-26:
 
 ### Where the parts sit
 
-The TypeScript packages, once `@xmoq/tracks` is there; `scripts/ci/check-layers.sh` checks the layers of today (`package_layer`):
+The TypeScript packages, as `scripts/ci/check-layers.sh` checks them (`package_layer`):
 
 | Layer | Packages |
 |---|---|
-| 0 | `@xmoq/moqt`, `@xmoq/loc`, `@xmoq/json` |
-| 1 | `@xmoq/tracks` (planned): the roles of an endpoint |
-| 2 | `@xmoq/msf`, `@xmoq/chat`, `@xmoq/transcript` |
-| 3 | `@xmoq/media` |
-| 4 | `@xmoq/meeting` |
-| 5 | `@xmoq/room` |
+| 0 | `@xmoq/moqt`, `@xmoq/loc`, `@xmoq/json`, `@xmoq/room-client` |
+| 1 | `@xmoq/tracks`: a track kept on one session, and the tracks a connection serves; `@xmoq/msf`, `@xmoq/chat`, `@xmoq/transcript` |
+| 2 | `@xmoq/media` |
+| 3 | `@xmoq/meeting` |
+| 4 | `@xmoq/room` |
+
+A package goes above `@xmoq/tracks` when it uses it, in the change that makes it do so: the chat's and the transcript's following of their tracks are to go on `@xmoq/tracks`, and the two then go above it. `@xmoq/msf` serves its catalog track as a `ServedTrack` does without naming the type.
 
 The Rust crates, by the same rule (a crate depends on those of a lower layer alone, dev-dependencies aside); `scripts/ci/check-layers.sh` checks the crates of today (`crate_layer`):
 

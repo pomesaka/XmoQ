@@ -7,11 +7,13 @@ import {
 	LONGEST_TIMER_MS,
 	type PeerFetch,
 	type PeerSubscribe,
+	PublishDoneCode,
 	PublishEndedError,
 	type PublishedTrack,
 	RequestErrorCode,
 	SessionClosedError,
 	type SubgroupWriter,
+	sameFullTrackName,
 } from "@xmoq/moqt";
 import {
 	createVideoSender,
@@ -22,8 +24,6 @@ import {
 	type VideoStreamMapping,
 } from "../core/video-sender.ts";
 
-/** PUBLISH_DONE Status Code TRACK_ENDED (transport draft 18 §10.11). */
-const TRACK_ENDED = 0x2n;
 /** The Track Property DYNAMIC_GROUPS (transport §12.6). */
 const DYNAMIC_GROUPS = 0x30n;
 
@@ -166,9 +166,6 @@ export interface VideoTrackPublisher {
 	stats(): VideoTrackPublisherStats;
 }
 
-const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
-	a.length === b.length && a.every((byte, index) => byte === b[index]);
-
 /** Whether a call on the subscription failed because the subscriber ended it, or the session is over. */
 const endedByThePeer = (error: unknown): boolean =>
 	error instanceof PublishEndedError || error instanceof SessionClosedError;
@@ -306,11 +303,9 @@ export function createVideoTrackPublisher(
 	let ended: Promise<void> | undefined;
 
 	const isThisTrack = (request: PeerSubscribe | PeerFetch): boolean =>
-		sameBytes(request.trackName, options.trackName) &&
-		request.trackNamespace.length === options.trackNamespace.length &&
-		request.trackNamespace.every((field, index) => {
-			const own = options.trackNamespace[index];
-			return own !== undefined && sameBytes(field, own);
+		sameFullTrackName(request, {
+			trackNamespace: options.trackNamespace,
+			trackName: options.trackName,
 		});
 
 	const skip = (because: VideoPushSkipReason): void => {
@@ -338,7 +333,7 @@ export function createVideoTrackPublisher(
 
 	/** PUBLISH_DONE for a subscription; does not reject. */
 	const tellEnd = (track: PublishedTrack): Promise<void> =>
-		track.done(TRACK_ENDED, "").then(
+		track.done(PublishDoneCode.TRACK_ENDED, "").then(
 			() => {},
 			(error: unknown) => {
 				// `reportError` is the global of HTML for an error nobody is

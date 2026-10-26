@@ -5,12 +5,7 @@
 // What it receives is handed to the caller, who plays it; publishing its
 // own broadcast is the caller's as well (`@xmoq/media`, `@xmoq/msf`).
 
-import {
-	type FrameOrigin,
-	keepTrackOnSession,
-	playAudioTrack,
-	playVideoTrack,
-} from "@xmoq/media";
+import { type FrameOrigin, playAudioTrack, playVideoTrack } from "@xmoq/media";
 import {
 	createAskAgain,
 	type MoqtConnection,
@@ -19,6 +14,7 @@ import {
 	waitFor,
 } from "@xmoq/moqt";
 import { type CatalogTrack, followCatalog } from "@xmoq/msf";
+import { keepTrackOnSession } from "@xmoq/tracks";
 import { meetingPrefix, participantOf } from "../core/names.ts";
 import {
 	createPresence,

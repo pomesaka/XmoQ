@@ -1,6 +1,7 @@
 import {
 	InactiveError,
 	MoqtError,
+	PublishDoneCode,
 	RequestErrorCode,
 	SessionErrorCode,
 	StreamResetErrorCode,
@@ -111,9 +112,6 @@ export const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
 const DEFAULT_OPEN_STREAM_TIMEOUT_MS = 10_000;
 /** The Error Reason of the PUBLISH_DONE that ends a PUBLISH nobody answered; the Rust client sends the same. */
 const NO_ANSWER_IN_TIME = "no answer in time";
-
-/** The Status Code INTERNAL_ERROR of PUBLISH_DONE (§10.11): "An implementation specific or generic error occurred." */
-const PUBLISH_DONE_INTERNAL_ERROR = 0x0n;
 
 /** Whether the event is the peer's answer to a request of this endpoint. */
 function isAnswer(event: SessionEvent): event is Extract<
@@ -2865,7 +2863,7 @@ export async function connectOver(
 		return applyVoid((s) => {
 			const outputs = s.publishDone(
 				requestId,
-				PUBLISH_DONE_INTERNAL_ERROR,
+				PublishDoneCode.INTERNAL_ERROR,
 				NO_ANSWER_IN_TIME,
 			);
 			peerStreamWaits.set(requestId, wait);
