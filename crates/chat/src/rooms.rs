@@ -12,6 +12,8 @@
 
 use std::collections::HashMap;
 
+use xmoq_chat_tracks::names::Room;
+
 /// The rooms the gatherer numbers at once. A participant of one room more
 /// is passed over and counted, and its lines are not taken.
 ///
@@ -24,13 +26,13 @@ pub const MAX_ROOMS: usize = 1_024;
 /// The next number of each room.
 #[derive(Debug, Default)]
 pub struct Rooms {
-    next: HashMap<String, u64>,
+    next: HashMap<Room, u64>,
 }
 
 impl Rooms {
     /// Whether the room is numbered here.
     #[must_use]
-    pub fn knows(&self, room: &str) -> bool {
+    pub fn knows(&self, room: &Room) -> bool {
         self.next.contains_key(room)
     }
 
@@ -50,20 +52,20 @@ impl Rooms {
     /// number the store holds of it, 0 for a room it holds nothing of.
     /// `false` where [`MAX_ROOMS`] are numbered already; a room that is
     /// numbered keeps its number.
-    pub fn add(&mut self, room: &str, next: u64) -> bool {
+    pub fn add(&mut self, room: &Room, next: u64) -> bool {
         if self.knows(room) {
             return true;
         }
         if self.next.len() >= MAX_ROOMS {
             return false;
         }
-        self.next.insert(room.to_string(), next);
+        self.next.insert(room.clone(), next);
         true
     }
 
     /// Numbers the room no more. Its next number is the store's to say when
     /// it is numbered again.
-    pub fn remove(&mut self, room: &str) {
+    pub fn remove(&mut self, room: &Room) {
         self.next.remove(room);
     }
 
@@ -74,13 +76,13 @@ impl Rooms {
 
     /// The largest number given in the room, `None` where none was.
     #[must_use]
-    pub fn largest(&self, room: &str) -> Option<u64> {
+    pub fn largest(&self, room: &Room) -> Option<u64> {
         self.next.get(room)?.checked_sub(1)
     }
 
     /// The number of the next line of the room; `None` for a room that is
     /// not numbered here, and after the last number there is.
-    pub fn number(&mut self, room: &str) -> Option<u64> {
+    pub fn number(&mut self, room: &Room) -> Option<u64> {
         let next = self.next.get_mut(room)?;
         let number = *next;
         *next = number.checked_add(1)?;
@@ -90,7 +92,7 @@ impl Rooms {
     /// The line numbered `number` could not be kept: the number is given
     /// again, so that the room has no gap. Only the last number given can
     /// be.
-    pub fn give_back(&mut self, room: &str, number: u64) {
+    pub fn give_back(&mut self, room: &Room, number: u64) {
         if let Some(next) = self.next.get_mut(room)
             && number.checked_add(1) == Some(*next)
         {
@@ -101,7 +103,17 @@ impl Rooms {
 
 #[cfg(test)]
 mod tests {
+    use xmoq_chat_tracks::names::Kind;
+
     use super::*;
+
+    /// The room of a broadcast that `name` names.
+    fn room_named(name: &str) -> Room {
+        Room {
+            kind: Kind::Broadcast,
+            name: name.to_string(),
+        }
+    }
 
     /// What is done to the rooms in a case, in order.
     enum Step {
@@ -173,14 +185,26 @@ mod tests {
             for (index, step) in steps.into_iter().enumerate() {
                 match step {
                     Add(room, next, added) => {
-                        assert_eq!(rooms.add(room, next), added, "{case}, step {index}");
+                        assert_eq!(
+                            rooms.add(&room_named(room), next),
+                            added,
+                            "{case}, step {index}"
+                        );
                     }
                     Number(room, number) => {
-                        assert_eq!(rooms.number(room), number, "{case}, step {index}");
+                        assert_eq!(
+                            rooms.number(&room_named(room)),
+                            number,
+                            "{case}, step {index}"
+                        );
                     }
-                    GiveBack(room, number) => rooms.give_back(room, number),
+                    GiveBack(room, number) => rooms.give_back(&room_named(room), number),
                     Largest(room, largest) => {
-                        assert_eq!(rooms.largest(room), largest, "{case}, step {index}");
+                        assert_eq!(
+                            rooms.largest(&room_named(room)),
+                            largest,
+                            "{case}, step {index}"
+                        );
                     }
                 }
             }
@@ -190,13 +214,13 @@ mod tests {
     #[test]
     fn a_room_numbered_no_more_is_numbered_again_from_what_it_is_given() {
         let mut rooms = Rooms::default();
-        assert!(rooms.add("r", 0));
-        assert_eq!(rooms.number("r"), Some(0));
-        rooms.remove("r");
-        assert!(!rooms.knows("r"));
-        assert_eq!(rooms.number("r"), None);
-        assert!(rooms.add("r", 1));
-        assert_eq!(rooms.number("r"), Some(1));
+        assert!(rooms.add(&room_named("r"), 0));
+        assert_eq!(rooms.number(&room_named("r")), Some(0));
+        rooms.remove(&room_named("r"));
+        assert!(!rooms.knows(&room_named("r")));
+        assert_eq!(rooms.number(&room_named("r")), None);
+        assert!(rooms.add(&room_named("r"), 1));
+        assert_eq!(rooms.number(&room_named("r")), Some(1));
         rooms.clear();
         assert!(rooms.is_empty());
     }
@@ -205,12 +229,18 @@ mod tests {
     fn no_more_rooms_than_the_limit_are_numbered() {
         let mut rooms = Rooms::default();
         for index in 0..MAX_ROOMS {
-            assert!(rooms.add(&index.to_string(), 0));
+            assert!(rooms.add(&room_named(&index.to_string()), 0));
         }
-        assert!(!rooms.add("one more", 0));
-        assert!(rooms.add("0", 0), "one that is numbered already");
+        assert!(!rooms.add(&room_named("one more"), 0));
+        assert!(
+            rooms.add(&room_named("0"), 0),
+            "one that is numbered already"
+        );
         assert_eq!(rooms.len(), MAX_ROOMS);
-        rooms.remove("0");
-        assert!(rooms.add("one more", 0), "after one is numbered no more");
+        rooms.remove(&room_named("0"));
+        assert!(
+            rooms.add(&room_named("one more"), 0),
+            "after one is numbered no more"
+        );
     }
 }

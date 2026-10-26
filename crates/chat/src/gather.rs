@@ -210,11 +210,21 @@ impl Gatherer {
 
 #[cfg(test)]
 mod tests {
+    use xmoq_chat_tracks::names::{Kind, Room};
+
     use super::*;
+
+    /// The room of a broadcast that `name` names.
+    fn broadcast(name: &str) -> Room {
+        Room {
+            kind: Kind::Broadcast,
+            name: name.to_string(),
+        }
+    }
 
     fn person(room: &str, name: &str) -> Person {
         Person {
-            room: room.to_string(),
+            room: broadcast(room),
             name: name.to_string(),
         }
     }
@@ -299,7 +309,7 @@ mod tests {
         ];
         for (case, sayings, expected) in cases {
             let mut gatherer = Gatherer::new(limits);
-            assert!(gatherer.rooms.add("r", 0));
+            assert!(gatherer.rooms.add(&broadcast("r"), 0));
             assert_eq!(gatherer.admit(&person("r", "a")), Admitted::Now);
             assert_eq!(gatherer.admit(&person("r", "b")), Admitted::Now);
             let got: Vec<Taken> = sayings
@@ -326,7 +336,7 @@ mod tests {
     #[test]
     fn a_line_that_is_taken_has_what_its_sender_said_and_the_gatherers_time() {
         let mut gatherer = Gatherer::new(Limits::default());
-        gatherer.rooms.add("r", 41);
+        gatherer.rooms.add(&broadcast("r"), 41);
         gatherer.admit(&person("r", "alice"));
         let line = gatherer
             .take(
@@ -357,7 +367,7 @@ mod tests {
         ];
         for (case, before, room, expected) in cases {
             let mut gatherer = Gatherer::new(Limits::default());
-            gatherer.rooms.add("r", 0);
+            gatherer.rooms.add(&broadcast("r"), 0);
             for (room, name) in before {
                 gatherer.admit(&person(room, name));
             }
@@ -402,8 +412,8 @@ mod tests {
         ];
         for (case, admitted, leaving, expected, numbered) in cases {
             let mut gatherer = Gatherer::new(Limits::default());
-            gatherer.rooms.add("r", 0);
-            gatherer.rooms.add("s", 0);
+            gatherer.rooms.add(&broadcast("r"), 0);
+            gatherer.rooms.add(&broadcast("s"), 0);
             gatherer.admit(&person("s", "a"));
             for name in admitted {
                 gatherer.admit(&person("r", name));
@@ -413,15 +423,18 @@ mod tests {
                 .map(|name| gatherer.leave(&person("r", name)))
                 .collect();
             assert_eq!(left, expected, "{case}");
-            assert_eq!(gatherer.rooms.knows("r"), numbered, "{case}");
-            assert!(gatherer.rooms.knows("s"), "{case}: another room stays");
+            assert_eq!(gatherer.rooms.knows(&broadcast("r")), numbered, "{case}");
+            assert!(
+                gatherer.rooms.knows(&broadcast("s")),
+                "{case}: another room stays"
+            );
         }
     }
 
     #[test]
     fn no_more_people_than_the_limit_are_followed_and_one_who_left_is_not() {
         let mut gatherer = Gatherer::new(Limits::default());
-        gatherer.rooms.add("r", 0);
+        gatherer.rooms.add(&broadcast("r"), 0);
         for index in 0..MAX_PEOPLE {
             assert_eq!(
                 gatherer.admit(&person("r", &index.to_string())),

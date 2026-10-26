@@ -19,6 +19,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
+use xmoq_chat_tracks::names::Room;
 use xmoq_chat_tracks::payloads::Line;
 
 /// The version of the schema, in `PRAGMA user_version`.
@@ -146,12 +147,12 @@ impl Store {
 
     /// The number the next line of the room gets: one after the largest it
     /// holds, 0 for a room it holds nothing of.
-    pub fn next_number(&self, room: &str) -> Result<u64> {
+    pub fn next_number(&self, room: &Room) -> Result<u64> {
         let largest: Option<i64> = self
             .connection
             .query_row(
                 "SELECT MAX(number) FROM lines WHERE room = ?1",
-                params![room],
+                params![room.to_string()],
                 |row| row.get(0),
             )
             .optional()?
@@ -163,14 +164,14 @@ impl Store {
     }
 
     /// Keeps a line of the room. It is in the file when this returns.
-    pub fn keep(&self, room: &str, line: &Line) -> Result<()> {
+    pub fn keep(&self, room: &Room, line: &Line) -> Result<()> {
         self.connection
             .prepare_cached(
                 "INSERT INTO lines (room, number, name, text, sent_at, at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?
             .execute(params![
-                room,
+                room.to_string(),
                 integer(line.number)?,
                 line.name,
                 line.text,
@@ -186,7 +187,7 @@ impl Store {
     /// there.
     pub fn lines(
         &self,
-        room: &str,
+        room: &Room,
         (first, last): (u64, u64),
         most_bytes: usize,
     ) -> Result<Option<Vec<Line>>> {
@@ -194,15 +195,18 @@ impl Store {
             "SELECT number, name, text, sent_at, at FROM lines
              WHERE room = ?1 AND number BETWEEN ?2 AND ?3 ORDER BY number",
         )?;
-        let rows = statement.query_map(params![room, integer(first)?, integer(last)?], |row| {
-            Ok(Line {
-                number: number(row.get(0)?)?,
-                name: row.get(1)?,
-                text: row.get(2)?,
-                sent_at: number(row.get(3)?)?,
-                at: number(row.get(4)?)?,
-            })
-        })?;
+        let rows = statement.query_map(
+            params![room.to_string(), integer(first)?, integer(last)?],
+            |row| {
+                Ok(Line {
+                    number: number(row.get(0)?)?,
+                    name: row.get(1)?,
+                    text: row.get(2)?,
+                    sent_at: number(row.get(3)?)?,
+                    at: number(row.get(4)?)?,
+                })
+            },
+        )?;
         let (mut lines, mut bytes) = (Vec::new(), 0_usize);
         for row in rows {
             let line = row?;
@@ -219,6 +223,14 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The room of a broadcast that `name` names.
+    fn broadcast(name: &str) -> Room {
+        Room {
+            kind: xmoq_chat_tracks::names::Kind::Broadcast,
+            name: name.to_string(),
+        }
+    }
 
     fn line(number: u64, name: &str, at: u64) -> Line {
         Line {
@@ -259,20 +271,25 @@ mod tests {
         let file = File::new("again");
         {
             let store = Store::open(&file.0).unwrap();
-            assert_eq!(store.next_number("r").unwrap(), 0);
+            assert_eq!(store.next_number(&broadcast("r")).unwrap(), 0);
             for (number, name, at) in [(0, "a", 10), (1, "b", 11), (2, "a", 12)] {
-                store.keep("r", &line(number, name, at)).unwrap();
+                store
+                    .keep(&broadcast("r"), &line(number, name, at))
+                    .unwrap();
             }
-            store.keep("s", &line(0, "c", 20)).unwrap();
+            store.keep(&broadcast("s"), &line(0, "c", 20)).unwrap();
         }
         let store = Store::open(&file.0).unwrap();
-        assert_eq!(store.next_number("r").unwrap(), 3);
-        assert_eq!(store.next_number("t").unwrap(), 0);
+        assert_eq!(store.next_number(&broadcast("r")).unwrap(), 3);
+        assert_eq!(store.next_number(&broadcast("t")).unwrap(), 0);
         assert_eq!(
             store.rooms(10).unwrap(),
-            [("s".to_string(), 1), ("r".to_string(), 3)]
+            [
+                ("broadcast/s".to_string(), 1),
+                ("broadcast/r".to_string(), 3)
+            ]
         );
-        assert_eq!(store.rooms(1).unwrap(), [("s".to_string(), 1)]);
+        assert_eq!(store.rooms(1).unwrap(), [("broadcast/s".to_string(), 1)]);
     }
 
     #[test]
@@ -280,9 +297,11 @@ mod tests {
         let file = File::new("range");
         let store = Store::open(&file.0).unwrap();
         for number in 0..6 {
-            store.keep("r", &line(number, "a", number)).unwrap();
+            store
+                .keep(&broadcast("r"), &line(number, "a", number))
+                .unwrap();
         }
-        store.keep("s", &line(0, "b", 0)).unwrap();
+        store.keep(&broadcast("s"), &line(0, "b", 0)).unwrap();
         let cases: [(&str, u64, u64, &[u64]); 4] = [
             ("all", 0, 5, &[0, 1, 2, 3, 4, 5]),
             ("the middle", 2, 3, &[2, 3]),
@@ -291,7 +310,7 @@ mod tests {
         ];
         for (case, first, last, expected) in cases {
             let numbers: Vec<u64> = store
-                .lines("r", (first, last), usize::MAX)
+                .lines(&broadcast("r"), (first, last), usize::MAX)
                 .unwrap()
                 .unwrap()
                 .iter()
@@ -300,19 +319,22 @@ mod tests {
             assert_eq!(numbers, expected, "{case}");
         }
         assert_eq!(
-            store.lines("r", (1, 1), usize::MAX).unwrap(),
+            store.lines(&broadcast("r"), (1, 1), usize::MAX).unwrap(),
             Some(vec![line(1, "a", 1)])
         );
         // Each payload here is the same length: two fit, three do not.
         let one = line(0, "a", 0).payload().len();
         assert_eq!(
             store
-                .lines("r", (0, 1), one * 2)
+                .lines(&broadcast("r"), (0, 1), one * 2)
                 .unwrap()
                 .map(|lines| lines.len()),
             Some(2)
         );
-        assert_eq!(store.lines("r", (0, 2), one * 2 + 1).unwrap(), None);
+        assert_eq!(
+            store.lines(&broadcast("r"), (0, 2), one * 2 + 1).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -329,7 +351,7 @@ mod tests {
     fn a_number_is_kept_once() {
         let file = File::new("once");
         let store = Store::open(&file.0).unwrap();
-        store.keep("r", &line(0, "a", 0)).unwrap();
-        assert!(store.keep("r", &line(0, "b", 1)).is_err());
+        store.keep(&broadcast("r"), &line(0, "a", 0)).unwrap();
+        assert!(store.keep(&broadcast("r"), &line(0, "b", 1)).is_err());
     }
 }

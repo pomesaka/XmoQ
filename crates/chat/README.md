@@ -61,7 +61,7 @@ A line that is not sent live is in the store, and a FETCH gets it.
 
 ## The store
 
-One SQLite file (`--store`), made where it is not there: the table `lines` (room, number, name, text, `sent_at`, at), keyed by room and number, with `PRAGMA user_version` 1. Nothing is taken out of it (decided on 2026-10-24: kept for good). A line is in the file, synced to the disk (`synchronous = FULL`), before it is published, so that a power loss does not take back a line that was seen and give its number to another.
+One SQLite file (`--store`), made where it is not there: the table `lines` (room, number, name, text, `sent_at`, at), keyed by room and number, with `PRAGMA user_version` 1. Nothing is taken out of it (decided on 2026-10-24: kept for good). The room is kept as its kind and name, `broadcast/<room>` or `meeting/<room>`; the lines kept before the rooms had a kind are under the room's name alone, and are read no more, though nothing was taken out. A line is in the file, synced to the disk (`synchronous = FULL`), before it is published, so that a power loss does not take back a line that was seen and give its number to another.
 
 **Each gatherer runs with a store of its own.** The file is held with `locking_mode = EXCLUSIVE`, and a second gatherer on it stops at the start (`the store ... is in use`). WHY NOT one file for gatherers of different rooms, which WAL allows on one machine: each would wait for the others' writes, and nothing would keep two from holding the same room. What the SQLite documentation says, and why SQLite and not JSON Lines, at the top of `src/bin/xmoq-chat/storage.rs`, the one file that uses `rusqlite`. The price of FULL is a sync of the disk for every line, which was not measured.
 
