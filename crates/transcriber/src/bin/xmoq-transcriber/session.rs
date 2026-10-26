@@ -356,7 +356,7 @@ pub async fn transcribe(
         transcribing.token(&format!("{}/*", namespace_text(prefix)), TokenRole::Sub)
     });
     let options = client::setup_options(token.as_deref(), implementation)?;
-    client::setup(
+    let set_up = client::setup(
         connection.as_ref(),
         &mut transcribing.session,
         &mut uni,
@@ -366,6 +366,12 @@ pub async fn transcribe(
     )
     .await?;
     println!("SETUP_OK");
+    // What came before the SETUP (§3.3) is taken first.
+    for event in set_up.early {
+        if let Some(ended) = transcribing.on_uni(event)? {
+            return Ok(ended);
+        }
+    }
     for index in 0..transcribing.watches.len() {
         transcribing.watch(index)?;
         transcribing.publish(index)?;
